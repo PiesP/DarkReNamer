@@ -14,5 +14,8 @@ dark-renamer-core = { path = "../dark-renamer-core" }
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1.4", features = ["fs"] }
 
+[target.'cfg(windows)'.dependencies]
+dark-renamer-windows = { path = "../dark-renamer-windows" }
+
 [lints]
 workspace = true

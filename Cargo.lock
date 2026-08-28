@@ -685,6 +685,7 @@ name = "dark-renamer-platform"
 version = "0.1.0"
 dependencies = [
  "dark-renamer-core",
+ "dark-renamer-windows",
  "rustix 1.1.4",
 ]
 

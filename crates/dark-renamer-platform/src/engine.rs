@@ -45,6 +45,7 @@ struct FrozenPlan {
 struct ScheduledMove {
     from: PathBuf,
     to: PathBuf,
+    parent_identity: FileIdentity,
     identity: FileIdentity,
 }
 
@@ -184,6 +185,12 @@ impl RenameEngine {
     #[must_use]
     pub const fn recovery_required(&self) -> bool {
         self.inner.recovery_required
+    }
+
+    /// Reports whether this build includes the audited mutation adapter.
+    #[must_use]
+    pub const fn mutation_supported(&self) -> bool {
+        cfg!(windows)
     }
 }
 
@@ -504,7 +511,7 @@ impl<F: FileSystem> Engine<F> {
             match self.filesystem.fingerprint(&path)? {
                 Some(fingerprint) => {
                     hash_u64(&mut value, fingerprint.identity.volume);
-                    hash_u64(&mut value, fingerprint.identity.file);
+                    hash_bytes(&mut value, &fingerprint.identity.file);
                     hash_u64(
                         &mut value,
                         match fingerprint.kind {
@@ -655,14 +662,27 @@ impl<F: FileSystem> Engine<F> {
                     ordinal,
                     &location,
                     &temporary,
+                    item.parent_fingerprint.identity,
                     item.fingerprint.identity,
                 )?;
                 ordinal = ordinal.saturating_add(1);
             }
-            second_phase.push((temporary, destination.clone(), item.fingerprint.identity));
+            second_phase.push((
+                temporary,
+                destination.clone(),
+                item.parent_fingerprint.identity,
+                item.fingerprint.identity,
+            ));
         }
-        for (from, to, identity) in second_phase {
-            self.execute_recovery_move(&mut journal, ordinal, &from, &to, identity)?;
+        for (from, to, parent_identity, identity) in second_phase {
+            self.execute_recovery_move(
+                &mut journal,
+                ordinal,
+                &from,
+                &to,
+                parent_identity,
+                identity,
+            )?;
             ordinal = ordinal.saturating_add(1);
         }
 
@@ -688,10 +708,14 @@ impl<F: FileSystem> Engine<F> {
         ordinal: u32,
         from: &Path,
         to: &Path,
+        parent_identity: FileIdentity,
         identity: FileIdentity,
     ) -> Result<(), PlatformError> {
         journal.intent(ordinal, from, to, identity)?;
-        match self.filesystem.move_no_replace(from, to, identity) {
+        match self
+            .filesystem
+            .move_no_replace(from, to, parent_identity, identity)
+        {
             Ok(()) => journal.complete(ordinal),
             Err(failure) if failure.kind == MoveFailureKind::Ambiguous => {
                 self.recovery_required = true;
@@ -765,6 +789,7 @@ impl<F: FileSystem> Engine<F> {
                 .map(|(item, temporary)| ScheduledMove {
                     from: item.source.path.clone(),
                     to: temporary.clone(),
+                    parent_identity: item.source.parent_fingerprint.identity,
                     identity: item.source.fingerprint.identity,
                 }),
         );
@@ -775,6 +800,7 @@ impl<F: FileSystem> Engine<F> {
                 .map(|(item, temporary)| ScheduledMove {
                     from: temporary.clone(),
                     to: item.target.clone(),
+                    parent_identity: item.source.parent_fingerprint.identity,
                     identity: item.source.fingerprint.identity,
                 }),
         );
@@ -807,6 +833,7 @@ impl<F: FileSystem> Engine<F> {
             match self.filesystem.move_no_replace(
                 &scheduled.from,
                 &scheduled.to,
+                scheduled.parent_identity,
                 scheduled.identity,
             ) {
                 Ok(()) => {
@@ -881,6 +908,7 @@ impl<F: FileSystem> Engine<F> {
                 .move_no_replace(
                     &move_to_reverse.to,
                     &move_to_reverse.from,
+                    move_to_reverse.parent_identity,
                     move_to_reverse.identity,
                 )
                 .is_err()
@@ -997,10 +1025,7 @@ mod tests {
 
         fn insert(&mut self, path: &Path, kind: EntryKind) -> Fingerprint {
             let fingerprint = Fingerprint {
-                identity: FileIdentity {
-                    volume: 1,
-                    file: self.next_identity,
-                },
+                identity: FileIdentity::from_u64(1, self.next_identity),
                 kind,
                 length: 10,
                 modified_nanos: 20,
@@ -1061,6 +1086,7 @@ mod tests {
             &mut self,
             from: &Path,
             to: &Path,
+            expected_parent: FileIdentity,
             expected: FileIdentity,
         ) -> Result<(), MoveFailure> {
             let mut state = self.state.borrow_mut();
@@ -1082,6 +1108,16 @@ mod tests {
                 return Err(MoveFailure {
                     kind: MoveFailureKind::Definite,
                     operation: "destination occupied",
+                });
+            }
+            let parent_matches = from
+                .parent()
+                .and_then(|parent| state.entries.get(parent))
+                .is_some_and(|fingerprint| fingerprint.identity == expected_parent);
+            if !parent_matches || from.parent() != to.parent() {
+                return Err(MoveFailure {
+                    kind: MoveFailureKind::Definite,
+                    operation: "parent identity changed",
                 });
             }
             let Some(fingerprint) = state.entries.get(from).copied() else {
@@ -1141,13 +1177,13 @@ mod tests {
                 original: PathBuf::from(original),
                 final_path: PathBuf::from(final_path),
                 fingerprint: Fingerprint {
-                    identity: FileIdentity { volume: 1, file: 1 },
+                    identity: FileIdentity::from_u64(1, 1),
                     kind: EntryKind::RegularFile,
                     length: 1,
                     modified_nanos: 1,
                 },
                 parent_fingerprint: Fingerprint {
-                    identity: FileIdentity { volume: 1, file: 2 },
+                    identity: FileIdentity::from_u64(1, 2),
                     kind: EntryKind::Directory,
                     length: 0,
                     modified_nanos: 0,
@@ -1191,7 +1227,7 @@ mod tests {
         engine.admit([PathBuf::from("/work/c.txt")])?;
         let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
         if let Some(parent) = state.borrow_mut().entries.get_mut(Path::new("/work")) {
-            parent.identity.file = parent.identity.file.saturating_add(10_000);
+            parent.identity.file[0] = parent.identity.file[0].wrapping_add(1);
         }
         assert!(matches!(
             engine.apply_confirmed(preview.id(), 1),
@@ -1735,11 +1771,29 @@ mod tests {
         )?;
         assert!(corrupt_engine.recovery_required);
 
+        let legacy = Fixture::new().map_err(|source| PlatformError::Io {
+            operation: "create test fixture",
+            source,
+        })?;
+        fs::write(legacy.root.join("0000000000000001.drj"), b"DRJNL001").map_err(|source| {
+            PlatformError::Io {
+                operation: "write legacy journal fixture",
+                source,
+            }
+        })?;
+        let legacy_engine = Engine::new(
+            &legacy.root,
+            MemoryFileSystem {
+                state: Rc::new(RefCell::new(MemoryState::new(legacy.root.clone()))),
+            },
+        )?;
+        assert!(legacy_engine.recovery_required);
+
         let torn = Fixture::new().map_err(|source| PlatformError::Io {
             operation: "create test fixture",
             source,
         })?;
-        let mut bytes = b"DRJNL001".to_vec();
+        let mut bytes = b"DRJNL002".to_vec();
         bytes.extend_from_slice(&8_u32.to_le_bytes());
         fs::write(torn.root.join("0000000000000001.drj"), bytes).map_err(|source| {
             PlatformError::Io {
@@ -1774,7 +1828,7 @@ mod tests {
                     0,
                     PathBuf::from("/work/a.txt"),
                     PathBuf::from("/other/forged.tmp"),
-                    FileIdentity { volume: 1, file: 1 },
+                    FileIdentity::from_u64(1, 1),
                 )],
             ),
         ];
@@ -1816,7 +1870,7 @@ mod tests {
             base.push('/');
         }
         let parent_fingerprint = Fingerprint {
-            identity: FileIdentity { volume: 1, file: 2 },
+            identity: FileIdentity::from_u64(1, 2),
             kind: EntryKind::Directory,
             length: 0,
             modified_nanos: 0,
@@ -1829,10 +1883,7 @@ mod tests {
                     original: PathBuf::from(format!("{base}original-{index}")),
                     final_path: PathBuf::from(format!("{base}final-{index}")),
                     fingerprint: Fingerprint {
-                        identity: FileIdentity {
-                            volume: 1,
-                            file: id.saturating_add(1),
-                        },
+                        identity: FileIdentity::from_u64(1, id.saturating_add(1)),
                         kind: EntryKind::RegularFile,
                         length: 1,
                         modified_nanos: 1,
@@ -1986,7 +2037,7 @@ mod tests {
         })?;
         let (store, _scan) = JournalStore::open(&fixture.root)?;
         let fingerprint = Fingerprint {
-            identity: FileIdentity { volume: 1, file: 1 },
+            identity: FileIdentity::from_u64(1, 1),
             kind: EntryKind::RegularFile,
             length: 1,
             modified_nanos: 1,
@@ -2001,7 +2052,7 @@ mod tests {
                 final_path: PathBuf::from("/work/b.txt"),
                 fingerprint,
                 parent_fingerprint: Fingerprint {
-                    identity: FileIdentity { volume: 1, file: 2 },
+                    identity: FileIdentity::from_u64(1, 2),
                     kind: EntryKind::Directory,
                     length: 0,
                     modified_nanos: 0,
@@ -2034,6 +2085,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn local_adapter_refuses_path_based_production_mutation() -> Result<(), PlatformError> {
         let fixture = Fixture::new().map_err(|source| PlatformError::Io {
@@ -2063,6 +2115,17 @@ mod tests {
         assert!(!renamed.exists());
         assert!(!engine.recovery_required());
         assert_eq!(fs::read_dir(&journals).map_or(0, Iterator::count), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn public_capability_matches_the_compiled_native_adapter() -> Result<(), PlatformError> {
+        let fixture = Fixture::new().map_err(|source| PlatformError::Io {
+            operation: "create capability fixture",
+            source,
+        })?;
+        let engine = RenameEngine::new(&fixture.root)?;
+        assert_eq!(engine.mutation_supported(), cfg!(windows));
         Ok(())
     }
 }

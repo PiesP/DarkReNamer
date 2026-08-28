@@ -9,7 +9,7 @@ use crate::{
     validate_persisted_path,
 };
 
-const MAGIC: &[u8; 8] = b"DRJNL001";
+const MAGIC: &[u8; 8] = b"DRJNL002";
 const MAX_FRAME_SIZE: usize = 1_048_576;
 const MAX_JOURNAL_SIZE: u64 = 16 * 1_048_576;
 
@@ -719,7 +719,7 @@ fn encode_event(event: &Event) -> Result<Vec<u8>, PlatformError> {
             put_path(&mut bytes, from)?;
             put_path(&mut bytes, to)?;
             put_u64(&mut bytes, identity.volume);
-            put_u64(&mut bytes, identity.file);
+            bytes.extend_from_slice(&identity.file);
         }
         Event::MoveComplete { ordinal } => {
             bytes.push(3);
@@ -778,7 +778,7 @@ fn decode_event(bytes: &[u8]) -> Result<Event, ()> {
             to: reader.path()?,
             identity: FileIdentity {
                 volume: reader.u64()?,
-                file: reader.u64()?,
+                file: reader.file_id()?,
             },
         },
         3 => Event::MoveComplete {
@@ -827,7 +827,7 @@ fn put_path(bytes: &mut Vec<u8>, path: &Path) -> Result<(), PlatformError> {
 
 fn put_fingerprint(bytes: &mut Vec<u8>, fingerprint: Fingerprint) {
     put_u64(bytes, fingerprint.identity.volume);
-    put_u64(bytes, fingerprint.identity.file);
+    bytes.extend_from_slice(&fingerprint.identity.file);
     bytes.push(match fingerprint.kind {
         EntryKind::RegularFile => 1,
         EntryKind::Directory => 2,
@@ -881,6 +881,10 @@ impl<'a> Reader<'a> {
         ))
     }
 
+    fn file_id(&mut self) -> Result<[u8; 16], ()> {
+        self.take(16)?.try_into().map_err(|_error| ())
+    }
+
     fn path(&mut self) -> Result<PathBuf, ()> {
         let length = usize::try_from(self.u32()?).map_err(|_error| ())?;
         if length > 4_096 {
@@ -897,7 +901,7 @@ impl<'a> Reader<'a> {
     fn fingerprint(&mut self) -> Result<Fingerprint, ()> {
         let identity = FileIdentity {
             volume: self.u64()?,
-            file: self.u64()?,
+            file: self.file_id()?,
         };
         let kind = match self.u8()? {
             1 => EntryKind::RegularFile,
