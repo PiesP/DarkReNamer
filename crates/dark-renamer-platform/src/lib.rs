@@ -31,6 +31,14 @@ pub struct PlanId(u64);
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TransactionId(u64);
 
+/// Single-use authority bound to one inspected journal and filesystem state.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RecoveryToken {
+    transaction_id: TransactionId,
+    state_checksum: u64,
+    nonce: u64,
+}
+
 /// Opaque admission generation used to invalidate stale previews.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Generation(u64);
@@ -88,6 +96,58 @@ pub struct TransactionSummary {
     changed_count: usize,
 }
 
+/// Operator-selected outcome for an inspected incomplete transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum RecoveryAction {
+    /// Return every participant identity to the transaction's original path.
+    RollBack,
+    /// Move every participant identity to the transaction's final path.
+    RollForward,
+}
+
+/// Path-free inspection of one actionable incomplete transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RecoveryInspection {
+    token: RecoveryToken,
+    transaction_id: TransactionId,
+    kind: TransactionKind,
+    changed_count: usize,
+    completed_move_count: usize,
+}
+
+impl RecoveryInspection {
+    /// Returns the single-use recovery authority.
+    #[must_use]
+    pub const fn token(self) -> RecoveryToken {
+        self.token
+    }
+
+    /// Returns the incomplete transaction identity.
+    #[must_use]
+    pub const fn transaction_id(self) -> TransactionId {
+        self.transaction_id
+    }
+
+    /// Returns the original transaction kind.
+    #[must_use]
+    pub const fn kind(self) -> TransactionKind {
+        self.kind
+    }
+
+    /// Returns the number of participant identities requiring a final outcome.
+    #[must_use]
+    pub const fn changed_count(self) -> usize {
+        self.changed_count
+    }
+
+    /// Returns the number of durably completed move frames already recorded.
+    #[must_use]
+    pub const fn completed_move_count(self) -> usize {
+        self.completed_move_count
+    }
+}
+
 impl TransactionSummary {
     /// Returns the transaction identity.
     #[must_use]
@@ -124,6 +184,8 @@ pub enum AdmissionRejection {
     NonUnicodePath,
     /// The same filesystem object was admitted more than once.
     DuplicateIdentity,
+    /// The path is relative and cannot be persisted as filesystem authority.
+    RelativePath,
 }
 
 /// A structured platform failure.
@@ -153,6 +215,8 @@ pub enum PlatformError {
     NoSources,
     /// The requested plan is not the current engine-owned preview.
     StalePlan,
+    /// The requested completed transaction is no longer latest.
+    StaleTransaction,
     /// The preview contains a blocking diagnostic or no changes.
     PlanNotApplicable,
     /// The caller's exact-count confirmation did not match the frozen plan.
@@ -179,6 +243,8 @@ pub enum PlatformError {
     },
     /// An incomplete or corrupt journal requires explicit recovery.
     RecoveryRequired,
+    /// Recovery authority no longer matches the journal or filesystem state.
+    StaleRecovery,
     /// There is no completed transaction to inspect or undo.
     NoCompletedTransaction,
     /// The latest completed transaction cannot be undone.
@@ -222,6 +288,7 @@ impl fmt::Display for PlatformError {
             }
             Self::NoSources => formatter.write_str("no sources are admitted"),
             Self::StalePlan => formatter.write_str("the preview is stale"),
+            Self::StaleTransaction => formatter.write_str("the completed transaction is stale"),
             Self::PlanNotApplicable => formatter.write_str("the preview cannot be applied"),
             Self::ConfirmationMismatch { expected, actual } => {
                 write!(
@@ -241,6 +308,7 @@ impl fmt::Display for PlatformError {
                 )
             }
             Self::RecoveryRequired => formatter.write_str("transaction recovery is required"),
+            Self::StaleRecovery => formatter.write_str("recovery inspection is stale"),
             Self::NoCompletedTransaction => formatter.write_str("no completed transaction exists"),
             Self::LatestTransactionNotUndoable => {
                 formatter.write_str("the latest transaction is not undoable")
@@ -275,6 +343,12 @@ fn io_error(operation: &'static str, source: std::io::Error) -> PlatformError {
 
 fn validate_persisted_path(path: &Path) -> Result<(), PlatformError> {
     const MAX_PATH_BYTES: usize = 4_096;
+    if !path.is_absolute() {
+        return Err(PlatformError::AdmissionRejected {
+            path: path.to_path_buf(),
+            reason: AdmissionRejection::RelativePath,
+        });
+    }
     let value = path
         .to_str()
         .ok_or_else(|| PlatformError::AdmissionRejected {

@@ -107,50 +107,40 @@ impl FileSystem for LocalFileSystem {
         to: &Path,
         expected: FileIdentity,
     ) -> Result<(), MoveFailure> {
-        // The destination hard link is an atomic no-replace operation. Its
-        // identity is checked before unlinking the source. If unlink fails, the
-        // new link is removed; a failed compensation is ambiguous.
-        fs::hard_link(from, to).map_err(|_error| MoveFailure {
-            kind: MoveFailureKind::Definite,
-            operation: "create no-replace destination link",
-        })?;
+        use rustix::fs::{CWD, RenameFlags, renameat_with};
 
-        let destination_matches = self
-            .fingerprint(to)
-            .ok()
-            .flatten()
-            .is_some_and(|fingerprint| fingerprint.identity == expected);
         let source_matches = self
             .fingerprint(from)
             .ok()
             .flatten()
             .is_some_and(|fingerprint| fingerprint.identity == expected);
-        if !destination_matches || !source_matches {
-            return match fs::remove_file(to) {
-                Ok(()) => Err(MoveFailure {
-                    kind: MoveFailureKind::Definite,
-                    operation: "revalidate linked source identity",
-                }),
-                Err(_error) => Err(MoveFailure {
-                    kind: MoveFailureKind::Ambiguous,
-                    operation: "compensate linked source identity failure",
-                }),
-            };
-        }
-
-        if fs::remove_file(from).is_ok() {
-            return Ok(());
-        }
-
-        match fs::remove_file(to) {
-            Ok(()) => Err(MoveFailure {
+        if !source_matches {
+            return Err(MoveFailure {
                 kind: MoveFailureKind::Definite,
-                operation: "remove source after linking destination",
-            }),
-            Err(_error) => Err(MoveFailure {
+                operation: "revalidate source identity before atomic rename",
+            });
+        }
+
+        renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE).map_err(|_error| {
+            MoveFailure {
+                // renameat2 with RENAME_NOREPLACE is atomic: an error means no
+                // rename occurred. Success is the only state-changing result.
+                kind: MoveFailureKind::Definite,
+                operation: "atomically rename without replacement",
+            }
+        })?;
+        if self
+            .fingerprint(to)
+            .ok()
+            .flatten()
+            .is_some_and(|fingerprint| fingerprint.identity == expected)
+        {
+            Ok(())
+        } else {
+            Err(MoveFailure {
                 kind: MoveFailureKind::Ambiguous,
-                operation: "compensate failed source removal",
-            }),
+                operation: "revalidate destination identity after atomic rename",
+            })
         }
     }
 

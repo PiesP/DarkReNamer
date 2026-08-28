@@ -11,6 +11,8 @@ publish = false
 [dependencies]
 dark-renamer-core = { path = "../dark-renamer-core" }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["fs"] }
+
 [lints]
 workspace = true
-

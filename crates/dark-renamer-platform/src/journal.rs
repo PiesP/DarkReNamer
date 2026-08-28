@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -39,6 +40,29 @@ pub(crate) struct JournalScan {
     pub(crate) recovery_required: bool,
     pub(crate) latest: Option<CompletedTransaction>,
     pub(crate) maximum_transaction_id: u64,
+    pub(crate) incomplete: Option<IncompleteTransaction>,
+    pub(crate) corrupt: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PendingMove {
+    pub(crate) ordinal: u32,
+    pub(crate) from: PathBuf,
+    pub(crate) to: PathBuf,
+    pub(crate) identity: FileIdentity,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct IncompleteTransaction {
+    pub(crate) path: PathBuf,
+    pub(crate) header: JournalHeader,
+    pub(crate) pending: Option<PendingMove>,
+    pub(crate) known_paths: Box<[PathBuf]>,
+    pub(crate) completed_move_count: usize,
+    pub(crate) next_ordinal: u32,
+    pub(crate) state_checksum: u64,
+    pub(crate) valid_length: u64,
+    pub(crate) file_length: u64,
 }
 
 #[derive(Debug)]
@@ -67,6 +91,10 @@ impl JournalStore {
         &self,
         header: &JournalHeader,
     ) -> Result<TransactionJournal, PlatformError> {
+        // Validate and bound the complete authority-bearing header before
+        // creating a filename that startup would interpret as a transaction.
+        let header_payload = encode_event(&Event::Header(header.clone()))?;
+        validate_frame_size(&header_payload)?;
         let path = self
             .root
             .join(format!("{:016x}.drj", header.transaction_id.0));
@@ -80,13 +108,12 @@ impl JournalStore {
         file.sync_data()
             .map_err(|error| io_error("sync journal magic", error))?;
         sync_directory(&self.root)?;
-        let _ = path;
         let mut journal = TransactionJournal { file };
-        journal.append(&Event::Header(header.clone()))?;
+        journal.append_payload(&header_payload)?;
         Ok(journal)
     }
 
-    fn scan(&self) -> Result<JournalScan, PlatformError> {
+    pub(crate) fn scan(&self) -> Result<JournalScan, PlatformError> {
         let entries =
             fs::read_dir(&self.root).map_err(|error| io_error("scan journal root", error))?;
         let mut paths = Vec::new();
@@ -103,15 +130,22 @@ impl JournalStore {
         let mut recovery_required = false;
         let mut latest: Option<CompletedTransaction> = None;
         let mut maximum_transaction_id = 0;
+        let mut transaction_ids = BTreeSet::new();
+        let mut incomplete = None;
+        let mut corrupt = None;
         for path in paths {
-            if let Some(value) = path
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .and_then(|value| u64::from_str_radix(value, 16).ok())
-            {
-                maximum_transaction_id = maximum_transaction_id.max(value);
+            let Ok(filename_id) = canonical_filename_id(&path) else {
+                recovery_required = true;
+                corrupt.get_or_insert(path);
+                continue;
+            };
+            maximum_transaction_id = maximum_transaction_id.max(filename_id);
+            if !transaction_ids.insert(filename_id) {
+                recovery_required = true;
+                corrupt.get_or_insert(path);
+                continue;
             }
-            match parse_journal(&path) {
+            match parse_journal(&path, filename_id) {
                 Ok(ParseOutcome::Committed(transaction)) => {
                     let is_newer = latest.as_ref().is_none_or(|current| {
                         transaction.header.transaction_id.0 > current.header.transaction_id.0
@@ -121,14 +155,55 @@ impl JournalStore {
                     }
                 }
                 Ok(ParseOutcome::Aborted) => {}
-                Ok(ParseOutcome::Incomplete) | Err(()) => recovery_required = true,
+                Ok(ParseOutcome::Incomplete(transaction)) => {
+                    recovery_required = true;
+                    if incomplete.is_some() {
+                        corrupt.get_or_insert(path);
+                    } else {
+                        incomplete = Some(transaction);
+                    }
+                }
+                Err(()) => {
+                    recovery_required = true;
+                    corrupt.get_or_insert(path);
+                }
             }
         }
         Ok(JournalScan {
             recovery_required,
             latest,
             maximum_transaction_id,
+            incomplete,
+            corrupt,
         })
+    }
+
+    pub(crate) fn resume(
+        &self,
+        transaction: &IncompleteTransaction,
+    ) -> Result<TransactionJournal, PlatformError> {
+        let current = parse_journal(&transaction.path, transaction.header.transaction_id.0)
+            .map_err(|()| PlatformError::CorruptJournal {
+                path: transaction.path.clone(),
+            })?;
+        let ParseOutcome::Incomplete(current) = current else {
+            return Err(PlatformError::StaleRecovery);
+        };
+        if current.state_checksum != transaction.state_checksum
+            || current.file_length != transaction.file_length
+        {
+            return Err(PlatformError::StaleRecovery);
+        }
+        let file = OpenOptions::new()
+            .append(true)
+            .open(&transaction.path)
+            .map_err(|error| io_error("open transaction journal for recovery", error))?;
+        if transaction.valid_length != transaction.file_length {
+            file.set_len(transaction.valid_length)
+                .and_then(|()| file.sync_data())
+                .map_err(|error| io_error("truncate torn journal tail", error))?;
+        }
+        Ok(TransactionJournal { file })
     }
 }
 
@@ -187,12 +262,11 @@ impl TransactionJournal {
 
     fn append(&mut self, event: &Event) -> Result<(), PlatformError> {
         let payload = encode_event(event)?;
-        if payload.len() > MAX_FRAME_SIZE {
-            return Err(PlatformError::BoundExceeded {
-                field: "journal frame",
-                maximum: MAX_FRAME_SIZE,
-            });
-        }
+        validate_frame_size(&payload)?;
+        self.append_payload(&payload)
+    }
+
+    fn append_payload(&mut self, payload: &[u8]) -> Result<(), PlatformError> {
         let length =
             u32::try_from(payload.len()).map_err(|_error| PlatformError::BoundExceeded {
                 field: "journal frame",
@@ -200,13 +274,23 @@ impl TransactionJournal {
             })?;
         self.file
             .write_all(&length.to_le_bytes())
-            .and_then(|()| self.file.write_all(&checksum(&payload).to_le_bytes()))
-            .and_then(|()| self.file.write_all(&payload))
+            .and_then(|()| self.file.write_all(&checksum(payload).to_le_bytes()))
+            .and_then(|()| self.file.write_all(payload))
             .map_err(|error| io_error("append transaction journal", error))?;
         self.file
             .sync_data()
             .map_err(|error| io_error("sync transaction journal", error))
     }
+}
+
+fn validate_frame_size(payload: &[u8]) -> Result<(), PlatformError> {
+    if payload.len() > MAX_FRAME_SIZE {
+        return Err(PlatformError::BoundExceeded {
+            field: "journal frame",
+            maximum: MAX_FRAME_SIZE,
+        });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -231,11 +315,29 @@ enum Event {
 enum ParseOutcome {
     Committed(CompletedTransaction),
     Aborted,
-    Incomplete,
+    Incomplete(IncompleteTransaction),
 }
 
-fn parse_journal(path: &Path) -> Result<ParseOutcome, ()> {
-    let metadata = fs::metadata(path).map_err(|_error| ())?;
+fn canonical_filename_id(path: &Path) -> Result<u64, ()> {
+    let value = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or(())?;
+    if value.len() != 16
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(());
+    }
+    u64::from_str_radix(value, 16).map_err(|_error| ())
+}
+
+fn parse_journal(path: &Path, filename_id: u64) -> Result<ParseOutcome, ()> {
+    let metadata = fs::symlink_metadata(path).map_err(|_error| ())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(());
+    }
     if metadata.len() > MAX_JOURNAL_SIZE {
         return Err(());
     }
@@ -249,9 +351,11 @@ fn parse_journal(path: &Path) -> Result<ParseOutcome, ()> {
 
     let mut cursor = MAGIC.len();
     let mut events = Vec::new();
+    let mut torn_tail = false;
     while cursor < bytes.len() {
         if bytes.len() - cursor < 12 {
-            return Ok(ParseOutcome::Incomplete);
+            torn_tail = true;
+            break;
         }
         let length =
             u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().map_err(|_error| ())?) as usize;
@@ -265,7 +369,9 @@ fn parse_journal(path: &Path) -> Result<ParseOutcome, ()> {
         }
         cursor += 12;
         if bytes.len() - cursor < length {
-            return Ok(ParseOutcome::Incomplete);
+            cursor -= 12;
+            torn_tail = true;
+            break;
         }
         let payload = &bytes[cursor..cursor + length];
         if checksum(payload) != expected_checksum {
@@ -274,24 +380,73 @@ fn parse_journal(path: &Path) -> Result<ParseOutcome, ()> {
         events.push(decode_event(payload)?);
         cursor += length;
     }
-    validate_events(events)
+    match events.first() {
+        Some(Event::Header(header)) if header.transaction_id.0 == filename_id => {}
+        _ => return Err(()),
+    }
+    validate_events(
+        events,
+        path,
+        checksum(&bytes),
+        u64::try_from(cursor).map_err(|_error| ())?,
+        metadata.len(),
+        torn_tail,
+    )
 }
 
-fn validate_events(events: Vec<Event>) -> Result<ParseOutcome, ()> {
+fn validate_events(
+    events: Vec<Event>,
+    path: &Path,
+    state_checksum: u64,
+    valid_length: u64,
+    file_length: u64,
+    torn_tail: bool,
+) -> Result<ParseOutcome, ()> {
     let mut events = events.into_iter();
     let Some(Event::Header(header)) = events.next() else {
         return Err(());
     };
-    let mut pending = None;
+    let mut pending: Option<PendingMove> = None;
     let mut terminal = None;
+    let mut last_ordinal = None;
+    let mut completed_move_count = 0_usize;
+    let mut known_paths = BTreeSet::new();
     for event in events {
         if terminal.is_some() {
             return Err(());
         }
         match event {
-            Event::MoveIntent { ordinal, .. } if pending.is_none() => pending = Some(ordinal),
-            Event::MoveComplete { ordinal } if pending == Some(ordinal) => pending = None,
-            Event::MoveFailed { ordinal } if pending == Some(ordinal) => pending = None,
+            Event::MoveIntent {
+                ordinal,
+                from,
+                to,
+                identity,
+            } if pending.is_none() && last_ordinal.is_none_or(|previous| ordinal > previous) => {
+                known_paths.insert(from.clone());
+                known_paths.insert(to.clone());
+                last_ordinal = Some(ordinal);
+                pending = Some(PendingMove {
+                    ordinal,
+                    from,
+                    to,
+                    identity,
+                });
+            }
+            Event::MoveComplete { ordinal }
+                if pending
+                    .as_ref()
+                    .is_some_and(|move_| move_.ordinal == ordinal) =>
+            {
+                pending = None;
+                completed_move_count = completed_move_count.saturating_add(1);
+            }
+            Event::MoveFailed { ordinal }
+                if pending
+                    .as_ref()
+                    .is_some_and(|move_| move_.ordinal == ordinal) =>
+            {
+                pending = None;
+            }
             Event::Commit if pending.is_none() => terminal = Some(true),
             Event::Abort if pending.is_none() => terminal = Some(false),
             Event::Header(_)
@@ -302,10 +457,23 @@ fn validate_events(events: Vec<Event>) -> Result<ParseOutcome, ()> {
             | Event::Abort => return Err(()),
         }
     }
+    if torn_tail && terminal.is_some() {
+        return Err(());
+    }
     match terminal {
         Some(true) => Ok(ParseOutcome::Committed(CompletedTransaction { header })),
         Some(false) => Ok(ParseOutcome::Aborted),
-        None => Ok(ParseOutcome::Incomplete),
+        None => Ok(ParseOutcome::Incomplete(IncompleteTransaction {
+            path: path.to_path_buf(),
+            header,
+            pending,
+            known_paths: known_paths.into_iter().collect(),
+            completed_move_count,
+            next_ordinal: last_ordinal.map_or(0, |ordinal| ordinal.saturating_add(1)),
+            state_checksum,
+            valid_length,
+            file_length,
+        })),
     }
 }
 

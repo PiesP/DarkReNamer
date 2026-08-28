@@ -8,11 +8,13 @@ use crate::filesystem::{
     has_duplicate_identities, validate_admitted_file,
 };
 use crate::journal::{
-    CompletedTransaction, JournalHeader, JournalItem, JournalStore, TransactionJournal,
+    CompletedTransaction, IncompleteTransaction, JournalHeader, JournalItem, JournalStore,
+    TransactionJournal,
 };
 use crate::{
-    AdmissionRejection, Generation, MAX_SOURCES, PlanId, PlatformError, Preview, SourceId,
-    TransactionId, TransactionKind, TransactionSummary, validate_persisted_path,
+    AdmissionRejection, Generation, MAX_SOURCES, PlanId, PlatformError, Preview, RecoveryAction,
+    RecoveryInspection, RecoveryToken, SourceId, TransactionId, TransactionKind,
+    TransactionSummary, validate_persisted_path,
 };
 
 #[derive(Clone, Debug)]
@@ -58,6 +60,10 @@ struct Engine<F> {
     current_plan: Option<FrozenPlan>,
     latest: Option<CompletedTransaction>,
     recovery_required: bool,
+    incomplete_recovery: Option<IncompleteTransaction>,
+    corrupt_journal: Option<PathBuf>,
+    issued_recovery: Option<RecoveryToken>,
+    next_recovery_nonce: u64,
 }
 
 /// Deep platform module for safe regular-file preview, apply, and undo.
@@ -138,8 +144,40 @@ impl RenameEngine {
     /// Fails if the latest transaction is absent or already an undo, an original
     /// destination is occupied unexpectedly, a final identity changed, or the
     /// engine requires recovery.
-    pub fn undo_latest(&mut self) -> Result<TransactionId, PlatformError> {
-        self.inner.undo_latest()
+    pub fn undo_latest(
+        &mut self,
+        expected_latest: TransactionId,
+        exact_changed_count: usize,
+    ) -> Result<TransactionId, PlatformError> {
+        self.inner.undo_latest(expected_latest, exact_changed_count)
+    }
+
+    /// Inspects the actionable incomplete transaction without exposing paths.
+    ///
+    /// The returned token is single-use and bound to both persisted journal
+    /// bytes and current participant identities.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError::CorruptJournal`] for non-actionable corruption,
+    /// or [`PlatformError::RecoveryRequired`] if no parsed incomplete journal
+    /// can safely be inspected.
+    pub fn inspect_recovery(&mut self) -> Result<RecoveryInspection, PlatformError> {
+        self.inner.inspect_recovery()
+    }
+
+    /// Resolves an inspected transaction toward its original or final state.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale or reused tokens and any identity or occupancy change.
+    /// Every recovery move is appended and synced to the original journal.
+    pub fn recover(
+        &mut self,
+        token: RecoveryToken,
+        action: RecoveryAction,
+    ) -> Result<TransactionId, PlatformError> {
+        self.inner.recover(token, action)
     }
 
     /// Reports whether explicit recovery is required before any mutation.
@@ -163,6 +201,10 @@ impl<F: FileSystem> Engine<F> {
             current_plan: None,
             latest: scan.latest,
             recovery_required: scan.recovery_required,
+            incomplete_recovery: scan.incomplete,
+            corrupt_journal: scan.corrupt,
+            issued_recovery: None,
+            next_recovery_nonce: 1,
         })
     }
 
@@ -313,7 +355,11 @@ impl<F: FileSystem> Engine<F> {
         })
     }
 
-    fn undo_latest(&mut self) -> Result<TransactionId, PlatformError> {
+    fn undo_latest(
+        &mut self,
+        expected_latest: TransactionId,
+        exact_changed_count: usize,
+    ) -> Result<TransactionId, PlatformError> {
         self.ensure_mutation_available()?;
         let latest = self
             .latest
@@ -321,6 +367,15 @@ impl<F: FileSystem> Engine<F> {
             .ok_or(PlatformError::NoCompletedTransaction)?;
         if latest.header.kind != TransactionKind::Apply {
             return Err(PlatformError::LatestTransactionNotUndoable);
+        }
+        if latest.header.transaction_id != expected_latest {
+            return Err(PlatformError::StaleTransaction);
+        }
+        if latest.header.items.len() != exact_changed_count {
+            return Err(PlatformError::ConfirmationMismatch {
+                expected: latest.header.items.len(),
+                actual: exact_changed_count,
+            });
         }
 
         let mut final_occupants = BTreeMap::new();
@@ -365,6 +420,297 @@ impl<F: FileSystem> Engine<F> {
             });
         }
         self.execute_transaction(TransactionKind::Undo, self.generation, &changed)
+    }
+
+    fn inspect_recovery(&mut self) -> Result<RecoveryInspection, PlatformError> {
+        self.refresh_recovery()?;
+        if let Some(path) = &self.corrupt_journal {
+            return Err(PlatformError::CorruptJournal { path: path.clone() });
+        }
+        let transaction = self
+            .incomplete_recovery
+            .as_ref()
+            .ok_or(PlatformError::RecoveryRequired)?;
+        let state_checksum = self.recovery_state_checksum(transaction)?;
+        let token = RecoveryToken {
+            transaction_id: transaction.header.transaction_id,
+            state_checksum,
+            nonce: self.next_recovery_nonce,
+        };
+        self.next_recovery_nonce = self.next_recovery_nonce.saturating_add(1);
+        self.issued_recovery = Some(token);
+        Ok(RecoveryInspection {
+            token,
+            transaction_id: transaction.header.transaction_id,
+            kind: transaction.header.kind,
+            changed_count: transaction.header.items.len(),
+            completed_move_count: transaction.completed_move_count,
+        })
+    }
+
+    fn recover(
+        &mut self,
+        token: RecoveryToken,
+        action: RecoveryAction,
+    ) -> Result<TransactionId, PlatformError> {
+        self.ensure_mutation_available_for_recovery()?;
+        if self.issued_recovery != Some(token) {
+            return Err(PlatformError::StaleRecovery);
+        }
+        self.issued_recovery = None;
+        self.refresh_recovery()?;
+        if let Some(path) = &self.corrupt_journal {
+            return Err(PlatformError::CorruptJournal { path: path.clone() });
+        }
+        let transaction = self
+            .incomplete_recovery
+            .clone()
+            .ok_or(PlatformError::StaleRecovery)?;
+        if token.transaction_id != transaction.header.transaction_id
+            || token.state_checksum != self.recovery_state_checksum(&transaction)?
+        {
+            return Err(PlatformError::StaleRecovery);
+        }
+        self.resolve_recovery(transaction, action)
+    }
+
+    fn ensure_mutation_available_for_recovery(&self) -> Result<(), PlatformError> {
+        #[cfg(windows)]
+        {
+            Err(PlatformError::Unsupported {
+                operation: "handle-atomic no-replace rename on Windows",
+            })
+        }
+        #[cfg(not(windows))]
+        Ok(())
+    }
+
+    fn refresh_recovery(&mut self) -> Result<(), PlatformError> {
+        let scan = self.journals.scan()?;
+        self.recovery_required = scan.recovery_required;
+        self.incomplete_recovery = scan.incomplete;
+        self.corrupt_journal = scan.corrupt;
+        if let Some(latest) = scan.latest {
+            self.latest = Some(latest);
+        }
+        Ok(())
+    }
+
+    fn recovery_state_checksum(
+        &self,
+        transaction: &IncompleteTransaction,
+    ) -> Result<u64, PlatformError> {
+        let mut candidates = self.recovery_candidate_paths(transaction);
+        candidates.sort();
+        candidates.dedup();
+        let mut value = transaction.state_checksum;
+        for path in candidates {
+            hash_bytes(&mut value, path.as_os_str().as_encoded_bytes());
+            match self.filesystem.fingerprint(&path)? {
+                Some(fingerprint) => {
+                    hash_u64(&mut value, fingerprint.identity.volume);
+                    hash_u64(&mut value, fingerprint.identity.file);
+                    hash_u64(
+                        &mut value,
+                        match fingerprint.kind {
+                            crate::filesystem::EntryKind::RegularFile => 1,
+                            crate::filesystem::EntryKind::Directory => 2,
+                            crate::filesystem::EntryKind::SymbolicLink => 3,
+                            crate::filesystem::EntryKind::Other => 4,
+                        },
+                    );
+                    hash_u64(&mut value, fingerprint.length);
+                    hash_u64(&mut value, fingerprint.modified_nanos as u64);
+                    hash_u64(&mut value, (fingerprint.modified_nanos >> 64) as u64);
+                }
+                None => hash_u64(&mut value, u64::MAX),
+            }
+        }
+        Ok(value)
+    }
+
+    fn recovery_candidate_paths(&self, transaction: &IncompleteTransaction) -> Vec<PathBuf> {
+        let mut paths = Vec::with_capacity(transaction.header.items.len() * 3 + 2);
+        for (index, item) in transaction.header.items.iter().enumerate() {
+            paths.push(item.original.clone());
+            paths.push(item.final_path.clone());
+            paths.push(recovery_temporary_path(
+                item.original.parent().unwrap_or_else(|| Path::new("/")),
+                transaction.header.transaction_id,
+                index,
+            ));
+        }
+        paths.extend(transaction.known_paths.iter().cloned());
+        if let Some(pending) = &transaction.pending {
+            paths.push(pending.from.clone());
+            paths.push(pending.to.clone());
+        }
+        paths
+    }
+
+    fn resolve_recovery(
+        &mut self,
+        transaction: IncompleteTransaction,
+        action: RecoveryAction,
+    ) -> Result<TransactionId, PlatformError> {
+        let mut journal = self.journals.resume(&transaction)?;
+        if let Some(pending) = &transaction.pending {
+            let from = self.filesystem.fingerprint(&pending.from)?;
+            let to = self.filesystem.fingerprint(&pending.to)?;
+            let expected = transaction
+                .header
+                .items
+                .iter()
+                .find(|item| item.fingerprint.identity == pending.identity)
+                .ok_or(PlatformError::StaleRecovery)?
+                .fingerprint;
+            if from == Some(expected) && to.is_none() {
+                journal.failed(pending.ordinal)?;
+            } else if to == Some(expected) && from.is_none() {
+                journal.complete(pending.ordinal)?;
+            } else {
+                return Err(PlatformError::StaleRecovery);
+            }
+        }
+
+        let candidates = self.recovery_candidate_paths(&transaction);
+        let participant_identities: BTreeSet<FileIdentity> = transaction
+            .header
+            .items
+            .iter()
+            .map(|item| item.fingerprint.identity)
+            .collect();
+        let mut locations = Vec::with_capacity(transaction.header.items.len());
+        for item in &transaction.header.items {
+            let mut matches = Vec::new();
+            for path in &candidates {
+                if let Some(actual) = self.filesystem.fingerprint(path)?
+                    && actual.identity == item.fingerprint.identity
+                {
+                    if actual != item.fingerprint {
+                        return Err(PlatformError::StaleSource {
+                            source_id: item.source_id,
+                        });
+                    }
+                    if !matches.contains(path) {
+                        matches.push(path.clone());
+                    }
+                }
+            }
+            let [location] = matches.as_slice() else {
+                return Err(PlatformError::StaleRecovery);
+            };
+            let parent = location.parent().ok_or(PlatformError::StaleParent {
+                source_id: item.source_id,
+            })?;
+            if !same_identity(
+                self.filesystem.fingerprint(parent)?,
+                item.parent_fingerprint,
+            ) {
+                return Err(PlatformError::StaleParent {
+                    source_id: item.source_id,
+                });
+            }
+            locations.push(location.clone());
+        }
+
+        let desired: Vec<&PathBuf> = transaction
+            .header
+            .items
+            .iter()
+            .map(|item| match action {
+                RecoveryAction::RollBack => &item.original,
+                RecoveryAction::RollForward => &item.final_path,
+            })
+            .collect();
+        for path in &desired {
+            if let Some(fingerprint) = self.filesystem.fingerprint(path)?
+                && !participant_identities.contains(&fingerprint.identity)
+            {
+                return Err(PlatformError::DestinationChanged {
+                    path: (*path).clone(),
+                });
+            }
+        }
+
+        let mut ordinal = transaction.next_ordinal;
+        let mut second_phase = Vec::new();
+        for (index, ((item, location), destination)) in transaction
+            .header
+            .items
+            .iter()
+            .zip(locations)
+            .zip(desired)
+            .enumerate()
+        {
+            if location == *destination {
+                continue;
+            }
+            let parent = item.original.parent().ok_or(PlatformError::StaleParent {
+                source_id: item.source_id,
+            })?;
+            let temporary =
+                recovery_temporary_path(parent, transaction.header.transaction_id, index);
+            if location != temporary && self.filesystem.fingerprint(&temporary)?.is_some() {
+                return Err(PlatformError::DestinationChanged { path: temporary });
+            }
+            if location != temporary {
+                self.execute_recovery_move(
+                    &mut journal,
+                    ordinal,
+                    &location,
+                    &temporary,
+                    item.fingerprint.identity,
+                )?;
+                ordinal = ordinal.saturating_add(1);
+            }
+            second_phase.push((temporary, destination.clone(), item.fingerprint.identity));
+        }
+        for (from, to, identity) in second_phase {
+            self.execute_recovery_move(&mut journal, ordinal, &from, &to, identity)?;
+            ordinal = ordinal.saturating_add(1);
+        }
+
+        match action {
+            RecoveryAction::RollBack => journal.abort()?,
+            RecoveryAction::RollForward => {
+                journal.commit()?;
+                self.latest = Some(CompletedTransaction {
+                    header: transaction.header.clone(),
+                });
+            }
+        }
+        self.refresh_recovery()?;
+        if self.recovery_required {
+            return Err(PlatformError::RecoveryRequired);
+        }
+        Ok(transaction.header.transaction_id)
+    }
+
+    fn execute_recovery_move(
+        &mut self,
+        journal: &mut TransactionJournal,
+        ordinal: u32,
+        from: &Path,
+        to: &Path,
+        identity: FileIdentity,
+    ) -> Result<(), PlatformError> {
+        journal.intent(ordinal, from, to, identity)?;
+        match self.filesystem.move_no_replace(from, to, identity) {
+            Ok(()) => journal.complete(ordinal),
+            Err(failure) if failure.kind == MoveFailureKind::Ambiguous => {
+                self.recovery_required = true;
+                Err(PlatformError::RecoveryRequired)
+            }
+            Err(failure) => {
+                journal.failed(ordinal)?;
+                self.recovery_required = true;
+                Err(PlatformError::ExecutionFailed {
+                    rolled_back: false,
+                    operation: failure.operation,
+                })
+            }
+        }
     }
 
     fn ensure_mutation_available(&self) -> Result<(), PlatformError> {
@@ -576,11 +922,30 @@ fn same_identity(actual: Option<Fingerprint>, expected: Fingerprint) -> bool {
         .is_some_and(|actual| actual.identity == expected.identity && actual.kind == expected.kind)
 }
 
+fn recovery_temporary_path(parent: &Path, transaction_id: TransactionId, index: usize) -> PathBuf {
+    parent.join(format!(
+        ".dark-renamer-recovery-{:016x}-{index:04x}.tmp",
+        transaction_id.0
+    ))
+}
+
+fn hash_u64(value: &mut u64, input: u64) {
+    hash_bytes(value, &input.to_le_bytes());
+}
+
+fn hash_bytes(value: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *value ^= u64::from(*byte);
+        *value = value.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
-    use std::fs;
+    use std::fs::{self, OpenOptions};
+    use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -867,6 +1232,33 @@ mod tests {
     }
 
     #[test]
+    fn relative_admission_is_rejected_before_persistence() -> Result<(), PlatformError> {
+        let fixture = Fixture::new().map_err(|source| PlatformError::Io {
+            operation: "create test fixture",
+            source,
+        })?;
+        let state = Rc::new(RefCell::new(MemoryState::new(fixture.root.clone())));
+        state
+            .borrow_mut()
+            .insert(Path::new("a.txt"), EntryKind::RegularFile);
+        let mut engine = Engine::new(
+            &fixture.root,
+            MemoryFileSystem {
+                state: Rc::clone(&state),
+            },
+        )?;
+        assert!(matches!(
+            engine.admit([PathBuf::from("a.txt")]),
+            Err(PlatformError::AdmissionRejected {
+                reason: AdmissionRejection::RelativePath,
+                ..
+            })
+        ));
+        assert_eq!(fs::read_dir(&fixture.root).map_or(0, Iterator::count), 0);
+        Ok(())
+    }
+
+    #[test]
     fn admission_accepts_only_unique_regular_non_symlink_files() -> Result<(), PlatformError> {
         let fixture = Fixture::new().map_err(|source| PlatformError::Io {
             operation: "create test fixture",
@@ -986,6 +1378,127 @@ mod tests {
     }
 
     #[test]
+    fn inspected_recovery_can_roll_back_and_token_is_single_use() -> Result<(), PlatformError> {
+        let fixture = Fixture::new().map_err(|source| PlatformError::Io {
+            operation: "create test fixture",
+            source,
+        })?;
+        let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
+        engine.admit([PathBuf::from("/work/a.txt")])?;
+        let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
+        state.borrow_mut().failure = Some(InjectedFailure::AmbiguousAfter(1));
+        assert!(matches!(
+            engine.apply_confirmed(preview.id(), 1),
+            Err(PlatformError::RecoveryRequired)
+        ));
+
+        let inspection = engine.inspect_recovery()?;
+        assert_eq!(inspection.kind(), TransactionKind::Apply);
+        assert_eq!(inspection.changed_count(), 1);
+        assert_eq!(inspection.completed_move_count(), 0);
+        let token = inspection.token();
+        assert_eq!(
+            engine.recover(token, RecoveryAction::RollBack)?,
+            inspection.transaction_id()
+        );
+        assert!(!engine.recovery_required);
+        assert!(
+            state
+                .borrow()
+                .entries
+                .contains_key(Path::new("/work/a.txt"))
+        );
+        assert!(matches!(
+            engine.recover(token, RecoveryAction::RollBack),
+            Err(PlatformError::StaleRecovery)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_token_rejects_state_change_and_roll_forward_commits() -> Result<(), PlatformError> {
+        let fixture = Fixture::new().map_err(|source| PlatformError::Io {
+            operation: "create test fixture",
+            source,
+        })?;
+        let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
+        engine.admit([PathBuf::from("/work/a.txt")])?;
+        let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
+        state.borrow_mut().failure = Some(InjectedFailure::AmbiguousAfter(1));
+        assert!(matches!(
+            engine.apply_confirmed(preview.id(), 1),
+            Err(PlatformError::RecoveryRequired)
+        ));
+        let stale = engine.inspect_recovery()?.token();
+        state
+            .borrow_mut()
+            .insert(Path::new("/work/new-a.txt"), EntryKind::RegularFile);
+        assert!(matches!(
+            engine.recover(stale, RecoveryAction::RollForward),
+            Err(PlatformError::StaleRecovery)
+        ));
+        state
+            .borrow_mut()
+            .entries
+            .remove(Path::new("/work/new-a.txt"));
+
+        let inspection = engine.inspect_recovery()?;
+        engine.recover(inspection.token(), RecoveryAction::RollForward)?;
+        assert!(!engine.recovery_required);
+        assert!(
+            state
+                .borrow()
+                .entries
+                .contains_key(Path::new("/work/new-a.txt"))
+        );
+        assert_eq!(engine.latest_transaction()?.kind(), TransactionKind::Apply);
+        Ok(())
+    }
+
+    #[test]
+    fn torn_tail_after_valid_intent_is_truncated_by_authorized_recovery()
+    -> Result<(), PlatformError> {
+        let fixture = Fixture::new().map_err(|source| PlatformError::Io {
+            operation: "create test fixture",
+            source,
+        })?;
+        let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
+        engine.admit([PathBuf::from("/work/a.txt")])?;
+        let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
+        state.borrow_mut().failure = Some(InjectedFailure::AmbiguousAfter(1));
+        assert!(matches!(
+            engine.apply_confirmed(preview.id(), 1),
+            Err(PlatformError::RecoveryRequired)
+        ));
+        drop(engine);
+        OpenOptions::new()
+            .append(true)
+            .open(fixture.root.join("0000000000000001.drj"))
+            .and_then(|mut file| file.write_all(&[1, 2, 3, 4]))
+            .map_err(|source| PlatformError::Io {
+                operation: "append torn journal tail fixture",
+                source,
+            })?;
+
+        let mut restarted = Engine::new(
+            &fixture.root,
+            MemoryFileSystem {
+                state: Rc::clone(&state),
+            },
+        )?;
+        let inspection = restarted.inspect_recovery()?;
+        restarted.recover(inspection.token(), RecoveryAction::RollBack)?;
+        assert!(!restarted.recovery_required);
+        assert!(
+            state
+                .borrow()
+                .entries
+                .contains_key(Path::new("/work/a.txt"))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn undo_revalidates_occupied_destination_and_final_identity() -> Result<(), PlatformError> {
         let fixture = Fixture::new().map_err(|source| PlatformError::Io {
             operation: "create test fixture",
@@ -994,12 +1507,12 @@ mod tests {
         let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
         engine.admit([PathBuf::from("/work/a.txt")])?;
         let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
-        engine.apply_confirmed(preview.id(), 1)?;
+        let apply_id = engine.apply_confirmed(preview.id(), 1)?;
         state
             .borrow_mut()
             .insert(Path::new("/work/a.txt"), EntryKind::RegularFile);
         assert!(matches!(
-            engine.undo_latest(),
+            engine.undo_latest(apply_id, 1),
             Err(PlatformError::DestinationChanged { .. })
         ));
 
@@ -1012,7 +1525,7 @@ mod tests {
             .borrow_mut()
             .insert(Path::new("/work/new-a.txt"), EntryKind::RegularFile);
         assert!(matches!(
-            engine.undo_latest(),
+            engine.undo_latest(apply_id, 1),
             Err(PlatformError::StaleSource { .. })
         ));
         Ok(())
@@ -1028,11 +1541,22 @@ mod tests {
         engine.admit([PathBuf::from("/work/a.txt")])?;
         let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
         let apply_id = engine.apply_confirmed(preview.id(), 1)?;
-        let undo_id = engine.undo_latest()?;
+        assert!(matches!(
+            engine.undo_latest(TransactionId(apply_id.0.saturating_add(1)), 1),
+            Err(PlatformError::StaleTransaction)
+        ));
+        assert!(matches!(
+            engine.undo_latest(apply_id, 2),
+            Err(PlatformError::ConfirmationMismatch {
+                expected: 1,
+                actual: 2
+            })
+        ));
+        let undo_id = engine.undo_latest(apply_id, 1)?;
         assert_ne!(apply_id, undo_id);
         assert_eq!(engine.latest_transaction()?.kind(), TransactionKind::Undo);
         assert!(matches!(
-            engine.undo_latest(),
+            engine.undo_latest(undo_id, 1),
             Err(PlatformError::LatestTransactionNotUndoable)
         ));
         assert!(
@@ -1068,7 +1592,7 @@ mod tests {
             restarted.latest_transaction()?.kind(),
             TransactionKind::Apply
         );
-        restarted.undo_latest()?;
+        restarted.undo_latest(apply_id, 1)?;
         assert!(
             state
                 .borrow()
@@ -1120,6 +1644,127 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn oversized_header_is_rejected_before_a_journal_file_exists() -> Result<(), PlatformError> {
+        let fixture = Fixture::new().map_err(|source| PlatformError::Io {
+            operation: "create test fixture",
+            source,
+        })?;
+        let (store, _scan) = JournalStore::open(&fixture.root)?;
+        let mut base = String::from("/");
+        for _ in 0..22 {
+            base.push_str(&"segment".repeat(14));
+            base.push('/');
+        }
+        let fingerprint = Fingerprint {
+            identity: FileIdentity { volume: 1, file: 1 },
+            kind: EntryKind::RegularFile,
+            length: 1,
+            modified_nanos: 1,
+        };
+        let parent_fingerprint = Fingerprint {
+            identity: FileIdentity { volume: 1, file: 2 },
+            kind: EntryKind::Directory,
+            length: 0,
+            modified_nanos: 0,
+        };
+        let items: Box<[JournalItem]> = (0..MAX_SOURCES)
+            .map(|index| JournalItem {
+                source_id: SourceId(u64::try_from(index).map_or(u64::MAX, |value| value)),
+                original: PathBuf::from(format!("{base}original-{index}")),
+                final_path: PathBuf::from(format!("{base}final-{index}")),
+                fingerprint,
+                parent_fingerprint,
+            })
+            .collect();
+        let result = store.create(&JournalHeader {
+            transaction_id: TransactionId(1),
+            kind: TransactionKind::Apply,
+            generation: Generation(1),
+            items,
+        });
+        assert!(matches!(
+            result,
+            Err(PlatformError::BoundExceeded {
+                field: "journal frame",
+                ..
+            })
+        ));
+        assert_eq!(fs::read_dir(&fixture.root).map_or(0, Iterator::count), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn journal_filename_must_canonically_match_header_transaction_id() -> Result<(), PlatformError>
+    {
+        let fixture = Fixture::new().map_err(|source| PlatformError::Io {
+            operation: "create test fixture",
+            source,
+        })?;
+        let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
+        engine.admit([PathBuf::from("/work/a.txt")])?;
+        let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
+        engine.apply_confirmed(preview.id(), 1)?;
+        drop(engine);
+        fs::rename(
+            fixture.root.join("0000000000000001.drj"),
+            fixture.root.join("0000000000000002.drj"),
+        )
+        .map_err(|source| PlatformError::Io {
+            operation: "rename journal fixture",
+            source,
+        })?;
+        let mut restarted = Engine::new(
+            &fixture.root,
+            MemoryFileSystem {
+                state: Rc::clone(&state),
+            },
+        )?;
+        assert!(restarted.recovery_required);
+        assert!(matches!(
+            restarted.inspect_recovery(),
+            Err(PlatformError::CorruptJournal { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_transaction_id_alias_is_rejected() -> Result<(), PlatformError> {
+        let fixture = Fixture::new().map_err(|source| PlatformError::Io {
+            operation: "create test fixture",
+            source,
+        })?;
+        let (store, _scan) = JournalStore::open(&fixture.root)?;
+        let mut journal = store.create(&JournalHeader {
+            transaction_id: TransactionId(1),
+            kind: TransactionKind::Apply,
+            generation: Generation(1),
+            items: Box::default(),
+        })?;
+        journal.commit()?;
+        fs::copy(
+            fixture.root.join("0000000000000001.drj"),
+            fixture.root.join("00000000000000001.drj"),
+        )
+        .map_err(|source| PlatformError::Io {
+            operation: "copy duplicate journal fixture",
+            source,
+        })?;
+
+        let mut restarted = Engine::new(
+            &fixture.root,
+            MemoryFileSystem {
+                state: Rc::new(RefCell::new(MemoryState::new(fixture.root.clone()))),
+            },
+        )?;
+        assert!(restarted.recovery_required);
+        assert!(matches!(
+            restarted.inspect_recovery(),
+            Err(PlatformError::CorruptJournal { .. })
+        ));
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn local_adapter_applies_and_undoes_without_replacement() -> Result<(), PlatformError> {
@@ -1142,10 +1787,10 @@ mod tests {
         let mut engine = RenameEngine::new(&journals)?;
         engine.admit([original.clone()])?;
         let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
-        engine.apply_confirmed(preview.id(), 1)?;
+        let apply_id = engine.apply_confirmed(preview.id(), 1)?;
         assert!(!original.exists());
         assert!(renamed.exists());
-        engine.undo_latest()?;
+        engine.undo_latest(apply_id, 1)?;
         assert!(original.exists());
         assert!(!renamed.exists());
         Ok(())
