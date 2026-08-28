@@ -3,6 +3,7 @@ members = [
   "crates/dark-renamer-app",
   "crates/dark-renamer-core",
   "crates/dark-renamer-platform",
+  "crates/dark-renamer-windows",
 ]
 resolver = "3"
 
@@ -38,3 +39,5 @@ opt-level = 3
 [profile.release.package.dark-renamer-platform]
 opt-level = 3
 
+[profile.release.package.dark-renamer-windows]
+opt-level = 3
