@@ -40,6 +40,7 @@ pub(crate) struct MoveFailure {
 }
 
 pub(crate) trait FileSystem {
+    fn ensure_mutation_supported(&self) -> Result<(), PlatformError>;
     fn fingerprint(&self, path: &Path) -> Result<Option<Fingerprint>, PlatformError>;
     fn siblings(&self, parent: &Path) -> Result<Vec<PathBuf>, PlatformError>;
     fn move_no_replace(
@@ -54,6 +55,12 @@ pub(crate) trait FileSystem {
 pub(crate) struct LocalFileSystem;
 
 impl FileSystem for LocalFileSystem {
+    fn ensure_mutation_supported(&self) -> Result<(), PlatformError> {
+        Err(PlatformError::Unsupported {
+            operation: "handle-bound atomic no-replace regular-file move",
+        })
+    }
+
     fn fingerprint(&self, path: &Path) -> Result<Option<Fingerprint>, PlatformError> {
         let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
@@ -100,51 +107,6 @@ impl FileSystem for LocalFileSystem {
         Ok(paths)
     }
 
-    #[cfg(unix)]
-    fn move_no_replace(
-        &mut self,
-        from: &Path,
-        to: &Path,
-        expected: FileIdentity,
-    ) -> Result<(), MoveFailure> {
-        use rustix::fs::{CWD, RenameFlags, renameat_with};
-
-        let source_matches = self
-            .fingerprint(from)
-            .ok()
-            .flatten()
-            .is_some_and(|fingerprint| fingerprint.identity == expected);
-        if !source_matches {
-            return Err(MoveFailure {
-                kind: MoveFailureKind::Definite,
-                operation: "revalidate source identity before atomic rename",
-            });
-        }
-
-        renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE).map_err(|_error| {
-            MoveFailure {
-                // renameat2 with RENAME_NOREPLACE is atomic: an error means no
-                // rename occurred. Success is the only state-changing result.
-                kind: MoveFailureKind::Definite,
-                operation: "atomically rename without replacement",
-            }
-        })?;
-        if self
-            .fingerprint(to)
-            .ok()
-            .flatten()
-            .is_some_and(|fingerprint| fingerprint.identity == expected)
-        {
-            Ok(())
-        } else {
-            Err(MoveFailure {
-                kind: MoveFailureKind::Ambiguous,
-                operation: "revalidate destination identity after atomic rename",
-            })
-        }
-    }
-
-    #[cfg(not(unix))]
     fn move_no_replace(
         &mut self,
         _from: &Path,
@@ -153,7 +115,7 @@ impl FileSystem for LocalFileSystem {
     ) -> Result<(), MoveFailure> {
         Err(MoveFailure {
             kind: MoveFailureKind::Definite,
-            operation: "atomic no-replace regular-file move is unsupported on this target",
+            operation: "handle-bound atomic no-replace regular-file move is unsupported",
         })
     }
 }

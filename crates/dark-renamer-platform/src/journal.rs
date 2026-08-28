@@ -1,6 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::filesystem::{EntryKind, FileIdentity, Fingerprint};
@@ -63,11 +63,30 @@ pub(crate) struct IncompleteTransaction {
     pub(crate) state_checksum: u64,
     pub(crate) valid_length: u64,
     pub(crate) file_length: u64,
+    pub(crate) journal_identity: JournalFileIdentity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct JournalFileIdentity {
+    pub(crate) volume: u64,
+    pub(crate) file: u64,
 }
 
 #[derive(Debug)]
 pub(crate) struct JournalStore {
     root: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedJournalHeader {
+    header: JournalHeader,
+    payload: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub(crate) struct JournalCreateError {
+    pub(crate) error: PlatformError,
+    pub(crate) may_have_partial_journal: bool,
 }
 
 impl JournalStore {
@@ -87,29 +106,59 @@ impl JournalStore {
         Ok((store, scan))
     }
 
-    pub(crate) fn create(
+    pub(crate) fn prepare(
         &self,
         header: &JournalHeader,
-    ) -> Result<TransactionJournal, PlatformError> {
+    ) -> Result<PreparedJournalHeader, PlatformError> {
         // Validate and bound the complete authority-bearing header before
         // creating a filename that startup would interpret as a transaction.
+        if !validate_header_authority(header) {
+            return Err(PlatformError::Unsupported {
+                operation: "journal header path authority",
+            });
+        }
         let header_payload = encode_event(&Event::Header(header.clone()))?;
         validate_frame_size(&header_payload)?;
+        Ok(PreparedJournalHeader {
+            header: header.clone(),
+            payload: header_payload,
+        })
+    }
+
+    pub(crate) fn create(
+        &self,
+        prepared: &PreparedJournalHeader,
+    ) -> Result<TransactionJournal, JournalCreateError> {
         let path = self
             .root
-            .join(format!("{:016x}.drj", header.transaction_id.0));
+            .join(format!("{:016x}.drj", prepared.header.transaction_id.0));
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&path)
-            .map_err(|error| io_error("create transaction journal", error))?;
-        file.write_all(MAGIC)
-            .map_err(|error| io_error("write journal magic", error))?;
-        file.sync_data()
-            .map_err(|error| io_error("sync journal magic", error))?;
-        sync_directory(&self.root)?;
+            .map_err(|error| JournalCreateError {
+                error: io_error("create transaction journal", error),
+                may_have_partial_journal: false,
+            })?;
+        file.write_all(MAGIC).map_err(|error| JournalCreateError {
+            error: io_error("write journal magic", error),
+            may_have_partial_journal: true,
+        })?;
+        file.sync_data().map_err(|error| JournalCreateError {
+            error: io_error("sync journal magic", error),
+            may_have_partial_journal: true,
+        })?;
+        sync_directory(&self.root).map_err(|error| JournalCreateError {
+            error,
+            may_have_partial_journal: true,
+        })?;
         let mut journal = TransactionJournal { file };
-        journal.append_payload(&header_payload)?;
+        journal
+            .append_payload(&prepared.payload)
+            .map_err(|error| JournalCreateError {
+                error,
+                may_have_partial_journal: true,
+            })?;
         Ok(journal)
     }
 
@@ -182,27 +231,30 @@ impl JournalStore {
         &self,
         transaction: &IncompleteTransaction,
     ) -> Result<TransactionJournal, PlatformError> {
-        let current = parse_journal(&transaction.path, transaction.header.transaction_id.0)
-            .map_err(|()| PlatformError::CorruptJournal {
-                path: transaction.path.clone(),
-            })?;
+        let mut file = open_journal_file(&transaction.path, true)
+            .map_err(|()| PlatformError::StaleRecovery)?;
+        let current = parse_journal_file(
+            &transaction.path,
+            transaction.header.transaction_id.0,
+            &mut file,
+        )
+        .map_err(|()| PlatformError::StaleRecovery)?;
         let ParseOutcome::Incomplete(current) = current else {
             return Err(PlatformError::StaleRecovery);
         };
         if current.state_checksum != transaction.state_checksum
             || current.file_length != transaction.file_length
+            || current.journal_identity != transaction.journal_identity
         {
             return Err(PlatformError::StaleRecovery);
         }
-        let file = OpenOptions::new()
-            .append(true)
-            .open(&transaction.path)
-            .map_err(|error| io_error("open transaction journal for recovery", error))?;
         if transaction.valid_length != transaction.file_length {
             file.set_len(transaction.valid_length)
                 .and_then(|()| file.sync_data())
                 .map_err(|error| io_error("truncate torn journal tail", error))?;
         }
+        file.seek(SeekFrom::End(0))
+            .map_err(|error| io_error("seek recovered journal tail", error))?;
         Ok(TransactionJournal { file })
     }
 }
@@ -334,17 +386,21 @@ fn canonical_filename_id(path: &Path) -> Result<u64, ()> {
 }
 
 fn parse_journal(path: &Path, filename_id: u64) -> Result<ParseOutcome, ()> {
-    let metadata = fs::symlink_metadata(path).map_err(|_error| ())?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    let mut file = open_journal_file(path, false)?;
+    parse_journal_file(path, filename_id, &mut file)
+}
+
+fn parse_journal_file(path: &Path, filename_id: u64, file: &mut File) -> Result<ParseOutcome, ()> {
+    let metadata = file.metadata().map_err(|_error| ())?;
+    if !metadata.is_file() {
         return Err(());
     }
     if metadata.len() > MAX_JOURNAL_SIZE {
         return Err(());
     }
     let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).map_err(|_error| ())?);
-    File::open(path)
-        .and_then(|mut file| file.read_to_end(&mut bytes))
-        .map_err(|_error| ())?;
+    file.seek(SeekFrom::Start(0)).map_err(|_error| ())?;
+    file.read_to_end(&mut bytes).map_err(|_error| ())?;
     if bytes.len() < MAGIC.len() || &bytes[..MAGIC.len()] != MAGIC {
         return Err(());
     }
@@ -391,7 +447,56 @@ fn parse_journal(path: &Path, filename_id: u64) -> Result<ParseOutcome, ()> {
         u64::try_from(cursor).map_err(|_error| ())?,
         metadata.len(),
         torn_tail,
+        journal_file_identity(&metadata),
     )
+}
+
+#[cfg(unix)]
+fn open_journal_file(path: &Path, writable: bool) -> Result<File, ()> {
+    use rustix::fs::{Mode, OFlags, open};
+
+    let access = if writable {
+        OFlags::RDWR | OFlags::APPEND
+    } else {
+        OFlags::RDONLY
+    };
+    open(
+        path,
+        access | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|_error| ())
+}
+
+#[cfg(not(unix))]
+fn open_journal_file(path: &Path, writable: bool) -> Result<File, ()> {
+    let mut options = OpenOptions::new();
+    options.read(true).append(writable);
+    options.open(path).map_err(|_error| ())
+}
+
+#[cfg(unix)]
+fn journal_file_identity(metadata: &fs::Metadata) -> JournalFileIdentity {
+    use std::os::unix::fs::MetadataExt;
+
+    JournalFileIdentity {
+        volume: metadata.dev(),
+        file: metadata.ino(),
+    }
+}
+
+#[cfg(not(unix))]
+fn journal_file_identity(metadata: &fs::Metadata) -> JournalFileIdentity {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    metadata.len().hash(&mut hasher);
+    metadata.modified().ok().hash(&mut hasher);
+    JournalFileIdentity {
+        volume: 0,
+        file: hasher.finish(),
+    }
 }
 
 fn validate_events(
@@ -401,6 +506,7 @@ fn validate_events(
     valid_length: u64,
     file_length: u64,
     torn_tail: bool,
+    journal_identity: JournalFileIdentity,
 ) -> Result<ParseOutcome, ()> {
     let mut events = events.into_iter();
     let Some(Event::Header(header)) = events.next() else {
@@ -408,9 +514,14 @@ fn validate_events(
     };
     let mut pending: Option<PendingMove> = None;
     let mut terminal = None;
-    let mut last_ordinal = None;
+    let mut next_ordinal = 0_u32;
     let mut completed_move_count = 0_usize;
     let mut known_paths = BTreeSet::new();
+    let mut locations: BTreeMap<FileIdentity, PathBuf> = header
+        .items
+        .iter()
+        .map(|item| (item.fingerprint.identity, item.original.clone()))
+        .collect();
     for event in events {
         if terminal.is_some() {
             return Err(());
@@ -421,10 +532,15 @@ fn validate_events(
                 from,
                 to,
                 identity,
-            } if pending.is_none() && last_ordinal.is_none_or(|previous| ordinal > previous) => {
+            } if pending.is_none()
+                && ordinal == next_ordinal
+                && is_authorized_journal_move(&header, identity, &from, &to)
+                && locations.get(&identity) == Some(&from)
+                && !locations.values().any(|location| location == &to) =>
+            {
                 known_paths.insert(from.clone());
                 known_paths.insert(to.clone());
-                last_ordinal = Some(ordinal);
+                next_ordinal = next_ordinal.saturating_add(1);
                 pending = Some(PendingMove {
                     ordinal,
                     from,
@@ -437,6 +553,9 @@ fn validate_events(
                     .as_ref()
                     .is_some_and(|move_| move_.ordinal == ordinal) =>
             {
+                if let Some(move_) = &pending {
+                    locations.insert(move_.identity, move_.to.clone());
+                }
                 pending = None;
                 completed_move_count = completed_move_count.saturating_add(1);
             }
@@ -461,18 +580,33 @@ fn validate_events(
         return Err(());
     }
     match terminal {
-        Some(true) => Ok(ParseOutcome::Committed(CompletedTransaction { header })),
-        Some(false) => Ok(ParseOutcome::Aborted),
+        Some(true)
+            if header.items.iter().all(|item| {
+                locations.get(&item.fingerprint.identity) == Some(&item.final_path)
+            }) =>
+        {
+            Ok(ParseOutcome::Committed(CompletedTransaction { header }))
+        }
+        Some(false)
+            if header
+                .items
+                .iter()
+                .all(|item| locations.get(&item.fingerprint.identity) == Some(&item.original)) =>
+        {
+            Ok(ParseOutcome::Aborted)
+        }
+        Some(_) => Err(()),
         None => Ok(ParseOutcome::Incomplete(IncompleteTransaction {
             path: path.to_path_buf(),
             header,
             pending,
             known_paths: known_paths.into_iter().collect(),
             completed_move_count,
-            next_ordinal: last_ordinal.map_or(0, |ordinal| ordinal.saturating_add(1)),
+            next_ordinal,
             state_checksum,
             valid_length,
             file_length,
+            journal_identity,
         })),
     }
 }
@@ -484,6 +618,66 @@ fn checksum(bytes: &[u8]) -> u64 {
         value = value.wrapping_mul(0x0000_0100_0000_01b3);
     }
     value
+}
+
+fn validate_header_authority(header: &JournalHeader) -> bool {
+    if header.items.is_empty() || header.items.len() > crate::MAX_SOURCES {
+        return false;
+    }
+    let mut source_ids = BTreeSet::new();
+    let mut identities = BTreeSet::new();
+    let mut originals = BTreeSet::new();
+    let mut finals = BTreeSet::new();
+    header.items.iter().all(|item| {
+        item.original.is_absolute()
+            && item.final_path.is_absolute()
+            && item.original.file_name().is_some()
+            && item.final_path.file_name().is_some()
+            && item.original.parent() == item.final_path.parent()
+            && item.original != item.final_path
+            && item.fingerprint.kind == EntryKind::RegularFile
+            && item.parent_fingerprint.kind == EntryKind::Directory
+            && source_ids.insert(item.source_id)
+            && identities.insert(item.fingerprint.identity)
+            && originals.insert(item.original.clone())
+            && finals.insert(item.final_path.clone())
+    })
+}
+
+fn is_authorized_journal_move(
+    header: &JournalHeader,
+    identity: FileIdentity,
+    from: &Path,
+    to: &Path,
+) -> bool {
+    header
+        .items
+        .iter()
+        .enumerate()
+        .find(|(_index, item)| item.fingerprint.identity == identity)
+        .is_some_and(|(index, item)| {
+            let Some(parent) = item.original.parent() else {
+                return false;
+            };
+            let temporary = parent.join(format!(
+                ".dark-renamer-{:016x}-{index:04x}.tmp",
+                header.transaction_id.0
+            ));
+            let recovery_temporary = parent.join(format!(
+                ".dark-renamer-recovery-{:016x}-{index:04x}.tmp",
+                header.transaction_id.0
+            ));
+            let normal = (from == item.original && to == temporary)
+                || (from == temporary && to == item.final_path)
+                || (from == item.final_path && to == temporary)
+                || (from == temporary && to == item.original);
+            let into_recovery = to == recovery_temporary
+                && from != recovery_temporary
+                && (from == item.original || from == item.final_path || from == temporary);
+            let out_of_recovery =
+                from == recovery_temporary && (to == item.original || to == item.final_path);
+            normal || into_recovery || out_of_recovery
+        })
 }
 
 fn encode_event(event: &Event) -> Result<Vec<u8>, PlatformError> {
@@ -567,12 +761,16 @@ fn decode_event(bytes: &[u8]) -> Result<Event, ()> {
                     parent_fingerprint: reader.fingerprint()?,
                 });
             }
-            Event::Header(JournalHeader {
+            let header = JournalHeader {
                 transaction_id,
                 kind,
                 generation,
                 items: items.into(),
-            })
+            };
+            if !validate_header_authority(&header) {
+                return Err(());
+            }
+            Event::Header(header)
         }
         2 => Event::MoveIntent {
             ordinal: reader.u32()?,
@@ -689,7 +887,11 @@ impl<'a> Reader<'a> {
             return Err(());
         }
         let value = std::str::from_utf8(self.take(length)?).map_err(|_error| ())?;
-        Ok(PathBuf::from(value))
+        let path = PathBuf::from(value);
+        if !path.is_absolute() {
+            return Err(());
+        }
+        Ok(path)
     }
 
     fn fingerprint(&mut self) -> Result<Fingerprint, ()> {
@@ -743,4 +945,77 @@ pub(crate) fn journal_has_pending_intent(path: &Path) -> bool {
         cursor += length;
     }
     pending
+}
+
+#[cfg(test)]
+pub(crate) fn write_unchecked_journal_fixture(
+    path: &Path,
+    header: &JournalHeader,
+    moves: &[(u32, PathBuf, PathBuf, FileIdentity)],
+) -> Result<(), PlatformError> {
+    let mut payloads = vec![encode_header_unchecked(header)?];
+    for (ordinal, from, to, identity) in moves {
+        payloads.push(encode_event(&Event::MoveIntent {
+            ordinal: *ordinal,
+            from: from.clone(),
+            to: to.clone(),
+            identity: *identity,
+        })?);
+    }
+    let mut bytes = MAGIC.to_vec();
+    for payload in payloads {
+        validate_frame_size(&payload)?;
+        let length =
+            u32::try_from(payload.len()).map_err(|_error| PlatformError::BoundExceeded {
+                field: "journal frame",
+                maximum: MAX_FRAME_SIZE,
+            })?;
+        bytes.extend_from_slice(&length.to_le_bytes());
+        bytes.extend_from_slice(&checksum(&payload).to_le_bytes());
+        bytes.extend_from_slice(&payload);
+    }
+    fs::write(path, bytes).map_err(|error| io_error("write unchecked journal fixture", error))
+}
+
+#[cfg(test)]
+fn encode_header_unchecked(header: &JournalHeader) -> Result<Vec<u8>, PlatformError> {
+    let mut bytes = Vec::new();
+    bytes.push(1);
+    put_u64(&mut bytes, header.transaction_id.0);
+    bytes.push(match header.kind {
+        TransactionKind::Apply => 1,
+        TransactionKind::Undo => 2,
+    });
+    put_u64(&mut bytes, header.generation.0);
+    put_u32(
+        &mut bytes,
+        u32::try_from(header.items.len()).map_err(|_error| PlatformError::BoundExceeded {
+            field: "journal item count",
+            maximum: crate::MAX_SOURCES,
+        })?,
+    );
+    for item in &header.items {
+        put_u64(&mut bytes, item.source_id.0);
+        put_path_unchecked(&mut bytes, &item.original)?;
+        put_path_unchecked(&mut bytes, &item.final_path)?;
+        put_fingerprint(&mut bytes, item.fingerprint);
+        put_fingerprint(&mut bytes, item.parent_fingerprint);
+    }
+    Ok(bytes)
+}
+
+#[cfg(test)]
+fn put_path_unchecked(bytes: &mut Vec<u8>, path: &Path) -> Result<(), PlatformError> {
+    let value = path.to_str().ok_or(PlatformError::Unsupported {
+        operation: "encode unchecked non-Unicode test path",
+    })?;
+    put_u32(
+        bytes,
+        u32::try_from(value.len()).map_err(|_error| PlatformError::BoundExceeded {
+            field: "path",
+            maximum: 4_096,
+        })?,
+    );
+    bytes.extend_from_slice(value.as_bytes());
+    Ok(())
 }

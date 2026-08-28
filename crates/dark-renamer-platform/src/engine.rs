@@ -321,7 +321,9 @@ impl<F: FileSystem> Engine<F> {
         plan_id: PlanId,
         exact_changed_count: usize,
     ) -> Result<TransactionId, PlatformError> {
-        self.ensure_mutation_available()?;
+        if self.recovery_required {
+            return Err(PlatformError::RecoveryRequired);
+        }
         let frozen = self.current_plan.clone().ok_or(PlatformError::StalePlan)?;
         if frozen.id != plan_id || frozen.generation != self.generation {
             return Err(PlatformError::StalePlan);
@@ -360,7 +362,9 @@ impl<F: FileSystem> Engine<F> {
         expected_latest: TransactionId,
         exact_changed_count: usize,
     ) -> Result<TransactionId, PlatformError> {
-        self.ensure_mutation_available()?;
+        if self.recovery_required {
+            return Err(PlatformError::RecoveryRequired);
+        }
         let latest = self
             .latest
             .clone()
@@ -453,14 +457,14 @@ impl<F: FileSystem> Engine<F> {
         token: RecoveryToken,
         action: RecoveryAction,
     ) -> Result<TransactionId, PlatformError> {
-        self.ensure_mutation_available_for_recovery()?;
+        self.filesystem.ensure_mutation_supported()?;
         if self.issued_recovery != Some(token) {
             return Err(PlatformError::StaleRecovery);
         }
         self.issued_recovery = None;
         self.refresh_recovery()?;
-        if let Some(path) = &self.corrupt_journal {
-            return Err(PlatformError::CorruptJournal { path: path.clone() });
+        if self.corrupt_journal.is_some() {
+            return Err(PlatformError::StaleRecovery);
         }
         let transaction = self
             .incomplete_recovery
@@ -472,17 +476,6 @@ impl<F: FileSystem> Engine<F> {
             return Err(PlatformError::StaleRecovery);
         }
         self.resolve_recovery(transaction, action)
-    }
-
-    fn ensure_mutation_available_for_recovery(&self) -> Result<(), PlatformError> {
-        #[cfg(windows)]
-        {
-            Err(PlatformError::Unsupported {
-                operation: "handle-atomic no-replace rename on Windows",
-            })
-        }
-        #[cfg(not(windows))]
-        Ok(())
     }
 
     fn refresh_recovery(&mut self) -> Result<(), PlatformError> {
@@ -504,6 +497,8 @@ impl<F: FileSystem> Engine<F> {
         candidates.sort();
         candidates.dedup();
         let mut value = transaction.state_checksum;
+        hash_u64(&mut value, transaction.journal_identity.volume);
+        hash_u64(&mut value, transaction.journal_identity.file);
         for path in candidates {
             hash_bytes(&mut value, path.as_os_str().as_encoded_bytes());
             match self.filesystem.fingerprint(&path)? {
@@ -713,20 +708,6 @@ impl<F: FileSystem> Engine<F> {
         }
     }
 
-    fn ensure_mutation_available(&self) -> Result<(), PlatformError> {
-        if self.recovery_required {
-            return Err(PlatformError::RecoveryRequired);
-        }
-        #[cfg(windows)]
-        {
-            Err(PlatformError::Unsupported {
-                operation: "handle-atomic no-replace rename on Windows",
-            })
-        }
-        #[cfg(not(windows))]
-        Ok(())
-    }
-
     fn revalidate_frozen(&self, changed: &[FrozenItem]) -> Result<(), PlatformError> {
         for item in changed {
             if self.filesystem.fingerprint(&item.source.path)? != Some(item.source.fingerprint) {
@@ -774,6 +755,7 @@ impl<F: FileSystem> Engine<F> {
                 })
                 .collect(),
         };
+        let prepared = self.journals.prepare(&header)?;
         let temporary = self.temporary_paths(transaction_id, changed)?;
         let mut schedule = Vec::with_capacity(changed.len() * 2);
         schedule.extend(
@@ -796,14 +778,16 @@ impl<F: FileSystem> Engine<F> {
                     identity: item.source.fingerprint.identity,
                 }),
         );
+        self.filesystem.ensure_mutation_supported()?;
 
-        let mut journal = match self.journals.create(&header) {
+        let mut journal = match self.journals.create(&prepared) {
             Ok(journal) => journal,
-            Err(_error) => {
-                // Creation may have persisted the magic or a partial header.
-                // Treat its outcome as ambiguous until an operator inspects it.
-                self.recovery_required = true;
-                return Err(PlatformError::RecoveryRequired);
+            Err(error) => {
+                if error.may_have_partial_journal {
+                    self.recovery_required = true;
+                    return Err(PlatformError::RecoveryRequired);
+                }
+                return Err(error.error);
             }
         };
         let mut completed = Vec::with_capacity(schedule.len());
@@ -954,7 +938,7 @@ mod tests {
 
     use super::*;
     use crate::filesystem::{EntryKind, MoveFailure};
-    use crate::journal::journal_has_pending_intent;
+    use crate::journal::{journal_has_pending_intent, write_unchecked_journal_fixture};
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
 
@@ -993,6 +977,7 @@ mod tests {
         failure: Option<InjectedFailure>,
         journal_root: PathBuf,
         every_move_had_intent: bool,
+        mutation_supported: bool,
     }
 
     impl MemoryState {
@@ -1004,6 +989,7 @@ mod tests {
                 failure: None,
                 journal_root,
                 every_move_had_intent: true,
+                mutation_supported: true,
             };
             state.insert(Path::new("/work"), EntryKind::Directory);
             state
@@ -1046,6 +1032,16 @@ mod tests {
     }
 
     impl FileSystem for MemoryFileSystem {
+        fn ensure_mutation_supported(&self) -> Result<(), PlatformError> {
+            if self.state.borrow().mutation_supported {
+                Ok(())
+            } else {
+                Err(PlatformError::Unsupported {
+                    operation: "injected unsupported mutation sink",
+                })
+            }
+        }
+
         fn fingerprint(&self, path: &Path) -> Result<Option<Fingerprint>, PlatformError> {
             Ok(self.state.borrow().entries.get(path).copied())
         }
@@ -1132,6 +1128,32 @@ mod tests {
         RenameRule::LiteralReplace {
             from: from.into(),
             to: to.into(),
+        }
+    }
+
+    fn test_journal_header(original: &str, final_path: &str) -> JournalHeader {
+        JournalHeader {
+            transaction_id: TransactionId(1),
+            kind: TransactionKind::Apply,
+            generation: Generation(1),
+            items: vec![JournalItem {
+                source_id: SourceId(1),
+                original: PathBuf::from(original),
+                final_path: PathBuf::from(final_path),
+                fingerprint: Fingerprint {
+                    identity: FileIdentity { volume: 1, file: 1 },
+                    kind: EntryKind::RegularFile,
+                    length: 1,
+                    modified_nanos: 1,
+                },
+                parent_fingerprint: Fingerprint {
+                    identity: FileIdentity { volume: 1, file: 2 },
+                    kind: EntryKind::Directory,
+                    length: 0,
+                    modified_nanos: 0,
+                },
+            }]
+            .into(),
         }
     }
 
@@ -1499,6 +1521,97 @@ mod tests {
     }
 
     #[test]
+    fn substituted_recovery_journal_is_stale_and_remains_unmodified() -> Result<(), PlatformError> {
+        let fixture = Fixture::new().map_err(|source| PlatformError::Io {
+            operation: "create test fixture",
+            source,
+        })?;
+        let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
+        engine.admit([PathBuf::from("/work/a.txt")])?;
+        let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
+        state.borrow_mut().failure = Some(InjectedFailure::AmbiguousAfter(1));
+        assert!(matches!(
+            engine.apply_confirmed(preview.id(), 1),
+            Err(PlatformError::RecoveryRequired)
+        ));
+        let token = engine.inspect_recovery()?.token();
+        let journal_path = fixture.root.join("0000000000000001.drj");
+        let original_path = fixture.root.join("original-journal.backup");
+        fs::rename(&journal_path, &original_path).map_err(|source| PlatformError::Io {
+            operation: "replace recovery journal fixture",
+            source,
+        })?;
+        fs::copy(&original_path, &journal_path).map_err(|source| PlatformError::Io {
+            operation: "copy substituted recovery journal fixture",
+            source,
+        })?;
+        let before = fs::read(&journal_path).map_err(|source| PlatformError::Io {
+            operation: "read substituted recovery journal fixture",
+            source,
+        })?;
+
+        assert!(matches!(
+            engine.recover(token, RecoveryAction::RollBack),
+            Err(PlatformError::StaleRecovery)
+        ));
+        let after = fs::read(&journal_path).map_err(|source| PlatformError::Io {
+            operation: "reread substituted recovery journal fixture",
+            source,
+        })?;
+        assert_eq!(before, after);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_recovery_journal_is_stale_and_not_followed() -> Result<(), PlatformError> {
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new().map_err(|source| PlatformError::Io {
+            operation: "create test fixture",
+            source,
+        })?;
+        let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
+        engine.admit([PathBuf::from("/work/a.txt")])?;
+        let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
+        state.borrow_mut().failure = Some(InjectedFailure::AmbiguousAfter(1));
+        assert!(matches!(
+            engine.apply_confirmed(preview.id(), 1),
+            Err(PlatformError::RecoveryRequired)
+        ));
+        let token = engine.inspect_recovery()?.token();
+        let journal_path = fixture.root.join("0000000000000001.drj");
+        let original_path = fixture.root.join("original-journal.backup");
+        fs::rename(&journal_path, &original_path).map_err(|source| PlatformError::Io {
+            operation: "move symlink recovery fixture target",
+            source,
+        })?;
+        let before = fs::read(&original_path).map_err(|source| PlatformError::Io {
+            operation: "read symlink recovery fixture target",
+            source,
+        })?;
+        symlink(&original_path, &journal_path).map_err(|source| PlatformError::Io {
+            operation: "create symlink recovery fixture",
+            source,
+        })?;
+
+        assert!(matches!(
+            engine.recover(token, RecoveryAction::RollBack),
+            Err(PlatformError::StaleRecovery)
+        ));
+        assert!(
+            fs::symlink_metadata(&journal_path)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        );
+        let after = fs::read(&original_path).map_err(|source| PlatformError::Io {
+            operation: "reread symlink recovery fixture target",
+            source,
+        })?;
+        assert_eq!(before, after);
+        Ok(())
+    }
+
+    #[test]
     fn undo_revalidates_occupied_destination_and_final_identity() -> Result<(), PlatformError> {
         let fixture = Fixture::new().map_err(|source| PlatformError::Io {
             operation: "create test fixture",
@@ -1645,6 +1758,52 @@ mod tests {
     }
 
     #[test]
+    fn decoded_journal_paths_and_moves_must_match_header_authority() -> Result<(), PlatformError> {
+        let cases = [
+            (
+                test_journal_header("relative-a.txt", "relative-b.txt"),
+                Vec::new(),
+            ),
+            (
+                test_journal_header("/work/a.txt", "/other/b.txt"),
+                Vec::new(),
+            ),
+            (
+                test_journal_header("/work/a.txt", "/work/b.txt"),
+                vec![(
+                    0,
+                    PathBuf::from("/work/a.txt"),
+                    PathBuf::from("/other/forged.tmp"),
+                    FileIdentity { volume: 1, file: 1 },
+                )],
+            ),
+        ];
+        for (header, moves) in cases {
+            let fixture = Fixture::new().map_err(|source| PlatformError::Io {
+                operation: "create test fixture",
+                source,
+            })?;
+            write_unchecked_journal_fixture(
+                &fixture.root.join("0000000000000001.drj"),
+                &header,
+                &moves,
+            )?;
+            let mut engine = Engine::new(
+                &fixture.root,
+                MemoryFileSystem {
+                    state: Rc::new(RefCell::new(MemoryState::new(fixture.root.clone()))),
+                },
+            )?;
+            assert!(engine.recovery_required);
+            assert!(matches!(
+                engine.inspect_recovery(),
+                Err(PlatformError::CorruptJournal { .. })
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn oversized_header_is_rejected_before_a_journal_file_exists() -> Result<(), PlatformError> {
         let fixture = Fixture::new().map_err(|source| PlatformError::Io {
             operation: "create test fixture",
@@ -1656,12 +1815,6 @@ mod tests {
             base.push_str(&"segment".repeat(14));
             base.push('/');
         }
-        let fingerprint = Fingerprint {
-            identity: FileIdentity { volume: 1, file: 1 },
-            kind: EntryKind::RegularFile,
-            length: 1,
-            modified_nanos: 1,
-        };
         let parent_fingerprint = Fingerprint {
             identity: FileIdentity { volume: 1, file: 2 },
             kind: EntryKind::Directory,
@@ -1669,15 +1822,26 @@ mod tests {
             modified_nanos: 0,
         };
         let items: Box<[JournalItem]> = (0..MAX_SOURCES)
-            .map(|index| JournalItem {
-                source_id: SourceId(u64::try_from(index).map_or(u64::MAX, |value| value)),
-                original: PathBuf::from(format!("{base}original-{index}")),
-                final_path: PathBuf::from(format!("{base}final-{index}")),
-                fingerprint,
-                parent_fingerprint,
+            .map(|index| {
+                let id = u64::try_from(index).map_or(u64::MAX, |value| value);
+                JournalItem {
+                    source_id: SourceId(id),
+                    original: PathBuf::from(format!("{base}original-{index}")),
+                    final_path: PathBuf::from(format!("{base}final-{index}")),
+                    fingerprint: Fingerprint {
+                        identity: FileIdentity {
+                            volume: 1,
+                            file: id.saturating_add(1),
+                        },
+                        kind: EntryKind::RegularFile,
+                        length: 1,
+                        modified_nanos: 1,
+                    },
+                    parent_fingerprint,
+                }
             })
             .collect();
-        let result = store.create(&JournalHeader {
+        let result = store.prepare(&JournalHeader {
             transaction_id: TransactionId(1),
             kind: TransactionKind::Apply,
             generation: Generation(1),
@@ -1691,6 +1855,92 @@ mod tests {
             })
         ));
         assert_eq!(fs::read_dir(&fixture.root).map_or(0, Iterator::count), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_engine_plan_does_not_latch_recovery_before_unsupported_sink()
+    -> Result<(), PlatformError> {
+        let fixture = Fixture::new().map_err(|source| PlatformError::Io {
+            operation: "create test fixture",
+            source,
+        })?;
+        let mut parent = String::from("/");
+        for _ in 0..22 {
+            parent.push_str(&"segment".repeat(14));
+            parent.push('/');
+        }
+        parent.push_str("work");
+        let parent = PathBuf::from(parent);
+        let state = Rc::new(RefCell::new(MemoryState::new(fixture.root.clone())));
+        state.borrow_mut().insert(&parent, EntryKind::Directory);
+        state.borrow_mut().mutation_supported = false;
+        let sources: Vec<PathBuf> = (0..MAX_SOURCES)
+            .map(|index| parent.join(format!("source-{index:04}.txt")))
+            .collect();
+        for source in &sources {
+            state.borrow_mut().insert(source, EntryKind::RegularFile);
+        }
+        let mut engine = Engine::new(
+            &fixture.root,
+            MemoryFileSystem {
+                state: Rc::clone(&state),
+            },
+        )?;
+        engine.admit(sources.clone())?;
+        let oversized = engine.preview(&[RenameRule::Prefix("new-".into())])?;
+        assert!(matches!(
+            engine.apply_confirmed(oversized.id(), MAX_SOURCES),
+            Err(PlatformError::BoundExceeded {
+                field: "journal frame",
+                ..
+            })
+        ));
+        assert!(!engine.recovery_required);
+        assert_eq!(fs::read_dir(&fixture.root).map_or(0, Iterator::count), 0);
+
+        engine.admit([sources[0].clone()])?;
+        let smaller = engine.preview(&[RenameRule::Prefix("new-".into())])?;
+        assert!(matches!(
+            engine.apply_confirmed(smaller.id(), 1),
+            Err(PlatformError::Unsupported { .. })
+        ));
+        assert!(!engine.recovery_required);
+        assert_eq!(fs::read_dir(&fixture.root).map_or(0, Iterator::count), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn create_new_collision_does_not_latch_live_recovery() -> Result<(), PlatformError> {
+        let fixture = Fixture::new().map_err(|source| PlatformError::Io {
+            operation: "create test fixture",
+            source,
+        })?;
+        let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
+        engine.admit([PathBuf::from("/work/a.txt")])?;
+        let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
+        fs::write(
+            fixture.root.join("0000000000000001.drj"),
+            b"preexisting file",
+        )
+        .map_err(|source| PlatformError::Io {
+            operation: "write create collision fixture",
+            source,
+        })?;
+        assert!(matches!(
+            engine.apply_confirmed(preview.id(), 1),
+            Err(PlatformError::Io {
+                operation: "create transaction journal",
+                ..
+            })
+        ));
+        assert!(!engine.recovery_required);
+        assert!(
+            state
+                .borrow()
+                .entries
+                .contains_key(Path::new("/work/a.txt"))
+        );
         Ok(())
     }
 
@@ -1735,13 +1985,32 @@ mod tests {
             source,
         })?;
         let (store, _scan) = JournalStore::open(&fixture.root)?;
-        let mut journal = store.create(&JournalHeader {
+        let fingerprint = Fingerprint {
+            identity: FileIdentity { volume: 1, file: 1 },
+            kind: EntryKind::RegularFile,
+            length: 1,
+            modified_nanos: 1,
+        };
+        let prepared = store.prepare(&JournalHeader {
             transaction_id: TransactionId(1),
             kind: TransactionKind::Apply,
             generation: Generation(1),
-            items: Box::default(),
+            items: vec![JournalItem {
+                source_id: SourceId(1),
+                original: PathBuf::from("/work/a.txt"),
+                final_path: PathBuf::from("/work/b.txt"),
+                fingerprint,
+                parent_fingerprint: Fingerprint {
+                    identity: FileIdentity { volume: 1, file: 2 },
+                    kind: EntryKind::Directory,
+                    length: 0,
+                    modified_nanos: 0,
+                },
+            }]
+            .into(),
         })?;
-        journal.commit()?;
+        let journal = store.create(&prepared).map_err(|error| error.error)?;
+        drop(journal);
         fs::copy(
             fixture.root.join("0000000000000001.drj"),
             fixture.root.join("00000000000000001.drj"),
@@ -1765,9 +2034,8 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
     #[test]
-    fn local_adapter_applies_and_undoes_without_replacement() -> Result<(), PlatformError> {
+    fn local_adapter_refuses_path_based_production_mutation() -> Result<(), PlatformError> {
         let fixture = Fixture::new().map_err(|source| PlatformError::Io {
             operation: "create test fixture",
             source,
@@ -1787,12 +2055,14 @@ mod tests {
         let mut engine = RenameEngine::new(&journals)?;
         engine.admit([original.clone()])?;
         let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
-        let apply_id = engine.apply_confirmed(preview.id(), 1)?;
-        assert!(!original.exists());
-        assert!(renamed.exists());
-        engine.undo_latest(apply_id, 1)?;
+        assert!(matches!(
+            engine.apply_confirmed(preview.id(), 1),
+            Err(PlatformError::Unsupported { .. })
+        ));
         assert!(original.exists());
         assert!(!renamed.exists());
+        assert!(!engine.recovery_required());
+        assert_eq!(fs::read_dir(&journals).map_or(0, Iterator::count), 0);
         Ok(())
     }
 }
