@@ -681,6 +681,10 @@ name = "dark-renamer-core"
 version = "0.1.0"
 
 [[package]]
+name = "dark-renamer-legacy"
+version = "0.1.0"
+
+[[package]]
 name = "dark-renamer-platform"
 version = "0.1.0"
 dependencies = [
