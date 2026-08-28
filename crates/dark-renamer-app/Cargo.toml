@@ -15,7 +15,12 @@ path = "src/main.rs"
 [dependencies]
 dark-renamer-core = { path = "../dark-renamer-core" }
 dark-renamer-platform = { path = "../dark-renamer-platform" }
+eframe = { version = "=0.36.1", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+rfd = "=0.17.2"
+
+[dev-dependencies]
+egui_kittest = "=0.36.1"
+kittest = "=0.4.0"
 
 [lints]
 workspace = true
-
