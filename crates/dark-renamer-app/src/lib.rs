@@ -21,7 +21,6 @@ use eframe::egui::{
 
 const APP_TITLE: &str = "Dark Renamer";
 const PREVIEW_ROW_HEIGHT: f32 = 44.0;
-const FILESYSTEM_MUTATION_AVAILABLE: bool = false;
 
 /// Starts the native Dark Renamer workbench.
 ///
@@ -48,11 +47,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn journal_root() -> Result<PathBuf, JournalRootError> {
     #[cfg(windows)]
     {
-        return env::var_os("LOCALAPPDATA")
+        env::var_os("LOCALAPPDATA")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .map(|path| path.join("DarkRenamer").join("journals"))
-            .ok_or(JournalRootError::MissingPerUserDataDirectory);
+            .ok_or(JournalRootError::MissingPerUserDataDirectory)
     }
     #[cfg(not(windows))]
     {
@@ -483,6 +482,7 @@ impl DarkRenamerApp {
                     }
                 }
                 if let Some(inspection) = self.recovery {
+                    let mutation_supported = self.engine.mutation_supported();
                     ui.label(format!(
                         "{} transaction: {} file(s), {} move step(s) already recorded.",
                         transaction_kind_label(inspection.kind()),
@@ -492,11 +492,11 @@ impl DarkRenamerApp {
                     ui.horizontal_wrapped(|ui| {
                         if ui
                             .add_enabled(
-                                FILESYSTEM_MUTATION_AVAILABLE,
+                                mutation_supported,
                                 Button::new("Roll back to original names"),
                             )
                             .on_disabled_hover_text(
-                                "Recovery execution is unavailable in this preview-only build.",
+                                "Recovery execution is unavailable on this platform.",
                             )
                             .clicked()
                         {
@@ -504,11 +504,11 @@ impl DarkRenamerApp {
                         }
                         if ui
                             .add_enabled(
-                                FILESYSTEM_MUTATION_AVAILABLE,
+                                mutation_supported,
                                 Button::new("Roll forward to previewed names"),
                             )
                             .on_disabled_hover_text(
-                                "Recovery execution is unavailable in this preview-only build.",
+                                "Recovery execution is unavailable on this platform.",
                             )
                             .clicked()
                         {
@@ -668,7 +668,7 @@ impl DarkRenamerApp {
             readiness,
             self.engine.recovery_required(),
             self.latest_transaction.map(TransactionSummary::kind),
-            FILESYSTEM_MUTATION_AVAILABLE,
+            self.engine.mutation_supported(),
         );
         ui.separator();
         ui.horizontal_wrapped(|ui| {
@@ -697,7 +697,9 @@ impl DarkRenamerApp {
                 ui.label("Latest transaction: none");
             }
         });
-        ui.small("This build is preview-only. Apply, Undo, and Recovery execution remain unavailable until a safe no-replace filesystem adapter is included.");
+        if !self.engine.mutation_supported() {
+            ui.small("This platform is preview-only. Apply, Undo, and Recovery are unavailable.");
+        }
     }
 
     fn undo_latest(&mut self, latest: TransactionSummary) {
@@ -1426,5 +1428,24 @@ mod tests {
             count.accesskit_node().role(),
             egui::accesskit::Role::TextInput
         );
+    }
+
+    #[test]
+    fn accesskit_apply_state_matches_the_platform_capability()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        fs::write(fixture.source(), b"contents")?;
+        let engine = RenameEngine::new(fixture.journals())?;
+        let mut app = DarkRenamerApp::new(engine);
+        app.rules.items = vec![RenameRule::Prefix("final-".to_owned())];
+        app.admit_paths(vec![fixture.source()]);
+
+        let harness = Harness::builder()
+            .with_size(egui::vec2(640.0, 120.0))
+            .build_ui_state(|ui, app| app.show_actions(ui), app);
+        let apply = harness.get_by_role_and_label(egui::accesskit::Role::Button, "Apply…");
+
+        assert_eq!(apply.accesskit_node().is_disabled(), !cfg!(windows));
+        Ok(())
     }
 }
