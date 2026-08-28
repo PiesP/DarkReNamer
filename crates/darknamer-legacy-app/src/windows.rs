@@ -11,6 +11,7 @@ use std::ptr::{null, null_mut};
 use dark_renamer_legacy::{LegacyList, LegacyListItem};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{COLOR_WINDOW, UpdateWindow};
+use windows_sys::Win32::Storage::FileSystem::MoveFileW;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
     ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_FMT, LVCF_TEXT,
@@ -23,12 +24,12 @@ use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW,
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateMenu, CreatePopupMenu,
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect,
-    GetMessageW, GetWindowLongPtrW, HMENU, IDC_ARROW, LoadCursorW, MF_POPUP, MF_SEPARATOR,
-    MF_STRING, MSG, MessageBoxW, MoveWindow, PostQuitMessage, RegisterClassExW, SW_SHOW,
-    SendMessageW, SetMenu, SetWindowLongPtrW, ShowWindow, TranslateMessage, WM_COMMAND, WM_CREATE,
-    WM_DESTROY, WM_DROPFILES, WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY, WM_SIZE, WNDCLASSEXW,
-    WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_MAXIMIZEBOX,
-    WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    GetMessageW, GetWindowLongPtrW, HMENU, IDC_ARROW, IDOK, LoadCursorW, MB_OKCANCEL, MF_POPUP,
+    MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, MoveWindow, PostQuitMessage, RegisterClassExW,
+    SW_SHOW, SendMessageW, SetMenu, SetWindowLongPtrW, ShowWindow, TranslateMessage, WM_COMMAND,
+    WM_CREATE, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY, WM_SIZE,
+    WNDCLASSEXW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW,
+    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::*;
@@ -368,6 +369,7 @@ unsafe fn arrange(window: HWND, state: &AppState) {
 
 unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
     match command {
+        APPLY => unsafe { apply_changes(window, state) },
         RESET => state.model.reset_proposals(),
         CLEAR_LIST => state.model = LegacyList::new(),
         CLEAR_NAME => state.model.clear_name(),
@@ -382,6 +384,59 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
         _ => {}
     }
     unsafe { refresh(state) };
+}
+
+unsafe fn apply_changes(window: HWND, state: &mut AppState) {
+    if state
+        .model
+        .items()
+        .iter()
+        .any(|item| item.proposed_name().is_empty())
+    {
+        unsafe {
+            message(window, "이름이 지정되지 않은 경우가 있습니다.", "DarkNamer")
+        };
+        return;
+    }
+    for left in 0..state.model.len() {
+        for right in left + 1..state.model.len() {
+            if state.model.items()[left]
+                .planned_path()
+                .case_insensitive_cmp(&state.model.items()[right].planned_path())
+                == std::cmp::Ordering::Equal
+            {
+                unsafe { message(window, "중복되는 이름이 있습니다.", "DarkNamer") };
+                return;
+            }
+        }
+    }
+    let prompt = wide("실제 파일 이름을 변경하시겠습니까?");
+    let caption = wide("DarkNamer");
+    if unsafe { MessageBoxW(window, prompt.as_ptr(), caption.as_ptr(), MB_OKCANCEL) } != IDOK {
+        return;
+    }
+    let mut failed = Vec::new();
+    for index in 0..state.model.len() {
+        let source = state.model.items()[index].source_path().clone();
+        let destination = state.model.items()[index].planned_path();
+        if source.case_insensitive_cmp(&destination) == std::cmp::Ordering::Equal {
+            continue;
+        }
+        let mut source_wide = source.units().to_vec();
+        source_wide.push(0);
+        let mut destination_wide = destination.units().to_vec();
+        destination_wide.push(0);
+        if unsafe { MoveFileW(source_wide.as_ptr(), destination_wide.as_ptr()) } != 0 {
+            state.model.record_move_success(index);
+        } else {
+            failed.push(format!("{source} -> {destination} 변경 실패."));
+        }
+    }
+    if failed.is_empty() {
+        unsafe { message(window, "파일 이름을 변경하였습니다.", "DarkNamer") };
+    } else {
+        unsafe { message(window, &failed.join("\n"), "DarkNamer") };
+    }
 }
 
 unsafe fn admit_drop(state: &mut AppState, drop: HDROP) {
