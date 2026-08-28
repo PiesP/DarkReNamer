@@ -1,0 +1,19 @@
+[artifact]
+name = "DarkNamer.exe"
+location = "../DarkNamer.exe"
+sha256 = "ae93ca169d2b69a5cafe7bf835cabb9e45e42ecffa94f41e7cc88f4eec917e34"
+size_bytes = 81920
+format = "PE32 i386 Windows GUI"
+link_timestamp_utc = "2018-08-30T23:22:27Z"
+
+[version_resource]
+file_version = "1.0.0.1"
+product_label = "DarkNamer 08.02.10"
+copyright_year = 2008
+
+[reconstruction]
+method = "independent behavior reconstruction from local static evidence"
+source_compatible = false
+bug_compatible = false
+binary_tracked = false
+
