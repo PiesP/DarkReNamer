@@ -25,7 +25,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
 const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-const SHARE_READ_WRITE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
+const SHARE_READ: u32 = FILE_SHARE_READ;
 
 /// Stable Windows filesystem identity read from an already-open handle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,7 +83,7 @@ pub fn open_journal_file(path: &Path, access: JournalAccess) -> io::Result<File>
     let mut options = OpenOptions::new();
     options
         .read(true)
-        .share_mode(SHARE_READ_WRITE)
+        .share_mode(SHARE_READ)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     if access == JournalAccess::ReadAppend {
         options.write(true).append(true);

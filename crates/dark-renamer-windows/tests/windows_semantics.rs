@@ -1,7 +1,7 @@
 #![cfg(windows)]
 
 use std::ffi::OsStr;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::windows::fs::symlink_file;
 use std::os::windows::io::AsHandle;
@@ -146,17 +146,34 @@ fn journal_recovery_retains_one_read_append_file() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn retained_journal_handle_blocks_path_substitution() -> Result<(), Box<dyn std::error::Error>> {
+fn retained_journal_handle_blocks_writers_and_path_substitution()
+-> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
-    let path = directory.path().join("journal.drj");
-    let replacement = directory.path().join("replacement.drj");
-    fs::write(&path, b"authorized")?;
-    fs::write(&replacement, b"replacement")?;
-    let file = open_journal_file(&path, JournalAccess::ReadAppend)?;
+    for (index, access) in [JournalAccess::Read, JournalAccess::ReadAppend]
+        .into_iter()
+        .enumerate()
+    {
+        let path = directory.path().join(format!("journal-{index}.drj"));
+        let moved = directory.path().join(format!("moved-{index}.drj"));
+        fs::write(&path, b"authorized")?;
+        let file = open_journal_file(&path, access)?;
 
-    assert!(fs::rename(&path, directory.path().join("moved.drj")).is_err());
-    assert!(fs::rename(&replacement, &path).is_err());
-    assert_eq!(fs::read(&path)?, b"authorized");
-    drop(file);
+        assert!(
+            OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&path)
+                .is_err()
+        );
+        assert!(fs::rename(&path, &moved).is_err());
+        assert!(fs::remove_file(&path).is_err());
+        assert_eq!(fs::read(&path)?, b"authorized");
+
+        drop(file);
+        let mut writer = OpenOptions::new().write(true).truncate(true).open(&path)?;
+        writer.write_all(b"changed")?;
+        drop(writer);
+        assert_eq!(fs::read(path)?, b"changed");
+    }
     Ok(())
 }
