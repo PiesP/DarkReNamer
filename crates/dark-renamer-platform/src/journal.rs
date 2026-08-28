@@ -69,7 +69,7 @@ pub(crate) struct IncompleteTransaction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct JournalFileIdentity {
     pub(crate) volume: u64,
-    pub(crate) file: u64,
+    pub(crate) file: [u8; 16],
 }
 
 #[derive(Debug)]
@@ -209,7 +209,7 @@ impl JournalStore {
                     if incomplete.is_some() {
                         corrupt.get_or_insert(path);
                     } else {
-                        incomplete = Some(transaction);
+                        incomplete = Some(*transaction);
                     }
                 }
                 Err(()) => {
@@ -367,7 +367,7 @@ enum Event {
 enum ParseOutcome {
     Committed(CompletedTransaction),
     Aborted,
-    Incomplete(IncompleteTransaction),
+    Incomplete(Box<IncompleteTransaction>),
 }
 
 fn canonical_filename_id(path: &Path) -> Result<u64, ()> {
@@ -447,7 +447,7 @@ fn parse_journal_file(path: &Path, filename_id: u64, file: &mut File) -> Result<
         u64::try_from(cursor).map_err(|_error| ())?,
         metadata.len(),
         torn_tail,
-        journal_file_identity(&metadata),
+        journal_file_identity(file, &metadata)?,
     )
 }
 
@@ -469,7 +469,17 @@ fn open_journal_file(path: &Path, writable: bool) -> Result<File, ()> {
     .map_err(|_error| ())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn open_journal_file(path: &Path, writable: bool) -> Result<File, ()> {
+    let access = if writable {
+        dark_renamer_windows::JournalAccess::ReadAppend
+    } else {
+        dark_renamer_windows::JournalAccess::Read
+    };
+    dark_renamer_windows::open_journal_file(path, access).map_err(|_error| ())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn open_journal_file(path: &Path, writable: bool) -> Result<File, ()> {
     let mut options = OpenOptions::new();
     options.read(true).append(writable);
@@ -477,26 +487,38 @@ fn open_journal_file(path: &Path, writable: bool) -> Result<File, ()> {
 }
 
 #[cfg(unix)]
-fn journal_file_identity(metadata: &fs::Metadata) -> JournalFileIdentity {
+fn journal_file_identity(_file: &File, metadata: &fs::Metadata) -> Result<JournalFileIdentity, ()> {
     use std::os::unix::fs::MetadataExt;
 
-    JournalFileIdentity {
+    let mut file = [0_u8; 16];
+    file[..8].copy_from_slice(&metadata.ino().to_le_bytes());
+    Ok(JournalFileIdentity {
         volume: metadata.dev(),
-        file: metadata.ino(),
-    }
+        file,
+    })
 }
 
-#[cfg(not(unix))]
-fn journal_file_identity(metadata: &fs::Metadata) -> JournalFileIdentity {
+#[cfg(windows)]
+fn journal_file_identity(file: &File, _metadata: &fs::Metadata) -> Result<JournalFileIdentity, ()> {
+    use std::os::windows::io::AsHandle;
+
+    let identity = dark_renamer_windows::file_identity(file.as_handle()).map_err(|_error| ())?;
+    Ok(JournalFileIdentity {
+        volume: identity.volume_serial_number(),
+        file: identity.file_id(),
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn journal_file_identity(_file: &File, metadata: &fs::Metadata) -> Result<JournalFileIdentity, ()> {
     use std::hash::{Hash, Hasher};
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     metadata.len().hash(&mut hasher);
     metadata.modified().ok().hash(&mut hasher);
-    JournalFileIdentity {
-        volume: 0,
-        file: hasher.finish(),
-    }
+    let mut file = [0_u8; 16];
+    file[..8].copy_from_slice(&hasher.finish().to_le_bytes());
+    Ok(JournalFileIdentity { volume: 0, file })
 }
 
 fn validate_events(
@@ -596,7 +618,7 @@ fn validate_events(
             Ok(ParseOutcome::Aborted)
         }
         Some(_) => Err(()),
-        None => Ok(ParseOutcome::Incomplete(IncompleteTransaction {
+        None => Ok(ParseOutcome::Incomplete(Box::new(IncompleteTransaction {
             path: path.to_path_buf(),
             header,
             pending,
@@ -607,7 +629,7 @@ fn validate_events(
             valid_length,
             file_length,
             journal_identity,
-        })),
+        }))),
     }
 }
 

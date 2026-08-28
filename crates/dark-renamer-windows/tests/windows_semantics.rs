@@ -2,9 +2,13 @@
 
 use std::ffi::OsStr;
 use std::fs;
-use std::io;
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::windows::fs::symlink_file;
+use std::os::windows::io::AsHandle;
 
-use dark_renamer_windows::{EntryHandle, ParentHandle, file_identity, rename_noreplace};
+use dark_renamer_windows::{
+    EntryHandle, JournalAccess, ParentHandle, file_identity, open_journal_file, rename_noreplace,
+};
 
 #[test]
 fn retained_handles_preserve_identity_across_rename() -> Result<(), Box<dyn std::error::Error>> {
@@ -100,5 +104,59 @@ fn invalid_leaf_names_are_rejected_before_ffi() -> Result<(), Box<dyn std::error
             .ok_or("invalid leaf name reached Win32")?;
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
+    Ok(())
+}
+
+#[test]
+fn journal_open_rejects_a_final_file_reparse_point() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let target = directory.path().join("target.drj");
+    let link = directory.path().join("journal.drj");
+    fs::write(&target, b"journal")?;
+    symlink_file(&target, &link)?;
+
+    let error = open_journal_file(&link, JournalAccess::Read)
+        .err()
+        .ok_or("journal reparse point was followed")?;
+
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(fs::read(target)?, b"journal");
+    Ok(())
+}
+
+#[test]
+fn journal_recovery_retains_one_read_append_file() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("journal.drj");
+    fs::write(&path, b"header-tail")?;
+    let mut file = open_journal_file(&path, JournalAccess::ReadAppend)?;
+    let identity = file_identity(file.as_handle())?;
+
+    file.set_len(6)?;
+    file.seek(SeekFrom::End(0))?;
+    file.write_all(b"-frame")?;
+    file.sync_data()?;
+    file.seek(SeekFrom::Start(0))?;
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents)?;
+
+    assert_eq!(contents, b"header-frame");
+    assert_eq!(file_identity(file.as_handle())?, identity);
+    Ok(())
+}
+
+#[test]
+fn retained_journal_handle_blocks_path_substitution() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("journal.drj");
+    let replacement = directory.path().join("replacement.drj");
+    fs::write(&path, b"authorized")?;
+    fs::write(&replacement, b"replacement")?;
+    let file = open_journal_file(&path, JournalAccess::ReadAppend)?;
+
+    assert!(fs::rename(&path, directory.path().join("moved.drj")).is_err());
+    assert!(fs::rename(&replacement, &path).is_err());
+    assert_eq!(fs::read(&path)?, b"authorized");
+    drop(file);
     Ok(())
 }

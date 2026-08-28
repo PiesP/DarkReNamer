@@ -25,6 +25,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
 const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+const SHARE_READ_WRITE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
 
 /// Stable Windows filesystem identity read from an already-open handle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -57,6 +58,45 @@ pub struct EntryHandle {
 #[derive(Debug)]
 pub struct ParentHandle {
     file: File,
+}
+
+/// Access required for a recovery journal handle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JournalAccess {
+    /// Parse a journal without modifying it.
+    Read,
+    /// Parse, truncate if needed, and append recovery frames.
+    ReadAppend,
+}
+
+/// Opens one absolute journal file without following its final reparse point.
+///
+/// The returned [`File`] is the same owned capability callers must retain for
+/// parsing and any authorized recovery writes.
+pub fn open_journal_file(path: &Path, access: JournalAccess) -> io::Result<File> {
+    if !path.is_absolute() || path.file_name().is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "journal path must be an absolute file path",
+        ));
+    }
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .share_mode(SHARE_READ_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    if access == JournalAccess::ReadAppend {
+        options.write(true).append(true);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "journal must be a regular non-reparse file",
+        ));
+    }
+    Ok(file)
 }
 
 impl ParentHandle {

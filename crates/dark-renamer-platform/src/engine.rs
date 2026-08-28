@@ -505,7 +505,7 @@ impl<F: FileSystem> Engine<F> {
         candidates.dedup();
         let mut value = transaction.state_checksum;
         hash_u64(&mut value, transaction.journal_identity.volume);
-        hash_u64(&mut value, transaction.journal_identity.file);
+        hash_bytes(&mut value, &transaction.journal_identity.file);
         for path in candidates {
             hash_bytes(&mut value, path.as_os_str().as_encoded_bytes());
             match self.filesystem.fingerprint(&path)? {
@@ -1598,10 +1598,13 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn symlinked_recovery_journal_is_stale_and_not_followed() -> Result<(), PlatformError> {
+        #[cfg(unix)]
         use std::os::unix::fs::symlink;
+        #[cfg(windows)]
+        use std::os::windows::fs::symlink_file as symlink;
 
         let fixture = Fixture::new().map_err(|source| PlatformError::Io {
             operation: "create test fixture",
