@@ -1,0 +1,40 @@
+[workspace]
+members = [
+  "crates/dark-renamer-app",
+  "crates/dark-renamer-core",
+  "crates/dark-renamer-platform",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+authors = ["PiesP"]
+license = "MIT"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "deny"
+expect_used = "deny"
+panic = "deny"
+unwrap_used = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = "s"
+panic = "abort"
+strip = "symbols"
+
+[profile.release.package.dark-renamer-app]
+opt-level = 3
+
+[profile.release.package.dark-renamer-core]
+opt-level = 3
+
+[profile.release.package.dark-renamer-platform]
+opt-level = 3
+

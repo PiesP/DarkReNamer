@@ -1,0 +1,21 @@
+[package]
+name = "dark-renamer-app"
+description = "Native desktop application for Dark Renamer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "dark-renamer"
+path = "src/main.rs"
+
+[dependencies]
+dark-renamer-core = { path = "../dark-renamer-core" }
+dark-renamer-platform = { path = "../dark-renamer-platform" }
+
+[lints]
+workspace = true
+
