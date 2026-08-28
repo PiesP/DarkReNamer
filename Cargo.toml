@@ -3,6 +3,7 @@ members = [
   "crates/dark-renamer-app",
   "crates/dark-renamer-core",
   "crates/dark-renamer-legacy",
+  "crates/darknamer-legacy-app",
   "crates/dark-renamer-platform",
   "crates/dark-renamer-windows",
 ]
@@ -38,6 +39,9 @@ opt-level = 3
 opt-level = 3
 
 [profile.release.package.dark-renamer-legacy]
+opt-level = 3
+
+[profile.release.package.darknamer-legacy-app]
 opt-level = 3
 
 [profile.release.package.dark-renamer-platform]
