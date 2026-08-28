@@ -1,48 +1,80 @@
-# Legacy behavior inventory
+# DarkNamer 08.02.10 compatibility contract
 
-This inventory binds the first Rust implementation to static evidence from the
-local binary identified in `reference/binary-baseline.toml`. It distinguishes
-observed behavior from safety choices made by the successor.
+This document defines the first Rust milestone: reproduce the behavior and
+native information architecture of the local `DarkNamer.exe` before adding
+product improvements.
 
-## Observed static evidence
+## Authoritative evidence
 
-The binary is a 32-bit Unicode MFC application importing `MFC42u.DLL`,
-`MSVCRT.dll`, and `MSVCP60.dll`. Its resources contain a main dialog with a
-`SysListView32`, a two-field input dialog, two 13-button toolbars, menus, icons,
-and bitmaps.
+The local executable and the upstream `DarkNamer v08.02.10.exe` at the commit
+recorded in `reference/binary-baseline.toml` are byte-identical and share SHA-256
+`ae93ca169d2b69a5cafe7bf835cabb9e45e42ecffa94f41e7cc88f4eec917e34`.
+The matching MFC source and resources are therefore the compatibility source of
+truth rather than inferred static evidence.
 
-The imported Windows APIs establish these capabilities:
+The relevant upstream files are `DarkNamerDlg.cpp`, `DarkNamerDlg.h`,
+`DlgInput.cpp`, `DarkNamer.rc`, and `resource.h` under
+`archives/darknamer_code_080210`.
 
-- Explorer file drag/drop and a native folder browser.
-- File attribute, size, creation-time, and modification-time inspection.
-- Rename through `MoveFileW`.
-- Name comparison through `CompareStringW`.
+## Native surface
 
-Menu resources expose the following user operations:
+- Window caption: `DarkNamer`; initial dialog template: 227×218 DLU with
+  resizable frame, menu, Explorer drop target, and 10-point MS Sans Serif.
+- Runtime layout: 44-pixel left toolbar, central report-mode ListView,
+  44-pixel right toolbar, and an 18-pixel sunken status bar.
+- Default visible columns: `현재이름`, `바꿀이름`, and `파일위치`. Optional
+  columns are `전체경로`, `파일크기`, `변경시각`, and `생성시각`.
+- Menus: `파일`, `편집`, `보기`, `기능`, and the root `버전` command.
+- The generic `입력창` dialog has two conditional edit fields, an optional
+  dropdown, `확인`, and `취소`.
 
-- Add files, clear/sort the path list, move rows up/down, and edit a name.
-- Replace text; add a prefix or suffix; remove a name, position, or delimited
-  segment; retain digits; pad digits; and add sequence numbers.
-- Remove, add, or replace extensions; add text before/after a path; and normalize
-  paths.
-- Import/export proposed names and paths through text files or the clipboard.
-- Toggle full path, size, modification time, and creation time columns.
-- Apply actual changes and restore original names.
+## List and command behavior
 
-## Successor contract
+- File picker, Explorer drop, and path-list import append to the current list.
+  Duplicate paths are skipped case-insensitively. Files and directories are
+  both accepted; adding a directory follows the original recursive/direct
+  choice.
+- `Delete` removes selected rows. `<` and `>` move selected rows. Double-click
+  performs direct proposed-name editing.
+- `Ctrl+Z` resets proposed names to the current original names; it is not a
+  filesystem Undo command.
+- View commands toggle optional columns. Sorting provides ascending/descending
+  modes for name, full path, size, modification time, and creation time.
+- Clipboard/text import and export retain list order and the original
+  blank-line behavior.
 
-Static evidence does not establish the legacy collision, overwrite, cycle,
-atomicity, or recovery semantics. Dark Renamer therefore does not reproduce
-those unknowns. The successor contract is:
+## Name transformation behavior
 
-1. Build an immutable before/after plan.
-2. Block invalid names, duplicate targets, occupied destinations, stale sources,
-   and unsupported path relationships.
-3. Require explicit confirmation of the exact changed-item count.
-4. Persist transaction intent before the first filesystem mutation.
-5. Use no-replace operations and temporary sibling names for cycles.
-6. Offer recovery and Undo only after identity revalidation.
+- String replacement operates on the complete proposed name, including the
+  extension. Prefix insertion also precedes the complete name; suffix insertion
+  occurs immediately before the extension for files.
+- Name clearing preserves only the extension. Position deletion is 1-based and
+  inclusive, with a separate delete-from-end mode. Delimiter deletion removes
+  the first matched start/end pair including both delimiters.
+- Number-only retains ASCII digits in the stem. Digit padding affects only the
+  first or last digit run selected by the dialog.
+- Sequence numbering supports front/back placement and front/back placement
+  with numbering restarted when the parent path changes.
+- Extension delete/add/replace follows the original first-dot/last-dot rules,
+  including its dotfile behavior. Directories do not have extensions.
+- Parent-folder text can be inserted before or after the proposed name. Path
+  unification changes every row's destination root.
 
-Runtime parity remains unverified until the legacy MFC dependency is available
-in a disposable Windows test environment. No claim in this document depends on
-runtime observation.
+## Apply behavior
+
+Apply performs the original confirmation and validation sequence: empty-name
+check, duplicate final-path check, confirmation, then row-order `MoveFile`
+attempts. Successful rows update their current path/name state. Failures remain
+in the list and are reported using the original partial-success model.
+
+Journaled execution, exact-count confirmation, recovery, case conversion, and
+other successor improvements are later-stage capabilities. They must not alter
+the default DarkNamer 08.02.10 compatibility surface until parity is complete.
+
+## Acceptance boundary
+
+Portable transformation and list-state behavior must be covered by golden
+tests derived from the matched source. Native menu/layout, file and directory
+admission, cross-parent moves, partial failures, Explorer drag/drop, and common
+control behavior require execution on a Windows host. Cross-compilation alone
+does not prove those semantics.

@@ -12,8 +12,15 @@ product_label = "DarkNamer 08.02.10"
 copyright_year = 2008
 
 [reconstruction]
-method = "independent behavior reconstruction from local static evidence"
-source_compatible = false
-bug_compatible = false
+method = "Rust port from byte-matched original source and resources"
+source_compatible = true
+bug_compatible = true
 binary_tracked = false
 
+[upstream]
+repository = "https://github.com/nanpuhaha/DarkNamer"
+commit = "3e5d6242e8c8eea60d94e73f8af8ddf9ab677203"
+source_path = "archives/darknamer_code_080210"
+binary_path = "DarkNamer v08.02.10.exe"
+license = "MIT"
+binary_byte_identical = true
