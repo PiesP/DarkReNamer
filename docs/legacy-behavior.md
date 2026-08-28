@@ -33,7 +33,7 @@ Menu resources expose the following user operations:
 
 Static evidence does not establish the legacy collision, overwrite, cycle,
 atomicity, or recovery semantics. Dark Renamer therefore does not reproduce
-those unknowns. It will:
+those unknowns. The successor contract is:
 
 1. Build an immutable before/after plan.
 2. Block invalid names, duplicate targets, occupied destinations, stale sources,
@@ -46,4 +46,3 @@ those unknowns. It will:
 Runtime parity remains unverified until the legacy MFC dependency is available
 in a disposable Windows test environment. No claim in this document depends on
 runtime observation.
-
