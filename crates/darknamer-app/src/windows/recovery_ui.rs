@@ -128,8 +128,8 @@ pub(super) fn discard_staged_journal(owner: HWND, state: &mut AppState) {
             "DarkReNamer - 복구 상태 확인 필요",
         );
     } else {
-        set_status(
-            state.status,
+        state.clear_recovery_status();
+        state.set_transient_status(
             "활성화 전 실행 계획을 폐기했습니다. 파일은 변경되지 않았습니다.",
         );
         message(

@@ -17,8 +17,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BS_CENTER, BS_FLAT, BS_MULTILINE, BS_PUSHBUTTON, BS_VCENTER, CreateWindowExW, DestroyWindow,
-    MoveWindow, SendMessageW, WM_SETFONT, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-    WS_TABSTOP, WS_VISIBLE,
+    MoveWindow, SW_HIDE, SW_SHOW, SendMessageW, ShowWindow, WM_SETFONT, WS_CHILD, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
 };
 
 use super::{CommandId, CommandPlacement, CommandRailSpec, ToolSpec, wide};
@@ -164,6 +164,14 @@ impl CommandRail {
         if let Some(button) = self.command_hwnd(command) {
             // SAFETY: button is the live child control associated with command.
             unsafe { EnableWindow(button, enabled as i32) };
+        }
+    }
+
+    pub(super) fn set_visible(&self, visible: bool) {
+        let command = if visible { SW_SHOW } else { SW_HIDE };
+        for button in &self.buttons {
+            // SAFETY: each button is a live child owned by this command rail.
+            unsafe { ShowWindow(button.window, command) };
         }
     }
 

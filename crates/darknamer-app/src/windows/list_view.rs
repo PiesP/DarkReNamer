@@ -102,17 +102,7 @@ pub(super) fn refresh(state: &mut AppState) {
     state.rendered_rows = rows;
     select_rows(state.list_window, &selected);
     update_controls(state);
-    let status = if state.model.is_empty() {
-        LegacyText::from(EMPTY_LIST_STATUS)
-    } else {
-        LegacyText::from(format!("{} 개", state.model.len()))
-    };
-    let mut status = status.units().to_vec();
-    status.push(0);
-    // SAFETY: status is live and the terminated text outlives this call.
-    unsafe {
-        windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(state.status, status.as_ptr());
-    }
+    state.set_status_item_count();
 }
 
 fn rendered_row(icon_cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyListItem) -> RenderedRow {

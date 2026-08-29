@@ -35,13 +35,45 @@ fn minimum_track_width(window: HWND, state: &AppState) -> i32 {
     } else {
         0
     };
-    scale_dip(INITIAL_WIDTH, state.dpi)
-        .max(scale_dip(minimum_content_width_dip(), state.dpi).saturating_add(nonclient_width))
+    let rail_width = state
+        .font_metrics
+        .rail_metrics(RailDensity::Compact, state.dpi)
+        .rail_width;
+    let baseline_rail_width = RailDensity::Compact.metrics(state.dpi).rail_width;
+    let measured_content_width = scale_dip(minimum_content_width_dip(), state.dpi).saturating_add(
+        rail_width
+            .saturating_sub(baseline_rail_width)
+            .saturating_mul(2),
+    );
+    scale_dip(INITIAL_WIDTH, state.dpi).max(measured_content_width.saturating_add(nonclient_width))
+}
+
+fn nonclient_height(window: HWND) -> i32 {
+    let mut outer = RECT::default();
+    let mut client = RECT::default();
+    // SAFETY: window is live and outer is writable for this synchronous query.
+    let got_outer = unsafe { GetWindowRect(window, &mut outer) } != 0;
+    // SAFETY: window is live and client is writable for this synchronous query.
+    let got_client = unsafe { GetClientRect(window, &mut client) } != 0;
+    if !got_outer || !got_client {
+        return 0;
+    }
+    ((outer.bottom - outer.top) - (client.bottom - client.top)).max(0)
+}
+
+fn minimum_track_height(window: HWND, state: &AppState) -> i32 {
+    minimum_main_client_height(state.dpi, state.font_metrics)
+        .saturating_add(nonclient_height(window))
+}
+
+fn recommended_track_height(window: HWND, state: &AppState) -> i32 {
+    recommended_main_client_height(state.dpi, state.font_metrics)
+        .saturating_add(nonclient_height(window))
 }
 
 fn resize_to_initial_dpi(window: HWND, state: &AppState) -> io::Result<()> {
     let width = minimum_track_width(window, state);
-    let height = scale_dip(INITIAL_HEIGHT, state.dpi);
+    let height = scale_dip(INITIAL_HEIGHT, state.dpi).max(recommended_track_height(window, state));
     // SAFETY: window is the newly created hidden top-level HWND. The flags keep
     // its system-selected position and z-order while applying physical pixels
     // derived from the window's actual DPI before the first ShowWindow call.
@@ -62,7 +94,7 @@ fn resize_to_initial_dpi(window: HWND, state: &AppState) -> io::Result<()> {
     Ok(())
 }
 
-fn ensure_minimum_track_width(window: HWND, state: &AppState) -> io::Result<()> {
+fn ensure_minimum_track_size(window: HWND, state: &AppState) -> io::Result<()> {
     // SAFETY: RECT has a valid all-zero representation and remains writable for
     // the synchronous top-level window geometry query.
     let mut rect: RECT = unsafe { zeroed() };
@@ -70,9 +102,11 @@ fn ensure_minimum_track_width(window: HWND, state: &AppState) -> io::Result<()> 
     if unsafe { GetWindowRect(window, &mut rect) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    let minimum = minimum_track_width(window, state);
+    let minimum_width = minimum_track_width(window, state);
+    let minimum_height = minimum_track_height(window, state);
     let current_width = rect.right - rect.left;
-    if current_width >= minimum {
+    let current_height = rect.bottom - rect.top;
+    if current_width >= minimum_width && current_height >= minimum_height {
         return Ok(());
     }
     // SAFETY: window is live; the nearest-monitor query dereferences no caller
@@ -95,19 +129,26 @@ fn ensure_minimum_track_width(window: HWND, state: &AppState) -> io::Result<()> 
         rect.left,
         monitor_info.rcWork.left,
         monitor_info.rcWork.right,
-        minimum,
+        minimum_width.max(current_width),
     )
     .ok_or_else(|| io::Error::other("invalid monitor work area"))?;
-    // SAFETY: the live window is widened within the nearest monitor work area
-    // without changing height, activation, or z-order.
+    let work_height = monitor_info.rcWork.bottom - monitor_info.rcWork.top;
+    if work_height <= 0 {
+        return Err(io::Error::other("invalid monitor work area height"));
+    }
+    let height = minimum_height.max(current_height).min(work_height);
+    let latest_y = monitor_info.rcWork.bottom - height;
+    let y = rect.top.clamp(monitor_info.rcWork.top, latest_y);
+    // SAFETY: the live window is resized within the nearest monitor work area
+    // without changing activation or z-order.
     if unsafe {
         SetWindowPos(
             window,
             null_mut(),
             placement.x,
-            rect.top,
+            y,
             placement.width,
-            rect.bottom - rect.top,
+            height,
             SWP_NOZORDER | SWP_NOACTIVATE,
         )
     } == 0
@@ -297,7 +338,7 @@ unsafe extern "system" fn window_proc(
                 // for this callback and state_ptr is the live AppState.
                 unsafe {
                     (*info).ptMinTrackSize.x = minimum_track_width(window, &*state_ptr);
-                    (*info).ptMinTrackSize.y = scale_dip(INITIAL_HEIGHT, (*state_ptr).dpi);
+                    (*info).ptMinTrackSize.y = minimum_track_height(window, &*state_ptr);
                 }
             }
             0
@@ -307,6 +348,7 @@ unsafe extern "system" fn window_proc(
             let state = unsafe { &mut *state_ptr };
             let dpi = u32::try_from(wparam & 0xFFFF).unwrap_or(BASE_DPI);
             state.dpi = dpi.max(BASE_DPI);
+            refresh_system_fonts(state);
             let suggested = lparam as *const RECT;
             if !suggested.is_null() {
                 // SAFETY: WM_DPICHANGED supplies a readable suggested RECT for
@@ -327,7 +369,13 @@ unsafe extern "system" fn window_proc(
                 };
             }
             update_dpi_metrics(state);
-            refresh_system_fonts(state);
+            if let Err(error) = ensure_minimum_track_size(window, state) {
+                super::message(
+                    window,
+                    &format!("새 DPI의 최소 창 크기를 적용하지 못했습니다: {error}"),
+                    "DarkReNamer - 표시 설정",
+                );
+            }
             arrange(window, state);
             0
         }
@@ -335,10 +383,10 @@ unsafe extern "system" fn window_proc(
             // SAFETY: state_ptr is the live UI-thread AppState.
             let state = unsafe { &mut *state_ptr };
             refresh_system_fonts(state);
-            if let Err(error) = ensure_minimum_track_width(window, state) {
+            if let Err(error) = ensure_minimum_track_size(window, state) {
                 super::message(
                     window,
-                    &format!("새 표시 설정의 최소 창 폭을 적용하지 못했습니다: {error}"),
+                    &format!("새 표시 설정의 최소 창 크기를 적용하지 못했습니다: {error}"),
                     "DarkReNamer - 표시 설정",
                 );
             }
@@ -349,6 +397,13 @@ unsafe extern "system" fn window_proc(
             // SAFETY: state_ptr is the live UI-thread AppState.
             let state = unsafe { &mut *state_ptr };
             refresh_system_fonts(state);
+            if let Err(error) = ensure_minimum_track_size(window, state) {
+                super::message(
+                    window,
+                    &format!("새 글꼴의 최소 창 크기를 적용하지 못했습니다: {error}"),
+                    "DarkReNamer - 글꼴 설정",
+                );
+            }
             arrange(window, state);
             0
         }

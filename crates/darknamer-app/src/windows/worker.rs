@@ -247,6 +247,7 @@ pub(super) fn handle_completed_execution(
     journal: FileJournal,
     execution: Result<ExecutionReport, ExecuteError>,
 ) {
+    state.clear_progress_status();
     let report = match execution {
         Ok(report) => report,
         Err(error) => {
@@ -379,10 +380,7 @@ pub(super) fn start_plan_worker(
         receiver,
         handle,
     });
-    set_status(
-        state.status,
-        "파일 시스템을 확인하고 실행 계획을 만들고 있습니다...",
-    );
+    state.set_progress_status("파일 시스템을 확인하고 실행 계획을 만들고 있습니다...");
     update_controls(state);
 }
 
@@ -401,6 +399,7 @@ pub(super) fn handle_plan_completion(window: HWND, state: &mut AppState) {
     };
     let joined = worker.handle.join();
     state.mutation_locked = false;
+    state.clear_progress_status();
     if state.close_pending {
         // SAFETY: planning performs no mutation and the worker has joined.
         unsafe { DestroyWindow(window) };
@@ -426,7 +425,7 @@ pub(super) fn handle_plan_completion(window: HWND, state: &mut AppState) {
             }
         }
         Ok(PlanWorkerResult::Cancelled) => {
-            set_status(state.status, "파일 변경 계획을 취소했습니다.");
+            state.set_transient_status("파일 변경 계획을 취소했습니다.");
         }
         Ok(PlanWorkerResult::Panicked) => {
             message(
@@ -534,7 +533,7 @@ pub(super) fn start_apply_worker(
         receiver,
         handle,
     });
-    set_status(state.status, "실행 순서를 준비하고 있습니다...");
+    state.set_progress_status("실행 순서를 준비하고 있습니다...");
     update_controls(state);
 }
 
@@ -553,7 +552,7 @@ pub(super) fn handle_apply_progress(state: &mut AppState) {
         3 => "저널 terminal 상태를 기록했습니다.".to_owned(),
         _ => "파일 변경 상태를 확인하고 있습니다...".to_owned(),
     };
-    set_status(state.status, &text);
+    state.set_progress_status(text);
 }
 
 pub(super) fn handle_apply_completion(window: HWND, state: &mut AppState) {
@@ -580,6 +579,7 @@ pub(super) fn handle_apply_completion(window: HWND, state: &mut AppState) {
 pub(super) fn finalize_apply_worker(window: HWND, state: &mut AppState, worker: ApplyWorker) {
     let joined = worker.handle.join();
     state.mutation_locked = false;
+    state.clear_progress_status();
     if joined.is_err() {
         state.recovery_locked = true;
         message(
@@ -620,6 +620,11 @@ pub(super) fn finalize_apply_worker(window: HWND, state: &mut AppState, worker: 
                 );
             }
         }
+    }
+    if state.recovery_locked {
+        state.set_recovery_status(
+            "복구 확인이 필요해 적용을 잠갔습니다. 복구 상태 메뉴에서 저널을 확인하세요.",
+        );
     }
     update_controls(state);
 }
@@ -669,8 +674,7 @@ pub(super) fn request_window_close(window: HWND, state: &mut AppState) {
         if !state.close_pending {
             state.close_pending = true;
             worker.cancellation.store(true, Ordering::Release);
-            set_status(
-                state.status,
+            state.set_progress_status(
                 "종료 요청을 받았습니다. 현재 경로 확인이 끝나는 즉시 종료합니다...",
             );
             update_controls(state);
@@ -681,8 +685,7 @@ pub(super) fn request_window_close(window: HWND, state: &mut AppState) {
         if !state.close_pending {
             state.close_pending = true;
             worker.cancellation.request();
-            set_status(
-                state.status,
+            state.set_progress_status(
                 "종료 요청을 받았습니다. 파일 시스템 확인이 끝나는 즉시 종료합니다...",
             );
             update_controls(state);
@@ -693,8 +696,7 @@ pub(super) fn request_window_close(window: HWND, state: &mut AppState) {
         if !state.close_pending {
             state.close_pending = true;
             worker.cancellation.request();
-            set_status(
-                state.status,
+            state.set_progress_status(
                 "종료 요청을 받았습니다. 현재 단계를 마친 뒤 안전하게 취소·복원합니다...",
             );
             update_controls(state);
@@ -807,7 +809,7 @@ pub(super) fn start_admission_worker(
         receiver,
         handle,
     });
-    set_status(state.status, "선택한 경로를 확인하고 있습니다...");
+    state.set_progress_status("선택한 경로를 확인하고 있습니다...");
     update_controls(state);
 }
 
@@ -826,6 +828,7 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
     };
     let joined = worker.handle.join();
     state.mutation_locked = false;
+    state.clear_progress_status();
     if state.close_pending {
         // SAFETY: admission performs no mutation and the worker has joined.
         unsafe { DestroyWindow(window) };
@@ -896,7 +899,7 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
                 let appended = state.model.append_batch_by(items, compare_windows);
                 state.commit_model_change(&before);
                 let summary = report.summary_korean(appended);
-                set_status(state.status, &summary);
+                state.set_transient_status(summary.clone());
                 if !report.issues.is_empty() {
                     message(window, &summary, "DarkReNamer - 일부 경로 제외");
                 }
@@ -909,10 +912,7 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
             }
         }
         Ok(AdmissionWorkerResult::Cancelled) => {
-            set_status(
-                state.status,
-                "경로 추가를 취소했습니다. 목록은 변경되지 않았습니다.",
-            );
+            state.set_transient_status("경로 추가를 취소했습니다. 목록은 변경되지 않았습니다.");
         }
         Ok(AdmissionWorkerResult::Panicked) => {
             message(

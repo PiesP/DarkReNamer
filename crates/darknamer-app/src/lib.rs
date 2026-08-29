@@ -114,6 +114,47 @@ pub struct UiMetrics {
     pub rail_width: i32,
 }
 
+/// Text extents measured from the active native message and status fonts.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct MeasuredFontMetrics {
+    pub(crate) button_text_width: i32,
+    pub(crate) button_text_height: i32,
+    pub(crate) status_text_height: i32,
+}
+
+#[cfg(any(windows, test))]
+impl MeasuredFontMetrics {
+    #[must_use]
+    pub(crate) fn rail_metrics(self, density: RailDensity, dpi: u32) -> UiMetrics {
+        let mut metrics = density.metrics(dpi);
+        let (horizontal_padding, vertical_padding) = match density {
+            RailDensity::Comfortable => (12, 10),
+            RailDensity::Compact => (10, 6),
+        };
+        metrics.rail_width = metrics.rail_width.max(
+            self.button_text_width
+                .max(0)
+                .saturating_add(scale_dip(horizontal_padding, dpi)),
+        );
+        metrics.button_height = metrics.button_height.max(
+            self.button_text_height
+                .max(0)
+                .saturating_add(scale_dip(vertical_padding, dpi)),
+        );
+        metrics
+    }
+
+    #[must_use]
+    pub(crate) fn status_height(self, dpi: u32) -> i32 {
+        scale_dip(STATUS_HEIGHT, dpi).max(
+            self.status_text_height
+                .max(0)
+                .saturating_add(scale_dip(4, dpi)),
+        )
+    }
+}
+
 impl RailDensity {
     /// Returns DPI-scaled pixel metrics for this density.
     #[must_use]
@@ -154,6 +195,37 @@ impl CommandPlacement {
 pub enum LayoutError {
     Overflow,
     InsufficientHeight { required: i32, available: i32 },
+}
+
+/// Selected command-rail presentation for the current client rectangle.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RailMode {
+    Comfortable,
+    Compact,
+    MenuOnly,
+}
+
+/// Nonnegative child-window geometry calculated without Win32 dependencies.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct LayoutRect {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) width: i32,
+    pub(crate) height: i32,
+}
+
+/// Complete main-client layout, including the explicit menu-only fallback.
+#[cfg(any(windows, test))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MainLayout {
+    pub(crate) rail_mode: RailMode,
+    pub(crate) rail_width: i32,
+    pub(crate) left_buttons: Vec<CommandPlacement>,
+    pub(crate) right_buttons: Vec<CommandPlacement>,
+    pub(crate) list: LayoutRect,
+    pub(crate) status: LayoutRect,
 }
 
 const LEFT_RAIL_GROUP_1: [CommandId; 1] = [APPLY];
@@ -284,6 +356,153 @@ pub fn select_command_rail_density(
         required,
         available: available_height,
     })
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn minimum_main_client_height(dpi: u32, measured: MeasuredFontMetrics) -> i32 {
+    let metrics = measured.rail_metrics(RailDensity::Compact, dpi);
+    let left = required_command_rail_height(&LEFT_RAIL, metrics).unwrap_or(i32::MAX);
+    let right = required_command_rail_height(&RIGHT_RAIL, metrics).unwrap_or(i32::MAX);
+    left.max(right).saturating_add(measured.status_height(dpi))
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn recommended_main_client_height(dpi: u32, measured: MeasuredFontMetrics) -> i32 {
+    let metrics = measured.rail_metrics(RailDensity::Comfortable, dpi);
+    let left = required_command_rail_height(&LEFT_RAIL, metrics).unwrap_or(i32::MAX);
+    let right = required_command_rail_height(&RIGHT_RAIL, metrics).unwrap_or(i32::MAX);
+    left.max(right).saturating_add(measured.status_height(dpi))
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn calculate_main_layout(
+    client_width: i32,
+    client_height: i32,
+    dpi: u32,
+    measured: MeasuredFontMetrics,
+) -> MainLayout {
+    let width = client_width.max(0);
+    let height = client_height.max(0);
+    let status_height = measured.status_height(dpi).min(height);
+    let rail_height = height.saturating_sub(status_height);
+
+    let selected = [RailDensity::Comfortable, RailDensity::Compact]
+        .into_iter()
+        .find_map(|density| {
+            let metrics = measured.rail_metrics(density, dpi);
+            let rails_width = metrics.rail_width.saturating_mul(2);
+            if rails_width >= width {
+                return None;
+            }
+            let left = calculate_command_rail_layout(&LEFT_RAIL, rail_height, metrics).ok()?;
+            let right = calculate_command_rail_layout(&RIGHT_RAIL, rail_height, metrics).ok()?;
+            Some((density, metrics.rail_width, left, right))
+        });
+
+    let (rail_mode, rail_width, left_buttons, right_buttons) = match selected {
+        Some((RailDensity::Comfortable, rail_width, left, right)) => {
+            (RailMode::Comfortable, rail_width, left, right)
+        }
+        Some((RailDensity::Compact, rail_width, left, right)) => {
+            (RailMode::Compact, rail_width, left, right)
+        }
+        None => (RailMode::MenuOnly, 0, Vec::new(), Vec::new()),
+    };
+    let list_width = width.saturating_sub(rail_width.saturating_mul(2));
+    MainLayout {
+        rail_mode,
+        rail_width,
+        left_buttons,
+        right_buttons,
+        list: LayoutRect {
+            x: rail_width,
+            y: 0,
+            width: list_width,
+            height: rail_height,
+        },
+        status: LayoutRect {
+            x: 0,
+            y: rail_height,
+            width,
+            height: status_height,
+        },
+    }
+}
+
+/// Structured status content whose independent channels survive row refreshes.
+#[cfg(any(windows, test))]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct UiStatus {
+    item_count: usize,
+    transient: Option<String>,
+    progress: Option<String>,
+    recovery: Option<String>,
+}
+
+#[cfg(any(windows, test))]
+impl UiStatus {
+    #[must_use]
+    pub(crate) fn with_recovery(message: impl Into<String>) -> Self {
+        Self {
+            recovery: Some(message.into()),
+            ..Self::default()
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn with_transient(message: impl Into<String>) -> Self {
+        Self {
+            transient: Some(message.into()),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn set_item_count(&mut self, item_count: usize) {
+        self.item_count = item_count;
+    }
+
+    pub(crate) fn set_transient(&mut self, message: impl Into<String>) {
+        self.transient = Some(message.into());
+    }
+
+    pub(crate) fn set_progress(&mut self, message: impl Into<String>) {
+        self.progress = Some(message.into());
+    }
+
+    pub(crate) fn set_recovery(&mut self, message: impl Into<String>) {
+        self.recovery = Some(message.into());
+    }
+
+    pub(crate) fn clear_progress(&mut self) {
+        self.progress = None;
+    }
+
+    pub(crate) fn clear_recovery(&mut self) {
+        self.recovery = None;
+    }
+
+    #[must_use]
+    pub(crate) fn text(&self) -> String {
+        let mut parts = Vec::with_capacity(4);
+        if let Some(message) = self.recovery.as_deref() {
+            parts.push(message.to_owned());
+        }
+        if let Some(message) = self.progress.as_deref() {
+            parts.push(message.to_owned());
+        }
+        if let Some(message) = self.transient.as_deref() {
+            parts.push(message.to_owned());
+        }
+        parts.push(if self.item_count == 0 {
+            EMPTY_LIST_STATUS.to_owned()
+        } else {
+            format!("{} 개", self.item_count)
+        });
+        parts.join("  |  ")
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -743,6 +962,86 @@ mod tests {
                 available: 295,
             })
         );
+    }
+
+    #[test]
+    fn measured_font_metrics_expand_rail_and_status_geometry() {
+        let measured = MeasuredFontMetrics {
+            button_text_width: 90,
+            button_text_height: 44,
+            status_text_height: 24,
+        };
+
+        let compact = measured.rail_metrics(RailDensity::Compact, 96);
+        assert!(compact.rail_width >= 100);
+        assert!(compact.button_height >= 50);
+        assert!(measured.status_height(96) >= 28);
+        assert!(
+            minimum_main_client_height(96, measured)
+                > minimum_main_client_height(96, MeasuredFontMetrics::default())
+        );
+        assert!(
+            recommended_main_client_height(96, measured) > minimum_main_client_height(96, measured)
+        );
+    }
+
+    #[test]
+    fn main_layout_falls_back_from_compact_to_menu_only_without_invalid_rectangles() {
+        let measured = MeasuredFontMetrics::default();
+        let comfortable = calculate_main_layout(464, 370, 96, measured);
+        assert_eq!(comfortable.rail_mode, RailMode::Comfortable);
+
+        let compact = calculate_main_layout(464, 369, 96, measured);
+        assert_eq!(compact.rail_mode, RailMode::Compact);
+
+        let vertical_menu_only = calculate_main_layout(464, 313, 96, measured);
+        assert_eq!(vertical_menu_only.rail_mode, RailMode::MenuOnly);
+
+        let menu_only = calculate_main_layout(80, 40, 96, measured);
+        assert_eq!(menu_only.rail_mode, RailMode::MenuOnly);
+        for rect in [menu_only.list, menu_only.status] {
+            assert!(rect.x >= 0);
+            assert!(rect.y >= 0);
+            assert!(rect.width >= 0);
+            assert!(rect.height >= 0);
+        }
+        assert_eq!(menu_only.list.width, 80);
+        assert_eq!(menu_only.status.width, 80);
+        assert_eq!(menu_only.list.height + menu_only.status.height, 40);
+    }
+
+    #[test]
+    fn item_count_refresh_does_not_erase_structured_status_messages() {
+        assert!(
+            UiStatus::with_transient("시작 알림")
+                .text()
+                .contains("시작 알림")
+        );
+        let mut status = UiStatus::with_recovery("복구 상태를 확인하세요.");
+        status.set_transient("2개 경로를 제외했습니다.");
+        status.set_progress("파일 이름 변경 중: 3/10 단계");
+        status.set_item_count(120);
+
+        let rendered = status.text();
+        assert!(rendered.contains("복구 상태를 확인하세요."));
+        assert!(rendered.contains("2개 경로를 제외했습니다."));
+        assert!(rendered.contains("파일 이름 변경 중: 3/10 단계"));
+        assert!(rendered.contains("120 개"));
+
+        status.set_item_count(121);
+        let refreshed = status.text();
+        assert!(refreshed.contains("2개 경로를 제외했습니다."));
+        assert!(refreshed.contains("파일 이름 변경 중: 3/10 단계"));
+        assert!(refreshed.contains("121 개"));
+
+        status.clear_progress();
+        status.clear_recovery();
+        status.set_recovery("새 복구 상태");
+        let settled = status.text();
+        assert!(!settled.contains("복구 상태를 확인하세요."));
+        assert!(!settled.contains("파일 이름 변경 중"));
+        assert!(settled.contains("2개 경로를 제외했습니다."));
+        assert!(settled.contains("새 복구 상태"));
     }
 
     #[test]

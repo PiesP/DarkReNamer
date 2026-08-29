@@ -69,16 +69,19 @@ use safe_runtime::{
 use text_io::{compare_windows, legacy_path, path_wide, read_legacy_text, wide, write_legacy_text};
 use windows_sys::Win32::Foundation::{FILETIME, HWND, LPARAM, LRESULT, RECT, SYSTEMTIME, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    COLOR_WINDOW, CreateFontIndirectW, DeleteObject, GetMonitorInfoW, HFONT,
-    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, RDW_ALLCHILDREN, RDW_ERASE,
-    RDW_INVALIDATE, RedrawWindow, UpdateWindow,
+    COLOR_WINDOW, CreateFontIndirectW, DT_CALCRECT, DT_NOPREFIX, DT_SINGLELINE, DeleteObject,
+    DrawTextW, GetDC, GetMonitorInfoW, HFONT, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromWindow, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RedrawWindow, ReleaseDC,
+    SelectObject, UpdateWindow,
 };
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
 use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::SystemServices::{SS_CENTERIMAGE, SS_ETCHEDHORZ, SS_SUNKEN};
+use windows_sys::Win32::System::SystemServices::{
+    SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_ETCHEDHORZ, SS_NOPREFIX, SS_SUNKEN,
+};
 use windows_sys::Win32::System::Time::FileTimeToSystemTime;
 use windows_sys::Win32::UI::Controls::{
     ICC_LISTVIEW_CLASSES, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_FMT,
@@ -163,7 +166,8 @@ struct AppState {
     admission_worker: Option<AdmissionWorker>,
     close_pending: bool,
     confirmation_pending: bool,
-    startup_status: Option<String>,
+    font_metrics: MeasuredFontMetrics,
+    ui_status: UiStatus,
     icon_cache: HashMap<IconCacheKey, i32>,
     rendered_rows: Vec<RenderedRow>,
     // Fields drop in declaration order. Keep the instance lock last so workers
@@ -173,6 +177,16 @@ struct AppState {
 
 impl AppState {
     fn new(runtime: SafeRuntime) -> Self {
+        let ui_status = runtime
+            .status
+            .clone()
+            .map_or_else(UiStatus::default, |status| {
+                if runtime.recovery_locked {
+                    UiStatus::with_recovery(status)
+                } else {
+                    UiStatus::with_transient(status)
+                }
+            });
         Self {
             list_window: null_mut(),
             status: null_mut(),
@@ -199,7 +213,8 @@ impl AppState {
             admission_worker: None,
             close_pending: false,
             confirmation_pending: false,
-            startup_status: runtime.status,
+            font_metrics: MeasuredFontMetrics::default(),
+            ui_status,
             icon_cache: HashMap::new(),
             rendered_rows: Vec::new(),
         }
@@ -246,6 +261,40 @@ impl AppState {
                 .blocked_journals
                 .iter()
                 .any(|blocked| blocked.evidence().is_some())
+    }
+
+    fn render_status(&self) {
+        set_status(self.status, &self.ui_status.text());
+    }
+
+    fn set_status_item_count(&mut self) {
+        self.ui_status.set_item_count(self.model.len());
+        self.render_status();
+    }
+
+    fn set_transient_status(&mut self, message: impl Into<String>) {
+        self.ui_status.set_transient(message);
+        self.render_status();
+    }
+
+    fn set_progress_status(&mut self, message: impl Into<String>) {
+        self.ui_status.set_progress(message);
+        self.render_status();
+    }
+
+    fn set_recovery_status(&mut self, message: impl Into<String>) {
+        self.ui_status.set_recovery(message);
+        self.render_status();
+    }
+
+    fn clear_progress_status(&mut self) {
+        self.ui_status.clear_progress();
+        self.render_status();
+    }
+
+    fn clear_recovery_status(&mut self) {
+        self.ui_status.clear_recovery();
+        self.render_status();
     }
 }
 
@@ -803,13 +852,6 @@ mod tests {
             return Err(io::Error::last_os_error().into());
         }
 
-        let metrics = RailDensity::Comfortable.metrics(dpi);
-        let available_height = scale_dip(352, dpi);
-        let left_placements = calculate_command_rail_layout(&LEFT_RAIL, available_height, metrics)
-            .map_err(|error| io::Error::other(format!("test layout failed: {error:?}")))?;
-        let right_placements =
-            calculate_command_rail_layout(&RIGHT_RAIL, available_height, metrics)
-                .map_err(|error| io::Error::other(format!("test layout failed: {error:?}")))?;
         let left = CommandRail::create(parent, &LEFT_RAIL, &LEFT_TOOLS)?;
         let right = match CommandRail::create(parent, &RIGHT_RAIL, &RIGHT_TOOLS) {
             Ok(rail) => rail,
@@ -820,10 +862,41 @@ mod tests {
                 return Err(error.into());
             }
         };
+        let message_font = create_message_font(dpi);
+        let status_font = create_status_font(dpi);
+        if message_font.is_null() || status_font.is_null() {
+            left.destroy();
+            right.destroy();
+            // SAFETY: any non-null fonts and parent were created in this test.
+            unsafe {
+                if !message_font.is_null() {
+                    DeleteObject(message_font);
+                }
+                if !status_font.is_null() {
+                    DeleteObject(status_font);
+                }
+                DestroyWindow(parent);
+            }
+            return Err(io::Error::other("could not create native system fonts").into());
+        }
+        let measured = measure_font_metrics(parent, message_font, status_font);
+        assert!(measured.button_text_width > 0);
+        assert!(measured.button_text_height > 0);
+        assert!(measured.status_text_height > 0);
+        let metrics = measured.rail_metrics(RailDensity::Compact, dpi);
+        let available_height =
+            minimum_main_client_height(dpi, measured).saturating_sub(measured.status_height(dpi));
+        let left_placements = calculate_command_rail_layout(&LEFT_RAIL, available_height, metrics)
+            .map_err(|error| io::Error::other(format!("test layout failed: {error:?}")))?;
+        let right_placements =
+            calculate_command_rail_layout(&RIGHT_RAIL, available_height, metrics)
+                .map_err(|error| io::Error::other(format!("test layout failed: {error:?}")))?;
         assert_eq!(left.button_count(), 10);
         assert_eq!(right.button_count(), 9);
 
         let right_origin = metrics.rail_width + scale_dip(20, dpi);
+        left.apply_font(message_font);
+        right.apply_font(message_font);
         left.arrange(0, &left_placements);
         right.arrange(right_origin, &right_placements);
 
@@ -853,6 +926,8 @@ mod tests {
                     assert_eq!(rect.top, placement.y);
                     assert_eq!(rect.right - rect.left, placement.width);
                     assert_eq!(rect.bottom - rect.top, placement.height);
+                    assert!(placement.width > measured.button_text_width);
+                    assert!(placement.height > measured.button_text_height);
                     // SAFETY: button is live and GWL_STYLE is a value query.
                     let style = unsafe { GetWindowLongPtrW(button, GWL_STYLE) } as u32;
                     assert_ne!(style & BS_MULTILINE as u32, 0);
@@ -874,8 +949,12 @@ mod tests {
         left.destroy();
         right.destroy();
         // SAFETY: all command-rail controls and tooltip text relationships have
-        // been torn down; parent is the remaining hidden test window.
-        unsafe { DestroyWindow(parent) };
+        // been torn down; their fonts and parent remain owned by this test.
+        unsafe {
+            DeleteObject(message_font);
+            DeleteObject(status_font);
+            DestroyWindow(parent);
+        }
         result.map_err(Into::into)
     }
 

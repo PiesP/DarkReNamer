@@ -51,6 +51,7 @@ pub(super) fn refresh_system_fonts(state: &mut AppState) {
     if let Some(rail) = &state.right_rail {
         rail.apply_font(message_font);
     }
+    state.font_metrics = measure_font_metrics(state.list_window, message_font, status_font);
     if !state.font.is_null() {
         // SAFETY: AppState owns this font and replaces it exactly once here.
         unsafe { DeleteObject(state.font) };
@@ -61,6 +62,62 @@ pub(super) fn refresh_system_fonts(state: &mut AppState) {
     }
     state.font = message_font;
     state.status_font = status_font;
+}
+
+pub(super) fn measure_font_metrics(
+    window: HWND,
+    message_font: HFONT,
+    status_font: HFONT,
+) -> MeasuredFontMetrics {
+    let mut button_text_width = 0;
+    let mut button_text_height = 0;
+    for tool in LEFT_TOOLS.iter().chain(RIGHT_TOOLS.iter()) {
+        if let Some((width, height)) = measure_text(window, message_font, tool.label, false) {
+            button_text_width = button_text_width.max(width);
+            button_text_height = button_text_height.max(height);
+        }
+    }
+    let status_text_height =
+        measure_text(window, status_font, EMPTY_LIST_STATUS, true).map_or(0, |(_, height)| height);
+    MeasuredFontMetrics {
+        button_text_width,
+        button_text_height,
+        status_text_height,
+    }
+}
+
+fn measure_text(window: HWND, font: HFONT, text: &str, single_line: bool) -> Option<(i32, i32)> {
+    if window.is_null() || font.is_null() || text.is_empty() {
+        return None;
+    }
+    let text = wide(text);
+    let length = i32::try_from(text.len().checked_sub(1)?).ok()?;
+    // SAFETY: window and font are live UI-thread handles; the returned DC is
+    // released before return and no selected object is deleted while selected.
+    let dc = unsafe { GetDC(window) };
+    if dc.is_null() {
+        return None;
+    }
+    // SAFETY: dc is live and font remains AppState-owned beyond this call.
+    let previous = unsafe { SelectObject(dc, font) };
+    let mut rect = RECT::default();
+    let mut format = DT_CALCRECT | DT_NOPREFIX;
+    if single_line {
+        format |= DT_SINGLELINE;
+    }
+    // SAFETY: text is terminated live UTF-16 storage with checked length and
+    // rect remains writable throughout this synchronous measurement.
+    let measured = unsafe { DrawTextW(dc, text.as_ptr(), length, &mut rect, format) };
+    if !previous.is_null() {
+        // SAFETY: previous is the object returned from selecting into this DC.
+        unsafe { SelectObject(dc, previous) };
+    }
+    // SAFETY: dc was acquired from this exact window in this function.
+    unsafe { ReleaseDC(window, dc) };
+    (measured > 0).then_some((
+        (rect.right - rect.left).max(0),
+        (rect.bottom - rect.top).max(0),
+    ))
 }
 
 pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> {
@@ -134,7 +191,7 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
             "STATIC",
             "",
             STATUS_ID as u16,
-            SS_CENTERIMAGE | SS_SUNKEN,
+            SS_CENTERIMAGE | SS_SUNKEN | SS_NOPREFIX | SS_ENDELLIPSIS,
         )
     };
     state.left_rail = Some(CommandRail::create(window, &LEFT_RAIL, &LEFT_TOOLS)?);
@@ -173,9 +230,6 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
     }
     arrange(window, state);
     refresh(state);
-    if let Some(status) = state.startup_status.as_deref() {
-        set_status(state.status, status);
-    }
     Ok(())
 }
 
@@ -207,44 +261,38 @@ pub(super) fn arrange(window: HWND, state: &AppState) {
     let mut rect: RECT = unsafe { zeroed() };
     // SAFETY: window is live and rect is writable RECT storage retained until GetClientRect returns.
     unsafe { GetClientRect(window, &mut rect) };
-    let status_height = scale_dip(STATUS_HEIGHT, state.dpi);
-    let width = rect.right.max(1);
-    let height = rect.bottom.max(status_height + 1);
-    let rail_height = height - status_height;
-    let Ok(density) = select_command_rail_density(rail_height, state.dpi) else {
-        return;
-    };
-    let metrics = density.metrics(state.dpi);
-    let rail_width = metrics.rail_width;
-    let (Ok(left_placements), Ok(right_placements)) = (
-        calculate_command_rail_layout(&LEFT_RAIL, rail_height, metrics),
-        calculate_command_rail_layout(&RIGHT_RAIL, rail_height, metrics),
-    ) else {
-        return;
-    };
+    let width = (rect.right - rect.left).max(0);
+    let height = (rect.bottom - rect.top).max(0);
+    let layout = calculate_main_layout(width, height, state.dpi, state.font_metrics);
+    let rails_visible = layout.rail_mode != RailMode::MenuOnly;
     if let Some(rail) = &state.left_rail {
-        rail.arrange(0, &left_placements);
+        rail.arrange(0, &layout.left_buttons);
+        rail.set_visible(rails_visible);
     }
     if let Some(rail) = &state.right_rail {
-        rail.arrange(width - rail_width, &right_placements);
+        rail.arrange(
+            width.saturating_sub(layout.rail_width),
+            &layout.right_buttons,
+        );
+        rail.set_visible(rails_visible);
     }
     // SAFETY: window plus AppState's list/status children are live on this UI
     // thread; each MoveWindow call retains no borrowed storage.
     unsafe {
         MoveWindow(
             state.list_window,
-            rail_width,
-            0,
-            width - rail_width * 2,
-            rail_height,
+            layout.list.x,
+            layout.list.y,
+            layout.list.width,
+            layout.list.height,
             1,
         );
         MoveWindow(
             state.status,
-            0,
-            height - status_height,
-            width,
-            status_height,
+            layout.status.x,
+            layout.status.y,
+            layout.status.width,
+            layout.status.height,
             1,
         );
     }
