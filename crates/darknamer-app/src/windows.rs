@@ -15,8 +15,9 @@ use std::ptr::{null, null_mut};
 use std::slice;
 
 use crate::admission::{
-    AdmissionAdapter, AdmissionMode, MAX_ADMITTED_SOURCES, WindowsAdmissionAdapter,
-    collect_admission,
+    AdmissionAdapter, AdmissionMode, MAX_ADMITTED_SOURCES, MAX_IMPORT_BYTES,
+    WindowsAdmissionAdapter, bounded_import_lines, bounded_selection, collect_admission,
+    read_bounded_import,
 };
 use crate::icon_cache::{IconCacheKey, icon_cache_key};
 use crate::rename::{
@@ -1919,9 +1920,12 @@ unsafe fn clear_selection(list: HWND) {
 
 unsafe fn admit_drop(owner: HWND, state: &mut AppState, drop: HDROP) {
     // SAFETY: drop is a valid HDROP for the duration of WM_DROPFILES handling.
-    let count = unsafe { DragQueryFileW(drop, u32::MAX, null_mut(), 0) };
-    let mut paths = Vec::new();
-    for index in 0..count {
+    let reported = unsafe { DragQueryFileW(drop, u32::MAX, null_mut(), 0) } as usize;
+    let remaining = MAX_ADMITTED_SOURCES.saturating_sub(state.model.len());
+    let bounded = bounded_selection(reported, remaining);
+    let mut paths = Vec::with_capacity(bounded.take);
+    for index in 0..bounded.take {
+        let index = u32::try_from(index).unwrap_or(u32::MAX);
         let length = unsafe { DragQueryFileW(drop, index, null_mut(), 0) };
         let mut buffer = vec![0; length as usize + 1];
         unsafe { DragQueryFileW(drop, index, buffer.as_mut_ptr(), buffer.len() as u32) };
@@ -1929,6 +1933,15 @@ unsafe fn admit_drop(owner: HWND, state: &mut AppState, drop: HDROP) {
         paths.push(PathBuf::from(std::ffi::OsString::from_wide(&buffer)));
     }
     unsafe { DragFinish(drop) };
+    if bounded.truncated {
+        unsafe {
+            message(
+                owner,
+                "선택 항목이 남은 10,000개 한도를 초과해 제한된 수만 처리합니다.",
+                "DarkNamer - 추가 한도",
+            )
+        };
+    }
     unsafe { set_status(state.status, "처리중...") };
     state.directory_mode = None;
     unsafe { admit_paths(owner, state, paths) };
@@ -2075,8 +2088,17 @@ unsafe fn import_names_dialog(owner: HWND, state: &mut AppState) {
     }) else {
         return;
     };
-    if let Ok(text) = read_legacy_text(&path) {
-        state.model.import_names(&text);
+    match read_legacy_text(&path) {
+        Ok(text) => {
+            state.model.import_names(&text);
+        }
+        Err(error) => unsafe {
+            message(
+                owner,
+                &format!("가져오기 파일을 읽지 못했습니다: {error}"),
+                "DarkNamer",
+            )
+        },
     }
 }
 
@@ -2090,11 +2112,32 @@ unsafe fn import_paths_dialog(owner: HWND, state: &mut AppState) {
     }) else {
         return;
     };
-    let Ok(text) = read_legacy_text(&path) else {
-        return;
+    let text = match read_legacy_text(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            unsafe {
+                message(
+                    owner,
+                    &format!("경로 목록을 읽지 못했습니다: {error}"),
+                    "DarkNamer",
+                )
+            };
+            return;
+        }
     };
     unsafe { set_status(state.status, "처리중...") };
-    let paths = darknamer_core::parse_import_lines(&text)
+    let remaining = MAX_ADMITTED_SOURCES.saturating_sub(state.model.len());
+    let (lines, truncated) = bounded_import_lines(&text, remaining.saturating_add(1));
+    if truncated || lines.len() > remaining {
+        unsafe {
+            message(
+                owner,
+                "경로 목록이 남은 10,000개 한도를 초과해 제한된 수만 처리합니다.",
+                "DarkNamer - 가져오기 한도",
+            )
+        };
+    }
+    let paths = lines
         .into_iter()
         .map(|line| PathBuf::from(std::ffi::OsString::from_wide(line.units())))
         .collect();
@@ -2130,7 +2173,13 @@ fn write_legacy_text(path: &Path, text: &LegacyText) -> io::Result<()> {
 }
 
 fn read_legacy_text(path: &Path) -> io::Result<LegacyText> {
-    let bytes = fs::read(path)?;
+    if fs::metadata(path)?.len() > MAX_IMPORT_BYTES as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "가져오기 파일이 2 MiB 한도를 초과합니다",
+        ));
+    }
+    let bytes = read_bounded_import(fs::File::open(path)?)?;
     if bytes.starts_with(&[0xFF, 0xFE]) {
         let units = bytes[2..]
             .chunks_exact(2)

@@ -1,11 +1,13 @@
 use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use darknamer_app::admission::{
     AdmissionAdapter, AdmissionAdapterError, AdmissionChildren, AdmissionIssueKind,
-    AdmissionMetadata, AdmissionMode, MAX_ADMITTED_SOURCES, collect_admission,
+    AdmissionMetadata, AdmissionMode, MAX_ADMITTED_SOURCES, MAX_IMPORT_BYTES, bounded_import_lines,
+    bounded_selection, collect_admission, read_bounded_import,
 };
 use darknamer_app::rename::EntryIdentity;
 use darknamer_core::LegacyText;
@@ -320,4 +322,32 @@ fn repeated_batches_respect_one_global_capacity() {
             .iter()
             .any(|issue| issue.kind == AdmissionIssueKind::LimitReached)
     );
+}
+
+#[test]
+fn external_selection_is_bounded_before_path_allocation() {
+    assert_eq!(bounded_selection(3, 5).take, 3);
+    let overflow = bounded_selection(50_000, 10);
+    assert_eq!(overflow.take, 11);
+    assert!(overflow.truncated);
+    assert_eq!(bounded_selection(5, 0).take, 1);
+}
+
+#[test]
+fn import_reader_and_line_parser_are_bounded() -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = read_bounded_import(Cursor::new(vec![b'a'; MAX_IMPORT_BYTES]))?;
+    assert_eq!(bytes.len(), MAX_IMPORT_BYTES);
+    assert!(read_bounded_import(Cursor::new(vec![b'a'; MAX_IMPORT_BYTES + 1])).is_err());
+
+    let text = LegacyText::from(" one \n\n two\nthree\nfour\n");
+    let (lines, truncated) = bounded_import_lines(&text, 3);
+    assert_eq!(
+        lines
+            .iter()
+            .map(LegacyText::to_string_lossy)
+            .collect::<Vec<_>>(),
+        vec!["one", "two", "three"]
+    );
+    assert!(truncated);
+    Ok(())
 }

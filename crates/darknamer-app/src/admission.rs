@@ -2,6 +2,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, VecDeque};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use darknamer_core::{LegacyListItem, LegacyText};
@@ -10,6 +11,73 @@ use crate::rename::EntryIdentity;
 
 /// Hard limit applied before inspecting further candidate metadata.
 pub const MAX_ADMITTED_SOURCES: usize = 10_000;
+/// Maximum imported text bytes read into memory.
+pub const MAX_IMPORT_BYTES: usize = 2 * 1024 * 1024;
+
+/// Bounded count selected from an external picker/drop report.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BoundedSelection {
+    /// Number of entries to extract, including at most one overflow witness.
+    pub take: usize,
+    /// Whether the reported count exceeded remaining capacity.
+    pub truncated: bool,
+}
+
+/// Bounds external selection extraction before per-path allocation.
+#[must_use]
+pub fn bounded_selection(reported: usize, remaining: usize) -> BoundedSelection {
+    let witness_bound = remaining.saturating_add(1);
+    BoundedSelection {
+        take: reported.min(witness_bound),
+        truncated: reported > remaining,
+    }
+}
+
+/// Reads at most [`MAX_IMPORT_BYTES`] and rejects an oversized stream.
+pub fn read_bounded_import(mut reader: impl Read) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .by_ref()
+        .take((MAX_IMPORT_BYTES as u64).saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_IMPORT_BYTES {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "import text exceeds byte limit",
+        ))
+    } else {
+        Ok(bytes)
+    }
+}
+
+/// Parses at most `limit` nonblank trimmed LF-delimited lines plus one witness.
+#[must_use]
+pub fn bounded_import_lines(text: &LegacyText, limit: usize) -> (Vec<LegacyText>, bool) {
+    let mut lines = Vec::with_capacity(limit.min(1024));
+    for units in text.units().split(|unit| *unit == b'\n' as u16) {
+        let first = units
+            .iter()
+            .position(|unit| !is_trim_unit(*unit))
+            .unwrap_or(units.len());
+        let last = units
+            .iter()
+            .rposition(|unit| !is_trim_unit(*unit))
+            .map_or(first, |index| index + 1);
+        if first == last {
+            continue;
+        }
+        lines.push(LegacyText::from_units(units[first..last].to_vec()));
+        if lines.len() > limit {
+            lines.truncate(limit);
+            return (lines, true);
+        }
+    }
+    (lines, false)
+}
+
+fn is_trim_unit(unit: u16) -> bool {
+    char::from_u32(u32::from(unit)).is_some_and(char::is_whitespace)
+}
 
 /// Whether selected directories are rows or traversal roots.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,7 +134,7 @@ pub struct AdmissionMetadata {
 /// Bounded directory read result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdmissionChildren {
-    /// Deterministic bounded children.
+    /// Bounded children; the collector sorts the returned subset.
     pub paths: Vec<PathBuf>,
     /// At least one directory-entry read failed.
     pub had_errors: bool,
@@ -130,7 +198,8 @@ impl AdmissionReport {
     }
 }
 
-/// Collects bounded sources iteratively in deterministic depth-first order.
+/// Collects sources iteratively in bounded depth-first order, sorting each
+/// bounded root/child subset without claiming a global lexical capped subset.
 pub fn collect_admission(
     adapter: &dyn AdmissionAdapter,
     mut roots: Vec<PathBuf>,
