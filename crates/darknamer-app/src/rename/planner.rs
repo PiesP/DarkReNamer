@@ -38,6 +38,28 @@ impl<'a> RenamePlanner<'a> {
 
         for intent in &changed {
             validate_intent(intent, &mut issues);
+        }
+        if !issues.is_empty() {
+            return Err(PlanError::new(issues));
+        }
+        for intent in &changed {
+            for path in [&intent.source, &intent.destination] {
+                if let Err(error) = self.backend.validate_path_environment(path) {
+                    issues.push(PlanIssue {
+                        entry: intent.id,
+                        kind: match error.code {
+                            50 => PlanIssueKind::UnsupportedCaseSensitiveParent,
+                            53 => PlanIssueKind::UnsupportedWindowsPath,
+                            _ => PlanIssueKind::Backend,
+                        },
+                    });
+                }
+            }
+        }
+        if !issues.is_empty() {
+            return Err(PlanError::new(issues));
+        }
+        for intent in &changed {
             source_owners
                 .entry(self.backend.path_key(&intent.source))
                 .or_default()

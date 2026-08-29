@@ -1,4 +1,7 @@
 //! Production Windows `RenameBackend` using retained parent and entry handles.
+//!
+//! Safe v1 rejects per-directory case-sensitive parents and UNC/SMB paths
+//! before ordinal folding or filesystem mutation.
 
 use std::os::windows::fs::MetadataExt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,7 +31,16 @@ const ERROR_ALREADY_EXISTS: u32 = 183;
 pub struct WindowsRenameBackend;
 
 impl RenameBackend for WindowsRenameBackend {
+    fn validate_path_environment(&self, path: &LegacyText) -> Result<(), BackendError> {
+        let (parent_path, _leaf) = split_absolute_path(path, BackendOperation::Observe)?;
+        NativeParent::open_legacy(&parent_path)
+            .map(|_parent| ())
+            .map_err(|error| observe_error(error, BackendOperation::Observe))
+    }
+
     fn path_key(&self, path: &LegacyText) -> PathKey {
+        // Planner/executor callers must first validate the path environment;
+        // safe v1 never folds a case-sensitive parent silently.
         let mut normalized = path.units().to_vec();
         for unit in &mut normalized {
             if *unit == b'/' as u16 {

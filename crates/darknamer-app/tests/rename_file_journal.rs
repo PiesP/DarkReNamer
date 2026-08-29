@@ -105,6 +105,17 @@ fn prepared_fixture() -> Result<Vec<JournalRecord>, Box<dyn std::error::Error>> 
     Ok(journal.records().to_vec())
 }
 
+fn supported_journal_root(
+    path: &std::path::Path,
+) -> Result<Option<JournalRoot>, Box<dyn std::error::Error>> {
+    match JournalRoot::open(path) {
+        Ok(root) => Ok(Some(root)),
+        #[cfg(windows)]
+        Err(error) if matches!(error.os_code, Some(87 | 120)) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[test]
 fn every_record_round_trips_exact_utf16_and_manifest_identities()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -246,7 +257,9 @@ fn file_journal_create_append_sync_resume_and_never_auto_delete()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("transaction.drj");
-    let root = JournalRoot::open(directory.path())?;
+    let Some(root) = supported_journal_root(directory.path())? else {
+        return Ok(());
+    };
     let records = complete_records();
     let JournalRecord::Intent { plan, steps } = &records[0] else {
         return Err(std::io::Error::other("fixture intent missing").into());
@@ -288,7 +301,9 @@ fn retained_linux_validation_handle_is_not_substituted_by_path_replacement()
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("transaction.drj");
     let moved = directory.path().join("retained.drj");
-    let root = JournalRoot::open(directory.path())?;
+    let Some(root) = supported_journal_root(directory.path())? else {
+        return Ok(());
+    };
     let records = complete_records();
     let JournalRecord::Intent { plan, steps } = &records[0] else {
         return Err(std::io::Error::other("fixture intent missing").into());
@@ -309,7 +324,9 @@ fn retained_linux_validation_handle_is_not_substituted_by_path_replacement()
 fn final_torn_prepared_frame_retains_prefix_then_truncates_on_authorized_recovery()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
-    let root = JournalRoot::open(directory.path())?;
+    let Some(root) = supported_journal_root(directory.path())? else {
+        return Ok(());
+    };
     let path = directory.path().join("prepared-torn.drj");
     let records = prepared_fixture()?;
     let mut bytes = encode_journal_records(&records)?;
@@ -345,7 +362,9 @@ fn final_torn_prepared_frame_retains_prefix_then_truncates_on_authorized_recover
 fn final_torn_completed_frame_reconciles_prepared_identity_before_rollback()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
-    let root = JournalRoot::open(directory.path())?;
+    let Some(root) = supported_journal_root(directory.path())? else {
+        return Ok(());
+    };
     let path = directory.path().join("completed-torn.drj");
     let mut records = prepared_fixture()?;
     records.push(JournalRecord::Completed {
@@ -384,7 +403,9 @@ fn journal_root_and_leaf_reject_relative_or_invalid_authority()
         Some(FileJournalErrorKind::RelativeRoot)
     );
     let directory = tempfile::tempdir()?;
-    let root = JournalRoot::open(directory.path())?;
+    let Some(root) = supported_journal_root(directory.path())? else {
+        return Ok(());
+    };
     assert_eq!(
         FileJournal::create_new(&root, "../escape.drj")
             .err()

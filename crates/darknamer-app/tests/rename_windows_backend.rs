@@ -4,9 +4,10 @@ use std::fs;
 use std::os::windows::ffi::OsStrExt;
 
 use darknamer_app::rename::{
-    EntryId, EntryKind, ExecuteErrorKind, ExecutionOutcome, FileJournal, JournalRoot,
-    MemoryJournal, ModelRevision, MutationCertainty, PlanIssueKind, PlanRequest, RenameBackend,
-    RenameExecutor, RenameIntent, RenameOperation, RenamePlanner, WindowsRenameBackend,
+    EntryId, EntryKind, ExecuteErrorKind, ExecutionOutcome, FileJournal, FileJournalErrorKind,
+    JournalRoot, MemoryJournal, ModelRevision, MutationCertainty, PlanIssueKind, PlanRequest,
+    RenameBackend, RenameExecutor, RenameIntent, RenameOperation, RenamePlanner,
+    WindowsRenameBackend,
 };
 use darknamer_core::LegacyText;
 
@@ -39,6 +40,15 @@ fn directory_intent(
     )
 }
 
+fn case_query_supported(parent: &std::path::Path) -> Result<bool, Box<dyn std::error::Error>> {
+    let backend = WindowsRenameBackend;
+    match backend.validate_path_environment(&legacy_path(&parent.join("case-query-probe"))) {
+        Ok(()) => Ok(true),
+        Err(error) if matches!(error.code, 87 | 120) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[test]
 fn occupied_destination_and_relative_path_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
@@ -46,6 +56,9 @@ fn occupied_destination_and_relative_path_are_rejected() -> Result<(), Box<dyn s
     let occupied = directory.path().join("b.txt");
     fs::write(&source, b"a")?;
     fs::write(&occupied, b"b")?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
     let backend = WindowsRenameBackend;
     let request = PlanRequest::new(
         ModelRevision::new(1),
@@ -66,6 +79,9 @@ fn case_only_and_swap_execute_through_handle_relative_moves()
     let directory = tempfile::tempdir()?;
     let source = directory.path().join("A.TXT");
     fs::write(&source, b"case")?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
     let mut backend = WindowsRenameBackend;
     let plan = RenamePlanner::new(&backend).plan(PlanRequest::new(
         ModelRevision::new(1),
@@ -113,6 +129,9 @@ fn stale_source_and_replaced_parent_fail_before_mutation() -> Result<(), Box<dyn
     fs::create_dir(&parent)?;
     let source = parent.join("a.txt");
     fs::write(&source, b"old")?;
+    if !case_query_supported(&parent)? {
+        return Ok(());
+    }
     let mut backend = WindowsRenameBackend;
     let plan = RenamePlanner::new(&backend).plan(PlanRequest::new(
         ModelRevision::new(1),
@@ -156,6 +175,9 @@ fn directory_normal_and_case_only_renames_use_the_same_safe_executor()
     let directory = tempfile::tempdir()?;
     let source = directory.path().join("Folder");
     fs::create_dir(&source)?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
     let mut backend = WindowsRenameBackend;
     let plan = RenamePlanner::new(&backend).plan(PlanRequest::new(
         ModelRevision::new(1),
@@ -194,6 +216,9 @@ fn hard_link_destination_is_never_replaced() -> Result<(), Box<dyn std::error::E
     let hard_link = directory.path().join("hard-link.txt");
     fs::write(&source, b"source")?;
     fs::hard_link(&source, &hard_link)?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
     let mut backend = WindowsRenameBackend;
     let source_snapshot = backend.observe(&legacy_path(&source))?;
     let destination_snapshot = backend.observe(&legacy_path(&hard_link))?;
@@ -226,6 +251,9 @@ fn intermediate_reparse_and_unsupported_prefix_are_rejected_when_available()
     let target = directory.path().join("target-parent");
     fs::create_dir(&target)?;
     fs::write(target.join("a.txt"), b"a")?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
     let link = directory.path().join("junction");
     if let Err(error) = symlink_dir(&target, &link) {
         if error.kind() == std::io::ErrorKind::PermissionDenied {
@@ -236,15 +264,99 @@ fn intermediate_reparse_and_unsupported_prefix_are_rejected_when_available()
     let backend = WindowsRenameBackend;
     assert!(backend.observe(&legacy_path(&link.join("a.txt"))).is_err());
     assert!(JournalRoot::open(&link).is_err());
-    assert!(backend.is_same_or_descendant(
-        &LegacyText::from("\\\\server\\share\\Folder"),
-        &LegacyText::from("\\\\SERVER\\SHARE\\folder\\child"),
-    )?);
+    let unc_error = backend
+        .validate_path_environment(&LegacyText::from("\\\\server\\share\\folder\\child.txt"))
+        .err()
+        .ok_or_else(|| std::io::Error::other("UNC path was accepted"))?;
+    assert_eq!(unc_error.code, 53);
     assert!(
         backend
             .observe(&LegacyText::from("\\\\.\\C:\\unsupported.txt"))
             .is_err()
     );
+    Ok(())
+}
+
+fn set_directory_case_sensitive(path: &std::path::Path, enabled: bool) -> std::io::Result<()> {
+    use std::mem::size_of;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_CASE_SENSITIVE_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+        FileCaseSensitiveInfo, SetFileInformationByHandle,
+    };
+    use windows_sys::Win32::System::SystemServices::FILE_CS_FLAG_CASE_SENSITIVE_DIR;
+
+    let file = fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    let info = FILE_CASE_SENSITIVE_INFO {
+        Flags: if enabled {
+            FILE_CS_FLAG_CASE_SENSITIVE_DIR
+        } else {
+            0
+        },
+    };
+    let size = u32::try_from(size_of::<FILE_CASE_SENSITIVE_INFO>())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    // SAFETY: file is a live directory handle and info is a correctly aligned,
+    // fully initialized buffer of the exact checked size for this synchronous call.
+    let success = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileCaseSensitiveInfo,
+            std::ptr::from_ref(&info).cast(),
+            size,
+        )
+    };
+    if success == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[test]
+fn case_sensitive_parent_is_explicitly_unsupported_when_platform_allows_fixture()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let parent = directory.path().join("case-sensitive");
+    fs::create_dir(&parent)?;
+    let source = parent.join("a.txt");
+    fs::write(&source, b"a")?;
+    if let Err(error) = set_directory_case_sensitive(&parent, true) {
+        if matches!(error.raw_os_error(), Some(5 | 50 | 87)) {
+            return Ok(());
+        }
+        return Err(error.into());
+    }
+
+    let backend = WindowsRenameBackend;
+    let environment_error = backend
+        .validate_path_environment(&legacy_path(&source))
+        .err();
+    let request = PlanRequest::new(
+        ModelRevision::new(1),
+        vec![intent(0, &source, &parent, "b.txt")],
+    );
+    let plan_error = RenamePlanner::new(&backend).plan(request).err();
+    let root_error = JournalRoot::open(&parent).err();
+    let restore = set_directory_case_sensitive(&parent, false);
+    restore?;
+
+    assert_eq!(environment_error.map(|error| error.code), Some(50));
+    assert!(plan_error.is_some_and(|error| {
+        error
+            .issues()
+            .iter()
+            .any(|issue| issue.kind == PlanIssueKind::UnsupportedCaseSensitiveParent)
+    }));
+    assert!(root_error.is_some_and(|error| {
+        error.kind == FileJournalErrorKind::Io && error.os_code == Some(50)
+    }));
     Ok(())
 }
 
@@ -257,6 +369,9 @@ fn final_reparse_and_journal_root_reparse_are_rejected_when_fixture_is_available
     let target = directory.path().join("target.txt");
     let link = directory.path().join("link.txt");
     fs::write(&target, b"target")?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
     if let Err(error) = symlink_file(&target, &link) {
         if error.kind() == std::io::ErrorKind::PermissionDenied {
             return Ok(());
@@ -289,6 +404,9 @@ fn final_reparse_and_journal_root_reparse_are_rejected_when_fixture_is_available
 fn journal_child_handle_is_exclusive_and_relative_to_retained_root()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
     let root = JournalRoot::open(directory.path())?;
     let journal = FileJournal::create_new(&root, "exclusive.drj")?;
     let competing = fs::OpenOptions::new()

@@ -140,6 +140,10 @@ impl MemoryBackend {
 }
 
 impl RenameBackend for MemoryBackend {
+    fn validate_path_environment(&self, _path: &LegacyText) -> Result<(), BackendError> {
+        Ok(())
+    }
+
     fn path_key(&self, path: &LegacyText) -> PathKey {
         PathKey(
             path.units()

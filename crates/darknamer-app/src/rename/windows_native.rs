@@ -18,12 +18,13 @@ use windows_sys::Wdk::Storage::FileSystem::{
 };
 use windows_sys::Win32::Foundation::{OBJ_CASE_INSENSITIVE, UNICODE_STRING};
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_DATA, FileIdInfo, GetFileInformationByHandleEx,
-    SYNCHRONIZE,
+    DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_CASE_SENSITIVE_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_READ_DATA,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_DATA,
+    FileCaseSensitiveInfo, FileIdInfo, GetFileInformationByHandleEx, SYNCHRONIZE,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+use windows_sys::Win32::System::SystemServices::FILE_CS_FLAG_CASE_SENSITIVE_DIR;
 
 const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 
@@ -62,6 +63,7 @@ impl NativeParent {
         };
         let mut file = open_root_directory(&root, root_share)?;
         validate_directory_handle(&file)?;
+        reject_case_sensitive_directory(&file)?;
         let component_count = components.len();
         for (index, component) in components.into_iter().enumerate() {
             let encoded = component.encode_wide().collect::<Vec<_>>();
@@ -79,6 +81,7 @@ impl NativeParent {
                 FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
             )?;
             validate_directory_handle(&file)?;
+            reject_case_sensitive_directory(&file)?;
         }
         let identity = file_identity(&file)?;
         Ok(Self { file, identity })
@@ -93,6 +96,34 @@ impl NativeParent {
     }
 }
 
+fn reject_case_sensitive_directory(file: &File) -> io::Result<()> {
+    let mut info = FILE_CASE_SENSITIVE_INFO::default();
+    let size = u32::try_from(size_of::<FILE_CASE_SENSITIVE_INFO>())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: file is a retained directory handle and info is a writable,
+    // correctly aligned buffer with its exact checked size.
+    let success = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileCaseSensitiveInfo,
+            ptr::from_mut(&mut info).cast(),
+            size,
+        )
+    };
+    if success == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if case_sensitive_flags_unsupported(info.Flags) {
+        Err(io::Error::from_raw_os_error(50))
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) const fn case_sensitive_flags_unsupported(flags: u32) -> bool {
+    flags & FILE_CS_FLAG_CASE_SENSITIVE_DIR != 0
+}
+
 fn traversal_parts(path: &Path) -> io::Result<(PathBuf, Vec<std::ffi::OsString>)> {
     let mut components = path.components();
     let Some(Component::Prefix(prefix)) = components.next() else {
@@ -102,16 +133,11 @@ fn traversal_parts(path: &Path) -> io::Result<(PathBuf, Vec<std::ffi::OsString>)
         ));
     };
     match prefix.kind() {
-        Prefix::Disk(_)
-        | Prefix::VerbatimDisk(_)
-        | Prefix::UNC(_, _)
-        | Prefix::VerbatimUNC(_, _) => {}
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "parent path prefix is unsupported",
-            ));
+        Prefix::Disk(_) | Prefix::VerbatimDisk(_) => {}
+        Prefix::UNC(_, _) | Prefix::VerbatimUNC(_, _) => {
+            return Err(io::Error::from_raw_os_error(53));
         }
+        _ => return Err(io::Error::from_raw_os_error(53)),
     }
     let Some(Component::RootDir) = components.next() else {
         return Err(io::Error::new(
@@ -344,5 +370,39 @@ pub(crate) fn rename_noreplace(
         ))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn case_sensitive_flag_interpretation_is_fail_closed() {
+        assert!(!case_sensitive_flags_unsupported(0));
+        assert!(case_sensitive_flags_unsupported(
+            FILE_CS_FLAG_CASE_SENSITIVE_DIR
+        ));
+        assert!(case_sensitive_flags_unsupported(
+            FILE_CS_FLAG_CASE_SENSITIVE_DIR | 0x8000_0000
+        ));
+    }
+
+    #[test]
+    fn traversal_accepts_local_drive_and_rejects_unc_or_device_prefixes() {
+        let local = traversal_parts(Path::new("C:\\parent\\child"));
+        assert!(local.is_ok_and(|(root, components)| root.is_absolute() && components.len() == 2));
+        assert_eq!(
+            traversal_parts(Path::new("\\\\server\\share\\folder"))
+                .err()
+                .and_then(|error| error.raw_os_error()),
+            Some(53)
+        );
+        assert_eq!(
+            traversal_parts(Path::new("\\\\.\\C:\\folder"))
+                .err()
+                .and_then(|error| error.raw_os_error()),
+            Some(53)
+        );
     }
 }

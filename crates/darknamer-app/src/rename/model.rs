@@ -219,6 +219,10 @@ pub enum PlanIssueKind {
     CrossParent,
     /// Selected sources have an ancestor/descendant relationship.
     SourceOverlap,
+    /// A parent uses per-directory case-sensitive lookup unsupported by safe v1.
+    UnsupportedCaseSensitiveParent,
+    /// A Windows path class such as UNC/SMB is unsupported by safe v1.
+    UnsupportedWindowsPath,
     /// A destination is occupied by an entry outside this plan.
     DestinationOccupied,
     /// A required backend observation failed.
