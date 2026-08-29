@@ -99,6 +99,15 @@ try {
 
     & $validator -SourceRoot $sourceRoot -HandoffRoot $handoffRoot
 
+    Write-Utf8NoBom -Path (Join-Path $sourceRoot 'LICENSE') -Content "LICENSE source policy`r`n"
+    Copy-Item -LiteralPath (Join-Path $sourceRoot 'LICENSE') -Destination $handoffRoot -Force
+    Assert-ValidatorFails `
+        -ExpectedFragment 'must use canonical LF line endings' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+    Write-Utf8NoBom -Path (Join-Path $sourceRoot 'LICENSE') -Content "LICENSE source policy`n"
+    Copy-Item -LiteralPath (Join-Path $sourceRoot 'LICENSE') -Destination $handoffRoot -Force
+
     $global:DarkReNamerTestAuthenticodeStatus = 'Valid'
     Assert-ValidatorFails `
         -ExpectedFragment 'Authenticode status must be NotSigned' `
