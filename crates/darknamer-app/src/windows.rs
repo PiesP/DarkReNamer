@@ -44,9 +44,8 @@ use windows_sys::Win32::Globalization::{
     MultiByteToWideChar, NORM_IGNORECASE,
 };
 use windows_sys::Win32::Graphics::Gdi::{
-    CLIP_DEFAULT_PRECIS, COLOR_WINDOW, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH,
-    DEFAULT_QUALITY, DeleteObject, FF_DONTCARE, FW_NORMAL, HFONT, OUT_DEFAULT_PRECIS,
-    RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RedrawWindow, UpdateWindow,
+    COLOR_WINDOW, CreateFontIndirectW, DeleteObject, HFONT, RDW_ALLCHILDREN, RDW_ERASE,
+    RDW_INVALIDATE, RedrawWindow, UpdateWindow,
 };
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
@@ -60,20 +59,21 @@ use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock,
 use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
 use windows_sys::Win32::System::SystemServices::{SS_CENTERIMAGE, SS_ETCHEDHORZ, SS_SUNKEN};
 use windows_sys::Win32::System::Time::FileTimeToSystemTime;
+use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows_sys::Win32::UI::Controls::{
-    CCS_NOPARENTALIGN, CCS_NORESIZE, CCS_VERT, ICC_BAR_CLASSES, ICC_LISTVIEW_CLASSES,
-    INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT,
-    LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW,
-    LVM_DELETEALLITEMS, LVM_DELETEITEM, LVM_ENSUREVISIBLE, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW,
-    LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST,
-    LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVM_SETITEMW, LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED,
-    LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS,
-    LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_DBLCLK, NMHDR, NMLISTVIEW, TB_ADDBITMAP, TB_ADDBUTTONS,
-    TB_BUTTONSTRUCTSIZE, TB_ENABLEBUTTON, TB_SETBITMAPSIZE, TB_SETBUTTONSIZE, TBADDBITMAP,
-    TBBUTTON, TBSTATE_ENABLED, TBSTYLE_BUTTON, TBSTYLE_FLAT, TBSTYLE_SEP, TBSTYLE_TOOLTIPS,
-    TBSTYLE_WRAPABLE, TOOLBARCLASSNAMEW,
+    BTNS_SHOWTEXT, CCS_NOPARENTALIGN, CCS_NORESIZE, CCS_VERT, I_IMAGENONE, ICC_BAR_CLASSES,
+    ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_FMT, LVCF_TEXT,
+    LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED,
+    LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_DELETEITEM, LVM_ENSUREVISIBLE, LVM_GETNEXTITEM,
+    LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE,
+    LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVM_SETITEMW, LVN_ITEMCHANGED,
+    LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER,
+    LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_DBLCLK, NMHDR, NMLISTVIEW,
+    TB_ADDBITMAP, TB_ADDBUTTONS, TB_ADDSTRINGW, TB_BUTTONSTRUCTSIZE, TB_ENABLEBUTTON,
+    TB_SETBITMAPSIZE, TB_SETBUTTONSIZE, TB_SETMAXTEXTROWS, TBADDBITMAP, TBBUTTON, TBSTATE_ENABLED,
+    TBSTYLE_BUTTON, TBSTYLE_FLAT, TBSTYLE_SEP, TBSTYLE_TOOLTIPS, TOOLBARCLASSNAMEW,
 };
-use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetKeyState, SetFocus, VK_CONTROL, VK_DELETE, VK_ESCAPE, VK_SHIFT,
 };
@@ -89,14 +89,16 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetParent, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, HMENU, IDC_ARROW, IDCANCEL,
     IDOK, IsDialogMessageW, KillTimer, LoadCursorW, LoadIconW, MB_OKCANCEL, MB_YESNO, MF_BYCOMMAND,
     MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO,
-    MSG, MessageBoxW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW, SW_SHOW,
-    SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND,
-    WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP,
-    WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFONT, WM_SETREDRAW, WM_SIZE, WM_TIMER, WNDCLASSEXW,
-    WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW,
-    WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE,
+    MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW, PostMessageW, PostQuitMessage,
+    RegisterClassExW, SPI_GETHIGHCONTRAST, SPI_GETNONCLIENTMETRICS, SW_SHOW, SWP_NOACTIVATE,
+    SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage, WM_APP, WM_CLOSE,
+    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_FONTCHANGE,
+    WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFONT,
+    WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER,
+    WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_ACCEPTFILES,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
+    WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::*;
@@ -119,11 +121,13 @@ struct AppState {
     status: HWND,
     menu: HMENU,
     font: HFONT,
+    status_font: HFONT,
     left_toolbar: HWND,
     right_toolbar: HWND,
     model: LegacyList,
     shown_columns: [bool; 4],
     dpi: u32,
+    high_contrast: bool,
     command_states: [bool; 34],
     model_revision: u64,
     mutation_locked: bool,
@@ -154,11 +158,13 @@ impl AppState {
             status: null_mut(),
             menu: null_mut(),
             font: null_mut(),
+            status_font: null_mut(),
             left_toolbar: null_mut(),
             right_toolbar: null_mut(),
             model: LegacyList::new(),
             shown_columns: [false; 4],
             dpi: BASE_DPI,
+            high_contrast: false,
             command_states: [false; 34],
             model_revision: 0,
             mutation_locked: false,
@@ -807,6 +813,17 @@ unsafe extern "system" fn window_proc(
                 };
             }
             update_dpi_metrics(state);
+            refresh_system_fonts(state);
+            arrange(window, state);
+            0
+        }
+        WM_SETTINGCHANGE | WM_FONTCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE
+            if !state_ptr.is_null() =>
+        {
+            // SAFETY: state_ptr is the live UI-thread AppState.
+            let state = unsafe { &mut *state_ptr };
+            refresh_system_fonts(state);
+            refresh_high_contrast_toolbars(window, state);
             arrange(window, state);
             0
         }
@@ -955,6 +972,11 @@ unsafe extern "system" fn window_proc(
                     // SAFETY: state_ptr is the non-null Box::into_raw value in GWLP_USERDATA, confined to this window thread until WM_NCDESTROY.
                     unsafe { DeleteObject((*state_ptr).font) };
                 }
+                // SAFETY: status_font is a distinct AppState-owned HFONT and is
+                // deleted exactly once at window teardown.
+                if !unsafe { (*state_ptr).status_font }.is_null() {
+                    unsafe { DeleteObject((*state_ptr).status_font) };
+                }
                 // SAFETY: state_ptr is the non-null Box::into_raw AppState stored at WM_NCCREATE; WM_NCDESTROY is its single reclamation point.
                 unsafe { drop(Box::from_raw(state_ptr)) };
                 // SAFETY: window is the active callback HWND; GWLP_USERDATA stores or clears the process-owned pointer without transferring ownership.
@@ -970,10 +992,85 @@ unsafe extern "system" fn window_proc(
     }
 }
 
+fn nonclient_metrics(dpi: u32) -> Option<NONCLIENTMETRICSW> {
+    let mut metrics = NONCLIENTMETRICSW {
+        cbSize: u32::try_from(size_of::<NONCLIENTMETRICSW>()).ok()?,
+        ..NONCLIENTMETRICSW::default()
+    };
+    // SAFETY: metrics is writable NONCLIENTMETRICSW storage with the exact
+    // checked size; no pointer is retained after the synchronous call.
+    let success = unsafe {
+        SystemParametersInfoForDpi(
+            SPI_GETNONCLIENTMETRICS,
+            metrics.cbSize,
+            (&mut metrics as *mut NONCLIENTMETRICSW).cast(),
+            0,
+            dpi.max(BASE_DPI),
+        )
+    };
+    (success != 0).then_some(metrics)
+}
+
+fn create_message_font(dpi: u32) -> HFONT {
+    let Some(metrics) = nonclient_metrics(dpi) else {
+        return null_mut();
+    };
+    // SAFETY: lfMessageFont is fully initialized by SystemParametersInfoForDpi
+    // and the native call copies the descriptor synchronously.
+    unsafe { CreateFontIndirectW(&raw const metrics.lfMessageFont) }
+}
+
+fn create_status_font(dpi: u32) -> HFONT {
+    let Some(metrics) = nonclient_metrics(dpi) else {
+        return null_mut();
+    };
+    // SAFETY: lfStatusFont is fully initialized by SystemParametersInfoForDpi
+    // and the native call copies the descriptor synchronously.
+    unsafe { CreateFontIndirectW(&raw const metrics.lfStatusFont) }
+}
+
+fn refresh_system_fonts(state: &mut AppState) {
+    let message_font = create_message_font(state.dpi);
+    let status_font = create_status_font(state.dpi);
+    // SAFETY: child HWNDs are live; a null font selects the control's default.
+    unsafe {
+        SendMessageW(state.list_window, WM_SETFONT, message_font as usize, 1);
+        SendMessageW(state.status, WM_SETFONT, status_font as usize, 1);
+    }
+    if !state.font.is_null() {
+        // SAFETY: AppState owns this font and replaces it exactly once here.
+        unsafe { DeleteObject(state.font) };
+    }
+    if !state.status_font.is_null() {
+        // SAFETY: AppState owns this distinct font and replaces it once here.
+        unsafe { DeleteObject(state.status_font) };
+    }
+    state.font = message_font;
+    state.status_font = status_font;
+}
+
+fn high_contrast_enabled() -> bool {
+    let mut contrast = HIGHCONTRASTW {
+        cbSize: u32::try_from(size_of::<HIGHCONTRASTW>()).unwrap_or(0),
+        ..HIGHCONTRASTW::default()
+    };
+    // SAFETY: contrast is writable HIGHCONTRASTW storage with its checked size.
+    let success = unsafe {
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            contrast.cbSize,
+            (&mut contrast as *mut HIGHCONTRASTW).cast(),
+            0,
+        )
+    };
+    success != 0 && contrast.dwFlags & HCF_HIGHCONTRASTON != 0
+}
+
 fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> {
     // SAFETY: window is the live top-level HWND being initialized.
     let dpi = unsafe { GetDpiForWindow(window) };
     state.dpi = if dpi == 0 { BASE_DPI } else { dpi };
+    state.high_contrast = high_contrast_enabled();
     // SAFETY: A null module name requests the current process module and dereferences no caller memory.
     let instance = unsafe { GetModuleHandleW(null()) };
     let list_class = wide("SysListView32");
@@ -1052,6 +1149,7 @@ fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> {
             resource_ids::LEFT_TOOLBAR_BITMAP,
             &LEFT_TOOLBAR_ITEMS,
             state.dpi,
+            state.high_contrast,
         )?
     };
     state.right_toolbar = {
@@ -1062,34 +1160,10 @@ fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> {
             resource_ids::RIGHT_TOOLBAR_BITMAP,
             &RIGHT_TOOLBAR_ITEMS,
             state.dpi,
+            state.high_contrast,
         )?
     };
-    let face = wide("MS Sans Serif");
-    // SAFETY: face is owned terminated UTF-16 retained through CreateFontW; the returned HFONT is kept in AppState and deleted once.
-    state.font = unsafe {
-        CreateFontW(
-            -13,
-            0,
-            0,
-            0,
-            FW_NORMAL as i32,
-            0,
-            0,
-            0,
-            u32::from(DEFAULT_CHARSET),
-            u32::from(OUT_DEFAULT_PRECIS),
-            u32::from(CLIP_DEFAULT_PRECIS),
-            u32::from(DEFAULT_QUALITY),
-            u32::from(DEFAULT_PITCH | FF_DONTCARE),
-            face.as_ptr(),
-        )
-    };
-    if !state.font.is_null() {
-        for control in [&state.list_window, &state.status] {
-            // SAFETY: Each control HWND is live and font is the AppState-owned HFONT retained beyond WM_SETFONT.
-            unsafe { SendMessageW(*control, WM_SETFONT, state.font as usize, 1) };
-        }
-    }
+    refresh_system_fonts(state);
     // SAFETY: window is the live top-level HWND and DragAcceptFiles stores no borrowed pointer.
     unsafe { DragAcceptFiles(window, 1) };
     let menu = { create_menu() };
@@ -1159,12 +1233,12 @@ fn create_toolbar(
     resource_id: u16,
     items: &[ToolbarItem],
     dpi: u32,
+    high_contrast: bool,
 ) -> io::Result<HWND> {
     let styles = WS_CHILD
         | WS_VISIBLE
         | TBSTYLE_FLAT
         | TBSTYLE_TOOLTIPS
-        | TBSTYLE_WRAPABLE
         | CCS_VERT as u32
         | CCS_NORESIZE as u32
         | CCS_NOPARENTALIGN as u32;
@@ -1193,6 +1267,7 @@ fn create_toolbar(
     // TB_BUTTONSTRUCTSIZE carries no pointer payload.
     unsafe {
         SendMessageW(toolbar, TB_BUTTONSTRUCTSIZE, size_of::<TBBUTTON>(), 0);
+        SendMessageW(toolbar, TB_SETMAXTEXTROWS, 0, 0);
         SendMessageW(
             toolbar,
             TB_SETBITMAPSIZE,
@@ -1207,43 +1282,66 @@ fn create_toolbar(
             TB_SETBUTTONSIZE,
             0,
             packed_dimensions(
-                scale_dip(TOOLBAR_WIDTH, dpi),
+                scale_dip(toolbar_width_dip(high_contrast), dpi),
                 scale_dip(TOOLBAR_BUTTON_HEIGHT, dpi),
             ),
         );
     }
-    let bitmap_count = items
-        .iter()
-        .filter(|item| matches!(item, ToolbarItem::Command(_)))
-        .count();
-    let bitmap = TBADDBITMAP {
-        hInst: instance,
-        nID: usize::from(resource_id),
+    let first_bitmap = if high_contrast {
+        0
+    } else {
+        let bitmap_count = items
+            .iter()
+            .filter(|item| matches!(item, ToolbarItem::Command(_)))
+            .count();
+        let bitmap = TBADDBITMAP {
+            hInst: instance,
+            nID: usize::from(resource_id),
+        };
+        // SAFETY: toolbar is live and resource_id identifies a linked bitmap;
+        // the structure remains allocated through the synchronous message.
+        let first = unsafe {
+            SendMessageW(
+                toolbar,
+                TB_ADDBITMAP,
+                bitmap_count,
+                (&raw const bitmap) as isize,
+            )
+        };
+        i32::try_from(first)
+            .ok()
+            .filter(|index| *index >= 0)
+            .ok_or_else(|| io::Error::other("could not load native toolbar bitmap resource"))?
     };
-    // SAFETY: toolbar is live and resource_id identifies a linked bitmap owned by
-    // instance; the TBADDBITMAP structure remains allocated through the message.
-    let first_bitmap = unsafe {
-        SendMessageW(
-            toolbar,
-            TB_ADDBITMAP,
-            bitmap_count,
-            (&raw const bitmap) as isize,
-        )
-    };
-    let first_bitmap = i32::try_from(first_bitmap)
-        .ok()
-        .filter(|index| *index >= 0)
-        .ok_or_else(|| io::Error::other("could not load native toolbar bitmap resource"))?;
     let mut image_index = 0_i32;
-    let buttons = items
-        .iter()
-        .map(|item| match *item {
+    let mut buttons = Vec::with_capacity(items.len());
+    for item in items {
+        let button = match *item {
             ToolbarItem::Command(command) => {
+                let mut name = toolbar_accessible_name(command)
+                    .encode_utf16()
+                    .chain([0, 0])
+                    .collect::<Vec<_>>();
+                // SAFETY: toolbar copies the double-NUL-terminated string pool
+                // synchronously before this owned buffer is dropped.
+                let string_index =
+                    unsafe { SendMessageW(toolbar, TB_ADDSTRINGW, 0, name.as_mut_ptr() as isize) };
+                if string_index < 0 {
+                    return Err(io::Error::other("could not add toolbar accessibility text"));
+                }
                 let button = TBBUTTON {
-                    iBitmap: first_bitmap + image_index,
+                    iBitmap: if high_contrast {
+                        I_IMAGENONE
+                    } else {
+                        first_bitmap + image_index
+                    },
                     idCommand: i32::from(command),
                     fsState: TBSTATE_ENABLED as u8,
-                    fsStyle: TBSTYLE_BUTTON as u8,
+                    fsStyle: u8::try_from(
+                        TBSTYLE_BUTTON | if high_contrast { BTNS_SHOWTEXT } else { 0 },
+                    )
+                    .unwrap_or(TBSTYLE_BUTTON as u8),
+                    iString: string_index,
                     ..TBBUTTON::default()
                 };
                 image_index += 1;
@@ -1254,8 +1352,9 @@ fn create_toolbar(
                 fsStyle: TBSTYLE_SEP as u8,
                 ..TBBUTTON::default()
             },
-        })
-        .collect::<Vec<_>>();
+        };
+        buttons.push(button);
+    }
     // SAFETY: toolbar is live and buttons is readable for exactly added entries;
     // its TBBUTTON storage remains allocated until TB_ADDBUTTONSW returns.
     let added = unsafe {
@@ -1272,8 +1371,85 @@ fn create_toolbar(
     Ok(toolbar)
 }
 
+fn refresh_high_contrast_toolbars(window: HWND, state: &mut AppState) {
+    let high_contrast = high_contrast_enabled();
+    if high_contrast == state.high_contrast {
+        return;
+    }
+    // SAFETY: null requests the current process module.
+    let instance = unsafe { GetModuleHandleW(null()) };
+    let left = match create_toolbar(
+        window,
+        instance,
+        LEFT_TOOLBAR_ID,
+        resource_ids::LEFT_TOOLBAR_BITMAP,
+        &LEFT_TOOLBAR_ITEMS,
+        state.dpi,
+        high_contrast,
+    ) {
+        Ok(toolbar) => toolbar,
+        Err(error) => {
+            message(
+                window,
+                &format!("고대비 도구 모음을 만들지 못했습니다: {error}"),
+                "DarkReNamer - 표시 설정",
+            );
+            return;
+        }
+    };
+    let right = match create_toolbar(
+        window,
+        instance,
+        RIGHT_TOOLBAR_ID,
+        resource_ids::RIGHT_TOOLBAR_BITMAP,
+        &RIGHT_TOOLBAR_ITEMS,
+        state.dpi,
+        high_contrast,
+    ) {
+        Ok(toolbar) => toolbar,
+        Err(error) => {
+            // SAFETY: left was created above but not adopted into AppState.
+            unsafe { DestroyWindow(left) };
+            message(
+                window,
+                &format!("고대비 도구 모음을 만들지 못했습니다: {error}"),
+                "DarkReNamer - 표시 설정",
+            );
+            return;
+        }
+    };
+    // SAFETY: replacement toolbars are live; old child windows are destroyed
+    // only after both replacements succeeded.
+    unsafe {
+        DestroyWindow(state.left_toolbar);
+        DestroyWindow(state.right_toolbar);
+    }
+    state.left_toolbar = left;
+    state.right_toolbar = right;
+    state.high_contrast = high_contrast;
+    apply_command_states(state);
+}
+
 const fn packed_dimensions(width: i32, height: i32) -> isize {
     ((width as u32 & 0xFFFF) | ((height as u32 & 0xFFFF) << 16)) as isize
+}
+
+fn toolbar_accessible_name(command: CommandId) -> String {
+    if command == UNIFY_PATH {
+        return "경로 통일하기 - 현재 지원하지 않음".to_owned();
+    }
+    LEFT_TOOLS
+        .iter()
+        .chain(&RIGHT_TOOLS)
+        .find(|tool| tool.id == command)
+        .map_or_else(
+            || format!("명령 {command}"),
+            |tool| tool.label.replace('\n', " "),
+        )
+}
+
+const fn toolbar_width_dip(high_contrast: bool) -> i32 {
+    if high_contrast { 120 } else { TOOLBAR_WIDTH }
 }
 
 fn arrange(window: HWND, state: &AppState) {
@@ -1281,7 +1457,7 @@ fn arrange(window: HWND, state: &AppState) {
     let mut rect: RECT = unsafe { zeroed() };
     // SAFETY: window is live and rect is writable RECT storage retained until GetClientRect returns.
     unsafe { GetClientRect(window, &mut rect) };
-    let toolbar_width = scale_dip(TOOLBAR_WIDTH, state.dpi);
+    let toolbar_width = scale_dip(toolbar_width_dip(state.high_contrast), state.dpi);
     let status_height = scale_dip(STATUS_HEIGHT, state.dpi);
     let width = rect.right.max(toolbar_width * 2 + 1);
     let height = rect.bottom.max(status_height + 1);
@@ -1323,6 +1499,21 @@ fn arrange(window: HWND, state: &AppState) {
     }
 }
 
+fn move_window_dip(window: HWND, x: i32, y: i32, width: i32, height: i32, dpi: u32) {
+    // SAFETY: callers pass a live child HWND and this helper forwards only
+    // scaled integer geometry without borrowed pointers.
+    unsafe {
+        MoveWindow(
+            window,
+            scale_dip(x, dpi),
+            scale_dip(y, dpi),
+            scale_dip(width, dpi),
+            scale_dip(height, dpi),
+            1,
+        )
+    };
+}
+
 #[derive(Clone, Debug)]
 struct PromptSpec {
     title: String,
@@ -1348,6 +1539,7 @@ struct PromptState {
     edit_two: HWND,
     combo: HWND,
     font: HFONT,
+    dpi: u32,
 }
 
 struct OwnerEnableGuard {
@@ -1386,6 +1578,9 @@ fn prompt_input(owner: HWND, spec: PromptSpec) -> io::Result<Option<PromptResult
     };
     // SAFETY: WNDCLASSEXW is initialized and its class name and callback remain valid during registration.
     unsafe { RegisterClassExW(&class) };
+    // SAFETY: owner is the live top-level window for this modal prompt.
+    let owner_dpi = unsafe { GetDpiForWindow(owner) };
+    let dpi = if owner_dpi == 0 { BASE_DPI } else { owner_dpi };
     let mut state = Box::new(PromptState {
         spec,
         result: None,
@@ -1394,6 +1589,7 @@ fn prompt_input(owner: HWND, spec: PromptSpec) -> io::Result<Option<PromptResult
         edit_two: null_mut(),
         combo: null_mut(),
         font: null_mut(),
+        dpi,
     });
     let state_ptr: *mut PromptState = &mut *state;
     // SAFETY: owner/instance are live and class_name/title plus stack PromptState
@@ -1406,8 +1602,8 @@ fn prompt_input(owner: HWND, spec: PromptSpec) -> io::Result<Option<PromptResult
             WS_POPUP | WS_CAPTION | WS_SYSMENU,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            380,
-            210,
+            scale_dip(380, dpi),
+            scale_dip(210, dpi),
             owner,
             null_mut(),
             instance,
@@ -1499,9 +1695,7 @@ unsafe extern "system" fn prompt_proc(
             // confined to this modal callback thread until WM_NCDESTROY clears it.
             let state = unsafe { &mut *state_ptr };
             let title = { child(window, "STATIC", &state.spec.title, 1001, 0) };
-            // SAFETY: title is the live STATIC child just created for window;
-            // MoveWindow retains no borrowed storage.
-            unsafe { MoveWindow(title, 12, 12, 340, 22, 1) };
+            move_window_dip(title, 12, 12, 340, 22, state.dpi);
             let mut controls = vec![title];
             if !state.spec.label_one.is_empty() {
                 let edit = {
@@ -1514,12 +1708,8 @@ unsafe extern "system" fn prompt_proc(
                     )
                 };
                 let label = { child(window, "STATIC", &state.spec.label_one, 1002, 0) };
-                // SAFETY: edit and label are live children just created for this
-                // prompt window; both MoveWindow calls retain no storage.
-                unsafe {
-                    MoveWindow(edit, 12, 48, 275, 25, 1);
-                    MoveWindow(label, 294, 48, 70, 25, 1);
-                }
+                move_window_dip(edit, 12, 48, 275, 25, state.dpi);
+                move_window_dip(label, 294, 48, 70, 25, state.dpi);
                 state.edit_one = edit;
                 controls.extend([edit, label]);
             }
@@ -1534,12 +1724,8 @@ unsafe extern "system" fn prompt_proc(
                     )
                 };
                 let label = { child(window, "STATIC", &state.spec.label_two, 1003, 0) };
-                // SAFETY: edit and label are live children just created for this
-                // prompt window; both MoveWindow calls retain no storage.
-                unsafe {
-                    MoveWindow(edit, 12, 80, 275, 25, 1);
-                    MoveWindow(label, 294, 80, 70, 25, 1);
-                }
+                move_window_dip(edit, 12, 80, 275, 25, state.dpi);
+                move_window_dip(label, 294, 80, 70, 25, state.dpi);
                 state.edit_two = edit;
                 controls.extend([edit, label]);
             }
@@ -1560,22 +1746,21 @@ unsafe extern "system" fn prompt_proc(
                         SendMessageW(combo, CB_ADDSTRING, 0, choice.as_ptr() as isize);
                     }
                 }
-                // SAFETY: combo is live and each choice pointer is owned terminated UTF-16 retained through synchronous SendMessageW.
                 unsafe {
                     SendMessageW(combo, CB_SETCURSEL, 0, 0);
-                    MoveWindow(
-                        combo,
-                        12,
-                        if state.spec.label_one.is_empty() && state.spec.label_two.is_empty() {
-                            60
-                        } else {
-                            126
-                        },
-                        185,
-                        160,
-                        1,
-                    );
                 }
+                move_window_dip(
+                    combo,
+                    12,
+                    if state.spec.label_one.is_empty() && state.spec.label_two.is_empty() {
+                        60
+                    } else {
+                        126
+                    },
+                    185,
+                    160,
+                    state.dpi,
+                );
                 state.combo = combo;
                 controls.push(combo);
             }
@@ -1590,35 +1775,11 @@ unsafe extern "system" fn prompt_proc(
             };
             let cancel = { child(window, "BUTTON", "취소", IDCANCEL as u16, WS_TABSTOP) };
             let separator = { child(window, "STATIC", "", 1010, SS_ETCHEDHORZ) };
-            // SAFETY: ok/cancel/separator are live children created for this
-            // prompt window; these MoveWindow calls retain no storage.
-            unsafe {
-                MoveWindow(ok, 205, 126, 75, 32, 1);
-                MoveWindow(cancel, 285, 126, 75, 32, 1);
-                MoveWindow(separator, 0, 116, 380, 2, 1);
-            }
+            move_window_dip(ok, 205, 126, 75, 32, state.dpi);
+            move_window_dip(cancel, 285, 126, 75, 32, state.dpi);
+            move_window_dip(separator, 0, 116, 380, 2, state.dpi);
             controls.extend([ok, cancel, separator]);
-            let face = wide("MS Sans Serif");
-            // SAFETY: face is owned terminated UTF-16 retained through CreateFontW;
-            // the returned HFONT is kept in the local PromptState and deleted once.
-            state.font = unsafe {
-                CreateFontW(
-                    -13,
-                    0,
-                    0,
-                    0,
-                    FW_NORMAL as i32,
-                    0,
-                    0,
-                    0,
-                    u32::from(DEFAULT_CHARSET),
-                    u32::from(OUT_DEFAULT_PRECIS),
-                    u32::from(CLIP_DEFAULT_PRECIS),
-                    u32::from(DEFAULT_QUALITY),
-                    u32::from(DEFAULT_PITCH | FF_DONTCARE),
-                    face.as_ptr(),
-                )
-            };
+            state.font = create_message_font(state.dpi);
             if !state.font.is_null() {
                 for control in controls {
                     // SAFETY: Each prompt control HWND is live and font is the
@@ -3538,7 +3699,7 @@ fn update_dpi_metrics(state: &AppState) {
         update_column_visibility(state, index);
     }
     let button = packed_dimensions(
-        scale_dip(TOOLBAR_WIDTH, state.dpi),
+        scale_dip(toolbar_width_dip(state.high_contrast), state.dpi),
         scale_dip(TOOLBAR_BUTTON_HEIGHT, state.dpi),
     );
     let bitmap = packed_dimensions(
@@ -4384,6 +4545,17 @@ mod tests {
 
         assert_eq!(updates.len(), 1);
         assert_eq!(changed_column_mask(updates[0].0, updates[0].1), 1 << 1);
+    }
+
+    #[test]
+    fn every_toolbar_command_has_single_line_accessibility_text() {
+        for tool in LEFT_TOOLS.into_iter().chain(RIGHT_TOOLS) {
+            let name = toolbar_accessible_name(tool.id);
+            assert!(!name.is_empty());
+            assert!(!name.contains('\n'));
+        }
+        assert!(toolbar_accessible_name(UNIFY_PATH).contains("지원하지 않음"));
+        assert!(toolbar_width_dip(true) > toolbar_width_dip(false));
     }
 
     #[test]
