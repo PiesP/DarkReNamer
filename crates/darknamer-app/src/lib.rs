@@ -25,6 +25,26 @@ pub const TOOLBAR_BUTTON_HEIGHT: i32 = 30;
 pub const TOOLBAR_SEPARATOR_SIZE: i32 = 8;
 /// Height of the bottom status bar.
 pub const STATUS_HEIGHT: i32 = 18;
+/// Design coordinate density used by the original Win32 layout.
+pub const BASE_DPI: u32 = 96;
+
+/// Scales one 96-DPI logical coordinate with nearest-integer rounding.
+#[must_use]
+pub const fn scale_dip(value: i32, dpi: u32) -> i32 {
+    let product = (value as i128) * (dpi as i128);
+    let scaled = if product < 0 {
+        -((-product + (BASE_DPI / 2) as i128) / BASE_DPI as i128)
+    } else {
+        (product + (BASE_DPI / 2) as i128) / BASE_DPI as i128
+    };
+    if scaled > i32::MAX as i128 {
+        i32::MAX
+    } else if scaled < i32::MIN as i128 {
+        i32::MIN
+    } else {
+        scaled as i32
+    }
+}
 /// Public product name used by the executable and user-facing diagnostics.
 pub const PRODUCT_NAME: &str = "DarkReNamer";
 /// Upstream behavior version targeted by compatibility mode.
@@ -344,6 +364,16 @@ mod tests {
         assert!(text.contains(concat!("DarkReNamer ", env!("CARGO_PKG_VERSION"))));
         assert!(text.contains("호환 대상: DarkNamer 08.02.10"));
         assert!(text.contains("비공식"));
+    }
+
+    #[test]
+    fn dpi_scaling_is_rounded_and_monotonic() {
+        assert_eq!(scale_dip(44, 96), 44);
+        assert_eq!(scale_dip(44, 120), 55);
+        assert_eq!(scale_dip(44, 144), 66);
+        assert_eq!(scale_dip(44, 192), 88);
+        assert_eq!(scale_dip(-13, 120), -16);
+        assert!(scale_dip(150, 120) < scale_dip(150, 144));
     }
 
     #[test]

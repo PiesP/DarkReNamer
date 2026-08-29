@@ -24,6 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let icon = output.join("DarkReNamer.ico");
     let toolbar1 = output.join("toolbar1.bmp");
     let toolbar2 = output.join("toolbar2.bmp");
+    let manifest = output.join("DarkReNamer.manifest");
     let resource = output.join("DarkReNamer.rc");
     let package_version = env::var("CARGO_PKG_VERSION")?;
     let version_numbers = [
@@ -42,12 +43,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &toolbar2,
         base64::engine::general_purpose::STANDARD.decode(TOOLBAR2_BASE64)?,
     )?;
+    fs::write(&manifest, resource_script::application_manifest())?;
     fs::write(
         &resource,
         resource_script::render(
             &icon,
             &toolbar1,
             &toolbar2,
+            &manifest,
             &package_version,
             version_numbers,
         ),

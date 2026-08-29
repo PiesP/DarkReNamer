@@ -73,6 +73,7 @@ use windows_sys::Win32::UI::Controls::{
     TBBUTTON, TBSTATE_ENABLED, TBSTYLE_BUTTON, TBSTYLE_FLAT, TBSTYLE_SEP, TBSTYLE_TOOLTIPS,
     TBSTYLE_WRAPABLE, TOOLBARCLASSNAMEW,
 };
+use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetKeyState, SetFocus, VK_CONTROL, VK_DELETE, VK_ESCAPE, VK_SHIFT,
 };
@@ -87,14 +88,15 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, GWLP_USERDATA, GetClientRect, GetMessageW,
     GetParent, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, HMENU, IDC_ARROW, IDCANCEL,
     IDOK, IsDialogMessageW, KillTimer, LoadCursorW, LoadIconW, MB_OKCANCEL, MB_YESNO, MF_BYCOMMAND,
-    MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG,
-    MessageBoxW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW, SW_SHOW,
-    SendMessageW, SetForegroundWindow, SetMenu, SetTimer, SetWindowLongPtrW, ShowWindow,
-    TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DROPFILES,
-    WM_KEYDOWN, WM_KEYUP, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFONT, WM_SETREDRAW, WM_SIZE,
-    WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_ACCEPTFILES,
-    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
-    WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO,
+    MSG, MessageBoxW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW, SW_SHOW,
+    SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND,
+    WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP,
+    WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFONT, WM_SETREDRAW, WM_SIZE, WM_TIMER, WNDCLASSEXW,
+    WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW,
+    WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU,
+    WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::*;
@@ -121,6 +123,7 @@ struct AppState {
     right_toolbar: HWND,
     model: LegacyList,
     shown_columns: [bool; 4],
+    dpi: u32,
     command_states: [bool; 34],
     model_revision: u64,
     mutation_locked: bool,
@@ -155,6 +158,7 @@ impl AppState {
             right_toolbar: null_mut(),
             model: LegacyList::new(),
             shown_columns: [false; 4],
+            dpi: BASE_DPI,
             command_states: [false; 34],
             model_revision: 0,
             mutation_locked: false,
@@ -768,6 +772,44 @@ unsafe extern "system" fn window_proc(
             arrange(window, unsafe { &*state_ptr });
             0
         }
+        WM_GETMINMAXINFO if !state_ptr.is_null() => {
+            let info = lparam as *mut MINMAXINFO;
+            if !info.is_null() {
+                // SAFETY: WM_GETMINMAXINFO supplies writable MINMAXINFO storage
+                // for this callback and state_ptr is the live AppState.
+                unsafe {
+                    (*info).ptMinTrackSize.x = scale_dip(INITIAL_WIDTH, (*state_ptr).dpi);
+                    (*info).ptMinTrackSize.y = scale_dip(INITIAL_HEIGHT, (*state_ptr).dpi);
+                }
+            }
+            0
+        }
+        WM_DPICHANGED if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is the live UI-thread AppState for this window.
+            let state = unsafe { &mut *state_ptr };
+            let dpi = u32::try_from(wparam & 0xFFFF).unwrap_or(BASE_DPI);
+            state.dpi = dpi.max(BASE_DPI);
+            let suggested = lparam as *const RECT;
+            if !suggested.is_null() {
+                // SAFETY: WM_DPICHANGED supplies a readable suggested RECT for
+                // this callback and SetWindowPos consumes copied coordinates.
+                let suggested = unsafe { *suggested };
+                unsafe {
+                    SetWindowPos(
+                        window,
+                        null_mut(),
+                        suggested.left,
+                        suggested.top,
+                        suggested.right - suggested.left,
+                        suggested.bottom - suggested.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    )
+                };
+            }
+            update_dpi_metrics(state);
+            arrange(window, state);
+            0
+        }
         WM_APP_APPLY_PROGRESS if !state_ptr.is_null() => {
             // SAFETY: state_ptr is the live UI-thread AppState for this window.
             handle_apply_progress(unsafe { &mut *state_ptr });
@@ -929,6 +971,9 @@ unsafe extern "system" fn window_proc(
 }
 
 fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> {
+    // SAFETY: window is the live top-level HWND being initialized.
+    let dpi = unsafe { GetDpiForWindow(window) };
+    state.dpi = if dpi == 0 { BASE_DPI } else { dpi };
     // SAFETY: A null module name requests the current process module and dereferences no caller memory.
     let instance = unsafe { GetModuleHandleW(null()) };
     let list_class = wide("SysListView32");
@@ -978,7 +1023,7 @@ fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> {
                 } else {
                     LVCFMT_LEFT
                 },
-                cx: column.default_width,
+                cx: scale_dip(column.default_width, state.dpi),
                 pszText: text.as_mut_ptr(),
                 ..zeroed()
             };
@@ -1006,6 +1051,7 @@ fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> {
             LEFT_TOOLBAR_ID,
             resource_ids::LEFT_TOOLBAR_BITMAP,
             &LEFT_TOOLBAR_ITEMS,
+            state.dpi,
         )?
     };
     state.right_toolbar = {
@@ -1015,6 +1061,7 @@ fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> {
             RIGHT_TOOLBAR_ID,
             resource_ids::RIGHT_TOOLBAR_BITMAP,
             &RIGHT_TOOLBAR_ITEMS,
+            state.dpi,
         )?
     };
     let face = wide("MS Sans Serif");
@@ -1111,6 +1158,7 @@ fn create_toolbar(
     control_id: usize,
     resource_id: u16,
     items: &[ToolbarItem],
+    dpi: u32,
 ) -> io::Result<HWND> {
     let styles = WS_CHILD
         | WS_VISIBLE
@@ -1149,13 +1197,19 @@ fn create_toolbar(
             toolbar,
             TB_SETBITMAPSIZE,
             0,
-            packed_dimensions(TOOLBAR_BITMAP_WIDTH, TOOLBAR_BITMAP_HEIGHT),
+            packed_dimensions(
+                scale_dip(TOOLBAR_BITMAP_WIDTH, dpi),
+                scale_dip(TOOLBAR_BITMAP_HEIGHT, dpi),
+            ),
         );
         SendMessageW(
             toolbar,
             TB_SETBUTTONSIZE,
             0,
-            packed_dimensions(TOOLBAR_WIDTH, TOOLBAR_BUTTON_HEIGHT),
+            packed_dimensions(
+                scale_dip(TOOLBAR_WIDTH, dpi),
+                scale_dip(TOOLBAR_BUTTON_HEIGHT, dpi),
+            ),
         );
     }
     let bitmap_count = items
@@ -1196,7 +1250,7 @@ fn create_toolbar(
                 button
             }
             ToolbarItem::Separator => TBBUTTON {
-                iBitmap: TOOLBAR_SEPARATOR_SIZE,
+                iBitmap: scale_dip(TOOLBAR_SEPARATOR_SIZE, dpi),
                 fsStyle: TBSTYLE_SEP as u8,
                 ..TBBUTTON::default()
             },
@@ -1227,8 +1281,10 @@ fn arrange(window: HWND, state: &AppState) {
     let mut rect: RECT = unsafe { zeroed() };
     // SAFETY: window is live and rect is writable RECT storage retained until GetClientRect returns.
     unsafe { GetClientRect(window, &mut rect) };
-    let width = rect.right.max(TOOLBAR_WIDTH * 2 + 1);
-    let height = rect.bottom.max(STATUS_HEIGHT + 1);
+    let toolbar_width = scale_dip(TOOLBAR_WIDTH, state.dpi);
+    let status_height = scale_dip(STATUS_HEIGHT, state.dpi);
+    let width = rect.right.max(toolbar_width * 2 + 1);
+    let height = rect.bottom.max(status_height + 1);
     // SAFETY: window plus AppState's list/status/toolbars are live child HWNDs on
     // this thread; each MoveWindow call retains no borrowed storage.
     unsafe {
@@ -1236,32 +1292,32 @@ fn arrange(window: HWND, state: &AppState) {
             state.left_toolbar,
             0,
             0,
-            TOOLBAR_WIDTH,
-            height - STATUS_HEIGHT,
+            toolbar_width,
+            height - status_height,
             1,
         );
         MoveWindow(
             state.right_toolbar,
-            width - TOOLBAR_WIDTH,
+            width - toolbar_width,
             0,
-            TOOLBAR_WIDTH,
-            height - STATUS_HEIGHT,
+            toolbar_width,
+            height - status_height,
             1,
         );
         MoveWindow(
             state.list_window,
-            TOOLBAR_WIDTH,
+            toolbar_width,
             0,
-            width - TOOLBAR_WIDTH * 2,
-            height - STATUS_HEIGHT,
+            width - toolbar_width * 2,
+            height - status_height,
             1,
         );
         MoveWindow(
             state.status,
             0,
-            height - STATUS_HEIGHT,
+            height - status_height,
             width,
-            STATUS_HEIGHT,
+            status_height,
             1,
         );
     }
@@ -3450,14 +3506,51 @@ fn read_legacy_text(path: &Path) -> io::Result<LegacyText> {
 fn update_column_visibility(state: &AppState, index: usize) {
     let column = index + 3;
     let width = if state.shown_columns[index] {
-        if column == 4 { 80 } else { 120 }
+        scale_dip(if column == 4 { 80 } else { 120 }, state.dpi)
     } else {
         0
     };
     // SAFETY: state.list_window is live and LVM_SETCOLUMNWIDTH carries only the
     // computed column and width values, with no pointer payload.
     unsafe {
-        SendMessageW(state.list_window, LVM_SETCOLUMNWIDTH, column, width);
+        SendMessageW(
+            state.list_window,
+            LVM_SETCOLUMNWIDTH,
+            column,
+            width as isize,
+        );
+    }
+}
+
+fn update_dpi_metrics(state: &AppState) {
+    for (column, spec) in COLUMNS.iter().enumerate().take(3) {
+        // SAFETY: list_window is live and width is a scaled integer value.
+        unsafe {
+            SendMessageW(
+                state.list_window,
+                LVM_SETCOLUMNWIDTH,
+                column,
+                scale_dip(spec.default_width, state.dpi) as isize,
+            )
+        };
+    }
+    for index in 0..state.shown_columns.len() {
+        update_column_visibility(state, index);
+    }
+    let button = packed_dimensions(
+        scale_dip(TOOLBAR_WIDTH, state.dpi),
+        scale_dip(TOOLBAR_BUTTON_HEIGHT, state.dpi),
+    );
+    let bitmap = packed_dimensions(
+        scale_dip(TOOLBAR_BITMAP_WIDTH, state.dpi),
+        scale_dip(TOOLBAR_BITMAP_HEIGHT, state.dpi),
+    );
+    // SAFETY: both toolbar HWNDs are live and the packed size has no pointer.
+    unsafe {
+        SendMessageW(state.left_toolbar, TB_SETBUTTONSIZE, 0, button);
+        SendMessageW(state.right_toolbar, TB_SETBUTTONSIZE, 0, button);
+        SendMessageW(state.left_toolbar, TB_SETBITMAPSIZE, 0, bitmap);
+        SendMessageW(state.right_toolbar, TB_SETBITMAPSIZE, 0, bitmap);
     }
 }
 
