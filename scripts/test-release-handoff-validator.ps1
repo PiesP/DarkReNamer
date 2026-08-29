@@ -116,7 +116,10 @@ try {
     Write-Checksums -HandoffRoot $handoffRoot
     $checksumPath = Join-Path $handoffRoot 'SHA256SUMS.txt'
     $checksums = Get-Content -LiteralPath $checksumPath -Raw
-    Write-Utf8NoBom -Path $checksumPath -Content ('0' + $checksums.Substring(1))
+    $replacement = if ($checksums[0] -eq '0') { '1' } else { '0' }
+    Write-Utf8NoBom `
+        -Path $checksumPath `
+        -Content ($replacement + $checksums.Substring(1))
     Assert-ValidatorFails `
         -ExpectedFragment 'Checksum mismatch' `
         -SourceRoot $sourceRoot `
