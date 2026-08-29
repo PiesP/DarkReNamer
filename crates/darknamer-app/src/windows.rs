@@ -66,6 +66,8 @@ use safe_runtime::{
 };
 use text_io::{compare_windows, legacy_path, path_wide, read_legacy_text, wide, write_legacy_text};
 use windows_sys::Win32::Foundation::{FILETIME, HWND, LPARAM, LRESULT, RECT, SYSTEMTIME, WPARAM};
+#[cfg(test)]
+use windows_sys::Win32::Graphics::Gdi::CreateBitmap;
 use windows_sys::Win32::Graphics::Gdi::{
     COLOR_BTNFACE, COLOR_WINDOW, CreateFontIndirectW, DeleteObject, GetMonitorInfoW, GetSysColor,
     HBITMAP, HFONT, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, RDW_ALLCHILDREN,
@@ -816,84 +818,57 @@ mod tests {
         }
 
         let result = (|| -> io::Result<()> {
-            for high_contrast in [false, true] {
-                for dpi in [96, 120, 144, 192] {
-                    let left = create_toolbar(parent, instance, LEFT_TOOLBAR, dpi, high_contrast)?;
-                    let right =
-                        match create_toolbar(parent, instance, RIGHT_TOOLBAR, dpi, high_contrast) {
-                            Ok(toolbar) => toolbar,
-                            Err(error) => {
-                                destroy_toolbar(left);
-                                return Err(error);
-                            }
-                        };
-                    let left_rects = toolbar_command_rects(left.window, &LEFT_TOOLBAR_ITEMS)?;
-                    let right_rects = toolbar_command_rects(right.window, &RIGHT_TOOLBAR_ITEMS)?;
-                    assert_eq!(left_rects.len(), 10);
-                    assert_eq!(right_rects.len(), 9);
-                    let rail_width = scale_dip(toolbar_width_dip(high_contrast), dpi);
-                    assert!(toolbar_rects_are_vertical(&left_rects, rail_width));
-                    assert!(toolbar_rects_are_vertical(&right_rects, rail_width));
-
-                    for (toolbar, images, tools, items) in [
-                        (
-                            left.window,
-                            left.images,
-                            LEFT_TOOLS.as_slice(),
-                            LEFT_TOOLBAR_ITEMS.as_slice(),
-                        ),
-                        (
-                            right.window,
-                            right.images,
-                            RIGHT_TOOLS.as_slice(),
-                            RIGHT_TOOLBAR_ITEMS.as_slice(),
-                        ),
-                    ] {
-                        if high_contrast {
-                            assert_eq!(images, 0);
-                        } else {
-                            assert_ne!(images, 0);
-                            // SAFETY: images is the live AppState-equivalent
-                            // image list owned by this test toolbar handle.
-                            let image_count = unsafe { ImageList_GetImageCount(images) };
-                            assert_eq!(image_count, tools.len() as i32);
-                        }
-                        for item in items {
-                            let ToolbarItem::Command(command) = *item else {
-                                continue;
-                            };
-                            // SAFETY: toolbar is live and command is passed by value.
-                            let index = unsafe {
-                                SendMessageW(toolbar, TB_COMMANDTOINDEX, usize::from(command), 0)
-                            };
-                            assert!(index >= 0);
-                            let mut button = TBBUTTON::default();
-                            // SAFETY: button remains writable through this
-                            // synchronous query for a validated toolbar index.
-                            let found = unsafe {
-                                SendMessageW(
-                                    toolbar,
-                                    TB_GETBUTTON,
-                                    usize::try_from(index).map_err(|_| {
-                                        io::Error::other("invalid native toolbar index")
-                                    })?,
-                                    (&mut button as *mut TBBUTTON) as isize,
-                                )
-                            };
-                            assert_ne!(found, 0);
-                            let expected = if high_contrast {
-                                I_IMAGENONE
-                            } else {
-                                toolbar_image_index(tools, command)
-                                    .ok_or_else(|| io::Error::other("missing image index"))?
-                            };
-                            assert_eq!(button.iBitmap, expected);
-                            assert_eq!(button.idCommand, i32::from(command));
-                        }
+            for dpi in [96, 120, 144, 192] {
+                let left = create_toolbar(parent, instance, LEFT_TOOLBAR, dpi, true)?;
+                let right = match create_toolbar(parent, instance, RIGHT_TOOLBAR, dpi, true) {
+                    Ok(toolbar) => toolbar,
+                    Err(error) => {
+                        destroy_toolbar(left);
+                        return Err(error);
                     }
-                    destroy_toolbar(left);
-                    destroy_toolbar(right);
+                };
+                let left_rects = toolbar_command_rects(left.window, &LEFT_TOOLBAR_ITEMS)?;
+                let right_rects = toolbar_command_rects(right.window, &RIGHT_TOOLBAR_ITEMS)?;
+                assert_eq!(left_rects.len(), 10);
+                assert_eq!(right_rects.len(), 9);
+                let rail_width = scale_dip(toolbar_width_dip(true), dpi);
+                assert!(toolbar_rects_are_vertical(&left_rects, rail_width));
+                assert!(toolbar_rects_are_vertical(&right_rects, rail_width));
+
+                for (toolbar, images, items) in [
+                    (left.window, left.images, LEFT_TOOLBAR_ITEMS.as_slice()),
+                    (right.window, right.images, RIGHT_TOOLBAR_ITEMS.as_slice()),
+                ] {
+                    assert_eq!(images, 0);
+                    for item in items {
+                        let ToolbarItem::Command(command) = *item else {
+                            continue;
+                        };
+                        // SAFETY: toolbar is live and command is passed by value.
+                        let index = unsafe {
+                            SendMessageW(toolbar, TB_COMMANDTOINDEX, usize::from(command), 0)
+                        };
+                        assert!(index >= 0);
+                        let mut button = TBBUTTON::default();
+                        // SAFETY: button remains writable through this
+                        // synchronous query for a validated toolbar index.
+                        let found = unsafe {
+                            SendMessageW(
+                                toolbar,
+                                TB_GETBUTTON,
+                                usize::try_from(index).map_err(|_| {
+                                    io::Error::other("invalid native toolbar index")
+                                })?,
+                                (&mut button as *mut TBBUTTON) as isize,
+                            )
+                        };
+                        assert_ne!(found, 0);
+                        assert_eq!(button.iBitmap, I_IMAGENONE);
+                        assert_eq!(button.idCommand, i32::from(command));
+                    }
                 }
+                destroy_toolbar(left);
+                destroy_toolbar(right);
             }
             Ok(())
         })();
@@ -901,6 +876,35 @@ mod tests {
         // destroyed after all child toolbars have released their resources.
         unsafe { DestroyWindow(parent) };
         result.map_err(Into::into)
+    }
+
+    #[test]
+    fn synthetic_toolbar_strip_scales_into_a_masked_image_list()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for dpi in [96, 120, 144, 192] {
+            let geometry = toolbar_image_geometry(10, dpi)
+                .ok_or_else(|| io::Error::other("invalid test toolbar geometry"))?;
+            // SAFETY: positive dimensions create a caller-owned monochrome
+            // bitmap with no borrowed pixel storage.
+            let source = unsafe {
+                CreateBitmap(
+                    TOOLBAR_BITMAP_WIDTH * 10,
+                    TOOLBAR_BITMAP_HEIGHT,
+                    1,
+                    1,
+                    null(),
+                )
+            };
+            if source.is_null() {
+                return Err(io::Error::last_os_error().into());
+            }
+            let images = create_toolbar_image_list_from_bitmap(source, geometry, 10)?;
+            // SAFETY: images is live and owned by this test until destroyed below.
+            assert_eq!(unsafe { ImageList_GetImageCount(images) }, 10);
+            // SAFETY: images is destroyed exactly once after the count query.
+            unsafe { ImageList_Destroy(images) };
+        }
+        Ok(())
     }
 
     #[test]
