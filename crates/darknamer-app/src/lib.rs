@@ -216,6 +216,14 @@ pub(crate) struct LayoutRect {
     pub(crate) height: i32,
 }
 
+#[cfg(any(windows, test))]
+impl LayoutRect {
+    #[must_use]
+    pub(crate) const fn bottom(self) -> i32 {
+        self.y.saturating_add(self.height)
+    }
+}
+
 /// Complete main-client layout, including the explicit menu-only fallback.
 #[cfg(any(windows, test))]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -226,6 +234,285 @@ pub(crate) struct MainLayout {
     pub(crate) right_buttons: Vec<CommandPlacement>,
     pub(crate) list: LayoutRect,
     pub(crate) status: LayoutRect,
+}
+
+/// Message-font measurements used by the native prompt layout.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PromptFontMetrics {
+    pub(crate) title_width: i32,
+    pub(crate) title_height: i32,
+    pub(crate) label_width: i32,
+    pub(crate) label_height: i32,
+    pub(crate) line_height: i32,
+}
+
+/// Controls present in one prompt invocation.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PromptFields {
+    pub(crate) value_one: bool,
+    pub(crate) value_two: bool,
+    pub(crate) choice: bool,
+}
+
+/// Complete prompt client geometry calculated without Win32 dependencies.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PromptLayout {
+    pub(crate) client: LayoutRect,
+    pub(crate) title: LayoutRect,
+    pub(crate) edit_one: Option<LayoutRect>,
+    pub(crate) label_one: Option<LayoutRect>,
+    pub(crate) edit_two: Option<LayoutRect>,
+    pub(crate) label_two: Option<LayoutRect>,
+    pub(crate) choice: Option<LayoutRect>,
+    pub(crate) separator: LayoutRect,
+    pub(crate) ok: LayoutRect,
+    pub(crate) cancel: LayoutRect,
+}
+
+/// Directory admission selected by the three-way native prompt.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DirectoryPromptChoice {
+    Direct,
+    Recurse,
+    Cancel,
+}
+
+/// Maps native YES/NO/CANCEL response values, failing closed for every unknown result.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn directory_prompt_choice(result: i32) -> DirectoryPromptChoice {
+    match result {
+        6 => DirectoryPromptChoice::Direct,
+        7 => DirectoryPromptChoice::Recurse,
+        _ => DirectoryPromptChoice::Cancel,
+    }
+}
+
+/// Calculates a message-font-aware prompt layout for the active field combination.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn calculate_prompt_layout(
+    dpi: u32,
+    measured: PromptFontMetrics,
+    fields: PromptFields,
+    maximum_client: LayoutRect,
+) -> PromptLayout {
+    let maximum_width = maximum_client.width.max(1);
+    let maximum_height = maximum_client.height.max(1);
+    let desired_padding = scale_dip(12, dpi);
+    let desired_gap = scale_dip(8, dpi);
+    let minimum_content_width = scale_dip(356, dpi);
+    let desired_label_width = measured
+        .label_width
+        .max(0)
+        .saturating_add(scale_dip(8, dpi))
+        .max(scale_dip(70, dpi));
+    let desired_edit_width = scale_dip(275, dpi);
+    let desired_field_width = desired_edit_width
+        .saturating_add(desired_gap)
+        .saturating_add(desired_label_width);
+    let desired_content_width = minimum_content_width
+        .max(measured.title_width.max(0))
+        .max(desired_field_width);
+    let client_width = desired_content_width
+        .saturating_add(desired_padding.saturating_mul(2))
+        .min(maximum_width)
+        .max(1);
+    let horizontal_padding = desired_padding.min(client_width.saturating_sub(1) / 2);
+    let content_width = client_width
+        .saturating_sub(horizontal_padding.saturating_mul(2))
+        .max(1);
+    let horizontal_gap = desired_gap.min(content_width.saturating_sub(2) / 4);
+    let field_space = content_width.saturating_sub(horizontal_gap);
+    let label_width = desired_label_width
+        .min((field_space / 3).max(1))
+        .min(field_space);
+    let edit_width = field_space.saturating_sub(label_width);
+    let line_height = measured.line_height.max(scale_dip(16, dpi));
+    let desired_title_height = measured.title_height.max(line_height);
+    let desired_field_height = line_height
+        .saturating_add(scale_dip(8, dpi))
+        .max(measured.label_height.max(0));
+    let desired_button_height = line_height.saturating_add(scale_dip(14, dpi));
+    let desired_separator_height = scale_dip(2, dpi).max(1);
+    let section_count = 3_usize
+        .saturating_add(usize::from(fields.value_one))
+        .saturating_add(usize::from(fields.value_two))
+        .saturating_add(usize::from(fields.choice));
+    let gap_count = section_count.saturating_sub(1);
+    let mut desired_heights = Vec::with_capacity(section_count);
+    desired_heights.push(desired_title_height);
+    if fields.value_one {
+        desired_heights.push(desired_field_height);
+    }
+    if fields.value_two {
+        desired_heights.push(desired_field_height);
+    }
+    if fields.choice {
+        desired_heights.push(desired_field_height);
+    }
+    desired_heights.push(desired_separator_height);
+    desired_heights.push(desired_button_height);
+    let desired_sections_height = desired_heights
+        .iter()
+        .fold(0_i32, |total, height| total.saturating_add(*height));
+    let desired_client_height = desired_sections_height
+        .saturating_add(desired_gap.saturating_mul(i32::try_from(gap_count).unwrap_or(i32::MAX)))
+        .saturating_add(desired_padding.saturating_mul(2));
+    let client_height = desired_client_height.min(maximum_height).max(1);
+    let minimum_sections_height = i32::try_from(section_count).unwrap_or(i32::MAX);
+    let vertical_padding =
+        desired_padding.min(client_height.saturating_sub(minimum_sections_height).max(0) / 2);
+    let available_after_padding = client_height
+        .saturating_sub(vertical_padding.saturating_mul(2))
+        .max(0);
+    let vertical_gap = if gap_count == 0 {
+        0
+    } else {
+        desired_gap.min(
+            available_after_padding
+                .saturating_sub(minimum_sections_height)
+                .max(0)
+                / i32::try_from(gap_count).unwrap_or(i32::MAX),
+        )
+    };
+    let available_for_sections = available_after_padding
+        .saturating_sub(vertical_gap.saturating_mul(i32::try_from(gap_count).unwrap_or(i32::MAX)));
+    let heights = fit_prompt_section_heights(&desired_heights, available_for_sections);
+    let mut height_index = 0_usize;
+    let mut next_height = || {
+        let height = heights.get(height_index).copied().unwrap_or_default();
+        height_index = height_index.saturating_add(1);
+        height
+    };
+
+    let title = LayoutRect {
+        x: horizontal_padding,
+        y: vertical_padding,
+        width: content_width,
+        height: next_height(),
+    };
+    let mut y = title.bottom().saturating_add(vertical_gap);
+    let mut field = |present: bool| {
+        present.then(|| {
+            let height = next_height();
+            let edit = LayoutRect {
+                x: horizontal_padding,
+                y,
+                width: edit_width,
+                height,
+            };
+            let label = LayoutRect {
+                x: horizontal_padding
+                    .saturating_add(edit_width)
+                    .saturating_add(horizontal_gap),
+                y,
+                width: label_width,
+                height,
+            };
+            y = y.saturating_add(height).saturating_add(vertical_gap);
+            (edit, label)
+        })
+    };
+    let (edit_one, label_one) = field(fields.value_one).unzip();
+    let (edit_two, label_two) = field(fields.value_two).unzip();
+    let choice = fields.choice.then(|| {
+        let height = next_height();
+        let rect = LayoutRect {
+            x: horizontal_padding,
+            y,
+            width: scale_dip(185, dpi).min(content_width),
+            height,
+        };
+        y = y.saturating_add(height).saturating_add(vertical_gap);
+        rect
+    });
+    let separator = LayoutRect {
+        x: 0,
+        y,
+        width: client_width,
+        height: next_height(),
+    };
+    let button_y = separator.bottom().saturating_add(vertical_gap);
+    let button_height = next_height();
+    let button_gap = horizontal_gap.min(content_width.saturating_sub(2) / 3);
+    let available_for_buttons = content_width.saturating_sub(button_gap);
+    let button_width = scale_dip(75, dpi).min(available_for_buttons / 2);
+    let cancel = LayoutRect {
+        x: client_width
+            .saturating_sub(horizontal_padding)
+            .saturating_sub(button_width),
+        y: button_y,
+        width: button_width,
+        height: button_height,
+    };
+    let ok = LayoutRect {
+        x: cancel
+            .x
+            .saturating_sub(button_gap)
+            .saturating_sub(button_width),
+        y: button_y,
+        width: button_width,
+        height: button_height,
+    };
+    PromptLayout {
+        client: LayoutRect {
+            x: 0,
+            y: 0,
+            width: client_width,
+            height: client_height,
+        },
+        title,
+        edit_one,
+        label_one,
+        edit_two,
+        label_two,
+        choice,
+        separator,
+        ok,
+        cancel,
+    }
+}
+
+#[cfg(any(windows, test))]
+fn fit_prompt_section_heights(desired: &[i32], available: i32) -> Vec<i32> {
+    let available = available.max(0);
+    let desired_total = desired
+        .iter()
+        .fold(0_i32, |total, height| total.saturating_add(*height));
+    if desired_total <= available {
+        return desired.to_vec();
+    }
+    let mut heights = vec![0; desired.len()];
+    let mut remaining = available;
+    for height in &mut heights {
+        if remaining == 0 {
+            break;
+        }
+        *height = 1;
+        remaining -= 1;
+    }
+    while remaining > 0 {
+        let mut progressed = false;
+        for (height, target) in heights.iter_mut().zip(desired) {
+            if remaining == 0 {
+                break;
+            }
+            if *height < *target {
+                *height += 1;
+                remaining -= 1;
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    heights
 }
 
 const LEFT_RAIL_GROUP_1: [CommandId; 1] = [APPLY];
@@ -1220,6 +1507,126 @@ mod tests {
         assert!(!settled.contains("파일 이름 변경 중"));
         assert!(settled.contains("2개 경로를 제외했습니다."));
         assert!(settled.contains("새 복구 상태"));
+    }
+
+    #[test]
+    fn directory_prompt_closes_and_unknown_results_cancel() {
+        assert_eq!(directory_prompt_choice(6), DirectoryPromptChoice::Direct);
+        assert_eq!(directory_prompt_choice(7), DirectoryPromptChoice::Recurse);
+        for result in [0, 1, 2, 42] {
+            assert_eq!(
+                directory_prompt_choice(result),
+                DirectoryPromptChoice::Cancel
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_layout_grows_for_measured_text_and_active_fields() {
+        let compact = calculate_prompt_layout(
+            96,
+            PromptFontMetrics {
+                title_width: 120,
+                title_height: 18,
+                label_width: 44,
+                label_height: 18,
+                line_height: 18,
+            },
+            PromptFields {
+                value_one: false,
+                value_two: false,
+                choice: true,
+            },
+            LayoutRect {
+                x: 0,
+                y: 0,
+                width: 1_920,
+                height: 1_080,
+            },
+        );
+        let expanded = calculate_prompt_layout(
+            96,
+            PromptFontMetrics {
+                title_width: 520,
+                title_height: 54,
+                label_width: 96,
+                label_height: 30,
+                line_height: 30,
+            },
+            PromptFields {
+                value_one: true,
+                value_two: true,
+                choice: true,
+            },
+            LayoutRect {
+                x: 0,
+                y: 0,
+                width: 1_920,
+                height: 1_080,
+            },
+        );
+
+        assert!(expanded.client.width > compact.client.width);
+        assert!(expanded.client.height > compact.client.height);
+        assert!(expanded.title.height >= 54);
+        assert!(expanded.edit_one.is_some());
+        assert!(expanded.edit_two.is_some());
+        assert!(expanded.choice.is_some());
+        assert!(
+            expanded
+                .edit_two
+                .is_some_and(|field| expanded.separator.y > field.y)
+        );
+        assert!(expanded.ok.bottom() <= expanded.client.height);
+        assert!(expanded.cancel.bottom() <= expanded.client.height);
+    }
+
+    #[test]
+    fn prompt_layout_keeps_every_active_child_inside_bounded_client() {
+        let bounds = LayoutRect {
+            x: 0,
+            y: 0,
+            width: 360,
+            height: 260,
+        };
+        let layout = calculate_prompt_layout(
+            192,
+            PromptFontMetrics {
+                title_width: 1_200,
+                title_height: 180,
+                label_width: 400,
+                label_height: 144,
+                line_height: 72,
+            },
+            PromptFields {
+                value_one: true,
+                value_two: true,
+                choice: true,
+            },
+            bounds,
+        );
+        let active = [
+            Some(layout.title),
+            layout.edit_one,
+            layout.label_one,
+            layout.edit_two,
+            layout.label_two,
+            layout.choice,
+            Some(layout.separator),
+            Some(layout.ok),
+            Some(layout.cancel),
+        ];
+
+        assert!(layout.client.width <= bounds.width);
+        assert!(layout.client.height <= bounds.height);
+        for rect in active.into_iter().flatten() {
+            assert!(rect.x >= 0);
+            assert!(rect.y >= 0);
+            assert!(rect.width >= 0);
+            assert!(rect.height >= 0);
+            assert!(rect.x.saturating_add(rect.width) <= layout.client.width);
+            assert!(rect.bottom() <= layout.client.height);
+        }
     }
 
     #[test]

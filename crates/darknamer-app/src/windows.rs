@@ -4,6 +4,7 @@ use std::ffi::c_void;
 use std::fs;
 use std::io;
 use std::mem::{size_of, zeroed};
+use std::num::NonZeroIsize;
 use std::os::windows::ffi::OsStringExt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -31,6 +32,10 @@ use crate::rename::{
 use darknamer_core::{
     LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,
     SortSemantics,
+};
+use raw_window_handle::{
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawWindowHandle,
+    Win32WindowHandle, WindowHandle,
 };
 
 mod application;
@@ -69,8 +74,8 @@ use safe_runtime::{
 use text_io::{compare_windows, legacy_path, path_wide, read_legacy_text, wide, write_legacy_text};
 use windows_sys::Win32::Foundation::{FILETIME, HWND, LPARAM, LRESULT, RECT, SYSTEMTIME, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    COLOR_WINDOW, CreateFontIndirectW, DT_CALCRECT, DT_NOPREFIX, DT_SINGLELINE, DeleteObject,
-    DrawTextW, GetDC, GetMonitorInfoW, HFONT, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    COLOR_WINDOW, CreateFontIndirectW, DT_CALCRECT, DT_NOPREFIX, DT_SINGLELINE, DT_WORDBREAK,
+    DeleteObject, DrawTextW, GetDC, GetMonitorInfoW, HFONT, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromWindow, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RedrawWindow, ReleaseDC,
     SelectObject, UpdateWindow,
 };
@@ -93,11 +98,12 @@ use windows_sys::Win32::UI::Controls::{
     LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS,
     LVSIL_SMALL, NM_DBLCLK, NMHDR, NMLISTVIEW,
 };
-use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
-#[cfg(test)]
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+use windows_sys::Win32::UI::HiDpi::{
+    AdjustWindowRectExForDpi, GetDpiForWindow, SystemParametersInfoForDpi,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, GetKeyState, SetFocus, VK_CONTROL, VK_DELETE, VK_ESCAPE, VK_SHIFT,
+    EnableWindow, GetKeyState, IsWindowEnabled, SetFocus, VK_CONTROL, VK_DELETE, VK_ESCAPE,
+    VK_SHIFT,
 };
 use windows_sys::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, HDROP, SHFILEINFOW, SHGFI_SMALLICON,
@@ -109,16 +115,16 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, GWLP_USERDATA, GetClientRect, GetMessageW,
     GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HMENU,
-    IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, KillTimer, LoadCursorW, LoadIconW, MB_OKCANCEL,
-    MB_YESNO, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW, PostMessageW,
-    PostQuitMessage, RegisterClassExW, SPI_GETNONCLIENTMETRICS, SW_SHOW, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND,
-    WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_FONTCHANGE, WM_GETMINMAXINFO,
-    WM_KEYDOWN, WM_KEYUP, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT,
-    WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER,
-    WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_ACCEPTFILES,
+    IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, KillTimer, LoadCursorW, LoadIconW, MB_DEFBUTTON2,
+    MB_ICONWARNING, MB_OKCANCEL, MB_YESNOCANCEL, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED,
+    MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW, MoveWindow,
+    NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassExW, SPI_GETNONCLIENTMETRICS,
+    SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu,
+    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_APP, WM_CLOSE,
+    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_FONTCHANGE,
+    WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS,
+    WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
+    WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_ACCEPTFILES,
     WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
     WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
@@ -805,6 +811,54 @@ mod tests {
 
         assert_eq!(updates.len(), 1);
         assert_eq!(changed_column_mask(updates[0].0, updates[0].1), 1 << 1);
+    }
+
+    #[test]
+    fn native_modal_guard_restores_the_owner_enabled_state() -> io::Result<()> {
+        let class = wide("STATIC");
+        // SAFETY: the system STATIC class and null optional handles remain valid for this hidden owner.
+        let owner = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                320,
+                240,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if owner.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+
+        // SAFETY: owner is the live hidden test HWND.
+        assert_ne!(unsafe { IsWindowEnabled(owner) }, 0);
+        let disabled_during_modal = modal_native_dialog(owner, || {
+            // SAFETY: owner remains live throughout this synchronous closure.
+            unsafe { IsWindowEnabled(owner) == 0 }
+        });
+        assert!(disabled_during_modal);
+        // SAFETY: owner remains live after the synchronous guard drops.
+        assert_ne!(unsafe { IsWindowEnabled(owner) }, 0);
+
+        // SAFETY: owner is live and remains intentionally disabled after the second guard drops.
+        unsafe { EnableWindow(owner, 0) };
+        let remained_disabled = modal_native_dialog(owner, || {
+            // SAFETY: owner remains live throughout this synchronous closure.
+            unsafe { IsWindowEnabled(owner) == 0 }
+        });
+        assert!(remained_disabled);
+        // SAFETY: owner remains live and intentionally disabled.
+        assert_eq!(unsafe { IsWindowEnabled(owner) }, 0);
+        // SAFETY: owner is the hidden test HWND created above and is destroyed once.
+        unsafe { DestroyWindow(owner) };
+        Ok(())
     }
 
     #[test]

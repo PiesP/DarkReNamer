@@ -10,7 +10,7 @@ pub(super) fn export_recovery_journal(owner: HWND, state: &mut AppState) {
         return;
     }
     let Some(directory) = modal_native_dialog(owner, || {
-        rfd::FileDialog::new()
+        native_file_dialog(owner)
             .set_title("복구 저널 원본을 저장할 폴더 선택")
             .pick_folder()
     }) else {
@@ -93,7 +93,15 @@ pub(super) fn discard_staged_journal(owner: HWND, state: &mut AppState) {
     let caption = wide("DarkReNamer - 활성화 전 계획 폐기");
     // SAFETY: owner is the live top-level HWND and both UTF-16 buffers remain
     // allocated throughout this synchronous confirmation call.
-    if unsafe { MessageBoxW(owner, prompt.as_ptr(), caption.as_ptr(), MB_OKCANCEL) } != IDOK {
+    if unsafe {
+        MessageBoxW(
+            owner,
+            prompt.as_ptr(),
+            caption.as_ptr(),
+            MB_OKCANCEL | MB_DEFBUTTON2 | MB_ICONWARNING,
+        )
+    } != IDOK
+    {
         return;
     }
     if !state.can_discard_staged_intent() {

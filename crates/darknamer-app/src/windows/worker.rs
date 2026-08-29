@@ -195,7 +195,7 @@ pub(super) fn handle_ready_plan(
         return;
     }
     let confirmation = format!(
-        "{}개 항목의 실제 이름을 변경하시겠습니까?\n파일 이동 단계 {}개\n계획 {:016X}\n목록 버전 {}",
+        "{}개 항목의 실제 이름을 변경합니다.\n파일 시스템 변경 단계: {}개\n\n계속하려면 확인을 선택하세요. 기본 선택은 취소입니다.\n\n진단 정보\n계획 지문: {:016X}\n목록 버전: {}",
         plan.changed_count(),
         ready.journal.primitive_steps(),
         plan.fingerprint(),
@@ -208,8 +208,14 @@ pub(super) fn handle_ready_plan(
     update_controls(state);
     // SAFETY: window is the live application HWND and prompt/caption are owned
     // NUL-terminated UTF-16 buffers retained through the modal MessageBoxW call.
-    let confirmed_by_user =
-        unsafe { MessageBoxW(window, prompt.as_ptr(), caption.as_ptr(), MB_OKCANCEL) } == IDOK;
+    let confirmed_by_user = unsafe {
+        MessageBoxW(
+            window,
+            prompt.as_ptr(),
+            caption.as_ptr(),
+            MB_OKCANCEL | MB_DEFBUTTON2 | MB_ICONWARNING,
+        )
+    } == IDOK;
     state.mutation_locked = false;
     state.confirmation_pending = false;
     update_controls(state);
@@ -859,15 +865,23 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
                 update_controls(state);
                 return;
             }
-            let text =
-                wide("경로를 직접 추가하려면 YES, 경로 내 파일을 추가하려면 NO를 선택하세요.");
+            let text = wide(
+                "선택한 폴더를 목록에 직접 추가하려면 예를 선택하세요.\n폴더 안의 파일을 재귀적으로 추가하려면 아니요를 선택하세요.\n목록을 변경하지 않으려면 취소를 선택하세요.",
+            );
             let caption = path_wide(&directory);
             state.mutation_locked = true;
             state.confirmation_pending = true;
             update_controls(state);
             // SAFETY: window is the live owner and both UTF-16 buffers remain
             // allocated throughout the synchronous modal call.
-            let answer = unsafe { MessageBoxW(window, text.as_ptr(), caption.as_ptr(), MB_YESNO) };
+            let answer = unsafe {
+                MessageBoxW(
+                    window,
+                    text.as_ptr(),
+                    caption.as_ptr(),
+                    MB_YESNOCANCEL | MB_DEFBUTTON2,
+                )
+            };
             state.mutation_locked = false;
             state.confirmation_pending = false;
             if state.close_pending {
@@ -875,10 +889,16 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
                 unsafe { DestroyWindow(window) };
                 return;
             }
-            let mode = if answer == windows_sys::Win32::UI::WindowsAndMessaging::IDYES {
-                AdmissionMode::Direct
-            } else {
-                AdmissionMode::Recurse
+            let mode = match directory_prompt_choice(answer) {
+                DirectoryPromptChoice::Direct => AdmissionMode::Direct,
+                DirectoryPromptChoice::Recurse => AdmissionMode::Recurse,
+                DirectoryPromptChoice::Cancel => {
+                    state.set_transient_status(
+                        "폴더 추가 방식을 취소했습니다. 목록은 변경되지 않았습니다.",
+                    );
+                    update_controls(state);
+                    return;
+                }
             };
             start_admission_worker(window, state, paths, Some(mode), capacity);
             return;

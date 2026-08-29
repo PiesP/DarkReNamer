@@ -52,6 +52,7 @@ dependencies = [
  "base64",
  "darknamer-core",
  "embed-resource",
+ "raw-window-handle",
  "rfd",
  "tempfile",
  "windows-sys 0.61.2",
