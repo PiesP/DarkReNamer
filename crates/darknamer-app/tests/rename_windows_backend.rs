@@ -50,6 +50,14 @@ fn case_query_supported(parent: &std::path::Path) -> Result<bool, Box<dyn std::e
 }
 
 #[test]
+fn journal_root_rejects_unc_before_filesystem_access() {
+    let error = JournalRoot::open("\\\\server\\share\\journal-root")
+        .err()
+        .and_then(|error| error.os_code);
+    assert_eq!(error, Some(53));
+}
+
+#[test]
 fn occupied_destination_and_relative_path_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let source = directory.path().join("a.txt");

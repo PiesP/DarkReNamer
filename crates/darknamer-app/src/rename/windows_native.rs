@@ -40,6 +40,10 @@ pub(crate) struct NativeParent {
     pub identity: NativeIdentity,
 }
 
+pub(crate) fn validate_safe_local_root(path: &Path) -> io::Result<()> {
+    traversal_parts(path).map(|_parts| ())
+}
+
 impl NativeParent {
     pub(crate) fn open_legacy(path: &LegacyText) -> io::Result<Self> {
         let path = std::ffi::OsString::from_wide(path.units());
@@ -129,7 +133,7 @@ fn traversal_parts(path: &Path) -> io::Result<(PathBuf, Vec<std::ffi::OsString>)
     let Some(Component::Prefix(prefix)) = components.next() else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "parent path must start at a drive or UNC share",
+            "parent path must start at a local drive root",
         ));
     };
     match prefix.kind() {

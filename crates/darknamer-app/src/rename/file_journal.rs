@@ -187,9 +187,9 @@ impl From<JournalCodecError> for FileJournalError {
 
 /// Retained authority for one validated absolute journal directory.
 ///
-/// Windows retains an exclusive no-follow directory handle. Child opens still
-/// use a validated full path because this crate has no handle-relative create
-/// adapter yet; production activation remains gated on closing that residual.
+/// Windows retains an exclusive, component-traversed, non-reparse directory
+/// handle and creates or opens each validated journal leaf relative to it with
+/// `NtCreateFile`. Safe v1 rejects UNC/SMB and device-namespace roots.
 #[derive(Debug)]
 pub struct JournalRoot {
     path: PathBuf,
@@ -207,6 +207,8 @@ impl JournalRoot {
                 os_code: None,
             });
         }
+        #[cfg(windows)]
+        super::windows_native::validate_safe_local_root(&path)?;
         validate_root_components(&path)?;
         let file = open_root(&path)?;
         let metadata = file.metadata()?;
