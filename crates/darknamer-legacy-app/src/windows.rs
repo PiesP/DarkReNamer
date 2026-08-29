@@ -46,9 +46,9 @@ use windows_sys::Win32::UI::Controls::{
     LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED,
     LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETNEXTITEM,
     LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE,
-    LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVNI_FOCUSED, LVNI_SELECTED,
-    LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS,
-    LVSIL_SMALL, NM_DBLCLK, NMHDR,
+    LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVN_ITEMCHANGED, LVNI_FOCUSED,
+    LVNI_SELECTED, LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS,
+    LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_DBLCLK, NMHDR, NMLISTVIEW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetKeyState, SetFocus, VK_CONTROL, VK_DELETE, VK_ESCAPE, VK_SHIFT,
@@ -283,13 +283,25 @@ unsafe extern "system" fn window_proc(
             let header = lparam as *const NMHDR;
             if !header.is_null()
                 && unsafe { (*header).hwndFrom } == unsafe { (*state_ptr).list_window }
-                && unsafe { (*header).code } == NM_DBLCLK
             {
-                let previous_states = unsafe { (*state_ptr).command_states };
-                unsafe { dispatch_command(window, &mut *state_ptr, MANUAL_CHANGE) };
-                unsafe {
-                    (*state_ptr).command_states = previous_states;
-                    apply_command_states(&*state_ptr);
+                if unsafe { (*header).code } == LVN_ITEMCHANGED {
+                    let notification = lparam as *const NMLISTVIEW;
+                    if !notification.is_null()
+                        && selection_command_state_changed(
+                            unsafe { (*notification).uChanged },
+                            unsafe { (*notification).uOldState },
+                            unsafe { (*notification).uNewState },
+                        )
+                    {
+                        unsafe { update_controls(&mut *state_ptr) };
+                    }
+                } else if unsafe { (*header).code } == NM_DBLCLK {
+                    let previous_states = unsafe { (*state_ptr).command_states };
+                    unsafe { dispatch_command(window, &mut *state_ptr, MANUAL_CHANGE) };
+                    unsafe {
+                        (*state_ptr).command_states = previous_states;
+                        apply_command_states(&*state_ptr);
+                    }
                 }
             }
             0

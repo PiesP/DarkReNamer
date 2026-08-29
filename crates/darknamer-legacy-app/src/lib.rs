@@ -191,6 +191,17 @@ pub fn command_enabled(id: CommandId, row_count: usize, selected_count: usize) -
     }
 }
 
+#[cfg(any(windows, test))]
+const LISTVIEW_STATE_CHANGED: u32 = 0x0008;
+#[cfg(any(windows, test))]
+const LISTVIEW_SELECTED: u32 = 0x0002;
+
+#[cfg(any(windows, test))]
+#[must_use]
+fn selection_command_state_changed(changed: u32, old_state: u32, new_state: u32) -> bool {
+    changed & LISTVIEW_STATE_CHANGED != 0 && (old_state ^ new_state) & LISTVIEW_SELECTED != 0
+}
+
 #[cfg(windows)]
 mod windows;
 
@@ -304,5 +315,29 @@ mod tests {
         assert!(command_enabled(APPLY, 1, 0));
         assert!(!command_enabled(MANUAL_CHANGE, 1, 0));
         assert!(command_enabled(MANUAL_CHANGE, 1, 1));
+    }
+
+    #[test]
+    fn listview_selection_changes_refresh_selection_commands() {
+        assert!(selection_command_state_changed(
+            LISTVIEW_STATE_CHANGED,
+            0,
+            LISTVIEW_SELECTED
+        ));
+        assert!(selection_command_state_changed(
+            LISTVIEW_STATE_CHANGED,
+            LISTVIEW_SELECTED,
+            0
+        ));
+    }
+
+    #[test]
+    fn unrelated_listview_changes_do_not_refresh_selection_commands() {
+        assert!(!selection_command_state_changed(0, 0, LISTVIEW_SELECTED));
+        assert!(!selection_command_state_changed(
+            LISTVIEW_STATE_CHANGED,
+            LISTVIEW_SELECTED,
+            LISTVIEW_SELECTED | 0x0001
+        ));
     }
 }
