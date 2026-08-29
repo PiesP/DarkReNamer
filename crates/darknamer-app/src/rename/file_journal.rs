@@ -1413,6 +1413,9 @@ impl FileJournal {
         match open_existing(&self._root, active_path, active_leaf) {
             Ok(_active) => return Err(unsafe_cleanup_error()),
             Err(error) if matches!(error.raw_os_error(), Some(2 | 3)) => {}
+            Err(error) if matches!(error.raw_os_error(), Some(32 | 33)) => {
+                return Err(unsafe_cleanup_error());
+            }
             Err(error) => return Err(error.into()),
         }
         mark_retained_file_delete(&self.file)?;

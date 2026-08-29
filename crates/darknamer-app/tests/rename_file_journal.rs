@@ -233,12 +233,16 @@ fn valid_file_journal_exports_exact_bytes_and_restores_append_cursor()
     )];
     let mut journal = FileJournal::create_new(&root, "active.drj")?;
     journal.begin(plan, &steps)?;
-    let expected = fs::read(&source)?;
+    let expected = encode_journal_records(&[JournalRecord::Intent {
+        plan,
+        steps: steps.clone().into_boxed_slice(),
+    }])?;
 
     assert_eq!(journal.copy_exact_to_new(&copied)?, expected.len() as u64);
     assert_eq!(fs::read(&copied)?, expected);
 
     journal.prepared(0, JournalDirection::Forward)?;
+    drop(journal);
     let records = decode_journal_records(&fs::read(source)?)?;
     assert!(matches!(
         records.as_slice(),
