@@ -60,6 +60,10 @@ jobs:
         shell: pwsh
         run: ./scripts/test-release-handoff-validator.ps1
 
+      - name: Test Windows acceptance evidence validation
+        shell: pwsh
+        run: ./scripts/test-windows-acceptance-evidence.ps1
+
       - name: Check formatting and lints
         run: |
           cargo fmt --all -- --check
