@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use base64::Engine as _;
 
+#[path = "resource_ids.rs"]
+mod resource_ids;
 #[path = "build_support/resource_script.rs"]
 mod resource_script;
 

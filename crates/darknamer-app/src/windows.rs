@@ -16,6 +16,9 @@ use std::slice;
 use darknamer_core::{
     LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,
 };
+
+#[path = "../resource_ids.rs"]
+mod resource_ids;
 use windows_sys::Win32::Foundation::{
     FILETIME, GlobalFree, HANDLE, HWND, LPARAM, LRESULT, RECT, SYSTEMTIME, WPARAM,
 };
@@ -154,7 +157,7 @@ unsafe fn run_unsafe() -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     let class_name = wide("DarkNamerLegacyWindow");
-    let icon = unsafe { LoadIconW(instance, int_resource(1)) };
+    let icon = unsafe { LoadIconW(instance, int_resource(resource_ids::APP_ICON)) };
     let window_class = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
         style: CS_HREDRAW | CS_VREDRAW,
@@ -411,14 +414,21 @@ unsafe fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> 
             SS_CENTERIMAGE | SS_SUNKEN,
         )
     };
-    state.left_toolbar =
-        unsafe { create_toolbar(window, instance, LEFT_TOOLBAR_ID, 130, &LEFT_TOOLBAR_ITEMS)? };
+    state.left_toolbar = unsafe {
+        create_toolbar(
+            window,
+            instance,
+            LEFT_TOOLBAR_ID,
+            resource_ids::LEFT_TOOLBAR_BITMAP,
+            &LEFT_TOOLBAR_ITEMS,
+        )?
+    };
     state.right_toolbar = unsafe {
         create_toolbar(
             window,
             instance,
             RIGHT_TOOLBAR_ID,
-            132,
+            resource_ids::RIGHT_TOOLBAR_BITMAP,
             &RIGHT_TOOLBAR_ITEMS,
         )?
     };
