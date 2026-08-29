@@ -408,6 +408,15 @@ impl JournalRoot {
         &self.path
     }
 
+    /// Clones the retained directory capability for a serialized worker job.
+    pub fn try_clone(&self) -> Result<Self, FileJournalError> {
+        Ok(Self {
+            path: self.path.clone(),
+            file: self.file.try_clone()?,
+            identity: self.identity,
+        })
+    }
+
     fn child(&self, leaf: &str) -> Result<PathBuf, FileJournalError> {
         if validate_windows_leaf_name(&LegacyText::from(leaf)).is_err() {
             return Err(FileJournalError {
