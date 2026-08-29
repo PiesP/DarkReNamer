@@ -380,7 +380,6 @@ fn case_sensitive_parent_is_explicitly_unsupported_when_platform_allows_fixture(
     fs::create_dir(&parent)?;
     fs::write(&unrelated, b"keep")?;
     let source = parent.join("a.txt");
-    fs::write(&source, b"a")?;
     if let Err(error) = set_directory_case_sensitive(&parent, true) {
         if matches!(error.raw_os_error(), Some(5 | 50 | 87)) {
             return Ok(());
@@ -388,6 +387,7 @@ fn case_sensitive_parent_is_explicitly_unsupported_when_platform_allows_fixture(
         return Err(error.into());
     }
     let mut fixture = CaseSensitiveFixtureGuard::new(&parent);
+    fs::write(&source, b"a")?;
 
     let backend = WindowsRenameBackend;
     let environment_error = backend
