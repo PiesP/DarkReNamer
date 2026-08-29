@@ -1,6 +1,9 @@
+use std::cell::Cell;
+
 use darknamer_app::rename::{
-    BackendError, EntryId, EntryKind, MemoryBackend, ModelRevision, PathKey, PathSnapshot,
-    PlanIssueKind, PlanRequest, RenameBackend, RenameIntent, RenameOperation, RenamePlanner,
+    BackendError, EntryId, EntryKind, MAX_PLAN_PATH_DEPTH, MemoryBackend, ModelRevision, PathKey,
+    PathSnapshot, PlanIssueKind, PlanRequest, RenameBackend, RenameIntent, RenameOperation,
+    RenamePlanner,
 };
 use darknamer_core::{LegacyText, WindowsLeafNameError};
 
@@ -332,5 +335,136 @@ fn ancestor_detection_does_not_interpret_backend_equality_keys_as_paths()
             .iter()
             .all(|issue| issue.kind == PlanIssueKind::SourceOverlap)
     );
+    Ok(())
+}
+
+struct CountingBackend {
+    inner: MemoryBackend,
+    validation_calls: Cell<usize>,
+    key_calls: Cell<usize>,
+    observe_calls: Cell<usize>,
+    relationship_calls: Cell<usize>,
+}
+
+impl RenameBackend for CountingBackend {
+    fn validate_path_environment(&self, path: &LegacyText) -> Result<(), BackendError> {
+        self.validation_calls.set(self.validation_calls.get() + 1);
+        self.inner.validate_path_environment(path)
+    }
+
+    fn path_key(&self, path: &LegacyText) -> PathKey {
+        self.key_calls.set(self.key_calls.get() + 1);
+        self.inner.path_key(path)
+    }
+
+    fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
+        self.observe_calls.set(self.observe_calls.get() + 1);
+        self.inner.observe(path)
+    }
+
+    fn is_same_or_descendant(
+        &self,
+        ancestor: &LegacyText,
+        candidate: &LegacyText,
+    ) -> Result<bool, BackendError> {
+        self.relationship_calls
+            .set(self.relationship_calls.get() + 1);
+        self.inner.is_same_or_descendant(ancestor, candidate)
+    }
+
+    fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
+        self.inner.next_transaction_nonce()
+    }
+
+    fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+        self.inner.rename_no_replace(operation)
+    }
+}
+
+#[test]
+fn nested_overlap_detection_has_bounded_calls_and_one_issue_per_row() {
+    let count = 128_usize;
+    let mut inner = MemoryBackend::new();
+    let mut intents = Vec::with_capacity(count);
+    let mut parent = "C:\\root".to_owned();
+    for index in 0..count {
+        let source = format!("{parent}\\node-{index}");
+        inner = inner.with_file(source.clone(), index as u128 + 1);
+        intents.push(RenameIntent::new(
+            EntryId::new(index as u32),
+            source.clone(),
+            parent.clone(),
+            format!("renamed-{index}"),
+            EntryKind::File,
+        ));
+        parent = source;
+    }
+    let backend = CountingBackend {
+        inner,
+        validation_calls: Cell::new(0),
+        key_calls: Cell::new(0),
+        observe_calls: Cell::new(0),
+        relationship_calls: Cell::new(0),
+    };
+
+    let error = RenamePlanner::new(&backend)
+        .plan(PlanRequest::new(ModelRevision::new(1), intents))
+        .err();
+    let Some(error) = error else {
+        return;
+    };
+    assert!(error.issues().len() <= count);
+    assert_eq!(backend.relationship_calls.get(), 0);
+    assert!(backend.key_calls.get() <= count * (MAX_PLAN_PATH_DEPTH + 8));
+}
+
+#[test]
+fn direct_request_rejects_excessive_path_depth_before_backend_access()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut deep_path = String::from("C:\\");
+    deep_path.push_str(
+        &(0..=MAX_PLAN_PATH_DEPTH)
+            .map(|index| format!("p{index}"))
+            .collect::<Vec<_>>()
+            .join("\\"),
+    );
+    let backend = CountingBackend {
+        inner: MemoryBackend::new(),
+        validation_calls: Cell::new(0),
+        key_calls: Cell::new(0),
+        observe_calls: Cell::new(0),
+        relationship_calls: Cell::new(0),
+    };
+    for request in [
+        RenameIntent::new(
+            EntryId::new(1),
+            deep_path.clone(),
+            "C:\\work",
+            "renamed.txt",
+            EntryKind::File,
+        ),
+        RenameIntent::new(
+            EntryId::new(2),
+            "C:\\work\\source.txt",
+            deep_path,
+            "renamed.txt",
+            EntryKind::File,
+        ),
+    ] {
+        let Err(error) = RenamePlanner::new(&backend)
+            .plan(PlanRequest::new(ModelRevision::new(1), vec![request]))
+        else {
+            return Err(
+                std::io::Error::other("over-depth direct request did not fail closed").into(),
+            );
+        };
+        assert_eq!(error.issues().len(), 1);
+        assert_eq!(error.issues()[0].kind, PlanIssueKind::PathTooDeep);
+    }
+    assert_eq!(backend.validation_calls.get(), 0);
+    assert_eq!(backend.key_calls.get(), 0);
+    assert_eq!(backend.observe_calls.get(), 0);
+    assert_eq!(backend.relationship_calls.get(), 0);
+    assert_eq!(backend.inner.mutation_count(), 0);
     Ok(())
 }

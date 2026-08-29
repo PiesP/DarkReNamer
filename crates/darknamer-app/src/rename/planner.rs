@@ -8,6 +8,11 @@ use super::{
     RenameIntent, RenamePlan,
 };
 
+/// Maximum number of path components accepted by one direct plan request.
+///
+/// This is a planner safety bound, independent of admission traversal depth.
+pub const MAX_PLAN_PATH_DEPTH: usize = 256;
+
 /// Builds immutable plans without mutating the filesystem adapter.
 pub struct RenamePlanner<'a> {
     backend: &'a dyn RenameBackend,
@@ -97,45 +102,19 @@ impl<'a> RenamePlanner<'a> {
                 kind: PlanIssueKind::DuplicateDestination,
             }));
         }
-        for left in 0..changed.len() {
-            for right in left + 1..changed.len() {
-                if self.backend.path_key(&changed[left].source)
-                    == self.backend.path_key(&changed[right].source)
-                {
-                    continue;
+        let mut overlap_entries = BTreeSet::new();
+        for intent in &changed {
+            visit_direct_ancestors(&intent.source, |ancestor| {
+                if let Some(owners) = source_owners.get(&self.backend.path_key(ancestor)) {
+                    overlap_entries.insert(intent.id);
+                    overlap_entries.extend(owners.iter().copied());
                 }
-                let overlaps = self
-                    .backend
-                    .is_same_or_descendant(&changed[left].source, &changed[right].source)
-                    .and_then(|left_contains_right| {
-                        if left_contains_right {
-                            Ok(true)
-                        } else {
-                            self.backend.is_same_or_descendant(
-                                &changed[right].source,
-                                &changed[left].source,
-                            )
-                        }
-                    });
-                match overlaps {
-                    Ok(true) => {
-                        issues.push(PlanIssue {
-                            entry: changed[left].id,
-                            kind: PlanIssueKind::SourceOverlap,
-                        });
-                        issues.push(PlanIssue {
-                            entry: changed[right].id,
-                            kind: PlanIssueKind::SourceOverlap,
-                        });
-                    }
-                    Ok(false) => {}
-                    Err(error) => issues.push(PlanIssue {
-                        entry: changed[left].id,
-                        kind: PlanIssueKind::BackendFailure(error),
-                    }),
-                }
-            }
+            });
         }
+        issues.extend(overlap_entries.into_iter().map(|entry| PlanIssue {
+            entry,
+            kind: PlanIssueKind::SourceOverlap,
+        }));
         if !issues.is_empty() {
             return Err(PlanError::new(issues));
         }
@@ -232,6 +211,30 @@ fn append_duplicate_issues<'a>(
     }
 }
 
+fn visit_direct_ancestors(
+    path: &darknamer_core::LegacyText,
+    mut visit: impl FnMut(&darknamer_core::LegacyText),
+) {
+    let mut ancestor = path.clone();
+    for _ in 0..MAX_PLAN_PATH_DEPTH {
+        let Some(separator) = ancestor
+            .units()
+            .iter()
+            .rposition(|unit| is_separator(*unit))
+        else {
+            break;
+        };
+        if separator <= 2 && ancestor.units().get(1) == Some(&(b':' as u16)) {
+            break;
+        }
+        ancestor.truncate_units(separator);
+        if ancestor.is_empty() {
+            break;
+        }
+        visit(&ancestor);
+    }
+}
+
 fn parent_path(path: &darknamer_core::LegacyText) -> darknamer_core::LegacyText {
     let units = path.units();
     let end = units
@@ -242,6 +245,14 @@ fn parent_path(path: &darknamer_core::LegacyText) -> darknamer_core::LegacyText 
 }
 
 fn validate_intent(intent: &RenameIntent, issues: &mut Vec<PlanIssue>) {
+    if path_component_depth(intent.source.units()) > MAX_PLAN_PATH_DEPTH
+        || path_component_depth(intent.destination_parent.units()) > MAX_PLAN_PATH_DEPTH
+    {
+        issues.push(PlanIssue {
+            entry: intent.id,
+            kind: PlanIssueKind::PathTooDeep,
+        });
+    }
     if !is_absolute_windows_path(intent.source.units()) {
         issues.push(PlanIssue {
             entry: intent.id,
@@ -260,6 +271,34 @@ fn validate_intent(intent: &RenameIntent, issues: &mut Vec<PlanIssue>) {
             kind: PlanIssueKind::InvalidDestinationName(error),
         });
     }
+}
+
+fn path_component_depth(units: &[u16]) -> usize {
+    let start = if units.len() >= 7
+        && is_separator(units[0])
+        && is_separator(units[1])
+        && units[2] == b'?' as u16
+        && is_separator(units[3])
+        && units[5] == b':' as u16
+        && is_separator(units[6])
+    {
+        7
+    } else if units.len() >= 3 && units[1] == b':' as u16 && is_separator(units[2]) {
+        3
+    } else {
+        0
+    };
+    let mut depth = 0;
+    let mut in_component = false;
+    for unit in &units[start..] {
+        if is_separator(*unit) {
+            in_component = false;
+        } else if !in_component {
+            depth += 1;
+            in_component = true;
+        }
+    }
+    depth
 }
 
 fn is_absolute_windows_path(units: &[u16]) -> bool {
