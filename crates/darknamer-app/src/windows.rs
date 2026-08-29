@@ -3,6 +3,7 @@
     reason = "all unsafe operations are confined to this Win32 boundary; entry-point invariants are documented"
 )]
 
+use std::collections::HashMap;
 use std::env;
 use std::ffi::c_void;
 use std::fs;
@@ -17,6 +18,7 @@ use std::slice;
 use crate::admission::{
     AdmissionMode, MAX_ADMITTED_SOURCES, WindowsAdmissionAdapter, collect_admission,
 };
+use crate::icon_cache::{IconCacheKey, icon_cache_key};
 use crate::rename::{
     ExecutionOutcome, FileJournal, JournalCleanupDecision, JournalRoot, ModelRevision,
     RecoveryOutcome, RenameExecutor, RenamePlanner, RenameRecovery, WindowsRenameBackend,
@@ -39,7 +41,8 @@ use windows_sys::Win32::Globalization::{
 };
 use windows_sys::Win32::Graphics::Gdi::{
     CLIP_DEFAULT_PRECIS, COLOR_WINDOW, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH,
-    DEFAULT_QUALITY, DeleteObject, FF_DONTCARE, FW_NORMAL, HFONT, OUT_DEFAULT_PRECIS, UpdateWindow,
+    DEFAULT_QUALITY, DeleteObject, FF_DONTCARE, FW_NORMAL, HFONT, OUT_DEFAULT_PRECIS,
+    RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RedrawWindow, UpdateWindow,
 };
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
@@ -59,11 +62,12 @@ use windows_sys::Win32::UI::Controls::{
     LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW,
     LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
     LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE,
-    LVM_SETITEMTEXTW, LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_FULLROWSELECT,
-    LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_DBLCLK,
-    NMHDR, NMLISTVIEW, TB_ADDBITMAP, TB_ADDBUTTONS, TB_BUTTONSTRUCTSIZE, TB_ENABLEBUTTON,
-    TB_SETBITMAPSIZE, TB_SETBUTTONSIZE, TBADDBITMAP, TBBUTTON, TBSTATE_ENABLED, TBSTYLE_BUTTON,
-    TBSTYLE_FLAT, TBSTYLE_SEP, TBSTYLE_TOOLTIPS, TBSTYLE_WRAPABLE, TOOLBARCLASSNAMEW,
+    LVM_SETITEMTEXTW, LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER,
+    LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS,
+    LVSIL_SMALL, NM_DBLCLK, NMHDR, NMLISTVIEW, TB_ADDBITMAP, TB_ADDBUTTONS, TB_BUTTONSTRUCTSIZE,
+    TB_ENABLEBUTTON, TB_SETBITMAPSIZE, TB_SETBUTTONSIZE, TBADDBITMAP, TBBUTTON, TBSTATE_ENABLED,
+    TBSTYLE_BUTTON, TBSTYLE_FLAT, TBSTYLE_SEP, TBSTYLE_TOOLTIPS, TBSTYLE_WRAPABLE,
+    TOOLBARCLASSNAMEW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetKeyState, SetFocus, VK_CONTROL, VK_DELETE, VK_ESCAPE, VK_SHIFT,
@@ -83,9 +87,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     MessageBoxW, MoveWindow, PostQuitMessage, RegisterClassExW, SW_SHOW, SendMessageW,
     SetForegroundWindow, SetMenu, SetWindowLongPtrW, ShowWindow, TranslateMessage, WM_CLOSE,
     WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN, WM_KEYUP, WM_NCCREATE,
-    WM_NCDESTROY, WM_NOTIFY, WM_SETFONT, WM_SIZE, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD,
-    WS_CLIPCHILDREN, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
-    WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    WM_NCDESTROY, WM_NOTIFY, WM_SETFONT, WM_SETREDRAW, WM_SIZE, WNDCLASSEXW, WS_BORDER, WS_CAPTION,
+    WS_CHILD, WS_CLIPCHILDREN, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP,
+    WS_VISIBLE,
 };
 
 use crate::*;
@@ -113,6 +118,7 @@ struct AppState {
     journal_root: JournalRoot,
     active_journal: Option<FileJournal>,
     startup_status: Option<String>,
+    icon_cache: HashMap<IconCacheKey, i32>,
 }
 
 struct WindowInit {
@@ -139,6 +145,7 @@ impl AppState {
             journal_root: runtime.root,
             active_journal: runtime.active_journal,
             startup_status: runtime.status,
+            icon_cache: HashMap::new(),
         }
     }
 
@@ -527,7 +534,7 @@ unsafe fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> 
             state.list_window,
             LVM_SETEXTENDEDLISTVIEWSTYLE,
             0,
-            LVS_EX_FULLROWSELECT as isize,
+            (LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER) as isize,
         );
         for (index, column) in COLUMNS.iter().enumerate() {
             let mut text = wide(column.label);
@@ -2168,7 +2175,39 @@ unsafe fn update_column_visibility(state: &AppState, index: usize) {
     }
 }
 
+struct RedrawGuard {
+    window: HWND,
+}
+
+impl RedrawGuard {
+    unsafe fn suspend(window: HWND) -> Self {
+        if !window.is_null() {
+            unsafe { SendMessageW(window, WM_SETREDRAW, 0, 0) };
+        }
+        Self { window }
+    }
+}
+
+impl Drop for RedrawGuard {
+    fn drop(&mut self) {
+        if !self.window.is_null() {
+            // SAFETY: the ListView remains owned by the UI thread throughout
+            // refresh; redraw is always restored even if refresh returns early.
+            unsafe {
+                SendMessageW(self.window, WM_SETREDRAW, 1, 0);
+                RedrawWindow(
+                    self.window,
+                    null(),
+                    null_mut(),
+                    RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
+                );
+            }
+        }
+    }
+}
+
 unsafe fn refresh(state: &mut AppState) {
+    let _redraw = unsafe { RedrawGuard::suspend(state.list_window) };
     let selected = unsafe { selected_indices(state.list_window) };
     unsafe { SendMessageW(state.list_window, LVM_DELETEALLITEMS, 0, 0) };
     for (row, item) in state.model.items().iter().enumerate() {
@@ -2193,7 +2232,7 @@ unsafe fn refresh(state: &mut AppState) {
                     iItem: row as i32,
                     iSubItem: 0,
                     pszText: text.as_mut_ptr(),
-                    iImage: unsafe { file_icon_index(item) },
+                    iImage: unsafe { file_icon_index(&mut state.icon_cache, item) },
                     ..unsafe { zeroed() }
                 };
                 unsafe {
@@ -2309,13 +2348,13 @@ unsafe fn set_toolbar_button_enabled(toolbar: HWND, command: CommandId, enabled:
     }
 }
 
-unsafe fn file_icon_index(item: &LegacyListItem) -> i32 {
+unsafe fn file_icon_index(cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyListItem) -> i32 {
+    let key = icon_cache_key(item.current_name(), item.is_directory());
+    if let Some(index) = cache.get(&key) {
+        return *index;
+    }
     let mut info: SHFILEINFOW = unsafe { zeroed() };
-    let path = if item.is_directory() {
-        LegacyText::from("folder")
-    } else {
-        item.current_name().clone()
-    };
+    let path = key.lookup_text();
     let mut path = path.units().to_vec();
     path.push(0);
     let attributes = if item.is_directory() {
@@ -2332,6 +2371,7 @@ unsafe fn file_icon_index(item: &LegacyListItem) -> i32 {
             SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON,
         );
     }
+    cache.insert(key, info.iIcon);
     info.iIcon
 }
 

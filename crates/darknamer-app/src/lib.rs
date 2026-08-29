@@ -4,6 +4,8 @@
 
 /// Bounded filesystem admission for native picker, drop, and path import.
 pub mod admission;
+/// Bounded shell-icon cache key derivation.
+pub mod icon_cache;
 /// Safe rename planning and execution foundation.
 pub mod rename;
 
