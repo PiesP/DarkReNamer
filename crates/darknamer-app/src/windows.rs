@@ -29,7 +29,8 @@ use darknamer_core::{
 #[path = "../resource_ids.rs"]
 mod resource_ids;
 use windows_sys::Win32::Foundation::{
-    FILETIME, GlobalFree, HANDLE, HWND, LPARAM, LRESULT, RECT, SYSTEMTIME, WPARAM,
+    FILETIME, GetLastError, GlobalFree, HANDLE, HWND, LPARAM, LRESULT, RECT, SYSTEMTIME,
+    SetLastError, WPARAM,
 };
 use windows_sys::Win32::Globalization::{
     CP_ACP, CSTR_GREATER_THAN, CSTR_LESS_THAN, CompareStringW, LOCALE_USER_DEFAULT,
@@ -1580,8 +1581,8 @@ fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
             "DarkReNamer - Safe 모드",
         ),
         ADD_FILES => add_files_dialog(window, state),
-        COPY_NAMES => copy_clipboard(window, &state.model.export_names()),
-        COPY_PATHS => copy_clipboard(window, &state.model.export_paths()),
+        COPY_NAMES => copy_clipboard_or_report(window, &state.model.export_names()),
+        COPY_PATHS => copy_clipboard_or_report(window, &state.model.export_paths()),
         SAVE_NAMES => save_text_dialog(window, state.model.export_names(), true),
         SAVE_PATHS => save_text_dialog(window, state.model.export_paths(), false),
         IMPORT_NAMES => import_names_dialog(window, state),
@@ -2133,8 +2134,10 @@ fn compare_windows(left: &LegacyText, right: &LegacyText) -> std::cmp::Ordering 
         std::cmp::Ordering::Less
     } else if result == CSTR_GREATER_THAN {
         std::cmp::Ordering::Greater
-    } else {
+    } else if result == windows_sys::Win32::Globalization::CSTR_EQUAL {
         std::cmp::Ordering::Equal
+    } else {
+        super::compare_utf16_fallback(left, right)
     }
 }
 
@@ -2142,41 +2145,96 @@ fn path_wide(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain([0]).collect()
 }
 
-fn copy_clipboard(owner: HWND, text: &LegacyText) {
+struct ClipboardSession {
+    open: bool,
+}
+
+impl ClipboardSession {
+    fn close(mut self) -> io::Result<()> {
+        // SAFETY: this guard owns the one clipboard session opened by this thread.
+        let closed = unsafe { CloseClipboard() };
+        if closed == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        self.open = false;
+        Ok(())
+    }
+}
+
+impl Drop for ClipboardSession {
+    fn drop(&mut self) {
+        if self.open {
+            // SAFETY: this guard still owns an open session. Drop is the
+            // best-effort cleanup path after an earlier operation or close failed.
+            unsafe { CloseClipboard() };
+        }
+    }
+}
+
+fn copy_clipboard_or_report(owner: HWND, text: &LegacyText) {
+    if let Err(error) = copy_clipboard(owner, text) {
+        message(
+            owner,
+            &format!("클립보드에 복사하지 못했습니다: {error}"),
+            "DarkReNamer - 복사 실패",
+        );
+    }
+}
+
+fn copy_clipboard(owner: HWND, text: &LegacyText) -> io::Result<()> {
     let mut units = text.units().to_vec();
     units.push(0);
     // SAFETY: owner is the live top-level HWND associated with this synchronous clipboard session.
     if unsafe { OpenClipboard(owner) } == 0 {
-        return;
+        return Err(io::Error::last_os_error());
     }
+    let session = ClipboardSession { open: true };
     // SAFETY: This thread successfully opened the clipboard immediately before emptying it.
-    unsafe { EmptyClipboard() };
+    if unsafe { EmptyClipboard() } == 0 {
+        return Err(io::Error::last_os_error());
+    }
     let bytes = units.len().saturating_mul(size_of::<u16>());
     // SAFETY: bytes is the checked UTF-16 byte count; the HGLOBAL stays owned until transfer or GlobalFree.
     let allocation = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) };
-    if !allocation.is_null() {
-        // SAFETY: allocation is the non-null newly allocated HGLOBAL and stays owned while its pointer is used.
-        let locked = unsafe { GlobalLock(allocation) } as *mut u16;
-        if !locked.is_null() {
-            // SAFETY: locked spans units.len writable u16 slots, units has that many elements, and they cannot overlap.
-            unsafe {
-                std::ptr::copy_nonoverlapping(units.as_ptr(), locked, units.len());
-                GlobalUnlock(allocation);
-            }
-            let transferred =
-                // SAFETY: allocation is unlocked movable HGLOBAL containing terminated UTF-16; success transfers ownership.
-                unsafe { SetClipboardData(u32::from(CF_UNICODETEXT), allocation as HANDLE) };
-            if transferred.is_null() {
-                // SAFETY: allocation is a non-null HGLOBAL still owned here because clipboard ownership was not transferred.
-                unsafe { GlobalFree(allocation) };
-            }
-        } else {
-            // SAFETY: allocation is a non-null HGLOBAL still owned here because clipboard ownership was not transferred.
-            unsafe { GlobalFree(allocation) };
-        }
+    if allocation.is_null() {
+        return Err(io::Error::last_os_error());
     }
-    // SAFETY: This thread closes exactly the clipboard session successfully opened above.
-    unsafe { CloseClipboard() };
+    // SAFETY: allocation is the non-null newly allocated HGLOBAL and stays owned while its pointer is used.
+    let locked = unsafe { GlobalLock(allocation) } as *mut u16;
+    if locked.is_null() {
+        let error = io::Error::last_os_error();
+        // SAFETY: allocation is a non-null HGLOBAL still owned by this function.
+        unsafe { GlobalFree(allocation) };
+        return Err(error);
+    }
+    // SAFETY: locked spans units.len writable u16 slots, units has that many
+    // elements, and they cannot overlap. Clearing last-error disambiguates
+    // GlobalUnlock's zero return for a fully unlocked allocation from failure.
+    let unlock_error = unsafe {
+        std::ptr::copy_nonoverlapping(units.as_ptr(), locked, units.len());
+        SetLastError(0);
+        let unlocked = GlobalUnlock(allocation);
+        let error = GetLastError();
+        (unlocked == 0 && error != 0).then_some(error)
+    };
+    if let Some(code) = unlock_error {
+        // SAFETY: ownership has not transferred. GlobalFree is the only
+        // available cleanup attempt after GlobalUnlock reported failure.
+        unsafe { GlobalFree(allocation) };
+        return Err(io::Error::from_raw_os_error(
+            i32::try_from(code).unwrap_or(i32::MAX),
+        ));
+    }
+    // SAFETY: allocation is an unlocked movable HGLOBAL containing terminated
+    // UTF-16; success transfers ownership to the clipboard.
+    let transferred = unsafe { SetClipboardData(u32::from(CF_UNICODETEXT), allocation as HANDLE) };
+    if transferred.is_null() {
+        let error = io::Error::last_os_error();
+        // SAFETY: ownership did not transfer, so this function still owns allocation.
+        unsafe { GlobalFree(allocation) };
+        return Err(error);
+    }
+    session.close()
 }
 
 fn save_text_dialog(owner: HWND, text: LegacyText, names: bool) {
@@ -2195,7 +2253,13 @@ fn save_text_dialog(owner: HWND, text: LegacyText, names: bool) {
     }) else {
         return;
     };
-    let _ = write_legacy_text(&path, &text);
+    if let Err(error) = write_legacy_text(&path, &text) {
+        message(
+            owner,
+            &format!("파일을 저장하지 못했습니다: {error}"),
+            "DarkReNamer - 저장 실패",
+        );
+    }
 }
 
 fn import_names_dialog(owner: HWND, state: &mut AppState) {
@@ -2641,7 +2705,7 @@ fn create_menu() -> HMENU {
         AppendMenuW(tools, MF_SEPARATOR, 0, null());
         menu_item(tools, PARENT_PREFIX, "경로명 앞에");
         menu_item(tools, PARENT_SUFFIX, "경로명 뒤에");
-        menu_item(tools, UNIFY_PATH, "경로 통일하기");
+        menu_item(tools, UNIFY_PATH, "경로 통일하기 (미지원)");
         append_popup(menu, tools, "기능(&T)");
         menu_item(menu, VERSION, "버전(H)");
     }

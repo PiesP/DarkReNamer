@@ -253,9 +253,18 @@ pub fn command_enabled(id: CommandId, row_count: usize, selected_count: usize) -
     match id {
         2 | ADD_FILES | IMPORT_PATHS | SHOW_FULL_PATH | SHOW_SIZE | SHOW_MODIFIED
         | SHOW_CREATED | VERSION => true,
+        UNIFY_PATH => false,
         MANUAL_CHANGE | MOVE_UP | MOVE_DOWN => selected_count > 0,
         _ => row_count > 0,
     }
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn compare_utf16_fallback(
+    left: &darknamer_core::LegacyText,
+    right: &darknamer_core::LegacyText,
+) -> std::cmp::Ordering {
+    left.units().cmp(right.units())
 }
 
 #[cfg(any(windows, test))]
@@ -433,8 +442,21 @@ mod tests {
         assert!(command_enabled(2, 0, 0));
         assert!(!command_enabled(APPLY, 0, 0));
         assert!(command_enabled(APPLY, 1, 0));
+        assert!(!command_enabled(UNIFY_PATH, 1, 0));
         assert!(!command_enabled(MANUAL_CHANGE, 1, 0));
         assert!(command_enabled(MANUAL_CHANGE, 1, 1));
+    }
+
+    #[test]
+    fn utf16_fallback_never_treats_distinct_values_as_equal() {
+        assert_eq!(
+            compare_utf16_fallback(&"File.txt".into(), &"file.txt".into()),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_utf16_fallback(&"same.txt".into(), &"same.txt".into()),
+            std::cmp::Ordering::Equal
+        );
     }
 
     #[test]
