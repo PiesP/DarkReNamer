@@ -64,14 +64,14 @@ use windows_sys::Win32::UI::Controls::{
     CCS_NOPARENTALIGN, CCS_NORESIZE, CCS_VERT, ICC_BAR_CLASSES, ICC_LISTVIEW_CLASSES,
     INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT,
     LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW,
-    LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
-    LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE,
-    LVM_SETITEMTEXTW, LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER,
-    LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS,
-    LVSIL_SMALL, NM_DBLCLK, NMHDR, NMLISTVIEW, TB_ADDBITMAP, TB_ADDBUTTONS, TB_BUTTONSTRUCTSIZE,
-    TB_ENABLEBUTTON, TB_SETBITMAPSIZE, TB_SETBUTTONSIZE, TBADDBITMAP, TBBUTTON, TBSTATE_ENABLED,
-    TBSTYLE_BUTTON, TBSTYLE_FLAT, TBSTYLE_SEP, TBSTYLE_TOOLTIPS, TBSTYLE_WRAPABLE,
-    TOOLBARCLASSNAMEW,
+    LVM_DELETEALLITEMS, LVM_DELETEITEM, LVM_ENSUREVISIBLE, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW,
+    LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST,
+    LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVM_SETITEMW, LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED,
+    LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS,
+    LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_DBLCLK, NMHDR, NMLISTVIEW, TB_ADDBITMAP, TB_ADDBUTTONS,
+    TB_BUTTONSTRUCTSIZE, TB_ENABLEBUTTON, TB_SETBITMAPSIZE, TB_SETBUTTONSIZE, TBADDBITMAP,
+    TBBUTTON, TBSTATE_ENABLED, TBSTYLE_BUTTON, TBSTYLE_FLAT, TBSTYLE_SEP, TBSTYLE_TOOLTIPS,
+    TBSTYLE_WRAPABLE, TOOLBARCLASSNAMEW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetKeyState, SetFocus, VK_CONTROL, VK_DELETE, VK_ESCAPE, VK_SHIFT,
@@ -136,6 +136,7 @@ struct AppState {
     confirmation_pending: bool,
     startup_status: Option<String>,
     icon_cache: HashMap<IconCacheKey, i32>,
+    rendered_rows: Vec<RenderedRow>,
 }
 
 struct WindowInit {
@@ -169,6 +170,7 @@ impl AppState {
             confirmation_pending: false,
             startup_status: runtime.status,
             icon_cache: HashMap::new(),
+            rendered_rows: Vec::new(),
         }
     }
 
@@ -194,6 +196,12 @@ impl AppState {
     const fn read_only_locked(&self) -> bool {
         self.recovery_locked
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RenderedRow {
+    values: [LegacyText; 7],
+    icon: i32,
 }
 
 struct ApplyWorker {
@@ -2397,6 +2405,7 @@ fn handle_completed_execution(
     let text = execution_outcome_korean(&outcome);
     match outcome {
         ExecutionOutcome::Completed => {
+            let before = state.model.clone();
             if !apply_execution_report(&mut state.model, &report) {
                 state.recovery_locked = true;
                 state.active_journal = Some(journal);
@@ -2408,6 +2417,8 @@ fn handle_completed_execution(
                 update_controls(state);
                 return;
             }
+            state.commit_model_change(&before);
+            refresh(state);
             let cleanup = cleanup_file_journal(journal);
             state.recovery_locked = cleanup.error.is_some() || cleanup.retained.is_some();
             state.active_journal = cleanup.retained;
@@ -3484,69 +3495,22 @@ impl Drop for RedrawGuard {
 }
 
 fn refresh(state: &mut AppState) {
+    let rows = {
+        let model = &state.model;
+        let icon_cache = &mut state.icon_cache;
+        model
+            .items()
+            .iter()
+            .map(|item| rendered_row(icon_cache, item))
+            .collect::<Vec<_>>()
+    };
     // SAFETY: state.list_window is live and the guard restores redraw for that exact HWND on every drop path.
     let _redraw = unsafe { RedrawGuard::suspend(state.list_window) };
     let selected = { selected_indices(state.list_window) };
-    // SAFETY: state.list_window is live and LVM_DELETEALLITEMS carries no pointer
-    // payload; redraw remains suspended by the guard.
-    unsafe { SendMessageW(state.list_window, LVM_DELETEALLITEMS, 0, 0) };
-    for (row, item) in state.model.items().iter().enumerate() {
-        let size = LegacyText::from(item.actual_size().to_string());
-        let modified = format_filetime(item.modified());
-        let created = format_filetime(item.created());
-        let values = [
-            item.current_name().clone(),
-            item.proposed_name().clone(),
-            item.root_path().clone(),
-            item.source_path().clone(),
-            size,
-            modified,
-            created,
-        ];
-        for (column, value) in values.iter().enumerate() {
-            let mut text = value.units().to_vec();
-            text.push(0);
-            if column == 0 {
-                let mut native = LVITEMW {
-                    mask: LVIF_TEXT | LVIF_IMAGE,
-                    iItem: row as i32,
-                    iSubItem: 0,
-                    pszText: text.as_mut_ptr(),
-                    iImage: { file_icon_index(&mut state.icon_cache, item) },
-                    // SAFETY: LVITEMW is C-compatible; zero initializes unused
-                    // fields before text/image fields are sent synchronously.
-                    ..unsafe { zeroed() }
-                };
-                // SAFETY: state.list_window is live; native and its terminated text
-                // buffer remain allocated until LVM_INSERTITEMW returns.
-                unsafe {
-                    SendMessageW(
-                        state.list_window,
-                        LVM_INSERTITEMW,
-                        0,
-                        (&mut native as *mut LVITEMW) as isize,
-                    )
-                };
-            } else {
-                let mut native = LVITEMW {
-                    iSubItem: column as i32,
-                    pszText: text.as_mut_ptr(),
-                    // SAFETY: LVITEMW is C-compatible; zero initializes optional fields before its explicit message fields are set.
-                    ..unsafe { zeroed() }
-                };
-                // SAFETY: state.list_window is live; native and its terminated text
-                // buffer remain allocated until LVM_SETITEMTEXTW returns.
-                unsafe {
-                    SendMessageW(
-                        state.list_window,
-                        LVM_SETITEMTEXTW,
-                        row,
-                        (&mut native as *mut LVITEMW) as isize,
-                    )
-                };
-            }
-        }
+    if !apply_incremental_rows(state.list_window, &state.rendered_rows, &rows) {
+        rebuild_native_rows(state.list_window, &rows);
     }
+    state.rendered_rows = rows;
     select_rows(state.list_window, &selected);
     update_controls(state);
     let status = if state.model.is_empty() {
@@ -3559,6 +3523,144 @@ fn refresh(state: &mut AppState) {
     // SAFETY: The status HWND is live and text is owned terminated UTF-16 retained through SetWindowTextW.
     unsafe {
         windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(state.status, status.as_ptr());
+    }
+}
+
+fn rendered_row(icon_cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyListItem) -> RenderedRow {
+    RenderedRow {
+        values: [
+            item.current_name().clone(),
+            item.proposed_name().clone(),
+            item.root_path().clone(),
+            item.source_path().clone(),
+            LegacyText::from(item.actual_size().to_string()),
+            format_filetime(item.modified()),
+            format_filetime(item.created()),
+        ],
+        icon: file_icon_index(icon_cache, item),
+    }
+}
+
+fn apply_incremental_rows(window: HWND, old: &[RenderedRow], new: &[RenderedRow]) -> bool {
+    for row in (new.len()..old.len()).rev() {
+        // SAFETY: window is the live ListView and row is a current trailing item.
+        if unsafe { SendMessageW(window, LVM_DELETEITEM, row, 0) } == 0 {
+            return false;
+        }
+    }
+    let shared = old.len().min(new.len());
+    for row in 0..shared {
+        let mask = changed_column_mask(&old[row], &new[row]);
+        if mask & 1 != 0 && !set_native_primary(window, row, &new[row]) {
+            return false;
+        }
+        for column in 1..7 {
+            if mask & (1 << column) != 0
+                && !set_native_subitem(window, row, column, &new[row].values[column])
+            {
+                return false;
+            }
+        }
+    }
+    for (row, value) in new.iter().enumerate().skip(old.len()) {
+        if !insert_native_row(window, row, value) {
+            return false;
+        }
+    }
+    true
+}
+
+fn changed_column_mask(old: &RenderedRow, new: &RenderedRow) -> u8 {
+    let mut mask = u8::from(old.icon != new.icon);
+    for column in 0..7 {
+        if old.values[column] != new.values[column] {
+            mask |= 1 << column;
+        }
+    }
+    mask
+}
+
+fn insert_native_row(window: HWND, row: usize, value: &RenderedRow) -> bool {
+    let mut text = value.values[0].units().to_vec();
+    text.push(0);
+    let mut native = LVITEMW {
+        mask: LVIF_TEXT | LVIF_IMAGE,
+        iItem: i32::try_from(row).unwrap_or(i32::MAX),
+        iSubItem: 0,
+        pszText: text.as_mut_ptr(),
+        iImage: value.icon,
+        // SAFETY: LVITEMW is C-compatible and zero is valid for unused fields.
+        ..unsafe { zeroed() }
+    };
+    // SAFETY: window is the live ListView; native and text outlive this
+    // synchronous insertion message.
+    if unsafe {
+        SendMessageW(
+            window,
+            LVM_INSERTITEMW,
+            0,
+            (&mut native as *mut LVITEMW) as isize,
+        )
+    } < 0
+    {
+        return false;
+    }
+    (1..7).all(|column| set_native_subitem(window, row, column, &value.values[column]))
+}
+
+fn set_native_primary(window: HWND, row: usize, value: &RenderedRow) -> bool {
+    let mut text = value.values[0].units().to_vec();
+    text.push(0);
+    let mut native = LVITEMW {
+        mask: LVIF_TEXT | LVIF_IMAGE,
+        iItem: i32::try_from(row).unwrap_or(i32::MAX),
+        iSubItem: 0,
+        pszText: text.as_mut_ptr(),
+        iImage: value.icon,
+        // SAFETY: LVITEMW is C-compatible and zero is valid for unused fields.
+        ..unsafe { zeroed() }
+    };
+    // SAFETY: window is the live ListView; native and text remain valid through
+    // the synchronous update.
+    unsafe {
+        SendMessageW(
+            window,
+            LVM_SETITEMW,
+            0,
+            (&mut native as *mut LVITEMW) as isize,
+        ) != 0
+    }
+}
+
+fn set_native_subitem(window: HWND, row: usize, column: usize, value: &LegacyText) -> bool {
+    let mut text = value.units().to_vec();
+    text.push(0);
+    let mut native = LVITEMW {
+        iSubItem: i32::try_from(column).unwrap_or(i32::MAX),
+        pszText: text.as_mut_ptr(),
+        // SAFETY: LVITEMW is C-compatible and zero is valid for unused fields.
+        ..unsafe { zeroed() }
+    };
+    // SAFETY: window is the live ListView; native and text remain valid through
+    // the synchronous subitem update.
+    unsafe {
+        SendMessageW(
+            window,
+            LVM_SETITEMTEXTW,
+            row,
+            (&mut native as *mut LVITEMW) as isize,
+        )
+    };
+    true
+}
+
+fn rebuild_native_rows(window: HWND, rows: &[RenderedRow]) {
+    // SAFETY: window is the live ListView and the message carries no pointer.
+    unsafe { SendMessageW(window, LVM_DELETEALLITEMS, 0, 0) };
+    for (row, value) in rows.iter().enumerate() {
+        if !insert_native_row(window, row, value) {
+            break;
+        }
     }
 }
 
@@ -4151,6 +4253,44 @@ mod tests {
         for command in [APPLY, ADD_FILES, IMPORT_PATHS, REPLACE, RESET, 0xFFFF] {
             assert!(!recovery_command_allowed(command));
         }
+    }
+
+    fn rendered_test_row(label: &str, icon: i32) -> RenderedRow {
+        RenderedRow {
+            values: core::array::from_fn(|column| LegacyText::from(format!("{label}-{column}"))),
+            icon,
+        }
+    }
+
+    #[test]
+    fn listview_diff_marks_only_the_changed_cell_or_icon() {
+        let original = rendered_test_row("row", 7);
+        let mut proposal = original.clone();
+        proposal.values[1] = LegacyText::from("changed");
+        assert_eq!(changed_column_mask(&original, &proposal), 1 << 1);
+
+        let mut icon = original.clone();
+        icon.icon = 8;
+        assert_eq!(changed_column_mask(&original, &icon), 1);
+        assert_eq!(changed_column_mask(&original, &original), 0);
+    }
+
+    #[test]
+    fn listview_diff_for_ten_thousand_rows_has_one_native_row_update() {
+        let old = (0..10_000)
+            .map(|index| rendered_test_row(&format!("row-{index}"), 1))
+            .collect::<Vec<_>>();
+        let mut new = old.clone();
+        new[7_654].values[1] = LegacyText::from("one changed proposal");
+
+        let updates = old
+            .iter()
+            .zip(&new)
+            .filter(|(old, new)| changed_column_mask(old, new) != 0)
+            .collect::<Vec<_>>();
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(changed_column_mask(updates[0].0, updates[0].1), 1 << 1);
     }
 
     #[test]
