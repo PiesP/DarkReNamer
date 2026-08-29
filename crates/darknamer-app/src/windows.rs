@@ -3,6 +3,7 @@
     reason = "all unsafe operations are confined to this Win32 boundary; entry-point invariants are documented"
 )]
 
+use std::env;
 use std::ffi::c_void;
 use std::fs;
 use std::io;
@@ -13,6 +14,13 @@ use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::slice;
 
+use crate::rename::{
+    ExecutionOutcome, FileJournal, JournalCleanupDecision, JournalRoot, ModelRevision,
+    RecoveryOutcome, RenameExecutor, RenamePlanner, RenameRecovery, WindowsRenameBackend,
+    apply_execution_report, build_plan_request, cleanup_decision, execute_error_korean,
+    execution_outcome_korean, next_model_revision, plan_error_korean, process_is_elevated,
+    safe_mode_unify_path_message,
+};
 use darknamer_core::{
     LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,
 };
@@ -30,9 +38,9 @@ use windows_sys::Win32::Graphics::Gdi::{
     CLIP_DEFAULT_PRECIS, COLOR_WINDOW, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH,
     DEFAULT_QUALITY, DeleteObject, FF_DONTCARE, FW_NORMAL, HFONT, OUT_DEFAULT_PRECIS, UpdateWindow,
 };
-use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, MoveFileW,
-};
+#[cfg(test)]
+use windows_sys::Win32::Storage::FileSystem::MoveFileW;
+use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
@@ -83,6 +91,7 @@ const LIST_ID: usize = 1000;
 const LEFT_TOOLBAR_ID: usize = 1001;
 const RIGHT_TOOLBAR_ID: usize = 1002;
 const STATUS_ID: usize = 1007;
+const ACTIVE_JOURNAL_LEAF: &str = "active.drj";
 
 struct AppState {
     list_window: HWND,
@@ -95,6 +104,12 @@ struct AppState {
     shown_columns: [bool; 4],
     directory_mode: Option<DirectoryMode>,
     command_states: [bool; 34],
+    model_revision: u64,
+    mutation_locked: bool,
+    recovery_locked: bool,
+    journal_root: JournalRoot,
+    active_journal: Option<FileJournal>,
+    startup_status: Option<String>,
 }
 
 struct WindowInit {
@@ -103,7 +118,7 @@ struct WindowInit {
 }
 
 impl AppState {
-    fn new() -> Self {
+    fn new(runtime: SafeRuntime) -> Self {
         Self {
             list_window: null_mut(),
             status: null_mut(),
@@ -115,8 +130,38 @@ impl AppState {
             shown_columns: [false; 4],
             directory_mode: None,
             command_states: [false; 34],
+            model_revision: 0,
+            mutation_locked: false,
+            recovery_locked: runtime.recovery_locked,
+            journal_root: runtime.root,
+            active_journal: runtime.active_journal,
+            startup_status: runtime.status,
         }
     }
+
+    fn revision(&self) -> ModelRevision {
+        ModelRevision::new(self.model_revision)
+    }
+
+    fn commit_model_change(&mut self, before: &LegacyList) {
+        self.model_revision = next_model_revision(self.model_revision, &self.model != before);
+    }
+
+    const fn apply_locked(&self) -> bool {
+        self.mutation_locked || self.recovery_locked || self.active_journal.is_some()
+    }
+}
+
+struct SafeRuntime {
+    root: JournalRoot,
+    active_journal: Option<FileJournal>,
+    recovery_locked: bool,
+    status: Option<String>,
+}
+
+struct JournalCleanup {
+    retained: Option<FileJournal>,
+    error: Option<io::Error>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -133,6 +178,94 @@ impl Drop for ComGuard {
     }
 }
 
+fn initialize_safe_runtime() -> io::Result<SafeRuntime> {
+    let local_app_data = env::var_os("LOCALAPPDATA")
+        .ok_or_else(|| io::Error::other("LOCALAPPDATA 환경 변수를 찾을 수 없습니다"))?;
+    let local_app_data = PathBuf::from(local_app_data);
+    if !local_app_data.is_absolute() {
+        return Err(io::Error::other("저널 경로가 절대 경로가 아닙니다"));
+    }
+    drop(JournalRoot::open(&local_app_data).map_err(io::Error::other)?);
+    let app_root = local_app_data.join("DarkReNamer");
+    if !app_root.exists() {
+        fs::create_dir(&app_root)?;
+    }
+    drop(JournalRoot::open(&app_root).map_err(io::Error::other)?);
+    let root_path = app_root.join("journal");
+    if !root_path.exists() {
+        fs::create_dir(&root_path)?;
+    }
+    let root = JournalRoot::open(&root_path).map_err(io::Error::other)?;
+    let active_path = root_path.join(ACTIVE_JOURNAL_LEAF);
+    if !active_path.exists() {
+        return Ok(SafeRuntime {
+            root,
+            active_journal: None,
+            recovery_locked: false,
+            status: None,
+        });
+    }
+
+    let mut journal =
+        FileJournal::open_existing(&root, ACTIVE_JOURNAL_LEAF).map_err(io::Error::other)?;
+    let mut backend = WindowsRenameBackend;
+    let outcome = RenameRecovery::new(&mut backend, &mut journal).rollback();
+    match outcome {
+        RecoveryOutcome::Recovered { .. } | RecoveryOutcome::NotRequired => {
+            let cleanup = cleanup_file_journal(journal);
+            let cleanup_failed = cleanup.error.is_some();
+            let mut status = if matches!(outcome, RecoveryOutcome::Recovered { .. }) {
+                "이전 변경을 안전하게 복구했습니다.".to_owned()
+            } else {
+                "저널 상태를 확인했습니다.".to_owned()
+            };
+            if let Some(error) = cleanup.error {
+                status.push_str(&format!(" 저널 삭제 실패: {error}"));
+            }
+            Ok(SafeRuntime {
+                root,
+                recovery_locked: cleanup_failed || cleanup.retained.is_some(),
+                active_journal: cleanup.retained,
+                status: Some(status),
+            })
+        }
+        RecoveryOutcome::Blocked { reason, .. } => Ok(SafeRuntime {
+            root,
+            active_journal: Some(journal),
+            recovery_locked: true,
+            status: Some(format!("복구가 차단되었습니다: {reason:?}")),
+        }),
+        RecoveryOutcome::RecoveryRequired { reason, .. } => Ok(SafeRuntime {
+            root,
+            active_journal: Some(journal),
+            recovery_locked: true,
+            status: Some(format!("복구가 필요합니다: {reason:?}")),
+        }),
+    }
+}
+
+fn cleanup_file_journal(mut journal: FileJournal) -> JournalCleanup {
+    if cleanup_decision(journal.records()) == JournalCleanupDecision::Retain {
+        return JournalCleanup {
+            retained: Some(journal),
+            error: None,
+        };
+    }
+    match journal.mark_delete_if_safe() {
+        Ok(()) => {
+            drop(journal);
+            JournalCleanup {
+                retained: None,
+                error: None,
+            }
+        }
+        Err(error) => JournalCleanup {
+            retained: Some(journal),
+            error: Some(io::Error::other(error)),
+        },
+    }
+}
+
 pub(crate) fn run() -> io::Result<()> {
     // SAFETY: All Win32 handles are created and consumed on this UI thread;
     // pointers passed to Win32 remain valid for each synchronous call.
@@ -140,6 +273,12 @@ pub(crate) fn run() -> io::Result<()> {
 }
 
 unsafe fn run_unsafe() -> io::Result<()> {
+    if process_is_elevated()? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "관리자 권한으로는 실행할 수 없습니다. 일반 사용자 권한으로 다시 실행해 주세요.",
+        ));
+    }
     let com_status = unsafe { CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32) };
     if com_status < 0 {
         return Err(io::Error::from_raw_os_error(com_status));
@@ -178,7 +317,8 @@ unsafe fn run_unsafe() -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     let title = wide("DarkNamer");
-    let state = Box::into_raw(Box::new(AppState::new()));
+    let runtime = initialize_safe_runtime()?;
+    let state = Box::into_raw(Box::new(AppState::new(runtime)));
     let mut adopted = false;
     let mut init = WindowInit {
         state,
@@ -219,7 +359,9 @@ unsafe fn run_unsafe() -> io::Result<()> {
         // SAFETY: message is writable and window filtering is disabled.
         let result = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
         if result == -1 {
-            return Err(io::Error::last_os_error());
+            let error = io::Error::last_os_error();
+            unsafe { DestroyWindow(window) };
+            return Err(error);
         }
         if result == 0 {
             break;
@@ -277,7 +419,11 @@ unsafe extern "system" fn window_proc(
         }
         WM_DROPFILES if !state_ptr.is_null() => {
             // SAFETY: wParam is HDROP for WM_DROPFILES.
-            unsafe { admit_drop(window, &mut *state_ptr, wparam as HDROP) };
+            let before = unsafe { (*state_ptr).model.clone() };
+            unsafe {
+                admit_drop(window, &mut *state_ptr, wparam as HDROP);
+                (*state_ptr).commit_model_change(&before);
+            }
             0
         }
         WM_NOTIFY if !state_ptr.is_null() => {
@@ -297,12 +443,8 @@ unsafe extern "system" fn window_proc(
                         unsafe { update_controls(&mut *state_ptr) };
                     }
                 } else if unsafe { (*header).code } == NM_DBLCLK {
-                    let previous_states = unsafe { (*state_ptr).command_states };
                     unsafe { dispatch_command(window, &mut *state_ptr, MANUAL_CHANGE) };
-                    unsafe {
-                        (*state_ptr).command_states = previous_states;
-                        apply_command_states(&*state_ptr);
-                    }
+                    unsafe { update_controls(&mut *state_ptr) };
                 }
             }
             0
@@ -485,6 +627,9 @@ unsafe fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> 
     }
     unsafe { arrange(window, state) };
     unsafe { refresh(state) };
+    if let Some(status) = state.startup_status.as_deref() {
+        unsafe { set_status(state.status, status) };
+    }
     Ok(())
 }
 
@@ -688,7 +833,22 @@ struct PromptState {
     font: HFONT,
 }
 
-unsafe fn prompt_input(owner: HWND, spec: PromptSpec) -> Option<PromptResult> {
+struct OwnerEnableGuard {
+    owner: HWND,
+}
+
+impl Drop for OwnerEnableGuard {
+    fn drop(&mut self) {
+        // SAFETY: owner belongs to the current UI thread and the guard is
+        // created only after it was disabled for a modal prompt.
+        unsafe {
+            EnableWindow(self.owner, 1);
+            SetForegroundWindow(self.owner);
+        }
+    }
+}
+
+unsafe fn prompt_input(owner: HWND, spec: PromptSpec) -> io::Result<Option<PromptResult>> {
     let instance = unsafe { GetModuleHandleW(null()) };
     let class_name = wide("DarkNamerInputWindow");
     let caption = wide("입력창");
@@ -734,19 +894,30 @@ unsafe fn prompt_input(owner: HWND, spec: PromptSpec) -> Option<PromptResult> {
         )
     };
     if dialog.is_null() {
-        return None;
+        return Err(io::Error::last_os_error());
     }
     unsafe {
         EnableWindow(owner, 0);
         ShowWindow(dialog, SW_SHOW);
         UpdateWindow(dialog);
     }
+    let _owner_guard = OwnerEnableGuard { owner };
     let mut message: MSG = unsafe { zeroed() };
     while !state.done {
         let status = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
-        if status <= 0 {
+        if status == -1 {
+            let error = io::Error::last_os_error();
+            unsafe { DestroyWindow(dialog) };
             state.done = true;
-            break;
+            return Err(error);
+        }
+        if status == 0 {
+            unsafe {
+                DestroyWindow(dialog);
+                PostQuitMessage(message.wParam as i32);
+            }
+            state.done = true;
+            return Ok(None);
         }
         if unsafe { IsDialogMessageW(dialog, &message) } == 0 {
             unsafe {
@@ -755,11 +926,26 @@ unsafe fn prompt_input(owner: HWND, spec: PromptSpec) -> Option<PromptResult> {
             }
         }
     }
-    unsafe {
-        EnableWindow(owner, 1);
-        SetForegroundWindow(owner);
+    Ok(state.result.take())
+}
+
+unsafe fn prompt_input_or_report(owner: HWND, spec: PromptSpec) -> Option<PromptResult> {
+    match unsafe { prompt_input(owner, spec) } {
+        Ok(result) => result,
+        Err(error) => {
+            unsafe {
+                message(
+                    owner,
+                    &format!(
+                        "입력창을 처리하지 못했습니다. OS {:?}",
+                        error.raw_os_error()
+                    ),
+                    "DarkNamer",
+                )
+            };
+            None
+        }
     }
-    state.result.take()
 }
 
 unsafe extern "system" fn prompt_proc(
@@ -984,26 +1170,15 @@ unsafe fn handle_accelerator(window: HWND, message: &MSG) -> bool {
     };
     if let Some(command) = command {
         let state = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *mut AppState;
-        if command != 0xFFFF && command != 2 && !state.is_null() {
-            let selected = unsafe { selected_indices((*state).list_window) }.len();
-            if !command_enabled(command, unsafe { (*state).model.len() }, selected) {
+        if (APPLY..=VERSION).contains(&command) && !state.is_null() {
+            let enabled = unsafe { (*state).command_states[usize::from(command - APPLY)] };
+            if !enabled {
                 return true;
             }
         }
-        let previous_states = (!state.is_null()).then(|| unsafe { (*state).command_states });
         unsafe { SendMessageW(window, WM_COMMAND, usize::from(command), 0) };
-        let list_was_cleared = !state.is_null()
-            && (command == CLEAR_LIST
-                || (command == 0xFFFF && unsafe { (*state).model.is_empty() }));
-        if command != 2
-            && !list_was_cleared
-            && !state.is_null()
-            && let Some(previous_states) = previous_states
-        {
-            unsafe {
-                (*state).command_states = previous_states;
-                apply_command_states(&*state);
-            }
+        if command != 2 && !state.is_null() {
+            unsafe { update_controls(&mut *state) };
         }
         true
     } else {
@@ -1113,6 +1288,7 @@ fn rows_for_tokens(model: &LegacyList, tokens: &[SelectionToken]) -> Vec<usize> 
 
 unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
     let selected = unsafe { selected_indices(state.list_window) };
+    let before = state.model.clone();
     match command {
         APPLY => unsafe { apply_changes(window, state) },
         RESET => state.model.reset_proposals(),
@@ -1126,6 +1302,7 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
                 .and_then(|focused| selected.iter().position(|index| *index == focused));
             unsafe { clear_selection(state.list_window) };
             let moved = state.model.move_rows_earlier(&selected);
+            state.commit_model_change(&before);
             unsafe { refresh(state) };
             let focused = focused_position.and_then(|position| moved.get(position).copied());
             unsafe {
@@ -1139,6 +1316,7 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
                 .and_then(|focused| selected.iter().position(|index| *index == focused));
             unsafe { clear_selection(state.list_window) };
             let moved = state.model.move_rows_later(&selected);
+            state.commit_model_change(&before);
             unsafe { refresh(state) };
             let focused = focused_position.and_then(|position| moved.get(position).copied());
             unsafe {
@@ -1151,7 +1329,7 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
             if let Some(index) = selected.first().copied() {
                 let current = state.model.items()[index].proposed_name().clone();
                 if let Some(result) = unsafe {
-                    prompt_input(
+                    prompt_input_or_report(
                         window,
                         prompt_spec(
                             format!("{} 를", current.to_string_lossy()),
@@ -1169,7 +1347,7 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
         }
         REPLACE => {
             if let Some(result) = unsafe {
-                prompt_input(
+                prompt_input_or_report(
                     window,
                     prompt_spec(
                         "이름에 들어있는 문자열을 바꿉니다.",
@@ -1188,7 +1366,7 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
         }
         PREFIX => {
             if let Some(result) = unsafe {
-                prompt_input(
+                prompt_input_or_report(
                     window,
                     prompt_spec(
                         "이름의 앞에 지정한 문자열을 붙여줍니다.",
@@ -1205,7 +1383,7 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
         }
         SUFFIX => {
             if let Some(result) = unsafe {
-                prompt_input(
+                prompt_input_or_report(
                     window,
                     prompt_spec(
                         "이름의 뒤에 지정한 문자열을 붙여줍니다.",
@@ -1228,13 +1406,14 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
         SEQUENCE => unsafe { sequence_command(window, state) },
         SORT => {
             if unsafe { sort_command(window, state) } {
+                state.commit_model_change(&before);
                 return;
             }
         }
         EXT_DELETE => state.model.delete_extension(),
         EXT_ADD => {
             if let Some(result) = unsafe {
-                prompt_input(
+                prompt_input_or_report(
                     window,
                     prompt_spec(
                         "확장자를 뒤에 붙입니다.",
@@ -1251,7 +1430,7 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
         }
         EXT_REPLACE => {
             if let Some(result) = unsafe {
-                prompt_input(
+                prompt_input_or_report(
                     window,
                     prompt_spec(
                         "확장자를 바꿔 줍니다.",
@@ -1268,13 +1447,13 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
         }
         PARENT_PREFIX => state.model.prefix_parent_folder(),
         PARENT_SUFFIX => state.model.suffix_parent_folder(),
-        UNIFY_PATH => {
-            if let Some(path) = modal_native_dialog(window, || {
-                rfd::FileDialog::new().set_title("경로 선택").pick_folder()
-            }) {
-                state.model.unify_root_path(&legacy_path(&path));
-            }
-        }
+        UNIFY_PATH => unsafe {
+            message(
+                window,
+                safe_mode_unify_path_message(),
+                "DarkNamer - Safe 모드",
+            )
+        },
         ADD_FILES => unsafe { add_files_dialog(window, state) },
         COPY_NAMES => unsafe { copy_clipboard(window, &state.model.export_names()) },
         COPY_PATHS => unsafe { copy_clipboard(window, &state.model.export_paths()) },
@@ -1294,6 +1473,7 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
         },
         _ => {}
     }
+    state.commit_model_change(&before);
     unsafe { refresh(state) };
 }
 
@@ -1353,7 +1533,7 @@ fn legacy_atoi(text: &LegacyText) -> i32 {
 
 unsafe fn pad_digits_command(window: HWND, state: &mut AppState) {
     let Some(result) = (unsafe {
-        prompt_input(
+        prompt_input_or_report(
             window,
             prompt_spec(
                 "숫자부분의 자리수를 맞춰 0을 붙입니다.",
@@ -1384,7 +1564,7 @@ unsafe fn pad_digits_command(window: HWND, state: &mut AppState) {
 
 unsafe fn sequence_command(window: HWND, state: &mut AppState) {
     let Some(result) = (unsafe {
-        prompt_input(
+        prompt_input_or_report(
             window,
             prompt_spec(
                 "붙일 숫자의 자리수와 시작값을 지정합니다.",
@@ -1424,7 +1604,7 @@ unsafe fn sequence_command(window: HWND, state: &mut AppState) {
 
 unsafe fn delete_position_command(window: HWND, state: &mut AppState) {
     let Some(result) = (unsafe {
-        prompt_input(
+        prompt_input_or_report(
             window,
             prompt_spec(
                 "지정위치를 삭제합니다.(첫글자는 1번째)",
@@ -1473,7 +1653,7 @@ unsafe fn delete_position_command(window: HWND, state: &mut AppState) {
 
 unsafe fn delete_delimited_command(window: HWND, state: &mut AppState) {
     let Some(result) = (unsafe {
-        prompt_input(
+        prompt_input_or_report(
             window,
             prompt_spec(
                 "지정된 문자로 묶인 부분을 삭제합니다.",
@@ -1516,7 +1696,7 @@ unsafe fn sort_command(window: HWND, state: &mut AppState) -> bool {
         "만든 시각에 따라 내림차순",
     ];
     let Some(result) = (unsafe {
-        prompt_input(
+        prompt_input_or_report(
             window,
             prompt_spec(
                 "정렬 기준 설정",
@@ -1566,72 +1746,148 @@ unsafe fn sort_command(window: HWND, state: &mut AppState) -> bool {
 }
 
 unsafe fn apply_changes(window: HWND, state: &mut AppState) {
-    let prompt = wide("실제 파일 이름을 변경하시겠습니까?");
-    let caption = wide("DarkNamer");
+    if state.apply_locked() {
+        unsafe {
+            message(
+                window,
+                "복구 또는 다른 변경이 진행 중이어서 적용할 수 없습니다.",
+                "DarkNamer",
+            )
+        };
+        return;
+    }
+    let revision = state.revision();
+    let request = build_plan_request(&state.model, revision);
+    let mut backend = WindowsRenameBackend;
+    let plan = match RenamePlanner::new(&backend).plan(request) {
+        Ok(plan) => plan,
+        Err(error) => {
+            let (message_text, rows) = plan_error_korean(&error);
+            unsafe {
+                clear_selection(state.list_window);
+                select_rows(state.list_window, &rows);
+                message(window, &message_text, "DarkNamer - 적용 차단");
+            }
+            return;
+        }
+    };
+    if plan.is_empty() {
+        unsafe { message(window, "변경할 항목이 없습니다.", "DarkNamer") };
+        return;
+    }
+    let confirmation = format!(
+        "{}개 항목의 실제 이름을 변경하시겠습니까?\n계획 {:016X}\n목록 버전 {}",
+        plan.changed_count(),
+        plan.fingerprint(),
+        state.model_revision,
+    );
+    let prompt = wide(&confirmation);
+    let caption = wide("DarkNamer - 안전한 적용 확인");
     if unsafe { MessageBoxW(window, prompt.as_ptr(), caption.as_ptr(), MB_OKCANCEL) } != IDOK {
         return;
     }
-    unsafe { clear_selection(state.list_window) };
-    if state
-        .model
-        .items()
-        .iter()
-        .any(|item| item.proposed_name().is_empty())
-    {
+    if state.revision() != revision {
         unsafe {
-            message(window, "이름이 지정되지 않은 경우가 있습니다.", "DarkNamer")
-        };
-        if let Some(index) = state
-            .model
-            .items()
-            .iter()
-            .position(|item| item.proposed_name().is_empty())
-        {
-            unsafe { select_rows(state.list_window, &[index]) };
+            message(
+                window,
+                "확인 후 목록이 변경되었습니다. 다시 계획하고 확인해 주세요.",
+                "DarkNamer",
+            )
         }
         return;
     }
-    for left in 0..state.model.len() {
-        for right in left + 1..state.model.len() {
-            if compare_windows(
-                &state.model.items()[left].planned_path(),
-                &state.model.items()[right].planned_path(),
-            ) == std::cmp::Ordering::Equal
-            {
-                let duplicate = state.model.items()[right].planned_path();
+    let id = plan.id();
+    let plan_revision = plan.revision();
+    let confirmed = match plan.confirm_presented(id, plan_revision) {
+        Ok(confirmed) => confirmed,
+        Err(error) => {
+            unsafe { message(window, &error.to_string(), "DarkNamer") };
+            return;
+        }
+    };
+    let mut journal = match FileJournal::create_new(&state.journal_root, ACTIVE_JOURNAL_LEAF) {
+        Ok(journal) => journal,
+        Err(error) => {
+            state.recovery_locked = true;
+            unsafe {
+                message(
+                    window,
+                    &format!(
+                        "활성 저널을 만들지 못했습니다. {:?}, OS {:?}",
+                        error.kind, error.os_code
+                    ),
+                    "DarkNamer - 적용 잠김",
+                )
+            };
+            return;
+        }
+    };
+    state.mutation_locked = true;
+    unsafe { update_controls(state) };
+    let execution = RenameExecutor::new(&mut backend, &mut journal).execute(confirmed);
+    state.mutation_locked = false;
+
+    let report = match execution {
+        Ok(report) => report,
+        Err(error) => {
+            let text = execute_error_korean(&error);
+            let cleanup = cleanup_file_journal(journal);
+            state.recovery_locked = cleanup.error.is_some() || cleanup.retained.is_some();
+            state.active_journal = cleanup.retained;
+            if let Some(cleanup_error) = cleanup.error {
                 unsafe {
                     message(
                         window,
-                        &format!("중복되는 이름이 있습니다.\n{duplicate}"),
-                        "DarkNamer",
+                        &cleanup_error.to_string(),
+                        "DarkNamer - 저널 정리 실패",
                     )
                 };
-                unsafe { select_rows(state.list_window, &[left, right]) };
+            }
+            unsafe { message(window, &text, "DarkNamer - 실행 거부") };
+            unsafe { update_controls(state) };
+            return;
+        }
+    };
+    let outcome = report.outcome().clone();
+    let text = execution_outcome_korean(&outcome);
+    match outcome {
+        ExecutionOutcome::Completed => {
+            if !apply_execution_report(&mut state.model, &report) {
+                state.recovery_locked = true;
+                state.active_journal = Some(journal);
+                unsafe {
+                    message(
+                        window,
+                        "완료 결과를 목록과 일치시키지 못했습니다. 저널을 보존하고 적용을 잠급니다.",
+                        "DarkNamer - 확인 필요",
+                    )
+                };
+                unsafe { update_controls(state) };
                 return;
             }
+            let cleanup = cleanup_file_journal(journal);
+            state.recovery_locked = cleanup.error.is_some() || cleanup.retained.is_some();
+            state.active_journal = cleanup.retained;
+            if let Some(error) = cleanup.error {
+                unsafe { message(window, &error.to_string(), "DarkNamer - 저널 정리 실패") };
+            }
+        }
+        ExecutionOutcome::RolledBack { .. } => {
+            let cleanup = cleanup_file_journal(journal);
+            state.recovery_locked = cleanup.error.is_some() || cleanup.retained.is_some();
+            state.active_journal = cleanup.retained;
+            if let Some(error) = cleanup.error {
+                unsafe { message(window, &error.to_string(), "DarkNamer - 저널 정리 실패") };
+            }
+        }
+        ExecutionOutcome::RecoveryRequired { .. } => {
+            state.recovery_locked = true;
+            state.active_journal = Some(journal);
         }
     }
-    let mut failed = Vec::new();
-    for index in 0..state.model.len() {
-        let source = state.model.items()[index].source_path().clone();
-        let destination = state.model.items()[index].planned_path();
-        if compare_windows(&source, &destination) == std::cmp::Ordering::Equal {
-            continue;
-        }
-        let mut source_wide = source.units().to_vec();
-        source_wide.push(0);
-        let mut destination_wide = destination.units().to_vec();
-        destination_wide.push(0);
-        if unsafe { MoveFileW(source_wide.as_ptr(), destination_wide.as_ptr()) } != 0 {
-            state.model.record_move_success(index);
-        } else {
-            failed.push(format!("{source} -> {destination} 변경 실패.\n"));
-        }
-    }
-    if failed.is_empty() {
-        unsafe { message(window, "파일 이름을 변경하였습니다.", "DarkNamer") };
-    } else {
-        unsafe { message(window, &failed.concat(), "DarkNamer") };
+    unsafe {
+        message(window, &text, "DarkNamer");
+        update_controls(state);
     }
 }
 
@@ -2008,7 +2264,8 @@ unsafe fn update_controls(state: &mut AppState) {
     let selected_count = unsafe { selected_indices(state.list_window) }.len();
     for id in APPLY..=VERSION {
         state.command_states[usize::from(id - APPLY)] =
-            command_enabled(id, state.model.len(), selected_count);
+            command_enabled(id, state.model.len(), selected_count)
+                && !(id == APPLY && state.apply_locked());
     }
     unsafe { apply_command_states(state) };
 }

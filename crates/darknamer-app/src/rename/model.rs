@@ -2,6 +2,8 @@ use std::fmt;
 
 use darknamer_core::{LegacyText, WindowsLeafNameError};
 
+use super::ports::BackendError;
+
 /// A row identifier scoped to one plan request.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct EntryId(u32);
@@ -11,6 +13,12 @@ impl EntryId {
     #[must_use]
     pub const fn new(value: u32) -> Self {
         Self(value)
+    }
+
+    /// Returns the zero-based legacy-list row represented by this plan ID.
+    #[must_use]
+    pub const fn row_index(self) -> u32 {
+        self.0
     }
 
     pub(super) const fn value(self) -> u32 {
@@ -227,6 +235,8 @@ pub enum PlanIssueKind {
     DestinationOccupied,
     /// A required backend observation failed.
     Backend,
+    /// A backend observation failed with retained operation and native code.
+    BackendFailure(BackendError),
 }
 
 /// One entry-scoped planning blocker.

@@ -50,7 +50,7 @@ impl<'a> RenamePlanner<'a> {
                         kind: match error.code {
                             50 => PlanIssueKind::UnsupportedCaseSensitiveParent,
                             53 => PlanIssueKind::UnsupportedWindowsPath,
-                            _ => PlanIssueKind::Backend,
+                            _ => PlanIssueKind::BackendFailure(error),
                         },
                     });
                 }
@@ -129,9 +129,9 @@ impl<'a> RenamePlanner<'a> {
                         });
                     }
                     Ok(false) => {}
-                    Err(_error) => issues.push(PlanIssue {
+                    Err(error) => issues.push(PlanIssue {
                         entry: changed[left].id,
-                        kind: PlanIssueKind::Backend,
+                        kind: PlanIssueKind::BackendFailure(error),
                     }),
                 }
             }
@@ -145,10 +145,10 @@ impl<'a> RenamePlanner<'a> {
         for intent in changed {
             let source_snapshot = match self.backend.observe(&intent.source) {
                 Ok(snapshot) => snapshot,
-                Err(_error) => {
+                Err(error) => {
                     issues.push(PlanIssue {
                         entry: intent.id,
-                        kind: PlanIssueKind::Backend,
+                        kind: PlanIssueKind::BackendFailure(error),
                     });
                     continue;
                 }
@@ -176,10 +176,10 @@ impl<'a> RenamePlanner<'a> {
             }
             let destination_snapshot = match self.backend.observe(&intent.destination) {
                 Ok(snapshot) => snapshot,
-                Err(_error) => {
+                Err(error) => {
                     issues.push(PlanIssue {
                         entry: intent.id,
-                        kind: PlanIssueKind::Backend,
+                        kind: PlanIssueKind::BackendFailure(error),
                     });
                     continue;
                 }

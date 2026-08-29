@@ -16,16 +16,21 @@ use windows_sys::Wdk::Storage::FileSystem::{
     FILE_RENAME_INFORMATION, FILE_SYNCHRONOUS_IO_NONALERT, FileRenameInformation, NtCreateFile,
     NtSetInformationFile, RtlNtStatusToDosErrorNoTeb,
 };
-use windows_sys::Win32::Foundation::{OBJ_CASE_INSENSITIVE, UNICODE_STRING};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, OBJ_CASE_INSENSITIVE, UNICODE_STRING};
+use windows_sys::Win32::Security::{
+    GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+};
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_CASE_SENSITIVE_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_READ_DATA,
-    FILE_REMOTE_PROTOCOL_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
-    FILE_WRITE_DATA, FileCaseSensitiveInfo, FileIdInfo, FileRemoteProtocolInfo, GetDriveTypeW,
-    GetFileInformationByHandleEx, SYNCHRONIZE,
+    DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_CASE_SENSITIVE_INFO, FILE_DISPOSITION_INFO,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES,
+    FILE_READ_DATA, FILE_REMOTE_PROTOCOL_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_DATA, FileCaseSensitiveInfo, FileDispositionInfo,
+    FileIdInfo, FileRemoteProtocolInfo, GetDriveTypeW, GetFileInformationByHandleEx, SYNCHRONIZE,
+    SetFileInformationByHandle,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::SystemServices::FILE_CS_FLAG_CASE_SENSITIVE_DIR;
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOVABLE};
 
 const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
@@ -157,6 +162,72 @@ pub(crate) const fn drive_type_supported(drive_type: u32) -> bool {
     matches!(drive_type, DRIVE_FIXED | DRIVE_REMOVABLE)
 }
 
+pub(crate) const fn token_elevation_is_unsafe(value: u32) -> bool {
+    value != 0
+}
+
+struct TokenHandle(HANDLE);
+
+impl Drop for TokenHandle {
+    fn drop(&mut self) {
+        // SAFETY: this guard owns the token handle returned by OpenProcessToken
+        // and closes it exactly once.
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+pub(crate) fn process_is_elevated() -> io::Result<bool> {
+    let mut token = ptr::null_mut();
+    // SAFETY: GetCurrentProcess returns the current pseudo-handle and token is
+    // a writable output pointer retained only for this synchronous call.
+    let opened = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+    if opened == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let token = TokenHandle(token);
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut returned = 0_u32;
+    let size = u32::try_from(size_of::<TOKEN_ELEVATION>())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: token remains owned by the guard and elevation/returned are
+    // writable buffers with the exact checked size for this synchronous query.
+    let success = unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenElevation,
+            ptr::from_mut(&mut elevation).cast(),
+            size,
+            ptr::from_mut(&mut returned),
+        )
+    };
+    if success == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(token_elevation_is_unsafe(elevation.TokenIsElevated))
+    }
+}
+
+pub(crate) fn mark_file_delete(file: &File) -> io::Result<()> {
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    let size = u32::try_from(size_of::<FILE_DISPOSITION_INFO>())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: file is a retained handle opened with DELETE access and
+    // disposition is a fully initialized buffer of the exact checked size.
+    let success = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfo,
+            ptr::from_ref(&disposition).cast(),
+            size,
+        )
+    };
+    if success == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 fn reject_remote_protocol_if_reported(file: &File) -> io::Result<()> {
     let mut info = FILE_REMOTE_PROTOCOL_INFO::default();
     let size = u32::try_from(size_of::<FILE_REMOTE_PROTOCOL_INFO>())
@@ -258,7 +329,7 @@ pub(crate) fn create_file_relative_exclusive(root: &File, leaf: &str) -> io::Res
     open_relative(
         root,
         &encoded,
-        FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        DELETE | FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
         0,
         FILE_CREATE,
         FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
@@ -270,7 +341,7 @@ pub(crate) fn open_file_relative_exclusive(root: &File, leaf: &str) -> io::Resul
     open_relative(
         root,
         &encoded,
-        FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        DELETE | FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
         0,
         FILE_OPEN,
         FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
@@ -472,5 +543,37 @@ mod tests {
         assert!(!drive_type_supported(DRIVE_NO_ROOT_DIR));
         assert!(!drive_type_supported(5));
         assert!(!drive_type_supported(6));
+    }
+
+    #[test]
+    fn token_elevation_flag_is_fail_closed() {
+        assert!(!token_elevation_is_unsafe(0));
+        assert!(token_elevation_is_unsafe(1));
+        assert!(token_elevation_is_unsafe(u32::MAX));
+    }
+
+    #[test]
+    fn process_elevation_query_returns_a_structured_flag() {
+        assert!(process_is_elevated().is_ok());
+    }
+
+    #[test]
+    fn retained_delete_handle_cannot_delete_a_later_path_replacement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("delete-by-handle.drj");
+        std::fs::write(&path, b"journal")?;
+        let file = OpenOptions::new()
+            .access_mode(DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+            .share_mode(0)
+            .open(&path)?;
+
+        mark_file_delete(&file)?;
+        assert!(std::fs::write(&path, b"replacement").is_err());
+        drop(file);
+        assert!(!path.exists());
+        std::fs::write(&path, b"replacement")?;
+        assert_eq!(std::fs::read(&path)?, b"replacement");
+        Ok(())
     }
 }
