@@ -1,0 +1,13 @@
+[package]
+name = "darknamer-core"
+description = "DarkNamer 08.02.10 list and transformation semantics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

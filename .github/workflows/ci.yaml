@@ -34,6 +34,26 @@ jobs:
           --component rustfmt
           --component clippy
 
+      - name: Enforce the Rust-only source tree
+        shell: bash
+        run: |
+          forbidden_sources="$(git ls-files '*.c' '*.cc' '*.cpp' '*.cxx' '*.h' '*.hpp' '*.rc' '*.dsp' '*.dsw' '*.aps' '*.ncb' '*.opt' '*.plg' '*.clw')"
+          if [[ -n "$forbidden_sources" ]]; then
+            printf 'Non-Rust legacy sources are tracked:\n%s\n' "$forbidden_sources" >&2
+            exit 1
+          fi
+          tracked_docs="$(git ls-files '*.md' '*.txt' | LC_ALL=C sort)"
+          expected_docs="$(printf '%s\n' \
+            LICENSES/DarkNamer-MIT.txt \
+            README.md \
+            SECURITY.md \
+            THIRD_PARTY_NOTICES.md \
+            crates/darknamer-app/THIRD_PARTY_NOTICES.md)"
+          if [[ "$tracked_docs" != "$expected_docs" ]]; then
+            printf 'Tracked documentation differs from the repository policy:\n%s\n' "$tracked_docs" >&2
+            exit 1
+          fi
+
       - name: Check formatting and lints
         run: |
           cargo fmt --all -- --check
@@ -83,5 +103,5 @@ jobs:
       - name: Build the compatibility executable
         shell: pwsh
         run: |
-          cargo build --release --locked --package darknamer-legacy-app --bin DarkNamer
+          cargo build --release --locked --package darknamer-app --bin DarkNamer
           if ($LASTEXITCODE -ne 0) { throw 'The Windows release build failed.' }

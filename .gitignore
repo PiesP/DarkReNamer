@@ -2,9 +2,6 @@
 *.log
 *.tmp
 
-# Local runtime state and recovery journals.
-/.dark-renamer/
-
 # Workspace guidance is intentionally local-only.
 /AGENTS.md
 /CODE_STANDARDS.md
@@ -14,6 +11,8 @@
 /reference/
 /plans/
 /notes/
+/archives/
+/img/
 
 # Local IDE and OS state.
 /.idea/
