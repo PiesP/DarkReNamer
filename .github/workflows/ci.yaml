@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: pr-gate/quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        run: >-
+          rustup toolchain install 1.97.1
+          --profile minimal
+          --component rustfmt
+          --component clippy
+
+      - name: Check formatting and lints
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  unit:
+    name: pr-gate/unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+
+      - name: Run workspace tests
+        run: cargo test --workspace --all-targets --all-features --locked
+
+  windows:
+    name: pr-gate/windows
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: >-
+          rustup toolchain install 1.97.1
+          --profile minimal
+          --component clippy
+
+      - name: Validate Windows tests and lints
+        shell: pwsh
+        run: |
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'The Windows Clippy gate failed.' }
+          cargo test --workspace --all-targets --all-features --locked
+          if ($LASTEXITCODE -ne 0) { throw 'The Windows test gate failed.' }
+
+      - name: Build the compatibility executable
+        shell: pwsh
+        run: |
+          cargo build --release --locked --package darknamer-legacy-app --bin DarkNamer
+          if ($LASTEXITCODE -ne 0) { throw 'The Windows release build failed.' }

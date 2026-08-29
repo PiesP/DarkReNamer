@@ -1,0 +1,51 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    cooldown:
+      default-days: 1
+    open-pull-requests-limit: 5
+    rebase-strategy: "auto"
+    reviewers: ["PiesP"]
+    labels: ["dependencies", "rust", "automated"]
+    commit-message:
+      prefix: "chore(deps-rust)"
+    groups:
+      rust:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "rust-toolchain"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    cooldown:
+      default-days: 1
+    open-pull-requests-limit: 2
+    reviewers: ["PiesP"]
+    labels: ["dependencies", "rust", "automated"]
+    commit-message:
+      prefix: "chore(toolchain)"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    cooldown:
+      default-days: 1
+    open-pull-requests-limit: 3
+    reviewers: ["PiesP"]
+    labels: ["ci", "dependencies", "automated"]
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      actions:
+        patterns: ["*"]
