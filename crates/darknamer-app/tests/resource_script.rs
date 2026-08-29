@@ -9,25 +9,20 @@ use std::path::Path;
 fn windows_resource_paths_escape_backslashes() {
     let script = resource_script::render(
         Path::new(r"C:\actions\temp\target\DarkReNamer.ico"),
-        Path::new(r"C:\actions\temp\target\toolbar1.bmp"),
-        Path::new(r"C:\actions\temp\target\toolbar2.bmp"),
         Path::new(r"C:\actions\temp\target\DarkReNamer.manifest"),
         "0.1.0",
         [0, 1, 0, 0],
     );
 
     assert!(script.contains(r#"1 ICON "C:\\actions\\temp\\target\\DarkReNamer.ico""#));
-    assert!(script.contains(r#"130 BITMAP "C:\\actions\\temp\\target\\toolbar1.bmp""#));
-    assert!(script.contains(r#"132 BITMAP "C:\\actions\\temp\\target\\toolbar2.bmp""#));
     assert!(script.contains(r#"1 24 "C:\\actions\\temp\\target\\DarkReNamer.manifest""#));
+    assert!(!script.contains("BITMAP"));
 }
 
 #[test]
 fn windows_resource_identifies_the_unofficial_port_and_cargo_version() {
     let script = resource_script::render(
         Path::new("DarkReNamer.ico"),
-        Path::new("toolbar1.bmp"),
-        Path::new("toolbar2.bmp"),
         Path::new("DarkReNamer.manifest"),
         "0.1.0",
         [0, 1, 0, 0],

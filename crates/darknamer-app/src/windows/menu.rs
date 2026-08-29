@@ -1,33 +1,5 @@
 use super::*;
 
-#[derive(Clone, Copy)]
-pub(super) struct ToolbarHandles {
-    pub(super) window: HWND,
-    pub(super) images: windows_sys::Win32::UI::Controls::HIMAGELIST,
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct ToolbarDefinition {
-    control_id: usize,
-    resource_id: u16,
-    tools: &'static [ToolSpec],
-    items: &'static [ToolbarItem],
-}
-
-pub(super) const LEFT_TOOLBAR: ToolbarDefinition = ToolbarDefinition {
-    control_id: LEFT_TOOLBAR_ID,
-    resource_id: resource_ids::LEFT_TOOLBAR_BITMAP,
-    tools: &LEFT_TOOLS,
-    items: &LEFT_TOOLBAR_ITEMS,
-};
-
-pub(super) const RIGHT_TOOLBAR: ToolbarDefinition = ToolbarDefinition {
-    control_id: RIGHT_TOOLBAR_ID,
-    resource_id: resource_ids::RIGHT_TOOLBAR_BITMAP,
-    tools: &RIGHT_TOOLS,
-    items: &RIGHT_TOOLBAR_ITEMS,
-};
-
 pub(super) fn nonclient_metrics(dpi: u32) -> Option<NONCLIENTMETRICSW> {
     let mut metrics = NONCLIENTMETRICSW {
         cbSize: u32::try_from(size_of::<NONCLIENTMETRICSW>()).ok()?,
@@ -73,6 +45,12 @@ pub(super) fn refresh_system_fonts(state: &mut AppState) {
         SendMessageW(state.list_window, WM_SETFONT, message_font as usize, 1);
         SendMessageW(state.status, WM_SETFONT, status_font as usize, 1);
     }
+    if let Some(rail) = &state.left_rail {
+        rail.apply_font(message_font);
+    }
+    if let Some(rail) = &state.right_rail {
+        rail.apply_font(message_font);
+    }
     if !state.font.is_null() {
         // SAFETY: AppState owns this font and replaces it exactly once here.
         unsafe { DeleteObject(state.font) };
@@ -85,28 +63,10 @@ pub(super) fn refresh_system_fonts(state: &mut AppState) {
     state.status_font = status_font;
 }
 
-pub(super) fn high_contrast_enabled() -> bool {
-    let mut contrast = HIGHCONTRASTW {
-        cbSize: u32::try_from(size_of::<HIGHCONTRASTW>()).unwrap_or(0),
-        ..HIGHCONTRASTW::default()
-    };
-    // SAFETY: contrast is writable HIGHCONTRASTW storage with its checked size.
-    let success = unsafe {
-        SystemParametersInfoW(
-            SPI_GETHIGHCONTRAST,
-            contrast.cbSize,
-            (&mut contrast as *mut HIGHCONTRASTW).cast(),
-            0,
-        )
-    };
-    success != 0 && contrast.dwFlags & HCF_HIGHCONTRASTON != 0
-}
-
 pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> {
     // SAFETY: window is the live top-level HWND being initialized.
     let dpi = unsafe { GetDpiForWindow(window) };
     state.dpi = if dpi == 0 { BASE_DPI } else { dpi };
-    state.high_contrast = high_contrast_enabled();
     // SAFETY: A null module name requests the current process module and dereferences no caller memory.
     let instance = unsafe { GetModuleHandleW(null()) };
     let list_class = wide("SysListView32");
@@ -177,24 +137,8 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
             SS_CENTERIMAGE | SS_SUNKEN,
         )
     };
-    let left = create_toolbar(
-        window,
-        instance,
-        LEFT_TOOLBAR,
-        state.dpi,
-        state.high_contrast,
-    )?;
-    state.left_toolbar = left.window;
-    state.left_toolbar_images = left.images;
-    let right = create_toolbar(
-        window,
-        instance,
-        RIGHT_TOOLBAR,
-        state.dpi,
-        state.high_contrast,
-    )?;
-    state.right_toolbar = right.window;
-    state.right_toolbar_images = right.images;
+    state.left_rail = Some(CommandRail::create(window, &LEFT_RAIL, &LEFT_TOOLS)?);
+    state.right_rail = Some(CommandRail::create(window, &RIGHT_RAIL, &RIGHT_TOOLS)?);
     refresh_system_fonts(state);
     // SAFETY: window is the live top-level HWND and DragAcceptFiles stores no borrowed pointer.
     unsafe { DragAcceptFiles(window, 1) };
@@ -258,404 +202,41 @@ pub(super) fn child(parent: HWND, class: &str, text: &str, id: u16, extra_style:
     }
 }
 
-pub(super) fn create_toolbar(
-    parent: HWND,
-    instance: windows_sys::Win32::Foundation::HINSTANCE,
-    definition: ToolbarDefinition,
-    dpi: u32,
-    high_contrast: bool,
-) -> io::Result<ToolbarHandles> {
-    let styles = WS_CHILD
-        | WS_VISIBLE
-        | TBSTYLE_FLAT
-        | TBSTYLE_TOOLTIPS
-        | CCS_VERT as u32
-        | CCS_NORESIZE as u32
-        | CCS_NOPARENTALIGN as u32;
-    // SAFETY: parent/instance are live HWND/module values and TOOLBARCLASSNAMEW
-    // plus the null creation parameter require no caller-owned string storage.
-    let toolbar = unsafe {
-        CreateWindowExW(
-            0,
-            TOOLBARCLASSNAMEW,
-            null(),
-            styles,
-            0,
-            0,
-            0,
-            0,
-            parent,
-            definition.control_id as *mut c_void,
-            instance,
-            null_mut(),
-        )
-    };
-    if toolbar.is_null() {
-        return Err(io::Error::last_os_error());
-    }
-    let mut handles = ToolbarHandles {
-        window: toolbar,
-        images: 0,
-    };
-    let result = (|| {
-        // SAFETY: toolbar is live and TBBUTTON's structure size and packed
-        // dimensions are passed by value with no pointer payload.
-        unsafe {
-            SendMessageW(toolbar, TB_BUTTONSTRUCTSIZE, size_of::<TBBUTTON>(), 0);
-            SendMessageW(toolbar, TB_SETMAXTEXTROWS, 0, 0);
-            SendMessageW(
-                toolbar,
-                TB_SETBUTTONSIZE,
-                0,
-                packed_dimensions(
-                    scale_dip(toolbar_width_dip(high_contrast), dpi),
-                    scale_dip(TOOLBAR_BUTTON_HEIGHT, dpi),
-                ),
-            );
-        }
-        if !high_contrast {
-            handles.images = create_toolbar_image_list(
-                instance,
-                definition.resource_id,
-                definition.tools.len(),
-                dpi,
-            )?;
-            // SAFETY: toolbar and the AppState-owned image list are live. The
-            // toolbar borrows the list until it is destroyed or detached.
-            unsafe { SendMessageW(toolbar, TB_SETIMAGELIST, 0, handles.images) };
-        }
-        let mut buttons = Vec::with_capacity(definition.items.len());
-        for item in definition.items {
-            let button = match *item {
-                ToolbarItem::Command(command) => {
-                    let mut name = toolbar_accessible_name(command)
-                        .encode_utf16()
-                        .chain([0, 0])
-                        .collect::<Vec<_>>();
-                    // SAFETY: toolbar copies the double-NUL-terminated string
-                    // pool synchronously before this owned buffer is dropped.
-                    let string_index = unsafe {
-                        SendMessageW(toolbar, TB_ADDSTRINGW, 0, name.as_mut_ptr() as isize)
-                    };
-                    if string_index < 0 {
-                        return Err(io::Error::other("could not add toolbar accessibility text"));
-                    }
-                    let image = if high_contrast {
-                        I_IMAGENONE
-                    } else {
-                        toolbar_image_index(definition.tools, command).ok_or_else(|| {
-                            io::Error::other("toolbar command has no source image")
-                        })?
-                    };
-                    TBBUTTON {
-                        iBitmap: image,
-                        idCommand: i32::from(command),
-                        fsState: u8::try_from(TBSTATE_ENABLED | TBSTATE_WRAP)
-                            .unwrap_or(TBSTATE_ENABLED as u8),
-                        fsStyle: u8::try_from(
-                            TBSTYLE_BUTTON | if high_contrast { BTNS_SHOWTEXT } else { 0 },
-                        )
-                        .unwrap_or(TBSTYLE_BUTTON as u8),
-                        iString: string_index,
-                        ..TBBUTTON::default()
-                    }
-                }
-                ToolbarItem::Separator => TBBUTTON {
-                    iBitmap: scale_dip(TOOLBAR_SEPARATOR_SIZE, dpi),
-                    fsStyle: TBSTYLE_SEP as u8,
-                    ..TBBUTTON::default()
-                },
-            };
-            buttons.push(button);
-        }
-        // SAFETY: toolbar is live and buttons is readable for exactly added
-        // entries until the synchronous TB_ADDBUTTONS call returns.
-        let added = unsafe {
-            SendMessageW(
-                toolbar,
-                TB_ADDBUTTONS,
-                buttons.len(),
-                buttons.as_ptr() as isize,
-            )
-        };
-        if added == 0 {
-            return Err(io::Error::other("could not add native toolbar buttons"));
-        }
-        // SAFETY: toolbar is live; TB_AUTOSIZE has no pointer payload.
-        unsafe { SendMessageW(toolbar, TB_AUTOSIZE, 0, 0) };
-        validate_toolbar_layout(
-            toolbar,
-            definition.items,
-            scale_dip(toolbar_width_dip(high_contrast), dpi),
-        )?;
-        Ok(())
-    })();
-    match result {
-        Ok(()) => Ok(handles),
-        Err(error) => {
-            destroy_toolbar(handles);
-            Err(error)
-        }
-    }
-}
-
-fn create_toolbar_image_list(
-    instance: windows_sys::Win32::Foundation::HINSTANCE,
-    resource_id: u16,
-    source_count: usize,
-    dpi: u32,
-) -> io::Result<windows_sys::Win32::UI::Controls::HIMAGELIST> {
-    let geometry = toolbar_image_geometry(source_count, dpi)
-        .ok_or_else(|| io::Error::other("invalid toolbar image strip geometry"))?;
-    // SAFETY: instance is the current module; the integer resource identifies a
-    // linked bitmap. The flags request a caller-owned DIB with system 3D colors.
-    let source = unsafe {
-        LoadImageW(
-            instance,
-            int_resource(resource_id),
-            IMAGE_BITMAP,
-            0,
-            0,
-            LR_CREATEDIBSECTION | LR_LOADMAP3DCOLORS,
-        ) as HBITMAP
-    };
-    if source.is_null() {
-        return Err(io::Error::other(
-            "could not load native toolbar bitmap resource",
-        ));
-    }
-    create_toolbar_image_list_from_bitmap(source, geometry, source_count)
-}
-
-pub(super) fn create_toolbar_image_list_from_bitmap(
-    source: HBITMAP,
-    geometry: ToolbarImageGeometry,
-    source_count: usize,
-) -> io::Result<windows_sys::Win32::UI::Controls::HIMAGELIST> {
-    // SAFETY: source is a caller-owned bitmap returned above. CopyImage creates
-    // a distinct full-strip DIB scaled to the exact image-list cell grid.
-    let scaled = unsafe {
-        CopyImage(
-            source,
-            IMAGE_BITMAP,
-            geometry.strip_width,
-            geometry.cell_height,
-            LR_CREATEDIBSECTION,
-        ) as HBITMAP
-    };
-    // SAFETY: source is no longer needed after CopyImage and is deleted once.
-    unsafe { DeleteObject(source) };
-    if scaled.is_null() {
-        return Err(io::Error::other("could not scale native toolbar bitmap"));
-    }
-    let initial = i32::try_from(source_count)
-        .map_err(|_| io::Error::other("toolbar image count exceeds native limits"))?;
-    // SAFETY: dimensions and capacity are checked positive native integers.
-    let images = unsafe {
-        ImageList_Create(
-            geometry.cell_width,
-            geometry.cell_height,
-            ILC_COLOR24 | ILC_MASK,
-            initial,
-            1,
-        )
-    };
-    if images == 0 {
-        // SAFETY: scaled is the caller-owned CopyImage result and is deleted once.
-        unsafe { DeleteObject(scaled) };
-        return Err(io::Error::other(
-            "could not create native toolbar image list",
-        ));
-    }
-    // SAFETY: images and scaled are live; the common control copies the bitmap
-    // cells synchronously and uses the current system face color as its mask.
-    let first = unsafe { ImageList_AddMasked(images, scaled, GetSysColor(COLOR_BTNFACE)) };
-    // SAFETY: ImageList_AddMasked copied the bitmap; the temporary is deleted once.
-    unsafe { DeleteObject(scaled) };
-    // SAFETY: images remains live and the query has no pointer payload.
-    let count = unsafe { ImageList_GetImageCount(images) };
-    if first != 0 || count != initial {
-        // SAFETY: images is not attached to a toolbar yet and is destroyed once.
-        unsafe { ImageList_Destroy(images) };
-        return Err(io::Error::other(
-            "native toolbar image list does not match the source strip",
-        ));
-    }
-    Ok(images)
-}
-
-pub(super) fn toolbar_command_rects(
-    toolbar: HWND,
-    items: &[ToolbarItem],
-) -> io::Result<Vec<ToolbarRect>> {
-    let command_count = items
-        .iter()
-        .filter(|item| matches!(item, ToolbarItem::Command(_)))
-        .count();
-    let mut rects = Vec::with_capacity(command_count);
-    for item in items {
-        let ToolbarItem::Command(command) = *item else {
-            continue;
-        };
-        // SAFETY: toolbar is live and the command identifier is passed by value.
-        let index = unsafe { SendMessageW(toolbar, TB_COMMANDTOINDEX, usize::from(command), 0) };
-        if index < 0 {
-            return Err(io::Error::other("native toolbar command is missing"));
-        }
-        // SAFETY: RECT is a C-compatible integer structure with valid zero state.
-        let mut rect: RECT = unsafe { zeroed() };
-        // SAFETY: toolbar is live and rect is writable through this synchronous
-        // TB_GETITEMRECT call for the checked native button index.
-        let found = unsafe {
-            SendMessageW(
-                toolbar,
-                TB_GETITEMRECT,
-                usize::try_from(index)
-                    .map_err(|_| io::Error::other("invalid native toolbar command index"))?,
-                (&mut rect as *mut RECT) as isize,
-            )
-        };
-        if found == 0 {
-            return Err(io::Error::other(
-                "could not read native toolbar command rectangle",
-            ));
-        }
-        rects.push(ToolbarRect {
-            left: rect.left,
-            top: rect.top,
-            right: rect.right,
-            bottom: rect.bottom,
-        });
-    }
-    Ok(rects)
-}
-
-fn validate_toolbar_layout(
-    toolbar: HWND,
-    items: &[ToolbarItem],
-    rail_width: i32,
-) -> io::Result<()> {
-    let rects = toolbar_command_rects(toolbar, items)?;
-    if !toolbar_rects_are_vertical(&rects, rail_width) {
-        return Err(io::Error::other(
-            "native toolbar command rectangles are not a single vertical rail",
-        ));
-    }
-    Ok(())
-}
-
-pub(super) fn destroy_toolbar(handles: ToolbarHandles) {
-    if !handles.window.is_null() {
-        // SAFETY: the caller owns this child toolbar. Destroying it first ends
-        // its borrowed reference to the separately owned image list.
-        unsafe { DestroyWindow(handles.window) };
-    }
-    if handles.images != 0 {
-        // SAFETY: the toolbar no longer references this AppState-owned list.
-        unsafe { ImageList_Destroy(handles.images) };
-    }
-}
-
-pub(super) fn refresh_toolbars(window: HWND, state: &mut AppState, force: bool) {
-    let high_contrast = high_contrast_enabled();
-    if !force && high_contrast == state.high_contrast {
-        return;
-    }
-    // SAFETY: null requests the current process module.
-    let instance = unsafe { GetModuleHandleW(null()) };
-    let left = match create_toolbar(window, instance, LEFT_TOOLBAR, state.dpi, high_contrast) {
-        Ok(toolbar) => toolbar,
-        Err(error) => {
-            message(
-                window,
-                &format!("새 표시 설정에 맞는 도구 모음을 만들지 못했습니다: {error}"),
-                "DarkReNamer - 표시 설정",
-            );
-            return;
-        }
-    };
-    let right = match create_toolbar(window, instance, RIGHT_TOOLBAR, state.dpi, high_contrast) {
-        Ok(toolbar) => toolbar,
-        Err(error) => {
-            destroy_toolbar(left);
-            message(
-                window,
-                &format!("새 표시 설정에 맞는 도구 모음을 만들지 못했습니다: {error}"),
-                "DarkReNamer - 표시 설정",
-            );
-            return;
-        }
-    };
-    let old_left = ToolbarHandles {
-        window: state.left_toolbar,
-        images: state.left_toolbar_images,
-    };
-    let old_right = ToolbarHandles {
-        window: state.right_toolbar,
-        images: state.right_toolbar_images,
-    };
-    state.left_toolbar = left.window;
-    state.left_toolbar_images = left.images;
-    state.right_toolbar = right.window;
-    state.right_toolbar_images = right.images;
-    state.high_contrast = high_contrast;
-    destroy_toolbar(old_left);
-    destroy_toolbar(old_right);
-    apply_command_states(state);
-}
-
-pub(super) const fn packed_dimensions(width: i32, height: i32) -> isize {
-    ((width as u32 & 0xFFFF) | ((height as u32 & 0xFFFF) << 16)) as isize
-}
-
-pub(super) fn toolbar_accessible_name(command: CommandId) -> String {
-    if command == UNIFY_PATH {
-        return "경로 통일하기 - 현재 지원하지 않음".to_owned();
-    }
-    LEFT_TOOLS
-        .iter()
-        .chain(&RIGHT_TOOLS)
-        .find(|tool| tool.id == command)
-        .map_or_else(
-            || format!("명령 {command}"),
-            |tool| tool.label.replace('\n', " "),
-        )
-}
-
 pub(super) fn arrange(window: HWND, state: &AppState) {
     // SAFETY: RECT is a C-compatible integer structure for which all-zero is a valid writable initial state.
     let mut rect: RECT = unsafe { zeroed() };
     // SAFETY: window is live and rect is writable RECT storage retained until GetClientRect returns.
     unsafe { GetClientRect(window, &mut rect) };
-    let toolbar_width = scale_dip(toolbar_width_dip(state.high_contrast), state.dpi);
     let status_height = scale_dip(STATUS_HEIGHT, state.dpi);
-    let width = rect.right.max(toolbar_width * 2 + 1);
+    let width = rect.right.max(1);
     let height = rect.bottom.max(status_height + 1);
-    // SAFETY: window plus AppState's list/status/toolbars are live child HWNDs on
-    // this thread; each MoveWindow call retains no borrowed storage.
+    let rail_height = height - status_height;
+    let Ok(density) = select_command_rail_density(rail_height, state.dpi) else {
+        return;
+    };
+    let metrics = density.metrics(state.dpi);
+    let rail_width = metrics.rail_width;
+    let (Ok(left_placements), Ok(right_placements)) = (
+        calculate_command_rail_layout(&LEFT_RAIL, rail_height, metrics),
+        calculate_command_rail_layout(&RIGHT_RAIL, rail_height, metrics),
+    ) else {
+        return;
+    };
+    if let Some(rail) = &state.left_rail {
+        rail.arrange(0, &left_placements);
+    }
+    if let Some(rail) = &state.right_rail {
+        rail.arrange(width - rail_width, &right_placements);
+    }
+    // SAFETY: window plus AppState's list/status children are live on this UI
+    // thread; each MoveWindow call retains no borrowed storage.
     unsafe {
         MoveWindow(
-            state.left_toolbar,
-            0,
-            0,
-            toolbar_width,
-            height - status_height,
-            1,
-        );
-        MoveWindow(
-            state.right_toolbar,
-            width - toolbar_width,
-            0,
-            toolbar_width,
-            height - status_height,
-            1,
-        );
-        MoveWindow(
             state.list_window,
-            toolbar_width,
+            rail_width,
             0,
-            width - toolbar_width * 2,
-            height - status_height,
+            width - rail_width * 2,
+            rail_height,
             1,
         );
         MoveWindow(
@@ -700,19 +281,15 @@ pub(super) fn update_controls(state: &mut AppState) {
 }
 
 pub(super) fn apply_command_states(state: &AppState) {
-    for tool in LEFT_TOOLS {
-        set_toolbar_button_enabled(
-            state.left_toolbar,
-            tool.id,
-            state.command_states[usize::from(tool.id - APPLY)],
-        );
+    for id in LEFT_RAIL.commands() {
+        if let Some(rail) = &state.left_rail {
+            rail.set_enabled(id, state.command_states[usize::from(id - APPLY)]);
+        }
     }
-    for tool in RIGHT_TOOLS {
-        set_toolbar_button_enabled(
-            state.right_toolbar,
-            tool.id,
-            state.command_states[usize::from(tool.id - APPLY)],
-        );
+    for id in RIGHT_RAIL.commands() {
+        if let Some(rail) = &state.right_rail {
+            rail.set_enabled(id, state.command_states[usize::from(id - APPLY)]);
+        }
     }
     for id in APPLY..=VERSION {
         let enabled = state.command_states[usize::from(id - APPLY)];
@@ -781,21 +358,6 @@ pub(super) fn apply_command_states(state: &AppState) {
     if !state.menu.is_null() {
         // SAFETY: AppState's menu and parent HWND are live and command IDs are validated resource values.
         unsafe { DrawMenuBar(GetParent(state.list_window)) };
-    }
-}
-
-pub(super) fn set_toolbar_button_enabled(toolbar: HWND, command: CommandId, enabled: bool) {
-    if !toolbar.is_null() {
-        // SAFETY: toolbar is the live left/right AppState toolbar HWND and command
-        // is a validated resource ID passed by value to TB_ENABLEBUTTON.
-        unsafe {
-            SendMessageW(
-                toolbar,
-                TB_ENABLEBUTTON,
-                usize::from(command),
-                enabled as isize,
-            )
-        };
     }
 }
 
