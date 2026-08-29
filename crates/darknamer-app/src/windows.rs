@@ -257,7 +257,7 @@ enum PlanWorkerResult {
 enum ApplyWorkerResult {
     JournalCreateFailed(FileJournalError),
     Executed {
-        journal: FileJournal,
+        journal: Box<FileJournal>,
         execution: Result<ExecutionReport, ExecuteError>,
     },
     Panicked,
@@ -538,6 +538,8 @@ unsafe extern "system" fn window_proc(
                 // SAFETY: WM_DPICHANGED supplies a readable suggested RECT for
                 // this callback and SetWindowPos consumes copied coordinates.
                 let suggested = unsafe { *suggested };
+                // SAFETY: window is the live callback HWND and suggested is a
+                // copied RECT supplied for this WM_DPICHANGED callback.
                 unsafe {
                     SetWindowPos(
                         window,
@@ -713,6 +715,8 @@ unsafe extern "system" fn window_proc(
                 // SAFETY: status_font is a distinct AppState-owned HFONT and is
                 // deleted exactly once at window teardown.
                 if !unsafe { (*state_ptr).status_font }.is_null() {
+                    // SAFETY: the non-null AppState-owned font is deleted once
+                    // at the window's single WM_NCDESTROY teardown point.
                     unsafe { DeleteObject((*state_ptr).status_font) };
                 }
                 // SAFETY: state_ptr is the non-null Box::into_raw AppState stored at WM_NCCREATE; WM_NCDESTROY is its single reclamation point.
@@ -1484,6 +1488,8 @@ unsafe extern "system" fn prompt_proc(
                         SendMessageW(combo, CB_ADDSTRING, 0, choice.as_ptr() as isize);
                     }
                 }
+                // SAFETY: combo is the live dialog ComboBox and selection zero
+                // is valid because the choices collection is non-empty.
                 unsafe {
                     SendMessageW(combo, CB_SETCURSEL, 0, 0);
                 }
@@ -2585,7 +2591,10 @@ fn start_apply_worker(window: HWND, state: &mut AppState, confirmed: crate::rena
                         let mut backend = WindowsRenameBackend;
                         let execution = RenameExecutor::new(&mut backend, &mut journal)
                             .execute_with_control(confirmed, &control);
-                        ApplyWorkerResult::Executed { journal, execution }
+                        ApplyWorkerResult::Executed {
+                            journal: Box::new(journal),
+                            execution,
+                        }
                     }
                     Err(error) => ApplyWorkerResult::JournalCreateFailed(error),
                 }
@@ -2679,7 +2688,7 @@ fn finalize_apply_worker(window: HWND, state: &mut AppState, worker: ApplyWorker
                 );
             }
             Ok(ApplyWorkerResult::Executed { journal, execution }) => {
-                handle_completed_execution(window, state, journal, execution);
+                handle_completed_execution(window, state, *journal, execution);
             }
             Ok(ApplyWorkerResult::Panicked) => {
                 state.recovery_locked = true;
@@ -3238,14 +3247,13 @@ fn modal_native_dialog<T>(owner: HWND, dialog: impl FnOnce() -> T) -> T {
 fn update_controls(state: &mut AppState) {
     let selected_count = { selected_indices(state.list_window) }.len();
     for id in APPLY..=VERSION {
-        state.command_states[usize::from(id - APPLY)] = if state.read_only_locked() {
-            id == VERSION
-        } else if state.mutation_locked {
-            id == VERSION
-        } else {
-            command_enabled(id, state.model.len(), selected_count)
-                && !(id == APPLY && state.apply_locked())
-        };
+        state.command_states[usize::from(id - APPLY)] =
+            if state.read_only_locked() || state.mutation_locked {
+                id == VERSION
+            } else {
+                command_enabled(id, state.model.len(), selected_count)
+                    && !(id == APPLY && state.apply_locked())
+            };
     }
     apply_command_states(state);
 }
