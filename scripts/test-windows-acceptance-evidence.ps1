@@ -112,8 +112,12 @@ function Assert-EvidencePathspec {
 
     $rootEvidence = 'windows-acceptance-evidence-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json'
     $nestedEvidence = 'windows-acceptance-evidence-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json'
+    $mixedRootEvidence = 'Windows-Acceptance-Evidence-cccccccccccccccccccccccccccccccccccccccc.JSON'
+    $mixedNestedEvidence = 'WINDOWS-ACCEPTANCE-EVIDENCE-dddddddddddddddddddddddddddddddddddddddd.json'
     [IO.File]::WriteAllText((Join-Path $repository $rootEvidence), '{}')
     [IO.File]::WriteAllText((Join-Path $nested $nestedEvidence), '{}')
+    [IO.File]::WriteAllText((Join-Path $repository $mixedRootEvidence), '{}')
+    [IO.File]::WriteAllText((Join-Path $nested $mixedNestedEvidence), '{}')
     [IO.File]::WriteAllText(
         (Join-Path $scripts 'windows-acceptance-evidence.schema.json'),
         '{}'
@@ -127,15 +131,18 @@ function Assert-EvidencePathspec {
     if ($LASTEXITCODE -ne 0) {
         throw 'Failed to populate the evidence pathspec fixture index.'
     }
-    $matches = @(& git -C $repository ls-files -- ':(glob)**/windows-acceptance-evidence-*.json')
+    $matches = @(& git -C $repository ls-files -- ':(glob,icase)**/windows-acceptance-evidence-*.json')
     if ($LASTEXITCODE -ne 0) {
         throw 'Failed to evaluate the evidence pathspec fixture.'
     }
     $expected = @(
+        "evidence/$mixedNestedEvidence"
         "evidence/$nestedEvidence"
+        $mixedRootEvidence
         $rootEvidence
     )
-    if (($matches -join "`n") -cne ($expected -join "`n")) {
+    if ($matches.Count -ne $expected.Count -or
+        @($expected | Where-Object { $matches -cnotcontains $_ }).Count -ne 0) {
         throw "Evidence pathspec mismatch. Expected: $($expected -join ', '). Actual: $($matches -join ', ')."
     }
 }
@@ -353,18 +360,32 @@ try {
         -ExpectedFragment 'prohibited absolute or profile path'
 
     foreach ($leakCase in @(
-            @{ Name = 'relative-path-leakage'; Value = '.\screenshots\acceptance.png' },
-            @{ Name = 'posix-path-leakage'; Value = '/tmp/private/acceptance.png' },
-            @{ Name = 'email-leakage'; Value = 'operator@example.com' },
-            @{ Name = 'ip-address-leakage'; Value = '192.0.2.10' }
+            @{ Name = 'relative-path-leakage'; Value = '.\screenshots\acceptance.png'; Expected = 'model family using only safe characters' },
+            @{ Name = 'posix-path-leakage'; Value = '/tmp/private/acceptance.png'; Expected = 'model family using only safe characters' },
+            @{ Name = 'email-leakage'; Value = 'operator@example.com'; Expected = 'model family using only safe characters' },
+            @{ Name = 'ip-address-leakage'; Value = '192.0.2.10'; Expected = 'prohibited IP address' }
         )) {
         $constrainedTextLeak = Copy-Evidence $complete
         $constrainedTextLeak.benchmarks[0].storage_model = $leakCase.Value
         Assert-ValidatorFails `
             -Evidence $constrainedTextLeak `
             -Name $leakCase.Name `
-            -ExpectedFragment 'model family using only safe characters'
+            -ExpectedFragment $leakCase.Expected
     }
+
+    $prefixedIpModel = Copy-Evidence $complete
+    $prefixedIpModel.benchmarks[0].storage_model = 'Drive 192.0.2.10'
+    Assert-ValidatorFails `
+        -Evidence $prefixedIpModel `
+        -Name 'prefixed-ip-model-leakage' `
+        -ExpectedFragment 'prohibited IP address'
+
+    $prefixedIpTool = Copy-Evidence $complete
+    $prefixedIpTool.scenarios[1].accessibility_tool.name = 'Narrator 192.0.2.10'
+    Assert-ValidatorFails `
+        -Evidence $prefixedIpTool `
+        -Name 'prefixed-ip-tool-leakage' `
+        -ExpectedFragment 'prohibited IP address'
 
     $usernameField = Copy-Evidence $complete
     $usernameField.operator_context[0] | Add-Member -NotePropertyName username -NotePropertyValue 'operator'

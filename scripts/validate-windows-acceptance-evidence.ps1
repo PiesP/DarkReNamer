@@ -203,6 +203,10 @@ function Assert-Privacy {
     if ($Value -match '(?i)\b(?:user(?:name)?|host(?:name)?|computer(?:name)?|machine(?:name)?|volume\s*serial(?:\s*number)?)\s*[:=]\s*\S+') {
         throw "$Location contains prohibited identity or volume-serial data."
     }
+    $ipv4Octet = '(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])'
+    if ($Value -match "(?<![0-9])$ipv4Octet(?:\.$ipv4Octet){3}(?![0-9])") {
+        throw "$Location contains a prohibited IP address."
+    }
 }
 
 function Get-UiTarget {
