@@ -30,6 +30,7 @@ use crate::rename::{
 };
 use darknamer_core::{
     LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,
+    SortSemantics,
 };
 
 mod clipboard;
@@ -2191,8 +2192,8 @@ fn sort_command(window: HWND, state: &mut AppState) -> bool {
         "파일 이름에 따라 내림차순",
         "전체경로에 따라 오름차순",
         "전체경로에 따라 내림차순",
-        "파일 크기에 따라 오름차순",
-        "파일 크기에 따라 내림차순",
+        "실제 파일 크기에 따라 오름차순",
+        "실제 파일 크기에 따라 내림차순",
         "수정한 시각에 따라 오름차순",
         "수정한 시각에 따라 내림차순",
         "만든 시각에 따라 오름차순",
@@ -2231,7 +2232,9 @@ fn sort_command(window: HWND, state: &mut AppState) -> bool {
         let focused = { focused_index(state.list_window) }
             .and_then(|index| selection_token(&state.model, index));
         clear_selection(state.list_window);
-        state.model.sort_by(*mode, compare_windows);
+        state
+            .model
+            .sort_by_with_semantics(*mode, SortSemantics::SafeActualSize, compare_windows);
         refresh(state);
         let moved = rows_for_tokens(&state.model, &tokens);
         let focused = focused.as_ref().and_then(|token| {

@@ -298,6 +298,15 @@ pub enum LegacySortMode {
     CreatedDescending,
 }
 
+/// File-size ordering policy layered over the legacy sort choices.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SortSemantics {
+    /// Compare the full observed 64-bit size.
+    SafeActualSize,
+    /// Preserve DarkNamer 08.02.10 wrapping 32-bit subtraction.
+    LegacyDarkNamer080210,
+}
+
 /// Placement and parent-folder reset behavior for legacy sequence numbering.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LegacySequenceMode {
@@ -780,6 +789,18 @@ impl LegacyList {
     where
         F: Fn(&LegacyText, &LegacyText) -> Ordering + Copy,
     {
+        self.sort_by_with_semantics(mode, SortSemantics::LegacyDarkNamer080210, compare_text);
+    }
+
+    /// Sorts with an explicit modern or legacy file-size policy.
+    pub fn sort_by_with_semantics<F>(
+        &mut self,
+        mode: LegacySortMode,
+        semantics: SortSemantics,
+        compare_text: F,
+    ) where
+        F: Fn(&LegacyText, &LegacyText) -> Ordering + Copy,
+    {
         self.items.sort_by(|left, right| match mode {
             LegacySortMode::NameAscending => {
                 compare_text(left.current_name(), right.current_name())
@@ -793,8 +814,16 @@ impl LegacyList {
             LegacySortMode::FullPathDescending => {
                 compare_text(left.source_path(), right.source_path()).reverse()
             }
-            LegacySortMode::SizeAscending => compare_legacy_size(left.size, right.size),
-            LegacySortMode::SizeDescending => compare_legacy_size(left.size, right.size).reverse(),
+            LegacySortMode::SizeAscending => match semantics {
+                SortSemantics::SafeActualSize => left.actual_size.cmp(&right.actual_size),
+                SortSemantics::LegacyDarkNamer080210 => compare_legacy_size(left.size, right.size),
+            },
+            LegacySortMode::SizeDescending => match semantics {
+                SortSemantics::SafeActualSize => left.actual_size.cmp(&right.actual_size).reverse(),
+                SortSemantics::LegacyDarkNamer080210 => {
+                    compare_legacy_size(left.size, right.size).reverse()
+                }
+            },
             LegacySortMode::ModifiedAscending => left.modified.cmp(&right.modified),
             LegacySortMode::ModifiedDescending => left.modified.cmp(&right.modified).reverse(),
             LegacySortMode::CreatedAscending => left.created.cmp(&right.created),
