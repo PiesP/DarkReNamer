@@ -13,5 +13,5 @@ under the MIT License with the following notice:
 The full upstream MIT terms are preserved in `LICENSES/DarkNamer-MIT.txt`.
 This project retains the credit and uses the matched version as a compatibility
 reference. Historical source, screenshots, archives, and executables remain in
-the fork history and upstream-derived paths; Rust release packaging is defined
+the fork history and upstream repository; Rust release packaging is defined
 separately.
