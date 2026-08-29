@@ -90,11 +90,66 @@ VM or hardware power loss, storage write-cache loss, or power-loss durability
 of directory-entry updates. Those cases require separate fault-injection or
 manual acceptance evidence bound to the tested source SHA and storage setup.
 
-Native release acceptance must additionally cover Windows 10 and 11, multiple
-DPI values, high contrast, keyboard operation, accessibility inspection,
-worker cancellation/close behavior, and representative 100, 1,000, and 10,000
-entry workloads. Unexecuted matrix cells must be reported rather than inferred
-from unit tests.
+## Windows acceptance evidence
+
+Windows acceptance is recorded as a local or external JSON artifact. Evidence
+files are not source files, must not be committed, and must not contain local
+paths, operator or machine identities, or volume serials. The JSON records a
+full source SHA and the tested executable's filename and SHA-256. An artifact
+from the Actions handoff also records its workflow run ID; a local build is
+identified only as a local build. The validator does not retrieve either
+artifact, so the operator remains responsible for hashing the executable that
+was actually exercised.
+
+[`scripts/windows-acceptance-evidence.schema.json`](scripts/windows-acceptance-evidence.schema.json)
+is the machine-readable field contract. Validate evidence with
+[`scripts/validate-windows-acceptance-evidence.ps1`](scripts/validate-windows-acceptance-evidence.ps1).
+The validator requires PowerShell 7.4 or newer and is invoked with `pwsh`.
+The default mode is the release gate. `-Draft` is for an intentionally
+incomplete session; it still validates structure, source and artifact binding,
+privacy, uniqueness, and references. Every omitted draft target and every
+`not-run` row must point to a reason in `unexecuted`. Draft validation never
+promotes missing work to release evidence.
+
+Complete release-gate evidence requires all of the following:
+
+- one unique UI result for Windows 10 and Windows 11 at 100%, 125%, 150%, and
+  200% DPI in both normal and high-contrast modes (16 cells total), all passed;
+- one passed result per operating system for keyboard-only operation,
+  accessibility inspection with tool and version, Explorer drag-and-drop,
+  common dialogs, clipboard, worker cancellation, worker close, startup
+  recovery, recovery export, and Intent-only candidate discard;
+- one benchmark each for 100, 1,000, and 10,000 entries on physical SSD and
+  HDD media, with planning and execution durations, storage model and
+  connection, free-space bucket, power mode, and a clean cleanup observation;
+  and
+- a passed application-process crash trial plus at least one separately
+  authorized and passed VM hard-reset or storage-fault trial.
+
+Physical power-loss evidence is an optional stronger trial. Process exit, VM
+hard reset, storage fault injection, and physical power loss remain distinct
+trial classes. Evidence from one class never establishes or substitutes for
+another. Every omitted durability class and every `not-run` durability row
+links to an explicit `unexecuted` reason, including optional and alternative
+classes. A failed recorded durability trial does not pass the release gate.
+An executed VM, storage-fault, or physical-power trial records only the
+`operator-authorized` scope marker, never the approver's identity.
+
+The JSON is deliberately path-free and has no generic note or narrative field.
+UI, scenario, durability, and unexecuted results use enumerated observation and
+reason codes. It stores an artifact filename, not its location, and uses
+bounded free-space categories instead of volume details. Accessibility tool
+and storage model-family values accept only a restricted character set. The
+operator must record the public model family, not a device serial, asset tag,
+operator name, or hostname.
+
+Screenshots, traces, detailed narratives, benchmark roots, user profiles,
+hostnames, and operator names remain outside the JSON. Name an external
+evidence artifact `windows-acceptance-evidence-<source-sha>.json`; CI rejects a
+tracked file matching that evidence pattern. A release decision must cite the
+external artifact through the release's controlled handoff rather than add a
+current run's SHA, timestamp, measurements, or machine details to this
+document.
 
 ### Durable workload benchmark
 
@@ -115,9 +170,8 @@ foreach ($count in 100, 1000, 10000) {
 }
 ```
 
-Use `ssd` for `DARKRENAMER_BENCH_MEDIA` on the SSD pass. Preserve the emitted
-planning and execution milliseconds together with the exact source SHA,
-Windows version, storage model, connection type, free space, and power mode.
-The media label is operator-supplied context, not an automatic hardware claim,
-and results from virtual CI storage do not substitute for both physical-media
-passes.
+Use `ssd` for `DARKRENAMER_BENCH_MEDIA` on the SSD pass. Record the emitted
+durations and the required storage context in the external evidence artifact;
+never copy the benchmark root into it. The media label is operator-supplied
+context, not an automatic hardware claim, and results from virtual CI storage
+do not substitute for either physical-media pass.

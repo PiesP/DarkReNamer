@@ -1,0 +1,450 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/PiesP/DarkReNamer/blob/master/scripts/windows-acceptance-evidence.schema.json",
+  "title": "DarkReNamer Windows acceptance evidence",
+  "description": "Path-free, source-bound evidence. Repository validators define draft and release-gate completeness modes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_sha",
+    "artifact",
+    "recorded_at_utc",
+    "operator_context",
+    "ui_matrix",
+    "scenarios",
+    "benchmarks",
+    "durability_trials",
+    "unexecuted"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "source_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "artifact": {
+      "$ref": "#/$defs/artifact"
+    },
+    "recorded_at_utc": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "operator_context": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/operatorContext"
+      }
+    },
+    "ui_matrix": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/uiCell"
+      }
+    },
+    "scenarios": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/scenario"
+      }
+    },
+    "benchmarks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/benchmark"
+      }
+    },
+    "durability_trials": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/durabilityTrial"
+      }
+    },
+    "unexecuted": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/unexecuted"
+      }
+    }
+  },
+  "$defs": {
+    "status": {
+      "enum": ["pass", "fail", "not-run"]
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filename", "sha256", "origin"],
+      "properties": {
+        "filename": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "origin": {
+          "enum": ["actions-handoff", "local-build"]
+        },
+        "workflow_run": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "origin": {
+                "const": "actions-handoff"
+              }
+            }
+          },
+          "then": {
+            "required": ["workflow_run"]
+          },
+          "else": {
+            "not": {
+              "required": ["workflow_run"]
+            }
+          }
+        }
+      ]
+    },
+    "operatorContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["windows_product", "windows_build", "architecture"],
+      "properties": {
+        "windows_product": {
+          "enum": ["Windows 10", "Windows 11"]
+        },
+        "windows_build": {
+          "type": "string",
+          "pattern": "^[0-9]+(?:\\.[0-9]+){0,3}$"
+        },
+        "architecture": {
+          "enum": ["x64", "arm64"]
+        }
+      }
+    },
+    "uiCell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["windows_product", "dpi_percent", "contrast", "status", "observation_code"],
+      "properties": {
+        "windows_product": {
+          "enum": ["Windows 10", "Windows 11"]
+        },
+        "dpi_percent": {
+          "enum": [100, 125, 150, 200]
+        },
+        "contrast": {
+          "enum": ["normal", "high-contrast"]
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "observation_code": {
+          "enum": ["layout-verified", "layout-defect", "not-executed"]
+        },
+        "unexecuted_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/$defs/notRunReference"
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "status": { "const": "pass" },
+                "observation_code": { "const": "layout-verified" }
+              }
+            },
+            {
+              "properties": {
+                "status": { "const": "fail" },
+                "observation_code": { "const": "layout-defect" }
+              }
+            },
+            {
+              "properties": {
+                "status": { "const": "not-run" },
+                "observation_code": { "const": "not-executed" }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["windows_product", "kind", "status", "observation_code"],
+      "properties": {
+        "windows_product": {
+          "enum": ["Windows 10", "Windows 11"]
+        },
+        "kind": {
+          "enum": [
+            "keyboard-only",
+            "accessibility",
+            "explorer-drag-drop",
+            "common-dialog",
+            "clipboard",
+            "worker-cancellation",
+            "worker-close",
+            "startup-recovery",
+            "recovery-export",
+            "intent-only-candidate-discard"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "observation_code": {
+          "enum": ["interaction-verified", "interaction-defect", "not-executed"]
+        },
+        "accessibility_tool": {
+          "$ref": "#/$defs/tool"
+        },
+        "unexecuted_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/$defs/notRunReference"
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "status": { "const": "pass" },
+                "observation_code": { "const": "interaction-verified" }
+              }
+            },
+            {
+              "properties": {
+                "status": { "const": "fail" },
+                "observation_code": { "const": "interaction-defect" }
+              }
+            },
+            {
+              "properties": {
+                "status": { "const": "not-run" },
+                "observation_code": { "const": "not-executed" }
+              }
+            }
+          ]
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "accessibility"
+              },
+              "status": {
+                "enum": ["pass", "fail"]
+              }
+            },
+            "required": ["kind", "status"]
+          },
+          "then": {
+            "required": ["accessibility_tool"]
+          },
+          "else": {
+            "not": {
+              "required": ["accessibility_tool"]
+            }
+          }
+        }
+      ]
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,99}$"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,99}$"
+        }
+      }
+    },
+    "benchmark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "media",
+        "count",
+        "planning_ms",
+        "execution_ms",
+        "storage_model",
+        "connection",
+        "free_space_bucket",
+        "power_mode",
+        "cleanup_observation"
+      ],
+      "properties": {
+        "media": {
+          "enum": ["ssd", "hdd"]
+        },
+        "count": {
+          "enum": [100, 1000, 10000]
+        },
+        "planning_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "execution_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "storage_model": {
+          "type": "string",
+          "pattern": "^(?=[A-Za-z0-9 ._()+-]{1,200}$)(?=.*[A-Za-z])[A-Za-z0-9][A-Za-z0-9 ._()+-]*$"
+        },
+        "connection": {
+          "enum": ["nvme", "sata", "usb", "thunderbolt", "other-physical"]
+        },
+        "free_space_bucket": {
+          "enum": ["under-10-percent", "10-to-24-percent", "25-to-49-percent", "50-percent-or-more"]
+        },
+        "power_mode": {
+          "enum": ["power-saver", "balanced", "high-performance", "other"]
+        },
+        "cleanup_observation": {
+          "enum": ["clean", "residue-found"]
+        }
+      }
+    },
+    "durabilityTrial": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "status", "observation_code"],
+      "properties": {
+        "kind": {
+          "enum": ["process-crash", "vm-hard-reset", "physical-power-loss", "storage-fault"]
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "observation_code": {
+          "enum": ["recovery-verified", "recovery-defect", "not-executed"]
+        },
+        "authorization": {
+          "const": "operator-authorized"
+        },
+        "unexecuted_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/$defs/notRunReference"
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "status": { "const": "pass" },
+                "observation_code": { "const": "recovery-verified" }
+              }
+            },
+            {
+              "properties": {
+                "status": { "const": "fail" },
+                "observation_code": { "const": "recovery-defect" }
+              }
+            },
+            {
+              "properties": {
+                "status": { "const": "not-run" },
+                "observation_code": { "const": "not-executed" }
+              }
+            }
+          ]
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": ["vm-hard-reset", "physical-power-loss", "storage-fault"]
+              },
+              "status": {
+                "enum": ["pass", "fail"]
+              }
+            },
+            "required": ["kind", "status"]
+          },
+          "then": {
+            "required": ["authorization"]
+          },
+          "else": {
+            "not": {
+              "required": ["authorization"]
+            }
+          }
+        }
+      ]
+    },
+    "unexecuted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "target", "reason_code"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "target": {
+          "type": "string",
+          "pattern": "^(?:ui\\|Windows (?:10|11)\\|(?:100|125|150|200)\\|(?:normal|high-contrast)|scenario\\|Windows (?:10|11)\\|[a-z-]+|benchmark\\|(?:ssd|hdd)\\|(?:100|1000|10000)|durability\\|[a-z-]+)$"
+        },
+        "reason_code": {
+          "enum": [
+            "environment-unavailable",
+            "hardware-unavailable",
+            "authorization-not-granted",
+            "scheduled-later",
+            "blocked-by-failed-prerequisite",
+            "not-in-run-scope"
+          ]
+        }
+      }
+    },
+    "notRunReference": {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "not-run"
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "required": ["unexecuted_id"]
+      },
+      "else": {
+        "not": {
+          "required": ["unexecuted_id"]
+        }
+      }
+    }
+  }
+}
