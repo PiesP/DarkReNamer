@@ -73,6 +73,12 @@ production recovery path. They assert expected original or committed names,
 unchanged sentinel files, no temporary names, and either terminal cleanup or an
 explicit recovery lock.
 
+Those child-process terminations verify recovery after application-process
+loss. They do not establish behavior across an operating-system crash, abrupt
+VM or hardware power loss, storage write-cache loss, or power-loss durability
+of directory-entry updates. Those cases require separate fault-injection or
+manual acceptance evidence bound to the tested source SHA and storage setup.
+
 Native release acceptance must additionally cover Windows 10 and 11, multiple
 DPI values, high contrast, keyboard operation, accessibility inspection,
 worker cancellation/close behavior, and representative 100, 1,000, and 10,000
