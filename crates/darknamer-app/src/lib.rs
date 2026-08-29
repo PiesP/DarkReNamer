@@ -13,16 +13,6 @@ pub mod rename;
 pub const INITIAL_WIDTH: i32 = 464;
 /// Original outer window height used by the parity shell.
 pub const INITIAL_HEIGHT: i32 = 408;
-/// Width of each command bar.
-pub const TOOLBAR_WIDTH: i32 = 44;
-/// Width of each bitmap cell in the original toolbar strips.
-pub const TOOLBAR_BITMAP_WIDTH: i32 = 38;
-/// Height of each bitmap cell in the original toolbar strips.
-pub const TOOLBAR_BITMAP_HEIGHT: i32 = 24;
-/// Height of a native toolbar button after the original MFC border padding.
-pub const TOOLBAR_BUTTON_HEIGHT: i32 = 30;
-/// Thickness of separators between native toolbar command groups.
-pub const TOOLBAR_SEPARATOR_SIZE: i32 = 8;
 /// Height of the bottom status bar.
 pub const STATUS_HEIGHT: i32 = 18;
 /// Design coordinate density used by the original Win32 layout.
@@ -63,29 +53,6 @@ pub(crate) fn fit_widened_window_to_work_area(
     })
 }
 
-#[cfg(any(windows, test))]
-#[must_use]
-pub(crate) const fn toolbar_width_dip(high_contrast: bool) -> i32 {
-    if high_contrast { 120 } else { TOOLBAR_WIDTH }
-}
-
-#[cfg(any(windows, test))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ToolbarImageGeometry {
-    pub(crate) cell_width: i32,
-    pub(crate) cell_height: i32,
-    pub(crate) strip_width: i32,
-}
-
-#[cfg(any(windows, test))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ToolbarRect {
-    pub(crate) left: i32,
-    pub(crate) top: i32,
-    pub(crate) right: i32,
-    pub(crate) bottom: i32,
-}
-
 /// Scales one 96-DPI logical coordinate with nearest-integer rounding.
 #[must_use]
 pub const fn scale_dip(value: i32, dpi: u32) -> i32 {
@@ -104,44 +71,219 @@ pub const fn scale_dip(value: i32, dpi: u32) -> i32 {
     }
 }
 
-#[cfg(any(windows, test))]
-#[must_use]
-pub(crate) fn toolbar_image_geometry(
-    source_count: usize,
-    dpi: u32,
-) -> Option<ToolbarImageGeometry> {
-    let source_count = i32::try_from(source_count).ok()?;
-    let cell_width = scale_dip(TOOLBAR_BITMAP_WIDTH, dpi);
-    let cell_height = scale_dip(TOOLBAR_BITMAP_HEIGHT, dpi);
-    let strip_width = cell_width.checked_mul(source_count)?;
-    (source_count > 0 && cell_width > 0 && cell_height > 0).then_some(ToolbarImageGeometry {
-        cell_width,
-        cell_height,
-        strip_width,
-    })
+/// One logical group of commands in a vertical command rail.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommandGroupSpec {
+    pub commands: &'static [CommandId],
 }
 
-#[cfg(any(windows, test))]
-#[must_use]
-pub(crate) fn toolbar_image_index(tools: &[ToolSpec], command: CommandId) -> Option<i32> {
-    tools
-        .iter()
-        .position(|tool| tool.id == command)
-        .and_then(|index| i32::try_from(index).ok())
+/// Ordered command groups for one side of the main window.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommandRailSpec {
+    pub groups: &'static [CommandGroupSpec],
 }
 
-#[cfg(any(windows, test))]
-#[must_use]
-pub(crate) fn toolbar_rects_are_vertical(rects: &[ToolbarRect], rail_width: i32) -> bool {
-    rail_width > 0
-        && rects.iter().all(|rect| {
-            rect.left >= 0
-                && rect.right <= rail_width
-                && rect.left < rect.right
-                && rect.top >= 0
-                && rect.top < rect.bottom
+impl CommandRailSpec {
+    /// Returns the total number of visible commands in this rail.
+    #[must_use]
+    pub fn command_count(self) -> usize {
+        self.groups.iter().map(|group| group.commands.len()).sum()
+    }
+
+    /// Iterates over visible command identifiers in display order.
+    pub fn commands(self) -> impl Iterator<Item = CommandId> {
+        self.groups
+            .iter()
+            .flat_map(|group| group.commands.iter().copied())
+    }
+}
+
+/// Supported command-rail density.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RailDensity {
+    Comfortable,
+    Compact,
+}
+
+/// Pixel metrics used to place one command rail.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiMetrics {
+    pub rail_padding: i32,
+    pub button_height: i32,
+    pub group_gap: i32,
+    pub rail_width: i32,
+}
+
+impl RailDensity {
+    /// Returns DPI-scaled pixel metrics for this density.
+    #[must_use]
+    pub const fn metrics(self, dpi: u32) -> UiMetrics {
+        let (rail_padding, button_height, group_gap, rail_width) = match self {
+            Self::Comfortable => (4, 32, 8, 52),
+            Self::Compact => (2, 28, 4, 52),
+        };
+        UiMetrics {
+            rail_padding: scale_dip(rail_padding, dpi),
+            button_height: scale_dip(button_height, dpi),
+            group_gap: scale_dip(group_gap, dpi),
+            rail_width: scale_dip(rail_width, dpi),
+        }
+    }
+}
+
+/// Calculated rectangle for one command button.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommandPlacement {
+    pub command: CommandId,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl CommandPlacement {
+    /// Returns the exclusive bottom coordinate of this placement.
+    #[must_use]
+    pub fn bottom(self) -> i32 {
+        self.y.saturating_add(self.height)
+    }
+}
+
+/// Failure to calculate a bounded command-rail layout.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LayoutError {
+    Overflow,
+    InsufficientHeight { required: i32, available: i32 },
+}
+
+const LEFT_RAIL_GROUP_1: [CommandId; 1] = [APPLY];
+const LEFT_RAIL_GROUP_2: [CommandId; 3] = [REPLACE, PREFIX, SUFFIX];
+const LEFT_RAIL_GROUP_3: [CommandId; 3] = [CLEAR_NAME, DELETE_POSITION, DELETE_DELIMITED];
+const LEFT_RAIL_GROUP_4: [CommandId; 3] = [KEEP_DIGITS, PAD_DIGITS, SEQUENCE];
+const LEFT_RAIL_GROUPS: [CommandGroupSpec; 4] = [
+    CommandGroupSpec {
+        commands: &LEFT_RAIL_GROUP_1,
+    },
+    CommandGroupSpec {
+        commands: &LEFT_RAIL_GROUP_2,
+    },
+    CommandGroupSpec {
+        commands: &LEFT_RAIL_GROUP_3,
+    },
+    CommandGroupSpec {
+        commands: &LEFT_RAIL_GROUP_4,
+    },
+];
+
+const RIGHT_RAIL_GROUP_1: [CommandId; 1] = [RESET];
+const RIGHT_RAIL_GROUP_2: [CommandId; 3] = [CLEAR_LIST, MANUAL_CHANGE, SORT];
+const RIGHT_RAIL_GROUP_3: [CommandId; 2] = [PARENT_PREFIX, PARENT_SUFFIX];
+const RIGHT_RAIL_GROUP_4: [CommandId; 3] = [EXT_DELETE, EXT_ADD, EXT_REPLACE];
+const RIGHT_RAIL_GROUPS: [CommandGroupSpec; 4] = [
+    CommandGroupSpec {
+        commands: &RIGHT_RAIL_GROUP_1,
+    },
+    CommandGroupSpec {
+        commands: &RIGHT_RAIL_GROUP_2,
+    },
+    CommandGroupSpec {
+        commands: &RIGHT_RAIL_GROUP_3,
+    },
+    CommandGroupSpec {
+        commands: &RIGHT_RAIL_GROUP_4,
+    },
+];
+
+/// Explicit left-side command grouping.
+pub const LEFT_RAIL: CommandRailSpec = CommandRailSpec {
+    groups: &LEFT_RAIL_GROUPS,
+};
+/// Explicit right-side command grouping.
+pub const RIGHT_RAIL: CommandRailSpec = CommandRailSpec {
+    groups: &RIGHT_RAIL_GROUPS,
+};
+
+fn required_command_rail_height(
+    spec: &CommandRailSpec,
+    metrics: UiMetrics,
+) -> Result<i32, LayoutError> {
+    let command_count = i32::try_from(spec.command_count()).map_err(|_| LayoutError::Overflow)?;
+    let group_gaps =
+        i32::try_from(spec.groups.len().saturating_sub(1)).map_err(|_| LayoutError::Overflow)?;
+    metrics
+        .rail_padding
+        .checked_mul(2)
+        .and_then(|padding| {
+            metrics
+                .button_height
+                .checked_mul(command_count)
+                .and_then(|buttons| padding.checked_add(buttons))
         })
-        && rects.windows(2).all(|pair| pair[0].bottom <= pair[1].top)
+        .and_then(|height| {
+            metrics
+                .group_gap
+                .checked_mul(group_gaps)
+                .and_then(|gaps| height.checked_add(gaps))
+        })
+        .ok_or(LayoutError::Overflow)
+}
+
+/// Calculates one non-overlapping vertical column of command buttons.
+pub fn calculate_command_rail_layout(
+    spec: &CommandRailSpec,
+    available_height: i32,
+    metrics: UiMetrics,
+) -> Result<Vec<CommandPlacement>, LayoutError> {
+    let required = required_command_rail_height(spec, metrics)?;
+    if required > available_height {
+        return Err(LayoutError::InsufficientHeight {
+            required,
+            available: available_height,
+        });
+    }
+
+    let mut placements = Vec::with_capacity(spec.command_count());
+    let mut y = metrics.rail_padding;
+    for (group_index, group) in spec.groups.iter().enumerate() {
+        if group_index > 0 {
+            y = y
+                .checked_add(metrics.group_gap)
+                .ok_or(LayoutError::Overflow)?;
+        }
+        for &command in group.commands {
+            placements.push(CommandPlacement {
+                command,
+                x: 0,
+                y,
+                width: metrics.rail_width,
+                height: metrics.button_height,
+            });
+            y = y
+                .checked_add(metrics.button_height)
+                .ok_or(LayoutError::Overflow)?;
+        }
+    }
+    Ok(placements)
+}
+
+/// Selects the most spacious density that fits both command rails.
+pub fn select_command_rail_density(
+    available_height: i32,
+    dpi: u32,
+) -> Result<RailDensity, LayoutError> {
+    for density in [RailDensity::Comfortable, RailDensity::Compact] {
+        let metrics = density.metrics(dpi);
+        if required_command_rail_height(&LEFT_RAIL, metrics)? <= available_height
+            && required_command_rail_height(&RIGHT_RAIL, metrics)? <= available_height
+        {
+            return Ok(density);
+        }
+    }
+    let required = required_command_rail_height(&LEFT_RAIL, RailDensity::Compact.metrics(dpi))?;
+    Err(LayoutError::InsufficientHeight {
+        required,
+        available: available_height,
+    })
 }
 
 #[cfg(any(windows, test))]
@@ -159,8 +301,10 @@ pub(crate) fn adaptive_primary_column_widths(available: i32, dpi: u32) -> [i32; 
 
 #[cfg(any(windows, test))]
 #[must_use]
-pub(crate) const fn minimum_content_width_dip(high_contrast: bool) -> i32 {
-    toolbar_width_dip(high_contrast) * 2 + NAME_COLUMN_MINIMUM * 2 + LOCATION_COLUMN_MINIMUM
+pub(crate) const fn minimum_content_width_dip() -> i32 {
+    RailDensity::Comfortable.metrics(BASE_DPI).rail_width * 2
+        + NAME_COLUMN_MINIMUM * 2
+        + LOCATION_COLUMN_MINIMUM
 }
 /// Public product name used by the executable and user-facing diagnostics.
 pub const PRODUCT_NAME: &str = "DarkReNamer";
@@ -252,18 +396,19 @@ pub const COLUMNS: [ColumnSpec; 7] = [
     },
 ];
 
-/// Toolbar command with its visible native button text.
+/// Command with its visible native rail-button text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ToolSpec {
     pub id: CommandId,
     pub label: &'static str,
 }
 
-/// One entry from an original toolbar resource.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ToolbarItem {
-    Command(CommandId),
-    Separator,
+impl ToolSpec {
+    /// Returns the one-line text used for tooltips and spoken command names.
+    #[must_use]
+    pub fn one_line_label(self) -> String {
+        self.label.replace('\n', " ")
+    }
 }
 
 pub const LEFT_TOOLS: [ToolSpec; 10] = [
@@ -350,37 +495,6 @@ pub const RIGHT_TOOLS: [ToolSpec; 10] = [
         id: EXT_REPLACE,
         label: "확장자\n변경",
     },
-];
-
-pub const LEFT_TOOLBAR_ITEMS: [ToolbarItem; 13] = [
-    ToolbarItem::Command(APPLY),
-    ToolbarItem::Separator,
-    ToolbarItem::Command(REPLACE),
-    ToolbarItem::Command(PREFIX),
-    ToolbarItem::Command(SUFFIX),
-    ToolbarItem::Separator,
-    ToolbarItem::Command(CLEAR_NAME),
-    ToolbarItem::Command(DELETE_POSITION),
-    ToolbarItem::Command(DELETE_DELIMITED),
-    ToolbarItem::Separator,
-    ToolbarItem::Command(KEEP_DIGITS),
-    ToolbarItem::Command(PAD_DIGITS),
-    ToolbarItem::Command(SEQUENCE),
-];
-
-pub const RIGHT_TOOLBAR_ITEMS: [ToolbarItem; 12] = [
-    ToolbarItem::Command(RESET),
-    ToolbarItem::Separator,
-    ToolbarItem::Command(CLEAR_LIST),
-    ToolbarItem::Command(MANUAL_CHANGE),
-    ToolbarItem::Command(SORT),
-    ToolbarItem::Separator,
-    ToolbarItem::Command(PARENT_PREFIX),
-    ToolbarItem::Command(PARENT_SUFFIX),
-    ToolbarItem::Separator,
-    ToolbarItem::Command(EXT_DELETE),
-    ToolbarItem::Command(EXT_ADD),
-    ToolbarItem::Command(EXT_REPLACE),
 ];
 
 /// Whether a command is enabled for current list/selection state.
@@ -493,79 +607,147 @@ mod tests {
     }
 
     #[test]
-    fn toolbar_strip_geometry_scales_every_source_cell() {
+    fn command_rail_specs_cover_each_visible_command_once() {
+        assert_eq!(LEFT_RAIL.command_count(), 10);
+        assert_eq!(RIGHT_RAIL.command_count(), 9);
+
+        let mut commands = LEFT_RAIL
+            .commands()
+            .chain(RIGHT_RAIL.commands())
+            .collect::<Vec<_>>();
+        commands.sort_unstable();
+        commands.dedup();
+
+        assert_eq!(commands.len(), 19);
+        assert!(!commands.contains(&UNIFY_PATH));
+    }
+
+    #[test]
+    fn every_visible_command_has_button_and_one_line_tooltip_text() {
+        for (spec, tools) in [
+            (&LEFT_RAIL, LEFT_TOOLS.as_slice()),
+            (&RIGHT_RAIL, RIGHT_TOOLS.as_slice()),
+        ] {
+            for command in spec.commands() {
+                let matches = tools
+                    .iter()
+                    .filter(|tool| tool.id == command)
+                    .collect::<Vec<_>>();
+                assert_eq!(matches.len(), 1);
+                assert!(!matches[0].label.is_empty());
+                let one_line = matches[0].one_line_label();
+                assert!(!one_line.is_empty());
+                assert!(!one_line.contains('\n'));
+            }
+        }
+    }
+
+    #[test]
+    fn command_rail_layout_has_exact_group_gaps_without_overlap() -> Result<(), LayoutError> {
+        let metrics = RailDensity::Comfortable.metrics(96);
+        let placements = calculate_command_rail_layout(&LEFT_RAIL, 352, metrics)?;
+
+        assert_eq!(placements.len(), 10);
+        assert!(placements.iter().all(|placement| {
+            placement.x == 0
+                && placement.width == 52
+                && placement.height == 32
+                && placement.bottom() <= 348
+        }));
+        assert!(
+            placements
+                .windows(2)
+                .all(|pair| pair[0].bottom() <= pair[1].y)
+        );
         assert_eq!(
-            [96, 120, 144, 192].map(|dpi| toolbar_image_geometry(10, dpi)),
+            placements.last().map(|placement| placement.bottom()),
+            Some(348)
+        );
+        assert_eq!(placements[9].bottom() + 4, 352);
+
+        for start in [1, 4, 7] {
+            assert_eq!(
+                placements[start].y - placements[start - 1].bottom(),
+                metrics.group_gap
+            );
+        }
+
+        let right = calculate_command_rail_layout(&RIGHT_RAIL, 352, metrics)?;
+        for start in [1, 4, 6] {
+            assert_eq!(
+                right[start].y - right[start - 1].bottom(),
+                metrics.group_gap
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn command_rail_metrics_scale_at_supported_dpis() {
+        assert_eq!(
+            [96, 120, 144, 192].map(|dpi| RailDensity::Comfortable.metrics(dpi)),
             [
-                Some(ToolbarImageGeometry {
-                    cell_width: 38,
-                    cell_height: 24,
-                    strip_width: 380,
-                }),
-                Some(ToolbarImageGeometry {
-                    cell_width: 48,
-                    cell_height: 30,
-                    strip_width: 480,
-                }),
-                Some(ToolbarImageGeometry {
-                    cell_width: 57,
-                    cell_height: 36,
-                    strip_width: 570,
-                }),
-                Some(ToolbarImageGeometry {
-                    cell_width: 76,
-                    cell_height: 48,
-                    strip_width: 760,
-                }),
+                UiMetrics {
+                    rail_padding: 4,
+                    button_height: 32,
+                    group_gap: 8,
+                    rail_width: 52
+                },
+                UiMetrics {
+                    rail_padding: 5,
+                    button_height: 40,
+                    group_gap: 10,
+                    rail_width: 65
+                },
+                UiMetrics {
+                    rail_padding: 6,
+                    button_height: 48,
+                    group_gap: 12,
+                    rail_width: 78
+                },
+                UiMetrics {
+                    rail_padding: 8,
+                    button_height: 64,
+                    group_gap: 16,
+                    rail_width: 104
+                },
             ]
         );
-        assert_eq!(toolbar_image_geometry(0, 192), None);
     }
 
     #[test]
-    fn toolbar_image_indices_follow_the_source_strip_when_a_command_is_hidden() {
-        assert!(!RIGHT_TOOLBAR_ITEMS.contains(&ToolbarItem::Command(UNIFY_PATH)));
-        assert_eq!(toolbar_image_index(&RIGHT_TOOLS, UNIFY_PATH), Some(6));
-        assert_eq!(toolbar_image_index(&RIGHT_TOOLS, EXT_DELETE), Some(7));
-        assert_eq!(toolbar_image_index(&RIGHT_TOOLS, EXT_ADD), Some(8));
-        assert_eq!(toolbar_image_index(&RIGHT_TOOLS, EXT_REPLACE), Some(9));
+    fn compact_rail_keeps_the_longest_two_line_label_width() {
+        assert_eq!(RailDensity::Compact.metrics(96).rail_width, 52);
+        assert_eq!(RailDensity::Compact.metrics(192).rail_width, 104);
+        assert_eq!(RIGHT_TOOLS[0].label, "원래\n이름으로");
     }
 
     #[test]
-    fn toolbar_rect_validation_rejects_overlap_and_cross_rail_layout() {
-        let valid = [
-            ToolbarRect {
-                left: 0,
-                top: 0,
-                right: 44,
-                bottom: 30,
-            },
-            ToolbarRect {
-                left: 0,
-                top: 38,
-                right: 44,
-                bottom: 68,
-            },
-        ];
-        assert!(toolbar_rects_are_vertical(&valid, 44));
-
-        let mut overlap = valid;
-        overlap[1].top = 29;
-        assert!(!toolbar_rects_are_vertical(&overlap, 44));
-
-        let mut cross_rail = valid;
-        cross_rail[1].right = 45;
-        assert!(!toolbar_rects_are_vertical(&cross_rail, 44));
-    }
-
-    #[test]
-    fn adaptive_primary_columns_fit_normal_and_high_contrast_minimums() {
-        assert_eq!(minimum_content_width_dip(false), 408);
-        assert_eq!(minimum_content_width_dip(true), 560);
+    fn command_rail_density_falls_back_and_reports_insufficient_height() {
         assert_eq!(
-            minimum_content_width_dip(true),
-            toolbar_width_dip(true) * 2 + NAME_COLUMN_MINIMUM * 2 + LOCATION_COLUMN_MINIMUM
+            select_command_rail_density(352, 96),
+            Ok(RailDensity::Comfortable)
         );
+        assert_eq!(
+            select_command_rail_density(351, 96),
+            Ok(RailDensity::Compact)
+        );
+        assert_eq!(
+            select_command_rail_density(296, 96),
+            Ok(RailDensity::Compact)
+        );
+        assert_eq!(
+            select_command_rail_density(295, 96),
+            Err(LayoutError::InsufficientHeight {
+                required: 296,
+                available: 295,
+            })
+        );
+    }
+
+    #[test]
+    fn adaptive_primary_columns_fit_command_rail_minimum() {
+        assert_eq!(minimum_content_width_dip(), 424);
 
         for (dpi, available, expected) in [
             (96, 320, [120, 120, 80]),
@@ -623,19 +805,10 @@ mod tests {
     }
 
     #[test]
-    fn layout_columns_and_toolbar_order_match_resources() {
+    fn layout_columns_and_command_order_match_specs() {
         assert_eq!(
-            (
-                INITIAL_WIDTH,
-                INITIAL_HEIGHT,
-                TOOLBAR_WIDTH,
-                TOOLBAR_BITMAP_WIDTH,
-                TOOLBAR_BITMAP_HEIGHT,
-                TOOLBAR_BUTTON_HEIGHT,
-                TOOLBAR_SEPARATOR_SIZE,
-                STATUS_HEIGHT
-            ),
-            (464, 408, 44, 38, 24, 30, 8, 18)
+            (INITIAL_WIDTH, INITIAL_HEIGHT, STATUS_HEIGHT),
+            (464, 408, 18)
         );
         assert_eq!(
             COLUMNS.map(|column| column.default_width),
@@ -672,39 +845,16 @@ mod tests {
             ]
         );
         assert_eq!(
-            LEFT_TOOLBAR_ITEMS,
-            [
-                ToolbarItem::Command(APPLY),
-                ToolbarItem::Separator,
-                ToolbarItem::Command(REPLACE),
-                ToolbarItem::Command(PREFIX),
-                ToolbarItem::Command(SUFFIX),
-                ToolbarItem::Separator,
-                ToolbarItem::Command(CLEAR_NAME),
-                ToolbarItem::Command(DELETE_POSITION),
-                ToolbarItem::Command(DELETE_DELIMITED),
-                ToolbarItem::Separator,
-                ToolbarItem::Command(KEEP_DIGITS),
-                ToolbarItem::Command(PAD_DIGITS),
-                ToolbarItem::Command(SEQUENCE),
-            ]
+            LEFT_RAIL.commands().collect::<Vec<_>>(),
+            LEFT_TOOLS.map(|tool| tool.id)
         );
         assert_eq!(
-            RIGHT_TOOLBAR_ITEMS,
-            [
-                ToolbarItem::Command(RESET),
-                ToolbarItem::Separator,
-                ToolbarItem::Command(CLEAR_LIST),
-                ToolbarItem::Command(MANUAL_CHANGE),
-                ToolbarItem::Command(SORT),
-                ToolbarItem::Separator,
-                ToolbarItem::Command(PARENT_PREFIX),
-                ToolbarItem::Command(PARENT_SUFFIX),
-                ToolbarItem::Separator,
-                ToolbarItem::Command(EXT_DELETE),
-                ToolbarItem::Command(EXT_ADD),
-                ToolbarItem::Command(EXT_REPLACE),
-            ]
+            RIGHT_RAIL.commands().collect::<Vec<_>>(),
+            RIGHT_TOOLS
+                .into_iter()
+                .filter(|tool| tool.id != UNIFY_PATH)
+                .map(|tool| tool.id)
+                .collect::<Vec<_>>()
         );
     }
 

@@ -36,6 +36,7 @@ use darknamer_core::{
 mod application;
 mod clipboard;
 mod command_dispatch;
+mod command_rail;
 mod dialog;
 mod drag_drop;
 mod list_view;
@@ -49,6 +50,7 @@ mod worker;
 
 use clipboard::copy_clipboard;
 use command_dispatch::*;
+use command_rail::CommandRail;
 use dialog::*;
 use drag_drop::*;
 #[cfg(test)]
@@ -66,12 +68,10 @@ use safe_runtime::{
 };
 use text_io::{compare_windows, legacy_path, path_wide, read_legacy_text, wide, write_legacy_text};
 use windows_sys::Win32::Foundation::{FILETIME, HWND, LPARAM, LRESULT, RECT, SYSTEMTIME, WPARAM};
-#[cfg(test)]
-use windows_sys::Win32::Graphics::Gdi::CreateBitmap;
 use windows_sys::Win32::Graphics::Gdi::{
-    COLOR_BTNFACE, COLOR_WINDOW, CreateFontIndirectW, DeleteObject, GetMonitorInfoW, GetSysColor,
-    HBITMAP, HFONT, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, RDW_ALLCHILDREN,
-    RDW_ERASE, RDW_INVALIDATE, RedrawWindow, UpdateWindow,
+    COLOR_WINDOW, CreateFontIndirectW, DeleteObject, GetMonitorInfoW, HFONT,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, RDW_ALLCHILDREN, RDW_ERASE,
+    RDW_INVALIDATE, RedrawWindow, UpdateWindow,
 };
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
@@ -80,25 +80,19 @@ use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, 
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::{SS_CENTERIMAGE, SS_ETCHEDHORZ, SS_SUNKEN};
 use windows_sys::Win32::System::Time::FileTimeToSystemTime;
-use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
-#[cfg(test)]
-use windows_sys::Win32::UI::Controls::TB_GETBUTTON;
 use windows_sys::Win32::UI::Controls::{
-    BTNS_SHOWTEXT, CCS_NOPARENTALIGN, CCS_NORESIZE, CCS_VERT, I_IMAGENONE, ICC_BAR_CLASSES,
-    ICC_LISTVIEW_CLASSES, ILC_COLOR24, ILC_MASK, INITCOMMONCONTROLSEX, ImageList_AddMasked,
-    ImageList_Create, ImageList_Destroy, ImageList_GetImageCount, InitCommonControlsEx, LVCF_FMT,
+    ICC_LISTVIEW_CLASSES, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_FMT,
     LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT,
     LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_DELETEITEM, LVM_ENSUREVISIBLE,
     LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH,
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW,
     LVM_SETITEMW, LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER,
     LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS,
-    LVSIL_SMALL, NM_DBLCLK, NMHDR, NMLISTVIEW, TB_ADDBUTTONS, TB_ADDSTRINGW, TB_AUTOSIZE,
-    TB_BUTTONSTRUCTSIZE, TB_COMMANDTOINDEX, TB_ENABLEBUTTON, TB_GETITEMRECT, TB_SETBUTTONSIZE,
-    TB_SETIMAGELIST, TB_SETMAXTEXTROWS, TBBUTTON, TBSTATE_ENABLED, TBSTATE_WRAP, TBSTYLE_BUTTON,
-    TBSTYLE_FLAT, TBSTYLE_SEP, TBSTYLE_TOOLTIPS, TOOLBARCLASSNAMEW,
+    LVSIL_SMALL, NM_DBLCLK, NMHDR, NMLISTVIEW,
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
+#[cfg(test)]
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetKeyState, SetFocus, VK_CONTROL, VK_DELETE, VK_ESCAPE, VK_SHIFT,
 };
@@ -109,30 +103,29 @@ use windows_sys::Win32::UI::Shell::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, BN_CLICKED, BS_DEFPUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL,
     CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem,
-    CopyImage, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, GWLP_USERDATA, GetClientRect,
-    GetMessageW, GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    HMENU, IDC_ARROW, IDCANCEL, IDOK, IMAGE_BITMAP, IsDialogMessageW, KillTimer,
-    LR_CREATEDIBSECTION, LR_LOADMAP3DCOLORS, LoadCursorW, LoadIconW, LoadImageW, MB_OKCANCEL,
+    CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, GWLP_USERDATA, GetClientRect, GetMessageW,
+    GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HMENU,
+    IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, KillTimer, LoadCursorW, LoadIconW, MB_OKCANCEL,
     MB_YESNO, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
     MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW, PostMessageW,
-    PostQuitMessage, RegisterClassExW, SPI_GETHIGHCONTRAST, SPI_GETNONCLIENTMETRICS, SW_SHOW,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage, WM_APP,
-    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_FONTCHANGE,
-    WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS,
-    WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
-    WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_ACCEPTFILES,
+    PostQuitMessage, RegisterClassExW, SPI_GETNONCLIENTMETRICS, SW_SHOW, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND,
+    WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_FONTCHANGE, WM_GETMINMAXINFO,
+    WM_KEYDOWN, WM_KEYUP, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT,
+    WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER,
+    WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_ACCEPTFILES,
     WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
     WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
+#[cfg(test)]
+use windows_sys::Win32::UI::WindowsAndMessaging::{BS_MULTILINE, GWL_STYLE};
 use worker::*;
 
 use crate::*;
 
 const LIST_ID: usize = 1000;
-const LEFT_TOOLBAR_ID: usize = 1001;
-const RIGHT_TOOLBAR_ID: usize = 1002;
 const STATUS_ID: usize = 1007;
 const CANDIDATE_JOURNAL_LEAF: &str = "candidate.drj";
 const ACTIVE_JOURNAL_LEAF: &str = "active.drj";
@@ -151,14 +144,11 @@ struct AppState {
     menu: HMENU,
     font: HFONT,
     status_font: HFONT,
-    left_toolbar: HWND,
-    right_toolbar: HWND,
-    left_toolbar_images: windows_sys::Win32::UI::Controls::HIMAGELIST,
-    right_toolbar_images: windows_sys::Win32::UI::Controls::HIMAGELIST,
+    left_rail: Option<CommandRail>,
+    right_rail: Option<CommandRail>,
     model: LegacyList,
     shown_columns: [bool; 4],
     dpi: u32,
-    high_contrast: bool,
     command_states: [bool; 34],
     model_revision: u64,
     mutation_locked: bool,
@@ -189,14 +179,11 @@ impl AppState {
             menu: null_mut(),
             font: null_mut(),
             status_font: null_mut(),
-            left_toolbar: null_mut(),
-            right_toolbar: null_mut(),
-            left_toolbar_images: 0,
-            right_toolbar_images: 0,
+            left_rail: None,
+            right_rail: None,
             model: LegacyList::new(),
             shown_columns: [false; 4],
             dpi: BASE_DPI,
-            high_contrast: false,
             command_states: [false; 34],
             model_revision: 0,
             mutation_locked: false,
@@ -772,30 +759,29 @@ mod tests {
     }
 
     #[test]
-    fn every_toolbar_command_has_single_line_accessibility_text() {
-        for tool in LEFT_TOOLS.into_iter().chain(RIGHT_TOOLS) {
-            let name = toolbar_accessible_name(tool.id);
-            assert!(!name.is_empty());
-            assert!(!name.contains('\n'));
-        }
-        assert!(toolbar_accessible_name(UNIFY_PATH).contains("지원하지 않음"));
-        assert!(toolbar_width_dip(true) > toolbar_width_dip(false));
-    }
-
-    #[test]
-    fn hidden_native_toolbars_keep_every_visible_command_in_one_vertical_rail()
+    fn native_command_rails_create_every_visible_button_with_expected_layout()
     -> Result<(), Box<dyn std::error::Error>> {
         let controls = INITCOMMONCONTROLSEX {
             dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_BAR_CLASSES,
+            dwICC: ICC_WIN95_CLASSES,
         };
         // SAFETY: controls has its exact structure size and remains readable for
         // the synchronous common-controls initialization call.
         unsafe { InitCommonControlsEx(&controls) };
         // SAFETY: null requests the current process module.
         let instance = unsafe { GetModuleHandleW(null()) };
+        for dpi in [96, 120, 144, 192] {
+            verify_native_command_rails_at_dpi(instance, dpi)?;
+        }
+        Ok(())
+    }
+
+    fn verify_native_command_rails_at_dpi(
+        instance: windows_sys::Win32::Foundation::HINSTANCE,
+        dpi: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let class = wide("STATIC");
-        // SAFETY: the system STATIC class, current module and null creation
+        // SAFETY: the system STATIC class, current module, and null creation
         // parameter remain valid for this hidden top-level test window.
         let parent = unsafe {
             CreateWindowExW(
@@ -817,94 +803,104 @@ mod tests {
             return Err(io::Error::last_os_error().into());
         }
 
-        let result = (|| -> io::Result<()> {
-            for dpi in [96, 120, 144, 192] {
-                let left = create_toolbar(parent, instance, LEFT_TOOLBAR, dpi, true)?;
-                let right = match create_toolbar(parent, instance, RIGHT_TOOLBAR, dpi, true) {
-                    Ok(toolbar) => toolbar,
-                    Err(error) => {
-                        destroy_toolbar(left);
-                        return Err(error);
-                    }
-                };
-                let left_rects = toolbar_command_rects(left.window, &LEFT_TOOLBAR_ITEMS)?;
-                let right_rects = toolbar_command_rects(right.window, &RIGHT_TOOLBAR_ITEMS)?;
-                assert_eq!(left_rects.len(), 10);
-                assert_eq!(right_rects.len(), 9);
-                let rail_width = scale_dip(toolbar_width_dip(true), dpi);
-                assert!(toolbar_rects_are_vertical(&left_rects, rail_width));
-                assert!(toolbar_rects_are_vertical(&right_rects, rail_width));
-
-                for (toolbar, images, items) in [
-                    (left.window, left.images, LEFT_TOOLBAR_ITEMS.as_slice()),
-                    (right.window, right.images, RIGHT_TOOLBAR_ITEMS.as_slice()),
-                ] {
-                    assert_eq!(images, 0);
-                    for item in items {
-                        let ToolbarItem::Command(command) = *item else {
-                            continue;
-                        };
-                        // SAFETY: toolbar is live and command is passed by value.
-                        let index = unsafe {
-                            SendMessageW(toolbar, TB_COMMANDTOINDEX, usize::from(command), 0)
-                        };
-                        assert!(index >= 0);
-                        let mut button = TBBUTTON::default();
-                        // SAFETY: button remains writable through this
-                        // synchronous query for a validated toolbar index.
-                        let found = unsafe {
-                            SendMessageW(
-                                toolbar,
-                                TB_GETBUTTON,
-                                usize::try_from(index).map_err(|_| {
-                                    io::Error::other("invalid native toolbar index")
-                                })?,
-                                (&mut button as *mut TBBUTTON) as isize,
-                            )
-                        };
-                        assert_ne!(found, 0);
-                        assert_eq!(button.iBitmap, I_IMAGENONE);
-                        assert_eq!(button.idCommand, i32::from(command));
-                    }
-                }
-                destroy_toolbar(left);
-                destroy_toolbar(right);
+        let metrics = RailDensity::Comfortable.metrics(dpi);
+        let available_height = scale_dip(352, dpi);
+        let left_placements = calculate_command_rail_layout(&LEFT_RAIL, available_height, metrics)
+            .map_err(|error| io::Error::other(format!("test layout failed: {error:?}")))?;
+        let right_placements =
+            calculate_command_rail_layout(&RIGHT_RAIL, available_height, metrics)
+                .map_err(|error| io::Error::other(format!("test layout failed: {error:?}")))?;
+        let left = CommandRail::create(parent, &LEFT_RAIL, &LEFT_TOOLS)?;
+        let right = match CommandRail::create(parent, &RIGHT_RAIL, &RIGHT_TOOLS) {
+            Ok(rail) => rail,
+            Err(error) => {
+                left.destroy();
+                // SAFETY: parent is the hidden test window created above.
+                unsafe { DestroyWindow(parent) };
+                return Err(error.into());
             }
+        };
+        assert_eq!(left.button_count(), 10);
+        assert_eq!(right.button_count(), 9);
+
+        let right_origin = metrics.rail_width + scale_dip(20, dpi);
+        left.arrange(0, &left_placements);
+        right.arrange(right_origin, &right_placements);
+
+        let result = (|| -> io::Result<()> {
+            let mut actual_ids = Vec::with_capacity(19);
+            for (rail, expected, tools, origin_x) in [
+                (&left, left_placements.as_slice(), LEFT_TOOLS.as_slice(), 0),
+                (
+                    &right,
+                    right_placements.as_slice(),
+                    RIGHT_TOOLS.as_slice(),
+                    right_origin,
+                ),
+            ] {
+                for placement in expected {
+                    let button = rail
+                        .command_hwnd(placement.command)
+                        .ok_or_else(|| io::Error::other("native command button is missing"))?;
+                    actual_ids.push(placement.command);
+                    let tool = tools
+                        .iter()
+                        .find(|tool| tool.id == placement.command)
+                        .ok_or_else(|| io::Error::other("native command label is missing"))?;
+                    assert_eq!(window_text(button)?, tool.label);
+                    let rect = rail.command_rect(placement.command)?;
+                    assert_eq!(rect.left, origin_x + placement.x);
+                    assert_eq!(rect.top, placement.y);
+                    assert_eq!(rect.right - rect.left, placement.width);
+                    assert_eq!(rect.bottom - rect.top, placement.height);
+                    // SAFETY: button is live and GWL_STYLE is a value query.
+                    let style = unsafe { GetWindowLongPtrW(button, GWL_STYLE) } as u32;
+                    assert_ne!(style & BS_MULTILINE as u32, 0);
+                    assert_ne!(style & WS_TABSTOP, 0);
+                    // SAFETY: button is live and the query has no pointers.
+                    assert_ne!(unsafe { IsWindowEnabled(button) }, 0);
+                    rail.set_enabled(placement.command, false);
+                    // SAFETY: button remains live after EnableWindow.
+                    assert_eq!(unsafe { IsWindowEnabled(button) }, 0);
+                    rail.set_enabled(placement.command, true);
+                }
+            }
+            actual_ids.sort_unstable();
+            actual_ids.dedup();
+            assert_eq!(actual_ids.len(), 19);
+            assert!(!actual_ids.contains(&UNIFY_PATH));
             Ok(())
         })();
-        // SAFETY: parent is the hidden test window created above and is
-        // destroyed after all child toolbars have released their resources.
+        left.destroy();
+        right.destroy();
+        // SAFETY: all command-rail controls and tooltip text relationships have
+        // been torn down; parent is the remaining hidden test window.
         unsafe { DestroyWindow(parent) };
         result.map_err(Into::into)
     }
 
-    #[test]
-    fn synthetic_toolbar_strip_scales_into_a_masked_image_list()
-    -> Result<(), Box<dyn std::error::Error>> {
-        for dpi in [96, 120, 144, 192] {
-            let geometry = toolbar_image_geometry(10, dpi)
-                .ok_or_else(|| io::Error::other("invalid test toolbar geometry"))?;
-            // SAFETY: positive dimensions create a caller-owned monochrome
-            // bitmap with no borrowed pixel storage.
-            let source = unsafe {
-                CreateBitmap(
-                    TOOLBAR_BITMAP_WIDTH * 10,
-                    TOOLBAR_BITMAP_HEIGHT,
-                    1,
-                    1,
-                    null(),
-                )
-            };
-            if source.is_null() {
-                return Err(io::Error::last_os_error().into());
-            }
-            let images = create_toolbar_image_list_from_bitmap(source, geometry, 10)?;
-            // SAFETY: images is live and owned by this test until destroyed below.
-            assert_eq!(unsafe { ImageList_GetImageCount(images) }, 10);
-            // SAFETY: images is destroyed exactly once after the count query.
-            unsafe { ImageList_Destroy(images) };
+    fn window_text(window: HWND) -> io::Result<String> {
+        // SAFETY: window is live and this query has no pointer payload.
+        let length = unsafe { GetWindowTextLengthW(window) };
+        let capacity = usize::try_from(length)
+            .map_err(|_| io::Error::other("invalid native button text length"))?
+            .saturating_add(1);
+        let mut buffer = vec![0_u16; capacity];
+        // SAFETY: buffer is writable for its checked length and retained through
+        // the synchronous text copy from the live child window.
+        let copied = unsafe {
+            GetWindowTextW(
+                window,
+                buffer.as_mut_ptr(),
+                i32::try_from(buffer.len())
+                    .map_err(|_| io::Error::other("native button text is too long"))?,
+            )
+        };
+        if copied < 0 {
+            return Err(io::Error::last_os_error());
         }
-        Ok(())
+        buffer.truncate(usize::try_from(copied).unwrap_or_default());
+        Ok(String::from_utf16_lossy(&buffer))
     }
 
     #[test]
