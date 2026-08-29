@@ -24,10 +24,8 @@ use windows_sys::Win32::Globalization::{
     MultiByteToWideChar, NORM_IGNORECASE,
 };
 use windows_sys::Win32::Graphics::Gdi::{
-    BitBlt, CLIP_DEFAULT_PRECIS, COLOR_WINDOW, CreateCompatibleBitmap, CreateCompatibleDC,
-    CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH, DEFAULT_QUALITY, DeleteDC, DeleteObject,
-    FF_DONTCARE, FW_NORMAL, GetDC, HBITMAP, HFONT, OUT_DEFAULT_PRECIS, ReleaseDC, SRCCOPY,
-    SelectObject, UpdateWindow,
+    CLIP_DEFAULT_PRECIS, COLOR_WINDOW, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH,
+    DEFAULT_QUALITY, DeleteObject, FF_DONTCARE, FW_NORMAL, HFONT, OUT_DEFAULT_PRECIS, UpdateWindow,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, MoveFileW,
@@ -42,13 +40,16 @@ use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
 use windows_sys::Win32::System::SystemServices::{SS_CENTERIMAGE, SS_ETCHEDHORZ, SS_SUNKEN};
 use windows_sys::Win32::System::Time::FileTimeToSystemTime;
 use windows_sys::Win32::UI::Controls::{
-    ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_FMT, LVCF_TEXT,
-    LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED,
-    LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETNEXTITEM,
-    LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE,
-    LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVNI_FOCUSED, LVNI_SELECTED,
-    LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS,
-    LVSIL_SMALL, NM_DBLCLK, NMHDR,
+    CCS_NOPARENTALIGN, CCS_NORESIZE, CCS_VERT, ICC_BAR_CLASSES, ICC_LISTVIEW_CLASSES,
+    INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT,
+    LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW,
+    LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
+    LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE,
+    LVM_SETITEMTEXTW, LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_FULLROWSELECT,
+    LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_DBLCLK,
+    NMHDR, NMLISTVIEW, TB_ADDBITMAP, TB_ADDBUTTONS, TB_BUTTONSTRUCTSIZE, TB_ENABLEBUTTON,
+    TB_SETBITMAPSIZE, TB_SETBUTTONSIZE, TBADDBITMAP, TBBUTTON, TBSTATE_ENABLED, TBSTYLE_BUTTON,
+    TBSTYLE_FLAT, TBSTYLE_SEP, TBSTYLE_TOOLTIPS, TBSTYLE_WRAPABLE, TOOLBARCLASSNAMEW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetKeyState, SetFocus, VK_CONTROL, VK_DELETE, VK_ESCAPE, VK_SHIFT,
@@ -58,25 +59,26 @@ use windows_sys::Win32::UI::Shell::{
     SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, BM_SETIMAGE, BN_CLICKED, BS_BITMAP, BS_DEFPUSHBUTTON, BS_FLAT, CB_ADDSTRING,
-    CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
-    CW_USEDEFAULT, CheckMenuItem, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-    DestroyWindow, DispatchMessageW, DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, GWLP_USERDATA,
-    GetClientRect, GetMessageW, GetParent, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW,
-    HMENU, IDC_ARROW, IDCANCEL, IDOK, IMAGE_BITMAP, IsDialogMessageW, LR_CREATEDIBSECTION,
-    LoadCursorW, LoadIconW, LoadImageW, MB_OKCANCEL, MB_YESNO, MF_BYCOMMAND, MF_CHECKED,
-    MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, MessageBoxW,
-    MoveWindow, PostQuitMessage, RegisterClassExW, SW_SHOW, SendMessageW, SetForegroundWindow,
-    SetMenu, SetWindowLongPtrW, ShowWindow, TranslateMessage, WM_CLOSE, WM_COMMAND, WM_CREATE,
-    WM_DESTROY, WM_DROPFILES, WM_KEYDOWN, WM_KEYUP, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY,
-    WM_SETFONT, WM_SIZE, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
-    WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
-    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    AppendMenuW, BN_CLICKED, BS_DEFPUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL,
+    CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem,
+    CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, GWLP_USERDATA, GetClientRect, GetMessageW,
+    GetParent, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, HMENU, IDC_ARROW, IDCANCEL,
+    IDOK, IsDialogMessageW, LoadCursorW, LoadIconW, MB_OKCANCEL, MB_YESNO, MF_BYCOMMAND,
+    MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG,
+    MessageBoxW, MoveWindow, PostQuitMessage, RegisterClassExW, SW_SHOW, SendMessageW,
+    SetForegroundWindow, SetMenu, SetWindowLongPtrW, ShowWindow, TranslateMessage, WM_CLOSE,
+    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN, WM_KEYUP, WM_NCCREATE,
+    WM_NCDESTROY, WM_NOTIFY, WM_SETFONT, WM_SIZE, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD,
+    WS_CLIPCHILDREN, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
+    WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::*;
 
 const LIST_ID: usize = 1000;
+const LEFT_TOOLBAR_ID: usize = 1001;
+const RIGHT_TOOLBAR_ID: usize = 1002;
 const STATUS_ID: usize = 1007;
 
 struct AppState {
@@ -84,10 +86,8 @@ struct AppState {
     status: HWND,
     menu: HMENU,
     font: HFONT,
-    toolbar_strips: Vec<HBITMAP>,
-    button_bitmaps: Vec<HBITMAP>,
-    left_buttons: Vec<HWND>,
-    right_buttons: Vec<HWND>,
+    left_toolbar: HWND,
+    right_toolbar: HWND,
     model: LegacyList,
     shown_columns: [bool; 4],
     directory_mode: Option<DirectoryMode>,
@@ -106,10 +106,8 @@ impl AppState {
             status: null_mut(),
             menu: null_mut(),
             font: null_mut(),
-            toolbar_strips: Vec::new(),
-            button_bitmaps: Vec::new(),
-            left_buttons: Vec::new(),
-            right_buttons: Vec::new(),
+            left_toolbar: null_mut(),
+            right_toolbar: null_mut(),
             model: LegacyList::new(),
             shown_columns: [false; 4],
             directory_mode: None,
@@ -146,7 +144,7 @@ unsafe fn run_unsafe() -> io::Result<()> {
     let _com = ComGuard;
     let controls = INITCOMMONCONTROLSEX {
         dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
-        dwICC: ICC_LISTVIEW_CLASSES,
+        dwICC: ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES,
     };
     // SAFETY: controls points to a fully initialized structure.
     unsafe { InitCommonControlsEx(&controls) };
@@ -283,13 +281,25 @@ unsafe extern "system" fn window_proc(
             let header = lparam as *const NMHDR;
             if !header.is_null()
                 && unsafe { (*header).hwndFrom } == unsafe { (*state_ptr).list_window }
-                && unsafe { (*header).code } == NM_DBLCLK
             {
-                let previous_states = unsafe { (*state_ptr).command_states };
-                unsafe { dispatch_command(window, &mut *state_ptr, MANUAL_CHANGE) };
-                unsafe {
-                    (*state_ptr).command_states = previous_states;
-                    apply_command_states(&*state_ptr);
+                if unsafe { (*header).code } == LVN_ITEMCHANGED {
+                    let notification = lparam as *const NMLISTVIEW;
+                    if !notification.is_null()
+                        && selection_command_state_changed(
+                            unsafe { (*notification).uChanged },
+                            unsafe { (*notification).uOldState },
+                            unsafe { (*notification).uNewState },
+                        )
+                    {
+                        unsafe { update_controls(&mut *state_ptr) };
+                    }
+                } else if unsafe { (*header).code } == NM_DBLCLK {
+                    let previous_states = unsafe { (*state_ptr).command_states };
+                    unsafe { dispatch_command(window, &mut *state_ptr, MANUAL_CHANGE) };
+                    unsafe {
+                        (*state_ptr).command_states = previous_states;
+                        apply_command_states(&*state_ptr);
+                    }
                 }
             }
             0
@@ -317,12 +327,6 @@ unsafe extern "system" fn window_proc(
             if !state_ptr.is_null() {
                 if !unsafe { (*state_ptr).font }.is_null() {
                     unsafe { DeleteObject((*state_ptr).font) };
-                }
-                for bitmap in unsafe { &(*state_ptr).button_bitmaps } {
-                    unsafe { DeleteObject(*bitmap) };
-                }
-                for bitmap in unsafe { &(*state_ptr).toolbar_strips } {
-                    unsafe { DeleteObject(*bitmap) };
                 }
                 // SAFETY: this is the single reclamation of Box::into_raw from run_unsafe.
                 unsafe { drop(Box::from_raw(state_ptr)) };
@@ -407,28 +411,17 @@ unsafe fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> 
             SS_CENTERIMAGE | SS_SUNKEN,
         )
     };
-    for tool in LEFT_TOOLS {
-        state.left_buttons.push(unsafe {
-            child(
-                window,
-                "BUTTON",
-                tool.label,
-                tool.id,
-                (BS_BITMAP | BS_FLAT) as u32,
-            )
-        });
-    }
-    for tool in RIGHT_TOOLS {
-        state.right_buttons.push(unsafe {
-            child(
-                window,
-                "BUTTON",
-                tool.label,
-                tool.id,
-                (BS_BITMAP | BS_FLAT) as u32,
-            )
-        });
-    }
+    state.left_toolbar =
+        unsafe { create_toolbar(window, instance, LEFT_TOOLBAR_ID, 130, &LEFT_TOOLBAR_ITEMS)? };
+    state.right_toolbar = unsafe {
+        create_toolbar(
+            window,
+            instance,
+            RIGHT_TOOLBAR_ID,
+            132,
+            &RIGHT_TOOLBAR_ITEMS,
+        )?
+    };
     let face = wide("MS Sans Serif");
     state.font = unsafe {
         CreateFontW(
@@ -449,15 +442,10 @@ unsafe fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> 
         )
     };
     if !state.font.is_null() {
-        for control in std::iter::once(&state.list_window)
-            .chain(std::iter::once(&state.status))
-            .chain(state.left_buttons.iter())
-            .chain(state.right_buttons.iter())
-        {
+        for control in [&state.list_window, &state.status] {
             unsafe { SendMessageW(*control, WM_SETFONT, state.font as usize, 1) };
         }
     }
-    unsafe { install_toolbar_images(window, state, instance) };
     // SAFETY: window is a live top-level HWND configured for shell drops.
     unsafe { DragAcceptFiles(window, 1) };
     let menu = unsafe { create_menu() };
@@ -512,88 +500,113 @@ unsafe fn child(parent: HWND, class: &str, text: &str, id: u16, extra_style: u32
     }
 }
 
-unsafe fn install_toolbar_images(
-    window: HWND,
-    state: &mut AppState,
+unsafe fn create_toolbar(
+    parent: HWND,
     instance: windows_sys::Win32::Foundation::HINSTANCE,
-) {
-    let left = state.left_buttons.clone();
-    let right = state.right_buttons.clone();
-    unsafe { install_toolbar_strip(window, state, instance, 130, &left) };
-    unsafe { install_toolbar_strip(window, state, instance, 132, &right) };
-}
-
-unsafe fn install_toolbar_strip(
-    window: HWND,
-    state: &mut AppState,
-    instance: windows_sys::Win32::Foundation::HINSTANCE,
+    control_id: usize,
     resource_id: u16,
-    buttons: &[HWND],
-) {
-    let strip = unsafe {
-        LoadImageW(
+    items: &[ToolbarItem],
+) -> io::Result<HWND> {
+    let styles = WS_CHILD
+        | WS_VISIBLE
+        | TBSTYLE_FLAT
+        | TBSTYLE_TOOLTIPS
+        | TBSTYLE_WRAPABLE
+        | CCS_VERT as u32
+        | CCS_NORESIZE as u32
+        | CCS_NOPARENTALIGN as u32;
+    let toolbar = unsafe {
+        CreateWindowExW(
+            0,
+            TOOLBARCLASSNAMEW,
+            null(),
+            styles,
+            0,
+            0,
+            0,
+            0,
+            parent,
+            control_id as *mut c_void,
             instance,
-            int_resource(resource_id),
-            IMAGE_BITMAP,
-            0,
-            0,
-            LR_CREATEDIBSECTION,
-        ) as HBITMAP
+            null_mut(),
+        )
     };
-    if strip.is_null() {
-        return;
-    }
-    let screen = unsafe { GetDC(window) };
-    if screen.is_null() {
-        unsafe { DeleteObject(strip) };
-        return;
-    }
-    let source_dc = unsafe { CreateCompatibleDC(screen) };
-    if source_dc.is_null() {
-        unsafe {
-            ReleaseDC(window, screen);
-            DeleteObject(strip);
-        }
-        return;
-    }
-    let old_source = unsafe { SelectObject(source_dc, strip) };
-    for (index, button) in buttons.iter().enumerate() {
-        let target_dc = unsafe { CreateCompatibleDC(screen) };
-        let bitmap = unsafe { CreateCompatibleBitmap(screen, 38, 24) };
-        if target_dc.is_null() || bitmap.is_null() {
-            if !target_dc.is_null() {
-                unsafe { DeleteDC(target_dc) };
-            }
-            if !bitmap.is_null() {
-                unsafe { DeleteObject(bitmap) };
-            }
-            continue;
-        }
-        let old_target = unsafe { SelectObject(target_dc, bitmap) };
-        unsafe {
-            BitBlt(
-                target_dc,
-                0,
-                0,
-                38,
-                24,
-                source_dc,
-                index as i32 * 38,
-                0,
-                SRCCOPY,
-            );
-            SelectObject(target_dc, old_target);
-            DeleteDC(target_dc);
-            SendMessageW(*button, BM_SETIMAGE, IMAGE_BITMAP as usize, bitmap as isize);
-        }
-        state.button_bitmaps.push(bitmap);
+    if toolbar.is_null() {
+        return Err(io::Error::last_os_error());
     }
     unsafe {
-        SelectObject(source_dc, old_source);
-        DeleteDC(source_dc);
-        ReleaseDC(window, screen);
+        SendMessageW(toolbar, TB_BUTTONSTRUCTSIZE, size_of::<TBBUTTON>(), 0);
+        SendMessageW(
+            toolbar,
+            TB_SETBITMAPSIZE,
+            0,
+            packed_dimensions(TOOLBAR_BITMAP_WIDTH, TOOLBAR_BITMAP_HEIGHT),
+        );
+        SendMessageW(
+            toolbar,
+            TB_SETBUTTONSIZE,
+            0,
+            packed_dimensions(TOOLBAR_WIDTH, TOOLBAR_BUTTON_HEIGHT),
+        );
     }
-    state.toolbar_strips.push(strip);
+    let bitmap_count = items
+        .iter()
+        .filter(|item| matches!(item, ToolbarItem::Command(_)))
+        .count();
+    let bitmap = TBADDBITMAP {
+        hInst: instance,
+        nID: usize::from(resource_id),
+    };
+    let first_bitmap = unsafe {
+        SendMessageW(
+            toolbar,
+            TB_ADDBITMAP,
+            bitmap_count,
+            (&raw const bitmap) as isize,
+        )
+    };
+    let first_bitmap = i32::try_from(first_bitmap)
+        .ok()
+        .filter(|index| *index >= 0)
+        .ok_or_else(|| io::Error::other("could not load native toolbar bitmap resource"))?;
+    let mut image_index = 0_i32;
+    let buttons = items
+        .iter()
+        .map(|item| match *item {
+            ToolbarItem::Command(command) => {
+                let button = TBBUTTON {
+                    iBitmap: first_bitmap + image_index,
+                    idCommand: i32::from(command),
+                    fsState: TBSTATE_ENABLED as u8,
+                    fsStyle: TBSTYLE_BUTTON as u8,
+                    ..TBBUTTON::default()
+                };
+                image_index += 1;
+                button
+            }
+            ToolbarItem::Separator => TBBUTTON {
+                iBitmap: TOOLBAR_SEPARATOR_SIZE,
+                fsStyle: TBSTYLE_SEP as u8,
+                ..TBBUTTON::default()
+            },
+        })
+        .collect::<Vec<_>>();
+    let added = unsafe {
+        SendMessageW(
+            toolbar,
+            TB_ADDBUTTONS,
+            buttons.len(),
+            buttons.as_ptr() as isize,
+        )
+    };
+    if added == 0 {
+        return Err(io::Error::other("could not add native toolbar buttons"));
+    }
+    Ok(toolbar)
+}
+
+const fn packed_dimensions(width: i32, height: i32) -> isize {
+    ((width as u32 & 0xFFFF) | ((height as u32 & 0xFFFF) << 16)) as isize
 }
 
 unsafe fn arrange(window: HWND, state: &AppState) {
@@ -602,41 +615,23 @@ unsafe fn arrange(window: HWND, state: &AppState) {
     unsafe { GetClientRect(window, &mut rect) };
     let width = rect.right.max(TOOLBAR_WIDTH * 2 + 1);
     let height = rect.bottom.max(STATUS_HEIGHT + 1);
-    let separator_height = 8;
-    let button_height = 32;
-    for (index, button) in state.left_buttons.iter().enumerate() {
-        let separators = [1_usize, 4, 7]
-            .into_iter()
-            .filter(|boundary| index >= *boundary)
-            .count() as i32;
-        unsafe {
-            MoveWindow(
-                *button,
-                0,
-                index as i32 * button_height + separators * separator_height,
-                TOOLBAR_WIDTH,
-                button_height,
-                1,
-            )
-        };
-    }
-    for (index, button) in state.right_buttons.iter().enumerate() {
-        let separators = [1_usize, 4, 7]
-            .into_iter()
-            .filter(|boundary| index >= *boundary)
-            .count() as i32;
-        unsafe {
-            MoveWindow(
-                *button,
-                width - TOOLBAR_WIDTH,
-                index as i32 * button_height + separators * separator_height,
-                TOOLBAR_WIDTH,
-                button_height,
-                1,
-            )
-        };
-    }
     unsafe {
+        MoveWindow(
+            state.left_toolbar,
+            0,
+            0,
+            TOOLBAR_WIDTH,
+            height - STATUS_HEIGHT,
+            1,
+        );
+        MoveWindow(
+            state.right_toolbar,
+            width - TOOLBAR_WIDTH,
+            0,
+            TOOLBAR_WIDTH,
+            height - STATUS_HEIGHT,
+            1,
+        );
         MoveWindow(
             state.list_window,
             TOOLBAR_WIDTH,
@@ -2014,34 +2009,22 @@ unsafe fn update_controls(state: &mut AppState) {
 
 unsafe fn apply_command_states(state: &AppState) {
     for tool in LEFT_TOOLS {
-        if let Some(button) = state
-            .left_buttons
-            .iter()
-            .zip(LEFT_TOOLS)
-            .find_map(|(button, spec)| (spec.id == tool.id).then_some(button))
-        {
-            unsafe {
-                EnableWindow(
-                    *button,
-                    i32::from(state.command_states[usize::from(tool.id - APPLY)]),
-                )
-            };
-        }
+        unsafe {
+            set_toolbar_button_enabled(
+                state.left_toolbar,
+                tool.id,
+                state.command_states[usize::from(tool.id - APPLY)],
+            )
+        };
     }
     for tool in RIGHT_TOOLS {
-        if let Some(button) = state
-            .right_buttons
-            .iter()
-            .zip(RIGHT_TOOLS)
-            .find_map(|(button, spec)| (spec.id == tool.id).then_some(button))
-        {
-            unsafe {
-                EnableWindow(
-                    *button,
-                    i32::from(state.command_states[usize::from(tool.id - APPLY)]),
-                )
-            };
-        }
+        unsafe {
+            set_toolbar_button_enabled(
+                state.right_toolbar,
+                tool.id,
+                state.command_states[usize::from(tool.id - APPLY)],
+            )
+        };
     }
     for id in APPLY..=VERSION {
         let enabled = state.command_states[usize::from(id - APPLY)];
@@ -2072,6 +2055,19 @@ unsafe fn apply_command_states(state: &AppState) {
     }
     if !state.menu.is_null() {
         unsafe { DrawMenuBar(GetParent(state.list_window)) };
+    }
+}
+
+unsafe fn set_toolbar_button_enabled(toolbar: HWND, command: CommandId, enabled: bool) {
+    if !toolbar.is_null() {
+        unsafe {
+            SendMessageW(
+                toolbar,
+                TB_ENABLEBUTTON,
+                usize::from(command),
+                enabled as isize,
+            )
+        };
     }
 }
 
