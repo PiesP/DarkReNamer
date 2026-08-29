@@ -970,6 +970,18 @@ mod tests {
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
 
+    fn test_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("dark-renamer-platform-memory-{name}"))
+    }
+
+    fn work_path(name: &str) -> PathBuf {
+        test_root("work").join(name)
+    }
+
+    fn other_path(name: &str) -> PathBuf {
+        test_root("other").join(name)
+    }
+
     struct Fixture {
         root: PathBuf,
     }
@@ -1019,7 +1031,7 @@ mod tests {
                 every_move_had_intent: true,
                 mutation_supported: true,
             };
-            state.insert(Path::new("/work"), EntryKind::Directory);
+            state.insert(&test_root("work"), EntryKind::Directory);
             state
         }
 
@@ -1152,7 +1164,7 @@ mod tests {
         for name in names {
             state
                 .borrow_mut()
-                .insert(&Path::new("/work").join(name), EntryKind::RegularFile);
+                .insert(&work_path(name), EntryKind::RegularFile);
         }
         let filesystem = MemoryFileSystem {
             state: Rc::clone(&state),
@@ -1167,15 +1179,18 @@ mod tests {
         }
     }
 
-    fn test_journal_header(original: &str, final_path: &str) -> JournalHeader {
+    fn test_journal_header(
+        original: impl Into<PathBuf>,
+        final_path: impl Into<PathBuf>,
+    ) -> JournalHeader {
         JournalHeader {
             transaction_id: TransactionId(1),
             kind: TransactionKind::Apply,
             generation: Generation(1),
             items: vec![JournalItem {
                 source_id: SourceId(1),
-                original: PathBuf::from(original),
-                final_path: PathBuf::from(final_path),
+                original: original.into(),
+                final_path: final_path.into(),
                 fingerprint: Fingerprint {
                     identity: FileIdentity::from_u64(1, 1),
                     kind: EntryKind::RegularFile,
@@ -1200,9 +1215,9 @@ mod tests {
             source,
         })?;
         let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
-        engine.admit([PathBuf::from("/work/a.txt")])?;
+        engine.admit([work_path("a.txt")])?;
         let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
-        if let Some(source) = state.borrow_mut().entries.get_mut(Path::new("/work/a.txt")) {
+        if let Some(source) = state.borrow_mut().entries.get_mut(&work_path("a.txt")) {
             source.length = source.length.saturating_add(1);
         }
         assert!(matches!(
@@ -1212,11 +1227,11 @@ mod tests {
         assert_eq!(fs::read_dir(&fixture.root).map_or(0, Iterator::count), 0);
 
         let (mut engine, state) = memory_engine(&fixture, &["b.txt"])?;
-        engine.admit([PathBuf::from("/work/b.txt")])?;
+        engine.admit([work_path("b.txt")])?;
         let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
         state
             .borrow_mut()
-            .insert(Path::new("/work/new-b.txt"), EntryKind::RegularFile);
+            .insert(&work_path("new-b.txt"), EntryKind::RegularFile);
         assert!(matches!(
             engine.apply_confirmed(preview.id(), 1),
             Err(PlatformError::DestinationChanged { .. })
@@ -1224,9 +1239,9 @@ mod tests {
         assert_eq!(fs::read_dir(&fixture.root).map_or(0, Iterator::count), 0);
 
         let (mut engine, state) = memory_engine(&fixture, &["c.txt"])?;
-        engine.admit([PathBuf::from("/work/c.txt")])?;
+        engine.admit([work_path("c.txt")])?;
         let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
-        if let Some(parent) = state.borrow_mut().entries.get_mut(Path::new("/work")) {
+        if let Some(parent) = state.borrow_mut().entries.get_mut(&test_root("work")) {
             parent.identity.file[0] = parent.identity.file[0].wrapping_add(1);
         }
         assert!(matches!(
@@ -1243,7 +1258,7 @@ mod tests {
             source,
         })?;
         let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
-        engine.admit([PathBuf::from("/work/a.txt")])?;
+        engine.admit([work_path("a.txt")])?;
         let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
         state.borrow_mut().failure = Some(InjectedFailure::DestinationRace(2));
         assert!(matches!(
@@ -1254,8 +1269,8 @@ mod tests {
             })
         ));
         let state = state.borrow();
-        assert!(state.entries.contains_key(Path::new("/work/a.txt")));
-        assert!(state.entries.contains_key(Path::new("/work/new-a.txt")));
+        assert!(state.entries.contains_key(&work_path("a.txt")));
+        assert!(state.entries.contains_key(&work_path("new-a.txt")));
         assert_eq!(state.entries.len(), 3);
         Ok(())
     }
@@ -1267,7 +1282,7 @@ mod tests {
             source,
         })?;
         let (mut engine, _state) = memory_engine(&fixture, &["a.txt"])?;
-        engine.admit([PathBuf::from("/work/a.txt")])?;
+        engine.admit([work_path("a.txt")])?;
         let first = engine.preview(&[RenameRule::Prefix("one-".into())])?;
         assert!(matches!(
             engine.apply_confirmed(first.id(), 2),
@@ -1281,7 +1296,7 @@ mod tests {
             engine.apply_confirmed(first.id(), 1),
             Err(PlatformError::StalePlan)
         ));
-        engine.admit([PathBuf::from("/work/a.txt")])?;
+        engine.admit([work_path("a.txt")])?;
         assert!(matches!(
             engine.apply_confirmed(second.id(), 1),
             Err(PlatformError::StalePlan)
@@ -1324,29 +1339,29 @@ mod tests {
         })?;
         let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
         assert!(matches!(
-            engine.admit([PathBuf::from("/work/a.txt"), PathBuf::from("/work/a.txt")]),
+            engine.admit([work_path("a.txt"), work_path("a.txt")]),
             Err(PlatformError::AdmissionRejected {
                 reason: AdmissionRejection::DuplicateIdentity,
                 ..
             })
         ));
 
-        if let Some(entry) = state.borrow_mut().entries.get_mut(Path::new("/work/a.txt")) {
+        if let Some(entry) = state.borrow_mut().entries.get_mut(&work_path("a.txt")) {
             entry.kind = EntryKind::SymbolicLink;
         }
         assert!(matches!(
-            engine.admit([PathBuf::from("/work/a.txt")]),
+            engine.admit([work_path("a.txt")]),
             Err(PlatformError::AdmissionRejected {
                 reason: AdmissionRejection::SymbolicLink,
                 ..
             })
         ));
 
-        if let Some(entry) = state.borrow_mut().entries.get_mut(Path::new("/work/a.txt")) {
+        if let Some(entry) = state.borrow_mut().entries.get_mut(&work_path("a.txt")) {
             entry.kind = EntryKind::Directory;
         }
         assert!(matches!(
-            engine.admit([PathBuf::from("/work/a.txt")]),
+            engine.admit([work_path("a.txt")]),
             Err(PlatformError::AdmissionRejected {
                 reason: AdmissionRejection::NotRegularFile,
                 ..
@@ -1363,11 +1378,7 @@ mod tests {
             source,
         })?;
         let (mut engine, state) = memory_engine(&fixture, &["a.txt", "b.txt", "c.txt"])?;
-        engine.admit([
-            PathBuf::from("/work/a.txt"),
-            PathBuf::from("/work/b.txt"),
-            PathBuf::from("/work/c.txt"),
-        ])?;
+        engine.admit([work_path("a.txt"), work_path("b.txt"), work_path("c.txt")])?;
         let preview = engine.preview(&[
             replace("a", "__a__"),
             replace("b", "a"),
@@ -1380,9 +1391,9 @@ mod tests {
         let state = state.borrow();
         assert_eq!(state.move_calls, 6);
         assert!(state.every_move_had_intent);
-        assert!(state.entries.contains_key(Path::new("/work/a.txt")));
-        assert!(state.entries.contains_key(Path::new("/work/b.txt")));
-        assert!(state.entries.contains_key(Path::new("/work/c.txt")));
+        assert!(state.entries.contains_key(&work_path("a.txt")));
+        assert!(state.entries.contains_key(&work_path("b.txt")));
+        assert!(state.entries.contains_key(&work_path("c.txt")));
         assert!(
             state
                 .entries
@@ -1399,7 +1410,7 @@ mod tests {
             source,
         })?;
         let (mut engine, state) = memory_engine(&fixture, &["a.txt", "b.txt"])?;
-        engine.admit([PathBuf::from("/work/a.txt"), PathBuf::from("/work/b.txt")])?;
+        engine.admit([work_path("a.txt"), work_path("b.txt")])?;
         let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
         state.borrow_mut().failure = Some(InjectedFailure::DefiniteBefore(2));
         assert!(matches!(
@@ -1410,8 +1421,8 @@ mod tests {
             })
         ));
         let state = state.borrow();
-        assert!(state.entries.contains_key(Path::new("/work/a.txt")));
-        assert!(state.entries.contains_key(Path::new("/work/b.txt")));
+        assert!(state.entries.contains_key(&work_path("a.txt")));
+        assert!(state.entries.contains_key(&work_path("b.txt")));
         assert_eq!(state.entries.len(), 3);
         assert!(!engine.recovery_required);
         Ok(())
@@ -1424,7 +1435,7 @@ mod tests {
             source,
         })?;
         let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
-        engine.admit([PathBuf::from("/work/a.txt")])?;
+        engine.admit([work_path("a.txt")])?;
         let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
         state.borrow_mut().failure = Some(InjectedFailure::AmbiguousAfter(1));
         assert!(matches!(
@@ -1442,7 +1453,7 @@ mod tests {
             source,
         })?;
         let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
-        engine.admit([PathBuf::from("/work/a.txt")])?;
+        engine.admit([work_path("a.txt")])?;
         let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
         state.borrow_mut().failure = Some(InjectedFailure::AmbiguousAfter(1));
         assert!(matches!(
@@ -1460,12 +1471,7 @@ mod tests {
             inspection.transaction_id()
         );
         assert!(!engine.recovery_required);
-        assert!(
-            state
-                .borrow()
-                .entries
-                .contains_key(Path::new("/work/a.txt"))
-        );
+        assert!(state.borrow().entries.contains_key(&work_path("a.txt")));
         assert!(matches!(
             engine.recover(token, RecoveryAction::RollBack),
             Err(PlatformError::StaleRecovery)
@@ -1480,7 +1486,7 @@ mod tests {
             source,
         })?;
         let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
-        engine.admit([PathBuf::from("/work/a.txt")])?;
+        engine.admit([work_path("a.txt")])?;
         let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
         state.borrow_mut().failure = Some(InjectedFailure::AmbiguousAfter(1));
         assert!(matches!(
@@ -1490,25 +1496,17 @@ mod tests {
         let stale = engine.inspect_recovery()?.token();
         state
             .borrow_mut()
-            .insert(Path::new("/work/new-a.txt"), EntryKind::RegularFile);
+            .insert(&work_path("new-a.txt"), EntryKind::RegularFile);
         assert!(matches!(
             engine.recover(stale, RecoveryAction::RollForward),
             Err(PlatformError::StaleRecovery)
         ));
-        state
-            .borrow_mut()
-            .entries
-            .remove(Path::new("/work/new-a.txt"));
+        state.borrow_mut().entries.remove(&work_path("new-a.txt"));
 
         let inspection = engine.inspect_recovery()?;
         engine.recover(inspection.token(), RecoveryAction::RollForward)?;
         assert!(!engine.recovery_required);
-        assert!(
-            state
-                .borrow()
-                .entries
-                .contains_key(Path::new("/work/new-a.txt"))
-        );
+        assert!(state.borrow().entries.contains_key(&work_path("new-a.txt")));
         assert_eq!(engine.latest_transaction()?.kind(), TransactionKind::Apply);
         Ok(())
     }
@@ -1521,7 +1519,7 @@ mod tests {
             source,
         })?;
         let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
-        engine.admit([PathBuf::from("/work/a.txt")])?;
+        engine.admit([work_path("a.txt")])?;
         let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
         state.borrow_mut().failure = Some(InjectedFailure::AmbiguousAfter(1));
         assert!(matches!(
@@ -1547,12 +1545,7 @@ mod tests {
         let inspection = restarted.inspect_recovery()?;
         restarted.recover(inspection.token(), RecoveryAction::RollBack)?;
         assert!(!restarted.recovery_required);
-        assert!(
-            state
-                .borrow()
-                .entries
-                .contains_key(Path::new("/work/a.txt"))
-        );
+        assert!(state.borrow().entries.contains_key(&work_path("a.txt")));
         Ok(())
     }
 
@@ -1563,7 +1556,7 @@ mod tests {
             source,
         })?;
         let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
-        engine.admit([PathBuf::from("/work/a.txt")])?;
+        engine.admit([work_path("a.txt")])?;
         let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
         state.borrow_mut().failure = Some(InjectedFailure::AmbiguousAfter(1));
         assert!(matches!(
@@ -1611,7 +1604,7 @@ mod tests {
             source,
         })?;
         let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
-        engine.admit([PathBuf::from("/work/a.txt")])?;
+        engine.admit([work_path("a.txt")])?;
         let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
         state.borrow_mut().failure = Some(InjectedFailure::AmbiguousAfter(1));
         assert!(matches!(
@@ -1657,25 +1650,22 @@ mod tests {
             source,
         })?;
         let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
-        engine.admit([PathBuf::from("/work/a.txt")])?;
+        engine.admit([work_path("a.txt")])?;
         let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
         let apply_id = engine.apply_confirmed(preview.id(), 1)?;
         state
             .borrow_mut()
-            .insert(Path::new("/work/a.txt"), EntryKind::RegularFile);
+            .insert(&work_path("a.txt"), EntryKind::RegularFile);
         assert!(matches!(
             engine.undo_latest(apply_id, 1),
             Err(PlatformError::DestinationChanged { .. })
         ));
 
-        state.borrow_mut().entries.remove(Path::new("/work/a.txt"));
+        state.borrow_mut().entries.remove(&work_path("a.txt"));
+        state.borrow_mut().entries.remove(&work_path("new-a.txt"));
         state
             .borrow_mut()
-            .entries
-            .remove(Path::new("/work/new-a.txt"));
-        state
-            .borrow_mut()
-            .insert(Path::new("/work/new-a.txt"), EntryKind::RegularFile);
+            .insert(&work_path("new-a.txt"), EntryKind::RegularFile);
         assert!(matches!(
             engine.undo_latest(apply_id, 1),
             Err(PlatformError::StaleSource { .. })
@@ -1690,7 +1680,7 @@ mod tests {
             source,
         })?;
         let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
-        engine.admit([PathBuf::from("/work/a.txt")])?;
+        engine.admit([work_path("a.txt")])?;
         let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
         let apply_id = engine.apply_confirmed(preview.id(), 1)?;
         assert!(matches!(
@@ -1711,12 +1701,7 @@ mod tests {
             engine.undo_latest(undo_id, 1),
             Err(PlatformError::LatestTransactionNotUndoable)
         ));
-        assert!(
-            state
-                .borrow()
-                .entries
-                .contains_key(Path::new("/work/a.txt"))
-        );
+        assert!(state.borrow().entries.contains_key(&work_path("a.txt")));
         Ok(())
     }
 
@@ -1728,7 +1713,7 @@ mod tests {
             source,
         })?;
         let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
-        engine.admit([PathBuf::from("/work/a.txt")])?;
+        engine.admit([work_path("a.txt")])?;
         let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
         let apply_id = engine.apply_confirmed(preview.id(), 1)?;
         drop(engine);
@@ -1745,12 +1730,7 @@ mod tests {
             TransactionKind::Apply
         );
         restarted.undo_latest(apply_id, 1)?;
-        assert!(
-            state
-                .borrow()
-                .entries
-                .contains_key(Path::new("/work/a.txt"))
-        );
+        assert!(state.borrow().entries.contains_key(&work_path("a.txt")));
         Ok(())
     }
 
@@ -1822,15 +1802,15 @@ mod tests {
                 Vec::new(),
             ),
             (
-                test_journal_header("/work/a.txt", "/other/b.txt"),
+                test_journal_header(work_path("a.txt"), other_path("b.txt")),
                 Vec::new(),
             ),
             (
-                test_journal_header("/work/a.txt", "/work/b.txt"),
+                test_journal_header(work_path("a.txt"), work_path("b.txt")),
                 vec![(
                     0,
-                    PathBuf::from("/work/a.txt"),
-                    PathBuf::from("/other/forged.tmp"),
+                    work_path("a.txt"),
+                    other_path("forged.tmp"),
                     FileIdentity::from_u64(1, 1),
                 )],
             ),
@@ -1867,10 +1847,9 @@ mod tests {
             source,
         })?;
         let (store, _scan) = JournalStore::open(&fixture.root)?;
-        let mut base = String::from("/");
+        let mut base = test_root("oversized-header");
         for _ in 0..22 {
-            base.push_str(&"segment".repeat(14));
-            base.push('/');
+            base.push("segment".repeat(14));
         }
         let parent_fingerprint = Fingerprint {
             identity: FileIdentity::from_u64(1, 2),
@@ -1883,8 +1862,8 @@ mod tests {
                 let id = u64::try_from(index).map_or(u64::MAX, |value| value);
                 JournalItem {
                     source_id: SourceId(id),
-                    original: PathBuf::from(format!("{base}original-{index}")),
-                    final_path: PathBuf::from(format!("{base}final-{index}")),
+                    original: base.join(format!("original-{index}")),
+                    final_path: base.join(format!("final-{index}")),
                     fingerprint: Fingerprint {
                         identity: FileIdentity::from_u64(1, id.saturating_add(1)),
                         kind: EntryKind::RegularFile,
@@ -1919,13 +1898,11 @@ mod tests {
             operation: "create test fixture",
             source,
         })?;
-        let mut parent = String::from("/");
+        let mut parent = test_root("oversized-plan");
         for _ in 0..22 {
-            parent.push_str(&"segment".repeat(14));
-            parent.push('/');
+            parent.push("segment".repeat(14));
         }
-        parent.push_str("work");
-        let parent = PathBuf::from(parent);
+        parent.push("work");
         let state = Rc::new(RefCell::new(MemoryState::new(fixture.root.clone())));
         state.borrow_mut().insert(&parent, EntryKind::Directory);
         state.borrow_mut().mutation_supported = false;
@@ -1971,7 +1948,7 @@ mod tests {
             source,
         })?;
         let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
-        engine.admit([PathBuf::from("/work/a.txt")])?;
+        engine.admit([work_path("a.txt")])?;
         let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
         fs::write(
             fixture.root.join("0000000000000001.drj"),
@@ -1989,12 +1966,7 @@ mod tests {
             })
         ));
         assert!(!engine.recovery_required);
-        assert!(
-            state
-                .borrow()
-                .entries
-                .contains_key(Path::new("/work/a.txt"))
-        );
+        assert!(state.borrow().entries.contains_key(&work_path("a.txt")));
         Ok(())
     }
 
@@ -2006,7 +1978,7 @@ mod tests {
             source,
         })?;
         let (mut engine, state) = memory_engine(&fixture, &["a.txt"])?;
-        engine.admit([PathBuf::from("/work/a.txt")])?;
+        engine.admit([work_path("a.txt")])?;
         let preview = engine.preview(&[RenameRule::Prefix("new-".into())])?;
         engine.apply_confirmed(preview.id(), 1)?;
         drop(engine);
@@ -2051,8 +2023,8 @@ mod tests {
             generation: Generation(1),
             items: vec![JournalItem {
                 source_id: SourceId(1),
-                original: PathBuf::from("/work/a.txt"),
-                final_path: PathBuf::from("/work/b.txt"),
+                original: work_path("a.txt"),
+                final_path: work_path("b.txt"),
                 fingerprint,
                 parent_fingerprint: Fingerprint {
                     identity: FileIdentity::from_u64(1, 2),
