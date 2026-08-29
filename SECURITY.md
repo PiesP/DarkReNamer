@@ -19,8 +19,10 @@ personal filenames, native paths, credentials, and unrelated user data from all
 reports and fixtures.
 
 Security-sensitive areas include unintended file replacement or movement,
-reparse-point traversal and path races, malformed import lists, unsafe Win32
-boundaries, dependency provenance, and release artifact substitution.
+reparse-point traversal and path races, malformed import lists, journal and
+recovery integrity, unsafe Win32 boundaries, dependency provenance, and release
+artifact substitution. The maintained safe path rejects elevated execution,
+network paths, case-sensitive parents, and cross-folder moves.
 Compatibility behavior inherited from DarkNamer is not
 automatically a vulnerability; reports should demonstrate the additional
 confidentiality, integrity, or availability impact in the maintained Rust port.
