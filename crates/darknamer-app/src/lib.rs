@@ -27,9 +27,13 @@ pub const TOOLBAR_SEPARATOR_SIZE: i32 = 8;
 pub const STATUS_HEIGHT: i32 = 18;
 /// Design coordinate density used by the original Win32 layout.
 pub const BASE_DPI: u32 = 96;
+#[cfg(any(windows, test))]
 pub(crate) const NAME_COLUMN_MINIMUM: i32 = 120;
+#[cfg(any(windows, test))]
 pub(crate) const LOCATION_COLUMN_MINIMUM: i32 = 80;
+#[cfg(any(windows, test))]
 pub(crate) const EMPTY_LIST_STATUS: &str = "파일이나 폴더를 끌어 놓거나 Ctrl+O로 추가하세요.";
+#[cfg(any(windows, test))]
 pub(crate) const VERSION_MENU_LABEL: &str = "버전(&H)";
 
 #[cfg(any(windows, test))]
