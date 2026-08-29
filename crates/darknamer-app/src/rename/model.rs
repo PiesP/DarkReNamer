@@ -28,9 +28,15 @@ impl ModelRevision {
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
+
+    pub(super) const fn value(self) -> u64 {
+        self.0
+    }
 }
 
-/// Opaque identity for an immutable plan.
+/// Deterministic display fingerprint for an immutable plan.
+///
+/// Transaction uniqueness is supplied independently by the execution backend.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PlanId(u64);
 

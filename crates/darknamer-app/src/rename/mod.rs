@@ -9,10 +9,13 @@ mod ports;
 mod schedule;
 
 pub use executor::{
-    ExecuteError, ExecuteErrorKind, ExecutionFailure, ExecutionOutcome, ExecutionReport,
-    RenameExecutor, RollbackFailure,
+    EntryExecution, ExecuteError, ExecuteErrorKind, ExecutionFailure, ExecutionOutcome,
+    ExecutionReport, RenameExecutor, RenameState, RollbackFailure,
 };
-pub use journal::{JournalDirection, JournalRecord, JournalTerminal, MemoryJournal, RecoveryState};
+pub use journal::{
+    JournalCorruption, JournalDirection, JournalRecord, JournalStep, JournalTerminal,
+    MemoryJournal, RecoveryReason, RecoveryState, replay_journal,
+};
 pub use memory::MemoryBackend;
 pub use model::{
     ConfirmationError, ConfirmedPlan, EntryId, EntryIdentity, EntryKind, ModelRevision, PathKey,

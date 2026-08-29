@@ -1,8 +1,8 @@
 use darknamer_app::rename::{
-    EntryId, EntryKind, ExecuteErrorKind, ExecutionOutcome, JournalRecord, JournalTerminal,
-    MAX_TEMP_CANDIDATES, MemoryBackend, MemoryJournal, ModelRevision, MutationCertainty,
-    PlanRequest, RecoveryState, RenameBackend, RenameExecutor, RenameIntent, RenameOperation,
-    RenamePlanner,
+    EntryId, EntryKind, ExecuteErrorKind, ExecutionOutcome, JournalCorruption, JournalRecord,
+    JournalTerminal, MAX_TEMP_CANDIDATES, MemoryBackend, MemoryJournal, ModelRevision,
+    MutationCertainty, PlanRequest, RecoveryReason, RecoveryState, RenameBackend, RenameExecutor,
+    RenameIntent, RenameOperation, RenamePlanner, RenameState, TemporaryPhase, replay_journal,
 };
 
 fn intent(id: u32, source_name: &str, destination_name: &str) -> RenameIntent {
@@ -50,6 +50,25 @@ fn chain_executes_in_reverse_dependency_order_without_a_temporary_name()
     );
     assert_eq!(backend.file_id("C:\\work\\b.txt"), Some(1));
     assert_eq!(backend.file_id("C:\\work\\c.txt"), Some(2));
+    assert!(
+        report
+            .entries()
+            .iter()
+            .all(|entry| entry.state() == RenameState::Applied)
+    );
+    let JournalRecord::Intent { steps, .. } = &journal.records()[0] else {
+        return Err(std::io::Error::other("journal intent manifest missing").into());
+    };
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[0].entry(), EntryId::new(1));
+    assert_eq!(steps[0].source().to_string_lossy(), "C:\\work\\b.txt");
+    assert_eq!(steps[0].destination().to_string_lossy(), "C:\\work\\c.txt");
+    assert_eq!(steps[0].expected_source().file_id(), 2);
+    assert_eq!(
+        steps[0].expected_source_parent(),
+        steps[0].expected_destination_parent()
+    );
+    assert_eq!(steps[0].temporary_phase(), TemporaryPhase::None);
     Ok(())
 }
 
@@ -66,6 +85,11 @@ fn case_only_rename_uses_one_same_parent_temporary_hop() -> Result<(), Box<dyn s
     assert!(backend.completed_moves()[0].1.contains(".__darknamer_"));
     assert_eq!(backend.completed_moves()[1].1, "C:\\work\\a.txt");
     assert_eq!(backend.file_id("C:\\work\\a.txt"), Some(1));
+    let JournalRecord::Intent { steps, .. } = &journal.records()[0] else {
+        return Err(std::io::Error::other("case-only manifest missing").into());
+    };
+    assert_eq!(steps[0].temporary_phase(), TemporaryPhase::IntoTemporary);
+    assert_eq!(steps[1].temporary_phase(), TemporaryPhase::FromTemporary);
     Ok(())
 }
 
@@ -171,6 +195,12 @@ fn forward_failure_rolls_completed_moves_back_in_reverse_order()
     assert_eq!(backend.file_id("C:\\work\\a.txt"), Some(1));
     assert_eq!(backend.file_id("C:\\work\\b.txt"), Some(2));
     assert_eq!(backend.file_id("C:\\work\\c.txt"), None);
+    assert!(
+        report
+            .entries()
+            .iter()
+            .all(|entry| entry.state() == RenameState::Restored)
+    );
     assert_eq!(journal.recovery_state(), RecoveryState::Clean);
     assert_eq!(
         journal.records().last(),
@@ -265,6 +295,7 @@ fn ambiguous_backend_error_stops_without_rollback_and_requires_recovery()
     ));
     assert_eq!(backend.mutation_count(), 1);
     assert_eq!(backend.file_id("C:\\work\\b.txt"), Some(1));
+    assert_eq!(report.entries()[0].state(), RenameState::Indeterminate);
     assert!(matches!(
         journal.recovery_state(),
         RecoveryState::RecoveryRequired { .. }
@@ -316,6 +347,66 @@ fn temporary_selection_retries_occupied_names_and_fails_closed_when_exhausted()
     assert_eq!(error.kind, ExecuteErrorKind::TemporaryExhausted);
     assert_eq!(exhausted_backend.mutation_count(), 0);
     assert!(exhausted_journal.records().is_empty());
+    Ok(())
+}
+
+#[test]
+fn strict_replay_requires_manifest_order_and_reconciles_prepared_or_corrupt_records()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut backend = MemoryBackend::new().with_file("C:\\work\\a.txt", 1);
+    let confirmed = confirmed_plan(&backend, vec![intent(0, "a.txt", "b.txt")])?;
+    backend.fail_ambiguous_move_on(1, 995);
+    let mut journal = MemoryJournal::new();
+    let _report = RenameExecutor::new(&mut backend, &mut journal).execute(confirmed)?;
+
+    assert!(matches!(
+        replay_journal(journal.records()),
+        RecoveryState::RecoveryRequired {
+            reason: RecoveryReason::PreparedOnly { step: 0, .. },
+            ..
+        }
+    ));
+
+    let mut corrupt = journal.records().to_vec();
+    corrupt.push(JournalRecord::Completed {
+        step: 99,
+        direction: darknamer_app::rename::JournalDirection::Forward,
+    });
+    assert!(matches!(
+        replay_journal(&corrupt),
+        RecoveryState::RecoveryRequired {
+            reason: RecoveryReason::Corrupt(JournalCorruption::StepOutOfBounds),
+            ..
+        }
+    ));
+
+    let intent_record = journal.records()[0].clone();
+    let invalid_order = vec![
+        intent_record.clone(),
+        JournalRecord::Completed {
+            step: 0,
+            direction: darknamer_app::rename::JournalDirection::Forward,
+        },
+    ];
+    assert!(matches!(
+        replay_journal(&invalid_order),
+        RecoveryState::RecoveryRequired {
+            reason: RecoveryReason::Corrupt(JournalCorruption::InvalidOrder),
+            ..
+        }
+    ));
+
+    let invalid_terminal = vec![
+        intent_record,
+        JournalRecord::Terminal(JournalTerminal::Committed),
+    ];
+    assert!(matches!(
+        replay_journal(&invalid_terminal),
+        RecoveryState::RecoveryRequired {
+            reason: RecoveryReason::Corrupt(JournalCorruption::InvalidTerminal),
+            ..
+        }
+    ));
     Ok(())
 }
 

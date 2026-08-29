@@ -4,8 +4,8 @@ use super::journal::{JournalDirection, JournalTerminal};
 use super::model::PlanRow;
 use super::schedule::{ScheduleError, ScheduleStep, TemporaryPhase, build_schedule};
 use super::{
-    BackendError, ConfirmedPlan, EntryId, JournalError, JournalStore, MutationCertainty, PlanId,
-    RenameBackend, RenameOperation,
+    BackendError, ConfirmedPlan, EntryId, JournalError, JournalStep, JournalStore,
+    MutationCertainty, PlanId, RenameBackend, RenameOperation,
 };
 
 /// A pre-mutation reason execution refused a confirmed plan.
@@ -78,11 +78,44 @@ pub enum ExecutionOutcome {
     },
 }
 
+/// Reconciled logical state of one plan entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RenameState {
+    /// The entry is at its final planned destination.
+    Applied,
+    /// The entry is at its original source after no mutation or rollback.
+    Restored,
+    /// The entry requires filesystem reconciliation.
+    Indeterminate,
+}
+
+/// Per-entry result keyed by the plan-scoped stable identifier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EntryExecution {
+    entry: EntryId,
+    state: RenameState,
+}
+
+impl EntryExecution {
+    /// Returns the plan-scoped stable entry identifier.
+    #[must_use]
+    pub const fn entry(&self) -> EntryId {
+        self.entry
+    }
+
+    /// Returns the reconciled logical state.
+    #[must_use]
+    pub const fn state(&self) -> RenameState {
+        self.state
+    }
+}
+
 /// Complete result returned after journalling or mutation began.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionReport {
     plan: PlanId,
     outcome: ExecutionOutcome,
+    entries: Box<[EntryExecution]>,
 }
 
 impl ExecutionReport {
@@ -96,6 +129,12 @@ impl ExecutionReport {
     #[must_use]
     pub const fn outcome(&self) -> &ExecutionOutcome {
         &self.outcome
+    }
+
+    /// Returns per-entry applied, restored, or indeterminate results.
+    #[must_use]
+    pub fn entries(&self) -> &[EntryExecution] {
+        &self.entries
     }
 }
 
@@ -120,16 +159,26 @@ impl<'a> RenameExecutor<'a> {
     /// all partial state is represented by [`ExecutionReport`].
     pub fn execute(&mut self, confirmed: ConfirmedPlan) -> Result<ExecutionReport, ExecuteError> {
         let plan = confirmed.plan;
+        let mut entries = plan
+            .entries
+            .iter()
+            .map(|row| EntryExecution {
+                entry: row.id,
+                state: RenameState::Restored,
+            })
+            .collect::<Vec<_>>();
         let schedule = build_schedule(&plan, self.backend).map_err(schedule_error)?;
         self.freeze(&plan.entries, &schedule)?;
         if schedule.is_empty() {
             return Ok(ExecutionReport {
                 plan: plan.id,
                 outcome: ExecutionOutcome::Completed,
+                entries: entries.into_boxed_slice(),
             });
         }
+        let manifest = schedule.iter().map(journal_step).collect::<Vec<_>>();
         self.journal
-            .begin(plan.id, schedule.len())
+            .begin(plan.id, &manifest)
             .map_err(|error| ExecuteError {
                 entry: None,
                 kind: ExecuteErrorKind::Journal(error),
@@ -145,10 +194,12 @@ impl<'a> RenameExecutor<'a> {
                         error,
                     },
                     &completed,
+                    entries,
                 ));
             }
             if let Err(error) = self.backend.rename_no_replace(&forward_operation(step)) {
                 if error.certainty == MutationCertainty::MayHaveApplied {
+                    set_state(&mut entries, step.entry, RenameState::Indeterminate);
                     return Ok(ExecutionReport {
                         plan: plan.id,
                         outcome: ExecutionOutcome::RecoveryRequired {
@@ -158,6 +209,27 @@ impl<'a> RenameExecutor<'a> {
                             },
                             rollback_failures: Box::new([]),
                         },
+                        entries: entries.into_boxed_slice(),
+                    });
+                }
+                if let Err(journal_error) = self
+                    .journal
+                    .not_applied(step_index, JournalDirection::Forward)
+                {
+                    return Ok(ExecutionReport {
+                        plan: plan.id,
+                        outcome: ExecutionOutcome::RecoveryRequired {
+                            failure: ExecutionFailure::Backend {
+                                step: step_index,
+                                error,
+                            },
+                            rollback_failures: vec![RollbackFailure::Journal {
+                                step: step_index,
+                                error: journal_error,
+                            }]
+                            .into_boxed_slice(),
+                        },
+                        entries: entries.into_boxed_slice(),
                     });
                 }
                 return Ok(self.rollback(
@@ -167,21 +239,31 @@ impl<'a> RenameExecutor<'a> {
                         error,
                     },
                     &completed,
+                    entries,
                 ));
             }
+            set_state(
+                &mut entries,
+                step.entry,
+                forward_state(step.temporary_phase),
+            );
             completed.push((step_index, step.clone()));
             if let Err(error) = self
                 .journal
                 .completed(step_index, JournalDirection::Forward)
             {
-                return Ok(self.rollback(
-                    plan.id,
-                    ExecutionFailure::Journal {
-                        step: step_index,
-                        error,
+                set_state(&mut entries, step.entry, RenameState::Indeterminate);
+                return Ok(ExecutionReport {
+                    plan: plan.id,
+                    outcome: ExecutionOutcome::RecoveryRequired {
+                        failure: ExecutionFailure::Journal {
+                            step: step_index,
+                            error,
+                        },
+                        rollback_failures: Box::new([]),
                     },
-                    &completed,
-                ));
+                    entries: entries.into_boxed_slice(),
+                });
             }
         }
 
@@ -195,11 +277,13 @@ impl<'a> RenameExecutor<'a> {
                     },
                     rollback_failures: Box::new([]),
                 },
+                entries: entries.into_boxed_slice(),
             });
         }
         Ok(ExecutionReport {
             plan: plan.id,
             outcome: ExecutionOutcome::Completed,
+            entries: entries.into_boxed_slice(),
         })
     }
 
@@ -285,6 +369,7 @@ impl<'a> RenameExecutor<'a> {
         plan: PlanId,
         failure: ExecutionFailure,
         completed: &[(usize, ScheduleStep)],
+        mut entries: Vec<EntryExecution>,
     ) -> ExecutionReport {
         let mut rollback_failures = Vec::new();
         for (step_index, step) in completed.iter().rev() {
@@ -296,7 +381,8 @@ impl<'a> RenameExecutor<'a> {
                     step: *step_index,
                     error,
                 });
-                continue;
+                set_state(&mut entries, step.entry, RenameState::Indeterminate);
+                break;
             }
             let operation = RenameOperation::new(
                 step.destination.clone(),
@@ -306,12 +392,28 @@ impl<'a> RenameExecutor<'a> {
                 step.source_parent,
             );
             if let Err(error) = self.backend.rename_no_replace(&operation) {
+                if error.certainty == MutationCertainty::NotApplied
+                    && let Err(journal_error) = self
+                        .journal
+                        .not_applied(*step_index, JournalDirection::Rollback)
+                {
+                    rollback_failures.push(RollbackFailure::Journal {
+                        step: *step_index,
+                        error: journal_error,
+                    });
+                }
                 rollback_failures.push(RollbackFailure::Backend {
                     step: *step_index,
                     error,
                 });
-                continue;
+                set_state(&mut entries, step.entry, RenameState::Indeterminate);
+                break;
             }
+            set_state(
+                &mut entries,
+                step.entry,
+                rollback_state(step.temporary_phase),
+            );
             if let Err(error) = self
                 .journal
                 .completed(*step_index, JournalDirection::Rollback)
@@ -320,6 +422,8 @@ impl<'a> RenameExecutor<'a> {
                     step: *step_index,
                     error,
                 });
+                set_state(&mut entries, step.entry, RenameState::Indeterminate);
+                break;
             }
         }
 
@@ -341,7 +445,11 @@ impl<'a> RenameExecutor<'a> {
                 rollback_failures: rollback_failures.into_boxed_slice(),
             }
         };
-        ExecutionReport { plan, outcome }
+        ExecutionReport {
+            plan,
+            outcome,
+            entries: entries.into_boxed_slice(),
+        }
     }
 }
 
@@ -353,6 +461,38 @@ fn forward_operation(step: &ScheduleStep) -> RenameOperation {
         step.source_parent,
         step.destination_parent,
     )
+}
+
+fn journal_step(step: &ScheduleStep) -> JournalStep {
+    JournalStep::new(
+        step.entry,
+        step.source.clone(),
+        step.destination.clone(),
+        step.identity,
+        step.source_parent,
+        step.destination_parent,
+        step.temporary_phase,
+    )
+}
+
+const fn forward_state(phase: TemporaryPhase) -> RenameState {
+    match phase {
+        TemporaryPhase::None | TemporaryPhase::FromTemporary => RenameState::Applied,
+        TemporaryPhase::IntoTemporary => RenameState::Indeterminate,
+    }
+}
+
+const fn rollback_state(phase: TemporaryPhase) -> RenameState {
+    match phase {
+        TemporaryPhase::None | TemporaryPhase::IntoTemporary => RenameState::Restored,
+        TemporaryPhase::FromTemporary => RenameState::Indeterminate,
+    }
+}
+
+fn set_state(entries: &mut [EntryExecution], entry: EntryId, state: RenameState) {
+    if let Some(result) = entries.iter_mut().find(|result| result.entry == entry) {
+        result.state = state;
+    }
 }
 
 fn schedule_error(error: ScheduleError) -> ExecuteError {

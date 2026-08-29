@@ -75,17 +75,24 @@ impl<'a> RenamePlanner<'a> {
                 kind: PlanIssueKind::DuplicateDestination,
             }));
         }
-        let ordered_sources = source_owners.iter().collect::<Vec<_>>();
-        for pair in ordered_sources.windows(2) {
-            if is_ancestor_key(pair[0].0, pair[1].0) {
-                issues.push(PlanIssue {
-                    entry: pair[0].1[0],
-                    kind: PlanIssueKind::SourceOverlap,
-                });
-                issues.push(PlanIssue {
-                    entry: pair[1].1[0],
-                    kind: PlanIssueKind::SourceOverlap,
-                });
+        for (descendant, descendant_owners) in &source_owners {
+            for separator in descendant
+                .units()
+                .iter()
+                .enumerate()
+                .filter_map(|(index, unit)| is_separator(*unit).then_some(index))
+            {
+                let ancestor = PathKey(descendant.units()[..separator].into());
+                if let Some(ancestor_owners) = source_owners.get(&ancestor) {
+                    issues.push(PlanIssue {
+                        entry: ancestor_owners[0],
+                        kind: PlanIssueKind::SourceOverlap,
+                    });
+                    issues.push(PlanIssue {
+                        entry: descendant_owners[0],
+                        kind: PlanIssueKind::SourceOverlap,
+                    });
+                }
             }
         }
         if !issues.is_empty() {
@@ -193,15 +200,6 @@ fn parent_path(path: &darknamer_core::LegacyText) -> darknamer_core::LegacyText 
     darknamer_core::LegacyText::from_units(units[..end].to_vec())
 }
 
-fn is_ancestor_key(ancestor: &PathKey, descendant: &PathKey) -> bool {
-    descendant.units().len() > ancestor.units().len()
-        && descendant.units().starts_with(ancestor.units())
-        && descendant
-            .units()
-            .get(ancestor.units().len())
-            .is_some_and(|unit| is_separator(*unit))
-}
-
 fn validate_intent(intent: &RenameIntent, issues: &mut Vec<PlanIssue>) {
     if !is_absolute_windows_path(intent.source.units()) {
         issues.push(PlanIssue {
@@ -239,16 +237,28 @@ fn is_separator(unit: u16) -> bool {
 
 fn plan_id(request: &PlanRequest) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    hash_value(&mut hash, 0x4452_504c_414e_0001);
+    hash_value(&mut hash, request.revision.value());
+    hash_value(&mut hash, request.entries.len() as u64);
     for intent in &request.entries {
-        for unit in intent
-            .source
-            .units()
-            .iter()
-            .chain(intent.destination.units())
-        {
-            hash ^= u64::from(*unit);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
+        hash_value(&mut hash, u64::from(intent.id.value()));
+        hash_value(&mut hash, intent.kind as u64);
+        hash_text(&mut hash, &intent.source);
+        hash_text(&mut hash, &intent.destination);
     }
     hash
+}
+
+fn hash_text(hash: &mut u64, text: &darknamer_core::LegacyText) {
+    hash_value(hash, text.len() as u64);
+    for unit in text.units() {
+        hash_value(hash, u64::from(*unit));
+    }
+}
+
+fn hash_value(hash: &mut u64, value: u64) {
+    for byte in value.to_le_bytes() {
+        *hash ^= u64::from(byte);
+        *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
 }

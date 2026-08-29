@@ -3,7 +3,7 @@ use std::fmt;
 use darknamer_core::LegacyText;
 
 use super::{EntryIdentity, PathKey, PathSnapshot};
-use super::{JournalDirection, JournalTerminal, PlanId};
+use super::{JournalDirection, JournalStep, JournalTerminal, PlanId};
 
 /// Backend operation associated with a structured error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,7 +116,10 @@ pub trait RenameBackend {
     /// Observes the exact leaf and resolved direct parent.
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError>;
 
-    /// Returns a transaction nonce suitable for bounded temporary-name derivation.
+    /// Returns a fresh, nonzero transaction nonce for temporary-name derivation.
+    ///
+    /// An adapter must not reuse a nonce while the corresponding transaction may
+    /// still require recovery. The executor also observes every derived endpoint.
     fn next_transaction_nonce(&mut self) -> Result<u128, BackendError>;
 
     /// Atomically moves the expected source without replacing a destination.
@@ -136,13 +139,17 @@ pub struct JournalError {
 /// Write-ahead journal used to make interrupted execution recoverable.
 pub trait JournalStore {
     /// Begins one immutable transaction before filesystem mutation.
-    fn begin(&mut self, plan: PlanId, step_count: usize) -> Result<(), JournalError>;
+    fn begin(&mut self, plan: PlanId, steps: &[JournalStep]) -> Result<(), JournalError>;
 
     /// Durably records that one move is about to be attempted.
     fn prepared(&mut self, step: usize, direction: JournalDirection) -> Result<(), JournalError>;
 
     /// Durably records that one move completed.
     fn completed(&mut self, step: usize, direction: JournalDirection) -> Result<(), JournalError>;
+
+    /// Durably records that a prepared move definitely did not mutate.
+    fn not_applied(&mut self, step: usize, direction: JournalDirection)
+    -> Result<(), JournalError>;
 
     /// Durably records a verified terminal state.
     fn terminal(&mut self, terminal: JournalTerminal) -> Result<(), JournalError>;
