@@ -14,7 +14,11 @@ impl Drop for ComGuard {
     }
 }
 
-pub(super) fn run_unsafe() -> io::Result<()> {
+pub(super) fn run() -> io::Result<()> {
+    run_unsafe()
+}
+
+fn run_unsafe() -> io::Result<()> {
     if process_is_elevated()? {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,

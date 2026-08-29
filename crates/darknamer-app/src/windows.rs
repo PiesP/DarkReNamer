@@ -47,7 +47,6 @@ mod safe_runtime;
 mod text_io;
 mod worker;
 
-use application::run_unsafe;
 use clipboard::copy_clipboard;
 use command_dispatch::*;
 use dialog::*;
@@ -249,10 +248,10 @@ impl AppState {
 }
 
 pub(crate) fn run() -> io::Result<()> {
-    run_unsafe()
+    application::run()
 }
 
-fn message(owner: HWND, text: &str, caption: &str) {
+pub(super) fn message(owner: HWND, text: &str, caption: &str) {
     let text = wide(text);
     let caption = wide(caption);
     // SAFETY: owner is a live HWND and text/caption are owned NUL-terminated
