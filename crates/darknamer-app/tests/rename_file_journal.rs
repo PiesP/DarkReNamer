@@ -1,12 +1,12 @@
 use std::fs;
 
 use darknamer_app::rename::{
-    EntryId, EntryIdentity, EntryKind, FileJournal, FileJournalErrorKind, JournalCodecErrorKind,
-    JournalDirection, JournalRecord, JournalRoot, JournalStep, JournalStore, JournalTailIssue,
-    JournalTerminal, MAX_JOURNAL_FRAME_BYTES, MAX_JOURNAL_STEPS, MAX_PATH_UNITS, MemoryBackend,
-    MemoryJournal, ModelRevision, PlanId, PlanRequest, RecoveryOutcome, RenameExecutor,
-    RenameIntent, RenamePlanner, RenameRecovery, TemporaryPhase, decode_journal_records,
-    encode_journal_records, inspect_journal_records,
+    AppendCertainty, EntryId, EntryIdentity, EntryKind, FileJournal, FileJournalErrorKind,
+    JournalCodecErrorKind, JournalDirection, JournalRecord, JournalRoot, JournalStep, JournalStore,
+    JournalTailIssue, JournalTerminal, MAX_JOURNAL_FRAME_BYTES, MAX_JOURNAL_STEPS, MAX_PATH_UNITS,
+    MemoryBackend, MemoryJournal, ModelRevision, PlanId, PlanRequest, RecoveryOutcome,
+    RenameExecutor, RenameIntent, RenamePlanner, RenameRecovery, TemporaryPhase,
+    decode_journal_records, encode_journal_records, inspect_journal_records,
 };
 use darknamer_core::LegacyText;
 
@@ -291,6 +291,152 @@ fn file_journal_create_append_sync_resume_and_never_auto_delete()
     assert_eq!(resumed.records(), records);
     drop(resumed);
     assert_eq!(decode_journal_records(&fs::read(path)?)?, records);
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn candidate_intent_is_durable_before_no_replace_active_promotion()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let Some(root) = supported_journal_root(directory.path())? else {
+        return Ok(());
+    };
+    let records = complete_records();
+    let JournalRecord::Intent { plan, steps } = &records[0] else {
+        return Err(std::io::Error::other("fixture intent missing").into());
+    };
+    let candidate_path = directory.path().join("candidate.drj");
+    let active_path = directory.path().join("active.drj");
+    let mut journal = FileJournal::create_candidate(&root, "candidate.drj", "active.drj")?;
+
+    journal.begin(*plan, steps)?;
+
+    assert!(!journal.is_candidate());
+    assert_eq!(journal.path(), active_path);
+    assert!(!candidate_path.exists());
+    assert!(active_path.exists());
+    assert_eq!(
+        decode_journal_records(&fs::read(active_path)?)?,
+        journal.records()
+    );
+    Ok(())
+}
+
+#[test]
+fn active_collision_preserves_both_files_and_poisons_candidate()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let Some(root) = supported_journal_root(directory.path())? else {
+        return Ok(());
+    };
+    let active_path = directory.path().join("active.drj");
+    let candidate_path = directory.path().join("candidate.drj");
+    fs::write(&active_path, b"external active evidence")?;
+    let records = complete_records();
+    let JournalRecord::Intent { plan, steps } = &records[0] else {
+        return Err(std::io::Error::other("fixture intent missing").into());
+    };
+    let mut journal = FileJournal::create_candidate(&root, "candidate.drj", "active.drj")?;
+
+    let promotion = journal
+        .begin(*plan, steps)
+        .err()
+        .ok_or_else(|| std::io::Error::other("active collision was replaced"))?;
+    let follow_up = journal
+        .prepared(0, JournalDirection::Forward)
+        .err()
+        .ok_or_else(|| std::io::Error::other("poisoned candidate accepted a record"))?;
+    let retry = journal
+        .begin(*plan, steps)
+        .err()
+        .ok_or_else(|| std::io::Error::other("uncertain promotion was retried"))?;
+
+    assert_eq!(promotion.certainty, AppendCertainty::MayHaveAppended);
+    assert_eq!(follow_up.certainty, AppendCertainty::MayHaveAppended);
+    assert_eq!(retry.certainty, AppendCertainty::MayHaveAppended);
+    assert_eq!(fs::read(active_path)?, b"external active evidence");
+    assert!(candidate_path.exists());
+    assert!(matches!(
+        journal.mark_delete_if_safe(),
+        Err(error) if error.kind == FileJournalErrorKind::UnsafeCleanupState
+    ));
+    Ok(())
+}
+
+#[cfg(not(windows))]
+#[test]
+fn non_windows_candidate_promotion_fails_closed_without_path_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let Some(root) = supported_journal_root(directory.path())? else {
+        return Ok(());
+    };
+    let records = complete_records();
+    let JournalRecord::Intent { plan, steps } = &records[0] else {
+        return Err(std::io::Error::other("fixture intent missing").into());
+    };
+    let candidate_path = directory.path().join("candidate.drj");
+    let active_path = directory.path().join("active.drj");
+    let mut journal = FileJournal::create_candidate(&root, "candidate.drj", "active.drj")?;
+
+    let error = journal
+        .begin(*plan, steps)
+        .err()
+        .ok_or_else(|| std::io::Error::other("non-Windows promotion unexpectedly succeeded"))?;
+
+    assert_eq!(error.certainty, AppendCertainty::MayHaveAppended);
+    assert!(candidate_path.exists());
+    assert!(!active_path.exists());
+    assert_eq!(journal.path(), candidate_path);
+    Ok(())
+}
+
+#[test]
+fn abandoned_intent_candidate_reopens_without_becoming_active()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let Some(root) = supported_journal_root(directory.path())? else {
+        return Ok(());
+    };
+    let records = complete_records();
+    fs::write(
+        directory.path().join("candidate.drj"),
+        encode_journal_records(&records[..1])?,
+    )?;
+
+    let mut candidate = FileJournal::open_candidate_existing(&root, "candidate.drj", "active.drj")?;
+    let transition = candidate
+        .prepared(0, JournalDirection::Forward)
+        .err()
+        .ok_or_else(|| std::io::Error::other("candidate accepted an execution transition"))?;
+
+    assert!(candidate.is_candidate());
+    assert_eq!(transition.certainty, AppendCertainty::NotAppended);
+    assert_eq!(candidate.records(), &records[..1]);
+    assert_eq!(candidate.path(), directory.path().join("candidate.drj"));
+    assert!(!directory.path().join("active.drj").exists());
+    Ok(())
+}
+
+#[test]
+fn candidate_with_execution_records_is_rejected_as_invalid_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let Some(root) = supported_journal_root(directory.path())? else {
+        return Ok(());
+    };
+    fs::write(
+        directory.path().join("candidate.drj"),
+        encode_journal_records(&complete_records())?,
+    )?;
+
+    let error = FileJournal::open_candidate_existing(&root, "candidate.drj", "active.drj")
+        .err()
+        .ok_or_else(|| std::io::Error::other("executing candidate was trusted"))?;
+
+    assert_eq!(error.kind, FileJournalErrorKind::InvalidCandidateState);
+    assert!(directory.path().join("candidate.drj").exists());
     Ok(())
 }
 

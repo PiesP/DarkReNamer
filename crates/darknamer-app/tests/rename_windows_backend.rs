@@ -510,11 +510,12 @@ fn planner_file_journal_backend_and_model_complete_one_production_path()
         let _ = fs::rename(&substituted_root, directory.path());
         return Err(std::io::Error::other("retained journal root was substituted").into());
     }
+    let candidate_path = directory.path().join("candidate.drj");
     let active_path = directory.path().join("active.drj");
-    let mut journal = FileJournal::create_new(&root, "active.drj")?;
+    let mut journal = FileJournal::create_candidate(&root, "candidate.drj", "active.drj")?;
     assert!(
-        fs::rename(&active_path, directory.path().join("substituted.drj")).is_err(),
-        "exclusive journal child was substituted"
+        fs::rename(&candidate_path, directory.path().join("substituted.drj")).is_err(),
+        "exclusive candidate journal was substituted"
     );
     let plan =
         RenamePlanner::new(&backend).plan(build_plan_request(&model, ModelRevision::new(1)))?;
@@ -525,6 +526,9 @@ fn planner_file_journal_backend_and_model_complete_one_production_path()
         .execute(plan.confirm_presented(id, revision)?)?;
 
     assert_eq!(report.outcome(), &ExecutionOutcome::Completed);
+    assert!(!candidate_path.exists());
+    assert!(active_path.exists());
+    assert_eq!(journal.path(), active_path);
     assert!(apply_execution_report(&mut model, &report));
     assert_eq!(
         model.items()[0].source_path(),

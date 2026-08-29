@@ -96,6 +96,7 @@ const LIST_ID: usize = 1000;
 const LEFT_TOOLBAR_ID: usize = 1001;
 const RIGHT_TOOLBAR_ID: usize = 1002;
 const STATUS_ID: usize = 1007;
+const CANDIDATE_JOURNAL_LEAF: &str = "candidate.drj";
 const ACTIVE_JOURNAL_LEAF: &str = "active.drj";
 
 struct AppState {
@@ -114,6 +115,7 @@ struct AppState {
     recovery_locked: bool,
     journal_root: JournalRoot,
     active_journal: Option<FileJournal>,
+    staged_journal: Option<FileJournal>,
     startup_status: Option<String>,
     icon_cache: HashMap<IconCacheKey, i32>,
 }
@@ -141,6 +143,7 @@ impl AppState {
             recovery_locked: runtime.recovery_locked,
             journal_root: runtime.root,
             active_journal: runtime.active_journal,
+            staged_journal: runtime.staged_journal,
             startup_status: runtime.status,
             icon_cache: HashMap::new(),
         }
@@ -155,13 +158,17 @@ impl AppState {
     }
 
     const fn apply_locked(&self) -> bool {
-        self.mutation_locked || self.recovery_locked || self.active_journal.is_some()
+        self.mutation_locked
+            || self.recovery_locked
+            || self.active_journal.is_some()
+            || self.staged_journal.is_some()
     }
 }
 
 struct SafeRuntime {
     root: JournalRoot,
     active_journal: Option<FileJournal>,
+    staged_journal: Option<FileJournal>,
     recovery_locked: bool,
     status: Option<String>,
 }
@@ -204,13 +211,33 @@ fn initialize_safe_runtime() -> io::Result<SafeRuntime> {
         fs::create_dir(&root_path)?;
     }
     let root = JournalRoot::open(&root_path).map_err(io::Error::other)?;
+    let candidate_path = root_path.join(CANDIDATE_JOURNAL_LEAF);
+    let staged_journal = if candidate_path.exists() {
+        Some(
+            FileJournal::open_candidate_existing(
+                &root,
+                CANDIDATE_JOURNAL_LEAF,
+                ACTIVE_JOURNAL_LEAF,
+            )
+            .map_err(io::Error::other)?,
+        )
+    } else {
+        None
+    };
     let active_path = root_path.join(ACTIVE_JOURNAL_LEAF);
     if !active_path.exists() {
+        let has_staged = staged_journal.is_some();
         return Ok(SafeRuntime {
             root,
             active_journal: None,
-            recovery_locked: false,
-            status: None,
+            staged_journal,
+            recovery_locked: has_staged,
+            status: has_staged.then(|| {
+                format!(
+                    "활성화 전 저널을 보존했습니다: {}. 파일 변경은 시작되지 않았으며 적용은 잠겼습니다.",
+                    candidate_path.display()
+                )
+            }),
         });
     }
 
@@ -230,25 +257,57 @@ fn initialize_safe_runtime() -> io::Result<SafeRuntime> {
             if let Some(error) = cleanup.error {
                 status.push_str(&format!(" 저널 삭제 실패: {error}"));
             }
+            append_staged_status(&mut status, staged_journal.as_ref());
             Ok(SafeRuntime {
                 root,
-                recovery_locked: cleanup_failed || cleanup.retained.is_some(),
+                recovery_locked: cleanup_failed
+                    || cleanup.retained.is_some()
+                    || staged_journal.is_some(),
                 active_journal: cleanup.retained,
+                staged_journal,
                 status: Some(status),
             })
         }
-        RecoveryOutcome::Blocked { reason, .. } => Ok(SafeRuntime {
-            root,
-            active_journal: Some(journal),
-            recovery_locked: true,
-            status: Some(format!("복구가 차단되었습니다: {reason:?}")),
-        }),
-        RecoveryOutcome::RecoveryRequired { reason, .. } => Ok(SafeRuntime {
-            root,
-            active_journal: Some(journal),
-            recovery_locked: true,
-            status: Some(format!("복구가 필요합니다: {reason:?}")),
-        }),
+        RecoveryOutcome::Blocked { reason, .. } => {
+            let status = status_with_staged_journal(
+                format!("복구가 차단되었습니다: {reason:?}"),
+                staged_journal.as_ref(),
+            );
+            Ok(SafeRuntime {
+                root,
+                active_journal: Some(journal),
+                staged_journal,
+                recovery_locked: true,
+                status: Some(status),
+            })
+        }
+        RecoveryOutcome::RecoveryRequired { reason, .. } => {
+            let status = status_with_staged_journal(
+                format!("복구가 필요합니다: {reason:?}"),
+                staged_journal.as_ref(),
+            );
+            Ok(SafeRuntime {
+                root,
+                active_journal: Some(journal),
+                staged_journal,
+                recovery_locked: true,
+                status: Some(status),
+            })
+        }
+    }
+}
+
+fn status_with_staged_journal(mut status: String, staged_journal: Option<&FileJournal>) -> String {
+    append_staged_status(&mut status, staged_journal);
+    status
+}
+
+fn append_staged_status(status: &mut String, staged_journal: Option<&FileJournal>) {
+    if let Some(journal) = staged_journal {
+        status.push_str(&format!(
+            " 활성화 전 저널도 보존했습니다: {}. 새 적용은 잠겼습니다.",
+            journal.path().display()
+        ));
     }
 }
 
@@ -1927,7 +1986,11 @@ fn apply_changes(window: HWND, state: &mut AppState) {
             return;
         }
     };
-    let mut journal = match FileJournal::create_new(&state.journal_root, ACTIVE_JOURNAL_LEAF) {
+    let mut journal = match FileJournal::create_candidate(
+        &state.journal_root,
+        CANDIDATE_JOURNAL_LEAF,
+        ACTIVE_JOURNAL_LEAF,
+    ) {
         Ok(journal) => journal,
         Err(error) => {
             state.recovery_locked = true;

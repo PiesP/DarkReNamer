@@ -151,6 +151,8 @@ pub enum FileJournalErrorKind {
     InvalidLeaf,
     /// Journal is incomplete or corrupt and cannot be deleted.
     UnsafeCleanupState,
+    /// A pre-activation candidate contains execution or terminal records.
+    InvalidCandidateState,
 }
 
 /// File journal error retaining a native code when available.
@@ -773,6 +775,17 @@ pub struct FileJournal {
     torn_prefix: Option<usize>,
     tail_issue: Option<JournalTailIssue>,
     poisoned: bool,
+    phase: FileJournalPhase,
+}
+
+#[derive(Debug)]
+enum FileJournalPhase {
+    Active,
+    Candidate {
+        active_path: PathBuf,
+        active_leaf: String,
+    },
+    PromotionUncertain,
 }
 
 impl FileJournal {
@@ -794,6 +807,44 @@ impl FileJournal {
             torn_prefix: None,
             tail_issue: None,
             poisoned: false,
+            phase: FileJournalPhase::Active,
+        })
+    }
+
+    /// Creates and retains a candidate that becomes active only after its
+    /// Intent record is durable.
+    pub fn create_candidate(
+        root: &JournalRoot,
+        candidate_leaf: &str,
+        active_leaf: &str,
+    ) -> Result<Self, FileJournalError> {
+        let candidate_path = root.child(candidate_leaf)?;
+        let active_path = root.child(active_leaf)?;
+        if candidate_path == active_path {
+            return Err(FileJournalError {
+                kind: FileJournalErrorKind::InvalidLeaf,
+                os_code: None,
+            });
+        }
+        let file = open_create_new(&root.file, &candidate_path, candidate_leaf)?;
+        validate_file_type(&file)?;
+        Ok(Self {
+            path: candidate_path,
+            _root: root.file.try_clone()?,
+            _root_identity: root.identity,
+            file,
+            records: Vec::new(),
+            identity: combined_identity(root.identity),
+            generation: 0,
+            next_sequence: 0,
+            byte_length: 0,
+            torn_prefix: None,
+            tail_issue: None,
+            poisoned: false,
+            phase: FileJournalPhase::Candidate {
+                active_path,
+                active_leaf: active_leaf.to_owned(),
+            },
         })
     }
 
@@ -844,13 +895,44 @@ impl FileJournal {
             torn_prefix: inspection.issue.map(|_| inspection.valid_bytes),
             tail_issue: inspection.issue,
             poisoned: false,
+            phase: FileJournalPhase::Active,
         })
+    }
+
+    /// Opens an abandoned pre-activation candidate without treating it as an
+    /// active transaction.
+    pub fn open_candidate_existing(
+        root: &JournalRoot,
+        candidate_leaf: &str,
+        active_leaf: &str,
+    ) -> Result<Self, FileJournalError> {
+        let active_path = root.child(active_leaf)?;
+        let mut journal = Self::open_existing(root, candidate_leaf)?;
+        let valid_candidate = journal.records.is_empty()
+            || matches!(journal.records.as_slice(), [JournalRecord::Intent { .. }]);
+        if !valid_candidate {
+            return Err(FileJournalError {
+                kind: FileJournalErrorKind::InvalidCandidateState,
+                os_code: None,
+            });
+        }
+        journal.phase = FileJournalPhase::Candidate {
+            active_path,
+            active_leaf: active_leaf.to_owned(),
+        };
+        Ok(journal)
     }
 
     /// Returns the retained path for operator display or explicit archival.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Returns whether this retained file has not been promoted to active.
+    #[must_use]
+    pub const fn is_candidate(&self) -> bool {
+        matches!(&self.phase, FileJournalPhase::Candidate { .. })
     }
 
     /// Returns decoded append-only records.
@@ -884,8 +966,15 @@ impl FileJournal {
     /// when the owned file handle is dropped.
     pub fn mark_delete_if_safe(&mut self) -> Result<(), FileJournalError> {
         let safe = !self.poisoned
-            && (self.records.is_empty()
-                || self.is_terminal() && replay_journal(&self.records) == RecoveryState::Clean);
+            && match &self.phase {
+                FileJournalPhase::Active => {
+                    self.records.is_empty()
+                        || self.is_terminal()
+                            && replay_journal(&self.records) == RecoveryState::Clean
+                }
+                FileJournalPhase::Candidate { .. } => self.records.is_empty(),
+                FileJournalPhase::PromotionUncertain => false,
+            };
         if !safe {
             return Err(FileJournalError {
                 kind: FileJournalErrorKind::UnsafeCleanupState,
@@ -926,6 +1015,43 @@ impl FileJournal {
         Ok(())
     }
 
+    fn promote_candidate(&mut self) -> Result<(), JournalError> {
+        let FileJournalPhase::Candidate {
+            active_path,
+            active_leaf,
+        } = &self.phase
+        else {
+            return Ok(());
+        };
+        let active_path = active_path.clone();
+        let active_leaf = active_leaf.clone();
+        self.poisoned = true;
+        if let Err(error) = promote_file_noreplace(
+            &self.file,
+            &self._root,
+            &self.path,
+            &active_path,
+            &active_leaf,
+        ) {
+            self.phase = FileJournalPhase::PromotionUncertain;
+            return Err(journal_io_may_have_appended(error));
+        }
+        self.path = active_path;
+        self.phase = FileJournalPhase::Active;
+        self.poisoned = false;
+        Ok(())
+    }
+
+    fn require_active(&self) -> Result<(), JournalError> {
+        if self.poisoned {
+            return Err(JournalError::may_have_appended(8));
+        }
+        if !matches!(&self.phase, FileJournalPhase::Active) {
+            return Err(JournalError::not_appended(9));
+        }
+        Ok(())
+    }
+
     fn authorized_append(
         &mut self,
         authorization: &mut JournalAuthorization,
@@ -934,6 +1060,7 @@ impl FileJournal {
         if self.poisoned {
             return Err(JournalError::may_have_appended(8));
         }
+        self.require_active()?;
         if authorization.identity != self.identity || authorization.generation != self.generation {
             return Err(JournalError::not_appended(2));
         }
@@ -963,20 +1090,26 @@ impl FileJournal {
 
 impl JournalStore for FileJournal {
     fn begin(&mut self, plan: PlanId, steps: &[JournalStep]) -> Result<(), JournalError> {
+        if self.poisoned {
+            return Err(JournalError::may_have_appended(8));
+        }
         if !self.records.is_empty() {
             return Err(JournalError::not_appended(1));
         }
         self.append(JournalRecord::Intent {
             plan,
             steps: steps.into(),
-        })
+        })?;
+        self.promote_candidate()
     }
 
     fn prepared(&mut self, step: usize, direction: JournalDirection) -> Result<(), JournalError> {
+        self.require_active()?;
         self.append(JournalRecord::Prepared { step, direction })
     }
 
     fn completed(&mut self, step: usize, direction: JournalDirection) -> Result<(), JournalError> {
+        self.require_active()?;
         self.append(JournalRecord::Completed { step, direction })
     }
 
@@ -985,19 +1118,19 @@ impl JournalStore for FileJournal {
         step: usize,
         direction: JournalDirection,
     ) -> Result<(), JournalError> {
+        self.require_active()?;
         self.append(JournalRecord::NotApplied { step, direction })
     }
 
     fn terminal(&mut self, terminal: JournalTerminal) -> Result<(), JournalError> {
+        self.require_active()?;
         self.append(JournalRecord::Terminal(terminal))
     }
 }
 
 impl AuthorizedJournal for FileJournal {
     fn authorized_snapshot(&mut self) -> Result<JournalSnapshot, JournalError> {
-        if self.poisoned {
-            return Err(JournalError::may_have_appended(8));
-        }
+        self.require_active()?;
         Ok(JournalSnapshot {
             records: self.records.clone().into_boxed_slice(),
             authorization: JournalAuthorization {
@@ -1050,6 +1183,32 @@ fn journal_io_may_have_appended(error: io::Error) -> JournalError {
             .and_then(|code| u32::try_from(code).ok())
             .unwrap_or(6),
     )
+}
+
+#[cfg(windows)]
+fn promote_file_noreplace(
+    file: &File,
+    root: &File,
+    _candidate_path: &Path,
+    _active_path: &Path,
+    active_leaf: &str,
+) -> io::Result<()> {
+    let active_leaf = active_leaf.encode_utf16().collect::<Vec<_>>();
+    super::windows_native::rename_noreplace(file, root, &active_leaf)
+}
+
+#[cfg(not(windows))]
+fn promote_file_noreplace(
+    _file: &File,
+    _root: &File,
+    _candidate_path: &Path,
+    _active_path: &Path,
+    _active_leaf: &str,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "candidate promotion is available only on Windows",
+    ))
 }
 
 fn next_file_identity() -> u64 {
