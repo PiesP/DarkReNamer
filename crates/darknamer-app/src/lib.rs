@@ -25,8 +25,6 @@ pub(crate) const LOCATION_COLUMN_MINIMUM: i32 = 80;
 pub(crate) const LIST_SCROLLBAR_ALLOWANCE_DIP: i32 = 17;
 #[cfg(any(windows, test))]
 pub(crate) const EMPTY_LIST_STATUS: &str = "파일이나 폴더를 끌어 놓거나 Ctrl+O로 추가하세요.";
-#[cfg(any(windows, test))]
-pub(crate) const VERSION_MENU_LABEL: &str = "버전(&H)";
 
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,30 +71,46 @@ pub const fn scale_dip(value: i32, dpi: u32) -> i32 {
     }
 }
 
-/// One logical group of commands in a vertical command rail.
+/// Side of the main window occupied by a visible command rail.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CommandGroupSpec {
-    pub commands: &'static [CommandId],
+pub enum RailSide {
+    Left,
+    Right,
 }
 
 /// Ordered command groups for one side of the main window.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommandRailSpec {
-    pub groups: &'static [CommandGroupSpec],
+    pub side: RailSide,
 }
 
 impl CommandRailSpec {
     /// Returns the total number of visible commands in this rail.
     #[must_use]
     pub fn command_count(self) -> usize {
-        self.groups.iter().map(|group| group.commands.len()).sum()
+        self.command_specs().count()
     }
 
     /// Iterates over visible command identifiers in display order.
     pub fn commands(self) -> impl Iterator<Item = CommandId> {
-        self.groups
-            .iter()
-            .flat_map(|group| group.commands.iter().copied())
+        self.command_specs().map(|spec| spec.id)
+    }
+
+    /// Iterates over the catalog entries visible on this rail.
+    pub fn command_specs(self) -> impl Iterator<Item = &'static CommandUiSpec> {
+        COMMAND_UI_SPECS.iter().filter(move |spec| {
+            spec.rail
+                .is_some_and(|placement| placement.side == self.side)
+        })
+    }
+
+    fn group_count(self) -> usize {
+        self.command_specs()
+            .fold((None, 0), |(previous, count), spec| {
+                let group = spec.rail.map(|placement| placement.group);
+                (group, count + usize::from(group != previous))
+            })
+            .1
     }
 }
 
@@ -517,51 +531,13 @@ fn fit_prompt_section_heights(desired: &[i32], available: i32) -> Vec<i32> {
     heights
 }
 
-const LEFT_RAIL_GROUP_1: [CommandId; 1] = [APPLY];
-const LEFT_RAIL_GROUP_2: [CommandId; 3] = [REPLACE, PREFIX, SUFFIX];
-const LEFT_RAIL_GROUP_3: [CommandId; 3] = [CLEAR_NAME, DELETE_POSITION, DELETE_DELIMITED];
-const LEFT_RAIL_GROUP_4: [CommandId; 3] = [KEEP_DIGITS, PAD_DIGITS, SEQUENCE];
-const LEFT_RAIL_GROUPS: [CommandGroupSpec; 4] = [
-    CommandGroupSpec {
-        commands: &LEFT_RAIL_GROUP_1,
-    },
-    CommandGroupSpec {
-        commands: &LEFT_RAIL_GROUP_2,
-    },
-    CommandGroupSpec {
-        commands: &LEFT_RAIL_GROUP_3,
-    },
-    CommandGroupSpec {
-        commands: &LEFT_RAIL_GROUP_4,
-    },
-];
-
-const RIGHT_RAIL_GROUP_1: [CommandId; 1] = [RESET];
-const RIGHT_RAIL_GROUP_2: [CommandId; 3] = [CLEAR_LIST, MANUAL_CHANGE, SORT];
-const RIGHT_RAIL_GROUP_3: [CommandId; 2] = [PARENT_PREFIX, PARENT_SUFFIX];
-const RIGHT_RAIL_GROUP_4: [CommandId; 3] = [EXT_DELETE, EXT_ADD, EXT_REPLACE];
-const RIGHT_RAIL_GROUPS: [CommandGroupSpec; 4] = [
-    CommandGroupSpec {
-        commands: &RIGHT_RAIL_GROUP_1,
-    },
-    CommandGroupSpec {
-        commands: &RIGHT_RAIL_GROUP_2,
-    },
-    CommandGroupSpec {
-        commands: &RIGHT_RAIL_GROUP_3,
-    },
-    CommandGroupSpec {
-        commands: &RIGHT_RAIL_GROUP_4,
-    },
-];
-
 /// Explicit left-side command grouping.
 pub const LEFT_RAIL: CommandRailSpec = CommandRailSpec {
-    groups: &LEFT_RAIL_GROUPS,
+    side: RailSide::Left,
 };
 /// Explicit right-side command grouping.
 pub const RIGHT_RAIL: CommandRailSpec = CommandRailSpec {
-    groups: &RIGHT_RAIL_GROUPS,
+    side: RailSide::Right,
 };
 
 fn required_command_rail_height(
@@ -570,7 +546,7 @@ fn required_command_rail_height(
 ) -> Result<i32, LayoutError> {
     let command_count = i32::try_from(spec.command_count()).map_err(|_| LayoutError::Overflow)?;
     let group_gaps =
-        i32::try_from(spec.groups.len().saturating_sub(1)).map_err(|_| LayoutError::Overflow)?;
+        i32::try_from(spec.group_count().saturating_sub(1)).map_err(|_| LayoutError::Overflow)?;
     metrics
         .rail_padding
         .checked_mul(2)
@@ -605,24 +581,28 @@ pub fn calculate_command_rail_layout(
 
     let mut placements = Vec::with_capacity(spec.command_count());
     let mut y = metrics.rail_padding;
-    for (group_index, group) in spec.groups.iter().enumerate() {
-        if group_index > 0 {
+    let mut previous_group = None;
+    for command_spec in spec.command_specs() {
+        let group = command_spec
+            .rail
+            .map(|placement| placement.group)
+            .ok_or(LayoutError::Overflow)?;
+        if previous_group.is_some_and(|previous| previous != group) {
             y = y
                 .checked_add(metrics.group_gap)
                 .ok_or(LayoutError::Overflow)?;
         }
-        for &command in group.commands {
-            placements.push(CommandPlacement {
-                command,
-                x: 0,
-                y,
-                width: metrics.rail_width,
-                height: metrics.button_height,
-            });
-            y = y
-                .checked_add(metrics.button_height)
-                .ok_or(LayoutError::Overflow)?;
-        }
+        previous_group = Some(group);
+        placements.push(CommandPlacement {
+            command: command_spec.id,
+            x: 0,
+            y,
+            width: metrics.rail_width,
+            height: metrics.button_height,
+        });
+        y = y
+            .checked_add(metrics.button_height)
+            .ok_or(LayoutError::Overflow)?;
     }
     Ok(placements)
 }
@@ -1059,6 +1039,672 @@ pub const SHOW_SIZE: CommandId = 0x8021;
 pub const SHOW_MODIFIED: CommandId = 0x8022;
 pub const SHOW_CREATED: CommandId = 0x8023;
 pub const VERSION: CommandId = 0x8024;
+pub(crate) const EXIT_COMMAND: CommandId = 2;
+pub(crate) const DELETE_SELECTED_COMMAND: CommandId = 0xFFFF;
+
+/// Placement of one command in a command rail. `None` means menu-only.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RailPlacement {
+    pub side: RailSide,
+    pub group: u8,
+    pub order: u8,
+}
+
+/// Top-level native menu containing a catalog command.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum MenuGroup {
+    File,
+    Edit,
+    View,
+    Tools,
+    About,
+}
+
+/// Placement of one command in a top-level native menu.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MenuPlacement {
+    pub group: MenuGroup,
+    /// Commands in different sections are separated visually.
+    pub section: u8,
+    pub order: u8,
+}
+
+/// Virtual keys used only for compatibility with the legacy UI contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LegacyVirtualKey {
+    Character(u16),
+    Delete,
+    Escape,
+    OemComma,
+    OemPeriod,
+}
+
+/// Modifier combinations used by legacy compatibility accelerators.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LegacyShortcutModifiers {
+    None,
+    Control,
+    ControlShift,
+}
+
+/// A legacy compatibility shortcut and its exact menu display text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LegacyShortcut {
+    pub virtual_key: LegacyVirtualKey,
+    pub modifiers: LegacyShortcutModifiers,
+    pub display: &'static str,
+}
+
+/// A legacy compatibility accelerator resolved to a native command ID.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LegacyCommandShortcut {
+    pub command: CommandId,
+    pub shortcut: LegacyShortcut,
+}
+
+/// Data-dependent command enablement rule.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommandEnableRule {
+    Always,
+    Rows,
+    Selection,
+    Never,
+}
+
+/// State boundary a command is allowed to mutate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommandMutationClass {
+    None,
+    Model,
+    Filesystem,
+}
+
+/// Immutable native UI metadata for one command resource identifier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommandUiSpec {
+    pub id: CommandId,
+    pub rail: Option<RailPlacement>,
+    pub rail_label: &'static str,
+    pub menu: MenuPlacement,
+    pub menu_label: &'static str,
+    pub tooltip_label: &'static str,
+    pub legacy_shortcut: Option<LegacyShortcut>,
+    pub enable_rule: CommandEnableRule,
+    pub mutation: CommandMutationClass,
+    pub display: CommandUiPolicy,
+}
+
+impl CommandUiSpec {
+    /// Returns the spoken one-line name exposed by a standard rail button's
+    /// catalog-owned window text.
+    #[must_use]
+    pub fn rail_spoken_label(self) -> String {
+        self.rail_label.replace('\n', " ")
+    }
+}
+
+const fn rail(side: RailSide, group: u8, order: u8) -> Option<RailPlacement> {
+    Some(RailPlacement { side, group, order })
+}
+
+const fn menu(group: MenuGroup, section: u8, order: u8) -> MenuPlacement {
+    MenuPlacement {
+        group,
+        section,
+        order,
+    }
+}
+
+const fn legacy(
+    virtual_key: LegacyVirtualKey,
+    modifiers: LegacyShortcutModifiers,
+    display: &'static str,
+) -> Option<LegacyShortcut> {
+    Some(LegacyShortcut {
+        virtual_key,
+        modifiers,
+        display,
+    })
+}
+
+macro_rules! command_ui_spec {
+    ($id:ident, $rail:expr, $rail_label:literal, $menu:expr, $menu_label:literal,
+     $tooltip:literal, $shortcut:expr, $enable:ident, $mutation:ident, $display:ident) => {
+        CommandUiSpec {
+            id: $id,
+            rail: $rail,
+            rail_label: $rail_label,
+            menu: $menu,
+            menu_label: $menu_label,
+            tooltip_label: $tooltip,
+            legacy_shortcut: $shortcut,
+            enable_rule: CommandEnableRule::$enable,
+            mutation: CommandMutationClass::$mutation,
+            display: CommandUiPolicy::$display,
+        }
+    };
+}
+
+/// Complete native UI command catalog in stable resource-ID order.
+pub const COMMAND_UI_SPECS: [CommandUiSpec; 34] = [
+    command_ui_spec!(
+        APPLY,
+        rail(RailSide::Left, 0, 0),
+        "변경\n적용",
+        menu(MenuGroup::File, 1, 0),
+        "실제 파일 변경",
+        "변경 적용",
+        legacy(
+            LegacyVirtualKey::Character(b'S' as u16),
+            LegacyShortcutModifiers::Control,
+            "Ctrl+S"
+        ),
+        Rows,
+        Filesystem,
+        NoRows
+    ),
+    command_ui_spec!(
+        REPLACE,
+        rail(RailSide::Left, 1, 0),
+        "문자열\n바꾸기",
+        menu(MenuGroup::Tools, 0, 0),
+        "문자열 바꾸기",
+        "문자열 바꾸기",
+        None,
+        Rows,
+        Model,
+        AllRows
+    ),
+    command_ui_spec!(
+        PREFIX,
+        rail(RailSide::Left, 1, 1),
+        "앞이름\n붙이기",
+        menu(MenuGroup::Tools, 0, 1),
+        "앞이름 붙이기",
+        "앞이름 붙이기",
+        None,
+        Rows,
+        Model,
+        AllRows
+    ),
+    command_ui_spec!(
+        SUFFIX,
+        rail(RailSide::Left, 1, 2),
+        "뒷이름\n붙이기",
+        menu(MenuGroup::Tools, 0, 2),
+        "뒷이름 붙이기",
+        "뒷이름 붙이기",
+        None,
+        Rows,
+        Model,
+        AllRows
+    ),
+    command_ui_spec!(
+        CLEAR_NAME,
+        rail(RailSide::Left, 2, 0),
+        "이름\n지우기",
+        menu(MenuGroup::Tools, 1, 0),
+        "이름 지우기",
+        "이름 지우기",
+        None,
+        Rows,
+        Model,
+        AllRows
+    ),
+    command_ui_spec!(
+        DELETE_POSITION,
+        rail(RailSide::Left, 2, 1),
+        "위치\n지우기",
+        menu(MenuGroup::Tools, 1, 1),
+        "위치 지우기",
+        "위치 지우기",
+        None,
+        Rows,
+        Model,
+        AllRows
+    ),
+    command_ui_spec!(
+        DELETE_DELIMITED,
+        rail(RailSide::Left, 2, 2),
+        "묶인곳\n지우기",
+        menu(MenuGroup::Tools, 1, 2),
+        "묶인곳 지우기",
+        "묶인곳 지우기",
+        None,
+        Rows,
+        Model,
+        AllRows
+    ),
+    command_ui_spec!(
+        KEEP_DIGITS,
+        rail(RailSide::Left, 3, 0),
+        "숫자만\n남기기",
+        menu(MenuGroup::Tools, 2, 0),
+        "숫자만 남기기",
+        "숫자만 남기기",
+        None,
+        Rows,
+        Model,
+        AllRows
+    ),
+    command_ui_spec!(
+        PAD_DIGITS,
+        rail(RailSide::Left, 3, 1),
+        "자리수\n맞추기",
+        menu(MenuGroup::Tools, 2, 1),
+        "자리수 맞추기",
+        "자리수 맞추기",
+        None,
+        Rows,
+        Model,
+        AllRows
+    ),
+    command_ui_spec!(
+        SEQUENCE,
+        rail(RailSide::Left, 3, 2),
+        "번호\n붙이기",
+        menu(MenuGroup::Tools, 2, 2),
+        "번호 붙이기",
+        "번호 붙이기",
+        None,
+        Rows,
+        Model,
+        AllRows
+    ),
+    command_ui_spec!(
+        RESET,
+        rail(RailSide::Right, 0, 0),
+        "원래\n이름으로",
+        menu(MenuGroup::File, 1, 1),
+        "원래 이름으로",
+        "원래 이름으로",
+        legacy(
+            LegacyVirtualKey::Character(b'Z' as u16),
+            LegacyShortcutModifiers::Control,
+            "Ctrl+Z"
+        ),
+        Rows,
+        Model,
+        AllRows
+    ),
+    command_ui_spec!(
+        CLEAR_LIST,
+        rail(RailSide::Right, 1, 0),
+        "목록\n지우기",
+        menu(MenuGroup::File, 1, 2),
+        "경로목록 지우기",
+        "목록 지우기",
+        legacy(
+            LegacyVirtualKey::Character(b'L' as u16),
+            LegacyShortcutModifiers::Control,
+            "Ctrl+L"
+        ),
+        Rows,
+        Model,
+        AllRows
+    ),
+    command_ui_spec!(
+        MANUAL_CHANGE,
+        rail(RailSide::Right, 1, 1),
+        "직접\n바꾸기",
+        menu(MenuGroup::Edit, 1, 0),
+        "직접 바꾸기",
+        "직접 바꾸기",
+        None,
+        Selection,
+        Model,
+        SingleRow
+    ),
+    command_ui_spec!(
+        SORT,
+        rail(RailSide::Right, 1, 2),
+        "목록\n정렬",
+        menu(MenuGroup::File, 1, 3),
+        "경로목록 정렬",
+        "목록 정렬",
+        legacy(
+            LegacyVirtualKey::Character(b'A' as u16),
+            LegacyShortcutModifiers::Control,
+            "Ctrl+A"
+        ),
+        Rows,
+        Model,
+        AllRows
+    ),
+    command_ui_spec!(
+        PARENT_PREFIX,
+        rail(RailSide::Right, 2, 0),
+        "경로명\n앞에",
+        menu(MenuGroup::Tools, 4, 0),
+        "경로명 앞에",
+        "경로명 앞에",
+        None,
+        Rows,
+        Model,
+        AllRows
+    ),
+    command_ui_spec!(
+        PARENT_SUFFIX,
+        rail(RailSide::Right, 2, 1),
+        "경로명\n뒤에",
+        menu(MenuGroup::Tools, 4, 1),
+        "경로명 뒤에",
+        "경로명 뒤에",
+        None,
+        Rows,
+        Model,
+        AllRows
+    ),
+    command_ui_spec!(
+        UNIFY_PATH,
+        None,
+        "경로\n통일",
+        menu(MenuGroup::Tools, 4, 2),
+        "경로 통일하기 (미지원)",
+        "경로 통일하기 (미지원)",
+        None,
+        Never,
+        None,
+        NoRows
+    ),
+    command_ui_spec!(
+        EXT_DELETE,
+        rail(RailSide::Right, 3, 0),
+        "확장자\n삭제",
+        menu(MenuGroup::Tools, 3, 0),
+        "확장자 삭제",
+        "확장자 삭제",
+        None,
+        Rows,
+        Model,
+        AllRows
+    ),
+    command_ui_spec!(
+        EXT_ADD,
+        rail(RailSide::Right, 3, 1),
+        "확장자\n추가",
+        menu(MenuGroup::Tools, 3, 1),
+        "확장자 추가",
+        "확장자 추가",
+        None,
+        Rows,
+        Model,
+        AllRows
+    ),
+    command_ui_spec!(
+        EXT_REPLACE,
+        rail(RailSide::Right, 3, 2),
+        "확장자\n변경",
+        menu(MenuGroup::Tools, 3, 2),
+        "확장자 변경",
+        "확장자 변경",
+        None,
+        Rows,
+        Model,
+        AllRows
+    ),
+    command_ui_spec!(
+        ADD_FILES,
+        None,
+        "파일 추가",
+        menu(MenuGroup::File, 0, 0),
+        "경로목록에 파일 추가하기",
+        "경로목록에 파일 추가하기",
+        legacy(
+            LegacyVirtualKey::Character(b'O' as u16),
+            LegacyShortcutModifiers::Control,
+            "Ctrl+O"
+        ),
+        Always,
+        Model,
+        NoRows
+    ),
+    command_ui_spec!(
+        COPY_NAMES,
+        None,
+        "이름 복사",
+        menu(MenuGroup::File, 2, 0),
+        "클립보드로 바꿀이름 복사",
+        "클립보드로 바꿀이름 복사",
+        legacy(
+            LegacyVirtualKey::Character(b'C' as u16),
+            LegacyShortcutModifiers::Control,
+            "Ctrl+C"
+        ),
+        Rows,
+        None,
+        NoRows
+    ),
+    command_ui_spec!(
+        SAVE_NAMES,
+        None,
+        "이름 저장",
+        menu(MenuGroup::File, 2, 1),
+        "문서파일로 바꿀이름 저장",
+        "문서파일로 바꿀이름 저장",
+        legacy(
+            LegacyVirtualKey::Character(b'X' as u16),
+            LegacyShortcutModifiers::Control,
+            "Ctrl+X"
+        ),
+        Rows,
+        Filesystem,
+        NoRows
+    ),
+    command_ui_spec!(
+        COPY_PATHS,
+        None,
+        "경로 복사",
+        menu(MenuGroup::File, 3, 0),
+        "클립보드로 경로목록 복사",
+        "클립보드로 경로목록 복사",
+        legacy(
+            LegacyVirtualKey::Character(b'C' as u16),
+            LegacyShortcutModifiers::ControlShift,
+            "Ctrl+Shift+C"
+        ),
+        Rows,
+        None,
+        NoRows
+    ),
+    command_ui_spec!(
+        SAVE_PATHS,
+        None,
+        "경로 저장",
+        menu(MenuGroup::File, 3, 1),
+        "문서파일로 경로목록 저장",
+        "문서파일로 경로목록 저장",
+        legacy(
+            LegacyVirtualKey::Character(b'X' as u16),
+            LegacyShortcutModifiers::ControlShift,
+            "Ctrl+Shift+X"
+        ),
+        Rows,
+        Filesystem,
+        NoRows
+    ),
+    command_ui_spec!(
+        IMPORT_NAMES,
+        None,
+        "이름 불러오기",
+        menu(MenuGroup::File, 4, 0),
+        "바꿀이름 불러오기",
+        "바꿀이름 불러오기",
+        legacy(
+            LegacyVirtualKey::Character(b'V' as u16),
+            LegacyShortcutModifiers::Control,
+            "Ctrl+V"
+        ),
+        Rows,
+        Model,
+        AllRows
+    ),
+    command_ui_spec!(
+        IMPORT_PATHS,
+        None,
+        "경로 불러오기",
+        menu(MenuGroup::File, 4, 1),
+        "경로목록 불러오기",
+        "경로목록 불러오기",
+        legacy(
+            LegacyVirtualKey::Character(b'V' as u16),
+            LegacyShortcutModifiers::ControlShift,
+            "Ctrl+Shift+V"
+        ),
+        Always,
+        Model,
+        NoRows
+    ),
+    command_ui_spec!(
+        MOVE_UP,
+        None,
+        "위로 올림",
+        menu(MenuGroup::Edit, 0, 0),
+        "위로 올림",
+        "위로 올림",
+        legacy(
+            LegacyVirtualKey::OemComma,
+            LegacyShortcutModifiers::None,
+            "<"
+        ),
+        Selection,
+        Model,
+        MovedRows
+    ),
+    command_ui_spec!(
+        MOVE_DOWN,
+        None,
+        "아래로 내림",
+        menu(MenuGroup::Edit, 0, 1),
+        "아래로 내림",
+        "아래로 내림",
+        legacy(
+            LegacyVirtualKey::OemPeriod,
+            LegacyShortcutModifiers::None,
+            ">"
+        ),
+        Selection,
+        Model,
+        MovedRows
+    ),
+    command_ui_spec!(
+        SHOW_FULL_PATH,
+        None,
+        "전체 경로 표시",
+        menu(MenuGroup::View, 0, 0),
+        "전체 경로 표시",
+        "전체 경로 표시",
+        None,
+        Always,
+        None,
+        Columns
+    ),
+    command_ui_spec!(
+        SHOW_SIZE,
+        None,
+        "파일 크기 표시",
+        menu(MenuGroup::View, 0, 1),
+        "파일 크기 표시",
+        "파일 크기 표시",
+        None,
+        Always,
+        None,
+        Columns
+    ),
+    command_ui_spec!(
+        SHOW_MODIFIED,
+        None,
+        "변경 시각 표시",
+        menu(MenuGroup::View, 0, 2),
+        "변경 시각 표시",
+        "변경 시각 표시",
+        None,
+        Always,
+        None,
+        Columns
+    ),
+    command_ui_spec!(
+        SHOW_CREATED,
+        None,
+        "생성 시각 표시",
+        menu(MenuGroup::View, 0, 3),
+        "생성 시각 표시",
+        "생성 시각 표시",
+        None,
+        Always,
+        None,
+        Columns
+    ),
+    command_ui_spec!(
+        VERSION,
+        None,
+        "버전",
+        menu(MenuGroup::About, 0, 0),
+        "버전(&H)",
+        "버전",
+        None,
+        Always,
+        None,
+        NoRows
+    ),
+];
+
+/// Legacy shell accelerators whose commands are outside APPLY..VERSION.
+pub const LEGACY_AUXILIARY_SHORTCUTS: [LegacyCommandShortcut; 2] = [
+    LegacyCommandShortcut {
+        command: DELETE_SELECTED_COMMAND,
+        shortcut: LegacyShortcut {
+            virtual_key: LegacyVirtualKey::Delete,
+            modifiers: LegacyShortcutModifiers::None,
+            display: "Delete",
+        },
+    },
+    LegacyCommandShortcut {
+        command: EXIT_COMMAND,
+        shortcut: LegacyShortcut {
+            virtual_key: LegacyVirtualKey::Escape,
+            modifiers: LegacyShortcutModifiers::None,
+            display: "Esc",
+        },
+    },
+];
+
+/// Iterates every catalog and auxiliary legacy compatibility accelerator.
+pub fn legacy_command_shortcuts() -> impl Iterator<Item = LegacyCommandShortcut> {
+    COMMAND_UI_SPECS
+        .iter()
+        .filter_map(|spec| {
+            spec.legacy_shortcut.map(|shortcut| LegacyCommandShortcut {
+                command: spec.id,
+                shortcut,
+            })
+        })
+        .chain(LEGACY_AUXILIARY_SHORTCUTS)
+}
+
+/// Looks up a legacy compatibility accelerator by command identifier.
+#[must_use]
+pub fn legacy_command_shortcut(command: CommandId) -> Option<LegacyShortcut> {
+    legacy_command_shortcuts()
+        .find(|spec| spec.command == command)
+        .map(|spec| spec.shortcut)
+}
+
+/// Looks up one command's immutable UI metadata.
+#[must_use]
+pub fn command_ui_spec(id: CommandId) -> Option<&'static CommandUiSpec> {
+    let index = usize::from(id.checked_sub(APPLY)?);
+    COMMAND_UI_SPECS.get(index).filter(|spec| spec.id == id)
+}
+
+/// Returns a menu label with its catalog-owned legacy shortcut display.
+#[must_use]
+pub fn command_menu_label(spec: &CommandUiSpec) -> String {
+    spec.legacy_shortcut.map_or_else(
+        || spec.menu_label.to_owned(),
+        |shortcut| format!("{}\t{}", spec.menu_label, shortcut.display),
+    )
+}
 
 /// Native UI work required after a command finishes.
 #[cfg(any(windows, test))]
@@ -1097,9 +1743,8 @@ impl CommandOutcome {
 }
 
 /// Maximum row-rendering scope for a native command.
-#[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CommandUiPolicy {
+pub enum CommandUiPolicy {
     NoRows,
     SingleRow,
     MovedRows,
@@ -1107,20 +1752,18 @@ pub(crate) enum CommandUiPolicy {
     Columns,
 }
 
-#[cfg(any(windows, test))]
 #[must_use]
-pub(crate) const fn command_ui_policy(command: CommandId) -> CommandUiPolicy {
-    match command {
-        MANUAL_CHANGE => CommandUiPolicy::SingleRow,
-        MOVE_UP | MOVE_DOWN => CommandUiPolicy::MovedRows,
-        SHOW_FULL_PATH | SHOW_SIZE | SHOW_MODIFIED | SHOW_CREATED => CommandUiPolicy::Columns,
-        RESET | CLEAR_LIST | REPLACE | PREFIX | SUFFIX | CLEAR_NAME | DELETE_POSITION
-        | DELETE_DELIMITED | KEEP_DIGITS | PAD_DIGITS | SEQUENCE | SORT | PARENT_PREFIX
-        | PARENT_SUFFIX | EXT_DELETE | EXT_ADD | EXT_REPLACE | IMPORT_NAMES | 0xFFFF => {
-            CommandUiPolicy::AllRows
-        }
-        _ => CommandUiPolicy::NoRows,
-    }
+pub fn command_ui_policy(command: CommandId) -> CommandUiPolicy {
+    command_ui_spec(command).map_or_else(
+        || {
+            if command == DELETE_SELECTED_COMMAND {
+                CommandUiPolicy::AllRows
+            } else {
+                CommandUiPolicy::NoRows
+            }
+        },
+        |spec| spec.display,
+    )
 }
 
 #[cfg(any(windows, test))]
@@ -1132,7 +1775,7 @@ pub(crate) fn command_effect_fits_policy(command: CommandId, outcome: &CommandOu
         UiEffect::RowsChanged(_) => command_ui_policy(command) == CommandUiPolicy::MovedRows,
         UiEffect::AllRowsChanged => command_ui_policy(command) == CommandUiPolicy::AllRows,
         UiEffect::ColumnsChanged(_) => command_ui_policy(command) == CommandUiPolicy::Columns,
-        UiEffect::CloseRequested => command == 2,
+        UiEffect::CloseRequested => command == EXIT_COMMAND,
     }
 }
 
@@ -1197,101 +1840,33 @@ impl ToolSpec {
     }
 }
 
-pub const LEFT_TOOLS: [ToolSpec; 10] = [
-    ToolSpec {
-        id: APPLY,
-        label: "변경\n적용",
-    },
-    ToolSpec {
-        id: REPLACE,
-        label: "문자열\n바꾸기",
-    },
-    ToolSpec {
-        id: PREFIX,
-        label: "앞이름\n붙이기",
-    },
-    ToolSpec {
-        id: SUFFIX,
-        label: "뒷이름\n붙이기",
-    },
-    ToolSpec {
-        id: CLEAR_NAME,
-        label: "이름\n지우기",
-    },
-    ToolSpec {
-        id: DELETE_POSITION,
-        label: "위치\n지우기",
-    },
-    ToolSpec {
-        id: DELETE_DELIMITED,
-        label: "묶인곳\n지우기",
-    },
-    ToolSpec {
-        id: KEEP_DIGITS,
-        label: "숫자만\n남기기",
-    },
-    ToolSpec {
-        id: PAD_DIGITS,
-        label: "자리수\n맞추기",
-    },
-    ToolSpec {
-        id: SEQUENCE,
-        label: "번호\n붙이기",
-    },
-];
+/// Derives the visible rail tool data for one catalog command.
+#[must_use]
+pub fn rail_tool_spec(command: CommandId) -> Option<ToolSpec> {
+    command_ui_spec(command).and_then(|spec| {
+        spec.rail.map(|_| ToolSpec {
+            id: spec.id,
+            label: spec.rail_label,
+        })
+    })
+}
 
-pub const RIGHT_TOOLS: [ToolSpec; 10] = [
-    ToolSpec {
-        id: RESET,
-        label: "원래\n이름으로",
-    },
-    ToolSpec {
-        id: CLEAR_LIST,
-        label: "목록\n지우기",
-    },
-    ToolSpec {
-        id: MANUAL_CHANGE,
-        label: "직접\n바꾸기",
-    },
-    ToolSpec {
-        id: SORT,
-        label: "목록\n정렬",
-    },
-    ToolSpec {
-        id: PARENT_PREFIX,
-        label: "경로명\n앞에",
-    },
-    ToolSpec {
-        id: PARENT_SUFFIX,
-        label: "경로명\n뒤에",
-    },
-    ToolSpec {
-        id: UNIFY_PATH,
-        label: "경로\n통일",
-    },
-    ToolSpec {
-        id: EXT_DELETE,
-        label: "확장자\n삭제",
-    },
-    ToolSpec {
-        id: EXT_ADD,
-        label: "확장자\n추가",
-    },
-    ToolSpec {
-        id: EXT_REPLACE,
-        label: "확장자\n변경",
-    },
-];
+/// Iterates the visible tool data for one rail in catalog order.
+pub fn rail_tool_specs(spec: CommandRailSpec) -> impl Iterator<Item = ToolSpec> {
+    spec.commands().filter_map(rail_tool_spec)
+}
 
 /// Whether a command is enabled for current list/selection state.
 #[must_use]
 pub fn command_enabled(id: CommandId, row_count: usize, selected_count: usize) -> bool {
-    match id {
-        2 | ADD_FILES | IMPORT_PATHS | SHOW_FULL_PATH | SHOW_SIZE | SHOW_MODIFIED
-        | SHOW_CREATED | VERSION => true,
-        UNIFY_PATH => false,
-        MANUAL_CHANGE | MOVE_UP | MOVE_DOWN => selected_count > 0,
-        _ => row_count > 0,
+    let Some(spec) = command_ui_spec(id) else {
+        return id == EXIT_COMMAND;
+    };
+    match spec.enable_rule {
+        CommandEnableRule::Always => true,
+        CommandEnableRule::Rows => row_count > 0,
+        CommandEnableRule::Selection => selected_count > 0,
+        CommandEnableRule::Never => false,
     }
 }
 
@@ -1372,6 +1947,157 @@ mod tests {
             VERSION,
         ];
         assert_eq!(ids, core::array::from_fn(|index| 0x8003 + index as u16));
+    }
+
+    #[test]
+    fn command_catalog_is_complete_unique_and_resource_ordered() {
+        assert_eq!(COMMAND_UI_SPECS.len(), usize::from(VERSION - APPLY + 1));
+        assert_eq!(
+            COMMAND_UI_SPECS.map(|spec| spec.id),
+            core::array::from_fn(|index| APPLY + index as u16)
+        );
+        for spec in &COMMAND_UI_SPECS {
+            assert_eq!(command_ui_spec(spec.id), Some(spec));
+        }
+        assert!(command_ui_spec(APPLY - 1).is_none());
+        assert!(command_ui_spec(VERSION + 1).is_none());
+    }
+
+    #[test]
+    fn catalog_menu_and_rail_placements_are_unique_and_ordered() {
+        for group in [
+            MenuGroup::File,
+            MenuGroup::Edit,
+            MenuGroup::View,
+            MenuGroup::Tools,
+            MenuGroup::About,
+        ] {
+            let mut placements = COMMAND_UI_SPECS
+                .iter()
+                .filter(|spec| spec.menu.group == group)
+                .map(|spec| (spec.menu.section, spec.menu.order))
+                .collect::<Vec<_>>();
+            placements.sort_unstable();
+            placements.dedup();
+            assert_eq!(
+                placements.len(),
+                COMMAND_UI_SPECS
+                    .iter()
+                    .filter(|spec| spec.menu.group == group)
+                    .count()
+            );
+        }
+        for rail in [LEFT_RAIL, RIGHT_RAIL] {
+            let placements = rail
+                .command_specs()
+                .filter_map(|spec| spec.rail)
+                .map(|placement| (placement.group, placement.order))
+                .collect::<Vec<_>>();
+            assert!(placements.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+        assert_eq!(command_ui_spec(UNIFY_PATH).and_then(|spec| spec.rail), None);
+    }
+
+    #[test]
+    fn catalog_labels_cover_menu_tooltip_and_standard_button_accessibility() {
+        for spec in &COMMAND_UI_SPECS {
+            assert!(!spec.menu_label.is_empty());
+            assert!(!spec.rail_label.is_empty());
+            assert!(!spec.tooltip_label.is_empty());
+            assert!(!spec.tooltip_label.contains('\n'));
+            let menu_label = command_menu_label(spec);
+            assert!(menu_label.starts_with(spec.menu_label));
+            assert_eq!(menu_label.contains('\t'), spec.legacy_shortcut.is_some());
+        }
+        for rail in [LEFT_RAIL, RIGHT_RAIL] {
+            for spec in rail.command_specs() {
+                assert_eq!(spec.rail_spoken_label(), spec.tooltip_label);
+            }
+        }
+    }
+
+    #[test]
+    fn catalog_classifies_enable_mutation_and_display_boundaries() {
+        let apply = command_ui_spec(APPLY).copied();
+        assert_eq!(
+            apply.map(|spec| (spec.enable_rule, spec.mutation, spec.display)),
+            Some((
+                CommandEnableRule::Rows,
+                CommandMutationClass::Filesystem,
+                CommandUiPolicy::NoRows,
+            ))
+        );
+        for command in [SAVE_NAMES, SAVE_PATHS] {
+            assert_eq!(
+                command_ui_spec(command).map(|spec| spec.mutation),
+                Some(CommandMutationClass::Filesystem)
+            );
+        }
+        assert_eq!(
+            command_ui_spec(MANUAL_CHANGE).map(|spec| (
+                spec.enable_rule,
+                spec.mutation,
+                spec.display
+            )),
+            Some((
+                CommandEnableRule::Selection,
+                CommandMutationClass::Model,
+                CommandUiPolicy::SingleRow,
+            ))
+        );
+        assert_eq!(
+            command_ui_spec(UNIFY_PATH).map(|spec| (spec.enable_rule, spec.mutation, spec.display)),
+            Some((
+                CommandEnableRule::Never,
+                CommandMutationClass::None,
+                CommandUiPolicy::NoRows,
+            ))
+        );
+    }
+
+    #[test]
+    fn exact_legacy_shortcuts_remain_explicit_compatibility_metadata() {
+        let shortcut = |command| legacy_command_shortcut(command);
+        assert_eq!(
+            shortcut(SORT),
+            legacy(
+                LegacyVirtualKey::Character(b'A' as u16),
+                LegacyShortcutModifiers::Control,
+                "Ctrl+A"
+            )
+        );
+        assert_eq!(
+            shortcut(SAVE_NAMES),
+            legacy(
+                LegacyVirtualKey::Character(b'X' as u16),
+                LegacyShortcutModifiers::Control,
+                "Ctrl+X"
+            )
+        );
+        assert_eq!(
+            shortcut(IMPORT_NAMES),
+            legacy(
+                LegacyVirtualKey::Character(b'V' as u16),
+                LegacyShortcutModifiers::Control,
+                "Ctrl+V"
+            )
+        );
+        assert_eq!(
+            shortcut(EXIT_COMMAND),
+            legacy(
+                LegacyVirtualKey::Escape,
+                LegacyShortcutModifiers::None,
+                "Esc"
+            )
+        );
+        assert_eq!(
+            shortcut(MOVE_UP).map(|value| value.virtual_key),
+            Some(LegacyVirtualKey::OemComma)
+        );
+        assert_eq!(
+            shortcut(MOVE_DOWN).map(|value| value.virtual_key),
+            Some(LegacyVirtualKey::OemPeriod)
+        );
     }
 
     #[test]
@@ -1504,18 +2230,10 @@ mod tests {
 
     #[test]
     fn every_visible_command_has_button_and_one_line_tooltip_text() {
-        for (spec, tools) in [
-            (&LEFT_RAIL, LEFT_TOOLS.as_slice()),
-            (&RIGHT_RAIL, RIGHT_TOOLS.as_slice()),
-        ] {
-            for command in spec.commands() {
-                let matches = tools
-                    .iter()
-                    .filter(|tool| tool.id == command)
-                    .collect::<Vec<_>>();
-                assert_eq!(matches.len(), 1);
-                assert!(!matches[0].label.is_empty());
-                let one_line = matches[0].one_line_label();
+        for spec in [LEFT_RAIL, RIGHT_RAIL] {
+            for tool in rail_tool_specs(spec) {
+                assert!(!tool.label.is_empty());
+                let one_line = tool.one_line_label();
                 assert!(!one_line.is_empty());
                 assert!(!one_line.contains('\n'));
             }
@@ -1599,7 +2317,10 @@ mod tests {
     fn compact_rail_keeps_the_longest_two_line_label_width() {
         assert_eq!(RailDensity::Compact.metrics(96).rail_width, 52);
         assert_eq!(RailDensity::Compact.metrics(192).rail_width, 104);
-        assert_eq!(RIGHT_TOOLS[0].label, "원래\n이름으로");
+        assert_eq!(
+            rail_tool_spec(RESET).map(|tool| tool.label),
+            Some("원래\n이름으로")
+        );
     }
 
     #[test]
@@ -1934,7 +2655,10 @@ mod tests {
             EMPTY_LIST_STATUS,
             "파일이나 폴더를 끌어 놓거나 Ctrl+O로 추가하세요."
         );
-        assert_eq!(VERSION_MENU_LABEL, "버전(&H)");
+        assert_eq!(
+            command_ui_spec(VERSION).map(|spec| spec.menu_label),
+            Some("버전(&H)")
+        );
         assert_eq!(
             COLUMNS.map(|column| column.label),
             [
@@ -1960,7 +2684,7 @@ mod tests {
             [150, 150, 100, 0, 0, 0, 0]
         );
         assert_eq!(
-            LEFT_TOOLS.map(|tool| tool.id),
+            LEFT_RAIL.commands().collect::<Vec<_>>(),
             [
                 APPLY,
                 REPLACE,
@@ -1973,9 +2697,10 @@ mod tests {
                 PAD_DIGITS,
                 SEQUENCE
             ]
+            .to_vec()
         );
         assert_eq!(
-            RIGHT_TOOLS.map(|tool| tool.id),
+            RIGHT_RAIL.commands().collect::<Vec<_>>(),
             [
                 RESET,
                 CLEAR_LIST,
@@ -1983,23 +2708,11 @@ mod tests {
                 SORT,
                 PARENT_PREFIX,
                 PARENT_SUFFIX,
-                UNIFY_PATH,
                 EXT_DELETE,
                 EXT_ADD,
                 EXT_REPLACE
             ]
-        );
-        assert_eq!(
-            LEFT_RAIL.commands().collect::<Vec<_>>(),
-            LEFT_TOOLS.map(|tool| tool.id)
-        );
-        assert_eq!(
-            RIGHT_RAIL.commands().collect::<Vec<_>>(),
-            RIGHT_TOOLS
-                .into_iter()
-                .filter(|tool| tool.id != UNIFY_PATH)
-                .map(|tool| tool.id)
-                .collect::<Vec<_>>()
+            .to_vec()
         );
     }
 

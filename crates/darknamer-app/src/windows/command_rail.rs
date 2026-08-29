@@ -21,7 +21,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
 };
 
-use super::{CommandId, CommandPlacement, CommandRailSpec, ToolSpec, wide};
+use super::{CommandId, CommandPlacement, CommandRailSpec, command_ui_spec, wide};
 
 #[derive(Debug)]
 struct CommandButton {
@@ -39,11 +39,7 @@ pub(super) struct CommandRail {
 }
 
 impl CommandRail {
-    pub(super) fn create(
-        parent: HWND,
-        spec: &'static CommandRailSpec,
-        tools: &'static [ToolSpec],
-    ) -> io::Result<Self> {
+    pub(super) fn create(parent: HWND, spec: &'static CommandRailSpec) -> io::Result<Self> {
         let tooltip = create_tooltip(parent)?;
         let mut rail = Self {
             parent,
@@ -53,20 +49,21 @@ impl CommandRail {
             tooltip_texts: Vec::with_capacity(spec.command_count()),
         };
 
-        if let Err(error) = rail.populate(tools) {
+        if let Err(error) = rail.populate() {
             rail.destroy_partial();
             return Err(error);
         }
         Ok(rail)
     }
 
-    fn populate(&mut self, tools: &'static [ToolSpec]) -> io::Result<()> {
+    fn populate(&mut self) -> io::Result<()> {
         for command in self.spec.commands() {
-            let tool = tools
-                .iter()
-                .find(|tool| tool.id == command)
+            let command_spec = command_ui_spec(command)
+                .filter(|spec| spec.rail.is_some())
                 .ok_or_else(|| io::Error::other("command rail label is missing"))?;
-            let label = wide(tool.label);
+            let label = wide(command_spec.rail_label);
+            // A standard BUTTON exposes this catalog-owned window text as its
+            // accessible name; no parallel accessibility string can drift.
             // SAFETY: parent is a live top-level window, label is terminated
             // UTF-16 retained through the synchronous control creation call,
             // and the numeric child identifier is the stable command ID.
@@ -100,13 +97,13 @@ impl CommandRail {
                 command,
                 window: button,
             });
-            self.add_tooltip(button, *tool)?;
+            self.add_tooltip(button, command_spec.tooltip_label)?;
         }
         Ok(())
     }
 
-    fn add_tooltip(&mut self, button: HWND, tool_spec: ToolSpec) -> io::Result<()> {
-        let text = wide(&tool_spec.one_line_label()).into_boxed_slice();
+    fn add_tooltip(&mut self, button: HWND, tooltip_label: &str) -> io::Result<()> {
+        let text = wide(tooltip_label).into_boxed_slice();
         // The V2 prefix excludes only lpReserved, which this application does
         // not use, and is accepted by both legacy and manifest-selected v6
         // tooltip controls. CCM_GETVERSION is deliberately not used here: it

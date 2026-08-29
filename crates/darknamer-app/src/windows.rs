@@ -105,31 +105,31 @@ use windows_sys::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForWindow, GetSystemMetricsForDpi, SystemParametersInfoForDpi,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, GetKeyState, IsWindowEnabled, SetFocus, VK_CONTROL, VK_DELETE, VK_ESCAPE,
-    VK_SHIFT,
+    EnableWindow, IsWindowEnabled, SetFocus, VK_DELETE, VK_ESCAPE, VK_OEM_COMMA, VK_OEM_PERIOD,
 };
 use windows_sys::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, HDROP, SHFILEINFOW, SHGFI_SMALLICON,
     SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, BN_CLICKED, BS_DEFPUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL,
+    ACCEL, AppendMenuW, BN_CLICKED, BS_DEFPUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL,
     CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem,
-    CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, GWLP_USERDATA, GetClientRect, GetMessageW,
-    GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HMENU,
-    IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, KillTimer, LoadCursorW, LoadIconW, MB_DEFBUTTON2,
-    MB_ICONWARNING, MB_OKCANCEL, MB_YESNOCANCEL, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED,
-    MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW, MoveWindow,
-    NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXVSCROLL,
-    SPI_GETNONCLIENTMETRICS, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendMessageW,
-    SetForegroundWindow, SetMenu, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
-    WM_DROPFILES, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_NCCREATE, WM_NCDESTROY,
-    WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
-    WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
-    WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
-    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    CreateAcceleratorTableW, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+    DestroyAcceleratorTable, DestroyWindow, DispatchMessageW, DrawMenuBar, ES_AUTOHSCROLL,
+    EnableMenuItem, FCONTROL, FSHIFT, FVIRTKEY, GWLP_USERDATA, GetClientRect, GetMessageW,
+    GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HACCEL,
+    HMENU, IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, KillTimer, LoadCursorW, LoadIconW,
+    MB_DEFBUTTON2, MB_ICONWARNING, MB_OKCANCEL, MB_YESNOCANCEL, MF_BYCOMMAND, MF_CHECKED,
+    MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG,
+    MessageBoxW, MoveWindow, NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassExW,
+    SM_CXVSCROLL, SPI_GETNONCLIENTMETRICS, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
+    SendMessageW, SetForegroundWindow, SetMenu, SetTimer, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, TranslateAcceleratorW, TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE,
+    WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_NCCREATE,
+    WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE,
+    WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD,
+    WS_CLIPCHILDREN, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
+    WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{BS_MULTILINE, GWL_STYLE};
@@ -911,8 +911,8 @@ mod tests {
             return Err(io::Error::last_os_error().into());
         }
 
-        let left = CommandRail::create(parent, &LEFT_RAIL, &LEFT_TOOLS)?;
-        let right = match CommandRail::create(parent, &RIGHT_RAIL, &RIGHT_TOOLS) {
+        let left = CommandRail::create(parent, &LEFT_RAIL)?;
+        let right = match CommandRail::create(parent, &RIGHT_RAIL) {
             Ok(rail) => rail,
             Err(error) => {
                 left.destroy();
@@ -961,23 +961,16 @@ mod tests {
 
         let result = (|| -> io::Result<()> {
             let mut actual_ids = Vec::with_capacity(19);
-            for (rail, expected, tools, origin_x) in [
-                (&left, left_placements.as_slice(), LEFT_TOOLS.as_slice(), 0),
-                (
-                    &right,
-                    right_placements.as_slice(),
-                    RIGHT_TOOLS.as_slice(),
-                    right_origin,
-                ),
+            for (rail, expected, origin_x) in [
+                (&left, left_placements.as_slice(), 0),
+                (&right, right_placements.as_slice(), right_origin),
             ] {
                 for placement in expected {
                     let button = rail
                         .command_hwnd(placement.command)
                         .ok_or_else(|| io::Error::other("native command button is missing"))?;
                     actual_ids.push(placement.command);
-                    let tool = tools
-                        .iter()
-                        .find(|tool| tool.id == placement.command)
+                    let tool = rail_tool_spec(placement.command)
                         .ok_or_else(|| io::Error::other("native command label is missing"))?;
                     assert_eq!(window_text(button)?, tool.label);
                     let rect = rail.command_rect(placement.command)?;

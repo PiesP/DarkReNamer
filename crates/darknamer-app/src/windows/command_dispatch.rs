@@ -1,49 +1,94 @@
 use super::*;
 
-pub(super) fn handle_accelerator(window: HWND, message: &MSG) -> bool {
-    // SAFETY: The virtual-key constant is defined and GetKeyState dereferences no caller pointer.
-    let ctrl = unsafe { GetKeyState(VK_CONTROL as i32) } < 0;
-    // SAFETY: The virtual-key constant is defined and GetKeyState dereferences no caller pointer.
-    let shift = unsafe { GetKeyState(VK_SHIFT as i32) } < 0;
-    let command = if message.message == WM_KEYDOWN {
-        match message.wParam as u32 {
-            value if value == u32::from(VK_DELETE) => Some(0xFFFF),
-            0xBC => Some(MOVE_UP),
-            0xBE => Some(MOVE_DOWN),
-            value if value == u32::from(VK_ESCAPE) => Some(2),
-            _ => None,
+pub(super) struct AcceleratorTable(HACCEL);
+
+impl AcceleratorTable {
+    pub(super) fn create() -> io::Result<Self> {
+        let entries = native_accelerator_entries();
+        let count = i32::try_from(entries.len())
+            .map_err(|_| io::Error::other("too many native accelerators"))?;
+        // SAFETY: entries is contiguous initialized ACCEL storage retained for
+        // the complete synchronous CreateAcceleratorTableW call.
+        let handle = unsafe { CreateAcceleratorTableW(entries.as_ptr(), count) };
+        if handle.is_null() {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(Self(handle))
         }
-    } else if message.message == WM_KEYUP && ctrl {
-        match message.wParam as u32 {
-            0x4F => Some(ADD_FILES),
-            0x53 => Some(APPLY),
-            0x5A => Some(RESET),
-            0x4C => Some(CLEAR_LIST),
-            0x41 => Some(SORT),
-            0x43 => Some(if shift { COPY_PATHS } else { COPY_NAMES }),
-            0x58 => Some(if shift { SAVE_PATHS } else { SAVE_NAMES }),
-            0x56 => Some(if shift { IMPORT_PATHS } else { IMPORT_NAMES }),
-            _ => None,
-        }
-    } else {
-        None
-    };
-    if let Some(command) = command {
-        // SAFETY: window is the active callback HWND; GWLP_USERDATA is read only to recover the pointer installed during creation.
-        let state = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *mut AppState;
-        if (APPLY..=VERSION).contains(&command) && !state.is_null() {
-            // SAFETY: state is the checked non-null AppState pointer from this HWND's GWLP_USERDATA and remains window-thread confined.
-            let enabled = unsafe { (*state).command_states[usize::from(command - APPLY)] };
-            if !enabled {
-                return true;
-            }
-        }
-        // SAFETY: window is the live top-level HWND; WM_COMMAND carries only the
-        // validated resource command value and no pointer payload.
-        unsafe { SendMessageW(window, WM_COMMAND, usize::from(command), 0) };
-        true
-    } else {
-        false
+    }
+
+    pub(super) fn translate(&self, window: HWND, message: &MSG) -> bool {
+        // TranslateAcceleratorW provides the standard key-down command path;
+        // only the catalog's intentional legacy command mappings are retained.
+        // SAFETY: self owns a live accelerator table, window is the live main
+        // HWND, and message is initialized MSG storage from GetMessageW.
+        unsafe { TranslateAcceleratorW(window, self.0, message) != 0 }
+    }
+}
+
+impl Drop for AcceleratorTable {
+    fn drop(&mut self) {
+        // SAFETY: this RAII owner destroys its non-null HACCEL exactly once and
+        // no TranslateAcceleratorW call can outlive the UI-thread owner.
+        unsafe { DestroyAcceleratorTable(self.0) };
+    }
+}
+
+fn native_accelerator_entries() -> Vec<ACCEL> {
+    legacy_command_shortcuts()
+        .map(|spec| ACCEL {
+            fVirt: FVIRTKEY
+                | match spec.shortcut.modifiers {
+                    LegacyShortcutModifiers::None => 0,
+                    LegacyShortcutModifiers::Control => FCONTROL,
+                    LegacyShortcutModifiers::ControlShift => FCONTROL | FSHIFT,
+                },
+            key: match spec.shortcut.virtual_key {
+                LegacyVirtualKey::Character(key) => key,
+                LegacyVirtualKey::Delete => VK_DELETE,
+                LegacyVirtualKey::Escape => VK_ESCAPE,
+                LegacyVirtualKey::OemComma => VK_OEM_COMMA,
+                LegacyVirtualKey::OemPeriod => VK_OEM_PERIOD,
+            },
+            cmd: spec.command,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod accelerator_tests {
+    use super::*;
+
+    #[test]
+    fn native_accelerators_use_standard_key_down_with_exact_legacy_bindings() {
+        let entries = native_accelerator_entries();
+        assert_eq!(entries.len(), legacy_command_shortcuts().count());
+        let exact = |command| entries.iter().find(|entry| entry.cmd == command).copied();
+        assert_eq!(
+            exact(SORT).map(|entry| (entry.fVirt, entry.key)),
+            Some((FVIRTKEY | FCONTROL, u16::from(b'A')))
+        );
+        assert_eq!(
+            exact(SAVE_NAMES).map(|entry| (entry.fVirt, entry.key)),
+            Some((FVIRTKEY | FCONTROL, u16::from(b'X')))
+        );
+        assert_eq!(
+            exact(IMPORT_NAMES).map(|entry| (entry.fVirt, entry.key)),
+            Some((FVIRTKEY | FCONTROL, u16::from(b'V')))
+        );
+        assert_eq!(
+            exact(EXIT_COMMAND).map(|entry| (entry.fVirt, entry.key)),
+            Some((FVIRTKEY, VK_ESCAPE))
+        );
+        assert_eq!(exact(MOVE_UP).map(|entry| entry.key), Some(VK_OEM_COMMA));
+        assert_eq!(exact(MOVE_DOWN).map(|entry| entry.key), Some(VK_OEM_PERIOD));
+        let mut bindings = entries
+            .iter()
+            .map(|entry| (entry.fVirt, entry.key))
+            .collect::<Vec<_>>();
+        bindings.sort_unstable();
+        bindings.dedup();
+        assert_eq!(bindings.len(), entries.len());
     }
 }
 
@@ -166,7 +211,7 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
         );
         return;
     }
-    if state.mutation_locked && !matches!(command, VERSION | 2) {
+    if state.mutation_locked && !matches!(command, VERSION | EXIT_COMMAND) {
         message(
             window,
             "파일 변경이 끝날 때까지 정보 보기와 종료 요청만 사용할 수 있습니다.",
@@ -188,7 +233,7 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
             state.model = LegacyList::new();
             UiEffect::AllRowsChanged
         }),
-        0xFFFF => {
+        DELETE_SELECTED_COMMAND => {
             let selected = selected_indices(state.list_window);
             selection_restore = Some(SelectionRestore::default());
             model_mutation(state, |state| {
@@ -453,7 +498,7 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
             show_recovery_status(window, state);
             CommandOutcome::ui(UiEffect::None)
         }
-        2 => CommandOutcome::ui(UiEffect::CloseRequested),
+        EXIT_COMMAND => CommandOutcome::ui(UiEffect::CloseRequested),
         _ => CommandOutcome::ui(UiEffect::None),
     };
     debug_assert!(command_effect_fits_policy(command, &outcome));
@@ -523,7 +568,11 @@ fn restore_selection(state: &mut AppState, selection: Option<SelectionRestore>) 
 pub(super) const fn recovery_command_allowed(command: u16) -> bool {
     matches!(
         command,
-        VERSION | EXPORT_RECOVERY_JOURNAL | DISCARD_STAGED_JOURNAL | SHOW_RECOVERY_STATUS | 2
+        VERSION
+            | EXPORT_RECOVERY_JOURNAL
+            | DISCARD_STAGED_JOURNAL
+            | SHOW_RECOVERY_STATUS
+            | EXIT_COMMAND
     )
 }
 

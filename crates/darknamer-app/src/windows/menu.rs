@@ -71,7 +71,7 @@ pub(super) fn measure_font_metrics(
 ) -> MeasuredFontMetrics {
     let mut button_text_width = 0;
     let mut button_text_height = 0;
-    for tool in LEFT_TOOLS.iter().chain(RIGHT_TOOLS.iter()) {
+    for tool in rail_tool_specs(LEFT_RAIL).chain(rail_tool_specs(RIGHT_RAIL)) {
         if let Some((width, height)) = measure_text(window, message_font, tool.label, false) {
             button_text_width = button_text_width.max(width);
             button_text_height = button_text_height.max(height);
@@ -194,8 +194,8 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
             SS_CENTERIMAGE | SS_SUNKEN | SS_NOPREFIX | SS_ENDELLIPSIS,
         )
     };
-    state.left_rail = Some(CommandRail::create(window, &LEFT_RAIL, &LEFT_TOOLS)?);
-    state.right_rail = Some(CommandRail::create(window, &RIGHT_RAIL, &RIGHT_TOOLS)?);
+    state.left_rail = Some(CommandRail::create(window, &LEFT_RAIL)?);
+    state.right_rail = Some(CommandRail::create(window, &RIGHT_RAIL)?);
     refresh_system_fonts(state);
     // SAFETY: window is the live top-level HWND and DragAcceptFiles stores no borrowed pointer.
     unsafe { DragAcceptFiles(window, 1) };
@@ -412,61 +412,12 @@ pub(super) fn apply_command_states(state: &AppState) {
 pub(super) fn create_menu() -> HMENU {
     // SAFETY: CreateMenu takes no pointers; the returned HMENU stays owned until attached to the top-level window.
     let menu = unsafe { CreateMenu() };
-    // SAFETY: CreatePopupMenu takes no pointers; the returned HMENU stays owned until appended to its parent.
-    let file = unsafe { CreatePopupMenu() };
+    append_catalog_popup(menu, MenuGroup::File, "파일(&F)");
+    append_catalog_popup(menu, MenuGroup::Edit, "편집(&E)");
+    append_catalog_popup(menu, MenuGroup::View, "보기(&V)");
+    append_catalog_popup(menu, MenuGroup::Tools, "기능(&T)");
     // SAFETY: CreatePopupMenu takes no pointers; the returned HMENU stays owned until appended to its parent.
     unsafe {
-        menu_item(file, ADD_FILES, "경로목록에 파일 추가하기\tCtrl+O");
-        AppendMenuW(file, MF_SEPARATOR, 0, null());
-        menu_item(file, APPLY, "실제 파일 변경\tCtrl+S");
-        menu_item(file, RESET, "원래 이름으로\tCtrl+Z");
-        menu_item(file, CLEAR_LIST, "경로목록 지우기\tCtrl+L");
-        menu_item(file, SORT, "경로목록 정렬\tCtrl+A");
-        AppendMenuW(file, MF_SEPARATOR, 0, null());
-        menu_item(file, COPY_NAMES, "클립보드로 바꿀이름 복사\tCtrl+C");
-        menu_item(file, SAVE_NAMES, "문서파일로 바꿀이름 저장\tCtrl+X");
-        AppendMenuW(file, MF_SEPARATOR, 0, null());
-        menu_item(file, COPY_PATHS, "클립보드로 경로목록 복사\tCtrl+Shift+C");
-        menu_item(file, SAVE_PATHS, "문서파일로 경로목록 저장\tCtrl+Shift+X");
-        AppendMenuW(file, MF_SEPARATOR, 0, null());
-        menu_item(file, IMPORT_NAMES, "바꿀이름 불러오기\tCtrl+V");
-        menu_item(file, IMPORT_PATHS, "경로목록 불러오기\tCtrl+Shift+V");
-        AppendMenuW(file, MF_SEPARATOR, 0, null());
-        menu_item(file, 2, "종료(&X)\tEsc");
-        append_popup(menu, file, "파일(&F)");
-        let edit = CreatePopupMenu();
-        menu_item(edit, MOVE_UP, "위로 올림\t<");
-        menu_item(edit, MOVE_DOWN, "아래로 내림\t>");
-        AppendMenuW(edit, MF_SEPARATOR, 0, null());
-        menu_item(edit, MANUAL_CHANGE, "직접 바꾸기");
-        append_popup(menu, edit, "편집(&E)");
-        let view = CreatePopupMenu();
-        menu_item(view, SHOW_FULL_PATH, "전체 경로 표시");
-        menu_item(view, SHOW_SIZE, "파일 크기 표시");
-        menu_item(view, SHOW_MODIFIED, "변경 시각 표시");
-        menu_item(view, SHOW_CREATED, "생성 시각 표시");
-        append_popup(menu, view, "보기(&V)");
-        let tools = CreatePopupMenu();
-        menu_item(tools, REPLACE, "문자열 바꾸기");
-        menu_item(tools, PREFIX, "앞이름 붙이기");
-        menu_item(tools, SUFFIX, "뒷이름 붙이기");
-        AppendMenuW(tools, MF_SEPARATOR, 0, null());
-        menu_item(tools, CLEAR_NAME, "이름 지우기");
-        menu_item(tools, DELETE_POSITION, "위치 지우기");
-        menu_item(tools, DELETE_DELIMITED, "묶인곳 지우기");
-        AppendMenuW(tools, MF_SEPARATOR, 0, null());
-        menu_item(tools, KEEP_DIGITS, "숫자만 남기기");
-        menu_item(tools, PAD_DIGITS, "자리수 맞추기");
-        menu_item(tools, SEQUENCE, "번호 붙이기");
-        AppendMenuW(tools, MF_SEPARATOR, 0, null());
-        menu_item(tools, EXT_DELETE, "확장자 삭제");
-        menu_item(tools, EXT_ADD, "확장자 추가");
-        menu_item(tools, EXT_REPLACE, "확장자 변경");
-        AppendMenuW(tools, MF_SEPARATOR, 0, null());
-        menu_item(tools, PARENT_PREFIX, "경로명 앞에");
-        menu_item(tools, PARENT_SUFFIX, "경로명 뒤에");
-        menu_item(tools, UNIFY_PATH, "경로 통일하기 (미지원)");
-        append_popup(menu, tools, "기능(&T)");
         let recovery = CreatePopupMenu();
         menu_item(
             recovery,
@@ -480,9 +431,45 @@ pub(super) fn create_menu() -> HMENU {
         );
         menu_item(recovery, SHOW_RECOVERY_STATUS, "복구 상태 보기...");
         append_popup(menu, recovery, "복구(&R)");
-        menu_item(menu, VERSION, VERSION_MENU_LABEL);
     }
+    append_catalog_items(menu, MenuGroup::About);
     menu
+}
+
+fn append_catalog_popup(menu: HMENU, group: MenuGroup, label: &str) {
+    // SAFETY: CreatePopupMenu takes no pointers; the returned HMENU stays owned
+    // until it is appended to the live parent menu below.
+    let popup = unsafe { CreatePopupMenu() };
+    append_catalog_items(popup, group);
+    append_popup(menu, popup, label);
+}
+
+fn append_catalog_items(menu: HMENU, group: MenuGroup) {
+    let mut specs = COMMAND_UI_SPECS
+        .iter()
+        .filter(|spec| spec.menu.group == group)
+        .collect::<Vec<_>>();
+    specs.sort_by_key(|spec| (spec.menu.section, spec.menu.order));
+    let mut previous_section = None;
+    for spec in specs {
+        if previous_section.is_some_and(|section| section != spec.menu.section) {
+            // SAFETY: menu is a live menu owned by create_menu and a separator
+            // carries no borrowed pointer or command identifier.
+            unsafe { AppendMenuW(menu, MF_SEPARATOR, 0, null()) };
+        }
+        previous_section = Some(spec.menu.section);
+        menu_item(menu, spec.id, &command_menu_label(spec));
+    }
+    if group == MenuGroup::File {
+        // Exit is an auxiliary shell command outside the contiguous catalog.
+        // SAFETY: same live menu ownership as the catalog items above.
+        unsafe { AppendMenuW(menu, MF_SEPARATOR, 0, null()) };
+        let label = legacy_command_shortcut(EXIT_COMMAND).map_or_else(
+            || "종료(&X)".to_owned(),
+            |shortcut| format!("종료(&X)\t{}", shortcut.display),
+        );
+        menu_item(menu, EXIT_COMMAND, &label);
+    }
 }
 
 pub(super) fn menu_item(menu: HMENU, id: u16, label: &str) {

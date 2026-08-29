@@ -246,6 +246,15 @@ fn run_unsafe() -> io::Result<()> {
         unsafe { DestroyWindow(window) };
         return Err(error);
     }
+    let accelerators = match AcceleratorTable::create() {
+        Ok(accelerators) => accelerators,
+        Err(error) => {
+            // SAFETY: window is still hidden and owns the adopted AppState. Its
+            // normal teardown reclaims children, GDI resources, and the state.
+            unsafe { DestroyWindow(window) };
+            return Err(error);
+        }
+    };
     // SAFETY: window is the non-null top-level HWND just created and remains owned by this UI thread.
     unsafe {
         ShowWindow(window, SW_SHOW);
@@ -270,7 +279,7 @@ fn run_unsafe() -> io::Result<()> {
         if result == 0 {
             break;
         }
-        if handle_accelerator(window, &message) {
+        if accelerators.translate(window, &message) {
             continue;
         }
         // SAFETY: window is the live top-level owner and message was populated
@@ -527,21 +536,6 @@ unsafe extern "system" fn window_proc(
                     // this HWND and remains exclusively callback-thread owned.
                     dispatch_command(window, unsafe { &mut *state_ptr }, MANUAL_CHANGE);
                 }
-            }
-            0
-        }
-        WM_KEYDOWN if !state_ptr.is_null() => {
-            let command = match wparam as u32 {
-                0x2E => Some(0xFFFF),
-                0xBC => Some(MOVE_UP),
-                0xBE => Some(MOVE_DOWN),
-                0x1B => Some(2),
-                _ => None,
-            };
-            if let Some(command) = command {
-                // SAFETY: state_ptr is the checked non-null AppState owned by the
-                // current window callback and is uniquely borrowed for dispatch.
-                dispatch_command(window, unsafe { &mut *state_ptr }, command);
             }
             0
         }
