@@ -4,7 +4,8 @@ use darknamer_core::LegacyText;
 
 use super::model::ObservedEntry;
 use super::{
-    BackendError, BackendOperation, EntryIdentity, EntryKind, PathKey, PathSnapshot, RenameBackend,
+    BackendError, BackendOperation, EntryIdentity, EntryKind, MutationCertainty, PathKey,
+    PathSnapshot, RenameBackend, RenameOperation,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -19,9 +20,10 @@ struct MemoryEntry {
 pub struct MemoryBackend {
     entries: BTreeMap<PathKey, MemoryEntry>,
     parent_identities: BTreeMap<PathKey, EntryIdentity>,
-    failures: BTreeMap<usize, u32>,
+    failures: BTreeMap<usize, (u32, MutationCertainty)>,
     move_attempts: usize,
     completed_moves: Vec<(String, String)>,
+    next_transaction_nonce: u128,
 }
 
 impl MemoryBackend {
@@ -34,6 +36,7 @@ impl MemoryBackend {
             failures: BTreeMap::new(),
             move_attempts: 0,
             completed_moves: Vec::new(),
+            next_transaction_nonce: 1,
         }
     }
 
@@ -86,7 +89,19 @@ impl MemoryBackend {
 
     /// Injects one backend failure by one-based move-attempt number.
     pub fn fail_move_on(&mut self, attempt: usize, code: u32) {
-        self.failures.insert(attempt, code);
+        self.failures
+            .insert(attempt, (code, MutationCertainty::NotApplied));
+    }
+
+    /// Injects an error after the selected primitive move has mutated state.
+    pub fn fail_ambiguous_move_on(&mut self, attempt: usize, code: u32) {
+        self.failures
+            .insert(attempt, (code, MutationCertainty::MayHaveApplied));
+    }
+
+    /// Sets the next deterministic transaction nonce used by tests.
+    pub const fn set_next_transaction_nonce(&mut self, nonce: u128) {
+        self.next_transaction_nonce = nonce;
     }
 
     /// Returns the file identifier currently occupying a path.
@@ -150,44 +165,88 @@ impl RenameBackend for MemoryBackend {
         })
     }
 
-    fn rename_no_replace(
-        &mut self,
-        source: &LegacyText,
-        destination: &LegacyText,
-        expected_source: EntryIdentity,
-    ) -> Result<(), BackendError> {
+    fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
+        let nonce = self.next_transaction_nonce;
+        let Some(next) = nonce.checked_add(1) else {
+            return Err(backend_error(
+                BackendOperation::TransactionNonce,
+                534,
+                MutationCertainty::NotApplied,
+            ));
+        };
+        self.next_transaction_nonce = next;
+        Ok(nonce)
+    }
+
+    fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
         self.move_attempts += 1;
-        if let Some(code) = self.failures.get(&self.move_attempts).copied() {
-            return Err(BackendError {
-                operation: BackendOperation::Rename,
+        let injected = self.failures.get(&self.move_attempts).copied();
+        if let Some((code, MutationCertainty::NotApplied)) = injected {
+            return Err(backend_error(
+                BackendOperation::Rename,
                 code,
-            });
+                MutationCertainty::NotApplied,
+            ));
         }
-        let source_key = self.path_key(source);
-        let destination_key = self.path_key(destination);
+        if self.parent_identity(operation.source()) != operation.expected_source_parent()
+            || self.parent_identity(operation.destination())
+                != operation.expected_destination_parent()
+        {
+            return Err(backend_error(
+                BackendOperation::Rename,
+                1168,
+                MutationCertainty::NotApplied,
+            ));
+        }
+        let source_key = self.path_key(operation.source());
+        let destination_key = self.path_key(operation.destination());
         if self.entries.contains_key(&destination_key) {
-            return Err(BackendError {
-                operation: BackendOperation::Rename,
-                code: 183,
-            });
+            return Err(backend_error(
+                BackendOperation::Rename,
+                183,
+                MutationCertainty::NotApplied,
+            ));
         }
         let Some(entry) = self.entries.remove(&source_key) else {
-            return Err(BackendError {
-                operation: BackendOperation::Rename,
-                code: 2,
-            });
+            return Err(backend_error(
+                BackendOperation::Rename,
+                2,
+                MutationCertainty::NotApplied,
+            ));
         };
-        if entry.identity != expected_source {
+        if entry.identity != operation.expected_source() {
             self.entries.insert(source_key, entry);
-            return Err(BackendError {
-                operation: BackendOperation::Rename,
-                code: 1168,
-            });
+            return Err(backend_error(
+                BackendOperation::Rename,
+                1168,
+                MutationCertainty::NotApplied,
+            ));
         }
         self.entries.insert(destination_key, entry);
-        self.completed_moves
-            .push((source.to_string_lossy(), destination.to_string_lossy()));
+        self.completed_moves.push((
+            operation.source().to_string_lossy(),
+            operation.destination().to_string_lossy(),
+        ));
+        if let Some((code, MutationCertainty::MayHaveApplied)) = injected {
+            return Err(backend_error(
+                BackendOperation::Rename,
+                code,
+                MutationCertainty::MayHaveApplied,
+            ));
+        }
         Ok(())
+    }
+}
+
+const fn backend_error(
+    operation: BackendOperation,
+    code: u32,
+    certainty: MutationCertainty,
+) -> BackendError {
+    BackendError {
+        operation,
+        code,
+        certainty,
     }
 }
 

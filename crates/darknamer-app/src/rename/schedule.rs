@@ -3,7 +3,21 @@ use std::collections::BTreeSet;
 use darknamer_core::LegacyText;
 
 use super::model::PlanRow;
-use super::{EntryId, EntryIdentity, PathKey, RenameBackend, RenamePlan};
+use super::{BackendError, EntryId, EntryIdentity, PathKey, RenameBackend, RenamePlan};
+
+/// Maximum temporary-name probes for one cycle pivot.
+pub const MAX_TEMP_CANDIDATES: usize = 32;
+
+/// Whether a primitive step enters or leaves a temporary endpoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TemporaryPhase {
+    /// Direct source-to-final-destination move.
+    None,
+    /// Source-to-temporary move opening a cycle.
+    IntoTemporary,
+    /// Temporary-to-final move closing a cycle.
+    FromTemporary,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ScheduleStep {
@@ -11,13 +25,23 @@ pub(super) struct ScheduleStep {
     pub source: LegacyText,
     pub destination: LegacyText,
     pub identity: EntryIdentity,
-    pub temporary_destination: bool,
+    pub source_parent: EntryIdentity,
+    pub destination_parent: EntryIdentity,
+    pub temporary_phase: TemporaryPhase,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ScheduleError {
+    Invalid,
+    Backend(BackendError),
+    StaleParent(EntryId),
+    TemporaryExhausted(EntryId),
 }
 
 pub(super) fn build_schedule(
     plan: &RenamePlan,
-    backend: &dyn RenameBackend,
-) -> Option<Vec<ScheduleStep>> {
+    backend: &mut dyn RenameBackend,
+) -> Result<Vec<ScheduleStep>, ScheduleError> {
     let source_keys = plan
         .entries
         .iter()
@@ -58,16 +82,21 @@ pub(super) fn build_schedule(
             continue;
         }
 
-        let pivot = pending.iter().position(|is_pending| *is_pending)?;
+        let pivot = pending
+            .iter()
+            .position(|is_pending| *is_pending)
+            .ok_or(ScheduleError::Invalid)?;
         let pivot_entry = &plan.entries[pivot];
-        let temporary = unique_temporary_path(plan, pivot_entry, backend, &mut reserved);
+        let temporary = unique_temporary_path(plan, pivot_entry, backend, &mut reserved)?;
         let identity = source_identity(pivot_entry)?;
         schedule.push(ScheduleStep {
             entry: pivot_entry.id,
             source: pivot_entry.source.clone(),
             destination: temporary.clone(),
             identity,
-            temporary_destination: true,
+            source_parent: pivot_entry.source_snapshot.parent,
+            destination_parent: pivot_entry.source_snapshot.parent,
+            temporary_phase: TemporaryPhase::IntoTemporary,
         });
 
         let mut freed_key = source_keys[pivot].clone();
@@ -90,40 +119,50 @@ pub(super) fn build_schedule(
             source: temporary,
             destination: pivot_entry.destination.clone(),
             identity,
-            temporary_destination: false,
+            source_parent: pivot_entry.source_snapshot.parent,
+            destination_parent: pivot_entry.destination_snapshot.parent,
+            temporary_phase: TemporaryPhase::FromTemporary,
         });
         pending[pivot] = false;
         remaining -= 1;
     }
 
-    Some(schedule)
+    Ok(schedule)
 }
 
-fn direct_step(entry: &PlanRow) -> Option<ScheduleStep> {
-    Some(ScheduleStep {
+fn direct_step(entry: &PlanRow) -> Result<ScheduleStep, ScheduleError> {
+    Ok(ScheduleStep {
         entry: entry.id,
         source: entry.source.clone(),
         destination: entry.destination.clone(),
         identity: source_identity(entry)?,
-        temporary_destination: false,
+        source_parent: entry.source_snapshot.parent,
+        destination_parent: entry.destination_snapshot.parent,
+        temporary_phase: TemporaryPhase::None,
     })
 }
 
-fn source_identity(entry: &PlanRow) -> Option<EntryIdentity> {
-    entry.source_snapshot.entry.map(|source| source.identity)
+fn source_identity(entry: &PlanRow) -> Result<EntryIdentity, ScheduleError> {
+    entry
+        .source_snapshot
+        .entry
+        .map(|source| source.identity)
+        .ok_or(ScheduleError::Invalid)
 }
 
 fn unique_temporary_path(
     plan: &RenamePlan,
     pivot: &PlanRow,
-    backend: &dyn RenameBackend,
+    backend: &mut dyn RenameBackend,
     reserved: &mut BTreeSet<PathKey>,
-) -> LegacyText {
+) -> Result<LegacyText, ScheduleError> {
+    let nonce = backend
+        .next_transaction_nonce()
+        .map_err(ScheduleError::Backend)?;
     let parent = parent_units(pivot.source.units());
-    let mut ordinal = 0_u32;
-    loop {
+    for ordinal in 0..MAX_TEMP_CANDIDATES {
         let leaf = format!(
-            ".__darknamer_{:016x}_{:08x}_{ordinal:08x}.tmp",
+            ".__darknamer_{:016x}_{nonce:032x}_{:08x}_{ordinal:02x}.tmp",
             plan.id.value(),
             pivot.id.value()
         );
@@ -132,11 +171,20 @@ fn unique_temporary_path(
         units.push(b'\\' as u16);
         units.extend(leaf.encode_utf16());
         let path = LegacyText::from_units(units);
-        if reserved.insert(backend.path_key(&path)) {
-            return path;
+        let key = backend.path_key(&path);
+        if reserved.contains(&key) {
+            continue;
         }
-        ordinal = ordinal.wrapping_add(1);
+        let snapshot = backend.observe(&path).map_err(ScheduleError::Backend)?;
+        if snapshot.parent != pivot.source_snapshot.parent {
+            return Err(ScheduleError::StaleParent(pivot.id));
+        }
+        if snapshot.entry.is_none() {
+            reserved.insert(key);
+            return Ok(path);
+        }
     }
+    Err(ScheduleError::TemporaryExhausted(pivot.id))
 }
 
 fn parent_units(path: &[u16]) -> &[u16] {

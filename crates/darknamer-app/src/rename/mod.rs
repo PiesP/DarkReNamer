@@ -20,4 +20,8 @@ pub use model::{
     RenamePlan,
 };
 pub use planner::RenamePlanner;
-pub use ports::{BackendError, BackendOperation, JournalError, JournalStore, RenameBackend};
+pub use ports::{
+    BackendError, BackendOperation, JournalError, JournalStore, MutationCertainty, RenameBackend,
+    RenameOperation,
+};
+pub use schedule::{MAX_TEMP_CANDIDATES, TemporaryPhase};

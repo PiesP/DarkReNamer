@@ -1,7 +1,8 @@
 use darknamer_app::rename::{
     EntryId, EntryKind, ExecuteErrorKind, ExecutionOutcome, JournalRecord, JournalTerminal,
-    MemoryBackend, MemoryJournal, ModelRevision, PlanRequest, RecoveryState, RenameExecutor,
-    RenameIntent, RenamePlanner,
+    MAX_TEMP_CANDIDATES, MemoryBackend, MemoryJournal, ModelRevision, MutationCertainty,
+    PlanRequest, RecoveryState, RenameBackend, RenameExecutor, RenameIntent, RenameOperation,
+    RenamePlanner,
 };
 
 fn intent(id: u32, source_name: &str, destination_name: &str) -> RenameIntent {
@@ -216,4 +217,108 @@ fn rollback_failure_is_structured_and_journal_replays_as_recovery_required()
             .any(|record| matches!(record, JournalRecord::Terminal(_)))
     );
     Ok(())
+}
+
+#[test]
+fn backend_enforces_expected_parent_identities_at_the_mutation_seam()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut backend = MemoryBackend::new().with_file("C:\\work\\a.txt", 1);
+    let source = darknamer_core::LegacyText::from("C:\\work\\a.txt");
+    let destination = darknamer_core::LegacyText::from("C:\\work\\b.txt");
+    let source_snapshot = backend.observe(&source)?;
+    let destination_snapshot = backend.observe(&destination)?;
+    backend.replace_parent_id("C:\\work\\a.txt", 99);
+    let source_entry = source_snapshot
+        .entry
+        .ok_or_else(|| std::io::Error::other("test source missing"))?;
+    let operation = RenameOperation::new(
+        source,
+        destination,
+        source_entry.identity,
+        source_snapshot.parent,
+        destination_snapshot.parent,
+    );
+
+    let error = backend
+        .rename_no_replace(&operation)
+        .err()
+        .ok_or_else(|| std::io::Error::other("stale parent mutation succeeded"))?;
+
+    assert_eq!(error.certainty, MutationCertainty::NotApplied);
+    assert_eq!(backend.mutation_count(), 0);
+    Ok(())
+}
+
+#[test]
+fn ambiguous_backend_error_stops_without_rollback_and_requires_recovery()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut backend = MemoryBackend::new().with_file("C:\\work\\a.txt", 1);
+    let confirmed = confirmed_plan(&backend, vec![intent(0, "a.txt", "b.txt")])?;
+    backend.fail_ambiguous_move_on(1, 995);
+    let mut journal = MemoryJournal::new();
+
+    let report = RenameExecutor::new(&mut backend, &mut journal).execute(confirmed)?;
+
+    assert!(matches!(
+        report.outcome(),
+        ExecutionOutcome::RecoveryRequired { .. }
+    ));
+    assert_eq!(backend.mutation_count(), 1);
+    assert_eq!(backend.file_id("C:\\work\\b.txt"), Some(1));
+    assert!(matches!(
+        journal.recovery_state(),
+        RecoveryState::RecoveryRequired { .. }
+    ));
+    Ok(())
+}
+
+#[test]
+fn temporary_selection_retries_occupied_names_and_fails_closed_when_exhausted()
+-> Result<(), Box<dyn std::error::Error>> {
+    let nonce = 7_u128;
+    let mut retry_backend = MemoryBackend::new().with_file("C:\\work\\A.TXT", 1);
+    let plan = RenamePlanner::new(&retry_backend).plan(PlanRequest::new(
+        ModelRevision::new(1),
+        vec![intent(0, "A.TXT", "a.txt")],
+    ))?;
+    let fingerprint = plan.fingerprint();
+    retry_backend.set_next_transaction_nonce(nonce);
+    retry_backend.insert_file(temp_path(fingerprint, nonce, 0, 0), 50);
+    let id = plan.id();
+    let revision = plan.revision();
+    let confirmed = plan.confirm_presented(id, revision)?;
+    let mut retry_journal = MemoryJournal::new();
+    let report = RenameExecutor::new(&mut retry_backend, &mut retry_journal).execute(confirmed)?;
+    assert_eq!(report.outcome(), &ExecutionOutcome::Completed);
+    assert!(retry_backend.completed_moves()[0].1.ends_with("_01.tmp"));
+
+    let mut exhausted_backend = MemoryBackend::new().with_file("C:\\work\\A.TXT", 1);
+    let plan = RenamePlanner::new(&exhausted_backend).plan(PlanRequest::new(
+        ModelRevision::new(1),
+        vec![intent(0, "A.TXT", "a.txt")],
+    ))?;
+    let fingerprint = plan.fingerprint();
+    exhausted_backend.set_next_transaction_nonce(nonce);
+    for ordinal in 0..MAX_TEMP_CANDIDATES {
+        exhausted_backend.insert_file(
+            temp_path(fingerprint, nonce, 0, ordinal),
+            100 + ordinal as u128,
+        );
+    }
+    let id = plan.id();
+    let revision = plan.revision();
+    let confirmed = plan.confirm_presented(id, revision)?;
+    let mut exhausted_journal = MemoryJournal::new();
+    let error = RenameExecutor::new(&mut exhausted_backend, &mut exhausted_journal)
+        .execute(confirmed)
+        .err()
+        .ok_or_else(|| std::io::Error::other("temporary exhaustion was ignored"))?;
+    assert_eq!(error.kind, ExecuteErrorKind::TemporaryExhausted);
+    assert_eq!(exhausted_backend.mutation_count(), 0);
+    assert!(exhausted_journal.records().is_empty());
+    Ok(())
+}
+
+fn temp_path(fingerprint: u64, nonce: u128, entry: u32, ordinal: usize) -> String {
+    format!("C:\\work\\.__darknamer_{fingerprint:016x}_{nonce:032x}_{entry:08x}_{ordinal:02x}.tmp")
 }

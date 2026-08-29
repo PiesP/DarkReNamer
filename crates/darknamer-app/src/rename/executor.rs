@@ -2,9 +2,10 @@ use std::fmt;
 
 use super::journal::{JournalDirection, JournalTerminal};
 use super::model::PlanRow;
-use super::schedule::{ScheduleStep, build_schedule};
+use super::schedule::{ScheduleError, ScheduleStep, TemporaryPhase, build_schedule};
 use super::{
-    BackendError, ConfirmedPlan, EntryId, JournalError, JournalStore, PlanId, RenameBackend,
+    BackendError, ConfirmedPlan, EntryId, JournalError, JournalStore, MutationCertainty, PlanId,
+    RenameBackend, RenameOperation,
 };
 
 /// A pre-mutation reason execution refused a confirmed plan.
@@ -20,6 +21,10 @@ pub enum ExecuteErrorKind {
     DestinationChanged,
     /// A generated temporary endpoint became occupied.
     TemporaryOccupied,
+    /// Every bounded temporary-name candidate was occupied.
+    TemporaryExhausted,
+    /// A backend operation failed before mutation.
+    Backend(BackendError),
     /// The durable journal could not begin before mutation.
     Journal(JournalError),
 }
@@ -115,12 +120,7 @@ impl<'a> RenameExecutor<'a> {
     /// all partial state is represented by [`ExecutionReport`].
     pub fn execute(&mut self, confirmed: ConfirmedPlan) -> Result<ExecutionReport, ExecuteError> {
         let plan = confirmed.plan;
-        let Some(schedule) = build_schedule(&plan, self.backend) else {
-            return Err(ExecuteError {
-                entry: None,
-                kind: ExecuteErrorKind::InvalidSchedule,
-            });
-        };
+        let schedule = build_schedule(&plan, self.backend).map_err(schedule_error)?;
         self.freeze(&plan.entries, &schedule)?;
         if schedule.is_empty() {
             return Ok(ExecutionReport {
@@ -147,10 +147,19 @@ impl<'a> RenameExecutor<'a> {
                     &completed,
                 ));
             }
-            if let Err(error) =
-                self.backend
-                    .rename_no_replace(&step.source, &step.destination, step.identity)
-            {
+            if let Err(error) = self.backend.rename_no_replace(&forward_operation(step)) {
+                if error.certainty == MutationCertainty::MayHaveApplied {
+                    return Ok(ExecutionReport {
+                        plan: plan.id,
+                        outcome: ExecutionOutcome::RecoveryRequired {
+                            failure: ExecutionFailure::Backend {
+                                step: step_index,
+                                error,
+                            },
+                            rollback_failures: Box::new([]),
+                        },
+                    });
+                }
                 return Ok(self.rollback(
                     plan.id,
                     ExecutionFailure::Backend {
@@ -237,7 +246,10 @@ impl<'a> RenameExecutor<'a> {
             }
         }
 
-        for step in schedule.iter().filter(|step| step.temporary_destination) {
+        for step in schedule
+            .iter()
+            .filter(|step| step.temporary_phase == TemporaryPhase::IntoTemporary)
+        {
             let temporary =
                 self.backend
                     .observe(&step.destination)
@@ -286,10 +298,14 @@ impl<'a> RenameExecutor<'a> {
                 });
                 continue;
             }
-            if let Err(error) =
-                self.backend
-                    .rename_no_replace(&step.destination, &step.source, step.identity)
-            {
+            let operation = RenameOperation::new(
+                step.destination.clone(),
+                step.source.clone(),
+                step.identity,
+                step.destination_parent,
+                step.source_parent,
+            );
+            if let Err(error) = self.backend.rename_no_replace(&operation) {
                 rollback_failures.push(RollbackFailure::Backend {
                     step: *step_index,
                     error,
@@ -326,5 +342,36 @@ impl<'a> RenameExecutor<'a> {
             }
         };
         ExecutionReport { plan, outcome }
+    }
+}
+
+fn forward_operation(step: &ScheduleStep) -> RenameOperation {
+    RenameOperation::new(
+        step.source.clone(),
+        step.destination.clone(),
+        step.identity,
+        step.source_parent,
+        step.destination_parent,
+    )
+}
+
+fn schedule_error(error: ScheduleError) -> ExecuteError {
+    match error {
+        ScheduleError::Invalid => ExecuteError {
+            entry: None,
+            kind: ExecuteErrorKind::InvalidSchedule,
+        },
+        ScheduleError::Backend(error) => ExecuteError {
+            entry: None,
+            kind: ExecuteErrorKind::Backend(error),
+        },
+        ScheduleError::StaleParent(entry) => ExecuteError {
+            entry: Some(entry),
+            kind: ExecuteErrorKind::StaleParent,
+        },
+        ScheduleError::TemporaryExhausted(entry) => ExecuteError {
+            entry: Some(entry),
+            kind: ExecuteErrorKind::TemporaryExhausted,
+        },
     }
 }
