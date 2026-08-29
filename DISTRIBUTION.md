@@ -2,26 +2,45 @@
 
 DarkReNamer publishes Windows builds only from a version tag whose commit is on
 `master` and whose name exactly matches the Cargo workspace version. The tag
-workflow creates a GitHub **prerelease**; ordinary branch, pull-request, and
-manual CI runs never publish artifacts.
+workflow creates a GitHub **prerelease**. A manual run packages and validates
+the selected source commit and retains an Actions handoff artifact, but cannot
+create a tag, release, or attestation.
 
 ## Current unsigned handoff
 
-The current executable is intentionally Authenticode `NotSigned`. The release
+The current executable is intentionally Authenticode `NotSigned`. The packaging
 workflow fails if that status changes without an explicit policy update. A
-release contains:
+published prerelease contains:
 
 - `DarkReNamer.exe`;
 - `SHA256SUMS.txt`;
 - a CycloneDX JSON SBOM;
-- a zipped PDB plus the complete Actions handoff artifact;
+- a zipped PDB;
 - license, attribution, and this distribution policy;
 - GitHub build-provenance and SBOM attestations.
+
+Every successful packaging run also retains the complete Actions handoff,
+including the raw PDB. The handoff validator checks the exact file layout,
+symbol archive contents, SBOM format, checksums, unsigned Authenticode status,
+and byte-identical copies of the repository license and policy files.
 
 Verify the checksum before running the executable. GitHub attestations can be
 verified with `gh attestation verify` against this repository. A valid checksum
 or attestation identifies the produced bytes; it does not replace Authenticode
 publisher identity.
+
+## Publish-free packaging validation
+
+Run the Portable prerelease workflow manually on the source ref to exercise the
+same Windows test, build, SBOM, packaging, and handoff-validation path without
+running the publication or attestation job. Inspect the retained dry-run
+artifact before creating a release tag.
+
+The workflow exports the source commit timestamp as `SOURCE_DATE_EPOCH` before
+the release build. This supplies stable source-time metadata to tools that honor
+the variable; it is not a claim that independent EXE or PDB builds are
+byte-for-byte reproducible. Desktop acceptance and power-loss durability remain
+separate from packaging validation.
 
 ## Future Authenticode boundary
 
@@ -31,7 +50,7 @@ credential boundary. Self-signed certificates are not release credentials and
 must not be introduced. Signing keys and service tokens must remain outside the
 repository and must not be exposed to pull-request workflows.
 
-The signing step, when approved, must run after the reproducible build and
+The signing step, when approved, must run after the validated release build and
 before checksums, SBOM attestation, artifact attestation, and publication. The
 workflow must then require a successful signature status instead of `NotSigned`.
 
