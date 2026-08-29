@@ -8,6 +8,14 @@ pub const INITIAL_WIDTH: i32 = 464;
 pub const INITIAL_HEIGHT: i32 = 408;
 /// Width of each command bar.
 pub const TOOLBAR_WIDTH: i32 = 44;
+/// Width of each bitmap cell in the original toolbar strips.
+pub const TOOLBAR_BITMAP_WIDTH: i32 = 38;
+/// Height of each bitmap cell in the original toolbar strips.
+pub const TOOLBAR_BITMAP_HEIGHT: i32 = 24;
+/// Height of a native toolbar button after the original MFC border padding.
+pub const TOOLBAR_BUTTON_HEIGHT: i32 = 30;
+/// Thickness of separators between native toolbar command groups.
+pub const TOOLBAR_SEPARATOR_SIZE: i32 = 8;
 /// Height of the bottom status bar.
 pub const STATUS_HEIGHT: i32 = 18;
 
@@ -92,6 +100,13 @@ pub const COLUMNS: [ColumnSpec; 7] = [
 pub struct ToolSpec {
     pub id: CommandId,
     pub label: &'static str,
+}
+
+/// One entry from an original toolbar resource.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolbarItem {
+    Command(CommandId),
+    Separator,
 }
 
 pub const LEFT_TOOLS: [ToolSpec; 10] = [
@@ -180,6 +195,38 @@ pub const RIGHT_TOOLS: [ToolSpec; 10] = [
     },
 ];
 
+pub const LEFT_TOOLBAR_ITEMS: [ToolbarItem; 13] = [
+    ToolbarItem::Command(APPLY),
+    ToolbarItem::Separator,
+    ToolbarItem::Command(REPLACE),
+    ToolbarItem::Command(PREFIX),
+    ToolbarItem::Command(SUFFIX),
+    ToolbarItem::Separator,
+    ToolbarItem::Command(CLEAR_NAME),
+    ToolbarItem::Command(DELETE_POSITION),
+    ToolbarItem::Command(DELETE_DELIMITED),
+    ToolbarItem::Separator,
+    ToolbarItem::Command(KEEP_DIGITS),
+    ToolbarItem::Command(PAD_DIGITS),
+    ToolbarItem::Command(SEQUENCE),
+];
+
+pub const RIGHT_TOOLBAR_ITEMS: [ToolbarItem; 13] = [
+    ToolbarItem::Command(RESET),
+    ToolbarItem::Separator,
+    ToolbarItem::Command(CLEAR_LIST),
+    ToolbarItem::Command(MANUAL_CHANGE),
+    ToolbarItem::Command(SORT),
+    ToolbarItem::Separator,
+    ToolbarItem::Command(PARENT_PREFIX),
+    ToolbarItem::Command(PARENT_SUFFIX),
+    ToolbarItem::Command(UNIFY_PATH),
+    ToolbarItem::Separator,
+    ToolbarItem::Command(EXT_DELETE),
+    ToolbarItem::Command(EXT_ADD),
+    ToolbarItem::Command(EXT_REPLACE),
+];
+
 /// Whether a command is enabled for current list/selection state.
 #[must_use]
 pub fn command_enabled(id: CommandId, row_count: usize, selected_count: usize) -> bool {
@@ -265,8 +312,17 @@ mod tests {
     #[test]
     fn layout_columns_and_toolbar_order_match_resources() {
         assert_eq!(
-            (INITIAL_WIDTH, INITIAL_HEIGHT, TOOLBAR_WIDTH, STATUS_HEIGHT),
-            (464, 408, 44, 18)
+            (
+                INITIAL_WIDTH,
+                INITIAL_HEIGHT,
+                TOOLBAR_WIDTH,
+                TOOLBAR_BITMAP_WIDTH,
+                TOOLBAR_BITMAP_HEIGHT,
+                TOOLBAR_BUTTON_HEIGHT,
+                TOOLBAR_SEPARATOR_SIZE,
+                STATUS_HEIGHT
+            ),
+            (464, 408, 44, 38, 24, 30, 8, 18)
         );
         assert_eq!(
             COLUMNS.map(|column| column.default_width),
@@ -300,6 +356,42 @@ mod tests {
                 EXT_DELETE,
                 EXT_ADD,
                 EXT_REPLACE
+            ]
+        );
+        assert_eq!(
+            LEFT_TOOLBAR_ITEMS,
+            [
+                ToolbarItem::Command(APPLY),
+                ToolbarItem::Separator,
+                ToolbarItem::Command(REPLACE),
+                ToolbarItem::Command(PREFIX),
+                ToolbarItem::Command(SUFFIX),
+                ToolbarItem::Separator,
+                ToolbarItem::Command(CLEAR_NAME),
+                ToolbarItem::Command(DELETE_POSITION),
+                ToolbarItem::Command(DELETE_DELIMITED),
+                ToolbarItem::Separator,
+                ToolbarItem::Command(KEEP_DIGITS),
+                ToolbarItem::Command(PAD_DIGITS),
+                ToolbarItem::Command(SEQUENCE),
+            ]
+        );
+        assert_eq!(
+            RIGHT_TOOLBAR_ITEMS,
+            [
+                ToolbarItem::Command(RESET),
+                ToolbarItem::Separator,
+                ToolbarItem::Command(CLEAR_LIST),
+                ToolbarItem::Command(MANUAL_CHANGE),
+                ToolbarItem::Command(SORT),
+                ToolbarItem::Separator,
+                ToolbarItem::Command(PARENT_PREFIX),
+                ToolbarItem::Command(PARENT_SUFFIX),
+                ToolbarItem::Command(UNIFY_PATH),
+                ToolbarItem::Separator,
+                ToolbarItem::Command(EXT_DELETE),
+                ToolbarItem::Command(EXT_ADD),
+                ToolbarItem::Command(EXT_REPLACE),
             ]
         );
     }
