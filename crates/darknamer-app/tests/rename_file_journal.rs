@@ -282,6 +282,21 @@ fn codec_rejects_oversized_step_path_and_declared_frame() -> Result<(), Box<dyn 
         Some(JournalCodecErrorKind::PathTooLong)
     );
 
+    let maximum_path = LegacyText::from_units(vec![b'a' as u16; MAX_PATH_UNITS]);
+    let oversized_manifest = JournalRecord::Intent {
+        plan: PlanId::from_fingerprint(3),
+        steps: (0..128)
+            .map(|index| step(index, maximum_path.clone(), maximum_path.clone()))
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    };
+    assert_eq!(
+        encode_journal_records(&[oversized_manifest])
+            .err()
+            .map(|error| error.kind),
+        Some(JournalCodecErrorKind::FrameTooLarge)
+    );
+
     let mut oversized_frame = encode_journal_records(&complete_records())?;
     oversized_frame[16..20].copy_from_slice(&((MAX_JOURNAL_FRAME_BYTES + 1) as u32).to_le_bytes());
     assert_eq!(

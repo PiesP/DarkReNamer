@@ -19,21 +19,21 @@ pub(crate) mod windows_native;
 
 pub use activation::{
     JournalCleanupDecision, apply_execution_report, build_plan_request, cleanup_decision,
-    execute_error_korean, execution_outcome_korean, next_model_revision, plan_error_korean,
-    safe_mode_unify_path_message,
+    execute_error_korean, execution_outcome_korean, journal_capacity_error_korean,
+    next_model_revision, plan_error_korean, safe_mode_unify_path_message,
 };
 pub use executor::{
     CancellationToken, EntryExecution, ExecuteError, ExecuteErrorKind, ExecutionControl,
     ExecutionFailure, ExecutionOutcome, ExecutionPhase, ExecutionProgress, ExecutionReport,
-    RenameExecutor, RenameState, RollbackFailure,
+    RenameExecutor, RenameState, RollbackFailure, preflight_plan,
 };
 pub use file_journal::{
     ExistingJournalOpenError, FileJournal, FileJournalError, FileJournalErrorKind,
-    JournalCodecError, JournalCodecErrorKind, JournalInspection, JournalOpenFailure,
-    JournalOpenStage, JournalRoot, JournalTailIssue, MAX_JOURNAL_FILE_BYTES,
-    MAX_JOURNAL_FRAME_BYTES, MAX_JOURNAL_FRAMES, MAX_JOURNAL_STEPS, MAX_PATH_UNITS,
-    RecoveryJournalEvidence, decode_journal_records, encode_journal_records,
-    inspect_journal_records,
+    JournalCapacityError, JournalCapacityKind, JournalCodecError, JournalCodecErrorKind,
+    JournalInspection, JournalOpenFailure, JournalOpenStage, JournalRequirements, JournalRoot,
+    JournalTailIssue, MAX_JOURNAL_FILE_BYTES, MAX_JOURNAL_FRAME_BYTES, MAX_JOURNAL_FRAMES,
+    MAX_JOURNAL_STEPS, MAX_PATH_UNITS, RecoveryJournalEvidence, decode_journal_records,
+    encode_journal_records, inspect_journal_records,
 };
 pub use journal::{
     JournalCorruption, JournalDirection, JournalRecord, JournalStep, JournalTerminal,

@@ -5,8 +5,9 @@ use super::journal::{JournalDirection, JournalTerminal};
 use super::model::PlanRow;
 use super::schedule::{ScheduleError, ScheduleStep, TemporaryPhase, build_schedule};
 use super::{
-    AppendCertainty, BackendError, ConfirmedPlan, EntryId, JournalError, JournalStep, JournalStore,
-    MutationCertainty, PlanId, RenameBackend, RenameOperation,
+    AppendCertainty, BackendError, ConfirmedPlan, EntryId, JournalCapacityError, JournalError,
+    JournalRequirements, JournalStep, JournalStore, MutationCertainty, PlanId, RenameBackend,
+    RenameOperation, RenamePlan,
 };
 
 /// A pre-mutation reason execution refused a confirmed plan.
@@ -30,6 +31,8 @@ pub enum ExecuteErrorKind {
     Backend(BackendError),
     /// The durable journal could not begin before mutation.
     Journal(JournalError),
+    /// The complete immutable manifest exceeds a journal codec capacity.
+    JournalCapacity(JournalCapacityError),
 }
 
 /// Execution stopped before any filesystem mutation.
@@ -252,6 +255,27 @@ pub struct RenameExecutor<'a> {
     journal: &'a mut dyn JournalStore,
 }
 
+/// Computes the exact journal resources needed by the current schedule without mutation.
+///
+/// The executor repeats this assessment after confirmation because temporary
+/// endpoint availability and filesystem observations may change.
+///
+/// # Errors
+///
+/// Returns a structured pre-mutation refusal when scheduling fails or the
+/// resulting immutable manifest exceeds a journal codec capacity.
+pub fn preflight_plan(
+    plan: &RenamePlan,
+    backend: &mut dyn RenameBackend,
+) -> Result<JournalRequirements, ExecuteError> {
+    let schedule = build_schedule(plan, backend).map_err(schedule_error)?;
+    let manifest = schedule.iter().map(journal_step).collect::<Vec<_>>();
+    super::file_journal::journal_requirements(&manifest).map_err(|error| ExecuteError {
+        entry: None,
+        kind: ExecuteErrorKind::JournalCapacity(error),
+    })
+}
+
 impl<'a> RenameExecutor<'a> {
     /// Creates an executor over filesystem and journal adapters.
     #[must_use]
@@ -297,6 +321,11 @@ impl<'a> RenameExecutor<'a> {
             })
             .collect::<Vec<_>>();
         let schedule = build_schedule(&plan, self.backend).map_err(schedule_error)?;
+        let manifest = schedule.iter().map(journal_step).collect::<Vec<_>>();
+        super::file_journal::journal_requirements(&manifest).map_err(|error| ExecuteError {
+            entry: None,
+            kind: ExecuteErrorKind::JournalCapacity(error),
+        })?;
         self.freeze(&plan.entries, &schedule)?;
         if control.cancellation_requested() {
             return Err(cancelled_before_begin());
@@ -316,7 +345,6 @@ impl<'a> RenameExecutor<'a> {
         if !control.begin_transaction() {
             return Err(cancelled_before_begin());
         }
-        let manifest = schedule.iter().map(journal_step).collect::<Vec<_>>();
         if let Err(error) = self.journal.begin(plan.id, &manifest) {
             if error.certainty == AppendCertainty::MayHaveAppended {
                 return Ok(ExecutionReport {

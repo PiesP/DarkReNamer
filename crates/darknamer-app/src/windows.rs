@@ -22,11 +22,11 @@ use crate::icon_cache::{IconCacheKey, icon_cache_key};
 use crate::rename::{
     CancellationToken, ExecuteError, ExecutionControl, ExecutionOutcome, ExecutionPhase,
     ExecutionProgress, ExecutionReport, ExistingJournalOpenError, FileJournal, FileJournalError,
-    JournalCleanupDecision, JournalOpenFailure, JournalRoot, ModelRevision, PlanError,
-    RecoveryJournalEvidence, RecoveryOutcome, RenameExecutor, RenamePlan, RenamePlanner,
+    JournalCleanupDecision, JournalOpenFailure, JournalRequirements, JournalRoot, ModelRevision,
+    PlanError, RecoveryJournalEvidence, RecoveryOutcome, RenameExecutor, RenamePlan, RenamePlanner,
     RenameRecovery, WindowsRenameBackend, apply_execution_report, build_plan_request,
     cleanup_decision, execute_error_korean, execution_outcome_korean, next_model_revision,
-    plan_error_korean, process_is_elevated, safe_mode_unify_path_message,
+    plan_error_korean, preflight_plan, process_is_elevated, safe_mode_unify_path_message,
 };
 use darknamer_core::{
     LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,
@@ -248,10 +248,20 @@ enum AdmissionWorkerResult {
 enum PlanWorkerResult {
     Finished {
         revision: ModelRevision,
-        plan: Result<RenamePlan, PlanError>,
+        plan: Result<ReadyPlan, ReadyPlanError>,
     },
     Cancelled,
     Panicked,
+}
+
+struct ReadyPlan {
+    plan: RenamePlan,
+    journal: JournalRequirements,
+}
+
+enum ReadyPlanError {
+    Plan(PlanError),
+    Preflight(ExecuteError),
 }
 
 enum ApplyWorkerResult {
@@ -2275,11 +2285,11 @@ fn handle_ready_plan(
     window: HWND,
     state: &mut AppState,
     revision: ModelRevision,
-    plan: Result<RenamePlan, PlanError>,
+    plan: Result<ReadyPlan, ReadyPlanError>,
 ) {
-    let plan = match plan {
-        Ok(plan) => plan,
-        Err(error) => {
+    let ready = match plan {
+        Ok(ready) => ready,
+        Err(ReadyPlanError::Plan(error)) => {
             let (message_text, rows) = plan_error_korean(&error);
             {
                 clear_selection(state.list_window);
@@ -2288,14 +2298,24 @@ fn handle_ready_plan(
             }
             return;
         }
+        Err(ReadyPlanError::Preflight(error)) => {
+            message(
+                window,
+                &execute_error_korean(&error),
+                "DarkReNamer - 적용 차단",
+            );
+            return;
+        }
     };
+    let plan = ready.plan;
     if plan.is_empty() {
         message(window, "변경할 항목이 없습니다.", "DarkReNamer");
         return;
     }
     let confirmation = format!(
-        "{}개 항목의 실제 이름을 변경하시겠습니까?\n계획 {:016X}\n목록 버전 {}",
+        "{}개 항목의 실제 이름을 변경하시겠습니까?\n파일 이동 단계 {}개\n계획 {:016X}\n목록 버전 {}",
         plan.changed_count(),
+        ready.journal.primitive_steps(),
         plan.fingerprint(),
         state.model_revision,
     );
@@ -2441,8 +2461,15 @@ fn start_plan_worker(
                 if worker_cancellation.is_requested() {
                     return PlanWorkerResult::Cancelled;
                 }
-                let backend = WindowsRenameBackend;
-                let plan = RenamePlanner::new(&backend).plan(request);
+                let mut backend = WindowsRenameBackend;
+                let plan = RenamePlanner::new(&backend)
+                    .plan(request)
+                    .map_err(ReadyPlanError::Plan)
+                    .and_then(|plan| {
+                        preflight_plan(&plan, &mut backend)
+                            .map(|journal| ReadyPlan { plan, journal })
+                            .map_err(ReadyPlanError::Preflight)
+                    });
                 if worker_cancellation.is_requested() {
                     PlanWorkerResult::Cancelled
                 } else {

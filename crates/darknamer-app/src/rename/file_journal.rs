@@ -37,6 +37,59 @@ pub const MAX_JOURNAL_FILE_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum UTF-16 code units in one exact journal path.
 pub const MAX_PATH_UNITS: usize = 32_767;
 
+/// Journal resource whose capacity would be exceeded by an intent manifest.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JournalCapacityKind {
+    /// Number of primitive rename steps in the immutable manifest.
+    PrimitiveSteps,
+    /// Encoded payload bytes in the single intent frame.
+    IntentFrameBytes,
+}
+
+/// Structured pre-mutation refusal for an intent that cannot fit the journal codec.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct JournalCapacityError {
+    /// Capacity dimension that was exceeded.
+    pub kind: JournalCapacityKind,
+    /// Exact capacity required by the proposed manifest.
+    pub required: usize,
+    /// Maximum accepted by the journal codec.
+    pub maximum: usize,
+}
+
+impl fmt::Display for JournalCapacityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "journal {:?} capacity exceeded: required {}, maximum {}",
+            self.kind, self.required, self.maximum
+        )
+    }
+}
+
+impl std::error::Error for JournalCapacityError {}
+
+/// Exact bounded resources required by one encoded intent manifest.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct JournalRequirements {
+    primitive_steps: usize,
+    intent_frame_bytes: usize,
+}
+
+impl JournalRequirements {
+    /// Returns the number of primitive rename steps in the manifest.
+    #[must_use]
+    pub const fn primitive_steps(self) -> usize {
+        self.primitive_steps
+    }
+
+    /// Returns the encoded payload bytes in the intent frame.
+    #[must_use]
+    pub const fn intent_frame_bytes(self) -> usize {
+        self.intent_frame_bytes
+    }
+}
+
 /// Strict codec failure kind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JournalCodecErrorKind {
@@ -614,12 +667,17 @@ fn encode_record(
 ) -> Result<u8, JournalCodecError> {
     match record {
         JournalRecord::Intent { plan, steps } => {
-            if steps.len() > MAX_JOURNAL_STEPS {
-                return Err(JournalCodecError::new(
+            journal_requirements(steps).map_err(|error| {
+                JournalCodecError::new(
                     frame,
-                    JournalCodecErrorKind::TooManySteps,
-                ));
-            }
+                    match error.kind {
+                        JournalCapacityKind::PrimitiveSteps => JournalCodecErrorKind::TooManySteps,
+                        JournalCapacityKind::IntentFrameBytes => {
+                            JournalCodecErrorKind::FrameTooLarge
+                        }
+                    },
+                )
+            })?;
             put_u64(payload, plan.fingerprint());
             put_u32_len(payload, steps.len(), frame)?;
             for step in steps {
@@ -662,6 +720,40 @@ fn encode_record(
             Ok(5)
         }
     }
+}
+
+const INTENT_FIXED_BYTES: usize = 8 + 4;
+const INTENT_STEP_FIXED_BYTES: usize = 4 + 4 + 4 + (8 + 16) * 3 + 1;
+
+pub(super) fn journal_requirements(
+    steps: &[JournalStep],
+) -> Result<JournalRequirements, JournalCapacityError> {
+    if steps.len() > MAX_JOURNAL_STEPS {
+        return Err(JournalCapacityError {
+            kind: JournalCapacityKind::PrimitiveSteps,
+            required: steps.len(),
+            maximum: MAX_JOURNAL_STEPS,
+        });
+    }
+
+    let required = steps.iter().fold(INTENT_FIXED_BYTES, |required, step| {
+        required
+            .saturating_add(INTENT_STEP_FIXED_BYTES)
+            .saturating_add(step.source().len().saturating_mul(2))
+            .saturating_add(step.destination().len().saturating_mul(2))
+    });
+    if required > MAX_JOURNAL_FRAME_BYTES {
+        return Err(JournalCapacityError {
+            kind: JournalCapacityKind::IntentFrameBytes,
+            required,
+            maximum: MAX_JOURNAL_FRAME_BYTES,
+        });
+    }
+
+    Ok(JournalRequirements {
+        primitive_steps: steps.len(),
+        intent_frame_bytes: required,
+    })
 }
 
 fn decode_record(
