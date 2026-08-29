@@ -37,9 +37,9 @@ separate from the 08.02.10 compatibility surface.
 - `dark-renamer-core`, `dark-renamer-platform`, `dark-renamer-windows`, and
   `dark-renamer-app`: the later safety-first successor track.
 
-The historical MFC source, binaries, screenshots, and archives remain in the
-fork history and upstream-derived paths for provenance. They are not Cargo
-production inputs.
+The historical MFC source, screenshots, and archives remain in the current
+tree, while the original executables remain available through the fork history
+for provenance. They are not Cargo production inputs.
 
 ## Development
 
