@@ -84,6 +84,12 @@ impl Drop for RedrawGuard {
 }
 
 pub(super) fn refresh(state: &mut AppState) {
+    refresh_all_rows(state);
+    update_controls(state);
+    state.set_status_item_count();
+}
+
+pub(super) fn refresh_all_rows(state: &mut AppState) {
     let rows = {
         let model = &state.model;
         let icon_cache = &mut state.icon_cache;
@@ -101,8 +107,38 @@ pub(super) fn refresh(state: &mut AppState) {
     }
     state.rendered_rows = rows;
     select_rows(state.list_window, &selected);
-    update_controls(state);
-    state.set_status_item_count();
+}
+
+pub(super) fn refresh_changed_rows(state: &mut AppState, changed: &[usize]) {
+    if state.rendered_rows.len() != state.model.len() {
+        refresh(state);
+        return;
+    }
+    let mut changed = changed
+        .iter()
+        .copied()
+        .filter(|index| *index < state.model.len())
+        .collect::<Vec<_>>();
+    changed.sort_unstable();
+    changed.dedup();
+    let rows = {
+        let model = &state.model;
+        let icon_cache = &mut state.icon_cache;
+        changed
+            .iter()
+            .map(|index| (*index, rendered_row(icon_cache, &model.items()[*index])))
+            .collect::<Vec<_>>()
+    };
+    // SAFETY: state.list_window is live and the guard restores redraw.
+    let _redraw = unsafe { RedrawGuard::suspend(state.list_window) };
+    for (index, row) in rows {
+        if !apply_rendered_row(state.list_window, index, &state.rendered_rows[index], &row) {
+            drop(_redraw);
+            refresh(state);
+            return;
+        }
+        state.rendered_rows[index] = row;
+    }
 }
 
 fn rendered_row(icon_cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyListItem) -> RenderedRow {
@@ -129,20 +165,27 @@ fn apply_incremental_rows(window: HWND, old: &[RenderedRow], new: &[RenderedRow]
     }
     let shared = old.len().min(new.len());
     for row in 0..shared {
-        let mask = changed_column_mask(&old[row], &new[row]);
-        if mask & 1 != 0 && !set_native_primary(window, row, &new[row]) {
+        if !apply_rendered_row(window, row, &old[row], &new[row]) {
             return false;
-        }
-        for column in 1..7 {
-            if mask & (1 << column) != 0
-                && !set_native_subitem(window, row, column, &new[row].values[column])
-            {
-                return false;
-            }
         }
     }
     for (row, value) in new.iter().enumerate().skip(old.len()) {
         if !insert_native_row(window, row, value) {
+            return false;
+        }
+    }
+    true
+}
+
+fn apply_rendered_row(window: HWND, row: usize, old: &RenderedRow, new: &RenderedRow) -> bool {
+    let mask = changed_column_mask(old, new);
+    if mask & 1 != 0 && !set_native_primary(window, row, new) {
+        return false;
+    }
+    for column in 1..7 {
+        if mask & (1 << column) != 0
+            && !set_native_subitem(window, row, column, &new.values[column])
+        {
             return false;
         }
     }

@@ -577,6 +577,90 @@ pub const SHOW_MODIFIED: CommandId = 0x8022;
 pub const SHOW_CREATED: CommandId = 0x8023;
 pub const VERSION: CommandId = 0x8024;
 
+/// Native UI work required after a command finishes.
+#[cfg(any(windows, test))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum UiEffect {
+    None,
+    RowChanged(usize),
+    RowsChanged(Box<[usize]>),
+    AllRowsChanged,
+    ColumnsChanged(usize),
+    CloseRequested,
+}
+
+/// Resolved command result after model-change detection.
+#[cfg(any(windows, test))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CommandOutcome {
+    effect: UiEffect,
+}
+
+#[cfg(any(windows, test))]
+impl CommandOutcome {
+    pub(crate) const fn ui(effect: UiEffect) -> Self {
+        Self { effect }
+    }
+
+    pub(crate) fn model(changed: bool, effect: UiEffect) -> Self {
+        Self {
+            effect: if changed { effect } else { UiEffect::None },
+        }
+    }
+
+    pub(crate) fn into_effect(self) -> UiEffect {
+        self.effect
+    }
+}
+
+/// Maximum row-rendering scope for a native command.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CommandUiPolicy {
+    NoRows,
+    SingleRow,
+    MovedRows,
+    AllRows,
+    Columns,
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn command_ui_policy(command: CommandId) -> CommandUiPolicy {
+    match command {
+        MANUAL_CHANGE => CommandUiPolicy::SingleRow,
+        MOVE_UP | MOVE_DOWN => CommandUiPolicy::MovedRows,
+        SHOW_FULL_PATH | SHOW_SIZE | SHOW_MODIFIED | SHOW_CREATED => CommandUiPolicy::Columns,
+        RESET | CLEAR_LIST | REPLACE | PREFIX | SUFFIX | CLEAR_NAME | DELETE_POSITION
+        | DELETE_DELIMITED | KEEP_DIGITS | PAD_DIGITS | SEQUENCE | SORT | PARENT_PREFIX
+        | PARENT_SUFFIX | EXT_DELETE | EXT_ADD | EXT_REPLACE | IMPORT_NAMES | 0xFFFF => {
+            CommandUiPolicy::AllRows
+        }
+        _ => CommandUiPolicy::NoRows,
+    }
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn command_effect_fits_policy(command: CommandId, outcome: &CommandOutcome) -> bool {
+    match &outcome.effect {
+        UiEffect::None => true,
+        UiEffect::RowChanged(_) => command_ui_policy(command) == CommandUiPolicy::SingleRow,
+        UiEffect::RowsChanged(_) => command_ui_policy(command) == CommandUiPolicy::MovedRows,
+        UiEffect::AllRowsChanged => command_ui_policy(command) == CommandUiPolicy::AllRows,
+        UiEffect::ColumnsChanged(_) => command_ui_policy(command) == CommandUiPolicy::Columns,
+        UiEffect::CloseRequested => command == 2,
+    }
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn changed_move_rows(before: &[usize], after: &[usize]) -> Box<[usize]> {
+    let mut changed = before.iter().chain(after).copied().collect::<Vec<_>>();
+    changed.sort_unstable();
+    changed.dedup();
+    changed.into_boxed_slice()
+}
+
 /// One report-mode ListView column.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ColumnSpec {
@@ -805,6 +889,100 @@ mod tests {
             VERSION,
         ];
         assert_eq!(ids, core::array::from_fn(|index| 0x8003 + index as u16));
+    }
+
+    #[test]
+    fn command_ui_policy_keeps_non_model_commands_out_of_row_rendering() {
+        for command in [
+            APPLY,
+            ADD_FILES,
+            COPY_NAMES,
+            COPY_PATHS,
+            SAVE_NAMES,
+            SAVE_PATHS,
+            IMPORT_PATHS,
+            UNIFY_PATH,
+            VERSION,
+        ] {
+            assert_eq!(command_ui_policy(command), CommandUiPolicy::NoRows);
+        }
+    }
+
+    #[test]
+    fn command_ui_policy_limits_local_changes_and_classifies_transforms() {
+        assert_eq!(command_ui_policy(MANUAL_CHANGE), CommandUiPolicy::SingleRow);
+        for command in [MOVE_UP, MOVE_DOWN] {
+            assert_eq!(command_ui_policy(command), CommandUiPolicy::MovedRows);
+        }
+        for command in [SHOW_FULL_PATH, SHOW_SIZE, SHOW_MODIFIED, SHOW_CREATED] {
+            assert_eq!(command_ui_policy(command), CommandUiPolicy::Columns);
+        }
+        for command in [
+            RESET,
+            CLEAR_LIST,
+            REPLACE,
+            PREFIX,
+            SUFFIX,
+            CLEAR_NAME,
+            DELETE_POSITION,
+            DELETE_DELIMITED,
+            KEEP_DIGITS,
+            PAD_DIGITS,
+            SEQUENCE,
+            SORT,
+            PARENT_PREFIX,
+            PARENT_SUFFIX,
+            EXT_DELETE,
+            EXT_ADD,
+            EXT_REPLACE,
+            IMPORT_NAMES,
+        ] {
+            assert_eq!(command_ui_policy(command), CommandUiPolicy::AllRows);
+        }
+    }
+
+    #[test]
+    fn unchanged_model_outcome_suppresses_requested_row_effect() {
+        let outcome = CommandOutcome::model(false, UiEffect::AllRowsChanged);
+        assert_eq!(outcome.into_effect(), UiEffect::None);
+
+        let changed = CommandOutcome::model(true, UiEffect::RowChanged(42));
+        assert_eq!(changed.into_effect(), UiEffect::RowChanged(42));
+
+        for effect in [
+            UiEffect::RowsChanged(vec![2, 3].into_boxed_slice()),
+            UiEffect::ColumnsChanged(1),
+            UiEffect::CloseRequested,
+        ] {
+            assert_ne!(CommandOutcome::ui(effect).into_effect(), UiEffect::None);
+        }
+    }
+
+    #[test]
+    fn command_outcomes_cannot_exceed_their_classified_render_scope() {
+        assert!(command_effect_fits_policy(
+            MANUAL_CHANGE,
+            &CommandOutcome::ui(UiEffect::RowChanged(7))
+        ));
+        assert!(command_effect_fits_policy(
+            MOVE_DOWN,
+            &CommandOutcome::ui(UiEffect::RowsChanged(vec![6, 7].into_boxed_slice()))
+        ));
+        assert!(command_effect_fits_policy(
+            SHOW_SIZE,
+            &CommandOutcome::ui(UiEffect::ColumnsChanged(1))
+        ));
+        assert!(!command_effect_fits_policy(
+            COPY_NAMES,
+            &CommandOutcome::ui(UiEffect::AllRowsChanged)
+        ));
+    }
+
+    #[test]
+    fn move_effect_renders_only_old_and_new_row_positions() {
+        assert_eq!(&*changed_move_rows(&[3], &[2]), &[2, 3]);
+        assert_eq!(&*changed_move_rows(&[1, 3], &[0, 2]), &[0, 1, 2, 3]);
+        assert_eq!(&*changed_move_rows(&[4, 5], &[4, 5]), &[4, 5]);
     }
 
     #[test]

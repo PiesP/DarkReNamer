@@ -56,8 +56,8 @@ use drag_drop::*;
 #[cfg(test)]
 use list_view::changed_column_mask;
 use list_view::{
-    RenderedRow, refresh, update_column_visibility, update_dpi_metrics,
-    update_primary_column_widths,
+    RenderedRow, refresh, refresh_all_rows, refresh_changed_rows, update_column_visibility,
+    update_dpi_metrics, update_primary_column_widths,
 };
 use menu::*;
 use recovery_ui::*;

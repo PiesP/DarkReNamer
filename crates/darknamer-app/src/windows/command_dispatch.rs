@@ -41,11 +41,6 @@ pub(super) fn handle_accelerator(window: HWND, message: &MSG) -> bool {
         // SAFETY: window is the live top-level HWND; WM_COMMAND carries only the
         // validated resource command value and no pointer payload.
         unsafe { SendMessageW(window, WM_COMMAND, usize::from(command), 0) };
-        if command != 2 && !state.is_null() {
-            // SAFETY: state is the checked non-null Box::into_raw AppState read
-            // from this HWND and remains confined to the current window thread.
-            update_controls(unsafe { &mut *state });
-        }
         true
     } else {
         false
@@ -179,46 +174,62 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
         );
         return;
     }
-    let selected = { selected_indices(state.list_window) };
-    let before = state.model.clone();
-    match command {
-        APPLY => apply_changes(window, state),
-        RESET => state.model.reset_proposals(),
-        CLEAR_LIST => state.model = LegacyList::new(),
+    let mut selection_restore = None;
+    let outcome = match command {
+        APPLY => {
+            apply_changes(window, state);
+            CommandOutcome::ui(UiEffect::None)
+        }
+        RESET => model_mutation(state, |state| {
+            state.model.reset_proposals();
+            UiEffect::AllRowsChanged
+        }),
+        CLEAR_LIST => model_mutation(state, |state| {
+            state.model = LegacyList::new();
+            UiEffect::AllRowsChanged
+        }),
         0xFFFF => {
-            clear_selection(state.list_window);
-            state.model.remove_rows(&selected);
+            let selected = selected_indices(state.list_window);
+            selection_restore = Some(SelectionRestore::default());
+            model_mutation(state, |state| {
+                state.model.remove_rows(&selected);
+                UiEffect::AllRowsChanged
+            })
         }
         MOVE_UP => {
-            let focused_position = { focused_index(state.list_window) }
+            let selected = selected_indices(state.list_window);
+            let focused_position = focused_index(state.list_window)
                 .and_then(|focused| selected.iter().position(|index| *index == focused));
-            clear_selection(state.list_window);
-            let moved = state.model.move_rows_earlier(&selected);
-            state.commit_model_change(&before);
-            refresh(state);
+            let mut moved = Box::default();
+            let outcome = model_mutation(state, |state| {
+                moved = state.model.move_rows_earlier(&selected);
+                UiEffect::RowsChanged(changed_move_rows(&selected, &moved))
+            });
             let focused = focused_position.and_then(|position| moved.get(position).copied());
-            {
-                select_rows_with_focus(state.list_window, &moved, focused);
-                update_controls(state);
-            }
-            return;
+            selection_restore = Some(SelectionRestore {
+                rows: moved,
+                focused,
+            });
+            outcome
         }
         MOVE_DOWN => {
-            let focused_position = { focused_index(state.list_window) }
+            let selected = selected_indices(state.list_window);
+            let focused_position = focused_index(state.list_window)
                 .and_then(|focused| selected.iter().position(|index| *index == focused));
-            clear_selection(state.list_window);
-            let moved = state.model.move_rows_later(&selected);
-            state.commit_model_change(&before);
-            refresh(state);
+            let mut moved = Box::default();
+            let outcome = model_mutation(state, |state| {
+                moved = state.model.move_rows_later(&selected);
+                UiEffect::RowsChanged(changed_move_rows(&selected, &moved))
+            });
             let focused = focused_position.and_then(|position| moved.get(position).copied());
-            {
-                select_rows_with_focus(state.list_window, &moved, focused);
-                update_controls(state);
-            }
-            return;
+            selection_restore = Some(SelectionRestore {
+                rows: moved,
+                focused,
+            });
+            outcome
         }
         MANUAL_CHANGE => {
-            if let Some(index) = selected.first().copied() {
+            if let Some(index) = selected_indices(state.list_window).first().copied() {
                 let current = state.model.items()[index].proposed_name().clone();
                 if let Some(result) = {
                     prompt_input_or_report(
@@ -233,8 +244,15 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
                         ),
                     )
                 } {
-                    state.model.manual_change(index, result.value_one);
+                    model_mutation(state, |state| {
+                        state.model.manual_change(index, result.value_one);
+                        UiEffect::RowChanged(index)
+                    })
+                } else {
+                    CommandOutcome::ui(UiEffect::None)
                 }
+            } else {
+                CommandOutcome::ui(UiEffect::None)
             }
         }
         REPLACE => {
@@ -251,9 +269,14 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
                     ),
                 )
             } {
-                state
-                    .model
-                    .replace_complete(&result.value_one, &result.value_two);
+                model_mutation(state, |state| {
+                    state
+                        .model
+                        .replace_complete(&result.value_one, &result.value_two);
+                    UiEffect::AllRowsChanged
+                })
+            } else {
+                CommandOutcome::ui(UiEffect::None)
             }
         }
         PREFIX => {
@@ -270,7 +293,12 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
                     ),
                 )
             } {
-                state.model.prefix_complete(&result.value_one);
+                model_mutation(state, |state| {
+                    state.model.prefix_complete(&result.value_one);
+                    UiEffect::AllRowsChanged
+                })
+            } else {
+                CommandOutcome::ui(UiEffect::None)
             }
         }
         SUFFIX => {
@@ -287,22 +315,35 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
                     ),
                 )
             } {
-                state.model.suffix_before_extension(&result.value_one);
+                model_mutation(state, |state| {
+                    state.model.suffix_before_extension(&result.value_one);
+                    UiEffect::AllRowsChanged
+                })
+            } else {
+                CommandOutcome::ui(UiEffect::None)
             }
         }
-        CLEAR_NAME => state.model.clear_name(),
+        CLEAR_NAME => model_mutation(state, |state| {
+            state.model.clear_name();
+            UiEffect::AllRowsChanged
+        }),
         DELETE_POSITION => delete_position_command(window, state),
         DELETE_DELIMITED => delete_delimited_command(window, state),
-        KEEP_DIGITS => state.model.keep_ascii_digits(),
+        KEEP_DIGITS => model_mutation(state, |state| {
+            state.model.keep_ascii_digits();
+            UiEffect::AllRowsChanged
+        }),
         PAD_DIGITS => pad_digits_command(window, state),
         SEQUENCE => sequence_command(window, state),
         SORT => {
-            if sort_command(window, state) {
-                state.commit_model_change(&before);
-                return;
-            }
+            let (outcome, restore) = sort_command(window, state);
+            selection_restore = restore;
+            outcome
         }
-        EXT_DELETE => state.model.delete_extension(),
+        EXT_DELETE => model_mutation(state, |state| {
+            state.model.delete_extension();
+            UiEffect::AllRowsChanged
+        }),
         EXT_ADD => {
             if let Some(result) = {
                 prompt_input_or_report(
@@ -317,7 +358,12 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
                     ),
                 )
             } {
-                state.model.add_extension(&result.value_one);
+                model_mutation(state, |state| {
+                    state.model.add_extension(&result.value_one);
+                    UiEffect::AllRowsChanged
+                })
+            } else {
+                CommandOutcome::ui(UiEffect::None)
             }
         }
         EXT_REPLACE => {
@@ -334,40 +380,144 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
                     ),
                 )
             } {
-                state.model.replace_extension(&result.value_one);
+                model_mutation(state, |state| {
+                    state.model.replace_extension(&result.value_one);
+                    UiEffect::AllRowsChanged
+                })
+            } else {
+                CommandOutcome::ui(UiEffect::None)
             }
         }
-        PARENT_PREFIX => state.model.prefix_parent_folder(),
-        PARENT_SUFFIX => state.model.suffix_parent_folder(),
-        UNIFY_PATH => message(
-            window,
-            safe_mode_unify_path_message(),
-            "DarkReNamer - Safe 모드",
-        ),
-        ADD_FILES => add_files_dialog(window, state),
-        COPY_NAMES => copy_clipboard_or_report(window, &state.model.export_names()),
-        COPY_PATHS => copy_clipboard_or_report(window, &state.model.export_paths()),
-        SAVE_NAMES => save_text_dialog(window, state.model.export_names(), true),
-        SAVE_PATHS => save_text_dialog(window, state.model.export_paths(), false),
-        IMPORT_NAMES => import_names_dialog(window, state),
-        IMPORT_PATHS => import_paths_dialog(window, state),
+        PARENT_PREFIX => model_mutation(state, |state| {
+            state.model.prefix_parent_folder();
+            UiEffect::AllRowsChanged
+        }),
+        PARENT_SUFFIX => model_mutation(state, |state| {
+            state.model.suffix_parent_folder();
+            UiEffect::AllRowsChanged
+        }),
+        UNIFY_PATH => {
+            message(
+                window,
+                safe_mode_unify_path_message(),
+                "DarkReNamer - Safe 모드",
+            );
+            CommandOutcome::ui(UiEffect::None)
+        }
+        ADD_FILES => {
+            add_files_dialog(window, state);
+            CommandOutcome::ui(UiEffect::None)
+        }
+        COPY_NAMES => {
+            copy_clipboard_or_report(window, &state.model.export_names());
+            CommandOutcome::ui(UiEffect::None)
+        }
+        COPY_PATHS => {
+            copy_clipboard_or_report(window, &state.model.export_paths());
+            CommandOutcome::ui(UiEffect::None)
+        }
+        SAVE_NAMES => {
+            save_text_dialog(window, state.model.export_names(), true);
+            CommandOutcome::ui(UiEffect::None)
+        }
+        SAVE_PATHS => {
+            save_text_dialog(window, state.model.export_paths(), false);
+            CommandOutcome::ui(UiEffect::None)
+        }
+        IMPORT_NAMES => model_mutation(state, |state| {
+            import_names_dialog(window, state);
+            UiEffect::AllRowsChanged
+        }),
+        IMPORT_PATHS => {
+            import_paths_dialog(window, state);
+            CommandOutcome::ui(UiEffect::None)
+        }
         SHOW_FULL_PATH | SHOW_SIZE | SHOW_MODIFIED | SHOW_CREATED => {
             let index = usize::from(command - SHOW_FULL_PATH);
             state.shown_columns[index] = !state.shown_columns[index];
-            update_column_visibility(state, index);
+            CommandOutcome::ui(UiEffect::ColumnsChanged(index))
         }
-        VERSION => message(window, &super::about_text(), "DarkReNamer 정보"),
-        EXPORT_RECOVERY_JOURNAL => export_recovery_journal(window, state),
-        DISCARD_STAGED_JOURNAL => discard_staged_journal(window, state),
-        SHOW_RECOVERY_STATUS => show_recovery_status(window, state),
-        2 => {
-            request_window_close(window, state);
-            return;
+        VERSION => {
+            message(window, &super::about_text(), "DarkReNamer 정보");
+            CommandOutcome::ui(UiEffect::None)
         }
-        _ => {}
-    }
+        EXPORT_RECOVERY_JOURNAL => {
+            export_recovery_journal(window, state);
+            CommandOutcome::ui(UiEffect::None)
+        }
+        DISCARD_STAGED_JOURNAL => {
+            discard_staged_journal(window, state);
+            CommandOutcome::ui(UiEffect::None)
+        }
+        SHOW_RECOVERY_STATUS => {
+            show_recovery_status(window, state);
+            CommandOutcome::ui(UiEffect::None)
+        }
+        2 => CommandOutcome::ui(UiEffect::CloseRequested),
+        _ => CommandOutcome::ui(UiEffect::None),
+    };
+    debug_assert!(command_effect_fits_policy(command, &outcome));
+    apply_command_outcome(window, state, outcome, selection_restore);
+}
+
+#[derive(Default)]
+struct SelectionRestore {
+    rows: Box<[usize]>,
+    focused: Option<usize>,
+}
+
+fn model_mutation(
+    state: &mut AppState,
+    mutation: impl FnOnce(&mut AppState) -> UiEffect,
+) -> CommandOutcome {
+    let before = state.model.clone();
+    let effect = mutation(state);
+    let changed = state.model != before;
     state.commit_model_change(&before);
-    refresh(state);
+    CommandOutcome::model(changed, effect)
+}
+
+fn apply_command_outcome(
+    window: HWND,
+    state: &mut AppState,
+    outcome: CommandOutcome,
+    selection: Option<SelectionRestore>,
+) {
+    match outcome.into_effect() {
+        UiEffect::None => {}
+        UiEffect::RowChanged(row) => {
+            refresh_changed_rows(state, slice::from_ref(&row));
+            update_controls(state);
+        }
+        UiEffect::RowsChanged(rows) => {
+            refresh_changed_rows(state, &rows);
+            restore_selection(state, selection);
+            update_controls(state);
+        }
+        UiEffect::AllRowsChanged => {
+            if selection.is_some() {
+                clear_selection(state.list_window);
+            }
+            refresh_all_rows(state);
+            restore_selection(state, selection);
+            update_controls(state);
+            state.set_status_item_count();
+        }
+        UiEffect::ColumnsChanged(index) => {
+            update_column_visibility(state, index);
+            update_primary_column_widths(state);
+            update_controls(state);
+        }
+        UiEffect::CloseRequested => request_window_close(window, state),
+    }
+}
+
+fn restore_selection(state: &mut AppState, selection: Option<SelectionRestore>) {
+    let Some(selection) = selection else {
+        return;
+    };
+    clear_selection(state.list_window);
+    select_rows_with_focus(state.list_window, &selection.rows, selection.focused);
 }
 
 pub(super) const fn recovery_command_allowed(command: u16) -> bool {
@@ -431,7 +581,7 @@ pub(super) fn legacy_atoi(text: &LegacyText) -> i32 {
     }
 }
 
-pub(super) fn pad_digits_command(window: HWND, state: &mut AppState) {
+fn pad_digits_command(window: HWND, state: &mut AppState) -> CommandOutcome {
     let Some(result) = ({
         prompt_input_or_report(
             window,
@@ -445,24 +595,27 @@ pub(super) fn pad_digits_command(window: HWND, state: &mut AppState) {
             ),
         )
     }) else {
-        return;
+        return CommandOutcome::ui(UiEffect::None);
     };
     let width = legacy_atoi(&result.value_one);
     if width <= 0 {
         message(window, "자리수 입력이 잘못되었습니다.", "DarkReNamer");
-        return;
+        return CommandOutcome::ui(UiEffect::None);
     }
-    let outcome = if result.choice == 0 {
-        state.model.pad_last_digit_run(width as usize)
-    } else {
-        state.model.pad_first_digit_run(width as usize)
-    };
-    if outcome.is_err() {
-        message(window, "자리수 입력이 잘못되었습니다.", "DarkReNamer");
-    }
+    model_mutation(state, |state| {
+        let outcome = if result.choice == 0 {
+            state.model.pad_last_digit_run(width as usize)
+        } else {
+            state.model.pad_first_digit_run(width as usize)
+        };
+        if outcome.is_err() {
+            message(window, "자리수 입력이 잘못되었습니다.", "DarkReNamer");
+        }
+        UiEffect::AllRowsChanged
+    })
 }
 
-pub(super) fn sequence_command(window: HWND, state: &mut AppState) {
+fn sequence_command(window: HWND, state: &mut AppState) -> CommandOutcome {
     let Some(result) = ({
         prompt_input_or_report(
             window,
@@ -481,12 +634,12 @@ pub(super) fn sequence_command(window: HWND, state: &mut AppState) {
             ),
         )
     }) else {
-        return;
+        return CommandOutcome::ui(UiEffect::None);
     };
     let width = legacy_atoi(&result.value_one);
     if width <= 0 {
         message(window, "자리수 입력이 잘못되었습니다.", "DarkReNamer");
-        return;
+        return CommandOutcome::ui(UiEffect::None);
     }
     let mode = match result.choice {
         0 => LegacySequenceMode::Append,
@@ -494,15 +647,18 @@ pub(super) fn sequence_command(window: HWND, state: &mut AppState) {
         2 => LegacySequenceMode::AppendRestartPerFolder,
         _ => LegacySequenceMode::PrependRestartPerFolder,
     };
-    let _ = state.model.add_sequence_by(
-        width as usize,
-        legacy_atoi(&result.value_two),
-        mode,
-        compare_windows,
-    );
+    model_mutation(state, |state| {
+        let _ = state.model.add_sequence_by(
+            width as usize,
+            legacy_atoi(&result.value_two),
+            mode,
+            compare_windows,
+        );
+        UiEffect::AllRowsChanged
+    })
 }
 
-pub(super) fn delete_position_command(window: HWND, state: &mut AppState) {
+fn delete_position_command(window: HWND, state: &mut AppState) -> CommandOutcome {
     let Some(result) = ({
         prompt_input_or_report(
             window,
@@ -516,7 +672,7 @@ pub(super) fn delete_position_command(window: HWND, state: &mut AppState) {
             ),
         )
     }) else {
-        return;
+        return CommandOutcome::ui(UiEffect::None);
     };
     let start = legacy_atoi(&result.value_one);
     let end = legacy_atoi(&result.value_two);
@@ -526,11 +682,11 @@ pub(super) fn delete_position_command(window: HWND, state: &mut AppState) {
             "음수값이나 잘못된 값이 입력되었습니다.",
             "DarkReNamer",
         );
-        return;
+        return CommandOutcome::ui(UiEffect::None);
     }
     if result.choice == 0 && end > 0 && start > end {
         message(window, "시작점이 끝점보다 뒤에 있습니다.", "DarkReNamer");
-        return;
+        return CommandOutcome::ui(UiEffect::None);
     }
     if result.choice == 1 && start != 0 {
         message(
@@ -538,16 +694,19 @@ pub(super) fn delete_position_command(window: HWND, state: &mut AppState) {
             "맨 뒤에서부터 삭제할때는 '~까지'만 필요합니다.",
             "DarkReNamer",
         );
-        return;
+        return CommandOutcome::ui(UiEffect::None);
     }
-    if result.choice == 0 {
-        let _ = state.model.delete_front_range(start as usize, end as usize);
-    } else {
-        state.model.delete_last(end as usize);
-    }
+    model_mutation(state, |state| {
+        if result.choice == 0 {
+            let _ = state.model.delete_front_range(start as usize, end as usize);
+        } else {
+            state.model.delete_last(end as usize);
+        }
+        UiEffect::AllRowsChanged
+    })
 }
 
-pub(super) fn delete_delimited_command(window: HWND, state: &mut AppState) {
+fn delete_delimited_command(window: HWND, state: &mut AppState) -> CommandOutcome {
     let Some(result) = ({
         prompt_input_or_report(
             window,
@@ -561,22 +720,25 @@ pub(super) fn delete_delimited_command(window: HWND, state: &mut AppState) {
             ),
         )
     }) else {
-        return;
+        return CommandOutcome::ui(UiEffect::None);
     };
-    if state
-        .model
-        .delete_first_delimited(&result.value_one, &result.value_two)
-        == Err(LegacyInputError::EmptyDelimiter)
-    {
-        message(
-            window,
-            "시작/끝 문자가 정확하게 지정되지 않았습니다.",
-            "DarkReNamer",
-        );
-    }
+    model_mutation(state, |state| {
+        if state
+            .model
+            .delete_first_delimited(&result.value_one, &result.value_two)
+            == Err(LegacyInputError::EmptyDelimiter)
+        {
+            message(
+                window,
+                "시작/끝 문자가 정확하게 지정되지 않았습니다.",
+                "DarkReNamer",
+            );
+        }
+        UiEffect::AllRowsChanged
+    })
 }
 
-pub(super) fn sort_command(window: HWND, state: &mut AppState) -> bool {
+fn sort_command(window: HWND, state: &mut AppState) -> (CommandOutcome, Option<SelectionRestore>) {
     let choices = [
         "파일 이름에 따라 오름차순",
         "파일 이름에 따라 내림차순",
@@ -602,7 +764,7 @@ pub(super) fn sort_command(window: HWND, state: &mut AppState) -> bool {
             ),
         )
     }) else {
-        return false;
+        return (CommandOutcome::ui(UiEffect::None), None);
     };
     let modes = [
         LegacySortMode::NameAscending,
@@ -617,28 +779,33 @@ pub(super) fn sort_command(window: HWND, state: &mut AppState) -> bool {
         LegacySortMode::CreatedDescending,
     ];
     if let Some(mode) = modes.get(result.choice) {
-        let selected = { selected_indices(state.list_window) };
+        let selected = selected_indices(state.list_window);
         let tokens = selection_tokens(&state.model, &selected);
-        let focused = { focused_index(state.list_window) }
-            .and_then(|index| selection_token(&state.model, index));
-        clear_selection(state.list_window);
-        state
-            .model
-            .sort_by_with_semantics(*mode, SortSemantics::SafeActualSize, compare_windows);
-        refresh(state);
+        let focused =
+            focused_index(state.list_window).and_then(|index| selection_token(&state.model, index));
+        let outcome = model_mutation(state, |state| {
+            state.model.sort_by_with_semantics(
+                *mode,
+                SortSemantics::SafeActualSize,
+                compare_windows,
+            );
+            UiEffect::AllRowsChanged
+        });
         let moved = rows_for_tokens(&state.model, &tokens);
         let focused = focused.as_ref().and_then(|token| {
             rows_for_tokens(&state.model, slice::from_ref(token))
                 .first()
                 .copied()
         });
-        {
-            select_rows_with_focus(state.list_window, &moved, focused);
-            update_controls(state);
-        }
-        return true;
+        return (
+            outcome,
+            Some(SelectionRestore {
+                rows: moved.into_boxed_slice(),
+                focused,
+            }),
+        );
     }
-    false
+    (CommandOutcome::ui(UiEffect::None), None)
 }
 
 pub(super) fn clear_selection(list: HWND) {

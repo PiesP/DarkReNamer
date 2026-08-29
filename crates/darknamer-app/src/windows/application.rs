@@ -515,9 +515,6 @@ unsafe extern "system" fn window_proc(
                     // SAFETY: state_ptr is the non-null AppState installed for
                     // this HWND and remains exclusively callback-thread owned.
                     dispatch_command(window, unsafe { &mut *state_ptr }, MANUAL_CHANGE);
-                    // SAFETY: dispatch returned, so a fresh unique borrow of the
-                    // same non-null window-owned AppState is valid for refresh.
-                    update_controls(unsafe { &mut *state_ptr });
                 }
             }
             0
