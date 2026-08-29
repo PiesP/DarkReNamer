@@ -61,8 +61,9 @@ use drag_drop::*;
 #[cfg(test)]
 use list_view::changed_column_mask;
 use list_view::{
-    RenderedRow, refresh, refresh_all_rows, refresh_changed_rows, update_column_visibility,
-    update_dpi_metrics, update_primary_column_widths,
+    RenderedRow, handle_header_end_track, handle_list_infotip, refresh, refresh_all_rows,
+    refresh_changed_rows, update_column_visibility, update_dpi_metrics,
+    update_primary_column_widths,
 };
 use menu::*;
 use recovery_ui::*;
@@ -73,6 +74,7 @@ use safe_runtime::{
 };
 use text_io::{compare_windows, legacy_path, path_wide, read_legacy_text, wide, write_legacy_text};
 use windows_sys::Win32::Foundation::{FILETIME, HWND, LPARAM, LRESULT, RECT, SYSTEMTIME, WPARAM};
+use windows_sys::Win32::Globalization::{DATE_SHORTDATE, GetDateFormatEx, GetTimeFormatEx};
 use windows_sys::Win32::Graphics::Gdi::{
     COLOR_WINDOW, CreateFontIndirectW, DT_CALCRECT, DT_NOPREFIX, DT_SINGLELINE, DT_WORDBREAK,
     DeleteObject, DrawTextW, GetDC, GetMonitorInfoW, HFONT, MONITOR_DEFAULTTONEAREST, MONITORINFO,
@@ -87,19 +89,20 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::{
     SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_ETCHEDHORZ, SS_NOPREFIX, SS_SUNKEN,
 };
-use windows_sys::Win32::System::Time::FileTimeToSystemTime;
+use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTimeEx};
 use windows_sys::Win32::UI::Controls::{
-    ICC_LISTVIEW_CLASSES, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_FMT,
-    LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT,
-    LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_DELETEITEM, LVM_ENSUREVISIBLE,
-    LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH,
-    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW,
-    LVM_SETITEMW, LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER,
-    LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS,
-    LVSIL_SMALL, NM_DBLCLK, NMHDR, NMLISTVIEW,
+    HDI_WIDTH, HDN_ENDTRACKW, ICC_LISTVIEW_CLASSES, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX,
+    InitCommonControlsEx, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW,
+    LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS,
+    LVM_DELETEITEM, LVM_ENSUREVISIBLE, LVM_GETCOLUMNWIDTH, LVM_GETHEADER, LVM_GETNEXTITEM,
+    LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE,
+    LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVM_SETITEMW, LVN_GETINFOTIPW,
+    LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
+    LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS,
+    LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_DBLCLK, NMHDR, NMHEADERW, NMLISTVIEW, NMLVGETINFOTIPW,
 };
 use windows_sys::Win32::UI::HiDpi::{
-    AdjustWindowRectExForDpi, GetDpiForWindow, SystemParametersInfoForDpi,
+    AdjustWindowRectExForDpi, GetDpiForWindow, GetSystemMetricsForDpi, SystemParametersInfoForDpi,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetKeyState, IsWindowEnabled, SetFocus, VK_CONTROL, VK_DELETE, VK_ESCAPE,
@@ -118,15 +121,15 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, KillTimer, LoadCursorW, LoadIconW, MB_DEFBUTTON2,
     MB_ICONWARNING, MB_OKCANCEL, MB_YESNOCANCEL, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED,
     MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW, MoveWindow,
-    NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassExW, SPI_GETNONCLIENTMETRICS,
-    SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu,
-    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_APP, WM_CLOSE,
-    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_FONTCHANGE,
-    WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS,
-    WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
-    WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_ACCEPTFILES,
-    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
-    WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXVSCROLL,
+    SPI_GETNONCLIENTMETRICS, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendMessageW,
+    SetForegroundWindow, SetMenu, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
+    WM_DROPFILES, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_NCCREATE, WM_NCDESTROY,
+    WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
+    WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{BS_MULTILINE, GWL_STYLE};
@@ -157,6 +160,7 @@ struct AppState {
     right_rail: Option<CommandRail>,
     model: LegacyList,
     shown_columns: [bool; 4],
+    column_states: [ColumnState; 7],
     dpi: u32,
     command_states: [bool; 34],
     model_revision: u64,
@@ -203,6 +207,7 @@ impl AppState {
             right_rail: None,
             model: LegacyList::new(),
             shown_columns: [false; 4],
+            column_states: default_column_states(),
             dpi: BASE_DPI,
             command_states: [false; 34],
             model_revision: 0,

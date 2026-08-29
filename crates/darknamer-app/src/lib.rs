@@ -22,6 +22,8 @@ pub(crate) const NAME_COLUMN_MINIMUM: i32 = 120;
 #[cfg(any(windows, test))]
 pub(crate) const LOCATION_COLUMN_MINIMUM: i32 = 80;
 #[cfg(any(windows, test))]
+pub(crate) const LIST_SCROLLBAR_ALLOWANCE_DIP: i32 = 17;
+#[cfg(any(windows, test))]
 pub(crate) const EMPTY_LIST_STATUS: &str = "파일이나 폴더를 끌어 놓거나 Ctrl+O로 추가하세요.";
 #[cfg(any(windows, test))]
 pub(crate) const VERSION_MENU_LABEL: &str = "버전(&H)";
@@ -806,11 +808,205 @@ pub(crate) fn adaptive_primary_column_widths(available: i32, dpi: u32) -> [i32; 
 }
 
 #[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ColumnState {
+    pub(crate) visible: bool,
+    pub(crate) width_dip: i32,
+    pub(crate) user_resized: bool,
+}
+
+#[cfg(any(windows, test))]
+impl ColumnState {
+    pub(crate) const fn visible(width_dip: i32) -> Self {
+        Self {
+            visible: true,
+            width_dip,
+            user_resized: false,
+        }
+    }
+
+    pub(crate) const fn hidden(width_dip: i32) -> Self {
+        Self {
+            visible: false,
+            width_dip,
+            user_resized: false,
+        }
+    }
+
+    pub(crate) fn set_visible(&mut self, visible: bool) {
+        self.visible = visible;
+    }
+
+    pub(crate) fn record_user_resize(&mut self, width_px: i32, dpi: u32) {
+        self.width_dip = unscale_px(width_px.max(0), dpi);
+        self.user_resized = true;
+    }
+
+    pub(crate) const fn width_px(self, dpi: u32) -> i32 {
+        scale_dip(self.width_dip, dpi)
+    }
+}
+
+#[cfg(any(windows, test))]
+pub(crate) const fn default_column_states() -> [ColumnState; 7] {
+    [
+        ColumnState::visible(150),
+        ColumnState::visible(150),
+        ColumnState::visible(100),
+        ColumnState::hidden(120),
+        ColumnState::hidden(80),
+        ColumnState::hidden(120),
+        ColumnState::hidden(120),
+    ]
+}
+
+#[cfg(any(windows, test))]
+const fn unscale_px(value: i32, dpi: u32) -> i32 {
+    if dpi == 0 {
+        return value;
+    }
+    let product = (value as i128) * (BASE_DPI as i128);
+    let scaled = (product + (dpi / 2) as i128) / (dpi as i128);
+    if scaled > i32::MAX as i128 {
+        i32::MAX
+    } else {
+        scaled as i32
+    }
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn allocate_primary_column_widths(
+    client_width: i32,
+    dpi: u32,
+    columns: &[ColumnState; 7],
+    scrollbar_allowance: i32,
+) -> [i32; 3] {
+    let optional_width = columns[3..]
+        .iter()
+        .filter(|column| column.visible)
+        .map(|column| column.width_px(dpi))
+        .fold(0_i32, i32::saturating_add);
+    let budget = client_width
+        .max(0)
+        .saturating_sub(scrollbar_allowance.max(0))
+        .saturating_sub(optional_width);
+    let minimum = [
+        scale_dip(NAME_COLUMN_MINIMUM, dpi),
+        scale_dip(NAME_COLUMN_MINIMUM, dpi),
+        scale_dip(LOCATION_COLUMN_MINIMUM, dpi),
+    ];
+    if columns[..3].iter().all(|column| !column.user_resized) && budget >= minimum.iter().sum() {
+        return adaptive_primary_column_widths(budget, dpi);
+    }
+    let preferred = [
+        scale_dip(COLUMNS[0].default_width, dpi),
+        scale_dip(COLUMNS[1].default_width, dpi),
+        scale_dip(COLUMNS[2].default_width, dpi),
+    ];
+    let mut widths = [0; 3];
+    let mut automatic = [false; 3];
+    let mut required = 0_i32;
+    for index in 0..3 {
+        if columns[index].user_resized {
+            widths[index] = columns[index].width_px(dpi);
+        } else {
+            widths[index] = minimum[index];
+            automatic[index] = true;
+        }
+        required = required.saturating_add(widths[index]);
+    }
+    let mut remaining = budget.saturating_sub(required);
+
+    let automatic_names = usize::from(automatic[0]) + usize::from(automatic[1]);
+    if automatic_names != 0 && remaining > 0 {
+        let name_deficit = (0..2)
+            .filter(|index| automatic[*index])
+            .map(|index| preferred[index].saturating_sub(widths[index]))
+            .sum::<i32>();
+        let distributed = remaining.min(name_deficit);
+        let each = distributed / i32::try_from(automatic_names).unwrap_or(1);
+        let mut remainder = distributed % i32::try_from(automatic_names).unwrap_or(1);
+        for index in 0..2 {
+            if automatic[index] {
+                let extra = each + i32::from(remainder > 0);
+                widths[index] = widths[index].saturating_add(extra);
+                remainder = remainder.saturating_sub(1);
+            }
+        }
+        remaining -= distributed;
+    }
+    if automatic[2] && remaining > 0 {
+        let distributed = remaining.min(preferred[2].saturating_sub(widths[2]));
+        widths[2] = widths[2].saturating_add(distributed);
+        remaining -= distributed;
+    }
+    if remaining > 0
+        && let Some(index) = automatic.iter().rposition(|automatic| *automatic)
+    {
+        widths[index] = widths[index].saturating_add(remaining);
+    }
+    widths
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn format_iec_file_size(bytes: u64) -> String {
+    const UNITS: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
+    if bytes < 1_024 {
+        return format!("{bytes} B");
+    }
+    let mut unit = 0_usize;
+    let mut divisor = 1_u128;
+    while unit + 1 < UNITS.len() && u128::from(bytes) >= divisor.saturating_mul(1_024) {
+        unit += 1;
+        divisor = divisor.saturating_mul(1_024);
+    }
+    let mut tenths = (u128::from(bytes).saturating_mul(10) + divisor / 2) / divisor;
+    if tenths >= 10_240 && unit + 1 < UNITS.len() {
+        unit += 1;
+        divisor = divisor.saturating_mul(1_024);
+        tenths = (u128::from(bytes).saturating_mul(10) + divisor / 2) / divisor;
+    }
+    let whole = tenths / 10;
+    let fraction = tenths % 10;
+    if fraction == 0 {
+        format!("{whole} {}", UNITS[unit])
+    } else {
+        format!("{whole}.{fraction} {}", UNITS[unit])
+    }
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn format_exact_bytes(bytes: u64) -> String {
+    let digits = bytes.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index != 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    format!("{grouped} bytes")
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn format_timestamp_fallback(date: [u16; 3], time: [u16; 3]) -> String {
+    format!(
+        "{}-{:02}-{:02} {:02}:{:02}:{:02}",
+        date[0], date[1], date[2], time[0], time[1], time[2]
+    )
+}
+
+#[cfg(any(windows, test))]
 #[must_use]
 pub(crate) const fn minimum_content_width_dip() -> i32 {
     RailDensity::Comfortable.metrics(BASE_DPI).rail_width * 2
         + NAME_COLUMN_MINIMUM * 2
         + LOCATION_COLUMN_MINIMUM
+        + LIST_SCROLLBAR_ALLOWANCE_DIP
 }
 /// Public product name used by the executable and user-facing diagnostics.
 pub const PRODUCT_NAME: &str = "DarkReNamer";
@@ -1631,7 +1827,7 @@ mod tests {
 
     #[test]
     fn adaptive_primary_columns_fit_command_rail_minimum() {
-        assert_eq!(minimum_content_width_dip(), 424);
+        assert_eq!(minimum_content_width_dip(), 441);
 
         for (dpi, available, expected) in [
             (96, 320, [120, 120, 80]),
@@ -1645,6 +1841,71 @@ mod tests {
             assert_eq!(widths, expected);
             assert_eq!(widths.iter().sum::<i32>(), available);
         }
+    }
+
+    #[test]
+    fn column_state_preserves_user_width_across_dpi_changes() {
+        let mut column = ColumnState::visible(150);
+
+        column.record_user_resize(300, 144);
+
+        assert!(column.visible);
+        assert!(column.user_resized);
+        assert_eq!(column.width_dip, 200);
+        assert_eq!(column.width_px(192), 400);
+        column.set_visible(false);
+        assert!(!column.visible);
+        assert_eq!(column.width_dip, 200);
+        assert!(column.user_resized);
+    }
+
+    #[test]
+    fn optional_columns_reduce_the_primary_width_budget() {
+        let mut columns = default_column_states();
+        columns[3].set_visible(true);
+
+        let widths = allocate_primary_column_widths(457, 96, &columns, 17);
+
+        assert_eq!(widths, [120, 120, 80]);
+        assert_eq!(widths.iter().sum::<i32>(), 320);
+    }
+
+    #[test]
+    fn narrow_width_keeps_user_resized_columns_and_allows_overflow() {
+        let mut columns = default_column_states();
+        columns[0].record_user_resize(220, 96);
+
+        let widths = allocate_primary_column_widths(300, 96, &columns, 17);
+
+        assert_eq!(widths, [220, 120, 80]);
+        assert!(widths.iter().sum::<i32>() > 300 - 17);
+    }
+
+    #[test]
+    fn iec_file_size_formatting_handles_unit_boundaries() {
+        for (bytes, expected) in [
+            (0, "0 B"),
+            (1, "1 B"),
+            (1_023, "1023 B"),
+            (1_024, "1 KiB"),
+            (1_536, "1.5 KiB"),
+            (10_240, "10 KiB"),
+            (1_048_575, "1 MiB"),
+            (1_048_576, "1 MiB"),
+            (1_073_741_823, "1 GiB"),
+            (1_073_741_824, "1 GiB"),
+        ] {
+            assert_eq!(format_iec_file_size(bytes), expected);
+        }
+        assert_eq!(format_exact_bytes(134_637_824), "134,637,824 bytes");
+    }
+
+    #[test]
+    fn timestamp_fallback_is_fixed_width_and_deterministic() {
+        assert_eq!(
+            format_timestamp_fallback([2026, 8, 29], [16, 30, 0]),
+            "2026-08-29 16:30:00"
+        );
     }
 
     #[test]

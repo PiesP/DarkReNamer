@@ -488,6 +488,17 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_NOTIFY if !state_ptr.is_null() => {
+            // Header controls are ListView children, so their resize
+            // notifications identify the header HWND rather than list_window.
+            // SAFETY: state_ptr is the live UI-thread AppState and lparam is
+            // inspected only for this synchronous WM_NOTIFY callback.
+            if handle_header_end_track(unsafe { &mut *state_ptr }, lparam) {
+                return 0;
+            }
+            // SAFETY: same live callback-owned AppState and WM_NOTIFY payload.
+            if handle_list_infotip(unsafe { &*state_ptr }, lparam) {
+                return 0;
+            }
             let header = lparam as *const NMHDR;
             if !header.is_null()
                 // SAFETY: For WM_NOTIFY, non-null lparam points to an NMHDR prefix that remains readable throughout this synchronous callback.
