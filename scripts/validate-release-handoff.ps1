@@ -41,6 +41,10 @@ foreach ($name in 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'DISTRIBUTION.md') {
     if (-not (Test-Path -LiteralPath $sourceFile -PathType Leaf)) {
         throw "Required source policy file is missing: $sourceFile"
     }
+    $sourceBytes = [IO.File]::ReadAllBytes($sourceFile)
+    if ([Array]::IndexOf($sourceBytes, [byte] 13) -ge 0) {
+        throw "Required source policy file $name must use canonical LF line endings."
+    }
     $sourceHash = (Get-FileHash -LiteralPath $sourceFile -Algorithm SHA256).Hash
     $handoffHash = (Get-FileHash -LiteralPath $handoffFile -Algorithm SHA256).Hash
     if ($sourceHash -ne $handoffHash) {
