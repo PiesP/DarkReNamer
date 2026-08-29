@@ -2172,7 +2172,7 @@ unsafe fn refresh(state: &mut AppState) {
     let selected = unsafe { selected_indices(state.list_window) };
     unsafe { SendMessageW(state.list_window, LVM_DELETEALLITEMS, 0, 0) };
     for (row, item) in state.model.items().iter().enumerate() {
-        let size = LegacyText::from(item.size().to_string());
+        let size = LegacyText::from(item.actual_size().to_string());
         let modified = format_filetime(item.modified());
         let created = format_filetime(item.created());
         let values = [

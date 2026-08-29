@@ -153,6 +153,7 @@ pub struct LegacyListItem {
     root_path: LegacyText,
     is_directory: bool,
     size: u32,
+    actual_size: u64,
     created: u64,
     modified: u64,
 }
@@ -167,6 +168,26 @@ impl LegacyListItem {
         created: u64,
         modified: u64,
     ) -> Self {
+        Self::new_with_actual_size(
+            source_path,
+            is_directory,
+            size,
+            u64::from(size),
+            created,
+            modified,
+        )
+    }
+
+    /// Creates a row with both legacy 32-bit and actual 64-bit size values.
+    #[must_use]
+    pub fn new_with_actual_size(
+        source_path: impl Into<LegacyText>,
+        is_directory: bool,
+        size: u32,
+        actual_size: u64,
+        created: u64,
+        modified: u64,
+    ) -> Self {
         let source_path = source_path.into();
         let current_name = path_name(&source_path);
         let root_path = path_root(&source_path);
@@ -177,6 +198,7 @@ impl LegacyListItem {
             root_path,
             is_directory,
             size,
+            actual_size,
             created,
             modified,
         }
@@ -216,6 +238,12 @@ impl LegacyListItem {
     #[must_use]
     pub const fn size(&self) -> u32 {
         self.size
+    }
+
+    /// Returns the full 64-bit size observed at admission.
+    #[must_use]
+    pub const fn actual_size(&self) -> u64 {
+        self.actual_size
     }
 
     /// Returns the original creation `FILETIME` value.

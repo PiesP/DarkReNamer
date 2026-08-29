@@ -231,10 +231,11 @@ pub fn collect_admission(
                 continue;
             }
         }
-        report.items.push(LegacyListItem::new(
+        report.items.push(LegacyListItem::new_with_actual_size(
             adapter.legacy_path(&path),
             metadata.is_directory,
             metadata.actual_size as u32,
+            metadata.actual_size,
             metadata.created,
             metadata.modified,
         ));
