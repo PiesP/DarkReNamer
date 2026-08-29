@@ -14,6 +14,9 @@ use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::slice;
 
+use crate::admission::{
+    AdmissionMode, MAX_ADMITTED_SOURCES, WindowsAdmissionAdapter, collect_admission,
+};
 use crate::rename::{
     ExecutionOutcome, FileJournal, JournalCleanupDecision, JournalRoot, ModelRevision,
     RecoveryOutcome, RenameExecutor, RenamePlanner, RenameRecovery, WindowsRenameBackend,
@@ -1940,68 +1943,40 @@ unsafe fn add_files_dialog(owner: HWND, state: &mut AppState) {
 }
 
 unsafe fn admit_paths(owner: HWND, state: &mut AppState, paths: Vec<PathBuf>) {
-    let mut items = Vec::new();
-    for path in paths {
-        unsafe { collect_path(owner, state, &path, &mut items) };
+    if state.directory_mode.is_none()
+        && let Some(directory) = paths.iter().take(MAX_ADMITTED_SOURCES).find(|path| {
+            path.is_absolute()
+                && fs::symlink_metadata(path).is_ok_and(|metadata| {
+                    let attributes = metadata.file_attributes();
+                    attributes & FILE_ATTRIBUTE_DIRECTORY != 0 && attributes & 0x400 == 0
+                })
+        })
+    {
+        let text = wide("경로를 직접 추가하려면 YES, 경로 내 파일을 추가하려면 NO를 선택하세요.");
+        let caption = path_wide(directory);
+        let answer = unsafe { MessageBoxW(owner, text.as_ptr(), caption.as_ptr(), MB_YESNO) };
+        state.directory_mode = Some(
+            if answer == windows_sys::Win32::UI::WindowsAndMessaging::IDYES {
+                DirectoryMode::Direct
+            } else {
+                DirectoryMode::Recurse
+            },
+        );
     }
-    state.model.append_batch_by(items, compare_windows);
-}
-
-unsafe fn collect_path(
-    owner: HWND,
-    state: &mut AppState,
-    path: &Path,
-    items: &mut Vec<LegacyListItem>,
-) {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return;
+    let mode = match state.directory_mode.unwrap_or(DirectoryMode::Direct) {
+        DirectoryMode::Direct => AdmissionMode::Direct,
+        DirectoryMode::Recurse => AdmissionMode::Recurse,
     };
-    let attributes = metadata.file_attributes();
-    let is_directory = attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
-    if is_directory {
-        let mode = match state.directory_mode {
-            Some(mode) => mode,
-            None => {
-                let text = wide("경로를 직접 추가려면 YES, 경로내 파일을 추가하려면 NO 선택.");
-                let caption = path_wide(path);
-                let answer =
-                    unsafe { MessageBoxW(owner, text.as_ptr(), caption.as_ptr(), MB_YESNO) };
-                let mode = if answer == windows_sys::Win32::UI::WindowsAndMessaging::IDYES {
-                    DirectoryMode::Direct
-                } else {
-                    DirectoryMode::Recurse
-                };
-                state.directory_mode = Some(mode);
-                mode
-            }
-        };
-        if mode == DirectoryMode::Recurse {
-            let Ok(read_dir) = fs::read_dir(path) else {
-                return;
-            };
-            let mut children = read_dir
-                .filter_map(Result::ok)
-                .map(|entry| entry.path())
-                .collect::<Vec<_>>();
-            children
-                .sort_by(|left, right| compare_windows(&legacy_path(left), &legacy_path(right)));
-            for child in children {
-                unsafe { collect_path(owner, state, &child, items) };
-            }
-            return;
-        }
+    let mut report = collect_admission(&WindowsAdmissionAdapter, paths, mode, |left, right| {
+        compare_windows(&legacy_path(left), &legacy_path(right))
+    });
+    let items = std::mem::take(&mut report.items);
+    let appended = state.model.append_batch_by(items, compare_windows);
+    let summary = report.summary_korean(appended);
+    unsafe { set_status(state.status, &summary) };
+    if !report.issues.is_empty() {
+        unsafe { message(owner, &summary, "DarkNamer - 일부 경로 제외") };
     }
-    items.push(legacy_item(path, &metadata, is_directory));
-}
-
-fn legacy_item(path: &Path, metadata: &fs::Metadata, is_directory: bool) -> LegacyListItem {
-    LegacyListItem::new(
-        legacy_path(path),
-        is_directory,
-        metadata.file_size() as u32,
-        metadata.creation_time(),
-        metadata.last_write_time(),
-    )
 }
 
 fn legacy_path(path: &Path) -> LegacyText {

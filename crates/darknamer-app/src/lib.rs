@@ -2,6 +2,8 @@
 
 #![cfg_attr(not(windows), forbid(unsafe_code))]
 
+/// Bounded filesystem admission for native picker, drop, and path import.
+pub mod admission;
 /// Safe rename planning and execution foundation.
 pub mod rename;
 
