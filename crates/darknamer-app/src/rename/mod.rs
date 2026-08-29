@@ -16,8 +16,9 @@ pub use executor::{
 };
 pub use file_journal::{
     FileJournal, FileJournalError, FileJournalErrorKind, JournalCodecError, JournalCodecErrorKind,
-    MAX_JOURNAL_FILE_BYTES, MAX_JOURNAL_FRAME_BYTES, MAX_JOURNAL_FRAMES, MAX_JOURNAL_STEPS,
-    MAX_PATH_UNITS, decode_journal_records, encode_journal_records,
+    JournalInspection, JournalRoot, JournalTailIssue, MAX_JOURNAL_FILE_BYTES,
+    MAX_JOURNAL_FRAME_BYTES, MAX_JOURNAL_FRAMES, MAX_JOURNAL_STEPS, MAX_PATH_UNITS,
+    decode_journal_records, encode_journal_records, inspect_journal_records,
 };
 pub use journal::{
     JournalCorruption, JournalDirection, JournalRecord, JournalStep, JournalTerminal,

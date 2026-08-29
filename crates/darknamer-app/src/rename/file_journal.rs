@@ -10,7 +10,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use darknamer_core::LegacyText;
+use darknamer_core::{LegacyText, validate_windows_leaf_name};
 
 use super::{
     AuthorizedJournal, EntryId, EntryIdentity, JournalAuthorization, JournalDirection,
@@ -94,6 +94,43 @@ impl fmt::Display for JournalCodecError {
 
 impl std::error::Error for JournalCodecError {}
 
+/// Recoverable issue limited to the final partially written frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JournalTailIssue {
+    /// The final frame header is incomplete.
+    TruncatedHeader,
+    /// The final frame payload is incomplete.
+    TruncatedPayload,
+}
+
+/// Complete valid prefix plus an optional recoverable final torn frame.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JournalInspection {
+    records: Vec<JournalRecord>,
+    issue: Option<JournalTailIssue>,
+    valid_bytes: usize,
+}
+
+impl JournalInspection {
+    /// Returns the strictly decoded complete-frame prefix.
+    #[must_use]
+    pub fn records(&self) -> &[JournalRecord] {
+        &self.records
+    }
+
+    /// Returns the final torn-frame issue, if present.
+    #[must_use]
+    pub const fn issue(&self) -> Option<JournalTailIssue> {
+        self.issue
+    }
+
+    /// Returns the exact byte length of the complete valid prefix.
+    #[must_use]
+    pub const fn valid_bytes(&self) -> usize {
+        self.valid_bytes
+    }
+}
+
 /// File adapter construction or resume failure kind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileJournalErrorKind {
@@ -103,6 +140,12 @@ pub enum FileJournalErrorKind {
     Codec(JournalCodecErrorKind),
     /// Opened target is not a regular non-reparse file.
     InvalidFileType,
+    /// Journal root is relative.
+    RelativeRoot,
+    /// Journal root is missing, non-directory, symlinked, or reparsed.
+    InvalidRoot,
+    /// Journal leaf is not one valid Windows filename component.
+    InvalidLeaf,
 }
 
 /// File journal error retaining a native code when available.
@@ -140,6 +183,61 @@ impl From<JournalCodecError> for FileJournalError {
     }
 }
 
+/// Retained authority for one validated absolute journal directory.
+///
+/// Windows retains an exclusive no-follow directory handle. Child opens still
+/// use a validated full path because this crate has no handle-relative create
+/// adapter yet; production activation remains gated on closing that residual.
+#[derive(Debug)]
+pub struct JournalRoot {
+    path: PathBuf,
+    file: File,
+    identity: u64,
+}
+
+impl JournalRoot {
+    /// Opens and retains an existing absolute non-reparse directory.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, FileJournalError> {
+        let path = path.as_ref().to_path_buf();
+        if !path.is_absolute() {
+            return Err(FileJournalError {
+                kind: FileJournalErrorKind::RelativeRoot,
+                os_code: None,
+            });
+        }
+        validate_root_components(&path)?;
+        let file = open_root(&path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_dir() || metadata_is_reparse(&metadata) {
+            return Err(FileJournalError {
+                kind: FileJournalErrorKind::InvalidRoot,
+                os_code: None,
+            });
+        }
+        Ok(Self {
+            path,
+            file,
+            identity: next_file_identity(),
+        })
+    }
+
+    /// Returns the retained root path for operator display.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn child(&self, leaf: &str) -> Result<PathBuf, FileJournalError> {
+        if validate_windows_leaf_name(&LegacyText::from(leaf)).is_err() {
+            return Err(FileJournalError {
+                kind: FileJournalErrorKind::InvalidLeaf,
+                os_code: None,
+            });
+        }
+        Ok(self.path.join(leaf))
+    }
+}
+
 /// Encodes a complete bounded append-only record stream.
 pub fn encode_journal_records(records: &[JournalRecord]) -> Result<Vec<u8>, JournalCodecError> {
     if records.len() > MAX_JOURNAL_FRAMES {
@@ -166,6 +264,18 @@ pub fn encode_journal_records(records: &[JournalRecord]) -> Result<Vec<u8>, Jour
 
 /// Decodes and strictly validates a complete bounded record stream.
 pub fn decode_journal_records(bytes: &[u8]) -> Result<Vec<JournalRecord>, JournalCodecError> {
+    let inspection = inspect_journal_records(bytes)?;
+    if inspection.issue.is_some() {
+        return Err(JournalCodecError::new(
+            inspection.records.len(),
+            JournalCodecErrorKind::TruncatedFrame,
+        ));
+    }
+    Ok(inspection.records)
+}
+
+/// Inspects a strict complete prefix while distinguishing only a final torn frame.
+pub fn inspect_journal_records(bytes: &[u8]) -> Result<JournalInspection, JournalCodecError> {
     if bytes.len() > MAX_JOURNAL_FILE_BYTES {
         return Err(JournalCodecError::new(
             0,
@@ -186,10 +296,7 @@ pub fn decode_journal_records(bytes: &[u8]) -> Result<Vec<JournalRecord>, Journa
             JournalCodecError::new(frame, JournalCodecErrorKind::IntegerOutOfRange)
         })?;
         let Some(header) = bytes.get(offset..header_end) else {
-            return Err(JournalCodecError::new(
-                frame,
-                JournalCodecErrorKind::TruncatedFrame,
-            ));
+            return finish_inspection(records, Some(JournalTailIssue::TruncatedHeader), offset);
         };
         if header[..4] != MAGIC {
             return Err(JournalCodecError::new(
@@ -236,10 +343,7 @@ pub fn decode_journal_records(bytes: &[u8]) -> Result<Vec<JournalRecord>, Journa
             JournalCodecError::new(frame, JournalCodecErrorKind::IntegerOutOfRange)
         })?;
         let Some(payload) = bytes.get(header_end..frame_end) else {
-            return Err(JournalCodecError::new(
-                frame,
-                JournalCodecErrorKind::TruncatedFrame,
-            ));
+            return finish_inspection(records, Some(JournalTailIssue::TruncatedPayload), offset);
         };
         let checksum = read_fixed_u32(&header[20..24], frame)?;
         if checksum != crc32_parts(&[&header[4..20], payload]) {
@@ -250,6 +354,20 @@ pub fn decode_journal_records(bytes: &[u8]) -> Result<Vec<JournalRecord>, Journa
         }
         records.push(decode_record(kind, payload, frame)?);
         offset = frame_end;
+    }
+    finish_inspection(records, None, offset)
+}
+
+fn finish_inspection(
+    records: Vec<JournalRecord>,
+    issue: Option<JournalTailIssue>,
+    valid_bytes: usize,
+) -> Result<JournalInspection, JournalCodecError> {
+    if issue.is_some() && records.is_empty() {
+        return Err(JournalCodecError::new(
+            0,
+            JournalCodecErrorKind::TruncatedFrame,
+        ));
     }
     if matches!(
         replay_journal(&records),
@@ -263,7 +381,11 @@ pub fn decode_journal_records(bytes: &[u8]) -> Result<Vec<JournalRecord>, Journa
             JournalCodecErrorKind::InvalidTransitions,
         ));
     }
-    Ok(records)
+    Ok(JournalInspection {
+        records,
+        issue,
+        valid_bytes,
+    })
 }
 
 fn encode_frame(
@@ -632,34 +754,43 @@ fn crc32_parts(parts: &[&[u8]]) -> u32 {
 #[derive(Debug)]
 pub struct FileJournal {
     path: PathBuf,
+    _root: File,
+    _root_identity: u64,
     file: File,
     records: Vec<JournalRecord>,
     identity: u64,
     generation: u64,
     next_sequence: u64,
     byte_length: usize,
+    torn_prefix: Option<usize>,
+    tail_issue: Option<JournalTailIssue>,
 }
 
 impl FileJournal {
     /// Creates and exclusively retains a new empty journal.
-    pub fn create_new(path: impl AsRef<Path>) -> Result<Self, FileJournalError> {
-        let path = path.as_ref().to_path_buf();
+    pub fn create_new(root: &JournalRoot, leaf: &str) -> Result<Self, FileJournalError> {
+        let path = root.child(leaf)?;
         let file = open_create_new(&path)?;
         validate_file_type(&file)?;
         Ok(Self {
             path,
+            _root: root.file.try_clone()?,
+            _root_identity: root.identity,
             file,
             records: Vec::new(),
-            identity: next_file_identity(),
+            identity: combined_identity(root.identity),
             generation: 0,
             next_sequence: 0,
             byte_length: 0,
+            torn_prefix: None,
+            tail_issue: None,
         })
     }
 
     /// Opens, exclusively retains, decodes, and resumes an existing journal.
-    pub fn open_existing(path: impl AsRef<Path>) -> Result<Self, FileJournalError> {
-        let path = path.as_ref().to_path_buf();
+    pub fn open_existing(root: &JournalRoot, leaf: &str) -> Result<Self, FileJournalError> {
+        let path = root.child(leaf)?;
+        reject_final_link(&path)?;
         let mut file = open_existing(&path)?;
         validate_file_type(&file)?;
         let file_len = usize::try_from(file.metadata()?.len()).map_err(|_| FileJournalError {
@@ -683,7 +814,8 @@ impl FileJournal {
                 os_code: None,
             });
         }
-        let records = decode_journal_records(&bytes)?;
+        let inspection = inspect_journal_records(&bytes)?;
+        let records = inspection.records;
         file.seek(SeekFrom::End(0))?;
         let generation = u64::try_from(records.len()).map_err(|_| FileJournalError {
             kind: FileJournalErrorKind::Codec(JournalCodecErrorKind::TooManyFrames),
@@ -691,12 +823,16 @@ impl FileJournal {
         })?;
         Ok(Self {
             path,
+            _root: root.file.try_clone()?,
+            _root_identity: root.identity,
             file,
             records,
-            identity: next_file_identity(),
+            identity: combined_identity(root.identity),
             generation,
             next_sequence: generation,
             byte_length: bytes.len(),
+            torn_prefix: inspection.issue.map(|_| inspection.valid_bytes),
+            tail_issue: inspection.issue,
         })
     }
 
@@ -712,6 +848,12 @@ impl FileJournal {
         &self.records
     }
 
+    /// Returns the explicit recoverable final torn-frame issue retained on resume.
+    #[must_use]
+    pub const fn tail_issue(&self) -> Option<JournalTailIssue> {
+        self.tail_issue
+    }
+
     /// Returns whether the retained journal has an explicit terminal record.
     ///
     /// The adapter never removes or archives a file implicitly; an operator may
@@ -722,6 +864,9 @@ impl FileJournal {
     }
 
     fn append(&mut self, record: JournalRecord) -> Result<(), JournalError> {
+        if self.torn_prefix.is_some() {
+            return Err(JournalError { code: 7 });
+        }
         if self.records.len() >= MAX_JOURNAL_FRAMES {
             return Err(JournalError { code: 3 });
         }
@@ -748,6 +893,20 @@ impl FileJournal {
     ) -> Result<(), JournalError> {
         if authorization.identity != self.identity || authorization.generation != self.generation {
             return Err(JournalError { code: 2 });
+        }
+        if let Some(valid_bytes) = self.torn_prefix {
+            let length = u64::try_from(valid_bytes).map_err(|_| JournalError { code: 4 })?;
+            self.file.set_len(length).map_err(journal_io_error)?;
+            self.file
+                .seek(SeekFrom::Start(length))
+                .map_err(journal_io_error)?;
+            self.file.flush().map_err(journal_io_error)?;
+            self.file.sync_all().map_err(journal_io_error)?;
+            self.byte_length = valid_bytes;
+            self.torn_prefix = None;
+            self.tail_issue = None;
+            self.generation = self.generation.saturating_add(1);
+            authorization.generation = self.generation;
         }
         self.append(record)?;
         authorization.generation = self.generation;
@@ -848,6 +1007,64 @@ fn next_file_identity() -> u64 {
     NEXT_IDENTITY.fetch_add(1, Ordering::Relaxed)
 }
 
+fn combined_identity(root_identity: u64) -> u64 {
+    next_file_identity() ^ root_identity.rotate_left(29)
+}
+
+fn validate_root_components(path: &Path) -> Result<(), FileJournalError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        if !current.is_absolute() {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(&current)?;
+        if metadata.file_type().is_symlink() || metadata_is_reparse(&metadata) {
+            return Err(FileJournalError {
+                kind: FileJournalErrorKind::InvalidRoot,
+                os_code: None,
+            });
+        }
+    }
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir() {
+        return Err(FileJournalError {
+            kind: FileJournalErrorKind::InvalidRoot,
+            os_code: None,
+        });
+    }
+    Ok(())
+}
+
+fn reject_final_link(path: &Path) -> Result<(), FileJournalError> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || metadata_is_reparse(&metadata) {
+        return Err(FileJournalError {
+            kind: FileJournalErrorKind::InvalidFileType,
+            os_code: None,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn open_root(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn open_root(path: &Path) -> io::Result<File> {
+    File::open(path)
+}
+
 #[cfg(windows)]
 fn open_create_new(path: &Path) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -932,8 +1149,8 @@ mod tests {
     #[test]
     fn authorized_append_rejects_generation_drift() -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
-        let path = directory.path().join("authorization.drj");
-        let mut journal = FileJournal::create_new(path)?;
+        let root = JournalRoot::open(directory.path())?;
+        let mut journal = FileJournal::create_new(&root, "authorization.drj")?;
         journal.begin(PlanId::from_fingerprint(1), &[test_step()])?;
         let snapshot = journal.authorized_snapshot()?;
         let (_records, mut authorization) = snapshot.into_parts();
@@ -950,8 +1167,9 @@ mod tests {
     fn authorization_from_another_file_capability_is_rejected()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
-        let mut first = FileJournal::create_new(directory.path().join("first.drj"))?;
-        let mut second = FileJournal::create_new(directory.path().join("second.drj"))?;
+        let root = JournalRoot::open(directory.path())?;
+        let mut first = FileJournal::create_new(&root, "first.drj")?;
+        let mut second = FileJournal::create_new(&root, "second.drj")?;
         first.begin(PlanId::from_fingerprint(1), &[test_step()])?;
         second.begin(PlanId::from_fingerprint(1), &[test_step()])?;
         let snapshot = first.authorized_snapshot()?;
