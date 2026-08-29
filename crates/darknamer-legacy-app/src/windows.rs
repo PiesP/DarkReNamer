@@ -90,6 +90,7 @@ struct AppState {
     model: LegacyList,
     shown_columns: [bool; 4],
     directory_mode: Option<DirectoryMode>,
+    command_states: [bool; 34],
 }
 
 struct WindowInit {
@@ -111,6 +112,7 @@ impl AppState {
             model: LegacyList::new(),
             shown_columns: [false; 4],
             directory_mode: None,
+            command_states: [false; 34],
         }
     }
 }
@@ -594,9 +596,8 @@ unsafe fn arrange(window: HWND, state: &AppState) {
     unsafe { GetClientRect(window, &mut rect) };
     let width = rect.right.max(TOOLBAR_WIDTH * 2 + 1);
     let height = rect.bottom.max(STATUS_HEIGHT + 1);
-    let available = height - STATUS_HEIGHT;
-    let separator_height = 4;
-    let button_height = ((available - separator_height * 3) / 10).max(24);
+    let separator_height = 8;
+    let button_height = 32;
     for (index, button) in state.left_buttons.iter().enumerate() {
         let separators = [1_usize, 4, 7]
             .into_iter()
@@ -971,16 +972,28 @@ unsafe fn handle_accelerator(window: HWND, message: &MSG) -> bool {
         None
     };
     if let Some(command) = command {
-        if command != 0xFFFF && command != 2 {
-            let state = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *const AppState;
-            if !state.is_null() {
-                let selected = unsafe { selected_indices((*state).list_window) }.len();
-                if !command_enabled(command, unsafe { (*state).model.len() }, selected) {
-                    return true;
-                }
+        let state = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *mut AppState;
+        if command != 0xFFFF && command != 2 && !state.is_null() {
+            let selected = unsafe { selected_indices((*state).list_window) }.len();
+            if !command_enabled(command, unsafe { (*state).model.len() }, selected) {
+                return true;
             }
         }
+        let previous_states = (!state.is_null()).then(|| unsafe { (*state).command_states });
         unsafe { SendMessageW(window, WM_COMMAND, usize::from(command), 0) };
+        let list_was_cleared = !state.is_null()
+            && (command == CLEAR_LIST
+                || (command == 0xFFFF && unsafe { (*state).model.is_empty() }));
+        if command != 2
+            && !list_was_cleared
+            && !state.is_null()
+            && let Some(previous_states) = previous_states
+        {
+            unsafe {
+                (*state).command_states = previous_states;
+                apply_command_states(&*state);
+            }
+        }
         true
     } else {
         false
@@ -1008,10 +1021,10 @@ unsafe fn selected_indices(list: HWND) -> Vec<usize> {
 }
 
 unsafe fn select_rows(list: HWND, rows: &[usize]) {
-    for row in rows {
+    for (position, row) in rows.iter().enumerate() {
         let mut item = LVITEMW {
             stateMask: LVIS_SELECTED | LVIS_FOCUSED,
-            state: LVIS_SELECTED,
+            state: LVIS_SELECTED | if position == 0 { LVIS_FOCUSED } else { 0 },
             ..unsafe { zeroed() }
         };
         unsafe {
@@ -1026,6 +1039,41 @@ unsafe fn select_rows(list: HWND, rows: &[usize]) {
     if let Some(row) = rows.first() {
         unsafe { SendMessageW(list, LVM_ENSUREVISIBLE, *row, 0) };
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SelectionToken {
+    path: LegacyText,
+    occurrence: usize,
+}
+
+fn selection_tokens(model: &LegacyList, selected: &[usize]) -> Vec<SelectionToken> {
+    selected
+        .iter()
+        .filter_map(|index| model.items().get(*index).map(|item| (*index, item)))
+        .map(|(index, item)| SelectionToken {
+            path: item.source_path().clone(),
+            occurrence: model.items()[..index]
+                .iter()
+                .filter(|previous| previous.source_path() == item.source_path())
+                .count(),
+        })
+        .collect()
+}
+
+fn rows_for_tokens(model: &LegacyList, tokens: &[SelectionToken]) -> Vec<usize> {
+    tokens
+        .iter()
+        .filter_map(|token| {
+            model
+                .items()
+                .iter()
+                .enumerate()
+                .filter(|(_index, item)| item.source_path() == &token.path)
+                .nth(token.occurrence)
+                .map(|(index, _item)| index)
+        })
+        .collect()
 }
 
 unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
@@ -1448,23 +1496,12 @@ unsafe fn sort_command(window: HWND, state: &mut AppState) -> bool {
         LegacySortMode::CreatedDescending,
     ];
     if let Some(mode) = modes.get(result.choice) {
-        let selected_paths = unsafe { selected_indices(state.list_window) }
-            .into_iter()
-            .filter_map(|index| state.model.items().get(index))
-            .map(|item| item.source_path().clone())
-            .collect::<Vec<_>>();
+        let selected = unsafe { selected_indices(state.list_window) };
+        let tokens = selection_tokens(&state.model, &selected);
         unsafe { clear_selection(state.list_window) };
         state.model.sort_by(*mode, compare_windows);
         unsafe { refresh(state) };
-        let moved = state
-            .model
-            .items()
-            .iter()
-            .enumerate()
-            .filter_map(|(index, item)| {
-                selected_paths.contains(item.source_path()).then_some(index)
-            })
-            .collect::<Vec<_>>();
+        let moved = rows_for_tokens(&state.model, &tokens);
         unsafe { select_rows(state.list_window, &moved) };
         return true;
     }
@@ -1847,7 +1884,7 @@ unsafe fn update_column_visibility(state: &AppState, index: usize) {
     }
 }
 
-unsafe fn refresh(state: &AppState) {
+unsafe fn refresh(state: &mut AppState) {
     let selected = unsafe { selected_indices(state.list_window) };
     unsafe { SendMessageW(state.list_window, LVM_DELETEALLITEMS, 0, 0) };
     for (row, item) in state.model.items().iter().enumerate() {
@@ -1914,8 +1951,16 @@ unsafe fn refresh(state: &AppState) {
     }
 }
 
-unsafe fn update_controls(state: &AppState) {
+unsafe fn update_controls(state: &mut AppState) {
     let selected_count = unsafe { selected_indices(state.list_window) }.len();
+    for id in APPLY..=VERSION {
+        state.command_states[usize::from(id - APPLY)] =
+            command_enabled(id, state.model.len(), selected_count);
+    }
+    unsafe { apply_command_states(state) };
+}
+
+unsafe fn apply_command_states(state: &AppState) {
     for tool in LEFT_TOOLS {
         if let Some(button) = state
             .left_buttons
@@ -1926,7 +1971,7 @@ unsafe fn update_controls(state: &AppState) {
             unsafe {
                 EnableWindow(
                     *button,
-                    i32::from(command_enabled(tool.id, state.model.len(), selected_count)),
+                    i32::from(state.command_states[usize::from(tool.id - APPLY)]),
                 )
             };
         }
@@ -1941,13 +1986,13 @@ unsafe fn update_controls(state: &AppState) {
             unsafe {
                 EnableWindow(
                     *button,
-                    i32::from(command_enabled(tool.id, state.model.len(), selected_count)),
+                    i32::from(state.command_states[usize::from(tool.id - APPLY)]),
                 )
             };
         }
     }
     for id in APPLY..=VERSION {
-        let enabled = command_enabled(id, state.model.len(), selected_count);
+        let enabled = state.command_states[usize::from(id - APPLY)];
         unsafe {
             EnableMenuItem(
                 state.menu,
