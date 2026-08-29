@@ -220,6 +220,8 @@ impl<'a> RenameExecutor<'a> {
                     entries,
                 ));
             }
+            #[cfg(test)]
+            super::failpoint::hit(&format!("forward-prepared-{step_index}"));
             if let Err(error) = self.backend.rename_no_replace(&forward_operation(step)) {
                 if error.certainty == MutationCertainty::MayHaveApplied {
                     set_state(&mut entries, step.entry, RenameState::Indeterminate);
@@ -265,6 +267,8 @@ impl<'a> RenameExecutor<'a> {
                     entries,
                 ));
             }
+            #[cfg(test)]
+            super::failpoint::hit(&format!("forward-rename-{step_index}"));
             set_state(
                 &mut entries,
                 step.entry,
@@ -288,6 +292,8 @@ impl<'a> RenameExecutor<'a> {
                     entries: entries.into_boxed_slice(),
                 });
             }
+            #[cfg(test)]
+            super::failpoint::hit(&format!("forward-completed-{step_index}"));
         }
 
         if let Err(error) = self.journal.terminal(JournalTerminal::Committed) {
@@ -303,6 +309,8 @@ impl<'a> RenameExecutor<'a> {
                 entries: entries.into_boxed_slice(),
             });
         }
+        #[cfg(test)]
+        super::failpoint::hit("terminal-committed");
         Ok(ExecutionReport {
             plan: plan.id,
             outcome: ExecutionOutcome::Completed,
@@ -407,6 +415,8 @@ impl<'a> RenameExecutor<'a> {
                 set_state(&mut entries, step.entry, RenameState::Indeterminate);
                 break;
             }
+            #[cfg(test)]
+            super::failpoint::hit(&format!("rollback-prepared-{step_index}"));
             let operation = RenameOperation::new(
                 step.destination.clone(),
                 step.source.clone(),
@@ -432,6 +442,8 @@ impl<'a> RenameExecutor<'a> {
                 set_state(&mut entries, step.entry, RenameState::Indeterminate);
                 break;
             }
+            #[cfg(test)]
+            super::failpoint::hit(&format!("rollback-rename-{step_index}"));
             set_state(
                 &mut entries,
                 step.entry,
@@ -448,11 +460,17 @@ impl<'a> RenameExecutor<'a> {
                 set_state(&mut entries, step.entry, RenameState::Indeterminate);
                 break;
             }
+            #[cfg(test)]
+            super::failpoint::hit(&format!("rollback-completed-{step_index}"));
         }
 
         let outcome = if rollback_failures.is_empty() {
             match self.journal.terminal(JournalTerminal::RolledBack) {
-                Ok(()) => ExecutionOutcome::RolledBack { failure },
+                Ok(()) => {
+                    #[cfg(test)]
+                    super::failpoint::hit("terminal-rolled-back");
+                    ExecutionOutcome::RolledBack { failure }
+                }
                 Err(error) => ExecutionOutcome::RecoveryRequired {
                     failure,
                     rollback_failures: vec![RollbackFailure::Journal {

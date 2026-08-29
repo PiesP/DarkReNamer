@@ -1420,7 +1420,12 @@ impl JournalStore for FileJournal {
             plan,
             steps: steps.into(),
         })?;
-        self.promote_candidate()
+        #[cfg(test)]
+        super::failpoint::hit("staged-intent-synced");
+        self.promote_candidate()?;
+        #[cfg(test)]
+        super::failpoint::hit("active-intent-promoted");
+        Ok(())
     }
 
     fn prepared(&mut self, step: usize, direction: JournalDirection) -> Result<(), JournalError> {

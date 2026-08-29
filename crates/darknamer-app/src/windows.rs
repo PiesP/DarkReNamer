@@ -3034,6 +3034,12 @@ const fn int_resource(id: u16) -> *const u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+
+    use crate::rename::{
+        BackendError, BackendOperation, EntryId, EntryKind, MutationCertainty, PathKey,
+        PathSnapshot, PlanRequest, RenameBackend, RenameIntent, RenameOperation,
+    };
 
     fn create_startup_journal_directory(
         local_app_data: &Path,
@@ -3041,6 +3047,202 @@ mod tests {
         let journal = local_app_data.join("DarkReNamer").join("journal");
         fs::create_dir_all(&journal)?;
         Ok(journal)
+    }
+
+    struct CrashBackend {
+        inner: WindowsRenameBackend,
+        fail_on_attempt: Option<usize>,
+        attempts: usize,
+    }
+
+    impl RenameBackend for CrashBackend {
+        fn validate_path_environment(&self, path: &LegacyText) -> Result<(), BackendError> {
+            self.inner.validate_path_environment(path)
+        }
+
+        fn path_key(&self, path: &LegacyText) -> PathKey {
+            self.inner.path_key(path)
+        }
+
+        fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
+            self.inner.observe(path)
+        }
+
+        fn is_same_or_descendant(
+            &self,
+            ancestor: &LegacyText,
+            candidate: &LegacyText,
+        ) -> Result<bool, BackendError> {
+            self.inner.is_same_or_descendant(ancestor, candidate)
+        }
+
+        fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
+            self.inner.next_transaction_nonce()
+        }
+
+        fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+            self.attempts = self.attempts.saturating_add(1);
+            if self.fail_on_attempt == Some(self.attempts) {
+                return Err(BackendError {
+                    operation: BackendOperation::Rename,
+                    code: 123,
+                    certainty: MutationCertainty::NotApplied,
+                });
+            }
+            self.inner.rename_no_replace(operation)
+        }
+    }
+
+    #[test]
+    fn crash_recovery_child() -> Result<(), Box<dyn std::error::Error>> {
+        if env::var("DARKRENAMER_TEST_CHILD_MODE").as_deref() != Ok("1") {
+            return Ok(());
+        }
+        let Some(local_app_data) = env::var_os("DARKRENAMER_TEST_CHILD_ROOT") else {
+            return Err(io::Error::other("crash child root missing").into());
+        };
+        let local_app_data = PathBuf::from(local_app_data);
+        let nonce = env::var("DARKRENAMER_TEST_FIXTURE_NONCE")?;
+        let marker = fs::read_to_string(local_app_data.join("fixture-nonce.txt"))?;
+        let canonical_root = fs::canonicalize(&local_app_data)?;
+        let canonical_temp = fs::canonicalize(env::temp_dir())?;
+        if marker != nonce
+            || !local_app_data.is_absolute()
+            || !canonical_root.starts_with(&canonical_temp)
+        {
+            return Err(io::Error::other("crash fixture authority mismatch").into());
+        }
+        let journal_directory = create_startup_journal_directory(&local_app_data)?;
+        let data = local_app_data.join("data");
+        let source_a = data.join("a.txt");
+        let source_b = data.join("b.txt");
+        let mut backend = CrashBackend {
+            inner: WindowsRenameBackend,
+            fail_on_attempt: (env::var_os("DARKRENAMER_TEST_FORCE_ROLLBACK").is_some())
+                .then_some(2),
+            attempts: 0,
+        };
+        backend.validate_path_environment(&legacy_path(&source_a))?;
+        let intents = vec![
+            RenameIntent::new(
+                EntryId::new(0),
+                legacy_path(&source_a),
+                legacy_path(&data),
+                "b.txt",
+                EntryKind::File,
+            ),
+            RenameIntent::new(
+                EntryId::new(1),
+                legacy_path(&source_b),
+                legacy_path(&data),
+                "a.txt",
+                EntryKind::File,
+            ),
+        ];
+        let plan =
+            RenamePlanner::new(&backend).plan(PlanRequest::new(ModelRevision::new(1), intents))?;
+        let id = plan.id();
+        let revision = plan.revision();
+        let root = JournalRoot::open(&journal_directory)?;
+        let mut journal =
+            FileJournal::create_candidate(&root, CANDIDATE_JOURNAL_LEAF, ACTIVE_JOURNAL_LEAF)?;
+
+        let _report = RenameExecutor::new(&mut backend, &mut journal)
+            .execute(plan.confirm_presented(id, revision)?)?;
+        Err(io::Error::other("configured crash point was not reached").into())
+    }
+
+    fn run_crash_recovery_case(
+        point: &str,
+        force_rollback: bool,
+        expect_swapped: bool,
+        expect_staged_lock: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let data = directory.path().join("data");
+        fs::create_dir(&data)?;
+        fs::write(data.join("a.txt"), b"a")?;
+        fs::write(data.join("b.txt"), b"b")?;
+        fs::write(data.join("sentinel.txt"), b"external")?;
+        let nonce = format!("{}-{point}", std::process::id());
+        fs::write(directory.path().join("fixture-nonce.txt"), &nonce)?;
+        let mut command = Command::new(std::env::current_exe()?);
+        command
+            .arg("--exact")
+            .arg("windows::tests::crash_recovery_child")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env("DARKRENAMER_TEST_CHILD_MODE", "1")
+            .env("DARKRENAMER_TEST_CHILD_ROOT", directory.path())
+            .env("DARKRENAMER_TEST_FIXTURE_NONCE", &nonce)
+            .env("DARKRENAMER_TEST_CRASH_POINT", point)
+            .env_remove("DARKRENAMER_TEST_FORCE_ROLLBACK");
+        if force_rollback {
+            command.env("DARKRENAMER_TEST_FORCE_ROLLBACK", "1");
+        }
+
+        let status = command.status()?;
+        if status.code() != Some(86) {
+            return Err(
+                io::Error::other(format!("child did not stop at {point}: {status}")).into(),
+            );
+        }
+
+        let runtime = initialize_safe_runtime_at(directory.path())?;
+        if expect_staged_lock {
+            assert!(runtime.recovery_locked);
+            assert!(runtime.staged_journal.is_some());
+        } else {
+            assert!(runtime.active_journal.is_none());
+        }
+        drop(runtime);
+
+        let (expected_a, expected_b) = if expect_swapped {
+            (b"b".as_slice(), b"a".as_slice())
+        } else {
+            (b"a".as_slice(), b"b".as_slice())
+        };
+        assert_eq!(fs::read(data.join("a.txt"))?, expected_a);
+        assert_eq!(fs::read(data.join("b.txt"))?, expected_b);
+        assert_eq!(fs::read(data.join("sentinel.txt"))?, b"external");
+        assert!(
+            fs::read_dir(&data)?.all(|entry| {
+                entry
+                    .ok()
+                    .and_then(|entry| entry.file_name().into_string().ok())
+                    .is_none_or(|name| !name.contains(".__darknamer_"))
+            }),
+            "temporary rename endpoint remained after startup recovery"
+        );
+        let journal_directory = directory.path().join("DarkReNamer").join("journal");
+        if expect_staged_lock {
+            assert!(journal_directory.join(CANDIDATE_JOURNAL_LEAF).exists());
+            assert!(!journal_directory.join(ACTIVE_JOURNAL_LEAF).exists());
+        } else {
+            assert!(!journal_directory.join(CANDIDATE_JOURNAL_LEAF).exists());
+            assert!(!journal_directory.join(ACTIVE_JOURNAL_LEAF).exists());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn crash_recovery_matrix_uses_real_windows_backend_and_file_journal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (point, force_rollback, expect_swapped, expect_staged_lock) in [
+            ("staged-intent-synced", false, false, true),
+            ("active-intent-promoted", false, false, false),
+            ("forward-prepared-0", false, false, false),
+            ("forward-rename-0", false, false, false),
+            ("forward-completed-0", false, false, false),
+            ("rollback-prepared-0", true, false, false),
+            ("rollback-rename-0", true, false, false),
+            ("rollback-completed-0", true, false, false),
+            ("terminal-committed", false, true, false),
+            ("terminal-rolled-back", true, false, false),
+        ] {
+            run_crash_recovery_case(point, force_rollback, expect_swapped, expect_staged_lock)?;
+        }
+        Ok(())
     }
 
     #[test]

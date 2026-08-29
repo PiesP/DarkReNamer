@@ -2,6 +2,8 @@
 
 mod activation;
 mod executor;
+#[cfg(test)]
+pub(crate) mod failpoint;
 mod file_journal;
 mod journal;
 mod memory;
