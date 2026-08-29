@@ -120,7 +120,7 @@ impl RailDensity {
     pub const fn metrics(self, dpi: u32) -> UiMetrics {
         let (rail_padding, button_height, group_gap, rail_width) = match self {
             Self::Comfortable => (4, 32, 8, 52),
-            Self::Compact => (2, 28, 4, 46),
+            Self::Compact => (2, 28, 4, 52),
         };
         UiMetrics {
             rail_padding: scale_dip(rail_padding, dpi),
@@ -713,6 +713,13 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn compact_rail_keeps_the_longest_two_line_label_width() {
+        assert_eq!(RailDensity::Compact.metrics(96).rail_width, 52);
+        assert_eq!(RailDensity::Compact.metrics(192).rail_width, 104);
+        assert_eq!(RIGHT_TOOLS[0].label, "원래\n이름으로");
     }
 
     #[test]

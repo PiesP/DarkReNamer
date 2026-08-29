@@ -1,6 +1,5 @@
 use std::ffi::c_void;
 use std::io;
-use std::mem::size_of;
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::HWND;
@@ -11,8 +10,7 @@ use windows_sys::Win32::Graphics::Gdi::HFONT;
 use windows_sys::Win32::Graphics::Gdi::MapWindowPoints;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
-    CCM_GETVERSION, TOOLTIPS_CLASSW, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTS_ALWAYSTIP,
-    TTTOOLINFOW,
+    TOOLTIPS_CLASSW, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTS_ALWAYSTIP, TTTOOLINFOW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 #[cfg(test)]
@@ -109,13 +107,11 @@ impl CommandRail {
 
     fn add_tooltip(&mut self, button: HWND, tool_spec: ToolSpec) -> io::Result<()> {
         let text = wide(&tool_spec.one_line_label()).into_boxed_slice();
-        // SAFETY: tooltip is live and CCM_GETVERSION has no pointer payload.
-        let tooltip_version = unsafe { SendMessageW(self.tooltip, CCM_GETVERSION, 0, 0) };
-        let tool_info_size = if tooltip_version >= 6 {
-            size_of::<TTTOOLINFOW>()
-        } else {
-            std::mem::offset_of!(TTTOOLINFOW, lpReserved)
-        };
+        // The V2 prefix excludes only lpReserved, which this application does
+        // not use, and is accepted by both legacy and manifest-selected v6
+        // tooltip controls. CCM_GETVERSION is deliberately not used here: it
+        // reports the per-control behavior version, not the ComCtl DLL version.
+        let tool_info_size = std::mem::offset_of!(TTTOOLINFOW, lpReserved);
         let mut tool = TTTOOLINFOW {
             // Common-controls before v6 rejects the final reserved pointer;
             // v6 accepts the complete structure used by the product manifest.
