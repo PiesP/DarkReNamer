@@ -1,6 +1,6 @@
 use darknamer_app::rename::{
-    EntryId, EntryKind, MemoryBackend, ModelRevision, PlanIssueKind, PlanRequest, RenameIntent,
-    RenamePlanner,
+    BackendError, EntryId, EntryKind, MemoryBackend, ModelRevision, PathKey, PathSnapshot,
+    PlanIssueKind, PlanRequest, RenameBackend, RenameIntent, RenameOperation, RenamePlanner,
 };
 use darknamer_core::{LegacyText, WindowsLeafNameError};
 
@@ -258,5 +258,75 @@ fn plan_exposes_stable_preview_rows_and_joins_root_without_double_separator()
     assert_eq!(plan.rows()[0].destination().to_string_lossy(), "C:\\b.txt");
     assert_eq!(plan.rows()[0].kind(), EntryKind::File);
     assert_ne!(plan.fingerprint(), 0);
+    Ok(())
+}
+
+struct CanonicalKeyBackend {
+    inner: MemoryBackend,
+}
+
+impl RenameBackend for CanonicalKeyBackend {
+    fn path_key(&self, path: &LegacyText) -> PathKey {
+        let opaque = path
+            .to_string_lossy()
+            .to_lowercase()
+            .chars()
+            .rev()
+            .collect::<String>();
+        PathKey::exact(&LegacyText::from(opaque))
+    }
+
+    fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
+        self.inner.observe(path)
+    }
+
+    fn is_same_or_descendant(
+        &self,
+        ancestor: &LegacyText,
+        candidate: &LegacyText,
+    ) -> Result<bool, BackendError> {
+        self.inner.is_same_or_descendant(ancestor, candidate)
+    }
+
+    fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
+        self.inner.next_transaction_nonce()
+    }
+
+    fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+        self.inner.rename_no_replace(operation)
+    }
+}
+
+#[test]
+fn ancestor_detection_does_not_interpret_backend_equality_keys_as_paths()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = CanonicalKeyBackend {
+        inner: MemoryBackend::new()
+            .with_file("C:\\work\\folder", 1)
+            .with_file("C:\\work\\folder\\child.txt", 2),
+    };
+    let request = PlanRequest::new(
+        ModelRevision::new(1),
+        vec![
+            intent(1, "C:\\work\\folder", "renamed"),
+            RenameIntent::new(
+                EntryId::new(2),
+                "C:\\work\\folder\\child.txt",
+                "C:\\work\\folder",
+                "child-2.txt",
+                EntryKind::File,
+            ),
+        ],
+    );
+
+    let Err(error) = RenamePlanner::new(&backend).plan(request) else {
+        return Err(std::io::Error::other("canonical keys hid source overlap").into());
+    };
+    assert!(
+        error
+            .issues()
+            .iter()
+            .all(|issue| issue.kind == PlanIssueKind::SourceOverlap)
+    );
     Ok(())
 }

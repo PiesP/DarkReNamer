@@ -75,23 +75,42 @@ impl<'a> RenamePlanner<'a> {
                 kind: PlanIssueKind::DuplicateDestination,
             }));
         }
-        for (descendant, descendant_owners) in &source_owners {
-            for separator in descendant
-                .units()
-                .iter()
-                .enumerate()
-                .filter_map(|(index, unit)| is_separator(*unit).then_some(index))
-            {
-                let ancestor = PathKey(descendant.units()[..separator].into());
-                if let Some(ancestor_owners) = source_owners.get(&ancestor) {
-                    issues.push(PlanIssue {
-                        entry: ancestor_owners[0],
-                        kind: PlanIssueKind::SourceOverlap,
+        for left in 0..changed.len() {
+            for right in left + 1..changed.len() {
+                if self.backend.path_key(&changed[left].source)
+                    == self.backend.path_key(&changed[right].source)
+                {
+                    continue;
+                }
+                let overlaps = self
+                    .backend
+                    .is_same_or_descendant(&changed[left].source, &changed[right].source)
+                    .and_then(|left_contains_right| {
+                        if left_contains_right {
+                            Ok(true)
+                        } else {
+                            self.backend.is_same_or_descendant(
+                                &changed[right].source,
+                                &changed[left].source,
+                            )
+                        }
                     });
-                    issues.push(PlanIssue {
-                        entry: descendant_owners[0],
-                        kind: PlanIssueKind::SourceOverlap,
-                    });
+                match overlaps {
+                    Ok(true) => {
+                        issues.push(PlanIssue {
+                            entry: changed[left].id,
+                            kind: PlanIssueKind::SourceOverlap,
+                        });
+                        issues.push(PlanIssue {
+                            entry: changed[right].id,
+                            kind: PlanIssueKind::SourceOverlap,
+                        });
+                    }
+                    Ok(false) => {}
+                    Err(_error) => issues.push(PlanIssue {
+                        entry: changed[left].id,
+                        kind: PlanIssueKind::Backend,
+                    }),
                 }
             }
         }

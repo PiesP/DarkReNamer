@@ -165,6 +165,20 @@ impl RenameBackend for MemoryBackend {
         })
     }
 
+    fn is_same_or_descendant(
+        &self,
+        ancestor: &LegacyText,
+        candidate: &LegacyText,
+    ) -> Result<bool, BackendError> {
+        let ancestor = path_components(ancestor);
+        let candidate = path_components(candidate);
+        Ok(candidate.len() >= ancestor.len()
+            && candidate
+                .iter()
+                .zip(ancestor.iter())
+                .all(|(candidate, ancestor)| candidate == ancestor))
+    }
+
     fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
         let nonce = self.next_transaction_nonce;
         let Some(next) = nonce.checked_add(1) else {
@@ -262,4 +276,12 @@ fn ascii_lower(unit: u16) -> u16 {
     } else {
         unit
     }
+}
+
+fn path_components(path: &LegacyText) -> Vec<Vec<u16>> {
+    path.units()
+        .split(|unit| *unit == b'\\' as u16 || *unit == b'/' as u16)
+        .filter(|component| !component.is_empty())
+        .map(|component| component.iter().map(|unit| ascii_lower(*unit)).collect())
+        .collect()
 }

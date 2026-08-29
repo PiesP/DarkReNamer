@@ -116,6 +116,14 @@ pub trait RenameBackend {
     /// Observes the exact leaf and resolved direct parent.
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError>;
 
+    /// Returns whether `candidate` is the same entry path as `ancestor` or is
+    /// nested below it according to backend-owned path comparison semantics.
+    fn is_same_or_descendant(
+        &self,
+        ancestor: &LegacyText,
+        candidate: &LegacyText,
+    ) -> Result<bool, BackendError>;
+
     /// Returns a fresh, nonzero transaction nonce for temporary-name derivation.
     ///
     /// An adapter must not reuse a nonce while the corresponding transaction may

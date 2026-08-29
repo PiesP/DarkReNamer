@@ -102,10 +102,6 @@ impl PathKey {
     pub fn exact(path: &LegacyText) -> Self {
         Self(path.units().into())
     }
-
-    pub(super) fn units(&self) -> &[u16] {
-        &self.0
-    }
 }
 
 /// One filesystem entry observed during planning or execution freeze.
