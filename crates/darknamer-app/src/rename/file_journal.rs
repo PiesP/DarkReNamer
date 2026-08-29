@@ -848,7 +848,11 @@ impl FileJournal {
         &self.path
     }
 
-    /// Returns decoded append-only records. Drop never deletes the journal.
+    /// Returns decoded append-only records.
+    ///
+    /// Dropping the value does not request deletion. If
+    /// [`Self::mark_delete_if_safe`] previously succeeded, closing the retained
+    /// handle during drop completes that explicit delete disposition.
     #[must_use]
     pub fn records(&self) -> &[JournalRecord] {
         &self.records
@@ -862,8 +866,8 @@ impl FileJournal {
 
     /// Returns whether the retained journal has an explicit terminal record.
     ///
-    /// The adapter never removes or archives a file implicitly; an operator may
-    /// act explicitly only after this reports true and the handle is closed.
+    /// The adapter never requests removal or archival implicitly; an operator
+    /// may explicitly call [`Self::mark_delete_if_safe`] after this reports true.
     #[must_use]
     pub fn is_terminal(&self) -> bool {
         matches!(self.records.last(), Some(JournalRecord::Terminal(_)))
