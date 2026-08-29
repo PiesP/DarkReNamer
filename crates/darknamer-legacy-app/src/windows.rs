@@ -11,6 +11,7 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
+use std::slice;
 
 use dark_renamer_legacy::{
     LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,
@@ -45,9 +46,9 @@ use windows_sys::Win32::UI::Controls::{
     LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED,
     LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETNEXTITEM,
     LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE,
-    LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVNI_SELECTED, LVS_EX_FULLROWSELECT,
-    LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_DBLCLK,
-    NMHDR,
+    LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVNI_FOCUSED, LVNI_SELECTED,
+    LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS,
+    LVSIL_SMALL, NM_DBLCLK, NMHDR,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetKeyState, SetFocus, VK_CONTROL, VK_DELETE, VK_ESCAPE, VK_SHIFT,
@@ -1021,10 +1022,24 @@ unsafe fn selected_indices(list: HWND) -> Vec<usize> {
 }
 
 unsafe fn select_rows(list: HWND, rows: &[usize]) {
-    for (position, row) in rows.iter().enumerate() {
+    unsafe { select_rows_with_focus(list, rows, rows.first().copied()) };
+}
+
+unsafe fn focused_index(list: HWND) -> Option<usize> {
+    let index = unsafe { SendMessageW(list, LVM_GETNEXTITEM, usize::MAX, LVNI_FOCUSED as isize) };
+    (index >= 0).then_some(index as usize)
+}
+
+unsafe fn select_rows_with_focus(list: HWND, rows: &[usize], focused: Option<usize>) {
+    for row in rows {
         let mut item = LVITEMW {
             stateMask: LVIS_SELECTED | LVIS_FOCUSED,
-            state: LVIS_SELECTED | if position == 0 { LVIS_FOCUSED } else { 0 },
+            state: LVIS_SELECTED
+                | if Some(*row) == focused {
+                    LVIS_FOCUSED
+                } else {
+                    0
+                },
             ..unsafe { zeroed() }
         };
         unsafe {
@@ -1061,6 +1076,16 @@ fn selection_tokens(model: &LegacyList, selected: &[usize]) -> Vec<SelectionToke
         .collect()
 }
 
+fn selection_token(model: &LegacyList, index: usize) -> Option<SelectionToken> {
+    model.items().get(index).map(|item| SelectionToken {
+        path: item.source_path().clone(),
+        occurrence: model.items()[..index]
+            .iter()
+            .filter(|previous| previous.source_path() == item.source_path())
+            .count(),
+    })
+}
+
 fn rows_for_tokens(model: &LegacyList, tokens: &[SelectionToken]) -> Vec<usize> {
     tokens
         .iter()
@@ -1087,17 +1112,41 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
             state.model.remove_rows(&selected);
         }
         MOVE_UP => {
+            let tokens = selection_tokens(&state.model, &selected);
+            let focused = unsafe { focused_index(state.list_window) }
+                .and_then(|index| selection_token(&state.model, index));
             unsafe { clear_selection(state.list_window) };
-            let moved = state.model.move_rows_earlier(&selected);
+            state.model.move_rows_earlier(&selected);
             unsafe { refresh(state) };
-            unsafe { select_rows(state.list_window, &moved) };
+            let moved = rows_for_tokens(&state.model, &tokens);
+            let focused = focused.as_ref().and_then(|token| {
+                rows_for_tokens(&state.model, slice::from_ref(token))
+                    .first()
+                    .copied()
+            });
+            unsafe {
+                select_rows_with_focus(state.list_window, &moved, focused);
+                update_controls(state);
+            }
             return;
         }
         MOVE_DOWN => {
+            let tokens = selection_tokens(&state.model, &selected);
+            let focused = unsafe { focused_index(state.list_window) }
+                .and_then(|index| selection_token(&state.model, index));
             unsafe { clear_selection(state.list_window) };
-            let moved = state.model.move_rows_later(&selected);
+            state.model.move_rows_later(&selected);
             unsafe { refresh(state) };
-            unsafe { select_rows(state.list_window, &moved) };
+            let moved = rows_for_tokens(&state.model, &tokens);
+            let focused = focused.as_ref().and_then(|token| {
+                rows_for_tokens(&state.model, slice::from_ref(token))
+                    .first()
+                    .copied()
+            });
+            unsafe {
+                select_rows_with_focus(state.list_window, &moved, focused);
+                update_controls(state);
+            }
             return;
         }
         MANUAL_CHANGE => {
@@ -1498,11 +1547,21 @@ unsafe fn sort_command(window: HWND, state: &mut AppState) -> bool {
     if let Some(mode) = modes.get(result.choice) {
         let selected = unsafe { selected_indices(state.list_window) };
         let tokens = selection_tokens(&state.model, &selected);
+        let focused = unsafe { focused_index(state.list_window) }
+            .and_then(|index| selection_token(&state.model, index));
         unsafe { clear_selection(state.list_window) };
         state.model.sort_by(*mode, compare_windows);
         unsafe { refresh(state) };
         let moved = rows_for_tokens(&state.model, &tokens);
-        unsafe { select_rows(state.list_window, &moved) };
+        let focused = focused.as_ref().and_then(|token| {
+            rows_for_tokens(&state.model, slice::from_ref(token))
+                .first()
+                .copied()
+        });
+        unsafe {
+            select_rows_with_focus(state.list_window, &moved, focused);
+            update_controls(state);
+        }
         return true;
     }
     false
