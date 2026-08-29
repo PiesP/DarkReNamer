@@ -18,6 +18,29 @@ pub(super) fn run() -> io::Result<()> {
     run_unsafe()
 }
 
+fn minimum_track_width(window: HWND, state: &AppState) -> i32 {
+    // SAFETY: both structures are C-compatible integer rectangles with valid
+    // all-zero initial states for the two synchronous geometry queries.
+    let mut outer: RECT = unsafe { zeroed() };
+    // SAFETY: see above.
+    let mut client: RECT = unsafe { zeroed() };
+    // SAFETY: window is the live top-level HWND and outer remains writable for
+    // the duration of this synchronous query.
+    let got_outer = unsafe { GetWindowRect(window, &mut outer) } != 0;
+    // SAFETY: window is the live top-level HWND and client remains writable for
+    // the duration of this synchronous query.
+    let got_client = unsafe { GetClientRect(window, &mut client) } != 0;
+    let nonclient_width = if got_outer && got_client {
+        ((outer.right - outer.left) - (client.right - client.left)).max(0)
+    } else {
+        0
+    };
+    scale_dip(INITIAL_WIDTH, state.dpi).max(
+        scale_dip(minimum_content_width_dip(state.high_contrast), state.dpi)
+            .saturating_add(nonclient_width),
+    )
+}
+
 fn run_unsafe() -> io::Result<()> {
     if process_is_elevated()? {
         return Err(io::Error::new(
@@ -171,13 +194,19 @@ unsafe extern "system" fn window_proc(
             arrange(window, unsafe { &*state_ptr });
             0
         }
+        WM_SETFOCUS if !state_ptr.is_null() => {
+            // SAFETY: list_window is the live focusable ListView child owned by
+            // this top-level window on the current UI thread.
+            unsafe { SetFocus((*state_ptr).list_window) };
+            0
+        }
         WM_GETMINMAXINFO if !state_ptr.is_null() => {
             let info = lparam as *mut MINMAXINFO;
             if !info.is_null() {
                 // SAFETY: WM_GETMINMAXINFO supplies writable MINMAXINFO storage
                 // for this callback and state_ptr is the live AppState.
                 unsafe {
-                    (*info).ptMinTrackSize.x = scale_dip(INITIAL_WIDTH, (*state_ptr).dpi);
+                    (*info).ptMinTrackSize.x = minimum_track_width(window, &*state_ptr);
                     (*info).ptMinTrackSize.y = scale_dip(INITIAL_HEIGHT, (*state_ptr).dpi);
                 }
             }

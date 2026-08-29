@@ -53,7 +53,10 @@ use dialog::*;
 use drag_drop::*;
 #[cfg(test)]
 use list_view::changed_column_mask;
-use list_view::{RenderedRow, refresh, update_column_visibility, update_dpi_metrics};
+use list_view::{
+    RenderedRow, refresh, update_column_visibility, update_dpi_metrics,
+    update_primary_column_widths,
+};
 use menu::*;
 use recovery_ui::*;
 #[cfg(test)]
@@ -103,18 +106,18 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem,
     CopyImage, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow,
     DispatchMessageW, DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, GWLP_USERDATA, GetClientRect,
-    GetMessageW, GetParent, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, HMENU,
-    IDC_ARROW, IDCANCEL, IDOK, IMAGE_BITMAP, IsDialogMessageW, KillTimer, LR_CREATEDIBSECTION,
-    LR_LOADMAP3DCOLORS, LoadCursorW, LoadIconW, LoadImageW, MB_OKCANCEL, MB_YESNO, MF_BYCOMMAND,
-    MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO,
-    MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SPI_GETHIGHCONTRAST, SPI_GETNONCLIENTMETRICS, SW_SHOW, SWP_NOACTIVATE,
-    SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage, WM_APP, WM_CLOSE,
-    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_FONTCHANGE,
-    WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFONT,
-    WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER,
-    WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_ACCEPTFILES,
+    GetMessageW, GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    HMENU, IDC_ARROW, IDCANCEL, IDOK, IMAGE_BITMAP, IsDialogMessageW, KillTimer,
+    LR_CREATEDIBSECTION, LR_LOADMAP3DCOLORS, LoadCursorW, LoadIconW, LoadImageW, MB_OKCANCEL,
+    MB_YESNO, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW, PostMessageW,
+    PostQuitMessage, RegisterClassExW, SPI_GETHIGHCONTRAST, SPI_GETNONCLIENTMETRICS, SW_SHOW,
+    SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage, WM_APP,
+    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_FONTCHANGE,
+    WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS,
+    WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
+    WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_ACCEPTFILES,
     WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
     WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };

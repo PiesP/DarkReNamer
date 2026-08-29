@@ -614,10 +614,6 @@ pub(super) fn toolbar_accessible_name(command: CommandId) -> String {
         )
 }
 
-pub(super) const fn toolbar_width_dip(high_contrast: bool) -> i32 {
-    if high_contrast { 120 } else { TOOLBAR_WIDTH }
-}
-
 pub(super) fn arrange(window: HWND, state: &AppState) {
     // SAFETY: RECT is a C-compatible integer structure for which all-zero is a valid writable initial state.
     let mut rect: RECT = unsafe { zeroed() };
@@ -663,6 +659,7 @@ pub(super) fn arrange(window: HWND, state: &AppState) {
             1,
         );
     }
+    update_primary_column_widths(state);
 }
 
 pub(super) fn move_window_dip(window: HWND, x: i32, y: i32, width: i32, height: i32, dpi: u32) {
@@ -865,7 +862,7 @@ pub(super) fn create_menu() -> HMENU {
         );
         menu_item(recovery, SHOW_RECOVERY_STATUS, "복구 상태 보기...");
         append_popup(menu, recovery, "복구(&R)");
-        menu_item(menu, VERSION, "버전(H)");
+        menu_item(menu, VERSION, VERSION_MENU_LABEL);
     }
     menu
 }

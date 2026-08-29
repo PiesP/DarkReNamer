@@ -27,6 +27,16 @@ pub const TOOLBAR_SEPARATOR_SIZE: i32 = 8;
 pub const STATUS_HEIGHT: i32 = 18;
 /// Design coordinate density used by the original Win32 layout.
 pub const BASE_DPI: u32 = 96;
+pub(crate) const NAME_COLUMN_MINIMUM: i32 = 120;
+pub(crate) const LOCATION_COLUMN_MINIMUM: i32 = 80;
+pub(crate) const EMPTY_LIST_STATUS: &str = "파일이나 폴더를 끌어 놓거나 Ctrl+O로 추가하세요.";
+pub(crate) const VERSION_MENU_LABEL: &str = "버전(&H)";
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn toolbar_width_dip(high_contrast: bool) -> i32 {
+    if high_contrast { 120 } else { TOOLBAR_WIDTH }
+}
 
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -102,6 +112,25 @@ pub(crate) fn toolbar_rects_are_vertical(rects: &[ToolbarRect], rail_width: i32)
         })
         && rects.windows(2).all(|pair| pair[0].bottom <= pair[1].top)
 }
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn adaptive_primary_column_widths(available: i32, dpi: u32) -> [i32; 3] {
+    let available = available.max(0);
+    let location_minimum = scale_dip(LOCATION_COLUMN_MINIMUM, dpi).min(available);
+    let names_available = available - location_minimum;
+    let preferred_name = scale_dip(COLUMNS[0].default_width, dpi);
+    let current = preferred_name.min((names_available + 1) / 2);
+    let proposed = preferred_name.min(names_available - current);
+    let location = available - current - proposed;
+    [current, proposed, location]
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn minimum_content_width_dip(high_contrast: bool) -> i32 {
+    toolbar_width_dip(high_contrast) * 2 + NAME_COLUMN_MINIMUM * 2 + LOCATION_COLUMN_MINIMUM
+}
 /// Public product name used by the executable and user-facing diagnostics.
 pub const PRODUCT_NAME: &str = "DarkReNamer";
 /// Upstream behavior version targeted by compatibility mode.
@@ -163,15 +192,15 @@ pub struct ColumnSpec {
 
 pub const COLUMNS: [ColumnSpec; 7] = [
     ColumnSpec {
-        label: "현재이름",
+        label: "현재 이름",
         default_width: 150,
     },
     ColumnSpec {
-        label: "바꿀이름",
+        label: "변경할 이름",
         default_width: 150,
     },
     ColumnSpec {
-        label: "파일위치",
+        label: "파일 위치",
         default_width: 100,
     },
     ColumnSpec {
@@ -496,6 +525,50 @@ mod tests {
         let mut cross_rail = valid;
         cross_rail[1].right = 45;
         assert!(!toolbar_rects_are_vertical(&cross_rail, 44));
+    }
+
+    #[test]
+    fn adaptive_primary_columns_fit_normal_and_high_contrast_minimums() {
+        assert_eq!(minimum_content_width_dip(false), 408);
+        assert_eq!(minimum_content_width_dip(true), 560);
+        assert_eq!(
+            minimum_content_width_dip(true),
+            toolbar_width_dip(true) * 2 + NAME_COLUMN_MINIMUM * 2 + LOCATION_COLUMN_MINIMUM
+        );
+
+        for (dpi, available, expected) in [
+            (96, 320, [120, 120, 80]),
+            (96, 360, [140, 140, 80]),
+            (96, 400, [150, 150, 100]),
+            (120, 400, [150, 150, 100]),
+            (144, 480, [180, 180, 120]),
+            (192, 640, [240, 240, 160]),
+        ] {
+            let widths = adaptive_primary_column_widths(available, dpi);
+            assert_eq!(widths, expected);
+            assert_eq!(widths.iter().sum::<i32>(), available);
+        }
+    }
+
+    #[test]
+    fn native_empty_state_and_menu_copy_are_exact() {
+        assert_eq!(
+            EMPTY_LIST_STATUS,
+            "파일이나 폴더를 끌어 놓거나 Ctrl+O로 추가하세요."
+        );
+        assert_eq!(VERSION_MENU_LABEL, "버전(&H)");
+        assert_eq!(
+            COLUMNS.map(|column| column.label),
+            [
+                "현재 이름",
+                "변경할 이름",
+                "파일 위치",
+                "전체경로",
+                "파일크기",
+                "변경시각",
+                "생성시각",
+            ]
+        );
     }
 
     #[test]

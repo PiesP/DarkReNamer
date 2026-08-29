@@ -25,19 +25,30 @@ pub(super) fn update_column_visibility(state: &AppState, index: usize) {
 }
 
 pub(super) fn update_dpi_metrics(state: &AppState) {
-    for (column, spec) in COLUMNS.iter().enumerate().take(3) {
-        // SAFETY: list_window is live and width is a scaled integer value.
+    for index in 0..state.shown_columns.len() {
+        update_column_visibility(state, index);
+    }
+}
+
+pub(super) fn update_primary_column_widths(state: &AppState) {
+    // SAFETY: RECT is a C-compatible integer structure with valid zero state.
+    let mut rect: RECT = unsafe { zeroed() };
+    // SAFETY: list_window is live and rect remains writable through this call.
+    if unsafe { GetClientRect(state.list_window, &mut rect) } == 0 {
+        return;
+    }
+    let widths = adaptive_primary_column_widths(rect.right - rect.left, state.dpi);
+    for (column, width) in widths.into_iter().enumerate() {
+        // SAFETY: list_window is live and the message carries a checked column
+        // index and an adaptive pixel width without a pointer payload.
         unsafe {
             SendMessageW(
                 state.list_window,
                 LVM_SETCOLUMNWIDTH,
                 column,
-                scale_dip(spec.default_width, state.dpi) as isize,
+                width as isize,
             )
         };
-    }
-    for index in 0..state.shown_columns.len() {
-        update_column_visibility(state, index);
     }
 }
 
@@ -92,7 +103,7 @@ pub(super) fn refresh(state: &mut AppState) {
     select_rows(state.list_window, &selected);
     update_controls(state);
     let status = if state.model.is_empty() {
-        LegacyText::default()
+        LegacyText::from(EMPTY_LIST_STATUS)
     } else {
         LegacyText::from(format!("{} 개", state.model.len()))
     };
