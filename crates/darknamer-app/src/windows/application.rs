@@ -77,17 +77,40 @@ fn ensure_minimum_track_width(window: HWND, state: &AppState) -> io::Result<()> 
     if current_width >= minimum {
         return Ok(());
     }
-    // SAFETY: the live window is widened in place without changing position,
-    // height, activation, or z-order after a display-mode transition.
+    // SAFETY: window is live; the nearest-monitor query dereferences no caller
+    // memory and returns a borrowed monitor identifier.
+    let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let mut monitor_info = MONITORINFO {
+        cbSize: u32::try_from(size_of::<MONITORINFO>())
+            .map_err(|_| io::Error::other("invalid monitor info size"))?,
+        ..MONITORINFO::default()
+    };
+    // SAFETY: monitor is live and monitor_info has its exact structure size and
+    // remains writable for this synchronous query.
+    if unsafe { GetMonitorInfoW(monitor, &mut monitor_info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let placement = fit_widened_window_to_work_area(
+        rect.left,
+        monitor_info.rcWork.left,
+        monitor_info.rcWork.right,
+        minimum,
+    )
+    .ok_or_else(|| io::Error::other("invalid monitor work area"))?;
+    // SAFETY: the live window is widened within the nearest monitor work area
+    // without changing height, activation, or z-order.
     if unsafe {
         SetWindowPos(
             window,
             null_mut(),
-            0,
-            0,
-            minimum,
+            placement.x,
+            rect.top,
+            placement.width,
             rect.bottom - rect.top,
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            SWP_NOZORDER | SWP_NOACTIVATE,
         )
     } == 0
     {

@@ -37,6 +37,33 @@ pub(crate) const EMPTY_LIST_STATUS: &str = "파일이나 폴더를 끌어 놓거
 pub(crate) const VERSION_MENU_LABEL: &str = "버전(&H)";
 
 #[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct HorizontalWindowPlacement {
+    pub(crate) x: i32,
+    pub(crate) width: i32,
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn fit_widened_window_to_work_area(
+    current_x: i32,
+    work_left: i32,
+    work_right: i32,
+    minimum_width: i32,
+) -> Option<HorizontalWindowPlacement> {
+    let work_width = work_right.checked_sub(work_left)?;
+    if work_width <= 0 || minimum_width <= 0 {
+        return None;
+    }
+    let width = minimum_width.min(work_width);
+    let latest_x = work_right - width;
+    Some(HorizontalWindowPlacement {
+        x: current_x.clamp(work_left, latest_x),
+        width,
+    })
+}
+
+#[cfg(any(windows, test))]
 #[must_use]
 pub(crate) const fn toolbar_width_dip(high_contrast: bool) -> i32 {
     if high_contrast { 120 } else { TOOLBAR_WIDTH }
@@ -552,6 +579,26 @@ mod tests {
             assert_eq!(widths, expected);
             assert_eq!(widths.iter().sum::<i32>(), available);
         }
+    }
+
+    #[test]
+    fn widened_window_stays_inside_the_nearest_monitor_work_area() {
+        assert_eq!(
+            fit_widened_window_to_work_area(1_456, 0, 1_920, 560),
+            Some(HorizontalWindowPlacement {
+                x: 1_360,
+                width: 560,
+            })
+        );
+        assert_eq!(
+            fit_widened_window_to_work_area(-80, 0, 1_920, 560),
+            Some(HorizontalWindowPlacement { x: 0, width: 560 })
+        );
+        assert_eq!(
+            fit_widened_window_to_work_area(200, 0, 480, 560),
+            Some(HorizontalWindowPlacement { x: 0, width: 480 })
+        );
+        assert_eq!(fit_widened_window_to_work_area(0, 10, 10, 560), None);
     }
 
     #[test]

@@ -67,8 +67,9 @@ use safe_runtime::{
 use text_io::{compare_windows, legacy_path, path_wide, read_legacy_text, wide, write_legacy_text};
 use windows_sys::Win32::Foundation::{FILETIME, HWND, LPARAM, LRESULT, RECT, SYSTEMTIME, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    COLOR_BTNFACE, COLOR_WINDOW, CreateFontIndirectW, DeleteObject, GetSysColor, HBITMAP, HFONT,
-    RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RedrawWindow, UpdateWindow,
+    COLOR_BTNFACE, COLOR_WINDOW, CreateFontIndirectW, DeleteObject, GetMonitorInfoW, GetSysColor,
+    HBITMAP, HFONT, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, RDW_ALLCHILDREN,
+    RDW_ERASE, RDW_INVALIDATE, RedrawWindow, UpdateWindow,
 };
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
