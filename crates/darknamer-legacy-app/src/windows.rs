@@ -1112,18 +1112,12 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
             state.model.remove_rows(&selected);
         }
         MOVE_UP => {
-            let tokens = selection_tokens(&state.model, &selected);
-            let focused = unsafe { focused_index(state.list_window) }
-                .and_then(|index| selection_token(&state.model, index));
+            let focused_position = unsafe { focused_index(state.list_window) }
+                .and_then(|focused| selected.iter().position(|index| *index == focused));
             unsafe { clear_selection(state.list_window) };
-            state.model.move_rows_earlier(&selected);
+            let moved = state.model.move_rows_earlier(&selected);
             unsafe { refresh(state) };
-            let moved = rows_for_tokens(&state.model, &tokens);
-            let focused = focused.as_ref().and_then(|token| {
-                rows_for_tokens(&state.model, slice::from_ref(token))
-                    .first()
-                    .copied()
-            });
+            let focused = focused_position.and_then(|position| moved.get(position).copied());
             unsafe {
                 select_rows_with_focus(state.list_window, &moved, focused);
                 update_controls(state);
@@ -1131,18 +1125,12 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
             return;
         }
         MOVE_DOWN => {
-            let tokens = selection_tokens(&state.model, &selected);
-            let focused = unsafe { focused_index(state.list_window) }
-                .and_then(|index| selection_token(&state.model, index));
+            let focused_position = unsafe { focused_index(state.list_window) }
+                .and_then(|focused| selected.iter().position(|index| *index == focused));
             unsafe { clear_selection(state.list_window) };
-            state.model.move_rows_later(&selected);
+            let moved = state.model.move_rows_later(&selected);
             unsafe { refresh(state) };
-            let moved = rows_for_tokens(&state.model, &tokens);
-            let focused = focused.as_ref().and_then(|token| {
-                rows_for_tokens(&state.model, slice::from_ref(token))
-                    .first()
-                    .copied()
-            });
+            let focused = focused_position.and_then(|position| moved.get(position).copied());
             unsafe {
                 select_rows_with_focus(state.list_window, &moved, focused);
                 update_controls(state);

@@ -60,6 +60,23 @@ fn file_list_add_skips_existing_duplicates_but_keeps_same_batch_duplicates() {
 }
 
 #[test]
+fn moving_one_same_path_duplicate_returns_its_new_row_identity() {
+    let mut list = LegacyList::new();
+    list.append_batch([
+        LegacyListItem::new(r"C:\same.txt", false, 1, 0, 0),
+        LegacyListItem::new(r"C:\same.txt", false, 2, 0, 0),
+    ]);
+
+    let selected_size = list.items()[1].size();
+    let other_size = list.items()[0].size();
+    let moved = list.move_rows_earlier(&[1]);
+
+    assert_eq!(&*moved, &[0]);
+    assert_eq!(list.items()[0].size(), selected_size);
+    assert_eq!(list.items()[1].size(), other_size);
+}
+
+#[test]
 fn stem_commands_discard_manual_path_prefix_like_get_name() {
     let mut list = list(&[(r"C:\root\source.txt", false)]);
     assert!(list.manual_change(0, r"subdir\manual.name.txt"));
