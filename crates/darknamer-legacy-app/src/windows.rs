@@ -285,7 +285,12 @@ unsafe extern "system" fn window_proc(
                 && unsafe { (*header).hwndFrom } == unsafe { (*state_ptr).list_window }
                 && unsafe { (*header).code } == NM_DBLCLK
             {
+                let previous_states = unsafe { (*state_ptr).command_states };
                 unsafe { dispatch_command(window, &mut *state_ptr, MANUAL_CHANGE) };
+                unsafe {
+                    (*state_ptr).command_states = previous_states;
+                    apply_command_states(&*state_ptr);
+                }
             }
             0
         }
