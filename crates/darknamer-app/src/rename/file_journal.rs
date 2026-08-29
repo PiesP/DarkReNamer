@@ -313,40 +313,7 @@ impl RecoveryJournalEvidence {
     /// Returns an error when the retained evidence is oversized, cannot be
     /// reread exactly, or the destination already exists or cannot be synced.
     pub fn copy_exact_to_new(&mut self, destination: &Path) -> io::Result<u64> {
-        if self.byte_len > MAX_JOURNAL_FILE_BYTES as u64 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "journal evidence exceeds the bounded copy limit",
-            ));
-        }
-        let expected = usize::try_from(self.byte_len)
-            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
-        self.file.seek(SeekFrom::Start(0))?;
-        let mut bytes = Vec::with_capacity(expected);
-        Read::by_ref(&mut self.file)
-            .take(self.byte_len.saturating_add(1))
-            .read_to_end(&mut bytes)?;
-        if bytes.len() != expected {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "retained journal evidence changed length",
-            ));
-        }
-        let mut output = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(destination)?;
-        let copy_result = output
-            .write_all(&bytes)
-            .and_then(|()| output.flush())
-            .and_then(|()| output.sync_all());
-        drop(output);
-        if let Err(error) = copy_result {
-            return Err(io::Error::other(format!(
-                "evidence copy failed ({error}); partial destination was retained"
-            )));
-        }
-        Ok(self.byte_len)
+        copy_retained_bytes(&mut self.file, self.byte_len, destination)
     }
 }
 
@@ -478,6 +445,29 @@ impl JournalRoot {
             });
         }
         Ok(self.path.join(leaf))
+    }
+
+    /// Acquires one persistent, exclusive application-instance lock leaf.
+    ///
+    /// The leaf is intentionally retained on disk. The returned handle owns
+    /// the exclusion for the process lifetime and a later process reopens the
+    /// same leaf after the prior handle closes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lock leaf is invalid, cannot be opened or
+    /// created relative to this retained root, or is held by another process.
+    pub fn acquire_runtime_lock(&self, leaf: &str) -> Result<File, FileJournalError> {
+        let path = self.child(leaf)?;
+        let file = match open_existing(&self.file, &path, leaf) {
+            Ok(file) => file,
+            Err(error) if matches!(error.raw_os_error(), Some(2 | 3)) => {
+                open_create_new(&self.file, &path, leaf)?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        validate_file_type(&file)?;
+        Ok(file)
     }
 }
 
@@ -1341,6 +1331,94 @@ impl FileJournal {
         matches!(&self.phase, FileJournalPhase::Candidate { .. })
     }
 
+    /// Returns the exact retained byte length observed for this journal.
+    #[must_use]
+    pub const fn byte_len(&self) -> u64 {
+        self.byte_length as u64
+    }
+
+    /// Returns whether this is a physically empty, complete candidate file.
+    #[must_use]
+    pub fn is_physically_empty_candidate(&self) -> bool {
+        matches!(&self.phase, FileJournalPhase::Candidate { .. })
+            && !self.poisoned
+            && self.byte_length == 0
+            && self.records.is_empty()
+            && self.torn_prefix.is_none()
+            && self.tail_issue.is_none()
+    }
+
+    /// Returns whether this candidate contains one complete Intent and no tail.
+    #[must_use]
+    pub fn is_complete_intent_candidate(&self) -> bool {
+        matches!(&self.phase, FileJournalPhase::Candidate { .. })
+            && !self.poisoned
+            && self.byte_length > 0
+            && matches!(self.records.as_slice(), [JournalRecord::Intent { .. }])
+            && self.torn_prefix.is_none()
+            && self.tail_issue.is_none()
+    }
+
+    /// Copies the exact retained journal bytes into a newly created destination.
+    ///
+    /// The source path is never reopened. The append cursor is restored on
+    /// every path; failure to restore it poisons this capability so later
+    /// mutation remains fail closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the retained bytes cannot be read exactly, the
+    /// destination exists or cannot be synced, or the append cursor cannot be
+    /// restored.
+    pub fn copy_exact_to_new(&mut self, destination: &Path) -> io::Result<u64> {
+        let original = self.file.stream_position()?;
+        let expected = self.byte_length as u64;
+        if original != expected {
+            self.poisoned = true;
+            return Err(io::Error::other(
+                "journal append cursor was not at the retained end of file",
+            ));
+        }
+        let copy = copy_retained_bytes(&mut self.file, expected, destination);
+        if let Err(error) = self.file.seek(SeekFrom::Start(original)) {
+            self.poisoned = true;
+            return Err(io::Error::other(format!(
+                "journal copy cursor restoration failed: {error}"
+            )));
+        }
+        copy
+    }
+
+    /// Marks one complete pre-activation Intent candidate for retained-handle deletion.
+    ///
+    /// This deliberately does not widen [`Self::mark_delete_if_safe`]. The
+    /// active leaf is probed relative to the retained root immediately before
+    /// setting delete disposition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless this is one complete Intent-only candidate, the
+    /// active leaf is absent, and retained-handle deletion succeeds.
+    pub fn mark_unactivated_intent_delete(&mut self) -> Result<(), FileJournalError> {
+        let FileJournalPhase::Candidate {
+            active_path,
+            active_leaf,
+        } = &self.phase
+        else {
+            return Err(unsafe_cleanup_error());
+        };
+        if !self.is_complete_intent_candidate() {
+            return Err(unsafe_cleanup_error());
+        }
+        match open_existing(&self._root, active_path, active_leaf) {
+            Ok(_active) => return Err(unsafe_cleanup_error()),
+            Err(error) if matches!(error.raw_os_error(), Some(2 | 3)) => {}
+            Err(error) => return Err(error.into()),
+        }
+        mark_retained_file_delete(&self.file)?;
+        Ok(())
+    }
+
     fn into_existing_error(self, failure: JournalOpenFailure) -> ExistingJournalOpenError {
         let path = self.path;
         let byte_len = self.byte_length as u64;
@@ -1393,7 +1471,7 @@ impl FileJournal {
                         || self.is_terminal()
                             && replay_journal(&self.records) == RecoveryState::Clean
                 }
-                FileJournalPhase::Candidate { .. } => self.records.is_empty(),
+                FileJournalPhase::Candidate { .. } => self.is_physically_empty_candidate(),
                 FileJournalPhase::PromotionUncertain => false,
             };
         if !safe {
@@ -1507,6 +1585,50 @@ impl FileJournal {
         authorization.generation = self.generation;
         Ok(())
     }
+}
+
+fn unsafe_cleanup_error() -> FileJournalError {
+    FileJournalError {
+        kind: FileJournalErrorKind::UnsafeCleanupState,
+        os_code: None,
+    }
+}
+
+fn copy_retained_bytes(file: &mut File, byte_len: u64, destination: &Path) -> io::Result<u64> {
+    if byte_len > MAX_JOURNAL_FILE_BYTES as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "retained journal exceeds the bounded copy limit",
+        ));
+    }
+    let expected =
+        usize::try_from(byte_len).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    file.seek(SeekFrom::Start(0))?;
+    let mut bytes = Vec::with_capacity(expected);
+    Read::by_ref(file)
+        .take(byte_len.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "retained journal changed length",
+        ));
+    }
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    let copy_result = output
+        .write_all(&bytes)
+        .and_then(|()| output.flush())
+        .and_then(|()| output.sync_all());
+    drop(output);
+    if let Err(error) = copy_result {
+        return Err(io::Error::other(format!(
+            "journal copy failed ({error}); partial destination was retained"
+        )));
+    }
+    Ok(byte_len)
 }
 
 impl JournalStore for FileJournal {

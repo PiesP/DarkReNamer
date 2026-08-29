@@ -5,8 +5,18 @@ pub(super) struct SafeRuntime {
     pub(super) active_journal: Option<FileJournal>,
     pub(super) staged_journal: Option<FileJournal>,
     pub(super) blocked_journals: Vec<StartupJournalBlock>,
+    pub(super) collision_observed: bool,
     pub(super) recovery_locked: bool,
     pub(super) status: Option<String>,
+    // Fields drop in declaration order. Keep the instance lock last so every
+    // retained journal capability closes before another process can start.
+    pub(super) runtime_lock: fs::File,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum JournalRole {
+    Active,
+    Candidate,
 }
 
 pub(super) struct JournalCleanup {
@@ -16,32 +26,50 @@ pub(super) struct JournalCleanup {
 
 #[derive(Debug)]
 pub(super) enum StartupJournalBlock {
-    Evidence(RecoveryJournalEvidence),
+    Evidence {
+        role: JournalRole,
+        evidence: RecoveryJournalEvidence,
+    },
     Unavailable {
+        role: JournalRole,
         path: PathBuf,
         failure: JournalOpenFailure,
     },
 }
 
 impl StartupJournalBlock {
-    fn from_open_error(error: ExistingJournalOpenError) -> Option<Self> {
+    pub(super) fn from_open_error(
+        role: JournalRole,
+        error: ExistingJournalOpenError,
+    ) -> Option<Self> {
         if error.is_not_found() {
             return None;
         }
         let path = error.path().to_path_buf();
         let failure = error.failure();
         Some(match error.into_evidence() {
-            Some(evidence) => Self::Evidence(evidence),
-            None => Self::Unavailable { path, failure },
+            Some(evidence) => Self::Evidence { role, evidence },
+            None => Self::Unavailable {
+                role,
+                path,
+                failure,
+            },
         })
     }
 
-    fn status_korean(&self) -> String {
+    pub(super) const fn role(&self) -> JournalRole {
         match self {
-            Self::Evidence(evidence) => {
+            Self::Evidence { role, .. } | Self::Unavailable { role, .. } => *role,
+        }
+    }
+
+    pub(super) fn status_korean(&self) -> String {
+        match self {
+            Self::Evidence { role, evidence } => {
                 let failure = evidence.failure();
                 format!(
-                    "저널을 복구용으로 해석하지 못해 원본 핸들을 보존했습니다: {} (단계 {:?}, 오류 {:?}, OS {:?}, frame {:?}, {} bytes). 자동 삭제하지 않았으며 새 적용은 잠겼습니다.",
+                    "{:?} 저널을 복구용으로 해석하지 못해 원본 핸들을 보존했습니다: {} (단계 {:?}, 오류 {:?}, OS {:?}, frame {:?}, {} bytes). 자동 삭제하지 않았으며 새 적용은 잠겼습니다.",
+                    role,
                     evidence.path().display(),
                     failure.stage,
                     failure.kind,
@@ -50,8 +78,12 @@ impl StartupJournalBlock {
                     evidence.byte_len(),
                 )
             }
-            Self::Unavailable { path, failure } => format!(
-                "저널을 열 수 없어 원본 핸들을 보존하지 못했습니다: {} (단계 {:?}, 오류 {:?}, OS {:?}). 경로를 다시 열어 복사하지 않으며 새 적용은 잠겼습니다.",
+            Self::Unavailable {
+                role,
+                path,
+                failure,
+            } => format!(
+                "{role:?} 저널을 열 수 없어 원본 핸들을 보존하지 못했습니다: {} (단계 {:?}, 오류 {:?}, OS {:?}). 경로를 다시 열어 복사하지 않으며 새 적용은 잠겼습니다.",
                 path.display(),
                 failure.stage,
                 failure.kind,
@@ -62,7 +94,14 @@ impl StartupJournalBlock {
 
     pub(super) fn evidence_mut(&mut self) -> Option<&mut RecoveryJournalEvidence> {
         match self {
-            Self::Evidence(evidence) => Some(evidence),
+            Self::Evidence { evidence, .. } => Some(evidence),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
+    pub(super) fn evidence(&self) -> Option<&RecoveryJournalEvidence> {
+        match self {
+            Self::Evidence { evidence, .. } => Some(evidence),
             Self::Unavailable { .. } => None,
         }
     }
@@ -89,38 +128,103 @@ pub(super) fn initialize_safe_runtime_at(local_app_data: &Path) -> io::Result<Sa
         fs::create_dir(&root_path)?;
     }
     let root = JournalRoot::open(&root_path).map_err(io::Error::other)?;
+    let runtime_lock = root.acquire_runtime_lock("runtime.lock").map_err(|error| {
+        io::Error::other(format!(
+            "다른 DarkReNamer 인스턴스가 실행 중이거나 runtime lock을 확보할 수 없습니다: {error}"
+        ))
+    })?;
     let mut blocked_journals = Vec::new();
     let active_journal = match FileJournal::open_existing_retained(&root, ACTIVE_JOURNAL_LEAF) {
         Ok(journal) => Some(journal),
         Err(error) => {
-            if let Some(blocked) = StartupJournalBlock::from_open_error(error) {
+            if let Some(blocked) = StartupJournalBlock::from_open_error(JournalRole::Active, error)
+            {
                 blocked_journals.push(blocked);
             }
             None
         }
     };
-    let staged_journal = match FileJournal::open_candidate_existing_retained(
+    let mut staged_journal = match FileJournal::open_candidate_existing_retained(
         &root,
         CANDIDATE_JOURNAL_LEAF,
         ACTIVE_JOURNAL_LEAF,
     ) {
         Ok(journal) => Some(journal),
         Err(error) => {
-            if let Some(blocked) = StartupJournalBlock::from_open_error(error) {
+            if let Some(blocked) =
+                StartupJournalBlock::from_open_error(JournalRole::Candidate, error)
+            {
                 blocked_journals.push(blocked);
             }
             None
         }
     };
+    let active_observed = active_journal.is_some()
+        || blocked_journals
+            .iter()
+            .any(|blocked| blocked.role() == JournalRole::Active);
+    let candidate_observed = staged_journal.is_some()
+        || blocked_journals
+            .iter()
+            .any(|blocked| blocked.role() == JournalRole::Candidate);
+    if active_observed && candidate_observed {
+        let mut status = "active 저널과 candidate 저널을 동시에 발견했습니다. 자동 복구와 폐기를 중단하고 두 상태를 보존합니다.".to_owned();
+        if let Some(journal) = active_journal.as_ref() {
+            status.push_str(&format!(
+                " Active 저널: {} ({} bytes).",
+                journal.path().display(),
+                journal.byte_len()
+            ));
+        }
+        append_blocked_status(&mut status, &blocked_journals);
+        append_staged_status(&mut status, staged_journal.as_ref());
+        return Ok(SafeRuntime {
+            root,
+            runtime_lock,
+            active_journal,
+            staged_journal,
+            blocked_journals,
+            collision_observed: true,
+            recovery_locked: true,
+            status: Some(status),
+        });
+    }
+    if staged_journal
+        .as_ref()
+        .is_some_and(FileJournal::is_physically_empty_candidate)
+    {
+        let Some(mut empty) = staged_journal.take() else {
+            return Err(io::Error::other("empty candidate state was lost"));
+        };
+        if let Err(error) = empty.mark_delete_if_safe() {
+            staged_journal = Some(empty);
+            let status = format!(
+                "빈 candidate 저널을 정리하지 못해 보존했습니다: {error}. 새 적용은 잠겼습니다."
+            );
+            return Ok(SafeRuntime {
+                root,
+                runtime_lock,
+                active_journal: None,
+                staged_journal,
+                blocked_journals,
+                collision_observed: false,
+                recovery_locked: true,
+                status: Some(status),
+            });
+        }
+        drop(empty);
+    }
     if active_journal.is_none() {
         let has_staged = staged_journal.is_some();
         let status = startup_locked_status(staged_journal.as_ref(), &blocked_journals);
         let recovery_locked = has_staged || !blocked_journals.is_empty();
         return Ok(SafeRuntime {
             root,
+            runtime_lock,
             active_journal: None,
             staged_journal,
             blocked_journals,
+            collision_observed: false,
             recovery_locked,
             status,
         });
@@ -147,6 +251,7 @@ pub(super) fn initialize_safe_runtime_at(local_app_data: &Path) -> io::Result<Sa
             append_blocked_status(&mut status, &blocked_journals);
             Ok(SafeRuntime {
                 root,
+                runtime_lock,
                 recovery_locked: cleanup_failed
                     || cleanup.retained.is_some()
                     || staged_journal.is_some()
@@ -154,6 +259,7 @@ pub(super) fn initialize_safe_runtime_at(local_app_data: &Path) -> io::Result<Sa
                 active_journal: cleanup.retained,
                 staged_journal,
                 blocked_journals,
+                collision_observed: false,
                 status: Some(status),
             })
         }
@@ -165,9 +271,11 @@ pub(super) fn initialize_safe_runtime_at(local_app_data: &Path) -> io::Result<Sa
             let status = status_with_blocked_journals(status, &blocked_journals);
             Ok(SafeRuntime {
                 root,
+                runtime_lock,
                 active_journal: Some(journal),
                 staged_journal,
                 blocked_journals,
+                collision_observed: false,
                 recovery_locked: true,
                 status: Some(status),
             })
@@ -180,9 +288,11 @@ pub(super) fn initialize_safe_runtime_at(local_app_data: &Path) -> io::Result<Sa
             let status = status_with_blocked_journals(status, &blocked_journals);
             Ok(SafeRuntime {
                 root,
+                runtime_lock,
                 active_journal: Some(journal),
                 staged_journal,
                 blocked_journals,
+                collision_observed: false,
                 recovery_locked: true,
                 status: Some(status),
             })

@@ -217,6 +217,134 @@ fn corrupt_existing_journal_retains_exact_handle_for_bounded_copy()
 }
 
 #[test]
+fn valid_file_journal_exports_exact_bytes_and_restores_append_cursor()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let Some(root) = supported_journal_root(directory.path())? else {
+        return Ok(());
+    };
+    let source = directory.path().join("active.drj");
+    let copied = directory.path().join("active.drj.retained");
+    let plan = PlanId::from_fingerprint(91);
+    let steps = vec![step(
+        0,
+        LegacyText::from("C:\\work\\a.txt"),
+        LegacyText::from("C:\\work\\b.txt"),
+    )];
+    let mut journal = FileJournal::create_new(&root, "active.drj")?;
+    journal.begin(plan, &steps)?;
+    let expected = fs::read(&source)?;
+
+    assert_eq!(journal.copy_exact_to_new(&copied)?, expected.len() as u64);
+    assert_eq!(fs::read(&copied)?, expected);
+
+    journal.prepared(0, JournalDirection::Forward)?;
+    let records = decode_journal_records(&fs::read(source)?)?;
+    assert!(matches!(
+        records.as_slice(),
+        [
+            JournalRecord::Intent { .. },
+            JournalRecord::Prepared { step: 0, .. }
+        ]
+    ));
+    Ok(())
+}
+
+#[test]
+fn torn_candidates_are_neither_physically_empty_nor_complete_intent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let Some(root) = supported_journal_root(directory.path())? else {
+        return Ok(());
+    };
+    let intent = JournalRecord::Intent {
+        plan: PlanId::from_fingerprint(92),
+        steps: vec![step(
+            0,
+            LegacyText::from("C:\\work\\a.txt"),
+            LegacyText::from("C:\\work\\b.txt"),
+        )]
+        .into_boxed_slice(),
+    };
+    let intent_bytes = encode_journal_records(std::slice::from_ref(&intent))?;
+    let candidate = directory.path().join("candidate.drj");
+
+    fs::write(&candidate, &intent_bytes[..8])?;
+    let partial_intent =
+        FileJournal::open_candidate_existing_retained(&root, "candidate.drj", "active.drj")
+            .err()
+            .ok_or_else(|| std::io::Error::other("partial Intent candidate was accepted"))?;
+    assert_eq!(
+        partial_intent.failure().kind,
+        FileJournalErrorKind::Codec(JournalCodecErrorKind::TruncatedFrame)
+    );
+    assert!(partial_intent.into_evidence().is_some());
+
+    fs::remove_file(&candidate)?;
+    let records = vec![
+        intent,
+        JournalRecord::Prepared {
+            step: 0,
+            direction: JournalDirection::Forward,
+        },
+    ];
+    let intent_and_prepared = encode_journal_records(&records)?;
+    fs::write(
+        &candidate,
+        &intent_and_prepared[..intent_bytes.len().saturating_add(8)],
+    )?;
+    let mut partial_prepared =
+        FileJournal::open_candidate_existing(&root, "candidate.drj", "active.drj")?;
+    assert!(matches!(
+        partial_prepared.records(),
+        [JournalRecord::Intent { .. }]
+    ));
+    assert!(partial_prepared.tail_issue().is_some());
+    assert!(!partial_prepared.is_physically_empty_candidate());
+    assert!(!partial_prepared.is_complete_intent_candidate());
+    assert!(matches!(
+        partial_prepared.mark_delete_if_safe(),
+        Err(error) if error.kind == FileJournalErrorKind::UnsafeCleanupState
+    ));
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn intent_candidate_discard_requires_active_absence_and_deletes_by_retained_handle()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let root = JournalRoot::open(directory.path())?;
+    let intent = JournalRecord::Intent {
+        plan: PlanId::from_fingerprint(93),
+        steps: vec![step(
+            0,
+            LegacyText::from("C:\\work\\a.txt"),
+            LegacyText::from("C:\\work\\b.txt"),
+        )]
+        .into_boxed_slice(),
+    };
+    let bytes = encode_journal_records(&[intent])?;
+    let candidate_path = directory.path().join("candidate.drj");
+    fs::write(&candidate_path, &bytes)?;
+    let mut candidate = FileJournal::open_candidate_existing(&root, "candidate.drj", "active.drj")?;
+    let mut active = FileJournal::create_new(&root, "active.drj")?;
+
+    let blocked = candidate.mark_unactivated_intent_delete();
+    assert!(matches!(
+        blocked,
+        Err(error) if error.kind == FileJournalErrorKind::UnsafeCleanupState
+    ));
+    active.mark_delete_if_safe()?;
+    drop(active);
+
+    candidate.mark_unactivated_intent_delete()?;
+    drop(candidate);
+    assert!(!candidate_path.exists());
+    Ok(())
+}
+
+#[test]
 fn decoder_rejects_invalid_record_order() -> Result<(), Box<dyn std::error::Error>> {
     let records = vec![
         JournalRecord::Intent {
