@@ -14,7 +14,7 @@ name = "DarkReNamer"
 path = "src/main.rs"
 
 [dependencies]
-darknamer-core = { path = "../darknamer-core" }
+darknamer-core = { path = "../darknamer-core", version = "=0.1.0" }
 
 [target.'cfg(windows)'.dependencies]
 rfd = "=0.17.2"

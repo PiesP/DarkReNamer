@@ -44,8 +44,10 @@ jobs:
           fi
           tracked_docs="$(git ls-files '*.md' '*.txt' | LC_ALL=C sort)"
           expected_docs="$(printf '%s\n' \
+            DISTRIBUTION.md \
             LICENSES/DarkNamer-MIT.txt \
             README.md \
+            SAFETY.md \
             SECURITY.md \
             THIRD_PARTY_NOTICES.md \
             crates/darknamer-app/THIRD_PARTY_NOTICES.md)"
@@ -74,6 +76,27 @@ jobs:
 
       - name: Run workspace tests
         run: cargo test --workspace --all-targets --all-features --locked
+
+  security:
+    name: pr-gate/security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust security tools
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          cargo install --locked cargo-audit --version 0.22.2
+          cargo install --locked cargo-deny --version 0.20.2
+
+      - name: Audit advisories, licenses, sources, and dependency policy
+        run: |
+          cargo audit --deny warnings
+          cargo deny check
 
   windows:
     name: pr-gate/windows

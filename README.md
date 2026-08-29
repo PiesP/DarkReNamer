@@ -44,6 +44,11 @@ The current tree contains only the Rust implementation and its build metadata.
 Historical MFC source, screenshots, archives, and executables remain available
 through the fork history and upstream repository for provenance.
 
+The filesystem transaction and recovery contract is documented in
+[`SAFETY.md`](SAFETY.md). Tagged Windows prereleases, unsigned artifact status,
+checksums, SBOMs, attestations, and the future signing boundary are documented
+in [`DISTRIBUTION.md`](DISTRIBUTION.md).
+
 ## Development
 
 Run the automated gate:
