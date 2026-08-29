@@ -28,7 +28,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     DEFAULT_QUALITY, DeleteObject, FF_DONTCARE, FW_NORMAL, HFONT, OUT_DEFAULT_PRECIS, UpdateWindow,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, MoveFileW,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, MoveFileW,
 };
 use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows_sys::Win32::System::DataExchange::{
@@ -1692,7 +1692,6 @@ unsafe fn collect_path(
     };
     let attributes = metadata.file_attributes();
     let is_directory = attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
-    let is_reparse = attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
     if is_directory {
         let mode = match state.directory_mode {
             Some(mode) => mode,
@@ -1711,9 +1710,6 @@ unsafe fn collect_path(
             }
         };
         if mode == DirectoryMode::Recurse {
-            if is_reparse {
-                return;
-            }
             let Ok(read_dir) = fs::read_dir(path) else {
                 return;
             };
