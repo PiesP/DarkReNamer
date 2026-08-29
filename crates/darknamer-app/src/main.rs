@@ -13,7 +13,7 @@ fn show_fatal_error(message: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW;
 
     let message = message.encode_utf16().chain([0]).collect::<Vec<_>>();
-    let caption = "DarkNamer - 시작 실패"
+    let caption = "DarkReNamer - 시작 실패"
         .encode_utf16()
         .chain([0])
         .collect::<Vec<_>>();
@@ -24,5 +24,5 @@ fn show_fatal_error(message: &str) {
 
 #[cfg(not(windows))]
 fn show_fatal_error(message: &str) {
-    eprintln!("DarkNamer: {message}");
+    eprintln!("DarkReNamer: {message}");
 }

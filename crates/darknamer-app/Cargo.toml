@@ -10,7 +10,7 @@ repository.workspace = true
 publish = false
 
 [[bin]]
-name = "DarkNamer"
+name = "DarkReNamer"
 path = "src/main.rs"
 
 [dependencies]

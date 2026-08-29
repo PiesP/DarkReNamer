@@ -21,10 +21,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let output = PathBuf::from(env::var_os("OUT_DIR").ok_or("Cargo did not provide OUT_DIR")?);
-    let icon = output.join("DarkNamer.ico");
+    let icon = output.join("DarkReNamer.ico");
     let toolbar1 = output.join("toolbar1.bmp");
     let toolbar2 = output.join("toolbar2.bmp");
-    let resource = output.join("DarkNamer.rc");
+    let resource = output.join("DarkReNamer.rc");
+    let package_version = env::var("CARGO_PKG_VERSION")?;
+    let version_numbers = [
+        env::var("CARGO_PKG_VERSION_MAJOR")?.parse::<u16>()?,
+        env::var("CARGO_PKG_VERSION_MINOR")?.parse::<u16>()?,
+        env::var("CARGO_PKG_VERSION_PATCH")?.parse::<u16>()?,
+        0,
+    ];
     let bytes = base64::engine::general_purpose::STANDARD.decode(ICON_BASE64)?;
     fs::write(&icon, bytes)?;
     fs::write(
@@ -37,7 +44,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     fs::write(
         &resource,
-        resource_script::render(&icon, &toolbar1, &toolbar2),
+        resource_script::render(
+            &icon,
+            &toolbar1,
+            &toolbar2,
+            &package_version,
+            version_numbers,
+        ),
     )?;
     embed_resource::compile(resource, embed_resource::NONE).manifest_optional()?;
     Ok(())

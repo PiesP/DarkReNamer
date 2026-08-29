@@ -103,5 +103,5 @@ jobs:
       - name: Build the compatibility executable
         shell: pwsh
         run: |
-          cargo build --release --locked --package darknamer-app --bin DarkNamer
+          cargo build --release --locked --package darknamer-app --bin DarkReNamer
           if ($LASTEXITCODE -ne 0) { throw 'The Windows release build failed.' }

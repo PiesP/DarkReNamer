@@ -25,6 +25,19 @@ pub const TOOLBAR_BUTTON_HEIGHT: i32 = 30;
 pub const TOOLBAR_SEPARATOR_SIZE: i32 = 8;
 /// Height of the bottom status bar.
 pub const STATUS_HEIGHT: i32 = 18;
+/// Public product name used by the executable and user-facing diagnostics.
+pub const PRODUCT_NAME: &str = "DarkReNamer";
+/// Upstream behavior version targeted by compatibility mode.
+pub const COMPATIBILITY_TARGET: &str = "DarkNamer 08.02.10";
+
+/// Returns the product identity shown by the native About command.
+#[must_use]
+pub fn about_text() -> String {
+    format!(
+        "{PRODUCT_NAME} {}\n호환 대상: {COMPATIBILITY_TARGET}\n비공식 커뮤니티 관리 Rust 포트",
+        env!("CARGO_PKG_VERSION")
+    )
+}
 
 /// Native command identifier.
 pub type CommandId = u16;
@@ -267,7 +280,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     #[cfg(not(windows))]
     {
-        Err("DarkNamer is available only on Windows".into())
+        Err("DarkReNamer is available only on Windows".into())
     }
 }
 
@@ -314,6 +327,14 @@ mod tests {
             VERSION,
         ];
         assert_eq!(ids, core::array::from_fn(|index| 0x8003 + index as u16));
+    }
+
+    #[test]
+    fn about_text_separates_product_version_from_compatibility_target() {
+        let text = about_text();
+        assert!(text.contains(concat!("DarkReNamer ", env!("CARGO_PKG_VERSION"))));
+        assert!(text.contains("호환 대상: DarkNamer 08.02.10"));
+        assert!(text.contains("비공식"));
     }
 
     #[test]

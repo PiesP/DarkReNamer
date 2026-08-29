@@ -301,7 +301,7 @@ fn run_unsafe() -> io::Result<()> {
     if instance.is_null() {
         return Err(io::Error::last_os_error());
     }
-    let class_name = wide("DarkNamerLegacyWindow");
+    let class_name = wide("DarkReNamerWindow");
     // SAFETY: instance is the current live module and int_resource encodes the linked APP_ICON resource.
     let icon = unsafe { LoadIconW(instance, int_resource(resource_ids::APP_ICON)) };
     let window_class = WNDCLASSEXW {
@@ -323,7 +323,7 @@ fn run_unsafe() -> io::Result<()> {
     if unsafe { RegisterClassExW(&window_class) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    let title = wide("DarkNamer");
+    let title = wide("DarkReNamer");
     let runtime = initialize_safe_runtime()?;
     let state = Box::into_raw(Box::new(AppState::new(runtime)));
     let mut adopted = false;
@@ -902,7 +902,7 @@ impl Drop for OwnerEnableGuard {
 fn prompt_input(owner: HWND, spec: PromptSpec) -> io::Result<Option<PromptResult>> {
     // SAFETY: A null module name requests the current process module and dereferences no caller memory.
     let instance = unsafe { GetModuleHandleW(null()) };
-    let class_name = wide("DarkNamerInputWindow");
+    let class_name = wide("DarkReNamerInputWindow");
     let caption = wide("입력창");
     let class = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
@@ -1004,7 +1004,7 @@ fn prompt_input_or_report(owner: HWND, spec: PromptSpec) -> Option<PromptResult>
                     "입력창을 처리하지 못했습니다. OS {:?}",
                     error.raw_os_error()
                 ),
-                "DarkNamer",
+                "DarkReNamer",
             );
             None
         }
@@ -1577,7 +1577,7 @@ fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
         UNIFY_PATH => message(
             window,
             safe_mode_unify_path_message(),
-            "DarkNamer - Safe 모드",
+            "DarkReNamer - Safe 모드",
         ),
         ADD_FILES => add_files_dialog(window, state),
         COPY_NAMES => copy_clipboard(window, &state.model.export_names()),
@@ -1591,7 +1591,7 @@ fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
             state.shown_columns[index] = !state.shown_columns[index];
             update_column_visibility(state, index);
         }
-        VERSION => message(window, "DarkNamer 08.02.10 버전", "DarkNamer"),
+        VERSION => message(window, &super::about_text(), "DarkReNamer 정보"),
         // SAFETY: window is the live top-level HWND owned by this UI thread and
         // command 2 destroys it exactly once on this dispatch path.
         2 => unsafe {
@@ -1676,7 +1676,7 @@ fn pad_digits_command(window: HWND, state: &mut AppState) {
     };
     let width = legacy_atoi(&result.value_one);
     if width <= 0 {
-        message(window, "자리수 입력이 잘못되었습니다.", "DarkNamer");
+        message(window, "자리수 입력이 잘못되었습니다.", "DarkReNamer");
         return;
     }
     let outcome = if result.choice == 0 {
@@ -1685,7 +1685,7 @@ fn pad_digits_command(window: HWND, state: &mut AppState) {
         state.model.pad_first_digit_run(width as usize)
     };
     if outcome.is_err() {
-        message(window, "자리수 입력이 잘못되었습니다.", "DarkNamer");
+        message(window, "자리수 입력이 잘못되었습니다.", "DarkReNamer");
     }
 }
 
@@ -1712,7 +1712,7 @@ fn sequence_command(window: HWND, state: &mut AppState) {
     };
     let width = legacy_atoi(&result.value_one);
     if width <= 0 {
-        message(window, "자리수 입력이 잘못되었습니다.", "DarkNamer");
+        message(window, "자리수 입력이 잘못되었습니다.", "DarkReNamer");
         return;
     }
     let mode = match result.choice {
@@ -1751,19 +1751,19 @@ fn delete_position_command(window: HWND, state: &mut AppState) {
         message(
             window,
             "음수값이나 잘못된 값이 입력되었습니다.",
-            "DarkNamer",
+            "DarkReNamer",
         );
         return;
     }
     if result.choice == 0 && end > 0 && start > end {
-        message(window, "시작점이 끝점보다 뒤에 있습니다.", "DarkNamer");
+        message(window, "시작점이 끝점보다 뒤에 있습니다.", "DarkReNamer");
         return;
     }
     if result.choice == 1 && start != 0 {
         message(
             window,
             "맨 뒤에서부터 삭제할때는 '~까지'만 필요합니다.",
-            "DarkNamer",
+            "DarkReNamer",
         );
         return;
     }
@@ -1798,7 +1798,7 @@ fn delete_delimited_command(window: HWND, state: &mut AppState) {
         message(
             window,
             "시작/끝 문자가 정확하게 지정되지 않았습니다.",
-            "DarkNamer",
+            "DarkReNamer",
         );
     }
 }
@@ -1871,7 +1871,7 @@ fn apply_changes(window: HWND, state: &mut AppState) {
         message(
             window,
             "복구 또는 다른 변경이 진행 중이어서 적용할 수 없습니다.",
-            "DarkNamer",
+            "DarkReNamer",
         );
         return;
     }
@@ -1885,13 +1885,13 @@ fn apply_changes(window: HWND, state: &mut AppState) {
             {
                 clear_selection(state.list_window);
                 select_rows(state.list_window, &rows);
-                message(window, &message_text, "DarkNamer - 적용 차단");
+                message(window, &message_text, "DarkReNamer - 적용 차단");
             }
             return;
         }
     };
     if plan.is_empty() {
-        message(window, "변경할 항목이 없습니다.", "DarkNamer");
+        message(window, "변경할 항목이 없습니다.", "DarkReNamer");
         return;
     }
     let confirmation = format!(
@@ -1901,7 +1901,7 @@ fn apply_changes(window: HWND, state: &mut AppState) {
         state.model_revision,
     );
     let prompt = wide(&confirmation);
-    let caption = wide("DarkNamer - 안전한 적용 확인");
+    let caption = wide("DarkReNamer - 안전한 적용 확인");
     // SAFETY: window is the live application HWND and prompt/caption are owned
     // NUL-terminated UTF-16 buffers retained through the modal MessageBoxW call.
     if unsafe { MessageBoxW(window, prompt.as_ptr(), caption.as_ptr(), MB_OKCANCEL) } != IDOK {
@@ -1912,7 +1912,7 @@ fn apply_changes(window: HWND, state: &mut AppState) {
             message(
                 window,
                 "확인 후 목록이 변경되었습니다. 다시 계획하고 확인해 주세요.",
-                "DarkNamer",
+                "DarkReNamer",
             )
         }
         return;
@@ -1922,7 +1922,7 @@ fn apply_changes(window: HWND, state: &mut AppState) {
     let confirmed = match plan.confirm_presented(id, plan_revision) {
         Ok(confirmed) => confirmed,
         Err(error) => {
-            message(window, &error.to_string(), "DarkNamer");
+            message(window, &error.to_string(), "DarkReNamer");
             return;
         }
     };
@@ -1936,7 +1936,7 @@ fn apply_changes(window: HWND, state: &mut AppState) {
                     "활성 저널을 만들지 못했습니다. {:?}, OS {:?}",
                     error.kind, error.os_code
                 ),
-                "DarkNamer - 적용 잠김",
+                "DarkReNamer - 적용 잠김",
             );
             return;
         }
@@ -1957,10 +1957,10 @@ fn apply_changes(window: HWND, state: &mut AppState) {
                 message(
                     window,
                     &cleanup_error.to_string(),
-                    "DarkNamer - 저널 정리 실패",
+                    "DarkReNamer - 저널 정리 실패",
                 );
             }
-            message(window, &text, "DarkNamer - 실행 거부");
+            message(window, &text, "DarkReNamer - 실행 거부");
             update_controls(state);
             return;
         }
@@ -1975,7 +1975,7 @@ fn apply_changes(window: HWND, state: &mut AppState) {
                 message(
                     window,
                     "완료 결과를 목록과 일치시키지 못했습니다. 저널을 보존하고 적용을 잠급니다.",
-                    "DarkNamer - 확인 필요",
+                    "DarkReNamer - 확인 필요",
                 );
                 update_controls(state);
                 return;
@@ -1984,7 +1984,7 @@ fn apply_changes(window: HWND, state: &mut AppState) {
             state.recovery_locked = cleanup.error.is_some() || cleanup.retained.is_some();
             state.active_journal = cleanup.retained;
             if let Some(error) = cleanup.error {
-                message(window, &error.to_string(), "DarkNamer - 저널 정리 실패");
+                message(window, &error.to_string(), "DarkReNamer - 저널 정리 실패");
             }
         }
         ExecutionOutcome::RolledBack { .. } => {
@@ -1992,7 +1992,7 @@ fn apply_changes(window: HWND, state: &mut AppState) {
             state.recovery_locked = cleanup.error.is_some() || cleanup.retained.is_some();
             state.active_journal = cleanup.retained;
             if let Some(error) = cleanup.error {
-                message(window, &error.to_string(), "DarkNamer - 저널 정리 실패");
+                message(window, &error.to_string(), "DarkReNamer - 저널 정리 실패");
             }
         }
         ExecutionOutcome::RecoveryRequired { .. } => {
@@ -2001,7 +2001,7 @@ fn apply_changes(window: HWND, state: &mut AppState) {
         }
     }
     {
-        message(window, &text, "DarkNamer");
+        message(window, &text, "DarkReNamer");
         update_controls(state);
     }
 }
@@ -2047,7 +2047,7 @@ fn admit_drop(owner: HWND, state: &mut AppState, drop: HDROP) {
         message(
             owner,
             "선택 항목이 남은 10,000개 한도를 초과해 제한된 수만 처리합니다.",
-            "DarkNamer - 추가 한도",
+            "DarkReNamer - 추가 한도",
         );
     }
     set_status(state.status, "처리중...");
@@ -2107,7 +2107,7 @@ fn admit_paths(owner: HWND, state: &mut AppState, paths: Vec<PathBuf>) {
     let summary = report.summary_korean(appended);
     set_status(state.status, &summary);
     if !report.issues.is_empty() {
-        message(owner, &summary, "DarkNamer - 일부 경로 제외");
+        message(owner, &summary, "DarkReNamer - 일부 경로 제외");
     }
 }
 
@@ -2215,7 +2215,7 @@ fn import_names_dialog(owner: HWND, state: &mut AppState) {
         Err(error) => message(
             owner,
             &format!("가져오기 파일을 읽지 못했습니다: {error}"),
-            "DarkNamer",
+            "DarkReNamer",
         ),
     }
 }
@@ -2236,7 +2236,7 @@ fn import_paths_dialog(owner: HWND, state: &mut AppState) {
             message(
                 owner,
                 &format!("경로 목록을 읽지 못했습니다: {error}"),
-                "DarkNamer",
+                "DarkReNamer",
             );
             return;
         }
@@ -2248,7 +2248,7 @@ fn import_paths_dialog(owner: HWND, state: &mut AppState) {
         message(
             owner,
             "경로 목록이 남은 10,000개 한도를 초과해 제한된 수만 처리합니다.",
-            "DarkNamer - 가져오기 한도",
+            "DarkReNamer - 가져오기 한도",
         );
     }
     let paths = lines
