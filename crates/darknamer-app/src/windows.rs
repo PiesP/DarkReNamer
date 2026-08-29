@@ -3,17 +3,23 @@
     reason = "all unsafe operations are confined to this Win32 boundary; entry-point invariants are documented"
 )]
 
+use std::collections::HashMap;
 use std::env;
 use std::ffi::c_void;
 use std::fs;
 use std::io;
 use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::slice;
 
+use crate::admission::{
+    AdmissionAdapter, AdmissionMode, MAX_ADMITTED_SOURCES, MAX_IMPORT_BYTES,
+    WindowsAdmissionAdapter, bounded_import_lines, bounded_selection, collect_admission,
+    read_bounded_import,
+};
+use crate::icon_cache::{IconCacheKey, icon_cache_key};
 use crate::rename::{
     ExecutionOutcome, FileJournal, JournalCleanupDecision, JournalRoot, ModelRevision,
     RecoveryOutcome, RenameExecutor, RenamePlanner, RenameRecovery, WindowsRenameBackend,
@@ -36,7 +42,8 @@ use windows_sys::Win32::Globalization::{
 };
 use windows_sys::Win32::Graphics::Gdi::{
     CLIP_DEFAULT_PRECIS, COLOR_WINDOW, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH,
-    DEFAULT_QUALITY, DeleteObject, FF_DONTCARE, FW_NORMAL, HFONT, OUT_DEFAULT_PRECIS, UpdateWindow,
+    DEFAULT_QUALITY, DeleteObject, FF_DONTCARE, FW_NORMAL, HFONT, OUT_DEFAULT_PRECIS,
+    RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RedrawWindow, UpdateWindow,
 };
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
@@ -56,11 +63,12 @@ use windows_sys::Win32::UI::Controls::{
     LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW,
     LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
     LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE,
-    LVM_SETITEMTEXTW, LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_FULLROWSELECT,
-    LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_DBLCLK,
-    NMHDR, NMLISTVIEW, TB_ADDBITMAP, TB_ADDBUTTONS, TB_BUTTONSTRUCTSIZE, TB_ENABLEBUTTON,
-    TB_SETBITMAPSIZE, TB_SETBUTTONSIZE, TBADDBITMAP, TBBUTTON, TBSTATE_ENABLED, TBSTYLE_BUTTON,
-    TBSTYLE_FLAT, TBSTYLE_SEP, TBSTYLE_TOOLTIPS, TBSTYLE_WRAPABLE, TOOLBARCLASSNAMEW,
+    LVM_SETITEMTEXTW, LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER,
+    LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS,
+    LVSIL_SMALL, NM_DBLCLK, NMHDR, NMLISTVIEW, TB_ADDBITMAP, TB_ADDBUTTONS, TB_BUTTONSTRUCTSIZE,
+    TB_ENABLEBUTTON, TB_SETBITMAPSIZE, TB_SETBUTTONSIZE, TBADDBITMAP, TBBUTTON, TBSTATE_ENABLED,
+    TBSTYLE_BUTTON, TBSTYLE_FLAT, TBSTYLE_SEP, TBSTYLE_TOOLTIPS, TBSTYLE_WRAPABLE,
+    TOOLBARCLASSNAMEW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetKeyState, SetFocus, VK_CONTROL, VK_DELETE, VK_ESCAPE, VK_SHIFT,
@@ -80,9 +88,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     MessageBoxW, MoveWindow, PostQuitMessage, RegisterClassExW, SW_SHOW, SendMessageW,
     SetForegroundWindow, SetMenu, SetWindowLongPtrW, ShowWindow, TranslateMessage, WM_CLOSE,
     WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN, WM_KEYUP, WM_NCCREATE,
-    WM_NCDESTROY, WM_NOTIFY, WM_SETFONT, WM_SIZE, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD,
-    WS_CLIPCHILDREN, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
-    WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    WM_NCDESTROY, WM_NOTIFY, WM_SETFONT, WM_SETREDRAW, WM_SIZE, WNDCLASSEXW, WS_BORDER, WS_CAPTION,
+    WS_CHILD, WS_CLIPCHILDREN, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP,
+    WS_VISIBLE,
 };
 
 use crate::*;
@@ -110,6 +119,7 @@ struct AppState {
     journal_root: JournalRoot,
     active_journal: Option<FileJournal>,
     startup_status: Option<String>,
+    icon_cache: HashMap<IconCacheKey, i32>,
 }
 
 struct WindowInit {
@@ -136,6 +146,7 @@ impl AppState {
             journal_root: runtime.root,
             active_journal: runtime.active_journal,
             startup_status: runtime.status,
+            icon_cache: HashMap::new(),
         }
     }
 
@@ -524,7 +535,7 @@ unsafe fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> 
             state.list_window,
             LVM_SETEXTENDEDLISTVIEWSTYLE,
             0,
-            LVS_EX_FULLROWSELECT as isize,
+            (LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER) as isize,
         );
         for (index, column) in COLUMNS.iter().enumerate() {
             let mut text = wide(column.label);
@@ -1909,9 +1920,12 @@ unsafe fn clear_selection(list: HWND) {
 
 unsafe fn admit_drop(owner: HWND, state: &mut AppState, drop: HDROP) {
     // SAFETY: drop is a valid HDROP for the duration of WM_DROPFILES handling.
-    let count = unsafe { DragQueryFileW(drop, u32::MAX, null_mut(), 0) };
-    let mut paths = Vec::new();
-    for index in 0..count {
+    let reported = unsafe { DragQueryFileW(drop, u32::MAX, null_mut(), 0) } as usize;
+    let remaining = MAX_ADMITTED_SOURCES.saturating_sub(state.model.len());
+    let bounded = bounded_selection(reported, remaining);
+    let mut paths = Vec::with_capacity(bounded.take);
+    for index in 0..bounded.take {
+        let index = u32::try_from(index).unwrap_or(u32::MAX);
         let length = unsafe { DragQueryFileW(drop, index, null_mut(), 0) };
         let mut buffer = vec![0; length as usize + 1];
         unsafe { DragQueryFileW(drop, index, buffer.as_mut_ptr(), buffer.len() as u32) };
@@ -1919,6 +1933,15 @@ unsafe fn admit_drop(owner: HWND, state: &mut AppState, drop: HDROP) {
         paths.push(PathBuf::from(std::ffi::OsString::from_wide(&buffer)));
     }
     unsafe { DragFinish(drop) };
+    if bounded.truncated {
+        unsafe {
+            message(
+                owner,
+                "선택 항목이 남은 10,000개 한도를 초과해 제한된 수만 처리합니다.",
+                "DarkNamer - 추가 한도",
+            )
+        };
+    }
     unsafe { set_status(state.status, "처리중...") };
     state.directory_mode = None;
     unsafe { admit_paths(owner, state, paths) };
@@ -1940,68 +1963,42 @@ unsafe fn add_files_dialog(owner: HWND, state: &mut AppState) {
 }
 
 unsafe fn admit_paths(owner: HWND, state: &mut AppState, paths: Vec<PathBuf>) {
-    let mut items = Vec::new();
-    for path in paths {
-        unsafe { collect_path(owner, state, &path, &mut items) };
+    let capacity = MAX_ADMITTED_SOURCES.saturating_sub(state.model.len());
+    let adapter = WindowsAdmissionAdapter::new();
+    if state.directory_mode.is_none()
+        && let Some(directory) = paths.iter().take(capacity).find(|path| {
+            path.is_absolute()
+                && adapter.validate_path(path).is_ok()
+                && adapter
+                    .metadata(path)
+                    .is_ok_and(|metadata| metadata.is_directory && !metadata.is_reparse_point)
+        })
+    {
+        let text = wide("경로를 직접 추가하려면 YES, 경로 내 파일을 추가하려면 NO를 선택하세요.");
+        let caption = path_wide(directory);
+        let answer = unsafe { MessageBoxW(owner, text.as_ptr(), caption.as_ptr(), MB_YESNO) };
+        state.directory_mode = Some(
+            if answer == windows_sys::Win32::UI::WindowsAndMessaging::IDYES {
+                DirectoryMode::Direct
+            } else {
+                DirectoryMode::Recurse
+            },
+        );
     }
-    state.model.append_batch_by(items, compare_windows);
-}
-
-unsafe fn collect_path(
-    owner: HWND,
-    state: &mut AppState,
-    path: &Path,
-    items: &mut Vec<LegacyListItem>,
-) {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return;
+    let mode = match state.directory_mode.unwrap_or(DirectoryMode::Direct) {
+        DirectoryMode::Direct => AdmissionMode::Direct,
+        DirectoryMode::Recurse => AdmissionMode::Recurse,
     };
-    let attributes = metadata.file_attributes();
-    let is_directory = attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
-    if is_directory {
-        let mode = match state.directory_mode {
-            Some(mode) => mode,
-            None => {
-                let text = wide("경로를 직접 추가려면 YES, 경로내 파일을 추가하려면 NO 선택.");
-                let caption = path_wide(path);
-                let answer =
-                    unsafe { MessageBoxW(owner, text.as_ptr(), caption.as_ptr(), MB_YESNO) };
-                let mode = if answer == windows_sys::Win32::UI::WindowsAndMessaging::IDYES {
-                    DirectoryMode::Direct
-                } else {
-                    DirectoryMode::Recurse
-                };
-                state.directory_mode = Some(mode);
-                mode
-            }
-        };
-        if mode == DirectoryMode::Recurse {
-            let Ok(read_dir) = fs::read_dir(path) else {
-                return;
-            };
-            let mut children = read_dir
-                .filter_map(Result::ok)
-                .map(|entry| entry.path())
-                .collect::<Vec<_>>();
-            children
-                .sort_by(|left, right| compare_windows(&legacy_path(left), &legacy_path(right)));
-            for child in children {
-                unsafe { collect_path(owner, state, &child, items) };
-            }
-            return;
-        }
+    let mut report = collect_admission(&adapter, paths, mode, capacity, |left, right| {
+        compare_windows(&legacy_path(left), &legacy_path(right))
+    });
+    let items = std::mem::take(&mut report.items);
+    let appended = state.model.append_batch_by(items, compare_windows);
+    let summary = report.summary_korean(appended);
+    unsafe { set_status(state.status, &summary) };
+    if !report.issues.is_empty() {
+        unsafe { message(owner, &summary, "DarkNamer - 일부 경로 제외") };
     }
-    items.push(legacy_item(path, &metadata, is_directory));
-}
-
-fn legacy_item(path: &Path, metadata: &fs::Metadata, is_directory: bool) -> LegacyListItem {
-    LegacyListItem::new(
-        legacy_path(path),
-        is_directory,
-        metadata.file_size() as u32,
-        metadata.creation_time(),
-        metadata.last_write_time(),
-    )
 }
 
 fn legacy_path(path: &Path) -> LegacyText {
@@ -2091,8 +2088,17 @@ unsafe fn import_names_dialog(owner: HWND, state: &mut AppState) {
     }) else {
         return;
     };
-    if let Ok(text) = read_legacy_text(&path) {
-        state.model.import_names(&text);
+    match read_legacy_text(&path) {
+        Ok(text) => {
+            state.model.import_names(&text);
+        }
+        Err(error) => unsafe {
+            message(
+                owner,
+                &format!("가져오기 파일을 읽지 못했습니다: {error}"),
+                "DarkNamer",
+            )
+        },
     }
 }
 
@@ -2106,14 +2112,36 @@ unsafe fn import_paths_dialog(owner: HWND, state: &mut AppState) {
     }) else {
         return;
     };
-    let Ok(text) = read_legacy_text(&path) else {
-        return;
+    let text = match read_legacy_text(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            unsafe {
+                message(
+                    owner,
+                    &format!("경로 목록을 읽지 못했습니다: {error}"),
+                    "DarkNamer",
+                )
+            };
+            return;
+        }
     };
     unsafe { set_status(state.status, "처리중...") };
-    let paths = darknamer_core::parse_import_lines(&text)
+    let remaining = MAX_ADMITTED_SOURCES.saturating_sub(state.model.len());
+    let (lines, truncated) = bounded_import_lines(&text, remaining.saturating_add(1));
+    if truncated || lines.len() > remaining {
+        unsafe {
+            message(
+                owner,
+                "경로 목록이 남은 10,000개 한도를 초과해 제한된 수만 처리합니다.",
+                "DarkNamer - 가져오기 한도",
+            )
+        };
+    }
+    let paths = lines
         .into_iter()
         .map(|line| PathBuf::from(std::ffi::OsString::from_wide(line.units())))
         .collect();
+    state.directory_mode = None;
     unsafe { admit_paths(owner, state, paths) };
 }
 
@@ -2145,7 +2173,13 @@ fn write_legacy_text(path: &Path, text: &LegacyText) -> io::Result<()> {
 }
 
 fn read_legacy_text(path: &Path) -> io::Result<LegacyText> {
-    let bytes = fs::read(path)?;
+    if fs::metadata(path)?.len() > MAX_IMPORT_BYTES as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "가져오기 파일이 2 MiB 한도를 초과합니다",
+        ));
+    }
+    let bytes = read_bounded_import(fs::File::open(path)?)?;
     if bytes.starts_with(&[0xFF, 0xFE]) {
         let units = bytes[2..]
             .chunks_exact(2)
@@ -2193,11 +2227,43 @@ unsafe fn update_column_visibility(state: &AppState, index: usize) {
     }
 }
 
+struct RedrawGuard {
+    window: HWND,
+}
+
+impl RedrawGuard {
+    unsafe fn suspend(window: HWND) -> Self {
+        if !window.is_null() {
+            unsafe { SendMessageW(window, WM_SETREDRAW, 0, 0) };
+        }
+        Self { window }
+    }
+}
+
+impl Drop for RedrawGuard {
+    fn drop(&mut self) {
+        if !self.window.is_null() {
+            // SAFETY: the ListView remains owned by the UI thread throughout
+            // refresh; redraw is always restored even if refresh returns early.
+            unsafe {
+                SendMessageW(self.window, WM_SETREDRAW, 1, 0);
+                RedrawWindow(
+                    self.window,
+                    null(),
+                    null_mut(),
+                    RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
+                );
+            }
+        }
+    }
+}
+
 unsafe fn refresh(state: &mut AppState) {
+    let _redraw = unsafe { RedrawGuard::suspend(state.list_window) };
     let selected = unsafe { selected_indices(state.list_window) };
     unsafe { SendMessageW(state.list_window, LVM_DELETEALLITEMS, 0, 0) };
     for (row, item) in state.model.items().iter().enumerate() {
-        let size = LegacyText::from(item.size().to_string());
+        let size = LegacyText::from(item.actual_size().to_string());
         let modified = format_filetime(item.modified());
         let created = format_filetime(item.created());
         let values = [
@@ -2218,7 +2284,7 @@ unsafe fn refresh(state: &mut AppState) {
                     iItem: row as i32,
                     iSubItem: 0,
                     pszText: text.as_mut_ptr(),
-                    iImage: unsafe { file_icon_index(item) },
+                    iImage: unsafe { file_icon_index(&mut state.icon_cache, item) },
                     ..unsafe { zeroed() }
                 };
                 unsafe {
@@ -2334,13 +2400,13 @@ unsafe fn set_toolbar_button_enabled(toolbar: HWND, command: CommandId, enabled:
     }
 }
 
-unsafe fn file_icon_index(item: &LegacyListItem) -> i32 {
+unsafe fn file_icon_index(cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyListItem) -> i32 {
+    let key = icon_cache_key(item.current_name(), item.is_directory());
+    if let Some(index) = cache.get(&key) {
+        return *index;
+    }
     let mut info: SHFILEINFOW = unsafe { zeroed() };
-    let path = if item.is_directory() {
-        LegacyText::from("folder")
-    } else {
-        item.current_name().clone()
-    };
+    let path = key.lookup_text();
     let mut path = path.units().to_vec();
     path.push(0);
     let attributes = if item.is_directory() {
@@ -2357,6 +2423,7 @@ unsafe fn file_icon_index(item: &LegacyListItem) -> i32 {
             SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON,
         );
     }
+    cache.insert(key, info.iIcon);
     info.iIcon
 }
 

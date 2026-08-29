@@ -12,11 +12,14 @@ use std::ptr;
 use darknamer_core::LegacyText;
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
-    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
-    FILE_RENAME_INFORMATION, FILE_SYNCHRONOUS_IO_NONALERT, FileRenameInformation, NtCreateFile,
+    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_ID_BOTH_DIR_INFORMATION, FILE_NON_DIRECTORY_FILE,
+    FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION, FILE_SYNCHRONOUS_IO_NONALERT,
+    FileIdBothDirectoryInformation, FileRenameInformation, NtCreateFile, NtQueryDirectoryFile,
     NtSetInformationFile, RtlNtStatusToDosErrorNoTeb,
 };
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, OBJ_CASE_INSENSITIVE, UNICODE_STRING};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, HANDLE, OBJ_CASE_INSENSITIVE, STATUS_NO_MORE_FILES, UNICODE_STRING,
+};
 use windows_sys::Win32::Security::{
     GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
 };
@@ -322,6 +325,82 @@ pub(crate) fn open_entry(
         FILE_OPEN,
         FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
     )
+}
+
+pub(crate) fn open_directory_entry(parent: &NativeParent, leaf: &[u16]) -> io::Result<File> {
+    open_relative(
+        parent.file(),
+        leaf,
+        FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        SHARE_ALL,
+        FILE_OPEN,
+        FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+    )
+}
+
+pub(crate) fn query_directory_names(
+    directory: &File,
+    limit: usize,
+) -> io::Result<(Vec<Vec<u16>>, bool)> {
+    let name_capacity = 255_usize;
+    let bytes = offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileName)
+        .checked_add(name_capacity * size_of::<u16>())
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let elements = bytes.div_ceil(size_of::<FILE_ID_BOTH_DIR_INFORMATION>());
+    let buffer_size =
+        u32::try_from(bytes).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let mut names = Vec::with_capacity(limit.min(name_capacity));
+    let mut restart = true;
+    loop {
+        let mut buffer = vec![FILE_ID_BOTH_DIR_INFORMATION::default(); elements];
+        let mut status_block = IO_STATUS_BLOCK::default();
+        // SAFETY: directory is a retained directory handle; buffer and status
+        // block are writable and correctly sized. Single-entry mode bounds each
+        // result and the call retains no pointers.
+        let status = unsafe {
+            NtQueryDirectoryFile(
+                directory.as_raw_handle(),
+                ptr::null_mut(),
+                None,
+                ptr::null(),
+                ptr::from_mut(&mut status_block),
+                buffer.as_mut_ptr().cast(),
+                buffer_size,
+                FileIdBothDirectoryInformation,
+                true,
+                ptr::null(),
+                restart,
+            )
+        };
+        restart = false;
+        if status == STATUS_NO_MORE_FILES {
+            return Ok((names, false));
+        }
+        if status < 0 {
+            // SAFETY: status came directly from NtQueryDirectoryFile.
+            let code = unsafe { RtlNtStatusToDosErrorNoTeb(status) };
+            return Err(io::Error::from_raw_os_error(
+                i32::try_from(code).unwrap_or(i32::MAX),
+            ));
+        }
+        let entry = &buffer[0];
+        let name_units = usize::try_from(entry.FileNameLength / 2)
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+        if name_units > name_capacity {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+        // SAFETY: FileNameLength was returned for this initialized flexible
+        // array and is bounded by the allocation above.
+        let name =
+            unsafe { std::slice::from_raw_parts(entry.FileName.as_ptr(), name_units).to_vec() };
+        if name != [b'.' as u16] && name != [b'.' as u16, b'.' as u16] {
+            names.push(name);
+            if names.len() > limit {
+                names.truncate(limit);
+                return Ok((names, true));
+            }
+        }
+    }
 }
 
 pub(crate) fn create_file_relative_exclusive(root: &File, leaf: &str) -> io::Result<File> {
