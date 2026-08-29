@@ -104,6 +104,221 @@ pub const fn scale_dip(value: i32, dpi: u32) -> i32 {
     }
 }
 
+/// One logical group of commands in a vertical command rail.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommandGroupSpec {
+    pub commands: &'static [CommandId],
+}
+
+/// Ordered command groups for one side of the main window.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommandRailSpec {
+    pub groups: &'static [CommandGroupSpec],
+}
+
+impl CommandRailSpec {
+    /// Returns the total number of visible commands in this rail.
+    #[must_use]
+    pub fn command_count(self) -> usize {
+        self.groups.iter().map(|group| group.commands.len()).sum()
+    }
+
+    /// Iterates over visible command identifiers in display order.
+    pub fn commands(self) -> impl Iterator<Item = CommandId> {
+        self.groups
+            .iter()
+            .flat_map(|group| group.commands.iter().copied())
+    }
+}
+
+/// Supported command-rail density.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RailDensity {
+    Comfortable,
+    Compact,
+}
+
+/// Pixel metrics used to place one command rail.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiMetrics {
+    pub rail_padding: i32,
+    pub button_height: i32,
+    pub group_gap: i32,
+    pub rail_width: i32,
+}
+
+impl RailDensity {
+    /// Returns DPI-scaled pixel metrics for this density.
+    #[must_use]
+    pub const fn metrics(self, dpi: u32) -> UiMetrics {
+        let (rail_padding, button_height, group_gap, rail_width) = match self {
+            Self::Comfortable => (4, 32, 8, 52),
+            Self::Compact => (2, 28, 4, 46),
+        };
+        UiMetrics {
+            rail_padding: scale_dip(rail_padding, dpi),
+            button_height: scale_dip(button_height, dpi),
+            group_gap: scale_dip(group_gap, dpi),
+            rail_width: scale_dip(rail_width, dpi),
+        }
+    }
+}
+
+/// Calculated rectangle for one command button.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommandPlacement {
+    pub command: CommandId,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl CommandPlacement {
+    /// Returns the exclusive bottom coordinate of this placement.
+    #[must_use]
+    pub fn bottom(self) -> i32 {
+        self.y.saturating_add(self.height)
+    }
+}
+
+/// Failure to calculate a bounded command-rail layout.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LayoutError {
+    Overflow,
+    InsufficientHeight { required: i32, available: i32 },
+}
+
+const LEFT_RAIL_GROUP_1: [CommandId; 1] = [APPLY];
+const LEFT_RAIL_GROUP_2: [CommandId; 3] = [REPLACE, PREFIX, SUFFIX];
+const LEFT_RAIL_GROUP_3: [CommandId; 3] = [CLEAR_NAME, DELETE_POSITION, DELETE_DELIMITED];
+const LEFT_RAIL_GROUP_4: [CommandId; 3] = [KEEP_DIGITS, PAD_DIGITS, SEQUENCE];
+const LEFT_RAIL_GROUPS: [CommandGroupSpec; 4] = [
+    CommandGroupSpec {
+        commands: &LEFT_RAIL_GROUP_1,
+    },
+    CommandGroupSpec {
+        commands: &LEFT_RAIL_GROUP_2,
+    },
+    CommandGroupSpec {
+        commands: &LEFT_RAIL_GROUP_3,
+    },
+    CommandGroupSpec {
+        commands: &LEFT_RAIL_GROUP_4,
+    },
+];
+
+const RIGHT_RAIL_GROUP_1: [CommandId; 1] = [RESET];
+const RIGHT_RAIL_GROUP_2: [CommandId; 3] = [CLEAR_LIST, MANUAL_CHANGE, SORT];
+const RIGHT_RAIL_GROUP_3: [CommandId; 2] = [PARENT_PREFIX, PARENT_SUFFIX];
+const RIGHT_RAIL_GROUP_4: [CommandId; 3] = [EXT_DELETE, EXT_ADD, EXT_REPLACE];
+const RIGHT_RAIL_GROUPS: [CommandGroupSpec; 4] = [
+    CommandGroupSpec {
+        commands: &RIGHT_RAIL_GROUP_1,
+    },
+    CommandGroupSpec {
+        commands: &RIGHT_RAIL_GROUP_2,
+    },
+    CommandGroupSpec {
+        commands: &RIGHT_RAIL_GROUP_3,
+    },
+    CommandGroupSpec {
+        commands: &RIGHT_RAIL_GROUP_4,
+    },
+];
+
+/// Explicit left-side command grouping.
+pub const LEFT_RAIL: CommandRailSpec = CommandRailSpec {
+    groups: &LEFT_RAIL_GROUPS,
+};
+/// Explicit right-side command grouping.
+pub const RIGHT_RAIL: CommandRailSpec = CommandRailSpec {
+    groups: &RIGHT_RAIL_GROUPS,
+};
+
+fn required_command_rail_height(
+    spec: &CommandRailSpec,
+    metrics: UiMetrics,
+) -> Result<i32, LayoutError> {
+    let command_count = i32::try_from(spec.command_count()).map_err(|_| LayoutError::Overflow)?;
+    let group_gaps =
+        i32::try_from(spec.groups.len().saturating_sub(1)).map_err(|_| LayoutError::Overflow)?;
+    metrics
+        .rail_padding
+        .checked_mul(2)
+        .and_then(|padding| {
+            metrics
+                .button_height
+                .checked_mul(command_count)
+                .and_then(|buttons| padding.checked_add(buttons))
+        })
+        .and_then(|height| {
+            metrics
+                .group_gap
+                .checked_mul(group_gaps)
+                .and_then(|gaps| height.checked_add(gaps))
+        })
+        .ok_or(LayoutError::Overflow)
+}
+
+/// Calculates one non-overlapping vertical column of command buttons.
+pub fn calculate_command_rail_layout(
+    spec: &CommandRailSpec,
+    available_height: i32,
+    metrics: UiMetrics,
+) -> Result<Vec<CommandPlacement>, LayoutError> {
+    let required = required_command_rail_height(spec, metrics)?;
+    if required > available_height {
+        return Err(LayoutError::InsufficientHeight {
+            required,
+            available: available_height,
+        });
+    }
+
+    let mut placements = Vec::with_capacity(spec.command_count());
+    let mut y = metrics.rail_padding;
+    for (group_index, group) in spec.groups.iter().enumerate() {
+        if group_index > 0 {
+            y = y
+                .checked_add(metrics.group_gap)
+                .ok_or(LayoutError::Overflow)?;
+        }
+        for &command in group.commands {
+            placements.push(CommandPlacement {
+                command,
+                x: 0,
+                y,
+                width: metrics.rail_width,
+                height: metrics.button_height,
+            });
+            y = y
+                .checked_add(metrics.button_height)
+                .ok_or(LayoutError::Overflow)?;
+        }
+    }
+    Ok(placements)
+}
+
+/// Selects the most spacious density that fits both command rails.
+pub fn select_command_rail_density(
+    available_height: i32,
+    dpi: u32,
+) -> Result<RailDensity, LayoutError> {
+    for density in [RailDensity::Comfortable, RailDensity::Compact] {
+        let metrics = density.metrics(dpi);
+        if required_command_rail_height(&LEFT_RAIL, metrics)? <= available_height
+            && required_command_rail_height(&RIGHT_RAIL, metrics)? <= available_height
+        {
+            return Ok(density);
+        }
+    }
+    let required = required_command_rail_height(&LEFT_RAIL, RailDensity::Compact.metrics(dpi))?;
+    Err(LayoutError::InsufficientHeight {
+        required,
+        available: available_height,
+    })
+}
+
 #[cfg(any(windows, test))]
 #[must_use]
 pub(crate) fn toolbar_image_geometry(
@@ -556,6 +771,119 @@ mod tests {
         let mut cross_rail = valid;
         cross_rail[1].right = 45;
         assert!(!toolbar_rects_are_vertical(&cross_rail, 44));
+    }
+
+    #[test]
+    fn command_rail_specs_cover_each_visible_command_once() {
+        assert_eq!(LEFT_RAIL.command_count(), 10);
+        assert_eq!(RIGHT_RAIL.command_count(), 9);
+
+        let mut commands = LEFT_RAIL
+            .commands()
+            .chain(RIGHT_RAIL.commands())
+            .collect::<Vec<_>>();
+        commands.sort_unstable();
+        commands.dedup();
+
+        assert_eq!(commands.len(), 19);
+        assert!(!commands.contains(&UNIFY_PATH));
+    }
+
+    #[test]
+    fn command_rail_layout_has_exact_group_gaps_without_overlap() {
+        let metrics = RailDensity::Comfortable.metrics(96);
+        let placements = calculate_command_rail_layout(&LEFT_RAIL, 352, metrics)
+            .expect("comfortable left rail should fit exactly");
+
+        assert_eq!(placements.len(), 10);
+        assert!(placements.iter().all(|placement| {
+            placement.x == 0
+                && placement.width == 52
+                && placement.height == 32
+                && placement.bottom() <= 348
+        }));
+        assert!(
+            placements
+                .windows(2)
+                .all(|pair| pair[0].bottom() <= pair[1].y)
+        );
+        assert_eq!(
+            placements.last().map(|placement| placement.bottom()),
+            Some(348)
+        );
+        assert_eq!(placements[9].bottom() + 4, 352);
+
+        for start in [1, 4, 7] {
+            assert_eq!(
+                placements[start].y - placements[start - 1].bottom(),
+                metrics.group_gap
+            );
+        }
+
+        let right = calculate_command_rail_layout(&RIGHT_RAIL, 352, metrics)
+            .expect("comfortable right rail should fit");
+        for start in [1, 4, 6] {
+            assert_eq!(
+                right[start].y - right[start - 1].bottom(),
+                metrics.group_gap
+            );
+        }
+    }
+
+    #[test]
+    fn command_rail_metrics_scale_at_supported_dpis() {
+        assert_eq!(
+            [96, 120, 144, 192].map(|dpi| RailDensity::Comfortable.metrics(dpi)),
+            [
+                UiMetrics {
+                    rail_padding: 4,
+                    button_height: 32,
+                    group_gap: 8,
+                    rail_width: 52
+                },
+                UiMetrics {
+                    rail_padding: 5,
+                    button_height: 40,
+                    group_gap: 10,
+                    rail_width: 65
+                },
+                UiMetrics {
+                    rail_padding: 6,
+                    button_height: 48,
+                    group_gap: 12,
+                    rail_width: 78
+                },
+                UiMetrics {
+                    rail_padding: 8,
+                    button_height: 64,
+                    group_gap: 16,
+                    rail_width: 104
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn command_rail_density_falls_back_and_reports_insufficient_height() {
+        assert_eq!(
+            select_command_rail_density(352, 96),
+            Ok(RailDensity::Comfortable)
+        );
+        assert_eq!(
+            select_command_rail_density(351, 96),
+            Ok(RailDensity::Compact)
+        );
+        assert_eq!(
+            select_command_rail_density(296, 96),
+            Ok(RailDensity::Compact)
+        );
+        assert_eq!(
+            select_command_rail_density(295, 96),
+            Err(LayoutError::InsufficientHeight {
+                required: 296,
+                available: 295,
+            })
+        );
     }
 
     #[test]
