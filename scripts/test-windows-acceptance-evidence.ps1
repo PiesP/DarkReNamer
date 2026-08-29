@@ -83,6 +83,47 @@ function Assert-ValidatorFails {
     throw "Expected '$Name' to fail with '$ExpectedFragment', but validation succeeded."
 }
 
+function Assert-EvidencePathspec {
+    param(
+        [Parameter(Mandatory)]
+        [string] $TestRoot
+    )
+
+    $repository = Join-Path $TestRoot 'pathspec-repository'
+    $nested = Join-Path $repository 'evidence'
+    $scripts = Join-Path $repository 'scripts'
+    New-Item -ItemType Directory -Path $repository, $nested, $scripts | Out-Null
+
+    $rootEvidence = 'windows-acceptance-evidence-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json'
+    $nestedEvidence = 'windows-acceptance-evidence-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json'
+    [IO.File]::WriteAllText((Join-Path $repository $rootEvidence), '{}')
+    [IO.File]::WriteAllText((Join-Path $nested $nestedEvidence), '{}')
+    [IO.File]::WriteAllText(
+        (Join-Path $scripts 'windows-acceptance-evidence.schema.json'),
+        '{}'
+    )
+
+    & git -C $repository init --quiet
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Failed to initialize the evidence pathspec fixture repository.'
+    }
+    & git -C $repository add --all
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Failed to populate the evidence pathspec fixture index.'
+    }
+    $matches = @(& git -C $repository ls-files -- ':(glob)**/windows-acceptance-evidence-*.json')
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Failed to evaluate the evidence pathspec fixture.'
+    }
+    $expected = @(
+        "evidence/$nestedEvidence"
+        $rootEvidence
+    )
+    if (($matches -join "`n") -cne ($expected -join "`n")) {
+        throw "Evidence pathspec mismatch. Expected: $($expected -join ', '). Actual: $($matches -join ', ')."
+    }
+}
+
 function New-CompleteEvidence {
     $uiMatrix = @(
         foreach ($product in 'Windows 10', 'Windows 11') {
@@ -206,6 +247,7 @@ function New-CompleteEvidence {
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "darkrenamer-acceptance-validator-$([Guid]::NewGuid())"
 try {
     New-Item -ItemType Directory -Path $testRoot | Out-Null
+    Assert-EvidencePathspec -TestRoot $testRoot
 
     $complete = New-CompleteEvidence
     Assert-ValidatorPasses -Evidence $complete -Name 'valid-complete'

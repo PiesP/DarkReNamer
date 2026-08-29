@@ -42,7 +42,7 @@ jobs:
             printf 'Non-Rust legacy sources are tracked:\n%s\n' "$forbidden_sources" >&2
             exit 1
           fi
-          tracked_acceptance_evidence="$(git ls-files '**/windows-acceptance-evidence-*.json')"
+          tracked_acceptance_evidence="$(git ls-files ':(glob)**/windows-acceptance-evidence-*.json')"
           if [[ -n "$tracked_acceptance_evidence" ]]; then
             printf 'Windows acceptance evidence must remain external:\n%s\n' "$tracked_acceptance_evidence" >&2
             exit 1
