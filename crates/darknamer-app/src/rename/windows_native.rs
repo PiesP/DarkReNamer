@@ -20,11 +20,13 @@ use windows_sys::Win32::Foundation::{OBJ_CASE_INSENSITIVE, UNICODE_STRING};
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_CASE_SENSITIVE_INFO, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_READ_DATA,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_DATA,
-    FileCaseSensitiveInfo, FileIdInfo, GetFileInformationByHandleEx, SYNCHRONIZE,
+    FILE_REMOTE_PROTOCOL_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+    FILE_WRITE_DATA, FileCaseSensitiveInfo, FileIdInfo, FileRemoteProtocolInfo, GetDriveTypeW,
+    GetFileInformationByHandleEx, SYNCHRONIZE,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::SystemServices::FILE_CS_FLAG_CASE_SENSITIVE_DIR;
+use windows_sys::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOVABLE};
 
 const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 
@@ -41,6 +43,7 @@ pub(crate) struct NativeParent {
 }
 
 pub(crate) fn validate_safe_local_root(path: &Path) -> io::Result<()> {
+    reject_unsupported_drive_type(path)?;
     traversal_parts(path).map(|_parts| ())
 }
 
@@ -59,6 +62,7 @@ impl NativeParent {
     }
 
     fn open_path_with_final_share(path: &Path, final_share: u32) -> io::Result<Self> {
+        reject_unsupported_drive_type(path)?;
         let (root, components) = traversal_parts(path)?;
         let root_share = if components.is_empty() {
             final_share
@@ -68,6 +72,7 @@ impl NativeParent {
         let mut file = open_root_directory(&root, root_share)?;
         validate_directory_handle(&file)?;
         reject_case_sensitive_directory(&file)?;
+        reject_remote_protocol_if_reported(&file)?;
         let component_count = components.len();
         for (index, component) in components.into_iter().enumerate() {
             let encoded = component.encode_wide().collect::<Vec<_>>();
@@ -86,6 +91,7 @@ impl NativeParent {
             )?;
             validate_directory_handle(&file)?;
             reject_case_sensitive_directory(&file)?;
+            reject_remote_protocol_if_reported(&file)?;
         }
         let identity = file_identity(&file)?;
         Ok(Self { file, identity })
@@ -126,6 +132,50 @@ fn reject_case_sensitive_directory(file: &File) -> io::Result<()> {
 
 pub(crate) const fn case_sensitive_flags_unsupported(flags: u32) -> bool {
     flags & FILE_CS_FLAG_CASE_SENSITIVE_DIR != 0
+}
+
+fn reject_unsupported_drive_type(path: &Path) -> io::Result<()> {
+    let Some(Component::Prefix(prefix)) = path.components().next() else {
+        return Err(io::Error::from_raw_os_error(53));
+    };
+    let letter = match prefix.kind() {
+        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => letter,
+        _ => return Err(io::Error::from_raw_os_error(53)),
+    };
+    let root = [u16::from(letter), b':' as u16, b'\\' as u16, 0];
+    // SAFETY: root is a fixed NUL-terminated UTF-16 drive-root buffer retained
+    // for the synchronous call; GetDriveTypeW stores no pointer.
+    let drive_type = unsafe { GetDriveTypeW(root.as_ptr()) };
+    if drive_type_supported(drive_type) {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(53))
+    }
+}
+
+pub(crate) const fn drive_type_supported(drive_type: u32) -> bool {
+    matches!(drive_type, DRIVE_FIXED | DRIVE_REMOVABLE)
+}
+
+fn reject_remote_protocol_if_reported(file: &File) -> io::Result<()> {
+    let mut info = FILE_REMOTE_PROTOCOL_INFO::default();
+    let size = u32::try_from(size_of::<FILE_REMOTE_PROTOCOL_INFO>())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: file is a retained directory handle and info is a writable,
+    // correctly aligned buffer of the exact checked size.
+    let success = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileRemoteProtocolInfo,
+            ptr::from_mut(&mut info).cast(),
+            size,
+        )
+    };
+    if success != 0 && info.Protocol != 0 {
+        Err(io::Error::from_raw_os_error(53))
+    } else {
+        Ok(())
+    }
 }
 
 fn traversal_parts(path: &Path) -> io::Result<(PathBuf, Vec<std::ffi::OsString>)> {
@@ -380,6 +430,9 @@ pub(crate) fn rename_noreplace(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows_sys::Win32::System::WindowsProgramming::{
+        DRIVE_NO_ROOT_DIR, DRIVE_REMOTE, DRIVE_UNKNOWN,
+    };
 
     #[test]
     fn case_sensitive_flag_interpretation_is_fail_closed() {
@@ -408,5 +461,16 @@ mod tests {
                 .and_then(|error| error.raw_os_error()),
             Some(53)
         );
+    }
+
+    #[test]
+    fn drive_type_policy_rejects_remote_unknown_and_missing_roots() {
+        assert!(drive_type_supported(DRIVE_FIXED));
+        assert!(drive_type_supported(DRIVE_REMOVABLE));
+        assert!(!drive_type_supported(DRIVE_REMOTE));
+        assert!(!drive_type_supported(DRIVE_UNKNOWN));
+        assert!(!drive_type_supported(DRIVE_NO_ROOT_DIR));
+        assert!(!drive_type_supported(5));
+        assert!(!drive_type_supported(6));
     }
 }
