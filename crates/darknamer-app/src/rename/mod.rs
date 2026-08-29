@@ -23,8 +23,9 @@ pub use activation::{
     safe_mode_unify_path_message,
 };
 pub use executor::{
-    EntryExecution, ExecuteError, ExecuteErrorKind, ExecutionFailure, ExecutionOutcome,
-    ExecutionReport, RenameExecutor, RenameState, RollbackFailure,
+    CancellationToken, EntryExecution, ExecuteError, ExecuteErrorKind, ExecutionControl,
+    ExecutionFailure, ExecutionOutcome, ExecutionPhase, ExecutionProgress, ExecutionReport,
+    RenameExecutor, RenameState, RollbackFailure,
 };
 pub use file_journal::{
     ExistingJournalOpenError, FileJournal, FileJournalError, FileJournalErrorKind,

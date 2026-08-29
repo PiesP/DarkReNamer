@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use super::journal::{JournalDirection, JournalTerminal};
 use super::model::PlanRow;
@@ -11,6 +12,8 @@ use super::{
 /// A pre-mutation reason execution refused a confirmed plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExecuteErrorKind {
+    /// Execution was cancelled before the durable transaction began.
+    Cancelled,
     /// The planner produced an internally inconsistent dependency graph.
     InvalidSchedule,
     /// A source entry no longer matches the planning snapshot.
@@ -49,10 +52,115 @@ impl std::error::Error for ExecuteError {}
 /// Failure that interrupted forward execution after journalling began.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExecutionFailure {
+    /// Cancellation was observed at a safe forward step boundary.
+    Cancelled { step: usize },
     /// Filesystem primitive failed.
     Backend { step: usize, error: BackendError },
     /// Journal transition failed.
     Journal { step: usize, error: JournalError },
+}
+
+/// High-level phase reported by the executor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutionPhase {
+    /// Schedule construction and filesystem revalidation completed.
+    Ready,
+    /// Forward primitive steps are being applied.
+    Forward,
+    /// Completed forward primitive steps are being restored.
+    Rollback,
+    /// A verified terminal record was written.
+    Terminal,
+}
+
+/// Coalescible execution progress at a durable step boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExecutionProgress {
+    /// Current execution phase.
+    pub phase: ExecutionPhase,
+    /// Completed durable steps within this phase.
+    pub completed: usize,
+    /// Total steps expected within this phase.
+    pub total: usize,
+}
+
+/// Cooperative control observed only at safe transaction boundaries.
+pub trait ExecutionControl: Send + Sync {
+    /// Returns whether forward execution should stop and roll back.
+    fn cancellation_requested(&self) -> bool;
+
+    /// Atomically commits the boundary after which cancellation rolls back.
+    fn begin_transaction(&self) -> bool;
+
+    /// Receives progress after schedule preparation or a durable step boundary.
+    fn progress(&self, progress: ExecutionProgress);
+}
+
+const CANCEL_REQUESTED: u8 = 0b01;
+const JOURNAL_BEGIN_COMMITTED: u8 = 0b10;
+
+/// One-shot cancellation token that linearizes cancellation against journal begin.
+#[derive(Debug, Default)]
+pub struct CancellationToken {
+    state: AtomicU8,
+}
+
+impl CancellationToken {
+    /// Creates a token before either cancellation or journal begin wins.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            state: AtomicU8::new(0),
+        }
+    }
+
+    /// Requests cancellation. Repeated requests are idempotent.
+    pub fn request(&self) {
+        self.state.fetch_or(CANCEL_REQUESTED, Ordering::AcqRel);
+    }
+
+    /// Returns whether cancellation has been requested.
+    #[must_use]
+    pub fn is_requested(&self) -> bool {
+        self.state.load(Ordering::Acquire) & CANCEL_REQUESTED != 0
+    }
+
+    fn commit_journal_begin(&self) -> bool {
+        self.state
+            .compare_exchange(
+                0,
+                JOURNAL_BEGIN_COMMITTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+}
+
+impl ExecutionControl for CancellationToken {
+    fn cancellation_requested(&self) -> bool {
+        self.is_requested()
+    }
+
+    fn begin_transaction(&self) -> bool {
+        self.commit_journal_begin()
+    }
+
+    fn progress(&self, _progress: ExecutionProgress) {}
+}
+
+struct NoopExecutionControl;
+
+impl ExecutionControl for NoopExecutionControl {
+    fn cancellation_requested(&self) -> bool {
+        false
+    }
+
+    fn begin_transaction(&self) -> bool {
+        true
+    }
+
+    fn progress(&self, _progress: ExecutionProgress) {}
 }
 
 /// One best-effort rollback operation that did not complete durably.
@@ -158,7 +266,28 @@ impl<'a> RenameExecutor<'a> {
     /// Returns only pre-mutation refusals. Once journalling or mutation begins,
     /// all partial state is represented by [`ExecutionReport`].
     pub fn execute(&mut self, confirmed: ConfirmedPlan) -> Result<ExecutionReport, ExecuteError> {
+        self.execute_with_control(confirmed, &NoopExecutionControl)
+    }
+
+    /// Revalidates and executes with cooperative cancellation and progress.
+    ///
+    /// Cancellation is read before journalling and only between complete
+    /// forward primitive transitions. It is deliberately ignored from a
+    /// Prepared record through reconciliation and throughout rollback.
+    ///
+    /// # Errors
+    ///
+    /// Returns only pre-mutation refusals. Once journalling begins, cancellation
+    /// and all partial state are represented by [`ExecutionReport`].
+    pub fn execute_with_control(
+        &mut self,
+        confirmed: ConfirmedPlan,
+        control: &dyn ExecutionControl,
+    ) -> Result<ExecutionReport, ExecuteError> {
         let plan = confirmed.plan;
+        if control.cancellation_requested() {
+            return Err(cancelled_before_begin());
+        }
         let mut entries = plan
             .entries
             .iter()
@@ -169,12 +298,23 @@ impl<'a> RenameExecutor<'a> {
             .collect::<Vec<_>>();
         let schedule = build_schedule(&plan, self.backend).map_err(schedule_error)?;
         self.freeze(&plan.entries, &schedule)?;
+        if control.cancellation_requested() {
+            return Err(cancelled_before_begin());
+        }
+        control.progress(ExecutionProgress {
+            phase: ExecutionPhase::Ready,
+            completed: 0,
+            total: schedule.len(),
+        });
         if schedule.is_empty() {
             return Ok(ExecutionReport {
                 plan: plan.id,
                 outcome: ExecutionOutcome::Completed,
                 entries: entries.into_boxed_slice(),
             });
+        }
+        if !control.begin_transaction() {
+            return Err(cancelled_before_begin());
         }
         let manifest = schedule.iter().map(journal_step).collect::<Vec<_>>();
         if let Err(error) = self.journal.begin(plan.id, &manifest) {
@@ -196,6 +336,15 @@ impl<'a> RenameExecutor<'a> {
 
         let mut completed = Vec::with_capacity(schedule.len());
         for (step_index, step) in schedule.iter().enumerate() {
+            if control.cancellation_requested() {
+                return Ok(self.rollback(
+                    plan.id,
+                    ExecutionFailure::Cancelled { step: step_index },
+                    &completed,
+                    entries,
+                    control,
+                ));
+            }
             if let Err(error) = self.journal.prepared(step_index, JournalDirection::Forward) {
                 if error.certainty == AppendCertainty::MayHaveAppended {
                     return Ok(ExecutionReport {
@@ -218,6 +367,7 @@ impl<'a> RenameExecutor<'a> {
                     },
                     &completed,
                     entries,
+                    control,
                 ));
             }
             #[cfg(test)]
@@ -265,6 +415,7 @@ impl<'a> RenameExecutor<'a> {
                     },
                     &completed,
                     entries,
+                    control,
                 ));
             }
             #[cfg(test)]
@@ -294,8 +445,24 @@ impl<'a> RenameExecutor<'a> {
             }
             #[cfg(test)]
             super::failpoint::hit(&format!("forward-completed-{step_index}"));
+            control.progress(ExecutionProgress {
+                phase: ExecutionPhase::Forward,
+                completed: completed.len(),
+                total: schedule.len(),
+            });
         }
 
+        if control.cancellation_requested() {
+            return Ok(self.rollback(
+                plan.id,
+                ExecutionFailure::Cancelled {
+                    step: schedule.len(),
+                },
+                &completed,
+                entries,
+                control,
+            ));
+        }
         if let Err(error) = self.journal.terminal(JournalTerminal::Committed) {
             return Ok(ExecutionReport {
                 plan: plan.id,
@@ -311,6 +478,11 @@ impl<'a> RenameExecutor<'a> {
         }
         #[cfg(test)]
         super::failpoint::hit("terminal-committed");
+        control.progress(ExecutionProgress {
+            phase: ExecutionPhase::Terminal,
+            completed: schedule.len(),
+            total: schedule.len(),
+        });
         Ok(ExecutionReport {
             plan: plan.id,
             outcome: ExecutionOutcome::Completed,
@@ -401,8 +573,15 @@ impl<'a> RenameExecutor<'a> {
         failure: ExecutionFailure,
         completed: &[(usize, ScheduleStep)],
         mut entries: Vec<EntryExecution>,
+        control: &dyn ExecutionControl,
     ) -> ExecutionReport {
         let mut rollback_failures = Vec::new();
+        control.progress(ExecutionProgress {
+            phase: ExecutionPhase::Rollback,
+            completed: 0,
+            total: completed.len(),
+        });
+        let mut restored = 0_usize;
         for (step_index, step) in completed.iter().rev() {
             if let Err(error) = self
                 .journal
@@ -462,6 +641,12 @@ impl<'a> RenameExecutor<'a> {
             }
             #[cfg(test)]
             super::failpoint::hit(&format!("rollback-completed-{step_index}"));
+            restored = restored.saturating_add(1);
+            control.progress(ExecutionProgress {
+                phase: ExecutionPhase::Rollback,
+                completed: restored,
+                total: completed.len(),
+            });
         }
 
         let outcome = if rollback_failures.is_empty() {
@@ -469,6 +654,11 @@ impl<'a> RenameExecutor<'a> {
                 Ok(()) => {
                     #[cfg(test)]
                     super::failpoint::hit("terminal-rolled-back");
+                    control.progress(ExecutionProgress {
+                        phase: ExecutionPhase::Terminal,
+                        completed: completed.len(),
+                        total: completed.len(),
+                    });
                     ExecutionOutcome::RolledBack { failure }
                 }
                 Err(error) => ExecutionOutcome::RecoveryRequired {
@@ -533,6 +723,13 @@ const fn rollback_state(phase: TemporaryPhase) -> RenameState {
 fn set_state(entries: &mut [EntryExecution], entry: EntryId, state: RenameState) {
     if let Some(result) = entries.iter_mut().find(|result| result.entry == entry) {
         result.state = state;
+    }
+}
+
+const fn cancelled_before_begin() -> ExecuteError {
+    ExecuteError {
+        entry: None,
+        kind: ExecuteErrorKind::Cancelled,
     }
 }
 

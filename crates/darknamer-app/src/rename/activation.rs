@@ -148,6 +148,7 @@ fn plan_issue_korean(kind: &PlanIssueKind) -> String {
 #[must_use]
 pub fn execute_error_korean(error: &ExecuteError) -> String {
     match error.kind {
+        ExecuteErrorKind::Cancelled => "파일 변경을 시작하기 전에 취소했습니다.".to_owned(),
         ExecuteErrorKind::Backend(backend) => backend_error_korean("실행 준비", backend),
         ExecuteErrorKind::Journal(journal) => {
             format!("저널을 준비하지 못했습니다. 코드 {}", journal.code)
@@ -169,12 +170,17 @@ pub fn execute_error_korean(error: &ExecuteError) -> String {
 pub fn execution_outcome_korean(outcome: &ExecutionOutcome) -> String {
     match outcome {
         ExecutionOutcome::Completed => "파일 이름을 변경하였습니다.".to_owned(),
-        ExecutionOutcome::RolledBack { failure } => {
-            format!(
-                "변경에 실패하여 원래 상태로 복원했습니다. {}",
-                failure_korean(*failure)
-            )
-        }
+        ExecutionOutcome::RolledBack {
+            failure: ExecutionFailure::Cancelled { .. },
+        } => "요청에 따라 변경을 취소하고 원래 상태로 복원했습니다.".to_owned(),
+        ExecutionOutcome::RolledBack { failure } => format!(
+            "변경에 실패하여 원래 상태로 복원했습니다. {}",
+            failure_korean(*failure)
+        ),
+        ExecutionOutcome::RecoveryRequired {
+            failure: ExecutionFailure::Cancelled { .. },
+            ..
+        } => "취소 요청 후 상태 확인과 복구가 필요합니다. 적용이 잠겼습니다.".to_owned(),
         ExecutionOutcome::RecoveryRequired { failure, .. } => format!(
             "상태 확인과 복구가 필요합니다. 적용이 잠겼습니다. {}",
             failure_korean(*failure)
@@ -184,6 +190,7 @@ pub fn execution_outcome_korean(outcome: &ExecutionOutcome) -> String {
 
 fn failure_korean(failure: ExecutionFailure) -> String {
     match failure {
+        ExecutionFailure::Cancelled { .. } => "요청에 따라 변경을 취소했습니다.".to_owned(),
         ExecutionFailure::Backend { error, .. } => backend_error_korean("파일 변경", error),
         ExecutionFailure::Journal { error, .. } => format!("저널 코드 {}", error.code),
     }
