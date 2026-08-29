@@ -15,7 +15,7 @@ use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
 use std::thread::{self, JoinHandle};
 
 use crate::admission::{
-    AdmissionAdapter, AdmissionMode, MAX_ADMITTED_SOURCES, MAX_IMPORT_BYTES,
+    AdmissionAdapter, AdmissionMode, AdmissionReport, MAX_ADMITTED_SOURCES, MAX_IMPORT_BYTES,
     WindowsAdmissionAdapter, bounded_import_lines, bounded_selection, collect_admission,
     read_bounded_import,
 };
@@ -109,6 +109,7 @@ const EXPORT_RECOVERY_JOURNAL: u16 = 0x9000;
 const WM_APP_APPLY_PROGRESS: u32 = WM_APP + 0x40;
 const WM_APP_APPLY_COMPLETE: u32 = WM_APP + 0x41;
 const WM_APP_PLAN_COMPLETE: u32 = WM_APP + 0x42;
+const WM_APP_ADMISSION_COMPLETE: u32 = WM_APP + 0x43;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 
 struct AppState {
@@ -120,7 +121,6 @@ struct AppState {
     right_toolbar: HWND,
     model: LegacyList,
     shown_columns: [bool; 4],
-    directory_mode: Option<DirectoryMode>,
     command_states: [bool; 34],
     model_revision: u64,
     mutation_locked: bool,
@@ -131,6 +131,7 @@ struct AppState {
     blocked_journals: Vec<StartupJournalBlock>,
     apply_worker: Option<ApplyWorker>,
     plan_worker: Option<PlanWorker>,
+    admission_worker: Option<AdmissionWorker>,
     close_pending: bool,
     confirmation_pending: bool,
     startup_status: Option<String>,
@@ -153,7 +154,6 @@ impl AppState {
             right_toolbar: null_mut(),
             model: LegacyList::new(),
             shown_columns: [false; 4],
-            directory_mode: None,
             command_states: [false; 34],
             model_revision: 0,
             mutation_locked: false,
@@ -164,6 +164,7 @@ impl AppState {
             blocked_journals: runtime.blocked_journals,
             apply_worker: None,
             plan_worker: None,
+            admission_worker: None,
             close_pending: false,
             confirmation_pending: false,
             startup_status: runtime.status,
@@ -187,6 +188,7 @@ impl AppState {
             || !self.blocked_journals.is_empty()
             || self.apply_worker.is_some()
             || self.plan_worker.is_some()
+            || self.admission_worker.is_some()
     }
 
     const fn read_only_locked(&self) -> bool {
@@ -205,6 +207,27 @@ struct PlanWorker {
     cancellation: Arc<CancellationToken>,
     receiver: Receiver<PlanWorkerResult>,
     handle: JoinHandle<()>,
+}
+
+struct AdmissionWorker {
+    cancellation: Arc<AtomicBool>,
+    receiver: Receiver<AdmissionWorkerResult>,
+    handle: JoinHandle<()>,
+}
+
+enum AdmissionWorkerResult {
+    NeedsDirectoryMode {
+        revision: ModelRevision,
+        paths: Vec<PathBuf>,
+        capacity: usize,
+        directory: PathBuf,
+    },
+    Finished {
+        revision: ModelRevision,
+        report: AdmissionReport,
+    },
+    Cancelled,
+    Panicked,
 }
 
 enum PlanWorkerResult {
@@ -270,15 +293,16 @@ struct CompletionWake {
     progress: Arc<WorkerProgress>,
 }
 
-struct PlanCompletionWake {
+struct SimpleCompletionWake {
     window: usize,
+    message: u32,
 }
 
-impl Drop for PlanCompletionWake {
+impl Drop for SimpleCompletionWake {
     fn drop(&mut self) {
         // SAFETY: window is the integer form of the top-level HWND captured
         // before spawning. The message carries no pointer payload.
-        unsafe { PostMessageW(self.window as HWND, WM_APP_PLAN_COMPLETE, 0, 0) };
+        unsafe { PostMessageW(self.window as HWND, self.message, 0, 0) };
     }
 }
 
@@ -377,12 +401,6 @@ impl StartupJournalBlock {
             Self::Unavailable { .. } => None,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DirectoryMode {
-    Recurse,
-    Direct,
 }
 
 struct ComGuard;
@@ -757,9 +775,22 @@ unsafe extern "system" fn window_proc(
             handle_plan_completion(window, unsafe { &mut *state_ptr });
             0
         }
+        WM_APP_ADMISSION_COMPLETE if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is the live UI-thread AppState for this window.
+            handle_admission_completion(window, unsafe { &mut *state_ptr });
+            0
+        }
         WM_TIMER if !state_ptr.is_null() && wparam == APPLY_POLL_TIMER_ID => {
             // SAFETY: state_ptr is the live UI-thread AppState for this window.
             let state = unsafe { &mut *state_ptr };
+            if state
+                .admission_worker
+                .as_ref()
+                .is_some_and(|worker| worker.handle.is_finished())
+            {
+                handle_admission_completion(window, state);
+                return 0;
+            }
             if state
                 .plan_worker
                 .as_ref()
@@ -804,11 +835,8 @@ unsafe extern "system" fn window_proc(
                 return 0;
             }
             // SAFETY: state_ptr is the non-null Box::into_raw value in GWLP_USERDATA, confined to this window thread until WM_NCDESTROY.
-            let before = unsafe { (*state_ptr).model.clone() };
-            // SAFETY: state_ptr is the non-null Box::into_raw value in GWLP_USERDATA, confined to this window thread until WM_NCDESTROY.
             unsafe {
                 admit_drop(window, &mut *state_ptr, wparam as HDROP);
-                (*state_ptr).commit_model_change(&before);
             }
             0
         }
@@ -2431,8 +2459,9 @@ fn start_plan_worker(
     let handle = match thread::Builder::new()
         .name("darkrenamer-plan".to_owned())
         .spawn(move || {
-            let _completion_wake = PlanCompletionWake {
+            let _completion_wake = SimpleCompletionWake {
                 window: window_value,
+                message: WM_APP_PLAN_COMPLETE,
             };
             let result = catch_unwind(AssertUnwindSafe(|| {
                 if worker_cancellation.is_requested() {
@@ -2715,6 +2744,13 @@ fn finish_apply_after_message_loop_failure(window: HWND) {
     // SAFETY: the message loop has failed on this same UI thread, so this is
     // the sole mutable access to the still-live AppState.
     let state = unsafe { &mut *state_ptr };
+    if let Some(worker) = state.admission_worker.take() {
+        worker.cancellation.store(true, Ordering::Release);
+        // SAFETY: this exact timer belongs to the still-live top-level window.
+        unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
+        let _joined = worker.handle.join();
+        state.mutation_locked = false;
+    }
     if let Some(worker) = state.plan_worker.take() {
         worker.cancellation.request();
         // SAFETY: this exact timer belongs to the still-live top-level window.
@@ -2737,6 +2773,18 @@ fn finish_apply_after_message_loop_failure(window: HWND) {
 fn request_window_close(window: HWND, state: &mut AppState) {
     if state.confirmation_pending {
         state.close_pending = true;
+        return;
+    }
+    if let Some(worker) = state.admission_worker.as_ref() {
+        if !state.close_pending {
+            state.close_pending = true;
+            worker.cancellation.store(true, Ordering::Release);
+            set_status(
+                state.status,
+                "종료 요청을 받았습니다. 현재 경로 확인이 끝나는 즉시 종료합니다...",
+            );
+            update_controls(state);
+        }
         return;
     }
     if let Some(worker) = state.plan_worker.as_ref() {
@@ -2813,9 +2861,7 @@ fn admit_drop(owner: HWND, state: &mut AppState, drop: HDROP) {
         );
     }
     set_status(state.status, "처리중...");
-    state.directory_mode = None;
     admit_paths(owner, state, paths);
-    refresh(state);
 }
 
 fn add_files_dialog(owner: HWND, state: &mut AppState) {
@@ -2828,49 +2874,228 @@ fn add_files_dialog(owner: HWND, state: &mut AppState) {
         return;
     };
     set_status(state.status, "처리중...");
-    state.directory_mode = None;
     admit_paths(owner, state, paths);
 }
 
 fn admit_paths(owner: HWND, state: &mut AppState, paths: Vec<PathBuf>) {
     let capacity = MAX_ADMITTED_SOURCES.saturating_sub(state.model.len());
-    let adapter = WindowsAdmissionAdapter::new();
-    if state.directory_mode.is_none()
-        && let Some(directory) = paths.iter().take(capacity).find(|path| {
-            path.is_absolute()
-                && adapter.validate_path(path).is_ok()
-                && adapter
-                    .metadata(path)
-                    .is_ok_and(|metadata| metadata.is_directory && !metadata.is_reparse_point)
-        })
-    {
-        let text = wide("경로를 직접 추가하려면 YES, 경로 내 파일을 추가하려면 NO를 선택하세요.");
-        let caption = path_wide(directory);
-        // SAFETY: owner is the live application HWND and text/caption are owned
-        // NUL-terminated UTF-16 buffers retained through the modal MessageBoxW call.
-        let answer = unsafe { MessageBoxW(owner, text.as_ptr(), caption.as_ptr(), MB_YESNO) };
-        state.directory_mode = Some(
-            if answer == windows_sys::Win32::UI::WindowsAndMessaging::IDYES {
-                DirectoryMode::Direct
-            } else {
-                DirectoryMode::Recurse
-            },
+    start_admission_worker(owner, state, paths, None, capacity);
+}
+
+fn start_admission_worker(
+    window: HWND,
+    state: &mut AppState,
+    paths: Vec<PathBuf>,
+    mode: Option<AdmissionMode>,
+    capacity: usize,
+) {
+    let revision = state.revision();
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let worker_cancellation = Arc::clone(&cancellation);
+    let (sender, receiver) = sync_channel(1);
+    // SAFETY: window is the live top-level HWND and the timer has no callback.
+    if unsafe { SetTimer(window, APPLY_POLL_TIMER_ID, 100, None) } == 0 {
+        message(
+            window,
+            &format!(
+                "admission worker 완료 감시 timer를 시작하지 못했습니다: {}",
+                io::Error::last_os_error()
+            ),
+            "DarkReNamer - 추가 실패",
         );
+        update_controls(state);
+        return;
     }
-    let mode = match state.directory_mode.unwrap_or(DirectoryMode::Direct) {
-        DirectoryMode::Direct => AdmissionMode::Direct,
-        DirectoryMode::Recurse => AdmissionMode::Recurse,
+    let window_value = window as usize;
+    let handle = match thread::Builder::new()
+        .name("darkrenamer-admission".to_owned())
+        .spawn(move || {
+            let _completion_wake = SimpleCompletionWake {
+                window: window_value,
+                message: WM_APP_ADMISSION_COMPLETE,
+            };
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                if worker_cancellation.load(Ordering::Acquire) {
+                    return AdmissionWorkerResult::Cancelled;
+                }
+                let adapter = WindowsAdmissionAdapter::new();
+                let mode = if let Some(mode) = mode {
+                    mode
+                } else {
+                    let mut directory = None;
+                    for path in paths.iter().take(capacity) {
+                        if worker_cancellation.load(Ordering::Acquire) {
+                            return AdmissionWorkerResult::Cancelled;
+                        }
+                        if path.is_absolute()
+                            && adapter.validate_path(path).is_ok()
+                            && adapter.metadata(path).is_ok_and(|metadata| {
+                                metadata.is_directory && !metadata.is_reparse_point
+                            })
+                        {
+                            directory = Some(path.clone());
+                            break;
+                        }
+                    }
+                    if let Some(directory) = directory {
+                        return AdmissionWorkerResult::NeedsDirectoryMode {
+                            revision,
+                            paths,
+                            capacity,
+                            directory,
+                        };
+                    }
+                    AdmissionMode::Direct
+                };
+                let report = collect_admission(&adapter, paths, mode, capacity, |left, right| {
+                    compare_windows(&legacy_path(left), &legacy_path(right))
+                });
+                if worker_cancellation.load(Ordering::Acquire) {
+                    AdmissionWorkerResult::Cancelled
+                } else {
+                    AdmissionWorkerResult::Finished { revision, report }
+                }
+            }))
+            .unwrap_or(AdmissionWorkerResult::Panicked);
+            let _sent = sender.send(result);
+        }) {
+        Ok(handle) => handle,
+        Err(error) => {
+            // SAFETY: this exact timer was installed above for the live window.
+            unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
+            message(
+                window,
+                &format!("admission worker를 시작하지 못했습니다: {error}"),
+                "DarkReNamer - 추가 실패",
+            );
+            update_controls(state);
+            return;
+        }
     };
-    let mut report = collect_admission(&adapter, paths, mode, capacity, |left, right| {
-        compare_windows(&legacy_path(left), &legacy_path(right))
+    state.mutation_locked = true;
+    state.admission_worker = Some(AdmissionWorker {
+        cancellation,
+        receiver,
+        handle,
     });
-    let items = std::mem::take(&mut report.items);
-    let appended = state.model.append_batch_by(items, compare_windows);
-    let summary = report.summary_korean(appended);
-    set_status(state.status, &summary);
-    if !report.issues.is_empty() {
-        message(owner, &summary, "DarkReNamer - 일부 경로 제외");
+    set_status(state.status, "선택한 경로를 확인하고 있습니다...");
+    update_controls(state);
+}
+
+fn handle_admission_completion(window: HWND, state: &mut AppState) {
+    let Some(worker) = state.admission_worker.as_ref() else {
+        return;
+    };
+    if !worker.handle.is_finished() {
+        return;
     }
+    // SAFETY: this timer belongs to the live window and the admission thread
+    // has reached its terminal state.
+    unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
+    let Some(worker) = state.admission_worker.take() else {
+        return;
+    };
+    let joined = worker.handle.join();
+    state.mutation_locked = false;
+    if state.close_pending {
+        // SAFETY: admission performs no mutation and the worker has joined.
+        unsafe { DestroyWindow(window) };
+        return;
+    }
+    if joined.is_err() {
+        message(
+            window,
+            "경로 확인 worker가 비정상 종료되었습니다. 목록은 변경되지 않았습니다.",
+            "DarkReNamer - 추가 오류",
+        );
+        update_controls(state);
+        return;
+    }
+    match worker.receiver.try_recv() {
+        Ok(AdmissionWorkerResult::NeedsDirectoryMode {
+            revision,
+            paths,
+            capacity,
+            directory,
+        }) => {
+            if state.revision() != revision {
+                message(
+                    window,
+                    "경로 확인 중 목록이 변경되어 결과를 적용하지 않았습니다.",
+                    "DarkReNamer - 오래된 결과",
+                );
+                update_controls(state);
+                return;
+            }
+            let text =
+                wide("경로를 직접 추가하려면 YES, 경로 내 파일을 추가하려면 NO를 선택하세요.");
+            let caption = path_wide(&directory);
+            state.mutation_locked = true;
+            state.confirmation_pending = true;
+            update_controls(state);
+            // SAFETY: window is the live owner and both UTF-16 buffers remain
+            // allocated throughout the synchronous modal call.
+            let answer = unsafe { MessageBoxW(window, text.as_ptr(), caption.as_ptr(), MB_YESNO) };
+            state.mutation_locked = false;
+            state.confirmation_pending = false;
+            if state.close_pending {
+                // SAFETY: the modal callback returned and no worker owns state.
+                unsafe { DestroyWindow(window) };
+                return;
+            }
+            let mode = if answer == windows_sys::Win32::UI::WindowsAndMessaging::IDYES {
+                AdmissionMode::Direct
+            } else {
+                AdmissionMode::Recurse
+            };
+            start_admission_worker(window, state, paths, Some(mode), capacity);
+            return;
+        }
+        Ok(AdmissionWorkerResult::Finished {
+            revision,
+            mut report,
+        }) => {
+            if state.revision() != revision {
+                message(
+                    window,
+                    "경로 확인 중 목록이 변경되어 결과를 적용하지 않았습니다.",
+                    "DarkReNamer - 오래된 결과",
+                );
+            } else {
+                let before = state.model.clone();
+                let items = std::mem::take(&mut report.items);
+                let appended = state.model.append_batch_by(items, compare_windows);
+                state.commit_model_change(&before);
+                let summary = report.summary_korean(appended);
+                set_status(state.status, &summary);
+                if !report.issues.is_empty() {
+                    message(window, &summary, "DarkReNamer - 일부 경로 제외");
+                }
+                refresh(state);
+            }
+        }
+        Ok(AdmissionWorkerResult::Cancelled) => {
+            set_status(
+                state.status,
+                "경로 추가를 취소했습니다. 목록은 변경되지 않았습니다.",
+            );
+        }
+        Ok(AdmissionWorkerResult::Panicked) => {
+            message(
+                window,
+                "경로 확인 worker 내부 오류가 발생했습니다. 목록은 변경되지 않았습니다.",
+                "DarkReNamer - 추가 오류",
+            );
+        }
+        Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
+            message(
+                window,
+                "경로 확인 worker가 결과를 전달하지 못했습니다. 목록은 변경되지 않았습니다.",
+                "DarkReNamer - 추가 결과 없음",
+            );
+        }
+    }
+    update_controls(state);
 }
 
 fn legacy_path(path: &Path) -> LegacyText {
@@ -3133,7 +3358,6 @@ fn import_paths_dialog(owner: HWND, state: &mut AppState) {
         .into_iter()
         .map(|line| PathBuf::from(std::ffi::OsString::from_wide(line.units())))
         .collect();
-    state.directory_mode = None;
     admit_paths(owner, state, paths);
 }
 
@@ -3614,6 +3838,7 @@ mod tests {
         assert_send::<crate::rename::ConfirmedPlan>();
         assert_send::<ApplyWorkerResult>();
         assert_send::<PlanWorkerResult>();
+        assert_send::<AdmissionWorkerResult>();
     }
 
     struct CrashBackend {
