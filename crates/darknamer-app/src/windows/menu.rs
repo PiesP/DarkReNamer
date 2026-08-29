@@ -447,7 +447,7 @@ fn create_toolbar_image_list(
         ImageList_Create(
             geometry.cell_width,
             geometry.cell_height,
-            ILC_COLOR32 | ILC_MASK,
+            ILC_COLOR24 | ILC_MASK,
             initial,
             1,
         )
