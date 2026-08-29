@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    BackendError, EntryIdentity, JournalDirection, JournalError, JournalRecord, JournalStep,
-    JournalStore, MutationCertainty, PathKey, PlanId, RecoveryReason, RecoveryState, RenameBackend,
+    AuthorizedJournal, BackendError, EntryIdentity, JournalDirection, JournalError, JournalRecord,
+    JournalStep, MutationCertainty, PathKey, PlanId, RecoveryReason, RecoveryState, RenameBackend,
     RenameOperation, replay_journal,
 };
 
@@ -19,6 +19,8 @@ pub enum RecoveryBlockKind {
     ParentChanged,
     /// Backend observation failed.
     Backend(BackendError),
+    /// The retained journal capability could not load an authorized snapshot.
+    Journal(JournalError),
 }
 
 /// A failure after a recovery transaction began appending records.
@@ -52,20 +54,33 @@ pub enum RecoveryOutcome {
 /// Reconciles one strict journal and rolls all applied steps back safely.
 pub struct RenameRecovery<'a> {
     backend: &'a mut dyn RenameBackend,
-    journal: &'a mut dyn JournalStore,
+    journal: &'a mut dyn AuthorizedJournal,
 }
 
 impl<'a> RenameRecovery<'a> {
     /// Creates a recovery module over the same backend and durable journal.
     #[must_use]
-    pub fn new(backend: &'a mut dyn RenameBackend, journal: &'a mut dyn JournalStore) -> Self {
+    pub fn new(backend: &'a mut dyn RenameBackend, journal: &'a mut dyn AuthorizedJournal) -> Self {
         Self { backend, journal }
     }
 
-    /// Reconciles all manifest endpoints before performing reverse moves.
+    /// Loads and reconciles the retained journal before performing reverse moves.
+    ///
+    /// Records cannot be supplied separately: snapshot and append authority are
+    /// obtained from the same exclusively retained journal capability.
     #[must_use]
-    pub fn rollback(&mut self, records: &[JournalRecord]) -> RecoveryOutcome {
-        let replay = replay_journal(records);
+    pub fn rollback(&mut self) -> RecoveryOutcome {
+        let snapshot = match self.journal.authorized_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return RecoveryOutcome::Blocked {
+                    plan: None,
+                    reason: RecoveryBlockKind::Journal(error),
+                };
+            }
+        };
+        let (records, mut authorization) = snapshot.into_parts();
+        let replay = replay_journal(&records);
         if replay == RecoveryState::Clean {
             return RecoveryOutcome::NotRequired;
         }
@@ -88,7 +103,7 @@ impl<'a> RenameRecovery<'a> {
             };
         };
         let plan = *plan;
-        let mut transitions = match transition_state(records, steps, self.backend) {
+        let mut transitions = match transition_state(&records, steps, self.backend) {
             Ok(state) => state,
             Err(reason) => {
                 return RecoveryOutcome::Blocked {
@@ -100,9 +115,17 @@ impl<'a> RenameRecovery<'a> {
 
         if let Some(prepared) = transitions.prepared {
             let result = if prepared.applied {
-                self.journal.completed(prepared.step, prepared.direction)
+                self.journal.authorized_completed(
+                    &mut authorization,
+                    prepared.step,
+                    prepared.direction,
+                )
             } else {
-                self.journal.not_applied(prepared.step, prepared.direction)
+                self.journal.authorized_not_applied(
+                    &mut authorization,
+                    prepared.step,
+                    prepared.direction,
+                )
             };
             if let Err(error) = result {
                 return RecoveryOutcome::RecoveryRequired {
@@ -134,10 +157,11 @@ impl<'a> RenameRecovery<'a> {
                     reason: RecoveryBlockKind::JournalCorrupt,
                 };
             };
-            if let Err(error) = self
-                .journal
-                .prepared(*step_index, JournalDirection::Rollback)
-            {
+            if let Err(error) = self.journal.authorized_prepared(
+                &mut authorization,
+                *step_index,
+                JournalDirection::Rollback,
+            ) {
                 return RecoveryOutcome::RecoveryRequired {
                     plan,
                     reason: RecoveryFailure::Journal(error),
@@ -146,26 +170,32 @@ impl<'a> RenameRecovery<'a> {
             let operation = reverse_operation(step);
             if let Err(error) = self.backend.rename_no_replace(&operation) {
                 if error.certainty == MutationCertainty::NotApplied {
-                    let _result = self
-                        .journal
-                        .not_applied(*step_index, JournalDirection::Rollback);
+                    let _result = self.journal.authorized_not_applied(
+                        &mut authorization,
+                        *step_index,
+                        JournalDirection::Rollback,
+                    );
                 }
                 return RecoveryOutcome::RecoveryRequired {
                     plan,
                     reason: RecoveryFailure::Backend(error),
                 };
             }
-            if let Err(error) = self
-                .journal
-                .completed(*step_index, JournalDirection::Rollback)
-            {
+            if let Err(error) = self.journal.authorized_completed(
+                &mut authorization,
+                *step_index,
+                JournalDirection::Rollback,
+            ) {
                 return RecoveryOutcome::RecoveryRequired {
                     plan,
                     reason: RecoveryFailure::Journal(error),
                 };
             }
         }
-        if let Err(error) = self.journal.terminal(super::JournalTerminal::RolledBack) {
+        if let Err(error) = self
+            .journal
+            .authorized_terminal(&mut authorization, super::JournalTerminal::RolledBack)
+        {
             return RecoveryOutcome::RecoveryRequired {
                 plan,
                 reason: RecoveryFailure::Journal(error),

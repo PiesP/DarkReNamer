@@ -1,8 +1,12 @@
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use darknamer_core::LegacyText;
 
-use super::{EntryId, EntryIdentity, JournalError, JournalStore, PlanId, TemporaryPhase};
+use super::{
+    AuthorizedJournal, EntryId, EntryIdentity, JournalAuthorization, JournalError, JournalSnapshot,
+    JournalStore, PlanId, TemporaryPhase,
+};
 
 /// Immutable identity-bound primitive step persisted before mutation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -367,24 +371,35 @@ const fn recovery(
 }
 
 /// In-memory journal adapter with the same append-only state machine as production.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug)]
 pub struct MemoryJournal {
     records: Vec<JournalRecord>,
+    identity: u64,
+    generation: u64,
+    invalidate_next_authorized_append: bool,
 }
 
 impl MemoryJournal {
     /// Creates an empty journal.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             records: Vec::new(),
+            identity: next_journal_identity(),
+            generation: 0,
+            invalidate_next_authorized_append: false,
         }
     }
 
     /// Creates an appendable in-memory journal from previously loaded records.
     #[must_use]
     pub fn from_records(records: Vec<JournalRecord>) -> Self {
-        Self { records }
+        Self {
+            generation: records.len() as u64,
+            records,
+            identity: next_journal_identity(),
+            invalidate_next_authorized_append: false,
+        }
     }
 
     /// Returns append-only records for behavior-level tests.
@@ -398,6 +413,39 @@ impl MemoryJournal {
     pub fn recovery_state(&self) -> RecoveryState {
         replay_journal(&self.records)
     }
+
+    /// Simulates journal drift after authorization for fail-closed tests.
+    pub const fn invalidate_on_next_authorized_append(&mut self) {
+        self.invalidate_next_authorized_append = true;
+    }
+
+    fn push(&mut self, record: JournalRecord) {
+        self.records.push(record);
+        self.generation = self.generation.saturating_add(1);
+    }
+
+    fn authorized_push(
+        &mut self,
+        authorization: &mut JournalAuthorization,
+        record: JournalRecord,
+    ) -> Result<(), JournalError> {
+        if self.invalidate_next_authorized_append {
+            self.invalidate_next_authorized_append = false;
+            self.generation = self.generation.saturating_add(1);
+        }
+        if authorization.identity != self.identity || authorization.generation != self.generation {
+            return Err(JournalError { code: 2 });
+        }
+        self.push(record);
+        authorization.generation = self.generation;
+        Ok(())
+    }
+}
+
+impl Default for MemoryJournal {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl JournalStore for MemoryJournal {
@@ -405,7 +453,7 @@ impl JournalStore for MemoryJournal {
         if !self.records.is_empty() {
             return Err(JournalError { code: 1 });
         }
-        self.records.push(JournalRecord::Intent {
+        self.push(JournalRecord::Intent {
             plan,
             steps: steps.into(),
         });
@@ -413,14 +461,12 @@ impl JournalStore for MemoryJournal {
     }
 
     fn prepared(&mut self, step: usize, direction: JournalDirection) -> Result<(), JournalError> {
-        self.records
-            .push(JournalRecord::Prepared { step, direction });
+        self.push(JournalRecord::Prepared { step, direction });
         Ok(())
     }
 
     fn completed(&mut self, step: usize, direction: JournalDirection) -> Result<(), JournalError> {
-        self.records
-            .push(JournalRecord::Completed { step, direction });
+        self.push(JournalRecord::Completed { step, direction });
         Ok(())
     }
 
@@ -429,13 +475,64 @@ impl JournalStore for MemoryJournal {
         step: usize,
         direction: JournalDirection,
     ) -> Result<(), JournalError> {
-        self.records
-            .push(JournalRecord::NotApplied { step, direction });
+        self.push(JournalRecord::NotApplied { step, direction });
         Ok(())
     }
 
     fn terminal(&mut self, terminal: JournalTerminal) -> Result<(), JournalError> {
-        self.records.push(JournalRecord::Terminal(terminal));
+        self.push(JournalRecord::Terminal(terminal));
         Ok(())
     }
+}
+
+impl AuthorizedJournal for MemoryJournal {
+    fn authorized_snapshot(&mut self) -> Result<JournalSnapshot, JournalError> {
+        Ok(JournalSnapshot {
+            records: self.records.clone().into_boxed_slice(),
+            authorization: JournalAuthorization {
+                identity: self.identity,
+                generation: self.generation,
+            },
+        })
+    }
+
+    fn authorized_prepared(
+        &mut self,
+        authorization: &mut JournalAuthorization,
+        step: usize,
+        direction: JournalDirection,
+    ) -> Result<(), JournalError> {
+        self.authorized_push(authorization, JournalRecord::Prepared { step, direction })
+    }
+
+    fn authorized_completed(
+        &mut self,
+        authorization: &mut JournalAuthorization,
+        step: usize,
+        direction: JournalDirection,
+    ) -> Result<(), JournalError> {
+        self.authorized_push(authorization, JournalRecord::Completed { step, direction })
+    }
+
+    fn authorized_not_applied(
+        &mut self,
+        authorization: &mut JournalAuthorization,
+        step: usize,
+        direction: JournalDirection,
+    ) -> Result<(), JournalError> {
+        self.authorized_push(authorization, JournalRecord::NotApplied { step, direction })
+    }
+
+    fn authorized_terminal(
+        &mut self,
+        authorization: &mut JournalAuthorization,
+        terminal: JournalTerminal,
+    ) -> Result<(), JournalError> {
+        self.authorized_push(authorization, JournalRecord::Terminal(terminal))
+    }
+}
+
+fn next_journal_identity() -> u64 {
+    static NEXT_IDENTITY: AtomicU64 = AtomicU64::new(1);
+    NEXT_IDENTITY.fetch_add(1, Ordering::Relaxed)
 }
