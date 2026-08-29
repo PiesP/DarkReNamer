@@ -86,7 +86,7 @@ pub fn open_journal_file(path: &Path, access: JournalAccess) -> io::Result<File>
         .share_mode(SHARE_READ)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     if access == JournalAccess::ReadAppend {
-        options.write(true).append(true);
+        options.write(true);
     }
     let file = options.open(path)?;
     let metadata = file.metadata()?;
