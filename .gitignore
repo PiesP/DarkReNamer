@@ -15,6 +15,7 @@
 /img/
 
 # Local IDE and OS state.
+/.githooks/
 /.idea/
 /.vscode/
 .DS_Store
