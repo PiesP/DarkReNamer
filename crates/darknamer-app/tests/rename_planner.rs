@@ -135,3 +135,128 @@ fn duplicate_and_external_occupied_destinations_are_blocked()
     );
     Ok(())
 }
+
+#[test]
+fn planner_blocks_duplicate_identity_inputs_cross_parent_and_source_overlap()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = MemoryBackend::new()
+        .with_file("C:\\work\\a.txt", 1)
+        .with_file("C:\\work\\folder", 2)
+        .with_file("C:\\work\\folder\\child.txt", 3);
+
+    let duplicate_id = PlanRequest::new(
+        ModelRevision::new(1),
+        vec![
+            intent(7, "C:\\work\\a.txt", "b.txt"),
+            intent(7, "C:\\work\\folder", "renamed"),
+        ],
+    );
+    let Err(error) = RenamePlanner::new(&backend).plan(duplicate_id) else {
+        return Err(std::io::Error::other("duplicate entry id was accepted").into());
+    };
+    assert!(
+        error
+            .issues()
+            .iter()
+            .any(|issue| issue.kind == PlanIssueKind::DuplicateEntryId)
+    );
+
+    let duplicate_source = PlanRequest::new(
+        ModelRevision::new(2),
+        vec![
+            intent(1, "C:\\work\\a.txt", "b.txt"),
+            intent(2, "C:\\WORK\\A.TXT", "c.txt"),
+        ],
+    );
+    let Err(error) = RenamePlanner::new(&backend).plan(duplicate_source) else {
+        return Err(std::io::Error::other("duplicate source key was accepted").into());
+    };
+    assert!(
+        error
+            .issues()
+            .iter()
+            .all(|issue| issue.kind == PlanIssueKind::DuplicateSource)
+    );
+
+    let cross_parent = PlanRequest::new(
+        ModelRevision::new(3),
+        vec![RenameIntent::new(
+            EntryId::new(3),
+            "C:\\work\\a.txt",
+            "C:\\other",
+            "a.txt",
+            EntryKind::File,
+        )],
+    );
+    let Err(error) = RenamePlanner::new(&backend).plan(cross_parent) else {
+        return Err(std::io::Error::other("cross-parent move was accepted").into());
+    };
+    assert_eq!(error.issues()[0].kind, PlanIssueKind::CrossParent);
+
+    let overlap = PlanRequest::new(
+        ModelRevision::new(4),
+        vec![
+            intent(4, "C:\\work\\folder", "renamed"),
+            RenameIntent::new(
+                EntryId::new(5),
+                "C:\\work\\folder\\child.txt",
+                "C:\\work\\folder",
+                "child-2.txt",
+                EntryKind::File,
+            ),
+        ],
+    );
+    let Err(error) = RenamePlanner::new(&backend).plan(overlap) else {
+        return Err(std::io::Error::other("ancestor source overlap was accepted").into());
+    };
+    assert!(
+        error
+            .issues()
+            .iter()
+            .all(|issue| issue.kind == PlanIssueKind::SourceOverlap)
+    );
+    Ok(())
+}
+
+#[test]
+fn occupied_hard_link_is_not_treated_as_a_pending_source_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = MemoryBackend::new()
+        .with_file("C:\\work\\a.txt", 1)
+        .with_file("C:\\work\\hard-link.txt", 1);
+    let request = PlanRequest::new(
+        ModelRevision::new(1),
+        vec![intent(0, "C:\\work\\a.txt", "hard-link.txt")],
+    );
+
+    let Err(error) = RenamePlanner::new(&backend).plan(request) else {
+        return Err(std::io::Error::other("occupied hard link was accepted").into());
+    };
+    assert_eq!(error.issues()[0].kind, PlanIssueKind::DestinationOccupied);
+    Ok(())
+}
+
+#[test]
+fn plan_exposes_stable_preview_rows_and_joins_root_without_double_separator()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = MemoryBackend::new().with_file("C:\\a.txt", 1);
+    let request = PlanRequest::new(
+        ModelRevision::new(1),
+        vec![RenameIntent::new(
+            EntryId::new(42),
+            "C:\\a.txt",
+            "C:\\",
+            "b.txt",
+            EntryKind::File,
+        )],
+    );
+
+    let plan = RenamePlanner::new(&backend).plan(request)?;
+    assert_eq!(plan.rows().len(), 1);
+    assert_eq!(plan.rows()[0].entry(), EntryId::new(42));
+    assert_eq!(plan.rows()[0].source().to_string_lossy(), "C:\\a.txt");
+    assert_eq!(plan.rows()[0].destination().to_string_lossy(), "C:\\b.txt");
+    assert_eq!(plan.rows()[0].kind(), EntryKind::File);
+    assert_ne!(plan.fingerprint(), 0);
+    Ok(())
+}

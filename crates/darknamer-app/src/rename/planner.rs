@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use darknamer_core::validate_windows_leaf_name;
 
-use super::model::PlannedEntry;
+use super::model::PlanRow;
 use super::{
-    PathKey, PlanError, PlanId, PlanIssue, PlanIssueKind, PlanRequest, RenameBackend, RenameIntent,
-    RenamePlan,
+    EntryId, PathKey, PlanError, PlanId, PlanIssue, PlanIssueKind, PlanRequest, RenameBackend,
+    RenameIntent, RenamePlan,
 };
 
 /// Builds immutable plans without mutating the filesystem adapter.
@@ -33,14 +33,39 @@ impl<'a> RenamePlanner<'a> {
             .collect::<Vec<_>>();
         let mut issues = Vec::new();
         let mut destination_owners: BTreeMap<PathKey, Vec<_>> = BTreeMap::new();
+        let mut source_owners: BTreeMap<PathKey, Vec<_>> = BTreeMap::new();
+        let mut entry_owners: BTreeMap<_, Vec<_>> = BTreeMap::new();
 
         for intent in &changed {
             validate_intent(intent, &mut issues);
+            source_owners
+                .entry(self.backend.path_key(&intent.source))
+                .or_default()
+                .push(intent.id);
+            entry_owners.entry(intent.id).or_default().push(intent.id);
             destination_owners
                 .entry(self.backend.path_key(&intent.destination))
                 .or_default()
                 .push(intent.id);
+            if self.backend.path_key(&parent_path(&intent.source))
+                != self.backend.path_key(&parent_path(&intent.destination))
+            {
+                issues.push(PlanIssue {
+                    entry: intent.id,
+                    kind: PlanIssueKind::CrossParent,
+                });
+            }
         }
+        append_duplicate_issues(
+            source_owners.values(),
+            PlanIssueKind::DuplicateSource,
+            &mut issues,
+        );
+        append_duplicate_issues(
+            entry_owners.values(),
+            PlanIssueKind::DuplicateEntryId,
+            &mut issues,
+        );
         for owners in destination_owners
             .values()
             .filter(|owners| owners.len() > 1)
@@ -50,12 +75,25 @@ impl<'a> RenamePlanner<'a> {
                 kind: PlanIssueKind::DuplicateDestination,
             }));
         }
+        let ordered_sources = source_owners.iter().collect::<Vec<_>>();
+        for pair in ordered_sources.windows(2) {
+            if is_ancestor_key(pair[0].0, pair[1].0) {
+                issues.push(PlanIssue {
+                    entry: pair[0].1[0],
+                    kind: PlanIssueKind::SourceOverlap,
+                });
+                issues.push(PlanIssue {
+                    entry: pair[1].1[0],
+                    kind: PlanIssueKind::SourceOverlap,
+                });
+            }
+        }
         if !issues.is_empty() {
             return Err(PlanError::new(issues));
         }
 
         let mut entries = Vec::with_capacity(changed.len());
-        let mut planned_source_identities = BTreeSet::new();
+        let planned_source_keys = source_owners.keys().cloned().collect::<BTreeSet<_>>();
         for intent in changed {
             let source_snapshot = match self.backend.observe(&intent.source) {
                 Ok(snapshot) => snapshot,
@@ -98,8 +136,7 @@ impl<'a> RenamePlanner<'a> {
                     continue;
                 }
             };
-            planned_source_identities.insert(source_entry.identity);
-            entries.push(PlannedEntry {
+            entries.push(PlanRow {
                 id: intent.id,
                 source: intent.source.clone(),
                 destination: intent.destination.clone(),
@@ -113,9 +150,9 @@ impl<'a> RenamePlanner<'a> {
         }
 
         for entry in &entries {
-            if entry.destination_snapshot.entry.is_some_and(|destination| {
-                !planned_source_identities.contains(&destination.identity)
-            }) {
+            if entry.destination_snapshot.entry.is_some()
+                && !planned_source_keys.contains(&self.backend.path_key(&entry.destination))
+            {
                 issues.push(PlanIssue {
                     entry: entry.id,
                     kind: PlanIssueKind::DestinationOccupied,
@@ -132,6 +169,37 @@ impl<'a> RenamePlanner<'a> {
             entries: entries.into_boxed_slice(),
         })
     }
+}
+
+fn append_duplicate_issues<'a>(
+    owner_sets: impl Iterator<Item = &'a Vec<EntryId>>,
+    kind: PlanIssueKind,
+    issues: &mut Vec<PlanIssue>,
+) {
+    for owners in owner_sets.filter(|owners| owners.len() > 1) {
+        issues.extend(owners.iter().map(|entry| PlanIssue {
+            entry: *entry,
+            kind: kind.clone(),
+        }));
+    }
+}
+
+fn parent_path(path: &darknamer_core::LegacyText) -> darknamer_core::LegacyText {
+    let units = path.units();
+    let end = units
+        .iter()
+        .rposition(|unit| is_separator(*unit))
+        .unwrap_or(0);
+    darknamer_core::LegacyText::from_units(units[..end].to_vec())
+}
+
+fn is_ancestor_key(ancestor: &PathKey, descendant: &PathKey) -> bool {
+    descendant.units().len() > ancestor.units().len()
+        && descendant.units().starts_with(ancestor.units())
+        && descendant
+            .units()
+            .get(ancestor.units().len())
+            .is_some_and(|unit| is_separator(*unit))
 }
 
 fn validate_intent(intent: &RenameIntent, issues: &mut Vec<PlanIssue>) {

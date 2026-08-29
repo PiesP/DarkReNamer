@@ -1,7 +1,7 @@
 use std::fmt;
 
 use super::journal::{JournalDirection, JournalTerminal};
-use super::model::PlannedEntry;
+use super::model::PlanRow;
 use super::schedule::{ScheduleStep, build_schedule};
 use super::{
     BackendError, ConfirmedPlan, EntryId, JournalError, JournalStore, PlanId, RenameBackend,
@@ -194,11 +194,7 @@ impl<'a> RenameExecutor<'a> {
         })
     }
 
-    fn freeze(
-        &self,
-        entries: &[PlannedEntry],
-        schedule: &[ScheduleStep],
-    ) -> Result<(), ExecuteError> {
+    fn freeze(&self, entries: &[PlanRow], schedule: &[ScheduleStep]) -> Result<(), ExecuteError> {
         for entry in entries {
             let current_source =
                 self.backend

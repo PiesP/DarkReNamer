@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use darknamer_core::LegacyText;
 
-use super::model::PlannedEntry;
+use super::model::PlanRow;
 use super::{EntryId, EntryIdentity, PathKey, RenameBackend, RenamePlan};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -99,7 +99,7 @@ pub(super) fn build_schedule(
     Some(schedule)
 }
 
-fn direct_step(entry: &PlannedEntry) -> Option<ScheduleStep> {
+fn direct_step(entry: &PlanRow) -> Option<ScheduleStep> {
     Some(ScheduleStep {
         entry: entry.id,
         source: entry.source.clone(),
@@ -109,13 +109,13 @@ fn direct_step(entry: &PlannedEntry) -> Option<ScheduleStep> {
     })
 }
 
-fn source_identity(entry: &PlannedEntry) -> Option<EntryIdentity> {
+fn source_identity(entry: &PlanRow) -> Option<EntryIdentity> {
     entry.source_snapshot.entry.map(|source| source.identity)
 }
 
 fn unique_temporary_path(
     plan: &RenamePlan,
-    pivot: &PlannedEntry,
+    pivot: &PlanRow,
     backend: &dyn RenameBackend,
     reserved: &mut BTreeSet<PathKey>,
 ) -> LegacyText {

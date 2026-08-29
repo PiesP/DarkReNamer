@@ -16,7 +16,7 @@ pub use journal::{JournalDirection, JournalRecord, JournalTerminal, MemoryJourna
 pub use memory::MemoryBackend;
 pub use model::{
     ConfirmationError, ConfirmedPlan, EntryId, EntryIdentity, EntryKind, ModelRevision, PathKey,
-    PathSnapshot, PlanError, PlanId, PlanIssue, PlanIssueKind, PlanRequest, RenameIntent,
+    PathSnapshot, PlanError, PlanId, PlanIssue, PlanIssueKind, PlanRequest, PlanRow, RenameIntent,
     RenamePlan,
 };
 pub use planner::RenamePlanner;

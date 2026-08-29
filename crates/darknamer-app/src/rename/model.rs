@@ -42,6 +42,12 @@ impl PlanId {
     pub(super) const fn value(self) -> u64 {
         self.0
     }
+
+    /// Returns the deterministic plan fingerprint shown during confirmation.
+    #[must_use]
+    pub const fn fingerprint(self) -> u64 {
+        self.0
+    }
 }
 
 /// The filesystem kind of a planned source.
@@ -89,6 +95,10 @@ impl PathKey {
     #[must_use]
     pub fn exact(path: &LegacyText) -> Self {
         Self(path.units().into())
+    }
+
+    pub(super) fn units(&self) -> &[u16] {
+        &self.0
     }
 }
 
@@ -138,7 +148,13 @@ impl RenameIntent {
         let mut destination_units =
             Vec::with_capacity(destination_parent.len() + 1 + destination_name.len());
         destination_units.extend_from_slice(destination_parent.units());
-        destination_units.push(b'\\' as u16);
+        if !destination_parent
+            .units()
+            .last()
+            .is_some_and(|unit| *unit == b'\\' as u16 || *unit == b'/' as u16)
+        {
+            destination_units.push(b'\\' as u16);
+        }
         destination_units.extend_from_slice(destination_name.units());
         Self {
             id,
@@ -187,6 +203,14 @@ pub enum PlanIssueKind {
     ReparseSource,
     /// Multiple entries target the same filesystem key.
     DuplicateDestination,
+    /// Multiple intents use the same plan-scoped entry identifier.
+    DuplicateEntryId,
+    /// Multiple intents refer to the same source path key.
+    DuplicateSource,
+    /// Source and destination resolve under different direct parents.
+    CrossParent,
+    /// Selected sources have an ancestor/descendant relationship.
+    SourceOverlap,
     /// A destination is occupied by an entry outside this plan.
     DestinationOccupied,
     /// A required backend observation failed.
@@ -235,13 +259,39 @@ impl fmt::Display for PlanError {
 impl std::error::Error for PlanError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct PlannedEntry {
-    pub id: EntryId,
-    pub source: LegacyText,
-    pub destination: LegacyText,
-    pub kind: EntryKind,
-    pub source_snapshot: PathSnapshot,
-    pub destination_snapshot: PathSnapshot,
+pub struct PlanRow {
+    pub(super) id: EntryId,
+    pub(super) source: LegacyText,
+    pub(super) destination: LegacyText,
+    pub(super) kind: EntryKind,
+    pub(super) source_snapshot: PathSnapshot,
+    pub(super) destination_snapshot: PathSnapshot,
+}
+
+impl PlanRow {
+    /// Returns the plan-scoped stable entry identifier.
+    #[must_use]
+    pub const fn entry(&self) -> EntryId {
+        self.id
+    }
+
+    /// Returns the exact source path submitted for planning.
+    #[must_use]
+    pub const fn source(&self) -> &LegacyText {
+        &self.source
+    }
+
+    /// Returns the exact validated destination path.
+    #[must_use]
+    pub const fn destination(&self) -> &LegacyText {
+        &self.destination
+    }
+
+    /// Returns the planned filesystem kind.
+    #[must_use]
+    pub const fn kind(&self) -> EntryKind {
+        self.kind
+    }
 }
 
 /// Immutable, validated rename plan.
@@ -249,7 +299,7 @@ pub(super) struct PlannedEntry {
 pub struct RenamePlan {
     pub(super) id: PlanId,
     pub(super) revision: ModelRevision,
-    pub(super) entries: Box<[PlannedEntry]>,
+    pub(super) entries: Box<[PlanRow]>,
 }
 
 impl RenamePlan {
@@ -257,6 +307,12 @@ impl RenamePlan {
     #[must_use]
     pub const fn id(&self) -> PlanId {
         self.id
+    }
+
+    /// Returns the deterministic display fingerprint for confirmation UI.
+    #[must_use]
+    pub const fn fingerprint(&self) -> u64 {
+        self.id.fingerprint()
     }
 
     /// Returns the list revision captured by the plan.
@@ -275,6 +331,12 @@ impl RenamePlan {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Returns safe preview rows without exposing execution snapshots or schedule internals.
+    #[must_use]
+    pub fn rows(&self) -> &[PlanRow] {
+        &self.entries
     }
 
     /// Consumes this exact plan after the caller confirms its displayed identity.
