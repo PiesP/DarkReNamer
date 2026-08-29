@@ -78,6 +78,8 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::{SS_CENTERIMAGE, SS_ETCHEDHORZ, SS_SUNKEN};
 use windows_sys::Win32::System::Time::FileTimeToSystemTime;
 use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::TB_GETBUTTON;
 use windows_sys::Win32::UI::Controls::{
     BTNS_SHOWTEXT, CCS_NOPARENTALIGN, CCS_NORESIZE, CCS_VERT, I_IMAGENONE, ICC_BAR_CLASSES,
     ICC_LISTVIEW_CLASSES, ILC_COLOR32, ILC_MASK, INITCOMMONCONTROLSEX, ImageList_AddMasked,
@@ -112,7 +114,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     MB_YESNO, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
     MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW, PostMessageW,
     PostQuitMessage, RegisterClassExW, SPI_GETHIGHCONTRAST, SPI_GETNONCLIENTMETRICS, SW_SHOW,
-    SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetTimer,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage, WM_APP,
     WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_FONTCHANGE,
     WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS,
@@ -813,29 +815,84 @@ mod tests {
         }
 
         let result = (|| -> io::Result<()> {
-            for dpi in [96, 120, 144, 192] {
-                let left = create_toolbar(parent, instance, LEFT_TOOLBAR, dpi, true)?;
-                let right = match create_toolbar(parent, instance, RIGHT_TOOLBAR, dpi, true) {
-                    Ok(toolbar) => toolbar,
-                    Err(error) => {
-                        destroy_toolbar(left);
-                        return Err(error);
+            for high_contrast in [false, true] {
+                for dpi in [96, 120, 144, 192] {
+                    let left = create_toolbar(parent, instance, LEFT_TOOLBAR, dpi, high_contrast)?;
+                    let right =
+                        match create_toolbar(parent, instance, RIGHT_TOOLBAR, dpi, high_contrast) {
+                            Ok(toolbar) => toolbar,
+                            Err(error) => {
+                                destroy_toolbar(left);
+                                return Err(error);
+                            }
+                        };
+                    let left_rects = toolbar_command_rects(left.window, &LEFT_TOOLBAR_ITEMS)?;
+                    let right_rects = toolbar_command_rects(right.window, &RIGHT_TOOLBAR_ITEMS)?;
+                    assert_eq!(left_rects.len(), 10);
+                    assert_eq!(right_rects.len(), 9);
+                    let rail_width = scale_dip(toolbar_width_dip(high_contrast), dpi);
+                    assert!(toolbar_rects_are_vertical(&left_rects, rail_width));
+                    assert!(toolbar_rects_are_vertical(&right_rects, rail_width));
+
+                    for (toolbar, images, tools, items) in [
+                        (
+                            left.window,
+                            left.images,
+                            LEFT_TOOLS.as_slice(),
+                            LEFT_TOOLBAR_ITEMS.as_slice(),
+                        ),
+                        (
+                            right.window,
+                            right.images,
+                            RIGHT_TOOLS.as_slice(),
+                            RIGHT_TOOLBAR_ITEMS.as_slice(),
+                        ),
+                    ] {
+                        if high_contrast {
+                            assert_eq!(images, 0);
+                        } else {
+                            assert_ne!(images, 0);
+                            // SAFETY: images is the live AppState-equivalent
+                            // image list owned by this test toolbar handle.
+                            let image_count = unsafe { ImageList_GetImageCount(images) };
+                            assert_eq!(image_count, tools.len() as i32);
+                        }
+                        for item in items {
+                            let ToolbarItem::Command(command) = *item else {
+                                continue;
+                            };
+                            // SAFETY: toolbar is live and command is passed by value.
+                            let index = unsafe {
+                                SendMessageW(toolbar, TB_COMMANDTOINDEX, usize::from(command), 0)
+                            };
+                            assert!(index >= 0);
+                            let mut button = TBBUTTON::default();
+                            // SAFETY: button remains writable through this
+                            // synchronous query for a validated toolbar index.
+                            let found = unsafe {
+                                SendMessageW(
+                                    toolbar,
+                                    TB_GETBUTTON,
+                                    usize::try_from(index).map_err(|_| {
+                                        io::Error::other("invalid native toolbar index")
+                                    })?,
+                                    (&mut button as *mut TBBUTTON) as isize,
+                                )
+                            };
+                            assert_ne!(found, 0);
+                            let expected = if high_contrast {
+                                I_IMAGENONE
+                            } else {
+                                toolbar_image_index(tools, command)
+                                    .ok_or_else(|| io::Error::other("missing image index"))?
+                            };
+                            assert_eq!(button.iBitmap, expected);
+                            assert_eq!(button.idCommand, i32::from(command));
+                        }
                     }
-                };
-                let left_rects = toolbar_command_rects(left.window, &LEFT_TOOLBAR_ITEMS)?;
-                let right_rects = toolbar_command_rects(right.window, &RIGHT_TOOLBAR_ITEMS)?;
-                assert_eq!(left_rects.len(), 10);
-                assert_eq!(right_rects.len(), 9);
-                assert!(toolbar_rects_are_vertical(
-                    &left_rects,
-                    scale_dip(toolbar_width_dip(true), dpi)
-                ));
-                assert!(toolbar_rects_are_vertical(
-                    &right_rects,
-                    scale_dip(toolbar_width_dip(true), dpi)
-                ));
-                destroy_toolbar(left);
-                destroy_toolbar(right);
+                    destroy_toolbar(left);
+                    destroy_toolbar(right);
+                }
             }
             Ok(())
         })();

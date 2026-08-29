@@ -41,6 +41,61 @@ fn minimum_track_width(window: HWND, state: &AppState) -> i32 {
     )
 }
 
+fn resize_to_initial_dpi(window: HWND, state: &AppState) -> io::Result<()> {
+    let width = minimum_track_width(window, state);
+    let height = scale_dip(INITIAL_HEIGHT, state.dpi);
+    // SAFETY: window is the newly created hidden top-level HWND. The flags keep
+    // its system-selected position and z-order while applying physical pixels
+    // derived from the window's actual DPI before the first ShowWindow call.
+    if unsafe {
+        SetWindowPos(
+            window,
+            null_mut(),
+            0,
+            0,
+            width,
+            height,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn ensure_minimum_track_width(window: HWND, state: &AppState) -> io::Result<()> {
+    // SAFETY: RECT has a valid all-zero representation and remains writable for
+    // the synchronous top-level window geometry query.
+    let mut rect: RECT = unsafe { zeroed() };
+    // SAFETY: window is the live top-level HWND owned by this UI thread.
+    if unsafe { GetWindowRect(window, &mut rect) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let minimum = minimum_track_width(window, state);
+    let current_width = rect.right - rect.left;
+    if current_width >= minimum {
+        return Ok(());
+    }
+    // SAFETY: the live window is widened in place without changing position,
+    // height, activation, or z-order after a display-mode transition.
+    if unsafe {
+        SetWindowPos(
+            window,
+            null_mut(),
+            0,
+            0,
+            minimum,
+            rect.bottom - rect.top,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn run_unsafe() -> io::Result<()> {
     if process_is_elevated()? {
         return Err(io::Error::new(
@@ -120,6 +175,14 @@ fn run_unsafe() -> io::Result<()> {
             unsafe { drop(Box::from_raw(state)) };
         }
         return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful WM_NCCREATE adopted `state`; it remains live in the
+    // window user data until WM_NCDESTROY and is read only for this resize.
+    if let Err(error) = resize_to_initial_dpi(window, unsafe { &*state }) {
+        // SAFETY: window is still hidden and owns the adopted AppState. Its
+        // normal teardown reclaims children, GDI resources, and the state.
+        unsafe { DestroyWindow(window) };
+        return Err(error);
     }
     // SAFETY: window is the non-null top-level HWND just created and remains owned by this UI thread.
     unsafe {
@@ -242,13 +305,25 @@ unsafe extern "system" fn window_proc(
             arrange(window, state);
             0
         }
-        WM_SETTINGCHANGE | WM_FONTCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE
-            if !state_ptr.is_null() =>
-        {
+        WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE if !state_ptr.is_null() => {
             // SAFETY: state_ptr is the live UI-thread AppState.
             let state = unsafe { &mut *state_ptr };
             refresh_system_fonts(state);
-            refresh_toolbars(window, state, false);
+            refresh_toolbars(window, state, true);
+            if let Err(error) = ensure_minimum_track_width(window, state) {
+                super::message(
+                    window,
+                    &format!("새 표시 설정의 최소 창 폭을 적용하지 못했습니다: {error}"),
+                    "DarkReNamer - 표시 설정",
+                );
+            }
+            arrange(window, state);
+            0
+        }
+        WM_FONTCHANGE if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is the live UI-thread AppState.
+            let state = unsafe { &mut *state_ptr };
+            refresh_system_fonts(state);
             arrange(window, state);
             0
         }
