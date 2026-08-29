@@ -424,6 +424,14 @@ fn create_toolbar_image_list(
             "could not load native toolbar bitmap resource",
         ));
     }
+    create_toolbar_image_list_from_bitmap(source, geometry, source_count)
+}
+
+pub(super) fn create_toolbar_image_list_from_bitmap(
+    source: HBITMAP,
+    geometry: ToolbarImageGeometry,
+    source_count: usize,
+) -> io::Result<windows_sys::Win32::UI::Controls::HIMAGELIST> {
     // SAFETY: source is a caller-owned bitmap returned above. CopyImage creates
     // a distinct full-strip DIB scaled to the exact image-list cell grid.
     let scaled = unsafe {
