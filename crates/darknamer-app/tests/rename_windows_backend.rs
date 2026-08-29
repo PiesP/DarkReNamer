@@ -7,9 +7,9 @@ use darknamer_app::rename::{
     EntryId, EntryKind, ExecuteErrorKind, ExecutionOutcome, FileJournal, FileJournalErrorKind,
     JournalRoot, MemoryJournal, ModelRevision, MutationCertainty, PlanIssueKind, PlanRequest,
     RenameBackend, RenameExecutor, RenameIntent, RenameOperation, RenamePlanner,
-    WindowsRenameBackend,
+    WindowsRenameBackend, apply_execution_report, build_plan_request,
 };
-use darknamer_core::LegacyText;
+use darknamer_core::{LegacyList, LegacyListItem, LegacyText};
 
 fn legacy_path(path: &std::path::Path) -> LegacyText {
     LegacyText::from_units(path.as_os_str().encode_wide().collect::<Vec<_>>())
@@ -431,5 +431,38 @@ fn journal_child_handle_is_exclusive_and_relative_to_retained_root()
     );
     drop(journal);
     assert!(directory.path().join("exclusive.drj").exists());
+    Ok(())
+}
+
+#[test]
+fn planner_file_journal_backend_and_model_complete_one_production_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+    let source = directory.path().join("before.txt");
+    fs::write(&source, b"content")?;
+    let mut model = LegacyList::new();
+    assert!(model.append(LegacyListItem::new(legacy_path(&source), false, 7, 8, 9,)));
+    assert!(model.manual_change(0, "after.txt"));
+    let mut backend = WindowsRenameBackend;
+    let plan =
+        RenamePlanner::new(&backend).plan(build_plan_request(&model, ModelRevision::new(1)))?;
+    let id = plan.id();
+    let revision = plan.revision();
+    let root = JournalRoot::open(directory.path())?;
+    let mut journal = FileJournal::create_new(&root, "active.drj")?;
+
+    let report = RenameExecutor::new(&mut backend, &mut journal)
+        .execute(plan.confirm_presented(id, revision)?)?;
+
+    assert_eq!(report.outcome(), &ExecutionOutcome::Completed);
+    assert!(apply_execution_report(&mut model, &report));
+    assert_eq!(
+        model.items()[0].source_path(),
+        &legacy_path(&directory.path().join("after.txt"))
+    );
+    assert!(journal.is_terminal());
     Ok(())
 }

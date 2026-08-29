@@ -1,7 +1,7 @@
 use darknamer_app::rename::{
     ExecutionOutcome, JournalCleanupDecision, JournalRecord, JournalTerminal, MemoryBackend,
     MemoryJournal, ModelRevision, RenameExecutor, RenamePlanner, apply_execution_report,
-    build_plan_request, cleanup_decision, plan_error_korean,
+    build_plan_request, cleanup_decision, next_model_revision, plan_error_korean,
 };
 use darknamer_core::{LegacyList, LegacyListItem, LegacyText};
 
@@ -87,4 +87,11 @@ fn blocker_message_is_structured_and_selects_affected_rows() {
     let (message, rows) = plan_error_korean(&error);
     assert!(message.contains("중복"));
     assert_eq!(rows, vec![0, 1]);
+}
+
+#[test]
+fn model_revision_is_monotonic_and_changes_only_with_the_model() {
+    assert_eq!(next_model_revision(7, false), 7);
+    assert_eq!(next_model_revision(7, true), 8);
+    assert_eq!(next_model_revision(u64::MAX, true), u64::MAX);
 }

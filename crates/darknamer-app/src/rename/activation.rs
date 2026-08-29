@@ -8,6 +8,16 @@ use super::{
     PlanRequest, RecoveryState, RenameIntent, RenameState, replay_journal,
 };
 
+/// Advances a monotonic model revision only for an observable model change.
+#[must_use]
+pub const fn next_model_revision(current: u64, changed: bool) -> u64 {
+    if changed {
+        current.saturating_add(1)
+    } else {
+        current
+    }
+}
+
 /// Builds an exact plan request from current legacy rows without changing them.
 #[must_use]
 pub fn build_plan_request(model: &LegacyList, revision: ModelRevision) -> PlanRequest {
