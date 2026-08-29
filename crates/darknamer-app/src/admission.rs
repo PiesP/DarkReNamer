@@ -80,6 +80,9 @@ pub struct AdmissionAdapterError;
 
 /// Local filesystem seam used by iterative admission and focused tests.
 pub trait AdmissionAdapter {
+    /// Validates path policy and retains any parent authority needed later.
+    fn validate_path(&self, path: &Path) -> Result<(), AdmissionAdapterError>;
+
     /// Inspects one candidate without following its final component.
     fn metadata(&self, path: &Path) -> Result<AdmissionMetadata, AdmissionAdapterError>;
 
@@ -132,17 +135,19 @@ pub fn collect_admission(
     adapter: &dyn AdmissionAdapter,
     mut roots: Vec<PathBuf>,
     mode: AdmissionMode,
+    capacity: usize,
     compare_paths: impl Fn(&Path, &Path) -> Ordering + Copy,
 ) -> AdmissionReport {
-    roots.sort_by(|left, right| compare_paths(left, right));
+    let capacity = capacity.min(MAX_ADMITTED_SOURCES);
     let mut report = AdmissionReport::default();
-    if roots.len() > MAX_ADMITTED_SOURCES {
+    if roots.len() > capacity {
         report.issues.push(AdmissionIssue {
-            path: roots[MAX_ADMITTED_SOURCES].clone(),
+            path: roots[capacity].clone(),
             kind: AdmissionIssueKind::LimitReached,
         });
-        roots.truncate(MAX_ADMITTED_SOURCES);
+        roots.truncate(capacity);
     }
+    roots.sort_by(|left, right| compare_paths(left, right));
     let mut stack = VecDeque::new();
     for root in roots.into_iter().rev() {
         stack.push_back(root);
@@ -151,7 +156,7 @@ pub fn collect_admission(
     let mut inspected = 0_usize;
 
     while let Some(path) = stack.pop_back() {
-        if inspected >= MAX_ADMITTED_SOURCES {
+        if inspected >= capacity {
             report.issues.push(AdmissionIssue {
                 path,
                 kind: AdmissionIssueKind::LimitReached,
@@ -163,6 +168,13 @@ pub fn collect_admission(
             report.issues.push(AdmissionIssue {
                 path,
                 kind: AdmissionIssueKind::RelativePath,
+            });
+            continue;
+        }
+        if adapter.validate_path(&path).is_err() {
+            report.issues.push(AdmissionIssue {
+                path,
+                kind: AdmissionIssueKind::Metadata,
             });
             continue;
         }
@@ -194,7 +206,7 @@ pub fn collect_admission(
                 continue;
             }
             if mode == AdmissionMode::Recurse {
-                let remaining = MAX_ADMITTED_SOURCES
+                let remaining = capacity
                     .saturating_sub(inspected)
                     .saturating_sub(stack.len());
                 if remaining == 0 {
@@ -247,42 +259,94 @@ pub fn collect_admission(
 
 #[cfg(windows)]
 mod windows {
-    use std::collections::BTreeSet;
-    use std::fs;
-    use std::os::windows::ffi::OsStrExt;
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+    use std::fs::File;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::os::windows::fs::MetadataExt;
 
-    use crate::rename::{RenameBackend, WindowsRenameBackend};
+    use darknamer_core::validate_windows_leaf_name;
+
+    use crate::rename::windows_native::{
+        NativeParent, file_identity, open_directory_entry, open_entry, query_directory_names,
+    };
 
     use super::*;
 
     /// Safe Windows adapter used by picker, drop, and path import.
     #[derive(Debug, Default)]
-    pub struct WindowsAdmissionAdapter;
+    pub struct WindowsAdmissionAdapter {
+        parents: RefCell<BTreeMap<PathBuf, NativeParent>>,
+        directories: RefCell<BTreeMap<PathBuf, File>>,
+        metadata_cache: RefCell<BTreeMap<PathBuf, AdmissionMetadata>>,
+    }
+
+    impl WindowsAdmissionAdapter {
+        /// Creates an empty retained-handle admission session.
+        #[must_use]
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        fn parent_and_leaf(path: &Path) -> Result<(PathBuf, Vec<u16>), AdmissionAdapterError> {
+            let parent = path.parent().ok_or(AdmissionAdapterError)?.to_path_buf();
+            let leaf = path
+                .file_name()
+                .ok_or(AdmissionAdapterError)?
+                .encode_wide()
+                .collect::<Vec<_>>();
+            if validate_windows_leaf_name(&LegacyText::from_units(leaf.clone())).is_err() {
+                return Err(AdmissionAdapterError);
+            }
+            Ok((parent, leaf))
+        }
+    }
 
     impl AdmissionAdapter for WindowsAdmissionAdapter {
+        fn validate_path(&self, path: &Path) -> Result<(), AdmissionAdapterError> {
+            let (parent, _leaf) = Self::parent_and_leaf(path)?;
+            if !self.parents.borrow().contains_key(&parent) {
+                let handle = NativeParent::open_path(&parent).map_err(|_| AdmissionAdapterError)?;
+                self.parents.borrow_mut().insert(parent, handle);
+            }
+            Ok(())
+        }
+
         fn metadata(&self, path: &Path) -> Result<AdmissionMetadata, AdmissionAdapterError> {
-            let metadata = fs::symlink_metadata(path).map_err(|_| AdmissionAdapterError)?;
+            if let Some(metadata) = self.metadata_cache.borrow().get(path).copied() {
+                return Ok(metadata);
+            }
+            let (parent_path, leaf) = Self::parent_and_leaf(path)?;
+            let parents = self.parents.borrow();
+            let parent = parents.get(&parent_path).ok_or(AdmissionAdapterError)?;
+            let file = open_entry(parent, &leaf, false).map_err(|_| AdmissionAdapterError)?;
+            let metadata = file.metadata().map_err(|_| AdmissionAdapterError)?;
             let attributes = metadata.file_attributes();
             let is_directory = attributes & 0x10 != 0;
             let is_reparse_point = attributes & 0x400 != 0;
             let directory_identity = if is_directory && !is_reparse_point {
-                WindowsRenameBackend
-                    .observe(&self.legacy_path(path))
-                    .map_err(|_| AdmissionAdapterError)?
-                    .entry
-                    .map(|entry| entry.identity)
+                let identity = file_identity(&file).map_err(|_| AdmissionAdapterError)?;
+                let directory =
+                    open_directory_entry(parent, &leaf).map_err(|_| AdmissionAdapterError)?;
+                self.directories
+                    .borrow_mut()
+                    .insert(path.to_path_buf(), directory);
+                Some(EntryIdentity::new(identity.volume, identity.file_id))
             } else {
                 None
             };
-            Ok(AdmissionMetadata {
+            let admitted = AdmissionMetadata {
                 is_directory,
                 is_reparse_point,
                 directory_identity,
                 actual_size: metadata.file_size(),
                 created: metadata.creation_time(),
                 modified: metadata.last_write_time(),
-            })
+            };
+            self.metadata_cache
+                .borrow_mut()
+                .insert(path.to_path_buf(), admitted);
+            Ok(admitted)
         }
 
         fn read_children(
@@ -290,24 +354,22 @@ mod windows {
             path: &Path,
             limit: usize,
         ) -> Result<AdmissionChildren, AdmissionAdapterError> {
-            let entries = fs::read_dir(path).map_err(|_| AdmissionAdapterError)?;
-            let mut bounded = BTreeSet::new();
+            let directories = self.directories.borrow();
+            let directory = directories.get(path).ok_or(AdmissionAdapterError)?;
+            let (names, truncated) =
+                query_directory_names(directory, limit).map_err(|_| AdmissionAdapterError)?;
+            let mut paths = Vec::with_capacity(names.len());
             let mut had_errors = false;
-            let mut truncated = false;
-            for entry in entries {
-                match entry {
-                    Ok(entry) => {
-                        bounded.insert(entry.path());
-                        if bounded.len() > limit {
-                            bounded.pop_last();
-                            truncated = true;
-                        }
-                    }
-                    Err(_error) => had_errors = true,
+            for name in names {
+                let text = LegacyText::from_units(name.clone());
+                if validate_windows_leaf_name(&text).is_err() {
+                    had_errors = true;
+                    continue;
                 }
+                paths.push(path.join(std::ffi::OsString::from_wide(&name)));
             }
             Ok(AdmissionChildren {
-                paths: bounded.into_iter().collect(),
+                paths,
                 had_errors,
                 truncated,
             })

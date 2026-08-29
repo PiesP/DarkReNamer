@@ -1,5 +1,6 @@
+use std::cell::Cell;
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use darknamer_app::admission::{
@@ -13,10 +14,22 @@ use darknamer_core::LegacyText;
 struct FakeAdapter {
     metadata: BTreeMap<PathBuf, AdmissionMetadata>,
     children: BTreeMap<PathBuf, Vec<PathBuf>>,
+    rejected: BTreeSet<PathBuf>,
+    metadata_calls: Cell<usize>,
+    enumeration_calls: Cell<usize>,
 }
 
 impl AdmissionAdapter for FakeAdapter {
+    fn validate_path(&self, path: &Path) -> Result<(), AdmissionAdapterError> {
+        if self.rejected.contains(path) {
+            Err(AdmissionAdapterError)
+        } else {
+            Ok(())
+        }
+    }
+
     fn metadata(&self, path: &Path) -> Result<AdmissionMetadata, AdmissionAdapterError> {
+        self.metadata_calls.set(self.metadata_calls.get() + 1);
         self.metadata
             .get(path)
             .copied()
@@ -28,6 +41,7 @@ impl AdmissionAdapter for FakeAdapter {
         path: &Path,
         limit: usize,
     ) -> Result<AdmissionChildren, AdmissionAdapterError> {
+        self.enumeration_calls.set(self.enumeration_calls.get() + 1);
         let children = self.children.get(path).ok_or(AdmissionAdapterError)?;
         Ok(AdmissionChildren {
             paths: children.iter().take(limit).cloned().collect(),
@@ -105,7 +119,13 @@ fn iterative_recurse_is_deterministic_and_skips_reparse_and_repeated_directories
     );
     adapter.children.insert(nested, vec![loop_dir]);
 
-    let report = collect_admission(&adapter, vec![root], AdmissionMode::Recurse, compare);
+    let report = collect_admission(
+        &adapter,
+        vec![root],
+        AdmissionMode::Recurse,
+        MAX_ADMITTED_SOURCES,
+        compare,
+    );
 
     let paths = report
         .items
@@ -138,7 +158,13 @@ fn hard_limit_stops_before_inspecting_additional_metadata() {
         adapter.metadata.insert(path.clone(), file());
     }
 
-    let report = collect_admission(&adapter, roots, AdmissionMode::Direct, compare);
+    let report = collect_admission(
+        &adapter,
+        roots,
+        AdmissionMode::Direct,
+        MAX_ADMITTED_SOURCES,
+        compare,
+    );
 
     assert_eq!(report.items.len(), MAX_ADMITTED_SOURCES);
     assert!(
@@ -155,6 +181,7 @@ fn relative_path_is_reported_without_metadata_access() {
         &FakeAdapter::default(),
         vec![PathBuf::from("relative.txt")],
         AdmissionMode::Direct,
+        MAX_ADMITTED_SOURCES,
         compare,
     );
     assert!(report.items.is_empty());
@@ -195,10 +222,12 @@ fn windows_reparse_loop_is_not_followed_and_missing_metadata_is_reported()
     };
     let missing = directory.path().join("missing.txt");
 
+    let adapter = WindowsAdmissionAdapter::new();
     let report = collect_admission(
-        &WindowsAdmissionAdapter,
+        &adapter,
         vec![root, missing],
         AdmissionMode::Recurse,
+        MAX_ADMITTED_SOURCES,
         compare,
     );
 
@@ -218,4 +247,77 @@ fn windows_reparse_loop_is_not_followed_and_missing_metadata_is_reported()
     }
     assert_eq!(report.items.len(), 1);
     Ok(())
+}
+
+#[test]
+fn rejected_safe_gate_performs_zero_metadata_or_enumeration_calls() {
+    let rejected = test_root().join("unsupported");
+    let mut adapter = FakeAdapter::default();
+    adapter.rejected.insert(rejected.clone());
+    adapter.metadata.insert(rejected.clone(), directory(1));
+    adapter.children.insert(rejected.clone(), Vec::new());
+
+    let report = collect_admission(
+        &adapter,
+        vec![rejected],
+        AdmissionMode::Recurse,
+        MAX_ADMITTED_SOURCES,
+        compare,
+    );
+
+    assert!(report.items.is_empty());
+    assert_eq!(adapter.metadata_calls.get(), 0);
+    assert_eq!(adapter.enumeration_calls.get(), 0);
+}
+
+#[test]
+fn directory_iterator_receives_only_remaining_budget_and_stops() {
+    let root = test_root();
+    let mut adapter = FakeAdapter::default();
+    adapter.metadata.insert(root.clone(), directory(1));
+    let children = (0..10)
+        .map(|index| root.join(format!("child-{index}")))
+        .collect::<Vec<_>>();
+    for child in &children {
+        adapter.metadata.insert(child.clone(), file());
+    }
+    adapter.children.insert(root.clone(), children);
+
+    let report = collect_admission(&adapter, vec![root], AdmissionMode::Recurse, 3, compare);
+
+    assert_eq!(report.items.len(), 2);
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.kind == AdmissionIssueKind::LimitReached)
+    );
+    assert_eq!(adapter.enumeration_calls.get(), 1);
+}
+
+#[test]
+fn repeated_batches_respect_one_global_capacity() {
+    let root = test_root();
+    let mut adapter = FakeAdapter::default();
+    let first = (0..6)
+        .map(|index| root.join(format!("first-{index}")))
+        .collect::<Vec<_>>();
+    let second = (0..6)
+        .map(|index| root.join(format!("second-{index}")))
+        .collect::<Vec<_>>();
+    for path in first.iter().chain(&second) {
+        adapter.metadata.insert(path.clone(), file());
+    }
+    let first_report = collect_admission(&adapter, first, AdmissionMode::Direct, 10, compare);
+    let remaining = 10 - first_report.items.len();
+    let second_report =
+        collect_admission(&adapter, second, AdmissionMode::Direct, remaining, compare);
+
+    assert_eq!(first_report.items.len() + second_report.items.len(), 10);
+    assert!(
+        second_report
+            .issues
+            .iter()
+            .any(|issue| issue.kind == AdmissionIssueKind::LimitReached)
+    );
 }

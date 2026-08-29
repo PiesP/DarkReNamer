@@ -13,7 +13,7 @@ mod schedule;
 #[cfg(windows)]
 mod windows_backend;
 #[cfg(windows)]
-mod windows_native;
+pub(crate) mod windows_native;
 
 pub use activation::{
     JournalCleanupDecision, apply_execution_report, build_plan_request, cleanup_decision,

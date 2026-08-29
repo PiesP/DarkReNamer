@@ -10,13 +10,13 @@ use std::fs;
 use std::io;
 use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::slice;
 
 use crate::admission::{
-    AdmissionMode, MAX_ADMITTED_SOURCES, WindowsAdmissionAdapter, collect_admission,
+    AdmissionAdapter, AdmissionMode, MAX_ADMITTED_SOURCES, WindowsAdmissionAdapter,
+    collect_admission,
 };
 use crate::icon_cache::{IconCacheKey, icon_cache_key};
 use crate::rename::{
@@ -1950,13 +1950,15 @@ unsafe fn add_files_dialog(owner: HWND, state: &mut AppState) {
 }
 
 unsafe fn admit_paths(owner: HWND, state: &mut AppState, paths: Vec<PathBuf>) {
+    let capacity = MAX_ADMITTED_SOURCES.saturating_sub(state.model.len());
+    let adapter = WindowsAdmissionAdapter::new();
     if state.directory_mode.is_none()
-        && let Some(directory) = paths.iter().take(MAX_ADMITTED_SOURCES).find(|path| {
+        && let Some(directory) = paths.iter().take(capacity).find(|path| {
             path.is_absolute()
-                && fs::symlink_metadata(path).is_ok_and(|metadata| {
-                    let attributes = metadata.file_attributes();
-                    attributes & FILE_ATTRIBUTE_DIRECTORY != 0 && attributes & 0x400 == 0
-                })
+                && adapter.validate_path(path).is_ok()
+                && adapter
+                    .metadata(path)
+                    .is_ok_and(|metadata| metadata.is_directory && !metadata.is_reparse_point)
         })
     {
         let text = wide("경로를 직접 추가하려면 YES, 경로 내 파일을 추가하려면 NO를 선택하세요.");
@@ -1974,7 +1976,7 @@ unsafe fn admit_paths(owner: HWND, state: &mut AppState, paths: Vec<PathBuf>) {
         DirectoryMode::Direct => AdmissionMode::Direct,
         DirectoryMode::Recurse => AdmissionMode::Recurse,
     };
-    let mut report = collect_admission(&WindowsAdmissionAdapter, paths, mode, |left, right| {
+    let mut report = collect_admission(&adapter, paths, mode, capacity, |left, right| {
         compare_windows(&legacy_path(left), &legacy_path(right))
     });
     let items = std::mem::take(&mut report.items);
@@ -2096,6 +2098,7 @@ unsafe fn import_paths_dialog(owner: HWND, state: &mut AppState) {
         .into_iter()
         .map(|line| PathBuf::from(std::ffi::OsString::from_wide(line.units())))
         .collect();
+    state.directory_mode = None;
     unsafe { admit_paths(owner, state, paths) };
 }
 
