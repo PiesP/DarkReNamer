@@ -276,6 +276,7 @@ fn file_journal_create_append_sync_resume_and_never_auto_delete()
     assert!(path.exists());
     let resumed = FileJournal::open_existing(&root, "transaction.drj")?;
     assert_eq!(resumed.records(), records);
+    drop(resumed);
     assert_eq!(decode_journal_records(&fs::read(path)?)?, records);
     Ok(())
 }
@@ -335,6 +336,7 @@ fn final_torn_prepared_frame_retains_prefix_then_truncates_on_authorized_recover
         }
     ));
     assert_eq!(journal.tail_issue(), None);
+    drop(journal);
     assert!(decode_journal_records(&fs::read(path)?).is_ok());
     Ok(())
 }
@@ -367,6 +369,7 @@ fn final_torn_completed_frame_reconciles_prepared_identity_before_rollback()
     ));
     assert_eq!(backend.file_id("C:\\work\\a.txt"), Some(1));
     assert_eq!(backend.file_id("C:\\work\\b.txt"), None);
+    drop(journal);
     assert!(decode_journal_records(&fs::read(path)?).is_ok());
     Ok(())
 }

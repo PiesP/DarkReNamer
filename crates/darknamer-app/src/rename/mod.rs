@@ -9,6 +9,10 @@ mod planner;
 mod ports;
 mod recovery;
 mod schedule;
+#[cfg(windows)]
+mod windows_backend;
+#[cfg(windows)]
+mod windows_native;
 
 pub use executor::{
     EntryExecution, ExecuteError, ExecuteErrorKind, ExecutionFailure, ExecutionOutcome,
@@ -37,3 +41,5 @@ pub use ports::{
 };
 pub use recovery::{RecoveryBlockKind, RecoveryFailure, RecoveryOutcome, RenameRecovery};
 pub use schedule::{MAX_TEMP_CANDIDATES, TemporaryPhase};
+#[cfg(windows)]
+pub use windows_backend::WindowsRenameBackend;
