@@ -1020,15 +1020,18 @@ unsafe extern "system" fn prompt_proc(
     if message == WM_NCCREATE {
         let create = lparam as *const CREATESTRUCTW;
         if !create.is_null() {
-            // SAFETY: For WM_NCCREATE, Windows supplies a non-null CREATESTRUCTW in lparam that remains readable for this callback.
+            // SAFETY: WM_NCCREATE supplies a readable CREATESTRUCTW whose
+            // lpCreateParams is the borrowed pointer to prompt_input's live local Box.
             unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, (*create).lpCreateParams as isize) };
         }
     }
-    // SAFETY: window is the active callback HWND; GWLP_USERDATA is read only to recover the pointer installed during creation.
+    // SAFETY: GWLP_USERDATA holds the borrowed pointer to prompt_input's local
+    // PromptState Box, which remains live until this modal dialog is destroyed.
     let state_ptr = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *mut PromptState;
     match message {
         WM_CREATE if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the non-null Box::into_raw value in GWLP_USERDATA, confined to this window thread until WM_NCDESTROY.
+            // SAFETY: state_ptr borrows prompt_input's live local Box and is
+            // confined to this modal callback thread until WM_NCDESTROY clears it.
             let state = unsafe { &mut *state_ptr };
             let title = { child(window, "STATIC", &state.spec.title, 1001, 0) };
             // SAFETY: title is the live STATIC child just created for window;
@@ -1131,7 +1134,8 @@ unsafe extern "system" fn prompt_proc(
             }
             controls.extend([ok, cancel, separator]);
             let face = wide("MS Sans Serif");
-            // SAFETY: face is owned terminated UTF-16 retained through CreateFontW; the returned HFONT is kept in AppState and deleted once.
+            // SAFETY: face is owned terminated UTF-16 retained through CreateFontW;
+            // the returned HFONT is kept in the local PromptState and deleted once.
             state.font = unsafe {
                 CreateFontW(
                     -13,
@@ -1152,7 +1156,8 @@ unsafe extern "system" fn prompt_proc(
             };
             if !state.font.is_null() {
                 for control in controls {
-                    // SAFETY: Each control HWND is live and font is the AppState-owned HFONT retained beyond WM_SETFONT.
+                    // SAFETY: Each prompt control HWND is live and font is the
+                    // PromptState-owned HFONT retained beyond WM_SETFONT.
                     unsafe { SendMessageW(control, WM_SETFONT, state.font as usize, 1) };
                 }
             }
@@ -1171,7 +1176,8 @@ unsafe extern "system" fn prompt_proc(
             let id = (wparam & 0xFFFF) as i32;
             let notification = ((wparam >> 16) & 0xFFFF) as u32;
             if notification == BN_CLICKED && id == IDOK {
-                // SAFETY: state_ptr is the non-null Box::into_raw value in GWLP_USERDATA, confined to this window thread until WM_NCDESTROY.
+                // SAFETY: state_ptr borrows prompt_input's live local Box and is
+                // confined to this modal callback thread until WM_NCDESTROY clears it.
                 let state = unsafe { &mut *state_ptr };
                 state.result = Some(PromptResult {
                     value_one: { window_text(state.edit_one) },
@@ -1189,7 +1195,8 @@ unsafe extern "system" fn prompt_proc(
                 // destroyed it on this callback path.
                 unsafe { DestroyWindow(window) };
             } else if notification == BN_CLICKED && id == IDCANCEL {
-                // SAFETY: state_ptr is the non-null Box::into_raw value in GWLP_USERDATA, confined to this window thread until WM_NCDESTROY.
+                // SAFETY: state_ptr is the non-null borrowed pointer to the live
+                // local PromptState Box for this modal callback.
                 unsafe { (*state_ptr).done = true };
                 // SAFETY: window is the live prompt HWND and IDCANCEL destroys it
                 // exactly once after recording completion.
@@ -1198,22 +1205,27 @@ unsafe extern "system" fn prompt_proc(
             0
         }
         WM_CLOSE if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the non-null Box::into_raw value in GWLP_USERDATA, confined to this window thread until WM_NCDESTROY.
+            // SAFETY: state_ptr is the non-null borrowed pointer to the live local
+            // PromptState Box for this modal callback.
             unsafe { (*state_ptr).done = true };
             // SAFETY: window is the live prompt HWND and WM_CLOSE destroys it once
-            // after marking the stack-owned PromptState complete.
+            // after marking the local boxed PromptState complete.
             unsafe { DestroyWindow(window) };
             0
         }
         WM_NCDESTROY if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the non-null Box::into_raw value in GWLP_USERDATA, confined to this window thread until WM_NCDESTROY.
+            // SAFETY: state_ptr borrows prompt_input's local PromptState Box,
+            // which remains live while WM_NCDESTROY releases its owned HFONT.
             if !unsafe { (*state_ptr).font }.is_null() {
-                // SAFETY: state_ptr is the non-null Box::into_raw value in GWLP_USERDATA, confined to this window thread until WM_NCDESTROY.
+                // SAFETY: font is the non-null HFONT stored in the still-live
+                // borrowed PromptState and is deleted exactly once here.
                 unsafe { DeleteObject((*state_ptr).font) };
-                // SAFETY: state_ptr is the non-null Box::into_raw value in GWLP_USERDATA, confined to this window thread until WM_NCDESTROY.
+                // SAFETY: state_ptr still borrows the live local PromptState Box;
+                // clearing font prevents reuse after its single DeleteObject.
                 unsafe { (*state_ptr).font = null_mut() };
             }
-            // SAFETY: window is the active callback HWND; GWLP_USERDATA stores or clears the process-owned pointer without transferring ownership.
+            // SAFETY: window is the active prompt HWND; clearing GWLP_USERDATA
+            // ends the borrowed association before prompt_input drops its local Box.
             unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, 0) };
             // SAFETY: window, message, wparam, and lparam are unchanged values from the active Windows callback.
             unsafe { DefWindowProcW(window, message, wparam, lparam) }
