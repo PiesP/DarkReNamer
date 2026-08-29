@@ -28,6 +28,23 @@ pub const STATUS_HEIGHT: i32 = 18;
 /// Design coordinate density used by the original Win32 layout.
 pub const BASE_DPI: u32 = 96;
 
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ToolbarImageGeometry {
+    pub(crate) cell_width: i32,
+    pub(crate) cell_height: i32,
+    pub(crate) strip_width: i32,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ToolbarRect {
+    pub(crate) left: i32,
+    pub(crate) top: i32,
+    pub(crate) right: i32,
+    pub(crate) bottom: i32,
+}
+
 /// Scales one 96-DPI logical coordinate with nearest-integer rounding.
 #[must_use]
 pub const fn scale_dip(value: i32, dpi: u32) -> i32 {
@@ -44,6 +61,46 @@ pub const fn scale_dip(value: i32, dpi: u32) -> i32 {
     } else {
         scaled as i32
     }
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn toolbar_image_geometry(
+    source_count: usize,
+    dpi: u32,
+) -> Option<ToolbarImageGeometry> {
+    let source_count = i32::try_from(source_count).ok()?;
+    let cell_width = scale_dip(TOOLBAR_BITMAP_WIDTH, dpi);
+    let cell_height = scale_dip(TOOLBAR_BITMAP_HEIGHT, dpi);
+    let strip_width = cell_width.checked_mul(source_count)?;
+    (source_count > 0 && cell_width > 0 && cell_height > 0).then_some(ToolbarImageGeometry {
+        cell_width,
+        cell_height,
+        strip_width,
+    })
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn toolbar_image_index(tools: &[ToolSpec], command: CommandId) -> Option<i32> {
+    tools
+        .iter()
+        .position(|tool| tool.id == command)
+        .and_then(|index| i32::try_from(index).ok())
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn toolbar_rects_are_vertical(rects: &[ToolbarRect], rail_width: i32) -> bool {
+    rail_width > 0
+        && rects.iter().all(|rect| {
+            rect.left >= 0
+                && rect.right <= rail_width
+                && rect.left < rect.right
+                && rect.top >= 0
+                && rect.top < rect.bottom
+        })
+        && rects.windows(2).all(|pair| pair[0].bottom <= pair[1].top)
 }
 /// Public product name used by the executable and user-facing diagnostics.
 pub const PRODUCT_NAME: &str = "DarkReNamer";
@@ -251,7 +308,7 @@ pub const LEFT_TOOLBAR_ITEMS: [ToolbarItem; 13] = [
     ToolbarItem::Command(SEQUENCE),
 ];
 
-pub const RIGHT_TOOLBAR_ITEMS: [ToolbarItem; 13] = [
+pub const RIGHT_TOOLBAR_ITEMS: [ToolbarItem; 12] = [
     ToolbarItem::Command(RESET),
     ToolbarItem::Separator,
     ToolbarItem::Command(CLEAR_LIST),
@@ -260,7 +317,6 @@ pub const RIGHT_TOOLBAR_ITEMS: [ToolbarItem; 13] = [
     ToolbarItem::Separator,
     ToolbarItem::Command(PARENT_PREFIX),
     ToolbarItem::Command(PARENT_SUFFIX),
-    ToolbarItem::Command(UNIFY_PATH),
     ToolbarItem::Separator,
     ToolbarItem::Command(EXT_DELETE),
     ToolbarItem::Command(EXT_ADD),
@@ -377,6 +433,72 @@ mod tests {
     }
 
     #[test]
+    fn toolbar_strip_geometry_scales_every_source_cell() {
+        assert_eq!(
+            [96, 120, 144, 192].map(|dpi| toolbar_image_geometry(10, dpi)),
+            [
+                Some(ToolbarImageGeometry {
+                    cell_width: 38,
+                    cell_height: 24,
+                    strip_width: 380,
+                }),
+                Some(ToolbarImageGeometry {
+                    cell_width: 48,
+                    cell_height: 30,
+                    strip_width: 480,
+                }),
+                Some(ToolbarImageGeometry {
+                    cell_width: 57,
+                    cell_height: 36,
+                    strip_width: 570,
+                }),
+                Some(ToolbarImageGeometry {
+                    cell_width: 76,
+                    cell_height: 48,
+                    strip_width: 760,
+                }),
+            ]
+        );
+        assert_eq!(toolbar_image_geometry(0, 192), None);
+    }
+
+    #[test]
+    fn toolbar_image_indices_follow_the_source_strip_when_a_command_is_hidden() {
+        assert!(!RIGHT_TOOLBAR_ITEMS.contains(&ToolbarItem::Command(UNIFY_PATH)));
+        assert_eq!(toolbar_image_index(&RIGHT_TOOLS, UNIFY_PATH), Some(6));
+        assert_eq!(toolbar_image_index(&RIGHT_TOOLS, EXT_DELETE), Some(7));
+        assert_eq!(toolbar_image_index(&RIGHT_TOOLS, EXT_ADD), Some(8));
+        assert_eq!(toolbar_image_index(&RIGHT_TOOLS, EXT_REPLACE), Some(9));
+    }
+
+    #[test]
+    fn toolbar_rect_validation_rejects_overlap_and_cross_rail_layout() {
+        let valid = [
+            ToolbarRect {
+                left: 0,
+                top: 0,
+                right: 44,
+                bottom: 30,
+            },
+            ToolbarRect {
+                left: 0,
+                top: 38,
+                right: 44,
+                bottom: 68,
+            },
+        ];
+        assert!(toolbar_rects_are_vertical(&valid, 44));
+
+        let mut overlap = valid;
+        overlap[1].top = 29;
+        assert!(!toolbar_rects_are_vertical(&overlap, 44));
+
+        let mut cross_rail = valid;
+        cross_rail[1].right = 45;
+        assert!(!toolbar_rects_are_vertical(&cross_rail, 44));
+    }
+
+    #[test]
     fn layout_columns_and_toolbar_order_match_resources() {
         assert_eq!(
             (
@@ -454,7 +576,6 @@ mod tests {
                 ToolbarItem::Separator,
                 ToolbarItem::Command(PARENT_PREFIX),
                 ToolbarItem::Command(PARENT_SUFFIX),
-                ToolbarItem::Command(UNIFY_PATH),
                 ToolbarItem::Separator,
                 ToolbarItem::Command(EXT_DELETE),
                 ToolbarItem::Command(EXT_ADD),

@@ -39,21 +39,6 @@ pub(super) fn update_dpi_metrics(state: &AppState) {
     for index in 0..state.shown_columns.len() {
         update_column_visibility(state, index);
     }
-    let button = packed_dimensions(
-        scale_dip(toolbar_width_dip(state.high_contrast), state.dpi),
-        scale_dip(TOOLBAR_BUTTON_HEIGHT, state.dpi),
-    );
-    let bitmap = packed_dimensions(
-        scale_dip(TOOLBAR_BITMAP_WIDTH, state.dpi),
-        scale_dip(TOOLBAR_BITMAP_HEIGHT, state.dpi),
-    );
-    // SAFETY: both toolbar HWNDs are live and the packed sizes have no pointers.
-    unsafe {
-        SendMessageW(state.left_toolbar, TB_SETBUTTONSIZE, 0, button);
-        SendMessageW(state.right_toolbar, TB_SETBUTTONSIZE, 0, button);
-        SendMessageW(state.left_toolbar, TB_SETBITMAPSIZE, 0, bitmap);
-        SendMessageW(state.right_toolbar, TB_SETBITMAPSIZE, 0, bitmap);
-    }
 }
 
 struct RedrawGuard {

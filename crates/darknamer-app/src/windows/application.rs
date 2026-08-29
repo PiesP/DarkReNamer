@@ -209,6 +209,7 @@ unsafe extern "system" fn window_proc(
             }
             update_dpi_metrics(state);
             refresh_system_fonts(state);
+            refresh_toolbars(window, state, true);
             arrange(window, state);
             0
         }
@@ -218,7 +219,7 @@ unsafe extern "system" fn window_proc(
             // SAFETY: state_ptr is the live UI-thread AppState.
             let state = unsafe { &mut *state_ptr };
             refresh_system_fonts(state);
-            refresh_high_contrast_toolbars(window, state);
+            refresh_toolbars(window, state, false);
             arrange(window, state);
             0
         }
@@ -373,6 +374,22 @@ unsafe extern "system" fn window_proc(
                     // SAFETY: the non-null AppState-owned font is deleted once
                     // at the window's single WM_NCDESTROY teardown point.
                     unsafe { DeleteObject((*state_ptr).status_font) };
+                }
+                // Child toolbars are destroyed before their parent reaches
+                // WM_NCDESTROY, so neither image list is still referenced.
+                // SAFETY: state_ptr is the non-null AppState retained in this
+                // window's user data until the final Box::from_raw below.
+                if unsafe { (*state_ptr).left_toolbar_images } != 0 {
+                    // SAFETY: the left toolbar child no longer exists and this
+                    // AppState-owned image list is destroyed exactly once.
+                    unsafe { ImageList_Destroy((*state_ptr).left_toolbar_images) };
+                }
+                // SAFETY: state_ptr is the non-null AppState retained in this
+                // window's user data until the final Box::from_raw below.
+                if unsafe { (*state_ptr).right_toolbar_images } != 0 {
+                    // SAFETY: the right toolbar child no longer exists and this
+                    // AppState-owned image list is destroyed exactly once.
+                    unsafe { ImageList_Destroy((*state_ptr).right_toolbar_images) };
                 }
                 // SAFETY: state_ptr is the non-null Box::into_raw AppState stored at WM_NCCREATE; WM_NCDESTROY is its single reclamation point.
                 unsafe { drop(Box::from_raw(state_ptr)) };

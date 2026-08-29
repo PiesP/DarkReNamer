@@ -64,8 +64,8 @@ use safe_runtime::{
 use text_io::{compare_windows, legacy_path, path_wide, read_legacy_text, wide, write_legacy_text};
 use windows_sys::Win32::Foundation::{FILETIME, HWND, LPARAM, LRESULT, RECT, SYSTEMTIME, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    COLOR_WINDOW, CreateFontIndirectW, DeleteObject, HFONT, RDW_ALLCHILDREN, RDW_ERASE,
-    RDW_INVALIDATE, RedrawWindow, UpdateWindow,
+    COLOR_BTNFACE, COLOR_WINDOW, CreateFontIndirectW, DeleteObject, GetSysColor, HBITMAP, HFONT,
+    RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RedrawWindow, UpdateWindow,
 };
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
@@ -77,16 +77,18 @@ use windows_sys::Win32::System::Time::FileTimeToSystemTime;
 use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows_sys::Win32::UI::Controls::{
     BTNS_SHOWTEXT, CCS_NOPARENTALIGN, CCS_NORESIZE, CCS_VERT, I_IMAGENONE, ICC_BAR_CLASSES,
-    ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_FMT, LVCF_TEXT,
-    LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED,
-    LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_DELETEITEM, LVM_ENSUREVISIBLE, LVM_GETNEXTITEM,
-    LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE,
-    LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVM_SETITEMW, LVN_ITEMCHANGED,
-    LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER,
-    LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_DBLCLK, NMHDR, NMLISTVIEW,
-    TB_ADDBITMAP, TB_ADDBUTTONS, TB_ADDSTRINGW, TB_BUTTONSTRUCTSIZE, TB_ENABLEBUTTON,
-    TB_SETBITMAPSIZE, TB_SETBUTTONSIZE, TB_SETMAXTEXTROWS, TBADDBITMAP, TBBUTTON, TBSTATE_ENABLED,
-    TBSTYLE_BUTTON, TBSTYLE_FLAT, TBSTYLE_SEP, TBSTYLE_TOOLTIPS, TOOLBARCLASSNAMEW,
+    ICC_LISTVIEW_CLASSES, ILC_COLOR32, ILC_MASK, INITCOMMONCONTROLSEX, ImageList_AddMasked,
+    ImageList_Create, ImageList_Destroy, ImageList_GetImageCount, InitCommonControlsEx, LVCF_FMT,
+    LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT,
+    LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_DELETEITEM, LVM_ENSUREVISIBLE,
+    LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH,
+    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW,
+    LVM_SETITEMW, LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER,
+    LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS,
+    LVSIL_SMALL, NM_DBLCLK, NMHDR, NMLISTVIEW, TB_ADDBUTTONS, TB_ADDSTRINGW, TB_AUTOSIZE,
+    TB_BUTTONSTRUCTSIZE, TB_COMMANDTOINDEX, TB_ENABLEBUTTON, TB_GETITEMRECT, TB_SETBUTTONSIZE,
+    TB_SETIMAGELIST, TB_SETMAXTEXTROWS, TBBUTTON, TBSTATE_ENABLED, TBSTATE_WRAP, TBSTYLE_BUTTON,
+    TBSTYLE_FLAT, TBSTYLE_SEP, TBSTYLE_TOOLTIPS, TOOLBARCLASSNAMEW,
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -99,10 +101,11 @@ use windows_sys::Win32::UI::Shell::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, BN_CLICKED, BS_DEFPUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL,
     CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem,
-    CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, GWLP_USERDATA, GetClientRect, GetMessageW,
-    GetParent, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, HMENU, IDC_ARROW, IDCANCEL,
-    IDOK, IsDialogMessageW, KillTimer, LoadCursorW, LoadIconW, MB_OKCANCEL, MB_YESNO, MF_BYCOMMAND,
+    CopyImage, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow,
+    DispatchMessageW, DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, GWLP_USERDATA, GetClientRect,
+    GetMessageW, GetParent, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, HMENU,
+    IDC_ARROW, IDCANCEL, IDOK, IMAGE_BITMAP, IsDialogMessageW, KillTimer, LR_CREATEDIBSECTION,
+    LR_LOADMAP3DCOLORS, LoadCursorW, LoadIconW, LoadImageW, MB_OKCANCEL, MB_YESNO, MF_BYCOMMAND,
     MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO,
     MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW, PostMessageW, PostQuitMessage,
     RegisterClassExW, SPI_GETHIGHCONTRAST, SPI_GETNONCLIENTMETRICS, SW_SHOW, SWP_NOACTIVATE,
@@ -142,6 +145,8 @@ struct AppState {
     status_font: HFONT,
     left_toolbar: HWND,
     right_toolbar: HWND,
+    left_toolbar_images: windows_sys::Win32::UI::Controls::HIMAGELIST,
+    right_toolbar_images: windows_sys::Win32::UI::Controls::HIMAGELIST,
     model: LegacyList,
     shown_columns: [bool; 4],
     dpi: u32,
@@ -178,6 +183,8 @@ impl AppState {
             status_font: null_mut(),
             left_toolbar: null_mut(),
             right_toolbar: null_mut(),
+            left_toolbar_images: 0,
+            right_toolbar_images: 0,
             model: LegacyList::new(),
             shown_columns: [false; 4],
             dpi: BASE_DPI,
@@ -765,6 +772,74 @@ mod tests {
         }
         assert!(toolbar_accessible_name(UNIFY_PATH).contains("지원하지 않음"));
         assert!(toolbar_width_dip(true) > toolbar_width_dip(false));
+    }
+
+    #[test]
+    fn hidden_native_toolbars_keep_every_visible_command_in_one_vertical_rail()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let controls = INITCOMMONCONTROLSEX {
+            dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+            dwICC: ICC_BAR_CLASSES,
+        };
+        // SAFETY: controls has its exact structure size and remains readable for
+        // the synchronous common-controls initialization call.
+        unsafe { InitCommonControlsEx(&controls) };
+        // SAFETY: null requests the current process module.
+        let instance = unsafe { GetModuleHandleW(null()) };
+        let class = wide("STATIC");
+        // SAFETY: the system STATIC class, current module and null creation
+        // parameter remain valid for this hidden top-level test window.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                1_000,
+                1_000,
+                null_mut(),
+                null_mut(),
+                instance,
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+
+        let result = (|| -> io::Result<()> {
+            for dpi in [96, 120, 144, 192] {
+                let left = create_toolbar(parent, instance, LEFT_TOOLBAR, dpi, true)?;
+                let right = match create_toolbar(parent, instance, RIGHT_TOOLBAR, dpi, true) {
+                    Ok(toolbar) => toolbar,
+                    Err(error) => {
+                        destroy_toolbar(left);
+                        return Err(error);
+                    }
+                };
+                let left_rects = toolbar_command_rects(left.window, &LEFT_TOOLBAR_ITEMS)?;
+                let right_rects = toolbar_command_rects(right.window, &RIGHT_TOOLBAR_ITEMS)?;
+                assert_eq!(left_rects.len(), 10);
+                assert_eq!(right_rects.len(), 9);
+                assert!(toolbar_rects_are_vertical(
+                    &left_rects,
+                    scale_dip(toolbar_width_dip(true), dpi)
+                ));
+                assert!(toolbar_rects_are_vertical(
+                    &right_rects,
+                    scale_dip(toolbar_width_dip(true), dpi)
+                ));
+                destroy_toolbar(left);
+                destroy_toolbar(right);
+            }
+            Ok(())
+        })();
+        // SAFETY: parent is the hidden test window created above and is
+        // destroyed after all child toolbars have released their resources.
+        unsafe { DestroyWindow(parent) };
+        result.map_err(Into::into)
     }
 
     #[test]
