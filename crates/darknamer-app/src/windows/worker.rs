@@ -901,6 +901,11 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
                     message(window, &summary, "DarkReNamer - 일부 경로 제외");
                 }
                 refresh(state);
+                if appended > 0 {
+                    // SAFETY: list_window is the live focusable ListView child
+                    // and admission completion runs on its owning UI thread.
+                    unsafe { SetFocus(state.list_window) };
+                }
             }
         }
         Ok(AdmissionWorkerResult::Cancelled) => {

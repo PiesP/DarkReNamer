@@ -18,6 +18,107 @@ pub(super) fn run() -> io::Result<()> {
     run_unsafe()
 }
 
+fn minimum_track_width(window: HWND, state: &AppState) -> i32 {
+    // SAFETY: both structures are C-compatible integer rectangles with valid
+    // all-zero initial states for the two synchronous geometry queries.
+    let mut outer: RECT = unsafe { zeroed() };
+    // SAFETY: see above.
+    let mut client: RECT = unsafe { zeroed() };
+    // SAFETY: window is the live top-level HWND and outer remains writable for
+    // the duration of this synchronous query.
+    let got_outer = unsafe { GetWindowRect(window, &mut outer) } != 0;
+    // SAFETY: window is the live top-level HWND and client remains writable for
+    // the duration of this synchronous query.
+    let got_client = unsafe { GetClientRect(window, &mut client) } != 0;
+    let nonclient_width = if got_outer && got_client {
+        ((outer.right - outer.left) - (client.right - client.left)).max(0)
+    } else {
+        0
+    };
+    scale_dip(INITIAL_WIDTH, state.dpi).max(
+        scale_dip(minimum_content_width_dip(state.high_contrast), state.dpi)
+            .saturating_add(nonclient_width),
+    )
+}
+
+fn resize_to_initial_dpi(window: HWND, state: &AppState) -> io::Result<()> {
+    let width = minimum_track_width(window, state);
+    let height = scale_dip(INITIAL_HEIGHT, state.dpi);
+    // SAFETY: window is the newly created hidden top-level HWND. The flags keep
+    // its system-selected position and z-order while applying physical pixels
+    // derived from the window's actual DPI before the first ShowWindow call.
+    if unsafe {
+        SetWindowPos(
+            window,
+            null_mut(),
+            0,
+            0,
+            width,
+            height,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn ensure_minimum_track_width(window: HWND, state: &AppState) -> io::Result<()> {
+    // SAFETY: RECT has a valid all-zero representation and remains writable for
+    // the synchronous top-level window geometry query.
+    let mut rect: RECT = unsafe { zeroed() };
+    // SAFETY: window is the live top-level HWND owned by this UI thread.
+    if unsafe { GetWindowRect(window, &mut rect) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let minimum = minimum_track_width(window, state);
+    let current_width = rect.right - rect.left;
+    if current_width >= minimum {
+        return Ok(());
+    }
+    // SAFETY: window is live; the nearest-monitor query dereferences no caller
+    // memory and returns a borrowed monitor identifier.
+    let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let mut monitor_info = MONITORINFO {
+        cbSize: u32::try_from(size_of::<MONITORINFO>())
+            .map_err(|_| io::Error::other("invalid monitor info size"))?,
+        ..MONITORINFO::default()
+    };
+    // SAFETY: monitor is live and monitor_info has its exact structure size and
+    // remains writable for this synchronous query.
+    if unsafe { GetMonitorInfoW(monitor, &mut monitor_info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let placement = fit_widened_window_to_work_area(
+        rect.left,
+        monitor_info.rcWork.left,
+        monitor_info.rcWork.right,
+        minimum,
+    )
+    .ok_or_else(|| io::Error::other("invalid monitor work area"))?;
+    // SAFETY: the live window is widened within the nearest monitor work area
+    // without changing height, activation, or z-order.
+    if unsafe {
+        SetWindowPos(
+            window,
+            null_mut(),
+            placement.x,
+            rect.top,
+            placement.width,
+            rect.bottom - rect.top,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn run_unsafe() -> io::Result<()> {
     if process_is_elevated()? {
         return Err(io::Error::new(
@@ -98,6 +199,14 @@ fn run_unsafe() -> io::Result<()> {
         }
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: successful WM_NCCREATE adopted `state`; it remains live in the
+    // window user data until WM_NCDESTROY and is read only for this resize.
+    if let Err(error) = resize_to_initial_dpi(window, unsafe { &*state }) {
+        // SAFETY: window is still hidden and owns the adopted AppState. Its
+        // normal teardown reclaims children, GDI resources, and the state.
+        unsafe { DestroyWindow(window) };
+        return Err(error);
+    }
     // SAFETY: window is the non-null top-level HWND just created and remains owned by this UI thread.
     unsafe {
         ShowWindow(window, SW_SHOW);
@@ -171,13 +280,19 @@ unsafe extern "system" fn window_proc(
             arrange(window, unsafe { &*state_ptr });
             0
         }
+        WM_SETFOCUS if !state_ptr.is_null() => {
+            // SAFETY: list_window is the live focusable ListView child owned by
+            // this top-level window on the current UI thread.
+            unsafe { SetFocus((*state_ptr).list_window) };
+            0
+        }
         WM_GETMINMAXINFO if !state_ptr.is_null() => {
             let info = lparam as *mut MINMAXINFO;
             if !info.is_null() {
                 // SAFETY: WM_GETMINMAXINFO supplies writable MINMAXINFO storage
                 // for this callback and state_ptr is the live AppState.
                 unsafe {
-                    (*info).ptMinTrackSize.x = scale_dip(INITIAL_WIDTH, (*state_ptr).dpi);
+                    (*info).ptMinTrackSize.x = minimum_track_width(window, &*state_ptr);
                     (*info).ptMinTrackSize.y = scale_dip(INITIAL_HEIGHT, (*state_ptr).dpi);
                 }
             }
@@ -209,16 +324,29 @@ unsafe extern "system" fn window_proc(
             }
             update_dpi_metrics(state);
             refresh_system_fonts(state);
+            refresh_toolbars(window, state, true);
             arrange(window, state);
             0
         }
-        WM_SETTINGCHANGE | WM_FONTCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE
-            if !state_ptr.is_null() =>
-        {
+        WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE if !state_ptr.is_null() => {
             // SAFETY: state_ptr is the live UI-thread AppState.
             let state = unsafe { &mut *state_ptr };
             refresh_system_fonts(state);
-            refresh_high_contrast_toolbars(window, state);
+            refresh_toolbars(window, state, true);
+            if let Err(error) = ensure_minimum_track_width(window, state) {
+                super::message(
+                    window,
+                    &format!("새 표시 설정의 최소 창 폭을 적용하지 못했습니다: {error}"),
+                    "DarkReNamer - 표시 설정",
+                );
+            }
+            arrange(window, state);
+            0
+        }
+        WM_FONTCHANGE if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is the live UI-thread AppState.
+            let state = unsafe { &mut *state_ptr };
+            refresh_system_fonts(state);
             arrange(window, state);
             0
         }
@@ -373,6 +501,22 @@ unsafe extern "system" fn window_proc(
                     // SAFETY: the non-null AppState-owned font is deleted once
                     // at the window's single WM_NCDESTROY teardown point.
                     unsafe { DeleteObject((*state_ptr).status_font) };
+                }
+                // Child toolbars are destroyed before their parent reaches
+                // WM_NCDESTROY, so neither image list is still referenced.
+                // SAFETY: state_ptr is the non-null AppState retained in this
+                // window's user data until the final Box::from_raw below.
+                if unsafe { (*state_ptr).left_toolbar_images } != 0 {
+                    // SAFETY: the left toolbar child no longer exists and this
+                    // AppState-owned image list is destroyed exactly once.
+                    unsafe { ImageList_Destroy((*state_ptr).left_toolbar_images) };
+                }
+                // SAFETY: state_ptr is the non-null AppState retained in this
+                // window's user data until the final Box::from_raw below.
+                if unsafe { (*state_ptr).right_toolbar_images } != 0 {
+                    // SAFETY: the right toolbar child no longer exists and this
+                    // AppState-owned image list is destroyed exactly once.
+                    unsafe { ImageList_Destroy((*state_ptr).right_toolbar_images) };
                 }
                 // SAFETY: state_ptr is the non-null Box::into_raw AppState stored at WM_NCCREATE; WM_NCDESTROY is its single reclamation point.
                 unsafe { drop(Box::from_raw(state_ptr)) };

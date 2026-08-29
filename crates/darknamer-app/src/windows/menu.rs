@@ -1,5 +1,33 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(super) struct ToolbarHandles {
+    pub(super) window: HWND,
+    pub(super) images: windows_sys::Win32::UI::Controls::HIMAGELIST,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ToolbarDefinition {
+    control_id: usize,
+    resource_id: u16,
+    tools: &'static [ToolSpec],
+    items: &'static [ToolbarItem],
+}
+
+pub(super) const LEFT_TOOLBAR: ToolbarDefinition = ToolbarDefinition {
+    control_id: LEFT_TOOLBAR_ID,
+    resource_id: resource_ids::LEFT_TOOLBAR_BITMAP,
+    tools: &LEFT_TOOLS,
+    items: &LEFT_TOOLBAR_ITEMS,
+};
+
+pub(super) const RIGHT_TOOLBAR: ToolbarDefinition = ToolbarDefinition {
+    control_id: RIGHT_TOOLBAR_ID,
+    resource_id: resource_ids::RIGHT_TOOLBAR_BITMAP,
+    tools: &RIGHT_TOOLS,
+    items: &RIGHT_TOOLBAR_ITEMS,
+};
+
 pub(super) fn nonclient_metrics(dpi: u32) -> Option<NONCLIENTMETRICSW> {
     let mut metrics = NONCLIENTMETRICSW {
         cbSize: u32::try_from(size_of::<NONCLIENTMETRICSW>()).ok()?,
@@ -149,28 +177,24 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
             SS_CENTERIMAGE | SS_SUNKEN,
         )
     };
-    state.left_toolbar = {
-        create_toolbar(
-            window,
-            instance,
-            LEFT_TOOLBAR_ID,
-            resource_ids::LEFT_TOOLBAR_BITMAP,
-            &LEFT_TOOLBAR_ITEMS,
-            state.dpi,
-            state.high_contrast,
-        )?
-    };
-    state.right_toolbar = {
-        create_toolbar(
-            window,
-            instance,
-            RIGHT_TOOLBAR_ID,
-            resource_ids::RIGHT_TOOLBAR_BITMAP,
-            &RIGHT_TOOLBAR_ITEMS,
-            state.dpi,
-            state.high_contrast,
-        )?
-    };
+    let left = create_toolbar(
+        window,
+        instance,
+        LEFT_TOOLBAR,
+        state.dpi,
+        state.high_contrast,
+    )?;
+    state.left_toolbar = left.window;
+    state.left_toolbar_images = left.images;
+    let right = create_toolbar(
+        window,
+        instance,
+        RIGHT_TOOLBAR,
+        state.dpi,
+        state.high_contrast,
+    )?;
+    state.right_toolbar = right.window;
+    state.right_toolbar_images = right.images;
     refresh_system_fonts(state);
     // SAFETY: window is the live top-level HWND and DragAcceptFiles stores no borrowed pointer.
     unsafe { DragAcceptFiles(window, 1) };
@@ -237,12 +261,10 @@ pub(super) fn child(parent: HWND, class: &str, text: &str, id: u16, extra_style:
 pub(super) fn create_toolbar(
     parent: HWND,
     instance: windows_sys::Win32::Foundation::HINSTANCE,
-    control_id: usize,
-    resource_id: u16,
-    items: &[ToolbarItem],
+    definition: ToolbarDefinition,
     dpi: u32,
     high_contrast: bool,
-) -> io::Result<HWND> {
+) -> io::Result<ToolbarHandles> {
     let styles = WS_CHILD
         | WS_VISIBLE
         | TBSTYLE_FLAT
@@ -263,7 +285,7 @@ pub(super) fn create_toolbar(
             0,
             0,
             parent,
-            control_id as *mut c_void,
+            definition.control_id as *mut c_void,
             instance,
             null_mut(),
         )
@@ -271,170 +293,306 @@ pub(super) fn create_toolbar(
     if toolbar.is_null() {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: toolbar is live and TBBUTTON's structure size is passed by value;
-    // TB_BUTTONSTRUCTSIZE carries no pointer payload.
-    unsafe {
-        SendMessageW(toolbar, TB_BUTTONSTRUCTSIZE, size_of::<TBBUTTON>(), 0);
-        SendMessageW(toolbar, TB_SETMAXTEXTROWS, 0, 0);
-        SendMessageW(
-            toolbar,
-            TB_SETBITMAPSIZE,
-            0,
-            packed_dimensions(
-                scale_dip(TOOLBAR_BITMAP_WIDTH, dpi),
-                scale_dip(TOOLBAR_BITMAP_HEIGHT, dpi),
-            ),
-        );
-        SendMessageW(
-            toolbar,
-            TB_SETBUTTONSIZE,
-            0,
-            packed_dimensions(
-                scale_dip(toolbar_width_dip(high_contrast), dpi),
-                scale_dip(TOOLBAR_BUTTON_HEIGHT, dpi),
-            ),
-        );
-    }
-    let first_bitmap = if high_contrast {
-        0
-    } else {
-        let bitmap_count = items
-            .iter()
-            .filter(|item| matches!(item, ToolbarItem::Command(_)))
-            .count();
-        let bitmap = TBADDBITMAP {
-            hInst: instance,
-            nID: usize::from(resource_id),
-        };
-        // SAFETY: toolbar is live and resource_id identifies a linked bitmap;
-        // the structure remains allocated through the synchronous message.
-        let first = unsafe {
+    let mut handles = ToolbarHandles {
+        window: toolbar,
+        images: 0,
+    };
+    let result = (|| {
+        // SAFETY: toolbar is live and TBBUTTON's structure size and packed
+        // dimensions are passed by value with no pointer payload.
+        unsafe {
+            SendMessageW(toolbar, TB_BUTTONSTRUCTSIZE, size_of::<TBBUTTON>(), 0);
+            SendMessageW(toolbar, TB_SETMAXTEXTROWS, 0, 0);
             SendMessageW(
                 toolbar,
-                TB_ADDBITMAP,
-                bitmap_count,
-                (&raw const bitmap) as isize,
-            )
-        };
-        i32::try_from(first)
-            .ok()
-            .filter(|index| *index >= 0)
-            .ok_or_else(|| io::Error::other("could not load native toolbar bitmap resource"))?
-    };
-    let mut image_index = 0_i32;
-    let mut buttons = Vec::with_capacity(items.len());
-    for item in items {
-        let button = match *item {
-            ToolbarItem::Command(command) => {
-                let mut name = toolbar_accessible_name(command)
-                    .encode_utf16()
-                    .chain([0, 0])
-                    .collect::<Vec<_>>();
-                // SAFETY: toolbar copies the double-NUL-terminated string pool
-                // synchronously before this owned buffer is dropped.
-                let string_index =
-                    unsafe { SendMessageW(toolbar, TB_ADDSTRINGW, 0, name.as_mut_ptr() as isize) };
-                if string_index < 0 {
-                    return Err(io::Error::other("could not add toolbar accessibility text"));
-                }
-                let button = TBBUTTON {
-                    iBitmap: if high_contrast {
+                TB_SETBUTTONSIZE,
+                0,
+                packed_dimensions(
+                    scale_dip(toolbar_width_dip(high_contrast), dpi),
+                    scale_dip(TOOLBAR_BUTTON_HEIGHT, dpi),
+                ),
+            );
+        }
+        if !high_contrast {
+            handles.images = create_toolbar_image_list(
+                instance,
+                definition.resource_id,
+                definition.tools.len(),
+                dpi,
+            )?;
+            // SAFETY: toolbar and the AppState-owned image list are live. The
+            // toolbar borrows the list until it is destroyed or detached.
+            unsafe { SendMessageW(toolbar, TB_SETIMAGELIST, 0, handles.images) };
+        }
+        let mut buttons = Vec::with_capacity(definition.items.len());
+        for item in definition.items {
+            let button = match *item {
+                ToolbarItem::Command(command) => {
+                    let mut name = toolbar_accessible_name(command)
+                        .encode_utf16()
+                        .chain([0, 0])
+                        .collect::<Vec<_>>();
+                    // SAFETY: toolbar copies the double-NUL-terminated string
+                    // pool synchronously before this owned buffer is dropped.
+                    let string_index = unsafe {
+                        SendMessageW(toolbar, TB_ADDSTRINGW, 0, name.as_mut_ptr() as isize)
+                    };
+                    if string_index < 0 {
+                        return Err(io::Error::other("could not add toolbar accessibility text"));
+                    }
+                    let image = if high_contrast {
                         I_IMAGENONE
                     } else {
-                        first_bitmap + image_index
-                    },
-                    idCommand: i32::from(command),
-                    fsState: TBSTATE_ENABLED as u8,
-                    fsStyle: u8::try_from(
-                        TBSTYLE_BUTTON | if high_contrast { BTNS_SHOWTEXT } else { 0 },
-                    )
-                    .unwrap_or(TBSTYLE_BUTTON as u8),
-                    iString: string_index,
+                        toolbar_image_index(definition.tools, command).ok_or_else(|| {
+                            io::Error::other("toolbar command has no source image")
+                        })?
+                    };
+                    TBBUTTON {
+                        iBitmap: image,
+                        idCommand: i32::from(command),
+                        fsState: u8::try_from(TBSTATE_ENABLED | TBSTATE_WRAP)
+                            .unwrap_or(TBSTATE_ENABLED as u8),
+                        fsStyle: u8::try_from(
+                            TBSTYLE_BUTTON | if high_contrast { BTNS_SHOWTEXT } else { 0 },
+                        )
+                        .unwrap_or(TBSTYLE_BUTTON as u8),
+                        iString: string_index,
+                        ..TBBUTTON::default()
+                    }
+                }
+                ToolbarItem::Separator => TBBUTTON {
+                    iBitmap: scale_dip(TOOLBAR_SEPARATOR_SIZE, dpi),
+                    fsStyle: TBSTYLE_SEP as u8,
                     ..TBBUTTON::default()
-                };
-                image_index += 1;
-                button
-            }
-            ToolbarItem::Separator => TBBUTTON {
-                iBitmap: scale_dip(TOOLBAR_SEPARATOR_SIZE, dpi),
-                fsStyle: TBSTYLE_SEP as u8,
-                ..TBBUTTON::default()
-            },
+                },
+            };
+            buttons.push(button);
+        }
+        // SAFETY: toolbar is live and buttons is readable for exactly added
+        // entries until the synchronous TB_ADDBUTTONS call returns.
+        let added = unsafe {
+            SendMessageW(
+                toolbar,
+                TB_ADDBUTTONS,
+                buttons.len(),
+                buttons.as_ptr() as isize,
+            )
         };
-        buttons.push(button);
-    }
-    // SAFETY: toolbar is live and buttons is readable for exactly added entries;
-    // its TBBUTTON storage remains allocated until TB_ADDBUTTONSW returns.
-    let added = unsafe {
-        SendMessageW(
+        if added == 0 {
+            return Err(io::Error::other("could not add native toolbar buttons"));
+        }
+        // SAFETY: toolbar is live; TB_AUTOSIZE has no pointer payload.
+        unsafe { SendMessageW(toolbar, TB_AUTOSIZE, 0, 0) };
+        validate_toolbar_layout(
             toolbar,
-            TB_ADDBUTTONS,
-            buttons.len(),
-            buttons.as_ptr() as isize,
-        )
-    };
-    if added == 0 {
-        return Err(io::Error::other("could not add native toolbar buttons"));
+            definition.items,
+            scale_dip(toolbar_width_dip(high_contrast), dpi),
+        )?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => Ok(handles),
+        Err(error) => {
+            destroy_toolbar(handles);
+            Err(error)
+        }
     }
-    Ok(toolbar)
 }
 
-pub(super) fn refresh_high_contrast_toolbars(window: HWND, state: &mut AppState) {
+fn create_toolbar_image_list(
+    instance: windows_sys::Win32::Foundation::HINSTANCE,
+    resource_id: u16,
+    source_count: usize,
+    dpi: u32,
+) -> io::Result<windows_sys::Win32::UI::Controls::HIMAGELIST> {
+    let geometry = toolbar_image_geometry(source_count, dpi)
+        .ok_or_else(|| io::Error::other("invalid toolbar image strip geometry"))?;
+    // SAFETY: instance is the current module; the integer resource identifies a
+    // linked bitmap. The flags request a caller-owned DIB with system 3D colors.
+    let source = unsafe {
+        LoadImageW(
+            instance,
+            int_resource(resource_id),
+            IMAGE_BITMAP,
+            0,
+            0,
+            LR_CREATEDIBSECTION | LR_LOADMAP3DCOLORS,
+        ) as HBITMAP
+    };
+    if source.is_null() {
+        return Err(io::Error::other(
+            "could not load native toolbar bitmap resource",
+        ));
+    }
+    // SAFETY: source is a caller-owned bitmap returned above. CopyImage creates
+    // a distinct full-strip DIB scaled to the exact image-list cell grid.
+    let scaled = unsafe {
+        CopyImage(
+            source,
+            IMAGE_BITMAP,
+            geometry.strip_width,
+            geometry.cell_height,
+            LR_CREATEDIBSECTION,
+        ) as HBITMAP
+    };
+    // SAFETY: source is no longer needed after CopyImage and is deleted once.
+    unsafe { DeleteObject(source) };
+    if scaled.is_null() {
+        return Err(io::Error::other("could not scale native toolbar bitmap"));
+    }
+    let initial = i32::try_from(source_count)
+        .map_err(|_| io::Error::other("toolbar image count exceeds native limits"))?;
+    // SAFETY: dimensions and capacity are checked positive native integers.
+    let images = unsafe {
+        ImageList_Create(
+            geometry.cell_width,
+            geometry.cell_height,
+            ILC_COLOR24 | ILC_MASK,
+            initial,
+            1,
+        )
+    };
+    if images == 0 {
+        // SAFETY: scaled is the caller-owned CopyImage result and is deleted once.
+        unsafe { DeleteObject(scaled) };
+        return Err(io::Error::other(
+            "could not create native toolbar image list",
+        ));
+    }
+    // SAFETY: images and scaled are live; the common control copies the bitmap
+    // cells synchronously and uses the current system face color as its mask.
+    let first = unsafe { ImageList_AddMasked(images, scaled, GetSysColor(COLOR_BTNFACE)) };
+    // SAFETY: ImageList_AddMasked copied the bitmap; the temporary is deleted once.
+    unsafe { DeleteObject(scaled) };
+    // SAFETY: images remains live and the query has no pointer payload.
+    let count = unsafe { ImageList_GetImageCount(images) };
+    if first != 0 || count != initial {
+        // SAFETY: images is not attached to a toolbar yet and is destroyed once.
+        unsafe { ImageList_Destroy(images) };
+        return Err(io::Error::other(
+            "native toolbar image list does not match the source strip",
+        ));
+    }
+    Ok(images)
+}
+
+pub(super) fn toolbar_command_rects(
+    toolbar: HWND,
+    items: &[ToolbarItem],
+) -> io::Result<Vec<ToolbarRect>> {
+    let command_count = items
+        .iter()
+        .filter(|item| matches!(item, ToolbarItem::Command(_)))
+        .count();
+    let mut rects = Vec::with_capacity(command_count);
+    for item in items {
+        let ToolbarItem::Command(command) = *item else {
+            continue;
+        };
+        // SAFETY: toolbar is live and the command identifier is passed by value.
+        let index = unsafe { SendMessageW(toolbar, TB_COMMANDTOINDEX, usize::from(command), 0) };
+        if index < 0 {
+            return Err(io::Error::other("native toolbar command is missing"));
+        }
+        // SAFETY: RECT is a C-compatible integer structure with valid zero state.
+        let mut rect: RECT = unsafe { zeroed() };
+        // SAFETY: toolbar is live and rect is writable through this synchronous
+        // TB_GETITEMRECT call for the checked native button index.
+        let found = unsafe {
+            SendMessageW(
+                toolbar,
+                TB_GETITEMRECT,
+                usize::try_from(index)
+                    .map_err(|_| io::Error::other("invalid native toolbar command index"))?,
+                (&mut rect as *mut RECT) as isize,
+            )
+        };
+        if found == 0 {
+            return Err(io::Error::other(
+                "could not read native toolbar command rectangle",
+            ));
+        }
+        rects.push(ToolbarRect {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        });
+    }
+    Ok(rects)
+}
+
+fn validate_toolbar_layout(
+    toolbar: HWND,
+    items: &[ToolbarItem],
+    rail_width: i32,
+) -> io::Result<()> {
+    let rects = toolbar_command_rects(toolbar, items)?;
+    if !toolbar_rects_are_vertical(&rects, rail_width) {
+        return Err(io::Error::other(
+            "native toolbar command rectangles are not a single vertical rail",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn destroy_toolbar(handles: ToolbarHandles) {
+    if !handles.window.is_null() {
+        // SAFETY: the caller owns this child toolbar. Destroying it first ends
+        // its borrowed reference to the separately owned image list.
+        unsafe { DestroyWindow(handles.window) };
+    }
+    if handles.images != 0 {
+        // SAFETY: the toolbar no longer references this AppState-owned list.
+        unsafe { ImageList_Destroy(handles.images) };
+    }
+}
+
+pub(super) fn refresh_toolbars(window: HWND, state: &mut AppState, force: bool) {
     let high_contrast = high_contrast_enabled();
-    if high_contrast == state.high_contrast {
+    if !force && high_contrast == state.high_contrast {
         return;
     }
     // SAFETY: null requests the current process module.
     let instance = unsafe { GetModuleHandleW(null()) };
-    let left = match create_toolbar(
-        window,
-        instance,
-        LEFT_TOOLBAR_ID,
-        resource_ids::LEFT_TOOLBAR_BITMAP,
-        &LEFT_TOOLBAR_ITEMS,
-        state.dpi,
-        high_contrast,
-    ) {
+    let left = match create_toolbar(window, instance, LEFT_TOOLBAR, state.dpi, high_contrast) {
         Ok(toolbar) => toolbar,
         Err(error) => {
             message(
                 window,
-                &format!("고대비 도구 모음을 만들지 못했습니다: {error}"),
+                &format!("새 표시 설정에 맞는 도구 모음을 만들지 못했습니다: {error}"),
                 "DarkReNamer - 표시 설정",
             );
             return;
         }
     };
-    let right = match create_toolbar(
-        window,
-        instance,
-        RIGHT_TOOLBAR_ID,
-        resource_ids::RIGHT_TOOLBAR_BITMAP,
-        &RIGHT_TOOLBAR_ITEMS,
-        state.dpi,
-        high_contrast,
-    ) {
+    let right = match create_toolbar(window, instance, RIGHT_TOOLBAR, state.dpi, high_contrast) {
         Ok(toolbar) => toolbar,
         Err(error) => {
-            // SAFETY: left was created above but not adopted into AppState.
-            unsafe { DestroyWindow(left) };
+            destroy_toolbar(left);
             message(
                 window,
-                &format!("고대비 도구 모음을 만들지 못했습니다: {error}"),
+                &format!("새 표시 설정에 맞는 도구 모음을 만들지 못했습니다: {error}"),
                 "DarkReNamer - 표시 설정",
             );
             return;
         }
     };
-    // SAFETY: replacement toolbars are live; old child windows are destroyed
-    // only after both replacements succeeded.
-    unsafe {
-        DestroyWindow(state.left_toolbar);
-        DestroyWindow(state.right_toolbar);
-    }
-    state.left_toolbar = left;
-    state.right_toolbar = right;
+    let old_left = ToolbarHandles {
+        window: state.left_toolbar,
+        images: state.left_toolbar_images,
+    };
+    let old_right = ToolbarHandles {
+        window: state.right_toolbar,
+        images: state.right_toolbar_images,
+    };
+    state.left_toolbar = left.window;
+    state.left_toolbar_images = left.images;
+    state.right_toolbar = right.window;
+    state.right_toolbar_images = right.images;
     state.high_contrast = high_contrast;
+    destroy_toolbar(old_left);
+    destroy_toolbar(old_right);
     apply_command_states(state);
 }
 
@@ -454,10 +612,6 @@ pub(super) fn toolbar_accessible_name(command: CommandId) -> String {
             || format!("명령 {command}"),
             |tool| tool.label.replace('\n', " "),
         )
-}
-
-pub(super) const fn toolbar_width_dip(high_contrast: bool) -> i32 {
-    if high_contrast { 120 } else { TOOLBAR_WIDTH }
 }
 
 pub(super) fn arrange(window: HWND, state: &AppState) {
@@ -505,6 +659,7 @@ pub(super) fn arrange(window: HWND, state: &AppState) {
             1,
         );
     }
+    update_primary_column_widths(state);
 }
 
 pub(super) fn move_window_dip(window: HWND, x: i32, y: i32, width: i32, height: i32, dpi: u32) {
@@ -707,7 +862,7 @@ pub(super) fn create_menu() -> HMENU {
         );
         menu_item(recovery, SHOW_RECOVERY_STATUS, "복구 상태 보기...");
         append_popup(menu, recovery, "복구(&R)");
-        menu_item(menu, VERSION, "버전(H)");
+        menu_item(menu, VERSION, VERSION_MENU_LABEL);
     }
     menu
 }
