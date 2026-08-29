@@ -2,11 +2,11 @@ use std::fs;
 
 use darknamer_app::rename::{
     AppendCertainty, EntryId, EntryIdentity, EntryKind, FileJournal, FileJournalErrorKind,
-    JournalCodecErrorKind, JournalDirection, JournalRecord, JournalRoot, JournalStep, JournalStore,
-    JournalTailIssue, JournalTerminal, MAX_JOURNAL_FRAME_BYTES, MAX_JOURNAL_STEPS, MAX_PATH_UNITS,
-    MemoryBackend, MemoryJournal, ModelRevision, PlanId, PlanRequest, RecoveryOutcome,
-    RenameExecutor, RenameIntent, RenamePlanner, RenameRecovery, TemporaryPhase,
-    decode_journal_records, encode_journal_records, inspect_journal_records,
+    JournalCodecErrorKind, JournalDirection, JournalOpenStage, JournalRecord, JournalRoot,
+    JournalStep, JournalStore, JournalTailIssue, JournalTerminal, MAX_JOURNAL_FRAME_BYTES,
+    MAX_JOURNAL_STEPS, MAX_PATH_UNITS, MemoryBackend, MemoryJournal, ModelRevision, PlanId,
+    PlanRequest, RecoveryOutcome, RenameExecutor, RenameIntent, RenamePlanner, RenameRecovery,
+    TemporaryPhase, decode_journal_records, encode_journal_records, inspect_journal_records,
 };
 use darknamer_core::LegacyText;
 
@@ -172,6 +172,47 @@ fn decoder_rejects_torn_checksum_version_sequence_and_unknown_kind()
         decode_journal_records(&kind).err().map(|error| error.kind),
         Some(JournalCodecErrorKind::UnknownRecordKind)
     );
+    Ok(())
+}
+
+#[test]
+fn corrupt_existing_journal_retains_exact_handle_for_bounded_copy()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let Some(root) = supported_journal_root(directory.path())? else {
+        return Ok(());
+    };
+    let path = directory.path().join("active.drj");
+    let copied = directory.path().join("diagnostic-copy.drj");
+    let mut corrupt = encode_journal_records(&complete_records())?;
+    let last = corrupt.len() - 1;
+    corrupt[last] ^= 0x80;
+    fs::write(&path, &corrupt)?;
+
+    let error = FileJournal::open_existing_retained(&root, "active.drj")
+        .err()
+        .ok_or_else(|| std::io::Error::other("corrupt journal decoded"))?;
+    assert_eq!(error.failure().stage, JournalOpenStage::Decode);
+    assert_eq!(
+        error.failure().kind,
+        FileJournalErrorKind::Codec(JournalCodecErrorKind::ChecksumMismatch)
+    );
+    assert!(error.failure().codec_frame.is_some());
+    let mut evidence = error
+        .into_evidence()
+        .ok_or_else(|| std::io::Error::other("corrupt file handle was dropped"))?;
+
+    #[cfg(unix)]
+    {
+        let moved = directory.path().join("retained-corrupt.drj");
+        fs::rename(&path, &moved)?;
+        fs::write(&path, b"substituted path")?;
+    }
+    evidence.copy_exact_to_new(&copied)?;
+
+    assert_eq!(fs::read(copied)?, corrupt);
+    assert_eq!(evidence.byte_len(), corrupt.len() as u64);
+    assert!(evidence.copy_exact_to_new(&path).is_err());
     Ok(())
 }
 

@@ -172,6 +172,177 @@ impl fmt::Display for FileJournalError {
 
 impl std::error::Error for FileJournalError {}
 
+/// Stage at which an existing journal could not become recoverable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JournalOpenStage {
+    /// The exact journal leaf could not be opened.
+    Open,
+    /// The opened object or its metadata was invalid.
+    Validate,
+    /// The retained file could not be read completely.
+    Read,
+    /// Retained bytes failed strict journal decoding.
+    Decode,
+}
+
+/// Structured failure retained for recovery diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct JournalOpenFailure {
+    /// Failed stage.
+    pub stage: JournalOpenStage,
+    /// Structured file-journal failure kind.
+    pub kind: FileJournalErrorKind,
+    /// Native operating-system code, when available.
+    pub os_code: Option<i32>,
+    /// Zero-based codec frame, when decoding identified one.
+    pub codec_frame: Option<usize>,
+}
+
+impl JournalOpenFailure {
+    fn from_file_error(stage: JournalOpenStage, error: FileJournalError) -> Self {
+        Self {
+            stage,
+            kind: error.kind,
+            os_code: error.os_code,
+            codec_frame: None,
+        }
+    }
+
+    fn from_codec(error: JournalCodecError) -> Self {
+        Self {
+            stage: JournalOpenStage::Decode,
+            kind: FileJournalErrorKind::Codec(error.kind),
+            os_code: None,
+            codec_frame: Some(error.frame),
+        }
+    }
+
+    fn as_file_error(self) -> FileJournalError {
+        FileJournalError {
+            kind: self.kind,
+            os_code: self.os_code,
+        }
+    }
+}
+
+/// Exact retained journal bytes that could not be decoded for recovery.
+#[derive(Debug)]
+pub struct RecoveryJournalEvidence {
+    path: PathBuf,
+    file: File,
+    byte_len: u64,
+    failure: JournalOpenFailure,
+}
+
+impl RecoveryJournalEvidence {
+    /// Returns the operator-facing path associated with the retained handle.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Returns the retained file length observed when opening failed.
+    #[must_use]
+    pub const fn byte_len(&self) -> u64 {
+        self.byte_len
+    }
+
+    /// Returns the structured failure that prevented recovery.
+    #[must_use]
+    pub const fn failure(&self) -> JournalOpenFailure {
+        self.failure
+    }
+
+    /// Copies the exact retained bytes into a newly created destination.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the retained evidence is oversized, cannot be
+    /// reread exactly, or the destination already exists or cannot be synced.
+    pub fn copy_exact_to_new(&mut self, destination: &Path) -> io::Result<u64> {
+        if self.byte_len > MAX_JOURNAL_FILE_BYTES as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "journal evidence exceeds the bounded copy limit",
+            ));
+        }
+        let expected = usize::try_from(self.byte_len)
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut bytes = Vec::with_capacity(expected);
+        Read::by_ref(&mut self.file)
+            .take(self.byte_len.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "retained journal evidence changed length",
+            ));
+        }
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)?;
+        let copy_result = output
+            .write_all(&bytes)
+            .and_then(|()| output.flush())
+            .and_then(|()| output.sync_all());
+        drop(output);
+        if let Err(error) = copy_result {
+            return Err(io::Error::other(format!(
+                "evidence copy failed ({error}); partial destination was retained"
+            )));
+        }
+        Ok(self.byte_len)
+    }
+}
+
+/// Existing-journal failure with retained evidence whenever open succeeded.
+#[derive(Debug)]
+pub struct ExistingJournalOpenError {
+    path: PathBuf,
+    failure: JournalOpenFailure,
+    evidence: Option<Box<RecoveryJournalEvidence>>,
+}
+
+impl ExistingJournalOpenError {
+    /// Returns the operator-facing journal path.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Returns why the journal could not become recoverable.
+    #[must_use]
+    pub const fn failure(&self) -> JournalOpenFailure {
+        self.failure
+    }
+
+    /// Returns whether no file existed at the retained journal leaf.
+    #[must_use]
+    pub fn is_not_found(&self) -> bool {
+        self.evidence.is_none() && matches!(self.failure.os_code, Some(2 | 3))
+    }
+
+    /// Takes the exact retained evidence, when the file was opened.
+    #[must_use]
+    pub fn into_evidence(self) -> Option<RecoveryJournalEvidence> {
+        self.evidence.map(|evidence| *evidence)
+    }
+}
+
+impl fmt::Display for ExistingJournalOpenError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "existing journal {:?} failed at {:?}",
+            self.failure.kind, self.failure.stage
+        )
+    }
+}
+
+impl std::error::Error for ExistingJournalOpenError {}
+
 impl From<io::Error> for FileJournalError {
     fn from(error: io::Error) -> Self {
         Self {
@@ -850,41 +1021,153 @@ impl FileJournal {
 
     /// Opens, exclusively retains, decodes, and resumes an existing journal.
     pub fn open_existing(root: &JournalRoot, leaf: &str) -> Result<Self, FileJournalError> {
-        let path = root.child(leaf)?;
-        reject_final_link(&path)?;
-        let mut file = open_existing(&root.file, &path, leaf)?;
-        validate_file_type(&file)?;
-        let file_len = usize::try_from(file.metadata()?.len()).map_err(|_| FileJournalError {
-            kind: FileJournalErrorKind::Codec(JournalCodecErrorKind::FileTooLarge),
-            os_code: None,
+        Self::open_existing_retained(root, leaf).map_err(|error| error.failure.as_file_error())
+    }
+
+    /// Opens an existing journal while retaining exact evidence on post-open
+    /// validation, read, or decode failure.
+    pub fn open_existing_retained(
+        root: &JournalRoot,
+        leaf: &str,
+    ) -> Result<Self, ExistingJournalOpenError> {
+        let path = root.child(leaf).map_err(|error| ExistingJournalOpenError {
+            path: root.path.join(leaf),
+            failure: JournalOpenFailure::from_file_error(JournalOpenStage::Validate, error),
+            evidence: None,
         })?;
-        if file_len > MAX_JOURNAL_FILE_BYTES {
-            return Err(FileJournalError {
-                kind: FileJournalErrorKind::Codec(JournalCodecErrorKind::FileTooLarge),
-                os_code: None,
-            });
+        reject_final_link(&path).map_err(|error| ExistingJournalOpenError {
+            path: path.clone(),
+            failure: JournalOpenFailure::from_file_error(JournalOpenStage::Validate, error),
+            evidence: None,
+        })?;
+        let mut file =
+            open_existing(&root.file, &path, leaf).map_err(|error| ExistingJournalOpenError {
+                path: path.clone(),
+                failure: JournalOpenFailure::from_file_error(JournalOpenStage::Open, error.into()),
+                evidence: None,
+            })?;
+        let metadata = match file.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                return Err(existing_evidence_error(
+                    path,
+                    file,
+                    0,
+                    JournalOpenFailure::from_file_error(JournalOpenStage::Validate, error.into()),
+                ));
+            }
+        };
+        let byte_len = metadata.len();
+        if !metadata.is_file() || metadata_is_reparse(&metadata) {
+            return Err(existing_evidence_error(
+                path,
+                file,
+                byte_len,
+                JournalOpenFailure::from_file_error(
+                    JournalOpenStage::Validate,
+                    FileJournalError {
+                        kind: FileJournalErrorKind::InvalidFileType,
+                        os_code: None,
+                    },
+                ),
+            ));
         }
+        let file_len = match usize::try_from(byte_len) {
+            Ok(length) if length <= MAX_JOURNAL_FILE_BYTES => length,
+            _ => {
+                return Err(existing_evidence_error(
+                    path,
+                    file,
+                    byte_len,
+                    JournalOpenFailure::from_file_error(
+                        JournalOpenStage::Validate,
+                        FileJournalError {
+                            kind: FileJournalErrorKind::Codec(JournalCodecErrorKind::FileTooLarge),
+                            os_code: None,
+                        },
+                    ),
+                ));
+            }
+        };
         let mut bytes = Vec::with_capacity(file_len);
-        file.seek(SeekFrom::Start(0))?;
-        Read::by_ref(&mut file)
-            .take((MAX_JOURNAL_FILE_BYTES as u64).saturating_add(1))
-            .read_to_end(&mut bytes)?;
-        if bytes.len() > MAX_JOURNAL_FILE_BYTES {
-            return Err(FileJournalError {
-                kind: FileJournalErrorKind::Codec(JournalCodecErrorKind::FileTooLarge),
-                os_code: None,
-            });
+        if let Err(error) = file.seek(SeekFrom::Start(0)).and_then(|_| {
+            Read::by_ref(&mut file)
+                .take((MAX_JOURNAL_FILE_BYTES as u64).saturating_add(1))
+                .read_to_end(&mut bytes)
+                .map(|_| ())
+        }) {
+            return Err(existing_evidence_error(
+                path,
+                file,
+                byte_len,
+                JournalOpenFailure::from_file_error(JournalOpenStage::Read, error.into()),
+            ));
         }
-        let inspection = inspect_journal_records(&bytes)?;
+        if bytes.len() > MAX_JOURNAL_FILE_BYTES {
+            return Err(existing_evidence_error(
+                path,
+                file,
+                byte_len,
+                JournalOpenFailure::from_file_error(
+                    JournalOpenStage::Validate,
+                    FileJournalError {
+                        kind: FileJournalErrorKind::Codec(JournalCodecErrorKind::FileTooLarge),
+                        os_code: None,
+                    },
+                ),
+            ));
+        }
+        let inspection = match inspect_journal_records(&bytes) {
+            Ok(inspection) => inspection,
+            Err(error) => {
+                return Err(existing_evidence_error(
+                    path,
+                    file,
+                    byte_len,
+                    JournalOpenFailure::from_codec(error),
+                ));
+            }
+        };
         let records = inspection.records;
-        file.seek(SeekFrom::End(0))?;
-        let generation = u64::try_from(records.len()).map_err(|_| FileJournalError {
-            kind: FileJournalErrorKind::Codec(JournalCodecErrorKind::TooManyFrames),
-            os_code: None,
-        })?;
+        if let Err(error) = file.seek(SeekFrom::End(0)) {
+            return Err(existing_evidence_error(
+                path,
+                file,
+                byte_len,
+                JournalOpenFailure::from_file_error(JournalOpenStage::Read, error.into()),
+            ));
+        }
+        let generation = match u64::try_from(records.len()) {
+            Ok(generation) => generation,
+            Err(_error) => {
+                return Err(existing_evidence_error(
+                    path,
+                    file,
+                    byte_len,
+                    JournalOpenFailure::from_file_error(
+                        JournalOpenStage::Decode,
+                        FileJournalError {
+                            kind: FileJournalErrorKind::Codec(JournalCodecErrorKind::TooManyFrames),
+                            os_code: None,
+                        },
+                    ),
+                ));
+            }
+        };
+        let retained_root = match root.file.try_clone() {
+            Ok(root) => root,
+            Err(error) => {
+                return Err(existing_evidence_error(
+                    path,
+                    file,
+                    byte_len,
+                    JournalOpenFailure::from_file_error(JournalOpenStage::Validate, error.into()),
+                ));
+            }
+        };
         Ok(Self {
             path,
-            _root: root.file.try_clone()?,
+            _root: retained_root,
             _root_identity: root.identity,
             file,
             records,
@@ -906,15 +1189,37 @@ impl FileJournal {
         candidate_leaf: &str,
         active_leaf: &str,
     ) -> Result<Self, FileJournalError> {
-        let active_path = root.child(active_leaf)?;
-        let mut journal = Self::open_existing(root, candidate_leaf)?;
+        Self::open_candidate_existing_retained(root, candidate_leaf, active_leaf)
+            .map_err(|error| error.failure.as_file_error())
+    }
+
+    /// Opens a candidate while retaining exact evidence when its bytes are
+    /// corrupt or contain post-activation transitions.
+    pub fn open_candidate_existing_retained(
+        root: &JournalRoot,
+        candidate_leaf: &str,
+        active_leaf: &str,
+    ) -> Result<Self, ExistingJournalOpenError> {
+        let active_path = root
+            .child(active_leaf)
+            .map_err(|error| ExistingJournalOpenError {
+                path: root.path.join(active_leaf),
+                failure: JournalOpenFailure::from_file_error(JournalOpenStage::Validate, error),
+                evidence: None,
+            })?;
+        let mut journal = Self::open_existing_retained(root, candidate_leaf)?;
         let valid_candidate = journal.records.is_empty()
             || matches!(journal.records.as_slice(), [JournalRecord::Intent { .. }]);
         if !valid_candidate {
-            return Err(FileJournalError {
-                kind: FileJournalErrorKind::InvalidCandidateState,
-                os_code: None,
-            });
+            return Err(
+                journal.into_existing_error(JournalOpenFailure::from_file_error(
+                    JournalOpenStage::Validate,
+                    FileJournalError {
+                        kind: FileJournalErrorKind::InvalidCandidateState,
+                        os_code: None,
+                    },
+                )),
+            );
         }
         journal.phase = FileJournalPhase::Candidate {
             active_path,
@@ -933,6 +1238,21 @@ impl FileJournal {
     #[must_use]
     pub const fn is_candidate(&self) -> bool {
         matches!(&self.phase, FileJournalPhase::Candidate { .. })
+    }
+
+    fn into_existing_error(self, failure: JournalOpenFailure) -> ExistingJournalOpenError {
+        let path = self.path;
+        let byte_len = self.byte_length as u64;
+        ExistingJournalOpenError {
+            path: path.clone(),
+            failure,
+            evidence: Some(Box::new(RecoveryJournalEvidence {
+                path,
+                file: self.file,
+                byte_len,
+                failure,
+            })),
+        }
     }
 
     /// Returns decoded append-only records.
@@ -1183,6 +1503,24 @@ fn journal_io_may_have_appended(error: io::Error) -> JournalError {
             .and_then(|code| u32::try_from(code).ok())
             .unwrap_or(6),
     )
+}
+
+fn existing_evidence_error(
+    path: PathBuf,
+    file: File,
+    byte_len: u64,
+    failure: JournalOpenFailure,
+) -> ExistingJournalOpenError {
+    ExistingJournalOpenError {
+        path: path.clone(),
+        failure,
+        evidence: Some(Box::new(RecoveryJournalEvidence {
+            path,
+            file,
+            byte_len,
+            failure,
+        })),
+    }
 }
 
 #[cfg(windows)]

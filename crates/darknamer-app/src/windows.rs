@@ -16,11 +16,11 @@ use crate::admission::{
 };
 use crate::icon_cache::{IconCacheKey, icon_cache_key};
 use crate::rename::{
-    ExecutionOutcome, FileJournal, JournalCleanupDecision, JournalRoot, ModelRevision,
-    RecoveryOutcome, RenameExecutor, RenamePlanner, RenameRecovery, WindowsRenameBackend,
-    apply_execution_report, build_plan_request, cleanup_decision, execute_error_korean,
-    execution_outcome_korean, next_model_revision, plan_error_korean, process_is_elevated,
-    safe_mode_unify_path_message,
+    ExecutionOutcome, ExistingJournalOpenError, FileJournal, JournalCleanupDecision,
+    JournalOpenFailure, JournalRoot, ModelRevision, RecoveryJournalEvidence, RecoveryOutcome,
+    RenameExecutor, RenamePlanner, RenameRecovery, WindowsRenameBackend, apply_execution_report,
+    build_plan_request, cleanup_decision, execute_error_korean, execution_outcome_korean,
+    next_model_revision, plan_error_korean, process_is_elevated, safe_mode_unify_path_message,
 };
 use darknamer_core::{
     LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,
@@ -98,6 +98,7 @@ const RIGHT_TOOLBAR_ID: usize = 1002;
 const STATUS_ID: usize = 1007;
 const CANDIDATE_JOURNAL_LEAF: &str = "candidate.drj";
 const ACTIVE_JOURNAL_LEAF: &str = "active.drj";
+const EXPORT_RECOVERY_JOURNAL: u16 = 0x9000;
 
 struct AppState {
     list_window: HWND,
@@ -116,6 +117,7 @@ struct AppState {
     journal_root: JournalRoot,
     active_journal: Option<FileJournal>,
     staged_journal: Option<FileJournal>,
+    blocked_journals: Vec<StartupJournalBlock>,
     startup_status: Option<String>,
     icon_cache: HashMap<IconCacheKey, i32>,
 }
@@ -144,6 +146,7 @@ impl AppState {
             journal_root: runtime.root,
             active_journal: runtime.active_journal,
             staged_journal: runtime.staged_journal,
+            blocked_journals: runtime.blocked_journals,
             startup_status: runtime.status,
             icon_cache: HashMap::new(),
         }
@@ -162,6 +165,11 @@ impl AppState {
             || self.recovery_locked
             || self.active_journal.is_some()
             || self.staged_journal.is_some()
+            || !self.blocked_journals.is_empty()
+    }
+
+    const fn read_only_locked(&self) -> bool {
+        self.recovery_locked
     }
 }
 
@@ -169,6 +177,7 @@ struct SafeRuntime {
     root: JournalRoot,
     active_journal: Option<FileJournal>,
     staged_journal: Option<FileJournal>,
+    blocked_journals: Vec<StartupJournalBlock>,
     recovery_locked: bool,
     status: Option<String>,
 }
@@ -176,6 +185,60 @@ struct SafeRuntime {
 struct JournalCleanup {
     retained: Option<FileJournal>,
     error: Option<io::Error>,
+}
+
+#[derive(Debug)]
+enum StartupJournalBlock {
+    Evidence(RecoveryJournalEvidence),
+    Unavailable {
+        path: PathBuf,
+        failure: JournalOpenFailure,
+    },
+}
+
+impl StartupJournalBlock {
+    fn from_open_error(error: ExistingJournalOpenError) -> Option<Self> {
+        if error.is_not_found() {
+            return None;
+        }
+        let path = error.path().to_path_buf();
+        let failure = error.failure();
+        Some(match error.into_evidence() {
+            Some(evidence) => Self::Evidence(evidence),
+            None => Self::Unavailable { path, failure },
+        })
+    }
+
+    fn status_korean(&self) -> String {
+        match self {
+            Self::Evidence(evidence) => {
+                let failure = evidence.failure();
+                format!(
+                    "저널을 복구용으로 해석하지 못해 원본 핸들을 보존했습니다: {} (단계 {:?}, 오류 {:?}, OS {:?}, frame {:?}, {} bytes). 자동 삭제하지 않았으며 새 적용은 잠겼습니다.",
+                    evidence.path().display(),
+                    failure.stage,
+                    failure.kind,
+                    failure.os_code,
+                    failure.codec_frame,
+                    evidence.byte_len(),
+                )
+            }
+            Self::Unavailable { path, failure } => format!(
+                "저널을 열 수 없어 원본 핸들을 보존하지 못했습니다: {} (단계 {:?}, 오류 {:?}, OS {:?}). 경로를 다시 열어 복사하지 않으며 새 적용은 잠겼습니다.",
+                path.display(),
+                failure.stage,
+                failure.kind,
+                failure.os_code,
+            ),
+        }
+    }
+
+    fn evidence_mut(&mut self) -> Option<&mut RecoveryJournalEvidence> {
+        match self {
+            Self::Evidence(evidence) => Some(evidence),
+            Self::Unavailable { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -197,6 +260,10 @@ fn initialize_safe_runtime() -> io::Result<SafeRuntime> {
     let local_app_data = env::var_os("LOCALAPPDATA")
         .ok_or_else(|| io::Error::other("LOCALAPPDATA 환경 변수를 찾을 수 없습니다"))?;
     let local_app_data = PathBuf::from(local_app_data);
+    initialize_safe_runtime_at(&local_app_data)
+}
+
+fn initialize_safe_runtime_at(local_app_data: &Path) -> io::Result<SafeRuntime> {
     if !local_app_data.is_absolute() {
         return Err(io::Error::other("저널 경로가 절대 경로가 아닙니다"));
     }
@@ -211,38 +278,46 @@ fn initialize_safe_runtime() -> io::Result<SafeRuntime> {
         fs::create_dir(&root_path)?;
     }
     let root = JournalRoot::open(&root_path).map_err(io::Error::other)?;
-    let candidate_path = root_path.join(CANDIDATE_JOURNAL_LEAF);
-    let staged_journal = if candidate_path.exists() {
-        Some(
-            FileJournal::open_candidate_existing(
-                &root,
-                CANDIDATE_JOURNAL_LEAF,
-                ACTIVE_JOURNAL_LEAF,
-            )
-            .map_err(io::Error::other)?,
-        )
-    } else {
-        None
+    let mut blocked_journals = Vec::new();
+    let active_journal = match FileJournal::open_existing_retained(&root, ACTIVE_JOURNAL_LEAF) {
+        Ok(journal) => Some(journal),
+        Err(error) => {
+            if let Some(blocked) = StartupJournalBlock::from_open_error(error) {
+                blocked_journals.push(blocked);
+            }
+            None
+        }
     };
-    let active_path = root_path.join(ACTIVE_JOURNAL_LEAF);
-    if !active_path.exists() {
+    let staged_journal = match FileJournal::open_candidate_existing_retained(
+        &root,
+        CANDIDATE_JOURNAL_LEAF,
+        ACTIVE_JOURNAL_LEAF,
+    ) {
+        Ok(journal) => Some(journal),
+        Err(error) => {
+            if let Some(blocked) = StartupJournalBlock::from_open_error(error) {
+                blocked_journals.push(blocked);
+            }
+            None
+        }
+    };
+    if active_journal.is_none() {
         let has_staged = staged_journal.is_some();
+        let status = startup_locked_status(staged_journal.as_ref(), &blocked_journals);
+        let recovery_locked = has_staged || !blocked_journals.is_empty();
         return Ok(SafeRuntime {
             root,
             active_journal: None,
             staged_journal,
-            recovery_locked: has_staged,
-            status: has_staged.then(|| {
-                format!(
-                    "활성화 전 저널을 보존했습니다: {}. 파일 변경은 시작되지 않았으며 적용은 잠겼습니다.",
-                    candidate_path.display()
-                )
-            }),
+            blocked_journals,
+            recovery_locked,
+            status,
         });
     }
 
-    let mut journal =
-        FileJournal::open_existing(&root, ACTIVE_JOURNAL_LEAF).map_err(io::Error::other)?;
+    let Some(mut journal) = active_journal else {
+        return Err(io::Error::other("active journal state was lost"));
+    };
     let mut backend = WindowsRenameBackend;
     let outcome = RenameRecovery::new(&mut backend, &mut journal).rollback();
     match outcome {
@@ -258,13 +333,16 @@ fn initialize_safe_runtime() -> io::Result<SafeRuntime> {
                 status.push_str(&format!(" 저널 삭제 실패: {error}"));
             }
             append_staged_status(&mut status, staged_journal.as_ref());
+            append_blocked_status(&mut status, &blocked_journals);
             Ok(SafeRuntime {
                 root,
                 recovery_locked: cleanup_failed
                     || cleanup.retained.is_some()
-                    || staged_journal.is_some(),
+                    || staged_journal.is_some()
+                    || !blocked_journals.is_empty(),
                 active_journal: cleanup.retained,
                 staged_journal,
+                blocked_journals,
                 status: Some(status),
             })
         }
@@ -273,10 +351,12 @@ fn initialize_safe_runtime() -> io::Result<SafeRuntime> {
                 format!("복구가 차단되었습니다: {reason:?}"),
                 staged_journal.as_ref(),
             );
+            let status = status_with_blocked_journals(status, &blocked_journals);
             Ok(SafeRuntime {
                 root,
                 active_journal: Some(journal),
                 staged_journal,
+                blocked_journals,
                 recovery_locked: true,
                 status: Some(status),
             })
@@ -286,15 +366,34 @@ fn initialize_safe_runtime() -> io::Result<SafeRuntime> {
                 format!("복구가 필요합니다: {reason:?}"),
                 staged_journal.as_ref(),
             );
+            let status = status_with_blocked_journals(status, &blocked_journals);
             Ok(SafeRuntime {
                 root,
                 active_journal: Some(journal),
                 staged_journal,
+                blocked_journals,
                 recovery_locked: true,
                 status: Some(status),
             })
         }
     }
+}
+
+fn startup_locked_status(
+    staged_journal: Option<&FileJournal>,
+    blocked_journals: &[StartupJournalBlock],
+) -> Option<String> {
+    let mut parts = blocked_journals
+        .iter()
+        .map(StartupJournalBlock::status_korean)
+        .collect::<Vec<_>>();
+    if let Some(journal) = staged_journal {
+        parts.push(format!(
+            "활성화 전 저널을 보존했습니다: {}. 파일 변경은 시작되지 않았으며 새 적용은 잠겼습니다.",
+            journal.path().display()
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
 }
 
 fn status_with_staged_journal(mut status: String, staged_journal: Option<&FileJournal>) -> String {
@@ -308,6 +407,21 @@ fn append_staged_status(status: &mut String, staged_journal: Option<&FileJournal
             " 활성화 전 저널도 보존했습니다: {}. 새 적용은 잠겼습니다.",
             journal.path().display()
         ));
+    }
+}
+
+fn status_with_blocked_journals(
+    mut status: String,
+    blocked_journals: &[StartupJournalBlock],
+) -> String {
+    append_blocked_status(&mut status, blocked_journals);
+    status
+}
+
+fn append_blocked_status(status: &mut String, blocked_journals: &[StartupJournalBlock]) {
+    for blocked in blocked_journals {
+        status.push(' ');
+        status.push_str(&blocked.status_korean());
     }
 }
 
@@ -385,6 +499,7 @@ fn run_unsafe() -> io::Result<()> {
     }
     let title = wide("DarkReNamer");
     let runtime = initialize_safe_runtime()?;
+    let startup_notice = runtime.status.clone();
     let state = Box::into_raw(Box::new(AppState::new(runtime)));
     let mut adopted = false;
     let mut init = WindowInit {
@@ -420,6 +535,9 @@ fn run_unsafe() -> io::Result<()> {
     unsafe {
         ShowWindow(window, SW_SHOW);
         UpdateWindow(window);
+    }
+    if let Some(notice) = startup_notice {
+        message(window, &notice, "DarkReNamer - 복구 상태");
     }
     // SAFETY: MSG is a C-compatible structure for which all-zero is a valid pre-GetMessageW state.
     let mut message: MSG = unsafe { zeroed() };
@@ -493,6 +611,18 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_DROPFILES if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is the live window-thread AppState pointer.
+            if unsafe { (*state_ptr).read_only_locked() } {
+                // SAFETY: wparam is the owned HDROP delivered with this message
+                // and is released exactly once on the rejected path.
+                unsafe { DragFinish(wparam as HDROP) };
+                self::message(
+                    window,
+                    "복구 잠금 상태에서는 목록을 변경할 수 없습니다.",
+                    "DarkReNamer - 읽기 전용",
+                );
+                return 0;
+            }
             // SAFETY: state_ptr is the non-null Box::into_raw value in GWLP_USERDATA, confined to this window thread until WM_NCDESTROY.
             let before = unsafe { (*state_ptr).model.clone() };
             // SAFETY: state_ptr is the non-null Box::into_raw value in GWLP_USERDATA, confined to this window thread until WM_NCDESTROY.
@@ -1474,6 +1604,14 @@ fn rows_for_tokens(model: &LegacyList, tokens: &[SelectionToken]) -> Vec<usize> 
 }
 
 fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
+    if state.read_only_locked() && !recovery_command_allowed(command) {
+        message(
+            window,
+            "복구 잠금 상태에서는 진단 저널 내보내기, 정보 보기, 종료만 사용할 수 있습니다.",
+            "DarkReNamer - 읽기 전용",
+        );
+        return;
+    }
     let selected = { selected_indices(state.list_window) };
     let before = state.model.clone();
     match command {
@@ -1652,6 +1790,7 @@ fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
             update_column_visibility(state, index);
         }
         VERSION => message(window, &super::about_text(), "DarkReNamer 정보"),
+        EXPORT_RECOVERY_JOURNAL => export_recovery_journal(window, state),
         // SAFETY: window is the live top-level HWND owned by this UI thread and
         // command 2 destroys it exactly once on this dispatch path.
         2 => unsafe {
@@ -1662,6 +1801,10 @@ fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
     }
     state.commit_model_change(&before);
     refresh(state);
+}
+
+const fn recovery_command_allowed(command: u16) -> bool {
+    matches!(command, VERSION | EXPORT_RECOVERY_JOURNAL | 2)
 }
 
 fn prompt_spec(
@@ -2325,6 +2468,59 @@ fn save_text_dialog(owner: HWND, text: LegacyText, names: bool) {
     }
 }
 
+fn export_recovery_journal(owner: HWND, state: &mut AppState) {
+    let evidence_count = state
+        .blocked_journals
+        .iter()
+        .filter(|blocked| matches!(blocked, StartupJournalBlock::Evidence(_)))
+        .count();
+    if evidence_count == 0 {
+        message(
+            owner,
+            "보존된 저널 핸들이 없어 원본을 안전하게 복사할 수 없습니다.",
+            "DarkReNamer - 진단 내보내기 불가",
+        );
+        return;
+    }
+    let Some(directory) = modal_native_dialog(owner, || {
+        rfd::FileDialog::new()
+            .set_title("복구 저널 원본을 저장할 폴더 선택")
+            .pick_folder()
+    }) else {
+        return;
+    };
+    let mut results = Vec::with_capacity(evidence_count);
+    let mut failures = 0_usize;
+    for evidence in state
+        .blocked_journals
+        .iter_mut()
+        .filter_map(StartupJournalBlock::evidence_mut)
+    {
+        let name = evidence
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map_or_else(
+                || "recovery-journal.drj.evidence".to_owned(),
+                |name| format!("{name}.evidence"),
+            );
+        let path = directory.join(name);
+        match evidence.copy_exact_to_new(&path) {
+            Ok(bytes) => results.push(format!("{bytes} bytes: {}", path.display())),
+            Err(error) => {
+                failures += 1;
+                results.push(format!("실패: {} ({error})", path.display()));
+            }
+        }
+    }
+    let caption = if failures == 0 {
+        "DarkReNamer - 진단 내보내기 완료"
+    } else {
+        "DarkReNamer - 진단 내보내기 일부 실패"
+    };
+    message(owner, &results.join("\n"), caption);
+}
+
 fn import_names_dialog(owner: HWND, state: &mut AppState) {
     let Some(path) = modal_native_dialog(owner, || {
         rfd::FileDialog::new()
@@ -2590,9 +2786,12 @@ fn refresh(state: &mut AppState) {
 fn update_controls(state: &mut AppState) {
     let selected_count = { selected_indices(state.list_window) }.len();
     for id in APPLY..=VERSION {
-        state.command_states[usize::from(id - APPLY)] =
+        state.command_states[usize::from(id - APPLY)] = if state.read_only_locked() {
+            id == VERSION
+        } else {
             command_enabled(id, state.model.len(), selected_count)
-                && !(id == APPLY && state.apply_locked());
+                && !(id == APPLY && state.apply_locked())
+        };
     }
     apply_command_states(state);
 }
@@ -2622,6 +2821,24 @@ fn apply_command_states(state: &AppState) {
                 MF_BYCOMMAND | if enabled { MF_ENABLED } else { MF_GRAYED },
             );
         }
+    }
+    let can_export_evidence = state
+        .blocked_journals
+        .iter()
+        .any(|blocked| matches!(blocked, StartupJournalBlock::Evidence(_)));
+    // SAFETY: state.menu is the live application menu and the diagnostic
+    // command identifier is owned by this process.
+    unsafe {
+        EnableMenuItem(
+            state.menu,
+            u32::from(EXPORT_RECOVERY_JOURNAL),
+            MF_BYCOMMAND
+                | if can_export_evidence {
+                    MF_ENABLED
+                } else {
+                    MF_GRAYED
+                },
+        );
     }
     for (index, id) in [SHOW_FULL_PATH, SHOW_SIZE, SHOW_MODIFIED, SHOW_CREATED]
         .into_iter()
@@ -2770,6 +2987,13 @@ fn create_menu() -> HMENU {
         menu_item(tools, PARENT_SUFFIX, "경로명 뒤에");
         menu_item(tools, UNIFY_PATH, "경로 통일하기 (미지원)");
         append_popup(menu, tools, "기능(&T)");
+        let recovery = CreatePopupMenu();
+        menu_item(
+            recovery,
+            EXPORT_RECOVERY_JOURNAL,
+            "보존된 모든 저널 원본 내보내기...",
+        );
+        append_popup(menu, recovery, "복구(&R)");
         menu_item(menu, VERSION, "버전(H)");
     }
     menu
@@ -2811,6 +3035,14 @@ const fn int_resource(id: u16) -> *const u16 {
 mod tests {
     use super::*;
 
+    fn create_startup_journal_directory(
+        local_app_data: &Path,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let journal = local_app_data.join("DarkReNamer").join("journal");
+        fs::create_dir_all(&journal)?;
+        Ok(journal)
+    }
+
     #[test]
     fn legacy_text_files_round_trip_utf16le_bom() -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
@@ -2828,6 +3060,103 @@ mod tests {
         assert_eq!(legacy_atoi(&LegacyText::from("  -12suffix")), -12);
         assert_eq!(legacy_atoi(&LegacyText::from("3abc")), 3);
         assert_eq!(legacy_atoi(&LegacyText::from("abc3")), 0);
+    }
+
+    #[test]
+    fn corrupt_active_journal_starts_recovery_locked_with_retained_evidence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let journal_directory = create_startup_journal_directory(directory.path())?;
+        let active = journal_directory.join(ACTIVE_JOURNAL_LEAF);
+        let corrupt = vec![0_u8; 24];
+        fs::write(&active, &corrupt)?;
+
+        let runtime = initialize_safe_runtime_at(directory.path())?;
+
+        assert!(runtime.recovery_locked);
+        assert!(runtime.active_journal.is_none());
+        assert_eq!(runtime.blocked_journals.len(), 1);
+        assert!(matches!(
+            runtime.blocked_journals[0],
+            StartupJournalBlock::Evidence(_)
+        ));
+        let status = runtime.status.as_deref().unwrap_or_default();
+        assert!(status.contains("원본 핸들을 보존"));
+        assert!(status.contains(&active.display().to_string()));
+        assert!(fs::read(&active).is_err());
+        drop(runtime);
+        assert_eq!(fs::read(active)?, corrupt);
+        Ok(())
+    }
+
+    #[test]
+    fn unavailable_active_journal_starts_locked_without_reopening_for_copy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let journal_directory = create_startup_journal_directory(directory.path())?;
+        let root = JournalRoot::open(&journal_directory)?;
+        let mut held = FileJournal::create_new(&root, ACTIVE_JOURNAL_LEAF)?;
+        drop(root);
+
+        let runtime = initialize_safe_runtime_at(directory.path())?;
+
+        assert!(runtime.recovery_locked);
+        assert_eq!(runtime.blocked_journals.len(), 1);
+        assert!(matches!(
+            runtime.blocked_journals[0],
+            StartupJournalBlock::Unavailable { .. }
+        ));
+        assert!(
+            runtime
+                .status
+                .as_deref()
+                .unwrap_or_default()
+                .contains("경로를 다시 열어 복사하지 않")
+        );
+        drop(runtime);
+        held.mark_delete_if_safe()?;
+        drop(held);
+        assert!(!journal_directory.join(ACTIVE_JOURNAL_LEAF).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn corrupt_active_and_candidate_retain_two_exportable_handles()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let journal_directory = create_startup_journal_directory(directory.path())?;
+        let active = journal_directory.join(ACTIVE_JOURNAL_LEAF);
+        let candidate = journal_directory.join(CANDIDATE_JOURNAL_LEAF);
+        fs::write(&active, vec![0_u8; 24])?;
+        fs::write(&candidate, vec![1_u8; 24])?;
+
+        let runtime = initialize_safe_runtime_at(directory.path())?;
+
+        assert!(runtime.recovery_locked);
+        assert_eq!(runtime.blocked_journals.len(), 2);
+        assert!(
+            runtime
+                .blocked_journals
+                .iter()
+                .all(|blocked| matches!(blocked, StartupJournalBlock::Evidence(_)))
+        );
+        let status = runtime.status.as_deref().unwrap_or_default();
+        assert!(status.contains(&active.display().to_string()));
+        assert!(status.contains(&candidate.display().to_string()));
+        drop(runtime);
+        assert!(active.exists());
+        assert!(candidate.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_lock_allows_only_diagnostics_about_and_exit() {
+        assert!(recovery_command_allowed(EXPORT_RECOVERY_JOURNAL));
+        assert!(recovery_command_allowed(VERSION));
+        assert!(recovery_command_allowed(2));
+        for command in [APPLY, ADD_FILES, IMPORT_PATHS, REPLACE, RESET, 0xFFFF] {
+            assert!(!recovery_command_allowed(command));
+        }
     }
 
     #[test]
