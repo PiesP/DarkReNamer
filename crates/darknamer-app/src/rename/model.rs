@@ -12,6 +12,10 @@ impl EntryId {
     pub const fn new(value: u32) -> Self {
         Self(value)
     }
+
+    pub(super) const fn value(self) -> u32 {
+        self.0
+    }
 }
 
 /// Revision of the mutable list model used to build a plan.
@@ -33,6 +37,10 @@ pub struct PlanId(u64);
 impl PlanId {
     pub(super) const fn new(value: u64) -> Self {
         Self(value)
+    }
+
+    pub(super) const fn value(self) -> u64 {
+        self.0
     }
 }
 
@@ -63,6 +71,12 @@ impl EntryIdentity {
     #[must_use]
     pub const fn volume(self) -> u64 {
         self.volume
+    }
+
+    /// Returns the backend-owned file identifier.
+    #[must_use]
+    pub const fn file_id(self) -> u128 {
+        self.file_id
     }
 }
 
@@ -262,4 +276,51 @@ impl RenamePlan {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Consumes this exact plan after the caller confirms its displayed identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either displayed value does not match this plan.
+    pub fn confirm_presented(
+        self,
+        displayed_id: PlanId,
+        displayed_revision: ModelRevision,
+    ) -> Result<ConfirmedPlan, ConfirmationError> {
+        if self.id != displayed_id {
+            return Err(ConfirmationError::PlanMismatch);
+        }
+        if self.revision != displayed_revision {
+            return Err(ConfirmationError::RevisionMismatch);
+        }
+        Ok(ConfirmedPlan { plan: self })
+    }
 }
+
+/// A one-shot ownership token for the exact plan shown to the caller.
+#[derive(Debug, Eq, PartialEq)]
+pub struct ConfirmedPlan {
+    pub(super) plan: RenamePlan,
+}
+
+/// Confirmation did not refer to the exact immutable plan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConfirmationError {
+    /// The displayed plan identifier differs.
+    PlanMismatch,
+    /// The displayed model revision differs.
+    RevisionMismatch,
+}
+
+impl fmt::Display for ConfirmationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PlanMismatch => formatter.write_str("confirmed plan identifier does not match"),
+            Self::RevisionMismatch => {
+                formatter.write_str("confirmed model revision does not match")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfirmationError {}

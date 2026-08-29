@@ -18,6 +18,10 @@ struct MemoryEntry {
 #[derive(Clone, Debug, Default)]
 pub struct MemoryBackend {
     entries: BTreeMap<PathKey, MemoryEntry>,
+    parent_identities: BTreeMap<PathKey, EntryIdentity>,
+    failures: BTreeMap<usize, u32>,
+    move_attempts: usize,
+    completed_moves: Vec<(String, String)>,
 }
 
 impl MemoryBackend {
@@ -26,6 +30,10 @@ impl MemoryBackend {
     pub const fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
+            parent_identities: BTreeMap::new(),
+            failures: BTreeMap::new(),
+            move_attempts: 0,
+            completed_moves: Vec::new(),
         }
     }
 
@@ -45,9 +53,70 @@ impl MemoryBackend {
         self
     }
 
+    /// Inserts or replaces a regular file after planning.
+    pub fn insert_file(&mut self, path: impl Into<LegacyText>, file_id: u128) {
+        let path = path.into();
+        let key = self.path_key(&path);
+        self.entries.insert(
+            key,
+            MemoryEntry {
+                identity: EntryIdentity::new(1, file_id),
+                kind: EntryKind::File,
+                is_reparse_point: false,
+            },
+        );
+    }
+
+    /// Replaces the identity at an existing path.
+    pub fn replace_file_id(&mut self, path: impl Into<LegacyText>, file_id: u128) {
+        let path = path.into();
+        let key = self.path_key(&path);
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.identity = EntryIdentity::new(entry.identity.volume(), file_id);
+        }
+    }
+
+    /// Overrides the resolved direct-parent identity for one child path.
+    pub fn replace_parent_id(&mut self, child_path: impl Into<LegacyText>, file_id: u128) {
+        let child_path = child_path.into();
+        let parent = LegacyText::from_units(parent_units(child_path.units()).to_vec());
+        self.parent_identities
+            .insert(self.path_key(&parent), EntryIdentity::new(1, file_id));
+    }
+
+    /// Injects one backend failure by one-based move-attempt number.
+    pub fn fail_move_on(&mut self, attempt: usize, code: u32) {
+        self.failures.insert(attempt, code);
+    }
+
+    /// Returns the file identifier currently occupying a path.
+    #[must_use]
+    pub fn file_id(&self, path: impl Into<LegacyText>) -> Option<u128> {
+        let path = path.into();
+        self.entries
+            .get(&self.path_key(&path))
+            .map(|entry| entry.identity.file_id())
+    }
+
+    /// Returns successful primitive moves in execution order.
+    #[must_use]
+    pub fn completed_moves(&self) -> &[(String, String)] {
+        &self.completed_moves
+    }
+
+    /// Returns the number of successful filesystem mutations.
+    #[must_use]
+    pub const fn mutation_count(&self) -> usize {
+        self.completed_moves.len()
+    }
+
     fn parent_identity(&self, path: &LegacyText) -> EntryIdentity {
+        let parent = LegacyText::from_units(parent_units(path.units()).to_vec());
+        if let Some(identity) = self.parent_identities.get(&self.path_key(&parent)) {
+            return *identity;
+        }
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-        for unit in parent_units(path.units()) {
+        for unit in parent.units() {
             hash ^= u64::from(ascii_lower(*unit));
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
@@ -87,6 +156,13 @@ impl RenameBackend for MemoryBackend {
         destination: &LegacyText,
         expected_source: EntryIdentity,
     ) -> Result<(), BackendError> {
+        self.move_attempts += 1;
+        if let Some(code) = self.failures.get(&self.move_attempts).copied() {
+            return Err(BackendError {
+                operation: BackendOperation::Rename,
+                code,
+            });
+        }
         let source_key = self.path_key(source);
         let destination_key = self.path_key(destination);
         if self.entries.contains_key(&destination_key) {
@@ -109,6 +185,8 @@ impl RenameBackend for MemoryBackend {
             });
         }
         self.entries.insert(destination_key, entry);
+        self.completed_moves
+            .push((source.to_string_lossy(), destination.to_string_lossy()));
         Ok(())
     }
 }

@@ -1,6 +1,7 @@
 use darknamer_core::LegacyText;
 
 use super::{EntryIdentity, PathKey, PathSnapshot};
+use super::{JournalDirection, JournalTerminal, PlanId};
 
 /// Backend operation associated with a structured error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,4 +36,26 @@ pub trait RenameBackend {
         destination: &LegacyText,
         expected_source: EntryIdentity,
     ) -> Result<(), BackendError>;
+}
+
+/// Durable journal adapter failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct JournalError {
+    /// Adapter-owned numeric error code.
+    pub code: u32,
+}
+
+/// Write-ahead journal used to make interrupted execution recoverable.
+pub trait JournalStore {
+    /// Begins one immutable transaction before filesystem mutation.
+    fn begin(&mut self, plan: PlanId, step_count: usize) -> Result<(), JournalError>;
+
+    /// Durably records that one move is about to be attempted.
+    fn prepared(&mut self, step: usize, direction: JournalDirection) -> Result<(), JournalError>;
+
+    /// Durably records that one move completed.
+    fn completed(&mut self, step: usize, direction: JournalDirection) -> Result<(), JournalError>;
+
+    /// Durably records a verified terminal state.
+    fn terminal(&mut self, terminal: JournalTerminal) -> Result<(), JournalError>;
 }
