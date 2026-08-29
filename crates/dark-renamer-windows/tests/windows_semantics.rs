@@ -146,6 +146,20 @@ fn journal_recovery_retains_one_read_append_file() -> Result<(), Box<dyn std::er
 }
 
 #[test]
+fn retained_read_append_handle_blocks_rescan_until_closed() -> Result<(), Box<dyn std::error::Error>>
+{
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("journal.drj");
+    fs::write(&path, b"journal")?;
+    let writer = open_journal_file(&path, JournalAccess::ReadAppend)?;
+
+    assert!(open_journal_file(&path, JournalAccess::Read).is_err());
+    drop(writer);
+    let _reader = open_journal_file(&path, JournalAccess::Read)?;
+    Ok(())
+}
+
+#[test]
 fn retained_journal_handle_blocks_writers_and_path_substitution()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;

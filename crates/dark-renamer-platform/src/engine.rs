@@ -695,6 +695,7 @@ impl<F: FileSystem> Engine<F> {
                 });
             }
         }
+        drop(journal);
         self.refresh_recovery()?;
         if self.recovery_required {
             return Err(PlatformError::RecoveryRequired);
