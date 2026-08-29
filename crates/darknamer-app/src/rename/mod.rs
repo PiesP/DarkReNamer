@@ -6,6 +6,7 @@ mod memory;
 mod model;
 mod planner;
 mod ports;
+mod recovery;
 mod schedule;
 
 pub use executor::{
@@ -27,4 +28,5 @@ pub use ports::{
     BackendError, BackendOperation, JournalError, JournalStore, MutationCertainty, RenameBackend,
     RenameOperation,
 };
+pub use recovery::{RecoveryBlockKind, RecoveryFailure, RecoveryOutcome, RenameRecovery};
 pub use schedule::{MAX_TEMP_CANDIDATES, TemporaryPhase};

@@ -381,6 +381,12 @@ impl MemoryJournal {
         }
     }
 
+    /// Creates an appendable in-memory journal from previously loaded records.
+    #[must_use]
+    pub fn from_records(records: Vec<JournalRecord>) -> Self {
+        Self { records }
+    }
+
     /// Returns append-only records for behavior-level tests.
     #[must_use]
     pub fn records(&self) -> &[JournalRecord] {
