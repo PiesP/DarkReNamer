@@ -184,7 +184,8 @@ pub const RIGHT_TOOLS: [ToolSpec; 10] = [
 #[must_use]
 pub fn command_enabled(id: CommandId, row_count: usize, selected_count: usize) -> bool {
     match id {
-        ADD_FILES | IMPORT_PATHS | VERSION => true,
+        2 | ADD_FILES | IMPORT_PATHS | SHOW_FULL_PATH | SHOW_SIZE | SHOW_MODIFIED
+        | SHOW_CREATED | VERSION => true,
         MANUAL_CHANGE | MOVE_UP | MOVE_DOWN => selected_count > 0,
         _ => row_count > 0,
     }
@@ -295,6 +296,10 @@ mod tests {
     #[test]
     fn menu_state_requires_rows_and_selection_like_original() {
         assert!(command_enabled(ADD_FILES, 0, 0));
+        assert!(command_enabled(IMPORT_PATHS, 0, 0));
+        assert!(command_enabled(SHOW_FULL_PATH, 0, 0));
+        assert!(command_enabled(VERSION, 0, 0));
+        assert!(command_enabled(2, 0, 0));
         assert!(!command_enabled(APPLY, 0, 0));
         assert!(command_enabled(APPLY, 1, 0));
         assert!(!command_enabled(MANUAL_CHANGE, 1, 0));
