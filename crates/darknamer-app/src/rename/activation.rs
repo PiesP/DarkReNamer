@@ -103,29 +103,38 @@ pub fn plan_error_korean(error: &PlanError) -> (String, Vec<usize>) {
     let reasons = error
         .issues()
         .iter()
-        .map(|issue| match &issue.kind {
-            PlanIssueKind::RelativeSource | PlanIssueKind::RelativeDestinationParent => {
-                "상대 경로는 사용할 수 없습니다."
-            }
-            PlanIssueKind::InvalidDestinationName(_) => "Windows에서 사용할 수 없는 이름입니다.",
-            PlanIssueKind::MissingSource => "원본 항목을 찾을 수 없습니다.",
-            PlanIssueKind::SourceKindChanged => "원본 항목 종류가 변경되었습니다.",
-            PlanIssueKind::ReparseSource => "재분석 지점은 변경할 수 없습니다.",
-            PlanIssueKind::DuplicateDestination => "중복되는 대상 이름이 있습니다.",
-            PlanIssueKind::DuplicateEntryId | PlanIssueKind::DuplicateSource => {
-                "중복되는 원본 항목이 있습니다."
-            }
-            PlanIssueKind::DestinationOccupied => "대상 이름이 이미 사용 중입니다.",
-            PlanIssueKind::CrossParent => "다른 폴더로 이동할 수 없습니다.",
-            PlanIssueKind::SourceOverlap => "상위/하위 항목을 함께 변경할 수 없습니다.",
-            PlanIssueKind::UnsupportedCaseSensitiveParent => {
-                "대소문자 구분 폴더는 아직 지원하지 않습니다."
-            }
-            PlanIssueKind::UnsupportedWindowsPath => "네트워크 또는 지원하지 않는 경로입니다.",
-            PlanIssueKind::Backend => "파일 시스템을 안전하게 확인하지 못했습니다.",
-        })
+        .map(|issue| plan_issue_korean(&issue.kind))
         .collect::<Vec<_>>();
     (reasons.join("\n"), rows)
+}
+
+fn plan_issue_korean(kind: &PlanIssueKind) -> String {
+    match kind {
+        PlanIssueKind::RelativeSource | PlanIssueKind::RelativeDestinationParent => {
+            "상대 경로는 사용할 수 없습니다.".to_owned()
+        }
+        PlanIssueKind::InvalidDestinationName(_) => {
+            "Windows에서 사용할 수 없는 이름입니다.".to_owned()
+        }
+        PlanIssueKind::MissingSource => "원본 항목을 찾을 수 없습니다.".to_owned(),
+        PlanIssueKind::SourceKindChanged => "원본 항목 종류가 변경되었습니다.".to_owned(),
+        PlanIssueKind::ReparseSource => "재분석 지점은 변경할 수 없습니다.".to_owned(),
+        PlanIssueKind::DuplicateDestination => "중복되는 대상 이름이 있습니다.".to_owned(),
+        PlanIssueKind::DuplicateEntryId | PlanIssueKind::DuplicateSource => {
+            "중복되는 원본 항목이 있습니다.".to_owned()
+        }
+        PlanIssueKind::DestinationOccupied => "대상 이름이 이미 사용 중입니다.".to_owned(),
+        PlanIssueKind::CrossParent => "다른 폴더로 이동할 수 없습니다.".to_owned(),
+        PlanIssueKind::SourceOverlap => "상위/하위 항목을 함께 변경할 수 없습니다.".to_owned(),
+        PlanIssueKind::UnsupportedCaseSensitiveParent => {
+            "대소문자 구분 폴더는 아직 지원하지 않습니다.".to_owned()
+        }
+        PlanIssueKind::UnsupportedWindowsPath => {
+            "네트워크 또는 지원하지 않는 경로입니다.".to_owned()
+        }
+        PlanIssueKind::Backend => "파일 시스템을 안전하게 확인하지 못했습니다.".to_owned(),
+        PlanIssueKind::BackendFailure(error) => backend_error_korean("계획 검사", *error),
+    }
 }
 
 /// Formats a pre-mutation execution refusal with native backend details.

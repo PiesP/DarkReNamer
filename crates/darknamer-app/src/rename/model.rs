@@ -2,6 +2,8 @@ use std::fmt;
 
 use darknamer_core::{LegacyText, WindowsLeafNameError};
 
+use super::ports::BackendError;
+
 /// A row identifier scoped to one plan request.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct EntryId(u32);
@@ -233,6 +235,8 @@ pub enum PlanIssueKind {
     DestinationOccupied,
     /// A required backend observation failed.
     Backend,
+    /// A backend observation failed with retained operation and native code.
+    BackendFailure(BackendError),
 }
 
 /// One entry-scoped planning blocker.
