@@ -144,6 +144,32 @@ pub struct JournalError {
     pub code: u32,
 }
 
+/// Opaque retained authorization for one exact journal identity and generation.
+#[derive(Debug)]
+pub struct JournalAuthorization {
+    pub(super) identity: u64,
+    pub(super) generation: u64,
+}
+
+/// Immutable records loaded through a retained exclusive journal capability.
+#[derive(Debug)]
+pub struct JournalSnapshot {
+    pub(super) records: Box<[super::JournalRecord]>,
+    pub(super) authorization: JournalAuthorization,
+}
+
+impl JournalSnapshot {
+    /// Returns the immutable authorized record snapshot.
+    #[must_use]
+    pub fn records(&self) -> &[super::JournalRecord] {
+        &self.records
+    }
+
+    pub(super) fn into_parts(self) -> (Box<[super::JournalRecord]>, JournalAuthorization) {
+        (self.records, self.authorization)
+    }
+}
+
 /// Write-ahead journal used to make interrupted execution recoverable.
 pub trait JournalStore {
     /// Begins one immutable transaction before filesystem mutation.
@@ -161,4 +187,45 @@ pub trait JournalStore {
 
     /// Durably records a verified terminal state.
     fn terminal(&mut self, terminal: JournalTerminal) -> Result<(), JournalError>;
+}
+
+/// Journal capability retained exclusively from snapshot through recovery writes.
+///
+/// Implementations must identity-check the same opened journal and reject any
+/// generation drift on every authorized append. Recovery must not combine a
+/// snapshot from one journal with mutation authority from another.
+pub trait AuthorizedJournal {
+    /// Loads records and an opaque authorization from the retained capability.
+    fn authorized_snapshot(&mut self) -> Result<JournalSnapshot, JournalError>;
+
+    /// Appends a prepared transition only if authorization is still current.
+    fn authorized_prepared(
+        &mut self,
+        authorization: &mut JournalAuthorization,
+        step: usize,
+        direction: JournalDirection,
+    ) -> Result<(), JournalError>;
+
+    /// Appends a completed transition only if authorization is still current.
+    fn authorized_completed(
+        &mut self,
+        authorization: &mut JournalAuthorization,
+        step: usize,
+        direction: JournalDirection,
+    ) -> Result<(), JournalError>;
+
+    /// Appends a no-mutation transition only if authorization is still current.
+    fn authorized_not_applied(
+        &mut self,
+        authorization: &mut JournalAuthorization,
+        step: usize,
+        direction: JournalDirection,
+    ) -> Result<(), JournalError>;
+
+    /// Appends terminal state only if authorization is still current.
+    fn authorized_terminal(
+        &mut self,
+        authorization: &mut JournalAuthorization,
+        terminal: JournalTerminal,
+    ) -> Result<(), JournalError>;
 }
