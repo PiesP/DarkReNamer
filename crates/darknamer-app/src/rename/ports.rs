@@ -110,7 +110,10 @@ impl RenameOperation {
 
 /// Filesystem adapter used by planning and execution.
 pub trait RenameBackend {
-    /// Builds the filesystem's comparison key for a complete path.
+    /// Validates parent filesystem semantics before any comparison-key folding.
+    fn validate_path_environment(&self, path: &LegacyText) -> Result<(), BackendError>;
+
+    /// Builds the filesystem's comparison key for a validated complete path.
     fn path_key(&self, path: &LegacyText) -> PathKey;
 
     /// Observes the exact leaf and resolved direct parent.

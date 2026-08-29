@@ -266,6 +266,10 @@ struct CanonicalKeyBackend {
 }
 
 impl RenameBackend for CanonicalKeyBackend {
+    fn validate_path_environment(&self, path: &LegacyText) -> Result<(), BackendError> {
+        self.inner.validate_path_environment(path)
+    }
+
     fn path_key(&self, path: &LegacyText) -> PathKey {
         let opaque = path
             .to_string_lossy()

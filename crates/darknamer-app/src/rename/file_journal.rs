@@ -5,7 +5,9 @@
 //! only; their ordinary file open is not a production confinement claim.
 
 use std::fmt;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(not(windows))]
+use std::fs::OpenOptions;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -185,9 +187,9 @@ impl From<JournalCodecError> for FileJournalError {
 
 /// Retained authority for one validated absolute journal directory.
 ///
-/// Windows retains an exclusive no-follow directory handle. Child opens still
-/// use a validated full path because this crate has no handle-relative create
-/// adapter yet; production activation remains gated on closing that residual.
+/// Windows retains an exclusive, component-traversed, non-reparse directory
+/// handle and creates or opens each validated journal leaf relative to it with
+/// `NtCreateFile`. Safe v1 rejects UNC/SMB and device-namespace roots.
 #[derive(Debug)]
 pub struct JournalRoot {
     path: PathBuf,
@@ -205,6 +207,8 @@ impl JournalRoot {
                 os_code: None,
             });
         }
+        #[cfg(windows)]
+        super::windows_native::validate_safe_local_root(&path)?;
         validate_root_components(&path)?;
         let file = open_root(&path)?;
         let metadata = file.metadata()?;
@@ -770,7 +774,7 @@ impl FileJournal {
     /// Creates and exclusively retains a new empty journal.
     pub fn create_new(root: &JournalRoot, leaf: &str) -> Result<Self, FileJournalError> {
         let path = root.child(leaf)?;
-        let file = open_create_new(&path)?;
+        let file = open_create_new(&root.file, &path, leaf)?;
         validate_file_type(&file)?;
         Ok(Self {
             path,
@@ -791,7 +795,7 @@ impl FileJournal {
     pub fn open_existing(root: &JournalRoot, leaf: &str) -> Result<Self, FileJournalError> {
         let path = root.child(leaf)?;
         reject_final_link(&path)?;
-        let mut file = open_existing(&path)?;
+        let mut file = open_existing(&root.file, &path, leaf)?;
         validate_file_type(&file)?;
         let file_len = usize::try_from(file.metadata()?.len()).map_err(|_| FileJournalError {
             kind: FileJournalErrorKind::Codec(JournalCodecErrorKind::FileTooLarge),
@@ -1049,15 +1053,7 @@ fn reject_final_link(path: &Path) -> Result<(), FileJournalError> {
 
 #[cfg(windows)]
 fn open_root(path: &Path) -> io::Result<File> {
-    use std::os::windows::fs::OpenOptionsExt;
-
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    OpenOptions::new()
-        .read(true)
-        .share_mode(0)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
+    super::windows_native::NativeParent::open_path_exclusive(path).map(|parent| parent.into_file())
 }
 
 #[cfg(not(windows))]
@@ -1066,21 +1062,12 @@ fn open_root(path: &Path) -> io::Result<File> {
 }
 
 #[cfg(windows)]
-fn open_create_new(path: &Path) -> io::Result<File> {
-    use std::os::windows::fs::OpenOptionsExt;
-
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    OpenOptions::new()
-        .read(true)
-        .append(true)
-        .create_new(true)
-        .share_mode(0)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
+fn open_create_new(root: &File, _path: &Path, leaf: &str) -> io::Result<File> {
+    super::windows_native::create_file_relative_exclusive(root, leaf)
 }
 
 #[cfg(not(windows))]
-fn open_create_new(path: &Path) -> io::Result<File> {
+fn open_create_new(_root: &File, path: &Path, _leaf: &str) -> io::Result<File> {
     OpenOptions::new()
         .read(true)
         .append(true)
@@ -1089,20 +1076,12 @@ fn open_create_new(path: &Path) -> io::Result<File> {
 }
 
 #[cfg(windows)]
-fn open_existing(path: &Path) -> io::Result<File> {
-    use std::os::windows::fs::OpenOptionsExt;
-
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    OpenOptions::new()
-        .read(true)
-        .append(true)
-        .share_mode(0)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
+fn open_existing(root: &File, _path: &Path, leaf: &str) -> io::Result<File> {
+    super::windows_native::open_file_relative_exclusive(root, leaf)
 }
 
 #[cfg(not(windows))]
-fn open_existing(path: &Path) -> io::Result<File> {
+fn open_existing(_root: &File, path: &Path, _leaf: &str) -> io::Result<File> {
     OpenOptions::new().read(true).append(true).open(path)
 }
 
