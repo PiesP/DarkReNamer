@@ -18,6 +18,12 @@ pub const fn next_model_revision(current: u64, changed: bool) -> u64 {
     }
 }
 
+/// Explains why legacy cross-parent root unification is inert in Safe v1.
+#[must_use]
+pub const fn safe_mode_unify_path_message() -> &'static str {
+    "Safe 모드에서는 다른 폴더로 이동하는 경로 통일을 아직 지원하지 않습니다. 목록은 변경되지 않았습니다."
+}
+
 /// Builds an exact plan request from current legacy rows without changing them.
 #[must_use]
 pub fn build_plan_request(model: &LegacyList, revision: ModelRevision) -> PlanRequest {

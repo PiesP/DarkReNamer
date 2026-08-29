@@ -18,6 +18,7 @@ mod windows_native;
 pub use activation::{
     JournalCleanupDecision, apply_execution_report, build_plan_request, cleanup_decision,
     execute_error_korean, execution_outcome_korean, next_model_revision, plan_error_korean,
+    safe_mode_unify_path_message,
 };
 pub use executor::{
     EntryExecution, ExecuteError, ExecuteErrorKind, ExecutionFailure, ExecutionOutcome,
@@ -48,3 +49,5 @@ pub use recovery::{RecoveryBlockKind, RecoveryFailure, RecoveryOutcome, RenameRe
 pub use schedule::{MAX_TEMP_CANDIDATES, TemporaryPhase};
 #[cfg(windows)]
 pub use windows_backend::WindowsRenameBackend;
+#[cfg(windows)]
+pub(crate) use windows_native::process_is_elevated;

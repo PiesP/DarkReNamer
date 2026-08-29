@@ -416,7 +416,7 @@ fn journal_child_handle_is_exclusive_and_relative_to_retained_root()
         return Ok(());
     }
     let root = JournalRoot::open(directory.path())?;
-    let journal = FileJournal::create_new(&root, "exclusive.drj")?;
+    let mut journal = FileJournal::create_new(&root, "exclusive.drj")?;
     let competing = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -429,8 +429,15 @@ fn journal_child_handle_is_exclusive_and_relative_to_retained_root()
         )
         .is_err()
     );
+    journal.mark_delete_if_safe()?;
+    assert!(fs::write(directory.path().join("exclusive.drj"), b"replacement").is_err());
     drop(journal);
-    assert!(directory.path().join("exclusive.drj").exists());
+    assert!(!directory.path().join("exclusive.drj").exists());
+    fs::write(directory.path().join("exclusive.drj"), b"replacement")?;
+    assert_eq!(
+        fs::read(directory.path().join("exclusive.drj"))?,
+        b"replacement"
+    );
     Ok(())
 }
 

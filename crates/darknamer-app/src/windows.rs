@@ -18,7 +18,8 @@ use crate::rename::{
     ExecutionOutcome, FileJournal, JournalCleanupDecision, JournalRoot, ModelRevision,
     RecoveryOutcome, RenameExecutor, RenamePlanner, RenameRecovery, WindowsRenameBackend,
     apply_execution_report, build_plan_request, cleanup_decision, execute_error_korean,
-    execution_outcome_korean, next_model_revision, plan_error_korean,
+    execution_outcome_korean, next_model_revision, plan_error_korean, process_is_elevated,
+    safe_mode_unify_path_message,
 };
 use darknamer_core::{
     LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,
@@ -158,6 +159,11 @@ struct SafeRuntime {
     status: Option<String>,
 }
 
+struct JournalCleanup {
+    retained: Option<FileJournal>,
+    error: Option<io::Error>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DirectoryMode {
     Recurse,
@@ -206,16 +212,21 @@ fn initialize_safe_runtime() -> io::Result<SafeRuntime> {
     let outcome = RenameRecovery::new(&mut backend, &mut journal).rollback();
     match outcome {
         RecoveryOutcome::Recovered { .. } | RecoveryOutcome::NotRequired => {
-            let retained = cleanup_file_journal(&root, journal)?;
+            let cleanup = cleanup_file_journal(journal);
+            let cleanup_failed = cleanup.error.is_some();
+            let mut status = if matches!(outcome, RecoveryOutcome::Recovered { .. }) {
+                "이전 변경을 안전하게 복구했습니다.".to_owned()
+            } else {
+                "저널 상태를 확인했습니다.".to_owned()
+            };
+            if let Some(error) = cleanup.error {
+                status.push_str(&format!(" 저널 삭제 실패: {error}"));
+            }
             Ok(SafeRuntime {
                 root,
-                recovery_locked: retained.is_some(),
-                active_journal: retained,
-                status: Some(if matches!(outcome, RecoveryOutcome::Recovered { .. }) {
-                    "이전 변경을 안전하게 복구했습니다.".to_owned()
-                } else {
-                    "저널 상태를 확인했습니다.".to_owned()
-                }),
+                recovery_locked: cleanup_failed || cleanup.retained.is_some(),
+                active_journal: cleanup.retained,
+                status: Some(status),
             })
         }
         RecoveryOutcome::Blocked { reason, .. } => Ok(SafeRuntime {
@@ -233,21 +244,25 @@ fn initialize_safe_runtime() -> io::Result<SafeRuntime> {
     }
 }
 
-fn cleanup_file_journal(
-    root: &JournalRoot,
-    journal: FileJournal,
-) -> io::Result<Option<FileJournal>> {
+fn cleanup_file_journal(mut journal: FileJournal) -> JournalCleanup {
     if cleanup_decision(journal.records()) == JournalCleanupDecision::Retain {
-        return Ok(Some(journal));
+        return JournalCleanup {
+            retained: Some(journal),
+            error: None,
+        };
     }
-    let path = journal.path().to_path_buf();
-    drop(journal);
-    match fs::remove_file(&path) {
-        Ok(()) if !path.exists() => Ok(None),
-        Ok(()) => Err(io::Error::other("저널 파일 삭제를 확인하지 못했습니다")),
-        Err(_error) => FileJournal::open_existing(root, ACTIVE_JOURNAL_LEAF)
-            .map(Some)
-            .map_err(io::Error::other),
+    match journal.mark_delete_if_safe() {
+        Ok(()) => {
+            drop(journal);
+            JournalCleanup {
+                retained: None,
+                error: None,
+            }
+        }
+        Err(error) => JournalCleanup {
+            retained: Some(journal),
+            error: Some(io::Error::other(error)),
+        },
     }
 }
 
@@ -258,6 +273,12 @@ pub(crate) fn run() -> io::Result<()> {
 }
 
 unsafe fn run_unsafe() -> io::Result<()> {
+    if process_is_elevated()? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "관리자 권한으로는 실행할 수 없습니다. 일반 사용자 권한으로 다시 실행해 주세요.",
+        ));
+    }
     let com_status = unsafe { CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32) };
     if com_status < 0 {
         return Err(io::Error::from_raw_os_error(com_status));
@@ -893,7 +914,7 @@ unsafe fn prompt_input(owner: HWND, spec: PromptSpec) -> io::Result<Option<Promp
         if status == 0 {
             unsafe {
                 DestroyWindow(dialog);
-                PostQuitMessage(0);
+                PostQuitMessage(message.wParam as i32);
             }
             state.done = true;
             return Ok(None);
@@ -1149,9 +1170,9 @@ unsafe fn handle_accelerator(window: HWND, message: &MSG) -> bool {
     };
     if let Some(command) = command {
         let state = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *mut AppState;
-        if command != 0xFFFF && command != 2 && !state.is_null() {
-            let selected = unsafe { selected_indices((*state).list_window) }.len();
-            if !command_enabled(command, unsafe { (*state).model.len() }, selected) {
+        if (APPLY..=VERSION).contains(&command) && !state.is_null() {
+            let enabled = unsafe { (*state).command_states[usize::from(command - APPLY)] };
+            if !enabled {
                 return true;
             }
         }
@@ -1426,13 +1447,13 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
         }
         PARENT_PREFIX => state.model.prefix_parent_folder(),
         PARENT_SUFFIX => state.model.suffix_parent_folder(),
-        UNIFY_PATH => {
-            if let Some(path) = modal_native_dialog(window, || {
-                rfd::FileDialog::new().set_title("경로 선택").pick_folder()
-            }) {
-                state.model.unify_root_path(&legacy_path(&path));
-            }
-        }
+        UNIFY_PATH => unsafe {
+            message(
+                window,
+                safe_mode_unify_path_message(),
+                "DarkNamer - Safe 모드",
+            )
+        },
         ADD_FILES => unsafe { add_files_dialog(window, state) },
         COPY_NAMES => unsafe { copy_clipboard(window, &state.model.export_names()) },
         COPY_PATHS => unsafe { copy_clipboard(window, &state.model.export_paths()) },
@@ -1810,21 +1831,17 @@ unsafe fn apply_changes(window: HWND, state: &mut AppState) {
         Ok(report) => report,
         Err(error) => {
             let text = execute_error_korean(&error);
-            match cleanup_file_journal(&state.journal_root, journal) {
-                Ok(retained) => {
-                    state.recovery_locked = retained.is_some();
-                    state.active_journal = retained;
-                }
-                Err(cleanup_error) => {
-                    state.recovery_locked = true;
-                    unsafe {
-                        message(
-                            window,
-                            &cleanup_error.to_string(),
-                            "DarkNamer - 저널 정리 실패",
-                        )
-                    };
-                }
+            let cleanup = cleanup_file_journal(journal);
+            state.recovery_locked = cleanup.error.is_some() || cleanup.retained.is_some();
+            state.active_journal = cleanup.retained;
+            if let Some(cleanup_error) = cleanup.error {
+                unsafe {
+                    message(
+                        window,
+                        &cleanup_error.to_string(),
+                        "DarkNamer - 저널 정리 실패",
+                    )
+                };
             }
             unsafe { message(window, &text, "DarkNamer - 실행 거부") };
             unsafe { update_controls(state) };
@@ -1848,31 +1865,19 @@ unsafe fn apply_changes(window: HWND, state: &mut AppState) {
                 unsafe { update_controls(state) };
                 return;
             }
-            match cleanup_file_journal(&state.journal_root, journal) {
-                Ok(retained) => {
-                    state.recovery_locked = retained.is_some();
-                    state.active_journal = retained;
-                }
-                Err(error) => {
-                    state.recovery_locked = true;
-                    unsafe {
-                        message(window, &error.to_string(), "DarkNamer - 저널 정리 실패")
-                    };
-                }
+            let cleanup = cleanup_file_journal(journal);
+            state.recovery_locked = cleanup.error.is_some() || cleanup.retained.is_some();
+            state.active_journal = cleanup.retained;
+            if let Some(error) = cleanup.error {
+                unsafe { message(window, &error.to_string(), "DarkNamer - 저널 정리 실패") };
             }
         }
         ExecutionOutcome::RolledBack { .. } => {
-            match cleanup_file_journal(&state.journal_root, journal) {
-                Ok(retained) => {
-                    state.recovery_locked = retained.is_some();
-                    state.active_journal = retained;
-                }
-                Err(error) => {
-                    state.recovery_locked = true;
-                    unsafe {
-                        message(window, &error.to_string(), "DarkNamer - 저널 정리 실패")
-                    };
-                }
+            let cleanup = cleanup_file_journal(journal);
+            state.recovery_locked = cleanup.error.is_some() || cleanup.retained.is_some();
+            state.active_journal = cleanup.retained;
+            if let Some(error) = cleanup.error {
+                unsafe { message(window, &error.to_string(), "DarkNamer - 저널 정리 실패") };
             }
         }
         ExecutionOutcome::RecoveryRequired { .. } => {

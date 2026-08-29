@@ -148,6 +148,8 @@ pub enum FileJournalErrorKind {
     InvalidRoot,
     /// Journal leaf is not one valid Windows filename component.
     InvalidLeaf,
+    /// Journal is incomplete or corrupt and cannot be deleted.
+    UnsafeCleanupState,
 }
 
 /// File journal error retaining a native code when available.
@@ -867,6 +869,23 @@ impl FileJournal {
         matches!(self.records.last(), Some(JournalRecord::Terminal(_)))
     }
 
+    /// Marks a verified empty or terminal journal for deletion by retained handle.
+    ///
+    /// The caller must keep this value on failure; successful deletion completes
+    /// when the owned file handle is dropped.
+    pub fn mark_delete_if_safe(&mut self) -> Result<(), FileJournalError> {
+        let safe = self.records.is_empty()
+            || self.is_terminal() && replay_journal(&self.records) == RecoveryState::Clean;
+        if !safe {
+            return Err(FileJournalError {
+                kind: FileJournalErrorKind::UnsafeCleanupState,
+                os_code: None,
+            });
+        }
+        mark_retained_file_delete(&self.file)?;
+        Ok(())
+    }
+
     fn append(&mut self, record: JournalRecord) -> Result<(), JournalError> {
         if self.torn_prefix.is_some() {
             return Err(JournalError { code: 7 });
@@ -1009,6 +1028,19 @@ fn journal_io_error(error: io::Error) -> JournalError {
 fn next_file_identity() -> u64 {
     static NEXT_IDENTITY: AtomicU64 = AtomicU64::new(1);
     NEXT_IDENTITY.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(windows)]
+fn mark_retained_file_delete(file: &File) -> io::Result<()> {
+    super::windows_native::mark_file_delete(file)
+}
+
+#[cfg(not(windows))]
+fn mark_retained_file_delete(_file: &File) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "retained-handle deletion is available only on Windows",
+    ))
 }
 
 fn combined_identity(root_identity: u64) -> u64 {

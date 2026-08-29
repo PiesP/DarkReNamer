@@ -3,7 +3,7 @@ use darknamer_app::rename::{
     JournalTerminal, MemoryBackend, MemoryJournal, ModelRevision, MutationCertainty, PathKey,
     PathSnapshot, RenameBackend, RenameExecutor, RenameOperation, RenamePlanner,
     apply_execution_report, build_plan_request, cleanup_decision, next_model_revision,
-    plan_error_korean,
+    plan_error_korean, safe_mode_unify_path_message,
 };
 use darknamer_core::{LegacyList, LegacyListItem, LegacyText};
 
@@ -96,6 +96,12 @@ fn model_revision_is_monotonic_and_changes_only_with_the_model() {
     assert_eq!(next_model_revision(7, false), 7);
     assert_eq!(next_model_revision(7, true), 8);
     assert_eq!(next_model_revision(u64::MAX, true), u64::MAX);
+}
+
+#[test]
+fn safe_mode_unify_path_is_explicitly_inert() {
+    assert!(safe_mode_unify_path_message().contains("지원하지"));
+    assert!(safe_mode_unify_path_message().contains("변경되지"));
 }
 
 struct FailingBackend {
