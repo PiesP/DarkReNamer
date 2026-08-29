@@ -2,6 +2,8 @@
 
 use std::fs;
 use std::os::windows::ffi::OsStrExt;
+use std::path::PathBuf;
+use std::time::Instant;
 
 use darknamer_app::rename::{
     EntryId, EntryKind, ExecuteErrorKind, ExecutionOutcome, FileJournal, FileJournalErrorKind,
@@ -535,5 +537,95 @@ fn planner_file_journal_backend_and_model_complete_one_production_path()
         &legacy_path(&directory.path().join("after.txt"))
     );
     assert!(journal.is_terminal());
+    Ok(())
+}
+
+#[test]
+#[ignore = "manual physical-volume benchmark; set DARKRENAMER_BENCH_ROOT and DARKRENAMER_BENCH_COUNT"]
+fn benchmark_durable_production_path() -> Result<(), Box<dyn std::error::Error>> {
+    let benchmark_root = std::env::var_os("DARKRENAMER_BENCH_ROOT")
+        .map(PathBuf::from)
+        .ok_or_else(|| std::io::Error::other("DARKRENAMER_BENCH_ROOT is required"))?;
+    let count = std::env::var("DARKRENAMER_BENCH_COUNT")
+        .map_err(|_| std::io::Error::other("DARKRENAMER_BENCH_COUNT is required"))?
+        .parse::<usize>()?;
+    if !matches!(count, 100 | 1_000 | 10_000) {
+        return Err(
+            std::io::Error::other("DARKRENAMER_BENCH_COUNT must be 100, 1000, or 10000").into(),
+        );
+    }
+    let media = std::env::var("DARKRENAMER_BENCH_MEDIA")
+        .map_err(|_| std::io::Error::other("DARKRENAMER_BENCH_MEDIA is required"))?;
+    if !matches!(media.as_str(), "ssd" | "hdd") {
+        return Err(std::io::Error::other("DARKRENAMER_BENCH_MEDIA must be ssd or hdd").into());
+    }
+    if !benchmark_root.is_absolute() || !benchmark_root.is_dir() {
+        return Err(std::io::Error::other(
+            "DARKRENAMER_BENCH_ROOT must be an existing absolute directory",
+        )
+        .into());
+    }
+
+    let fixture = tempfile::Builder::new()
+        .prefix("darkrenamer-benchmark-")
+        .tempdir_in(&benchmark_root)?;
+    if !case_query_supported(fixture.path())? {
+        return Err(std::io::Error::other(
+            "the selected volume does not support the required Windows path capability",
+        )
+        .into());
+    }
+
+    let mut intents = Vec::with_capacity(count);
+    for index in 0..count {
+        let source = fixture.path().join(format!("source-{index:05}.txt"));
+        fs::write(&source, b"benchmark")?;
+        intents.push(intent(
+            u32::try_from(index)?,
+            &source,
+            fixture.path(),
+            &format!("renamed-{index:05}.txt"),
+        ));
+    }
+
+    let mut backend = WindowsRenameBackend;
+    let planning_started = Instant::now();
+    let plan =
+        RenamePlanner::new(&backend).plan(PlanRequest::new(ModelRevision::new(1), intents))?;
+    let planning = planning_started.elapsed();
+    let id = plan.id();
+    let revision = plan.revision();
+    let root = JournalRoot::open(fixture.path())?;
+    let mut journal = FileJournal::create_candidate(&root, "candidate.drj", "active.drj")?;
+
+    let execution_started = Instant::now();
+    let report = RenameExecutor::new(&mut backend, &mut journal)
+        .execute(plan.confirm_presented(id, revision)?)?;
+    let execution = execution_started.elapsed();
+    assert_eq!(report.outcome(), &ExecutionOutcome::Completed);
+    assert!(journal.is_terminal());
+    journal.mark_delete_if_safe()?;
+    drop(journal);
+
+    for index in 0..count {
+        assert!(
+            fixture
+                .path()
+                .join(format!("renamed-{index:05}.txt"))
+                .is_file()
+        );
+        assert!(
+            !fixture
+                .path()
+                .join(format!("source-{index:05}.txt"))
+                .exists()
+        );
+    }
+
+    println!(
+        "darkrenamer_benchmark,media={media},count={count},planning_ms={},execution_ms={}",
+        planning.as_millis(),
+        execution.as_millis()
+    );
     Ok(())
 }
