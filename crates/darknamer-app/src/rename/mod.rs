@@ -1,5 +1,6 @@
 //! Safe, preview-first rename planning and execution.
 
+mod activation;
 mod executor;
 mod file_journal;
 mod journal;
@@ -14,6 +15,10 @@ mod windows_backend;
 #[cfg(windows)]
 mod windows_native;
 
+pub use activation::{
+    JournalCleanupDecision, apply_execution_report, build_plan_request, cleanup_decision,
+    execute_error_korean, execution_outcome_korean, plan_error_korean,
+};
 pub use executor::{
     EntryExecution, ExecuteError, ExecuteErrorKind, ExecutionFailure, ExecutionOutcome,
     ExecutionReport, RenameExecutor, RenameState, RollbackFailure,

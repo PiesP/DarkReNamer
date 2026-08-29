@@ -13,6 +13,12 @@ impl EntryId {
         Self(value)
     }
 
+    /// Returns the zero-based legacy-list row represented by this plan ID.
+    #[must_use]
+    pub const fn row_index(self) -> u32 {
+        self.0
+    }
+
     pub(super) const fn value(self) -> u32 {
         self.0
     }
