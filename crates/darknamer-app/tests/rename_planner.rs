@@ -1,9 +1,9 @@
 use std::cell::Cell;
 
-use darknamer_app::admission::MAX_ADMISSION_DEPTH;
 use darknamer_app::rename::{
-    BackendError, EntryId, EntryKind, MemoryBackend, ModelRevision, PathKey, PathSnapshot,
-    PlanIssueKind, PlanRequest, RenameBackend, RenameIntent, RenameOperation, RenamePlanner,
+    BackendError, EntryId, EntryKind, MAX_PLAN_PATH_DEPTH, MemoryBackend, ModelRevision, PathKey,
+    PathSnapshot, PlanIssueKind, PlanRequest, RenameBackend, RenameIntent, RenameOperation,
+    RenamePlanner,
 };
 use darknamer_core::{LegacyText, WindowsLeafNameError};
 
@@ -340,12 +340,15 @@ fn ancestor_detection_does_not_interpret_backend_equality_keys_as_paths()
 
 struct CountingBackend {
     inner: MemoryBackend,
+    validation_calls: Cell<usize>,
     key_calls: Cell<usize>,
+    observe_calls: Cell<usize>,
     relationship_calls: Cell<usize>,
 }
 
 impl RenameBackend for CountingBackend {
     fn validate_path_environment(&self, path: &LegacyText) -> Result<(), BackendError> {
+        self.validation_calls.set(self.validation_calls.get() + 1);
         self.inner.validate_path_environment(path)
     }
 
@@ -355,6 +358,7 @@ impl RenameBackend for CountingBackend {
     }
 
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
+        self.observe_calls.set(self.observe_calls.get() + 1);
         self.inner.observe(path)
     }
 
@@ -397,7 +401,9 @@ fn nested_overlap_detection_has_bounded_calls_and_one_issue_per_row() {
     }
     let backend = CountingBackend {
         inner,
+        validation_calls: Cell::new(0),
         key_calls: Cell::new(0),
+        observe_calls: Cell::new(0),
         relationship_calls: Cell::new(0),
     };
 
@@ -409,5 +415,56 @@ fn nested_overlap_detection_has_bounded_calls_and_one_issue_per_row() {
     };
     assert!(error.issues().len() <= count);
     assert_eq!(backend.relationship_calls.get(), 0);
-    assert!(backend.key_calls.get() <= count * (MAX_ADMISSION_DEPTH + 8));
+    assert!(backend.key_calls.get() <= count * (MAX_PLAN_PATH_DEPTH + 8));
+}
+
+#[test]
+fn direct_request_rejects_excessive_path_depth_before_backend_access()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut deep_path = String::from("C:\\");
+    deep_path.push_str(
+        &(0..=MAX_PLAN_PATH_DEPTH)
+            .map(|index| format!("p{index}"))
+            .collect::<Vec<_>>()
+            .join("\\"),
+    );
+    let backend = CountingBackend {
+        inner: MemoryBackend::new(),
+        validation_calls: Cell::new(0),
+        key_calls: Cell::new(0),
+        observe_calls: Cell::new(0),
+        relationship_calls: Cell::new(0),
+    };
+    for request in [
+        RenameIntent::new(
+            EntryId::new(1),
+            deep_path.clone(),
+            "C:\\work",
+            "renamed.txt",
+            EntryKind::File,
+        ),
+        RenameIntent::new(
+            EntryId::new(2),
+            "C:\\work\\source.txt",
+            deep_path,
+            "renamed.txt",
+            EntryKind::File,
+        ),
+    ] {
+        let Err(error) = RenamePlanner::new(&backend)
+            .plan(PlanRequest::new(ModelRevision::new(1), vec![request]))
+        else {
+            return Err(
+                std::io::Error::other("over-depth direct request did not fail closed").into(),
+            );
+        };
+        assert_eq!(error.issues().len(), 1);
+        assert_eq!(error.issues()[0].kind, PlanIssueKind::PathTooDeep);
+    }
+    assert_eq!(backend.validation_calls.get(), 0);
+    assert_eq!(backend.key_calls.get(), 0);
+    assert_eq!(backend.observe_calls.get(), 0);
+    assert_eq!(backend.relationship_calls.get(), 0);
+    assert_eq!(backend.inner.mutation_count(), 0);
+    Ok(())
 }

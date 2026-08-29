@@ -40,7 +40,7 @@ pub use model::{
     PathSnapshot, PlanError, PlanId, PlanIssue, PlanIssueKind, PlanRequest, PlanRow, RenameIntent,
     RenamePlan,
 };
-pub use planner::RenamePlanner;
+pub use planner::{MAX_PLAN_PATH_DEPTH, RenamePlanner};
 pub use ports::{
     AuthorizedJournal, BackendError, BackendOperation, JournalAuthorization, JournalError,
     JournalSnapshot, JournalStore, MutationCertainty, RenameBackend, RenameOperation,

@@ -2,13 +2,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use darknamer_core::validate_windows_leaf_name;
 
-use crate::admission::MAX_ADMISSION_DEPTH;
-
 use super::model::PlanRow;
 use super::{
     EntryId, PathKey, PlanError, PlanId, PlanIssue, PlanIssueKind, PlanRequest, RenameBackend,
     RenameIntent, RenamePlan,
 };
+
+/// Maximum number of path components accepted by one direct plan request.
+///
+/// This is a planner safety bound, independent of admission traversal depth.
+pub const MAX_PLAN_PATH_DEPTH: usize = 256;
 
 /// Builds immutable plans without mutating the filesystem adapter.
 pub struct RenamePlanner<'a> {
@@ -213,7 +216,7 @@ fn visit_direct_ancestors(
     mut visit: impl FnMut(&darknamer_core::LegacyText),
 ) {
     let mut ancestor = path.clone();
-    for _ in 0..MAX_ADMISSION_DEPTH {
+    for _ in 0..MAX_PLAN_PATH_DEPTH {
         let Some(separator) = ancestor
             .units()
             .iter()
@@ -242,6 +245,14 @@ fn parent_path(path: &darknamer_core::LegacyText) -> darknamer_core::LegacyText 
 }
 
 fn validate_intent(intent: &RenameIntent, issues: &mut Vec<PlanIssue>) {
+    if path_component_depth(intent.source.units()) > MAX_PLAN_PATH_DEPTH
+        || path_component_depth(intent.destination_parent.units()) > MAX_PLAN_PATH_DEPTH
+    {
+        issues.push(PlanIssue {
+            entry: intent.id,
+            kind: PlanIssueKind::PathTooDeep,
+        });
+    }
     if !is_absolute_windows_path(intent.source.units()) {
         issues.push(PlanIssue {
             entry: intent.id,
@@ -260,6 +271,34 @@ fn validate_intent(intent: &RenameIntent, issues: &mut Vec<PlanIssue>) {
             kind: PlanIssueKind::InvalidDestinationName(error),
         });
     }
+}
+
+fn path_component_depth(units: &[u16]) -> usize {
+    let start = if units.len() >= 7
+        && is_separator(units[0])
+        && is_separator(units[1])
+        && units[2] == b'?' as u16
+        && is_separator(units[3])
+        && units[5] == b':' as u16
+        && is_separator(units[6])
+    {
+        7
+    } else if units.len() >= 3 && units[1] == b':' as u16 && is_separator(units[2]) {
+        3
+    } else {
+        0
+    };
+    let mut depth = 0;
+    let mut in_component = false;
+    for unit in &units[start..] {
+        if is_separator(*unit) {
+            in_component = false;
+        } else if !in_component {
+            depth += 1;
+            in_component = true;
+        }
+    }
+    depth
 }
 
 fn is_absolute_windows_path(units: &[u16]) -> bool {

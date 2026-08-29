@@ -227,6 +227,8 @@ pub enum PlanIssueKind {
     CrossParent,
     /// Selected sources have an ancestor/descendant relationship.
     SourceOverlap,
+    /// A source or destination parent exceeds the planner's bounded path depth.
+    PathTooDeep,
     /// A parent uses per-directory case-sensitive lookup unsupported by safe v1.
     UnsupportedCaseSensitiveParent,
     /// A Windows path class such as UNC/SMB is unsupported by safe v1.

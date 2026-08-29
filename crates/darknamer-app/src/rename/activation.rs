@@ -132,6 +132,7 @@ fn plan_issue_korean(kind: &PlanIssueKind) -> String {
         PlanIssueKind::DestinationOccupied => "대상 이름이 이미 사용 중입니다.".to_owned(),
         PlanIssueKind::CrossParent => "다른 폴더로 이동할 수 없습니다.".to_owned(),
         PlanIssueKind::SourceOverlap => "상위/하위 항목을 함께 변경할 수 없습니다.".to_owned(),
+        PlanIssueKind::PathTooDeep => "경로의 폴더 깊이가 안전 한도를 초과했습니다.".to_owned(),
         PlanIssueKind::UnsupportedCaseSensitiveParent => {
             "대소문자 구분 폴더는 아직 지원하지 않습니다.".to_owned()
         }
