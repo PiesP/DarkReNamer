@@ -9,6 +9,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+if ($PSVersionTable.PSVersion -lt [version] '7.4') {
+    throw 'Windows acceptance evidence validation requires PowerShell 7.4 or newer (pwsh).'
+}
+
 function Test-Property {
     param(
         [Parameter(Mandatory)]
@@ -77,8 +81,50 @@ function Assert-Enum {
         [string] $Location
     )
 
-    if ($Value -notin $Allowed) {
+    $matched = $false
+    foreach ($candidate in $Allowed) {
+        if ($Value -is [string] -and $candidate -is [string]) {
+            if ([string]::Equals($Value, $candidate, [StringComparison]::Ordinal)) {
+                $matched = $true
+                break
+            }
+            continue
+        }
+        $valueIsNumber = $Value -is [byte] -or $Value -is [sbyte] -or
+            $Value -is [int16] -or $Value -is [uint16] -or
+            $Value -is [int32] -or $Value -is [uint32] -or
+            $Value -is [int64] -or $Value -is [uint64] -or
+            $Value -is [single] -or $Value -is [double] -or $Value -is [decimal]
+        $candidateIsNumber = $candidate -is [byte] -or $candidate -is [sbyte] -or
+            $candidate -is [int16] -or $candidate -is [uint16] -or
+            $candidate -is [int32] -or $candidate -is [uint32] -or
+            $candidate -is [int64] -or $candidate -is [uint64] -or
+            $candidate -is [single] -or $candidate -is [double] -or $candidate -is [decimal]
+        if ($valueIsNumber -and $candidateIsNumber -and [decimal] $Value -eq [decimal] $candidate) {
+            $matched = $true
+            break
+        }
+    }
+    if (-not $matched) {
         throw "$Location must be one of: $($Allowed -join ', ')."
+    }
+}
+
+function Assert-ObservationCode {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Status,
+        [Parameter(Mandatory)]
+        [string] $Code,
+        [Parameter(Mandatory)]
+        [hashtable] $Codes,
+        [Parameter(Mandatory)]
+        [string] $Location
+    )
+
+    $expected = $Codes[$Status]
+    if (-not [string]::Equals($Code, $expected, [StringComparison]::Ordinal)) {
+        throw "$Location must be $expected when status is $Status."
     }
 }
 
@@ -179,15 +225,6 @@ function Get-DurabilityTarget {
     return "durability|$($Row.kind)"
 }
 
-function Test-DurabilityEquivalenceClaim {
-    param(
-        [Parameter(Mandatory)]
-        [string] $Value
-    )
-
-    return $Value -match '(?i)\b(?:is|are|was|were|acts?|serves?)\s+(?:as\s+)?(?:an?\s+|the\s+)?(?:equivalent\s+(?:to|as)|same\s+as|substitute\s+for)\b|\b(?:can|does|will)\s+substitute\s+for\b|(?:은|는|이|가)\s*(?:동등|대체)'
-}
-
 $schemaPath = Join-Path $PSScriptRoot 'windows-acceptance-evidence.schema.json'
 if (-not (Test-Path -LiteralPath $schemaPath -PathType Leaf)) {
     throw "Windows acceptance evidence schema is missing: $schemaPath"
@@ -235,7 +272,7 @@ Assert-ObjectShape `
     -Location 'evidence'
 Assert-Privacy -Value $evidence -Location 'evidence'
 
-if ($evidence.schema_version -ne $expectedSchemaVersion) {
+if ($evidence.schema_version -is [string] -or [decimal] $evidence.schema_version -ne [decimal] $expectedSchemaVersion) {
     throw "schema_version must be $expectedSchemaVersion."
 }
 if ($evidence.source_sha -isnot [string] -or $evidence.source_sha -cnotmatch $schemaDocument.properties.source_sha.pattern) {
@@ -315,18 +352,14 @@ $unexecutedById = @{}
 $unexecutedByTarget = @{}
 foreach ($item in @($evidence.unexecuted)) {
     $location = "unexecuted[$($unexecutedById.Count)]"
-    Assert-ObjectShape -Object $item -Required @('id', 'target', 'reason') -Location $location
+    Assert-ObjectShape -Object $item -Required @('id', 'target', 'reason_code') -Location $location
     if ($item.id -isnot [string] -or $item.id -cnotmatch $schemaDefinitions.unexecuted.properties.id.pattern) {
         throw "$location.id must be a lowercase stable identifier."
     }
     Assert-String -Value $item.target -Location "$location.target" -MaximumLength 200
-    Assert-String -Value $item.reason -Location "$location.reason" -MaximumLength 1000
+    Assert-Enum -Value $item.reason_code -Allowed @($schemaDefinitions.unexecuted.properties.reason_code.enum) -Location "$location.reason_code"
     if (-not $expectedTargets.Contains($item.target)) {
         throw "$location.target does not identify a required acceptance target: $($item.target)."
-    }
-    if ($item.target.StartsWith('durability|', [StringComparison]::Ordinal) -and
-        (Test-DurabilityEquivalenceClaim -Value $item.reason)) {
-        throw "$location.reason must not claim equivalence between durability trial classes."
     }
     if ($unexecutedById.ContainsKey($item.id)) {
         throw "Duplicate unexecuted id: $($item.id)."
@@ -398,12 +431,17 @@ $uiByTarget = @{}
 $uiIndex = 0
 foreach ($row in @($evidence.ui_matrix)) {
     $location = "ui_matrix[$uiIndex]"
-    Assert-ObjectShape -Object $row -Required @('windows_product', 'dpi_percent', 'contrast', 'status', 'observation') -Optional @('unexecuted_id') -Location $location
+    Assert-ObjectShape -Object $row -Required @('windows_product', 'dpi_percent', 'contrast', 'status', 'observation_code') -Optional @('unexecuted_id') -Location $location
     Assert-Enum -Value $row.windows_product -Allowed $windowsProducts -Location "$location.windows_product"
     Assert-Enum -Value $row.dpi_percent -Allowed $dpiValues -Location "$location.dpi_percent"
     Assert-Enum -Value $row.contrast -Allowed $contrastValues -Location "$location.contrast"
     Assert-Enum -Value $row.status -Allowed $statuses -Location "$location.status"
-    Assert-String -Value $row.observation -Location "$location.observation" -MaximumLength 1000
+    Assert-Enum -Value $row.observation_code -Allowed @($schemaDefinitions.uiCell.properties.observation_code.enum) -Location "$location.observation_code"
+    Assert-ObservationCode `
+        -Status $row.status `
+        -Code $row.observation_code `
+        -Codes @{ pass = 'layout-verified'; fail = 'layout-defect'; 'not-run' = 'not-executed' } `
+        -Location "$location.observation_code"
     if (-not $contextsByProduct.ContainsKey($row.windows_product)) {
         throw "$location has no matching operator_context for $($row.windows_product)."
     }
@@ -420,11 +458,16 @@ $scenarioByTarget = @{}
 $scenarioIndex = 0
 foreach ($row in @($evidence.scenarios)) {
     $location = "scenarios[$scenarioIndex]"
-    Assert-ObjectShape -Object $row -Required @('windows_product', 'kind', 'status', 'observation') -Optional @('accessibility_tool', 'unexecuted_id') -Location $location
+    Assert-ObjectShape -Object $row -Required @('windows_product', 'kind', 'status', 'observation_code') -Optional @('accessibility_tool', 'unexecuted_id') -Location $location
     Assert-Enum -Value $row.windows_product -Allowed $windowsProducts -Location "$location.windows_product"
     Assert-Enum -Value $row.kind -Allowed $scenarioKinds -Location "$location.kind"
     Assert-Enum -Value $row.status -Allowed $statuses -Location "$location.status"
-    Assert-String -Value $row.observation -Location "$location.observation" -MaximumLength 2000
+    Assert-Enum -Value $row.observation_code -Allowed @($schemaDefinitions.scenario.properties.observation_code.enum) -Location "$location.observation_code"
+    Assert-ObservationCode `
+        -Status $row.status `
+        -Code $row.observation_code `
+        -Codes @{ pass = 'interaction-verified'; fail = 'interaction-defect'; 'not-run' = 'not-executed' } `
+        -Location "$location.observation_code"
     if (-not $contextsByProduct.ContainsKey($row.windows_product)) {
         throw "$location has no matching operator_context for $($row.windows_product)."
     }
@@ -434,8 +477,14 @@ foreach ($row in @($evidence.scenarios)) {
             throw "$location requires accessibility_tool name and version."
         }
         Assert-ObjectShape -Object $row.accessibility_tool -Required @('name', 'version') -Location "$location.accessibility_tool"
-        Assert-String -Value $row.accessibility_tool.name -Location "$location.accessibility_tool.name" -MaximumLength 100
-        Assert-String -Value $row.accessibility_tool.version -Location "$location.accessibility_tool.version" -MaximumLength 100
+        if ($row.accessibility_tool.name -isnot [string] -or
+            $row.accessibility_tool.name -cnotmatch $schemaDefinitions.tool.properties.name.pattern) {
+            throw "$location.accessibility_tool.name contains unsupported characters."
+        }
+        if ($row.accessibility_tool.version -isnot [string] -or
+            $row.accessibility_tool.version -cnotmatch $schemaDefinitions.tool.properties.version.pattern) {
+            throw "$location.accessibility_tool.version contains unsupported characters."
+        }
     }
     elseif ($hasTool) {
         throw "$location may include accessibility_tool only for an executed accessibility scenario."
@@ -464,7 +513,10 @@ foreach ($row in @($evidence.benchmarks)) {
     Assert-Enum -Value $row.count -Allowed $benchmarkCounts -Location "$location.count"
     Assert-NonNegativeNumber -Value $row.planning_ms -Location "$location.planning_ms"
     Assert-NonNegativeNumber -Value $row.execution_ms -Location "$location.execution_ms"
-    Assert-String -Value $row.storage_model -Location "$location.storage_model" -MaximumLength 200
+    if ($row.storage_model -isnot [string] -or
+        $row.storage_model -cnotmatch $schemaDefinitions.benchmark.properties.storage_model.pattern) {
+        throw "$location.storage_model must be a model family using only safe characters."
+    }
     Assert-Enum -Value $row.connection -Allowed @($schemaDefinitions.benchmark.properties.connection.enum) -Location "$location.connection"
     Assert-Enum -Value $row.free_space_bucket -Allowed @($schemaDefinitions.benchmark.properties.free_space_bucket.enum) -Location "$location.free_space_bucket"
     Assert-Enum -Value $row.power_mode -Allowed @($schemaDefinitions.benchmark.properties.power_mode.enum) -Location "$location.power_mode"
@@ -481,17 +533,21 @@ $durabilityByTarget = @{}
 $durabilityIndex = 0
 foreach ($row in @($evidence.durability_trials)) {
     $location = "durability_trials[$durabilityIndex]"
-    Assert-ObjectShape -Object $row -Required @('kind', 'status', 'observation') -Optional @('authorization', 'unexecuted_id') -Location $location
+    Assert-ObjectShape -Object $row -Required @('kind', 'status', 'observation_code') -Optional @('authorization', 'unexecuted_id') -Location $location
     Assert-Enum -Value $row.kind -Allowed $durabilityKinds -Location "$location.kind"
     Assert-Enum -Value $row.status -Allowed $statuses -Location "$location.status"
-    Assert-String -Value $row.observation -Location "$location.observation" -MaximumLength 2000
-    if (Test-DurabilityEquivalenceClaim -Value $row.observation) {
-        throw "$location.observation must not claim equivalence between durability trial classes."
-    }
+    Assert-Enum -Value $row.observation_code -Allowed @($schemaDefinitions.durabilityTrial.properties.observation_code.enum) -Location "$location.observation_code"
+    Assert-ObservationCode `
+        -Status $row.status `
+        -Code $row.observation_code `
+        -Codes @{ pass = 'recovery-verified'; fail = 'recovery-defect'; 'not-run' = 'not-executed' } `
+        -Location "$location.observation_code"
     $hasAuthorization = Test-Property -Object $row -Name 'authorization'
     $requiresAuthorization = $row.kind -ne 'process-crash' -and $row.status -ne 'not-run'
     if ($requiresAuthorization) {
-        if (-not $hasAuthorization -or $row.authorization -ne 'operator-authorized') {
+        if (-not $hasAuthorization -or
+            $row.authorization -isnot [string] -or
+            -not [string]::Equals($row.authorization, 'operator-authorized', [StringComparison]::Ordinal)) {
             throw "$location requires operator-authorized scope for an executed disruptive trial."
         }
     }
@@ -581,6 +637,16 @@ if (-not $Draft) {
             throw 'Complete evidence cannot contain a failed durability trial.'
         }
     }
+}
+
+$schemaErrors = @()
+$conformsToSchema = Test-Json `
+    -Json $evidenceJson `
+    -SchemaFile $schemaPath `
+    -ErrorAction SilentlyContinue `
+    -ErrorVariable +schemaErrors
+if (-not $conformsToSchema) {
+    throw 'Evidence does not conform to windows-acceptance-evidence.schema.json.'
 }
 
 $mode = if ($Draft) { 'draft' } else { 'complete release-gate' }

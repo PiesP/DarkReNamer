@@ -104,6 +104,7 @@ was actually exercised.
 [`scripts/windows-acceptance-evidence.schema.json`](scripts/windows-acceptance-evidence.schema.json)
 is the machine-readable field contract. Validate evidence with
 [`scripts/validate-windows-acceptance-evidence.ps1`](scripts/validate-windows-acceptance-evidence.ps1).
+The validator requires PowerShell 7.4 or newer and is invoked with `pwsh`.
 The default mode is the release gate. `-Draft` is for an intentionally
 incomplete session; it still validates structure, source and artifact binding,
 privacy, uniqueness, and references. Every omitted draft target and every
@@ -134,12 +135,21 @@ classes. A failed recorded durability trial does not pass the release gate.
 An executed VM, storage-fault, or physical-power trial records only the
 `operator-authorized` scope marker, never the approver's identity.
 
-The JSON is deliberately path-free. It stores an artifact filename, not its
-location, and uses bounded free-space categories instead of volume details.
-Screenshots, traces, benchmark roots, user profiles, hostnames, and operator
-names remain outside the JSON. A release decision must cite the evidence
-artifact through the release's controlled handoff rather than add a current
-run's SHA, timestamp, measurements, or machine details to this document.
+The JSON is deliberately path-free and has no generic note or narrative field.
+UI, scenario, durability, and unexecuted results use enumerated observation and
+reason codes. It stores an artifact filename, not its location, and uses
+bounded free-space categories instead of volume details. Accessibility tool
+and storage model-family values accept only a restricted character set. The
+operator must record the public model family, not a device serial, asset tag,
+operator name, or hostname.
+
+Screenshots, traces, detailed narratives, benchmark roots, user profiles,
+hostnames, and operator names remain outside the JSON. Name an external
+evidence artifact `windows-acceptance-evidence-<source-sha>.json`; CI rejects a
+tracked file matching that evidence pattern. A release decision must cite the
+external artifact through the release's controlled handoff rather than add a
+current run's SHA, timestamp, measurements, or machine details to this
+document.
 
 ### Durable workload benchmark
 

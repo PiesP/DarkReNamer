@@ -93,7 +93,7 @@ function New-CompleteEvidence {
                         dpi_percent = $dpi
                         contrast = $contrast
                         status = 'pass'
-                        observation = 'Layout and command state matched the acceptance checklist.'
+                        observation_code = 'layout-verified'
                     }
                 }
             }
@@ -119,7 +119,7 @@ function New-CompleteEvidence {
                     windows_product = $product
                     kind = $kind
                     status = 'pass'
-                    observation = 'The named interaction completed with the expected visible state.'
+                    observation_code = 'interaction-verified'
                 }
                 if ($kind -eq 'accessibility') {
                     $row.accessibility_tool = [ordered]@{
@@ -179,12 +179,12 @@ function New-CompleteEvidence {
             [pscustomobject]@{
                 kind = 'process-crash'
                 status = 'pass'
-                observation = 'Restart recovery returned the fixture to the original state.'
+                observation_code = 'recovery-verified'
             },
             [pscustomobject]@{
                 kind = 'vm-hard-reset'
                 status = 'pass'
-                observation = 'An authorized VM hard reset preserved a recoverable journal state.'
+                observation_code = 'recovery-verified'
                 authorization = 'operator-authorized'
             }
         )
@@ -192,12 +192,12 @@ function New-CompleteEvidence {
             [pscustomobject]@{
                 id = 'power-loss-deferred'
                 target = 'durability|physical-power-loss'
-                reason = 'No authorized physical power-loss environment was available.'
+                reason_code = 'hardware-unavailable'
             },
             [pscustomobject]@{
                 id = 'storage-fault-deferred'
                 target = 'durability|storage-fault'
-                reason = 'Storage fault injection was not authorized for this run.'
+                reason_code = 'authorization-not-granted'
             }
         )
     }
@@ -217,27 +217,26 @@ try {
 
     $storageFaultAlternative = Copy-Evidence $complete
     $storageFaultAlternative.durability_trials[1].kind = 'storage-fault'
-    $storageFaultAlternative.durability_trials[1].observation = 'Authorized fault injection preserved a recoverable journal state.'
     $storageFaultAlternative.unexecuted[1].id = 'vm-reset-deferred'
     $storageFaultAlternative.unexecuted[1].target = 'durability|vm-hard-reset'
-    $storageFaultAlternative.unexecuted[1].reason = 'No authorized VM hard-reset environment was available.'
+    $storageFaultAlternative.unexecuted[1].reason_code = 'environment-unavailable'
     Assert-ValidatorPasses -Evidence $storageFaultAlternative -Name 'valid-storage-fault-alternative'
 
     $draft = Copy-Evidence $complete
     $draft.ui_matrix = @($draft.ui_matrix | Select-Object -SkipLast 1)
     $draft.scenarios[0].status = 'not-run'
-    $draft.scenarios[0].observation = 'Not executed in this draft.'
+    $draft.scenarios[0].observation_code = 'not-executed'
     $draft.scenarios[0] | Add-Member -NotePropertyName unexecuted_id -NotePropertyValue 'keyboard-deferred'
     $draft.unexecuted = @(
         [pscustomobject]@{
             id = 'ui-cell-deferred'
             target = 'ui|Windows 11|200|high-contrast'
-            reason = 'This display configuration was unavailable for the draft run.'
+            reason_code = 'environment-unavailable'
         },
         [pscustomobject]@{
             id = 'keyboard-deferred'
             target = 'scenario|Windows 10|keyboard-only'
-            reason = 'Keyboard-only review was scheduled for the next operator session.'
+            reason_code = 'scheduled-later'
         },
         $complete.unexecuted[0],
         $complete.unexecuted[1]
@@ -273,11 +272,25 @@ try {
         -ExpectedFragment 'workflow_run is required'
 
     $pathLeak = Copy-Evidence $complete
-    $pathLeak.ui_matrix[0].observation = 'Captured from C:\Users\operator\Desktop\acceptance.png.'
+    $pathLeak.benchmarks[0].storage_model = 'C:\Users\operator\Desktop\acceptance.png'
     Assert-ValidatorFails `
         -Evidence $pathLeak `
         -Name 'path-leakage' `
         -ExpectedFragment 'prohibited absolute or profile path'
+
+    foreach ($leakCase in @(
+            @{ Name = 'relative-path-leakage'; Value = '.\screenshots\acceptance.png' },
+            @{ Name = 'posix-path-leakage'; Value = '/tmp/private/acceptance.png' },
+            @{ Name = 'email-leakage'; Value = 'operator@example.com' },
+            @{ Name = 'ip-address-leakage'; Value = '192.0.2.10' }
+        )) {
+        $constrainedTextLeak = Copy-Evidence $complete
+        $constrainedTextLeak.benchmarks[0].storage_model = $leakCase.Value
+        Assert-ValidatorFails `
+            -Evidence $constrainedTextLeak `
+            -Name $leakCase.Name `
+            -ExpectedFragment 'model family using only safe characters'
+    }
 
     $usernameField = Copy-Evidence $complete
     $usernameField.operator_context[0] | Add-Member -NotePropertyName username -NotePropertyValue 'operator'
@@ -287,7 +300,7 @@ try {
         -ExpectedFragment 'prohibited identity or volume field'
 
     $hostnameValue = Copy-Evidence $complete
-    $hostnameValue.scenarios[0].observation = 'hostname=acceptance-machine'
+    $hostnameValue.benchmarks[0].storage_model = 'hostname=acceptance-machine'
     Assert-ValidatorFails `
         -Evidence $hostnameValue `
         -Name 'hostname-value' `
@@ -302,7 +315,7 @@ try {
 
     $notRunWithoutReason = Copy-Evidence $complete
     $notRunWithoutReason.ui_matrix[0].status = 'not-run'
-    $notRunWithoutReason.ui_matrix[0].observation = 'Not executed.'
+    $notRunWithoutReason.ui_matrix[0].observation_code = 'not-executed'
     Assert-ValidatorFails `
         -Evidence $notRunWithoutReason `
         -Name 'not-run-without-reason' `
@@ -311,12 +324,11 @@ try {
 
     $physicalPowerOnly = Copy-Evidence $complete
     $physicalPowerOnly.durability_trials[1].kind = 'physical-power-loss'
-    $physicalPowerOnly.durability_trials[1].observation = 'The separately authorized physical trial recovered successfully.'
     $physicalPowerOnly.unexecuted = @(
         [pscustomobject]@{
             id = 'vm-reset-deferred'
             target = 'durability|vm-hard-reset'
-            reason = 'No authorized VM hard-reset environment was available.'
+            reason_code = 'environment-unavailable'
         },
         $complete.unexecuted[1]
     )
@@ -326,11 +338,13 @@ try {
         -ExpectedFragment 'VM hard-reset or storage-fault trial'
 
     $equivalenceClaim = Copy-Evidence $complete
-    $equivalenceClaim.durability_trials[0].observation = 'This process crash is the same as a physical power loss.'
+    $equivalenceClaim.durability_trials[0] | Add-Member `
+        -NotePropertyName equivalence_claim `
+        -NotePropertyValue 'physical-power-loss'
     Assert-ValidatorFails `
         -Evidence $equivalenceClaim `
         -Name 'durability-equivalence-claim' `
-        -ExpectedFragment 'must not claim equivalence'
+        -ExpectedFragment 'unsupported field: equivalence_claim'
 
     $missingAuthorization = Copy-Evidence $complete
     $missingAuthorization.durability_trials[1].PSObject.Properties.Remove('authorization')
@@ -338,6 +352,41 @@ try {
         -Evidence $missingAuthorization `
         -Name 'missing-disruptive-authorization' `
         -ExpectedFragment 'requires operator-authorized scope'
+
+    $uppercaseEnum = Copy-Evidence $complete
+    $uppercaseEnum.artifact.origin = 'ACTIONS-HANDOFF'
+    Assert-ValidatorFails `
+        -Evidence $uppercaseEnum `
+        -Name 'uppercase-enum' `
+        -ExpectedFragment 'artifact.origin must be one of'
+
+    $uppercaseAuthorization = Copy-Evidence $complete
+    $uppercaseAuthorization.durability_trials[1].authorization = 'OPERATOR-AUTHORIZED'
+    Assert-ValidatorFails `
+        -Evidence $uppercaseAuthorization `
+        -Name 'uppercase-authorization' `
+        -ExpectedFragment 'requires operator-authorized scope'
+
+    $stringSchemaVersion = Copy-Evidence $complete
+    $stringSchemaVersion.schema_version = '1'
+    Assert-ValidatorFails `
+        -Evidence $stringSchemaVersion `
+        -Name 'string-schema-version' `
+        -ExpectedFragment 'schema_version must be'
+
+    $stringDpi = Copy-Evidence $complete
+    $stringDpi.ui_matrix[0].dpi_percent = '100'
+    Assert-ValidatorFails `
+        -Evidence $stringDpi `
+        -Name 'string-dpi' `
+        -ExpectedFragment 'dpi_percent must be one of'
+
+    $stringCount = Copy-Evidence $complete
+    $stringCount.benchmarks[0].count = '100'
+    Assert-ValidatorFails `
+        -Evidence $stringCount `
+        -Name 'string-benchmark-count' `
+        -ExpectedFragment 'count must be one of'
 
     Write-Host 'Windows acceptance evidence validator tests passed.'
 }

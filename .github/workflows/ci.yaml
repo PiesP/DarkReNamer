@@ -42,6 +42,11 @@ jobs:
             printf 'Non-Rust legacy sources are tracked:\n%s\n' "$forbidden_sources" >&2
             exit 1
           fi
+          tracked_acceptance_evidence="$(git ls-files '**/windows-acceptance-evidence-*.json')"
+          if [[ -n "$tracked_acceptance_evidence" ]]; then
+            printf 'Windows acceptance evidence must remain external:\n%s\n' "$tracked_acceptance_evidence" >&2
+            exit 1
+          fi
           tracked_docs="$(git ls-files '*.md' '*.txt' | LC_ALL=C sort)"
           expected_docs="$(printf '%s\n' \
             DISTRIBUTION.md \
@@ -115,6 +120,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Test Windows acceptance evidence validation
+        shell: pwsh
+        run: ./scripts/test-windows-acceptance-evidence.ps1
 
       - name: Install pinned Rust toolchain
         shell: pwsh

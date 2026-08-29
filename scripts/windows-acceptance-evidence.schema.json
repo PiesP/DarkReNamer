@@ -135,7 +135,7 @@
     "uiCell": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["windows_product", "dpi_percent", "contrast", "status", "observation"],
+      "required": ["windows_product", "dpi_percent", "contrast", "status", "observation_code"],
       "properties": {
         "windows_product": {
           "enum": ["Windows 10", "Windows 11"]
@@ -149,10 +149,8 @@
         "status": {
           "$ref": "#/$defs/status"
         },
-        "observation": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 1000
+        "observation_code": {
+          "enum": ["layout-verified", "layout-defect", "not-executed"]
         },
         "unexecuted_id": {
           "type": "string",
@@ -168,7 +166,7 @@
     "scenario": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["windows_product", "kind", "status", "observation"],
+      "required": ["windows_product", "kind", "status", "observation_code"],
       "properties": {
         "windows_product": {
           "enum": ["Windows 10", "Windows 11"]
@@ -190,10 +188,8 @@
         "status": {
           "$ref": "#/$defs/status"
         },
-        "observation": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 2000
+        "observation_code": {
+          "enum": ["interaction-verified", "interaction-defect", "not-executed"]
         },
         "accessibility_tool": {
           "$ref": "#/$defs/tool"
@@ -237,13 +233,11 @@
       "properties": {
         "name": {
           "type": "string",
-          "minLength": 1,
-          "maxLength": 100
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,99}$"
         },
         "version": {
           "type": "string",
-          "minLength": 1,
-          "maxLength": 100
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,99}$"
         }
       }
     },
@@ -278,8 +272,7 @@
         },
         "storage_model": {
           "type": "string",
-          "minLength": 1,
-          "maxLength": 200
+          "pattern": "^(?=[A-Za-z0-9 ._()+-]{1,200}$)(?=.*[A-Za-z])[A-Za-z0-9][A-Za-z0-9 ._()+-]*$"
         },
         "connection": {
           "enum": ["nvme", "sata", "usb", "thunderbolt", "other-physical"]
@@ -298,7 +291,7 @@
     "durabilityTrial": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "status", "observation"],
+      "required": ["kind", "status", "observation_code"],
       "properties": {
         "kind": {
           "enum": ["process-crash", "vm-hard-reset", "physical-power-loss", "storage-fault"]
@@ -306,10 +299,8 @@
         "status": {
           "$ref": "#/$defs/status"
         },
-        "observation": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 2000
+        "observation_code": {
+          "enum": ["recovery-verified", "recovery-defect", "not-executed"]
         },
         "authorization": {
           "const": "operator-authorized"
@@ -349,7 +340,7 @@
     "unexecuted": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "target", "reason"],
+      "required": ["id", "target", "reason_code"],
       "properties": {
         "id": {
           "type": "string",
@@ -359,10 +350,15 @@
           "type": "string",
           "pattern": "^(?:ui\\|Windows (?:10|11)\\|(?:100|125|150|200)\\|(?:normal|high-contrast)|scenario\\|Windows (?:10|11)\\|[a-z-]+|benchmark\\|(?:ssd|hdd)\\|(?:100|1000|10000)|durability\\|[a-z-]+)$"
         },
-        "reason": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 1000
+        "reason_code": {
+          "enum": [
+            "environment-unavailable",
+            "hardware-unavailable",
+            "authorization-not-granted",
+            "scheduled-later",
+            "blocked-by-failed-prerequisite",
+            "not-in-run-scope"
+          ]
         }
       }
     },
