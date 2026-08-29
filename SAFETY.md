@@ -49,19 +49,30 @@ from `Prepared` through rename reconciliation and throughout rollback.
 
 ## Startup recovery and corrupt evidence
 
-Startup exclusively opens the exact active journal. A valid nonterminal stream
-is reconciled against current entry identities and occupancy before rollback.
-Ambiguous observations never cause a guessed rename.
+Startup first holds an exclusive runtime lock, then opens both fixed journal
+leaves before taking a recovery action. If active and candidate are observed
+together, both handles and their collision provenance are retained; automatic
+rollback, cleanup, and candidate discard remain disabled. With only a valid
+active stream, current entry identities and occupancy are reconciled before
+rollback. Ambiguous observations never cause a guessed rename.
 
 If bytes cannot be decoded, the UI starts recovery-locked and retains the exact
 opened file handle when possible. It reports the path, failure stage, structured
-kind, native code, codec frame, and observed size. Diagnostic export copies from
-that handle into new files only; an unavailable path is not reopened and a
-corrupt journal is never automatically deleted.
+kind, native code, codec frame, and observed size. Diagnostic export copies
+valid active, valid candidate, and corrupt evidence from their retained handles
+into new files only. An unavailable path is not reopened and an existing
+destination is not overwritten.
 
-Only an empty pre-mutation file or a strictly clean terminal journal may receive
-delete disposition. Candidate and active names seen together, invalid candidate
-transitions, poison, or any cleanup error keep Apply locked.
+A physically zero-byte candidate is removed automatically. A candidate that
+contains exactly one complete Intent and no torn tail represents a plan that was
+never activated and therefore never mutated selected files. With no active or
+blocked artifact, the recovery UI may delete that candidate only after explicit
+confirmation and an active-leaf recheck. It then rediscovers both fixed leaves
+and unlocks Apply only when neither remains.
+
+Otherwise only a strictly clean terminal journal may receive delete disposition.
+Candidate and active names seen together, invalid or torn candidate content,
+poison, promotion uncertainty, or any cleanup error keep Apply locked.
 
 ## Verification expectations
 
@@ -72,6 +83,12 @@ tests terminate after each durable/mutation boundary and restart through the
 production recovery path. They assert expected original or committed names,
 unchanged sentinel files, no temporary names, and either terminal cleanup or an
 explicit recovery lock.
+
+Those child-process terminations verify recovery after application-process
+loss. They do not establish behavior across an operating-system crash, abrupt
+VM or hardware power loss, storage write-cache loss, or power-loss durability
+of directory-entry updates. Those cases require separate fault-injection or
+manual acceptance evidence bound to the tested source SHA and storage setup.
 
 Native release acceptance must additionally cover Windows 10 and 11, multiple
 DPI values, high contrast, keyboard operation, accessibility inspection,
