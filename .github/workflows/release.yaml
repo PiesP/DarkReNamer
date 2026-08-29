@@ -89,7 +89,8 @@ jobs:
           if ($actual -ne $expected) { throw 'cargo-cyclonedx checksum mismatch.' }
           Expand-Archive -Path $archive -DestinationPath $tools
           Add-Content -Path $env:GITHUB_PATH -Value $tools
-          & (Join-Path $tools 'cargo-cyclonedx.exe') --version
+          $env:PATH = "$tools;$env:PATH"
+          cargo cyclonedx --version
           if ($LASTEXITCODE -ne 0) { throw 'cargo-cyclonedx verification failed.' }
 
       - name: Test and build selected source
