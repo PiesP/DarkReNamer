@@ -23,50 +23,54 @@ use windows_sys::Win32::Globalization::{
     MultiByteToWideChar, NORM_IGNORECASE,
 };
 use windows_sys::Win32::Graphics::Gdi::{
-    CLIP_DEFAULT_PRECIS, COLOR_WINDOW, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH,
-    DEFAULT_QUALITY, DeleteObject, FF_DONTCARE, FW_NORMAL, HFONT, OUT_DEFAULT_PRECIS, UpdateWindow,
+    BitBlt, CLIP_DEFAULT_PRECIS, COLOR_WINDOW, CreateCompatibleBitmap, CreateCompatibleDC,
+    CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH, DEFAULT_QUALITY, DeleteDC, DeleteObject,
+    FF_DONTCARE, FW_NORMAL, GetDC, HBITMAP, HFONT, OUT_DEFAULT_PRECIS, ReleaseDC, SRCCOPY,
+    SelectObject, UpdateWindow,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, MoveFileW,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, MoveFileW,
 };
+use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
-use windows_sys::Win32::System::SystemServices::{SS_CENTERIMAGE, SS_SUNKEN};
+use windows_sys::Win32::System::SystemServices::{SS_CENTERIMAGE, SS_ETCHEDHORZ, SS_SUNKEN};
 use windows_sys::Win32::System::Time::FileTimeToSystemTime;
 use windows_sys::Win32::UI::Controls::{
     ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_FMT, LVCF_TEXT,
     LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED,
     LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETNEXTITEM,
     LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE,
-    LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVN_ITEMCHANGED, LVNI_SELECTED,
-    LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_DBLCLK,
+    LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVNI_SELECTED, LVS_EX_FULLROWSELECT,
+    LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_DBLCLK,
     NMHDR,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, GetKeyState, VK_CONTROL, VK_DELETE, VK_ESCAPE, VK_SHIFT,
+    EnableWindow, GetKeyState, SetFocus, VK_CONTROL, VK_DELETE, VK_ESCAPE, VK_SHIFT,
 };
 use windows_sys::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, HDROP, SHFILEINFOW, SHGFI_SMALLICON,
     SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, BN_CLICKED, BS_DEFPUSHBUTTON, BS_MULTILINE, CB_ADDSTRING, CB_GETCURSEL,
-    CB_SETCURSEL, CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
-    CheckMenuItem, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, GWLP_USERDATA, GetClientRect,
-    GetMessageW, GetParent, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, HMENU,
-    IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, LoadCursorW, LoadIconW, MB_OKCANCEL, MB_YESNO,
-    MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    MF_UNCHECKED, MSG, MessageBoxW, MoveWindow, PostQuitMessage, RegisterClassExW, SW_SHOW,
-    SendMessageW, SetForegroundWindow, SetMenu, SetWindowLongPtrW, ShowWindow, TranslateMessage,
-    WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN, WM_KEYUP, WM_NCCREATE,
-    WM_NCDESTROY, WM_NOTIFY, WM_SETFONT, WM_SIZE, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD,
-    WS_CLIPCHILDREN, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
-    WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    AppendMenuW, BM_SETIMAGE, BN_CLICKED, BS_BITMAP, BS_DEFPUSHBUTTON, BS_FLAT, CB_ADDSTRING,
+    CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
+    CW_USEDEFAULT, CheckMenuItem, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+    DestroyWindow, DispatchMessageW, DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, GWLP_USERDATA,
+    GetClientRect, GetMessageW, GetParent, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW,
+    HMENU, IDC_ARROW, IDCANCEL, IDOK, IMAGE_BITMAP, IsDialogMessageW, LR_CREATEDIBSECTION,
+    LoadCursorW, LoadIconW, LoadImageW, MB_OKCANCEL, MB_YESNO, MF_BYCOMMAND, MF_CHECKED,
+    MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, MessageBoxW,
+    MoveWindow, PostQuitMessage, RegisterClassExW, SW_SHOW, SendMessageW, SetForegroundWindow,
+    SetMenu, SetWindowLongPtrW, ShowWindow, TranslateMessage, WM_CLOSE, WM_COMMAND, WM_CREATE,
+    WM_DESTROY, WM_DROPFILES, WM_KEYDOWN, WM_KEYUP, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY,
+    WM_SETFONT, WM_SIZE, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::*;
@@ -79,11 +83,18 @@ struct AppState {
     status: HWND,
     menu: HMENU,
     font: HFONT,
+    toolbar_strips: Vec<HBITMAP>,
+    button_bitmaps: Vec<HBITMAP>,
     left_buttons: Vec<HWND>,
     right_buttons: Vec<HWND>,
     model: LegacyList,
     shown_columns: [bool; 4],
     directory_mode: Option<DirectoryMode>,
+}
+
+struct WindowInit {
+    state: *mut AppState,
+    adopted: *mut bool,
 }
 
 impl AppState {
@@ -93,6 +104,8 @@ impl AppState {
             status: null_mut(),
             menu: null_mut(),
             font: null_mut(),
+            toolbar_strips: Vec::new(),
+            button_bitmaps: Vec::new(),
             left_buttons: Vec::new(),
             right_buttons: Vec::new(),
             model: LegacyList::new(),
@@ -108,6 +121,14 @@ enum DirectoryMode {
     Direct,
 }
 
+struct ComGuard;
+
+impl Drop for ComGuard {
+    fn drop(&mut self) {
+        unsafe { CoUninitialize() };
+    }
+}
+
 pub(crate) fn run() -> io::Result<()> {
     // SAFETY: All Win32 handles are created and consumed on this UI thread;
     // pointers passed to Win32 remain valid for each synchronous call.
@@ -115,6 +136,11 @@ pub(crate) fn run() -> io::Result<()> {
 }
 
 unsafe fn run_unsafe() -> io::Result<()> {
+    let com_status = unsafe { CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32) };
+    if com_status < 0 {
+        return Err(io::Error::from_raw_os_error(com_status));
+    }
+    let _com = ComGuard;
     let controls = INITCOMMONCONTROLSEX {
         dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
         dwICC: ICC_LISTVIEW_CLASSES,
@@ -148,8 +174,14 @@ unsafe fn run_unsafe() -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     let title = wide("DarkNamer");
-    let state = Box::new(AppState::new());
-    // SAFETY: state ownership transfers to WM_NCCREATE and is reclaimed at WM_NCDESTROY.
+    let state = Box::into_raw(Box::new(AppState::new()));
+    let mut adopted = false;
+    let mut init = WindowInit {
+        state,
+        adopted: &mut adopted,
+    };
+    // SAFETY: init remains live for the synchronous CreateWindowExW call. The
+    // state ownership transfers only when WM_NCCREATE marks it adopted.
     let window = unsafe {
         CreateWindowExW(
             WS_EX_ACCEPTFILES | WS_EX_APPWINDOW,
@@ -163,10 +195,13 @@ unsafe fn run_unsafe() -> io::Result<()> {
             null_mut(),
             null_mut(),
             instance,
-            Box::into_raw(state).cast(),
+            (&mut init as *mut WindowInit).cast(),
         )
     };
     if window.is_null() {
+        if !adopted {
+            unsafe { drop(Box::from_raw(state)) };
+        }
         return Err(io::Error::last_os_error());
     }
     // SAFETY: window is a live top-level window.
@@ -206,8 +241,13 @@ unsafe extern "system" fn window_proc(
     if message == WM_NCCREATE {
         let create = lparam as *const CREATESTRUCTW;
         if !create.is_null() {
-            // SAFETY: WM_NCCREATE lParam is CREATESTRUCTW and lpCreateParams is our Box pointer.
-            unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, (*create).lpCreateParams as isize) };
+            let init = unsafe { (*create).lpCreateParams as *mut WindowInit };
+            if !init.is_null() {
+                unsafe {
+                    *(*init).adopted = true;
+                    SetWindowLongPtrW(window, GWLP_USERDATA, (*init).state as isize);
+                }
+            }
         }
     }
     // SAFETY: GWLP_USERDATA contains AppState from WM_NCCREATE until WM_NCDESTROY.
@@ -240,12 +280,9 @@ unsafe extern "system" fn window_proc(
             let header = lparam as *const NMHDR;
             if !header.is_null()
                 && unsafe { (*header).hwndFrom } == unsafe { (*state_ptr).list_window }
+                && unsafe { (*header).code } == NM_DBLCLK
             {
-                if unsafe { (*header).code } == NM_DBLCLK {
-                    unsafe { dispatch_command(window, &mut *state_ptr, MANUAL_CHANGE) };
-                } else if unsafe { (*header).code } == LVN_ITEMCHANGED {
-                    unsafe { update_controls(&*state_ptr) };
-                }
+                unsafe { dispatch_command(window, &mut *state_ptr, MANUAL_CHANGE) };
             }
             0
         }
@@ -272,6 +309,12 @@ unsafe extern "system" fn window_proc(
             if !state_ptr.is_null() {
                 if !unsafe { (*state_ptr).font }.is_null() {
                     unsafe { DeleteObject((*state_ptr).font) };
+                }
+                for bitmap in unsafe { &(*state_ptr).button_bitmaps } {
+                    unsafe { DeleteObject(*bitmap) };
+                }
+                for bitmap in unsafe { &(*state_ptr).toolbar_strips } {
+                    unsafe { DeleteObject(*bitmap) };
                 }
                 // SAFETY: this is the single reclamation of Box::into_raw from run_unsafe.
                 unsafe { drop(Box::from_raw(state_ptr)) };
@@ -303,6 +346,7 @@ unsafe fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> 
                 | WS_TABSTOP
                 | LVS_REPORT
                 | LVS_SHOWSELALWAYS
+                | LVS_SHAREIMAGELISTS
                 | LVS_NOSORTHEADER,
             0,
             0,
@@ -356,14 +400,26 @@ unsafe fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> 
         )
     };
     for tool in LEFT_TOOLS {
-        state
-            .left_buttons
-            .push(unsafe { child(window, "BUTTON", tool.label, tool.id, BS_MULTILINE as u32) });
+        state.left_buttons.push(unsafe {
+            child(
+                window,
+                "BUTTON",
+                tool.label,
+                tool.id,
+                (BS_BITMAP | BS_FLAT) as u32,
+            )
+        });
     }
     for tool in RIGHT_TOOLS {
-        state
-            .right_buttons
-            .push(unsafe { child(window, "BUTTON", tool.label, tool.id, BS_MULTILINE as u32) });
+        state.right_buttons.push(unsafe {
+            child(
+                window,
+                "BUTTON",
+                tool.label,
+                tool.id,
+                (BS_BITMAP | BS_FLAT) as u32,
+            )
+        });
     }
     let face = wide("MS Sans Serif");
     state.font = unsafe {
@@ -393,6 +449,7 @@ unsafe fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> 
             unsafe { SendMessageW(*control, WM_SETFONT, state.font as usize, 1) };
         }
     }
+    unsafe { install_toolbar_images(window, state, instance) };
     // SAFETY: window is a live top-level HWND configured for shell drops.
     unsafe { DragAcceptFiles(window, 1) };
     let menu = unsafe { create_menu() };
@@ -445,6 +502,90 @@ unsafe fn child(parent: HWND, class: &str, text: &str, id: u16, extra_style: u32
             null_mut(),
         )
     }
+}
+
+unsafe fn install_toolbar_images(
+    window: HWND,
+    state: &mut AppState,
+    instance: windows_sys::Win32::Foundation::HINSTANCE,
+) {
+    let left = state.left_buttons.clone();
+    let right = state.right_buttons.clone();
+    unsafe { install_toolbar_strip(window, state, instance, 130, &left) };
+    unsafe { install_toolbar_strip(window, state, instance, 132, &right) };
+}
+
+unsafe fn install_toolbar_strip(
+    window: HWND,
+    state: &mut AppState,
+    instance: windows_sys::Win32::Foundation::HINSTANCE,
+    resource_id: u16,
+    buttons: &[HWND],
+) {
+    let strip = unsafe {
+        LoadImageW(
+            instance,
+            int_resource(resource_id),
+            IMAGE_BITMAP,
+            0,
+            0,
+            LR_CREATEDIBSECTION,
+        ) as HBITMAP
+    };
+    if strip.is_null() {
+        return;
+    }
+    let screen = unsafe { GetDC(window) };
+    if screen.is_null() {
+        unsafe { DeleteObject(strip) };
+        return;
+    }
+    let source_dc = unsafe { CreateCompatibleDC(screen) };
+    if source_dc.is_null() {
+        unsafe {
+            ReleaseDC(window, screen);
+            DeleteObject(strip);
+        }
+        return;
+    }
+    let old_source = unsafe { SelectObject(source_dc, strip) };
+    for (index, button) in buttons.iter().enumerate() {
+        let target_dc = unsafe { CreateCompatibleDC(screen) };
+        let bitmap = unsafe { CreateCompatibleBitmap(screen, 38, 24) };
+        if target_dc.is_null() || bitmap.is_null() {
+            if !target_dc.is_null() {
+                unsafe { DeleteDC(target_dc) };
+            }
+            if !bitmap.is_null() {
+                unsafe { DeleteObject(bitmap) };
+            }
+            continue;
+        }
+        let old_target = unsafe { SelectObject(target_dc, bitmap) };
+        unsafe {
+            BitBlt(
+                target_dc,
+                0,
+                0,
+                38,
+                24,
+                source_dc,
+                index as i32 * 38,
+                0,
+                SRCCOPY,
+            );
+            SelectObject(target_dc, old_target);
+            DeleteDC(target_dc);
+            SendMessageW(*button, BM_SETIMAGE, IMAGE_BITMAP as usize, bitmap as isize);
+        }
+        state.button_bitmaps.push(bitmap);
+    }
+    unsafe {
+        SelectObject(source_dc, old_source);
+        DeleteDC(source_dc);
+        ReleaseDC(window, screen);
+    }
+    state.toolbar_strips.push(strip);
 }
 
 unsafe fn arrange(window: HWND, state: &AppState) {
@@ -532,6 +673,7 @@ struct PromptState {
     edit_one: HWND,
     edit_two: HWND,
     combo: HWND,
+    font: HFONT,
 }
 
 unsafe fn prompt_input(owner: HWND, spec: PromptSpec) -> Option<PromptResult> {
@@ -560,6 +702,7 @@ unsafe fn prompt_input(owner: HWND, spec: PromptSpec) -> Option<PromptResult> {
         edit_one: null_mut(),
         edit_two: null_mut(),
         combo: null_mut(),
+        font: null_mut(),
     });
     let state_ptr: *mut PromptState = &mut *state;
     let dialog = unsafe {
@@ -625,6 +768,7 @@ unsafe extern "system" fn prompt_proc(
             let state = unsafe { &mut *state_ptr };
             let title = unsafe { child(window, "STATIC", &state.spec.title, 1001, 0) };
             unsafe { MoveWindow(title, 12, 12, 340, 22, 1) };
+            let mut controls = vec![title];
             if !state.spec.label_one.is_empty() {
                 let edit = unsafe {
                     child(
@@ -641,6 +785,7 @@ unsafe extern "system" fn prompt_proc(
                     MoveWindow(label, 294, 48, 70, 25, 1);
                 }
                 state.edit_one = edit;
+                controls.extend([edit, label]);
             }
             if !state.spec.label_two.is_empty() {
                 let edit = unsafe {
@@ -658,6 +803,7 @@ unsafe extern "system" fn prompt_proc(
                     MoveWindow(label, 294, 80, 70, 25, 1);
                 }
                 state.edit_two = edit;
+                controls.extend([edit, label]);
             }
             if !state.spec.choices.is_empty() {
                 let combo = unsafe {
@@ -691,6 +837,7 @@ unsafe extern "system" fn prompt_proc(
                     );
                 }
                 state.combo = combo;
+                controls.push(combo);
             }
             let ok = unsafe {
                 child(
@@ -702,9 +849,44 @@ unsafe extern "system" fn prompt_proc(
                 )
             };
             let cancel = unsafe { child(window, "BUTTON", "취소", IDCANCEL as u16, WS_TABSTOP) };
+            let separator = unsafe { child(window, "STATIC", "", 1010, SS_ETCHEDHORZ) };
             unsafe {
                 MoveWindow(ok, 205, 126, 75, 32, 1);
                 MoveWindow(cancel, 285, 126, 75, 32, 1);
+                MoveWindow(separator, 0, 116, 380, 2, 1);
+            }
+            controls.extend([ok, cancel, separator]);
+            let face = wide("MS Sans Serif");
+            state.font = unsafe {
+                CreateFontW(
+                    -13,
+                    0,
+                    0,
+                    0,
+                    FW_NORMAL as i32,
+                    0,
+                    0,
+                    0,
+                    u32::from(DEFAULT_CHARSET),
+                    u32::from(OUT_DEFAULT_PRECIS),
+                    u32::from(CLIP_DEFAULT_PRECIS),
+                    u32::from(DEFAULT_QUALITY),
+                    u32::from(DEFAULT_PITCH | FF_DONTCARE),
+                    face.as_ptr(),
+                )
+            };
+            if !state.font.is_null() {
+                for control in controls {
+                    unsafe { SendMessageW(control, WM_SETFONT, state.font as usize, 1) };
+                }
+            }
+            let first = if !state.edit_one.is_null() {
+                state.edit_one
+            } else {
+                state.combo
+            };
+            if !first.is_null() {
+                unsafe { SetFocus(first) };
             }
             0
         }
@@ -735,6 +917,14 @@ unsafe extern "system" fn prompt_proc(
             unsafe { (*state_ptr).done = true };
             unsafe { DestroyWindow(window) };
             0
+        }
+        WM_NCDESTROY if !state_ptr.is_null() => {
+            if !unsafe { (*state_ptr).font }.is_null() {
+                unsafe { DeleteObject((*state_ptr).font) };
+                unsafe { (*state_ptr).font = null_mut() };
+            }
+            unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, 0) };
+            unsafe { DefWindowProcW(window, message, wparam, lparam) }
         }
         _ => unsafe { DefWindowProcW(window, message, wparam, lparam) },
     }
@@ -845,15 +1035,18 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
         RESET => state.model.reset_proposals(),
         CLEAR_LIST => state.model = LegacyList::new(),
         0xFFFF => {
+            unsafe { clear_selection(state.list_window) };
             state.model.remove_rows(&selected);
         }
         MOVE_UP => {
+            unsafe { clear_selection(state.list_window) };
             let moved = state.model.move_rows_earlier(&selected);
             unsafe { refresh(state) };
             unsafe { select_rows(state.list_window, &moved) };
             return;
         }
         MOVE_DOWN => {
+            unsafe { clear_selection(state.list_window) };
             let moved = state.model.move_rows_later(&selected);
             unsafe { refresh(state) };
             unsafe { select_rows(state.list_window, &moved) };
@@ -938,7 +1131,11 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
         KEEP_DIGITS => state.model.keep_ascii_digits(),
         PAD_DIGITS => unsafe { pad_digits_command(window, state) },
         SEQUENCE => unsafe { sequence_command(window, state) },
-        SORT => unsafe { sort_command(window, state) },
+        SORT => {
+            if unsafe { sort_command(window, state) } {
+                return;
+            }
+        }
         EXT_DELETE => state.model.delete_extension(),
         EXT_ADD => {
             if let Some(result) = unsafe {
@@ -977,7 +1174,9 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
         PARENT_PREFIX => state.model.prefix_parent_folder(),
         PARENT_SUFFIX => state.model.suffix_parent_folder(),
         UNIFY_PATH => {
-            if let Some(path) = rfd::FileDialog::new().set_title("경로 선택").pick_folder() {
+            if let Some(path) = modal_native_dialog(window, || {
+                rfd::FileDialog::new().set_title("경로 선택").pick_folder()
+            }) {
                 state.model.unify_root_path(&legacy_path(&path));
             }
         }
@@ -996,6 +1195,7 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
         VERSION => unsafe { message(window, "DarkNamer 08.02.10 버전", "DarkNamer") },
         2 => unsafe {
             DestroyWindow(window);
+            return;
         },
         _ => {}
     }
@@ -1021,7 +1221,39 @@ fn prompt_spec(
 }
 
 fn legacy_atoi(text: &LegacyText) -> i32 {
-    text.to_string_lossy().trim().parse::<i32>().unwrap_or(0)
+    let value = text.to_string_lossy();
+    let mut characters = value.trim_start().chars().peekable();
+    let sign = match characters.peek().copied() {
+        Some('-') => {
+            characters.next();
+            -1_i64
+        }
+        Some('+') => {
+            characters.next();
+            1_i64
+        }
+        _ => 1_i64,
+    };
+    let mut found = false;
+    let mut number = 0_i64;
+    while let Some(character) = characters.peek().copied() {
+        if !character.is_ascii_digit() {
+            break;
+        }
+        let digit = u32::from(character as u8 - b'0');
+        found = true;
+        characters.next();
+        number = number.saturating_mul(10).saturating_add(i64::from(digit));
+    }
+    if !found {
+        0
+    } else {
+        i32::try_from(number.saturating_mul(sign)).unwrap_or(if sign < 0 {
+            i32::MIN
+        } else {
+            i32::MAX
+        })
+    }
 }
 
 unsafe fn pad_digits_command(window: HWND, state: &mut AppState) {
@@ -1175,7 +1407,7 @@ unsafe fn delete_delimited_command(window: HWND, state: &mut AppState) {
     }
 }
 
-unsafe fn sort_command(window: HWND, state: &mut AppState) {
+unsafe fn sort_command(window: HWND, state: &mut AppState) -> bool {
     let choices = [
         "파일 이름에 따라 오름차순",
         "파일 이름에 따라 내림차순",
@@ -1201,7 +1433,7 @@ unsafe fn sort_command(window: HWND, state: &mut AppState) {
             ),
         )
     }) else {
-        return;
+        return false;
     };
     let modes = [
         LegacySortMode::NameAscending,
@@ -1216,8 +1448,27 @@ unsafe fn sort_command(window: HWND, state: &mut AppState) {
         LegacySortMode::CreatedDescending,
     ];
     if let Some(mode) = modes.get(result.choice) {
+        let selected_paths = unsafe { selected_indices(state.list_window) }
+            .into_iter()
+            .filter_map(|index| state.model.items().get(index))
+            .map(|item| item.source_path().clone())
+            .collect::<Vec<_>>();
+        unsafe { clear_selection(state.list_window) };
         state.model.sort_by(*mode, compare_windows);
+        unsafe { refresh(state) };
+        let moved = state
+            .model
+            .items()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                selected_paths.contains(item.source_path()).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        unsafe { select_rows(state.list_window, &moved) };
+        return true;
     }
+    false
 }
 
 unsafe fn apply_changes(window: HWND, state: &mut AppState) {
@@ -1325,11 +1576,12 @@ unsafe fn admit_drop(owner: HWND, state: &mut AppState, drop: HDROP) {
 }
 
 unsafe fn add_files_dialog(owner: HWND, state: &mut AppState) {
-    let Some(paths) = rfd::FileDialog::new()
-        .set_title("이름 붙일 파일 불러오기")
-        .add_filter("All Files", &["*"])
-        .pick_files()
-    else {
+    let Some(paths) = modal_native_dialog(owner, || {
+        rfd::FileDialog::new()
+            .set_title("이름 붙일 파일 불러오기")
+            .add_filter("All Files", &["*"])
+            .pick_files()
+    }) else {
         return;
     };
     unsafe { set_status(state.status, "처리중...") };
@@ -1351,10 +1603,13 @@ unsafe fn collect_path(
     path: &Path,
     items: &mut Vec<LegacyListItem>,
 ) {
-    let Ok(metadata) = fs::metadata(path) else {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
         return;
     };
-    if metadata.is_dir() {
+    let attributes = metadata.file_attributes();
+    let is_directory = attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+    let is_reparse = attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    if is_directory {
         let mode = match state.directory_mode {
             Some(mode) => mode,
             None => {
@@ -1372,6 +1627,9 @@ unsafe fn collect_path(
             }
         };
         if mode == DirectoryMode::Recurse {
+            if is_reparse {
+                return;
+            }
             let Ok(read_dir) = fs::read_dir(path) else {
                 return;
             };
@@ -1387,14 +1645,14 @@ unsafe fn collect_path(
             return;
         }
     }
-    items.push(legacy_item(path, &metadata));
+    items.push(legacy_item(path, &metadata, is_directory));
 }
 
-fn legacy_item(path: &Path, metadata: &fs::Metadata) -> LegacyListItem {
+fn legacy_item(path: &Path, metadata: &fs::Metadata, is_directory: bool) -> LegacyListItem {
     LegacyListItem::new(
         legacy_path(path),
-        metadata.is_dir(),
-        u32::try_from(metadata.file_size()).unwrap_or(u32::MAX),
+        is_directory,
+        metadata.file_size() as u32,
         metadata.creation_time(),
         metadata.last_write_time(),
     )
@@ -1458,31 +1716,33 @@ unsafe fn copy_clipboard(owner: HWND, text: &LegacyText) {
     unsafe { CloseClipboard() };
 }
 
-unsafe fn save_text_dialog(_owner: HWND, text: LegacyText, names: bool) {
+unsafe fn save_text_dialog(owner: HWND, text: LegacyText, names: bool) {
     let title = if names {
         "파일명 저장"
     } else {
         "경로명 저장"
     };
-    let Some(path) = rfd::FileDialog::new()
-        .set_title(title)
-        .add_filter("Text Files", &["txt"])
-        .add_filter("All Files", &["*"])
-        .set_file_name("*.txt")
-        .save_file()
-    else {
+    let Some(path) = modal_native_dialog(owner, || {
+        rfd::FileDialog::new()
+            .set_title(title)
+            .add_filter("Text Files", &["txt"])
+            .add_filter("All Files", &["*"])
+            .set_file_name("*.txt")
+            .save_file()
+    }) else {
         return;
     };
     let _ = write_legacy_text(&path, &text);
 }
 
-unsafe fn import_names_dialog(_owner: HWND, state: &mut AppState) {
-    let Some(path) = rfd::FileDialog::new()
-        .set_title("바꿀 파일 이름 불러오기")
-        .add_filter("Text Files", &["txt"])
-        .add_filter("All Files", &["*"])
-        .pick_file()
-    else {
+unsafe fn import_names_dialog(owner: HWND, state: &mut AppState) {
+    let Some(path) = modal_native_dialog(owner, || {
+        rfd::FileDialog::new()
+            .set_title("바꿀 파일 이름 불러오기")
+            .add_filter("Text Files", &["txt"])
+            .add_filter("All Files", &["*"])
+            .pick_file()
+    }) else {
         return;
     };
     if let Ok(text) = read_legacy_text(&path) {
@@ -1491,12 +1751,13 @@ unsafe fn import_names_dialog(_owner: HWND, state: &mut AppState) {
 }
 
 unsafe fn import_paths_dialog(owner: HWND, state: &mut AppState) {
-    let Some(path) = rfd::FileDialog::new()
-        .set_title("파일에서 경로목록 읽어 추가하기")
-        .add_filter("Text Files", &["txt"])
-        .add_filter("All Files", &["*"])
-        .pick_file()
-    else {
+    let Some(path) = modal_native_dialog(owner, || {
+        rfd::FileDialog::new()
+            .set_title("파일에서 경로목록 읽어 추가하기")
+            .add_filter("Text Files", &["txt"])
+            .add_filter("All Files", &["*"])
+            .pick_file()
+    }) else {
         return;
     };
     let Ok(text) = read_legacy_text(&path) else {
@@ -1516,6 +1777,16 @@ unsafe fn set_status(status: HWND, text: &str) {
         windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(status, text.as_ptr());
         UpdateWindow(status);
     }
+}
+
+fn modal_native_dialog<T>(owner: HWND, dialog: impl FnOnce() -> T) -> T {
+    unsafe { EnableWindow(owner, 0) };
+    let result = dialog();
+    unsafe {
+        EnableWindow(owner, 1);
+        SetForegroundWindow(owner);
+    }
+    result
 }
 
 fn write_legacy_text(path: &Path, text: &LegacyText) -> io::Result<()> {
@@ -1853,6 +2124,13 @@ mod tests {
         assert!(bytes.starts_with(&[0xFF, 0xFE]));
         assert_eq!(read_legacy_text(&path)?, expected);
         Ok(())
+    }
+
+    #[test]
+    fn ttoi_compatibility_accepts_numeric_prefixes() {
+        assert_eq!(legacy_atoi(&LegacyText::from("  -12suffix")), -12);
+        assert_eq!(legacy_atoi(&LegacyText::from("3abc")), 3);
+        assert_eq!(legacy_atoi(&LegacyText::from("abc3")), 0);
     }
 
     #[test]
