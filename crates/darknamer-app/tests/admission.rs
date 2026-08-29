@@ -67,9 +67,20 @@ fn compare(left: &Path, right: &Path) -> Ordering {
     left.cmp(right)
 }
 
+fn test_root() -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from("C:\\admission-test")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/admission-test")
+    }
+}
+
 #[test]
 fn iterative_recurse_is_deterministic_and_skips_reparse_and_repeated_directories() {
-    let root = PathBuf::from("/root");
+    let root = test_root();
     let a = root.join("a.txt");
     let nested = root.join("nested");
     let z = root.join("z.txt");
@@ -119,8 +130,9 @@ fn iterative_recurse_is_deterministic_and_skips_reparse_and_repeated_directories
 #[test]
 fn hard_limit_stops_before_inspecting_additional_metadata() {
     let mut adapter = FakeAdapter::default();
+    let root = test_root();
     let roots = (0..=MAX_ADMITTED_SOURCES)
-        .map(|index| PathBuf::from(format!("/file-{index:05}")))
+        .map(|index| root.join(format!("file-{index:05}")))
         .collect::<Vec<_>>();
     for path in &roots {
         adapter.metadata.insert(path.clone(), file());

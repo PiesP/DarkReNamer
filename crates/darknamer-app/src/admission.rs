@@ -148,15 +148,17 @@ pub fn collect_admission(
         stack.push_back(root);
     }
     let mut seen_directories = BTreeSet::new();
+    let mut inspected = 0_usize;
 
     while let Some(path) = stack.pop_back() {
-        if report.items.len() >= MAX_ADMITTED_SOURCES {
+        if inspected >= MAX_ADMITTED_SOURCES {
             report.issues.push(AdmissionIssue {
                 path,
                 kind: AdmissionIssueKind::LimitReached,
             });
             break;
         }
+        inspected += 1;
         if !path.is_absolute() {
             report.issues.push(AdmissionIssue {
                 path,
@@ -193,7 +195,7 @@ pub fn collect_admission(
             }
             if mode == AdmissionMode::Recurse {
                 let remaining = MAX_ADMITTED_SOURCES
-                    .saturating_sub(report.items.len())
+                    .saturating_sub(inspected)
                     .saturating_sub(stack.len());
                 if remaining == 0 {
                     report.issues.push(AdmissionIssue {
