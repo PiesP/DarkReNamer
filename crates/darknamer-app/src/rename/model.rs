@@ -41,6 +41,12 @@ impl ModelRevision {
 pub struct PlanId(u64);
 
 impl PlanId {
+    /// Reconstructs a display fingerprint from a trusted journal codec.
+    #[must_use]
+    pub const fn from_fingerprint(value: u64) -> Self {
+        Self(value)
+    }
+
     pub(super) const fn new(value: u64) -> Self {
         Self(value)
     }
