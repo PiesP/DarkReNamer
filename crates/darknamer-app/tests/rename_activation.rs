@@ -1,9 +1,10 @@
 use darknamer_app::rename::{
-    BackendError, BackendOperation, ExecutionOutcome, JournalCleanupDecision, JournalRecord,
-    JournalTerminal, MemoryBackend, MemoryJournal, ModelRevision, MutationCertainty, PathKey,
-    PathSnapshot, RenameBackend, RenameExecutor, RenameOperation, RenamePlanner,
-    apply_execution_report, build_plan_request, cleanup_decision, next_model_revision,
-    plan_error_korean, safe_mode_unify_path_message,
+    BackendError, BackendOperation, ExecutionOutcome, JournalCapacityError, JournalCapacityKind,
+    JournalCleanupDecision, JournalRecord, JournalTerminal, MemoryBackend, MemoryJournal,
+    ModelRevision, MutationCertainty, PathKey, PathSnapshot, RenameBackend, RenameExecutor,
+    RenameOperation, RenamePlanner, apply_execution_report, build_plan_request, cleanup_decision,
+    journal_capacity_error_korean, next_model_revision, plan_error_korean,
+    safe_mode_unify_path_message,
 };
 use darknamer_core::{LegacyList, LegacyListItem, LegacyText};
 
@@ -102,6 +103,27 @@ fn model_revision_is_monotonic_and_changes_only_with_the_model() {
 fn safe_mode_unify_path_is_explicitly_inert() {
     assert!(safe_mode_unify_path_message().contains("지원하지"));
     assert!(safe_mode_unify_path_message().contains("변경되지"));
+}
+
+#[test]
+fn capacity_messages_name_the_resource_and_required_and_maximum_values() {
+    let steps = journal_capacity_error_korean(JournalCapacityError {
+        kind: JournalCapacityKind::PrimitiveSteps,
+        required: 10_002,
+        maximum: 10_000,
+    });
+    assert!(steps.contains("파일 이동 단계"));
+    assert!(steps.contains("10002"));
+    assert!(steps.contains("10000"));
+
+    let frame = journal_capacity_error_korean(JournalCapacityError {
+        kind: JournalCapacityKind::IntentFrameBytes,
+        required: 16_777_217,
+        maximum: 16_777_216,
+    });
+    assert!(frame.contains("실행 계획 용량"));
+    assert!(frame.contains("16777217"));
+    assert!(frame.contains("16777216"));
 }
 
 struct FailingBackend {

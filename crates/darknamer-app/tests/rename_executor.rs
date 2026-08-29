@@ -3,11 +3,12 @@ use std::sync::{Arc, Mutex};
 use darknamer_app::rename::{
     AppendCertainty, BackendError, CancellationToken, EntryId, EntryKind, ExecuteErrorKind,
     ExecutionControl, ExecutionFailure, ExecutionOutcome, ExecutionPhase, ExecutionProgress,
-    JournalCorruption, JournalDirection, JournalError, JournalRecord, JournalStep, JournalStore,
-    JournalTerminal, MAX_TEMP_CANDIDATES, MemoryBackend, MemoryJournal, ModelRevision,
-    MutationCertainty, PathKey, PathSnapshot, PlanId, PlanRequest, RecoveryReason, RecoveryState,
-    RenameBackend, RenameExecutor, RenameIntent, RenameOperation, RenamePlanner, RenameState,
-    TemporaryPhase, replay_journal,
+    JournalCapacityKind, JournalCorruption, JournalDirection, JournalError, JournalRecord,
+    JournalStep, JournalStore, JournalTerminal, MAX_JOURNAL_FRAME_BYTES, MAX_JOURNAL_STEPS,
+    MAX_TEMP_CANDIDATES, MemoryBackend, MemoryJournal, ModelRevision, MutationCertainty, PathKey,
+    PathSnapshot, PlanId, PlanRequest, RecoveryReason, RecoveryState, RenameBackend,
+    RenameExecutor, RenameIntent, RenameOperation, RenamePlanner, RenameState, TemporaryPhase,
+    preflight_plan, replay_journal,
 };
 
 fn intent(id: u32, source_name: &str, destination_name: &str) -> RenameIntent {
@@ -134,6 +135,142 @@ fn case_only_rename_uses_one_same_parent_temporary_hop() -> Result<(), Box<dyn s
     };
     assert_eq!(steps[0].temporary_phase(), TemporaryPhase::IntoTemporary);
     assert_eq!(steps[1].temporary_phase(), TemporaryPhase::FromTemporary);
+    Ok(())
+}
+
+#[test]
+fn preflight_reports_exact_primitive_steps_for_mixed_direct_cycle_and_case_only_plan()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut backend = MemoryBackend::new()
+        .with_file("C:\\work\\a.txt", 1)
+        .with_file("C:\\work\\b.txt", 2)
+        .with_file("C:\\work\\c.txt", 3)
+        .with_file("C:\\work\\D.TXT", 4);
+    let plan = RenamePlanner::new(&backend).plan(PlanRequest::new(
+        ModelRevision::new(1),
+        vec![
+            intent(0, "a.txt", "x.txt"),
+            intent(1, "b.txt", "c.txt"),
+            intent(2, "c.txt", "b.txt"),
+            intent(3, "D.TXT", "d.txt"),
+        ],
+    ))?;
+
+    let requirements = preflight_plan(&plan, &mut backend)?;
+
+    assert_eq!(requirements.primitive_steps(), 6);
+    assert!(requirements.intent_frame_bytes() < MAX_JOURNAL_FRAME_BYTES);
+    Ok(())
+}
+
+#[test]
+fn case_only_plan_above_step_capacity_is_refused_before_begin_and_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    const LOGICAL_RENAMES: usize = MAX_JOURNAL_STEPS / 2 + 1;
+    let mut backend = MemoryBackend::new();
+    let mut intents = Vec::with_capacity(LOGICAL_RENAMES);
+    for index in 0..LOGICAL_RENAMES {
+        let source_name = format!("A{index:04}.TXT");
+        let destination_name = format!("a{index:04}.txt");
+        backend.insert_file(format!("C:\\work\\{source_name}"), index as u128 + 1);
+        intents.push(intent(index as u32, &source_name, &destination_name));
+    }
+    let plan =
+        RenamePlanner::new(&backend).plan(PlanRequest::new(ModelRevision::new(1), intents))?;
+
+    let preflight_error = match preflight_plan(&plan, &mut backend) {
+        Ok(_) => {
+            return Err(std::io::Error::other("capacity preflight unexpectedly passed").into());
+        }
+        Err(error) => error,
+    };
+    assert!(matches!(
+        preflight_error.kind,
+        ExecuteErrorKind::JournalCapacity(error)
+            if error.kind == JournalCapacityKind::PrimitiveSteps
+                && error.required == LOGICAL_RENAMES * 2
+                && error.maximum == MAX_JOURNAL_STEPS
+    ));
+
+    let id = plan.id();
+    let revision = plan.revision();
+    let confirmed = plan.confirm_presented(id, revision)?;
+    let mut journal = MemoryJournal::new();
+    let execution_error = match RenameExecutor::new(&mut backend, &mut journal).execute(confirmed) {
+        Ok(_) => {
+            return Err(
+                std::io::Error::other("executor capacity check unexpectedly passed").into(),
+            );
+        }
+        Err(error) => error,
+    };
+
+    assert_eq!(execution_error, preflight_error);
+    assert!(journal.records().is_empty());
+    assert_eq!(backend.mutation_count(), 0);
+    Ok(())
+}
+
+#[test]
+fn case_only_plan_at_exact_step_capacity_passes_preflight() -> Result<(), Box<dyn std::error::Error>>
+{
+    const LOGICAL_RENAMES: usize = MAX_JOURNAL_STEPS / 2;
+    let mut backend = MemoryBackend::new();
+    let mut intents = Vec::with_capacity(LOGICAL_RENAMES);
+    for index in 0..LOGICAL_RENAMES {
+        let source_name = format!("B{index:04}.TXT");
+        let destination_name = format!("b{index:04}.txt");
+        backend.insert_file(format!("C:\\work\\{source_name}"), index as u128 + 1);
+        intents.push(intent(index as u32, &source_name, &destination_name));
+    }
+    let plan =
+        RenamePlanner::new(&backend).plan(PlanRequest::new(ModelRevision::new(1), intents))?;
+
+    let requirements = preflight_plan(&plan, &mut backend)?;
+
+    assert_eq!(requirements.primitive_steps(), MAX_JOURNAL_STEPS);
+    assert_eq!(backend.mutation_count(), 0);
+    Ok(())
+}
+
+#[test]
+fn preflight_refuses_long_utf16_intent_manifest_before_confirmation()
+-> Result<(), Box<dyn std::error::Error>> {
+    const LOGICAL_RENAMES: usize = 128;
+    let parent = format!("C:\\\u{0061}{}", "p".repeat(32_750));
+    let mut backend = MemoryBackend::new();
+    let mut intents = Vec::with_capacity(LOGICAL_RENAMES);
+    for index in 0..LOGICAL_RENAMES {
+        let source_name = format!("s{index:03}");
+        let destination_name = format!("d{index:03}");
+        let source = format!("{parent}\\{source_name}");
+        backend.insert_file(source.as_str(), index as u128 + 1);
+        intents.push(RenameIntent::new(
+            EntryId::new(index as u32),
+            source,
+            parent.clone(),
+            destination_name,
+            EntryKind::File,
+        ));
+    }
+    let plan =
+        RenamePlanner::new(&backend).plan(PlanRequest::new(ModelRevision::new(1), intents))?;
+
+    let error = match preflight_plan(&plan, &mut backend) {
+        Ok(_) => {
+            return Err(std::io::Error::other("oversized manifest unexpectedly passed").into());
+        }
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error.kind,
+        ExecuteErrorKind::JournalCapacity(capacity)
+            if capacity.kind == JournalCapacityKind::IntentFrameBytes
+                && capacity.required > MAX_JOURNAL_FRAME_BYTES
+                && capacity.maximum == MAX_JOURNAL_FRAME_BYTES
+    ));
+    assert_eq!(backend.mutation_count(), 0);
     Ok(())
 }
 

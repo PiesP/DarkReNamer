@@ -4,8 +4,9 @@ use darknamer_core::LegacyList;
 
 use super::{
     BackendError, EntryId, EntryKind, ExecuteError, ExecuteErrorKind, ExecutionFailure,
-    ExecutionOutcome, ExecutionReport, JournalRecord, ModelRevision, PlanError, PlanIssueKind,
-    PlanRequest, RecoveryState, RenameIntent, RenameState, replay_journal,
+    ExecutionOutcome, ExecutionReport, JournalCapacityError, JournalCapacityKind, JournalRecord,
+    ModelRevision, PlanError, PlanIssueKind, PlanRequest, RecoveryState, RenameIntent, RenameState,
+    replay_journal,
 };
 
 /// Advances a monotonic model revision only for an observable model change.
@@ -153,6 +154,7 @@ pub fn execute_error_korean(error: &ExecuteError) -> String {
         ExecuteErrorKind::Journal(journal) => {
             format!("저널을 준비하지 못했습니다. 코드 {}", journal.code)
         }
+        ExecuteErrorKind::JournalCapacity(capacity) => journal_capacity_error_korean(capacity),
         ExecuteErrorKind::StaleSource => "원본 항목이 계획 이후 변경되었습니다.".to_owned(),
         ExecuteErrorKind::StaleParent => "부모 폴더가 계획 이후 변경되었습니다.".to_owned(),
         ExecuteErrorKind::DestinationChanged | ExecuteErrorKind::TemporaryOccupied => {
@@ -162,6 +164,21 @@ pub fn execute_error_korean(error: &ExecuteError) -> String {
             "안전한 임시 이름을 확보하지 못했습니다.".to_owned()
         }
         ExecuteErrorKind::InvalidSchedule => "안전한 실행 순서를 만들지 못했습니다.".to_owned(),
+    }
+}
+
+/// Formats a journal-capacity refusal with the required and maximum values.
+#[must_use]
+pub fn journal_capacity_error_korean(error: JournalCapacityError) -> String {
+    match error.kind {
+        JournalCapacityKind::PrimitiveSteps => format!(
+            "저널의 파일 이동 단계 용량을 초과했습니다. 필요 {}개, 최대 {}개입니다.",
+            error.required, error.maximum
+        ),
+        JournalCapacityKind::IntentFrameBytes => format!(
+            "저널 실행 계획 용량을 초과했습니다. 필요 {}바이트, 최대 {}바이트입니다.",
+            error.required, error.maximum
+        ),
     }
 }
 
