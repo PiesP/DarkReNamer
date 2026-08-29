@@ -23,11 +23,11 @@ use crate::icon_cache::{IconCacheKey, icon_cache_key};
 use crate::rename::{
     CancellationToken, ExecuteError, ExecutionControl, ExecutionOutcome, ExecutionPhase,
     ExecutionProgress, ExecutionReport, ExistingJournalOpenError, FileJournal, FileJournalError,
-    JournalCleanupDecision, JournalOpenFailure, JournalRoot, ModelRevision,
-    RecoveryJournalEvidence, RecoveryOutcome, RenameExecutor, RenamePlanner, RenameRecovery,
-    WindowsRenameBackend, apply_execution_report, build_plan_request, cleanup_decision,
-    execute_error_korean, execution_outcome_korean, next_model_revision, plan_error_korean,
-    process_is_elevated, safe_mode_unify_path_message,
+    JournalCleanupDecision, JournalOpenFailure, JournalRoot, ModelRevision, PlanError,
+    RecoveryJournalEvidence, RecoveryOutcome, RenameExecutor, RenamePlan, RenamePlanner,
+    RenameRecovery, WindowsRenameBackend, apply_execution_report, build_plan_request,
+    cleanup_decision, execute_error_korean, execution_outcome_korean, next_model_revision,
+    plan_error_korean, process_is_elevated, safe_mode_unify_path_message,
 };
 use darknamer_core::{
     LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,
@@ -108,6 +108,7 @@ const ACTIVE_JOURNAL_LEAF: &str = "active.drj";
 const EXPORT_RECOVERY_JOURNAL: u16 = 0x9000;
 const WM_APP_APPLY_PROGRESS: u32 = WM_APP + 0x40;
 const WM_APP_APPLY_COMPLETE: u32 = WM_APP + 0x41;
+const WM_APP_PLAN_COMPLETE: u32 = WM_APP + 0x42;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 
 struct AppState {
@@ -129,7 +130,9 @@ struct AppState {
     staged_journal: Option<FileJournal>,
     blocked_journals: Vec<StartupJournalBlock>,
     apply_worker: Option<ApplyWorker>,
+    plan_worker: Option<PlanWorker>,
     close_pending: bool,
+    confirmation_pending: bool,
     startup_status: Option<String>,
     icon_cache: HashMap<IconCacheKey, i32>,
 }
@@ -160,7 +163,9 @@ impl AppState {
             staged_journal: runtime.staged_journal,
             blocked_journals: runtime.blocked_journals,
             apply_worker: None,
+            plan_worker: None,
             close_pending: false,
+            confirmation_pending: false,
             startup_status: runtime.status,
             icon_cache: HashMap::new(),
         }
@@ -181,6 +186,7 @@ impl AppState {
             || self.staged_journal.is_some()
             || !self.blocked_journals.is_empty()
             || self.apply_worker.is_some()
+            || self.plan_worker.is_some()
     }
 
     const fn read_only_locked(&self) -> bool {
@@ -193,6 +199,21 @@ struct ApplyWorker {
     progress: Arc<WorkerProgress>,
     receiver: Receiver<ApplyWorkerResult>,
     handle: JoinHandle<()>,
+}
+
+struct PlanWorker {
+    cancellation: Arc<CancellationToken>,
+    receiver: Receiver<PlanWorkerResult>,
+    handle: JoinHandle<()>,
+}
+
+enum PlanWorkerResult {
+    Finished {
+        revision: ModelRevision,
+        plan: Result<RenamePlan, PlanError>,
+    },
+    Cancelled,
+    Panicked,
 }
 
 enum ApplyWorkerResult {
@@ -247,6 +268,18 @@ struct WorkerExecutionControl {
 
 struct CompletionWake {
     progress: Arc<WorkerProgress>,
+}
+
+struct PlanCompletionWake {
+    window: usize,
+}
+
+impl Drop for PlanCompletionWake {
+    fn drop(&mut self) {
+        // SAFETY: window is the integer form of the top-level HWND captured
+        // before spawning. The message carries no pointer payload.
+        unsafe { PostMessageW(self.window as HWND, WM_APP_PLAN_COMPLETE, 0, 0) };
+    }
 }
 
 impl Drop for CompletionWake {
@@ -719,9 +752,22 @@ unsafe extern "system" fn window_proc(
             handle_apply_completion(window, unsafe { &mut *state_ptr });
             0
         }
+        WM_APP_PLAN_COMPLETE if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is the live UI-thread AppState for this window.
+            handle_plan_completion(window, unsafe { &mut *state_ptr });
+            0
+        }
         WM_TIMER if !state_ptr.is_null() && wparam == APPLY_POLL_TIMER_ID => {
             // SAFETY: state_ptr is the live UI-thread AppState for this window.
             let state = unsafe { &mut *state_ptr };
+            if state
+                .plan_worker
+                .as_ref()
+                .is_some_and(|worker| worker.handle.is_finished())
+            {
+                handle_plan_completion(window, state);
+                return 0;
+            }
             handle_apply_progress(state);
             if state
                 .apply_worker
@@ -2223,8 +2269,16 @@ fn apply_changes(window: HWND, state: &mut AppState) {
     }
     let revision = state.revision();
     let request = build_plan_request(&state.model, revision);
-    let backend = WindowsRenameBackend;
-    let plan = match RenamePlanner::new(&backend).plan(request) {
+    start_plan_worker(window, state, revision, request);
+}
+
+fn handle_ready_plan(
+    window: HWND,
+    state: &mut AppState,
+    revision: ModelRevision,
+    plan: Result<RenamePlan, PlanError>,
+) {
+    let plan = match plan {
         Ok(plan) => plan,
         Err(error) => {
             let (message_text, rows) = plan_error_korean(&error);
@@ -2248,9 +2302,20 @@ fn apply_changes(window: HWND, state: &mut AppState) {
     );
     let prompt = wide(&confirmation);
     let caption = wide("DarkReNamer - 안전한 적용 확인");
+    state.mutation_locked = true;
+    state.confirmation_pending = true;
+    update_controls(state);
     // SAFETY: window is the live application HWND and prompt/caption are owned
     // NUL-terminated UTF-16 buffers retained through the modal MessageBoxW call.
-    if unsafe { MessageBoxW(window, prompt.as_ptr(), caption.as_ptr(), MB_OKCANCEL) } != IDOK {
+    let confirmed_by_user =
+        unsafe { MessageBoxW(window, prompt.as_ptr(), caption.as_ptr(), MB_OKCANCEL) } == IDOK;
+    state.mutation_locked = false;
+    state.confirmation_pending = false;
+    update_controls(state);
+    if state.close_pending {
+        return;
+    }
+    if !confirmed_by_user {
         return;
     }
     if state.revision() != revision {
@@ -2339,6 +2404,134 @@ fn handle_completed_execution(
         message(window, &text, "DarkReNamer");
         update_controls(state);
     }
+}
+
+fn start_plan_worker(
+    window: HWND,
+    state: &mut AppState,
+    revision: ModelRevision,
+    request: crate::rename::PlanRequest,
+) {
+    let cancellation = Arc::new(CancellationToken::new());
+    let worker_cancellation = Arc::clone(&cancellation);
+    let (sender, receiver) = sync_channel(1);
+    // SAFETY: window is the live top-level HWND and the timer has no callback.
+    if unsafe { SetTimer(window, APPLY_POLL_TIMER_ID, 100, None) } == 0 {
+        message(
+            window,
+            &format!(
+                "planning worker 완료 감시 timer를 시작하지 못했습니다: {}",
+                io::Error::last_os_error()
+            ),
+            "DarkReNamer - 실행 실패",
+        );
+        return;
+    }
+    let window_value = window as usize;
+    let handle = match thread::Builder::new()
+        .name("darkrenamer-plan".to_owned())
+        .spawn(move || {
+            let _completion_wake = PlanCompletionWake {
+                window: window_value,
+            };
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                if worker_cancellation.is_requested() {
+                    return PlanWorkerResult::Cancelled;
+                }
+                let backend = WindowsRenameBackend;
+                let plan = RenamePlanner::new(&backend).plan(request);
+                if worker_cancellation.is_requested() {
+                    PlanWorkerResult::Cancelled
+                } else {
+                    PlanWorkerResult::Finished { revision, plan }
+                }
+            }))
+            .unwrap_or(PlanWorkerResult::Panicked);
+            let _sent = sender.send(result);
+        }) {
+        Ok(handle) => handle,
+        Err(error) => {
+            // SAFETY: this exact timer was installed above for the live window.
+            unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
+            message(
+                window,
+                &format!("planning worker를 시작하지 못했습니다: {error}"),
+                "DarkReNamer - 실행 실패",
+            );
+            return;
+        }
+    };
+    state.mutation_locked = true;
+    state.plan_worker = Some(PlanWorker {
+        cancellation,
+        receiver,
+        handle,
+    });
+    set_status(
+        state.status,
+        "파일 시스템을 확인하고 실행 계획을 만들고 있습니다...",
+    );
+    update_controls(state);
+}
+
+fn handle_plan_completion(window: HWND, state: &mut AppState) {
+    let Some(worker) = state.plan_worker.as_ref() else {
+        return;
+    };
+    if !worker.handle.is_finished() {
+        return;
+    }
+    // SAFETY: this exact timer belongs to the live top-level window and the
+    // planning thread has reached its terminal state.
+    unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
+    let Some(worker) = state.plan_worker.take() else {
+        return;
+    };
+    let joined = worker.handle.join();
+    state.mutation_locked = false;
+    if state.close_pending {
+        // SAFETY: planning performs no mutation and the worker has joined.
+        unsafe { DestroyWindow(window) };
+        return;
+    }
+    if joined.is_err() {
+        message(
+            window,
+            "planning worker가 비정상 종료되었습니다. 파일 변경은 시작되지 않았습니다.",
+            "DarkReNamer - 계획 오류",
+        );
+        update_controls(state);
+        return;
+    }
+    match worker.receiver.try_recv() {
+        Ok(PlanWorkerResult::Finished { revision, plan }) => {
+            handle_ready_plan(window, state, revision, plan);
+            if state.close_pending {
+                // SAFETY: the confirmation callback has returned and no worker
+                // owns state, so deferred close can now destroy the window.
+                unsafe { DestroyWindow(window) };
+                return;
+            }
+        }
+        Ok(PlanWorkerResult::Cancelled) => {
+            set_status(state.status, "파일 변경 계획을 취소했습니다.");
+        }
+        Ok(PlanWorkerResult::Panicked) => {
+            message(
+                window,
+                "planning worker 내부 오류가 발생했습니다. 파일 변경은 시작되지 않았습니다.",
+                "DarkReNamer - 계획 오류",
+            );
+        }
+        Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
+            message(
+                window,
+                "planning worker가 결과를 전달하지 못했습니다. 파일 변경은 시작되지 않았습니다.",
+                "DarkReNamer - 계획 결과 없음",
+            );
+        }
+    }
+    update_controls(state);
 }
 
 fn start_apply_worker(window: HWND, state: &mut AppState, confirmed: crate::rename::ConfirmedPlan) {
@@ -2522,6 +2715,13 @@ fn finish_apply_after_message_loop_failure(window: HWND) {
     // SAFETY: the message loop has failed on this same UI thread, so this is
     // the sole mutable access to the still-live AppState.
     let state = unsafe { &mut *state_ptr };
+    if let Some(worker) = state.plan_worker.take() {
+        worker.cancellation.request();
+        // SAFETY: this exact timer belongs to the still-live top-level window.
+        unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
+        let _joined = worker.handle.join();
+        state.mutation_locked = false;
+    }
     let Some(worker) = state.apply_worker.take() else {
         return;
     };
@@ -2535,6 +2735,22 @@ fn finish_apply_after_message_loop_failure(window: HWND) {
 }
 
 fn request_window_close(window: HWND, state: &mut AppState) {
+    if state.confirmation_pending {
+        state.close_pending = true;
+        return;
+    }
+    if let Some(worker) = state.plan_worker.as_ref() {
+        if !state.close_pending {
+            state.close_pending = true;
+            worker.cancellation.request();
+            set_status(
+                state.status,
+                "종료 요청을 받았습니다. 파일 시스템 확인이 끝나는 즉시 종료합니다...",
+            );
+            update_controls(state);
+        }
+        return;
+    }
     if let Some(worker) = state.apply_worker.as_ref() {
         if !state.close_pending {
             state.close_pending = true;
@@ -3397,6 +3613,7 @@ mod tests {
         assert_send::<FileJournal>();
         assert_send::<crate::rename::ConfirmedPlan>();
         assert_send::<ApplyWorkerResult>();
+        assert_send::<PlanWorkerResult>();
     }
 
     struct CrashBackend {
