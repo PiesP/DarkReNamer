@@ -18,6 +18,29 @@ pub(super) fn run() -> io::Result<()> {
     run_unsafe()
 }
 
+fn minimum_track_width(window: HWND, state: &AppState) -> i32 {
+    // SAFETY: both structures are C-compatible integer rectangles with valid
+    // all-zero initial states for the two synchronous geometry queries.
+    let mut outer: RECT = unsafe { zeroed() };
+    // SAFETY: see above.
+    let mut client: RECT = unsafe { zeroed() };
+    // SAFETY: window is the live top-level HWND and outer remains writable for
+    // the duration of this synchronous query.
+    let got_outer = unsafe { GetWindowRect(window, &mut outer) } != 0;
+    // SAFETY: window is the live top-level HWND and client remains writable for
+    // the duration of this synchronous query.
+    let got_client = unsafe { GetClientRect(window, &mut client) } != 0;
+    let nonclient_width = if got_outer && got_client {
+        ((outer.right - outer.left) - (client.right - client.left)).max(0)
+    } else {
+        0
+    };
+    scale_dip(INITIAL_WIDTH, state.dpi).max(
+        scale_dip(minimum_content_width_dip(state.high_contrast), state.dpi)
+            .saturating_add(nonclient_width),
+    )
+}
+
 fn run_unsafe() -> io::Result<()> {
     if process_is_elevated()? {
         return Err(io::Error::new(
@@ -171,13 +194,19 @@ unsafe extern "system" fn window_proc(
             arrange(window, unsafe { &*state_ptr });
             0
         }
+        WM_SETFOCUS if !state_ptr.is_null() => {
+            // SAFETY: list_window is the live focusable ListView child owned by
+            // this top-level window on the current UI thread.
+            unsafe { SetFocus((*state_ptr).list_window) };
+            0
+        }
         WM_GETMINMAXINFO if !state_ptr.is_null() => {
             let info = lparam as *mut MINMAXINFO;
             if !info.is_null() {
                 // SAFETY: WM_GETMINMAXINFO supplies writable MINMAXINFO storage
                 // for this callback and state_ptr is the live AppState.
                 unsafe {
-                    (*info).ptMinTrackSize.x = scale_dip(INITIAL_WIDTH, (*state_ptr).dpi);
+                    (*info).ptMinTrackSize.x = minimum_track_width(window, &*state_ptr);
                     (*info).ptMinTrackSize.y = scale_dip(INITIAL_HEIGHT, (*state_ptr).dpi);
                 }
             }
@@ -209,6 +238,7 @@ unsafe extern "system" fn window_proc(
             }
             update_dpi_metrics(state);
             refresh_system_fonts(state);
+            refresh_toolbars(window, state, true);
             arrange(window, state);
             0
         }
@@ -218,7 +248,7 @@ unsafe extern "system" fn window_proc(
             // SAFETY: state_ptr is the live UI-thread AppState.
             let state = unsafe { &mut *state_ptr };
             refresh_system_fonts(state);
-            refresh_high_contrast_toolbars(window, state);
+            refresh_toolbars(window, state, false);
             arrange(window, state);
             0
         }
@@ -373,6 +403,22 @@ unsafe extern "system" fn window_proc(
                     // SAFETY: the non-null AppState-owned font is deleted once
                     // at the window's single WM_NCDESTROY teardown point.
                     unsafe { DeleteObject((*state_ptr).status_font) };
+                }
+                // Child toolbars are destroyed before their parent reaches
+                // WM_NCDESTROY, so neither image list is still referenced.
+                // SAFETY: state_ptr is the non-null AppState retained in this
+                // window's user data until the final Box::from_raw below.
+                if unsafe { (*state_ptr).left_toolbar_images } != 0 {
+                    // SAFETY: the left toolbar child no longer exists and this
+                    // AppState-owned image list is destroyed exactly once.
+                    unsafe { ImageList_Destroy((*state_ptr).left_toolbar_images) };
+                }
+                // SAFETY: state_ptr is the non-null AppState retained in this
+                // window's user data until the final Box::from_raw below.
+                if unsafe { (*state_ptr).right_toolbar_images } != 0 {
+                    // SAFETY: the right toolbar child no longer exists and this
+                    // AppState-owned image list is destroyed exactly once.
+                    unsafe { ImageList_Destroy((*state_ptr).right_toolbar_images) };
                 }
                 // SAFETY: state_ptr is the non-null Box::into_raw AppState stored at WM_NCCREATE; WM_NCDESTROY is its single reclamation point.
                 unsafe { drop(Box::from_raw(state_ptr)) };

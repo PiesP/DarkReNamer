@@ -27,6 +27,37 @@ pub const TOOLBAR_SEPARATOR_SIZE: i32 = 8;
 pub const STATUS_HEIGHT: i32 = 18;
 /// Design coordinate density used by the original Win32 layout.
 pub const BASE_DPI: u32 = 96;
+#[cfg(any(windows, test))]
+pub(crate) const NAME_COLUMN_MINIMUM: i32 = 120;
+#[cfg(any(windows, test))]
+pub(crate) const LOCATION_COLUMN_MINIMUM: i32 = 80;
+#[cfg(any(windows, test))]
+pub(crate) const EMPTY_LIST_STATUS: &str = "파일이나 폴더를 끌어 놓거나 Ctrl+O로 추가하세요.";
+#[cfg(any(windows, test))]
+pub(crate) const VERSION_MENU_LABEL: &str = "버전(&H)";
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn toolbar_width_dip(high_contrast: bool) -> i32 {
+    if high_contrast { 120 } else { TOOLBAR_WIDTH }
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ToolbarImageGeometry {
+    pub(crate) cell_width: i32,
+    pub(crate) cell_height: i32,
+    pub(crate) strip_width: i32,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ToolbarRect {
+    pub(crate) left: i32,
+    pub(crate) top: i32,
+    pub(crate) right: i32,
+    pub(crate) bottom: i32,
+}
 
 /// Scales one 96-DPI logical coordinate with nearest-integer rounding.
 #[must_use]
@@ -44,6 +75,65 @@ pub const fn scale_dip(value: i32, dpi: u32) -> i32 {
     } else {
         scaled as i32
     }
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn toolbar_image_geometry(
+    source_count: usize,
+    dpi: u32,
+) -> Option<ToolbarImageGeometry> {
+    let source_count = i32::try_from(source_count).ok()?;
+    let cell_width = scale_dip(TOOLBAR_BITMAP_WIDTH, dpi);
+    let cell_height = scale_dip(TOOLBAR_BITMAP_HEIGHT, dpi);
+    let strip_width = cell_width.checked_mul(source_count)?;
+    (source_count > 0 && cell_width > 0 && cell_height > 0).then_some(ToolbarImageGeometry {
+        cell_width,
+        cell_height,
+        strip_width,
+    })
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn toolbar_image_index(tools: &[ToolSpec], command: CommandId) -> Option<i32> {
+    tools
+        .iter()
+        .position(|tool| tool.id == command)
+        .and_then(|index| i32::try_from(index).ok())
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn toolbar_rects_are_vertical(rects: &[ToolbarRect], rail_width: i32) -> bool {
+    rail_width > 0
+        && rects.iter().all(|rect| {
+            rect.left >= 0
+                && rect.right <= rail_width
+                && rect.left < rect.right
+                && rect.top >= 0
+                && rect.top < rect.bottom
+        })
+        && rects.windows(2).all(|pair| pair[0].bottom <= pair[1].top)
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn adaptive_primary_column_widths(available: i32, dpi: u32) -> [i32; 3] {
+    let available = available.max(0);
+    let location_minimum = scale_dip(LOCATION_COLUMN_MINIMUM, dpi).min(available);
+    let names_available = available - location_minimum;
+    let preferred_name = scale_dip(COLUMNS[0].default_width, dpi);
+    let current = preferred_name.min((names_available + 1) / 2);
+    let proposed = preferred_name.min(names_available - current);
+    let location = available - current - proposed;
+    [current, proposed, location]
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn minimum_content_width_dip(high_contrast: bool) -> i32 {
+    toolbar_width_dip(high_contrast) * 2 + NAME_COLUMN_MINIMUM * 2 + LOCATION_COLUMN_MINIMUM
 }
 /// Public product name used by the executable and user-facing diagnostics.
 pub const PRODUCT_NAME: &str = "DarkReNamer";
@@ -106,15 +196,15 @@ pub struct ColumnSpec {
 
 pub const COLUMNS: [ColumnSpec; 7] = [
     ColumnSpec {
-        label: "현재이름",
+        label: "현재 이름",
         default_width: 150,
     },
     ColumnSpec {
-        label: "바꿀이름",
+        label: "변경할 이름",
         default_width: 150,
     },
     ColumnSpec {
-        label: "파일위치",
+        label: "파일 위치",
         default_width: 100,
     },
     ColumnSpec {
@@ -251,7 +341,7 @@ pub const LEFT_TOOLBAR_ITEMS: [ToolbarItem; 13] = [
     ToolbarItem::Command(SEQUENCE),
 ];
 
-pub const RIGHT_TOOLBAR_ITEMS: [ToolbarItem; 13] = [
+pub const RIGHT_TOOLBAR_ITEMS: [ToolbarItem; 12] = [
     ToolbarItem::Command(RESET),
     ToolbarItem::Separator,
     ToolbarItem::Command(CLEAR_LIST),
@@ -260,7 +350,6 @@ pub const RIGHT_TOOLBAR_ITEMS: [ToolbarItem; 13] = [
     ToolbarItem::Separator,
     ToolbarItem::Command(PARENT_PREFIX),
     ToolbarItem::Command(PARENT_SUFFIX),
-    ToolbarItem::Command(UNIFY_PATH),
     ToolbarItem::Separator,
     ToolbarItem::Command(EXT_DELETE),
     ToolbarItem::Command(EXT_ADD),
@@ -377,6 +466,116 @@ mod tests {
     }
 
     #[test]
+    fn toolbar_strip_geometry_scales_every_source_cell() {
+        assert_eq!(
+            [96, 120, 144, 192].map(|dpi| toolbar_image_geometry(10, dpi)),
+            [
+                Some(ToolbarImageGeometry {
+                    cell_width: 38,
+                    cell_height: 24,
+                    strip_width: 380,
+                }),
+                Some(ToolbarImageGeometry {
+                    cell_width: 48,
+                    cell_height: 30,
+                    strip_width: 480,
+                }),
+                Some(ToolbarImageGeometry {
+                    cell_width: 57,
+                    cell_height: 36,
+                    strip_width: 570,
+                }),
+                Some(ToolbarImageGeometry {
+                    cell_width: 76,
+                    cell_height: 48,
+                    strip_width: 760,
+                }),
+            ]
+        );
+        assert_eq!(toolbar_image_geometry(0, 192), None);
+    }
+
+    #[test]
+    fn toolbar_image_indices_follow_the_source_strip_when_a_command_is_hidden() {
+        assert!(!RIGHT_TOOLBAR_ITEMS.contains(&ToolbarItem::Command(UNIFY_PATH)));
+        assert_eq!(toolbar_image_index(&RIGHT_TOOLS, UNIFY_PATH), Some(6));
+        assert_eq!(toolbar_image_index(&RIGHT_TOOLS, EXT_DELETE), Some(7));
+        assert_eq!(toolbar_image_index(&RIGHT_TOOLS, EXT_ADD), Some(8));
+        assert_eq!(toolbar_image_index(&RIGHT_TOOLS, EXT_REPLACE), Some(9));
+    }
+
+    #[test]
+    fn toolbar_rect_validation_rejects_overlap_and_cross_rail_layout() {
+        let valid = [
+            ToolbarRect {
+                left: 0,
+                top: 0,
+                right: 44,
+                bottom: 30,
+            },
+            ToolbarRect {
+                left: 0,
+                top: 38,
+                right: 44,
+                bottom: 68,
+            },
+        ];
+        assert!(toolbar_rects_are_vertical(&valid, 44));
+
+        let mut overlap = valid;
+        overlap[1].top = 29;
+        assert!(!toolbar_rects_are_vertical(&overlap, 44));
+
+        let mut cross_rail = valid;
+        cross_rail[1].right = 45;
+        assert!(!toolbar_rects_are_vertical(&cross_rail, 44));
+    }
+
+    #[test]
+    fn adaptive_primary_columns_fit_normal_and_high_contrast_minimums() {
+        assert_eq!(minimum_content_width_dip(false), 408);
+        assert_eq!(minimum_content_width_dip(true), 560);
+        assert_eq!(
+            minimum_content_width_dip(true),
+            toolbar_width_dip(true) * 2 + NAME_COLUMN_MINIMUM * 2 + LOCATION_COLUMN_MINIMUM
+        );
+
+        for (dpi, available, expected) in [
+            (96, 320, [120, 120, 80]),
+            (96, 360, [140, 140, 80]),
+            (96, 400, [150, 150, 100]),
+            (120, 400, [150, 150, 100]),
+            (144, 480, [180, 180, 120]),
+            (192, 640, [240, 240, 160]),
+        ] {
+            let widths = adaptive_primary_column_widths(available, dpi);
+            assert_eq!(widths, expected);
+            assert_eq!(widths.iter().sum::<i32>(), available);
+        }
+    }
+
+    #[test]
+    fn native_empty_state_and_menu_copy_are_exact() {
+        assert_eq!(
+            EMPTY_LIST_STATUS,
+            "파일이나 폴더를 끌어 놓거나 Ctrl+O로 추가하세요."
+        );
+        assert_eq!(VERSION_MENU_LABEL, "버전(&H)");
+        assert_eq!(
+            COLUMNS.map(|column| column.label),
+            [
+                "현재 이름",
+                "변경할 이름",
+                "파일 위치",
+                "전체경로",
+                "파일크기",
+                "변경시각",
+                "생성시각",
+            ]
+        );
+    }
+
+    #[test]
     fn layout_columns_and_toolbar_order_match_resources() {
         assert_eq!(
             (
@@ -454,7 +653,6 @@ mod tests {
                 ToolbarItem::Separator,
                 ToolbarItem::Command(PARENT_PREFIX),
                 ToolbarItem::Command(PARENT_SUFFIX),
-                ToolbarItem::Command(UNIFY_PATH),
                 ToolbarItem::Separator,
                 ToolbarItem::Command(EXT_DELETE),
                 ToolbarItem::Command(EXT_ADD),
