@@ -338,12 +338,12 @@ impl CaseSensitiveFixtureGuard {
         }
     }
 
-    fn restore(&mut self) -> std::io::Result<()> {
+    fn cleanup(&mut self) -> std::io::Result<()> {
         let Some(path) = self.path.as_deref() else {
             return Ok(());
         };
         empty_directory(path)?;
-        set_directory_case_sensitive(path, false)?;
+        fs::remove_dir(path)?;
         self.path = None;
         Ok(())
     }
@@ -353,7 +353,7 @@ impl Drop for CaseSensitiveFixtureGuard {
     fn drop(&mut self) {
         if let Some(path) = self.path.as_deref() {
             let _ = empty_directory(path);
-            let _ = set_directory_case_sensitive(path, false);
+            let _ = fs::remove_dir(path);
         }
     }
 }
@@ -376,7 +376,9 @@ fn case_sensitive_parent_is_explicitly_unsupported_when_platform_allows_fixture(
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let parent = directory.path().join("case-sensitive");
+    let unrelated = directory.path().join("unrelated.txt");
     fs::create_dir(&parent)?;
+    fs::write(&unrelated, b"keep")?;
     let source = parent.join("a.txt");
     fs::write(&source, b"a")?;
     if let Err(error) = set_directory_case_sensitive(&parent, true) {
@@ -397,7 +399,11 @@ fn case_sensitive_parent_is_explicitly_unsupported_when_platform_allows_fixture(
     );
     let plan_error = RenamePlanner::new(&backend).plan(request).err();
     let root_error = JournalRoot::open(&parent).err();
-    fixture.restore()?;
+    fixture.cleanup()?;
+
+    assert!(!parent.exists());
+    assert_eq!(fs::read(&unrelated)?, b"keep");
+    assert!(directory.path().is_dir());
 
     assert_eq!(environment_error.map(|error| error.code), Some(50));
     assert!(plan_error.is_some_and(|error| {
