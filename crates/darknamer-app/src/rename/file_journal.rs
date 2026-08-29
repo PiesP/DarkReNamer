@@ -1,8 +1,9 @@
 //! Durable file journal and strict portable codec.
 //!
-//! On Windows, open operations retain one exclusive, final-component
-//! no-follow handle. Other hosts provide codec and retained-handle validation
-//! only; their ordinary file open is not a production confinement claim.
+//! On Windows, the root is retained without delete sharing and journal files use
+//! exclusive final-component no-follow handles. Other hosts provide codec and
+//! retained-handle validation only; their ordinary file open is not a production
+//! confinement claim.
 
 use std::fmt;
 use std::fs::File;
@@ -189,9 +190,10 @@ impl From<JournalCodecError> for FileJournalError {
 
 /// Retained authority for one validated absolute journal directory.
 ///
-/// Windows retains an exclusive, component-traversed, non-reparse directory
-/// handle and creates or opens each validated journal leaf relative to it with
-/// `NtCreateFile`. Safe v1 rejects UNC/SMB and device-namespace roots.
+/// Windows retains a component-traversed, non-reparse directory handle with
+/// read/write sharing but no delete sharing, then creates or opens each validated
+/// journal leaf relative to it with an exclusive `NtCreateFile`. Safe v1 rejects
+/// UNC/SMB and device-namespace roots.
 #[derive(Debug)]
 pub struct JournalRoot {
     path: PathBuf,
@@ -1089,7 +1091,8 @@ fn reject_final_link(path: &Path) -> Result<(), FileJournalError> {
 
 #[cfg(windows)]
 fn open_root(path: &Path) -> io::Result<File> {
-    super::windows_native::NativeParent::open_path_exclusive(path).map(|parent| parent.into_file())
+    super::windows_native::NativeParent::open_path_without_delete_share(path)
+        .map(|parent| parent.into_file())
 }
 
 #[cfg(not(windows))]

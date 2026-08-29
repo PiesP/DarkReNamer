@@ -327,6 +327,50 @@ fn set_directory_case_sensitive(path: &std::path::Path, enabled: bool) -> std::i
     }
 }
 
+struct CaseSensitiveFixtureGuard {
+    path: Option<std::path::PathBuf>,
+}
+
+impl CaseSensitiveFixtureGuard {
+    fn new(path: &std::path::Path) -> Self {
+        Self {
+            path: Some(path.to_path_buf()),
+        }
+    }
+
+    fn restore(&mut self) -> std::io::Result<()> {
+        let Some(path) = self.path.as_deref() else {
+            return Ok(());
+        };
+        empty_directory(path)?;
+        set_directory_case_sensitive(path, false)?;
+        self.path = None;
+        Ok(())
+    }
+}
+
+impl Drop for CaseSensitiveFixtureGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.as_deref() {
+            let _ = empty_directory(path);
+            let _ = set_directory_case_sensitive(path, false);
+        }
+    }
+}
+
+fn empty_directory(path: &std::path::Path) -> std::io::Result<()> {
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            fs::remove_dir_all(entry.path())?;
+        } else {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn case_sensitive_parent_is_explicitly_unsupported_when_platform_allows_fixture()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -341,6 +385,7 @@ fn case_sensitive_parent_is_explicitly_unsupported_when_platform_allows_fixture(
         }
         return Err(error.into());
     }
+    let mut fixture = CaseSensitiveFixtureGuard::new(&parent);
 
     let backend = WindowsRenameBackend;
     let environment_error = backend
@@ -352,8 +397,7 @@ fn case_sensitive_parent_is_explicitly_unsupported_when_platform_allows_fixture(
     );
     let plan_error = RenamePlanner::new(&backend).plan(request).err();
     let root_error = JournalRoot::open(&parent).err();
-    let restore = set_directory_case_sensitive(&parent, false);
-    restore?;
+    fixture.restore()?;
 
     assert_eq!(environment_error.map(|error| error.code), Some(50));
     assert!(plan_error.is_some_and(|error| {
@@ -454,12 +498,22 @@ fn planner_file_journal_backend_and_model_complete_one_production_path()
     assert!(model.append(LegacyListItem::new(legacy_path(&source), false, 7, 8, 9,)));
     assert!(model.manual_change(0, "after.txt"));
     let mut backend = WindowsRenameBackend;
+    let root = JournalRoot::open(directory.path())?;
+    let substituted_root = directory.path().with_extension("substituted-root");
+    if fs::rename(directory.path(), &substituted_root).is_ok() {
+        let _ = fs::rename(&substituted_root, directory.path());
+        return Err(std::io::Error::other("retained journal root was substituted").into());
+    }
+    let active_path = directory.path().join("active.drj");
+    let mut journal = FileJournal::create_new(&root, "active.drj")?;
+    assert!(
+        fs::rename(&active_path, directory.path().join("substituted.drj")).is_err(),
+        "exclusive journal child was substituted"
+    );
     let plan =
         RenamePlanner::new(&backend).plan(build_plan_request(&model, ModelRevision::new(1)))?;
     let id = plan.id();
     let revision = plan.revision();
-    let root = JournalRoot::open(directory.path())?;
-    let mut journal = FileJournal::create_new(&root, "active.drj")?;
 
     let report = RenameExecutor::new(&mut backend, &mut journal)
         .execute(plan.confirm_presented(id, revision)?)?;

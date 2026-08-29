@@ -37,6 +37,7 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 use windows_sys::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOVABLE};
 
 const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+const SHARE_READ_WRITE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct NativeIdentity {
@@ -65,8 +66,8 @@ impl NativeParent {
         Self::open_path_with_final_share(path, SHARE_ALL)
     }
 
-    pub(crate) fn open_path_exclusive(path: &Path) -> io::Result<Self> {
-        Self::open_path_with_final_share(path, 0)
+    pub(crate) fn open_path_without_delete_share(path: &Path) -> io::Result<Self> {
+        Self::open_path_with_final_share(path, SHARE_READ_WRITE)
     }
 
     fn open_path_with_final_share(path: &Path, final_share: u32) -> io::Result<Self> {
