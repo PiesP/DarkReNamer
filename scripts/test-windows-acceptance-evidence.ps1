@@ -83,6 +83,22 @@ function Assert-ValidatorFails {
     throw "Expected '$Name' to fail with '$ExpectedFragment', but validation succeeded."
 }
 
+function Assert-SchemaRejects {
+    param(
+        [Parameter(Mandatory)]
+        [object] $Evidence,
+        [Parameter(Mandatory)]
+        [string] $Name
+    )
+
+    $path = Join-Path $script:testRoot "$Name.json"
+    Write-Evidence -Evidence $Evidence -Path $path
+    $json = Get-Content -LiteralPath $path -Raw
+    if ($json | Test-Json -SchemaFile $script:schema -ErrorAction SilentlyContinue) {
+        throw "Expected JSON Schema to reject '$Name', but schema validation succeeded."
+    }
+}
+
 function Assert-EvidencePathspec {
     param(
         [Parameter(Mandatory)]
@@ -251,6 +267,22 @@ try {
 
     $complete = New-CompleteEvidence
     Assert-ValidatorPasses -Evidence $complete -Name 'valid-complete'
+
+    $uiStatusMismatch = Copy-Evidence $complete
+    $uiStatusMismatch.ui_matrix[0].observation_code = 'layout-defect'
+    Assert-SchemaRejects -Evidence $uiStatusMismatch -Name 'schema-ui-status-code-mismatch'
+
+    $scenarioStatusMismatch = Copy-Evidence $complete
+    $scenarioStatusMismatch.scenarios[0].observation_code = 'interaction-defect'
+    Assert-SchemaRejects `
+        -Evidence $scenarioStatusMismatch `
+        -Name 'schema-scenario-status-code-mismatch'
+
+    $durabilityStatusMismatch = Copy-Evidence $complete
+    $durabilityStatusMismatch.durability_trials[0].observation_code = 'recovery-defect'
+    Assert-SchemaRejects `
+        -Evidence $durabilityStatusMismatch `
+        -Name 'schema-durability-status-code-mismatch'
 
     $localBuild = Copy-Evidence $complete
     $localBuild.artifact.origin = 'local-build'

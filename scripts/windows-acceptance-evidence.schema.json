@@ -160,6 +160,28 @@
       "allOf": [
         {
           "$ref": "#/$defs/notRunReference"
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "status": { "const": "pass" },
+                "observation_code": { "const": "layout-verified" }
+              }
+            },
+            {
+              "properties": {
+                "status": { "const": "fail" },
+                "observation_code": { "const": "layout-defect" }
+              }
+            },
+            {
+              "properties": {
+                "status": { "const": "not-run" },
+                "observation_code": { "const": "not-executed" }
+              }
+            }
+          ]
         }
       ]
     },
@@ -202,6 +224,28 @@
       "allOf": [
         {
           "$ref": "#/$defs/notRunReference"
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "status": { "const": "pass" },
+                "observation_code": { "const": "interaction-verified" }
+              }
+            },
+            {
+              "properties": {
+                "status": { "const": "fail" },
+                "observation_code": { "const": "interaction-defect" }
+              }
+            },
+            {
+              "properties": {
+                "status": { "const": "not-run" },
+                "observation_code": { "const": "not-executed" }
+              }
+            }
+          ]
         },
         {
           "if": {
@@ -313,6 +357,28 @@
       "allOf": [
         {
           "$ref": "#/$defs/notRunReference"
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "status": { "const": "pass" },
+                "observation_code": { "const": "recovery-verified" }
+              }
+            },
+            {
+              "properties": {
+                "status": { "const": "fail" },
+                "observation_code": { "const": "recovery-defect" }
+              }
+            },
+            {
+              "properties": {
+                "status": { "const": "not-run" },
+                "observation_code": { "const": "not-executed" }
+              }
+            }
+          ]
         },
         {
           "if": {
