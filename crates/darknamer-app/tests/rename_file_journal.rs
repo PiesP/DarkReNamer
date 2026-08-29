@@ -357,10 +357,15 @@ fn candidate_intent_is_durable_before_no_replace_active_promotion()
     assert_eq!(journal.path(), active_path);
     assert!(!candidate_path.exists());
     assert!(active_path.exists());
+    let expected_records = journal.records().to_vec();
+    drop(journal);
+
     assert_eq!(
-        decode_journal_records(&fs::read(active_path)?)?,
-        journal.records()
+        decode_journal_records(&fs::read(&active_path)?)?,
+        expected_records
     );
+    let resumed = FileJournal::open_existing(&root, "active.drj")?;
+    assert_eq!(resumed.records(), expected_records);
     Ok(())
 }
 
