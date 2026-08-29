@@ -1,0 +1,395 @@
+use std::cell::Cell;
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
+use std::io::Cursor;
+use std::path::{Path, PathBuf};
+
+use darknamer_app::admission::{
+    AdmissionAdapter, AdmissionAdapterError, AdmissionChildren, AdmissionIssueKind,
+    AdmissionMetadata, AdmissionMode, AdmissionOperation, MAX_ADMISSION_DEPTH,
+    MAX_ADMITTED_SOURCES, MAX_IMPORT_BYTES, bounded_import_lines, bounded_selection,
+    collect_admission, read_bounded_import,
+};
+use darknamer_app::rename::EntryIdentity;
+use darknamer_core::LegacyText;
+
+#[derive(Default)]
+struct FakeAdapter {
+    metadata: BTreeMap<PathBuf, AdmissionMetadata>,
+    children: BTreeMap<PathBuf, Vec<PathBuf>>,
+    rejected: BTreeMap<PathBuf, AdmissionAdapterError>,
+    metadata_calls: Cell<usize>,
+    enumeration_calls: Cell<usize>,
+}
+
+impl AdmissionAdapter for FakeAdapter {
+    fn validate_path(&self, path: &Path) -> Result<(), AdmissionAdapterError> {
+        self.rejected.get(path).copied().map_or(Ok(()), Err)
+    }
+
+    fn metadata(&self, path: &Path) -> Result<AdmissionMetadata, AdmissionAdapterError> {
+        self.metadata_calls.set(self.metadata_calls.get() + 1);
+        self.metadata
+            .get(path)
+            .copied()
+            .ok_or(AdmissionAdapterError::new(AdmissionOperation::Metadata))
+    }
+
+    fn read_children(
+        &self,
+        path: &Path,
+        limit: usize,
+    ) -> Result<AdmissionChildren, AdmissionAdapterError> {
+        self.enumeration_calls.set(self.enumeration_calls.get() + 1);
+        let children = self.children.get(path).ok_or(AdmissionAdapterError::new(
+            AdmissionOperation::ReadDirectory,
+        ))?;
+        Ok(AdmissionChildren {
+            paths: children.iter().take(limit).cloned().collect(),
+            had_errors: false,
+            truncated: children.len() > limit,
+        })
+    }
+
+    fn legacy_path(&self, path: &Path) -> LegacyText {
+        LegacyText::from(path.to_string_lossy().into_owned())
+    }
+}
+
+fn file() -> AdmissionMetadata {
+    AdmissionMetadata {
+        is_directory: false,
+        is_reparse_point: false,
+        directory_identity: None,
+        actual_size: 7,
+        created: 8,
+        modified: 9,
+    }
+}
+
+fn directory(id: u128) -> AdmissionMetadata {
+    AdmissionMetadata {
+        is_directory: true,
+        is_reparse_point: false,
+        directory_identity: Some(EntryIdentity::new(1, id)),
+        actual_size: 0,
+        created: 1,
+        modified: 2,
+    }
+}
+
+fn compare(left: &Path, right: &Path) -> Ordering {
+    left.cmp(right)
+}
+
+fn test_root() -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from("C:\\admission-test")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/admission-test")
+    }
+}
+
+#[test]
+fn iterative_recurse_is_deterministic_and_skips_reparse_and_repeated_directories() {
+    let root = test_root();
+    let a = root.join("a.txt");
+    let nested = root.join("nested");
+    let z = root.join("z.txt");
+    let loop_dir = nested.join("loop");
+    let reparse = root.join("reparse");
+    let mut adapter = FakeAdapter::default();
+    adapter.metadata.insert(root.clone(), directory(1));
+    adapter.metadata.insert(a.clone(), file());
+    adapter.metadata.insert(nested.clone(), directory(2));
+    adapter.metadata.insert(z.clone(), file());
+    adapter.metadata.insert(loop_dir.clone(), directory(1));
+    adapter.metadata.insert(
+        reparse.clone(),
+        AdmissionMetadata {
+            is_reparse_point: true,
+            ..directory(3)
+        },
+    );
+    adapter.children.insert(
+        root.clone(),
+        vec![z.clone(), reparse.clone(), nested.clone(), a.clone()],
+    );
+    adapter.children.insert(nested, vec![loop_dir]);
+
+    let report = collect_admission(
+        &adapter,
+        vec![root],
+        AdmissionMode::Recurse,
+        MAX_ADMITTED_SOURCES,
+        compare,
+    );
+
+    let paths = report
+        .items
+        .iter()
+        .map(|item| item.source_path().to_string_lossy())
+        .collect::<Vec<_>>();
+    assert_eq!(paths, vec![a.to_string_lossy(), z.to_string_lossy()]);
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.kind == AdmissionIssueKind::ReparsePoint)
+    );
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.kind == AdmissionIssueKind::RepeatedDirectory)
+    );
+}
+
+#[test]
+fn hard_limit_stops_before_inspecting_additional_metadata() {
+    let mut adapter = FakeAdapter::default();
+    let root = test_root();
+    let roots = (0..=MAX_ADMITTED_SOURCES)
+        .map(|index| root.join(format!("file-{index:05}")))
+        .collect::<Vec<_>>();
+    for path in &roots {
+        adapter.metadata.insert(path.clone(), file());
+    }
+
+    let report = collect_admission(
+        &adapter,
+        roots,
+        AdmissionMode::Direct,
+        MAX_ADMITTED_SOURCES,
+        compare,
+    );
+
+    assert_eq!(report.items.len(), MAX_ADMITTED_SOURCES);
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.kind == AdmissionIssueKind::LimitReached)
+    );
+}
+
+#[test]
+fn relative_path_is_reported_without_metadata_access() {
+    let report = collect_admission(
+        &FakeAdapter::default(),
+        vec![PathBuf::from("relative.txt")],
+        AdmissionMode::Direct,
+        MAX_ADMITTED_SOURCES,
+        compare,
+    );
+    assert!(report.items.is_empty());
+    assert_eq!(report.issues[0].kind, AdmissionIssueKind::RelativePath);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_reparse_loop_is_not_followed_and_missing_metadata_is_reported()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::symlink_dir;
+
+    use darknamer_app::admission::WindowsAdmissionAdapter;
+    use darknamer_app::rename::{RenameBackend, WindowsRenameBackend};
+
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().join("root");
+    fs::create_dir(&root)?;
+    fs::write(root.join("file.txt"), b"file")?;
+    let probe = LegacyText::from_units(
+        root.join("file.txt")
+            .as_os_str()
+            .encode_wide()
+            .collect::<Vec<_>>(),
+    );
+    if let Err(error) = WindowsRenameBackend.validate_path_environment(&probe)
+        && matches!(error.code, 87 | 120)
+    {
+        return Ok(());
+    }
+    let loop_path = root.join("loop");
+    let symlink_available = match symlink_dir(&root, &loop_path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => false,
+        Err(error) => return Err(error.into()),
+    };
+    let missing = directory.path().join("missing.txt");
+
+    let adapter = WindowsAdmissionAdapter::new();
+    let report = collect_admission(
+        &adapter,
+        vec![root, missing],
+        AdmissionMode::Recurse,
+        MAX_ADMITTED_SOURCES,
+        compare,
+    );
+
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.kind == AdmissionIssueKind::Metadata)
+    );
+    if symlink_available {
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.kind == AdmissionIssueKind::ReparsePoint)
+        );
+    }
+    assert_eq!(report.items.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn rejected_safe_gate_performs_zero_metadata_or_enumeration_calls() {
+    let rejected = test_root().join("unsupported");
+    let mut adapter = FakeAdapter::default();
+    adapter.rejected.insert(
+        rejected.clone(),
+        AdmissionAdapterError {
+            operation: AdmissionOperation::Validation,
+            code: Some(53),
+        },
+    );
+    adapter.metadata.insert(rejected.clone(), directory(1));
+    adapter.children.insert(rejected.clone(), Vec::new());
+
+    let report = collect_admission(
+        &adapter,
+        vec![rejected],
+        AdmissionMode::Recurse,
+        MAX_ADMITTED_SOURCES,
+        compare,
+    );
+
+    assert!(report.items.is_empty());
+    assert_eq!(adapter.metadata_calls.get(), 0);
+    assert_eq!(adapter.enumeration_calls.get(), 0);
+    assert_eq!(
+        report.issues[0].operation,
+        Some(AdmissionOperation::Validation)
+    );
+    assert_eq!(report.issues[0].code, Some(53));
+    assert!(report.summary_korean(0).contains("Validation:53"));
+}
+
+#[test]
+fn directory_iterator_receives_only_remaining_budget_and_stops() {
+    let root = test_root();
+    let mut adapter = FakeAdapter::default();
+    adapter.metadata.insert(root.clone(), directory(1));
+    let children = (0..10)
+        .map(|index| root.join(format!("child-{index}")))
+        .collect::<Vec<_>>();
+    for child in &children {
+        adapter.metadata.insert(child.clone(), file());
+    }
+    adapter.children.insert(root.clone(), children);
+
+    let report = collect_admission(&adapter, vec![root], AdmissionMode::Recurse, 3, compare);
+
+    assert_eq!(report.items.len(), 2);
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.kind == AdmissionIssueKind::LimitReached)
+    );
+    assert_eq!(adapter.enumeration_calls.get(), 1);
+}
+
+#[test]
+fn repeated_batches_respect_one_global_capacity() {
+    let root = test_root();
+    let mut adapter = FakeAdapter::default();
+    let first = (0..6)
+        .map(|index| root.join(format!("first-{index}")))
+        .collect::<Vec<_>>();
+    let second = (0..6)
+        .map(|index| root.join(format!("second-{index}")))
+        .collect::<Vec<_>>();
+    for path in first.iter().chain(&second) {
+        adapter.metadata.insert(path.clone(), file());
+    }
+    let first_report = collect_admission(&adapter, first, AdmissionMode::Direct, 10, compare);
+    let remaining = 10 - first_report.items.len();
+    let second_report =
+        collect_admission(&adapter, second, AdmissionMode::Direct, remaining, compare);
+
+    assert_eq!(first_report.items.len() + second_report.items.len(), 10);
+    assert!(
+        second_report
+            .issues
+            .iter()
+            .any(|issue| issue.kind == AdmissionIssueKind::LimitReached)
+    );
+}
+
+#[test]
+fn external_selection_is_bounded_before_path_allocation() {
+    assert_eq!(bounded_selection(3, 5).take, 3);
+    let overflow = bounded_selection(50_000, 10);
+    assert_eq!(overflow.take, 11);
+    assert!(overflow.truncated);
+    assert_eq!(bounded_selection(5, 0).take, 1);
+}
+
+#[test]
+fn import_reader_and_line_parser_are_bounded() -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = read_bounded_import(Cursor::new(vec![b'a'; MAX_IMPORT_BYTES]))?;
+    assert_eq!(bytes.len(), MAX_IMPORT_BYTES);
+    assert!(read_bounded_import(Cursor::new(vec![b'a'; MAX_IMPORT_BYTES + 1])).is_err());
+
+    let text = LegacyText::from(" one \n\n two\nthree\nfour\n");
+    let (lines, truncated) = bounded_import_lines(&text, 3);
+    assert_eq!(
+        lines
+            .iter()
+            .map(LegacyText::to_string_lossy)
+            .collect::<Vec<_>>(),
+        vec!["one", "two", "three"]
+    );
+    assert!(truncated);
+    Ok(())
+}
+
+#[test]
+fn nested_directory_depth_stops_before_unbounded_enumeration() {
+    let root = test_root();
+    let mut adapter = FakeAdapter::default();
+    let mut current = root.clone();
+    for depth in 0..=MAX_ADMISSION_DEPTH {
+        adapter
+            .metadata
+            .insert(current.clone(), directory(depth as u128 + 1));
+        let child = current.join("child");
+        adapter.children.insert(current, vec![child.clone()]);
+        current = child;
+    }
+
+    let report = collect_admission(
+        &adapter,
+        vec![root],
+        AdmissionMode::Recurse,
+        MAX_ADMITTED_SOURCES,
+        compare,
+    );
+
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.kind == AdmissionIssueKind::DepthExceeded)
+    );
+    assert!(adapter.enumeration_calls.get() <= MAX_ADMISSION_DEPTH);
+}

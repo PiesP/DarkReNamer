@@ -12,15 +12,25 @@ That matched source and resource set defines the compatibility target.
 
 ## Current status
 
-The Rust workspace provides a native Win32 implementation of the
-Korean menu, command IDs, bitmap command bars, seven-column ListView, generic
-input dialogs, keyboard commands, file and directory admission, sorting,
-import/export, and row-order partial-success `MoveFileW` behavior.
+The Rust workspace provides a native Win32 implementation of the Korean menu,
+command IDs, bitmap command bars, seven-column ListView, input dialogs,
+keyboard commands, bounded file and directory admission, sorting, and
+import/export. The UTF-16 name transformations retain DarkNamer 08.02.10
+compatibility, while Apply uses the maintained safe execution path.
+
+Apply validates Windows leaf names and current file identities before showing
+confirmation. It executes local same-folder renames with handle-relative,
+no-replace operations, including case-only changes and rename cycles. A bounded
+write-ahead journal records intent before mutation, supports reverse rollback,
+and blocks further Apply operations when an interrupted state cannot be safely
+reconciled. Network paths, reparse traversal, case-sensitive directories, and
+cross-folder moves are rejected by the current safe policy.
 
 Portable transformation and state behavior are covered by automated tests, and
 the Windows binary cross-builds from Linux. Native focus and menu timing,
-Explorer drag/drop, common dialogs, clipboard operations, cross-parent moves,
-and partial-failure behavior still require acceptance on a real Windows host.
+Explorer drag/drop, common dialogs, clipboard operations, native startup
+recovery, and interactive failure handling still require acceptance on a real
+Windows host.
 Until that evidence exists, releases should distinguish source-complete porting
 from manually verified runtime parity.
 

@@ -10,6 +10,10 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt;
 
+mod windows_leaf_name;
+
+pub use windows_leaf_name::{WindowsLeafNameError, validate_windows_leaf_name};
+
 const BACKSLASH: u16 = b'\\' as u16;
 const DOT: u16 = b'.' as u16;
 const CR: u16 = b'\r' as u16;
@@ -47,6 +51,11 @@ impl LegacyText {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.units.is_empty()
+    }
+
+    /// Truncates to at most `length` exact UTF-16 code units.
+    pub fn truncate_units(&mut self, length: usize) {
+        self.units.truncate(length);
     }
 
     /// Converts to displayable Unicode, replacing unpaired surrogates.
@@ -149,6 +158,7 @@ pub struct LegacyListItem {
     root_path: LegacyText,
     is_directory: bool,
     size: u32,
+    actual_size: u64,
     created: u64,
     modified: u64,
 }
@@ -163,6 +173,26 @@ impl LegacyListItem {
         created: u64,
         modified: u64,
     ) -> Self {
+        Self::new_with_actual_size(
+            source_path,
+            is_directory,
+            size,
+            u64::from(size),
+            created,
+            modified,
+        )
+    }
+
+    /// Creates a row with both legacy 32-bit and actual 64-bit size values.
+    #[must_use]
+    pub fn new_with_actual_size(
+        source_path: impl Into<LegacyText>,
+        is_directory: bool,
+        size: u32,
+        actual_size: u64,
+        created: u64,
+        modified: u64,
+    ) -> Self {
         let source_path = source_path.into();
         let current_name = path_name(&source_path);
         let root_path = path_root(&source_path);
@@ -173,6 +203,7 @@ impl LegacyListItem {
             root_path,
             is_directory,
             size,
+            actual_size,
             created,
             modified,
         }
@@ -212,6 +243,12 @@ impl LegacyListItem {
     #[must_use]
     pub const fn size(&self) -> u32 {
         self.size
+    }
+
+    /// Returns the full 64-bit size observed at admission.
+    #[must_use]
+    pub const fn actual_size(&self) -> u64 {
+        self.actual_size
     }
 
     /// Returns the original creation `FILETIME` value.
