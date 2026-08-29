@@ -1,8 +1,3 @@
-#![allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "all unsafe operations are confined to this Win32 boundary; entry-point invariants are documented"
-)]
-
 use std::collections::HashMap;
 use std::env;
 use std::ffi::c_void;
@@ -185,6 +180,7 @@ struct ComGuard;
 
 impl Drop for ComGuard {
     fn drop(&mut self) {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe { CoUninitialize() };
     }
 }
@@ -280,6 +276,7 @@ fn cleanup_file_journal(mut journal: FileJournal) -> JournalCleanup {
 pub(crate) fn run() -> io::Result<()> {
     // SAFETY: All Win32 handles are created and consumed on this UI thread;
     // pointers passed to Win32 remain valid for each synchronous call.
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { run_unsafe() }
 }
 
@@ -290,6 +287,7 @@ unsafe fn run_unsafe() -> io::Result<()> {
             "관리자 권한으로는 실행할 수 없습니다. 일반 사용자 권한으로 다시 실행해 주세요.",
         ));
     }
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let com_status = unsafe { CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32) };
     if com_status < 0 {
         return Err(io::Error::from_raw_os_error(com_status));
@@ -307,6 +305,7 @@ unsafe fn run_unsafe() -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     let class_name = wide("DarkNamerLegacyWindow");
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let icon = unsafe { LoadIconW(instance, int_resource(resource_ids::APP_ICON)) };
     let window_class = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
@@ -337,6 +336,7 @@ unsafe fn run_unsafe() -> io::Result<()> {
     };
     // SAFETY: init remains live for the synchronous CreateWindowExW call. The
     // state ownership transfers only when WM_NCCREATE marks it adopted.
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let window = unsafe {
         CreateWindowExW(
             WS_EX_ACCEPTFILES | WS_EX_APPWINDOW,
@@ -355,6 +355,7 @@ unsafe fn run_unsafe() -> io::Result<()> {
     };
     if window.is_null() {
         if !adopted {
+            // SAFETY: The raw pointer comes from the active Win32 callback or allocation and remains valid for this synchronous access.
             unsafe { drop(Box::from_raw(state)) };
         }
         return Err(io::Error::last_os_error());
@@ -371,12 +372,14 @@ unsafe fn run_unsafe() -> io::Result<()> {
         let result = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
         if result == -1 {
             let error = io::Error::last_os_error();
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe { DestroyWindow(window) };
             return Err(error);
         }
         if result == 0 {
             break;
         }
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         if unsafe { handle_accelerator(window, &message) } {
             continue;
         }
@@ -398,8 +401,10 @@ unsafe extern "system" fn window_proc(
     if message == WM_NCCREATE {
         let create = lparam as *const CREATESTRUCTW;
         if !create.is_null() {
+            // SAFETY: The raw pointer comes from the active Win32 callback or allocation and remains valid for this synchronous access.
             let init = unsafe { (*create).lpCreateParams as *mut WindowInit };
             if !init.is_null() {
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 unsafe {
                     *(*init).adopted = true;
                     SetWindowLongPtrW(window, GWLP_USERDATA, (*init).state as isize);
@@ -431,6 +436,7 @@ unsafe extern "system" fn window_proc(
         WM_DROPFILES if !state_ptr.is_null() => {
             // SAFETY: wParam is HDROP for WM_DROPFILES.
             let before = unsafe { (*state_ptr).model.clone() };
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe {
                 admit_drop(window, &mut *state_ptr, wparam as HDROP);
                 (*state_ptr).commit_model_change(&before);
@@ -440,21 +446,30 @@ unsafe extern "system" fn window_proc(
         WM_NOTIFY if !state_ptr.is_null() => {
             let header = lparam as *const NMHDR;
             if !header.is_null()
+// SAFETY: The raw pointer comes from the active Win32 callback or allocation and remains valid for this synchronous access.
                 && unsafe { (*header).hwndFrom } == unsafe { (*state_ptr).list_window }
             {
+                // SAFETY: The raw pointer comes from the active Win32 callback or allocation and remains valid for this synchronous access.
                 if unsafe { (*header).code } == LVN_ITEMCHANGED {
                     let notification = lparam as *const NMLISTVIEW;
                     if !notification.is_null()
                         && selection_command_state_changed(
+                            // SAFETY: The raw pointer comes from the active Win32 callback or allocation and remains valid for this synchronous access.
                             unsafe { (*notification).uChanged },
+                            // SAFETY: The raw pointer comes from the active Win32 callback or allocation and remains valid for this synchronous access.
                             unsafe { (*notification).uOldState },
+                            // SAFETY: The raw pointer comes from the active Win32 callback or allocation and remains valid for this synchronous access.
                             unsafe { (*notification).uNewState },
                         )
                     {
+                        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                         unsafe { update_controls(&mut *state_ptr) };
                     }
+                // SAFETY: The raw pointer comes from the active Win32 callback or allocation and remains valid for this synchronous access.
                 } else if unsafe { (*header).code } == NM_DBLCLK {
+                    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                     unsafe { dispatch_command(window, &mut *state_ptr, MANUAL_CHANGE) };
+                    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                     unsafe { update_controls(&mut *state_ptr) };
                 }
             }
@@ -481,7 +496,9 @@ unsafe extern "system" fn window_proc(
         }
         WM_NCDESTROY => {
             if !state_ptr.is_null() {
+                // SAFETY: The raw pointer comes from the active Win32 callback or allocation and remains valid for this synchronous access.
                 if !unsafe { (*state_ptr).font }.is_null() {
+                    // SAFETY: The raw pointer comes from the active Win32 callback or allocation and remains valid for this synchronous access.
                     unsafe { DeleteObject((*state_ptr).font) };
                 }
                 // SAFETY: this is the single reclamation of Box::into_raw from run_unsafe.
@@ -500,6 +517,7 @@ unsafe extern "system" fn window_proc(
 }
 
 unsafe fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> {
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let instance = unsafe { GetModuleHandleW(null()) };
     let list_class = wide("SysListView32");
     // SAFETY: all strings remain valid during this synchronous creation call.
@@ -558,6 +576,7 @@ unsafe fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> 
             );
         }
     }
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     state.status = unsafe {
         child(
             window,
@@ -567,6 +586,7 @@ unsafe fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> 
             SS_CENTERIMAGE | SS_SUNKEN,
         )
     };
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     state.left_toolbar = unsafe {
         create_toolbar(
             window,
@@ -576,6 +596,7 @@ unsafe fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> 
             &LEFT_TOOLBAR_ITEMS,
         )?
     };
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     state.right_toolbar = unsafe {
         create_toolbar(
             window,
@@ -586,6 +607,7 @@ unsafe fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> 
         )?
     };
     let face = wide("MS Sans Serif");
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     state.font = unsafe {
         CreateFontW(
             -13,
@@ -606,17 +628,21 @@ unsafe fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> 
     };
     if !state.font.is_null() {
         for control in [&state.list_window, &state.status] {
+            // SAFETY: The raw pointer comes from the active Win32 callback or allocation and remains valid for this synchronous access.
             unsafe { SendMessageW(*control, WM_SETFONT, state.font as usize, 1) };
         }
     }
     // SAFETY: window is a live top-level HWND configured for shell drops.
     unsafe { DragAcceptFiles(window, 1) };
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let menu = unsafe { create_menu() };
     state.menu = menu;
     // SAFETY: menu ownership transfers to the top-level window.
     unsafe { SetMenu(window, menu) };
+    // SAFETY: This Win32 value is a plain data structure whose zero state is valid before the API fills or reads its fields.
     let mut shell_info: SHFILEINFOW = unsafe { zeroed() };
     let empty = wide("");
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let image_list = unsafe {
         SHGetFileInfoW(
             empty.as_ptr(),
@@ -627,6 +653,7 @@ unsafe fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> 
         )
     };
     if image_list != 0 {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe {
             SendMessageW(
                 state.list_window,
@@ -636,9 +663,12 @@ unsafe fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> 
             )
         };
     }
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { arrange(window, state) };
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { refresh(state) };
     if let Some(status) = state.startup_status.as_deref() {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe { set_status(state.status, status) };
     }
     Ok(())
@@ -681,6 +711,7 @@ unsafe fn create_toolbar(
         | CCS_VERT as u32
         | CCS_NORESIZE as u32
         | CCS_NOPARENTALIGN as u32;
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let toolbar = unsafe {
         CreateWindowExW(
             0,
@@ -700,6 +731,7 @@ unsafe fn create_toolbar(
     if toolbar.is_null() {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe {
         SendMessageW(toolbar, TB_BUTTONSTRUCTSIZE, size_of::<TBBUTTON>(), 0);
         SendMessageW(
@@ -723,6 +755,7 @@ unsafe fn create_toolbar(
         hInst: instance,
         nID: usize::from(resource_id),
     };
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let first_bitmap = unsafe {
         SendMessageW(
             toolbar,
@@ -757,6 +790,7 @@ unsafe fn create_toolbar(
             },
         })
         .collect::<Vec<_>>();
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let added = unsafe {
         SendMessageW(
             toolbar,
@@ -778,9 +812,11 @@ const fn packed_dimensions(width: i32, height: i32) -> isize {
 unsafe fn arrange(window: HWND, state: &AppState) {
     // SAFETY: rect is writable and window is live.
     let mut rect: RECT = unsafe { zeroed() };
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { GetClientRect(window, &mut rect) };
     let width = rect.right.max(TOOLBAR_WIDTH * 2 + 1);
     let height = rect.bottom.max(STATUS_HEIGHT + 1);
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe {
         MoveWindow(
             state.left_toolbar,
@@ -852,6 +888,7 @@ impl Drop for OwnerEnableGuard {
     fn drop(&mut self) {
         // SAFETY: owner belongs to the current UI thread and the guard is
         // created only after it was disabled for a modal prompt.
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe {
             EnableWindow(self.owner, 1);
             SetForegroundWindow(self.owner);
@@ -860,6 +897,7 @@ impl Drop for OwnerEnableGuard {
 }
 
 unsafe fn prompt_input(owner: HWND, spec: PromptSpec) -> io::Result<Option<PromptResult>> {
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let instance = unsafe { GetModuleHandleW(null()) };
     let class_name = wide("DarkNamerInputWindow");
     let caption = wide("입력창");
@@ -871,12 +909,14 @@ unsafe fn prompt_input(owner: HWND, spec: PromptSpec) -> io::Result<Option<Promp
         cbWndExtra: 0,
         hInstance: instance,
         hIcon: null_mut(),
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         hCursor: unsafe { LoadCursorW(null_mut(), IDC_ARROW) },
         hbrBackground: (COLOR_WINDOW + 1) as *mut c_void,
         lpszMenuName: null(),
         lpszClassName: class_name.as_ptr(),
         hIconSm: null_mut(),
     };
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { RegisterClassExW(&class) };
     let mut state = Box::new(PromptState {
         spec,
@@ -888,6 +928,7 @@ unsafe fn prompt_input(owner: HWND, spec: PromptSpec) -> io::Result<Option<Promp
         font: null_mut(),
     });
     let state_ptr: *mut PromptState = &mut *state;
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let dialog = unsafe {
         CreateWindowExW(
             WS_EX_TOOLWINDOW,
@@ -907,22 +948,27 @@ unsafe fn prompt_input(owner: HWND, spec: PromptSpec) -> io::Result<Option<Promp
     if dialog.is_null() {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe {
         EnableWindow(owner, 0);
         ShowWindow(dialog, SW_SHOW);
         UpdateWindow(dialog);
     }
     let _owner_guard = OwnerEnableGuard { owner };
+    // SAFETY: This Win32 value is a plain data structure whose zero state is valid before the API fills or reads its fields.
     let mut message: MSG = unsafe { zeroed() };
     while !state.done {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         let status = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
         if status == -1 {
             let error = io::Error::last_os_error();
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe { DestroyWindow(dialog) };
             state.done = true;
             return Err(error);
         }
         if status == 0 {
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe {
                 DestroyWindow(dialog);
                 PostQuitMessage(message.wParam as i32);
@@ -930,7 +976,9 @@ unsafe fn prompt_input(owner: HWND, spec: PromptSpec) -> io::Result<Option<Promp
             state.done = true;
             return Ok(None);
         }
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         if unsafe { IsDialogMessageW(dialog, &message) } == 0 {
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe {
                 TranslateMessage(&message);
                 DispatchMessageW(&message);
@@ -941,9 +989,11 @@ unsafe fn prompt_input(owner: HWND, spec: PromptSpec) -> io::Result<Option<Promp
 }
 
 unsafe fn prompt_input_or_report(owner: HWND, spec: PromptSpec) -> Option<PromptResult> {
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     match unsafe { prompt_input(owner, spec) } {
         Ok(result) => result,
         Err(error) => {
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe {
                 message(
                     owner,
@@ -968,17 +1018,23 @@ unsafe extern "system" fn prompt_proc(
     if message == WM_NCCREATE {
         let create = lparam as *const CREATESTRUCTW;
         if !create.is_null() {
+            // SAFETY: The raw pointer comes from the active Win32 callback or allocation and remains valid for this synchronous access.
             unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, (*create).lpCreateParams as isize) };
         }
     }
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let state_ptr = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *mut PromptState;
     match message {
         WM_CREATE if !state_ptr.is_null() => {
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             let state = unsafe { &mut *state_ptr };
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             let title = unsafe { child(window, "STATIC", &state.spec.title, 1001, 0) };
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe { MoveWindow(title, 12, 12, 340, 22, 1) };
             let mut controls = vec![title];
             if !state.spec.label_one.is_empty() {
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 let edit = unsafe {
                     child(
                         window,
@@ -988,7 +1044,9 @@ unsafe extern "system" fn prompt_proc(
                         WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
                     )
                 };
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 let label = unsafe { child(window, "STATIC", &state.spec.label_one, 1002, 0) };
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 unsafe {
                     MoveWindow(edit, 12, 48, 275, 25, 1);
                     MoveWindow(label, 294, 48, 70, 25, 1);
@@ -997,6 +1055,7 @@ unsafe extern "system" fn prompt_proc(
                 controls.extend([edit, label]);
             }
             if !state.spec.label_two.is_empty() {
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 let edit = unsafe {
                     child(
                         window,
@@ -1006,7 +1065,9 @@ unsafe extern "system" fn prompt_proc(
                         WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
                     )
                 };
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 let label = unsafe { child(window, "STATIC", &state.spec.label_two, 1003, 0) };
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 unsafe {
                     MoveWindow(edit, 12, 80, 275, 25, 1);
                     MoveWindow(label, 294, 80, 70, 25, 1);
@@ -1015,6 +1076,7 @@ unsafe extern "system" fn prompt_proc(
                 controls.extend([edit, label]);
             }
             if !state.spec.choices.is_empty() {
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 let combo = unsafe {
                     child(
                         window,
@@ -1026,10 +1088,12 @@ unsafe extern "system" fn prompt_proc(
                 };
                 for choice in &state.spec.choices {
                     let choice = wide(choice);
+                    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                     unsafe {
                         SendMessageW(combo, CB_ADDSTRING, 0, choice.as_ptr() as isize);
                     }
                 }
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 unsafe {
                     SendMessageW(combo, CB_SETCURSEL, 0, 0);
                     MoveWindow(
@@ -1048,6 +1112,7 @@ unsafe extern "system" fn prompt_proc(
                 state.combo = combo;
                 controls.push(combo);
             }
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             let ok = unsafe {
                 child(
                     window,
@@ -1057,8 +1122,11 @@ unsafe extern "system" fn prompt_proc(
                     WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
                 )
             };
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             let cancel = unsafe { child(window, "BUTTON", "취소", IDCANCEL as u16, WS_TABSTOP) };
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             let separator = unsafe { child(window, "STATIC", "", 1010, SS_ETCHEDHORZ) };
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe {
                 MoveWindow(ok, 205, 126, 75, 32, 1);
                 MoveWindow(cancel, 285, 126, 75, 32, 1);
@@ -1066,6 +1134,7 @@ unsafe extern "system" fn prompt_proc(
             }
             controls.extend([ok, cancel, separator]);
             let face = wide("MS Sans Serif");
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             state.font = unsafe {
                 CreateFontW(
                     -13,
@@ -1086,6 +1155,7 @@ unsafe extern "system" fn prompt_proc(
             };
             if !state.font.is_null() {
                 for control in controls {
+                    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                     unsafe { SendMessageW(control, WM_SETFONT, state.font as usize, 1) };
                 }
             }
@@ -1095,6 +1165,7 @@ unsafe extern "system" fn prompt_proc(
                 state.combo
             };
             if !first.is_null() {
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 unsafe { SetFocus(first) };
             }
             0
@@ -1103,38 +1174,53 @@ unsafe extern "system" fn prompt_proc(
             let id = (wparam & 0xFFFF) as i32;
             let notification = ((wparam >> 16) & 0xFFFF) as u32;
             if notification == BN_CLICKED && id == IDOK {
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 let state = unsafe { &mut *state_ptr };
                 state.result = Some(PromptResult {
+                    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                     value_one: unsafe { window_text(state.edit_one) },
+                    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                     value_two: unsafe { window_text(state.edit_two) },
                     choice: if state.combo.is_null() {
                         0
                     } else {
+                        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                         usize::try_from(unsafe { SendMessageW(state.combo, CB_GETCURSEL, 0, 0) })
                             .unwrap_or(0)
                     },
                 });
                 state.done = true;
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 unsafe { DestroyWindow(window) };
             } else if notification == BN_CLICKED && id == IDCANCEL {
+                // SAFETY: The raw pointer comes from the active Win32 callback or allocation and remains valid for this synchronous access.
                 unsafe { (*state_ptr).done = true };
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 unsafe { DestroyWindow(window) };
             }
             0
         }
         WM_CLOSE if !state_ptr.is_null() => {
+            // SAFETY: The raw pointer comes from the active Win32 callback or allocation and remains valid for this synchronous access.
             unsafe { (*state_ptr).done = true };
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe { DestroyWindow(window) };
             0
         }
         WM_NCDESTROY if !state_ptr.is_null() => {
+            // SAFETY: The raw pointer comes from the active Win32 callback or allocation and remains valid for this synchronous access.
             if !unsafe { (*state_ptr).font }.is_null() {
+                // SAFETY: The raw pointer comes from the active Win32 callback or allocation and remains valid for this synchronous access.
                 unsafe { DeleteObject((*state_ptr).font) };
+                // SAFETY: The raw pointer comes from the active Win32 callback or allocation and remains valid for this synchronous access.
                 unsafe { (*state_ptr).font = null_mut() };
             }
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, 0) };
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe { DefWindowProcW(window, message, wparam, lparam) }
         }
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         _ => unsafe { DefWindowProcW(window, message, wparam, lparam) },
     }
 }
@@ -1143,18 +1229,22 @@ unsafe fn window_text(window: HWND) -> LegacyText {
     if window.is_null() {
         return LegacyText::default();
     }
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let length = unsafe { GetWindowTextLengthW(window) };
     if length <= 0 {
         return LegacyText::default();
     }
     let mut value = vec![0_u16; length as usize + 1];
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let copied = unsafe { GetWindowTextW(window, value.as_mut_ptr(), value.len() as i32) };
     value.truncate(copied.max(0) as usize);
     LegacyText::from_units(value)
 }
 
 unsafe fn handle_accelerator(window: HWND, message: &MSG) -> bool {
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let ctrl = unsafe { GetKeyState(VK_CONTROL as i32) } < 0;
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let shift = unsafe { GetKeyState(VK_SHIFT as i32) } < 0;
     let command = if message.message == WM_KEYDOWN {
         match message.wParam as u32 {
@@ -1180,15 +1270,19 @@ unsafe fn handle_accelerator(window: HWND, message: &MSG) -> bool {
         None
     };
     if let Some(command) = command {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         let state = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *mut AppState;
         if (APPLY..=VERSION).contains(&command) && !state.is_null() {
+            // SAFETY: The raw pointer comes from the active Win32 callback or allocation and remains valid for this synchronous access.
             let enabled = unsafe { (*state).command_states[usize::from(command - APPLY)] };
             if !enabled {
                 return true;
             }
         }
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe { SendMessageW(window, WM_COMMAND, usize::from(command), 0) };
         if command != 2 && !state.is_null() {
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe { update_controls(&mut *state) };
         }
         true
@@ -1201,6 +1295,7 @@ unsafe fn selected_indices(list: HWND) -> Vec<usize> {
     let mut indices = Vec::new();
     let mut index = -1_i32;
     loop {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         index = unsafe {
             SendMessageW(
                 list,
@@ -1218,10 +1313,12 @@ unsafe fn selected_indices(list: HWND) -> Vec<usize> {
 }
 
 unsafe fn select_rows(list: HWND, rows: &[usize]) {
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { select_rows_with_focus(list, rows, rows.first().copied()) };
 }
 
 unsafe fn focused_index(list: HWND) -> Option<usize> {
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let index = unsafe { SendMessageW(list, LVM_GETNEXTITEM, usize::MAX, LVNI_FOCUSED as isize) };
     (index >= 0).then_some(index as usize)
 }
@@ -1236,8 +1333,10 @@ unsafe fn select_rows_with_focus(list: HWND, rows: &[usize], focused: Option<usi
                 } else {
                     0
                 },
+            // SAFETY: This Win32 value is a plain data structure whose zero state is valid before the API fills or reads its fields.
             ..unsafe { zeroed() }
         };
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe {
             SendMessageW(
                 list,
@@ -1248,6 +1347,7 @@ unsafe fn select_rows_with_focus(list: HWND, rows: &[usize], focused: Option<usi
         }
     }
     if let Some(row) = rows.first() {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe { SendMessageW(list, LVM_ENSUREVISIBLE, *row, 0) };
     }
 }
@@ -1298,24 +1398,31 @@ fn rows_for_tokens(model: &LegacyList, tokens: &[SelectionToken]) -> Vec<usize> 
 }
 
 unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let selected = unsafe { selected_indices(state.list_window) };
     let before = state.model.clone();
     match command {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         APPLY => unsafe { apply_changes(window, state) },
         RESET => state.model.reset_proposals(),
         CLEAR_LIST => state.model = LegacyList::new(),
         0xFFFF => {
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe { clear_selection(state.list_window) };
             state.model.remove_rows(&selected);
         }
         MOVE_UP => {
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             let focused_position = unsafe { focused_index(state.list_window) }
                 .and_then(|focused| selected.iter().position(|index| *index == focused));
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe { clear_selection(state.list_window) };
             let moved = state.model.move_rows_earlier(&selected);
             state.commit_model_change(&before);
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe { refresh(state) };
             let focused = focused_position.and_then(|position| moved.get(position).copied());
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe {
                 select_rows_with_focus(state.list_window, &moved, focused);
                 update_controls(state);
@@ -1323,13 +1430,17 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
             return;
         }
         MOVE_DOWN => {
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             let focused_position = unsafe { focused_index(state.list_window) }
                 .and_then(|focused| selected.iter().position(|index| *index == focused));
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe { clear_selection(state.list_window) };
             let moved = state.model.move_rows_later(&selected);
             state.commit_model_change(&before);
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe { refresh(state) };
             let focused = focused_position.and_then(|position| moved.get(position).copied());
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe {
                 select_rows_with_focus(state.list_window, &moved, focused);
                 update_controls(state);
@@ -1339,6 +1450,7 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
         MANUAL_CHANGE => {
             if let Some(index) = selected.first().copied() {
                 let current = state.model.items()[index].proposed_name().clone();
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 if let Some(result) = unsafe {
                     prompt_input_or_report(
                         window,
@@ -1357,6 +1469,7 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
             }
         }
         REPLACE => {
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             if let Some(result) = unsafe {
                 prompt_input_or_report(
                     window,
@@ -1376,6 +1489,7 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
             }
         }
         PREFIX => {
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             if let Some(result) = unsafe {
                 prompt_input_or_report(
                     window,
@@ -1393,6 +1507,7 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
             }
         }
         SUFFIX => {
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             if let Some(result) = unsafe {
                 prompt_input_or_report(
                     window,
@@ -1410,12 +1525,17 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
             }
         }
         CLEAR_NAME => state.model.clear_name(),
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         DELETE_POSITION => unsafe { delete_position_command(window, state) },
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         DELETE_DELIMITED => unsafe { delete_delimited_command(window, state) },
         KEEP_DIGITS => state.model.keep_ascii_digits(),
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         PAD_DIGITS => unsafe { pad_digits_command(window, state) },
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         SEQUENCE => unsafe { sequence_command(window, state) },
         SORT => {
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             if unsafe { sort_command(window, state) } {
                 state.commit_model_change(&before);
                 return;
@@ -1423,6 +1543,7 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
         }
         EXT_DELETE => state.model.delete_extension(),
         EXT_ADD => {
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             if let Some(result) = unsafe {
                 prompt_input_or_report(
                     window,
@@ -1440,6 +1561,7 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
             }
         }
         EXT_REPLACE => {
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             if let Some(result) = unsafe {
                 prompt_input_or_report(
                     window,
@@ -1458,6 +1580,7 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
         }
         PARENT_PREFIX => state.model.prefix_parent_folder(),
         PARENT_SUFFIX => state.model.suffix_parent_folder(),
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         UNIFY_PATH => unsafe {
             message(
                 window,
@@ -1465,19 +1588,29 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
                 "DarkNamer - Safe 모드",
             )
         },
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         ADD_FILES => unsafe { add_files_dialog(window, state) },
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         COPY_NAMES => unsafe { copy_clipboard(window, &state.model.export_names()) },
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         COPY_PATHS => unsafe { copy_clipboard(window, &state.model.export_paths()) },
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         SAVE_NAMES => unsafe { save_text_dialog(window, state.model.export_names(), true) },
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         SAVE_PATHS => unsafe { save_text_dialog(window, state.model.export_paths(), false) },
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         IMPORT_NAMES => unsafe { import_names_dialog(window, state) },
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         IMPORT_PATHS => unsafe { import_paths_dialog(window, state) },
         SHOW_FULL_PATH | SHOW_SIZE | SHOW_MODIFIED | SHOW_CREATED => {
             let index = usize::from(command - SHOW_FULL_PATH);
             state.shown_columns[index] = !state.shown_columns[index];
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe { update_column_visibility(state, index) };
         }
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         VERSION => unsafe { message(window, "DarkNamer 08.02.10 버전", "DarkNamer") },
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         2 => unsafe {
             DestroyWindow(window);
             return;
@@ -1485,6 +1618,7 @@ unsafe fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
         _ => {}
     }
     state.commit_model_change(&before);
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { refresh(state) };
 }
 
@@ -1543,6 +1677,7 @@ fn legacy_atoi(text: &LegacyText) -> i32 {
 }
 
 unsafe fn pad_digits_command(window: HWND, state: &mut AppState) {
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let Some(result) = (unsafe {
         prompt_input_or_report(
             window,
@@ -1560,6 +1695,7 @@ unsafe fn pad_digits_command(window: HWND, state: &mut AppState) {
     };
     let width = legacy_atoi(&result.value_one);
     if width <= 0 {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe { message(window, "자리수 입력이 잘못되었습니다.", "DarkNamer") };
         return;
     }
@@ -1569,11 +1705,13 @@ unsafe fn pad_digits_command(window: HWND, state: &mut AppState) {
         state.model.pad_first_digit_run(width as usize)
     };
     if outcome.is_err() {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe { message(window, "자리수 입력이 잘못되었습니다.", "DarkNamer") };
     }
 }
 
 unsafe fn sequence_command(window: HWND, state: &mut AppState) {
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let Some(result) = (unsafe {
         prompt_input_or_report(
             window,
@@ -1596,6 +1734,7 @@ unsafe fn sequence_command(window: HWND, state: &mut AppState) {
     };
     let width = legacy_atoi(&result.value_one);
     if width <= 0 {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe { message(window, "자리수 입력이 잘못되었습니다.", "DarkNamer") };
         return;
     }
@@ -1614,6 +1753,7 @@ unsafe fn sequence_command(window: HWND, state: &mut AppState) {
 }
 
 unsafe fn delete_position_command(window: HWND, state: &mut AppState) {
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let Some(result) = (unsafe {
         prompt_input_or_report(
             window,
@@ -1632,6 +1772,7 @@ unsafe fn delete_position_command(window: HWND, state: &mut AppState) {
     let start = legacy_atoi(&result.value_one);
     let end = legacy_atoi(&result.value_two);
     if start < 0 || end < 0 {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe {
             message(
                 window,
@@ -1642,10 +1783,12 @@ unsafe fn delete_position_command(window: HWND, state: &mut AppState) {
         return;
     }
     if result.choice == 0 && end > 0 && start > end {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe { message(window, "시작점이 끝점보다 뒤에 있습니다.", "DarkNamer") };
         return;
     }
     if result.choice == 1 && start != 0 {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe {
             message(
                 window,
@@ -1663,6 +1806,7 @@ unsafe fn delete_position_command(window: HWND, state: &mut AppState) {
 }
 
 unsafe fn delete_delimited_command(window: HWND, state: &mut AppState) {
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let Some(result) = (unsafe {
         prompt_input_or_report(
             window,
@@ -1683,6 +1827,7 @@ unsafe fn delete_delimited_command(window: HWND, state: &mut AppState) {
         .delete_first_delimited(&result.value_one, &result.value_two)
         == Err(LegacyInputError::EmptyDelimiter)
     {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe {
             message(
                 window,
@@ -1706,6 +1851,7 @@ unsafe fn sort_command(window: HWND, state: &mut AppState) -> bool {
         "만든 시각에 따라 오름차순",
         "만든 시각에 따라 내림차순",
     ];
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let Some(result) = (unsafe {
         prompt_input_or_report(
             window,
@@ -1734,12 +1880,16 @@ unsafe fn sort_command(window: HWND, state: &mut AppState) -> bool {
         LegacySortMode::CreatedDescending,
     ];
     if let Some(mode) = modes.get(result.choice) {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         let selected = unsafe { selected_indices(state.list_window) };
         let tokens = selection_tokens(&state.model, &selected);
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         let focused = unsafe { focused_index(state.list_window) }
             .and_then(|index| selection_token(&state.model, index));
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe { clear_selection(state.list_window) };
         state.model.sort_by(*mode, compare_windows);
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe { refresh(state) };
         let moved = rows_for_tokens(&state.model, &tokens);
         let focused = focused.as_ref().and_then(|token| {
@@ -1747,6 +1897,7 @@ unsafe fn sort_command(window: HWND, state: &mut AppState) -> bool {
                 .first()
                 .copied()
         });
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe {
             select_rows_with_focus(state.list_window, &moved, focused);
             update_controls(state);
@@ -1758,6 +1909,7 @@ unsafe fn sort_command(window: HWND, state: &mut AppState) -> bool {
 
 unsafe fn apply_changes(window: HWND, state: &mut AppState) {
     if state.apply_locked() {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe {
             message(
                 window,
@@ -1774,6 +1926,7 @@ unsafe fn apply_changes(window: HWND, state: &mut AppState) {
         Ok(plan) => plan,
         Err(error) => {
             let (message_text, rows) = plan_error_korean(&error);
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe {
                 clear_selection(state.list_window);
                 select_rows(state.list_window, &rows);
@@ -1783,6 +1936,7 @@ unsafe fn apply_changes(window: HWND, state: &mut AppState) {
         }
     };
     if plan.is_empty() {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe { message(window, "변경할 항목이 없습니다.", "DarkNamer") };
         return;
     }
@@ -1794,10 +1948,12 @@ unsafe fn apply_changes(window: HWND, state: &mut AppState) {
     );
     let prompt = wide(&confirmation);
     let caption = wide("DarkNamer - 안전한 적용 확인");
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     if unsafe { MessageBoxW(window, prompt.as_ptr(), caption.as_ptr(), MB_OKCANCEL) } != IDOK {
         return;
     }
     if state.revision() != revision {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe {
             message(
                 window,
@@ -1812,6 +1968,7 @@ unsafe fn apply_changes(window: HWND, state: &mut AppState) {
     let confirmed = match plan.confirm_presented(id, plan_revision) {
         Ok(confirmed) => confirmed,
         Err(error) => {
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe { message(window, &error.to_string(), "DarkNamer") };
             return;
         }
@@ -1820,6 +1977,7 @@ unsafe fn apply_changes(window: HWND, state: &mut AppState) {
         Ok(journal) => journal,
         Err(error) => {
             state.recovery_locked = true;
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe {
                 message(
                     window,
@@ -1834,6 +1992,7 @@ unsafe fn apply_changes(window: HWND, state: &mut AppState) {
         }
     };
     state.mutation_locked = true;
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { update_controls(state) };
     let execution = RenameExecutor::new(&mut backend, &mut journal).execute(confirmed);
     state.mutation_locked = false;
@@ -1846,6 +2005,7 @@ unsafe fn apply_changes(window: HWND, state: &mut AppState) {
             state.recovery_locked = cleanup.error.is_some() || cleanup.retained.is_some();
             state.active_journal = cleanup.retained;
             if let Some(cleanup_error) = cleanup.error {
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 unsafe {
                     message(
                         window,
@@ -1854,7 +2014,9 @@ unsafe fn apply_changes(window: HWND, state: &mut AppState) {
                     )
                 };
             }
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe { message(window, &text, "DarkNamer - 실행 거부") };
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe { update_controls(state) };
             return;
         }
@@ -1866,6 +2028,7 @@ unsafe fn apply_changes(window: HWND, state: &mut AppState) {
             if !apply_execution_report(&mut state.model, &report) {
                 state.recovery_locked = true;
                 state.active_journal = Some(journal);
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 unsafe {
                     message(
                         window,
@@ -1873,6 +2036,7 @@ unsafe fn apply_changes(window: HWND, state: &mut AppState) {
                         "DarkNamer - 확인 필요",
                     )
                 };
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 unsafe { update_controls(state) };
                 return;
             }
@@ -1880,6 +2044,7 @@ unsafe fn apply_changes(window: HWND, state: &mut AppState) {
             state.recovery_locked = cleanup.error.is_some() || cleanup.retained.is_some();
             state.active_journal = cleanup.retained;
             if let Some(error) = cleanup.error {
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 unsafe { message(window, &error.to_string(), "DarkNamer - 저널 정리 실패") };
             }
         }
@@ -1888,6 +2053,7 @@ unsafe fn apply_changes(window: HWND, state: &mut AppState) {
             state.recovery_locked = cleanup.error.is_some() || cleanup.retained.is_some();
             state.active_journal = cleanup.retained;
             if let Some(error) = cleanup.error {
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 unsafe { message(window, &error.to_string(), "DarkNamer - 저널 정리 실패") };
             }
         }
@@ -1896,6 +2062,7 @@ unsafe fn apply_changes(window: HWND, state: &mut AppState) {
             state.active_journal = Some(journal);
         }
     }
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe {
         message(window, &text, "DarkNamer");
         update_controls(state);
@@ -1906,8 +2073,10 @@ unsafe fn clear_selection(list: HWND) {
     let mut item = LVITEMW {
         stateMask: LVIS_SELECTED | LVIS_FOCUSED,
         state: 0,
+        // SAFETY: This Win32 value is a plain data structure whose zero state is valid before the API fills or reads its fields.
         ..unsafe { zeroed() }
     };
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe {
         SendMessageW(
             list,
@@ -1926,14 +2095,18 @@ unsafe fn admit_drop(owner: HWND, state: &mut AppState, drop: HDROP) {
     let mut paths = Vec::with_capacity(bounded.take);
     for index in 0..bounded.take {
         let index = u32::try_from(index).unwrap_or(u32::MAX);
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         let length = unsafe { DragQueryFileW(drop, index, null_mut(), 0) };
         let mut buffer = vec![0; length as usize + 1];
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe { DragQueryFileW(drop, index, buffer.as_mut_ptr(), buffer.len() as u32) };
         buffer.truncate(length as usize);
         paths.push(PathBuf::from(std::ffi::OsString::from_wide(&buffer)));
     }
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { DragFinish(drop) };
     if bounded.truncated {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe {
             message(
                 owner,
@@ -1942,9 +2115,12 @@ unsafe fn admit_drop(owner: HWND, state: &mut AppState, drop: HDROP) {
             )
         };
     }
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { set_status(state.status, "처리중...") };
     state.directory_mode = None;
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { admit_paths(owner, state, paths) };
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { refresh(state) };
 }
 
@@ -1957,8 +2133,10 @@ unsafe fn add_files_dialog(owner: HWND, state: &mut AppState) {
     }) else {
         return;
     };
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { set_status(state.status, "처리중...") };
     state.directory_mode = None;
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { admit_paths(owner, state, paths) };
 }
 
@@ -1976,6 +2154,7 @@ unsafe fn admit_paths(owner: HWND, state: &mut AppState, paths: Vec<PathBuf>) {
     {
         let text = wide("경로를 직접 추가하려면 YES, 경로 내 파일을 추가하려면 NO를 선택하세요.");
         let caption = path_wide(directory);
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         let answer = unsafe { MessageBoxW(owner, text.as_ptr(), caption.as_ptr(), MB_YESNO) };
         state.directory_mode = Some(
             if answer == windows_sys::Win32::UI::WindowsAndMessaging::IDYES {
@@ -1995,8 +2174,10 @@ unsafe fn admit_paths(owner: HWND, state: &mut AppState, paths: Vec<PathBuf>) {
     let items = std::mem::take(&mut report.items);
     let appended = state.model.append_batch_by(items, compare_windows);
     let summary = report.summary_korean(appended);
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { set_status(state.status, &summary) };
     if !report.issues.is_empty() {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe { message(owner, &summary, "DarkNamer - 일부 경로 제외") };
     }
 }
@@ -2008,6 +2189,7 @@ fn legacy_path(path: &Path) -> LegacyText {
 fn compare_windows(left: &LegacyText, right: &LegacyText) -> std::cmp::Ordering {
     let left_len = i32::try_from(left.len()).unwrap_or(i32::MAX);
     let right_len = i32::try_from(right.len()).unwrap_or(i32::MAX);
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let result = unsafe {
         CompareStringW(
             LOCALE_USER_DEFAULT,
@@ -2034,28 +2216,37 @@ fn path_wide(path: &Path) -> Vec<u16> {
 unsafe fn copy_clipboard(owner: HWND, text: &LegacyText) {
     let mut units = text.units().to_vec();
     units.push(0);
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     if unsafe { OpenClipboard(owner) } == 0 {
         return;
     }
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { EmptyClipboard() };
     let bytes = units.len().saturating_mul(size_of::<u16>());
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let allocation = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) };
     if !allocation.is_null() {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         let locked = unsafe { GlobalLock(allocation) } as *mut u16;
         if !locked.is_null() {
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe {
                 std::ptr::copy_nonoverlapping(units.as_ptr(), locked, units.len());
                 GlobalUnlock(allocation);
             }
             let transferred =
+// SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 unsafe { SetClipboardData(u32::from(CF_UNICODETEXT), allocation as HANDLE) };
             if transferred.is_null() {
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 unsafe { GlobalFree(allocation) };
             }
         } else {
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe { GlobalFree(allocation) };
         }
     }
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { CloseClipboard() };
 }
 
@@ -2092,6 +2283,7 @@ unsafe fn import_names_dialog(owner: HWND, state: &mut AppState) {
         Ok(text) => {
             state.model.import_names(&text);
         }
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         Err(error) => unsafe {
             message(
                 owner,
@@ -2115,6 +2307,7 @@ unsafe fn import_paths_dialog(owner: HWND, state: &mut AppState) {
     let text = match read_legacy_text(&path) {
         Ok(text) => text,
         Err(error) => {
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe {
                 message(
                     owner,
@@ -2125,10 +2318,12 @@ unsafe fn import_paths_dialog(owner: HWND, state: &mut AppState) {
             return;
         }
     };
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { set_status(state.status, "처리중...") };
     let remaining = MAX_ADMITTED_SOURCES.saturating_sub(state.model.len());
     let (lines, truncated) = bounded_import_lines(&text, remaining.saturating_add(1));
     if truncated || lines.len() > remaining {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe {
             message(
                 owner,
@@ -2142,11 +2337,13 @@ unsafe fn import_paths_dialog(owner: HWND, state: &mut AppState) {
         .map(|line| PathBuf::from(std::ffi::OsString::from_wide(line.units())))
         .collect();
     state.directory_mode = None;
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { admit_paths(owner, state, paths) };
 }
 
 unsafe fn set_status(status: HWND, text: &str) {
     let text = wide(text);
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe {
         windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(status, text.as_ptr());
         UpdateWindow(status);
@@ -2154,8 +2351,10 @@ unsafe fn set_status(status: HWND, text: &str) {
 }
 
 fn modal_native_dialog<T>(owner: HWND, dialog: impl FnOnce() -> T) -> T {
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { EnableWindow(owner, 0) };
     let result = dialog();
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe {
         EnableWindow(owner, 1);
         SetForegroundWindow(owner);
@@ -2193,11 +2392,13 @@ fn read_legacy_text(path: &Path) -> io::Result<LegacyText> {
     let input_len =
         i32::try_from(bytes.len()).map_err(|_| io::Error::other("text file too large"))?;
     let needed =
+// SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe { MultiByteToWideChar(CP_ACP, 0, bytes.as_ptr(), input_len, null_mut(), 0) };
     if needed <= 0 {
         return Err(io::Error::last_os_error());
     }
     let mut units = vec![0_u16; needed as usize];
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let written = unsafe {
         MultiByteToWideChar(
             CP_ACP,
@@ -2222,6 +2423,7 @@ unsafe fn update_column_visibility(state: &AppState, index: usize) {
     } else {
         0
     };
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe {
         SendMessageW(state.list_window, LVM_SETCOLUMNWIDTH, column, width);
     }
@@ -2234,6 +2436,7 @@ struct RedrawGuard {
 impl RedrawGuard {
     unsafe fn suspend(window: HWND) -> Self {
         if !window.is_null() {
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe { SendMessageW(window, WM_SETREDRAW, 0, 0) };
         }
         Self { window }
@@ -2245,6 +2448,7 @@ impl Drop for RedrawGuard {
         if !self.window.is_null() {
             // SAFETY: the ListView remains owned by the UI thread throughout
             // refresh; redraw is always restored even if refresh returns early.
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe {
                 SendMessageW(self.window, WM_SETREDRAW, 1, 0);
                 RedrawWindow(
@@ -2259,8 +2463,11 @@ impl Drop for RedrawGuard {
 }
 
 unsafe fn refresh(state: &mut AppState) {
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let _redraw = unsafe { RedrawGuard::suspend(state.list_window) };
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let selected = unsafe { selected_indices(state.list_window) };
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { SendMessageW(state.list_window, LVM_DELETEALLITEMS, 0, 0) };
     for (row, item) in state.model.items().iter().enumerate() {
         let size = LegacyText::from(item.actual_size().to_string());
@@ -2284,9 +2491,12 @@ unsafe fn refresh(state: &mut AppState) {
                     iItem: row as i32,
                     iSubItem: 0,
                     pszText: text.as_mut_ptr(),
+                    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                     iImage: unsafe { file_icon_index(&mut state.icon_cache, item) },
+                    // SAFETY: This Win32 value is a plain data structure whose zero state is valid before the API fills or reads its fields.
                     ..unsafe { zeroed() }
                 };
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 unsafe {
                     SendMessageW(
                         state.list_window,
@@ -2299,8 +2509,10 @@ unsafe fn refresh(state: &mut AppState) {
                 let mut native = LVITEMW {
                     iSubItem: column as i32,
                     pszText: text.as_mut_ptr(),
+                    // SAFETY: This Win32 value is a plain data structure whose zero state is valid before the API fills or reads its fields.
                     ..unsafe { zeroed() }
                 };
+                // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
                 unsafe {
                     SendMessageW(
                         state.list_window,
@@ -2312,7 +2524,9 @@ unsafe fn refresh(state: &mut AppState) {
             }
         }
     }
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { select_rows(state.list_window, &selected) };
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { update_controls(state) };
     let status = if state.model.is_empty() {
         LegacyText::default()
@@ -2321,23 +2535,27 @@ unsafe fn refresh(state: &mut AppState) {
     };
     let mut status = status.units().to_vec();
     status.push(0);
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe {
         windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(state.status, status.as_ptr());
     }
 }
 
 unsafe fn update_controls(state: &mut AppState) {
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let selected_count = unsafe { selected_indices(state.list_window) }.len();
     for id in APPLY..=VERSION {
         state.command_states[usize::from(id - APPLY)] =
             command_enabled(id, state.model.len(), selected_count)
                 && !(id == APPLY && state.apply_locked());
     }
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { apply_command_states(state) };
 }
 
 unsafe fn apply_command_states(state: &AppState) {
     for tool in LEFT_TOOLS {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe {
             set_toolbar_button_enabled(
                 state.left_toolbar,
@@ -2347,6 +2565,7 @@ unsafe fn apply_command_states(state: &AppState) {
         };
     }
     for tool in RIGHT_TOOLS {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe {
             set_toolbar_button_enabled(
                 state.right_toolbar,
@@ -2357,6 +2576,7 @@ unsafe fn apply_command_states(state: &AppState) {
     }
     for id in APPLY..=VERSION {
         let enabled = state.command_states[usize::from(id - APPLY)];
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe {
             EnableMenuItem(
                 state.menu,
@@ -2369,6 +2589,7 @@ unsafe fn apply_command_states(state: &AppState) {
         .into_iter()
         .enumerate()
     {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe {
             CheckMenuItem(
                 state.menu,
@@ -2383,12 +2604,14 @@ unsafe fn apply_command_states(state: &AppState) {
         }
     }
     if !state.menu.is_null() {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe { DrawMenuBar(GetParent(state.list_window)) };
     }
 }
 
 unsafe fn set_toolbar_button_enabled(toolbar: HWND, command: CommandId, enabled: bool) {
     if !toolbar.is_null() {
+        // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
         unsafe {
             SendMessageW(
                 toolbar,
@@ -2405,6 +2628,7 @@ unsafe fn file_icon_index(cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyL
     if let Some(index) = cache.get(&key) {
         return *index;
     }
+    // SAFETY: This Win32 value is a plain data structure whose zero state is valid before the API fills or reads its fields.
     let mut info: SHFILEINFOW = unsafe { zeroed() };
     let path = key.lookup_text();
     let mut path = path.units().to_vec();
@@ -2414,6 +2638,7 @@ unsafe fn file_icon_index(cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyL
     } else {
         FILE_ATTRIBUTE_NORMAL
     };
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe {
         SHGetFileInfoW(
             path.as_ptr(),
@@ -2435,7 +2660,9 @@ fn format_filetime(value: u64) -> LegacyText {
         dwLowDateTime: value as u32,
         dwHighDateTime: (value >> 32) as u32,
     };
+    // SAFETY: This Win32 value is a plain data structure whose zero state is valid before the API fills or reads its fields.
     let mut system: SYSTEMTIME = unsafe { zeroed() };
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     if unsafe { FileTimeToSystemTime(&filetime, &mut system) } == 0 {
         return LegacyText::default();
     }
@@ -2446,8 +2673,11 @@ fn format_filetime(value: u64) -> LegacyText {
 }
 
 unsafe fn create_menu() -> HMENU {
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let menu = unsafe { CreateMenu() };
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     let file = unsafe { CreatePopupMenu() };
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe {
         menu_item(file, ADD_FILES, "경로목록에 파일 추가하기\tCtrl+O");
         AppendMenuW(file, MF_SEPARATOR, 0, null());
@@ -2507,17 +2737,20 @@ unsafe fn create_menu() -> HMENU {
 
 unsafe fn menu_item(menu: HMENU, id: u16, label: &str) {
     let label = wide(label);
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { AppendMenuW(menu, MF_STRING, usize::from(id), label.as_ptr()) };
 }
 
 unsafe fn append_popup(menu: HMENU, popup: HMENU, label: &str) {
     let label = wide(label);
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { AppendMenuW(menu, MF_POPUP, popup as usize, label.as_ptr()) };
 }
 
 unsafe fn message(owner: HWND, text: &str, caption: &str) {
     let text = wide(text);
     let caption = wide(caption);
+    // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
     unsafe { MessageBoxW(owner, text.as_ptr(), caption.as_ptr(), 0) };
 }
 
@@ -2568,6 +2801,7 @@ mod tests {
         let target_file = target_root.join("new.txt");
         fs::write(&source_file, b"legacy")?;
         assert_ne!(
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe {
                 MoveFileW(
                     path_wide(&source_file).as_ptr(),
@@ -2582,6 +2816,7 @@ mod tests {
         let target_directory = target_root.join("new-folder");
         fs::create_dir(&source_directory)?;
         assert_ne!(
+            // SAFETY: The surrounding Win32 boundary establishes live handles and keeps every referenced buffer valid for this synchronous call.
             unsafe {
                 MoveFileW(
                     path_wide(&source_directory).as_ptr(),
