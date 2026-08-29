@@ -1,13 +1,14 @@
 use std::cell::Cell;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use darknamer_app::admission::{
     AdmissionAdapter, AdmissionAdapterError, AdmissionChildren, AdmissionIssueKind,
-    AdmissionMetadata, AdmissionMode, MAX_ADMISSION_DEPTH, MAX_ADMITTED_SOURCES, MAX_IMPORT_BYTES,
-    bounded_import_lines, bounded_selection, collect_admission, read_bounded_import,
+    AdmissionMetadata, AdmissionMode, AdmissionOperation, MAX_ADMISSION_DEPTH,
+    MAX_ADMITTED_SOURCES, MAX_IMPORT_BYTES, bounded_import_lines, bounded_selection,
+    collect_admission, read_bounded_import,
 };
 use darknamer_app::rename::EntryIdentity;
 use darknamer_core::LegacyText;
@@ -16,18 +17,14 @@ use darknamer_core::LegacyText;
 struct FakeAdapter {
     metadata: BTreeMap<PathBuf, AdmissionMetadata>,
     children: BTreeMap<PathBuf, Vec<PathBuf>>,
-    rejected: BTreeSet<PathBuf>,
+    rejected: BTreeMap<PathBuf, AdmissionAdapterError>,
     metadata_calls: Cell<usize>,
     enumeration_calls: Cell<usize>,
 }
 
 impl AdmissionAdapter for FakeAdapter {
     fn validate_path(&self, path: &Path) -> Result<(), AdmissionAdapterError> {
-        if self.rejected.contains(path) {
-            Err(AdmissionAdapterError)
-        } else {
-            Ok(())
-        }
+        self.rejected.get(path).copied().map_or(Ok(()), Err)
     }
 
     fn metadata(&self, path: &Path) -> Result<AdmissionMetadata, AdmissionAdapterError> {
@@ -35,7 +32,7 @@ impl AdmissionAdapter for FakeAdapter {
         self.metadata
             .get(path)
             .copied()
-            .ok_or(AdmissionAdapterError)
+            .ok_or(AdmissionAdapterError::new(AdmissionOperation::Metadata))
     }
 
     fn read_children(
@@ -44,7 +41,9 @@ impl AdmissionAdapter for FakeAdapter {
         limit: usize,
     ) -> Result<AdmissionChildren, AdmissionAdapterError> {
         self.enumeration_calls.set(self.enumeration_calls.get() + 1);
-        let children = self.children.get(path).ok_or(AdmissionAdapterError)?;
+        let children = self.children.get(path).ok_or(AdmissionAdapterError::new(
+            AdmissionOperation::ReadDirectory,
+        ))?;
         Ok(AdmissionChildren {
             paths: children.iter().take(limit).cloned().collect(),
             had_errors: false,
@@ -255,7 +254,13 @@ fn windows_reparse_loop_is_not_followed_and_missing_metadata_is_reported()
 fn rejected_safe_gate_performs_zero_metadata_or_enumeration_calls() {
     let rejected = test_root().join("unsupported");
     let mut adapter = FakeAdapter::default();
-    adapter.rejected.insert(rejected.clone());
+    adapter.rejected.insert(
+        rejected.clone(),
+        AdmissionAdapterError {
+            operation: AdmissionOperation::Validation,
+            code: Some(53),
+        },
+    );
     adapter.metadata.insert(rejected.clone(), directory(1));
     adapter.children.insert(rejected.clone(), Vec::new());
 
@@ -270,6 +275,12 @@ fn rejected_safe_gate_performs_zero_metadata_or_enumeration_calls() {
     assert!(report.items.is_empty());
     assert_eq!(adapter.metadata_calls.get(), 0);
     assert_eq!(adapter.enumeration_calls.get(), 0);
+    assert_eq!(
+        report.issues[0].operation,
+        Some(AdmissionOperation::Validation)
+    );
+    assert_eq!(report.issues[0].code, Some(53));
+    assert!(report.summary_korean(0).contains("Validation:53"));
 }
 
 #[test]

@@ -116,6 +116,10 @@ pub struct AdmissionIssue {
     pub path: PathBuf,
     /// Structured issue kind.
     pub kind: AdmissionIssueKind,
+    /// Adapter operation that failed, when applicable.
+    pub operation: Option<AdmissionOperation>,
+    /// Native error code retained without a path, when available.
+    pub code: Option<u32>,
 }
 
 /// Metadata needed to construct one legacy-compatible row.
@@ -147,8 +151,45 @@ pub struct AdmissionChildren {
 }
 
 /// Adapter operation failure without leaking native paths or error strings.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum AdmissionOperation {
+    /// Safe path and parent policy validation.
+    Validation,
+    /// Entry metadata or identity observation.
+    Metadata,
+    /// Retained-handle directory enumeration.
+    ReadDirectory,
+}
+
+/// Structured adapter failure preserving operation and native code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AdmissionAdapterError;
+pub struct AdmissionAdapterError {
+    /// Failed operation.
+    pub operation: AdmissionOperation,
+    /// Native OS error code, when available.
+    pub code: Option<u32>,
+}
+
+impl AdmissionAdapterError {
+    /// Creates an adapter error without a native code.
+    #[must_use]
+    pub const fn new(operation: AdmissionOperation) -> Self {
+        Self {
+            operation,
+            code: None,
+        }
+    }
+
+    #[cfg(windows)]
+    fn from_io(operation: AdmissionOperation, error: &io::Error) -> Self {
+        Self {
+            operation,
+            code: error
+                .raw_os_error()
+                .and_then(|code| u32::try_from(code).ok()),
+        }
+    }
+}
 
 /// Local filesystem seam used by iterative admission and focused tests.
 pub trait AdmissionAdapter {
@@ -188,7 +229,7 @@ impl AdmissionReport {
                 .filter(|issue| issue.kind == kind)
                 .count()
         };
-        format!(
+        let mut summary = format!(
             "{}개 추가, {}개 제외/중단 (상대경로 {}, 메타데이터 {}, 폴더읽기 {}, 재분석지점 {}, 한도 {}, 반복폴더 {}, 깊이 {})",
             appended,
             self.issues.len(),
@@ -199,7 +240,34 @@ impl AdmissionReport {
             count(AdmissionIssueKind::LimitReached),
             count(AdmissionIssueKind::RepeatedDirectory),
             count(AdmissionIssueKind::DepthExceeded),
-        )
+        );
+        let codes = self
+            .issues
+            .iter()
+            .filter_map(|issue| Some((issue.operation?, issue.code?)))
+            .collect::<BTreeSet<_>>();
+        if !codes.is_empty() {
+            let codes = codes
+                .into_iter()
+                .map(|(operation, code)| format!("{operation:?}:{code}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            summary.push_str(&format!(" 코드 {codes}"));
+        }
+        summary
+    }
+}
+
+fn issue(
+    path: PathBuf,
+    kind: AdmissionIssueKind,
+    error: Option<AdmissionAdapterError>,
+) -> AdmissionIssue {
+    AdmissionIssue {
+        path,
+        kind,
+        operation: error.map(|error| error.operation),
+        code: error.and_then(|error| error.code),
     }
 }
 
@@ -215,10 +283,11 @@ pub fn collect_admission(
     let capacity = capacity.min(MAX_ADMITTED_SOURCES);
     let mut report = AdmissionReport::default();
     if roots.len() > capacity {
-        report.issues.push(AdmissionIssue {
-            path: roots[capacity].clone(),
-            kind: AdmissionIssueKind::LimitReached,
-        });
+        report.issues.push(issue(
+            roots[capacity].clone(),
+            AdmissionIssueKind::LimitReached,
+            None,
+        ));
         roots.truncate(capacity);
     }
     roots.sort_by(|left, right| compare_paths(left, right));
@@ -231,70 +300,62 @@ pub fn collect_admission(
 
     while let Some((path, depth)) = stack.pop_back() {
         if inspected >= capacity {
-            report.issues.push(AdmissionIssue {
-                path,
-                kind: AdmissionIssueKind::LimitReached,
-            });
+            report
+                .issues
+                .push(issue(path, AdmissionIssueKind::LimitReached, None));
             break;
         }
         inspected += 1;
         if !path.is_absolute() {
-            report.issues.push(AdmissionIssue {
-                path,
-                kind: AdmissionIssueKind::RelativePath,
-            });
+            report
+                .issues
+                .push(issue(path, AdmissionIssueKind::RelativePath, None));
             continue;
         }
-        if adapter.validate_path(&path).is_err() {
-            report.issues.push(AdmissionIssue {
-                path,
-                kind: AdmissionIssueKind::Metadata,
-            });
+        if let Err(error) = adapter.validate_path(&path) {
+            report
+                .issues
+                .push(issue(path, AdmissionIssueKind::Metadata, Some(error)));
             continue;
         }
         let metadata = match adapter.metadata(&path) {
             Ok(metadata) => metadata,
-            Err(_error) => {
-                report.issues.push(AdmissionIssue {
-                    path,
-                    kind: AdmissionIssueKind::Metadata,
-                });
+            Err(error) => {
+                report
+                    .issues
+                    .push(issue(path, AdmissionIssueKind::Metadata, Some(error)));
                 continue;
             }
         };
         if metadata.is_reparse_point {
-            report.issues.push(AdmissionIssue {
-                path,
-                kind: AdmissionIssueKind::ReparsePoint,
-            });
+            report
+                .issues
+                .push(issue(path, AdmissionIssueKind::ReparsePoint, None));
             continue;
         }
         if metadata.is_directory {
             if let Some(identity) = metadata.directory_identity
                 && !seen_directories.insert(identity)
             {
-                report.issues.push(AdmissionIssue {
-                    path,
-                    kind: AdmissionIssueKind::RepeatedDirectory,
-                });
+                report
+                    .issues
+                    .push(issue(path, AdmissionIssueKind::RepeatedDirectory, None));
                 continue;
             }
             if mode == AdmissionMode::Recurse {
                 if depth >= MAX_ADMISSION_DEPTH {
-                    report.issues.push(AdmissionIssue {
-                        path,
-                        kind: AdmissionIssueKind::DepthExceeded,
-                    });
+                    report
+                        .issues
+                        .push(issue(path, AdmissionIssueKind::DepthExceeded, None));
                     continue;
                 }
                 let remaining = capacity
                     .saturating_sub(inspected)
                     .saturating_sub(stack.len());
                 if remaining == 0 {
-                    report.issues.push(AdmissionIssue {
-                        path,
-                        kind: AdmissionIssueKind::LimitReached,
-                    });
+                    report
+                        .issues
+                        .push(issue(path, AdmissionIssueKind::LimitReached, None));
                     break;
                 }
                 match adapter.read_children(&path, remaining) {
@@ -306,22 +367,23 @@ pub fn collect_admission(
                             stack.push_back((child, depth + 1));
                         }
                         if children.had_errors {
-                            report.issues.push(AdmissionIssue {
-                                path: path.clone(),
-                                kind: AdmissionIssueKind::ReadDirectory,
-                            });
+                            report.issues.push(issue(
+                                path.clone(),
+                                AdmissionIssueKind::ReadDirectory,
+                                None,
+                            ));
                         }
                         if children.truncated {
-                            report.issues.push(AdmissionIssue {
-                                path,
-                                kind: AdmissionIssueKind::LimitReached,
-                            });
+                            report
+                                .issues
+                                .push(issue(path, AdmissionIssueKind::LimitReached, None));
                         }
                     }
-                    Err(_error) => report.issues.push(AdmissionIssue {
+                    Err(error) => report.issues.push(issue(
                         path,
-                        kind: AdmissionIssueKind::ReadDirectory,
-                    }),
+                        AdmissionIssueKind::ReadDirectory,
+                        Some(error),
+                    )),
                 }
                 continue;
             }
@@ -370,14 +432,17 @@ mod windows {
         }
 
         fn parent_and_leaf(path: &Path) -> Result<(PathBuf, Vec<u16>), AdmissionAdapterError> {
-            let parent = path.parent().ok_or(AdmissionAdapterError)?.to_path_buf();
+            let parent = path
+                .parent()
+                .ok_or(AdmissionAdapterError::new(AdmissionOperation::Validation))?
+                .to_path_buf();
             let leaf = path
                 .file_name()
-                .ok_or(AdmissionAdapterError)?
+                .ok_or(AdmissionAdapterError::new(AdmissionOperation::Validation))?
                 .encode_wide()
                 .collect::<Vec<_>>();
             if validate_windows_leaf_name(&LegacyText::from_units(leaf.clone())).is_err() {
-                return Err(AdmissionAdapterError);
+                return Err(AdmissionAdapterError::new(AdmissionOperation::Validation));
             }
             Ok((parent, leaf))
         }
@@ -387,7 +452,9 @@ mod windows {
         fn validate_path(&self, path: &Path) -> Result<(), AdmissionAdapterError> {
             let (parent, _leaf) = Self::parent_and_leaf(path)?;
             if !self.parents.borrow().contains_key(&parent) {
-                let handle = NativeParent::open_path(&parent).map_err(|_| AdmissionAdapterError)?;
+                let handle = NativeParent::open_path(&parent).map_err(|error| {
+                    AdmissionAdapterError::from_io(AdmissionOperation::Validation, &error)
+                })?;
                 self.parents.borrow_mut().insert(parent, handle);
             }
             Ok(())
@@ -399,16 +466,25 @@ mod windows {
             }
             let (parent_path, leaf) = Self::parent_and_leaf(path)?;
             let parents = self.parents.borrow();
-            let parent = parents.get(&parent_path).ok_or(AdmissionAdapterError)?;
-            let file = open_entry(parent, &leaf, false).map_err(|_| AdmissionAdapterError)?;
-            let metadata = file.metadata().map_err(|_| AdmissionAdapterError)?;
+            let parent = parents
+                .get(&parent_path)
+                .ok_or(AdmissionAdapterError::new(AdmissionOperation::Metadata))?;
+            let file = open_entry(parent, &leaf, false).map_err(|error| {
+                AdmissionAdapterError::from_io(AdmissionOperation::Metadata, &error)
+            })?;
+            let metadata = file.metadata().map_err(|error| {
+                AdmissionAdapterError::from_io(AdmissionOperation::Metadata, &error)
+            })?;
             let attributes = metadata.file_attributes();
             let is_directory = attributes & 0x10 != 0;
             let is_reparse_point = attributes & 0x400 != 0;
             let directory_identity = if is_directory && !is_reparse_point {
-                let identity = file_identity(&file).map_err(|_| AdmissionAdapterError)?;
-                let directory =
-                    open_directory_entry(parent, &leaf).map_err(|_| AdmissionAdapterError)?;
+                let identity = file_identity(&file).map_err(|error| {
+                    AdmissionAdapterError::from_io(AdmissionOperation::Metadata, &error)
+                })?;
+                let directory = open_directory_entry(parent, &leaf).map_err(|error| {
+                    AdmissionAdapterError::from_io(AdmissionOperation::Metadata, &error)
+                })?;
                 self.directories
                     .borrow_mut()
                     .insert(path.to_path_buf(), directory);
@@ -436,9 +512,12 @@ mod windows {
             limit: usize,
         ) -> Result<AdmissionChildren, AdmissionAdapterError> {
             let directories = self.directories.borrow();
-            let directory = directories.get(path).ok_or(AdmissionAdapterError)?;
-            let (names, truncated) =
-                query_directory_names(directory, limit).map_err(|_| AdmissionAdapterError)?;
+            let directory = directories.get(path).ok_or(AdmissionAdapterError::new(
+                AdmissionOperation::ReadDirectory,
+            ))?;
+            let (names, truncated) = query_directory_names(directory, limit).map_err(|error| {
+                AdmissionAdapterError::from_io(AdmissionOperation::ReadDirectory, &error)
+            })?;
             let mut paths = Vec::with_capacity(names.len());
             let mut had_errors = false;
             for name in names {
