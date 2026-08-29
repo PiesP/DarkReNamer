@@ -144,6 +144,18 @@ pub struct JournalError {
     pub code: u32,
 }
 
+impl fmt::Display for JournalError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "journal operation failed with code {}",
+            self.code
+        )
+    }
+}
+
+impl std::error::Error for JournalError {}
+
 /// Opaque retained authorization for one exact journal identity and generation.
 #[derive(Debug)]
 pub struct JournalAuthorization {

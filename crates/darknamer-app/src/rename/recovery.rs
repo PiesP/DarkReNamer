@@ -169,12 +169,17 @@ impl<'a> RenameRecovery<'a> {
             }
             let operation = reverse_operation(step);
             if let Err(error) = self.backend.rename_no_replace(&operation) {
-                if error.certainty == MutationCertainty::NotApplied {
-                    let _result = self.journal.authorized_not_applied(
+                if error.certainty == MutationCertainty::NotApplied
+                    && let Err(journal_error) = self.journal.authorized_not_applied(
                         &mut authorization,
                         *step_index,
                         JournalDirection::Rollback,
-                    );
+                    )
+                {
+                    return RecoveryOutcome::RecoveryRequired {
+                        plan,
+                        reason: RecoveryFailure::Journal(journal_error),
+                    };
                 }
                 return RecoveryOutcome::RecoveryRequired {
                     plan,

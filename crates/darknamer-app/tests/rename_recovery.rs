@@ -1,7 +1,9 @@
 use darknamer_app::rename::{
-    EntryId, EntryKind, JournalDirection, JournalRecord, JournalStep, MemoryBackend, MemoryJournal,
-    ModelRevision, PlanRequest, RecoveryBlockKind, RecoveryFailure, RecoveryOutcome,
-    RenameExecutor, RenameIntent, RenamePlanner, RenameRecovery, TemporaryPhase,
+    AuthorizedJournal, EntryId, EntryIdentity, EntryKind, JournalAuthorization, JournalDirection,
+    JournalError, JournalRecord, JournalSnapshot, JournalStep, JournalTerminal, MemoryBackend,
+    MemoryJournal, ModelRevision, PlanId, PlanRequest, RecoveryBlockKind, RecoveryFailure,
+    RecoveryOutcome, RenameBackend, RenameExecutor, RenameIntent, RenamePlanner, RenameRecovery,
+    TemporaryPhase,
 };
 use darknamer_core::LegacyText;
 
@@ -204,5 +206,101 @@ fn journal_generation_drift_after_snapshot_fails_before_recovery_mutation()
         } if plan == id
     ));
     assert_eq!(backend.mutation_count(), before);
+    Ok(())
+}
+
+struct FailNotAppliedJournal {
+    inner: MemoryJournal,
+}
+
+impl AuthorizedJournal for FailNotAppliedJournal {
+    fn authorized_snapshot(&mut self) -> Result<JournalSnapshot, JournalError> {
+        self.inner.authorized_snapshot()
+    }
+
+    fn authorized_prepared(
+        &mut self,
+        authorization: &mut JournalAuthorization,
+        step: usize,
+        direction: JournalDirection,
+    ) -> Result<(), JournalError> {
+        self.inner
+            .authorized_prepared(authorization, step, direction)
+    }
+
+    fn authorized_completed(
+        &mut self,
+        authorization: &mut JournalAuthorization,
+        step: usize,
+        direction: JournalDirection,
+    ) -> Result<(), JournalError> {
+        self.inner
+            .authorized_completed(authorization, step, direction)
+    }
+
+    fn authorized_not_applied(
+        &mut self,
+        _authorization: &mut JournalAuthorization,
+        _step: usize,
+        _direction: JournalDirection,
+    ) -> Result<(), JournalError> {
+        Err(JournalError { code: 88 })
+    }
+
+    fn authorized_terminal(
+        &mut self,
+        authorization: &mut JournalAuthorization,
+        terminal: JournalTerminal,
+    ) -> Result<(), JournalError> {
+        self.inner.authorized_terminal(authorization, terminal)
+    }
+}
+
+#[test]
+fn rollback_not_applied_journal_failure_is_preserved() -> Result<(), Box<dyn std::error::Error>> {
+    let mut backend = MemoryBackend::new().with_file("C:\\work\\b.txt", 1);
+    let source = LegacyText::from("C:\\work\\a.txt");
+    let destination = LegacyText::from("C:\\work\\b.txt");
+    let source_parent = backend.observe(&source)?.parent;
+    let destination_parent = backend.observe(&destination)?.parent;
+    let step = JournalStep::new(
+        EntryId::new(0),
+        source,
+        destination,
+        EntryIdentity::new(1, 1),
+        source_parent,
+        destination_parent,
+        TemporaryPhase::None,
+    );
+    let plan = PlanId::from_fingerprint(9);
+    let records = vec![
+        JournalRecord::Intent {
+            plan,
+            steps: vec![step].into_boxed_slice(),
+        },
+        JournalRecord::Prepared {
+            step: 0,
+            direction: JournalDirection::Forward,
+        },
+        JournalRecord::Completed {
+            step: 0,
+            direction: JournalDirection::Forward,
+        },
+    ];
+    backend.fail_move_on(1, 32);
+    let mut journal = FailNotAppliedJournal {
+        inner: MemoryJournal::from_records(records),
+    };
+
+    let outcome = RenameRecovery::new(&mut backend, &mut journal).rollback();
+
+    assert_eq!(
+        outcome,
+        RecoveryOutcome::RecoveryRequired {
+            plan,
+            reason: RecoveryFailure::Journal(JournalError { code: 88 }),
+        }
+    );
+    assert_eq!(backend.mutation_count(), 0);
     Ok(())
 }
