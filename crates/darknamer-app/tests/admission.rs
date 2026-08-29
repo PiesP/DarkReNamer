@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use darknamer_app::admission::{
     AdmissionAdapter, AdmissionAdapterError, AdmissionChildren, AdmissionIssueKind,
-    AdmissionMetadata, AdmissionMode, MAX_ADMITTED_SOURCES, MAX_IMPORT_BYTES, bounded_import_lines,
-    bounded_selection, collect_admission, read_bounded_import,
+    AdmissionMetadata, AdmissionMode, MAX_ADMISSION_DEPTH, MAX_ADMITTED_SOURCES, MAX_IMPORT_BYTES,
+    bounded_import_lines, bounded_selection, collect_admission, read_bounded_import,
 };
 use darknamer_app::rename::EntryIdentity;
 use darknamer_core::LegacyText;
@@ -350,4 +350,35 @@ fn import_reader_and_line_parser_are_bounded() -> Result<(), Box<dyn std::error:
     );
     assert!(truncated);
     Ok(())
+}
+
+#[test]
+fn nested_directory_depth_stops_before_unbounded_enumeration() {
+    let root = test_root();
+    let mut adapter = FakeAdapter::default();
+    let mut current = root.clone();
+    for depth in 0..=MAX_ADMISSION_DEPTH {
+        adapter
+            .metadata
+            .insert(current.clone(), directory(depth as u128 + 1));
+        let child = current.join("child");
+        adapter.children.insert(current, vec![child.clone()]);
+        current = child;
+    }
+
+    let report = collect_admission(
+        &adapter,
+        vec![root],
+        AdmissionMode::Recurse,
+        MAX_ADMITTED_SOURCES,
+        compare,
+    );
+
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.kind == AdmissionIssueKind::DepthExceeded)
+    );
+    assert!(adapter.enumeration_calls.get() <= MAX_ADMISSION_DEPTH);
 }

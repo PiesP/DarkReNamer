@@ -1,3 +1,6 @@
+use std::cell::Cell;
+
+use darknamer_app::admission::MAX_ADMISSION_DEPTH;
 use darknamer_app::rename::{
     BackendError, EntryId, EntryKind, MemoryBackend, ModelRevision, PathKey, PathSnapshot,
     PlanIssueKind, PlanRequest, RenameBackend, RenameIntent, RenameOperation, RenamePlanner,
@@ -333,4 +336,78 @@ fn ancestor_detection_does_not_interpret_backend_equality_keys_as_paths()
             .all(|issue| issue.kind == PlanIssueKind::SourceOverlap)
     );
     Ok(())
+}
+
+struct CountingBackend {
+    inner: MemoryBackend,
+    key_calls: Cell<usize>,
+    relationship_calls: Cell<usize>,
+}
+
+impl RenameBackend for CountingBackend {
+    fn validate_path_environment(&self, path: &LegacyText) -> Result<(), BackendError> {
+        self.inner.validate_path_environment(path)
+    }
+
+    fn path_key(&self, path: &LegacyText) -> PathKey {
+        self.key_calls.set(self.key_calls.get() + 1);
+        self.inner.path_key(path)
+    }
+
+    fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
+        self.inner.observe(path)
+    }
+
+    fn is_same_or_descendant(
+        &self,
+        ancestor: &LegacyText,
+        candidate: &LegacyText,
+    ) -> Result<bool, BackendError> {
+        self.relationship_calls
+            .set(self.relationship_calls.get() + 1);
+        self.inner.is_same_or_descendant(ancestor, candidate)
+    }
+
+    fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
+        self.inner.next_transaction_nonce()
+    }
+
+    fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+        self.inner.rename_no_replace(operation)
+    }
+}
+
+#[test]
+fn nested_overlap_detection_has_bounded_calls_and_one_issue_per_row() {
+    let count = 128_usize;
+    let mut inner = MemoryBackend::new();
+    let mut intents = Vec::with_capacity(count);
+    let mut parent = "C:\\root".to_owned();
+    for index in 0..count {
+        let source = format!("{parent}\\node-{index}");
+        inner = inner.with_file(source.clone(), index as u128 + 1);
+        intents.push(RenameIntent::new(
+            EntryId::new(index as u32),
+            source.clone(),
+            parent.clone(),
+            format!("renamed-{index}"),
+            EntryKind::File,
+        ));
+        parent = source;
+    }
+    let backend = CountingBackend {
+        inner,
+        key_calls: Cell::new(0),
+        relationship_calls: Cell::new(0),
+    };
+
+    let error = RenamePlanner::new(&backend)
+        .plan(PlanRequest::new(ModelRevision::new(1), intents))
+        .err();
+    let Some(error) = error else {
+        return;
+    };
+    assert!(error.issues().len() <= count);
+    assert_eq!(backend.relationship_calls.get(), 0);
+    assert!(backend.key_calls.get() <= count * (MAX_ADMISSION_DEPTH + 8));
 }

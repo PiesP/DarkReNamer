@@ -11,6 +11,8 @@ use crate::rename::EntryIdentity;
 
 /// Hard limit applied before inspecting further candidate metadata.
 pub const MAX_ADMITTED_SOURCES: usize = 10_000;
+/// Maximum directory nesting inspected or enumerated by admission.
+pub const MAX_ADMISSION_DEPTH: usize = 256;
 /// Maximum imported text bytes read into memory.
 pub const MAX_IMPORT_BYTES: usize = 2 * 1024 * 1024;
 
@@ -103,6 +105,8 @@ pub enum AdmissionIssueKind {
     LimitReached,
     /// The same stable directory identity was encountered again.
     RepeatedDirectory,
+    /// Directory nesting exceeded the bounded admission depth.
+    DepthExceeded,
 }
 
 /// One path-scoped admission issue.
@@ -185,7 +189,7 @@ impl AdmissionReport {
                 .count()
         };
         format!(
-            "{}개 추가, {}개 제외/중단 (상대경로 {}, 메타데이터 {}, 폴더읽기 {}, 재분석지점 {}, 한도 {}, 반복폴더 {})",
+            "{}개 추가, {}개 제외/중단 (상대경로 {}, 메타데이터 {}, 폴더읽기 {}, 재분석지점 {}, 한도 {}, 반복폴더 {}, 깊이 {})",
             appended,
             self.issues.len(),
             count(AdmissionIssueKind::RelativePath),
@@ -194,6 +198,7 @@ impl AdmissionReport {
             count(AdmissionIssueKind::ReparsePoint),
             count(AdmissionIssueKind::LimitReached),
             count(AdmissionIssueKind::RepeatedDirectory),
+            count(AdmissionIssueKind::DepthExceeded),
         )
     }
 }
@@ -219,12 +224,12 @@ pub fn collect_admission(
     roots.sort_by(|left, right| compare_paths(left, right));
     let mut stack = VecDeque::new();
     for root in roots.into_iter().rev() {
-        stack.push_back(root);
+        stack.push_back((root, 0_usize));
     }
     let mut seen_directories = BTreeSet::new();
     let mut inspected = 0_usize;
 
-    while let Some(path) = stack.pop_back() {
+    while let Some((path, depth)) = stack.pop_back() {
         if inspected >= capacity {
             report.issues.push(AdmissionIssue {
                 path,
@@ -275,6 +280,13 @@ pub fn collect_admission(
                 continue;
             }
             if mode == AdmissionMode::Recurse {
+                if depth >= MAX_ADMISSION_DEPTH {
+                    report.issues.push(AdmissionIssue {
+                        path,
+                        kind: AdmissionIssueKind::DepthExceeded,
+                    });
+                    continue;
+                }
                 let remaining = capacity
                     .saturating_sub(inspected)
                     .saturating_sub(stack.len());
@@ -291,7 +303,7 @@ pub fn collect_admission(
                             .paths
                             .sort_by(|left, right| compare_paths(left, right));
                         for child in children.paths.into_iter().rev() {
-                            stack.push_back(child);
+                            stack.push_back((child, depth + 1));
                         }
                         if children.had_errors {
                             report.issues.push(AdmissionIssue {

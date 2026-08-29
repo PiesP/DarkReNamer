@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use darknamer_core::validate_windows_leaf_name;
 
+use crate::admission::MAX_ADMISSION_DEPTH;
+
 use super::model::PlanRow;
 use super::{
     EntryId, PathKey, PlanError, PlanId, PlanIssue, PlanIssueKind, PlanRequest, RenameBackend,
@@ -97,45 +99,19 @@ impl<'a> RenamePlanner<'a> {
                 kind: PlanIssueKind::DuplicateDestination,
             }));
         }
-        for left in 0..changed.len() {
-            for right in left + 1..changed.len() {
-                if self.backend.path_key(&changed[left].source)
-                    == self.backend.path_key(&changed[right].source)
-                {
-                    continue;
+        let mut overlap_entries = BTreeSet::new();
+        for intent in &changed {
+            visit_direct_ancestors(&intent.source, |ancestor| {
+                if let Some(owners) = source_owners.get(&self.backend.path_key(ancestor)) {
+                    overlap_entries.insert(intent.id);
+                    overlap_entries.extend(owners.iter().copied());
                 }
-                let overlaps = self
-                    .backend
-                    .is_same_or_descendant(&changed[left].source, &changed[right].source)
-                    .and_then(|left_contains_right| {
-                        if left_contains_right {
-                            Ok(true)
-                        } else {
-                            self.backend.is_same_or_descendant(
-                                &changed[right].source,
-                                &changed[left].source,
-                            )
-                        }
-                    });
-                match overlaps {
-                    Ok(true) => {
-                        issues.push(PlanIssue {
-                            entry: changed[left].id,
-                            kind: PlanIssueKind::SourceOverlap,
-                        });
-                        issues.push(PlanIssue {
-                            entry: changed[right].id,
-                            kind: PlanIssueKind::SourceOverlap,
-                        });
-                    }
-                    Ok(false) => {}
-                    Err(error) => issues.push(PlanIssue {
-                        entry: changed[left].id,
-                        kind: PlanIssueKind::BackendFailure(error),
-                    }),
-                }
-            }
+            });
         }
+        issues.extend(overlap_entries.into_iter().map(|entry| PlanIssue {
+            entry,
+            kind: PlanIssueKind::SourceOverlap,
+        }));
         if !issues.is_empty() {
             return Err(PlanError::new(issues));
         }
@@ -229,6 +205,30 @@ fn append_duplicate_issues<'a>(
             entry: *entry,
             kind: kind.clone(),
         }));
+    }
+}
+
+fn visit_direct_ancestors(
+    path: &darknamer_core::LegacyText,
+    mut visit: impl FnMut(&darknamer_core::LegacyText),
+) {
+    let mut ancestor = path.clone();
+    for _ in 0..MAX_ADMISSION_DEPTH {
+        let Some(separator) = ancestor
+            .units()
+            .iter()
+            .rposition(|unit| is_separator(*unit))
+        else {
+            break;
+        };
+        if separator <= 2 && ancestor.units().get(1) == Some(&(b':' as u16)) {
+            break;
+        }
+        ancestor.truncate_units(separator);
+        if ancestor.is_empty() {
+            break;
+        }
+        visit(&ancestor);
     }
 }
 

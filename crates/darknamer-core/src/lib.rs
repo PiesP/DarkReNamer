@@ -53,6 +53,11 @@ impl LegacyText {
         self.units.is_empty()
     }
 
+    /// Truncates to at most `length` exact UTF-16 code units.
+    pub fn truncate_units(&mut self, length: usize) {
+        self.units.truncate(length);
+    }
+
     /// Converts to displayable Unicode, replacing unpaired surrogates.
     #[must_use]
     pub fn to_string_lossy(&self) -> String {
