@@ -2,6 +2,9 @@
 
 #![cfg_attr(not(windows), forbid(unsafe_code))]
 
+/// Safe rename planning and execution foundation.
+pub mod rename;
+
 /// Original outer window width used by the parity shell.
 pub const INITIAL_WIDTH: i32 = 464;
 /// Original outer window height used by the parity shell.

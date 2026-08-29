@@ -10,6 +10,10 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt;
 
+mod windows_leaf_name;
+
+pub use windows_leaf_name::{WindowsLeafNameError, validate_windows_leaf_name};
+
 const BACKSLASH: u16 = b'\\' as u16;
 const DOT: u16 = b'.' as u16;
 const CR: u16 = b'\r' as u16;
