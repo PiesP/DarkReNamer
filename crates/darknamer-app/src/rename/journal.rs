@@ -434,7 +434,7 @@ impl MemoryJournal {
             self.generation = self.generation.saturating_add(1);
         }
         if authorization.identity != self.identity || authorization.generation != self.generation {
-            return Err(JournalError { code: 2 });
+            return Err(JournalError::not_appended(2));
         }
         self.push(record);
         authorization.generation = self.generation;
@@ -451,7 +451,7 @@ impl Default for MemoryJournal {
 impl JournalStore for MemoryJournal {
     fn begin(&mut self, plan: PlanId, steps: &[JournalStep]) -> Result<(), JournalError> {
         if !self.records.is_empty() {
-            return Err(JournalError { code: 1 });
+            return Err(JournalError::not_appended(1));
         }
         self.push(JournalRecord::Intent {
             plan,

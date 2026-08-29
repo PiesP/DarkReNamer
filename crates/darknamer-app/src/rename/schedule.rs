@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use darknamer_core::LegacyText;
 
@@ -57,34 +57,55 @@ pub(super) fn build_schedule(
         .chain(&destination_keys)
         .cloned()
         .collect::<BTreeSet<_>>();
+    let mut source_owners = BTreeMap::new();
+    for (index, key) in source_keys.iter().cloned().enumerate() {
+        if source_owners.insert(key, index).is_some() {
+            return Err(ScheduleError::Invalid);
+        }
+    }
+    let mut dependencies = vec![None; plan.entries.len()];
+    let mut predecessors = vec![None; plan.entries.len()];
+    for (index, destination) in destination_keys.iter().enumerate() {
+        let Some(owner) = source_owners.get(destination).copied() else {
+            continue;
+        };
+        dependencies[index] = Some(owner);
+        if predecessors[owner].replace(index).is_some() {
+            return Err(ScheduleError::Invalid);
+        }
+    }
     let mut pending = vec![true; plan.entries.len()];
     let mut remaining = pending.len();
-    let mut schedule = Vec::new();
+    let mut remaining_indices = (0..plan.entries.len()).collect::<BTreeSet<_>>();
+    let mut ready = dependencies
+        .iter()
+        .enumerate()
+        .filter_map(|(index, dependency)| dependency.is_none().then_some(index))
+        .collect::<BTreeSet<_>>();
+    let mut schedule = Vec::with_capacity(plan.entries.len().saturating_mul(2));
 
     while remaining > 0 {
-        let movable = pending.iter().enumerate().find_map(|(index, is_pending)| {
-            if !is_pending {
-                return None;
+        if let Some(index) = ready.pop_first() {
+            if !pending[index] {
+                return Err(ScheduleError::Invalid);
             }
-            let destination_is_pending_source =
-                pending
-                    .iter()
-                    .enumerate()
-                    .any(|(source_index, source_pending)| {
-                        *source_pending && source_keys[source_index] == destination_keys[index]
-                    });
-            (!destination_is_pending_source).then_some(index)
-        });
-        if let Some(index) = movable {
             schedule.push(direct_step(&plan.entries[index])?);
             pending[index] = false;
+            if !remaining_indices.remove(&index) {
+                return Err(ScheduleError::Invalid);
+            }
             remaining -= 1;
+            if let Some(predecessor) = predecessors[index]
+                && pending[predecessor]
+            {
+                ready.insert(predecessor);
+            }
             continue;
         }
 
-        let pivot = pending
-            .iter()
-            .position(|is_pending| *is_pending)
+        let pivot = remaining_indices
+            .first()
+            .copied()
             .ok_or(ScheduleError::Invalid)?;
         let pivot_entry = &plan.entries[pivot];
         let temporary = unique_temporary_path(plan, pivot_entry, backend, &mut reserved)?;
@@ -99,18 +120,20 @@ pub(super) fn build_schedule(
             temporary_phase: TemporaryPhase::IntoTemporary,
         });
 
-        let mut freed_key = source_keys[pivot].clone();
-        loop {
-            let predecessor = pending.iter().enumerate().find_map(|(index, is_pending)| {
-                (*is_pending && index != pivot && destination_keys[index] == freed_key)
-                    .then_some(index)
-            });
-            let Some(index) = predecessor else {
+        let mut freed = pivot;
+        while let Some(index) = predecessors[freed] {
+            if index == pivot {
                 break;
-            };
+            }
+            if !pending[index] {
+                return Err(ScheduleError::Invalid);
+            }
             schedule.push(direct_step(&plan.entries[index])?);
-            freed_key.clone_from(&source_keys[index]);
+            freed = index;
             pending[index] = false;
+            if !remaining_indices.remove(&index) {
+                return Err(ScheduleError::Invalid);
+            }
             remaining -= 1;
         }
 
@@ -124,6 +147,9 @@ pub(super) fn build_schedule(
             temporary_phase: TemporaryPhase::FromTemporary,
         });
         pending[pivot] = false;
+        if !remaining_indices.remove(&pivot) {
+            return Err(ScheduleError::Invalid);
+        }
         remaining -= 1;
     }
 
@@ -191,4 +217,180 @@ fn parent_units(path: &[u16]) -> &[u16] {
     path.iter()
         .rposition(|unit| *unit == b'\\' as u16 || *unit == b'/' as u16)
         .map_or(&[], |index| &path[..index])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rename::{EntryKind, MemoryBackend, ModelRevision, PlanId};
+
+    fn build_plan(
+        backend: &MemoryBackend,
+        paths: impl IntoIterator<Item = (u32, String, String)>,
+    ) -> Result<RenamePlan, BackendError> {
+        let entries = paths
+            .into_iter()
+            .map(|(id, source, destination)| {
+                let source = LegacyText::from(source);
+                let destination = LegacyText::from(destination);
+                Ok(PlanRow {
+                    id: EntryId::new(id),
+                    source_snapshot: backend.observe(&source)?,
+                    destination_snapshot: backend.observe(&destination)?,
+                    source,
+                    destination,
+                    kind: EntryKind::File,
+                })
+            })
+            .collect::<Result<Vec<_>, BackendError>>()?;
+        Ok(RenamePlan {
+            id: PlanId::from_fingerprint(1),
+            revision: ModelRevision::new(1),
+            entries: entries.into_boxed_slice(),
+        })
+    }
+
+    #[test]
+    fn ten_thousand_independent_entries_keep_input_order() -> Result<(), Box<dyn std::error::Error>>
+    {
+        const COUNT: usize = 10_000;
+        let mut backend = MemoryBackend::new();
+        let mut paths = Vec::with_capacity(COUNT);
+        for index in 0..COUNT {
+            let source = format!("C:\\work\\source-{index:05}.txt");
+            let destination = format!("C:\\work\\target-{index:05}.txt");
+            backend = backend.with_file(source.clone(), index as u128 + 1);
+            paths.push((index as u32, source, destination));
+        }
+        let plan = build_plan(&backend, paths)?;
+
+        let schedule = build_schedule(&plan, &mut backend)
+            .map_err(|error| std::io::Error::other(format!("schedule failed: {error:?}")))?;
+
+        assert_eq!(schedule.len(), COUNT);
+        assert!(
+            schedule
+                .iter()
+                .enumerate()
+                .all(|(index, step)| step.entry == EntryId::new(index as u32))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ten_thousand_entry_chain_runs_in_reverse_dependency_order()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const COUNT: usize = 10_000;
+        let mut backend = MemoryBackend::new();
+        let mut paths = Vec::with_capacity(COUNT);
+        for index in 0..COUNT {
+            let source = format!("C:\\work\\node-{index:05}.txt");
+            let destination = if index + 1 == COUNT {
+                "C:\\work\\final.txt".to_owned()
+            } else {
+                format!("C:\\work\\node-{:05}.txt", index + 1)
+            };
+            backend = backend.with_file(source.clone(), index as u128 + 1);
+            paths.push((index as u32, source, destination));
+        }
+        let plan = build_plan(&backend, paths)?;
+
+        let schedule = build_schedule(&plan, &mut backend)
+            .map_err(|error| std::io::Error::other(format!("schedule failed: {error:?}")))?;
+
+        assert_eq!(schedule.len(), COUNT);
+        assert!(schedule.iter().enumerate().all(|(index, step)| {
+            step.entry == EntryId::new(u32::try_from(COUNT - index - 1).unwrap_or_default())
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn separate_cycles_each_use_one_temporary_hop() -> Result<(), Box<dyn std::error::Error>> {
+        let mut backend = MemoryBackend::new()
+            .with_file("C:\\work\\a.txt", 1)
+            .with_file("C:\\work\\b.txt", 2)
+            .with_file("C:\\work\\c.txt", 3)
+            .with_file("C:\\work\\d.txt", 4);
+        let plan = build_plan(
+            &backend,
+            [
+                (
+                    0,
+                    "C:\\work\\a.txt".to_owned(),
+                    "C:\\work\\b.txt".to_owned(),
+                ),
+                (
+                    1,
+                    "C:\\work\\b.txt".to_owned(),
+                    "C:\\work\\a.txt".to_owned(),
+                ),
+                (
+                    2,
+                    "C:\\work\\c.txt".to_owned(),
+                    "C:\\work\\d.txt".to_owned(),
+                ),
+                (
+                    3,
+                    "C:\\work\\d.txt".to_owned(),
+                    "C:\\work\\c.txt".to_owned(),
+                ),
+            ],
+        )?;
+
+        let schedule = build_schedule(&plan, &mut backend)
+            .map_err(|error| std::io::Error::other(format!("schedule failed: {error:?}")))?;
+
+        assert_eq!(schedule.len(), 6);
+        assert_eq!(
+            schedule
+                .iter()
+                .filter(|step| step.temporary_phase == TemporaryPhase::IntoTemporary)
+                .count(),
+            2
+        );
+        assert_eq!(
+            schedule
+                .iter()
+                .filter(|step| step.temporary_phase == TemporaryPhase::FromTemporary)
+                .count(),
+            2
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ten_thousand_case_only_cycles_use_bounded_pivot_selection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const COUNT: usize = 10_000;
+        let mut backend = MemoryBackend::new();
+        let mut paths = Vec::with_capacity(COUNT);
+        for index in 0..COUNT {
+            let source = format!("C:\\work\\FILE-{index:05}.TXT");
+            let destination = format!("C:\\work\\file-{index:05}.txt");
+            backend = backend.with_file(source.clone(), index as u128 + 1);
+            paths.push((index as u32, source, destination));
+        }
+        let plan = build_plan(&backend, paths)?;
+
+        let schedule = build_schedule(&plan, &mut backend)
+            .map_err(|error| std::io::Error::other(format!("schedule failed: {error:?}")))?;
+
+        assert_eq!(schedule.len(), COUNT * 2);
+        assert_eq!(
+            schedule
+                .iter()
+                .filter(|step| step.temporary_phase == TemporaryPhase::IntoTemporary)
+                .count(),
+            COUNT
+        );
+        assert_eq!(
+            schedule
+                .iter()
+                .filter(|step| step.temporary_phase == TemporaryPhase::FromTemporary)
+                .count(),
+            COUNT
+        );
+        Ok(())
+    }
 }

@@ -2,6 +2,8 @@
 
 mod activation;
 mod executor;
+#[cfg(test)]
+pub(crate) mod failpoint;
 mod file_journal;
 mod journal;
 mod memory;
@@ -21,14 +23,17 @@ pub use activation::{
     safe_mode_unify_path_message,
 };
 pub use executor::{
-    EntryExecution, ExecuteError, ExecuteErrorKind, ExecutionFailure, ExecutionOutcome,
-    ExecutionReport, RenameExecutor, RenameState, RollbackFailure,
+    CancellationToken, EntryExecution, ExecuteError, ExecuteErrorKind, ExecutionControl,
+    ExecutionFailure, ExecutionOutcome, ExecutionPhase, ExecutionProgress, ExecutionReport,
+    RenameExecutor, RenameState, RollbackFailure,
 };
 pub use file_journal::{
-    FileJournal, FileJournalError, FileJournalErrorKind, JournalCodecError, JournalCodecErrorKind,
-    JournalInspection, JournalRoot, JournalTailIssue, MAX_JOURNAL_FILE_BYTES,
+    ExistingJournalOpenError, FileJournal, FileJournalError, FileJournalErrorKind,
+    JournalCodecError, JournalCodecErrorKind, JournalInspection, JournalOpenFailure,
+    JournalOpenStage, JournalRoot, JournalTailIssue, MAX_JOURNAL_FILE_BYTES,
     MAX_JOURNAL_FRAME_BYTES, MAX_JOURNAL_FRAMES, MAX_JOURNAL_STEPS, MAX_PATH_UNITS,
-    decode_journal_records, encode_journal_records, inspect_journal_records,
+    RecoveryJournalEvidence, decode_journal_records, encode_journal_records,
+    inspect_journal_records,
 };
 pub use journal::{
     JournalCorruption, JournalDirection, JournalRecord, JournalStep, JournalTerminal,
@@ -42,8 +47,8 @@ pub use model::{
 };
 pub use planner::{MAX_PLAN_PATH_DEPTH, RenamePlanner};
 pub use ports::{
-    AuthorizedJournal, BackendError, BackendOperation, JournalAuthorization, JournalError,
-    JournalSnapshot, JournalStore, MutationCertainty, RenameBackend, RenameOperation,
+    AppendCertainty, AuthorizedJournal, BackendError, BackendOperation, JournalAuthorization,
+    JournalError, JournalSnapshot, JournalStore, MutationCertainty, RenameBackend, RenameOperation,
 };
 pub use recovery::{RecoveryBlockKind, RecoveryFailure, RecoveryOutcome, RenameRecovery};
 pub use schedule::{MAX_TEMP_CANDIDATES, TemporaryPhase};

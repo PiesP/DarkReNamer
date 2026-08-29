@@ -142,17 +142,48 @@ pub trait RenameBackend {
 
 /// Durable journal adapter failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AppendCertainty {
+    /// The adapter guarantees that the attempted record was not appended.
+    NotAppended,
+    /// The adapter cannot prove whether some or all of the record was appended.
+    MayHaveAppended,
+}
+
+/// Durable journal adapter failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct JournalError {
     /// Adapter-owned numeric error code.
     pub code: u32,
+    /// Journal append certainty associated with the failure.
+    pub certainty: AppendCertainty,
+}
+
+impl JournalError {
+    /// Creates an error that guarantees the attempted record was not appended.
+    #[must_use]
+    pub const fn not_appended(code: u32) -> Self {
+        Self {
+            code,
+            certainty: AppendCertainty::NotAppended,
+        }
+    }
+
+    /// Creates an error for an append whose durable result is uncertain.
+    #[must_use]
+    pub const fn may_have_appended(code: u32) -> Self {
+        Self {
+            code,
+            certainty: AppendCertainty::MayHaveAppended,
+        }
+    }
 }
 
 impl fmt::Display for JournalError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "journal operation failed with code {}",
-            self.code
+            "journal operation failed with code {} ({:?})",
+            self.code, self.certainty
         )
     }
 }

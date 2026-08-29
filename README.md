@@ -38,11 +38,16 @@ from manually verified runtime parity.
 
 - `darknamer-core`: portable UTF-16 list state and DarkNamer 08.02.10
   transformation semantics.
-- `darknamer-app`: native Win32 application and `DarkNamer.exe` binary.
+- `darknamer-app`: native Win32 application and `DarkReNamer.exe` binary.
 
 The current tree contains only the Rust implementation and its build metadata.
 Historical MFC source, screenshots, archives, and executables remain available
 through the fork history and upstream repository for provenance.
+
+The filesystem transaction and recovery contract is documented in
+[`SAFETY.md`](SAFETY.md). Tagged Windows prereleases, unsigned artifact status,
+checksums, SBOMs, attestations, and the future signing boundary are documented
+in [`DISTRIBUTION.md`](DISTRIBUTION.md).
 
 ## Development
 
@@ -61,7 +66,7 @@ Cross-build the compatibility executable from Linux:
 ```text
 RC=/usr/bin/llvm-rc-19 cargo xwin build --release --locked \
   --target x86_64-pc-windows-msvc \
-  -p darknamer-app --bin DarkNamer
+  -p darknamer-app --bin DarkReNamer
 ```
 
 ## Attribution and license

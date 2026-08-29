@@ -1,0 +1,192 @@
+name: Portable prerelease
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: prerelease/build-windows
+    runs-on: windows-2025
+    timeout-minutes: 45
+    outputs:
+      tagged_commit: ${{ steps.validate.outputs.tagged_commit }}
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate tag authority and version
+        id: validate
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $taggedCommit = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'The tagged commit could not be resolved.' }
+          $masterCommit = git rev-parse origin/master
+          if ($LASTEXITCODE -ne 0) { throw 'The current origin/master could not be resolved.' }
+          if ($taggedCommit -ne $masterCommit) {
+            throw 'The release tag must point to the current origin/master commit.'
+          }
+          "tagged_commit=$taggedCommit" | Out-File `
+            -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $cargo = Get-Content Cargo.toml -Raw
+          $match = [regex]::Match($cargo, '(?m)^version = "([^"]+)"$')
+          if (-not $match.Success) { throw 'Workspace version was not found.' }
+          $expected = "v$($match.Groups[1].Value)"
+          if ($env:RELEASE_TAG -ne $expected) {
+            throw "Tag $env:RELEASE_TAG does not match $expected."
+          }
+
+      - name: Install pinned Rust and verified SBOM tool
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Rust installation failed.' }
+          cargo install --locked cargo-audit --version 0.22.2
+          if ($LASTEXITCODE -ne 0) { throw 'cargo-audit installation failed.' }
+          cargo install --locked cargo-deny --version 0.20.2
+          if ($LASTEXITCODE -ne 0) { throw 'cargo-deny installation failed.' }
+          $archive = Join-Path $env:RUNNER_TEMP 'cargo-cyclonedx-0.5.9.zip'
+          $tools = Join-Path $env:RUNNER_TEMP 'cargo-cyclonedx-0.5.9'
+          Invoke-WebRequest `
+            -Uri 'https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-0.5.9/cargo-cyclonedx-x86_64-pc-windows-msvc.zip' `
+            -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          $expected = '8750e00775661dcb75bc482c1a298839fd94e8a0c033b49905ba0f246ffed202'
+          if ($actual -ne $expected) { throw 'cargo-cyclonedx checksum mismatch.' }
+          Expand-Archive -Path $archive -DestinationPath $tools
+          Add-Content -Path $env:GITHUB_PATH -Value $tools
+          & (Join-Path $tools 'cargo-cyclonedx.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw 'cargo-cyclonedx verification failed.' }
+
+      - name: Test and build tagged source
+        shell: pwsh
+        run: |
+          cargo audit --deny warnings
+          if ($LASTEXITCODE -ne 0) { throw 'Tagged dependency audit failed.' }
+          cargo deny check
+          if ($LASTEXITCODE -ne 0) { throw 'Tagged dependency policy check failed.' }
+          cargo test --workspace --all-targets --all-features --locked
+          if ($LASTEXITCODE -ne 0) { throw 'Tagged workspace tests failed.' }
+          cargo build --release --locked --package darknamer-app --bin DarkReNamer
+          if ($LASTEXITCODE -ne 0) { throw 'Tagged Windows build failed.' }
+
+      - name: Generate release files
+        shell: pwsh
+        run: |
+          $epoch = git show -s --format=%ct HEAD
+          $env:SOURCE_DATE_EPOCH = $epoch
+          cargo cyclonedx --manifest-path crates/darknamer-app/Cargo.toml `
+            --format json `
+            --describe binaries `
+            --target x86_64-pc-windows-msvc `
+            --target-in-filename `
+            --spec-version 1.5
+          if ($LASTEXITCODE -ne 0) { throw 'CycloneDX generation failed.' }
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item target/release/DarkReNamer.exe dist/DarkReNamer.exe
+          Copy-Item target/release/DarkReNamer.pdb dist/DarkReNamer.pdb
+          Copy-Item crates/darknamer-app/DarkReNamer_bin_x86_64-pc-windows-msvc.cdx.json `
+            dist/DarkReNamer.cdx.json
+          Copy-Item LICENSE dist/LICENSE
+          Copy-Item THIRD_PARTY_NOTICES.md dist/THIRD_PARTY_NOTICES.md
+          Copy-Item DISTRIBUTION.md dist/DISTRIBUTION.md
+          Compress-Archive -Path dist/DarkReNamer.pdb `
+            -DestinationPath dist/DarkReNamer-debug-symbols.zip
+          $signature = Get-AuthenticodeSignature dist/DarkReNamer.exe
+          if ($signature.Status -ne 'NotSigned') {
+            throw "Unsigned prerelease policy changed unexpectedly: $($signature.Status)."
+          }
+          $files = Get-ChildItem dist -File |
+            Where-Object Name -ne 'DarkReNamer.pdb' |
+            Sort-Object Name
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
+            "$hash *$($file.Name)"
+          }
+          [IO.File]::WriteAllText(
+            (Join-Path $PWD 'dist/SHA256SUMS.txt'),
+            (($lines -join "`n") + "`n"),
+            [Text.UTF8Encoding]::new($false)
+          )
+
+      - name: Retain complete release handoff
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: DarkReNamer-${{ github.ref_name }}-windows
+          path: dist/
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    name: prerelease/publish
+    needs: windows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Download verified build handoff
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: DarkReNamer-${{ github.ref_name }}-windows
+          path: dist
+
+      - name: Revalidate tag target
+        env:
+          EXPECTED_COMMIT: ${{ needs.windows.outputs.tagged_commit }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          remote_commit="$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" "refs/tags/$RELEASE_TAG^{}" | cut -f1)"
+          if [ -z "$remote_commit" ]; then
+            remote_commit="$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" "refs/tags/$RELEASE_TAG" | cut -f1)"
+          fi
+          if [ "$remote_commit" != "$EXPECTED_COMMIT" ]; then
+            echo 'The release tag moved after the verified build.' >&2
+            exit 1
+          fi
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*
+
+      - name: Attest executable SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/DarkReNamer.exe
+          sbom-path: dist/DarkReNamer.cdx.json
+
+      - name: Publish unsigned GitHub prerelease
+        shell: pwsh
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create $env:RELEASE_TAG `
+            --verify-tag `
+            --prerelease `
+            --title "DarkReNamer $env:RELEASE_TAG" `
+            --notes "Unsigned Windows prerelease. Verify SHA256SUMS.txt and the GitHub artifact attestations before use." `
+            dist/DarkReNamer.exe `
+            dist/DarkReNamer.cdx.json `
+            dist/DarkReNamer-debug-symbols.zip `
+            dist/SHA256SUMS.txt `
+            dist/LICENSE `
+            dist/THIRD_PARTY_NOTICES.md `
+            dist/DISTRIBUTION.md

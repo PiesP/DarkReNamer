@@ -4,67 +4,79 @@ use std::ffi::c_void;
 use std::fs;
 use std::io;
 use std::mem::{size_of, zeroed};
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::ffi::OsStringExt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::slice;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
+use std::thread::{self, JoinHandle};
 
 use crate::admission::{
-    AdmissionAdapter, AdmissionMode, MAX_ADMITTED_SOURCES, MAX_IMPORT_BYTES,
+    AdmissionAdapter, AdmissionMode, AdmissionReport, MAX_ADMITTED_SOURCES,
     WindowsAdmissionAdapter, bounded_import_lines, bounded_selection, collect_admission,
-    read_bounded_import,
 };
 use crate::icon_cache::{IconCacheKey, icon_cache_key};
 use crate::rename::{
-    ExecutionOutcome, FileJournal, JournalCleanupDecision, JournalRoot, ModelRevision,
-    RecoveryOutcome, RenameExecutor, RenamePlanner, RenameRecovery, WindowsRenameBackend,
-    apply_execution_report, build_plan_request, cleanup_decision, execute_error_korean,
-    execution_outcome_korean, next_model_revision, plan_error_korean, process_is_elevated,
-    safe_mode_unify_path_message,
+    CancellationToken, ExecuteError, ExecutionControl, ExecutionOutcome, ExecutionPhase,
+    ExecutionProgress, ExecutionReport, ExistingJournalOpenError, FileJournal, FileJournalError,
+    JournalCleanupDecision, JournalOpenFailure, JournalRoot, ModelRevision, PlanError,
+    RecoveryJournalEvidence, RecoveryOutcome, RenameExecutor, RenamePlan, RenamePlanner,
+    RenameRecovery, WindowsRenameBackend, apply_execution_report, build_plan_request,
+    cleanup_decision, execute_error_korean, execution_outcome_korean, next_model_revision,
+    plan_error_korean, process_is_elevated, safe_mode_unify_path_message,
 };
 use darknamer_core::{
     LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,
+    SortSemantics,
 };
 
+mod clipboard;
+mod list_view;
 #[path = "../resource_ids.rs"]
 mod resource_ids;
-use windows_sys::Win32::Foundation::{
-    FILETIME, GlobalFree, HANDLE, HWND, LPARAM, LRESULT, RECT, SYSTEMTIME, WPARAM,
+mod safe_runtime;
+mod text_io;
+
+use clipboard::copy_clipboard;
+#[cfg(test)]
+use list_view::changed_column_mask;
+use list_view::{RenderedRow, refresh, update_column_visibility, update_dpi_metrics};
+#[cfg(test)]
+use safe_runtime::initialize_safe_runtime_at;
+use safe_runtime::{
+    SafeRuntime, StartupJournalBlock, cleanup_file_journal, initialize_safe_runtime,
 };
-use windows_sys::Win32::Globalization::{
-    CP_ACP, CSTR_GREATER_THAN, CSTR_LESS_THAN, CompareStringW, LOCALE_USER_DEFAULT,
-    MultiByteToWideChar, NORM_IGNORECASE,
-};
+use text_io::{compare_windows, legacy_path, path_wide, read_legacy_text, wide, write_legacy_text};
+use windows_sys::Win32::Foundation::{FILETIME, HWND, LPARAM, LRESULT, RECT, SYSTEMTIME, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    CLIP_DEFAULT_PRECIS, COLOR_WINDOW, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH,
-    DEFAULT_QUALITY, DeleteObject, FF_DONTCARE, FW_NORMAL, HFONT, OUT_DEFAULT_PRECIS,
-    RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RedrawWindow, UpdateWindow,
+    COLOR_WINDOW, CreateFontIndirectW, DeleteObject, HFONT, RDW_ALLCHILDREN, RDW_ERASE,
+    RDW_INVALIDATE, RedrawWindow, UpdateWindow,
 };
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
 use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
-use windows_sys::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
-};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
-use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
 use windows_sys::Win32::System::SystemServices::{SS_CENTERIMAGE, SS_ETCHEDHORZ, SS_SUNKEN};
 use windows_sys::Win32::System::Time::FileTimeToSystemTime;
+use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows_sys::Win32::UI::Controls::{
-    CCS_NOPARENTALIGN, CCS_NORESIZE, CCS_VERT, ICC_BAR_CLASSES, ICC_LISTVIEW_CLASSES,
-    INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT,
-    LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW,
-    LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
-    LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE,
-    LVM_SETITEMTEXTW, LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER,
-    LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS,
-    LVSIL_SMALL, NM_DBLCLK, NMHDR, NMLISTVIEW, TB_ADDBITMAP, TB_ADDBUTTONS, TB_BUTTONSTRUCTSIZE,
-    TB_ENABLEBUTTON, TB_SETBITMAPSIZE, TB_SETBUTTONSIZE, TBADDBITMAP, TBBUTTON, TBSTATE_ENABLED,
-    TBSTYLE_BUTTON, TBSTYLE_FLAT, TBSTYLE_SEP, TBSTYLE_TOOLTIPS, TBSTYLE_WRAPABLE,
-    TOOLBARCLASSNAMEW,
+    BTNS_SHOWTEXT, CCS_NOPARENTALIGN, CCS_NORESIZE, CCS_VERT, I_IMAGENONE, ICC_BAR_CLASSES,
+    ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_FMT, LVCF_TEXT,
+    LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED,
+    LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_DELETEITEM, LVM_ENSUREVISIBLE, LVM_GETNEXTITEM,
+    LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE,
+    LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVM_SETITEMW, LVN_ITEMCHANGED,
+    LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER,
+    LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_DBLCLK, NMHDR, NMLISTVIEW,
+    TB_ADDBITMAP, TB_ADDBUTTONS, TB_ADDSTRINGW, TB_BUTTONSTRUCTSIZE, TB_ENABLEBUTTON,
+    TB_SETBITMAPSIZE, TB_SETBUTTONSIZE, TB_SETMAXTEXTROWS, TBADDBITMAP, TBBUTTON, TBSTATE_ENABLED,
+    TBSTYLE_BUTTON, TBSTYLE_FLAT, TBSTYLE_SEP, TBSTYLE_TOOLTIPS, TOOLBARCLASSNAMEW,
 };
+use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetKeyState, SetFocus, VK_CONTROL, VK_DELETE, VK_ESCAPE, VK_SHIFT,
 };
@@ -78,15 +90,18 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, GWLP_USERDATA, GetClientRect, GetMessageW,
     GetParent, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, HMENU, IDC_ARROW, IDCANCEL,
-    IDOK, IsDialogMessageW, LoadCursorW, LoadIconW, MB_OKCANCEL, MB_YESNO, MF_BYCOMMAND,
-    MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG,
-    MessageBoxW, MoveWindow, PostQuitMessage, RegisterClassExW, SW_SHOW, SendMessageW,
-    SetForegroundWindow, SetMenu, SetWindowLongPtrW, ShowWindow, TranslateMessage, WM_CLOSE,
-    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN, WM_KEYUP, WM_NCCREATE,
-    WM_NCDESTROY, WM_NOTIFY, WM_SETFONT, WM_SETREDRAW, WM_SIZE, WNDCLASSEXW, WS_BORDER, WS_CAPTION,
-    WS_CHILD, WS_CLIPCHILDREN, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
-    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP,
-    WS_VISIBLE,
+    IDOK, IsDialogMessageW, KillTimer, LoadCursorW, LoadIconW, MB_OKCANCEL, MB_YESNO, MF_BYCOMMAND,
+    MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO,
+    MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW, PostMessageW, PostQuitMessage,
+    RegisterClassExW, SPI_GETHIGHCONTRAST, SPI_GETNONCLIENTMETRICS, SW_SHOW, SWP_NOACTIVATE,
+    SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage, WM_APP, WM_CLOSE,
+    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_FONTCHANGE,
+    WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFONT,
+    WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER,
+    WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_ACCEPTFILES,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
+    WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::*;
@@ -95,26 +110,43 @@ const LIST_ID: usize = 1000;
 const LEFT_TOOLBAR_ID: usize = 1001;
 const RIGHT_TOOLBAR_ID: usize = 1002;
 const STATUS_ID: usize = 1007;
+const CANDIDATE_JOURNAL_LEAF: &str = "candidate.drj";
 const ACTIVE_JOURNAL_LEAF: &str = "active.drj";
+const EXPORT_RECOVERY_JOURNAL: u16 = 0x9000;
+const WM_APP_APPLY_PROGRESS: u32 = WM_APP + 0x40;
+const WM_APP_APPLY_COMPLETE: u32 = WM_APP + 0x41;
+const WM_APP_PLAN_COMPLETE: u32 = WM_APP + 0x42;
+const WM_APP_ADMISSION_COMPLETE: u32 = WM_APP + 0x43;
+const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 
 struct AppState {
     list_window: HWND,
     status: HWND,
     menu: HMENU,
     font: HFONT,
+    status_font: HFONT,
     left_toolbar: HWND,
     right_toolbar: HWND,
     model: LegacyList,
     shown_columns: [bool; 4],
-    directory_mode: Option<DirectoryMode>,
+    dpi: u32,
+    high_contrast: bool,
     command_states: [bool; 34],
     model_revision: u64,
     mutation_locked: bool,
     recovery_locked: bool,
     journal_root: JournalRoot,
     active_journal: Option<FileJournal>,
+    staged_journal: Option<FileJournal>,
+    blocked_journals: Vec<StartupJournalBlock>,
+    apply_worker: Option<ApplyWorker>,
+    plan_worker: Option<PlanWorker>,
+    admission_worker: Option<AdmissionWorker>,
+    close_pending: bool,
+    confirmation_pending: bool,
     startup_status: Option<String>,
     icon_cache: HashMap<IconCacheKey, i32>,
+    rendered_rows: Vec<RenderedRow>,
 }
 
 struct WindowInit {
@@ -129,19 +161,29 @@ impl AppState {
             status: null_mut(),
             menu: null_mut(),
             font: null_mut(),
+            status_font: null_mut(),
             left_toolbar: null_mut(),
             right_toolbar: null_mut(),
             model: LegacyList::new(),
             shown_columns: [false; 4],
-            directory_mode: None,
+            dpi: BASE_DPI,
+            high_contrast: false,
             command_states: [false; 34],
             model_revision: 0,
             mutation_locked: false,
             recovery_locked: runtime.recovery_locked,
             journal_root: runtime.root,
             active_journal: runtime.active_journal,
+            staged_journal: runtime.staged_journal,
+            blocked_journals: runtime.blocked_journals,
+            apply_worker: None,
+            plan_worker: None,
+            admission_worker: None,
+            close_pending: false,
+            confirmation_pending: false,
             startup_status: runtime.status,
             icon_cache: HashMap::new(),
+            rendered_rows: Vec::new(),
         }
     }
 
@@ -154,26 +196,158 @@ impl AppState {
     }
 
     const fn apply_locked(&self) -> bool {
-        self.mutation_locked || self.recovery_locked || self.active_journal.is_some()
+        self.mutation_locked
+            || self.recovery_locked
+            || self.active_journal.is_some()
+            || self.staged_journal.is_some()
+            || !self.blocked_journals.is_empty()
+            || self.apply_worker.is_some()
+            || self.plan_worker.is_some()
+            || self.admission_worker.is_some()
+    }
+
+    const fn read_only_locked(&self) -> bool {
+        self.recovery_locked
     }
 }
 
-struct SafeRuntime {
-    root: JournalRoot,
-    active_journal: Option<FileJournal>,
-    recovery_locked: bool,
-    status: Option<String>,
+struct ApplyWorker {
+    cancellation: Arc<CancellationToken>,
+    progress: Arc<WorkerProgress>,
+    receiver: Receiver<ApplyWorkerResult>,
+    handle: JoinHandle<()>,
 }
 
-struct JournalCleanup {
-    retained: Option<FileJournal>,
-    error: Option<io::Error>,
+struct PlanWorker {
+    cancellation: Arc<CancellationToken>,
+    receiver: Receiver<PlanWorkerResult>,
+    handle: JoinHandle<()>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DirectoryMode {
-    Recurse,
-    Direct,
+struct AdmissionWorker {
+    cancellation: Arc<AtomicBool>,
+    receiver: Receiver<AdmissionWorkerResult>,
+    handle: JoinHandle<()>,
+}
+
+enum AdmissionWorkerResult {
+    NeedsDirectoryMode {
+        revision: ModelRevision,
+        paths: Vec<PathBuf>,
+        capacity: usize,
+        directory: PathBuf,
+    },
+    Finished {
+        revision: ModelRevision,
+        report: AdmissionReport,
+    },
+    Cancelled,
+    Panicked,
+}
+
+enum PlanWorkerResult {
+    Finished {
+        revision: ModelRevision,
+        plan: Result<RenamePlan, PlanError>,
+    },
+    Cancelled,
+    Panicked,
+}
+
+enum ApplyWorkerResult {
+    JournalCreateFailed(FileJournalError),
+    Executed {
+        journal: Box<FileJournal>,
+        execution: Result<ExecutionReport, ExecuteError>,
+    },
+    Panicked,
+}
+
+struct WorkerProgress {
+    phase: AtomicU8,
+    completed: AtomicUsize,
+    total: AtomicUsize,
+    wake_pending: AtomicBool,
+    window: usize,
+}
+
+impl WorkerProgress {
+    fn new(window: HWND) -> Self {
+        Self {
+            phase: AtomicU8::new(execution_phase_code(ExecutionPhase::Ready)),
+            completed: AtomicUsize::new(0),
+            total: AtomicUsize::new(0),
+            wake_pending: AtomicBool::new(false),
+            window: window as usize,
+        }
+    }
+
+    fn publish(&self, progress: ExecutionProgress) {
+        self.phase
+            .store(execution_phase_code(progress.phase), Ordering::Release);
+        self.completed.store(progress.completed, Ordering::Release);
+        self.total.store(progress.total, Ordering::Release);
+        if !self.wake_pending.swap(true, Ordering::AcqRel) {
+            self.post(WM_APP_APPLY_PROGRESS);
+        }
+    }
+
+    fn post(&self, message: u32) {
+        // SAFETY: window is the integer form of the top-level HWND captured
+        // before spawning. The message carries no pointer payload.
+        unsafe { PostMessageW(self.window as HWND, message, 0, 0) };
+    }
+}
+
+struct WorkerExecutionControl {
+    cancellation: Arc<CancellationToken>,
+    progress: Arc<WorkerProgress>,
+}
+
+struct CompletionWake {
+    progress: Arc<WorkerProgress>,
+}
+
+struct SimpleCompletionWake {
+    window: usize,
+    message: u32,
+}
+
+impl Drop for SimpleCompletionWake {
+    fn drop(&mut self) {
+        // SAFETY: window is the integer form of the top-level HWND captured
+        // before spawning. The message carries no pointer payload.
+        unsafe { PostMessageW(self.window as HWND, self.message, 0, 0) };
+    }
+}
+
+impl Drop for CompletionWake {
+    fn drop(&mut self) {
+        self.progress.post(WM_APP_APPLY_COMPLETE);
+    }
+}
+
+impl ExecutionControl for WorkerExecutionControl {
+    fn cancellation_requested(&self) -> bool {
+        self.cancellation.is_requested()
+    }
+
+    fn begin_transaction(&self) -> bool {
+        ExecutionControl::begin_transaction(self.cancellation.as_ref())
+    }
+
+    fn progress(&self, progress: ExecutionProgress) {
+        self.progress.publish(progress);
+    }
+}
+
+const fn execution_phase_code(phase: ExecutionPhase) -> u8 {
+    match phase {
+        ExecutionPhase::Ready => 0,
+        ExecutionPhase::Forward => 1,
+        ExecutionPhase::Rollback => 2,
+        ExecutionPhase::Terminal => 3,
+    }
 }
 
 struct ComGuard;
@@ -182,94 +356,6 @@ impl Drop for ComGuard {
     fn drop(&mut self) {
         // SAFETY: ComGuard exists only after successful CoInitializeEx and drops on the same apartment thread.
         unsafe { CoUninitialize() };
-    }
-}
-
-fn initialize_safe_runtime() -> io::Result<SafeRuntime> {
-    let local_app_data = env::var_os("LOCALAPPDATA")
-        .ok_or_else(|| io::Error::other("LOCALAPPDATA 환경 변수를 찾을 수 없습니다"))?;
-    let local_app_data = PathBuf::from(local_app_data);
-    if !local_app_data.is_absolute() {
-        return Err(io::Error::other("저널 경로가 절대 경로가 아닙니다"));
-    }
-    drop(JournalRoot::open(&local_app_data).map_err(io::Error::other)?);
-    let app_root = local_app_data.join("DarkReNamer");
-    if !app_root.exists() {
-        fs::create_dir(&app_root)?;
-    }
-    drop(JournalRoot::open(&app_root).map_err(io::Error::other)?);
-    let root_path = app_root.join("journal");
-    if !root_path.exists() {
-        fs::create_dir(&root_path)?;
-    }
-    let root = JournalRoot::open(&root_path).map_err(io::Error::other)?;
-    let active_path = root_path.join(ACTIVE_JOURNAL_LEAF);
-    if !active_path.exists() {
-        return Ok(SafeRuntime {
-            root,
-            active_journal: None,
-            recovery_locked: false,
-            status: None,
-        });
-    }
-
-    let mut journal =
-        FileJournal::open_existing(&root, ACTIVE_JOURNAL_LEAF).map_err(io::Error::other)?;
-    let mut backend = WindowsRenameBackend;
-    let outcome = RenameRecovery::new(&mut backend, &mut journal).rollback();
-    match outcome {
-        RecoveryOutcome::Recovered { .. } | RecoveryOutcome::NotRequired => {
-            let cleanup = cleanup_file_journal(journal);
-            let cleanup_failed = cleanup.error.is_some();
-            let mut status = if matches!(outcome, RecoveryOutcome::Recovered { .. }) {
-                "이전 변경을 안전하게 복구했습니다.".to_owned()
-            } else {
-                "저널 상태를 확인했습니다.".to_owned()
-            };
-            if let Some(error) = cleanup.error {
-                status.push_str(&format!(" 저널 삭제 실패: {error}"));
-            }
-            Ok(SafeRuntime {
-                root,
-                recovery_locked: cleanup_failed || cleanup.retained.is_some(),
-                active_journal: cleanup.retained,
-                status: Some(status),
-            })
-        }
-        RecoveryOutcome::Blocked { reason, .. } => Ok(SafeRuntime {
-            root,
-            active_journal: Some(journal),
-            recovery_locked: true,
-            status: Some(format!("복구가 차단되었습니다: {reason:?}")),
-        }),
-        RecoveryOutcome::RecoveryRequired { reason, .. } => Ok(SafeRuntime {
-            root,
-            active_journal: Some(journal),
-            recovery_locked: true,
-            status: Some(format!("복구가 필요합니다: {reason:?}")),
-        }),
-    }
-}
-
-fn cleanup_file_journal(mut journal: FileJournal) -> JournalCleanup {
-    if cleanup_decision(journal.records()) == JournalCleanupDecision::Retain {
-        return JournalCleanup {
-            retained: Some(journal),
-            error: None,
-        };
-    }
-    match journal.mark_delete_if_safe() {
-        Ok(()) => {
-            drop(journal);
-            JournalCleanup {
-                retained: None,
-                error: None,
-            }
-        }
-        Err(error) => JournalCleanup {
-            retained: Some(journal),
-            error: Some(io::Error::other(error)),
-        },
     }
 }
 
@@ -301,7 +387,7 @@ fn run_unsafe() -> io::Result<()> {
     if instance.is_null() {
         return Err(io::Error::last_os_error());
     }
-    let class_name = wide("DarkNamerLegacyWindow");
+    let class_name = wide("DarkReNamerWindow");
     // SAFETY: instance is the current live module and int_resource encodes the linked APP_ICON resource.
     let icon = unsafe { LoadIconW(instance, int_resource(resource_ids::APP_ICON)) };
     let window_class = WNDCLASSEXW {
@@ -323,8 +409,9 @@ fn run_unsafe() -> io::Result<()> {
     if unsafe { RegisterClassExW(&window_class) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    let title = wide("DarkNamer");
+    let title = wide("DarkReNamer");
     let runtime = initialize_safe_runtime()?;
+    let startup_notice = runtime.status.clone();
     let state = Box::into_raw(Box::new(AppState::new(runtime)));
     let mut adopted = false;
     let mut init = WindowInit {
@@ -361,6 +448,9 @@ fn run_unsafe() -> io::Result<()> {
         ShowWindow(window, SW_SHOW);
         UpdateWindow(window);
     }
+    if let Some(notice) = startup_notice {
+        message(window, &notice, "DarkReNamer - 복구 상태");
+    }
     // SAFETY: MSG is a C-compatible structure for which all-zero is a valid pre-GetMessageW state.
     let mut message: MSG = unsafe { zeroed() };
     loop {
@@ -368,8 +458,9 @@ fn run_unsafe() -> io::Result<()> {
         let result = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
         if result == -1 {
             let error = io::Error::last_os_error();
+            finish_apply_after_message_loop_failure(window);
             // SAFETY: window is the live top-level HWND created above and this
-            // GetMessageW error path destroys it exactly once before returning.
+            // path destroys it only after any worker reached terminal handoff.
             unsafe { DestroyWindow(window) };
             return Err(error);
         }
@@ -425,6 +516,111 @@ unsafe extern "system" fn window_proc(
             arrange(window, unsafe { &*state_ptr });
             0
         }
+        WM_GETMINMAXINFO if !state_ptr.is_null() => {
+            let info = lparam as *mut MINMAXINFO;
+            if !info.is_null() {
+                // SAFETY: WM_GETMINMAXINFO supplies writable MINMAXINFO storage
+                // for this callback and state_ptr is the live AppState.
+                unsafe {
+                    (*info).ptMinTrackSize.x = scale_dip(INITIAL_WIDTH, (*state_ptr).dpi);
+                    (*info).ptMinTrackSize.y = scale_dip(INITIAL_HEIGHT, (*state_ptr).dpi);
+                }
+            }
+            0
+        }
+        WM_DPICHANGED if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is the live UI-thread AppState for this window.
+            let state = unsafe { &mut *state_ptr };
+            let dpi = u32::try_from(wparam & 0xFFFF).unwrap_or(BASE_DPI);
+            state.dpi = dpi.max(BASE_DPI);
+            let suggested = lparam as *const RECT;
+            if !suggested.is_null() {
+                // SAFETY: WM_DPICHANGED supplies a readable suggested RECT for
+                // this callback and SetWindowPos consumes copied coordinates.
+                let suggested = unsafe { *suggested };
+                // SAFETY: window is the live callback HWND and suggested is a
+                // copied RECT supplied for this WM_DPICHANGED callback.
+                unsafe {
+                    SetWindowPos(
+                        window,
+                        null_mut(),
+                        suggested.left,
+                        suggested.top,
+                        suggested.right - suggested.left,
+                        suggested.bottom - suggested.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    )
+                };
+            }
+            update_dpi_metrics(state);
+            refresh_system_fonts(state);
+            arrange(window, state);
+            0
+        }
+        WM_SETTINGCHANGE | WM_FONTCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE
+            if !state_ptr.is_null() =>
+        {
+            // SAFETY: state_ptr is the live UI-thread AppState.
+            let state = unsafe { &mut *state_ptr };
+            refresh_system_fonts(state);
+            refresh_high_contrast_toolbars(window, state);
+            arrange(window, state);
+            0
+        }
+        WM_APP_APPLY_PROGRESS if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is the live UI-thread AppState for this window.
+            handle_apply_progress(unsafe { &mut *state_ptr });
+            0
+        }
+        WM_APP_APPLY_COMPLETE if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is the live UI-thread AppState for this window.
+            handle_apply_completion(window, unsafe { &mut *state_ptr });
+            0
+        }
+        WM_APP_PLAN_COMPLETE if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is the live UI-thread AppState for this window.
+            handle_plan_completion(window, unsafe { &mut *state_ptr });
+            0
+        }
+        WM_APP_ADMISSION_COMPLETE if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is the live UI-thread AppState for this window.
+            handle_admission_completion(window, unsafe { &mut *state_ptr });
+            0
+        }
+        WM_TIMER if !state_ptr.is_null() && wparam == APPLY_POLL_TIMER_ID => {
+            // SAFETY: state_ptr is the live UI-thread AppState for this window.
+            let state = unsafe { &mut *state_ptr };
+            if state
+                .admission_worker
+                .as_ref()
+                .is_some_and(|worker| worker.handle.is_finished())
+            {
+                handle_admission_completion(window, state);
+                return 0;
+            }
+            if state
+                .plan_worker
+                .as_ref()
+                .is_some_and(|worker| worker.handle.is_finished())
+            {
+                handle_plan_completion(window, state);
+                return 0;
+            }
+            handle_apply_progress(state);
+            if state
+                .apply_worker
+                .as_ref()
+                .is_some_and(|worker| worker.handle.is_finished())
+            {
+                handle_apply_completion(window, state);
+            }
+            0
+        }
+        WM_CLOSE if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is the live UI-thread AppState for this window.
+            request_window_close(window, unsafe { &mut *state_ptr });
+            0
+        }
         WM_COMMAND if !state_ptr.is_null() => {
             let command = (wparam & 0xFFFF) as u16;
             // SAFETY: state_ptr is the non-null, window-thread-confined AppState
@@ -433,12 +629,21 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_DROPFILES if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the non-null Box::into_raw value in GWLP_USERDATA, confined to this window thread until WM_NCDESTROY.
-            let before = unsafe { (*state_ptr).model.clone() };
+            // SAFETY: state_ptr is the live window-thread AppState pointer.
+            if unsafe { (*state_ptr).read_only_locked() || (*state_ptr).mutation_locked } {
+                // SAFETY: wparam is the owned HDROP delivered with this message
+                // and is released exactly once on the rejected path.
+                unsafe { DragFinish(wparam as HDROP) };
+                self::message(
+                    window,
+                    "파일 변경 또는 복구 잠금 중에는 목록을 변경할 수 없습니다.",
+                    "DarkReNamer - 변경 중",
+                );
+                return 0;
+            }
             // SAFETY: state_ptr is the non-null Box::into_raw value in GWLP_USERDATA, confined to this window thread until WM_NCDESTROY.
             unsafe {
                 admit_drop(window, &mut *state_ptr, wparam as HDROP);
-                (*state_ptr).commit_model_change(&before);
             }
             0
         }
@@ -499,10 +704,20 @@ unsafe extern "system" fn window_proc(
         }
         WM_NCDESTROY => {
             if !state_ptr.is_null() {
+                // SAFETY: this timer identifier is process-owned; killing an
+                // absent timer is harmless during defensive teardown.
+                unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
                 // SAFETY: state_ptr is the non-null Box::into_raw value in GWLP_USERDATA, confined to this window thread until WM_NCDESTROY.
                 if !unsafe { (*state_ptr).font }.is_null() {
                     // SAFETY: state_ptr is the non-null Box::into_raw value in GWLP_USERDATA, confined to this window thread until WM_NCDESTROY.
                     unsafe { DeleteObject((*state_ptr).font) };
+                }
+                // SAFETY: status_font is a distinct AppState-owned HFONT and is
+                // deleted exactly once at window teardown.
+                if !unsafe { (*state_ptr).status_font }.is_null() {
+                    // SAFETY: the non-null AppState-owned font is deleted once
+                    // at the window's single WM_NCDESTROY teardown point.
+                    unsafe { DeleteObject((*state_ptr).status_font) };
                 }
                 // SAFETY: state_ptr is the non-null Box::into_raw AppState stored at WM_NCCREATE; WM_NCDESTROY is its single reclamation point.
                 unsafe { drop(Box::from_raw(state_ptr)) };
@@ -519,7 +734,85 @@ unsafe extern "system" fn window_proc(
     }
 }
 
+fn nonclient_metrics(dpi: u32) -> Option<NONCLIENTMETRICSW> {
+    let mut metrics = NONCLIENTMETRICSW {
+        cbSize: u32::try_from(size_of::<NONCLIENTMETRICSW>()).ok()?,
+        ..NONCLIENTMETRICSW::default()
+    };
+    // SAFETY: metrics is writable NONCLIENTMETRICSW storage with the exact
+    // checked size; no pointer is retained after the synchronous call.
+    let success = unsafe {
+        SystemParametersInfoForDpi(
+            SPI_GETNONCLIENTMETRICS,
+            metrics.cbSize,
+            (&mut metrics as *mut NONCLIENTMETRICSW).cast(),
+            0,
+            dpi.max(BASE_DPI),
+        )
+    };
+    (success != 0).then_some(metrics)
+}
+
+fn create_message_font(dpi: u32) -> HFONT {
+    let Some(metrics) = nonclient_metrics(dpi) else {
+        return null_mut();
+    };
+    // SAFETY: lfMessageFont is fully initialized by SystemParametersInfoForDpi
+    // and the native call copies the descriptor synchronously.
+    unsafe { CreateFontIndirectW(&raw const metrics.lfMessageFont) }
+}
+
+fn create_status_font(dpi: u32) -> HFONT {
+    let Some(metrics) = nonclient_metrics(dpi) else {
+        return null_mut();
+    };
+    // SAFETY: lfStatusFont is fully initialized by SystemParametersInfoForDpi
+    // and the native call copies the descriptor synchronously.
+    unsafe { CreateFontIndirectW(&raw const metrics.lfStatusFont) }
+}
+
+fn refresh_system_fonts(state: &mut AppState) {
+    let message_font = create_message_font(state.dpi);
+    let status_font = create_status_font(state.dpi);
+    // SAFETY: child HWNDs are live; a null font selects the control's default.
+    unsafe {
+        SendMessageW(state.list_window, WM_SETFONT, message_font as usize, 1);
+        SendMessageW(state.status, WM_SETFONT, status_font as usize, 1);
+    }
+    if !state.font.is_null() {
+        // SAFETY: AppState owns this font and replaces it exactly once here.
+        unsafe { DeleteObject(state.font) };
+    }
+    if !state.status_font.is_null() {
+        // SAFETY: AppState owns this distinct font and replaces it once here.
+        unsafe { DeleteObject(state.status_font) };
+    }
+    state.font = message_font;
+    state.status_font = status_font;
+}
+
+fn high_contrast_enabled() -> bool {
+    let mut contrast = HIGHCONTRASTW {
+        cbSize: u32::try_from(size_of::<HIGHCONTRASTW>()).unwrap_or(0),
+        ..HIGHCONTRASTW::default()
+    };
+    // SAFETY: contrast is writable HIGHCONTRASTW storage with its checked size.
+    let success = unsafe {
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            contrast.cbSize,
+            (&mut contrast as *mut HIGHCONTRASTW).cast(),
+            0,
+        )
+    };
+    success != 0 && contrast.dwFlags & HCF_HIGHCONTRASTON != 0
+}
+
 fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> {
+    // SAFETY: window is the live top-level HWND being initialized.
+    let dpi = unsafe { GetDpiForWindow(window) };
+    state.dpi = if dpi == 0 { BASE_DPI } else { dpi };
+    state.high_contrast = high_contrast_enabled();
     // SAFETY: A null module name requests the current process module and dereferences no caller memory.
     let instance = unsafe { GetModuleHandleW(null()) };
     let list_class = wide("SysListView32");
@@ -569,7 +862,7 @@ fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> {
                 } else {
                     LVCFMT_LEFT
                 },
-                cx: column.default_width,
+                cx: scale_dip(column.default_width, state.dpi),
                 pszText: text.as_mut_ptr(),
                 ..zeroed()
             };
@@ -597,6 +890,8 @@ fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> {
             LEFT_TOOLBAR_ID,
             resource_ids::LEFT_TOOLBAR_BITMAP,
             &LEFT_TOOLBAR_ITEMS,
+            state.dpi,
+            state.high_contrast,
         )?
     };
     state.right_toolbar = {
@@ -606,34 +901,11 @@ fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> {
             RIGHT_TOOLBAR_ID,
             resource_ids::RIGHT_TOOLBAR_BITMAP,
             &RIGHT_TOOLBAR_ITEMS,
+            state.dpi,
+            state.high_contrast,
         )?
     };
-    let face = wide("MS Sans Serif");
-    // SAFETY: face is owned terminated UTF-16 retained through CreateFontW; the returned HFONT is kept in AppState and deleted once.
-    state.font = unsafe {
-        CreateFontW(
-            -13,
-            0,
-            0,
-            0,
-            FW_NORMAL as i32,
-            0,
-            0,
-            0,
-            u32::from(DEFAULT_CHARSET),
-            u32::from(OUT_DEFAULT_PRECIS),
-            u32::from(CLIP_DEFAULT_PRECIS),
-            u32::from(DEFAULT_QUALITY),
-            u32::from(DEFAULT_PITCH | FF_DONTCARE),
-            face.as_ptr(),
-        )
-    };
-    if !state.font.is_null() {
-        for control in [&state.list_window, &state.status] {
-            // SAFETY: Each control HWND is live and font is the AppState-owned HFONT retained beyond WM_SETFONT.
-            unsafe { SendMessageW(*control, WM_SETFONT, state.font as usize, 1) };
-        }
-    }
+    refresh_system_fonts(state);
     // SAFETY: window is the live top-level HWND and DragAcceptFiles stores no borrowed pointer.
     unsafe { DragAcceptFiles(window, 1) };
     let menu = { create_menu() };
@@ -702,12 +974,13 @@ fn create_toolbar(
     control_id: usize,
     resource_id: u16,
     items: &[ToolbarItem],
+    dpi: u32,
+    high_contrast: bool,
 ) -> io::Result<HWND> {
     let styles = WS_CHILD
         | WS_VISIBLE
         | TBSTYLE_FLAT
         | TBSTYLE_TOOLTIPS
-        | TBSTYLE_WRAPABLE
         | CCS_VERT as u32
         | CCS_NORESIZE as u32
         | CCS_NOPARENTALIGN as u32;
@@ -736,63 +1009,94 @@ fn create_toolbar(
     // TB_BUTTONSTRUCTSIZE carries no pointer payload.
     unsafe {
         SendMessageW(toolbar, TB_BUTTONSTRUCTSIZE, size_of::<TBBUTTON>(), 0);
+        SendMessageW(toolbar, TB_SETMAXTEXTROWS, 0, 0);
         SendMessageW(
             toolbar,
             TB_SETBITMAPSIZE,
             0,
-            packed_dimensions(TOOLBAR_BITMAP_WIDTH, TOOLBAR_BITMAP_HEIGHT),
+            packed_dimensions(
+                scale_dip(TOOLBAR_BITMAP_WIDTH, dpi),
+                scale_dip(TOOLBAR_BITMAP_HEIGHT, dpi),
+            ),
         );
         SendMessageW(
             toolbar,
             TB_SETBUTTONSIZE,
             0,
-            packed_dimensions(TOOLBAR_WIDTH, TOOLBAR_BUTTON_HEIGHT),
+            packed_dimensions(
+                scale_dip(toolbar_width_dip(high_contrast), dpi),
+                scale_dip(TOOLBAR_BUTTON_HEIGHT, dpi),
+            ),
         );
     }
-    let bitmap_count = items
-        .iter()
-        .filter(|item| matches!(item, ToolbarItem::Command(_)))
-        .count();
-    let bitmap = TBADDBITMAP {
-        hInst: instance,
-        nID: usize::from(resource_id),
+    let first_bitmap = if high_contrast {
+        0
+    } else {
+        let bitmap_count = items
+            .iter()
+            .filter(|item| matches!(item, ToolbarItem::Command(_)))
+            .count();
+        let bitmap = TBADDBITMAP {
+            hInst: instance,
+            nID: usize::from(resource_id),
+        };
+        // SAFETY: toolbar is live and resource_id identifies a linked bitmap;
+        // the structure remains allocated through the synchronous message.
+        let first = unsafe {
+            SendMessageW(
+                toolbar,
+                TB_ADDBITMAP,
+                bitmap_count,
+                (&raw const bitmap) as isize,
+            )
+        };
+        i32::try_from(first)
+            .ok()
+            .filter(|index| *index >= 0)
+            .ok_or_else(|| io::Error::other("could not load native toolbar bitmap resource"))?
     };
-    // SAFETY: toolbar is live and resource_id identifies a linked bitmap owned by
-    // instance; the TBADDBITMAP structure remains allocated through the message.
-    let first_bitmap = unsafe {
-        SendMessageW(
-            toolbar,
-            TB_ADDBITMAP,
-            bitmap_count,
-            (&raw const bitmap) as isize,
-        )
-    };
-    let first_bitmap = i32::try_from(first_bitmap)
-        .ok()
-        .filter(|index| *index >= 0)
-        .ok_or_else(|| io::Error::other("could not load native toolbar bitmap resource"))?;
     let mut image_index = 0_i32;
-    let buttons = items
-        .iter()
-        .map(|item| match *item {
+    let mut buttons = Vec::with_capacity(items.len());
+    for item in items {
+        let button = match *item {
             ToolbarItem::Command(command) => {
+                let mut name = toolbar_accessible_name(command)
+                    .encode_utf16()
+                    .chain([0, 0])
+                    .collect::<Vec<_>>();
+                // SAFETY: toolbar copies the double-NUL-terminated string pool
+                // synchronously before this owned buffer is dropped.
+                let string_index =
+                    unsafe { SendMessageW(toolbar, TB_ADDSTRINGW, 0, name.as_mut_ptr() as isize) };
+                if string_index < 0 {
+                    return Err(io::Error::other("could not add toolbar accessibility text"));
+                }
                 let button = TBBUTTON {
-                    iBitmap: first_bitmap + image_index,
+                    iBitmap: if high_contrast {
+                        I_IMAGENONE
+                    } else {
+                        first_bitmap + image_index
+                    },
                     idCommand: i32::from(command),
                     fsState: TBSTATE_ENABLED as u8,
-                    fsStyle: TBSTYLE_BUTTON as u8,
+                    fsStyle: u8::try_from(
+                        TBSTYLE_BUTTON | if high_contrast { BTNS_SHOWTEXT } else { 0 },
+                    )
+                    .unwrap_or(TBSTYLE_BUTTON as u8),
+                    iString: string_index,
                     ..TBBUTTON::default()
                 };
                 image_index += 1;
                 button
             }
             ToolbarItem::Separator => TBBUTTON {
-                iBitmap: TOOLBAR_SEPARATOR_SIZE,
+                iBitmap: scale_dip(TOOLBAR_SEPARATOR_SIZE, dpi),
                 fsStyle: TBSTYLE_SEP as u8,
                 ..TBBUTTON::default()
             },
-        })
-        .collect::<Vec<_>>();
+        };
+        buttons.push(button);
+    }
     // SAFETY: toolbar is live and buttons is readable for exactly added entries;
     // its TBBUTTON storage remains allocated until TB_ADDBUTTONSW returns.
     let added = unsafe {
@@ -809,8 +1113,85 @@ fn create_toolbar(
     Ok(toolbar)
 }
 
+fn refresh_high_contrast_toolbars(window: HWND, state: &mut AppState) {
+    let high_contrast = high_contrast_enabled();
+    if high_contrast == state.high_contrast {
+        return;
+    }
+    // SAFETY: null requests the current process module.
+    let instance = unsafe { GetModuleHandleW(null()) };
+    let left = match create_toolbar(
+        window,
+        instance,
+        LEFT_TOOLBAR_ID,
+        resource_ids::LEFT_TOOLBAR_BITMAP,
+        &LEFT_TOOLBAR_ITEMS,
+        state.dpi,
+        high_contrast,
+    ) {
+        Ok(toolbar) => toolbar,
+        Err(error) => {
+            message(
+                window,
+                &format!("고대비 도구 모음을 만들지 못했습니다: {error}"),
+                "DarkReNamer - 표시 설정",
+            );
+            return;
+        }
+    };
+    let right = match create_toolbar(
+        window,
+        instance,
+        RIGHT_TOOLBAR_ID,
+        resource_ids::RIGHT_TOOLBAR_BITMAP,
+        &RIGHT_TOOLBAR_ITEMS,
+        state.dpi,
+        high_contrast,
+    ) {
+        Ok(toolbar) => toolbar,
+        Err(error) => {
+            // SAFETY: left was created above but not adopted into AppState.
+            unsafe { DestroyWindow(left) };
+            message(
+                window,
+                &format!("고대비 도구 모음을 만들지 못했습니다: {error}"),
+                "DarkReNamer - 표시 설정",
+            );
+            return;
+        }
+    };
+    // SAFETY: replacement toolbars are live; old child windows are destroyed
+    // only after both replacements succeeded.
+    unsafe {
+        DestroyWindow(state.left_toolbar);
+        DestroyWindow(state.right_toolbar);
+    }
+    state.left_toolbar = left;
+    state.right_toolbar = right;
+    state.high_contrast = high_contrast;
+    apply_command_states(state);
+}
+
 const fn packed_dimensions(width: i32, height: i32) -> isize {
     ((width as u32 & 0xFFFF) | ((height as u32 & 0xFFFF) << 16)) as isize
+}
+
+fn toolbar_accessible_name(command: CommandId) -> String {
+    if command == UNIFY_PATH {
+        return "경로 통일하기 - 현재 지원하지 않음".to_owned();
+    }
+    LEFT_TOOLS
+        .iter()
+        .chain(&RIGHT_TOOLS)
+        .find(|tool| tool.id == command)
+        .map_or_else(
+            || format!("명령 {command}"),
+            |tool| tool.label.replace('\n', " "),
+        )
+}
+
+const fn toolbar_width_dip(high_contrast: bool) -> i32 {
+    if high_contrast { 120 } else { TOOLBAR_WIDTH }
 }
 
 fn arrange(window: HWND, state: &AppState) {
@@ -818,8 +1199,10 @@ fn arrange(window: HWND, state: &AppState) {
     let mut rect: RECT = unsafe { zeroed() };
     // SAFETY: window is live and rect is writable RECT storage retained until GetClientRect returns.
     unsafe { GetClientRect(window, &mut rect) };
-    let width = rect.right.max(TOOLBAR_WIDTH * 2 + 1);
-    let height = rect.bottom.max(STATUS_HEIGHT + 1);
+    let toolbar_width = scale_dip(toolbar_width_dip(state.high_contrast), state.dpi);
+    let status_height = scale_dip(STATUS_HEIGHT, state.dpi);
+    let width = rect.right.max(toolbar_width * 2 + 1);
+    let height = rect.bottom.max(status_height + 1);
     // SAFETY: window plus AppState's list/status/toolbars are live child HWNDs on
     // this thread; each MoveWindow call retains no borrowed storage.
     unsafe {
@@ -827,35 +1210,50 @@ fn arrange(window: HWND, state: &AppState) {
             state.left_toolbar,
             0,
             0,
-            TOOLBAR_WIDTH,
-            height - STATUS_HEIGHT,
+            toolbar_width,
+            height - status_height,
             1,
         );
         MoveWindow(
             state.right_toolbar,
-            width - TOOLBAR_WIDTH,
+            width - toolbar_width,
             0,
-            TOOLBAR_WIDTH,
-            height - STATUS_HEIGHT,
+            toolbar_width,
+            height - status_height,
             1,
         );
         MoveWindow(
             state.list_window,
-            TOOLBAR_WIDTH,
+            toolbar_width,
             0,
-            width - TOOLBAR_WIDTH * 2,
-            height - STATUS_HEIGHT,
+            width - toolbar_width * 2,
+            height - status_height,
             1,
         );
         MoveWindow(
             state.status,
             0,
-            height - STATUS_HEIGHT,
+            height - status_height,
             width,
-            STATUS_HEIGHT,
+            status_height,
             1,
         );
     }
+}
+
+fn move_window_dip(window: HWND, x: i32, y: i32, width: i32, height: i32, dpi: u32) {
+    // SAFETY: callers pass a live child HWND and this helper forwards only
+    // scaled integer geometry without borrowed pointers.
+    unsafe {
+        MoveWindow(
+            window,
+            scale_dip(x, dpi),
+            scale_dip(y, dpi),
+            scale_dip(width, dpi),
+            scale_dip(height, dpi),
+            1,
+        )
+    };
 }
 
 #[derive(Clone, Debug)]
@@ -883,6 +1281,7 @@ struct PromptState {
     edit_two: HWND,
     combo: HWND,
     font: HFONT,
+    dpi: u32,
 }
 
 struct OwnerEnableGuard {
@@ -902,7 +1301,7 @@ impl Drop for OwnerEnableGuard {
 fn prompt_input(owner: HWND, spec: PromptSpec) -> io::Result<Option<PromptResult>> {
     // SAFETY: A null module name requests the current process module and dereferences no caller memory.
     let instance = unsafe { GetModuleHandleW(null()) };
-    let class_name = wide("DarkNamerInputWindow");
+    let class_name = wide("DarkReNamerInputWindow");
     let caption = wide("입력창");
     let class = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
@@ -921,6 +1320,9 @@ fn prompt_input(owner: HWND, spec: PromptSpec) -> io::Result<Option<PromptResult
     };
     // SAFETY: WNDCLASSEXW is initialized and its class name and callback remain valid during registration.
     unsafe { RegisterClassExW(&class) };
+    // SAFETY: owner is the live top-level window for this modal prompt.
+    let owner_dpi = unsafe { GetDpiForWindow(owner) };
+    let dpi = if owner_dpi == 0 { BASE_DPI } else { owner_dpi };
     let mut state = Box::new(PromptState {
         spec,
         result: None,
@@ -929,6 +1331,7 @@ fn prompt_input(owner: HWND, spec: PromptSpec) -> io::Result<Option<PromptResult
         edit_two: null_mut(),
         combo: null_mut(),
         font: null_mut(),
+        dpi,
     });
     let state_ptr: *mut PromptState = &mut *state;
     // SAFETY: owner/instance are live and class_name/title plus stack PromptState
@@ -941,8 +1344,8 @@ fn prompt_input(owner: HWND, spec: PromptSpec) -> io::Result<Option<PromptResult
             WS_POPUP | WS_CAPTION | WS_SYSMENU,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            380,
-            210,
+            scale_dip(380, dpi),
+            scale_dip(210, dpi),
             owner,
             null_mut(),
             instance,
@@ -1004,7 +1407,7 @@ fn prompt_input_or_report(owner: HWND, spec: PromptSpec) -> Option<PromptResult>
                     "입력창을 처리하지 못했습니다. OS {:?}",
                     error.raw_os_error()
                 ),
-                "DarkNamer",
+                "DarkReNamer",
             );
             None
         }
@@ -1034,9 +1437,7 @@ unsafe extern "system" fn prompt_proc(
             // confined to this modal callback thread until WM_NCDESTROY clears it.
             let state = unsafe { &mut *state_ptr };
             let title = { child(window, "STATIC", &state.spec.title, 1001, 0) };
-            // SAFETY: title is the live STATIC child just created for window;
-            // MoveWindow retains no borrowed storage.
-            unsafe { MoveWindow(title, 12, 12, 340, 22, 1) };
+            move_window_dip(title, 12, 12, 340, 22, state.dpi);
             let mut controls = vec![title];
             if !state.spec.label_one.is_empty() {
                 let edit = {
@@ -1049,12 +1450,8 @@ unsafe extern "system" fn prompt_proc(
                     )
                 };
                 let label = { child(window, "STATIC", &state.spec.label_one, 1002, 0) };
-                // SAFETY: edit and label are live children just created for this
-                // prompt window; both MoveWindow calls retain no storage.
-                unsafe {
-                    MoveWindow(edit, 12, 48, 275, 25, 1);
-                    MoveWindow(label, 294, 48, 70, 25, 1);
-                }
+                move_window_dip(edit, 12, 48, 275, 25, state.dpi);
+                move_window_dip(label, 294, 48, 70, 25, state.dpi);
                 state.edit_one = edit;
                 controls.extend([edit, label]);
             }
@@ -1069,12 +1466,8 @@ unsafe extern "system" fn prompt_proc(
                     )
                 };
                 let label = { child(window, "STATIC", &state.spec.label_two, 1003, 0) };
-                // SAFETY: edit and label are live children just created for this
-                // prompt window; both MoveWindow calls retain no storage.
-                unsafe {
-                    MoveWindow(edit, 12, 80, 275, 25, 1);
-                    MoveWindow(label, 294, 80, 70, 25, 1);
-                }
+                move_window_dip(edit, 12, 80, 275, 25, state.dpi);
+                move_window_dip(label, 294, 80, 70, 25, state.dpi);
                 state.edit_two = edit;
                 controls.extend([edit, label]);
             }
@@ -1095,22 +1488,23 @@ unsafe extern "system" fn prompt_proc(
                         SendMessageW(combo, CB_ADDSTRING, 0, choice.as_ptr() as isize);
                     }
                 }
-                // SAFETY: combo is live and each choice pointer is owned terminated UTF-16 retained through synchronous SendMessageW.
+                // SAFETY: combo is the live dialog ComboBox and selection zero
+                // is valid because the choices collection is non-empty.
                 unsafe {
                     SendMessageW(combo, CB_SETCURSEL, 0, 0);
-                    MoveWindow(
-                        combo,
-                        12,
-                        if state.spec.label_one.is_empty() && state.spec.label_two.is_empty() {
-                            60
-                        } else {
-                            126
-                        },
-                        185,
-                        160,
-                        1,
-                    );
                 }
+                move_window_dip(
+                    combo,
+                    12,
+                    if state.spec.label_one.is_empty() && state.spec.label_two.is_empty() {
+                        60
+                    } else {
+                        126
+                    },
+                    185,
+                    160,
+                    state.dpi,
+                );
                 state.combo = combo;
                 controls.push(combo);
             }
@@ -1125,35 +1519,11 @@ unsafe extern "system" fn prompt_proc(
             };
             let cancel = { child(window, "BUTTON", "취소", IDCANCEL as u16, WS_TABSTOP) };
             let separator = { child(window, "STATIC", "", 1010, SS_ETCHEDHORZ) };
-            // SAFETY: ok/cancel/separator are live children created for this
-            // prompt window; these MoveWindow calls retain no storage.
-            unsafe {
-                MoveWindow(ok, 205, 126, 75, 32, 1);
-                MoveWindow(cancel, 285, 126, 75, 32, 1);
-                MoveWindow(separator, 0, 116, 380, 2, 1);
-            }
+            move_window_dip(ok, 205, 126, 75, 32, state.dpi);
+            move_window_dip(cancel, 285, 126, 75, 32, state.dpi);
+            move_window_dip(separator, 0, 116, 380, 2, state.dpi);
             controls.extend([ok, cancel, separator]);
-            let face = wide("MS Sans Serif");
-            // SAFETY: face is owned terminated UTF-16 retained through CreateFontW;
-            // the returned HFONT is kept in the local PromptState and deleted once.
-            state.font = unsafe {
-                CreateFontW(
-                    -13,
-                    0,
-                    0,
-                    0,
-                    FW_NORMAL as i32,
-                    0,
-                    0,
-                    0,
-                    u32::from(DEFAULT_CHARSET),
-                    u32::from(OUT_DEFAULT_PRECIS),
-                    u32::from(CLIP_DEFAULT_PRECIS),
-                    u32::from(DEFAULT_QUALITY),
-                    u32::from(DEFAULT_PITCH | FF_DONTCARE),
-                    face.as_ptr(),
-                )
-            };
+            state.font = create_message_font(state.dpi);
             if !state.font.is_null() {
                 for control in controls {
                     // SAFETY: Each prompt control HWND is live and font is the
@@ -1414,6 +1784,22 @@ fn rows_for_tokens(model: &LegacyList, tokens: &[SelectionToken]) -> Vec<usize> 
 }
 
 fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
+    if state.read_only_locked() && !recovery_command_allowed(command) {
+        message(
+            window,
+            "복구 잠금 상태에서는 진단 저널 내보내기, 정보 보기, 종료만 사용할 수 있습니다.",
+            "DarkReNamer - 읽기 전용",
+        );
+        return;
+    }
+    if state.mutation_locked && !matches!(command, VERSION | 2) {
+        message(
+            window,
+            "파일 변경이 끝날 때까지 정보 보기와 종료 요청만 사용할 수 있습니다.",
+            "DarkReNamer - 변경 중",
+        );
+        return;
+    }
     let selected = { selected_indices(state.list_window) };
     let before = state.model.clone();
     match command {
@@ -1577,11 +1963,11 @@ fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
         UNIFY_PATH => message(
             window,
             safe_mode_unify_path_message(),
-            "DarkNamer - Safe 모드",
+            "DarkReNamer - Safe 모드",
         ),
         ADD_FILES => add_files_dialog(window, state),
-        COPY_NAMES => copy_clipboard(window, &state.model.export_names()),
-        COPY_PATHS => copy_clipboard(window, &state.model.export_paths()),
+        COPY_NAMES => copy_clipboard_or_report(window, &state.model.export_names()),
+        COPY_PATHS => copy_clipboard_or_report(window, &state.model.export_paths()),
         SAVE_NAMES => save_text_dialog(window, state.model.export_names(), true),
         SAVE_PATHS => save_text_dialog(window, state.model.export_paths(), false),
         IMPORT_NAMES => import_names_dialog(window, state),
@@ -1591,17 +1977,20 @@ fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
             state.shown_columns[index] = !state.shown_columns[index];
             update_column_visibility(state, index);
         }
-        VERSION => message(window, "DarkNamer 08.02.10 버전", "DarkNamer"),
-        // SAFETY: window is the live top-level HWND owned by this UI thread and
-        // command 2 destroys it exactly once on this dispatch path.
-        2 => unsafe {
-            DestroyWindow(window);
+        VERSION => message(window, &super::about_text(), "DarkReNamer 정보"),
+        EXPORT_RECOVERY_JOURNAL => export_recovery_journal(window, state),
+        2 => {
+            request_window_close(window, state);
             return;
-        },
+        }
         _ => {}
     }
     state.commit_model_change(&before);
     refresh(state);
+}
+
+const fn recovery_command_allowed(command: u16) -> bool {
+    matches!(command, VERSION | EXPORT_RECOVERY_JOURNAL | 2)
 }
 
 fn prompt_spec(
@@ -1676,7 +2065,7 @@ fn pad_digits_command(window: HWND, state: &mut AppState) {
     };
     let width = legacy_atoi(&result.value_one);
     if width <= 0 {
-        message(window, "자리수 입력이 잘못되었습니다.", "DarkNamer");
+        message(window, "자리수 입력이 잘못되었습니다.", "DarkReNamer");
         return;
     }
     let outcome = if result.choice == 0 {
@@ -1685,7 +2074,7 @@ fn pad_digits_command(window: HWND, state: &mut AppState) {
         state.model.pad_first_digit_run(width as usize)
     };
     if outcome.is_err() {
-        message(window, "자리수 입력이 잘못되었습니다.", "DarkNamer");
+        message(window, "자리수 입력이 잘못되었습니다.", "DarkReNamer");
     }
 }
 
@@ -1712,7 +2101,7 @@ fn sequence_command(window: HWND, state: &mut AppState) {
     };
     let width = legacy_atoi(&result.value_one);
     if width <= 0 {
-        message(window, "자리수 입력이 잘못되었습니다.", "DarkNamer");
+        message(window, "자리수 입력이 잘못되었습니다.", "DarkReNamer");
         return;
     }
     let mode = match result.choice {
@@ -1751,19 +2140,19 @@ fn delete_position_command(window: HWND, state: &mut AppState) {
         message(
             window,
             "음수값이나 잘못된 값이 입력되었습니다.",
-            "DarkNamer",
+            "DarkReNamer",
         );
         return;
     }
     if result.choice == 0 && end > 0 && start > end {
-        message(window, "시작점이 끝점보다 뒤에 있습니다.", "DarkNamer");
+        message(window, "시작점이 끝점보다 뒤에 있습니다.", "DarkReNamer");
         return;
     }
     if result.choice == 1 && start != 0 {
         message(
             window,
             "맨 뒤에서부터 삭제할때는 '~까지'만 필요합니다.",
-            "DarkNamer",
+            "DarkReNamer",
         );
         return;
     }
@@ -1798,7 +2187,7 @@ fn delete_delimited_command(window: HWND, state: &mut AppState) {
         message(
             window,
             "시작/끝 문자가 정확하게 지정되지 않았습니다.",
-            "DarkNamer",
+            "DarkReNamer",
         );
     }
 }
@@ -1809,8 +2198,8 @@ fn sort_command(window: HWND, state: &mut AppState) -> bool {
         "파일 이름에 따라 내림차순",
         "전체경로에 따라 오름차순",
         "전체경로에 따라 내림차순",
-        "파일 크기에 따라 오름차순",
-        "파일 크기에 따라 내림차순",
+        "실제 파일 크기에 따라 오름차순",
+        "실제 파일 크기에 따라 내림차순",
         "수정한 시각에 따라 오름차순",
         "수정한 시각에 따라 내림차순",
         "만든 시각에 따라 오름차순",
@@ -1849,7 +2238,9 @@ fn sort_command(window: HWND, state: &mut AppState) -> bool {
         let focused = { focused_index(state.list_window) }
             .and_then(|index| selection_token(&state.model, index));
         clear_selection(state.list_window);
-        state.model.sort_by(*mode, compare_windows);
+        state
+            .model
+            .sort_by_with_semantics(*mode, SortSemantics::SafeActualSize, compare_windows);
         refresh(state);
         let moved = rows_for_tokens(&state.model, &tokens);
         let focused = focused.as_ref().and_then(|token| {
@@ -1871,27 +2262,35 @@ fn apply_changes(window: HWND, state: &mut AppState) {
         message(
             window,
             "복구 또는 다른 변경이 진행 중이어서 적용할 수 없습니다.",
-            "DarkNamer",
+            "DarkReNamer",
         );
         return;
     }
     let revision = state.revision();
     let request = build_plan_request(&state.model, revision);
-    let mut backend = WindowsRenameBackend;
-    let plan = match RenamePlanner::new(&backend).plan(request) {
+    start_plan_worker(window, state, revision, request);
+}
+
+fn handle_ready_plan(
+    window: HWND,
+    state: &mut AppState,
+    revision: ModelRevision,
+    plan: Result<RenamePlan, PlanError>,
+) {
+    let plan = match plan {
         Ok(plan) => plan,
         Err(error) => {
             let (message_text, rows) = plan_error_korean(&error);
             {
                 clear_selection(state.list_window);
                 select_rows(state.list_window, &rows);
-                message(window, &message_text, "DarkNamer - 적용 차단");
+                message(window, &message_text, "DarkReNamer - 적용 차단");
             }
             return;
         }
     };
     if plan.is_empty() {
-        message(window, "변경할 항목이 없습니다.", "DarkNamer");
+        message(window, "변경할 항목이 없습니다.", "DarkReNamer");
         return;
     }
     let confirmation = format!(
@@ -1901,10 +2300,21 @@ fn apply_changes(window: HWND, state: &mut AppState) {
         state.model_revision,
     );
     let prompt = wide(&confirmation);
-    let caption = wide("DarkNamer - 안전한 적용 확인");
+    let caption = wide("DarkReNamer - 안전한 적용 확인");
+    state.mutation_locked = true;
+    state.confirmation_pending = true;
+    update_controls(state);
     // SAFETY: window is the live application HWND and prompt/caption are owned
     // NUL-terminated UTF-16 buffers retained through the modal MessageBoxW call.
-    if unsafe { MessageBoxW(window, prompt.as_ptr(), caption.as_ptr(), MB_OKCANCEL) } != IDOK {
+    let confirmed_by_user =
+        unsafe { MessageBoxW(window, prompt.as_ptr(), caption.as_ptr(), MB_OKCANCEL) } == IDOK;
+    state.mutation_locked = false;
+    state.confirmation_pending = false;
+    update_controls(state);
+    if state.close_pending {
+        return;
+    }
+    if !confirmed_by_user {
         return;
     }
     if state.revision() != revision {
@@ -1912,7 +2322,7 @@ fn apply_changes(window: HWND, state: &mut AppState) {
             message(
                 window,
                 "확인 후 목록이 변경되었습니다. 다시 계획하고 확인해 주세요.",
-                "DarkNamer",
+                "DarkReNamer",
             )
         }
         return;
@@ -1922,30 +2332,19 @@ fn apply_changes(window: HWND, state: &mut AppState) {
     let confirmed = match plan.confirm_presented(id, plan_revision) {
         Ok(confirmed) => confirmed,
         Err(error) => {
-            message(window, &error.to_string(), "DarkNamer");
+            message(window, &error.to_string(), "DarkReNamer");
             return;
         }
     };
-    let mut journal = match FileJournal::create_new(&state.journal_root, ACTIVE_JOURNAL_LEAF) {
-        Ok(journal) => journal,
-        Err(error) => {
-            state.recovery_locked = true;
-            message(
-                window,
-                &format!(
-                    "활성 저널을 만들지 못했습니다. {:?}, OS {:?}",
-                    error.kind, error.os_code
-                ),
-                "DarkNamer - 적용 잠김",
-            );
-            return;
-        }
-    };
-    state.mutation_locked = true;
-    update_controls(state);
-    let execution = RenameExecutor::new(&mut backend, &mut journal).execute(confirmed);
-    state.mutation_locked = false;
+    start_apply_worker(window, state, confirmed);
+}
 
+fn handle_completed_execution(
+    window: HWND,
+    state: &mut AppState,
+    journal: FileJournal,
+    execution: Result<ExecutionReport, ExecuteError>,
+) {
     let report = match execution {
         Ok(report) => report,
         Err(error) => {
@@ -1957,10 +2356,10 @@ fn apply_changes(window: HWND, state: &mut AppState) {
                 message(
                     window,
                     &cleanup_error.to_string(),
-                    "DarkNamer - 저널 정리 실패",
+                    "DarkReNamer - 저널 정리 실패",
                 );
             }
-            message(window, &text, "DarkNamer - 실행 거부");
+            message(window, &text, "DarkReNamer - 실행 거부");
             update_controls(state);
             return;
         }
@@ -1969,22 +2368,25 @@ fn apply_changes(window: HWND, state: &mut AppState) {
     let text = execution_outcome_korean(&outcome);
     match outcome {
         ExecutionOutcome::Completed => {
+            let before = state.model.clone();
             if !apply_execution_report(&mut state.model, &report) {
                 state.recovery_locked = true;
                 state.active_journal = Some(journal);
                 message(
                     window,
                     "완료 결과를 목록과 일치시키지 못했습니다. 저널을 보존하고 적용을 잠급니다.",
-                    "DarkNamer - 확인 필요",
+                    "DarkReNamer - 확인 필요",
                 );
                 update_controls(state);
                 return;
             }
+            state.commit_model_change(&before);
+            refresh(state);
             let cleanup = cleanup_file_journal(journal);
             state.recovery_locked = cleanup.error.is_some() || cleanup.retained.is_some();
             state.active_journal = cleanup.retained;
             if let Some(error) = cleanup.error {
-                message(window, &error.to_string(), "DarkNamer - 저널 정리 실패");
+                message(window, &error.to_string(), "DarkReNamer - 저널 정리 실패");
             }
         }
         ExecutionOutcome::RolledBack { .. } => {
@@ -1992,7 +2394,7 @@ fn apply_changes(window: HWND, state: &mut AppState) {
             state.recovery_locked = cleanup.error.is_some() || cleanup.retained.is_some();
             state.active_journal = cleanup.retained;
             if let Some(error) = cleanup.error {
-                message(window, &error.to_string(), "DarkNamer - 저널 정리 실패");
+                message(window, &error.to_string(), "DarkReNamer - 저널 정리 실패");
             }
         }
         ExecutionOutcome::RecoveryRequired { .. } => {
@@ -2001,9 +2403,394 @@ fn apply_changes(window: HWND, state: &mut AppState) {
         }
     }
     {
-        message(window, &text, "DarkNamer");
+        message(window, &text, "DarkReNamer");
         update_controls(state);
     }
+}
+
+fn start_plan_worker(
+    window: HWND,
+    state: &mut AppState,
+    revision: ModelRevision,
+    request: crate::rename::PlanRequest,
+) {
+    let cancellation = Arc::new(CancellationToken::new());
+    let worker_cancellation = Arc::clone(&cancellation);
+    let (sender, receiver) = sync_channel(1);
+    // SAFETY: window is the live top-level HWND and the timer has no callback.
+    if unsafe { SetTimer(window, APPLY_POLL_TIMER_ID, 100, None) } == 0 {
+        message(
+            window,
+            &format!(
+                "planning worker 완료 감시 timer를 시작하지 못했습니다: {}",
+                io::Error::last_os_error()
+            ),
+            "DarkReNamer - 실행 실패",
+        );
+        return;
+    }
+    let window_value = window as usize;
+    let handle = match thread::Builder::new()
+        .name("darkrenamer-plan".to_owned())
+        .spawn(move || {
+            let _completion_wake = SimpleCompletionWake {
+                window: window_value,
+                message: WM_APP_PLAN_COMPLETE,
+            };
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                if worker_cancellation.is_requested() {
+                    return PlanWorkerResult::Cancelled;
+                }
+                let backend = WindowsRenameBackend;
+                let plan = RenamePlanner::new(&backend).plan(request);
+                if worker_cancellation.is_requested() {
+                    PlanWorkerResult::Cancelled
+                } else {
+                    PlanWorkerResult::Finished { revision, plan }
+                }
+            }))
+            .unwrap_or(PlanWorkerResult::Panicked);
+            let _sent = sender.send(result);
+        }) {
+        Ok(handle) => handle,
+        Err(error) => {
+            // SAFETY: this exact timer was installed above for the live window.
+            unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
+            message(
+                window,
+                &format!("planning worker를 시작하지 못했습니다: {error}"),
+                "DarkReNamer - 실행 실패",
+            );
+            return;
+        }
+    };
+    state.mutation_locked = true;
+    state.plan_worker = Some(PlanWorker {
+        cancellation,
+        receiver,
+        handle,
+    });
+    set_status(
+        state.status,
+        "파일 시스템을 확인하고 실행 계획을 만들고 있습니다...",
+    );
+    update_controls(state);
+}
+
+fn handle_plan_completion(window: HWND, state: &mut AppState) {
+    let Some(worker) = state.plan_worker.as_ref() else {
+        return;
+    };
+    if !worker.handle.is_finished() {
+        return;
+    }
+    // SAFETY: this exact timer belongs to the live top-level window and the
+    // planning thread has reached its terminal state.
+    unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
+    let Some(worker) = state.plan_worker.take() else {
+        return;
+    };
+    let joined = worker.handle.join();
+    state.mutation_locked = false;
+    if state.close_pending {
+        // SAFETY: planning performs no mutation and the worker has joined.
+        unsafe { DestroyWindow(window) };
+        return;
+    }
+    if joined.is_err() {
+        message(
+            window,
+            "planning worker가 비정상 종료되었습니다. 파일 변경은 시작되지 않았습니다.",
+            "DarkReNamer - 계획 오류",
+        );
+        update_controls(state);
+        return;
+    }
+    match worker.receiver.try_recv() {
+        Ok(PlanWorkerResult::Finished { revision, plan }) => {
+            handle_ready_plan(window, state, revision, plan);
+            if state.close_pending {
+                // SAFETY: the confirmation callback has returned and no worker
+                // owns state, so deferred close can now destroy the window.
+                unsafe { DestroyWindow(window) };
+                return;
+            }
+        }
+        Ok(PlanWorkerResult::Cancelled) => {
+            set_status(state.status, "파일 변경 계획을 취소했습니다.");
+        }
+        Ok(PlanWorkerResult::Panicked) => {
+            message(
+                window,
+                "planning worker 내부 오류가 발생했습니다. 파일 변경은 시작되지 않았습니다.",
+                "DarkReNamer - 계획 오류",
+            );
+        }
+        Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
+            message(
+                window,
+                "planning worker가 결과를 전달하지 못했습니다. 파일 변경은 시작되지 않았습니다.",
+                "DarkReNamer - 계획 결과 없음",
+            );
+        }
+    }
+    update_controls(state);
+}
+
+fn start_apply_worker(window: HWND, state: &mut AppState, confirmed: crate::rename::ConfirmedPlan) {
+    let root = match state.journal_root.try_clone() {
+        Ok(root) => root,
+        Err(error) => {
+            state.recovery_locked = true;
+            message(
+                window,
+                &format!(
+                    "저널 루트 권한을 worker로 전달하지 못했습니다. {:?}, OS {:?}",
+                    error.kind, error.os_code
+                ),
+                "DarkReNamer - 적용 잠김",
+            );
+            update_controls(state);
+            return;
+        }
+    };
+    let cancellation = Arc::new(CancellationToken::new());
+    let progress = Arc::new(WorkerProgress::new(window));
+    let control = WorkerExecutionControl {
+        cancellation: Arc::clone(&cancellation),
+        progress: Arc::clone(&progress),
+    };
+    let (sender, receiver) = sync_channel(1);
+    let worker_progress = Arc::clone(&progress);
+    // SAFETY: window is the live top-level HWND and the timer carries no
+    // callback pointer; WM_TIMER is handled on this UI thread.
+    if unsafe { SetTimer(window, APPLY_POLL_TIMER_ID, 100, None) } == 0 {
+        message(
+            window,
+            &format!(
+                "worker 완료 감시 timer를 시작하지 못했습니다: {}",
+                io::Error::last_os_error()
+            ),
+            "DarkReNamer - 실행 실패",
+        );
+        return;
+    }
+    let handle = match thread::Builder::new()
+        .name("darkrenamer-apply".to_owned())
+        .spawn(move || {
+            let _completion_wake = CompletionWake {
+                progress: Arc::clone(&worker_progress),
+            };
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                match FileJournal::create_candidate(
+                    &root,
+                    CANDIDATE_JOURNAL_LEAF,
+                    ACTIVE_JOURNAL_LEAF,
+                ) {
+                    Ok(mut journal) => {
+                        let mut backend = WindowsRenameBackend;
+                        let execution = RenameExecutor::new(&mut backend, &mut journal)
+                            .execute_with_control(confirmed, &control);
+                        ApplyWorkerResult::Executed {
+                            journal: Box::new(journal),
+                            execution,
+                        }
+                    }
+                    Err(error) => ApplyWorkerResult::JournalCreateFailed(error),
+                }
+            }))
+            .unwrap_or(ApplyWorkerResult::Panicked);
+            let _sent = sender.send(result);
+        }) {
+        Ok(handle) => handle,
+        Err(error) => {
+            // SAFETY: this exact timer was installed above for the live window.
+            unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
+            message(
+                window,
+                &format!("적용 worker를 시작하지 못했습니다: {error}"),
+                "DarkReNamer - 실행 실패",
+            );
+            return;
+        }
+    };
+    state.mutation_locked = true;
+    state.apply_worker = Some(ApplyWorker {
+        cancellation,
+        progress,
+        receiver,
+        handle,
+    });
+    set_status(state.status, "실행 순서를 준비하고 있습니다...");
+    update_controls(state);
+}
+
+fn handle_apply_progress(state: &mut AppState) {
+    let Some(worker) = state.apply_worker.as_ref() else {
+        return;
+    };
+    let phase = worker.progress.phase.load(Ordering::Acquire);
+    let completed = worker.progress.completed.load(Ordering::Acquire);
+    let total = worker.progress.total.load(Ordering::Acquire);
+    worker.progress.wake_pending.store(false, Ordering::Release);
+    let text = match phase {
+        0 => format!("실행 준비 완료: {total} 단계"),
+        1 => format!("파일 이름 변경 중: {completed}/{total} 단계"),
+        2 => format!("취소 또는 오류 후 복원 중: {completed}/{total} 단계"),
+        3 => "저널 terminal 상태를 기록했습니다.".to_owned(),
+        _ => "파일 변경 상태를 확인하고 있습니다...".to_owned(),
+    };
+    set_status(state.status, &text);
+}
+
+fn handle_apply_completion(window: HWND, state: &mut AppState) {
+    let Some(worker) = state.apply_worker.as_ref() else {
+        return;
+    };
+    if !worker.handle.is_finished() {
+        return;
+    }
+    // SAFETY: this exact timer belongs to the live top-level window and the
+    // worker has reached its terminal thread state.
+    unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
+    let Some(worker) = state.apply_worker.take() else {
+        return;
+    };
+    finalize_apply_worker(window, state, worker);
+    if state.close_pending {
+        // SAFETY: terminal worker handoff is complete and AppState no longer
+        // owns a running thread, so the top-level window may now be destroyed.
+        unsafe { DestroyWindow(window) };
+    }
+}
+
+fn finalize_apply_worker(window: HWND, state: &mut AppState, worker: ApplyWorker) {
+    let joined = worker.handle.join();
+    state.mutation_locked = false;
+    if joined.is_err() {
+        state.recovery_locked = true;
+        message(
+            window,
+            "적용 worker가 비정상 종료되었습니다. 남은 저널을 다음 시작에서 복구하도록 적용을 잠급니다.",
+            "DarkReNamer - worker 오류",
+        );
+    } else {
+        match worker.receiver.try_recv() {
+            Ok(ApplyWorkerResult::JournalCreateFailed(error)) => {
+                state.recovery_locked = true;
+                message(
+                    window,
+                    &format!(
+                        "활성 저널을 만들지 못했습니다. {:?}, OS {:?}",
+                        error.kind, error.os_code
+                    ),
+                    "DarkReNamer - 적용 잠김",
+                );
+            }
+            Ok(ApplyWorkerResult::Executed { journal, execution }) => {
+                handle_completed_execution(window, state, *journal, execution);
+            }
+            Ok(ApplyWorkerResult::Panicked) => {
+                state.recovery_locked = true;
+                message(
+                    window,
+                    "적용 worker 내부 오류가 발생했습니다. 남은 저널을 다음 시작에서 복구하도록 적용을 잠급니다.",
+                    "DarkReNamer - worker panic",
+                );
+            }
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
+                state.recovery_locked = true;
+                message(
+                    window,
+                    "적용 worker가 terminal 결과를 전달하지 못했습니다. 다음 시작 복구를 위해 적용을 잠급니다.",
+                    "DarkReNamer - worker 결과 없음",
+                );
+            }
+        }
+    }
+    update_controls(state);
+}
+
+fn finish_apply_after_message_loop_failure(window: HWND) {
+    // SAFETY: window is still live and GWLP_USERDATA retains the UI-owned
+    // AppState until the subsequent DestroyWindow call.
+    let state_ptr = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *mut AppState;
+    if state_ptr.is_null() {
+        return;
+    }
+    // SAFETY: the message loop has failed on this same UI thread, so this is
+    // the sole mutable access to the still-live AppState.
+    let state = unsafe { &mut *state_ptr };
+    if let Some(worker) = state.admission_worker.take() {
+        worker.cancellation.store(true, Ordering::Release);
+        // SAFETY: this exact timer belongs to the still-live top-level window.
+        unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
+        let _joined = worker.handle.join();
+        state.mutation_locked = false;
+    }
+    if let Some(worker) = state.plan_worker.take() {
+        worker.cancellation.request();
+        // SAFETY: this exact timer belongs to the still-live top-level window.
+        unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
+        let _joined = worker.handle.join();
+        state.mutation_locked = false;
+    }
+    let Some(worker) = state.apply_worker.take() else {
+        return;
+    };
+    worker.cancellation.request();
+    // SAFETY: this exact timer belongs to the still-live top-level window.
+    unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
+    finalize_apply_worker(window, state, worker);
+    if state.close_pending {
+        state.close_pending = false;
+    }
+}
+
+fn request_window_close(window: HWND, state: &mut AppState) {
+    if state.confirmation_pending {
+        state.close_pending = true;
+        return;
+    }
+    if let Some(worker) = state.admission_worker.as_ref() {
+        if !state.close_pending {
+            state.close_pending = true;
+            worker.cancellation.store(true, Ordering::Release);
+            set_status(
+                state.status,
+                "종료 요청을 받았습니다. 현재 경로 확인이 끝나는 즉시 종료합니다...",
+            );
+            update_controls(state);
+        }
+        return;
+    }
+    if let Some(worker) = state.plan_worker.as_ref() {
+        if !state.close_pending {
+            state.close_pending = true;
+            worker.cancellation.request();
+            set_status(
+                state.status,
+                "종료 요청을 받았습니다. 파일 시스템 확인이 끝나는 즉시 종료합니다...",
+            );
+            update_controls(state);
+        }
+        return;
+    }
+    if let Some(worker) = state.apply_worker.as_ref() {
+        if !state.close_pending {
+            state.close_pending = true;
+            worker.cancellation.request();
+            set_status(
+                state.status,
+                "종료 요청을 받았습니다. 현재 단계를 마친 뒤 안전하게 취소·복원합니다...",
+            );
+            update_controls(state);
+        }
+        return;
+    }
+    // SAFETY: no worker owns journal or filesystem mutation state, so the
+    // top-level window can be destroyed immediately.
+    unsafe { DestroyWindow(window) };
 }
 
 fn clear_selection(list: HWND) {
@@ -2047,13 +2834,11 @@ fn admit_drop(owner: HWND, state: &mut AppState, drop: HDROP) {
         message(
             owner,
             "선택 항목이 남은 10,000개 한도를 초과해 제한된 수만 처리합니다.",
-            "DarkNamer - 추가 한도",
+            "DarkReNamer - 추가 한도",
         );
     }
     set_status(state.status, "처리중...");
-    state.directory_mode = None;
     admit_paths(owner, state, paths);
-    refresh(state);
 }
 
 fn add_files_dialog(owner: HWND, state: &mut AppState) {
@@ -2066,117 +2851,238 @@ fn add_files_dialog(owner: HWND, state: &mut AppState) {
         return;
     };
     set_status(state.status, "처리중...");
-    state.directory_mode = None;
     admit_paths(owner, state, paths);
 }
 
 fn admit_paths(owner: HWND, state: &mut AppState, paths: Vec<PathBuf>) {
     let capacity = MAX_ADMITTED_SOURCES.saturating_sub(state.model.len());
-    let adapter = WindowsAdmissionAdapter::new();
-    if state.directory_mode.is_none()
-        && let Some(directory) = paths.iter().take(capacity).find(|path| {
-            path.is_absolute()
-                && adapter.validate_path(path).is_ok()
-                && adapter
-                    .metadata(path)
-                    .is_ok_and(|metadata| metadata.is_directory && !metadata.is_reparse_point)
-        })
-    {
-        let text = wide("경로를 직접 추가하려면 YES, 경로 내 파일을 추가하려면 NO를 선택하세요.");
-        let caption = path_wide(directory);
-        // SAFETY: owner is the live application HWND and text/caption are owned
-        // NUL-terminated UTF-16 buffers retained through the modal MessageBoxW call.
-        let answer = unsafe { MessageBoxW(owner, text.as_ptr(), caption.as_ptr(), MB_YESNO) };
-        state.directory_mode = Some(
-            if answer == windows_sys::Win32::UI::WindowsAndMessaging::IDYES {
-                DirectoryMode::Direct
-            } else {
-                DirectoryMode::Recurse
-            },
+    start_admission_worker(owner, state, paths, None, capacity);
+}
+
+fn start_admission_worker(
+    window: HWND,
+    state: &mut AppState,
+    paths: Vec<PathBuf>,
+    mode: Option<AdmissionMode>,
+    capacity: usize,
+) {
+    let revision = state.revision();
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let worker_cancellation = Arc::clone(&cancellation);
+    let (sender, receiver) = sync_channel(1);
+    // SAFETY: window is the live top-level HWND and the timer has no callback.
+    if unsafe { SetTimer(window, APPLY_POLL_TIMER_ID, 100, None) } == 0 {
+        message(
+            window,
+            &format!(
+                "admission worker 완료 감시 timer를 시작하지 못했습니다: {}",
+                io::Error::last_os_error()
+            ),
+            "DarkReNamer - 추가 실패",
         );
-    }
-    let mode = match state.directory_mode.unwrap_or(DirectoryMode::Direct) {
-        DirectoryMode::Direct => AdmissionMode::Direct,
-        DirectoryMode::Recurse => AdmissionMode::Recurse,
-    };
-    let mut report = collect_admission(&adapter, paths, mode, capacity, |left, right| {
-        compare_windows(&legacy_path(left), &legacy_path(right))
-    });
-    let items = std::mem::take(&mut report.items);
-    let appended = state.model.append_batch_by(items, compare_windows);
-    let summary = report.summary_korean(appended);
-    set_status(state.status, &summary);
-    if !report.issues.is_empty() {
-        message(owner, &summary, "DarkNamer - 일부 경로 제외");
-    }
-}
-
-fn legacy_path(path: &Path) -> LegacyText {
-    LegacyText::from_units(path.as_os_str().encode_wide().collect::<Vec<_>>())
-}
-
-fn compare_windows(left: &LegacyText, right: &LegacyText) -> std::cmp::Ordering {
-    let left_len = i32::try_from(left.len()).unwrap_or(i32::MAX);
-    let right_len = i32::try_from(right.len()).unwrap_or(i32::MAX);
-    // SAFETY: Both UTF-16 slices remain allocated and checked i32 lengths describe their exact readable units.
-    let result = unsafe {
-        CompareStringW(
-            LOCALE_USER_DEFAULT,
-            NORM_IGNORECASE,
-            left.units().as_ptr(),
-            left_len,
-            right.units().as_ptr(),
-            right_len,
-        )
-    };
-    if result == CSTR_LESS_THAN {
-        std::cmp::Ordering::Less
-    } else if result == CSTR_GREATER_THAN {
-        std::cmp::Ordering::Greater
-    } else {
-        std::cmp::Ordering::Equal
-    }
-}
-
-fn path_wide(path: &Path) -> Vec<u16> {
-    path.as_os_str().encode_wide().chain([0]).collect()
-}
-
-fn copy_clipboard(owner: HWND, text: &LegacyText) {
-    let mut units = text.units().to_vec();
-    units.push(0);
-    // SAFETY: owner is the live top-level HWND associated with this synchronous clipboard session.
-    if unsafe { OpenClipboard(owner) } == 0 {
+        update_controls(state);
         return;
     }
-    // SAFETY: This thread successfully opened the clipboard immediately before emptying it.
-    unsafe { EmptyClipboard() };
-    let bytes = units.len().saturating_mul(size_of::<u16>());
-    // SAFETY: bytes is the checked UTF-16 byte count; the HGLOBAL stays owned until transfer or GlobalFree.
-    let allocation = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) };
-    if !allocation.is_null() {
-        // SAFETY: allocation is the non-null newly allocated HGLOBAL and stays owned while its pointer is used.
-        let locked = unsafe { GlobalLock(allocation) } as *mut u16;
-        if !locked.is_null() {
-            // SAFETY: locked spans units.len writable u16 slots, units has that many elements, and they cannot overlap.
-            unsafe {
-                std::ptr::copy_nonoverlapping(units.as_ptr(), locked, units.len());
-                GlobalUnlock(allocation);
+    let window_value = window as usize;
+    let handle = match thread::Builder::new()
+        .name("darkrenamer-admission".to_owned())
+        .spawn(move || {
+            let _completion_wake = SimpleCompletionWake {
+                window: window_value,
+                message: WM_APP_ADMISSION_COMPLETE,
+            };
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                if worker_cancellation.load(Ordering::Acquire) {
+                    return AdmissionWorkerResult::Cancelled;
+                }
+                let adapter = WindowsAdmissionAdapter::new();
+                let mode = if let Some(mode) = mode {
+                    mode
+                } else {
+                    let mut directory = None;
+                    for path in paths.iter().take(capacity) {
+                        if worker_cancellation.load(Ordering::Acquire) {
+                            return AdmissionWorkerResult::Cancelled;
+                        }
+                        if path.is_absolute()
+                            && adapter.validate_path(path).is_ok()
+                            && adapter.metadata(path).is_ok_and(|metadata| {
+                                metadata.is_directory && !metadata.is_reparse_point
+                            })
+                        {
+                            directory = Some(path.clone());
+                            break;
+                        }
+                    }
+                    if let Some(directory) = directory {
+                        return AdmissionWorkerResult::NeedsDirectoryMode {
+                            revision,
+                            paths,
+                            capacity,
+                            directory,
+                        };
+                    }
+                    AdmissionMode::Direct
+                };
+                let report = collect_admission(&adapter, paths, mode, capacity, |left, right| {
+                    compare_windows(&legacy_path(left), &legacy_path(right))
+                });
+                if worker_cancellation.load(Ordering::Acquire) {
+                    AdmissionWorkerResult::Cancelled
+                } else {
+                    AdmissionWorkerResult::Finished { revision, report }
+                }
+            }))
+            .unwrap_or(AdmissionWorkerResult::Panicked);
+            let _sent = sender.send(result);
+        }) {
+        Ok(handle) => handle,
+        Err(error) => {
+            // SAFETY: this exact timer was installed above for the live window.
+            unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
+            message(
+                window,
+                &format!("admission worker를 시작하지 못했습니다: {error}"),
+                "DarkReNamer - 추가 실패",
+            );
+            update_controls(state);
+            return;
+        }
+    };
+    state.mutation_locked = true;
+    state.admission_worker = Some(AdmissionWorker {
+        cancellation,
+        receiver,
+        handle,
+    });
+    set_status(state.status, "선택한 경로를 확인하고 있습니다...");
+    update_controls(state);
+}
+
+fn handle_admission_completion(window: HWND, state: &mut AppState) {
+    let Some(worker) = state.admission_worker.as_ref() else {
+        return;
+    };
+    if !worker.handle.is_finished() {
+        return;
+    }
+    // SAFETY: this timer belongs to the live window and the admission thread
+    // has reached its terminal state.
+    unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
+    let Some(worker) = state.admission_worker.take() else {
+        return;
+    };
+    let joined = worker.handle.join();
+    state.mutation_locked = false;
+    if state.close_pending {
+        // SAFETY: admission performs no mutation and the worker has joined.
+        unsafe { DestroyWindow(window) };
+        return;
+    }
+    if joined.is_err() {
+        message(
+            window,
+            "경로 확인 worker가 비정상 종료되었습니다. 목록은 변경되지 않았습니다.",
+            "DarkReNamer - 추가 오류",
+        );
+        update_controls(state);
+        return;
+    }
+    match worker.receiver.try_recv() {
+        Ok(AdmissionWorkerResult::NeedsDirectoryMode {
+            revision,
+            paths,
+            capacity,
+            directory,
+        }) => {
+            if state.revision() != revision {
+                message(
+                    window,
+                    "경로 확인 중 목록이 변경되어 결과를 적용하지 않았습니다.",
+                    "DarkReNamer - 오래된 결과",
+                );
+                update_controls(state);
+                return;
             }
-            let transferred =
-                // SAFETY: allocation is unlocked movable HGLOBAL containing terminated UTF-16; success transfers ownership.
-                unsafe { SetClipboardData(u32::from(CF_UNICODETEXT), allocation as HANDLE) };
-            if transferred.is_null() {
-                // SAFETY: allocation is a non-null HGLOBAL still owned here because clipboard ownership was not transferred.
-                unsafe { GlobalFree(allocation) };
+            let text =
+                wide("경로를 직접 추가하려면 YES, 경로 내 파일을 추가하려면 NO를 선택하세요.");
+            let caption = path_wide(&directory);
+            state.mutation_locked = true;
+            state.confirmation_pending = true;
+            update_controls(state);
+            // SAFETY: window is the live owner and both UTF-16 buffers remain
+            // allocated throughout the synchronous modal call.
+            let answer = unsafe { MessageBoxW(window, text.as_ptr(), caption.as_ptr(), MB_YESNO) };
+            state.mutation_locked = false;
+            state.confirmation_pending = false;
+            if state.close_pending {
+                // SAFETY: the modal callback returned and no worker owns state.
+                unsafe { DestroyWindow(window) };
+                return;
             }
-        } else {
-            // SAFETY: allocation is a non-null HGLOBAL still owned here because clipboard ownership was not transferred.
-            unsafe { GlobalFree(allocation) };
+            let mode = if answer == windows_sys::Win32::UI::WindowsAndMessaging::IDYES {
+                AdmissionMode::Direct
+            } else {
+                AdmissionMode::Recurse
+            };
+            start_admission_worker(window, state, paths, Some(mode), capacity);
+            return;
+        }
+        Ok(AdmissionWorkerResult::Finished {
+            revision,
+            mut report,
+        }) => {
+            if state.revision() != revision {
+                message(
+                    window,
+                    "경로 확인 중 목록이 변경되어 결과를 적용하지 않았습니다.",
+                    "DarkReNamer - 오래된 결과",
+                );
+            } else {
+                let before = state.model.clone();
+                let items = std::mem::take(&mut report.items);
+                let appended = state.model.append_batch_by(items, compare_windows);
+                state.commit_model_change(&before);
+                let summary = report.summary_korean(appended);
+                set_status(state.status, &summary);
+                if !report.issues.is_empty() {
+                    message(window, &summary, "DarkReNamer - 일부 경로 제외");
+                }
+                refresh(state);
+            }
+        }
+        Ok(AdmissionWorkerResult::Cancelled) => {
+            set_status(
+                state.status,
+                "경로 추가를 취소했습니다. 목록은 변경되지 않았습니다.",
+            );
+        }
+        Ok(AdmissionWorkerResult::Panicked) => {
+            message(
+                window,
+                "경로 확인 worker 내부 오류가 발생했습니다. 목록은 변경되지 않았습니다.",
+                "DarkReNamer - 추가 오류",
+            );
+        }
+        Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
+            message(
+                window,
+                "경로 확인 worker가 결과를 전달하지 못했습니다. 목록은 변경되지 않았습니다.",
+                "DarkReNamer - 추가 결과 없음",
+            );
         }
     }
-    // SAFETY: This thread closes exactly the clipboard session successfully opened above.
-    unsafe { CloseClipboard() };
+    update_controls(state);
+}
+
+fn copy_clipboard_or_report(owner: HWND, text: &LegacyText) {
+    if let Err(error) = copy_clipboard(owner, text) {
+        message(
+            owner,
+            &format!("클립보드에 복사하지 못했습니다: {error}"),
+            "DarkReNamer - 복사 실패",
+        );
+    }
 }
 
 fn save_text_dialog(owner: HWND, text: LegacyText, names: bool) {
@@ -2195,7 +3101,66 @@ fn save_text_dialog(owner: HWND, text: LegacyText, names: bool) {
     }) else {
         return;
     };
-    let _ = write_legacy_text(&path, &text);
+    if let Err(error) = write_legacy_text(&path, &text) {
+        message(
+            owner,
+            &format!("파일을 저장하지 못했습니다: {error}"),
+            "DarkReNamer - 저장 실패",
+        );
+    }
+}
+
+fn export_recovery_journal(owner: HWND, state: &mut AppState) {
+    let evidence_count = state
+        .blocked_journals
+        .iter()
+        .filter(|blocked| matches!(blocked, StartupJournalBlock::Evidence(_)))
+        .count();
+    if evidence_count == 0 {
+        message(
+            owner,
+            "보존된 저널 핸들이 없어 원본을 안전하게 복사할 수 없습니다.",
+            "DarkReNamer - 진단 내보내기 불가",
+        );
+        return;
+    }
+    let Some(directory) = modal_native_dialog(owner, || {
+        rfd::FileDialog::new()
+            .set_title("복구 저널 원본을 저장할 폴더 선택")
+            .pick_folder()
+    }) else {
+        return;
+    };
+    let mut results = Vec::with_capacity(evidence_count);
+    let mut failures = 0_usize;
+    for evidence in state
+        .blocked_journals
+        .iter_mut()
+        .filter_map(StartupJournalBlock::evidence_mut)
+    {
+        let name = evidence
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map_or_else(
+                || "recovery-journal.drj.evidence".to_owned(),
+                |name| format!("{name}.evidence"),
+            );
+        let path = directory.join(name);
+        match evidence.copy_exact_to_new(&path) {
+            Ok(bytes) => results.push(format!("{bytes} bytes: {}", path.display())),
+            Err(error) => {
+                failures += 1;
+                results.push(format!("실패: {} ({error})", path.display()));
+            }
+        }
+    }
+    let caption = if failures == 0 {
+        "DarkReNamer - 진단 내보내기 완료"
+    } else {
+        "DarkReNamer - 진단 내보내기 일부 실패"
+    };
+    message(owner, &results.join("\n"), caption);
 }
 
 fn import_names_dialog(owner: HWND, state: &mut AppState) {
@@ -2215,7 +3180,7 @@ fn import_names_dialog(owner: HWND, state: &mut AppState) {
         Err(error) => message(
             owner,
             &format!("가져오기 파일을 읽지 못했습니다: {error}"),
-            "DarkNamer",
+            "DarkReNamer",
         ),
     }
 }
@@ -2236,7 +3201,7 @@ fn import_paths_dialog(owner: HWND, state: &mut AppState) {
             message(
                 owner,
                 &format!("경로 목록을 읽지 못했습니다: {error}"),
-                "DarkNamer",
+                "DarkReNamer",
             );
             return;
         }
@@ -2248,14 +3213,13 @@ fn import_paths_dialog(owner: HWND, state: &mut AppState) {
         message(
             owner,
             "경로 목록이 남은 10,000개 한도를 초과해 제한된 수만 처리합니다.",
-            "DarkNamer - 가져오기 한도",
+            "DarkReNamer - 가져오기 한도",
         );
     }
     let paths = lines
         .into_iter()
         .map(|line| PathBuf::from(std::ffi::OsString::from_wide(line.units())))
         .collect();
-    state.directory_mode = None;
     admit_paths(owner, state, paths);
 }
 
@@ -2280,192 +3244,16 @@ fn modal_native_dialog<T>(owner: HWND, dialog: impl FnOnce() -> T) -> T {
     result
 }
 
-fn write_legacy_text(path: &Path, text: &LegacyText) -> io::Result<()> {
-    let mut bytes = Vec::with_capacity(2 + text.len() * 2);
-    bytes.extend_from_slice(&[0xFF, 0xFE]);
-    for unit in text.units() {
-        bytes.extend_from_slice(&unit.to_le_bytes());
-    }
-    fs::write(path, bytes)
-}
-
-fn read_legacy_text(path: &Path) -> io::Result<LegacyText> {
-    if fs::metadata(path)?.len() > MAX_IMPORT_BYTES as u64 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "가져오기 파일이 2 MiB 한도를 초과합니다",
-        ));
-    }
-    let bytes = read_bounded_import(fs::File::open(path)?)?;
-    if bytes.starts_with(&[0xFF, 0xFE]) {
-        let units = bytes[2..]
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .collect::<Vec<_>>();
-        return Ok(LegacyText::from_units(units));
-    }
-    if bytes.is_empty() {
-        return Ok(LegacyText::default());
-    }
-    let input_len =
-        i32::try_from(bytes.len()).map_err(|_| io::Error::other("text file too large"))?;
-    let needed =
-        // SAFETY: bytes is readable for input_len and any output pointer targets the previously sized UTF-16 buffer.
-        unsafe { MultiByteToWideChar(CP_ACP, 0, bytes.as_ptr(), input_len, null_mut(), 0) };
-    if needed <= 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let mut units = vec![0_u16; needed as usize];
-    // SAFETY: bytes is readable for input_len and any output pointer targets the previously sized UTF-16 buffer.
-    let written = unsafe {
-        MultiByteToWideChar(
-            CP_ACP,
-            0,
-            bytes.as_ptr(),
-            input_len,
-            units.as_mut_ptr(),
-            needed,
-        )
-    };
-    if written <= 0 {
-        return Err(io::Error::last_os_error());
-    }
-    units.truncate(written as usize);
-    Ok(LegacyText::from_units(units))
-}
-
-fn update_column_visibility(state: &AppState, index: usize) {
-    let column = index + 3;
-    let width = if state.shown_columns[index] {
-        if column == 4 { 80 } else { 120 }
-    } else {
-        0
-    };
-    // SAFETY: state.list_window is live and LVM_SETCOLUMNWIDTH carries only the
-    // computed column and width values, with no pointer payload.
-    unsafe {
-        SendMessageW(state.list_window, LVM_SETCOLUMNWIDTH, column, width);
-    }
-}
-
-struct RedrawGuard {
-    window: HWND,
-}
-
-impl RedrawGuard {
-    unsafe fn suspend(window: HWND) -> Self {
-        if !window.is_null() {
-            // SAFETY: window is the non-null AppState ListView HWND; WM_SETREDRAW
-            // carries no pointer payload and the guard retains this exact value.
-            unsafe { SendMessageW(window, WM_SETREDRAW, 0, 0) };
-        }
-        Self { window }
-    }
-}
-
-impl Drop for RedrawGuard {
-    fn drop(&mut self) {
-        if !self.window.is_null() {
-            // SAFETY: self.window is the same AppState ListView HWND suspended by
-            // this guard; redraw messages use null regions and retain no pointers.
-            unsafe {
-                SendMessageW(self.window, WM_SETREDRAW, 1, 0);
-                RedrawWindow(
-                    self.window,
-                    null(),
-                    null_mut(),
-                    RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
-                );
-            }
-        }
-    }
-}
-
-fn refresh(state: &mut AppState) {
-    // SAFETY: state.list_window is live and the guard restores redraw for that exact HWND on every drop path.
-    let _redraw = unsafe { RedrawGuard::suspend(state.list_window) };
-    let selected = { selected_indices(state.list_window) };
-    // SAFETY: state.list_window is live and LVM_DELETEALLITEMS carries no pointer
-    // payload; redraw remains suspended by the guard.
-    unsafe { SendMessageW(state.list_window, LVM_DELETEALLITEMS, 0, 0) };
-    for (row, item) in state.model.items().iter().enumerate() {
-        let size = LegacyText::from(item.actual_size().to_string());
-        let modified = format_filetime(item.modified());
-        let created = format_filetime(item.created());
-        let values = [
-            item.current_name().clone(),
-            item.proposed_name().clone(),
-            item.root_path().clone(),
-            item.source_path().clone(),
-            size,
-            modified,
-            created,
-        ];
-        for (column, value) in values.iter().enumerate() {
-            let mut text = value.units().to_vec();
-            text.push(0);
-            if column == 0 {
-                let mut native = LVITEMW {
-                    mask: LVIF_TEXT | LVIF_IMAGE,
-                    iItem: row as i32,
-                    iSubItem: 0,
-                    pszText: text.as_mut_ptr(),
-                    iImage: { file_icon_index(&mut state.icon_cache, item) },
-                    // SAFETY: LVITEMW is C-compatible; zero initializes unused
-                    // fields before text/image fields are sent synchronously.
-                    ..unsafe { zeroed() }
-                };
-                // SAFETY: state.list_window is live; native and its terminated text
-                // buffer remain allocated until LVM_INSERTITEMW returns.
-                unsafe {
-                    SendMessageW(
-                        state.list_window,
-                        LVM_INSERTITEMW,
-                        0,
-                        (&mut native as *mut LVITEMW) as isize,
-                    )
-                };
-            } else {
-                let mut native = LVITEMW {
-                    iSubItem: column as i32,
-                    pszText: text.as_mut_ptr(),
-                    // SAFETY: LVITEMW is C-compatible; zero initializes optional fields before its explicit message fields are set.
-                    ..unsafe { zeroed() }
-                };
-                // SAFETY: state.list_window is live; native and its terminated text
-                // buffer remain allocated until LVM_SETITEMTEXTW returns.
-                unsafe {
-                    SendMessageW(
-                        state.list_window,
-                        LVM_SETITEMTEXTW,
-                        row,
-                        (&mut native as *mut LVITEMW) as isize,
-                    )
-                };
-            }
-        }
-    }
-    select_rows(state.list_window, &selected);
-    update_controls(state);
-    let status = if state.model.is_empty() {
-        LegacyText::default()
-    } else {
-        LegacyText::from(format!("{} 개", state.model.len()))
-    };
-    let mut status = status.units().to_vec();
-    status.push(0);
-    // SAFETY: The status HWND is live and text is owned terminated UTF-16 retained through SetWindowTextW.
-    unsafe {
-        windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(state.status, status.as_ptr());
-    }
-}
-
 fn update_controls(state: &mut AppState) {
     let selected_count = { selected_indices(state.list_window) }.len();
     for id in APPLY..=VERSION {
         state.command_states[usize::from(id - APPLY)] =
-            command_enabled(id, state.model.len(), selected_count)
-                && !(id == APPLY && state.apply_locked());
+            if state.read_only_locked() || state.mutation_locked {
+                id == VERSION
+            } else {
+                command_enabled(id, state.model.len(), selected_count)
+                    && !(id == APPLY && state.apply_locked())
+            };
     }
     apply_command_states(state);
 }
@@ -2495,6 +3283,24 @@ fn apply_command_states(state: &AppState) {
                 MF_BYCOMMAND | if enabled { MF_ENABLED } else { MF_GRAYED },
             );
         }
+    }
+    let can_export_evidence = state
+        .blocked_journals
+        .iter()
+        .any(|blocked| matches!(blocked, StartupJournalBlock::Evidence(_)));
+    // SAFETY: state.menu is the live application menu and the diagnostic
+    // command identifier is owned by this process.
+    unsafe {
+        EnableMenuItem(
+            state.menu,
+            u32::from(EXPORT_RECOVERY_JOURNAL),
+            MF_BYCOMMAND
+                | if can_export_evidence {
+                    MF_ENABLED
+                } else {
+                    MF_GRAYED
+                },
+        );
     }
     for (index, id) in [SHOW_FULL_PATH, SHOW_SIZE, SHOW_MODIFIED, SHOW_CREATED]
         .into_iter()
@@ -2533,56 +3339,6 @@ fn set_toolbar_button_enabled(toolbar: HWND, command: CommandId, enabled: bool) 
             )
         };
     }
-}
-
-fn file_icon_index(cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyListItem) -> i32 {
-    let key = icon_cache_key(item.current_name(), item.is_directory());
-    if let Some(index) = cache.get(&key) {
-        return *index;
-    }
-    // SAFETY: SHFILEINFOW is a C-compatible output structure whose all-zero state is valid before the shell fills it.
-    let mut info: SHFILEINFOW = unsafe { zeroed() };
-    let path = key.lookup_text();
-    let mut path = path.units().to_vec();
-    path.push(0);
-    let attributes = if item.is_directory() {
-        FILE_ATTRIBUTE_DIRECTORY
-    } else {
-        FILE_ATTRIBUTE_NORMAL
-    };
-    // SAFETY: The lookup path is owned terminated UTF-16 and info is writable SHFILEINFOW retained for the shell query.
-    unsafe {
-        SHGetFileInfoW(
-            path.as_ptr(),
-            attributes,
-            &mut info,
-            size_of::<SHFILEINFOW>() as u32,
-            SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON,
-        );
-    }
-    cache.insert(key, info.iIcon);
-    info.iIcon
-}
-
-fn format_filetime(value: u64) -> LegacyText {
-    if value == 0 {
-        return LegacyText::default();
-    }
-    let filetime = FILETIME {
-        dwLowDateTime: value as u32,
-        dwHighDateTime: (value >> 32) as u32,
-    };
-    // SAFETY: SYSTEMTIME is a C-compatible integer structure whose all-zero state
-    // is valid writable output before FileTimeToSystemTime fills it.
-    let mut system: SYSTEMTIME = unsafe { zeroed() };
-    // SAFETY: filetime is initialized and system is writable SYSTEMTIME retained through conversion.
-    if unsafe { FileTimeToSystemTime(&filetime, &mut system) } == 0 {
-        return LegacyText::default();
-    }
-    LegacyText::from(format!(
-        "{}-{:02}-{:02} {:02}:{:02}:{:02}",
-        system.wYear, system.wMonth, system.wDay, system.wHour, system.wMinute, system.wSecond
-    ))
 }
 
 fn create_menu() -> HMENU {
@@ -2641,8 +3397,15 @@ fn create_menu() -> HMENU {
         AppendMenuW(tools, MF_SEPARATOR, 0, null());
         menu_item(tools, PARENT_PREFIX, "경로명 앞에");
         menu_item(tools, PARENT_SUFFIX, "경로명 뒤에");
-        menu_item(tools, UNIFY_PATH, "경로 통일하기");
+        menu_item(tools, UNIFY_PATH, "경로 통일하기 (미지원)");
         append_popup(menu, tools, "기능(&T)");
+        let recovery = CreatePopupMenu();
+        menu_item(
+            recovery,
+            EXPORT_RECOVERY_JOURNAL,
+            "보존된 모든 저널 원본 내보내기...",
+        );
+        append_popup(menu, recovery, "복구(&R)");
         menu_item(menu, VERSION, "버전(H)");
     }
     menu
@@ -2668,10 +3431,6 @@ fn message(owner: HWND, text: &str, caption: &str) {
     unsafe { MessageBoxW(owner, text.as_ptr(), caption.as_ptr(), 0) };
 }
 
-fn wide(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain([0]).collect()
-}
-
 #[allow(
     clippy::manual_dangling_ptr,
     reason = "Win32 MAKEINTRESOURCEW encodes a numeric resource ID in a pointer value"
@@ -2683,6 +3442,227 @@ const fn int_resource(id: u16) -> *const u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+
+    use crate::rename::{
+        BackendError, BackendOperation, EntryId, EntryKind, MutationCertainty, PathKey,
+        PathSnapshot, PlanRequest, RenameBackend, RenameIntent, RenameOperation,
+    };
+
+    fn create_startup_journal_directory(
+        local_app_data: &Path,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let journal = local_app_data.join("DarkReNamer").join("journal");
+        fs::create_dir_all(&journal)?;
+        Ok(journal)
+    }
+
+    #[test]
+    fn apply_worker_payloads_and_capabilities_are_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<JournalRoot>();
+        assert_send::<FileJournal>();
+        assert_send::<crate::rename::ConfirmedPlan>();
+        assert_send::<ApplyWorkerResult>();
+        assert_send::<PlanWorkerResult>();
+        assert_send::<AdmissionWorkerResult>();
+    }
+
+    struct CrashBackend {
+        inner: WindowsRenameBackend,
+        fail_on_attempt: Option<usize>,
+        attempts: usize,
+    }
+
+    impl RenameBackend for CrashBackend {
+        fn validate_path_environment(&self, path: &LegacyText) -> Result<(), BackendError> {
+            self.inner.validate_path_environment(path)
+        }
+
+        fn path_key(&self, path: &LegacyText) -> PathKey {
+            self.inner.path_key(path)
+        }
+
+        fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
+            self.inner.observe(path)
+        }
+
+        fn is_same_or_descendant(
+            &self,
+            ancestor: &LegacyText,
+            candidate: &LegacyText,
+        ) -> Result<bool, BackendError> {
+            self.inner.is_same_or_descendant(ancestor, candidate)
+        }
+
+        fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
+            self.inner.next_transaction_nonce()
+        }
+
+        fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+            self.attempts = self.attempts.saturating_add(1);
+            if self.fail_on_attempt == Some(self.attempts) {
+                return Err(BackendError {
+                    operation: BackendOperation::Rename,
+                    code: 123,
+                    certainty: MutationCertainty::NotApplied,
+                });
+            }
+            self.inner.rename_no_replace(operation)
+        }
+    }
+
+    #[test]
+    fn crash_recovery_child() -> Result<(), Box<dyn std::error::Error>> {
+        if env::var("DARKRENAMER_TEST_CHILD_MODE").as_deref() != Ok("1") {
+            return Ok(());
+        }
+        let Some(local_app_data) = env::var_os("DARKRENAMER_TEST_CHILD_ROOT") else {
+            return Err(io::Error::other("crash child root missing").into());
+        };
+        let local_app_data = PathBuf::from(local_app_data);
+        let nonce = env::var("DARKRENAMER_TEST_FIXTURE_NONCE")?;
+        let marker = fs::read_to_string(local_app_data.join("fixture-nonce.txt"))?;
+        let canonical_root = fs::canonicalize(&local_app_data)?;
+        let canonical_temp = fs::canonicalize(env::temp_dir())?;
+        if marker != nonce
+            || !local_app_data.is_absolute()
+            || !canonical_root.starts_with(&canonical_temp)
+        {
+            return Err(io::Error::other("crash fixture authority mismatch").into());
+        }
+        let journal_directory = create_startup_journal_directory(&local_app_data)?;
+        let data = local_app_data.join("data");
+        let source_a = data.join("a.txt");
+        let source_b = data.join("b.txt");
+        let mut backend = CrashBackend {
+            inner: WindowsRenameBackend,
+            fail_on_attempt: (env::var_os("DARKRENAMER_TEST_FORCE_ROLLBACK").is_some())
+                .then_some(2),
+            attempts: 0,
+        };
+        backend.validate_path_environment(&legacy_path(&source_a))?;
+        let intents = vec![
+            RenameIntent::new(
+                EntryId::new(0),
+                legacy_path(&source_a),
+                legacy_path(&data),
+                "b.txt",
+                EntryKind::File,
+            ),
+            RenameIntent::new(
+                EntryId::new(1),
+                legacy_path(&source_b),
+                legacy_path(&data),
+                "a.txt",
+                EntryKind::File,
+            ),
+        ];
+        let plan =
+            RenamePlanner::new(&backend).plan(PlanRequest::new(ModelRevision::new(1), intents))?;
+        let id = plan.id();
+        let revision = plan.revision();
+        let root = JournalRoot::open(&journal_directory)?;
+        let mut journal =
+            FileJournal::create_candidate(&root, CANDIDATE_JOURNAL_LEAF, ACTIVE_JOURNAL_LEAF)?;
+
+        let _report = RenameExecutor::new(&mut backend, &mut journal)
+            .execute(plan.confirm_presented(id, revision)?)?;
+        Err(io::Error::other("configured crash point was not reached").into())
+    }
+
+    fn run_crash_recovery_case(
+        point: &str,
+        force_rollback: bool,
+        expect_swapped: bool,
+        expect_staged_lock: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let data = directory.path().join("data");
+        fs::create_dir(&data)?;
+        fs::write(data.join("a.txt"), b"a")?;
+        fs::write(data.join("b.txt"), b"b")?;
+        fs::write(data.join("sentinel.txt"), b"external")?;
+        let nonce = format!("{}-{point}", std::process::id());
+        fs::write(directory.path().join("fixture-nonce.txt"), &nonce)?;
+        let mut command = Command::new(std::env::current_exe()?);
+        command
+            .arg("--exact")
+            .arg("windows::tests::crash_recovery_child")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env("DARKRENAMER_TEST_CHILD_MODE", "1")
+            .env("DARKRENAMER_TEST_CHILD_ROOT", directory.path())
+            .env("DARKRENAMER_TEST_FIXTURE_NONCE", &nonce)
+            .env("DARKRENAMER_TEST_CRASH_POINT", point)
+            .env_remove("DARKRENAMER_TEST_FORCE_ROLLBACK");
+        if force_rollback {
+            command.env("DARKRENAMER_TEST_FORCE_ROLLBACK", "1");
+        }
+
+        let status = command.status()?;
+        if status.code() != Some(86) {
+            return Err(
+                io::Error::other(format!("child did not stop at {point}: {status}")).into(),
+            );
+        }
+
+        let runtime = initialize_safe_runtime_at(directory.path())?;
+        if expect_staged_lock {
+            assert!(runtime.recovery_locked);
+            assert!(runtime.staged_journal.is_some());
+        } else {
+            assert!(runtime.active_journal.is_none());
+        }
+        drop(runtime);
+
+        let (expected_a, expected_b) = if expect_swapped {
+            (b"b".as_slice(), b"a".as_slice())
+        } else {
+            (b"a".as_slice(), b"b".as_slice())
+        };
+        assert_eq!(fs::read(data.join("a.txt"))?, expected_a);
+        assert_eq!(fs::read(data.join("b.txt"))?, expected_b);
+        assert_eq!(fs::read(data.join("sentinel.txt"))?, b"external");
+        assert!(
+            fs::read_dir(&data)?.all(|entry| {
+                entry
+                    .ok()
+                    .and_then(|entry| entry.file_name().into_string().ok())
+                    .is_none_or(|name| !name.contains(".__darknamer_"))
+            }),
+            "temporary rename endpoint remained after startup recovery"
+        );
+        let journal_directory = directory.path().join("DarkReNamer").join("journal");
+        if expect_staged_lock {
+            assert!(journal_directory.join(CANDIDATE_JOURNAL_LEAF).exists());
+            assert!(!journal_directory.join(ACTIVE_JOURNAL_LEAF).exists());
+        } else {
+            assert!(!journal_directory.join(CANDIDATE_JOURNAL_LEAF).exists());
+            assert!(!journal_directory.join(ACTIVE_JOURNAL_LEAF).exists());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn crash_recovery_matrix_uses_real_windows_backend_and_file_journal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (point, force_rollback, expect_swapped, expect_staged_lock) in [
+            ("staged-intent-synced", false, false, true),
+            ("active-intent-promoted", false, false, false),
+            ("forward-prepared-0", false, false, false),
+            ("forward-rename-0", false, false, false),
+            ("forward-completed-0", false, false, false),
+            ("rollback-prepared-0", true, false, false),
+            ("rollback-rename-0", true, false, false),
+            ("rollback-completed-0", true, false, false),
+            ("terminal-committed", false, true, false),
+            ("terminal-rolled-back", true, false, false),
+        ] {
+            run_crash_recovery_case(point, force_rollback, expect_swapped, expect_staged_lock)?;
+        }
+        Ok(())
+    }
 
     #[test]
     fn legacy_text_files_round_trip_utf16le_bom() -> Result<(), Box<dyn std::error::Error>> {
@@ -2701,6 +3681,152 @@ mod tests {
         assert_eq!(legacy_atoi(&LegacyText::from("  -12suffix")), -12);
         assert_eq!(legacy_atoi(&LegacyText::from("3abc")), 3);
         assert_eq!(legacy_atoi(&LegacyText::from("abc3")), 0);
+    }
+
+    #[test]
+    fn corrupt_active_journal_starts_recovery_locked_with_retained_evidence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let journal_directory = create_startup_journal_directory(directory.path())?;
+        let active = journal_directory.join(ACTIVE_JOURNAL_LEAF);
+        let corrupt = vec![0_u8; 24];
+        fs::write(&active, &corrupt)?;
+
+        let runtime = initialize_safe_runtime_at(directory.path())?;
+
+        assert!(runtime.recovery_locked);
+        assert!(runtime.active_journal.is_none());
+        assert_eq!(runtime.blocked_journals.len(), 1);
+        assert!(matches!(
+            runtime.blocked_journals[0],
+            StartupJournalBlock::Evidence(_)
+        ));
+        let status = runtime.status.as_deref().unwrap_or_default();
+        assert!(status.contains("원본 핸들을 보존"));
+        assert!(status.contains(&active.display().to_string()));
+        assert!(fs::read(&active).is_err());
+        drop(runtime);
+        assert_eq!(fs::read(active)?, corrupt);
+        Ok(())
+    }
+
+    #[test]
+    fn unavailable_active_journal_starts_locked_without_reopening_for_copy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let journal_directory = create_startup_journal_directory(directory.path())?;
+        let root = JournalRoot::open(&journal_directory)?;
+        let mut held = FileJournal::create_new(&root, ACTIVE_JOURNAL_LEAF)?;
+        drop(root);
+
+        let runtime = initialize_safe_runtime_at(directory.path())?;
+
+        assert!(runtime.recovery_locked);
+        assert_eq!(runtime.blocked_journals.len(), 1);
+        assert!(matches!(
+            runtime.blocked_journals[0],
+            StartupJournalBlock::Unavailable { .. }
+        ));
+        assert!(
+            runtime
+                .status
+                .as_deref()
+                .unwrap_or_default()
+                .contains("경로를 다시 열어 복사하지 않")
+        );
+        drop(runtime);
+        held.mark_delete_if_safe()?;
+        drop(held);
+        assert!(!journal_directory.join(ACTIVE_JOURNAL_LEAF).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn corrupt_active_and_candidate_retain_two_exportable_handles()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let journal_directory = create_startup_journal_directory(directory.path())?;
+        let active = journal_directory.join(ACTIVE_JOURNAL_LEAF);
+        let candidate = journal_directory.join(CANDIDATE_JOURNAL_LEAF);
+        fs::write(&active, vec![0_u8; 24])?;
+        fs::write(&candidate, vec![1_u8; 24])?;
+
+        let runtime = initialize_safe_runtime_at(directory.path())?;
+
+        assert!(runtime.recovery_locked);
+        assert_eq!(runtime.blocked_journals.len(), 2);
+        assert!(
+            runtime
+                .blocked_journals
+                .iter()
+                .all(|blocked| matches!(blocked, StartupJournalBlock::Evidence(_)))
+        );
+        let status = runtime.status.as_deref().unwrap_or_default();
+        assert!(status.contains(&active.display().to_string()));
+        assert!(status.contains(&candidate.display().to_string()));
+        drop(runtime);
+        assert!(active.exists());
+        assert!(candidate.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_lock_allows_only_diagnostics_about_and_exit() {
+        assert!(recovery_command_allowed(EXPORT_RECOVERY_JOURNAL));
+        assert!(recovery_command_allowed(VERSION));
+        assert!(recovery_command_allowed(2));
+        for command in [APPLY, ADD_FILES, IMPORT_PATHS, REPLACE, RESET, 0xFFFF] {
+            assert!(!recovery_command_allowed(command));
+        }
+    }
+
+    fn rendered_test_row(label: &str, icon: i32) -> RenderedRow {
+        RenderedRow {
+            values: core::array::from_fn(|column| LegacyText::from(format!("{label}-{column}"))),
+            icon,
+        }
+    }
+
+    #[test]
+    fn listview_diff_marks_only_the_changed_cell_or_icon() {
+        let original = rendered_test_row("row", 7);
+        let mut proposal = original.clone();
+        proposal.values[1] = LegacyText::from("changed");
+        assert_eq!(changed_column_mask(&original, &proposal), 1 << 1);
+
+        let mut icon = original.clone();
+        icon.icon = 8;
+        assert_eq!(changed_column_mask(&original, &icon), 1);
+        assert_eq!(changed_column_mask(&original, &original), 0);
+    }
+
+    #[test]
+    fn listview_diff_for_ten_thousand_rows_has_one_native_row_update() {
+        let old = (0..10_000)
+            .map(|index| rendered_test_row(&format!("row-{index}"), 1))
+            .collect::<Vec<_>>();
+        let mut new = old.clone();
+        new[7_654].values[1] = LegacyText::from("one changed proposal");
+
+        let updates = old
+            .iter()
+            .zip(&new)
+            .filter(|(old, new)| changed_column_mask(old, new) != 0)
+            .collect::<Vec<_>>();
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(changed_column_mask(updates[0].0, updates[0].1), 1 << 1);
+    }
+
+    #[test]
+    fn every_toolbar_command_has_single_line_accessibility_text() {
+        for tool in LEFT_TOOLS.into_iter().chain(RIGHT_TOOLS) {
+            let name = toolbar_accessible_name(tool.id);
+            assert!(!name.is_empty());
+            assert!(!name.contains('\n'));
+        }
+        assert!(toolbar_accessible_name(UNIFY_PATH).contains("지원하지 않음"));
+        assert!(toolbar_width_dip(true) > toolbar_width_dip(false));
     }
 
     #[test]

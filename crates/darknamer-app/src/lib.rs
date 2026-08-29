@@ -25,6 +25,39 @@ pub const TOOLBAR_BUTTON_HEIGHT: i32 = 30;
 pub const TOOLBAR_SEPARATOR_SIZE: i32 = 8;
 /// Height of the bottom status bar.
 pub const STATUS_HEIGHT: i32 = 18;
+/// Design coordinate density used by the original Win32 layout.
+pub const BASE_DPI: u32 = 96;
+
+/// Scales one 96-DPI logical coordinate with nearest-integer rounding.
+#[must_use]
+pub const fn scale_dip(value: i32, dpi: u32) -> i32 {
+    let product = (value as i128) * (dpi as i128);
+    let scaled = if product < 0 {
+        -((-product + (BASE_DPI / 2) as i128) / BASE_DPI as i128)
+    } else {
+        (product + (BASE_DPI / 2) as i128) / BASE_DPI as i128
+    };
+    if scaled > i32::MAX as i128 {
+        i32::MAX
+    } else if scaled < i32::MIN as i128 {
+        i32::MIN
+    } else {
+        scaled as i32
+    }
+}
+/// Public product name used by the executable and user-facing diagnostics.
+pub const PRODUCT_NAME: &str = "DarkReNamer";
+/// Upstream behavior version targeted by compatibility mode.
+pub const COMPATIBILITY_TARGET: &str = "DarkNamer 08.02.10";
+
+/// Returns the product identity shown by the native About command.
+#[must_use]
+pub fn about_text() -> String {
+    format!(
+        "{PRODUCT_NAME} {}\n호환 대상: {COMPATIBILITY_TARGET}\n비공식 커뮤니티 관리 Rust 포트",
+        env!("CARGO_PKG_VERSION")
+    )
+}
 
 /// Native command identifier.
 pub type CommandId = u16;
@@ -240,9 +273,18 @@ pub fn command_enabled(id: CommandId, row_count: usize, selected_count: usize) -
     match id {
         2 | ADD_FILES | IMPORT_PATHS | SHOW_FULL_PATH | SHOW_SIZE | SHOW_MODIFIED
         | SHOW_CREATED | VERSION => true,
+        UNIFY_PATH => false,
         MANUAL_CHANGE | MOVE_UP | MOVE_DOWN => selected_count > 0,
         _ => row_count > 0,
     }
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn compare_utf16_fallback(
+    left: &darknamer_core::LegacyText,
+    right: &darknamer_core::LegacyText,
+) -> std::cmp::Ordering {
+    left.units().cmp(right.units())
 }
 
 #[cfg(any(windows, test))]
@@ -267,7 +309,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     #[cfg(not(windows))]
     {
-        Err("DarkNamer is available only on Windows".into())
+        Err("DarkReNamer is available only on Windows".into())
     }
 }
 
@@ -314,6 +356,24 @@ mod tests {
             VERSION,
         ];
         assert_eq!(ids, core::array::from_fn(|index| 0x8003 + index as u16));
+    }
+
+    #[test]
+    fn about_text_separates_product_version_from_compatibility_target() {
+        let text = about_text();
+        assert!(text.contains(concat!("DarkReNamer ", env!("CARGO_PKG_VERSION"))));
+        assert!(text.contains("호환 대상: DarkNamer 08.02.10"));
+        assert!(text.contains("비공식"));
+    }
+
+    #[test]
+    fn dpi_scaling_is_rounded_and_monotonic() {
+        assert_eq!(scale_dip(44, 96), 44);
+        assert_eq!(scale_dip(44, 120), 55);
+        assert_eq!(scale_dip(44, 144), 66);
+        assert_eq!(scale_dip(44, 192), 88);
+        assert_eq!(scale_dip(-13, 120), -16);
+        assert!(scale_dip(150, 120) < scale_dip(150, 144));
     }
 
     #[test]
@@ -412,8 +472,21 @@ mod tests {
         assert!(command_enabled(2, 0, 0));
         assert!(!command_enabled(APPLY, 0, 0));
         assert!(command_enabled(APPLY, 1, 0));
+        assert!(!command_enabled(UNIFY_PATH, 1, 0));
         assert!(!command_enabled(MANUAL_CHANGE, 1, 0));
         assert!(command_enabled(MANUAL_CHANGE, 1, 1));
+    }
+
+    #[test]
+    fn utf16_fallback_never_treats_distinct_values_as_equal() {
+        assert_eq!(
+            compare_utf16_fallback(&"File.txt".into(), &"file.txt".into()),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_utf16_fallback(&"same.txt".into(), &"same.txt".into()),
+            std::cmp::Ordering::Equal
+        );
     }
 
     #[test]
