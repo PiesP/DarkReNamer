@@ -3,16 +3,16 @@
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::mem::{offset_of, size_of};
-use std::os::windows::ffi::OsStringExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::ptr;
 
 use darknamer_core::LegacyText;
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
-    FILE_CREATE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
+    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
     FILE_RENAME_INFORMATION, FILE_SYNCHRONOUS_IO_NONALERT, FileRenameInformation, NtCreateFile,
     NtSetInformationFile, RtlNtStatusToDosErrorNoTeb,
 };
@@ -46,23 +46,39 @@ impl NativeParent {
     }
 
     pub(crate) fn open_path(path: &Path) -> io::Result<Self> {
-        if !path.is_absolute() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "parent path must be absolute",
-            ));
-        }
-        let file = OpenOptions::new()
-            .access_mode(FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
-            .share_mode(SHARE_ALL)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
-            .open(path)?;
-        let metadata = file.metadata()?;
-        if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "parent must be a non-reparse directory",
-            ));
+        Self::open_path_with_final_share(path, SHARE_ALL)
+    }
+
+    pub(crate) fn open_path_exclusive(path: &Path) -> io::Result<Self> {
+        Self::open_path_with_final_share(path, 0)
+    }
+
+    fn open_path_with_final_share(path: &Path, final_share: u32) -> io::Result<Self> {
+        let (root, components) = traversal_parts(path)?;
+        let root_share = if components.is_empty() {
+            final_share
+        } else {
+            SHARE_ALL
+        };
+        let mut file = open_root_directory(&root, root_share)?;
+        validate_directory_handle(&file)?;
+        let component_count = components.len();
+        for (index, component) in components.into_iter().enumerate() {
+            let encoded = component.encode_wide().collect::<Vec<_>>();
+            let share = if index + 1 == component_count {
+                final_share
+            } else {
+                SHARE_ALL
+            };
+            file = open_relative(
+                &file,
+                &encoded,
+                FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                share,
+                FILE_OPEN,
+                FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            )?;
+            validate_directory_handle(&file)?;
         }
         let identity = file_identity(&file)?;
         Ok(Self { file, identity })
@@ -70,6 +86,74 @@ impl NativeParent {
 
     pub(crate) fn file(&self) -> &File {
         &self.file
+    }
+
+    pub(crate) fn into_file(self) -> File {
+        self.file
+    }
+}
+
+fn traversal_parts(path: &Path) -> io::Result<(PathBuf, Vec<std::ffi::OsString>)> {
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "parent path must start at a drive or UNC share",
+        ));
+    };
+    match prefix.kind() {
+        Prefix::Disk(_)
+        | Prefix::VerbatimDisk(_)
+        | Prefix::UNC(_, _)
+        | Prefix::VerbatimUNC(_, _) => {}
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "parent path prefix is unsupported",
+            ));
+        }
+    }
+    let Some(Component::RootDir) = components.next() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "parent path is not rooted",
+        ));
+    };
+    let mut root = PathBuf::new();
+    root.push(prefix.as_os_str());
+    root.push(Component::RootDir.as_os_str());
+    let mut normal = Vec::new();
+    for component in components {
+        match component {
+            Component::Normal(value) => normal.push(value.to_os_string()),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "parent path contains unsupported components",
+                ));
+            }
+        }
+    }
+    Ok((root, normal))
+}
+
+fn open_root_directory(path: &Path, share: u32) -> io::Result<File> {
+    OpenOptions::new()
+        .access_mode(FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .share_mode(share)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+fn validate_directory_handle(file: &File) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    if metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "parent component must be a non-reparse directory",
+        ))
     }
 }
 
@@ -205,15 +289,6 @@ pub(crate) fn file_identity(file: &File) -> io::Result<NativeIdentity> {
     Ok(NativeIdentity {
         volume: info.VolumeSerialNumber,
         file_id: u128::from_le_bytes(info.FileId.Identifier),
-    })
-}
-
-pub(crate) fn entry_identity(file: &File) -> io::Result<NativeIdentity> {
-    let identity = file_identity(file)?;
-    let creation_time = file.metadata()?.creation_time();
-    Ok(NativeIdentity {
-        volume: identity.volume,
-        file_id: identity.file_id ^ u128::from(creation_time).rotate_left(37),
     })
 }
 

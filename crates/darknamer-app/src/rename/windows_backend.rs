@@ -13,7 +13,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 use super::model::ObservedEntry;
-use super::windows_native::{NativeParent, entry_identity, open_entry, rename_noreplace};
+use super::windows_native::{NativeParent, file_identity, open_entry, rename_noreplace};
 use super::{
     BackendError, BackendOperation, EntryIdentity, EntryKind, MutationCertainty, PathKey,
     PathSnapshot, RenameBackend, RenameOperation,
@@ -51,7 +51,7 @@ impl RenameBackend for WindowsRenameBackend {
                 let metadata = file
                     .metadata()
                     .map_err(|error| observe_error(error, BackendOperation::Observe))?;
-                let identity = entry_identity(&file)
+                let identity = file_identity(&file)
                     .map_err(|error| observe_error(error, BackendOperation::Observe))?;
                 Some(ObservedEntry {
                     identity: model_identity(identity),
@@ -139,7 +139,7 @@ impl RenameBackend for WindowsRenameBackend {
                 certainty: MutationCertainty::NotApplied,
             });
         }
-        let source_identity = entry_identity(&source)
+        let source_identity = file_identity(&source)
             .map(model_identity)
             .map_err(|error| mutation_error(error, MutationCertainty::NotApplied))?;
         if source_identity != operation.expected_source() {
@@ -168,7 +168,7 @@ impl RenameBackend for WindowsRenameBackend {
 
         let destination = open_entry(&destination_parent, destination_leaf.units(), false)
             .map_err(|error| mutation_error(error, MutationCertainty::MayHaveApplied))?;
-        let observed = entry_identity(&destination)
+        let observed = file_identity(&destination)
             .map(model_identity)
             .map_err(|error| mutation_error(error, MutationCertainty::MayHaveApplied))?;
         if observed != source_identity {

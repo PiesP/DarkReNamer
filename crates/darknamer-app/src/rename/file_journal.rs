@@ -5,7 +5,9 @@
 //! only; their ordinary file open is not a production confinement claim.
 
 use std::fmt;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(not(windows))]
+use std::fs::OpenOptions;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1049,15 +1051,7 @@ fn reject_final_link(path: &Path) -> Result<(), FileJournalError> {
 
 #[cfg(windows)]
 fn open_root(path: &Path) -> io::Result<File> {
-    use std::os::windows::fs::OpenOptionsExt;
-
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    OpenOptions::new()
-        .read(true)
-        .share_mode(0)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
+    super::windows_native::NativeParent::open_path_exclusive(path).map(|parent| parent.into_file())
 }
 
 #[cfg(not(windows))]
