@@ -2,6 +2,8 @@
 members = [
   "crates/dark-renamer-app",
   "crates/dark-renamer-core",
+  "crates/dark-renamer-legacy",
+  "crates/darknamer-legacy-app",
   "crates/dark-renamer-platform",
   "crates/dark-renamer-windows",
 ]
@@ -34,6 +36,12 @@ strip = "symbols"
 opt-level = 3
 
 [profile.release.package.dark-renamer-core]
+opt-level = 3
+
+[profile.release.package.dark-renamer-legacy]
+opt-level = 3
+
+[profile.release.package.darknamer-legacy-app]
 opt-level = 3
 
 [profile.release.package.dark-renamer-platform]
