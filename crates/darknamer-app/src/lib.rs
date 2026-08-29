@@ -260,7 +260,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     #[cfg(not(windows))]
     {
-        Err("DarkNamer legacy UI is available only on Windows".into())
+        Err("DarkNamer is available only on Windows".into())
     }
 }
 

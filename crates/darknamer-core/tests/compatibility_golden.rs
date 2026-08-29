@@ -3,7 +3,7 @@
 //! `NameAddNum`, `NameEmpty`, `NameDelPos`, `NameDelToken`, the `Ext*` commands,
 //! `NameAddPath*`, `NameSamePath`, `SortList`/`Compare`, and import/export.
 
-use dark_renamer_legacy::{
+use darknamer_core::{
     LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,
     parse_import_lines,
 };

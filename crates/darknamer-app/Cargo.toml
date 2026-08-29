@@ -1,6 +1,6 @@
 [package]
-name = "darknamer-legacy-app"
-description = "Native Win32 compatibility application for DarkNamer 08.02.10"
+name = "darknamer-app"
+description = "Native Rust port of DarkNamer 08.02.10 for Windows"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,7 +14,7 @@ name = "DarkNamer"
 path = "src/main.rs"
 
 [dependencies]
-dark-renamer-legacy = { path = "../dark-renamer-legacy" }
+darknamer-core = { path = "../darknamer-core" }
 
 [target.'cfg(windows)'.dependencies]
 rfd = "=0.17.2"

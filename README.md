@@ -24,18 +24,11 @@ and partial-failure behavior still require acceptance on a real Windows host.
 Until that evidence exists, releases should be described as compatibility
 previews rather than complete parity.
 
-The workspace also retains the preview-first successor implementation with
-journaling, recovery, and stricter safety checks. Those improvements are kept
-separate from the 08.02.10 compatibility surface.
-
 ## Workspace
 
-- `dark-renamer-legacy`: portable UTF-16 list state and DarkNamer 08.02.10
+- `darknamer-core`: portable UTF-16 list state and DarkNamer 08.02.10
   transformation semantics.
-- `darknamer-legacy-app`: native Win32 compatibility shell and `DarkNamer.exe`
-  compatibility binary.
-- `dark-renamer-core`, `dark-renamer-platform`, `dark-renamer-windows`, and
-  `dark-renamer-app`: the later safety-first successor track.
+- `darknamer-app`: native Win32 application and `DarkNamer.exe` binary.
 
 The historical MFC source, screenshots, and archives remain in the current
 tree, while the original executables remain available through the fork history
@@ -58,7 +51,7 @@ Cross-build the compatibility executable from Linux:
 ```text
 RC=/usr/bin/llvm-rc-19 cargo xwin build --release --locked \
   --target x86_64-pc-windows-msvc \
-  -p darknamer-legacy-app --bin DarkNamer
+  -p darknamer-app --bin DarkNamer
 ```
 
 ## Attribution and license

@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::slice;
 
-use dark_renamer_legacy::{
+use darknamer_core::{
     LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,
 };
 use windows_sys::Win32::Foundation::{
@@ -1848,7 +1848,7 @@ unsafe fn import_paths_dialog(owner: HWND, state: &mut AppState) {
         return;
     };
     unsafe { set_status(state.status, "처리중...") };
-    let paths = dark_renamer_legacy::parse_import_lines(&text)
+    let paths = darknamer_core::parse_import_lines(&text)
         .into_iter()
         .map(|line| PathBuf::from(std::ffi::OsString::from_wide(line.units())))
         .collect();
