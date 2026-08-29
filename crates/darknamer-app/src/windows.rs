@@ -4,7 +4,7 @@ use std::ffi::c_void;
 use std::fs;
 use std::io;
 use std::mem::{size_of, zeroed};
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::ffi::OsStringExt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
@@ -15,9 +15,8 @@ use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
 use std::thread::{self, JoinHandle};
 
 use crate::admission::{
-    AdmissionAdapter, AdmissionMode, AdmissionReport, MAX_ADMITTED_SOURCES, MAX_IMPORT_BYTES,
+    AdmissionAdapter, AdmissionMode, AdmissionReport, MAX_ADMITTED_SOURCES,
     WindowsAdmissionAdapter, bounded_import_lines, bounded_selection, collect_admission,
-    read_bounded_import,
 };
 use crate::icon_cache::{IconCacheKey, icon_cache_key};
 use crate::rename::{
@@ -33,16 +32,24 @@ use darknamer_core::{
     LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,
 };
 
+mod clipboard;
+mod list_view;
 #[path = "../resource_ids.rs"]
 mod resource_ids;
-use windows_sys::Win32::Foundation::{
-    FILETIME, GetLastError, GlobalFree, HANDLE, HWND, LPARAM, LRESULT, RECT, SYSTEMTIME,
-    SetLastError, WPARAM,
+mod safe_runtime;
+mod text_io;
+
+use clipboard::copy_clipboard;
+#[cfg(test)]
+use list_view::changed_column_mask;
+use list_view::{RenderedRow, refresh, update_column_visibility, update_dpi_metrics};
+#[cfg(test)]
+use safe_runtime::initialize_safe_runtime_at;
+use safe_runtime::{
+    SafeRuntime, StartupJournalBlock, cleanup_file_journal, initialize_safe_runtime,
 };
-use windows_sys::Win32::Globalization::{
-    CP_ACP, CSTR_GREATER_THAN, CSTR_LESS_THAN, CompareStringW, LOCALE_USER_DEFAULT,
-    MultiByteToWideChar, NORM_IGNORECASE,
-};
+use text_io::{compare_windows, legacy_path, path_wide, read_legacy_text, wide, write_legacy_text};
+use windows_sys::Win32::Foundation::{FILETIME, HWND, LPARAM, LRESULT, RECT, SYSTEMTIME, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     COLOR_WINDOW, CreateFontIndirectW, DeleteObject, HFONT, RDW_ALLCHILDREN, RDW_ERASE,
     RDW_INVALIDATE, RedrawWindow, UpdateWindow,
@@ -51,12 +58,7 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
 use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
-use windows_sys::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
-};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
-use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
 use windows_sys::Win32::System::SystemServices::{SS_CENTERIMAGE, SS_ETCHEDHORZ, SS_SUNKEN};
 use windows_sys::Win32::System::Time::FileTimeToSystemTime;
 use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
@@ -208,12 +210,6 @@ impl AppState {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RenderedRow {
-    values: [LegacyText; 7],
-    icon: i32,
-}
-
 struct ApplyWorker {
     cancellation: Arc<CancellationToken>,
     progress: Arc<WorkerProgress>,
@@ -353,271 +349,12 @@ const fn execution_phase_code(phase: ExecutionPhase) -> u8 {
     }
 }
 
-struct SafeRuntime {
-    root: JournalRoot,
-    active_journal: Option<FileJournal>,
-    staged_journal: Option<FileJournal>,
-    blocked_journals: Vec<StartupJournalBlock>,
-    recovery_locked: bool,
-    status: Option<String>,
-}
-
-struct JournalCleanup {
-    retained: Option<FileJournal>,
-    error: Option<io::Error>,
-}
-
-#[derive(Debug)]
-enum StartupJournalBlock {
-    Evidence(RecoveryJournalEvidence),
-    Unavailable {
-        path: PathBuf,
-        failure: JournalOpenFailure,
-    },
-}
-
-impl StartupJournalBlock {
-    fn from_open_error(error: ExistingJournalOpenError) -> Option<Self> {
-        if error.is_not_found() {
-            return None;
-        }
-        let path = error.path().to_path_buf();
-        let failure = error.failure();
-        Some(match error.into_evidence() {
-            Some(evidence) => Self::Evidence(evidence),
-            None => Self::Unavailable { path, failure },
-        })
-    }
-
-    fn status_korean(&self) -> String {
-        match self {
-            Self::Evidence(evidence) => {
-                let failure = evidence.failure();
-                format!(
-                    "저널을 복구용으로 해석하지 못해 원본 핸들을 보존했습니다: {} (단계 {:?}, 오류 {:?}, OS {:?}, frame {:?}, {} bytes). 자동 삭제하지 않았으며 새 적용은 잠겼습니다.",
-                    evidence.path().display(),
-                    failure.stage,
-                    failure.kind,
-                    failure.os_code,
-                    failure.codec_frame,
-                    evidence.byte_len(),
-                )
-            }
-            Self::Unavailable { path, failure } => format!(
-                "저널을 열 수 없어 원본 핸들을 보존하지 못했습니다: {} (단계 {:?}, 오류 {:?}, OS {:?}). 경로를 다시 열어 복사하지 않으며 새 적용은 잠겼습니다.",
-                path.display(),
-                failure.stage,
-                failure.kind,
-                failure.os_code,
-            ),
-        }
-    }
-
-    fn evidence_mut(&mut self) -> Option<&mut RecoveryJournalEvidence> {
-        match self {
-            Self::Evidence(evidence) => Some(evidence),
-            Self::Unavailable { .. } => None,
-        }
-    }
-}
-
 struct ComGuard;
 
 impl Drop for ComGuard {
     fn drop(&mut self) {
         // SAFETY: ComGuard exists only after successful CoInitializeEx and drops on the same apartment thread.
         unsafe { CoUninitialize() };
-    }
-}
-
-fn initialize_safe_runtime() -> io::Result<SafeRuntime> {
-    let local_app_data = env::var_os("LOCALAPPDATA")
-        .ok_or_else(|| io::Error::other("LOCALAPPDATA 환경 변수를 찾을 수 없습니다"))?;
-    let local_app_data = PathBuf::from(local_app_data);
-    initialize_safe_runtime_at(&local_app_data)
-}
-
-fn initialize_safe_runtime_at(local_app_data: &Path) -> io::Result<SafeRuntime> {
-    if !local_app_data.is_absolute() {
-        return Err(io::Error::other("저널 경로가 절대 경로가 아닙니다"));
-    }
-    drop(JournalRoot::open(&local_app_data).map_err(io::Error::other)?);
-    let app_root = local_app_data.join("DarkReNamer");
-    if !app_root.exists() {
-        fs::create_dir(&app_root)?;
-    }
-    drop(JournalRoot::open(&app_root).map_err(io::Error::other)?);
-    let root_path = app_root.join("journal");
-    if !root_path.exists() {
-        fs::create_dir(&root_path)?;
-    }
-    let root = JournalRoot::open(&root_path).map_err(io::Error::other)?;
-    let mut blocked_journals = Vec::new();
-    let active_journal = match FileJournal::open_existing_retained(&root, ACTIVE_JOURNAL_LEAF) {
-        Ok(journal) => Some(journal),
-        Err(error) => {
-            if let Some(blocked) = StartupJournalBlock::from_open_error(error) {
-                blocked_journals.push(blocked);
-            }
-            None
-        }
-    };
-    let staged_journal = match FileJournal::open_candidate_existing_retained(
-        &root,
-        CANDIDATE_JOURNAL_LEAF,
-        ACTIVE_JOURNAL_LEAF,
-    ) {
-        Ok(journal) => Some(journal),
-        Err(error) => {
-            if let Some(blocked) = StartupJournalBlock::from_open_error(error) {
-                blocked_journals.push(blocked);
-            }
-            None
-        }
-    };
-    if active_journal.is_none() {
-        let has_staged = staged_journal.is_some();
-        let status = startup_locked_status(staged_journal.as_ref(), &blocked_journals);
-        let recovery_locked = has_staged || !blocked_journals.is_empty();
-        return Ok(SafeRuntime {
-            root,
-            active_journal: None,
-            staged_journal,
-            blocked_journals,
-            recovery_locked,
-            status,
-        });
-    }
-
-    let Some(mut journal) = active_journal else {
-        return Err(io::Error::other("active journal state was lost"));
-    };
-    let mut backend = WindowsRenameBackend;
-    let outcome = RenameRecovery::new(&mut backend, &mut journal).rollback();
-    match outcome {
-        RecoveryOutcome::Recovered { .. } | RecoveryOutcome::NotRequired => {
-            let cleanup = cleanup_file_journal(journal);
-            let cleanup_failed = cleanup.error.is_some();
-            let mut status = if matches!(outcome, RecoveryOutcome::Recovered { .. }) {
-                "이전 변경을 안전하게 복구했습니다.".to_owned()
-            } else {
-                "저널 상태를 확인했습니다.".to_owned()
-            };
-            if let Some(error) = cleanup.error {
-                status.push_str(&format!(" 저널 삭제 실패: {error}"));
-            }
-            append_staged_status(&mut status, staged_journal.as_ref());
-            append_blocked_status(&mut status, &blocked_journals);
-            Ok(SafeRuntime {
-                root,
-                recovery_locked: cleanup_failed
-                    || cleanup.retained.is_some()
-                    || staged_journal.is_some()
-                    || !blocked_journals.is_empty(),
-                active_journal: cleanup.retained,
-                staged_journal,
-                blocked_journals,
-                status: Some(status),
-            })
-        }
-        RecoveryOutcome::Blocked { reason, .. } => {
-            let status = status_with_staged_journal(
-                format!("복구가 차단되었습니다: {reason:?}"),
-                staged_journal.as_ref(),
-            );
-            let status = status_with_blocked_journals(status, &blocked_journals);
-            Ok(SafeRuntime {
-                root,
-                active_journal: Some(journal),
-                staged_journal,
-                blocked_journals,
-                recovery_locked: true,
-                status: Some(status),
-            })
-        }
-        RecoveryOutcome::RecoveryRequired { reason, .. } => {
-            let status = status_with_staged_journal(
-                format!("복구가 필요합니다: {reason:?}"),
-                staged_journal.as_ref(),
-            );
-            let status = status_with_blocked_journals(status, &blocked_journals);
-            Ok(SafeRuntime {
-                root,
-                active_journal: Some(journal),
-                staged_journal,
-                blocked_journals,
-                recovery_locked: true,
-                status: Some(status),
-            })
-        }
-    }
-}
-
-fn startup_locked_status(
-    staged_journal: Option<&FileJournal>,
-    blocked_journals: &[StartupJournalBlock],
-) -> Option<String> {
-    let mut parts = blocked_journals
-        .iter()
-        .map(StartupJournalBlock::status_korean)
-        .collect::<Vec<_>>();
-    if let Some(journal) = staged_journal {
-        parts.push(format!(
-            "활성화 전 저널을 보존했습니다: {}. 파일 변경은 시작되지 않았으며 새 적용은 잠겼습니다.",
-            journal.path().display()
-        ));
-    }
-    (!parts.is_empty()).then(|| parts.join(" "))
-}
-
-fn status_with_staged_journal(mut status: String, staged_journal: Option<&FileJournal>) -> String {
-    append_staged_status(&mut status, staged_journal);
-    status
-}
-
-fn append_staged_status(status: &mut String, staged_journal: Option<&FileJournal>) {
-    if let Some(journal) = staged_journal {
-        status.push_str(&format!(
-            " 활성화 전 저널도 보존했습니다: {}. 새 적용은 잠겼습니다.",
-            journal.path().display()
-        ));
-    }
-}
-
-fn status_with_blocked_journals(
-    mut status: String,
-    blocked_journals: &[StartupJournalBlock],
-) -> String {
-    append_blocked_status(&mut status, blocked_journals);
-    status
-}
-
-fn append_blocked_status(status: &mut String, blocked_journals: &[StartupJournalBlock]) {
-    for blocked in blocked_journals {
-        status.push(' ');
-        status.push_str(&blocked.status_korean());
-    }
-}
-
-fn cleanup_file_journal(mut journal: FileJournal) -> JournalCleanup {
-    if cleanup_decision(journal.records()) == JournalCleanupDecision::Retain {
-        return JournalCleanup {
-            retained: Some(journal),
-            error: None,
-        };
-    }
-    match journal.mark_delete_if_safe() {
-        Ok(()) => {
-            drop(journal);
-            JournalCleanup {
-                retained: None,
-                error: None,
-            }
-        }
-        Err(error) => JournalCleanup {
-            retained: Some(journal),
-            error: Some(io::Error::other(error)),
-        },
     }
 }
 
@@ -3326,65 +3063,6 @@ fn handle_admission_completion(window: HWND, state: &mut AppState) {
     update_controls(state);
 }
 
-fn legacy_path(path: &Path) -> LegacyText {
-    LegacyText::from_units(path.as_os_str().encode_wide().collect::<Vec<_>>())
-}
-
-fn compare_windows(left: &LegacyText, right: &LegacyText) -> std::cmp::Ordering {
-    let left_len = i32::try_from(left.len()).unwrap_or(i32::MAX);
-    let right_len = i32::try_from(right.len()).unwrap_or(i32::MAX);
-    // SAFETY: Both UTF-16 slices remain allocated and checked i32 lengths describe their exact readable units.
-    let result = unsafe {
-        CompareStringW(
-            LOCALE_USER_DEFAULT,
-            NORM_IGNORECASE,
-            left.units().as_ptr(),
-            left_len,
-            right.units().as_ptr(),
-            right_len,
-        )
-    };
-    if result == CSTR_LESS_THAN {
-        std::cmp::Ordering::Less
-    } else if result == CSTR_GREATER_THAN {
-        std::cmp::Ordering::Greater
-    } else if result == windows_sys::Win32::Globalization::CSTR_EQUAL {
-        std::cmp::Ordering::Equal
-    } else {
-        super::compare_utf16_fallback(left, right)
-    }
-}
-
-fn path_wide(path: &Path) -> Vec<u16> {
-    path.as_os_str().encode_wide().chain([0]).collect()
-}
-
-struct ClipboardSession {
-    open: bool,
-}
-
-impl ClipboardSession {
-    fn close(mut self) -> io::Result<()> {
-        // SAFETY: this guard owns the one clipboard session opened by this thread.
-        let closed = unsafe { CloseClipboard() };
-        if closed == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        self.open = false;
-        Ok(())
-    }
-}
-
-impl Drop for ClipboardSession {
-    fn drop(&mut self) {
-        if self.open {
-            // SAFETY: this guard still owns an open session. Drop is the
-            // best-effort cleanup path after an earlier operation or close failed.
-            unsafe { CloseClipboard() };
-        }
-    }
-}
-
 fn copy_clipboard_or_report(owner: HWND, text: &LegacyText) {
     if let Err(error) = copy_clipboard(owner, text) {
         message(
@@ -3393,62 +3071,6 @@ fn copy_clipboard_or_report(owner: HWND, text: &LegacyText) {
             "DarkReNamer - 복사 실패",
         );
     }
-}
-
-fn copy_clipboard(owner: HWND, text: &LegacyText) -> io::Result<()> {
-    let mut units = text.units().to_vec();
-    units.push(0);
-    // SAFETY: owner is the live top-level HWND associated with this synchronous clipboard session.
-    if unsafe { OpenClipboard(owner) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let session = ClipboardSession { open: true };
-    // SAFETY: This thread successfully opened the clipboard immediately before emptying it.
-    if unsafe { EmptyClipboard() } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let bytes = units.len().saturating_mul(size_of::<u16>());
-    // SAFETY: bytes is the checked UTF-16 byte count; the HGLOBAL stays owned until transfer or GlobalFree.
-    let allocation = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) };
-    if allocation.is_null() {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: allocation is the non-null newly allocated HGLOBAL and stays owned while its pointer is used.
-    let locked = unsafe { GlobalLock(allocation) } as *mut u16;
-    if locked.is_null() {
-        let error = io::Error::last_os_error();
-        // SAFETY: allocation is a non-null HGLOBAL still owned by this function.
-        unsafe { GlobalFree(allocation) };
-        return Err(error);
-    }
-    // SAFETY: locked spans units.len writable u16 slots, units has that many
-    // elements, and they cannot overlap. Clearing last-error disambiguates
-    // GlobalUnlock's zero return for a fully unlocked allocation from failure.
-    let unlock_error = unsafe {
-        std::ptr::copy_nonoverlapping(units.as_ptr(), locked, units.len());
-        SetLastError(0);
-        let unlocked = GlobalUnlock(allocation);
-        let error = GetLastError();
-        (unlocked == 0 && error != 0).then_some(error)
-    };
-    if let Some(code) = unlock_error {
-        // SAFETY: ownership has not transferred. GlobalFree is the only
-        // available cleanup attempt after GlobalUnlock reported failure.
-        unsafe { GlobalFree(allocation) };
-        return Err(io::Error::from_raw_os_error(
-            i32::try_from(code).unwrap_or(i32::MAX),
-        ));
-    }
-    // SAFETY: allocation is an unlocked movable HGLOBAL containing terminated
-    // UTF-16; success transfers ownership to the clipboard.
-    let transferred = unsafe { SetClipboardData(u32::from(CF_UNICODETEXT), allocation as HANDLE) };
-    if transferred.is_null() {
-        let error = io::Error::last_os_error();
-        // SAFETY: ownership did not transfer, so this function still owns allocation.
-        unsafe { GlobalFree(allocation) };
-        return Err(error);
-    }
-    session.close()
 }
 
 fn save_text_dialog(owner: HWND, text: LegacyText, names: bool) {
@@ -3610,314 +3232,6 @@ fn modal_native_dialog<T>(owner: HWND, dialog: impl FnOnce() -> T) -> T {
     result
 }
 
-fn write_legacy_text(path: &Path, text: &LegacyText) -> io::Result<()> {
-    let mut bytes = Vec::with_capacity(2 + text.len() * 2);
-    bytes.extend_from_slice(&[0xFF, 0xFE]);
-    for unit in text.units() {
-        bytes.extend_from_slice(&unit.to_le_bytes());
-    }
-    fs::write(path, bytes)
-}
-
-fn read_legacy_text(path: &Path) -> io::Result<LegacyText> {
-    if fs::metadata(path)?.len() > MAX_IMPORT_BYTES as u64 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "가져오기 파일이 2 MiB 한도를 초과합니다",
-        ));
-    }
-    let bytes = read_bounded_import(fs::File::open(path)?)?;
-    if bytes.starts_with(&[0xFF, 0xFE]) {
-        let units = bytes[2..]
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .collect::<Vec<_>>();
-        return Ok(LegacyText::from_units(units));
-    }
-    if bytes.is_empty() {
-        return Ok(LegacyText::default());
-    }
-    let input_len =
-        i32::try_from(bytes.len()).map_err(|_| io::Error::other("text file too large"))?;
-    let needed =
-        // SAFETY: bytes is readable for input_len and any output pointer targets the previously sized UTF-16 buffer.
-        unsafe { MultiByteToWideChar(CP_ACP, 0, bytes.as_ptr(), input_len, null_mut(), 0) };
-    if needed <= 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let mut units = vec![0_u16; needed as usize];
-    // SAFETY: bytes is readable for input_len and any output pointer targets the previously sized UTF-16 buffer.
-    let written = unsafe {
-        MultiByteToWideChar(
-            CP_ACP,
-            0,
-            bytes.as_ptr(),
-            input_len,
-            units.as_mut_ptr(),
-            needed,
-        )
-    };
-    if written <= 0 {
-        return Err(io::Error::last_os_error());
-    }
-    units.truncate(written as usize);
-    Ok(LegacyText::from_units(units))
-}
-
-fn update_column_visibility(state: &AppState, index: usize) {
-    let column = index + 3;
-    let width = if state.shown_columns[index] {
-        scale_dip(if column == 4 { 80 } else { 120 }, state.dpi)
-    } else {
-        0
-    };
-    // SAFETY: state.list_window is live and LVM_SETCOLUMNWIDTH carries only the
-    // computed column and width values, with no pointer payload.
-    unsafe {
-        SendMessageW(
-            state.list_window,
-            LVM_SETCOLUMNWIDTH,
-            column,
-            width as isize,
-        );
-    }
-}
-
-fn update_dpi_metrics(state: &AppState) {
-    for (column, spec) in COLUMNS.iter().enumerate().take(3) {
-        // SAFETY: list_window is live and width is a scaled integer value.
-        unsafe {
-            SendMessageW(
-                state.list_window,
-                LVM_SETCOLUMNWIDTH,
-                column,
-                scale_dip(spec.default_width, state.dpi) as isize,
-            )
-        };
-    }
-    for index in 0..state.shown_columns.len() {
-        update_column_visibility(state, index);
-    }
-    let button = packed_dimensions(
-        scale_dip(toolbar_width_dip(state.high_contrast), state.dpi),
-        scale_dip(TOOLBAR_BUTTON_HEIGHT, state.dpi),
-    );
-    let bitmap = packed_dimensions(
-        scale_dip(TOOLBAR_BITMAP_WIDTH, state.dpi),
-        scale_dip(TOOLBAR_BITMAP_HEIGHT, state.dpi),
-    );
-    // SAFETY: both toolbar HWNDs are live and the packed size has no pointer.
-    unsafe {
-        SendMessageW(state.left_toolbar, TB_SETBUTTONSIZE, 0, button);
-        SendMessageW(state.right_toolbar, TB_SETBUTTONSIZE, 0, button);
-        SendMessageW(state.left_toolbar, TB_SETBITMAPSIZE, 0, bitmap);
-        SendMessageW(state.right_toolbar, TB_SETBITMAPSIZE, 0, bitmap);
-    }
-}
-
-struct RedrawGuard {
-    window: HWND,
-}
-
-impl RedrawGuard {
-    unsafe fn suspend(window: HWND) -> Self {
-        if !window.is_null() {
-            // SAFETY: window is the non-null AppState ListView HWND; WM_SETREDRAW
-            // carries no pointer payload and the guard retains this exact value.
-            unsafe { SendMessageW(window, WM_SETREDRAW, 0, 0) };
-        }
-        Self { window }
-    }
-}
-
-impl Drop for RedrawGuard {
-    fn drop(&mut self) {
-        if !self.window.is_null() {
-            // SAFETY: self.window is the same AppState ListView HWND suspended by
-            // this guard; redraw messages use null regions and retain no pointers.
-            unsafe {
-                SendMessageW(self.window, WM_SETREDRAW, 1, 0);
-                RedrawWindow(
-                    self.window,
-                    null(),
-                    null_mut(),
-                    RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
-                );
-            }
-        }
-    }
-}
-
-fn refresh(state: &mut AppState) {
-    let rows = {
-        let model = &state.model;
-        let icon_cache = &mut state.icon_cache;
-        model
-            .items()
-            .iter()
-            .map(|item| rendered_row(icon_cache, item))
-            .collect::<Vec<_>>()
-    };
-    // SAFETY: state.list_window is live and the guard restores redraw for that exact HWND on every drop path.
-    let _redraw = unsafe { RedrawGuard::suspend(state.list_window) };
-    let selected = { selected_indices(state.list_window) };
-    if !apply_incremental_rows(state.list_window, &state.rendered_rows, &rows) {
-        rebuild_native_rows(state.list_window, &rows);
-    }
-    state.rendered_rows = rows;
-    select_rows(state.list_window, &selected);
-    update_controls(state);
-    let status = if state.model.is_empty() {
-        LegacyText::default()
-    } else {
-        LegacyText::from(format!("{} 개", state.model.len()))
-    };
-    let mut status = status.units().to_vec();
-    status.push(0);
-    // SAFETY: The status HWND is live and text is owned terminated UTF-16 retained through SetWindowTextW.
-    unsafe {
-        windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(state.status, status.as_ptr());
-    }
-}
-
-fn rendered_row(icon_cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyListItem) -> RenderedRow {
-    RenderedRow {
-        values: [
-            item.current_name().clone(),
-            item.proposed_name().clone(),
-            item.root_path().clone(),
-            item.source_path().clone(),
-            LegacyText::from(item.actual_size().to_string()),
-            format_filetime(item.modified()),
-            format_filetime(item.created()),
-        ],
-        icon: file_icon_index(icon_cache, item),
-    }
-}
-
-fn apply_incremental_rows(window: HWND, old: &[RenderedRow], new: &[RenderedRow]) -> bool {
-    for row in (new.len()..old.len()).rev() {
-        // SAFETY: window is the live ListView and row is a current trailing item.
-        if unsafe { SendMessageW(window, LVM_DELETEITEM, row, 0) } == 0 {
-            return false;
-        }
-    }
-    let shared = old.len().min(new.len());
-    for row in 0..shared {
-        let mask = changed_column_mask(&old[row], &new[row]);
-        if mask & 1 != 0 && !set_native_primary(window, row, &new[row]) {
-            return false;
-        }
-        for column in 1..7 {
-            if mask & (1 << column) != 0
-                && !set_native_subitem(window, row, column, &new[row].values[column])
-            {
-                return false;
-            }
-        }
-    }
-    for (row, value) in new.iter().enumerate().skip(old.len()) {
-        if !insert_native_row(window, row, value) {
-            return false;
-        }
-    }
-    true
-}
-
-fn changed_column_mask(old: &RenderedRow, new: &RenderedRow) -> u8 {
-    let mut mask = u8::from(old.icon != new.icon);
-    for column in 0..7 {
-        if old.values[column] != new.values[column] {
-            mask |= 1 << column;
-        }
-    }
-    mask
-}
-
-fn insert_native_row(window: HWND, row: usize, value: &RenderedRow) -> bool {
-    let mut text = value.values[0].units().to_vec();
-    text.push(0);
-    let mut native = LVITEMW {
-        mask: LVIF_TEXT | LVIF_IMAGE,
-        iItem: i32::try_from(row).unwrap_or(i32::MAX),
-        iSubItem: 0,
-        pszText: text.as_mut_ptr(),
-        iImage: value.icon,
-        // SAFETY: LVITEMW is C-compatible and zero is valid for unused fields.
-        ..unsafe { zeroed() }
-    };
-    // SAFETY: window is the live ListView; native and text outlive this
-    // synchronous insertion message.
-    if unsafe {
-        SendMessageW(
-            window,
-            LVM_INSERTITEMW,
-            0,
-            (&mut native as *mut LVITEMW) as isize,
-        )
-    } < 0
-    {
-        return false;
-    }
-    (1..7).all(|column| set_native_subitem(window, row, column, &value.values[column]))
-}
-
-fn set_native_primary(window: HWND, row: usize, value: &RenderedRow) -> bool {
-    let mut text = value.values[0].units().to_vec();
-    text.push(0);
-    let mut native = LVITEMW {
-        mask: LVIF_TEXT | LVIF_IMAGE,
-        iItem: i32::try_from(row).unwrap_or(i32::MAX),
-        iSubItem: 0,
-        pszText: text.as_mut_ptr(),
-        iImage: value.icon,
-        // SAFETY: LVITEMW is C-compatible and zero is valid for unused fields.
-        ..unsafe { zeroed() }
-    };
-    // SAFETY: window is the live ListView; native and text remain valid through
-    // the synchronous update.
-    unsafe {
-        SendMessageW(
-            window,
-            LVM_SETITEMW,
-            0,
-            (&mut native as *mut LVITEMW) as isize,
-        ) != 0
-    }
-}
-
-fn set_native_subitem(window: HWND, row: usize, column: usize, value: &LegacyText) -> bool {
-    let mut text = value.units().to_vec();
-    text.push(0);
-    let mut native = LVITEMW {
-        iSubItem: i32::try_from(column).unwrap_or(i32::MAX),
-        pszText: text.as_mut_ptr(),
-        // SAFETY: LVITEMW is C-compatible and zero is valid for unused fields.
-        ..unsafe { zeroed() }
-    };
-    // SAFETY: window is the live ListView; native and text remain valid through
-    // the synchronous subitem update.
-    unsafe {
-        SendMessageW(
-            window,
-            LVM_SETITEMTEXTW,
-            row,
-            (&mut native as *mut LVITEMW) as isize,
-        )
-    };
-    true
-}
-
-fn rebuild_native_rows(window: HWND, rows: &[RenderedRow]) {
-    // SAFETY: window is the live ListView and the message carries no pointer.
-    unsafe { SendMessageW(window, LVM_DELETEALLITEMS, 0, 0) };
-    for (row, value) in rows.iter().enumerate() {
-        if !insert_native_row(window, row, value) {
-            break;
-        }
-    }
-}
-
 fn update_controls(state: &mut AppState) {
     let selected_count = { selected_indices(state.list_window) }.len();
     for id in APPLY..=VERSION {
@@ -4016,56 +3330,6 @@ fn set_toolbar_button_enabled(toolbar: HWND, command: CommandId, enabled: bool) 
     }
 }
 
-fn file_icon_index(cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyListItem) -> i32 {
-    let key = icon_cache_key(item.current_name(), item.is_directory());
-    if let Some(index) = cache.get(&key) {
-        return *index;
-    }
-    // SAFETY: SHFILEINFOW is a C-compatible output structure whose all-zero state is valid before the shell fills it.
-    let mut info: SHFILEINFOW = unsafe { zeroed() };
-    let path = key.lookup_text();
-    let mut path = path.units().to_vec();
-    path.push(0);
-    let attributes = if item.is_directory() {
-        FILE_ATTRIBUTE_DIRECTORY
-    } else {
-        FILE_ATTRIBUTE_NORMAL
-    };
-    // SAFETY: The lookup path is owned terminated UTF-16 and info is writable SHFILEINFOW retained for the shell query.
-    unsafe {
-        SHGetFileInfoW(
-            path.as_ptr(),
-            attributes,
-            &mut info,
-            size_of::<SHFILEINFOW>() as u32,
-            SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON,
-        );
-    }
-    cache.insert(key, info.iIcon);
-    info.iIcon
-}
-
-fn format_filetime(value: u64) -> LegacyText {
-    if value == 0 {
-        return LegacyText::default();
-    }
-    let filetime = FILETIME {
-        dwLowDateTime: value as u32,
-        dwHighDateTime: (value >> 32) as u32,
-    };
-    // SAFETY: SYSTEMTIME is a C-compatible integer structure whose all-zero state
-    // is valid writable output before FileTimeToSystemTime fills it.
-    let mut system: SYSTEMTIME = unsafe { zeroed() };
-    // SAFETY: filetime is initialized and system is writable SYSTEMTIME retained through conversion.
-    if unsafe { FileTimeToSystemTime(&filetime, &mut system) } == 0 {
-        return LegacyText::default();
-    }
-    LegacyText::from(format!(
-        "{}-{:02}-{:02} {:02}:{:02}:{:02}",
-        system.wYear, system.wMonth, system.wDay, system.wHour, system.wMinute, system.wSecond
-    ))
-}
-
 fn create_menu() -> HMENU {
     // SAFETY: CreateMenu takes no pointers; the returned HMENU stays owned until attached to the top-level window.
     let menu = unsafe { CreateMenu() };
@@ -4154,10 +3418,6 @@ fn message(owner: HWND, text: &str, caption: &str) {
     // SAFETY: owner is a live HWND and text/caption are owned NUL-terminated
     // UTF-16 buffers retained until the synchronous MessageBoxW call returns.
     unsafe { MessageBoxW(owner, text.as_ptr(), caption.as_ptr(), 0) };
-}
-
-fn wide(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain([0]).collect()
 }
 
 #[allow(
