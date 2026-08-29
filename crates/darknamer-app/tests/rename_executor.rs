@@ -1,8 +1,9 @@
 use darknamer_app::rename::{
-    EntryId, EntryKind, ExecuteErrorKind, ExecutionOutcome, JournalCorruption, JournalRecord,
-    JournalTerminal, MAX_TEMP_CANDIDATES, MemoryBackend, MemoryJournal, ModelRevision,
-    MutationCertainty, PlanRequest, RecoveryReason, RecoveryState, RenameBackend, RenameExecutor,
-    RenameIntent, RenameOperation, RenamePlanner, RenameState, TemporaryPhase, replay_journal,
+    AppendCertainty, EntryId, EntryKind, ExecuteErrorKind, ExecutionOutcome, JournalCorruption,
+    JournalDirection, JournalError, JournalRecord, JournalStep, JournalStore, JournalTerminal,
+    MAX_TEMP_CANDIDATES, MemoryBackend, MemoryJournal, ModelRevision, MutationCertainty, PlanId,
+    PlanRequest, RecoveryReason, RecoveryState, RenameBackend, RenameExecutor, RenameIntent,
+    RenameOperation, RenamePlanner, RenameState, TemporaryPhase, replay_journal,
 };
 
 fn intent(id: u32, source_name: &str, destination_name: &str) -> RenameIntent {
@@ -300,6 +301,140 @@ fn ambiguous_backend_error_stops_without_rollback_and_requires_recovery()
         journal.recovery_state(),
         RecoveryState::RecoveryRequired { .. }
     ));
+    Ok(())
+}
+
+struct FailingAppendJournal {
+    inner: MemoryJournal,
+    begin_failure: Option<AppendCertainty>,
+    prepared_failure: Option<(usize, AppendCertainty)>,
+}
+
+impl FailingAppendJournal {
+    fn new(
+        begin_failure: Option<AppendCertainty>,
+        prepared_failure: Option<(usize, AppendCertainty)>,
+    ) -> Self {
+        Self {
+            inner: MemoryJournal::new(),
+            begin_failure,
+            prepared_failure,
+        }
+    }
+}
+
+impl JournalStore for FailingAppendJournal {
+    fn begin(&mut self, plan: PlanId, steps: &[JournalStep]) -> Result<(), JournalError> {
+        if let Some(certainty) = self.begin_failure.take() {
+            return Err(JournalError {
+                code: 112,
+                certainty,
+            });
+        }
+        self.inner.begin(plan, steps)
+    }
+
+    fn prepared(&mut self, step: usize, direction: JournalDirection) -> Result<(), JournalError> {
+        if self.prepared_failure == Some((step, AppendCertainty::MayHaveAppended)) {
+            self.prepared_failure = None;
+            return Err(JournalError::may_have_appended(112));
+        }
+        if self.prepared_failure == Some((step, AppendCertainty::NotAppended)) {
+            self.prepared_failure = None;
+            return Err(JournalError::not_appended(112));
+        }
+        self.inner.prepared(step, direction)
+    }
+
+    fn completed(&mut self, step: usize, direction: JournalDirection) -> Result<(), JournalError> {
+        self.inner.completed(step, direction)
+    }
+
+    fn not_applied(
+        &mut self,
+        step: usize,
+        direction: JournalDirection,
+    ) -> Result<(), JournalError> {
+        self.inner.not_applied(step, direction)
+    }
+
+    fn terminal(&mut self, terminal: JournalTerminal) -> Result<(), JournalError> {
+        self.inner.terminal(terminal)
+    }
+}
+
+#[test]
+fn maybe_appended_intent_is_retained_as_recovery_required() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut backend = MemoryBackend::new().with_file("C:\\work\\a.txt", 1);
+    let confirmed = confirmed_plan(&backend, vec![intent(0, "a.txt", "b.txt")])?;
+    let mut journal = FailingAppendJournal::new(Some(AppendCertainty::MayHaveAppended), None);
+
+    let report = RenameExecutor::new(&mut backend, &mut journal).execute(confirmed)?;
+
+    assert!(matches!(
+        report.outcome(),
+        ExecutionOutcome::RecoveryRequired { .. }
+    ));
+    assert_eq!(backend.mutation_count(), 0);
+    assert_eq!(backend.file_id("C:\\work\\a.txt"), Some(1));
+    Ok(())
+}
+
+#[test]
+fn maybe_appended_prepared_stops_without_speculative_rollback()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut backend = MemoryBackend::new()
+        .with_file("C:\\work\\a.txt", 1)
+        .with_file("C:\\work\\b.txt", 2);
+    let confirmed = confirmed_plan(
+        &backend,
+        vec![intent(0, "a.txt", "b.txt"), intent(1, "b.txt", "c.txt")],
+    )?;
+    let mut journal = FailingAppendJournal::new(None, Some((1, AppendCertainty::MayHaveAppended)));
+
+    let report = RenameExecutor::new(&mut backend, &mut journal).execute(confirmed)?;
+
+    assert!(matches!(
+        report.outcome(),
+        ExecutionOutcome::RecoveryRequired { .. }
+    ));
+    assert_eq!(backend.mutation_count(), 1);
+    assert_eq!(backend.file_id("C:\\work\\a.txt"), Some(1));
+    assert_eq!(backend.file_id("C:\\work\\b.txt"), None);
+    assert_eq!(backend.file_id("C:\\work\\c.txt"), Some(2));
+    assert!(!journal.inner.records().iter().any(|record| matches!(
+        record,
+        JournalRecord::Prepared {
+            direction: JournalDirection::Rollback,
+            ..
+        }
+    )));
+    Ok(())
+}
+
+#[test]
+fn definitely_not_appended_prepared_allows_durable_rollback()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut backend = MemoryBackend::new()
+        .with_file("C:\\work\\a.txt", 1)
+        .with_file("C:\\work\\b.txt", 2);
+    let confirmed = confirmed_plan(
+        &backend,
+        vec![intent(0, "a.txt", "b.txt"), intent(1, "b.txt", "c.txt")],
+    )?;
+    let mut journal = FailingAppendJournal::new(None, Some((1, AppendCertainty::NotAppended)));
+
+    let report = RenameExecutor::new(&mut backend, &mut journal).execute(confirmed)?;
+
+    assert!(matches!(
+        report.outcome(),
+        ExecutionOutcome::RolledBack { .. }
+    ));
+    assert_eq!(backend.file_id("C:\\work\\a.txt"), Some(1));
+    assert_eq!(backend.file_id("C:\\work\\b.txt"), Some(2));
+    assert_eq!(backend.file_id("C:\\work\\c.txt"), None);
+    assert_eq!(journal.inner.recovery_state(), RecoveryState::Clean);
     Ok(())
 }
 

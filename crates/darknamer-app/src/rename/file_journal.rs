@@ -772,6 +772,7 @@ pub struct FileJournal {
     byte_length: usize,
     torn_prefix: Option<usize>,
     tail_issue: Option<JournalTailIssue>,
+    poisoned: bool,
 }
 
 impl FileJournal {
@@ -792,6 +793,7 @@ impl FileJournal {
             byte_length: 0,
             torn_prefix: None,
             tail_issue: None,
+            poisoned: false,
         })
     }
 
@@ -841,6 +843,7 @@ impl FileJournal {
             byte_length: bytes.len(),
             torn_prefix: inspection.issue.map(|_| inspection.valid_bytes),
             tail_issue: inspection.issue,
+            poisoned: false,
         })
     }
 
@@ -880,8 +883,9 @@ impl FileJournal {
     /// The caller must keep this value on failure; successful deletion completes
     /// when the owned file handle is dropped.
     pub fn mark_delete_if_safe(&mut self) -> Result<(), FileJournalError> {
-        let safe = self.records.is_empty()
-            || self.is_terminal() && replay_journal(&self.records) == RecoveryState::Clean;
+        let safe = !self.poisoned
+            && (self.records.is_empty()
+                || self.is_terminal() && replay_journal(&self.records) == RecoveryState::Clean);
         if !safe {
             return Err(FileJournalError {
                 kind: FileJournalErrorKind::UnsafeCleanupState,
@@ -893,25 +897,32 @@ impl FileJournal {
     }
 
     fn append(&mut self, record: JournalRecord) -> Result<(), JournalError> {
+        if self.poisoned {
+            return Err(JournalError::may_have_appended(8));
+        }
         if self.torn_prefix.is_some() {
-            return Err(JournalError { code: 7 });
+            return Err(JournalError::not_appended(7));
         }
         if self.records.len() >= MAX_JOURNAL_FRAMES {
-            return Err(JournalError { code: 3 });
+            return Err(JournalError::not_appended(3));
         }
         let frame_index = self.records.len();
         let frame = encode_frame(self.next_sequence, &record, frame_index)
-            .map_err(|_| JournalError { code: 4 })?;
+            .map_err(|_| JournalError::not_appended(4))?;
         if self.byte_length.saturating_add(frame.len()) > MAX_JOURNAL_FILE_BYTES {
-            return Err(JournalError { code: 5 });
+            return Err(JournalError::not_appended(5));
         }
-        self.file.write_all(&frame).map_err(journal_io_error)?;
-        self.file.flush().map_err(journal_io_error)?;
-        self.file.sync_all().map_err(journal_io_error)?;
+        self.poisoned = true;
+        self.file
+            .write_all(&frame)
+            .map_err(journal_io_may_have_appended)?;
+        self.file.flush().map_err(journal_io_may_have_appended)?;
+        self.file.sync_all().map_err(journal_io_may_have_appended)?;
         self.byte_length += frame.len();
         self.records.push(record);
         self.generation = self.generation.saturating_add(1);
         self.next_sequence = self.next_sequence.saturating_add(1);
+        self.poisoned = false;
         Ok(())
     }
 
@@ -920,22 +931,29 @@ impl FileJournal {
         authorization: &mut JournalAuthorization,
         record: JournalRecord,
     ) -> Result<(), JournalError> {
+        if self.poisoned {
+            return Err(JournalError::may_have_appended(8));
+        }
         if authorization.identity != self.identity || authorization.generation != self.generation {
-            return Err(JournalError { code: 2 });
+            return Err(JournalError::not_appended(2));
         }
         if let Some(valid_bytes) = self.torn_prefix {
-            let length = u64::try_from(valid_bytes).map_err(|_| JournalError { code: 4 })?;
-            self.file.set_len(length).map_err(journal_io_error)?;
+            let length = u64::try_from(valid_bytes).map_err(|_| JournalError::not_appended(4))?;
+            self.poisoned = true;
+            self.file
+                .set_len(length)
+                .map_err(journal_io_may_have_appended)?;
             self.file
                 .seek(SeekFrom::Start(length))
-                .map_err(journal_io_error)?;
-            self.file.flush().map_err(journal_io_error)?;
-            self.file.sync_all().map_err(journal_io_error)?;
+                .map_err(journal_io_may_have_appended)?;
+            self.file.flush().map_err(journal_io_may_have_appended)?;
+            self.file.sync_all().map_err(journal_io_may_have_appended)?;
             self.byte_length = valid_bytes;
             self.torn_prefix = None;
             self.tail_issue = None;
             self.generation = self.generation.saturating_add(1);
             authorization.generation = self.generation;
+            self.poisoned = false;
         }
         self.append(record)?;
         authorization.generation = self.generation;
@@ -946,7 +964,7 @@ impl FileJournal {
 impl JournalStore for FileJournal {
     fn begin(&mut self, plan: PlanId, steps: &[JournalStep]) -> Result<(), JournalError> {
         if !self.records.is_empty() {
-            return Err(JournalError { code: 1 });
+            return Err(JournalError::not_appended(1));
         }
         self.append(JournalRecord::Intent {
             plan,
@@ -977,6 +995,9 @@ impl JournalStore for FileJournal {
 
 impl AuthorizedJournal for FileJournal {
     fn authorized_snapshot(&mut self) -> Result<JournalSnapshot, JournalError> {
+        if self.poisoned {
+            return Err(JournalError::may_have_appended(8));
+        }
         Ok(JournalSnapshot {
             records: self.records.clone().into_boxed_slice(),
             authorization: JournalAuthorization {
@@ -1022,13 +1043,13 @@ impl AuthorizedJournal for FileJournal {
     }
 }
 
-fn journal_io_error(error: io::Error) -> JournalError {
-    JournalError {
-        code: error
+fn journal_io_may_have_appended(error: io::Error) -> JournalError {
+    JournalError::may_have_appended(
+        error
             .raw_os_error()
             .and_then(|code| u32::try_from(code).ok())
             .unwrap_or(6),
-    }
+    )
 }
 
 fn next_file_identity() -> u64 {
@@ -1133,6 +1154,68 @@ fn validate_file_type(file: &File) -> Result<(), FileJournalError> {
         });
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod unix_fault_tests {
+    use std::fs::{self, OpenOptions};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new() -> io::Result<Self> {
+            static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+            let path = std::env::temp_dir().join(format!(
+                "darkrenamer-file-journal-{}-{}",
+                std::process::id(),
+                NEXT_ID.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path)?;
+            Ok(Self(path))
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn write_started_error_poisons_journal_and_forbids_cleanup_or_more_appends()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let root = JournalRoot::open(&directory.0)?;
+        let mut journal = FileJournal::create_new(&root, "active.drj")?;
+        journal.file = OpenOptions::new().write(true).open("/dev/full")?;
+
+        let first = journal
+            .terminal(JournalTerminal::Committed)
+            .err()
+            .ok_or_else(|| io::Error::other("/dev/full unexpectedly accepted a frame"))?;
+        let second = journal
+            .terminal(JournalTerminal::Committed)
+            .err()
+            .ok_or_else(|| io::Error::other("poisoned journal accepted another frame"))?;
+
+        assert_eq!(
+            first.certainty,
+            super::super::AppendCertainty::MayHaveAppended
+        );
+        assert_eq!(second, JournalError::may_have_appended(8));
+        assert_eq!(journal.records(), &[]);
+        assert!(matches!(
+            journal.mark_delete_if_safe(),
+            Err(FileJournalError {
+                kind: FileJournalErrorKind::UnsafeCleanupState,
+                ..
+            })
+        ));
+        Ok(())
+    }
 }
 
 #[cfg(windows)]

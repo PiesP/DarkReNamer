@@ -4,7 +4,7 @@ use super::journal::{JournalDirection, JournalTerminal};
 use super::model::PlanRow;
 use super::schedule::{ScheduleError, ScheduleStep, TemporaryPhase, build_schedule};
 use super::{
-    BackendError, ConfirmedPlan, EntryId, JournalError, JournalStep, JournalStore,
+    AppendCertainty, BackendError, ConfirmedPlan, EntryId, JournalError, JournalStep, JournalStore,
     MutationCertainty, PlanId, RenameBackend, RenameOperation,
 };
 
@@ -177,16 +177,39 @@ impl<'a> RenameExecutor<'a> {
             });
         }
         let manifest = schedule.iter().map(journal_step).collect::<Vec<_>>();
-        self.journal
-            .begin(plan.id, &manifest)
-            .map_err(|error| ExecuteError {
+        if let Err(error) = self.journal.begin(plan.id, &manifest) {
+            if error.certainty == AppendCertainty::MayHaveAppended {
+                return Ok(ExecutionReport {
+                    plan: plan.id,
+                    outcome: ExecutionOutcome::RecoveryRequired {
+                        failure: ExecutionFailure::Journal { step: 0, error },
+                        rollback_failures: Box::new([]),
+                    },
+                    entries: entries.into_boxed_slice(),
+                });
+            }
+            return Err(ExecuteError {
                 entry: None,
                 kind: ExecuteErrorKind::Journal(error),
-            })?;
+            });
+        }
 
         let mut completed = Vec::with_capacity(schedule.len());
         for (step_index, step) in schedule.iter().enumerate() {
             if let Err(error) = self.journal.prepared(step_index, JournalDirection::Forward) {
+                if error.certainty == AppendCertainty::MayHaveAppended {
+                    return Ok(ExecutionReport {
+                        plan: plan.id,
+                        outcome: ExecutionOutcome::RecoveryRequired {
+                            failure: ExecutionFailure::Journal {
+                                step: step_index,
+                                error,
+                            },
+                            rollback_failures: Box::new([]),
+                        },
+                        entries: entries.into_boxed_slice(),
+                    });
+                }
                 return Ok(self.rollback(
                     plan.id,
                     ExecutionFailure::Journal {

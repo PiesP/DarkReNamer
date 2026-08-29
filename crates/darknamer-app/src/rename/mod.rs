@@ -42,8 +42,8 @@ pub use model::{
 };
 pub use planner::{MAX_PLAN_PATH_DEPTH, RenamePlanner};
 pub use ports::{
-    AuthorizedJournal, BackendError, BackendOperation, JournalAuthorization, JournalError,
-    JournalSnapshot, JournalStore, MutationCertainty, RenameBackend, RenameOperation,
+    AppendCertainty, AuthorizedJournal, BackendError, BackendOperation, JournalAuthorization,
+    JournalError, JournalSnapshot, JournalStore, MutationCertainty, RenameBackend, RenameOperation,
 };
 pub use recovery::{RecoveryBlockKind, RecoveryFailure, RecoveryOutcome, RenameRecovery};
 pub use schedule::{MAX_TEMP_CANDIDATES, TemporaryPhase};

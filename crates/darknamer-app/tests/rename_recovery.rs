@@ -244,7 +244,7 @@ impl AuthorizedJournal for FailNotAppliedJournal {
         _step: usize,
         _direction: JournalDirection,
     ) -> Result<(), JournalError> {
-        Err(JournalError { code: 88 })
+        Err(JournalError::not_appended(88))
     }
 
     fn authorized_terminal(
@@ -298,7 +298,7 @@ fn rollback_not_applied_journal_failure_is_preserved() -> Result<(), Box<dyn std
         outcome,
         RecoveryOutcome::RecoveryRequired {
             plan,
-            reason: RecoveryFailure::Journal(JournalError { code: 88 }),
+            reason: RecoveryFailure::Journal(JournalError::not_appended(88)),
         }
     );
     assert_eq!(backend.mutation_count(), 0);
