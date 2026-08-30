@@ -5,11 +5,11 @@ use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     COLOR_WINDOW, FillRect, GetMonitorInfoW, GetSysColorBrush, MONITOR_DEFAULTTONEAREST,
-    MONITORINFO, MonitorFromWindow, SetBkColor, SetTextColor, UpdateWindow,
+    MONITORINFO, MonitorFromWindow, SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::{SS_ETCHEDHORZ, SS_NOPREFIX};
-use windows_sys::Win32::UI::Controls::{BST_CHECKED, BST_UNCHECKED};
+use windows_sys::Win32::UI::Controls::{BST_CHECKED, BST_UNCHECKED, SetWindowTheme};
 use windows_sys::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -646,9 +646,23 @@ fn apply_dialog_appearance(window: HWND, state: &mut AppearanceDialogWindowState
         .model
         .draft()
         .resolve(state.model.forced_colors(), state.system_theme);
-    state.appearance_resources = semantic_palette(resolved.theme)
-        .and_then(|palette| AppearanceResources::create(palette).ok());
-    apply_auxiliary_dwm_title_frame(window, resolved.theme);
+    let replacement = semantic_palette(resolved.theme).and_then(|palette| {
+        set_native_control_theme_disabled(state, true)
+            .then(|| AppearanceResources::create(palette).ok())
+            .flatten()
+    });
+    if replacement.is_none() {
+        set_native_control_theme_disabled(state, false);
+    }
+    state.appearance_resources = replacement;
+    apply_auxiliary_dwm_title_frame(
+        window,
+        if state.appearance_resources.is_some() {
+            resolved.theme
+        } else {
+            ResolvedTheme::NativeSystem
+        },
+    );
     // SAFETY: window is live and resources are installed before invalidation.
     unsafe {
         RedrawWindow(
@@ -658,6 +672,26 @@ fn apply_dialog_appearance(window: HWND, state: &mut AppearanceDialogWindowState
             RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
         )
     };
+}
+
+fn native_themed_controls(state: &AppearanceDialogWindowState) -> impl Iterator<Item = HWND> + '_ {
+    [state.density_group]
+        .into_iter()
+        .chain(state.density)
+        .chain([state.emphasis_group])
+        .chain(state.emphasis)
+        .chain(state.checkboxes)
+}
+
+fn set_native_control_theme_disabled(state: &AppearanceDialogWindowState, disabled: bool) -> bool {
+    let empty = [0_u16];
+    let theme = if disabled { empty.as_ptr() } else { null() };
+    native_themed_controls(state).all(|control| {
+        // SAFETY: every control is a live dialog child. Empty strings disable
+        // visual styles so documented WM_CTLCOLOR colors remain authoritative;
+        // null pointers restore the system theme.
+        (unsafe { SetWindowTheme(control, theme, theme) }) >= 0
+    })
 }
 
 fn action_for_command(
@@ -1019,7 +1053,7 @@ unsafe extern "system" fn appearance_dialog_proc(
                 // SAFETY: wparam is the callback-owned control DC.
                 unsafe {
                     SetTextColor(wparam as HDC, palette.text_primary);
-                    SetBkColor(wparam as HDC, palette.surface_dialog);
+                    SetBkMode(wparam as HDC, TRANSPARENT as i32);
                 }
                 resources.dialog_brush() as LRESULT
             } else {
@@ -1117,7 +1151,9 @@ unsafe extern "system" fn appearance_dialog_proc(
 mod native_tests {
     use super::*;
     use windows_sys::Win32::Graphics::Gdi::{GetDC, ReleaseDC};
-    use windows_sys::Win32::UI::Controls::{CDIS_DEFAULT, NM_CUSTOMDRAW, NMCUSTOMDRAW};
+    use windows_sys::Win32::UI::Controls::{
+        CDIS_DEFAULT, GetWindowTheme, NM_CUSTOMDRAW, NMCUSTOMDRAW,
+    };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_RETURN;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         BM_CLICK, BS_TYPEMASK, GWL_STYLE, GetClientRect, GetWindowLongPtrW, IsDialogMessageW, MSG,
@@ -1211,6 +1247,9 @@ mod native_tests {
         unsafe { ReleaseDC(ok, dc) };
 
         assert_eq!(window_text(menu_only), LegacyText::from(DENSITY_LABELS[3]));
+        // SAFETY: menu_only is live and the borrowed theme handle query retains
+        // no caller storage. Custom colors require the classic paint path.
+        assert_eq!(unsafe { GetWindowTheme(menu_only) }, 0);
         // SAFETY: menu_only is the live fourth density radio. The unarmed dialog
         // updates only its local preview model for this synchronous click.
         unsafe { SendMessageW(menu_only, BM_CLICK, 0, 0) };
