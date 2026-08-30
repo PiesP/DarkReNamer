@@ -69,6 +69,10 @@ jobs:
         shell: pwsh
         run: ./scripts/test-windows-acceptance-evidence.ps1
 
+      - name: Test release acceptance cross-validation
+        shell: pwsh
+        run: ./scripts/test-release-acceptance-validator.ps1
+
       - name: Check formatting and lints
         run: |
           cargo fmt --all -- --check
@@ -124,6 +128,10 @@ jobs:
       - name: Test Windows acceptance evidence validation
         shell: pwsh
         run: ./scripts/test-windows-acceptance-evidence.ps1
+
+      - name: Test release acceptance cross-validation
+        shell: pwsh
+        run: ./scripts/test-release-acceptance-validator.ps1
 
       - name: Install pinned Rust toolchain
         shell: pwsh
