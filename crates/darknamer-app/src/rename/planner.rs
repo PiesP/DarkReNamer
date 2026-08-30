@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 use darknamer_core::validate_windows_leaf_name;
 
@@ -18,6 +19,39 @@ pub struct RenamePlanner<'a> {
     backend: &'a dyn RenameBackend,
 }
 
+/// Outcome that distinguishes cooperative cancellation from plan blockers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PlanAttemptError {
+    /// The caller requested cancellation before planning completed.
+    Cancelled,
+    /// Planning completed with structured blockers.
+    Plan(PlanError),
+}
+
+impl From<PlanError> for PlanAttemptError {
+    fn from(error: PlanError) -> Self {
+        Self::Plan(error)
+    }
+}
+
+impl fmt::Display for PlanAttemptError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled => formatter.write_str("rename planning was cancelled"),
+            Self::Plan(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for PlanAttemptError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Cancelled => None,
+            Self::Plan(error) => Some(error),
+        }
+    }
+}
+
 impl<'a> RenamePlanner<'a> {
     /// Creates a planner over one filesystem adapter.
     #[must_use]
@@ -31,24 +65,49 @@ impl<'a> RenamePlanner<'a> {
     ///
     /// Returns structured blockers without mutating the backend.
     pub fn plan(&self, request: PlanRequest) -> Result<RenamePlan, PlanError> {
-        let changed = request
-            .entries
-            .iter()
-            .filter(|intent| intent.source != intent.destination)
-            .collect::<Vec<_>>();
+        match self.plan_cancellable(request, || false) {
+            Ok(plan) => Ok(plan),
+            Err(PlanAttemptError::Plan(error)) => Err(error),
+            Err(PlanAttemptError::Cancelled) => {
+                unreachable!("the non-cancellable planner cannot be cancelled")
+            }
+        }
+    }
+
+    /// Validates a request while polling cooperative cancellation between rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlanAttemptError::Cancelled`] independently from structured
+    /// plan blockers.
+    pub fn plan_cancellable(
+        &self,
+        request: PlanRequest,
+        cancellation_requested: impl Fn() -> bool,
+    ) -> Result<RenamePlan, PlanAttemptError> {
+        let mut changed = Vec::with_capacity(request.entries.len());
+        for intent in &request.entries {
+            check_cancelled(&cancellation_requested)?;
+            if intent.source != intent.destination {
+                changed.push(intent);
+            }
+        }
         let mut issues = Vec::new();
         let mut destination_owners: BTreeMap<PathKey, Vec<_>> = BTreeMap::new();
         let mut source_owners: BTreeMap<PathKey, Vec<_>> = BTreeMap::new();
         let mut entry_owners: BTreeMap<_, Vec<_>> = BTreeMap::new();
 
         for intent in &changed {
+            check_cancelled(&cancellation_requested)?;
             validate_intent(intent, &mut issues);
         }
         if !issues.is_empty() {
-            return Err(PlanError::new(issues));
+            return Err(PlanError::new(issues).into());
         }
         for intent in &changed {
+            check_cancelled(&cancellation_requested)?;
             for path in [&intent.source, &intent.destination] {
+                check_cancelled(&cancellation_requested)?;
                 if let Err(error) = self.backend.validate_path_environment(path) {
                     issues.push(PlanIssue {
                         entry: intent.id,
@@ -62,9 +121,10 @@ impl<'a> RenamePlanner<'a> {
             }
         }
         if !issues.is_empty() {
-            return Err(PlanError::new(issues));
+            return Err(PlanError::new(issues).into());
         }
         for intent in &changed {
+            check_cancelled(&cancellation_requested)?;
             source_owners
                 .entry(self.backend.path_key(&intent.source))
                 .or_default()
@@ -87,41 +147,56 @@ impl<'a> RenamePlanner<'a> {
             source_owners.values(),
             PlanIssueKind::DuplicateSource,
             &mut issues,
-        );
+            &cancellation_requested,
+        )?;
         append_duplicate_issues(
             entry_owners.values(),
             PlanIssueKind::DuplicateEntryId,
             &mut issues,
-        );
+            &cancellation_requested,
+        )?;
         for owners in destination_owners
             .values()
             .filter(|owners| owners.len() > 1)
         {
-            issues.extend(owners.iter().map(|entry| PlanIssue {
-                entry: *entry,
-                kind: PlanIssueKind::DuplicateDestination,
-            }));
+            check_cancelled(&cancellation_requested)?;
+            for entry in owners {
+                check_cancelled(&cancellation_requested)?;
+                issues.push(PlanIssue {
+                    entry: *entry,
+                    kind: PlanIssueKind::DuplicateDestination,
+                });
+            }
         }
         let mut overlap_entries = BTreeSet::new();
         for intent in &changed {
-            visit_direct_ancestors(&intent.source, |ancestor| {
+            check_cancelled(&cancellation_requested)?;
+            visit_direct_ancestors(&intent.source, &cancellation_requested, |ancestor| {
                 if let Some(owners) = source_owners.get(&self.backend.path_key(ancestor)) {
                     overlap_entries.insert(intent.id);
                     overlap_entries.extend(owners.iter().copied());
                 }
+            })?;
+        }
+        for entry in overlap_entries {
+            check_cancelled(&cancellation_requested)?;
+            issues.push(PlanIssue {
+                entry,
+                kind: PlanIssueKind::SourceOverlap,
             });
         }
-        issues.extend(overlap_entries.into_iter().map(|entry| PlanIssue {
-            entry,
-            kind: PlanIssueKind::SourceOverlap,
-        }));
         if !issues.is_empty() {
-            return Err(PlanError::new(issues));
+            return Err(PlanError::new(issues).into());
         }
 
         let mut entries = Vec::with_capacity(changed.len());
-        let planned_source_keys = source_owners.keys().cloned().collect::<BTreeSet<_>>();
+        let mut planned_source_keys = BTreeSet::new();
+        for key in source_owners.keys() {
+            check_cancelled(&cancellation_requested)?;
+            planned_source_keys.insert(key.clone());
+        }
         for intent in changed {
+            check_cancelled(&cancellation_requested)?;
             let source_snapshot = match self.backend.observe(&intent.source) {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
@@ -132,6 +207,7 @@ impl<'a> RenamePlanner<'a> {
                     continue;
                 }
             };
+            check_cancelled(&cancellation_requested)?;
             let Some(source_entry) = source_snapshot.entry else {
                 issues.push(PlanIssue {
                     entry: intent.id,
@@ -163,6 +239,7 @@ impl<'a> RenamePlanner<'a> {
                     continue;
                 }
             };
+            check_cancelled(&cancellation_requested)?;
             entries.push(PlanRow {
                 id: intent.id,
                 source: intent.source.clone(),
@@ -173,10 +250,11 @@ impl<'a> RenamePlanner<'a> {
             });
         }
         if !issues.is_empty() {
-            return Err(PlanError::new(issues));
+            return Err(PlanError::new(issues).into());
         }
 
         for entry in &entries {
+            check_cancelled(&cancellation_requested)?;
             if entry.destination_snapshot.entry.is_some()
                 && !planned_source_keys.contains(&self.backend.path_key(&entry.destination))
             {
@@ -187,11 +265,12 @@ impl<'a> RenamePlanner<'a> {
             }
         }
         if !issues.is_empty() {
-            return Err(PlanError::new(issues));
+            return Err(PlanError::new(issues).into());
         }
 
+        check_cancelled(&cancellation_requested)?;
         Ok(RenamePlan {
-            id: PlanId::new(plan_id(&request)),
+            id: PlanId::new(plan_id_cancellable(&request, &cancellation_requested)?),
             revision: request.revision,
             entries: entries.into_boxed_slice(),
         })
@@ -202,21 +281,29 @@ fn append_duplicate_issues<'a>(
     owner_sets: impl Iterator<Item = &'a Vec<EntryId>>,
     kind: PlanIssueKind,
     issues: &mut Vec<PlanIssue>,
-) {
+    cancellation_requested: &impl Fn() -> bool,
+) -> Result<(), PlanAttemptError> {
     for owners in owner_sets.filter(|owners| owners.len() > 1) {
-        issues.extend(owners.iter().map(|entry| PlanIssue {
-            entry: *entry,
-            kind: kind.clone(),
-        }));
+        check_cancelled(cancellation_requested)?;
+        for entry in owners {
+            check_cancelled(cancellation_requested)?;
+            issues.push(PlanIssue {
+                entry: *entry,
+                kind: kind.clone(),
+            });
+        }
     }
+    Ok(())
 }
 
 fn visit_direct_ancestors(
     path: &darknamer_core::LegacyText,
+    cancellation_requested: &impl Fn() -> bool,
     mut visit: impl FnMut(&darknamer_core::LegacyText),
-) {
+) -> Result<(), PlanAttemptError> {
     let mut ancestor = path.clone();
     for _ in 0..MAX_PLAN_PATH_DEPTH {
+        check_cancelled(cancellation_requested)?;
         let Some(separator) = ancestor
             .units()
             .iter()
@@ -233,6 +320,7 @@ fn visit_direct_ancestors(
         }
         visit(&ancestor);
     }
+    Ok(())
 }
 
 fn parent_path(path: &darknamer_core::LegacyText) -> darknamer_core::LegacyText {
@@ -315,18 +403,30 @@ fn is_separator(unit: u16) -> bool {
     unit == b'\\' as u16 || unit == b'/' as u16
 }
 
-fn plan_id(request: &PlanRequest) -> u64 {
+fn plan_id_cancellable(
+    request: &PlanRequest,
+    cancellation_requested: &impl Fn() -> bool,
+) -> Result<u64, PlanAttemptError> {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     hash_value(&mut hash, 0x4452_504c_414e_0001);
     hash_value(&mut hash, request.revision.value());
     hash_value(&mut hash, request.entries.len() as u64);
     for intent in &request.entries {
+        check_cancelled(cancellation_requested)?;
         hash_value(&mut hash, u64::from(intent.id.value()));
         hash_value(&mut hash, intent.kind as u64);
         hash_text(&mut hash, &intent.source);
         hash_text(&mut hash, &intent.destination);
     }
-    hash
+    Ok(hash)
+}
+
+fn check_cancelled(cancellation_requested: &impl Fn() -> bool) -> Result<(), PlanAttemptError> {
+    if cancellation_requested() {
+        Err(PlanAttemptError::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 fn hash_text(hash: &mut u64, text: &darknamer_core::LegacyText) {

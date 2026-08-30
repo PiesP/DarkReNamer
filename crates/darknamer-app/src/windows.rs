@@ -18,7 +18,8 @@ use std::thread::{self, JoinHandle};
 
 use crate::admission::{
     AdmissionAdapter, AdmissionMode, AdmissionReport, MAX_ADMITTED_SOURCES,
-    WindowsAdmissionAdapter, bounded_import_lines, bounded_selection, collect_admission,
+    WindowsAdmissionAdapter, bounded_import_lines, bounded_selection,
+    collect_admission_cancellable,
 };
 use crate::icon_cache::{IconCacheKey, icon_cache_key};
 use crate::preferences::{
@@ -26,15 +27,15 @@ use crate::preferences::{
     save as save_column_preferences, shown_columns,
 };
 use crate::rename::{
-    CancellationToken, ExecuteError, ExecutionControl, ExecutionOutcome,
+    CancellationToken, ExecuteError, ExecuteErrorKind, ExecutionControl, ExecutionOutcome,
     ExecutionOutcomePresentation, ExecutionPhase, ExecutionProgress, ExecutionReport,
     ExistingJournalOpenError, FileJournal, FileJournalError, JournalCleanupDecision,
-    JournalOpenFailure, JournalRoot, ModelRevision, PlanError, RecoveryJournalEvidence,
-    RecoveryOutcome, RenameBackend, RenameExecutor, RenamePlan, RenamePlanner, RenameRecovery,
-    WindowsRenameBackend, apply_execution_report, build_plan_request, cleanup_decision,
-    execute_error_korean, execution_outcome_korean, execution_outcome_presentation,
-    next_model_revision, plan_error_korean, preflight_plan, process_is_elevated,
-    safe_mode_unify_path_message,
+    JournalOpenFailure, JournalRoot, ModelRevision, PlanAttemptError, PlanError,
+    RecoveryJournalEvidence, RecoveryOutcome, RenameBackend, RenameExecutor, RenamePlan,
+    RenamePlanner, RenameRecovery, WindowsRenameBackend, apply_execution_report,
+    build_plan_request, cleanup_decision, execute_error_korean, execution_outcome_korean,
+    execution_outcome_presentation, next_model_revision, plan_error_korean,
+    preflight_plan_cancellable, process_is_elevated, safe_mode_unify_path_message,
 };
 use darknamer_core::{
     LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,

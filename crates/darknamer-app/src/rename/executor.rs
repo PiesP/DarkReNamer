@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use super::journal::{JournalDirection, JournalTerminal};
 use super::model::PlanRow;
-use super::schedule::{ScheduleError, ScheduleStep, TemporaryPhase, build_schedule};
+use super::schedule::{ScheduleError, ScheduleStep, TemporaryPhase, build_schedule_cancellable};
 use super::{
     AppendCertainty, BackendError, ConfirmedPlan, EntryId, JournalCapacityError, JournalError,
     JournalRequirements, JournalStep, JournalStore, MutationCertainty, PlanId, RenameBackend,
@@ -268,12 +268,41 @@ pub fn preflight_plan(
     plan: &RenamePlan,
     backend: &mut dyn RenameBackend,
 ) -> Result<JournalRequirements, ExecuteError> {
-    let schedule = build_schedule(plan, backend).map_err(schedule_error)?;
-    let manifest = schedule.iter().map(journal_step).collect::<Vec<_>>();
-    super::file_journal::journal_requirements(&manifest).map_err(|error| ExecuteError {
-        entry: None,
-        kind: ExecuteErrorKind::JournalCapacity(error),
-    })
+    preflight_plan_cancellable(plan, backend, || false)
+}
+
+/// Computes journal requirements while polling cancellation during scheduling.
+///
+/// # Errors
+///
+/// Returns [`ExecuteErrorKind::Cancelled`] before any journal or filesystem
+/// mutation when cancellation is requested.
+pub fn preflight_plan_cancellable(
+    plan: &RenamePlan,
+    backend: &mut dyn RenameBackend,
+    cancellation_requested: impl Fn() -> bool,
+) -> Result<JournalRequirements, ExecuteError> {
+    let schedule = build_schedule_cancellable(plan, backend, &cancellation_requested)
+        .map_err(schedule_error)?;
+    let mut manifest = Vec::with_capacity(schedule.len());
+    for step in &schedule {
+        if cancellation_requested() {
+            return Err(cancelled_before_begin());
+        }
+        manifest.push(journal_step(step));
+    }
+    if cancellation_requested() {
+        return Err(cancelled_before_begin());
+    }
+    let requirements =
+        super::file_journal::journal_requirements(&manifest).map_err(|error| ExecuteError {
+            entry: None,
+            kind: ExecuteErrorKind::JournalCapacity(error),
+        })?;
+    if cancellation_requested() {
+        return Err(cancelled_before_begin());
+    }
+    Ok(requirements)
 }
 
 impl<'a> RenameExecutor<'a> {
@@ -320,13 +349,21 @@ impl<'a> RenameExecutor<'a> {
                 state: RenameState::Restored,
             })
             .collect::<Vec<_>>();
-        let schedule = build_schedule(&plan, self.backend).map_err(schedule_error)?;
-        let manifest = schedule.iter().map(journal_step).collect::<Vec<_>>();
+        let schedule =
+            build_schedule_cancellable(&plan, self.backend, &|| control.cancellation_requested())
+                .map_err(schedule_error)?;
+        let mut manifest = Vec::with_capacity(schedule.len());
+        for step in &schedule {
+            if control.cancellation_requested() {
+                return Err(cancelled_before_begin());
+            }
+            manifest.push(journal_step(step));
+        }
         super::file_journal::journal_requirements(&manifest).map_err(|error| ExecuteError {
             entry: None,
             kind: ExecuteErrorKind::JournalCapacity(error),
         })?;
-        self.freeze(&plan.entries, &schedule)?;
+        self.freeze(&plan.entries, &schedule, control)?;
         if control.cancellation_requested() {
             return Err(cancelled_before_begin());
         }
@@ -518,8 +555,16 @@ impl<'a> RenameExecutor<'a> {
         })
     }
 
-    fn freeze(&self, entries: &[PlanRow], schedule: &[ScheduleStep]) -> Result<(), ExecuteError> {
+    fn freeze(
+        &self,
+        entries: &[PlanRow],
+        schedule: &[ScheduleStep],
+        control: &dyn ExecutionControl,
+    ) -> Result<(), ExecuteError> {
         for entry in entries {
+            if control.cancellation_requested() {
+                return Err(cancelled_before_begin());
+            }
             let current_source =
                 self.backend
                     .observe(&entry.source)
@@ -527,6 +572,9 @@ impl<'a> RenameExecutor<'a> {
                         entry: Some(entry.id),
                         kind: ExecuteErrorKind::StaleSource,
                     })?;
+            if control.cancellation_requested() {
+                return Err(cancelled_before_begin());
+            }
             if current_source.parent != entry.source_snapshot.parent {
                 return Err(ExecuteError {
                     entry: Some(entry.id),
@@ -547,6 +595,9 @@ impl<'a> RenameExecutor<'a> {
                         entry: Some(entry.id),
                         kind: ExecuteErrorKind::DestinationChanged,
                     })?;
+            if control.cancellation_requested() {
+                return Err(cancelled_before_begin());
+            }
             if current_destination.parent != entry.destination_snapshot.parent {
                 return Err(ExecuteError {
                     entry: Some(entry.id),
@@ -565,6 +616,9 @@ impl<'a> RenameExecutor<'a> {
             .iter()
             .filter(|step| step.temporary_phase == TemporaryPhase::IntoTemporary)
         {
+            if control.cancellation_requested() {
+                return Err(cancelled_before_begin());
+            }
             let temporary =
                 self.backend
                     .observe(&step.destination)
@@ -572,6 +626,9 @@ impl<'a> RenameExecutor<'a> {
                         entry: Some(step.entry),
                         kind: ExecuteErrorKind::TemporaryOccupied,
                     })?;
+            if control.cancellation_requested() {
+                return Err(cancelled_before_begin());
+            }
             let planned = entries.iter().find(|entry| entry.id == step.entry);
             let Some(planned) = planned else {
                 return Err(ExecuteError {
@@ -763,6 +820,7 @@ const fn cancelled_before_begin() -> ExecuteError {
 
 fn schedule_error(error: ScheduleError) -> ExecuteError {
     match error {
+        ScheduleError::Cancelled => cancelled_before_begin(),
         ScheduleError::Invalid => ExecuteError {
             entry: None,
             kind: ExecuteErrorKind::InvalidSchedule,
