@@ -868,7 +868,10 @@ pub(super) fn add_files_dialog(owner: HWND, state: &mut AppState) {
     }) else {
         return;
     };
-    let _started = admit_paths(owner, state, paths);
+    match admit_paths(owner, state, paths) {
+        Ok(()) => finalize_admission_start(state),
+        Err(error) => report_admission_start_error(owner, &error),
+    }
 }
 
 pub(super) fn copy_clipboard_or_report(owner: HWND, text: &LegacyText) {
@@ -964,16 +967,18 @@ pub(super) fn import_paths_dialog(owner: HWND, state: &mut AppState) {
         .into_iter()
         .map(|line| PathBuf::from(std::ffi::OsString::from_wide(line.units())))
         .collect();
-    let _started = admit_paths(owner, state, paths);
+    match admit_paths(owner, state, paths) {
+        Ok(()) => finalize_admission_start(state),
+        Err(error) => report_admission_start_error(owner, &error),
+    }
 }
 
 pub(super) fn set_status(status: HWND, text: &str) {
     let text = wide(text);
-    // SAFETY: window is the non-null top-level HWND just created and remains owned by this UI thread.
-    unsafe {
-        windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(status, text.as_ptr());
-        UpdateWindow(status);
-    }
+    // SAFETY: status is a live UI-thread control and SetWindowTextW copies the
+    // terminated buffer synchronously. Its ordinary invalidation paints only
+    // after the caller's AppState borrow/callback boundary has ended.
+    unsafe { windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(status, text.as_ptr()) };
 }
 
 pub(super) fn modal_native_dialog<T>(owner: HWND, dialog: impl FnOnce() -> T) -> T {

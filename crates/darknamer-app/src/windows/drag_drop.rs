@@ -468,11 +468,28 @@ unsafe extern "system" fn drop_target_drop(
         if unsafe { (*state).drop_locked() } {
             return Some(S_OK);
         }
-        // SAFETY: same fresh pointer; this is the one admission dispatch and no
-        // IDataObject/STGMEDIUM/HGLOBAL is retained across the worker start.
-        let started = unsafe { admit_paths(target.state_owner, &mut *state, paths) };
+        // The tiny borrow ends before PostMessageW or the error reporter can
+        // reenter the window. No IDataObject/STGMEDIUM/HGLOBAL is retained.
+        // SAFETY: state was freshly resolved after all external boundaries.
+        let start_result = unsafe {
+            let state = &mut *state;
+            admit_paths(target.state_owner, state, paths)
+        };
         // SAFETY: drop_callback validated effect and it remains live.
-        unsafe { *effect = drop_effect_after_admission_start(started) };
+        unsafe { *effect = drop_effect_after_admission_start(start_result.is_ok()) };
+        match start_result {
+            Ok(()) => {
+                // SAFETY: state borrow ended above; this posts an integral
+                // handoff that will re-resolve AppState in window_proc.
+                unsafe {
+                    PostMessageW(target.state_owner, WM_APP_ADMISSION_STARTED, 0, 0);
+                }
+            }
+            Err(error) => {
+                // No AppState borrow survives into this modal reporter.
+                report_admission_start_error(target.state_owner, &error);
+            }
+        }
         Some(S_OK)
     })
 }

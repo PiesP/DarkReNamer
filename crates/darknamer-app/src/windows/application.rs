@@ -556,6 +556,12 @@ unsafe extern "system" fn window_proc(
             handle_admission_completion(window, unsafe { &mut *state_ptr });
             0
         }
+        WM_APP_ADMISSION_STARTED if !state_ptr.is_null() => {
+            // SAFETY: the posted handoff re-resolves live UI-thread state after
+            // the OLE Drop callback and its AppState borrow have ended.
+            finalize_admission_start(unsafe { &mut *state_ptr });
+            0
+        }
         WM_APP_PREFERENCES_WAKE if !state_ptr.is_null() => {
             // SAFETY: state_ptr is the live UI-thread AppState for this window.
             handle_preferences_wake(window, unsafe { &mut *state_ptr });
