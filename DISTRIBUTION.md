@@ -21,6 +21,13 @@ published prerelease contains:
 - license, attribution, and this distribution policy;
 - GitHub build-provenance and SBOM attestations.
 
+`DarkReNamer.exe` is the only runnable product file and requires no adjacent
+configuration file. The workflow name “Portable prerelease” means an
+installer-free executable; it does not make preferences self-contained with the
+download. UI preferences remain in the current user's
+`%LOCALAPPDATA%\DarkReNamer` directory, while the executable can be replaced or
+moved independently.
+
 Every successful packaging run also retains the complete Actions handoff,
 including the raw PDB. The handoff validator checks the exact file layout,
 symbol archive contents, SBOM format, checksums, unsigned Authenticode status,

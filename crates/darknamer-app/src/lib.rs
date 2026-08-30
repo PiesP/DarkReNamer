@@ -52,6 +52,32 @@ pub(crate) struct HorizontalWindowPlacement {
     pub(crate) width: i32,
 }
 
+/// Effective top-level minimum size after applying the nearest monitor bounds.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WindowTrackSize {
+    pub(crate) width: i32,
+    pub(crate) height: i32,
+}
+
+/// Constrains a requested top-level minimum size to a positive monitor work area.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn constrain_minimum_track_size_to_work_area(
+    minimum_width: i32,
+    minimum_height: i32,
+    work_width: i32,
+    work_height: i32,
+) -> Option<WindowTrackSize> {
+    if minimum_width <= 0 || minimum_height <= 0 || work_width <= 0 || work_height <= 0 {
+        return None;
+    }
+    Some(WindowTrackSize {
+        width: minimum_width.min(work_width),
+        height: minimum_height.min(work_height),
+    })
+}
+
 #[cfg(any(windows, test))]
 #[must_use]
 pub(crate) fn fit_widened_window_to_work_area(
@@ -138,6 +164,607 @@ impl CommandRailSpec {
 pub enum RailDensity {
     Comfortable,
     Compact,
+}
+
+/// Persisted application theme preference.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum AppThemeMode {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+/// Persisted command-rail density preference.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RailDensityPreference {
+    #[default]
+    Automatic,
+    Comfortable,
+    Compact,
+}
+
+impl RailDensityPreference {
+    const AUTOMATIC_CANDIDATES: [RailDensity; 2] = [RailDensity::Comfortable, RailDensity::Compact];
+    const COMFORTABLE_CANDIDATES: [RailDensity; 1] = [RailDensity::Comfortable];
+    const COMPACT_CANDIDATES: [RailDensity; 1] = [RailDensity::Compact];
+
+    #[must_use]
+    const fn candidates(self) -> &'static [RailDensity] {
+        match self {
+            Self::Automatic => &Self::AUTOMATIC_CANDIDATES,
+            Self::Comfortable => &Self::COMFORTABLE_CANDIDATES,
+            Self::Compact => &Self::COMPACT_CANDIDATES,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn minimum_density(self) -> RailDensity {
+        match self {
+            Self::Automatic | Self::Compact => RailDensity::Compact,
+            Self::Comfortable => RailDensity::Comfortable,
+        }
+    }
+
+    #[must_use]
+    #[cfg(any(windows, test))]
+    const fn recommended_density(self) -> RailDensity {
+        match self {
+            Self::Automatic | Self::Comfortable => RailDensity::Comfortable,
+            Self::Compact => RailDensity::Compact,
+        }
+    }
+}
+
+/// Persisted strength of proposed-name semantic emphasis.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum PreviewEmphasis {
+    Subtle,
+    #[default]
+    Standard,
+    Strong,
+}
+
+/// User-owned appearance preferences stored independently from column state.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct UiAppearance {
+    pub(crate) theme: AppThemeMode,
+    pub(crate) density: RailDensityPreference,
+    pub(crate) emphasis: PreviewEmphasis,
+    pub(crate) show_separators: bool,
+    pub(crate) show_preview_tint: bool,
+    pub(crate) show_empty_safety: bool,
+}
+
+#[cfg(any(windows, test))]
+impl Default for UiAppearance {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Appearance after fail-closed Forced Colors precedence is applied.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedUiAppearance {
+    pub(crate) appearance: UiAppearance,
+    pub(crate) theme: ResolvedTheme,
+    pub(crate) custom_colors_enabled: bool,
+}
+
+/// Theme resolved for app-owned surfaces after system and accessibility policy.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResolvedTheme {
+    NativeSystem,
+    Light,
+    Dark,
+}
+
+/// Resolves background theme from the official UISettings foreground color.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn theme_from_foreground(red: u8, green: u8, blue: u8) -> ResolvedTheme {
+    let luminance = (red as u32) * 299 + (green as u32) * 587 + (blue as u32) * 114;
+    if luminance >= 128_000 {
+        ResolvedTheme::Dark
+    } else {
+        ResolvedTheme::Light
+    }
+}
+
+/// Semantic colors for the small set of app-owned native surfaces.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SemanticPalette {
+    pub(crate) surface_workspace: u32,
+    pub(crate) surface_status: u32,
+    pub(crate) surface_drop: u32,
+    pub(crate) text_primary: u32,
+    pub(crate) text_secondary: u32,
+    pub(crate) changed_subtle: u32,
+    pub(crate) changed_standard: u32,
+    pub(crate) changed_strong: u32,
+    pub(crate) preview_tint: u32,
+    pub(crate) apply_keyline: u32,
+}
+
+#[cfg(any(windows, test))]
+const fn color_ref(red: u8, green: u8, blue: u8) -> u32 {
+    (red as u32) | ((green as u32) << 8) | ((blue as u32) << 16)
+}
+
+#[cfg(any(windows, test))]
+const PRECISION_LIGHT: SemanticPalette = SemanticPalette {
+    surface_workspace: color_ref(255, 255, 255),
+    surface_status: color_ref(244, 245, 247),
+    surface_drop: color_ref(245, 248, 255),
+    text_primary: color_ref(27, 29, 32),
+    text_secondary: color_ref(95, 102, 112),
+    changed_subtle: color_ref(121, 43, 51),
+    changed_standard: color_ref(143, 38, 51),
+    changed_strong: color_ref(169, 22, 33),
+    preview_tint: color_ref(245, 248, 255),
+    apply_keyline: color_ref(217, 41, 50),
+};
+
+#[cfg(any(windows, test))]
+const GRAPHITE_DARK: SemanticPalette = SemanticPalette {
+    surface_workspace: color_ref(23, 25, 28),
+    surface_status: color_ref(30, 32, 36),
+    surface_drop: color_ref(32, 40, 51),
+    text_primary: color_ref(242, 244, 247),
+    text_secondary: color_ref(184, 190, 199),
+    changed_subtle: color_ref(217, 164, 168),
+    changed_standard: color_ref(255, 102, 112),
+    changed_strong: color_ref(255, 137, 145),
+    preview_tint: color_ref(32, 40, 51),
+    apply_keyline: color_ref(255, 102, 112),
+};
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn semantic_palette(theme: ResolvedTheme) -> Option<SemanticPalette> {
+    match theme {
+        ResolvedTheme::NativeSystem => None,
+        ResolvedTheme::Light => Some(PRECISION_LIGHT),
+        ResolvedTheme::Dark => Some(GRAPHITE_DARK),
+    }
+}
+
+/// Custom colors for one changed proposed-name cell.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProposedNameColors {
+    pub(crate) text: u32,
+    pub(crate) background: Option<u32>,
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn proposed_name_colors(
+    resolved: ResolvedUiAppearance,
+    visual: ProposedNameVisual,
+) -> Option<ProposedNameColors> {
+    if !resolved.custom_colors_enabled || !matches!(visual, ProposedNameVisual::Changed) {
+        return None;
+    }
+    let Some(palette) = semantic_palette(resolved.theme) else {
+        return None;
+    };
+    let text = match resolved.appearance.emphasis {
+        PreviewEmphasis::Subtle => palette.changed_subtle,
+        PreviewEmphasis::Standard => palette.changed_standard,
+        PreviewEmphasis::Strong => palette.changed_strong,
+    };
+    Some(ProposedNameColors {
+        text,
+        background: if resolved.appearance.show_preview_tint {
+            Some(palette.preview_tint)
+        } else {
+            None
+        },
+    })
+}
+
+#[cfg(any(windows, test))]
+impl UiAppearance {
+    #[must_use]
+    pub(crate) const fn resolve(
+        self,
+        forced_colors: ForcedColorsState,
+        system_theme: Option<ResolvedTheme>,
+    ) -> ResolvedUiAppearance {
+        if !forced_colors.custom_colors_enabled() {
+            return ResolvedUiAppearance {
+                appearance: Self {
+                    theme: AppThemeMode::System,
+                    show_preview_tint: false,
+                    ..self
+                },
+                theme: ResolvedTheme::NativeSystem,
+                custom_colors_enabled: false,
+            };
+        }
+        let (theme, custom_colors_enabled) = match self.theme {
+            AppThemeMode::Light => (ResolvedTheme::Light, true),
+            AppThemeMode::Dark => (ResolvedTheme::Dark, true),
+            AppThemeMode::System => match system_theme {
+                Some(ResolvedTheme::Dark) => (ResolvedTheme::Dark, true),
+                Some(ResolvedTheme::Light) => (ResolvedTheme::Light, true),
+                Some(ResolvedTheme::NativeSystem) | None => (ResolvedTheme::NativeSystem, false),
+            },
+        };
+        ResolvedUiAppearance {
+            appearance: self,
+            theme,
+            custom_colors_enabled,
+        }
+    }
+}
+
+/// Best-effort DWM frame update needed for one resolved transition.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DwmFrameAction {
+    None,
+    SetDark(bool),
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn dwm_frame_action(
+    theme: ResolvedTheme,
+    dark_frame_requested: bool,
+) -> DwmFrameAction {
+    match theme {
+        ResolvedTheme::Dark => DwmFrameAction::SetDark(true),
+        ResolvedTheme::Light => DwmFrameAction::SetDark(false),
+        ResolvedTheme::NativeSystem if dark_frame_requested => DwmFrameAction::SetDark(false),
+        ResolvedTheme::NativeSystem => DwmFrameAction::None,
+    }
+}
+
+/// Auxiliary appearance commands stay outside the contiguous legacy catalog.
+#[cfg(any(windows, test))]
+pub(crate) const THEME_SYSTEM: u16 = 0x9010;
+#[cfg(any(windows, test))]
+pub(crate) const THEME_LIGHT: u16 = 0x9011;
+#[cfg(any(windows, test))]
+pub(crate) const THEME_DARK: u16 = 0x9012;
+#[cfg(any(windows, test))]
+pub(crate) const APPEARANCE_ADVANCED: u16 = 0x9013;
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn theme_mode_for_command(command: u16) -> Option<AppThemeMode> {
+    match command {
+        THEME_SYSTEM => Some(AppThemeMode::System),
+        THEME_LIGHT => Some(AppThemeMode::Light),
+        THEME_DARK => Some(AppThemeMode::Dark),
+        _ => None,
+    }
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn theme_command_for_mode(mode: AppThemeMode) -> u16 {
+    match mode {
+        AppThemeMode::System => THEME_SYSTEM,
+        AppThemeMode::Light => THEME_LIGHT,
+        AppThemeMode::Dark => THEME_DARK,
+    }
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn appearance_command_allowed(command: u16, worker_active: bool) -> bool {
+    theme_mode_for_command(command).is_some() || (command == APPEARANCE_ADVANCED && !worker_active)
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn appearance_after_theme_command(
+    appearance: UiAppearance,
+    command: u16,
+) -> Option<UiAppearance> {
+    let Some(theme) = theme_mode_for_command(command) else {
+        return None;
+    };
+    Some(UiAppearance {
+        theme,
+        ..appearance
+    })
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn advanced_appearance_available(
+    worker_active: bool,
+    confirmation_pending: bool,
+) -> bool {
+    !worker_active && !confirmation_pending
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn appearance_dialog_should_notify_cancel(armed: bool, finished: bool) -> bool {
+    armed && !finished
+}
+
+/// Pure action understood by the dedicated advanced-appearance dialog.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AppearanceDialogAction {
+    Density(RailDensityPreference),
+    Emphasis(PreviewEmphasis),
+    ShowSeparators(bool),
+    ShowPreviewTint(bool),
+    ShowEmptySafety(bool),
+    ResetDefaults,
+    Accept,
+    Cancel,
+}
+
+/// Terminal or preview effect emitted by one appearance-dialog action.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AppearanceDialogEffect {
+    None,
+    Preview(UiAppearance),
+    Accept(UiAppearance),
+    Cancel(UiAppearance),
+}
+
+/// Borrow-free appearance-dialog state used by native controls and tests.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AppearanceDialogModel {
+    original: UiAppearance,
+    draft: UiAppearance,
+    forced_colors: ForcedColorsState,
+}
+
+#[cfg(any(windows, test))]
+impl AppearanceDialogModel {
+    #[must_use]
+    pub(crate) const fn new(original: UiAppearance, forced_colors: ForcedColorsState) -> Self {
+        Self {
+            original,
+            draft: original,
+            forced_colors,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn draft(self) -> UiAppearance {
+        self.draft
+    }
+
+    #[must_use]
+    pub(crate) const fn forced_colors(self) -> ForcedColorsState {
+        self.forced_colors
+    }
+
+    pub(crate) const fn set_forced_colors(&mut self, forced_colors: ForcedColorsState) {
+        self.forced_colors = forced_colors;
+    }
+
+    pub(crate) fn apply(&mut self, action: AppearanceDialogAction) -> AppearanceDialogEffect {
+        let next = match action {
+            AppearanceDialogAction::Density(density) => UiAppearance {
+                density,
+                ..self.draft
+            },
+            AppearanceDialogAction::Emphasis(emphasis)
+                if self.forced_colors.custom_colors_enabled() =>
+            {
+                UiAppearance {
+                    emphasis,
+                    ..self.draft
+                }
+            }
+            AppearanceDialogAction::ShowSeparators(show_separators) => UiAppearance {
+                show_separators,
+                ..self.draft
+            },
+            AppearanceDialogAction::ShowPreviewTint(show_preview_tint)
+                if self.forced_colors.custom_colors_enabled() =>
+            {
+                UiAppearance {
+                    show_preview_tint,
+                    ..self.draft
+                }
+            }
+            AppearanceDialogAction::ShowEmptySafety(show_empty_safety) => UiAppearance {
+                show_empty_safety,
+                ..self.draft
+            },
+            AppearanceDialogAction::ResetDefaults => UiAppearance {
+                theme: self.draft.theme,
+                ..UiAppearance::DEFAULT
+            },
+            AppearanceDialogAction::Accept => return AppearanceDialogEffect::Accept(self.draft),
+            AppearanceDialogAction::Cancel => {
+                self.draft = self.original;
+                return AppearanceDialogEffect::Cancel(self.original);
+            }
+            AppearanceDialogAction::Emphasis(_) | AppearanceDialogAction::ShowPreviewTint(_) => {
+                self.draft
+            }
+        };
+        if next == self.draft {
+            AppearanceDialogEffect::None
+        } else {
+            self.draft = next;
+            AppearanceDialogEffect::Preview(next)
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+impl UiAppearance {
+    pub(crate) const DEFAULT: Self = Self {
+        theme: AppThemeMode::System,
+        density: RailDensityPreference::Automatic,
+        emphasis: PreviewEmphasis::Standard,
+        show_separators: true,
+        show_preview_tint: true,
+        show_empty_safety: true,
+    };
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn pack_ui_appearance(appearance: UiAppearance) -> u32 {
+    let theme = match appearance.theme {
+        AppThemeMode::System => 0,
+        AppThemeMode::Light => 1,
+        AppThemeMode::Dark => 2,
+    };
+    let density = match appearance.density {
+        RailDensityPreference::Automatic => 0,
+        RailDensityPreference::Comfortable => 1,
+        RailDensityPreference::Compact => 2,
+    };
+    let emphasis = match appearance.emphasis {
+        PreviewEmphasis::Subtle => 0,
+        PreviewEmphasis::Standard => 1,
+        PreviewEmphasis::Strong => 2,
+    };
+    theme
+        | (density << 2)
+        | (emphasis << 4)
+        | ((appearance.show_separators as u32) << 6)
+        | ((appearance.show_preview_tint as u32) << 7)
+        | ((appearance.show_empty_safety as u32) << 8)
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn unpack_ui_appearance(packed: u32) -> Option<UiAppearance> {
+    if packed & !0x1FF != 0 {
+        return None;
+    }
+    let theme = match packed & 0x3 {
+        0 => AppThemeMode::System,
+        1 => AppThemeMode::Light,
+        2 => AppThemeMode::Dark,
+        _ => return None,
+    };
+    let density = match (packed >> 2) & 0x3 {
+        0 => RailDensityPreference::Automatic,
+        1 => RailDensityPreference::Comfortable,
+        2 => RailDensityPreference::Compact,
+        _ => return None,
+    };
+    let emphasis = match (packed >> 4) & 0x3 {
+        0 => PreviewEmphasis::Subtle,
+        1 => PreviewEmphasis::Standard,
+        2 => PreviewEmphasis::Strong,
+        _ => return None,
+    };
+    Some(UiAppearance {
+        theme,
+        density,
+        emphasis,
+        show_separators: packed & (1 << 6) != 0,
+        show_preview_tint: packed & (1 << 7) != 0,
+        show_empty_safety: packed & (1 << 8) != 0,
+    })
+}
+
+/// Bounded control rectangles for the native advanced-appearance dialog.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AppearanceDialogLayout {
+    pub(crate) client: LayoutRect,
+    pub(crate) density_group: LayoutRect,
+    pub(crate) density_options: [LayoutRect; 3],
+    pub(crate) emphasis_group: LayoutRect,
+    pub(crate) emphasis_options: [LayoutRect; 3],
+    pub(crate) forced_explanation: LayoutRect,
+    pub(crate) checkboxes: [LayoutRect; 3],
+    pub(crate) separator: LayoutRect,
+    pub(crate) reset: LayoutRect,
+    pub(crate) ok: LayoutRect,
+    pub(crate) cancel: LayoutRect,
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+fn bounded_dialog_rect(x: i32, y: i32, width: i32, height: i32, client: LayoutRect) -> LayoutRect {
+    let x = x.max(0).min(client.width);
+    let y = y.max(0).min(client.height);
+    LayoutRect {
+        x,
+        y,
+        width: width.max(0).min(client.width.saturating_sub(x)),
+        height: height.max(0).min(client.height.saturating_sub(y)),
+    }
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn calculate_appearance_dialog_layout(
+    dpi: u32,
+    maximum_width: i32,
+    maximum_height: i32,
+    show_forced_explanation: bool,
+) -> Option<AppearanceDialogLayout> {
+    let desired_width = scale_dip(456, dpi);
+    let explanation_band = if show_forced_explanation { 48 } else { 0 };
+    let desired_height = scale_dip(372 + explanation_band, dpi);
+    if maximum_width < desired_width || maximum_height < desired_height {
+        return None;
+    }
+    let client = LayoutRect {
+        x: 0,
+        y: 0,
+        width: desired_width,
+        height: desired_height,
+    };
+    let rect = |x, y, width, height| {
+        bounded_dialog_rect(
+            scale_dip(x, dpi),
+            scale_dip(y, dpi),
+            scale_dip(width, dpi),
+            scale_dip(height, dpi),
+            client,
+        )
+    };
+    Some(AppearanceDialogLayout {
+        client,
+        density_group: rect(12, 12, 432, 88),
+        density_options: [
+            rect(28, 34, 392, 20),
+            rect(28, 56, 392, 20),
+            rect(28, 78, 392, 20),
+        ],
+        emphasis_group: rect(12, 108, 432, 88),
+        emphasis_options: [
+            rect(28, 130, 392, 20),
+            rect(28, 152, 392, 20),
+            rect(28, 174, 392, 20),
+        ],
+        forced_explanation: if show_forced_explanation {
+            rect(12, 204, 432, 40)
+        } else {
+            rect(12, 204, 0, 0)
+        },
+        checkboxes: [
+            rect(20, 204 + explanation_band, 416, 22),
+            rect(20, 232 + explanation_band, 416, 22),
+            rect(20, 260 + explanation_band, 416, 22),
+        ],
+        separator: rect(12, 292 + explanation_band, 432, 2),
+        reset: rect(12, 312 + explanation_band, 124, 30),
+        ok: rect(292, 312 + explanation_band, 72, 30),
+        cancel: rect(372, 312 + explanation_band, 72, 30),
+    })
 }
 
 /// Pixel metrics used to place one command rail.
@@ -227,6 +854,7 @@ impl MeasuredFontMetrics {
         self,
         dpi: u32,
         available_width: i32,
+        show_safety: bool,
     ) -> EmptyStateContentMetrics {
         let available_width = available_width.max(0);
         let fallback_line_height = scale_dip(16, dpi);
@@ -235,11 +863,15 @@ impl MeasuredFontMetrics {
             self.empty_instruction_text_height.max(fallback_line_height),
             available_width,
         );
-        let safety_height = conservative_wrapped_text_height(
-            self.empty_safety_text_width.max(0),
-            self.empty_safety_text_height.max(fallback_line_height),
-            available_width,
-        );
+        let safety_height = if show_safety {
+            conservative_wrapped_text_height(
+                self.empty_safety_text_width.max(0),
+                self.empty_safety_text_height.max(fallback_line_height),
+                available_width,
+            )
+        } else {
+            0
+        };
         let add_width = self
             .empty_add_text_width
             .max(0)
@@ -260,16 +892,19 @@ impl MeasuredFontMetrics {
             total_height: instruction_height
                 .saturating_add(gap)
                 .saturating_add(add_height)
-                .saturating_add(gap)
-                .saturating_add(safety_height),
+                .saturating_add(if show_safety {
+                    gap.saturating_add(safety_height)
+                } else {
+                    0
+                }),
         }
     }
 
-    fn empty_state_required_height(self, dpi: u32) -> i32 {
+    fn empty_state_required_height(self, dpi: u32, show_safety: bool) -> i32 {
         let content_width = self
             .empty_state_minimum_width(dpi)
             .saturating_sub(scale_dip(24, dpi));
-        self.empty_state_content_metrics(dpi, content_width)
+        self.empty_state_content_metrics(dpi, content_width, show_safety)
             .total_height
             .saturating_add(scale_dip(24, dpi))
     }
@@ -1185,7 +1820,20 @@ pub fn select_command_rail_density(
     available_height: i32,
     dpi: u32,
 ) -> Result<RailDensity, LayoutError> {
-    for density in [RailDensity::Comfortable, RailDensity::Compact] {
+    select_command_rail_density_with_preference(
+        available_height,
+        dpi,
+        RailDensityPreference::Automatic,
+    )
+}
+
+/// Selects the preferred density without substituting another explicit choice.
+pub fn select_command_rail_density_with_preference(
+    available_height: i32,
+    dpi: u32,
+    preference: RailDensityPreference,
+) -> Result<RailDensity, LayoutError> {
+    for density in preference.candidates().iter().copied() {
         let metrics = density.metrics(dpi);
         if required_command_rail_height(&LEFT_RAIL, metrics)? <= available_height
             && required_command_rail_height(&RIGHT_RAIL, metrics)? <= available_height
@@ -1193,60 +1841,103 @@ pub fn select_command_rail_density(
             return Ok(density);
         }
     }
-    let required = required_command_rail_height(&LEFT_RAIL, RailDensity::Compact.metrics(dpi))?;
+    let required =
+        required_command_rail_height(&LEFT_RAIL, preference.minimum_density().metrics(dpi))?;
     Err(LayoutError::InsufficientHeight {
         required,
         available: available_height,
     })
 }
 
-#[cfg(any(windows, test))]
+#[cfg(test)]
 #[must_use]
-pub(crate) fn minimum_main_client_height(dpi: u32, measured: MeasuredFontMetrics) -> i32 {
-    let metrics = measured.rail_metrics(RailDensity::Compact, dpi);
-    let left = required_command_rail_height(&LEFT_RAIL, metrics).unwrap_or(i32::MAX);
-    let right = required_command_rail_height(&RIGHT_RAIL, metrics).unwrap_or(i32::MAX);
-    left.max(right)
-        .max(measured.empty_state_required_height(dpi))
-        .saturating_add(measured.status_height(dpi))
+pub(crate) fn minimum_main_client_height(
+    dpi: u32,
+    measured: MeasuredFontMetrics,
+    preference: RailDensityPreference,
+) -> i32 {
+    minimum_main_client_height_with_safety(dpi, measured, preference, true)
 }
 
 #[cfg(any(windows, test))]
 #[must_use]
-pub(crate) fn recommended_main_client_height(dpi: u32, measured: MeasuredFontMetrics) -> i32 {
-    let metrics = measured.rail_metrics(RailDensity::Comfortable, dpi);
+pub(crate) fn minimum_main_client_height_with_safety(
+    dpi: u32,
+    measured: MeasuredFontMetrics,
+    preference: RailDensityPreference,
+    show_empty_safety: bool,
+) -> i32 {
+    let metrics = measured.rail_metrics(preference.minimum_density(), dpi);
     let left = required_command_rail_height(&LEFT_RAIL, metrics).unwrap_or(i32::MAX);
     let right = required_command_rail_height(&RIGHT_RAIL, metrics).unwrap_or(i32::MAX);
     left.max(right)
-        .max(measured.empty_state_required_height(dpi))
+        .max(measured.empty_state_required_height(dpi, show_empty_safety))
         .saturating_add(measured.status_height(dpi))
 }
 
+#[cfg(test)]
+#[must_use]
+pub(crate) fn recommended_main_client_height(
+    dpi: u32,
+    measured: MeasuredFontMetrics,
+    preference: RailDensityPreference,
+) -> i32 {
+    recommended_main_client_height_with_safety(dpi, measured, preference, true)
+}
+
 #[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn recommended_main_client_height_with_safety(
+    dpi: u32,
+    measured: MeasuredFontMetrics,
+    preference: RailDensityPreference,
+    show_empty_safety: bool,
+) -> i32 {
+    let metrics = measured.rail_metrics(preference.recommended_density(), dpi);
+    let left = required_command_rail_height(&LEFT_RAIL, metrics).unwrap_or(i32::MAX);
+    let right = required_command_rail_height(&RIGHT_RAIL, metrics).unwrap_or(i32::MAX);
+    left.max(right)
+        .max(measured.empty_state_required_height(dpi, show_empty_safety))
+        .saturating_add(measured.status_height(dpi))
+}
+
+#[cfg(test)]
 #[must_use]
 pub(crate) fn calculate_main_layout(
     client_width: i32,
     client_height: i32,
     dpi: u32,
     measured: MeasuredFontMetrics,
+    preference: RailDensityPreference,
+) -> MainLayout {
+    calculate_main_layout_with_safety(client_width, client_height, dpi, measured, preference, true)
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn calculate_main_layout_with_safety(
+    client_width: i32,
+    client_height: i32,
+    dpi: u32,
+    measured: MeasuredFontMetrics,
+    preference: RailDensityPreference,
+    show_empty_safety: bool,
 ) -> MainLayout {
     let width = client_width.max(0);
     let height = client_height.max(0);
     let status_height = measured.status_height(dpi).min(height);
     let rail_height = height.saturating_sub(status_height);
 
-    let selected = [RailDensity::Comfortable, RailDensity::Compact]
-        .into_iter()
-        .find_map(|density| {
-            let metrics = measured.rail_metrics(density, dpi);
-            let rails_width = metrics.rail_width.saturating_mul(2);
-            if rails_width >= width {
-                return None;
-            }
-            let left = calculate_command_rail_layout(&LEFT_RAIL, rail_height, metrics).ok()?;
-            let right = calculate_command_rail_layout(&RIGHT_RAIL, rail_height, metrics).ok()?;
-            Some((density, metrics.rail_width, left, right))
-        });
+    let selected = preference.candidates().iter().copied().find_map(|density| {
+        let metrics = measured.rail_metrics(density, dpi);
+        let rails_width = metrics.rail_width.saturating_mul(2);
+        if rails_width >= width {
+            return None;
+        }
+        let left = calculate_command_rail_layout(&LEFT_RAIL, rail_height, metrics).ok()?;
+        let right = calculate_command_rail_layout(&RIGHT_RAIL, rail_height, metrics).ok()?;
+        Some((density, metrics.rail_width, left, right))
+    });
 
     let (rail_mode, rail_width, left_buttons, right_buttons) = match selected {
         Some((RailDensity::Comfortable, rail_width, left, right)) => {
@@ -1276,7 +1967,7 @@ pub(crate) fn calculate_main_layout(
         width: list_width,
         height: rail_height,
     };
-    let empty = calculate_empty_state_layout(list, dpi, measured);
+    let empty = calculate_empty_state_layout(list, dpi, measured, show_empty_safety);
     let drop_overlay = calculate_drop_overlay_layout(list, dpi, measured);
     MainLayout {
         rail_mode,
@@ -1350,21 +2041,18 @@ fn calculate_empty_state_layout(
     list: LayoutRect,
     dpi: u32,
     measured: MeasuredFontMetrics,
+    show_safety: bool,
 ) -> EmptyStateLayout {
     let horizontal_padding = scale_dip(12, dpi).min(list.width.saturating_div(2));
     let content_width = list
         .width
         .saturating_sub(horizontal_padding.saturating_mul(2));
-    let content = measured.empty_state_content_metrics(dpi, content_width);
+    let content = measured.empty_state_content_metrics(dpi, content_width, show_safety);
     let desired_instruction_height = content.instruction_height;
     let desired_button_height = content.add_height;
     let desired_safety_height = content.safety_height;
     let desired_gap = scale_dip(8, dpi);
-    let desired_total = desired_instruction_height
-        .saturating_add(desired_gap)
-        .saturating_add(desired_button_height)
-        .saturating_add(desired_gap)
-        .saturating_add(desired_safety_height);
+    let desired_total = content.total_height;
     let top = list
         .y
         .saturating_add(list.height.saturating_sub(desired_total).max(0) / 2);
@@ -1379,7 +2067,9 @@ fn calculate_empty_state_layout(
     let button_y = y;
     let button_height = desired_button_height.min(bottom.saturating_sub(y)).max(0);
     y = y.saturating_add(button_height);
-    y = y.saturating_add(desired_gap.min(bottom.saturating_sub(y)).max(0));
+    if show_safety {
+        y = y.saturating_add(desired_gap.min(bottom.saturating_sub(y)).max(0));
+    }
     let safety_y = y;
     let safety_height = desired_safety_height.min(bottom.saturating_sub(y)).max(0);
     let button_width = content.add_width;
@@ -1662,11 +2352,7 @@ pub(crate) const fn proposed_name_visual_decision(
     }
 }
 
-/// Restrained native light-theme colors used only for changed proposal cells.
-#[cfg(any(windows, test))]
-pub(crate) const PROPOSED_CHANGED_TEXT_COLOR: u32 = 0x0033_268F;
-#[cfg(any(windows, test))]
-pub(crate) const PROPOSED_CHANGED_BACKGROUND_COLOR: u32 = 0x00F7_F7FF;
+/// Initial Apply keyline color before appearance resources are installed.
 #[cfg(any(windows, test))]
 pub(crate) const APPLY_KEYLINE_COLOR: u32 = 0x0032_29D9;
 
@@ -2749,6 +3435,7 @@ pub(crate) enum UiEffect {
     ProposalRowsChanged(Box<[usize]>),
     AllRowsChanged,
     ColumnsChanged(usize),
+    AppearanceChanged,
     CloseRequested,
 }
 
@@ -2812,6 +3499,7 @@ pub(crate) fn command_effect_fits_policy(command: CommandId, outcome: &CommandOu
         ),
         UiEffect::AllRowsChanged => command_ui_policy(command) == CommandUiPolicy::AllRows,
         UiEffect::ColumnsChanged(_) => command_ui_policy(command) == CommandUiPolicy::Columns,
+        UiEffect::AppearanceChanged => appearance_command_allowed(command, false),
         UiEffect::CloseRequested => command == EXIT_COMMAND,
     }
 }
@@ -3549,6 +4237,445 @@ mod tests {
     }
 
     #[test]
+    fn appearance_defaults_and_forced_colors_precedence_are_fail_closed() {
+        let defaults = UiAppearance::default();
+        assert_eq!(defaults.theme, AppThemeMode::System);
+        assert_eq!(defaults.density, RailDensityPreference::Automatic);
+        assert_eq!(defaults.emphasis, PreviewEmphasis::Standard);
+        assert!(defaults.show_separators);
+        assert!(defaults.show_preview_tint);
+        assert!(defaults.show_empty_safety);
+
+        let custom = UiAppearance {
+            theme: AppThemeMode::Dark,
+            density: RailDensityPreference::Comfortable,
+            emphasis: PreviewEmphasis::Strong,
+            show_separators: false,
+            show_preview_tint: true,
+            show_empty_safety: false,
+        };
+        let ordinary = custom.resolve(ForcedColorsState::Inactive, Some(ResolvedTheme::Dark));
+        assert_eq!(ordinary.appearance, custom);
+        assert_eq!(ordinary.theme, ResolvedTheme::Dark);
+        assert!(ordinary.custom_colors_enabled);
+
+        let forced = custom.resolve(
+            ForcedColorsState::ActiveOrUnknown,
+            Some(ResolvedTheme::Dark),
+        );
+        assert_eq!(forced.appearance.theme, AppThemeMode::System);
+        assert_eq!(forced.theme, ResolvedTheme::NativeSystem);
+        assert!(!forced.appearance.show_preview_tint);
+        assert!(!forced.custom_colors_enabled);
+        assert_eq!(forced.appearance.density, custom.density);
+        assert_eq!(
+            forced.appearance.show_empty_safety,
+            custom.show_empty_safety
+        );
+
+        let system = UiAppearance::default();
+        assert_eq!(
+            system
+                .resolve(ForcedColorsState::Inactive, Some(ResolvedTheme::Dark))
+                .theme,
+            ResolvedTheme::Dark
+        );
+        let unavailable = system.resolve(ForcedColorsState::Inactive, None);
+        assert_eq!(unavailable.theme, ResolvedTheme::NativeSystem);
+        assert!(!unavailable.custom_colors_enabled);
+        assert_eq!(semantic_palette(unavailable.theme), None);
+        assert_eq!(
+            dwm_frame_action(ResolvedTheme::NativeSystem, false),
+            DwmFrameAction::None
+        );
+        assert_eq!(
+            dwm_frame_action(ResolvedTheme::Dark, false),
+            DwmFrameAction::SetDark(true)
+        );
+        assert_eq!(
+            dwm_frame_action(ResolvedTheme::NativeSystem, true),
+            DwmFrameAction::SetDark(false)
+        );
+        assert_eq!(theme_from_foreground(245, 245, 245), ResolvedTheme::Dark);
+        assert_eq!(theme_from_foreground(24, 24, 24), ResolvedTheme::Light);
+    }
+
+    #[test]
+    fn auxiliary_theme_commands_are_presentation_only_and_safely_classified() {
+        let original = UiAppearance {
+            theme: AppThemeMode::System,
+            density: RailDensityPreference::Compact,
+            emphasis: PreviewEmphasis::Strong,
+            show_separators: false,
+            show_preview_tint: false,
+            show_empty_safety: true,
+        };
+        for (command, theme) in [
+            (THEME_SYSTEM, AppThemeMode::System),
+            (THEME_LIGHT, AppThemeMode::Light),
+            (THEME_DARK, AppThemeMode::Dark),
+        ] {
+            assert!(command > VERSION);
+            assert!(command_ui_spec(command).is_none());
+            assert_eq!(theme_mode_for_command(command), Some(theme));
+            assert_eq!(theme_command_for_mode(theme), command);
+            assert!(appearance_command_allowed(command, false));
+            assert!(appearance_command_allowed(command, true));
+            let updated = appearance_after_theme_command(original, command);
+            assert_eq!(updated.map(|appearance| appearance.theme), Some(theme));
+            assert_eq!(
+                updated.map(|appearance| appearance.density),
+                Some(original.density)
+            );
+            assert_eq!(
+                updated.map(|appearance| appearance.emphasis),
+                Some(original.emphasis)
+            );
+        }
+        assert!(appearance_command_allowed(APPEARANCE_ADVANCED, false));
+        assert!(!appearance_command_allowed(APPEARANCE_ADVANCED, true));
+        assert_eq!(appearance_after_theme_command(original, VERSION), None);
+        let outcome = CommandOutcome::ui(UiEffect::AppearanceChanged);
+        assert!(command_effect_fits_policy(THEME_DARK, &outcome));
+        assert!(!command_effect_fits_policy(COPY_NAMES, &outcome));
+    }
+
+    #[test]
+    fn preview_emphasis_tint_and_native_precedence_are_semantic() {
+        let base = UiAppearance::default();
+        let light = base.resolve(ForcedColorsState::Inactive, Some(ResolvedTheme::Light));
+        let subtle = proposed_name_colors(
+            ResolvedUiAppearance {
+                appearance: UiAppearance {
+                    emphasis: PreviewEmphasis::Subtle,
+                    ..base
+                },
+                ..light
+            },
+            ProposedNameVisual::Changed,
+        );
+        let strong = proposed_name_colors(
+            ResolvedUiAppearance {
+                appearance: UiAppearance {
+                    emphasis: PreviewEmphasis::Strong,
+                    show_preview_tint: false,
+                    ..base
+                },
+                ..light
+            },
+            ProposedNameVisual::Changed,
+        );
+        assert_eq!(
+            subtle.map(|colors| colors.text),
+            Some(PRECISION_LIGHT.changed_subtle)
+        );
+        assert_eq!(
+            subtle.and_then(|colors| colors.background),
+            Some(PRECISION_LIGHT.preview_tint)
+        );
+        assert_eq!(
+            strong.map(|colors| colors.text),
+            Some(PRECISION_LIGHT.changed_strong)
+        );
+        assert_eq!(strong.and_then(|colors| colors.background), None);
+        assert_eq!(
+            proposed_name_colors(light, ProposedNameVisual::Default),
+            None
+        );
+
+        let forced = base.resolve(
+            ForcedColorsState::ActiveOrUnknown,
+            Some(ResolvedTheme::Dark),
+        );
+        assert_eq!(semantic_palette(forced.theme), None);
+        assert_eq!(
+            proposed_name_colors(forced, ProposedNameVisual::Changed),
+            None
+        );
+        assert_ne!(
+            semantic_palette(ResolvedTheme::Light),
+            semantic_palette(ResolvedTheme::Dark)
+        );
+    }
+
+    #[test]
+    fn advanced_appearance_model_previews_resets_accepts_and_cancels_exactly() {
+        let original = UiAppearance {
+            theme: AppThemeMode::Dark,
+            density: RailDensityPreference::Compact,
+            emphasis: PreviewEmphasis::Strong,
+            show_separators: false,
+            show_preview_tint: false,
+            show_empty_safety: false,
+        };
+        let mut model = AppearanceDialogModel::new(original, ForcedColorsState::Inactive);
+        assert_eq!(
+            model.apply(AppearanceDialogAction::Density(
+                RailDensityPreference::Comfortable,
+            )),
+            AppearanceDialogEffect::Preview(UiAppearance {
+                density: RailDensityPreference::Comfortable,
+                ..original
+            })
+        );
+        assert!(matches!(
+            model.apply(AppearanceDialogAction::ShowSeparators(true)),
+            AppearanceDialogEffect::Preview(UiAppearance {
+                show_separators: true,
+                ..
+            })
+        ));
+        assert!(matches!(
+            model.apply(AppearanceDialogAction::ShowEmptySafety(true)),
+            AppearanceDialogEffect::Preview(UiAppearance {
+                show_empty_safety: true,
+                ..
+            })
+        ));
+        assert_eq!(
+            model.apply(AppearanceDialogAction::ResetDefaults),
+            AppearanceDialogEffect::Preview(UiAppearance {
+                theme: AppThemeMode::Dark,
+                ..UiAppearance::default()
+            })
+        );
+        assert_eq!(
+            model.apply(AppearanceDialogAction::Accept),
+            AppearanceDialogEffect::Accept(UiAppearance {
+                theme: AppThemeMode::Dark,
+                ..UiAppearance::default()
+            })
+        );
+        assert_eq!(
+            model.apply(AppearanceDialogAction::Cancel),
+            AppearanceDialogEffect::Cancel(original)
+        );
+        assert_eq!(model.draft(), original);
+
+        let mut forced = AppearanceDialogModel::new(original, ForcedColorsState::ActiveOrUnknown);
+        assert_eq!(forced.forced_colors(), ForcedColorsState::ActiveOrUnknown);
+        assert_eq!(
+            forced.apply(AppearanceDialogAction::Emphasis(PreviewEmphasis::Subtle,)),
+            AppearanceDialogEffect::None
+        );
+        assert_eq!(
+            forced.apply(AppearanceDialogAction::ShowPreviewTint(true)),
+            AppearanceDialogEffect::None
+        );
+        assert_eq!(forced.draft(), original);
+        forced.set_forced_colors(ForcedColorsState::Inactive);
+        assert_eq!(forced.forced_colors(), ForcedColorsState::Inactive);
+        assert!(!advanced_appearance_available(true, false));
+        assert!(!advanced_appearance_available(false, true));
+        assert!(advanced_appearance_available(false, false));
+        assert!(!appearance_dialog_should_notify_cancel(false, false));
+        assert!(!appearance_dialog_should_notify_cancel(false, true));
+        assert!(!appearance_dialog_should_notify_cancel(true, true));
+        assert!(appearance_dialog_should_notify_cancel(true, false));
+    }
+
+    #[test]
+    fn appearance_preview_payload_is_strict_and_round_trips_every_setting() {
+        for theme in [
+            AppThemeMode::System,
+            AppThemeMode::Light,
+            AppThemeMode::Dark,
+        ] {
+            for density in [
+                RailDensityPreference::Automatic,
+                RailDensityPreference::Comfortable,
+                RailDensityPreference::Compact,
+            ] {
+                for emphasis in [
+                    PreviewEmphasis::Subtle,
+                    PreviewEmphasis::Standard,
+                    PreviewEmphasis::Strong,
+                ] {
+                    for flags in 0_u8..8 {
+                        let appearance = UiAppearance {
+                            theme,
+                            density,
+                            emphasis,
+                            show_separators: flags & 1 != 0,
+                            show_preview_tint: flags & 2 != 0,
+                            show_empty_safety: flags & 4 != 0,
+                        };
+                        assert_eq!(
+                            unpack_ui_appearance(pack_ui_appearance(appearance)),
+                            Some(appearance)
+                        );
+                    }
+                }
+            }
+        }
+        for invalid in [0x3, 0xC, 0x30, 1 << 9, u32::MAX] {
+            assert_eq!(unpack_ui_appearance(invalid), None);
+        }
+    }
+
+    #[test]
+    fn preinstall_appearance_dialog_destruction_emits_no_owner_callback() {
+        assert!(!appearance_dialog_should_notify_cancel(false, false));
+        assert!(appearance_dialog_should_notify_cancel(true, false));
+        assert!(!appearance_dialog_should_notify_cancel(true, true));
+    }
+
+    #[test]
+    fn advanced_appearance_layout_keeps_every_control_inside_work_area_bounds() {
+        for (dpi, width, height) in [(96, 456, 420), (144, 684, 630), (192, 912, 840)] {
+            let layout = calculate_appearance_dialog_layout(dpi, width, height, true);
+            assert!(layout.is_some(), "valid work area rejected at {dpi} DPI");
+            let Some(layout) = layout else {
+                continue;
+            };
+            let rects = [
+                layout.density_group,
+                layout.density_options[0],
+                layout.density_options[1],
+                layout.density_options[2],
+                layout.emphasis_group,
+                layout.emphasis_options[0],
+                layout.emphasis_options[1],
+                layout.emphasis_options[2],
+                layout.forced_explanation,
+                layout.checkboxes[0],
+                layout.checkboxes[1],
+                layout.checkboxes[2],
+                layout.separator,
+                layout.reset,
+                layout.ok,
+                layout.cancel,
+            ];
+            assert!(layout.client.width <= width);
+            assert!(layout.client.height <= height);
+            for rect in rects {
+                assert!(rect.x >= 0 && rect.y >= 0 && rect.width >= 0 && rect.height >= 0);
+                assert!(rect.x.saturating_add(rect.width) <= layout.client.width);
+                assert!(rect.bottom() <= layout.client.height);
+            }
+        }
+        assert_eq!(
+            calculate_appearance_dialog_layout(192, 320, 300, true),
+            None
+        );
+        assert_eq!(
+            calculate_appearance_dialog_layout(192, 320, 300, false),
+            None
+        );
+        let layout = calculate_appearance_dialog_layout(96, 456, 420, true);
+        assert!(
+            layout.is_some(),
+            "baseline appearance dialog layout was rejected"
+        );
+        let Some(layout) = layout else {
+            return;
+        };
+        let interactive = [
+            layout.density_options[0],
+            layout.density_options[1],
+            layout.density_options[2],
+            layout.emphasis_options[0],
+            layout.emphasis_options[1],
+            layout.emphasis_options[2],
+            layout.checkboxes[0],
+            layout.checkboxes[1],
+            layout.checkboxes[2],
+            layout.reset,
+            layout.ok,
+            layout.cancel,
+        ];
+        assert!(
+            interactive
+                .iter()
+                .all(|rect| rect.width > 0 && rect.height > 0)
+        );
+        for (index, left) in interactive.iter().enumerate() {
+            for right in &interactive[index + 1..] {
+                let overlaps = left.x < right.x.saturating_add(right.width)
+                    && right.x < left.x.saturating_add(left.width)
+                    && left.y < right.bottom()
+                    && right.y < left.bottom();
+                assert!(!overlaps);
+            }
+        }
+
+        let ordinary = calculate_appearance_dialog_layout(96, 456, 420, false);
+        let forced = calculate_appearance_dialog_layout(96, 456, 420, true);
+        let (Some(ordinary), Some(forced)) = (ordinary, forced) else {
+            return;
+        };
+        assert_eq!(ordinary.client.height, scale_dip(372, 96));
+        assert_eq!(forced.client.height, scale_dip(420, 96));
+        assert_eq!(ordinary.forced_explanation.width, 0);
+        assert_eq!(ordinary.forced_explanation.height, 0);
+        assert!(forced.forced_explanation.width > 0);
+        assert!(forced.forced_explanation.height > 0);
+        assert_eq!(
+            forced.checkboxes[0].y - ordinary.checkboxes[0].y,
+            scale_dip(48, 96)
+        );
+        assert_eq!(forced.reset.y - ordinary.reset.y, scale_dip(48, 96));
+        assert_eq!(
+            ordinary.client.height - ordinary.cancel.bottom(),
+            forced.client.height - forced.cancel.bottom(),
+        );
+    }
+
+    #[test]
+    fn explicit_density_preferences_never_silently_substitute_the_other_density() {
+        assert_eq!(
+            select_command_rail_density_with_preference(
+                352,
+                96,
+                RailDensityPreference::Comfortable,
+            ),
+            Ok(RailDensity::Comfortable)
+        );
+        assert!(matches!(
+            select_command_rail_density_with_preference(
+                351,
+                96,
+                RailDensityPreference::Comfortable,
+            ),
+            Err(LayoutError::InsufficientHeight { .. })
+        ));
+        assert_eq!(
+            select_command_rail_density_with_preference(296, 96, RailDensityPreference::Compact),
+            Ok(RailDensity::Compact)
+        );
+        assert!(matches!(
+            select_command_rail_density_with_preference(295, 96, RailDensityPreference::Compact),
+            Err(LayoutError::InsufficientHeight { .. })
+        ));
+
+        let measured = MeasuredFontMetrics::default();
+        let automatic =
+            calculate_main_layout(464, 369, 96, measured, RailDensityPreference::Automatic);
+        let comfortable =
+            calculate_main_layout(464, 369, 96, measured, RailDensityPreference::Comfortable);
+        let compact = calculate_main_layout(464, 369, 96, measured, RailDensityPreference::Compact);
+        assert_eq!(automatic.rail_mode, RailMode::Compact);
+        assert_eq!(comfortable.rail_mode, RailMode::MenuOnly);
+        assert_eq!(compact.rail_mode, RailMode::Compact);
+        assert_eq!(
+            minimum_main_client_height(96, measured, RailDensityPreference::Automatic),
+            minimum_main_client_height(96, measured, RailDensityPreference::Compact)
+        );
+        assert!(
+            minimum_main_client_height(96, measured, RailDensityPreference::Comfortable)
+                > minimum_main_client_height(96, measured, RailDensityPreference::Compact)
+        );
+        assert_eq!(
+            recommended_main_client_height(96, measured, RailDensityPreference::Automatic),
+            recommended_main_client_height(96, measured, RailDensityPreference::Comfortable)
+        );
+        assert_eq!(
+            recommended_main_client_height(96, measured, RailDensityPreference::Compact),
+            minimum_main_client_height(96, measured, RailDensityPreference::Compact)
+        );
+    }
+
+    #[test]
     fn measured_font_metrics_expand_rail_and_status_geometry() {
         let measured = MeasuredFontMetrics {
             button_text_width: 90,
@@ -3573,20 +4700,33 @@ mod tests {
         assert!(measured.status_height(96) >= 28);
         assert!(measured.empty_state_minimum_width(96) >= 384);
         assert!(
-            minimum_main_client_height(96, measured)
-                > minimum_main_client_height(96, MeasuredFontMetrics::default())
+            minimum_main_client_height(96, measured, RailDensityPreference::Automatic)
+                > minimum_main_client_height(
+                    96,
+                    MeasuredFontMetrics::default(),
+                    RailDensityPreference::Automatic,
+                )
         );
         assert!(
-            recommended_main_client_height(96, measured) > minimum_main_client_height(96, measured)
+            recommended_main_client_height(96, measured, RailDensityPreference::Automatic)
+                > minimum_main_client_height(96, measured, RailDensityPreference::Automatic)
         );
 
         let client_width = compact
             .rail_width
             .saturating_mul(2)
             .saturating_add(measured.empty_state_minimum_width(96));
-        let client_height = minimum_main_client_height(96, measured);
-        let layout = calculate_main_layout(client_width, client_height, 96, measured);
-        let empty = measured.empty_state_content_metrics(96, layout.empty_safety.width);
+        let client_height =
+            minimum_main_client_height(96, measured, RailDensityPreference::Automatic);
+        let layout = calculate_main_layout(
+            client_width,
+            client_height,
+            96,
+            measured,
+            RailDensityPreference::Automatic,
+        );
+        assert_eq!(layout.rail_mode, RailMode::Compact);
+        let empty = measured.empty_state_content_metrics(96, layout.empty_safety.width, true);
         assert!(layout.empty_instruction.height >= empty.instruction_height);
         assert!(layout.empty_safety.height >= empty.safety_height);
         assert!(layout.empty_add.height >= empty.add_height);
@@ -3637,15 +4777,22 @@ mod tests {
         let client_width = rail_width
             .saturating_mul(2)
             .saturating_add(measured.empty_state_minimum_width(96));
-        let client_height = minimum_main_client_height(96, measured);
+        let client_height =
+            minimum_main_client_height(96, measured, RailDensityPreference::Automatic);
         let rail_only_height =
             required_command_rail_height(&LEFT_RAIL, RailDensity::Compact.metrics(96))
                 .unwrap_or_default()
                 .saturating_add(measured.status_height(96));
         assert!(client_height > rail_only_height);
 
-        let layout = calculate_main_layout(client_width, client_height, 96, measured);
-        let content = measured.empty_state_content_metrics(96, layout.empty_safety.width);
+        let layout = calculate_main_layout(
+            client_width,
+            client_height,
+            96,
+            measured,
+            RailDensityPreference::Automatic,
+        );
+        let content = measured.empty_state_content_metrics(96, layout.empty_safety.width, true);
         assert!(layout.empty_instruction.height >= content.instruction_height);
         assert!(layout.empty_safety.height >= content.safety_height);
         assert!(layout.empty_add.height >= content.add_height);
@@ -3653,20 +4800,109 @@ mod tests {
     }
 
     #[test]
+    fn hiding_empty_safety_removes_its_rect_gap_and_minimum_height() {
+        let measured = MeasuredFontMetrics {
+            empty_instruction_text_width: 240,
+            empty_instruction_text_height: 24,
+            empty_safety_text_width: 3_000,
+            empty_safety_text_height: 40,
+            empty_add_text_width: 140,
+            empty_add_text_height: 30,
+            ..MeasuredFontMetrics::default()
+        };
+        let with_safety = minimum_main_client_height_with_safety(
+            96,
+            measured,
+            RailDensityPreference::Automatic,
+            true,
+        );
+        let without_safety = minimum_main_client_height_with_safety(
+            96,
+            measured,
+            RailDensityPreference::Automatic,
+            false,
+        );
+        assert!(without_safety < with_safety);
+        assert!(
+            recommended_main_client_height_with_safety(
+                96,
+                measured,
+                RailDensityPreference::Automatic,
+                false,
+            ) < recommended_main_client_height_with_safety(
+                96,
+                measured,
+                RailDensityPreference::Automatic,
+                true,
+            )
+        );
+        let width = measured
+            .rail_metrics(RailDensity::Compact, 96)
+            .rail_width
+            .saturating_mul(2)
+            .saturating_add(measured.empty_state_minimum_width(96));
+        let hidden = calculate_main_layout_with_safety(
+            width,
+            without_safety,
+            96,
+            measured,
+            RailDensityPreference::Automatic,
+            false,
+        );
+        let hidden_content =
+            measured.empty_state_content_metrics(96, hidden.empty_instruction.width, false);
+        assert_eq!(hidden.empty_safety.height, 0);
+        assert_eq!(hidden.empty_safety.y, hidden.empty_add.bottom());
+        assert_eq!(
+            hidden.empty_instruction.y,
+            hidden.list.y.saturating_add(
+                hidden
+                    .list
+                    .height
+                    .saturating_sub(hidden_content.total_height)
+                    / 2,
+            ),
+        );
+        let shown = calculate_main_layout_with_safety(
+            width,
+            with_safety,
+            96,
+            measured,
+            RailDensityPreference::Automatic,
+            true,
+        );
+        let shown_content =
+            measured.empty_state_content_metrics(96, shown.empty_instruction.width, true);
+        assert!(shown.empty_safety.height > 0);
+        assert!(shown.empty_safety.y > shown.empty_add.bottom());
+        assert_eq!(
+            shown.empty_instruction.y,
+            shown
+                .list
+                .y
+                .saturating_add(shown.list.height.saturating_sub(shown_content.total_height) / 2,),
+        );
+    }
+
+    #[test]
     fn main_layout_falls_back_from_compact_to_menu_only_without_invalid_rectangles() {
         let measured = MeasuredFontMetrics::default();
-        let comfortable = calculate_main_layout(464, 370, 96, measured);
+        let comfortable =
+            calculate_main_layout(464, 370, 96, measured, RailDensityPreference::Automatic);
         assert_eq!(comfortable.rail_mode, RailMode::Comfortable);
         assert_eq!(main_layout_window_count(&comfortable), 34);
 
-        let compact = calculate_main_layout(464, 369, 96, measured);
+        let compact =
+            calculate_main_layout(464, 369, 96, measured, RailDensityPreference::Automatic);
         assert_eq!(compact.rail_mode, RailMode::Compact);
 
-        let vertical_menu_only = calculate_main_layout(464, 313, 96, measured);
+        let vertical_menu_only =
+            calculate_main_layout(464, 313, 96, measured, RailDensityPreference::Automatic);
         assert_eq!(vertical_menu_only.rail_mode, RailMode::MenuOnly);
         assert_eq!(main_layout_window_count(&vertical_menu_only), 8);
 
-        let menu_only = calculate_main_layout(80, 40, 96, measured);
+        let menu_only =
+            calculate_main_layout(80, 40, 96, measured, RailDensityPreference::Automatic);
         assert_eq!(menu_only.rail_mode, RailMode::MenuOnly);
         for rect in [
             menu_only.list,
@@ -3936,8 +5172,6 @@ mod tests {
             assert_eq!(state, ForcedColorsState::ActiveOrUnknown);
             assert!(!state.custom_colors_enabled());
         }
-        assert_eq!(PROPOSED_CHANGED_TEXT_COLOR, 0x0033_268F);
-        assert_eq!(PROPOSED_CHANGED_BACKGROUND_COLOR, 0x00F7_F7FF);
         assert_eq!(APPLY_KEYLINE_COLOR, 0x0032_29D9);
         assert_eq!(
             proposed_name_visual_decision(ProposedNameVisualContext {
@@ -4356,6 +5590,129 @@ mod tests {
             Some(HorizontalWindowPlacement { x: 0, width: 480 })
         );
         assert_eq!(fit_widened_window_to_work_area(0, 10, 10, 560), None);
+    }
+
+    #[test]
+    fn minimum_track_size_is_clamped_per_axis_to_the_work_area() {
+        assert_eq!(
+            constrain_minimum_track_size_to_work_area(640, 520, 1_920, 1_040),
+            Some(WindowTrackSize {
+                width: 640,
+                height: 520,
+            })
+        );
+        assert_eq!(
+            constrain_minimum_track_size_to_work_area(640, 520, 480, 320),
+            Some(WindowTrackSize {
+                width: 480,
+                height: 320,
+            })
+        );
+        assert_eq!(
+            constrain_minimum_track_size_to_work_area(i32::MAX, i32::MAX, 1, 1),
+            Some(WindowTrackSize {
+                width: 1,
+                height: 1,
+            })
+        );
+        for invalid in [
+            (0, 520, 480, 320),
+            (640, 0, 480, 320),
+            (640, 520, 0, 320),
+            (640, 520, 480, 0),
+        ] {
+            assert_eq!(
+                constrain_minimum_track_size_to_work_area(
+                    invalid.0, invalid.1, invalid.2, invalid.3,
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn work_area_clamping_preserves_compact_then_menu_only_with_bounded_children() {
+        let measured = MeasuredFontMetrics::default();
+        let minimum_height =
+            minimum_main_client_height(96, measured, RailDensityPreference::Automatic);
+        let normal = WindowTrackSize {
+            width: INITIAL_WIDTH,
+            height: minimum_height,
+        };
+        assert_eq!(
+            constrain_minimum_track_size_to_work_area(normal.width, normal.height, 1_920, 1_040,),
+            Some(normal)
+        );
+        let compact = calculate_main_layout(
+            normal.width,
+            normal.height,
+            96,
+            measured,
+            RailDensityPreference::Automatic,
+        );
+        assert_eq!(compact.rail_mode, RailMode::Compact);
+
+        let constrained = WindowTrackSize {
+            width: INITIAL_WIDTH,
+            height: minimum_height - 1,
+        };
+        assert_eq!(
+            constrain_minimum_track_size_to_work_area(
+                INITIAL_WIDTH,
+                minimum_height,
+                constrained.width,
+                constrained.height,
+            ),
+            Some(constrained)
+        );
+        let menu_only = calculate_main_layout(
+            constrained.width,
+            constrained.height,
+            96,
+            measured,
+            RailDensityPreference::Automatic,
+        );
+        assert_eq!(menu_only.rail_mode, RailMode::MenuOnly);
+
+        let smallest = calculate_main_layout(1, 1, 96, measured, RailDensityPreference::Automatic);
+
+        for (layout, bounds) in [
+            (&compact, normal),
+            (&menu_only, constrained),
+            (
+                &smallest,
+                WindowTrackSize {
+                    width: 1,
+                    height: 1,
+                },
+            ),
+        ] {
+            for rect in [
+                layout.list,
+                layout.status_message,
+                layout.status_count,
+                layout.cancel,
+                layout.empty_instruction,
+                layout.empty_safety,
+                layout.empty_add,
+                layout.drop_overlay,
+            ] {
+                assert!(rect.x >= 0);
+                assert!(rect.y >= 0);
+                assert!(rect.width >= 0);
+                assert!(rect.height >= 0);
+                assert!(rect.x.saturating_add(rect.width) <= bounds.width);
+                assert!(rect.bottom() <= bounds.height);
+            }
+            for placement in layout.left_buttons.iter().chain(&layout.right_buttons) {
+                assert!(placement.x >= 0);
+                assert!(placement.y >= 0);
+                assert!(placement.width >= 0);
+                assert!(placement.height >= 0);
+                assert!(placement.x.saturating_add(placement.width) <= layout.rail_width);
+                assert!(placement.bottom() <= layout.list.height);
+            }
+        }
     }
 
     #[test]

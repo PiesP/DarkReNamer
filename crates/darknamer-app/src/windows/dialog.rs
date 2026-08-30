@@ -200,7 +200,7 @@ pub(super) struct OwnerEnableGuard {
 }
 
 impl OwnerEnableGuard {
-    fn new(owner: HWND) -> Self {
+    pub(super) fn new(owner: HWND) -> Self {
         // SAFETY: owner is the live top-level window supplied by the synchronous caller.
         let was_enabled = unsafe { IsWindowEnabled(owner) } != 0;
         if was_enabled {
@@ -208,6 +208,10 @@ impl OwnerEnableGuard {
             unsafe { EnableWindow(owner, 0) };
         }
         Self { owner, was_enabled }
+    }
+
+    pub(super) const fn disarm(&mut self) {
+        self.was_enabled = false;
     }
 }
 

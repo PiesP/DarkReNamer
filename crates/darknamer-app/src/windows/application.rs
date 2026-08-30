@@ -36,11 +36,12 @@ fn minimum_track_width(window: HWND, state: &AppState) -> i32 {
     } else {
         0
     };
+    let density = state.resolved_appearance().appearance.density;
     let rail_width = state
         .font_metrics
-        .rail_metrics(RailDensity::Compact, state.dpi)
+        .rail_metrics(density.minimum_density(), state.dpi)
         .rail_width;
-    let baseline_rail_width = RailDensity::Compact.metrics(state.dpi).rail_width;
+    let baseline_rail_width = density.minimum_density().metrics(state.dpi).rail_width;
     let measured_content_width = scale_dip(minimum_content_width_dip(), state.dpi)
         .saturating_add(
             rail_width
@@ -69,20 +70,87 @@ fn nonclient_height(window: HWND) -> i32 {
 }
 
 fn minimum_track_height(window: HWND, state: &AppState) -> i32 {
-    minimum_main_client_height(state.dpi, state.font_metrics)
-        .saturating_add(nonclient_height(window))
+    let appearance = state.resolved_appearance().appearance;
+    minimum_main_client_height_with_safety(
+        state.dpi,
+        state.font_metrics,
+        appearance.density,
+        appearance.show_empty_safety,
+    )
+    .saturating_add(nonclient_height(window))
+}
+
+fn requested_minimum_track_size(window: HWND, state: &AppState) -> WindowTrackSize {
+    WindowTrackSize {
+        width: minimum_track_width(window, state),
+        height: minimum_track_height(window, state),
+    }
+}
+
+fn nearest_monitor_work_area(window: HWND) -> io::Result<RECT> {
+    // SAFETY: window is live; the nearest-monitor query dereferences no caller
+    // memory and returns a borrowed monitor identifier.
+    let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let mut monitor_info = MONITORINFO {
+        cbSize: u32::try_from(size_of::<MONITORINFO>())
+            .map_err(|_| io::Error::other("invalid monitor info size"))?,
+        ..MONITORINFO::default()
+    };
+    // SAFETY: monitor is live and monitor_info has its exact structure size and
+    // remains writable for this synchronous query.
+    if unsafe { GetMonitorInfoW(monitor, &mut monitor_info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let work = monitor_info.rcWork;
+    if work.right <= work.left || work.bottom <= work.top {
+        return Err(io::Error::other("invalid monitor work area"));
+    }
+    Ok(work)
+}
+
+fn effective_minimum_track_size(window: HWND, state: &AppState) -> io::Result<WindowTrackSize> {
+    let requested = requested_minimum_track_size(window, state);
+    let work = nearest_monitor_work_area(window)?;
+    constrain_minimum_track_size_to_work_area(
+        requested.width,
+        requested.height,
+        work.right - work.left,
+        work.bottom - work.top,
+    )
+    .ok_or_else(|| io::Error::other("invalid minimum track size"))
 }
 
 fn recommended_track_height(window: HWND, state: &AppState) -> i32 {
-    recommended_main_client_height(state.dpi, state.font_metrics)
-        .saturating_add(nonclient_height(window))
+    let appearance = state.resolved_appearance().appearance;
+    recommended_main_client_height_with_safety(
+        state.dpi,
+        state.font_metrics,
+        appearance.density,
+        appearance.show_empty_safety,
+    )
+    .saturating_add(nonclient_height(window))
 }
 
 fn initial_dpi_size(window: HWND, state: &AppState) -> (i32, i32) {
-    (
-        minimum_track_width(window, state),
-        scale_dip(INITIAL_HEIGHT, state.dpi).max(recommended_track_height(window, state)),
-    )
+    let requested = WindowTrackSize {
+        width: minimum_track_width(window, state),
+        height: scale_dip(INITIAL_HEIGHT, state.dpi).max(recommended_track_height(window, state)),
+    };
+    let effective = nearest_monitor_work_area(window)
+        .ok()
+        .and_then(|work| {
+            constrain_minimum_track_size_to_work_area(
+                requested.width,
+                requested.height,
+                work.right - work.left,
+                work.bottom - work.top,
+            )
+        })
+        .unwrap_or(requested);
+    (effective.width, effective.height)
 }
 
 fn resize_to_initial_dpi(window: HWND, width: i32, height: i32) -> io::Result<()> {
@@ -166,43 +234,31 @@ fn ensure_minimum_track_size(window: HWND, state: &AppState) -> io::Result<()> {
     if unsafe { GetWindowRect(window, &mut rect) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    let minimum_width = minimum_track_width(window, state);
-    let minimum_height = minimum_track_height(window, state);
+    let work = nearest_monitor_work_area(window)?;
+    let requested = requested_minimum_track_size(window, state);
+    let minimum = constrain_minimum_track_size_to_work_area(
+        requested.width,
+        requested.height,
+        work.right - work.left,
+        work.bottom - work.top,
+    )
+    .ok_or_else(|| io::Error::other("invalid minimum track size"))?;
     let current_width = rect.right - rect.left;
     let current_height = rect.bottom - rect.top;
-    if current_width >= minimum_width && current_height >= minimum_height {
+    if current_width >= minimum.width && current_height >= minimum.height {
         return Ok(());
-    }
-    // SAFETY: window is live; the nearest-monitor query dereferences no caller
-    // memory and returns a borrowed monitor identifier.
-    let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) };
-    if monitor.is_null() {
-        return Err(io::Error::last_os_error());
-    }
-    let mut monitor_info = MONITORINFO {
-        cbSize: u32::try_from(size_of::<MONITORINFO>())
-            .map_err(|_| io::Error::other("invalid monitor info size"))?,
-        ..MONITORINFO::default()
-    };
-    // SAFETY: monitor is live and monitor_info has its exact structure size and
-    // remains writable for this synchronous query.
-    if unsafe { GetMonitorInfoW(monitor, &mut monitor_info) } == 0 {
-        return Err(io::Error::last_os_error());
     }
     let placement = fit_widened_window_to_work_area(
         rect.left,
-        monitor_info.rcWork.left,
-        monitor_info.rcWork.right,
-        minimum_width.max(current_width),
+        work.left,
+        work.right,
+        minimum.width.max(current_width),
     )
     .ok_or_else(|| io::Error::other("invalid monitor work area"))?;
-    let work_height = monitor_info.rcWork.bottom - monitor_info.rcWork.top;
-    if work_height <= 0 {
-        return Err(io::Error::other("invalid monitor work area height"));
-    }
-    let height = minimum_height.max(current_height).min(work_height);
-    let latest_y = monitor_info.rcWork.bottom - height;
-    let y = rect.top.clamp(monitor_info.rcWork.top, latest_y);
+    let work_height = work.bottom - work.top;
+    let height = minimum.height.max(current_height).min(work_height);
+    let latest_y = work.bottom - height;
+    let y = rect.top.clamp(work.top, latest_y);
     // SAFETY: the live window is resized within the nearest monitor work area
     // without changing activation or z-order.
     if unsafe {
@@ -239,6 +295,9 @@ fn run_unsafe() -> io::Result<()> {
         )));
     }
     let _ole = OleGuard;
+    // A failed WinRT initialization does not block the native workbench. System
+    // theme resolution then falls back to the documented light/native path.
+    let _winrt = WinRtGuard::initialize();
     let controls = INITCOMMONCONTROLSEX {
         dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
         dwICC: ICC_LISTVIEW_CLASSES | ICC_WIN95_CLASSES,
@@ -346,6 +405,12 @@ fn run_unsafe() -> io::Result<()> {
         let result = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
         if result == -1 {
             let error = io::Error::last_os_error();
+            let state_ptr = window_state_ptr(window);
+            if !state_ptr.is_null() {
+                // SAFETY: the failed message loop is no longer dispatching and
+                // this short borrow rolls back any uncommitted dialog preview.
+                cancel_appearance_dialog(window, unsafe { &mut *state_ptr });
+            }
             finish_apply_after_message_loop_failure(window);
             // SAFETY: window is the live top-level HWND created above and this
             // path destroys it only after any worker reached terminal handoff.
@@ -356,6 +421,24 @@ fn run_unsafe() -> io::Result<()> {
             break;
         }
         let state_is_live = has_window_state(window);
+        let appearance_dialog = if state_is_live {
+            let state_ptr = window_state_ptr(window);
+            // SAFETY: the pointer is live and only a copied HWND leaves this borrow.
+            (!state_ptr.is_null())
+                .then(|| active_appearance_dialog(unsafe { &*state_ptr }))
+                .flatten()
+        } else {
+            None
+        };
+        // The owned appearance dialog gets native Tab/Shift+Tab/Esc/Enter
+        // handling before owner accelerators can consume the key.
+        if let Some(dialog) = appearance_dialog
+            // SAFETY: dialog is a live owned top-level HWND and message is the
+            // current thread-queue value populated by GetMessageW.
+            && unsafe { IsDialogMessageW(dialog, &message) } != 0
+        {
+            continue;
+        }
         if state_is_live && accelerators.translate(window, &message) {
             continue;
         }
@@ -428,7 +511,7 @@ unsafe extern "system" fn window_proc(
             unsafe { (*current_state).drop_registrations = Some(registrations) };
             // SAFETY: child creation succeeded and state_ptr remains the live,
             // UI-thread-confined AppState for this top-level window.
-            start_preferences_writer(window, unsafe { &mut *current_state });
+            start_preferences_writers(window, unsafe { &mut *current_state });
             0
         }
         WM_SIZE if !state_ptr.is_null() => {
@@ -458,11 +541,15 @@ unsafe extern "system" fn window_proc(
         WM_GETMINMAXINFO if !state_ptr.is_null() => {
             let info = lparam as *mut MINMAXINFO;
             if !info.is_null() {
-                // SAFETY: WM_GETMINMAXINFO supplies writable MINMAXINFO storage
-                // for this callback and state_ptr is the live AppState.
-                unsafe {
-                    (*info).ptMinTrackSize.x = minimum_track_width(window, &*state_ptr);
-                    (*info).ptMinTrackSize.y = minimum_track_height(window, &*state_ptr);
+                // SAFETY: state_ptr is the live AppState. Query failure leaves
+                // the operating system's current tracking bounds unchanged.
+                if let Ok(minimum) = effective_minimum_track_size(window, unsafe { &*state_ptr }) {
+                    // SAFETY: WM_GETMINMAXINFO supplies writable MINMAXINFO
+                    // storage for the duration of this callback.
+                    unsafe {
+                        (*info).ptMinTrackSize.x = minimum.width;
+                        (*info).ptMinTrackSize.y = minimum.height;
+                    }
                 }
             }
             0
@@ -507,10 +594,9 @@ unsafe extern "system" fn window_proc(
             // SAFETY: state_ptr is the live UI-thread AppState.
             let state = unsafe { &mut *state_ptr };
             refresh_forced_colors(state);
-            let apply = state
-                .presentation(selected_indices(state.list_window).len())
-                .apply;
-            refresh_apply_keyline(state, apply);
+            refresh_system_theme(state);
+            notify_appearance_dialog_accessibility(state);
+            apply_native_appearance_nonblocking(window, state);
             refresh_system_fonts(state);
             if let Err(error) = ensure_minimum_track_size(window, state) {
                 super::message(
@@ -519,7 +605,38 @@ unsafe extern "system" fn window_proc(
                     "DarkReNamer - 표시 설정",
                 );
             }
+            update_controls(state);
             arrange(window, state);
+            0
+        }
+        WM_APP_APPEARANCE_PREVIEW if !state_ptr.is_null() => {
+            // SAFETY: scalar payloads are validated before updating live state.
+            let state = unsafe { &mut *state_ptr };
+            if handle_appearance_preview(state, wparam, lparam) {
+                apply_native_appearance_nonblocking(window, state);
+                update_controls(state);
+                arrange(window, state);
+            }
+            0
+        }
+        WM_APP_APPEARANCE_FINISH if !state_ptr.is_null() => {
+            let released_session = {
+                // SAFETY: scalar payload/session ID are validated by the finish seam.
+                let state = unsafe { &mut *state_ptr };
+                let released = finish_appearance_dialog(window, state, wparam, lparam);
+                if released.is_some() {
+                    if let Err(error) = ensure_minimum_track_size(window, state) {
+                        state.set_transient_status(format!(
+                            "모양 설정의 최소 창 크기를 적용하지 못했습니다: {error}"
+                        ));
+                    }
+                    arrange(window, state);
+                }
+                released
+            };
+            // Dropping may synchronously restore owner focus, so it occurs only
+            // after the AppState borrow above has ended.
+            drop(released_session);
             0
         }
         WM_FONTCHANGE if !state_ptr.is_null() => {
@@ -603,7 +720,9 @@ unsafe extern "system" fn window_proc(
         }
         WM_CLOSE if !state_ptr.is_null() => {
             // SAFETY: state_ptr is the live UI-thread AppState for this window.
-            request_window_close(window, unsafe { &mut *state_ptr });
+            let state = unsafe { &mut *state_ptr };
+            cancel_appearance_dialog(window, state);
+            request_window_close(window, state);
             0
         }
         WM_CTLCOLORSTATIC if !state_ptr.is_null() => {
@@ -611,7 +730,7 @@ unsafe extern "system" fn window_proc(
             // Copy all routing values in a tiny borrow that ends before any GDI
             // call. Keyline matching remains the first and exact route.
             // SAFETY: state_ptr is live UI-thread state for this callback.
-            let (keyline_brush, instruction, safety) = unsafe {
+            let (keyline_brush, custom_colors, instruction, safety) = unsafe {
                 let state = &*state_ptr;
                 let keyline_brush = state
                     .left_rail
@@ -623,10 +742,16 @@ unsafe extern "system" fn window_proc(
                             .as_ref()
                             .and_then(|rail| rail.apply_keyline_brush_for(child))
                     });
-                (keyline_brush, state.empty_instruction, state.empty_safety)
+                (
+                    keyline_brush,
+                    static_control_colors(state, child),
+                    state.empty_instruction,
+                    state.empty_safety,
+                )
             };
             if let Some(brush) = route_static_control_colors(
                 keyline_brush,
+                custom_colors,
                 instruction,
                 safety,
                 child,
@@ -738,6 +863,9 @@ unsafe extern "system" fn window_proc(
         }
         WM_DESTROY => {
             if !state_ptr.is_null() {
+                // SAFETY: defensive owner teardown rolls back and destroys any
+                // still-live appearance session before preference shutdown/drop.
+                cancel_appearance_dialog(window, unsafe { &mut *state_ptr });
                 // Take the registration without retaining an AppState borrow;
                 // RevokeDragDrop may synchronously release the COM target.
                 // SAFETY: state_ptr is live UI-thread state for this callback.
@@ -798,6 +926,7 @@ unsafe extern "system" fn window_proc(
 
 pub(super) fn route_static_control_colors(
     keyline_brush: Option<HBRUSH>,
+    custom_colors: Option<StaticControlColors>,
     empty_instruction: HWND,
     empty_safety: HWND,
     child: HWND,
@@ -805,6 +934,15 @@ pub(super) fn route_static_control_colors(
 ) -> Option<HBRUSH> {
     if let Some(brush) = keyline_brush {
         return Some(brush);
+    }
+    if let Some(colors) = custom_colors {
+        // SAFETY: WM_CTLCOLORSTATIC supplies a live HDC. AppState owns the
+        // selected brush through this synchronous paint callback.
+        unsafe {
+            SetTextColor(dc, colors.text);
+            SetBkColor(dc, colors.background);
+        }
+        return Some(colors.brush);
     }
     if child != empty_instruction && child != empty_safety {
         return None;
