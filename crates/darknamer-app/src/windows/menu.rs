@@ -73,7 +73,9 @@ pub(super) fn refresh_system_fonts(state: &mut AppState) {
     // SAFETY: child HWNDs are live; a null font selects the control's default.
     unsafe {
         SendMessageW(state.list_window, WM_SETFONT, message_font as usize, 1);
-        SendMessageW(state.status, WM_SETFONT, status_font as usize, 1);
+        SendMessageW(state.status_message, WM_SETFONT, status_font as usize, 1);
+        SendMessageW(state.status_count, WM_SETFONT, status_font as usize, 1);
+        SendMessageW(state.cancel_worker, WM_SETFONT, message_font as usize, 1);
     }
     if let Some(rail) = &state.left_rail {
         rail.apply_font(message_font);
@@ -101,10 +103,17 @@ pub(super) fn measure_font_metrics(
     }
     let status_text_height =
         measure_text(window, status_font, EMPTY_LIST_STATUS, true).map_or(0, |(_, height)| height);
+    let status_count_text_width =
+        measure_text(window, status_font, STATUS_COUNT_SAMPLE, true).map_or(0, |(width, _)| width);
+    let (cancel_text_width, cancel_text_height) =
+        measure_text(window, message_font, STATUS_CANCEL_LABEL, true).unwrap_or_default();
     MeasuredFontMetrics {
         button_text_width,
         button_text_height,
         status_text_height,
+        status_count_text_width,
+        cancel_text_width,
+        cancel_text_height,
     }
 }
 
@@ -207,13 +216,11 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
             );
         }
     }
-    state.status = child(
-        window,
-        "STATIC",
-        "",
-        STATUS_ID as u16,
-        SS_CENTERIMAGE | SS_SUNKEN | SS_NOPREFIX | SS_ENDELLIPSIS,
-    )?;
+    (
+        state.status_message,
+        state.status_count,
+        state.cancel_worker,
+    ) = create_status_controls(window)?;
     state.left_rail = Some(CommandRail::create(window, &LEFT_RAIL)?);
     state.right_rail = Some(CommandRail::create(window, &RIGHT_RAIL)?);
     refresh_system_fonts(state);
@@ -248,6 +255,37 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
     arrange(window, state);
     refresh(state);
     Ok(())
+}
+
+pub(super) fn create_status_controls(parent: HWND) -> io::Result<(HWND, HWND, HWND)> {
+    let message = child(
+        parent,
+        "STATIC",
+        "",
+        STATUS_MESSAGE_ID as u16,
+        SS_CENTERIMAGE | SS_SUNKEN | SS_NOPREFIX | SS_ENDELLIPSIS,
+    )?;
+    let count = child(
+        parent,
+        "STATIC",
+        "",
+        STATUS_COUNT_ID as u16,
+        SS_CENTERIMAGE | SS_SUNKEN | SS_NOPREFIX | SS_ENDELLIPSIS,
+    )?;
+    let cancel = child(
+        parent,
+        "BUTTON",
+        STATUS_CANCEL_LABEL,
+        CANCEL_WORKER_ID,
+        WS_TABSTOP,
+    )?;
+    // SAFETY: cancel is the newly created live worker-control HWND. It remains
+    // hidden and disabled until one of the three cancellable workers is active.
+    unsafe {
+        EnableWindow(cancel, 0);
+        ShowWindow(cancel, SW_HIDE);
+    }
+    Ok((message, count, cancel))
 }
 
 pub(super) fn child(
@@ -306,7 +344,9 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
         );
     }
     windows.push((state.list_window, layout.list));
-    windows.push((state.status, layout.status));
+    windows.push((state.status_message, layout.status_message));
+    windows.push((state.status_count, layout.status_count));
+    windows.push((state.cancel_worker, layout.cancel));
     apply_deferred_layout(&windows);
     if state.rails_visible != rails_visible {
         if let Some(rail) = &state.left_rail {
@@ -412,6 +452,7 @@ pub(super) fn update_controls(state: &mut AppState) {
             };
     }
     apply_command_states(state);
+    apply_cancel_control_state(state);
     repair_focus_state(state);
     let focused_target_changed = match previously_focused {
         Some((FocusChild::LeftRail, Some(index))) => {
@@ -424,6 +465,33 @@ pub(super) fn update_controls(state: &mut AppState) {
     };
     if focused_target_changed {
         schedule_focus_restore(state);
+    }
+}
+
+pub(super) fn apply_cancel_control_state(state: &AppState) {
+    let control = cancel_control_state(state.worker_activity());
+    // SAFETY: this UI-thread query returns a non-owning HWND value only.
+    let cancel_had_focus = unsafe { GetFocus() == state.cancel_worker };
+    // SAFETY: cancel_worker is the live standard BUTTON owned by AppState.
+    // Visibility follows worker lifetime; a repeated request stays visible but
+    // disabled until terminal handoff removes the worker from AppState.
+    unsafe {
+        EnableWindow(state.cancel_worker, i32::from(control.is_enabled()));
+        ShowWindow(
+            state.cancel_worker,
+            if control.is_visible() {
+                SW_SHOW
+            } else {
+                SW_HIDE
+            },
+        );
+    }
+    if cancel_had_focus && !control.is_enabled() {
+        // Disabling a focused native control clears focus. Restore it through a
+        // posted message so SetFocus runs only after this AppState borrow ends.
+        // SAFETY: list_window is a live direct child while AppState exists.
+        let parent = unsafe { GetParent(state.list_window) };
+        schedule_focus_target(parent, state.list_window);
     }
 }
 

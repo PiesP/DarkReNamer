@@ -25,6 +25,10 @@ pub(crate) const LOCATION_COLUMN_MINIMUM: i32 = 80;
 pub(crate) const LIST_SCROLLBAR_ALLOWANCE_DIP: i32 = 17;
 #[cfg(any(windows, test))]
 pub(crate) const EMPTY_LIST_STATUS: &str = "파일이나 폴더를 끌어 놓거나 Ctrl+O로 추가하세요.";
+#[cfg(windows)]
+pub(crate) const STATUS_COUNT_SAMPLE: &str = "10000 개";
+#[cfg(windows)]
+pub(crate) const STATUS_CANCEL_LABEL: &str = "취소";
 
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -137,6 +141,9 @@ pub(crate) struct MeasuredFontMetrics {
     pub(crate) button_text_width: i32,
     pub(crate) button_text_height: i32,
     pub(crate) status_text_height: i32,
+    pub(crate) status_count_text_width: i32,
+    pub(crate) cancel_text_width: i32,
+    pub(crate) cancel_text_height: i32,
 }
 
 #[cfg(any(windows, test))]
@@ -163,11 +170,17 @@ impl MeasuredFontMetrics {
 
     #[must_use]
     pub(crate) fn status_height(self, dpi: u32) -> i32 {
-        scale_dip(STATUS_HEIGHT, dpi).max(
-            self.status_text_height
-                .max(0)
-                .saturating_add(scale_dip(4, dpi)),
-        )
+        scale_dip(STATUS_HEIGHT, dpi)
+            .max(
+                self.status_text_height
+                    .max(0)
+                    .saturating_add(scale_dip(4, dpi)),
+            )
+            .max(
+                self.cancel_text_height
+                    .max(0)
+                    .saturating_add(scale_dip(6, dpi)),
+            )
     }
 }
 
@@ -249,7 +262,9 @@ pub(crate) struct MainLayout {
     pub(crate) left_buttons: Vec<CommandPlacement>,
     pub(crate) right_buttons: Vec<CommandPlacement>,
     pub(crate) list: LayoutRect,
-    pub(crate) status: LayoutRect,
+    pub(crate) status_message: LayoutRect,
+    pub(crate) status_count: LayoutRect,
+    pub(crate) cancel: LayoutRect,
 }
 
 /// Major focus regions in the native workbench.
@@ -461,7 +476,7 @@ pub(crate) const fn main_layout_window_count(layout: &MainLayout) -> usize {
         .left_buttons
         .len()
         .saturating_add(layout.right_buttons.len())
-        .saturating_add(2)
+        .saturating_add(4)
 }
 
 /// Message-font measurements used by the native prompt layout.
@@ -1011,6 +1026,18 @@ pub(crate) fn calculate_main_layout(
         None => (RailMode::MenuOnly, 0, Vec::new(), Vec::new()),
     };
     let list_width = width.saturating_sub(rail_width.saturating_mul(2));
+    let cancel_preferred = measured
+        .cancel_text_width
+        .max(scale_dip(36, dpi))
+        .saturating_add(scale_dip(16, dpi));
+    let cancel_width = cancel_preferred.min(width);
+    let after_cancel = width.saturating_sub(cancel_width);
+    let count_preferred = measured
+        .status_count_text_width
+        .max(scale_dip(44, dpi))
+        .saturating_add(scale_dip(12, dpi));
+    let count_width = count_preferred.min(after_cancel);
+    let message_width = after_cancel.saturating_sub(count_width);
     MainLayout {
         rail_mode,
         rail_width,
@@ -1022,10 +1049,22 @@ pub(crate) fn calculate_main_layout(
             width: list_width,
             height: rail_height,
         },
-        status: LayoutRect {
+        status_message: LayoutRect {
             x: 0,
             y: rail_height,
-            width,
+            width: message_width,
+            height: status_height,
+        },
+        status_count: LayoutRect {
+            x: message_width,
+            y: rail_height,
+            width: count_width,
+            height: status_height,
+        },
+        cancel: LayoutRect {
+            x: message_width.saturating_add(count_width),
+            y: rail_height,
+            width: cancel_width,
             height: status_height,
         },
     }
@@ -1084,23 +1123,81 @@ impl UiStatus {
     }
 
     #[must_use]
-    pub(crate) fn text(&self) -> String {
-        let mut parts = Vec::with_capacity(4);
-        if let Some(message) = self.recovery.as_deref() {
-            parts.push(message.to_owned());
-        }
-        if let Some(message) = self.progress.as_deref() {
-            parts.push(message.to_owned());
-        }
-        if let Some(message) = self.transient.as_deref() {
-            parts.push(message.to_owned());
-        }
-        parts.push(if self.item_count == 0 {
-            EMPTY_LIST_STATUS.to_owned()
-        } else {
-            format!("{} 개", self.item_count)
-        });
-        parts.join("  |  ")
+    pub(crate) fn message_text(&self) -> &str {
+        self.recovery
+            .as_deref()
+            .or(self.progress.as_deref())
+            .or(self.transient.as_deref())
+            .unwrap_or(EMPTY_LIST_STATUS)
+    }
+
+    #[must_use]
+    pub(crate) fn count_text(&self) -> String {
+        format!("{} 개", self.item_count)
+    }
+}
+
+/// Current native worker activity used to derive the explicit Cancel control.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct WorkerActivity {
+    pub(crate) admission: bool,
+    pub(crate) plan: bool,
+    pub(crate) apply: bool,
+    pub(crate) cancellation_requested: bool,
+}
+
+/// The single worker whose existing cancellation primitive may be requested.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ActiveWorkerKind {
+    Admission,
+    Plan,
+    Apply,
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn active_worker_kind(activity: WorkerActivity) -> Option<ActiveWorkerKind> {
+    match (activity.admission, activity.plan, activity.apply) {
+        (true, false, false) => Some(ActiveWorkerKind::Admission),
+        (false, true, false) => Some(ActiveWorkerKind::Plan),
+        (false, false, true) => Some(ActiveWorkerKind::Apply),
+        _ => None,
+    }
+}
+
+/// Visibility and enabled state of the explicit worker Cancel control.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CancelControlState {
+    Hidden,
+    Enabled,
+    Requested,
+}
+
+#[cfg(any(windows, test))]
+impl CancelControlState {
+    #[must_use]
+    pub(crate) const fn is_visible(self) -> bool {
+        !matches!(self, Self::Hidden)
+    }
+
+    #[must_use]
+    pub(crate) const fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn cancel_control_state(activity: WorkerActivity) -> CancelControlState {
+    if active_worker_kind(activity).is_none() {
+        CancelControlState::Hidden
+    } else if activity.cancellation_requested {
+        CancelControlState::Requested
+    } else {
+        CancelControlState::Enabled
     }
 }
 
@@ -2833,6 +2930,9 @@ mod tests {
             button_text_width: 90,
             button_text_height: 44,
             status_text_height: 24,
+            status_count_text_width: 72,
+            cancel_text_width: 48,
+            cancel_text_height: 30,
         };
 
         let compact = measured.rail_metrics(RailDensity::Compact, 96);
@@ -2853,60 +2953,127 @@ mod tests {
         let measured = MeasuredFontMetrics::default();
         let comfortable = calculate_main_layout(464, 370, 96, measured);
         assert_eq!(comfortable.rail_mode, RailMode::Comfortable);
-        assert_eq!(main_layout_window_count(&comfortable), 21);
+        assert_eq!(main_layout_window_count(&comfortable), 23);
 
         let compact = calculate_main_layout(464, 369, 96, measured);
         assert_eq!(compact.rail_mode, RailMode::Compact);
 
         let vertical_menu_only = calculate_main_layout(464, 313, 96, measured);
         assert_eq!(vertical_menu_only.rail_mode, RailMode::MenuOnly);
-        assert_eq!(main_layout_window_count(&vertical_menu_only), 2);
+        assert_eq!(main_layout_window_count(&vertical_menu_only), 4);
 
         let menu_only = calculate_main_layout(80, 40, 96, measured);
         assert_eq!(menu_only.rail_mode, RailMode::MenuOnly);
-        for rect in [menu_only.list, menu_only.status] {
+        for rect in [
+            menu_only.list,
+            menu_only.status_message,
+            menu_only.status_count,
+            menu_only.cancel,
+        ] {
             assert!(rect.x >= 0);
             assert!(rect.y >= 0);
             assert!(rect.width >= 0);
             assert!(rect.height >= 0);
         }
         assert_eq!(menu_only.list.width, 80);
-        assert_eq!(menu_only.status.width, 80);
-        assert_eq!(menu_only.list.height + menu_only.status.height, 40);
+        assert_eq!(menu_only.status_message.x, 0);
+        assert_eq!(menu_only.cancel.x + menu_only.cancel.width, 80);
+        assert_eq!(
+            menu_only.status_message.width + menu_only.status_count.width + menu_only.cancel.width,
+            80
+        );
+        assert_eq!(menu_only.list.height + menu_only.status_message.height, 40);
     }
 
     #[test]
-    fn item_count_refresh_does_not_erase_structured_status_messages() {
-        assert!(
-            UiStatus::with_transient("시작 알림")
-                .text()
-                .contains("시작 알림")
-        );
+    fn structured_status_renders_one_priority_message_and_an_independent_count() {
         let mut status = UiStatus::with_recovery("복구 상태를 확인하세요.");
         status.set_transient("2개 경로를 제외했습니다.");
         status.set_progress("파일 이름 변경 중: 3/10 단계");
         status.set_item_count(120);
 
-        let rendered = status.text();
-        assert!(rendered.contains("복구 상태를 확인하세요."));
-        assert!(rendered.contains("2개 경로를 제외했습니다."));
-        assert!(rendered.contains("파일 이름 변경 중: 3/10 단계"));
-        assert!(rendered.contains("120 개"));
+        assert_eq!(status.message_text(), "복구 상태를 확인하세요.");
+        assert_eq!(status.count_text(), "120 개");
 
         status.set_item_count(121);
-        let refreshed = status.text();
-        assert!(refreshed.contains("2개 경로를 제외했습니다."));
-        assert!(refreshed.contains("파일 이름 변경 중: 3/10 단계"));
-        assert!(refreshed.contains("121 개"));
+        assert_eq!(status.message_text(), "복구 상태를 확인하세요.");
+        assert_eq!(status.count_text(), "121 개");
 
-        status.clear_progress();
         status.clear_recovery();
-        status.set_recovery("새 복구 상태");
-        let settled = status.text();
-        assert!(!settled.contains("복구 상태를 확인하세요."));
-        assert!(!settled.contains("파일 이름 변경 중"));
-        assert!(settled.contains("2개 경로를 제외했습니다."));
-        assert!(settled.contains("새 복구 상태"));
+        assert_eq!(status.message_text(), "파일 이름 변경 중: 3/10 단계");
+        status.clear_progress();
+        assert_eq!(status.message_text(), "2개 경로를 제외했습니다.");
+
+        let empty = UiStatus::default();
+        assert_eq!(empty.message_text(), EMPTY_LIST_STATUS);
+        assert_eq!(empty.count_text(), "0 개");
+
+        let mut promoted = UiStatus::with_transient("일시 상태");
+        promoted.set_recovery("복구 상태");
+        assert_eq!(promoted.message_text(), "복구 상태");
+    }
+
+    #[test]
+    fn cancel_control_is_enabled_only_for_an_uncancelled_active_worker() {
+        assert_eq!(
+            cancel_control_state(WorkerActivity::default()),
+            CancelControlState::Hidden
+        );
+        for activity in [
+            WorkerActivity {
+                admission: true,
+                ..WorkerActivity::default()
+            },
+            WorkerActivity {
+                plan: true,
+                ..WorkerActivity::default()
+            },
+            WorkerActivity {
+                apply: true,
+                ..WorkerActivity::default()
+            },
+        ] {
+            let state = cancel_control_state(activity);
+            assert!(state.is_visible());
+            assert!(state.is_enabled());
+        }
+        assert_eq!(
+            active_worker_kind(WorkerActivity {
+                admission: true,
+                ..WorkerActivity::default()
+            }),
+            Some(ActiveWorkerKind::Admission)
+        );
+        assert_eq!(
+            active_worker_kind(WorkerActivity {
+                plan: true,
+                ..WorkerActivity::default()
+            }),
+            Some(ActiveWorkerKind::Plan)
+        );
+        assert_eq!(
+            active_worker_kind(WorkerActivity {
+                apply: true,
+                ..WorkerActivity::default()
+            }),
+            Some(ActiveWorkerKind::Apply)
+        );
+        assert_eq!(
+            active_worker_kind(WorkerActivity {
+                admission: true,
+                plan: true,
+                ..WorkerActivity::default()
+            }),
+            None
+        );
+        let requested = cancel_control_state(WorkerActivity {
+            apply: true,
+            cancellation_requested: true,
+            ..WorkerActivity::default()
+        });
+        assert_eq!(requested, CancelControlState::Requested);
+        assert!(requested.is_visible());
+        assert!(!requested.is_enabled());
     }
 
     #[test]

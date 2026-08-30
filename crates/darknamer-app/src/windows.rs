@@ -134,15 +134,15 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     LoadCursorW, LoadIconW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP,
     MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW, MoveWindow,
     NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXVSCROLL,
-    SPI_GETNONCLIENTMETRICS, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW, SWP_NOZORDER,
-    SendMessageW, SetForegroundWindow, SetMenu, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, TranslateAcceleratorW, TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE,
-    WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_KEYDOWN,
-    WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE,
-    WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION,
-    WS_CHILD, WS_CLIPCHILDREN, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
-    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP,
-    WS_VISIBLE,
+    SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW,
+    SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, TranslateAcceleratorW, TranslateMessage, WM_APP, WM_CLOSE,
+    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_FONTCHANGE,
+    WM_GETMINMAXINFO, WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT,
+    WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER,
+    WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_ACCEPTFILES,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
+    WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{BS_MULTILINE, GWL_STYLE};
@@ -151,7 +151,9 @@ use worker::*;
 use crate::*;
 
 const LIST_ID: usize = 1000;
-const STATUS_ID: usize = 1007;
+const STATUS_MESSAGE_ID: usize = 1007;
+const STATUS_COUNT_ID: usize = 1008;
+const CANCEL_WORKER_ID: u16 = 1009;
 const CANDIDATE_JOURNAL_LEAF: &str = "candidate.drj";
 const ACTIVE_JOURNAL_LEAF: &str = "active.drj";
 const EXPORT_RECOVERY_JOURNAL: u16 = 0x9000;
@@ -166,7 +168,9 @@ const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 
 struct AppState {
     list_window: HWND,
-    status: HWND,
+    status_message: HWND,
+    status_count: HWND,
+    cancel_worker: HWND,
     menu: HMENU,
     font: OwnedFont,
     status_font: OwnedFont,
@@ -225,7 +229,9 @@ impl AppState {
         let column_states = loaded_columns.columns;
         Self {
             list_window: null_mut(),
-            status: null_mut(),
+            status_message: null_mut(),
+            status_count: null_mut(),
+            cancel_worker: null_mut(),
             menu: null_mut(),
             font: OwnedFont::default(),
             status_font: OwnedFont::default(),
@@ -262,10 +268,6 @@ impl AppState {
 
     fn revision(&self) -> ModelRevision {
         ModelRevision::new(self.model_revision)
-    }
-
-    fn commit_model_change(&mut self, before: &LegacyList) {
-        self.model_revision = next_model_revision(self.model_revision, &self.model != before);
     }
 
     fn commit_known_model_change(&mut self, changed: bool) {
@@ -308,7 +310,28 @@ impl AppState {
     }
 
     fn render_status(&self) {
-        set_status(self.status, &self.ui_status.text());
+        set_status(self.status_message, self.ui_status.message_text());
+        set_status(self.status_count, &self.ui_status.count_text());
+    }
+
+    fn worker_activity(&self) -> WorkerActivity {
+        WorkerActivity {
+            admission: self.admission_worker.is_some(),
+            plan: self.plan_worker.is_some(),
+            apply: self.apply_worker.is_some(),
+            cancellation_requested: self
+                .admission_worker
+                .as_ref()
+                .is_some_and(AdmissionWorker::cancellation_requested)
+                || self
+                    .plan_worker
+                    .as_ref()
+                    .is_some_and(PlanWorker::cancellation_requested)
+                || self
+                    .apply_worker
+                    .as_ref()
+                    .is_some_and(ApplyWorker::cancellation_requested),
+        }
     }
 
     fn set_status_item_count(&mut self) {
@@ -925,6 +948,57 @@ mod tests {
             verify_native_command_rails_at_dpi(instance, dpi)?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn native_status_controls_use_ellipsized_statics_and_accessible_cancel_button()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // SAFETY: null requests the current process module.
+        let instance = unsafe { GetModuleHandleW(null()) };
+        let class = wide("STATIC");
+        // SAFETY: the system STATIC class and current module remain valid for
+        // this hidden top-level test window.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                instance,
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let result = (|| -> io::Result<()> {
+            let (status_message, status_count, cancel) = create_status_controls(parent)?;
+            for status in [status_message, status_count] {
+                // SAFETY: status is a live native STATIC and GWL_STYLE is a
+                // pointer-free value query.
+                let style = unsafe { GetWindowLongPtrW(status, GWL_STYLE) } as u32;
+                assert_eq!(style & SS_NOPREFIX, SS_NOPREFIX);
+                assert_eq!(style & SS_ENDELLIPSIS, SS_ENDELLIPSIS);
+            }
+            // SAFETY: cancel is a live standard BUTTON and GWL_STYLE is a
+            // pointer-free value query.
+            let cancel_style = unsafe { GetWindowLongPtrW(cancel, GWL_STYLE) } as u32;
+            assert_ne!(cancel_style & WS_TABSTOP, 0);
+            assert_eq!(cancel_style & WS_VISIBLE, 0);
+            assert_eq!(window_text(cancel)?, STATUS_CANCEL_LABEL);
+            // SAFETY: cancel remains live and the enabled query has no pointers.
+            assert_eq!(unsafe { IsWindowEnabled(cancel) }, 0);
+            Ok(())
+        })();
+        // SAFETY: parent is the hidden test HWND and destroys all child controls.
+        unsafe { DestroyWindow(parent) };
+        result.map_err(Into::into)
     }
 
     fn verify_native_command_rails_at_dpi(

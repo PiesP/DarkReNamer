@@ -19,6 +19,24 @@ pub(super) struct AdmissionWorker {
     pub(super) handle: JoinHandle<()>,
 }
 
+impl ApplyWorker {
+    pub(super) fn cancellation_requested(&self) -> bool {
+        self.cancellation.is_requested()
+    }
+}
+
+impl PlanWorker {
+    pub(super) fn cancellation_requested(&self) -> bool {
+        self.cancellation.is_requested()
+    }
+}
+
+impl AdmissionWorker {
+    pub(super) fn cancellation_requested(&self) -> bool {
+        self.cancellation.load(Ordering::Acquire)
+    }
+}
+
 pub(super) enum AdmissionWorkerResult {
     NeedsDirectoryMode {
         revision: ModelRevision,
@@ -294,11 +312,10 @@ pub(super) fn handle_completed_execution(
             return;
         }
     };
-    let outcome = report.outcome().clone();
-    let text = execution_outcome_korean(&outcome);
-    match outcome {
+    let text = execution_outcome_korean(report.outcome());
+    match report.outcome() {
         ExecutionOutcome::Completed => {
-            let before = state.model.clone();
+            let changed = !report.entries().is_empty();
             if !apply_execution_report(&mut state.model, &report) {
                 state.recovery_locked = true;
                 state.active_journal = Some(journal);
@@ -310,13 +327,15 @@ pub(super) fn handle_completed_execution(
                 update_controls(state);
                 return;
             }
-            state.commit_model_change(&before);
+            state.commit_known_model_change(changed);
             refresh(state);
             let cleanup = cleanup_file_journal(journal);
             state.recovery_locked = cleanup.error.is_some() || cleanup.retained.is_some();
             state.active_journal = cleanup.retained;
             if let Some(error) = cleanup.error {
                 message(window, &error.to_string(), "DarkReNamer - 저널 정리 실패");
+            } else {
+                state.set_transient_status(text);
             }
         }
         ExecutionOutcome::RolledBack { .. } => {
@@ -325,17 +344,17 @@ pub(super) fn handle_completed_execution(
             state.active_journal = cleanup.retained;
             if let Some(error) = cleanup.error {
                 message(window, &error.to_string(), "DarkReNamer - 저널 정리 실패");
+            } else {
+                state.set_transient_status(text);
             }
         }
         ExecutionOutcome::RecoveryRequired { .. } => {
             state.recovery_locked = true;
             state.active_journal = Some(journal);
+            message(window, &text, "DarkReNamer - 복구 필요");
         }
     }
-    {
-        message(window, &text, "DarkReNamer");
-        update_controls(state);
-    }
+    update_controls(state);
 }
 
 pub(super) fn start_plan_worker(
@@ -432,6 +451,7 @@ pub(super) fn handle_plan_completion(window: HWND, state: &mut AppState) {
     let Some(worker) = state.plan_worker.take() else {
         return;
     };
+    apply_cancel_control_state(state);
     let joined = worker.handle.join();
     state.mutation_locked = false;
     state.clear_progress_status();
@@ -580,11 +600,15 @@ pub(super) fn handle_apply_progress(state: &mut AppState) {
     let completed = worker.progress.completed.load(Ordering::Acquire);
     let total = worker.progress.total.load(Ordering::Acquire);
     worker.progress.wake_pending.store(false, Ordering::Release);
-    let text = match phase {
-        0 => format!("실행 준비 완료: {total} 단계"),
-        1 => format!("파일 이름 변경 중: {completed}/{total} 단계"),
-        2 => format!("취소 또는 오류 후 복원 중: {completed}/{total} 단계"),
-        3 => "저널 terminal 상태를 기록했습니다.".to_owned(),
+    let cancellation_requested = worker.cancellation.is_requested();
+    let text = match (phase, cancellation_requested) {
+        (0 | 1, true) => {
+            format!("취소 요청됨: 현재 원시 변경 경계를 마치는 중 ({completed}/{total} 단계)")
+        }
+        (0, _) => format!("실행 준비 완료: {total} 단계"),
+        (1, _) => format!("파일 이름 변경 중: {completed}/{total} 단계"),
+        (2, _) => format!("취소 또는 오류 후 복원 중: {completed}/{total} 단계"),
+        (3, _) => "저널 terminal 상태를 기록했습니다.".to_owned(),
         _ => "파일 변경 상태를 확인하고 있습니다...".to_owned(),
     };
     state.set_progress_status(text);
@@ -603,6 +627,7 @@ pub(super) fn handle_apply_completion(window: HWND, state: &mut AppState) {
     let Some(worker) = state.apply_worker.take() else {
         return;
     };
+    apply_cancel_control_state(state);
     finalize_apply_worker(window, state, worker);
     if state.close_pending {
         // SAFETY: terminal worker handoff is complete and AppState no longer
@@ -743,6 +768,28 @@ pub(super) fn request_window_close(window: HWND, state: &mut AppState) {
     unsafe { DestroyWindow(window) };
 }
 
+pub(super) fn request_active_worker_cancel(state: &mut AppState) {
+    let progress = match active_worker_kind(state.worker_activity()) {
+        Some(ActiveWorkerKind::Admission) => state.admission_worker.as_ref().map(|worker| {
+            worker.cancellation.store(true, Ordering::Release);
+            "경로 추가 취소를 요청했습니다. 현재 확인 경계가 끝나면 중단합니다..."
+        }),
+        Some(ActiveWorkerKind::Plan) => state.plan_worker.as_ref().map(|worker| {
+            worker.cancellation.request();
+            "파일 변경 계획 취소를 요청했습니다. 현재 파일 시스템 확인 경계가 끝나면 중단합니다..."
+        }),
+        Some(ActiveWorkerKind::Apply) => state.apply_worker.as_ref().map(|worker| {
+            worker.cancellation.request();
+            "적용 취소를 요청했습니다. 현재 원시 변경 경계가 끝나면 안전하게 복원합니다..."
+        }),
+        None => None,
+    };
+    if let Some(progress) = progress {
+        state.set_progress_status(progress);
+        update_controls(state);
+    }
+}
+
 pub(super) fn admit_paths(owner: HWND, state: &mut AppState, paths: Vec<PathBuf>) {
     let capacity = MAX_ADMITTED_SOURCES.saturating_sub(state.model.len());
     start_admission_worker(owner, state, paths, None, capacity);
@@ -861,6 +908,7 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
     let Some(worker) = state.admission_worker.take() else {
         return;
     };
+    apply_cancel_control_state(state);
     let joined = worker.handle.join();
     state.mutation_locked = false;
     state.clear_progress_status();
@@ -971,10 +1019,9 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
                     "DarkReNamer - 오래된 결과",
                 );
             } else {
-                let before = state.model.clone();
                 let items = std::mem::take(&mut report.items);
                 let appended = state.model.append_batch_by(items, compare_windows);
-                state.commit_model_change(&before);
+                state.commit_known_model_change(appended > 0);
                 let summary = report.summary_korean(appended);
                 state.set_transient_status(summary.clone());
                 if !report.issues.is_empty() {

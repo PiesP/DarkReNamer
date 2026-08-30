@@ -556,6 +556,19 @@ unsafe extern "system" fn window_proc(
             let command = (wparam & 0xFFFF) as u16;
             let notification = u32::try_from((wparam >> 16) & 0xFFFF).unwrap_or_default();
             let source = lparam as HWND;
+            if command == CANCEL_WORKER_ID {
+                // Intercept the dedicated control before the generic mutation
+                // lock. It requests only the already-active worker token and
+                // never enters command dispatch or an Apply authorization path.
+                // SAFETY: state_ptr is the live UI-thread AppState installed in
+                // this callback window and is only read for HWND identity here.
+                if source == unsafe { (*state_ptr).cancel_worker } && notification == BN_CLICKED {
+                    // SAFETY: state_ptr is the live UI-thread AppState and the
+                    // source was verified as its dedicated Cancel BUTTON.
+                    request_active_worker_cancel(unsafe { &mut *state_ptr });
+                }
+                return 0;
+            }
             if !source.is_null() && notification == BN_SETFOCUS {
                 // SAFETY: source is the live command button identified by this
                 // synchronous notification and state_ptr is UI-thread confined.
