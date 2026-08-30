@@ -241,6 +241,12 @@ pub(super) fn rows_for_tokens(model: &LegacyList, tokens: &[SelectionToken]) -> 
 }
 
 pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
+    if let Some(dialog) = active_appearance_dialog(state) {
+        // SAFETY: dialog is the live owned modal surface; owner commands remain
+        // inert until the dialog reaches OK or Cancel.
+        unsafe { SetForegroundWindow(dialog) };
+        return;
+    }
     if state.read_only_locked() && !recovery_command_allowed(command) {
         message(
             window,
@@ -532,6 +538,10 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
                 state.appearance = appearance;
                 CommandOutcome::ui(UiEffect::AppearanceChanged)
             }
+        }
+        APPEARANCE_ADVANCED => {
+            open_appearance_dialog(window, state);
+            CommandOutcome::ui(UiEffect::None)
         }
         EXIT_COMMAND => CommandOutcome::ui(UiEffect::CloseRequested),
         _ => CommandOutcome::ui(UiEffect::None),

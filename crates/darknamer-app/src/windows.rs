@@ -49,6 +49,7 @@ use raw_window_handle::{
 use windows_sys::core::{GUID, HRESULT, IID_IUnknown};
 
 mod appearance;
+mod appearance_dialog;
 mod application;
 mod clipboard;
 mod command_dispatch;
@@ -168,6 +169,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{BS_FLAT, BS_MULTILINE, GWL_STY
 use worker::*;
 
 use appearance::*;
+use appearance_dialog::*;
 
 use crate::*;
 
@@ -190,6 +192,10 @@ const WM_APP_ADMISSION_COMPLETE: u32 = WM_APP + 0x43;
 const WM_APP_RESTORE_FOCUS: u32 = WM_APP + 0x44;
 const WM_APP_PREFERENCES_WAKE: u32 = WM_APP + 0x45;
 const WM_APP_ADMISSION_STARTED: u32 = WM_APP + 0x46;
+const WM_APP_APPEARANCE_PREVIEW: u32 = WM_APP + 0x47;
+const WM_APP_APPEARANCE_FINISH: u32 = WM_APP + 0x48;
+const WM_APP_APPEARANCE_ACCESSIBILITY: u32 = WM_APP + 0x49;
+const WM_APP_APPEARANCE_DISMISS: u32 = WM_APP + 0x4A;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 const PREFERENCES_POLL_TIMER_ID: usize = 0xD4A2;
 
@@ -243,6 +249,8 @@ struct AppState {
     forced_colors: ForcedColorsState,
     system_theme: Option<ResolvedTheme>,
     appearance_resources: Option<AppearanceResources>,
+    appearance_dialog: Option<AppearanceDialogSession>,
+    next_appearance_dialog_id: u32,
     icon_cache: HashMap<IconCacheKey, i32>,
     rendered_rows: Vec<RenderedRow>,
     // Fields drop in declaration order. Keep the instance lock last so workers
@@ -330,6 +338,8 @@ impl AppState {
             forced_colors: ForcedColorsState::default(),
             system_theme: None,
             appearance_resources: None,
+            appearance_dialog: None,
+            next_appearance_dialog_id: 0,
             icon_cache: HashMap::new(),
             rendered_rows: Vec::new(),
         }

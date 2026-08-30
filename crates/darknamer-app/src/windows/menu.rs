@@ -942,6 +942,24 @@ pub(super) fn apply_command_states(state: &AppState) {
             MF_BYCOMMAND,
         )
     };
+    let activity = state.worker_activity();
+    let advanced_enabled = advanced_appearance_available(
+        activity.admission || activity.plan || activity.apply,
+        state.confirmation_pending,
+    );
+    // SAFETY: APPEARANCE_ADVANCED is an application-owned auxiliary menu item.
+    unsafe {
+        EnableMenuItem(
+            state.menu,
+            u32::from(APPEARANCE_ADVANCED),
+            MF_BYCOMMAND
+                | if advanced_enabled {
+                    MF_ENABLED
+                } else {
+                    MF_GRAYED
+                },
+        )
+    };
     if !state.menu.is_null() {
         // SAFETY: AppState's menu and parent HWND are live and command IDs are validated resource values.
         unsafe { DrawMenuBar(GetParent(state.list_window)) };
@@ -1081,11 +1099,15 @@ fn append_view_popup(menu: &mut MenuBuilder) -> io::Result<()> {
     let mut view = MenuBuilder::popup()?;
     append_catalog_items(&mut view, MenuGroup::View)?;
     view.separator()?;
+    let mut appearance = MenuBuilder::popup()?;
     let mut theme = MenuBuilder::popup()?;
     theme.item(THEME_SYSTEM, "시스템 설정 사용(&S)")?;
     theme.item(THEME_LIGHT, "라이트(&L)")?;
     theme.item(THEME_DARK, "다크(&D)")?;
-    view.popup_child(theme, "테마(&T)")?;
+    appearance.popup_child(theme, "테마(&T)")?;
+    appearance.separator()?;
+    appearance.item(APPEARANCE_ADVANCED, "고급 모양 설정(&A)...")?;
+    view.popup_child(appearance, "모양(&A)")?;
     menu.popup_child(view, "보기(&V)")
 }
 

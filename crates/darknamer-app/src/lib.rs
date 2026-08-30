@@ -242,14 +242,7 @@ pub(crate) struct UiAppearance {
 #[cfg(any(windows, test))]
 impl Default for UiAppearance {
     fn default() -> Self {
-        Self {
-            theme: AppThemeMode::System,
-            density: RailDensityPreference::Automatic,
-            emphasis: PreviewEmphasis::Standard,
-            show_separators: true,
-            show_preview_tint: true,
-            show_empty_safety: true,
-        }
+        Self::DEFAULT
     }
 }
 
@@ -463,6 +456,281 @@ pub(crate) const fn appearance_after_theme_command(
     Some(UiAppearance {
         theme,
         ..appearance
+    })
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn advanced_appearance_available(
+    worker_active: bool,
+    confirmation_pending: bool,
+) -> bool {
+    !worker_active && !confirmation_pending
+}
+
+/// Pure action understood by the dedicated advanced-appearance dialog.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AppearanceDialogAction {
+    Density(RailDensityPreference),
+    Emphasis(PreviewEmphasis),
+    ShowSeparators(bool),
+    ShowPreviewTint(bool),
+    ShowEmptySafety(bool),
+    ResetDefaults,
+    Accept,
+    Cancel,
+}
+
+/// Terminal or preview effect emitted by one appearance-dialog action.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AppearanceDialogEffect {
+    None,
+    Preview(UiAppearance),
+    Accept(UiAppearance),
+    Cancel(UiAppearance),
+}
+
+/// Borrow-free appearance-dialog state used by native controls and tests.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AppearanceDialogModel {
+    original: UiAppearance,
+    draft: UiAppearance,
+    forced_colors: ForcedColorsState,
+}
+
+#[cfg(any(windows, test))]
+impl AppearanceDialogModel {
+    #[must_use]
+    pub(crate) const fn new(original: UiAppearance, forced_colors: ForcedColorsState) -> Self {
+        Self {
+            original,
+            draft: original,
+            forced_colors,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn draft(self) -> UiAppearance {
+        self.draft
+    }
+
+    #[must_use]
+    pub(crate) const fn forced_colors(self) -> ForcedColorsState {
+        self.forced_colors
+    }
+
+    pub(crate) const fn set_forced_colors(&mut self, forced_colors: ForcedColorsState) {
+        self.forced_colors = forced_colors;
+    }
+
+    pub(crate) fn apply(&mut self, action: AppearanceDialogAction) -> AppearanceDialogEffect {
+        let next = match action {
+            AppearanceDialogAction::Density(density) => UiAppearance {
+                density,
+                ..self.draft
+            },
+            AppearanceDialogAction::Emphasis(emphasis)
+                if self.forced_colors.custom_colors_enabled() =>
+            {
+                UiAppearance {
+                    emphasis,
+                    ..self.draft
+                }
+            }
+            AppearanceDialogAction::ShowSeparators(show_separators) => UiAppearance {
+                show_separators,
+                ..self.draft
+            },
+            AppearanceDialogAction::ShowPreviewTint(show_preview_tint)
+                if self.forced_colors.custom_colors_enabled() =>
+            {
+                UiAppearance {
+                    show_preview_tint,
+                    ..self.draft
+                }
+            }
+            AppearanceDialogAction::ShowEmptySafety(show_empty_safety) => UiAppearance {
+                show_empty_safety,
+                ..self.draft
+            },
+            AppearanceDialogAction::ResetDefaults => UiAppearance {
+                theme: self.draft.theme,
+                ..UiAppearance::DEFAULT
+            },
+            AppearanceDialogAction::Accept => return AppearanceDialogEffect::Accept(self.draft),
+            AppearanceDialogAction::Cancel => {
+                self.draft = self.original;
+                return AppearanceDialogEffect::Cancel(self.original);
+            }
+            AppearanceDialogAction::Emphasis(_) | AppearanceDialogAction::ShowPreviewTint(_) => {
+                self.draft
+            }
+        };
+        if next == self.draft {
+            AppearanceDialogEffect::None
+        } else {
+            self.draft = next;
+            AppearanceDialogEffect::Preview(next)
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+impl UiAppearance {
+    pub(crate) const DEFAULT: Self = Self {
+        theme: AppThemeMode::System,
+        density: RailDensityPreference::Automatic,
+        emphasis: PreviewEmphasis::Standard,
+        show_separators: true,
+        show_preview_tint: true,
+        show_empty_safety: true,
+    };
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn pack_ui_appearance(appearance: UiAppearance) -> u32 {
+    let theme = match appearance.theme {
+        AppThemeMode::System => 0,
+        AppThemeMode::Light => 1,
+        AppThemeMode::Dark => 2,
+    };
+    let density = match appearance.density {
+        RailDensityPreference::Automatic => 0,
+        RailDensityPreference::Comfortable => 1,
+        RailDensityPreference::Compact => 2,
+    };
+    let emphasis = match appearance.emphasis {
+        PreviewEmphasis::Subtle => 0,
+        PreviewEmphasis::Standard => 1,
+        PreviewEmphasis::Strong => 2,
+    };
+    theme
+        | (density << 2)
+        | (emphasis << 4)
+        | ((appearance.show_separators as u32) << 6)
+        | ((appearance.show_preview_tint as u32) << 7)
+        | ((appearance.show_empty_safety as u32) << 8)
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn unpack_ui_appearance(packed: u32) -> Option<UiAppearance> {
+    if packed & !0x1FF != 0 {
+        return None;
+    }
+    let theme = match packed & 0x3 {
+        0 => AppThemeMode::System,
+        1 => AppThemeMode::Light,
+        2 => AppThemeMode::Dark,
+        _ => return None,
+    };
+    let density = match (packed >> 2) & 0x3 {
+        0 => RailDensityPreference::Automatic,
+        1 => RailDensityPreference::Comfortable,
+        2 => RailDensityPreference::Compact,
+        _ => return None,
+    };
+    let emphasis = match (packed >> 4) & 0x3 {
+        0 => PreviewEmphasis::Subtle,
+        1 => PreviewEmphasis::Standard,
+        2 => PreviewEmphasis::Strong,
+        _ => return None,
+    };
+    Some(UiAppearance {
+        theme,
+        density,
+        emphasis,
+        show_separators: packed & (1 << 6) != 0,
+        show_preview_tint: packed & (1 << 7) != 0,
+        show_empty_safety: packed & (1 << 8) != 0,
+    })
+}
+
+/// Bounded control rectangles for the native advanced-appearance dialog.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AppearanceDialogLayout {
+    pub(crate) client: LayoutRect,
+    pub(crate) density_group: LayoutRect,
+    pub(crate) density_options: [LayoutRect; 3],
+    pub(crate) emphasis_group: LayoutRect,
+    pub(crate) emphasis_options: [LayoutRect; 3],
+    pub(crate) forced_explanation: LayoutRect,
+    pub(crate) checkboxes: [LayoutRect; 3],
+    pub(crate) separator: LayoutRect,
+    pub(crate) reset: LayoutRect,
+    pub(crate) ok: LayoutRect,
+    pub(crate) cancel: LayoutRect,
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+fn bounded_dialog_rect(x: i32, y: i32, width: i32, height: i32, client: LayoutRect) -> LayoutRect {
+    let x = x.max(0).min(client.width);
+    let y = y.max(0).min(client.height);
+    LayoutRect {
+        x,
+        y,
+        width: width.max(0).min(client.width.saturating_sub(x)),
+        height: height.max(0).min(client.height.saturating_sub(y)),
+    }
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn calculate_appearance_dialog_layout(
+    dpi: u32,
+    maximum_width: i32,
+    maximum_height: i32,
+) -> Option<AppearanceDialogLayout> {
+    let desired_width = scale_dip(456, dpi);
+    let desired_height = scale_dip(420, dpi);
+    if maximum_width < desired_width || maximum_height < desired_height {
+        return None;
+    }
+    let client = LayoutRect {
+        x: 0,
+        y: 0,
+        width: desired_width,
+        height: desired_height,
+    };
+    let rect = |x, y, width, height| {
+        bounded_dialog_rect(
+            scale_dip(x, dpi),
+            scale_dip(y, dpi),
+            scale_dip(width, dpi),
+            scale_dip(height, dpi),
+            client,
+        )
+    };
+    Some(AppearanceDialogLayout {
+        client,
+        density_group: rect(12, 12, 432, 88),
+        density_options: [
+            rect(28, 34, 392, 20),
+            rect(28, 56, 392, 20),
+            rect(28, 78, 392, 20),
+        ],
+        emphasis_group: rect(12, 108, 432, 88),
+        emphasis_options: [
+            rect(28, 130, 392, 20),
+            rect(28, 152, 392, 20),
+            rect(28, 174, 392, 20),
+        ],
+        forced_explanation: rect(12, 204, 432, 40),
+        checkboxes: [
+            rect(20, 252, 416, 22),
+            rect(20, 280, 416, 22),
+            rect(20, 308, 416, 22),
+        ],
+        separator: rect(12, 340, 432, 2),
+        reset: rect(12, 360, 124, 30),
+        ok: rect(292, 360, 72, 30),
+        cancel: rect(372, 360, 72, 30),
     })
 }
 
@@ -4041,6 +4309,190 @@ mod tests {
             semantic_palette(ResolvedTheme::Light),
             semantic_palette(ResolvedTheme::Dark)
         );
+    }
+
+    #[test]
+    fn advanced_appearance_model_previews_resets_accepts_and_cancels_exactly() {
+        let original = UiAppearance {
+            theme: AppThemeMode::Dark,
+            density: RailDensityPreference::Compact,
+            emphasis: PreviewEmphasis::Strong,
+            show_separators: false,
+            show_preview_tint: false,
+            show_empty_safety: false,
+        };
+        let mut model = AppearanceDialogModel::new(original, ForcedColorsState::Inactive);
+        assert_eq!(
+            model.apply(AppearanceDialogAction::Density(
+                RailDensityPreference::Comfortable,
+            )),
+            AppearanceDialogEffect::Preview(UiAppearance {
+                density: RailDensityPreference::Comfortable,
+                ..original
+            })
+        );
+        assert!(matches!(
+            model.apply(AppearanceDialogAction::ShowSeparators(true)),
+            AppearanceDialogEffect::Preview(UiAppearance {
+                show_separators: true,
+                ..
+            })
+        ));
+        assert!(matches!(
+            model.apply(AppearanceDialogAction::ShowEmptySafety(true)),
+            AppearanceDialogEffect::Preview(UiAppearance {
+                show_empty_safety: true,
+                ..
+            })
+        ));
+        assert_eq!(
+            model.apply(AppearanceDialogAction::ResetDefaults),
+            AppearanceDialogEffect::Preview(UiAppearance {
+                theme: AppThemeMode::Dark,
+                ..UiAppearance::default()
+            })
+        );
+        assert_eq!(
+            model.apply(AppearanceDialogAction::Accept),
+            AppearanceDialogEffect::Accept(UiAppearance {
+                theme: AppThemeMode::Dark,
+                ..UiAppearance::default()
+            })
+        );
+        assert_eq!(
+            model.apply(AppearanceDialogAction::Cancel),
+            AppearanceDialogEffect::Cancel(original)
+        );
+        assert_eq!(model.draft(), original);
+
+        let mut forced = AppearanceDialogModel::new(original, ForcedColorsState::ActiveOrUnknown);
+        assert_eq!(forced.forced_colors(), ForcedColorsState::ActiveOrUnknown);
+        assert_eq!(
+            forced.apply(AppearanceDialogAction::Emphasis(PreviewEmphasis::Subtle,)),
+            AppearanceDialogEffect::None
+        );
+        assert_eq!(
+            forced.apply(AppearanceDialogAction::ShowPreviewTint(true)),
+            AppearanceDialogEffect::None
+        );
+        assert_eq!(forced.draft(), original);
+        forced.set_forced_colors(ForcedColorsState::Inactive);
+        assert_eq!(forced.forced_colors(), ForcedColorsState::Inactive);
+        assert!(!advanced_appearance_available(true, false));
+        assert!(!advanced_appearance_available(false, true));
+        assert!(advanced_appearance_available(false, false));
+    }
+
+    #[test]
+    fn appearance_preview_payload_is_strict_and_round_trips_every_setting() {
+        for theme in [
+            AppThemeMode::System,
+            AppThemeMode::Light,
+            AppThemeMode::Dark,
+        ] {
+            for density in [
+                RailDensityPreference::Automatic,
+                RailDensityPreference::Comfortable,
+                RailDensityPreference::Compact,
+            ] {
+                for emphasis in [
+                    PreviewEmphasis::Subtle,
+                    PreviewEmphasis::Standard,
+                    PreviewEmphasis::Strong,
+                ] {
+                    for flags in 0_u8..8 {
+                        let appearance = UiAppearance {
+                            theme,
+                            density,
+                            emphasis,
+                            show_separators: flags & 1 != 0,
+                            show_preview_tint: flags & 2 != 0,
+                            show_empty_safety: flags & 4 != 0,
+                        };
+                        assert_eq!(
+                            unpack_ui_appearance(pack_ui_appearance(appearance)),
+                            Some(appearance)
+                        );
+                    }
+                }
+            }
+        }
+        for invalid in [0x3, 0xC, 0x30, 1 << 9, u32::MAX] {
+            assert_eq!(unpack_ui_appearance(invalid), None);
+        }
+    }
+
+    #[test]
+    fn advanced_appearance_layout_keeps_every_control_inside_work_area_bounds() {
+        for (dpi, width, height) in [(96, 456, 420), (144, 684, 630), (192, 912, 840)] {
+            let layout = calculate_appearance_dialog_layout(dpi, width, height);
+            assert!(layout.is_some(), "valid work area rejected at {dpi} DPI");
+            let Some(layout) = layout else {
+                continue;
+            };
+            let rects = [
+                layout.density_group,
+                layout.density_options[0],
+                layout.density_options[1],
+                layout.density_options[2],
+                layout.emphasis_group,
+                layout.emphasis_options[0],
+                layout.emphasis_options[1],
+                layout.emphasis_options[2],
+                layout.forced_explanation,
+                layout.checkboxes[0],
+                layout.checkboxes[1],
+                layout.checkboxes[2],
+                layout.separator,
+                layout.reset,
+                layout.ok,
+                layout.cancel,
+            ];
+            assert!(layout.client.width <= width);
+            assert!(layout.client.height <= height);
+            for rect in rects {
+                assert!(rect.x >= 0 && rect.y >= 0 && rect.width >= 0 && rect.height >= 0);
+                assert!(rect.x.saturating_add(rect.width) <= layout.client.width);
+                assert!(rect.bottom() <= layout.client.height);
+            }
+        }
+        assert_eq!(calculate_appearance_dialog_layout(192, 320, 300), None);
+        let layout = calculate_appearance_dialog_layout(96, 456, 420);
+        assert!(
+            layout.is_some(),
+            "baseline appearance dialog layout was rejected"
+        );
+        let Some(layout) = layout else {
+            return;
+        };
+        let interactive = [
+            layout.density_options[0],
+            layout.density_options[1],
+            layout.density_options[2],
+            layout.emphasis_options[0],
+            layout.emphasis_options[1],
+            layout.emphasis_options[2],
+            layout.checkboxes[0],
+            layout.checkboxes[1],
+            layout.checkboxes[2],
+            layout.reset,
+            layout.ok,
+            layout.cancel,
+        ];
+        assert!(
+            interactive
+                .iter()
+                .all(|rect| rect.width > 0 && rect.height > 0)
+        );
+        for (index, left) in interactive.iter().enumerate() {
+            for right in &interactive[index + 1..] {
+                let overlaps = left.x < right.x.saturating_add(right.width)
+                    && right.x < left.x.saturating_add(left.width)
+                    && left.y < right.bottom()
+                    && right.y < left.bottom();
+                assert!(!overlaps);
+            }
+        }
     }
 
     #[test]

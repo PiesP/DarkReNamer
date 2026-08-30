@@ -401,6 +401,12 @@ fn run_unsafe() -> io::Result<()> {
         let result = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
         if result == -1 {
             let error = io::Error::last_os_error();
+            let state_ptr = window_state_ptr(window);
+            if !state_ptr.is_null() {
+                // SAFETY: the failed message loop is no longer dispatching and
+                // this short borrow rolls back any uncommitted dialog preview.
+                cancel_appearance_dialog(window, unsafe { &mut *state_ptr });
+            }
             finish_apply_after_message_loop_failure(window);
             // SAFETY: window is the live top-level HWND created above and this
             // path destroys it only after any worker reached terminal handoff.
@@ -411,6 +417,24 @@ fn run_unsafe() -> io::Result<()> {
             break;
         }
         let state_is_live = has_window_state(window);
+        let appearance_dialog = if state_is_live {
+            let state_ptr = window_state_ptr(window);
+            // SAFETY: the pointer is live and only a copied HWND leaves this borrow.
+            (!state_ptr.is_null())
+                .then(|| active_appearance_dialog(unsafe { &*state_ptr }))
+                .flatten()
+        } else {
+            None
+        };
+        // The owned appearance dialog gets native Tab/Shift+Tab/Esc/Enter
+        // handling before owner accelerators can consume the key.
+        if let Some(dialog) = appearance_dialog
+            // SAFETY: dialog is a live owned top-level HWND and message is the
+            // current thread-queue value populated by GetMessageW.
+            && unsafe { IsDialogMessageW(dialog, &message) } != 0
+        {
+            continue;
+        }
         if state_is_live && accelerators.translate(window, &message) {
             continue;
         }
@@ -567,6 +591,7 @@ unsafe extern "system" fn window_proc(
             let state = unsafe { &mut *state_ptr };
             refresh_forced_colors(state);
             refresh_system_theme(state);
+            notify_appearance_dialog_accessibility(state);
             apply_native_appearance_nonblocking(window, state);
             refresh_system_fonts(state);
             if let Err(error) = ensure_minimum_track_size(window, state) {
@@ -578,6 +603,36 @@ unsafe extern "system" fn window_proc(
             }
             update_controls(state);
             arrange(window, state);
+            0
+        }
+        WM_APP_APPEARANCE_PREVIEW if !state_ptr.is_null() => {
+            // SAFETY: scalar payloads are validated before updating live state.
+            let state = unsafe { &mut *state_ptr };
+            if handle_appearance_preview(state, wparam, lparam) {
+                apply_native_appearance_nonblocking(window, state);
+                update_controls(state);
+                arrange(window, state);
+            }
+            0
+        }
+        WM_APP_APPEARANCE_FINISH if !state_ptr.is_null() => {
+            let released_session = {
+                // SAFETY: scalar payload/session ID are validated by the finish seam.
+                let state = unsafe { &mut *state_ptr };
+                let released = finish_appearance_dialog(window, state, wparam, lparam);
+                if released.is_some() {
+                    if let Err(error) = ensure_minimum_track_size(window, state) {
+                        state.set_transient_status(format!(
+                            "모양 설정의 최소 창 크기를 적용하지 못했습니다: {error}"
+                        ));
+                    }
+                    arrange(window, state);
+                }
+                released
+            };
+            // Dropping may synchronously restore owner focus, so it occurs only
+            // after the AppState borrow above has ended.
+            drop(released_session);
             0
         }
         WM_FONTCHANGE if !state_ptr.is_null() => {
@@ -661,7 +716,9 @@ unsafe extern "system" fn window_proc(
         }
         WM_CLOSE if !state_ptr.is_null() => {
             // SAFETY: state_ptr is the live UI-thread AppState for this window.
-            request_window_close(window, unsafe { &mut *state_ptr });
+            let state = unsafe { &mut *state_ptr };
+            cancel_appearance_dialog(window, state);
+            request_window_close(window, state);
             0
         }
         WM_CTLCOLORSTATIC if !state_ptr.is_null() => {
@@ -802,6 +859,9 @@ unsafe extern "system" fn window_proc(
         }
         WM_DESTROY => {
             if !state_ptr.is_null() {
+                // SAFETY: defensive owner teardown rolls back and destroys any
+                // still-live appearance session before preference shutdown/drop.
+                cancel_appearance_dialog(window, unsafe { &mut *state_ptr });
                 // Take the registration without retaining an AppState borrow;
                 // RevokeDragDrop may synchronously release the COM target.
                 // SAFETY: state_ptr is live UI-thread state for this callback.
