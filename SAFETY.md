@@ -101,6 +101,14 @@ identified only as a local build. The validator does not retrieve either
 artifact, so the operator remains responsible for hashing the executable that
 was actually exercised.
 
+For a release decision, validate the complete external evidence against the
+downloaded Actions handoff and matching checkout with
+[`scripts/validate-release-acceptance.ps1`](scripts/validate-release-acceptance.ps1).
+This cross-check requires the evidence to identify `actions-handoff` and match
+the handoff's source SHA, workflow run, executable filename, executable digest,
+and actual executable bytes. Packaging validation by itself does not satisfy
+the acceptance matrix below.
+
 [`scripts/windows-acceptance-evidence.schema.json`](scripts/windows-acceptance-evidence.schema.json)
 is the machine-readable field contract. Validate evidence with
 [`scripts/validate-windows-acceptance-evidence.ps1`](scripts/validate-windows-acceptance-evidence.ps1).

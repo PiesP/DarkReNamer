@@ -19,6 +19,7 @@ $expectedNames = @(
     'DarkReNamer.pdb'
     'DISTRIBUTION.md'
     'LICENSE'
+    'release-handoff.json'
     'SHA256SUMS.txt'
     'THIRD_PARTY_NOTICES.md'
 )
@@ -33,6 +34,133 @@ foreach ($file in $actualFiles) {
     if ($file.Length -eq 0) {
         throw "Release handoff file is empty: $($file.Name)"
     }
+}
+
+function Assert-ObjectShape {
+    param(
+        [Parameter(Mandatory)]
+        [object] $Object,
+        [Parameter(Mandatory)]
+        [string[]] $Required,
+        [Parameter(Mandatory)]
+        [string] $Location
+    )
+
+    if ($null -eq $Object -or $Object -isnot [pscustomobject]) {
+        throw "$Location must be a JSON object."
+    }
+    $expected = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($name in $Required) {
+        [void] $expected.Add($name)
+    }
+    foreach ($property in $Object.PSObject.Properties) {
+        if (-not $expected.Contains($property.Name)) {
+            throw "$Location contains an unsupported field: $($property.Name)."
+        }
+    }
+    foreach ($name in $Required) {
+        if ($null -eq $Object.PSObject.Properties[$name] -or $null -eq $Object.$name) {
+            throw "$Location is missing required field: $name."
+        }
+    }
+}
+
+function Assert-UniqueJsonProperties {
+    param(
+        [Parameter(Mandatory)]
+        [Text.Json.JsonElement] $Element,
+        [Parameter(Mandatory)]
+        [string] $Location
+    )
+
+    if ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Object) {
+        $observed = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($property in $Element.EnumerateObject()) {
+            if (-not $observed.Add($property.Name)) {
+                throw "$Location contains a duplicate field: $($property.Name)."
+            }
+            Assert-UniqueJsonProperties -Element $property.Value -Location "$Location.$($property.Name)"
+        }
+    }
+    elseif ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Array) {
+        $index = 0
+        foreach ($item in $Element.EnumerateArray()) {
+            Assert-UniqueJsonProperties -Element $item -Location "$Location[$index]"
+            $index++
+        }
+    }
+}
+
+$provenancePath = Join-Path $handoffPath 'release-handoff.json'
+try {
+    $provenanceJson = Get-Content -LiteralPath $provenancePath -Raw
+    $provenanceDocument = [Text.Json.JsonDocument]::Parse($provenanceJson)
+}
+catch {
+    throw "release-handoff.json is not valid JSON: $($_.Exception.Message)"
+}
+try {
+    if ($provenanceDocument.RootElement.ValueKind -ne [Text.Json.JsonValueKind]::Object) {
+        throw 'release-handoff must be a JSON object.'
+    }
+    Assert-UniqueJsonProperties -Element $provenanceDocument.RootElement -Location 'release-handoff'
+    $provenance = $provenanceJson | ConvertFrom-Json
+}
+finally {
+    $provenanceDocument.Dispose()
+}
+
+Assert-ObjectShape `
+    -Object $provenance `
+    -Required @('schema_version', 'source_sha', 'workflow_run', 'executable') `
+    -Location 'release-handoff'
+Assert-ObjectShape `
+    -Object $provenance.executable `
+    -Required @('filename', 'sha256') `
+    -Location 'release-handoff.executable'
+
+if ($provenance.schema_version -is [string] -or
+    $provenance.schema_version -is [bool] -or
+    [decimal] $provenance.schema_version -ne 1) {
+    throw 'release-handoff.schema_version must be the JSON number 1.'
+}
+if ($provenance.source_sha -isnot [string] -or $provenance.source_sha -cnotmatch '^[0-9a-f]{40}$') {
+    throw 'release-handoff.source_sha must be a full lowercase 40-character Git SHA.'
+}
+if ($provenance.workflow_run -isnot [string] -or $provenance.workflow_run -notmatch '^[1-9][0-9]*$') {
+    throw 'release-handoff.workflow_run must be a positive numeric GitHub Actions run ID.'
+}
+if ($provenance.executable.filename -isnot [string] -or
+    -not [string]::Equals($provenance.executable.filename, 'DarkReNamer.exe', [StringComparison]::Ordinal)) {
+    throw 'release-handoff.executable.filename must be DarkReNamer.exe.'
+}
+if ($provenance.executable.sha256 -isnot [string] -or
+    $provenance.executable.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+    throw 'release-handoff.executable.sha256 must be a lowercase 64-character SHA-256 digest.'
+}
+
+$sourceTopLevel = @(& git -C $sourcePath rev-parse --show-toplevel)
+if ($LASTEXITCODE -ne 0 -or $sourceTopLevel.Count -ne 1) {
+    throw 'SourceRoot must identify a Git worktree root.'
+}
+$resolvedTopLevel = [IO.Path]::GetFullPath($sourceTopLevel[0]).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+$resolvedSourcePath = [IO.Path]::GetFullPath($sourcePath).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+$pathComparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+if (-not [string]::Equals($resolvedTopLevel, $resolvedSourcePath, $pathComparison)) {
+    throw 'SourceRoot must identify the exact Git worktree root.'
+}
+$sourceHead = @(& git -C $sourcePath rev-parse HEAD)
+if ($LASTEXITCODE -ne 0 -or $sourceHead.Count -ne 1 -or $sourceHead[0] -cnotmatch '^[0-9a-f]{40}$') {
+    throw 'Source HEAD could not be resolved as a full Git SHA.'
+}
+if (-not [string]::Equals($provenance.source_sha, $sourceHead[0], [StringComparison]::Ordinal)) {
+    throw 'release-handoff.source_sha does not match source HEAD.'
+}
+
+$provenanceExePath = Join-Path $handoffPath $provenance.executable.filename
+$provenanceExeHash = (Get-FileHash -LiteralPath $provenanceExePath -Algorithm SHA256).Hash.ToLowerInvariant()
+if (-not [string]::Equals($provenance.executable.sha256, $provenanceExeHash, [StringComparison]::Ordinal)) {
+    throw 'release-handoff.executable.sha256 does not match the handoff executable bytes.'
 }
 
 foreach ($name in 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'DISTRIBUTION.md') {
@@ -104,6 +232,7 @@ $expectedChecksumSubjects = @(
     'DarkReNamer.exe'
     'DISTRIBUTION.md'
     'LICENSE'
+    'release-handoff.json'
     'THIRD_PARTY_NOTICES.md'
 )
 $checksumPath = Join-Path $handoffPath 'SHA256SUMS.txt'

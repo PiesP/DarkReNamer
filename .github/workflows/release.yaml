@@ -128,6 +128,23 @@ jobs:
           Copy-Item DISTRIBUTION.md dist/DISTRIBUTION.md
           Compress-Archive -Path dist/DarkReNamer.pdb `
             -DestinationPath dist/DarkReNamer-debug-symbols.zip
+          $executableHash = (Get-FileHash `
+              -Algorithm SHA256 `
+              -LiteralPath dist/DarkReNamer.exe).Hash.ToLowerInvariant()
+          $handoff = [ordered]@{
+            schema_version = 1
+            source_sha = '${{ steps.source.outputs.source_commit }}'
+            workflow_run = $env:GITHUB_RUN_ID
+            executable = [ordered]@{
+              filename = 'DarkReNamer.exe'
+              sha256 = $executableHash
+            }
+          }
+          [IO.File]::WriteAllText(
+            (Join-Path $PWD 'dist/release-handoff.json'),
+            (($handoff | ConvertTo-Json -Depth 4) + "`n"),
+            [Text.UTF8Encoding]::new($false)
+          )
           $files = Get-ChildItem dist -File |
             Where-Object Name -ne 'DarkReNamer.pdb' |
             Sort-Object Name
@@ -217,4 +234,5 @@ jobs:
             dist/SHA256SUMS.txt `
             dist/LICENSE `
             dist/THIRD_PARTY_NOTICES.md `
-            dist/DISTRIBUTION.md
+            dist/DISTRIBUTION.md `
+            dist/release-handoff.json
