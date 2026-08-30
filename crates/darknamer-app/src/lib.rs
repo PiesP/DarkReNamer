@@ -389,21 +389,42 @@ impl UiAppearance {
                 custom_colors_enabled: false,
             };
         }
-        let theme = match self.theme {
-            AppThemeMode::Light => ResolvedTheme::Light,
-            AppThemeMode::Dark => ResolvedTheme::Dark,
+        let (theme, custom_colors_enabled) = match self.theme {
+            AppThemeMode::Light => (ResolvedTheme::Light, true),
+            AppThemeMode::Dark => (ResolvedTheme::Dark, true),
             AppThemeMode::System => match system_theme {
-                Some(ResolvedTheme::Dark) => ResolvedTheme::Dark,
-                Some(ResolvedTheme::Light | ResolvedTheme::NativeSystem) | None => {
-                    ResolvedTheme::Light
-                }
+                Some(ResolvedTheme::Dark) => (ResolvedTheme::Dark, true),
+                Some(ResolvedTheme::Light) => (ResolvedTheme::Light, true),
+                Some(ResolvedTheme::NativeSystem) | None => (ResolvedTheme::NativeSystem, false),
             },
         };
         ResolvedUiAppearance {
             appearance: self,
             theme,
-            custom_colors_enabled: true,
+            custom_colors_enabled,
         }
+    }
+}
+
+/// Best-effort DWM frame update needed for one resolved transition.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DwmFrameAction {
+    None,
+    SetDark(bool),
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn dwm_frame_action(
+    theme: ResolvedTheme,
+    dark_frame_requested: bool,
+) -> DwmFrameAction {
+    match theme {
+        ResolvedTheme::Dark => DwmFrameAction::SetDark(true),
+        ResolvedTheme::Light => DwmFrameAction::SetDark(false),
+        ResolvedTheme::NativeSystem if dark_frame_requested => DwmFrameAction::SetDark(false),
+        ResolvedTheme::NativeSystem => DwmFrameAction::None,
     }
 }
 
@@ -466,6 +487,12 @@ pub(crate) const fn advanced_appearance_available(
     confirmation_pending: bool,
 ) -> bool {
     !worker_active && !confirmation_pending
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn appearance_dialog_should_notify_cancel(armed: bool, finished: bool) -> bool {
+    armed && !finished
 }
 
 /// Pure action understood by the dedicated advanced-appearance dialog.
@@ -821,6 +848,7 @@ impl MeasuredFontMetrics {
         self,
         dpi: u32,
         available_width: i32,
+        show_safety: bool,
     ) -> EmptyStateContentMetrics {
         let available_width = available_width.max(0);
         let fallback_line_height = scale_dip(16, dpi);
@@ -829,11 +857,15 @@ impl MeasuredFontMetrics {
             self.empty_instruction_text_height.max(fallback_line_height),
             available_width,
         );
-        let safety_height = conservative_wrapped_text_height(
-            self.empty_safety_text_width.max(0),
-            self.empty_safety_text_height.max(fallback_line_height),
-            available_width,
-        );
+        let safety_height = if show_safety {
+            conservative_wrapped_text_height(
+                self.empty_safety_text_width.max(0),
+                self.empty_safety_text_height.max(fallback_line_height),
+                available_width,
+            )
+        } else {
+            0
+        };
         let add_width = self
             .empty_add_text_width
             .max(0)
@@ -854,16 +886,19 @@ impl MeasuredFontMetrics {
             total_height: instruction_height
                 .saturating_add(gap)
                 .saturating_add(add_height)
-                .saturating_add(gap)
-                .saturating_add(safety_height),
+                .saturating_add(if show_safety {
+                    gap.saturating_add(safety_height)
+                } else {
+                    0
+                }),
         }
     }
 
-    fn empty_state_required_height(self, dpi: u32) -> i32 {
+    fn empty_state_required_height(self, dpi: u32, show_safety: bool) -> i32 {
         let content_width = self
             .empty_state_minimum_width(dpi)
             .saturating_sub(scale_dip(24, dpi));
-        self.empty_state_content_metrics(dpi, content_width)
+        self.empty_state_content_metrics(dpi, content_width, show_safety)
             .total_height
             .saturating_add(scale_dip(24, dpi))
     }
@@ -1808,37 +1843,59 @@ pub fn select_command_rail_density_with_preference(
     })
 }
 
-#[cfg(any(windows, test))]
+#[cfg(test)]
 #[must_use]
 pub(crate) fn minimum_main_client_height(
     dpi: u32,
     measured: MeasuredFontMetrics,
     preference: RailDensityPreference,
 ) -> i32 {
+    minimum_main_client_height_with_safety(dpi, measured, preference, true)
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn minimum_main_client_height_with_safety(
+    dpi: u32,
+    measured: MeasuredFontMetrics,
+    preference: RailDensityPreference,
+    show_empty_safety: bool,
+) -> i32 {
     let metrics = measured.rail_metrics(preference.minimum_density(), dpi);
     let left = required_command_rail_height(&LEFT_RAIL, metrics).unwrap_or(i32::MAX);
     let right = required_command_rail_height(&RIGHT_RAIL, metrics).unwrap_or(i32::MAX);
     left.max(right)
-        .max(measured.empty_state_required_height(dpi))
+        .max(measured.empty_state_required_height(dpi, show_empty_safety))
         .saturating_add(measured.status_height(dpi))
 }
 
-#[cfg(any(windows, test))]
+#[cfg(test)]
 #[must_use]
 pub(crate) fn recommended_main_client_height(
     dpi: u32,
     measured: MeasuredFontMetrics,
     preference: RailDensityPreference,
 ) -> i32 {
+    recommended_main_client_height_with_safety(dpi, measured, preference, true)
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn recommended_main_client_height_with_safety(
+    dpi: u32,
+    measured: MeasuredFontMetrics,
+    preference: RailDensityPreference,
+    show_empty_safety: bool,
+) -> i32 {
     let metrics = measured.rail_metrics(preference.recommended_density(), dpi);
     let left = required_command_rail_height(&LEFT_RAIL, metrics).unwrap_or(i32::MAX);
     let right = required_command_rail_height(&RIGHT_RAIL, metrics).unwrap_or(i32::MAX);
     left.max(right)
-        .max(measured.empty_state_required_height(dpi))
+        .max(measured.empty_state_required_height(dpi, show_empty_safety))
         .saturating_add(measured.status_height(dpi))
 }
 
-#[cfg(any(windows, test))]
+#[cfg(test)]
 #[must_use]
 pub(crate) fn calculate_main_layout(
     client_width: i32,
@@ -1846,6 +1903,19 @@ pub(crate) fn calculate_main_layout(
     dpi: u32,
     measured: MeasuredFontMetrics,
     preference: RailDensityPreference,
+) -> MainLayout {
+    calculate_main_layout_with_safety(client_width, client_height, dpi, measured, preference, true)
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn calculate_main_layout_with_safety(
+    client_width: i32,
+    client_height: i32,
+    dpi: u32,
+    measured: MeasuredFontMetrics,
+    preference: RailDensityPreference,
+    show_empty_safety: bool,
 ) -> MainLayout {
     let width = client_width.max(0);
     let height = client_height.max(0);
@@ -1891,7 +1961,7 @@ pub(crate) fn calculate_main_layout(
         width: list_width,
         height: rail_height,
     };
-    let empty = calculate_empty_state_layout(list, dpi, measured);
+    let empty = calculate_empty_state_layout(list, dpi, measured, show_empty_safety);
     let drop_overlay = calculate_drop_overlay_layout(list, dpi, measured);
     MainLayout {
         rail_mode,
@@ -1965,12 +2035,13 @@ fn calculate_empty_state_layout(
     list: LayoutRect,
     dpi: u32,
     measured: MeasuredFontMetrics,
+    show_safety: bool,
 ) -> EmptyStateLayout {
     let horizontal_padding = scale_dip(12, dpi).min(list.width.saturating_div(2));
     let content_width = list
         .width
         .saturating_sub(horizontal_padding.saturating_mul(2));
-    let content = measured.empty_state_content_metrics(dpi, content_width);
+    let content = measured.empty_state_content_metrics(dpi, content_width, show_safety);
     let desired_instruction_height = content.instruction_height;
     let desired_button_height = content.add_height;
     let desired_safety_height = content.safety_height;
@@ -1994,7 +2065,9 @@ fn calculate_empty_state_layout(
     let button_y = y;
     let button_height = desired_button_height.min(bottom.saturating_sub(y)).max(0);
     y = y.saturating_add(button_height);
-    y = y.saturating_add(desired_gap.min(bottom.saturating_sub(y)).max(0));
+    if show_safety {
+        y = y.saturating_add(desired_gap.min(bottom.saturating_sub(y)).max(0));
+    }
     let safety_y = y;
     let safety_height = desired_safety_height.min(bottom.saturating_sub(y)).max(0);
     let button_width = content.add_width;
@@ -4205,9 +4278,21 @@ mod tests {
                 .theme,
             ResolvedTheme::Dark
         );
+        let unavailable = system.resolve(ForcedColorsState::Inactive, None);
+        assert_eq!(unavailable.theme, ResolvedTheme::NativeSystem);
+        assert!(!unavailable.custom_colors_enabled);
+        assert_eq!(semantic_palette(unavailable.theme), None);
         assert_eq!(
-            system.resolve(ForcedColorsState::Inactive, None).theme,
-            ResolvedTheme::Light
+            dwm_frame_action(ResolvedTheme::NativeSystem, false),
+            DwmFrameAction::None
+        );
+        assert_eq!(
+            dwm_frame_action(ResolvedTheme::Dark, false),
+            DwmFrameAction::SetDark(true)
+        );
+        assert_eq!(
+            dwm_frame_action(ResolvedTheme::NativeSystem, true),
+            DwmFrameAction::SetDark(false)
         );
         assert_eq!(theme_from_foreground(245, 245, 245), ResolvedTheme::Dark);
         assert_eq!(theme_from_foreground(24, 24, 24), ResolvedTheme::Light);
@@ -4381,6 +4466,10 @@ mod tests {
         assert!(!advanced_appearance_available(true, false));
         assert!(!advanced_appearance_available(false, true));
         assert!(advanced_appearance_available(false, false));
+        assert!(!appearance_dialog_should_notify_cancel(false, false));
+        assert!(!appearance_dialog_should_notify_cancel(false, true));
+        assert!(!appearance_dialog_should_notify_cancel(true, true));
+        assert!(appearance_dialog_should_notify_cancel(true, false));
     }
 
     #[test]
@@ -4420,6 +4509,13 @@ mod tests {
         for invalid in [0x3, 0xC, 0x30, 1 << 9, u32::MAX] {
             assert_eq!(unpack_ui_appearance(invalid), None);
         }
+    }
+
+    #[test]
+    fn preinstall_appearance_dialog_destruction_emits_no_owner_callback() {
+        assert!(!appearance_dialog_should_notify_cancel(false, false));
+        assert!(appearance_dialog_should_notify_cancel(true, false));
+        assert!(!appearance_dialog_should_notify_cancel(true, true));
     }
 
     #[test]
@@ -4600,7 +4696,7 @@ mod tests {
             RailDensityPreference::Automatic,
         );
         assert_eq!(layout.rail_mode, RailMode::Compact);
-        let empty = measured.empty_state_content_metrics(96, layout.empty_safety.width);
+        let empty = measured.empty_state_content_metrics(96, layout.empty_safety.width, true);
         assert!(layout.empty_instruction.height >= empty.instruction_height);
         assert!(layout.empty_safety.height >= empty.safety_height);
         assert!(layout.empty_add.height >= empty.add_height);
@@ -4666,11 +4762,75 @@ mod tests {
             measured,
             RailDensityPreference::Automatic,
         );
-        let content = measured.empty_state_content_metrics(96, layout.empty_safety.width);
+        let content = measured.empty_state_content_metrics(96, layout.empty_safety.width, true);
         assert!(layout.empty_instruction.height >= content.instruction_height);
         assert!(layout.empty_safety.height >= content.safety_height);
         assert!(layout.empty_add.height >= content.add_height);
         assert!(layout.empty_safety.bottom() <= layout.list.bottom());
+    }
+
+    #[test]
+    fn hiding_empty_safety_removes_its_rect_gap_and_minimum_height() {
+        let measured = MeasuredFontMetrics {
+            empty_instruction_text_width: 240,
+            empty_instruction_text_height: 24,
+            empty_safety_text_width: 3_000,
+            empty_safety_text_height: 40,
+            empty_add_text_width: 140,
+            empty_add_text_height: 30,
+            ..MeasuredFontMetrics::default()
+        };
+        let with_safety = minimum_main_client_height_with_safety(
+            96,
+            measured,
+            RailDensityPreference::Automatic,
+            true,
+        );
+        let without_safety = minimum_main_client_height_with_safety(
+            96,
+            measured,
+            RailDensityPreference::Automatic,
+            false,
+        );
+        assert!(without_safety < with_safety);
+        assert!(
+            recommended_main_client_height_with_safety(
+                96,
+                measured,
+                RailDensityPreference::Automatic,
+                false,
+            ) < recommended_main_client_height_with_safety(
+                96,
+                measured,
+                RailDensityPreference::Automatic,
+                true,
+            )
+        );
+        let width = measured
+            .rail_metrics(RailDensity::Compact, 96)
+            .rail_width
+            .saturating_mul(2)
+            .saturating_add(measured.empty_state_minimum_width(96));
+        let hidden = calculate_main_layout_with_safety(
+            width,
+            without_safety,
+            96,
+            measured,
+            RailDensityPreference::Automatic,
+            false,
+        );
+        assert_eq!(hidden.empty_safety.height, 0);
+        assert_eq!(hidden.empty_safety.y, hidden.empty_add.bottom());
+        let shown = calculate_main_layout_with_safety(
+            width,
+            with_safety,
+            96,
+            measured,
+            RailDensityPreference::Automatic,
+            true,
+        );
+        assert!(shown.empty_safety.height > 0);
+        assert!(shown.empty_safety.y > shown.empty_add.bottom());
     }
 
     #[test]

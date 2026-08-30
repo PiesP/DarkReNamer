@@ -70,10 +70,12 @@ fn nonclient_height(window: HWND) -> i32 {
 }
 
 fn minimum_track_height(window: HWND, state: &AppState) -> i32 {
-    minimum_main_client_height(
+    let appearance = state.resolved_appearance().appearance;
+    minimum_main_client_height_with_safety(
         state.dpi,
         state.font_metrics,
-        state.resolved_appearance().appearance.density,
+        appearance.density,
+        appearance.show_empty_safety,
     )
     .saturating_add(nonclient_height(window))
 }
@@ -122,10 +124,12 @@ fn effective_minimum_track_size(window: HWND, state: &AppState) -> io::Result<Wi
 }
 
 fn recommended_track_height(window: HWND, state: &AppState) -> i32 {
-    recommended_main_client_height(
+    let appearance = state.resolved_appearance().appearance;
+    recommended_main_client_height_with_safety(
         state.dpi,
         state.font_metrics,
-        state.resolved_appearance().appearance.density,
+        appearance.density,
+        appearance.show_empty_safety,
     )
     .saturating_add(nonclient_height(window))
 }

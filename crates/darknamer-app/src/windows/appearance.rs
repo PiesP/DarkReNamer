@@ -187,7 +187,7 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
     for rail in [&state.left_rail, &state.right_rail].into_iter().flatten() {
         rail.set_separators_visible(resolved.appearance.show_separators);
     }
-    apply_dwm_title_frame(window, resolved.theme);
+    apply_dwm_title_frame(window, state, resolved.theme);
     // SAFETY: window is the live top-level HWND. One invalidation repaints all
     // children after every brush and ListView color has been installed.
     unsafe {
@@ -209,12 +209,18 @@ pub(super) fn apply_native_appearance_nonblocking(window: HWND, state: &mut AppS
     }
 }
 
-fn apply_dwm_title_frame(window: HWND, theme: ResolvedTheme) {
-    let enabled = i32::from(matches!(theme, ResolvedTheme::Dark));
+fn apply_dwm_title_frame(window: HWND, state: &mut AppState, theme: ResolvedTheme) {
+    let DwmFrameAction::SetDark(dark) = dwm_frame_action(theme, state.dwm_dark_frame_requested)
+    else {
+        // NativeSystem performs no initial or repeated override. A successful
+        // prior dark request is explicitly cleared by the SetDark(false) case.
+        return;
+    };
+    let enabled = i32::from(dark);
     // SAFETY: window is the live top-level HWND and enabled is retained for the
     // complete synchronous documented DWM attribute call. Failure is a
     // best-effort capability result and never changes application safety state.
-    let _result = unsafe {
+    let result = unsafe {
         DwmSetWindowAttribute(
             window,
             DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
@@ -222,4 +228,7 @@ fn apply_dwm_title_frame(window: HWND, theme: ResolvedTheme) {
             size_of::<i32>() as u32,
         )
     };
+    if result >= 0 {
+        state.dwm_dark_frame_requested = dark;
+    }
 }

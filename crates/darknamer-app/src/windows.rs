@@ -196,6 +196,7 @@ const WM_APP_APPEARANCE_PREVIEW: u32 = WM_APP + 0x47;
 const WM_APP_APPEARANCE_FINISH: u32 = WM_APP + 0x48;
 const WM_APP_APPEARANCE_ACCESSIBILITY: u32 = WM_APP + 0x49;
 const WM_APP_APPEARANCE_DISMISS: u32 = WM_APP + 0x4A;
+const WM_APP_APPEARANCE_ARM: u32 = WM_APP + 0x4B;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 const PREFERENCES_POLL_TIMER_ID: usize = 0xD4A2;
 
@@ -251,6 +252,7 @@ struct AppState {
     appearance_resources: Option<AppearanceResources>,
     appearance_dialog: Option<AppearanceDialogSession>,
     next_appearance_dialog_id: u32,
+    dwm_dark_frame_requested: bool,
     icon_cache: HashMap<IconCacheKey, i32>,
     rendered_rows: Vec<RenderedRow>,
     // Fields drop in declaration order. Keep the instance lock last so workers
@@ -340,6 +342,7 @@ impl AppState {
             appearance_resources: None,
             appearance_dialog: None,
             next_appearance_dialog_id: 0,
+            dwm_dark_frame_requested: false,
             icon_cache: HashMap::new(),
             rendered_rows: Vec::new(),
         }

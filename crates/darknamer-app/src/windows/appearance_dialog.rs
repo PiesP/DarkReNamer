@@ -42,12 +42,14 @@ pub(super) struct AppearanceDialogSession {
     pub(super) id: u32,
     pub(super) window: HWND,
     pub(super) baseline: UiAppearance,
-    _owner_guard: OwnerEnableGuard,
+    owner_guard: Option<OwnerEnableGuard>,
 }
 
 impl AppearanceDialogSession {
     pub(super) fn disarm_owner_restore(&mut self) {
-        self._owner_guard.disarm();
+        if let Some(guard) = self.owner_guard.as_mut() {
+            guard.disarm();
+        }
     }
 }
 
@@ -67,6 +69,7 @@ struct AppearanceDialogWindowState {
     cancel: HWND,
     font: OwnedFont,
     dpi: u32,
+    armed: bool,
     finished: bool,
 }
 
@@ -97,14 +100,34 @@ pub(super) fn open_appearance_dialog(owner: HWND, state: &mut AppState) {
     let next = state.next_appearance_dialog_id.wrapping_add(1).max(1);
     match create_appearance_dialog_window(owner, next, state.appearance, state.forced_colors) {
         Ok(window) => {
-            let guard = OwnerEnableGuard::new(owner);
             state.next_appearance_dialog_id = next;
             state.appearance_dialog = Some(AppearanceDialogSession {
                 id: next,
                 window,
                 baseline: state.appearance,
-                _owner_guard: guard,
+                owner_guard: None,
             });
+            // SAFETY: the dialog is live, the AppState session is installed,
+            // and this scalar ID cannot cause an owner callback.
+            let armed =
+                unsafe { SendMessageW(window, WM_APP_APPEARANCE_ARM, 0, next as isize) != 0 };
+            if armed {
+                let guard = OwnerEnableGuard::new(owner);
+                if let Some(session) = state.appearance_dialog.as_mut() {
+                    session.owner_guard = Some(guard);
+                }
+            } else {
+                let session = state.appearance_dialog.take();
+                if let Some(session) = session {
+                    // SAFETY: the unarmed HWND cannot notify the owner and is
+                    // destroyed before its pointer-free session is dropped.
+                    unsafe { DestroyWindow(session.window) };
+                    drop(session);
+                }
+                state.set_transient_status(
+                    "모양 설정 창을 활성화하지 못했습니다. 현재 작업에는 영향이 없습니다.",
+                );
+            }
         }
         Err(error) => {
             state.set_transient_status(format!(
@@ -287,6 +310,7 @@ fn create_appearance_dialog_window(
         cancel: null_mut(),
         font: OwnedFont::default(),
         dpi: BASE_DPI,
+        armed: false,
         finished: false,
     }));
     let mut adopted = false;
@@ -495,6 +519,9 @@ fn is_checked(control: HWND) -> bool {
 }
 
 fn send_effect(state: &AppearanceDialogWindowState, effect: AppearanceDialogEffect) {
+    if !state.armed {
+        return;
+    }
     let (message, payload) = match effect {
         AppearanceDialogEffect::None => return,
         AppearanceDialogEffect::Preview(appearance) => {
@@ -843,11 +870,22 @@ unsafe extern "system" fn appearance_dialog_proc(
             }
             0
         }
+        WM_APP_APPEARANCE_ARM if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is the dialog-owned Box on this UI thread. This
+            // transition never calls or posts to the owner.
+            let state = unsafe { &mut *state_ptr };
+            if u32::try_from(lparam).ok() == Some(state.session_id) && !state.finished {
+                state.armed = true;
+                1
+            } else {
+                0
+            }
+        }
         WM_NCDESTROY if !state_ptr.is_null() => {
             // SAFETY: state_ptr is still the dialog-owned Box for this final
             // callback. Unexpected destruction fails closed as Cancel.
             let state = unsafe { &mut *state_ptr };
-            if !state.finished {
+            if appearance_dialog_should_notify_cancel(state.armed, state.finished) {
                 let effect = state.model.apply(AppearanceDialogAction::Cancel);
                 send_effect(state, effect);
                 state.finished = true;
