@@ -5,12 +5,13 @@ struct WindowInit {
     adopted: *mut bool,
 }
 
-struct ComGuard;
+struct OleGuard;
 
-impl Drop for ComGuard {
+impl Drop for OleGuard {
     fn drop(&mut self) {
-        // SAFETY: ComGuard exists only after successful CoInitializeEx and drops on the same apartment thread.
-        unsafe { CoUninitialize() };
+        // SAFETY: OleGuard exists only after successful OleInitialize and drops
+        // on the same UI thread after the window revoked its drop target.
+        unsafe { OleUninitialize() };
     }
 }
 
@@ -40,11 +41,17 @@ fn minimum_track_width(window: HWND, state: &AppState) -> i32 {
         .rail_metrics(RailDensity::Compact, state.dpi)
         .rail_width;
     let baseline_rail_width = RailDensity::Compact.metrics(state.dpi).rail_width;
-    let measured_content_width = scale_dip(minimum_content_width_dip(), state.dpi).saturating_add(
-        rail_width
-            .saturating_sub(baseline_rail_width)
-            .saturating_mul(2),
-    );
+    let measured_content_width = scale_dip(minimum_content_width_dip(), state.dpi)
+        .saturating_add(
+            rail_width
+                .saturating_sub(baseline_rail_width)
+                .saturating_mul(2),
+        )
+        .max(
+            rail_width
+                .saturating_mul(2)
+                .saturating_add(state.font_metrics.empty_state_minimum_width(state.dpi)),
+        );
     scale_dip(INITIAL_WIDTH, state.dpi).max(measured_content_width.saturating_add(nonclient_width))
 }
 
@@ -222,12 +229,16 @@ fn run_unsafe() -> io::Result<()> {
             "관리자 권한으로는 실행할 수 없습니다. 일반 사용자 권한으로 다시 실행해 주세요.",
         ));
     }
-    // SAFETY: CoInitializeEx requires a null reserved pointer; ComGuard balances success on this same apartment thread.
-    let com_status = unsafe { CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32) };
-    if com_status < 0 {
-        return Err(io::Error::from_raw_os_error(com_status));
+    // SAFETY: OleInitialize requires a null reserved pointer, initializes the
+    // UI thread as STA, and is balanced by OleGuard on this same thread.
+    let ole_status = unsafe { OleInitialize(null()) };
+    if ole_status < 0 {
+        return Err(io::Error::other(format!(
+            "OLE initialization failed: 0x{:08X}",
+            ole_status as u32
+        )));
     }
-    let _com = ComGuard;
+    let _ole = OleGuard;
     let controls = INITCOMMONCONTROLSEX {
         dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
         dwICC: ICC_LISTVIEW_CLASSES | ICC_WIN95_CLASSES,
@@ -274,7 +285,7 @@ fn run_unsafe() -> io::Result<()> {
     // storage remain allocated throughout this synchronous CreateWindowExW call.
     let window = unsafe {
         CreateWindowExW(
-            WS_EX_ACCEPTFILES | WS_EX_APPWINDOW,
+            WS_EX_APPWINDOW,
             class_name.as_ptr(),
             title.as_ptr(),
             WS_OVERLAPPEDWINDOW | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN,
@@ -396,9 +407,28 @@ unsafe extern "system" fn window_proc(
             if create_children(window, unsafe { &mut *state_ptr }).is_err() {
                 return -1;
             }
+            // Copy child hit surfaces in a tiny borrow, then release it before
+            // RegisterDragDrop can enter OLE.
+            // SAFETY: state_ptr is live UI-thread state for this callback.
+            let (list, overlay) = unsafe {
+                let state = &*state_ptr;
+                (state.list_window, state.drop_overlay)
+            };
+            let registrations = match register_drop_targets(list, overlay, window) {
+                Ok(registrations) => registrations,
+                Err(_) => return -1,
+            };
+            let current_state = window_state_ptr(window);
+            if current_state.is_null() {
+                drop(registrations);
+                return -1;
+            }
+            // SAFETY: state was freshly re-resolved after both OLE calls and no
+            // further reentrant call occurs during this field assignment.
+            unsafe { (*current_state).drop_registrations = Some(registrations) };
             // SAFETY: child creation succeeded and state_ptr remains the live,
             // UI-thread-confined AppState for this top-level window.
-            start_preferences_writer(window, unsafe { &mut *state_ptr });
+            start_preferences_writer(window, unsafe { &mut *current_state });
             0
         }
         WM_SIZE if !state_ptr.is_null() => {
@@ -476,6 +506,11 @@ unsafe extern "system" fn window_proc(
         WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE if !state_ptr.is_null() => {
             // SAFETY: state_ptr is the live UI-thread AppState.
             let state = unsafe { &mut *state_ptr };
+            refresh_forced_colors(state);
+            let apply = state
+                .presentation(selected_indices(state.list_window).len())
+                .apply;
+            refresh_apply_keyline(state, apply);
             refresh_system_fonts(state);
             if let Err(error) = ensure_minimum_track_size(window, state) {
                 super::message(
@@ -519,6 +554,12 @@ unsafe extern "system" fn window_proc(
         WM_APP_ADMISSION_COMPLETE if !state_ptr.is_null() => {
             // SAFETY: state_ptr is the live UI-thread AppState for this window.
             handle_admission_completion(window, unsafe { &mut *state_ptr });
+            0
+        }
+        WM_APP_ADMISSION_STARTED if !state_ptr.is_null() => {
+            // SAFETY: the posted handoff re-resolves live UI-thread state after
+            // the OLE Drop callback and its AppState borrow have ended.
+            finalize_admission_start(unsafe { &mut *state_ptr });
             0
         }
         WM_APP_PREFERENCES_WAKE if !state_ptr.is_null() => {
@@ -565,6 +606,38 @@ unsafe extern "system" fn window_proc(
             request_window_close(window, unsafe { &mut *state_ptr });
             0
         }
+        WM_CTLCOLORSTATIC if !state_ptr.is_null() => {
+            let child = lparam as HWND;
+            // Copy all routing values in a tiny borrow that ends before any GDI
+            // call. Keyline matching remains the first and exact route.
+            // SAFETY: state_ptr is live UI-thread state for this callback.
+            let (keyline_brush, instruction, safety) = unsafe {
+                let state = &*state_ptr;
+                let keyline_brush = state
+                    .left_rail
+                    .as_ref()
+                    .and_then(|rail| rail.apply_keyline_brush_for(child))
+                    .or_else(|| {
+                        state
+                            .right_rail
+                            .as_ref()
+                            .and_then(|rail| rail.apply_keyline_brush_for(child))
+                    });
+                (keyline_brush, state.empty_instruction, state.empty_safety)
+            };
+            if let Some(brush) = route_static_control_colors(
+                keyline_brush,
+                instruction,
+                safety,
+                child,
+                wparam as HDC,
+            ) {
+                return brush as LRESULT;
+            }
+            // SAFETY: unrecognized STATIC children retain the system default
+            // color handling with the original message arguments.
+            unsafe { DefWindowProcW(window, message, wparam, lparam) }
+        }
         WM_COMMAND if !state_ptr.is_null() => {
             let command = (wparam & 0xFFFF) as u16;
             let notification = u32::try_from((wparam >> 16) & 0xFFFF).unwrap_or_default();
@@ -596,25 +669,6 @@ unsafe extern "system" fn window_proc(
             dispatch_command(window, unsafe { &mut *state_ptr }, command);
             0
         }
-        WM_DROPFILES if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the live window-thread AppState pointer.
-            if unsafe { (*state_ptr).read_only_locked() || (*state_ptr).mutation_locked } {
-                // SAFETY: wparam is the owned HDROP delivered with this message
-                // and is released exactly once on the rejected path.
-                unsafe { DragFinish(wparam as HDROP) };
-                self::message(
-                    window,
-                    "파일 변경 또는 복구 잠금 중에는 목록을 변경할 수 없습니다.",
-                    "DarkReNamer - 변경 중",
-                );
-                return 0;
-            }
-            // SAFETY: state_ptr is the non-null Box::into_raw value in GWLP_USERDATA, confined to this window thread until WM_NCDESTROY.
-            unsafe {
-                admit_drop(window, &mut *state_ptr, wparam as HDROP);
-            }
-            0
-        }
         WM_NOTIFY if !state_ptr.is_null() => {
             let header = lparam as *const NMHDR;
             if !header.is_null()
@@ -625,6 +679,11 @@ unsafe extern "system" fn window_proc(
                 && programmatic_list_update_active()
             {
                 return 0;
+            }
+            // SAFETY: state_ptr is the live UI-thread AppState and the custom
+            // draw helper validates the synchronous WM_NOTIFY payload/source.
+            if let Some(result) = handle_list_custom_draw(unsafe { &*state_ptr }, lparam) {
+                return result;
             }
             // Header controls are ListView children, so their resize
             // notifications identify the header HWND rather than list_window.
@@ -679,6 +738,15 @@ unsafe extern "system" fn window_proc(
         }
         WM_DESTROY => {
             if !state_ptr.is_null() {
+                // Take the registration without retaining an AppState borrow;
+                // RevokeDragDrop may synchronously release the COM target.
+                // SAFETY: state_ptr is live UI-thread state for this callback.
+                let (overlay, registrations) = unsafe {
+                    let state = &mut *state_ptr;
+                    (state.drop_overlay, state.drop_registrations.take())
+                };
+                set_drop_overlay_control(overlay, DropPresentation::Inactive);
+                drop(registrations);
                 // Destroy tooltip windows before their CommandRail-owned text
                 // buffers are released, then destroy the direct child buttons.
                 // SAFETY: state_ptr is the live window-thread AppState and this
@@ -697,6 +765,15 @@ unsafe extern "system" fn window_proc(
         }
         WM_NCDESTROY => {
             if !state_ptr.is_null() {
+                // Defensive idempotent fallback if creation teardown reached
+                // WM_NCDESTROY without the ordinary WM_DESTROY path.
+                // SAFETY: state_ptr is still published and UI-thread confined.
+                let (overlay, registrations) = unsafe {
+                    let state = &mut *state_ptr;
+                    (state.drop_overlay, state.drop_registrations.take())
+                };
+                set_drop_overlay_control(overlay, DropPresentation::Inactive);
+                drop(registrations);
                 // Clear the published pointer before reclaiming it so queued
                 // worker/input messages cannot recover freed AppState storage.
                 // SAFETY: this callback owns the exact GWLP_USERDATA slot.
@@ -716,5 +793,27 @@ unsafe extern "system" fn window_proc(
             // SAFETY: window, message, wparam, and lparam are unchanged values from the active Windows callback.
             unsafe { DefWindowProcW(window, message, wparam, lparam) }
         }
+    }
+}
+
+pub(super) fn route_static_control_colors(
+    keyline_brush: Option<HBRUSH>,
+    empty_instruction: HWND,
+    empty_safety: HWND,
+    child: HWND,
+    dc: HDC,
+) -> Option<HBRUSH> {
+    if let Some(brush) = keyline_brush {
+        return Some(brush);
+    }
+    if child != empty_instruction && child != empty_safety {
+        return None;
+    }
+    // SAFETY: WM_CTLCOLORSTATIC supplies a live HDC. System colors and the
+    // cached system brush automatically follow high-contrast/theme changes.
+    unsafe {
+        SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+        SetBkColor(dc, GetSysColor(COLOR_WINDOW));
+        Some(GetSysColorBrush(COLOR_WINDOW))
     }
 }

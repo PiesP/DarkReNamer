@@ -49,6 +49,28 @@ pub(super) fn nonclient_metrics(dpi: u32) -> Option<NONCLIENTMETRICSW> {
     (success != 0).then_some(metrics)
 }
 
+pub(super) fn query_high_contrast_active() -> Option<bool> {
+    let mut contrast = HIGHCONTRASTW {
+        cbSize: u32::try_from(size_of::<HIGHCONTRASTW>()).ok()?,
+        ..HIGHCONTRASTW::default()
+    };
+    // SAFETY: contrast is writable HIGHCONTRASTW storage with its checked
+    // structure size; the synchronous query retains no pointer.
+    let succeeded = unsafe {
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            contrast.cbSize,
+            (&mut contrast as *mut HIGHCONTRASTW).cast(),
+            0,
+        )
+    };
+    (succeeded != 0).then_some(contrast.dwFlags & HCF_HIGHCONTRASTON != 0)
+}
+
+pub(super) fn refresh_forced_colors(state: &mut AppState) {
+    state.forced_colors = ForcedColorsState::from_high_contrast_query(query_high_contrast_active());
+}
+
 pub(super) fn create_message_font(dpi: u32) -> HFONT {
     let Some(metrics) = nonclient_metrics(dpi) else {
         return null_mut();
@@ -76,6 +98,15 @@ pub(super) fn refresh_system_fonts(state: &mut AppState) {
         SendMessageW(state.status_message, WM_SETFONT, status_font as usize, 1);
         SendMessageW(state.status_count, WM_SETFONT, status_font as usize, 1);
         SendMessageW(state.cancel_worker, WM_SETFONT, message_font as usize, 1);
+        SendMessageW(
+            state.empty_instruction,
+            WM_SETFONT,
+            message_font as usize,
+            1,
+        );
+        SendMessageW(state.empty_safety, WM_SETFONT, status_font as usize, 1);
+        SendMessageW(state.empty_add, WM_SETFONT, message_font as usize, 1);
+        SendMessageW(state.drop_overlay, WM_SETFONT, message_font as usize, 1);
     }
     if let Some(rail) = &state.left_rail {
         rail.apply_font(message_font);
@@ -107,6 +138,23 @@ pub(super) fn measure_font_metrics(
         measure_text(window, status_font, STATUS_COUNT_SAMPLE, true).map_or(0, |(width, _)| width);
     let (cancel_text_width, cancel_text_height) =
         measure_text(window, message_font, STATUS_CANCEL_LABEL, true).unwrap_or_default();
+    let (empty_instruction_text_width, empty_instruction_text_height) =
+        measure_text(window, message_font, EMPTY_STATE_INSTRUCTION, true).unwrap_or_default();
+    let (empty_safety_text_width, empty_safety_text_height) =
+        measure_text(window, status_font, EMPTY_STATE_SAFETY, true).unwrap_or_default();
+    let (empty_add_text_width, empty_add_text_height) =
+        measure_text(window, message_font, EMPTY_STATE_ADD_LABEL, true).unwrap_or_default();
+    let (drop_overlay_text_width, drop_overlay_text_height) = [
+        DROP_ACCEPTING_TEXT,
+        DROP_LOCKED_TEXT,
+        DROP_UNSUPPORTED_TEXT,
+        DROP_FULL_TEXT,
+    ]
+    .into_iter()
+    .filter_map(|text| measure_text(window, message_font, text, true))
+    .fold((0_i32, 0_i32), |(width, height), measured| {
+        (width.max(measured.0), height.max(measured.1))
+    });
     MeasuredFontMetrics {
         button_text_width,
         button_text_height,
@@ -114,6 +162,14 @@ pub(super) fn measure_font_metrics(
         status_count_text_width,
         cancel_text_width,
         cancel_text_height,
+        empty_instruction_text_width,
+        empty_instruction_text_height,
+        empty_safety_text_width,
+        empty_safety_text_height,
+        empty_add_text_width,
+        empty_add_text_height,
+        drop_overlay_text_width,
+        drop_overlay_text_height,
     }
 }
 
@@ -155,6 +211,7 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
     // SAFETY: window is the live top-level HWND being initialized.
     let dpi = unsafe { GetDpiForWindow(window) };
     state.dpi = if dpi == 0 { BASE_DPI } else { dpi };
+    refresh_forced_colors(state);
     // SAFETY: A null module name requests the current process module and dereferences no caller memory.
     let instance = unsafe { GetModuleHandleW(null()) };
     let list_class = wide("SysListView32");
@@ -223,9 +280,10 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
     ) = create_status_controls(window)?;
     state.left_rail = Some(CommandRail::create(window, &LEFT_RAIL)?);
     state.right_rail = Some(CommandRail::create(window, &RIGHT_RAIL)?);
+    (state.empty_instruction, state.empty_safety, state.empty_add) =
+        create_empty_state_controls(window)?;
+    state.drop_overlay = create_drop_overlay(window)?;
     refresh_system_fonts(state);
-    // SAFETY: window is the live top-level HWND and DragAcceptFiles stores no borrowed pointer.
-    unsafe { DragAcceptFiles(window, 1) };
     state.menu = create_menu()?.attach(window)?;
     // SAFETY: SHFILEINFOW is a C-compatible output structure whose all-zero state is valid before the shell fills it.
     let mut shell_info: SHFILEINFOW = unsafe { zeroed() };
@@ -288,6 +346,81 @@ pub(super) fn create_status_controls(parent: HWND) -> io::Result<(HWND, HWND, HW
     Ok((message, count, cancel))
 }
 
+pub(super) fn create_empty_state_controls(parent: HWND) -> io::Result<(HWND, HWND, HWND)> {
+    let instruction = child(
+        parent,
+        "STATIC",
+        EMPTY_STATE_INSTRUCTION,
+        EMPTY_INSTRUCTION_ID,
+        SS_CENTER | SS_NOPREFIX,
+    )?;
+    let safety = child(
+        parent,
+        "STATIC",
+        EMPTY_STATE_SAFETY,
+        EMPTY_SAFETY_ID,
+        SS_CENTER | SS_NOPREFIX,
+    )?;
+    let add = child(
+        parent,
+        "BUTTON",
+        EMPTY_STATE_ADD_LABEL,
+        EMPTY_ADD_ID,
+        WS_TABSTOP | BS_PUSHBUTTON as u32,
+    )?;
+    Ok((instruction, safety, add))
+}
+
+pub(super) fn create_drop_overlay(parent: HWND) -> io::Result<HWND> {
+    let class = wide("STATIC");
+    // This direct child starts hidden and has no ID, focus, notification, or
+    // command semantics. Its system STATIC renderer supplies colors/fonts.
+    // SAFETY: parent is live and the system class retains no caller storage.
+    let overlay = unsafe {
+        CreateWindowExW(
+            0,
+            class.as_ptr(),
+            null(),
+            WS_CHILD | SS_CENTER | SS_NOPREFIX,
+            0,
+            0,
+            0,
+            0,
+            parent,
+            null_mut(),
+            GetModuleHandleW(null()),
+            null_mut(),
+        )
+    };
+    if overlay.is_null() {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(overlay)
+    }
+}
+
+pub(super) fn set_drop_overlay_control(overlay: HWND, presentation: DropPresentation) {
+    let text = match presentation {
+        DropPresentation::Inactive => "",
+        DropPresentation::Accepting => DROP_ACCEPTING_TEXT,
+        DropPresentation::Locked => DROP_LOCKED_TEXT,
+        DropPresentation::Unsupported => DROP_UNSUPPORTED_TEXT,
+        DropPresentation::Full => DROP_FULL_TEXT,
+    };
+    set_status(overlay, text);
+    // SAFETY: drop_overlay is the live noninteractive STATIC owned by AppState.
+    unsafe {
+        ShowWindow(
+            overlay,
+            if presentation == DropPresentation::Inactive {
+                SW_HIDE
+            } else {
+                SW_SHOW
+            },
+        )
+    };
+}
+
 pub(super) fn child(
     parent: HWND,
     class: &str,
@@ -334,16 +467,21 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
     let previously_focused = focused_child(state);
     let mut windows = Vec::with_capacity(main_layout_window_count(&layout));
     if let Some(rail) = &state.left_rail {
-        rail.append_placements(0, &layout.left_buttons, &mut windows);
+        rail.append_placements(0, &layout.left_buttons, state.dpi, &mut windows);
     }
     if let Some(rail) = &state.right_rail {
         rail.append_placements(
             width.saturating_sub(layout.rail_width),
             &layout.right_buttons,
+            state.dpi,
             &mut windows,
         );
     }
     windows.push((state.list_window, layout.list));
+    windows.push((state.empty_instruction, layout.empty_instruction));
+    windows.push((state.empty_safety, layout.empty_safety));
+    windows.push((state.empty_add, layout.empty_add));
+    windows.push((state.drop_overlay, layout.drop_overlay));
     windows.push((state.status_message, layout.status_message));
     windows.push((state.status_count, layout.status_count));
     windows.push((state.cancel_worker, layout.cancel));
@@ -357,6 +495,14 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
         }
     }
     state.rails_visible = rails_visible;
+    refresh_apply_keyline(
+        state,
+        if state.command_states[0] {
+            ApplyPresentation::Ready
+        } else {
+            ApplyPresentation::NoChanges
+        },
+    );
     repair_focus_state(state);
     if !rails_visible && previously_focused.is_some_and(|(child, _)| child != FocusChild::List) {
         schedule_focus_restore(state);
@@ -442,17 +588,22 @@ pub(super) fn move_window_dip(window: HWND, x: i32, y: i32, width: i32, height: 
 pub(super) fn update_controls(state: &mut AppState) {
     let previously_focused = focused_child(state);
     let selected_count = { selected_indices(state.list_window) }.len();
+    let presentation = state.presentation(selected_count);
+    state.ui_status.set_preview_counts(presentation.counts);
+    state.render_status();
     for id in APPLY..=VERSION {
-        state.command_states[usize::from(id - APPLY)] =
-            if state.read_only_locked() || state.mutation_locked {
-                id == VERSION
-            } else {
-                command_enabled(id, state.model.len(), selected_count)
-                    && !(id == APPLY && state.apply_locked())
-            };
+        state.command_states[usize::from(id - APPLY)] = if id == APPLY {
+            matches!(presentation.apply, ApplyPresentation::Ready)
+        } else if state.read_only_locked() || state.mutation_locked {
+            id == VERSION
+        } else {
+            command_enabled(id, state.model.len(), selected_count)
+        };
     }
     apply_command_states(state);
+    refresh_apply_keyline(state, presentation.apply);
     apply_cancel_control_state(state);
+    apply_empty_state_presentation(state, presentation.empty);
     repair_focus_state(state);
     let focused_target_changed = match previously_focused {
         Some((FocusChild::LeftRail, Some(index))) => {
@@ -465,6 +616,52 @@ pub(super) fn update_controls(state: &mut AppState) {
     };
     if focused_target_changed {
         schedule_focus_restore(state);
+    }
+}
+
+pub(super) fn refresh_apply_keyline(state: &AppState, apply: ApplyPresentation) {
+    let requested = apply_keyline_visible(apply, state.forced_colors, state.rails_visible);
+    if let Some(rail) = &state.left_rail {
+        rail.set_apply_keyline_visible(requested);
+    }
+    if let Some(rail) = &state.right_rail {
+        rail.set_apply_keyline_visible(requested);
+    }
+}
+
+fn apply_empty_state_presentation(state: &AppState, presentation: EmptyStatePresentation) {
+    let visible = matches!(presentation, EmptyStatePresentation::ReadyToAdd);
+    // SAFETY: this query reads only the current UI-thread focus HWND.
+    let add_had_focus = unsafe { GetFocus() == state.empty_add };
+    set_empty_state_controls(
+        state.empty_instruction,
+        state.empty_safety,
+        state.empty_add,
+        presentation,
+    );
+    // Hiding a focused CTA clears focus; restore the durable ListView target
+    // through the existing non-reentrant focus path.
+    if !visible && add_had_focus {
+        // SAFETY: list_window is a live direct child while AppState exists.
+        let parent = unsafe { GetParent(state.list_window) };
+        schedule_focus_target(parent, state.list_window);
+    }
+}
+
+pub(super) fn set_empty_state_controls(
+    instruction: HWND,
+    safety: HWND,
+    add: HWND,
+    presentation: EmptyStatePresentation,
+) {
+    let visible = matches!(presentation, EmptyStatePresentation::ReadyToAdd);
+    // SAFETY: these are live standard direct children owned by AppState or a
+    // hidden native test parent. Only the CTA is ever enabled for interaction.
+    unsafe {
+        EnableWindow(add, i32::from(visible));
+        for control in [instruction, safety, add] {
+            ShowWindow(control, if visible { SW_SHOW } else { SW_HIDE });
+        }
     }
 }
 

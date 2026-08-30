@@ -930,9 +930,13 @@ pub(super) fn request_active_worker_cancel(state: &mut AppState) {
     }
 }
 
-pub(super) fn admit_paths(owner: HWND, state: &mut AppState, paths: Vec<PathBuf>) {
+pub(super) fn admit_paths(
+    owner: HWND,
+    state: &mut AppState,
+    paths: Vec<PathBuf>,
+) -> io::Result<()> {
     let capacity = MAX_ADMITTED_SOURCES.saturating_sub(state.model.len());
-    start_admission_worker(owner, state, paths, None, capacity);
+    start_admission_worker(owner, state, paths, None, capacity)
 }
 
 pub(super) fn start_admission_worker(
@@ -941,23 +945,17 @@ pub(super) fn start_admission_worker(
     paths: Vec<PathBuf>,
     mode: Option<AdmissionMode>,
     capacity: usize,
-) {
+) -> io::Result<()> {
     let revision = state.revision();
     let cancellation = Arc::new(AtomicBool::new(false));
     let worker_cancellation = Arc::clone(&cancellation);
     let (sender, receiver) = sync_channel(1);
     // SAFETY: window is the live top-level HWND and the timer has no callback.
     if unsafe { SetTimer(window, APPLY_POLL_TIMER_ID, 100, None) } == 0 {
-        message(
-            window,
-            &format!(
-                "admission worker 완료 감시 timer를 시작하지 못했습니다: {}",
-                io::Error::last_os_error()
-            ),
-            "DarkReNamer - 추가 실패",
-        );
-        update_controls(state);
-        return;
+        return Err(io::Error::other(format!(
+            "admission worker 완료 감시 timer를 시작하지 못했습니다: {}",
+            io::Error::last_os_error()
+        )));
     }
     let window_value = window as usize;
     let handle = match thread::Builder::new()
@@ -1019,13 +1017,9 @@ pub(super) fn start_admission_worker(
         Err(error) => {
             // SAFETY: this exact timer was installed above for the live window.
             unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
-            message(
-                window,
-                &format!("admission worker를 시작하지 못했습니다: {error}"),
-                "DarkReNamer - 추가 실패",
-            );
-            update_controls(state);
-            return;
+            return Err(io::Error::other(format!(
+                "admission worker를 시작하지 못했습니다: {error}"
+            )));
         }
     };
     state.mutation_locked = true;
@@ -1034,8 +1028,23 @@ pub(super) fn start_admission_worker(
         receiver,
         handle,
     });
+    Ok(())
+}
+
+pub(super) fn finalize_admission_start(state: &mut AppState) {
+    if state.admission_worker.is_none() {
+        return;
+    }
     state.set_progress_status("선택한 경로를 확인하고 있습니다...");
     update_controls(state);
+}
+
+pub(super) fn finalize_admission_start_failure(state: &mut AppState) {
+    update_controls(state);
+}
+
+pub(super) fn report_admission_start_error(owner: HWND, error: &io::Error) {
+    message(owner, &error.to_string(), "DarkReNamer - 추가 실패");
 }
 
 pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
@@ -1146,7 +1155,13 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
                     return;
                 }
             };
-            start_admission_worker(window, state, paths, Some(mode), capacity);
+            match start_admission_worker(window, state, paths, Some(mode), capacity) {
+                Ok(()) => finalize_admission_start(state),
+                Err(error) => {
+                    finalize_admission_start_failure(state);
+                    report_admission_start_error(window, &error);
+                }
+            }
             return;
         }
         Ok(AdmissionWorkerResult::Finished {
