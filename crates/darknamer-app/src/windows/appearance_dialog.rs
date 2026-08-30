@@ -1114,6 +1114,8 @@ mod native_tests {
     -> Result<(), Box<dyn std::error::Error>> {
         // SAFETY: null requests the current process module.
         let instance = unsafe { GetModuleHandleW(null()) };
+        // SAFETY: the system STATIC class and current module remain live for
+        // this hidden test-owned top-level window.
         let owner = unsafe {
             CreateWindowExW(
                 0,
@@ -1192,7 +1194,7 @@ mod native_tests {
         // SAFETY: dc came from this exact live button.
         unsafe { ReleaseDC(ok, dc) };
 
-        let mut message = MSG {
+        let message = MSG {
             hwnd: radio,
             message: WM_KEYDOWN,
             wParam: VK_RETURN as WPARAM,
@@ -1200,7 +1202,7 @@ mod native_tests {
         };
         // SAFETY: dialog/radio/message are live and synchronous. The unarmed
         // dialog accepts locally without sending an owner state pointer.
-        let handled = unsafe { IsDialogMessageW(dialog, &mut message) };
+        let handled = unsafe { IsDialogMessageW(dialog, &message) };
         assert_ne!(handled, 0);
         // SAFETY: IsWindow is a non-owning value query.
         assert_eq!(unsafe { IsWindow(dialog) }, 0);
