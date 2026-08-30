@@ -725,6 +725,34 @@ unsafe extern "system" fn window_proc(
             request_window_close(window, state);
             0
         }
+        WM_ERASEBKGND if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is live UI-thread state and wparam is the
+            // callback-owned paint DC for this exact top-level window.
+            let resources = unsafe { (*state_ptr).appearance_resources.as_ref() };
+            erase_themed_background(window, wparam as HDC, resources);
+            1
+        }
+        WM_DRAWITEM if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is live UI-thread state and the renderer reads
+            // only the synchronous WM_DRAWITEM payload.
+            let resources = unsafe { (*state_ptr).appearance_resources.as_ref() };
+            if draw_owner_button(resources, lparam) || draw_owner_menu(resources, lparam) {
+                return 1;
+            }
+            // SAFETY: unrecognized owner-draw payloads retain system handling.
+            unsafe { DefWindowProcW(window, message, wparam, lparam) }
+        }
+        WM_MEASUREITEM if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is live UI-thread state and lparam is the
+            // synchronous writable measurement payload.
+            let state = unsafe { &*state_ptr };
+            if measure_owner_menu(window, state.font.as_raw(), state.dpi, lparam) {
+                1
+            } else {
+                // SAFETY: unrecognized measurement retains system handling.
+                unsafe { DefWindowProcW(window, message, wparam, lparam) }
+            }
+        }
         WM_CTLCOLORSTATIC if !state_ptr.is_null() => {
             let child = lparam as HWND;
             // Copy all routing values in a tiny borrow that ends before any GDI
@@ -808,6 +836,10 @@ unsafe extern "system" fn window_proc(
             // SAFETY: state_ptr is the live UI-thread AppState and the custom
             // draw helper validates the synchronous WM_NOTIFY payload/source.
             if let Some(result) = handle_list_custom_draw(unsafe { &*state_ptr }, lparam) {
+                return result;
+            }
+            // SAFETY: same synchronous notification and live UI-thread state.
+            if let Some(result) = handle_header_custom_draw(unsafe { &*state_ptr }, lparam) {
                 return result;
             }
             // Header controls are ListView children, so their resize

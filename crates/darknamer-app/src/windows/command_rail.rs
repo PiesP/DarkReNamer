@@ -20,9 +20,10 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BS_CENTER, BS_MULTILINE, BS_NOTIFY, BS_PUSHBUTTON, BS_VCENTER, CreateWindowExW, DestroyWindow,
-    GWL_STYLE, GetWindowLongPtrW, SW_HIDE, SW_SHOW, SendMessageW, SetWindowLongPtrW, ShowWindow,
-    WM_SETFONT, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
+    BS_CENTER, BS_MULTILINE, BS_NOTIFY, BS_OWNERDRAW, BS_PUSHBUTTON, BS_VCENTER, CreateWindowExW,
+    DestroyWindow, GWL_STYLE, GetWindowLongPtrW, SW_HIDE, SW_SHOW, SendMessageW, SetWindowLongPtrW,
+    ShowWindow, WM_SETFONT, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP,
+    WS_VISIBLE,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -166,6 +167,7 @@ impl CommandRail {
                     WS_CHILD
                         | WS_VISIBLE
                         | BS_PUSHBUTTON as u32
+                        | BS_OWNERDRAW as u32
                         | BS_NOTIFY as u32
                         | BS_MULTILINE as u32
                         | BS_CENTER as u32
@@ -404,6 +406,10 @@ impl CommandRail {
             .as_ref()
             .filter(|keyline| keyline.window == window)
             .map(|keyline| keyline.brush)
+    }
+
+    pub(super) fn is_separator(&self, window: HWND) -> bool {
+        self.separators.contains(&window)
     }
 
     pub(super) fn set_apply_keyline_color(&mut self, color: u32) -> io::Result<()> {

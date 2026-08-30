@@ -107,6 +107,98 @@ pub(super) fn handle_header_end_track(state: &mut AppState, lparam: LPARAM) -> b
     true
 }
 
+pub(super) fn handle_header_custom_draw(state: &AppState, lparam: LPARAM) -> Option<LRESULT> {
+    let resources = state.appearance_resources.as_ref()?;
+    let header = lparam as *const NMHDR;
+    if header.is_null() {
+        return None;
+    }
+    // SAFETY: list_window is live and returns its borrowed Header child.
+    let header_window = unsafe { SendMessageW(state.list_window, LVM_GETHEADER, 0, 0) } as HWND;
+    // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix synchronously.
+    if header_window.is_null()
+        || unsafe { (*header).hwndFrom } != header_window
+        || unsafe { (*header).code } != NM_CUSTOMDRAW
+    {
+        return None;
+    }
+    let custom = lparam as *const NMCUSTOMDRAW;
+    if custom.is_null() {
+        return Some(CDRF_DODEFAULT as LRESULT);
+    }
+    // SAFETY: Header NM_CUSTOMDRAW supplies NMCUSTOMDRAW storage.
+    let stage = unsafe { (*custom).dwDrawStage };
+    if stage == CDDS_PREPAINT {
+        let mut rect = RECT::default();
+        // SAFETY: header/DC are live and rect is writable for this paint.
+        unsafe {
+            GetClientRect(header_window, &mut rect);
+            FillRect((*custom).hdc, &rect, resources.header_brush());
+        }
+        return Some(CDRF_NOTIFYITEMDRAW as LRESULT);
+    }
+    if stage != CDDS_ITEMPREPAINT {
+        return Some(CDRF_DODEFAULT as LRESULT);
+    }
+    // SAFETY: item spec/state/rect/DC belong to this live Header callback.
+    let item = unsafe { (*custom).dwItemSpec };
+    let mut label = vec![0_u16; 256];
+    let mut header_item = HDITEMW {
+        mask: HDI_TEXT,
+        pszText: label.as_mut_ptr(),
+        cchTextMax: i32::try_from(label.len()).unwrap_or(i32::MAX),
+        ..HDITEMW::default()
+    };
+    // SAFETY: header_item and label remain writable through the synchronous query.
+    if unsafe {
+        SendMessageW(
+            header_window,
+            HDM_GETITEMW,
+            item,
+            (&mut header_item as *mut HDITEMW) as LPARAM,
+        )
+    } == 0
+    {
+        return Some(CDRF_DODEFAULT as LRESULT);
+    }
+    let length = label
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(label.len());
+    let palette = resources.palette();
+    // SAFETY: same live callback fields as above.
+    let state_flags = unsafe { (*custom).uItemState };
+    let background = if state_flags & CDIS_SELECTED != 0 {
+        resources.control_brush(true, false, false)
+    } else if state_flags & CDIS_HOT != 0 {
+        resources.control_brush(false, true, false)
+    } else {
+        resources.header_brush()
+    };
+    // SAFETY: same live callback storage and resource-owned brushes.
+    let mut rect = unsafe { (*custom).rc };
+    unsafe {
+        FillRect((*custom).hdc, &rect, background);
+        FrameRect((*custom).hdc, &rect, resources.border_brush());
+        SetBkMode((*custom).hdc, TRANSPARENT as i32);
+        SetTextColor((*custom).hdc, palette.text_primary);
+    }
+    rect.left = rect.left.saturating_add(scale_dip(8, state.dpi));
+    rect.right = rect.right.saturating_sub(scale_dip(8, state.dpi));
+    let alignment = if item == 4 { DT_RIGHT } else { DT_LEFT };
+    // SAFETY: label/rect/DC remain live for synchronous text drawing.
+    unsafe {
+        DrawTextW(
+            (*custom).hdc,
+            label.as_ptr(),
+            i32::try_from(length).unwrap_or(i32::MAX),
+            &mut rect,
+            alignment | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+        )
+    };
+    Some(CDRF_SKIPDEFAULT as LRESULT)
+}
+
 /// Applies restrained colors only to an unselected changed proposed-name cell.
 /// Every other stage and state remains under the native ListView renderer.
 pub(super) fn handle_list_custom_draw(state: &AppState, lparam: LPARAM) -> Option<LRESULT> {
