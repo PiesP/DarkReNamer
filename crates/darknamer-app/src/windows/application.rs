@@ -71,9 +71,14 @@ fn recommended_track_height(window: HWND, state: &AppState) -> i32 {
         .saturating_add(nonclient_height(window))
 }
 
-fn resize_to_initial_dpi(window: HWND, state: &AppState) -> io::Result<()> {
-    let width = minimum_track_width(window, state);
-    let height = scale_dip(INITIAL_HEIGHT, state.dpi).max(recommended_track_height(window, state));
+fn initial_dpi_size(window: HWND, state: &AppState) -> (i32, i32) {
+    (
+        minimum_track_width(window, state),
+        scale_dip(INITIAL_HEIGHT, state.dpi).max(recommended_track_height(window, state)),
+    )
+}
+
+fn resize_to_initial_dpi(window: HWND, width: i32, height: i32) -> io::Result<()> {
     // SAFETY: window is the newly created hidden top-level HWND. The flags keep
     // its system-selected position and z-order while applying physical pixels
     // derived from the window's actual DPI before the first ShowWindow call.
@@ -92,6 +97,58 @@ fn resize_to_initial_dpi(window: HWND, state: &AppState) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+fn window_state_ptr(window: HWND) -> *mut AppState {
+    // SAFETY: this value query reads only the pointer installed in this exact
+    // window's user-data slot and does not create a Rust reference.
+    unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) as *mut AppState }
+}
+
+fn has_window_state(window: HWND) -> bool {
+    !window_state_ptr(window).is_null()
+}
+
+fn valid_focus_target(window: HWND, target: HWND) -> bool {
+    if target.is_null() {
+        return false;
+    }
+    // SAFETY: all calls are non-owning value queries. Requiring a live direct
+    // child, enabled state, and effective visibility rejects stale HWNDs and
+    // hidden menu-only rail buttons at the final action boundary.
+    unsafe {
+        IsWindow(target) != 0
+            && GetParent(target) == window
+            && IsWindowEnabled(target) != 0
+            && IsWindowVisible(target) != 0
+    }
+}
+
+fn navigation_focus_target(window: HWND, message: &MSG) -> Option<HWND> {
+    let state_ptr = window_state_ptr(window);
+    if state_ptr.is_null() {
+        return None;
+    }
+    // SAFETY: the pointer was resolved from the live window immediately above;
+    // this borrow ends before any target validation or SetFocus call.
+    let target = unsafe { handle_focus_navigation(&mut *state_ptr, message) }?;
+    valid_focus_target(window, target).then_some(target)
+}
+
+fn restored_focus_target(window: HWND, state_ptr: *mut AppState) -> Option<HWND> {
+    if state_ptr.is_null() {
+        return None;
+    }
+    // SAFETY: state_ptr is the current value from this callback window's user
+    // data. The mutable borrow ends before the reentrant SetFocus boundary.
+    let target = unsafe { restore_child_focus(&mut *state_ptr) }?;
+    valid_focus_target(window, target).then_some(target)
+}
+
+fn apply_focus_target(target: HWND) {
+    // SAFETY: callers validate target after releasing every AppState reference;
+    // SetFocus may synchronously emit BN_SETFOCUS and reenter window_proc.
+    unsafe { SetFocus(target) };
 }
 
 fn ensure_minimum_track_size(window: HWND, state: &AppState) -> io::Result<()> {
@@ -238,9 +295,17 @@ fn run_unsafe() -> io::Result<()> {
         }
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: successful WM_NCCREATE adopted `state`; it remains live in the
-    // window user data until WM_NCDESTROY and is read only for this resize.
-    if let Err(error) = resize_to_initial_dpi(window, unsafe { &*state }) {
+    let state_ptr = window_state_ptr(window);
+    if state_ptr.is_null() {
+        // SAFETY: the created window did not retain its required AppState and
+        // is destroyed before returning the initialization failure.
+        unsafe { DestroyWindow(window) };
+        return Err(io::Error::other("window state was not adopted"));
+    }
+    // SAFETY: state_ptr was resolved from the live window. Only copied geometry
+    // leaves this block, so SetWindowPos cannot reenter while the borrow exists.
+    let (initial_width, initial_height) = unsafe { initial_dpi_size(window, &*state_ptr) };
+    if let Err(error) = resize_to_initial_dpi(window, initial_width, initial_height) {
         // SAFETY: window is still hidden and owns the adopted AppState. Its
         // normal teardown reclaims children, GDI resources, and the state.
         unsafe { DestroyWindow(window) };
@@ -279,13 +344,18 @@ fn run_unsafe() -> io::Result<()> {
         if result == 0 {
             break;
         }
-        if accelerators.translate(window, &message) {
+        let state_is_live = has_window_state(window);
+        if state_is_live && accelerators.translate(window, &message) {
+            continue;
+        }
+        if state_is_live && let Some(target) = navigation_focus_target(window, &message) {
+            apply_focus_target(target);
             continue;
         }
         // SAFETY: window is the live top-level owner and message was populated
         // by GetMessageW. Existing accelerators are handled first; dialog-style
         // navigation then provides Tab and Shift+Tab across direct children.
-        if unsafe { IsDialogMessageW(window, &message) } != 0 {
+        if state_is_live && unsafe { IsDialogMessageW(window, &message) } != 0 {
             continue;
         }
         // SAFETY: message was initialized by GetMessageW and remains valid through synchronous translation and dispatch.
@@ -331,13 +401,25 @@ unsafe extern "system" fn window_proc(
         WM_SIZE if !state_ptr.is_null() => {
             // SAFETY: state_ptr is non-null window-owned AppState storage and no
             // mutable reference exists while this shared layout borrow is live.
-            arrange(window, unsafe { &*state_ptr });
+            arrange(window, unsafe { &mut *state_ptr });
             0
         }
         WM_SETFOCUS if !state_ptr.is_null() => {
-            // SAFETY: list_window is the live focusable ListView child owned by
-            // this top-level window on the current UI thread.
-            unsafe { SetFocus((*state_ptr).list_window) };
+            if let Some(target) = restored_focus_target(window, state_ptr) {
+                apply_focus_target(target);
+            }
+            0
+        }
+        WM_APP_RESTORE_FOCUS if !state_ptr.is_null() => {
+            let requested = wparam as HWND;
+            let target = if requested.is_null() {
+                restored_focus_target(window, state_ptr)
+            } else {
+                valid_focus_target(window, requested).then_some(requested)
+            };
+            if let Some(target) = target {
+                apply_focus_target(target);
+            }
             0
         }
         WM_GETMINMAXINFO if !state_ptr.is_null() => {
@@ -472,6 +554,17 @@ unsafe extern "system" fn window_proc(
         }
         WM_COMMAND if !state_ptr.is_null() => {
             let command = (wparam & 0xFFFF) as u16;
+            let notification = u32::try_from((wparam >> 16) & 0xFFFF).unwrap_or_default();
+            let source = lparam as HWND;
+            if !source.is_null() && notification == BN_SETFOCUS {
+                // SAFETY: source is the live command button identified by this
+                // synchronous notification and state_ptr is UI-thread confined.
+                record_child_focus(unsafe { &mut *state_ptr }, source);
+                return 0;
+            }
+            if !source.is_null() && notification != BN_CLICKED {
+                return 0;
+            }
             // SAFETY: state_ptr is the non-null, window-thread-confined AppState
             // installed in GWLP_USERDATA and is uniquely borrowed for dispatch.
             dispatch_command(window, unsafe { &mut *state_ptr }, command);
@@ -513,6 +606,16 @@ unsafe extern "system" fn window_proc(
                 // SAFETY: For WM_NOTIFY, non-null lparam points to an NMHDR prefix that remains readable throughout this synchronous callback.
                 && unsafe { (*header).hwndFrom } == unsafe { (*state_ptr).list_window }
             {
+                // SAFETY: header is the live NMHDR prefix supplied by the
+                // ListView for this synchronous notification.
+                if unsafe { (*header).code } == NM_SETFOCUS {
+                    // SAFETY: state_ptr is live UI-thread state and list_window
+                    // is the notification source just validated above.
+                    record_child_focus(unsafe { &mut *state_ptr }, unsafe {
+                        (*state_ptr).list_window
+                    });
+                    return 0;
+                }
                 // SAFETY: For WM_NOTIFY, non-null lparam points to an NMHDR prefix that remains readable throughout this synchronous callback.
                 if unsafe { (*header).code } == LVN_ITEMCHANGED {
                     let notification = lparam as *const NMLISTVIEW;
@@ -559,25 +662,15 @@ unsafe extern "system" fn window_proc(
         }
         WM_NCDESTROY => {
             if !state_ptr.is_null() {
+                // Clear the published pointer before reclaiming it so queued
+                // worker/input messages cannot recover freed AppState storage.
+                // SAFETY: this callback owns the exact GWLP_USERDATA slot.
+                unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, 0) };
                 // SAFETY: this timer identifier is process-owned; killing an
                 // absent timer is harmless during defensive teardown.
                 unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
-                // SAFETY: state_ptr is the non-null Box::into_raw value in GWLP_USERDATA, confined to this window thread until WM_NCDESTROY.
-                if !unsafe { (*state_ptr).font }.is_null() {
-                    // SAFETY: state_ptr is the non-null Box::into_raw value in GWLP_USERDATA, confined to this window thread until WM_NCDESTROY.
-                    unsafe { DeleteObject((*state_ptr).font) };
-                }
-                // SAFETY: status_font is a distinct AppState-owned HFONT and is
-                // deleted exactly once at window teardown.
-                if !unsafe { (*state_ptr).status_font }.is_null() {
-                    // SAFETY: the non-null AppState-owned font is deleted once
-                    // at the window's single WM_NCDESTROY teardown point.
-                    unsafe { DeleteObject((*state_ptr).status_font) };
-                }
                 // SAFETY: state_ptr is the non-null Box::into_raw AppState stored at WM_NCCREATE; WM_NCDESTROY is its single reclamation point.
                 unsafe { drop(Box::from_raw(state_ptr)) };
-                // SAFETY: window is the active callback HWND; GWLP_USERDATA stores or clears the process-owned pointer without transferring ownership.
-                unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, 0) };
             }
             // SAFETY: window, message, wparam, and lparam are unchanged values from the active Windows callback.
             unsafe { DefWindowProcW(window, message, wparam, lparam) }

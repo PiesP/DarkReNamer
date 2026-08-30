@@ -1,5 +1,35 @@
 use super::*;
 
+#[derive(Debug)]
+pub(super) struct OwnedFont(HFONT);
+
+impl Default for OwnedFont {
+    fn default() -> Self {
+        Self(null_mut())
+    }
+}
+
+impl OwnedFont {
+    pub(super) fn as_raw(&self) -> HFONT {
+        self.0
+    }
+
+    pub(super) fn replace(&mut self, replacement: HFONT) {
+        let previous = std::mem::replace(&mut self.0, replacement);
+        if !previous.is_null() {
+            // SAFETY: previous was the distinct font owned by this wrapper and
+            // no control uses it after every child received the replacement.
+            unsafe { DeleteObject(previous) };
+        }
+    }
+}
+
+impl Drop for OwnedFont {
+    fn drop(&mut self) {
+        self.replace(null_mut());
+    }
+}
+
 pub(super) fn nonclient_metrics(dpi: u32) -> Option<NONCLIENTMETRICSW> {
     let mut metrics = NONCLIENTMETRICSW {
         cbSize: u32::try_from(size_of::<NONCLIENTMETRICSW>()).ok()?,
@@ -52,16 +82,8 @@ pub(super) fn refresh_system_fonts(state: &mut AppState) {
         rail.apply_font(message_font);
     }
     state.font_metrics = measure_font_metrics(state.list_window, message_font, status_font);
-    if !state.font.is_null() {
-        // SAFETY: AppState owns this font and replaces it exactly once here.
-        unsafe { DeleteObject(state.font) };
-    }
-    if !state.status_font.is_null() {
-        // SAFETY: AppState owns this distinct font and replaces it once here.
-        unsafe { DeleteObject(state.status_font) };
-    }
-    state.font = message_font;
-    state.status_font = status_font;
+    state.font.replace(message_font);
+    state.status_font.replace(status_font);
 }
 
 pub(super) fn measure_font_metrics(
@@ -185,24 +207,19 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
             );
         }
     }
-    state.status = {
-        child(
-            window,
-            "STATIC",
-            "",
-            STATUS_ID as u16,
-            SS_CENTERIMAGE | SS_SUNKEN | SS_NOPREFIX | SS_ENDELLIPSIS,
-        )
-    };
+    state.status = child(
+        window,
+        "STATIC",
+        "",
+        STATUS_ID as u16,
+        SS_CENTERIMAGE | SS_SUNKEN | SS_NOPREFIX | SS_ENDELLIPSIS,
+    )?;
     state.left_rail = Some(CommandRail::create(window, &LEFT_RAIL)?);
     state.right_rail = Some(CommandRail::create(window, &RIGHT_RAIL)?);
     refresh_system_fonts(state);
     // SAFETY: window is the live top-level HWND and DragAcceptFiles stores no borrowed pointer.
     unsafe { DragAcceptFiles(window, 1) };
-    let menu = { create_menu() };
-    state.menu = menu;
-    // SAFETY: window and menu are live HWND/HMENU values; SetMenu attaches the owned menu to that window.
-    unsafe { SetMenu(window, menu) };
+    state.menu = create_menu()?.attach(window)?;
     // SAFETY: SHFILEINFOW is a C-compatible output structure whose all-zero state is valid before the shell fills it.
     let mut shell_info: SHFILEINFOW = unsafe { zeroed() };
     let empty = wide("");
@@ -233,12 +250,18 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
     Ok(())
 }
 
-pub(super) fn child(parent: HWND, class: &str, text: &str, id: u16, extra_style: u32) -> HWND {
+pub(super) fn child(
+    parent: HWND,
+    class: &str,
+    text: &str,
+    id: u16,
+    extra_style: u32,
+) -> io::Result<HWND> {
     let class = wide(class);
     let text = wide(text);
     // SAFETY: parent is a live HWND and the owned terminated class/text buffers
     // remain allocated through this synchronous child CreateWindowExW call.
-    unsafe {
+    let child = unsafe {
         CreateWindowExW(
             0,
             class.as_ptr(),
@@ -253,10 +276,15 @@ pub(super) fn child(parent: HWND, class: &str, text: &str, id: u16, extra_style:
             GetModuleHandleW(null()),
             null_mut(),
         )
+    };
+    if child.is_null() {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(child)
     }
 }
 
-pub(super) fn arrange(window: HWND, state: &AppState) {
+pub(super) fn arrange(window: HWND, state: &mut AppState) {
     // SAFETY: RECT is a C-compatible integer structure for which all-zero is a valid writable initial state.
     let mut rect: RECT = unsafe { zeroed() };
     // SAFETY: window is live and rect is writable RECT storage retained until GetClientRect returns.
@@ -265,38 +293,95 @@ pub(super) fn arrange(window: HWND, state: &AppState) {
     let height = (rect.bottom - rect.top).max(0);
     let layout = calculate_main_layout(width, height, state.dpi, state.font_metrics);
     let rails_visible = layout.rail_mode != RailMode::MenuOnly;
+    let previously_focused = focused_child(state);
+    let mut windows = Vec::with_capacity(main_layout_window_count(&layout));
     if let Some(rail) = &state.left_rail {
-        rail.arrange(0, &layout.left_buttons);
-        rail.set_visible(rails_visible);
+        rail.append_placements(0, &layout.left_buttons, &mut windows);
     }
     if let Some(rail) = &state.right_rail {
-        rail.arrange(
+        rail.append_placements(
             width.saturating_sub(layout.rail_width),
             &layout.right_buttons,
+            &mut windows,
         );
-        rail.set_visible(rails_visible);
     }
-    // SAFETY: window plus AppState's list/status children are live on this UI
-    // thread; each MoveWindow call retains no borrowed storage.
-    unsafe {
-        MoveWindow(
-            state.list_window,
-            layout.list.x,
-            layout.list.y,
-            layout.list.width,
-            layout.list.height,
-            1,
-        );
-        MoveWindow(
-            state.status,
-            layout.status.x,
-            layout.status.y,
-            layout.status.width,
-            layout.status.height,
-            1,
-        );
+    windows.push((state.list_window, layout.list));
+    windows.push((state.status, layout.status));
+    apply_deferred_layout(&windows);
+    if state.rails_visible != rails_visible {
+        if let Some(rail) = &state.left_rail {
+            rail.set_visible(rails_visible);
+        }
+        if let Some(rail) = &state.right_rail {
+            rail.set_visible(rails_visible);
+        }
+    }
+    state.rails_visible = rails_visible;
+    repair_focus_state(state);
+    if !rails_visible && previously_focused.is_some_and(|(child, _)| child != FocusChild::List) {
+        schedule_focus_restore(state);
     }
     update_primary_column_widths(state);
+    // SAFETY: one parent invalidation repaints the completed child batch,
+    // column sizing, and any visibility changes without per-control immediate
+    // repaint requests.
+    unsafe {
+        RedrawWindow(
+            window,
+            null(),
+            null_mut(),
+            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
+        )
+    };
+}
+
+fn apply_deferred_layout(windows: &[(HWND, LayoutRect)]) {
+    let count = i32::try_from(windows.len()).unwrap_or(i32::MAX);
+    // SAFETY: count is the bounded number of live child windows supplied below.
+    let mut batch = unsafe { BeginDeferWindowPos(count) };
+    if !batch.is_null() {
+        for (window, rect) in windows {
+            // SAFETY: batch is the current live HDWP and every window/rectangle
+            // remains valid for this synchronous deferred-position operation.
+            batch = unsafe {
+                DeferWindowPos(
+                    batch,
+                    *window,
+                    null_mut(),
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    rect.height,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
+                )
+            };
+            if batch.is_null() {
+                break;
+            }
+        }
+    }
+    if !batch.is_null() {
+        // SAFETY: batch is the live handle returned by the final successful
+        // DeferWindowPos call and is consumed exactly once here.
+        if unsafe { EndDeferWindowPos(batch) } != 0 {
+            return;
+        }
+    }
+    for (window, rect) in windows {
+        // SAFETY: fallback applies the same checked child geometry without
+        // repaint; the caller performs one parent redraw after the full batch.
+        unsafe {
+            SetWindowPos(
+                *window,
+                null_mut(),
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
+            )
+        };
+    }
 }
 
 pub(super) fn move_window_dip(window: HWND, x: i32, y: i32, width: i32, height: i32, dpi: u32) {
@@ -315,6 +400,7 @@ pub(super) fn move_window_dip(window: HWND, x: i32, y: i32, width: i32, height: 
 }
 
 pub(super) fn update_controls(state: &mut AppState) {
+    let previously_focused = focused_child(state);
     let selected_count = { selected_indices(state.list_window) }.len();
     for id in APPLY..=VERSION {
         state.command_states[usize::from(id - APPLY)] =
@@ -326,6 +412,170 @@ pub(super) fn update_controls(state: &mut AppState) {
             };
     }
     apply_command_states(state);
+    repair_focus_state(state);
+    let focused_target_changed = match previously_focused {
+        Some((FocusChild::LeftRail, Some(index))) => {
+            focus_index(state, FocusChild::LeftRail) != Some(index)
+        }
+        Some((FocusChild::RightRail, Some(index))) => {
+            focus_index(state, FocusChild::RightRail) != Some(index)
+        }
+        _ => false,
+    };
+    if focused_target_changed {
+        schedule_focus_restore(state);
+    }
+}
+
+fn rail_enabled_states(state: &AppState, spec: CommandRailSpec) -> Vec<bool> {
+    spec.commands()
+        .map(|command| state.command_states[usize::from(command - APPLY)])
+        .collect()
+}
+
+fn focus_index(state: &AppState, child: FocusChild) -> Option<usize> {
+    let enabled = match child {
+        FocusChild::List => return None,
+        FocusChild::LeftRail => rail_enabled_states(state, LEFT_RAIL),
+        FocusChild::RightRail => rail_enabled_states(state, RIGHT_RAIL),
+    };
+    state
+        .focus
+        .active_index(child, &enabled, state.rails_visible)
+}
+
+fn repair_focus_state(state: &mut AppState) {
+    let left = rail_enabled_states(state, LEFT_RAIL);
+    let right = rail_enabled_states(state, RIGHT_RAIL);
+    state.focus.repair(&left, &right, state.rails_visible);
+    if let Some(rail) = &state.left_rail {
+        rail.set_tab_stop(state.focus.active_index(
+            FocusChild::LeftRail,
+            &left,
+            state.rails_visible,
+        ));
+    }
+    if let Some(rail) = &state.right_rail {
+        rail.set_tab_stop(state.focus.active_index(
+            FocusChild::RightRail,
+            &right,
+            state.rails_visible,
+        ));
+    }
+}
+
+fn focus_window(state: &AppState, action: FocusAction) -> Option<HWND> {
+    match action {
+        FocusAction::List => (!state.list_window.is_null()).then_some(state.list_window),
+        FocusAction::LeftRail(index) => state.left_rail.as_ref()?.hwnd_at(index),
+        FocusAction::RightRail(index) => state.right_rail.as_ref()?.hwnd_at(index),
+    }
+}
+
+fn focus_target(state: &mut AppState) -> Option<HWND> {
+    repair_focus_state(state);
+    focus_window(state, state.focus.action())
+        .or_else(|| (!state.list_window.is_null()).then_some(state.list_window))
+}
+
+fn schedule_focus_restore(state: &AppState) {
+    // SAFETY: list_window is a live direct child while AppState exists. Posting
+    // is non-reentrant; the handler re-resolves and validates state and target.
+    let parent = unsafe { GetParent(state.list_window) };
+    if !parent.is_null() {
+        schedule_focus_target(parent, null_mut());
+    }
+}
+
+pub(super) fn schedule_focus_target(window: HWND, target: HWND) {
+    if window.is_null() {
+        return;
+    }
+    // SAFETY: window is the live top-level owner at the call site. The HWND is
+    // copied as a non-owning request and revalidated when the message runs.
+    unsafe { PostMessageW(window, WM_APP_RESTORE_FOCUS, target as usize, 0) };
+}
+
+fn focused_child(state: &AppState) -> Option<(FocusChild, Option<usize>)> {
+    // SAFETY: this query reads the current UI-thread focus HWND only.
+    let focused = unsafe { GetFocus() };
+    if focused.is_null() {
+        return None;
+    }
+    if focused == state.list_window {
+        return Some((FocusChild::List, None));
+    }
+    if let Some(index) = state
+        .left_rail
+        .as_ref()
+        .and_then(|rail| rail.index_for_hwnd(focused))
+    {
+        return Some((FocusChild::LeftRail, Some(index)));
+    }
+    state
+        .right_rail
+        .as_ref()
+        .and_then(|rail| rail.index_for_hwnd(focused))
+        .map(|index| (FocusChild::RightRail, Some(index)))
+}
+
+pub(super) fn record_child_focus(state: &mut AppState, focused: HWND) -> bool {
+    let focused_child = if focused == state.list_window {
+        Some((FocusChild::List, None))
+    } else if let Some(index) = state
+        .left_rail
+        .as_ref()
+        .and_then(|rail| rail.index_for_hwnd(focused))
+    {
+        Some((FocusChild::LeftRail, Some(index)))
+    } else {
+        state
+            .right_rail
+            .as_ref()
+            .and_then(|rail| rail.index_for_hwnd(focused))
+            .map(|index| (FocusChild::RightRail, Some(index)))
+    };
+    let Some((child, index)) = focused_child else {
+        return false;
+    };
+    state.focus.record(child, index);
+    repair_focus_state(state);
+    true
+}
+
+pub(super) fn restore_child_focus(state: &mut AppState) -> Option<HWND> {
+    focus_target(state)
+}
+
+pub(super) fn handle_focus_navigation(state: &mut AppState, message: &MSG) -> Option<HWND> {
+    if message.message != WM_KEYDOWN {
+        return None;
+    }
+    if let Some((child, index)) = focused_child(state) {
+        state.focus.record(child, index);
+    }
+    let left = rail_enabled_states(state, LEFT_RAIL);
+    let right = rail_enabled_states(state, RIGHT_RAIL);
+    let target = match u16::try_from(message.wParam).ok() {
+        Some(VK_F6) => Some(state.focus.cycle_major(&left, &right, state.rails_visible)),
+        Some(VK_UP) => state
+            .focus
+            .move_within_rail(false, &left, &right, state.rails_visible)
+            .map(|(child, _)| child),
+        Some(VK_DOWN) => state
+            .focus
+            .move_within_rail(true, &left, &right, state.rails_visible)
+            .map(|(child, _)| child),
+        _ => return None,
+    };
+    let target = target?;
+    repair_focus_state(state);
+    let action = match target {
+        FocusChild::List => FocusAction::List,
+        FocusChild::LeftRail => FocusAction::LeftRail(state.focus.left_rail_index),
+        FocusChild::RightRail => FocusAction::RightRail(state.focus.right_rail_index),
+    };
+    focus_window(state, action)
 }
 
 pub(super) fn apply_command_states(state: &AppState) {
@@ -409,42 +659,142 @@ pub(super) fn apply_command_states(state: &AppState) {
     }
 }
 
-pub(super) fn create_menu() -> HMENU {
-    // SAFETY: CreateMenu takes no pointers; the returned HMENU stays owned until attached to the top-level window.
-    let menu = unsafe { CreateMenu() };
-    append_catalog_popup(menu, MenuGroup::File, "파일(&F)");
-    append_catalog_popup(menu, MenuGroup::Edit, "편집(&E)");
-    append_catalog_popup(menu, MenuGroup::View, "보기(&V)");
-    append_catalog_popup(menu, MenuGroup::Tools, "기능(&T)");
-    // SAFETY: CreatePopupMenu takes no pointers; the returned HMENU stays owned until appended to its parent.
-    unsafe {
-        let recovery = CreatePopupMenu();
-        menu_item(
-            recovery,
-            EXPORT_RECOVERY_JOURNAL,
-            "보존된 저널 바이트 내보내기...",
-        );
-        menu_item(
-            recovery,
-            DISCARD_STAGED_JOURNAL,
-            "활성화 전 실행 계획 폐기...",
-        );
-        menu_item(recovery, SHOW_RECOVERY_STATUS, "복구 상태 보기...");
-        append_popup(menu, recovery, "복구(&R)");
+#[derive(Debug)]
+pub(super) struct OwnedMenu(HMENU);
+
+impl OwnedMenu {
+    fn new_bar() -> io::Result<Self> {
+        // SAFETY: CreateMenu takes no pointers and returns a newly owned menu.
+        let menu = unsafe { CreateMenu() };
+        (!menu.is_null())
+            .then_some(Self(menu))
+            .ok_or_else(io::Error::last_os_error)
     }
-    append_catalog_items(menu, MenuGroup::About);
-    menu
+
+    fn new_popup() -> io::Result<Self> {
+        // SAFETY: CreatePopupMenu takes no pointers and returns a newly owned menu.
+        let menu = unsafe { CreatePopupMenu() };
+        (!menu.is_null())
+            .then_some(Self(menu))
+            .ok_or_else(io::Error::last_os_error)
+    }
+
+    fn as_raw(&self) -> HMENU {
+        self.0
+    }
+
+    fn release(&mut self) -> HMENU {
+        std::mem::replace(&mut self.0, null_mut())
+    }
+
+    pub(super) fn attach(mut self, window: HWND) -> io::Result<HMENU> {
+        // SAFETY: window and this unattached menu are live; successful SetMenu
+        // transfers menu destruction to the top-level window.
+        if unsafe { SetMenu(window, self.0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(self.release())
+    }
 }
 
-fn append_catalog_popup(menu: HMENU, group: MenuGroup, label: &str) {
-    // SAFETY: CreatePopupMenu takes no pointers; the returned HMENU stays owned
-    // until it is appended to the live parent menu below.
-    let popup = unsafe { CreatePopupMenu() };
-    append_catalog_items(popup, group);
-    append_popup(menu, popup, label);
+impl Drop for OwnedMenu {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: only unattached menus remain non-null in this owner. Child
+            // popups already transferred to this menu are destroyed recursively.
+            unsafe { DestroyMenu(self.0) };
+            self.0 = null_mut();
+        }
+    }
 }
 
-fn append_catalog_items(menu: HMENU, group: MenuGroup) {
+struct MenuBuilder {
+    menu: OwnedMenu,
+}
+
+impl MenuBuilder {
+    fn bar() -> io::Result<Self> {
+        OwnedMenu::new_bar().map(|menu| Self { menu })
+    }
+
+    fn popup() -> io::Result<Self> {
+        OwnedMenu::new_popup().map(|menu| Self { menu })
+    }
+
+    fn item(&mut self, id: u16, label: &str) -> io::Result<()> {
+        let label = wide(label);
+        // SAFETY: the menu is live and label is retained terminated UTF-16 for
+        // the complete synchronous AppendMenuW call.
+        if unsafe {
+            AppendMenuW(
+                self.menu.as_raw(),
+                MF_STRING,
+                usize::from(id),
+                label.as_ptr(),
+            )
+        } == 0
+        {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn separator(&mut self) -> io::Result<()> {
+        // SAFETY: the menu is live and separators carry no pointer payload.
+        if unsafe { AppendMenuW(self.menu.as_raw(), MF_SEPARATOR, 0, null()) } == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn popup_child(&mut self, mut popup: Self, label: &str) -> io::Result<()> {
+        let label = wide(label);
+        // SAFETY: both menus are unattached and live; success transfers popup
+        // ownership into the parent menu's recursive ownership tree.
+        if unsafe {
+            AppendMenuW(
+                self.menu.as_raw(),
+                MF_POPUP,
+                popup.menu.as_raw() as usize,
+                label.as_ptr(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        popup.menu.release();
+        Ok(())
+    }
+
+    fn finish(self) -> OwnedMenu {
+        self.menu
+    }
+}
+
+pub(super) fn create_menu() -> io::Result<OwnedMenu> {
+    let mut menu = MenuBuilder::bar()?;
+    append_catalog_popup(&mut menu, MenuGroup::File, "파일(&F)")?;
+    append_catalog_popup(&mut menu, MenuGroup::Edit, "편집(&E)")?;
+    append_catalog_popup(&mut menu, MenuGroup::View, "보기(&V)")?;
+    append_catalog_popup(&mut menu, MenuGroup::Tools, "기능(&T)")?;
+    let mut recovery = MenuBuilder::popup()?;
+    recovery.item(EXPORT_RECOVERY_JOURNAL, "보존된 저널 바이트 내보내기...")?;
+    recovery.item(DISCARD_STAGED_JOURNAL, "활성화 전 실행 계획 폐기...")?;
+    recovery.item(SHOW_RECOVERY_STATUS, "복구 상태 보기...")?;
+    menu.popup_child(recovery, "복구(&R)")?;
+    append_catalog_items(&mut menu, MenuGroup::About)?;
+    Ok(menu.finish())
+}
+
+fn append_catalog_popup(menu: &mut MenuBuilder, group: MenuGroup, label: &str) -> io::Result<()> {
+    let mut popup = MenuBuilder::popup()?;
+    append_catalog_items(&mut popup, group)?;
+    menu.popup_child(popup, label)
+}
+
+fn append_catalog_items(menu: &mut MenuBuilder, group: MenuGroup) -> io::Result<()> {
     let mut specs = COMMAND_UI_SPECS
         .iter()
         .filter(|spec| spec.menu.group == group)
@@ -453,33 +803,19 @@ fn append_catalog_items(menu: HMENU, group: MenuGroup) {
     let mut previous_section = None;
     for spec in specs {
         if previous_section.is_some_and(|section| section != spec.menu.section) {
-            // SAFETY: menu is a live menu owned by create_menu and a separator
-            // carries no borrowed pointer or command identifier.
-            unsafe { AppendMenuW(menu, MF_SEPARATOR, 0, null()) };
+            menu.separator()?;
         }
         previous_section = Some(spec.menu.section);
-        menu_item(menu, spec.id, &command_menu_label(spec));
+        menu.item(spec.id, &command_menu_label(spec))?;
     }
     if group == MenuGroup::File {
         // Exit is an auxiliary shell command outside the contiguous catalog.
-        // SAFETY: same live menu ownership as the catalog items above.
-        unsafe { AppendMenuW(menu, MF_SEPARATOR, 0, null()) };
+        menu.separator()?;
         let label = legacy_command_shortcut(EXIT_COMMAND).map_or_else(
             || "종료(&X)".to_owned(),
             |shortcut| format!("종료(&X)\t{}", shortcut.display),
         );
-        menu_item(menu, EXIT_COMMAND, &label);
+        menu.item(EXIT_COMMAND, &label)?;
     }
-}
-
-pub(super) fn menu_item(menu: HMENU, id: u16, label: &str) {
-    let label = wide(label);
-    // SAFETY: menu/popup are live HMENU values and label is owned terminated UTF-16 retained through AppendMenuW.
-    unsafe { AppendMenuW(menu, MF_STRING, usize::from(id), label.as_ptr()) };
-}
-
-pub(super) fn append_popup(menu: HMENU, popup: HMENU, label: &str) {
-    let label = wide(label);
-    // SAFETY: menu/popup are live HMENU values and label is owned terminated UTF-16 retained through AppendMenuW.
-    unsafe { AppendMenuW(menu, MF_POPUP, popup as usize, label.as_ptr()) };
+    Ok(())
 }

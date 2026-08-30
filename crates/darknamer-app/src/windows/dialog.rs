@@ -31,7 +31,8 @@ pub(super) struct PromptState {
     pub(super) separator: HWND,
     pub(super) ok: HWND,
     pub(super) cancel: HWND,
-    pub(super) font: HFONT,
+    pub(super) font: OwnedFont,
+    pub(super) creation_error: Option<io::Error>,
     pub(super) dpi: u32,
 }
 
@@ -127,7 +128,8 @@ pub(super) fn prompt_input(owner: HWND, spec: PromptSpec) -> io::Result<Option<P
         separator: null_mut(),
         ok: null_mut(),
         cancel: null_mut(),
-        font: null_mut(),
+        font: OwnedFont::default(),
+        creation_error: None,
         dpi,
     });
     let state_ptr: *mut PromptState = &mut *state;
@@ -150,7 +152,10 @@ pub(super) fn prompt_input(owner: HWND, spec: PromptSpec) -> io::Result<Option<P
         )
     };
     if dialog.is_null() {
-        return Err(io::Error::last_os_error());
+        return Err(state
+            .creation_error
+            .take()
+            .unwrap_or_else(io::Error::last_os_error));
     }
     // SAFETY: window is the non-null top-level HWND just created and remains owned by this UI thread.
     let _owner_guard = OwnerEnableGuard::new(owner);
@@ -236,11 +241,7 @@ fn recreate_prompt_font(state: &mut PromptState) {
             unsafe { SendMessageW(control, WM_SETFONT, replacement as usize, 1) };
         }
     }
-    if !state.font.is_null() {
-        // SAFETY: the old font is no longer selected by any prompt child after synchronous WM_SETFONT.
-        unsafe { DeleteObject(state.font) };
-    }
-    state.font = replacement;
+    state.font.replace(replacement);
 }
 
 fn measured_prompt_text(window: HWND, font: HFONT, text: &str, max_width: i32) -> LayoutRect {
@@ -283,7 +284,7 @@ fn measure_prompt_font(
     state: &PromptState,
     maximum_client: LayoutRect,
 ) -> PromptFontMetrics {
-    if state.font.is_null() {
+    if state.font.as_raw().is_null() {
         return PromptFontMetrics::default();
     }
     let horizontal_padding = scale_dip(24, state.dpi);
@@ -292,17 +293,22 @@ fn measure_prompt_font(
         .max(1);
     let maximum_label_width = scale_dip(138, state.dpi)
         .min(maximum_title_width.saturating_sub(scale_dip(8, state.dpi)) / 3);
-    let title = measured_prompt_text(window, state.font, &state.spec.title, maximum_title_width);
-    let line = measured_prompt_text(window, state.font, "Mg", maximum_title_width);
+    let title = measured_prompt_text(
+        window,
+        state.font.as_raw(),
+        &state.spec.title,
+        maximum_title_width,
+    );
+    let line = measured_prompt_text(window, state.font.as_raw(), "Mg", maximum_title_width);
     let label_one = measured_prompt_text(
         window,
-        state.font,
+        state.font.as_raw(),
         &state.spec.label_one,
         maximum_label_width,
     );
     let label_two = measured_prompt_text(
         window,
-        state.font,
+        state.font.as_raw(),
         &state.spec.label_two,
         maximum_label_width,
     );
@@ -501,58 +507,81 @@ pub(super) unsafe extern "system" fn prompt_proc(
             // SAFETY: state_ptr borrows prompt_input's live local Box and is
             // confined to this modal callback thread until WM_NCDESTROY clears it.
             let state = unsafe { &mut *state_ptr };
-            state.title = child(window, "STATIC", &state.spec.title, 1001, SS_NOPREFIX);
-            if !state.spec.label_one.is_empty() {
-                state.edit_one = child(
-                    window,
-                    "EDIT",
-                    &state.spec.value_one.to_string_lossy(),
-                    1004,
-                    WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
-                );
-                state.label_one = child(window, "STATIC", &state.spec.label_one, 1002, SS_NOPREFIX);
-            }
-            if !state.spec.label_two.is_empty() {
-                state.edit_two = child(
-                    window,
-                    "EDIT",
-                    &state.spec.value_two.to_string_lossy(),
-                    1005,
-                    WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
-                );
-                state.label_two = child(window, "STATIC", &state.spec.label_two, 1003, SS_NOPREFIX);
-            }
-            if !state.spec.choices.is_empty() {
-                let combo = child(
-                    window,
-                    "COMBOBOX",
-                    "",
-                    1006,
-                    WS_TABSTOP | CBS_DROPDOWNLIST as u32,
-                );
-                for choice in &state.spec.choices {
-                    let choice = wide(choice);
-                    // SAFETY: combo is live and each choice pointer is owned terminated UTF-16 retained through synchronous SendMessageW.
-                    unsafe {
-                        SendMessageW(combo, CB_ADDSTRING, 0, choice.as_ptr() as isize);
+            let created = (|| -> io::Result<()> {
+                state.title = child(window, "STATIC", &state.spec.title, 1001, SS_NOPREFIX)?;
+                if !state.spec.label_one.is_empty() {
+                    state.edit_one = child(
+                        window,
+                        "EDIT",
+                        &state.spec.value_one.to_string_lossy(),
+                        1004,
+                        WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
+                    )?;
+                    state.label_one =
+                        child(window, "STATIC", &state.spec.label_one, 1002, SS_NOPREFIX)?;
+                }
+                if !state.spec.label_two.is_empty() {
+                    state.edit_two = child(
+                        window,
+                        "EDIT",
+                        &state.spec.value_two.to_string_lossy(),
+                        1005,
+                        WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
+                    )?;
+                    state.label_two =
+                        child(window, "STATIC", &state.spec.label_two, 1003, SS_NOPREFIX)?;
+                }
+                if !state.spec.choices.is_empty() {
+                    let combo = child(
+                        window,
+                        "COMBOBOX",
+                        "",
+                        1006,
+                        WS_TABSTOP | CBS_DROPDOWNLIST as u32,
+                    )?;
+                    for choice in &state.spec.choices {
+                        let choice = wide(choice);
+                        // SAFETY: combo is live and each choice pointer is owned terminated UTF-16 retained through synchronous SendMessageW.
+                        let added = unsafe {
+                            SendMessageW(combo, CB_ADDSTRING, 0, choice.as_ptr() as isize)
+                        };
+                        validate_combo_result(ComboOperation::AddString, added).map_err(
+                            |error| {
+                                io::Error::other(match error {
+                                    ComboControlError::Rejected => {
+                                        "combo box rejected a prompt choice"
+                                    }
+                                    ComboControlError::OutOfSpace => {
+                                        "combo box ran out of space for prompt choices"
+                                    }
+                                })
+                            },
+                        )?;
                     }
+                    // SAFETY: combo is the live dialog ComboBox and selection zero
+                    // is valid because the choices collection is non-empty.
+                    let selected = unsafe { SendMessageW(combo, CB_SETCURSEL, 0, 0) };
+                    validate_combo_result(ComboOperation::Select, selected).map_err(|error| {
+                        debug_assert_eq!(error, ComboControlError::Rejected);
+                        io::Error::other("combo box could not select the first prompt choice")
+                    })?;
+                    state.combo = combo;
                 }
-                // SAFETY: combo is the live dialog ComboBox and selection zero
-                // is valid because the choices collection is non-empty.
-                unsafe {
-                    SendMessageW(combo, CB_SETCURSEL, 0, 0);
-                }
-                state.combo = combo;
+                state.ok = child(
+                    window,
+                    "BUTTON",
+                    "확인",
+                    IDOK as u16,
+                    WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
+                )?;
+                state.cancel = child(window, "BUTTON", "취소", IDCANCEL as u16, WS_TABSTOP)?;
+                state.separator = child(window, "STATIC", "", 1010, SS_ETCHEDHORZ)?;
+                Ok(())
+            })();
+            if let Err(error) = created {
+                state.creation_error = Some(error);
+                return -1;
             }
-            state.ok = child(
-                window,
-                "BUTTON",
-                "확인",
-                IDOK as u16,
-                WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
-            );
-            state.cancel = child(window, "BUTTON", "취소", IDCANCEL as u16, WS_TABSTOP);
-            state.separator = child(window, "STATIC", "", 1010, SS_ETCHEDHORZ);
             recreate_prompt_font(state);
             arrange_prompt(window, state, true);
             let first = if !state.edit_one.is_null() {
@@ -644,18 +673,9 @@ pub(super) unsafe extern "system" fn prompt_proc(
             0
         }
         WM_NCDESTROY if !state_ptr.is_null() => {
-            // SAFETY: state_ptr borrows prompt_input's local PromptState Box,
-            // which remains live while WM_NCDESTROY releases its owned HFONT.
-            if !unsafe { (*state_ptr).font }.is_null() {
-                // SAFETY: font is the non-null HFONT stored in the still-live
-                // borrowed PromptState and is deleted exactly once here.
-                unsafe { DeleteObject((*state_ptr).font) };
-                // SAFETY: state_ptr still borrows the live local PromptState Box;
-                // clearing font prevents reuse after its single DeleteObject.
-                unsafe { (*state_ptr).font = null_mut() };
-            }
             // SAFETY: window is the active prompt HWND; clearing GWLP_USERDATA
-            // ends the borrowed association before prompt_input drops its local Box.
+            // ends the borrowed association before prompt_input drops its local
+            // Box and its unambiguously owned font.
             unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, 0) };
             // SAFETY: window, message, wparam, and lparam are unchanged values from the active Windows callback.
             unsafe { DefWindowProcW(window, message, wparam, lparam) }

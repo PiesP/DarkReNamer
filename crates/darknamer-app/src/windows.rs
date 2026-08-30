@@ -99,37 +99,41 @@ use windows_sys::Win32::UI::Controls::{
     LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVM_SETITEMW, LVN_GETINFOTIPW,
     LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
     LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS,
-    LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_DBLCLK, NMHDR, NMHEADERW, NMLISTVIEW, NMLVGETINFOTIPW,
+    LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_DBLCLK, NM_SETFOCUS, NMHDR, NMHEADERW, NMLISTVIEW,
+    NMLVGETINFOTIPW,
 };
 use windows_sys::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForWindow, GetSystemMetricsForDpi, SystemParametersInfoForDpi,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, IsWindowEnabled, SetFocus, VK_DELETE, VK_ESCAPE, VK_OEM_COMMA, VK_OEM_PERIOD,
+    EnableWindow, GetFocus, IsWindowEnabled, SetFocus, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_F6,
+    VK_OEM_COMMA, VK_OEM_PERIOD, VK_UP,
 };
 use windows_sys::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, HDROP, SHFILEINFOW, SHGFI_SMALLICON,
     SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    ACCEL, AppendMenuW, BN_CLICKED, BS_DEFPUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL,
-    CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem,
-    CreateAcceleratorTableW, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-    DestroyAcceleratorTable, DestroyWindow, DispatchMessageW, DrawMenuBar, ES_AUTOHSCROLL,
-    EnableMenuItem, FCONTROL, FSHIFT, FVIRTKEY, GWLP_USERDATA, GetClientRect, GetMessageW,
+    ACCEL, AppendMenuW, BN_CLICKED, BN_SETFOCUS, BS_DEFPUSHBUTTON, BeginDeferWindowPos,
+    CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW,
+    CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem, CreateAcceleratorTableW, CreateMenu, CreatePopupMenu,
+    CreateWindowExW, DefWindowProcW, DeferWindowPos, DestroyAcceleratorTable, DestroyMenu,
+    DestroyWindow, DispatchMessageW, DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem,
+    EndDeferWindowPos, FCONTROL, FSHIFT, FVIRTKEY, GWLP_USERDATA, GetClientRect, GetMessageW,
     GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HACCEL,
-    HMENU, IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, KillTimer, LoadCursorW, LoadIconW,
-    MB_DEFBUTTON2, MB_ICONWARNING, MB_OKCANCEL, MB_YESNOCANCEL, MF_BYCOMMAND, MF_CHECKED,
-    MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG,
-    MessageBoxW, MoveWindow, NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassExW,
-    SM_CXVSCROLL, SPI_GETNONCLIENTMETRICS, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
-    SendMessageW, SetForegroundWindow, SetMenu, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, TranslateAcceleratorW, TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE,
-    WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_NCCREATE,
-    WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE,
-    WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD,
-    WS_CLIPCHILDREN, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
-    WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    HMENU, IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, IsWindow, IsWindowVisible, KillTimer,
+    LoadCursorW, LoadIconW, MB_DEFBUTTON2, MB_ICONWARNING, MB_OKCANCEL, MB_YESNOCANCEL,
+    MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW, PostMessageW,
+    PostQuitMessage, RegisterClassExW, SM_CXVSCROLL, SPI_GETNONCLIENTMETRICS, SW_SHOW,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW, SWP_NOZORDER, SendMessageW, SetForegroundWindow,
+    SetMenu, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateAcceleratorW,
+    TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
+    WM_DROPFILES, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY,
+    WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
+    WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{BS_MULTILINE, GWL_STYLE};
@@ -148,14 +152,15 @@ const WM_APP_APPLY_PROGRESS: u32 = WM_APP + 0x40;
 const WM_APP_APPLY_COMPLETE: u32 = WM_APP + 0x41;
 const WM_APP_PLAN_COMPLETE: u32 = WM_APP + 0x42;
 const WM_APP_ADMISSION_COMPLETE: u32 = WM_APP + 0x43;
+const WM_APP_RESTORE_FOCUS: u32 = WM_APP + 0x44;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 
 struct AppState {
     list_window: HWND,
     status: HWND,
     menu: HMENU,
-    font: HFONT,
-    status_font: HFONT,
+    font: OwnedFont,
+    status_font: OwnedFont,
     left_rail: Option<CommandRail>,
     right_rail: Option<CommandRail>,
     model: LegacyList,
@@ -177,6 +182,8 @@ struct AppState {
     close_pending: bool,
     confirmation_pending: bool,
     font_metrics: MeasuredFontMetrics,
+    focus: FocusState,
+    rails_visible: bool,
     ui_status: UiStatus,
     icon_cache: HashMap<IconCacheKey, i32>,
     rendered_rows: Vec<RenderedRow>,
@@ -201,8 +208,8 @@ impl AppState {
             list_window: null_mut(),
             status: null_mut(),
             menu: null_mut(),
-            font: null_mut(),
-            status_font: null_mut(),
+            font: OwnedFont::default(),
+            status_font: OwnedFont::default(),
             left_rail: None,
             right_rail: None,
             model: LegacyList::new(),
@@ -225,6 +232,8 @@ impl AppState {
             close_pending: false,
             confirmation_pending: false,
             font_metrics: MeasuredFontMetrics::default(),
+            focus: FocusState::default(),
+            rails_visible: true,
             ui_status,
             icon_cache: HashMap::new(),
             rendered_rows: Vec::new(),
@@ -956,6 +965,8 @@ mod tests {
         let right_origin = metrics.rail_width + scale_dip(20, dpi);
         left.apply_font(message_font);
         right.apply_font(message_font);
+        left.set_tab_stop(Some(0));
+        right.set_tab_stop(Some(0));
         left.arrange(0, &left_placements);
         right.arrange(right_origin, &right_placements);
 
@@ -965,7 +976,7 @@ mod tests {
                 (&left, left_placements.as_slice(), 0),
                 (&right, right_placements.as_slice(), right_origin),
             ] {
-                for placement in expected {
+                for (index, placement) in expected.iter().enumerate() {
                     let button = rail
                         .command_hwnd(placement.command)
                         .ok_or_else(|| io::Error::other("native command button is missing"))?;
@@ -983,13 +994,22 @@ mod tests {
                     // SAFETY: button is live and GWL_STYLE is a value query.
                     let style = unsafe { GetWindowLongPtrW(button, GWL_STYLE) } as u32;
                     assert_ne!(style & BS_MULTILINE as u32, 0);
-                    assert_ne!(style & WS_TABSTOP, 0);
+                    assert_eq!(style & WS_TABSTOP != 0, index == 0);
                     // SAFETY: button is live and the query has no pointers.
                     assert_ne!(unsafe { IsWindowEnabled(button) }, 0);
                     rail.set_enabled(placement.command, false);
                     // SAFETY: button remains live after EnableWindow.
                     assert_eq!(unsafe { IsWindowEnabled(button) }, 0);
                     rail.set_enabled(placement.command, true);
+                }
+                rail.set_tab_stop(Some(2));
+                for (index, placement) in expected.iter().enumerate() {
+                    let button = rail
+                        .command_hwnd(placement.command)
+                        .ok_or_else(|| io::Error::other("native command button is missing"))?;
+                    // SAFETY: button remains live and GWL_STYLE is a value query.
+                    let style = unsafe { GetWindowLongPtrW(button, GWL_STYLE) } as u32;
+                    assert_eq!(style & WS_TABSTOP != 0, index == 2);
                 }
             }
             actual_ids.sort_unstable();
