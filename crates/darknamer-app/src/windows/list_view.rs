@@ -53,12 +53,29 @@ unsafe extern "system" fn list_view_notification_subclass(
         // subclass has stopped retaining AppState refdata.
         return unsafe { DefSubclassProc(window, message, wparam, lparam) };
     }
-    if message == WM_NOTIFY && state_ref != 0 {
-        // SAFETY: the owner removes this subclass before reclaiming the stable
-        // Box<AppState>; callbacks are synchronous on the owning UI thread.
-        let state = unsafe { &*(state_ref as *const AppState) };
-        if let Some(result) = handle_header_custom_draw(state, lparam) {
-            return result;
+    if message == WM_NOTIFY && state_ref != 0 && !programmatic_list_update_active() {
+        let notification = lparam as *const NMHDR;
+        // Validate the pointer-free native routing boundary before borrowing
+        // AppState. Programmatic SendMessage callers retain their existing
+        // mutable borrow and are deliberately delegated to DefSubclassProc.
+        if !notification.is_null() {
+            // SAFETY: window is the live ListView and this value query retains no
+            // caller storage.
+            let header = unsafe { SendMessageW(window, LVM_GETHEADER, 0, 0) } as HWND;
+            // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix synchronously.
+            let is_header_draw = !header.is_null()
+                && unsafe {
+                    (*notification).hwndFrom == header && (*notification).code == NM_CUSTOMDRAW
+                };
+            if is_header_draw {
+                // SAFETY: the owner removes this subclass before reclaiming the
+                // stable Box<AppState>. The programmatic re-entry guard above
+                // excludes synchronous callers that retain &mut AppState.
+                let state = unsafe { &*(state_ref as *const AppState) };
+                if let Some(result) = handle_header_custom_draw(state, lparam) {
+                    return result;
+                }
+            }
         }
     }
     // SAFETY: every notification not owned by the header painter is forwarded
@@ -201,7 +218,35 @@ pub(super) fn handle_header_custom_draw(state: &AppState, lparam: LPARAM) -> Opt
             GetClientRect(header_window, &mut rect);
             FillRect((*custom).hdc, &rect, resources.header_brush());
         }
-        return Some(CDRF_NOTIFYITEMDRAW as LRESULT);
+        return Some((CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT) as LRESULT);
+    }
+    if stage == CDDS_POSTPAINT {
+        let mut client = RECT::default();
+        // SAFETY: header/DC are live and client is writable for this paint.
+        unsafe { GetClientRect(header_window, &mut client) };
+        // SAFETY: this value query retains no caller storage.
+        let item_count = unsafe { SendMessageW(header_window, HDM_GETITEMCOUNT, 0, 0) };
+        if item_count > 0 {
+            let mut last = RECT::default();
+            // SAFETY: item_count-1 names the final live header item and last is
+            // writable for this synchronous rectangle query.
+            if unsafe {
+                SendMessageW(
+                    header_window,
+                    HDM_GETITEMRECT,
+                    usize::try_from(item_count - 1).unwrap_or_default(),
+                    (&raw mut last) as LPARAM,
+                )
+            } != 0
+            {
+                client.left = last.right.clamp(client.left, client.right);
+            }
+        }
+        if client.left < client.right {
+            // SAFETY: callback DC and header brush remain live through postpaint.
+            unsafe { FillRect((*custom).hdc, &client, resources.header_brush()) };
+        }
+        return Some(CDRF_DODEFAULT as LRESULT);
     }
     if stage != CDDS_ITEMPREPAINT {
         return Some(CDRF_DODEFAULT as LRESULT);

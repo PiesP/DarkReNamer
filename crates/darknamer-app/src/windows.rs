@@ -120,9 +120,10 @@ use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::CDIS_FOCUS;
 use windows_sys::Win32::UI::Controls::{
-    CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDIS_HOT, CDIS_SELECTED, CDRF_DODEFAULT,
-    CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, HDI_TEXT,
-    HDI_WIDTH, HDITEMW, HDM_GETITEMW, HDN_ENDTRACKW, HDN_ITEMCHANGEDW, HDN_ITEMCHANGINGW,
+    CDDS_ITEMPREPAINT, CDDS_POSTPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDIS_HOT, CDIS_SELECTED,
+    CDRF_DODEFAULT, CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYPOSTPAINT,
+    CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, HDI_TEXT, HDI_WIDTH, HDITEMW, HDM_GETITEMCOUNT,
+    HDM_GETITEMRECT, HDM_GETITEMW, HDN_ENDTRACKW, HDN_ITEMCHANGEDW, HDN_ITEMCHANGINGW,
     ICC_LISTVIEW_CLASSES, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_FMT,
     LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT,
     LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_DELETEITEM, LVM_ENSUREVISIBLE,
@@ -1434,16 +1435,32 @@ mod tests {
             // SAFETY: list_window is the header's actual notification parent and
             // custom remains writable for the complete synchronous dispatch.
             let routed = unsafe {
-                SendMessageW(
-                    state.list_window,
-                    WM_NOTIFY,
-                    0,
-                    (&raw mut custom as *mut NMCUSTOMDRAW) as LPARAM,
-                )
+                SendMessageW(state.list_window, WM_NOTIFY, 0, (&raw mut custom) as LPARAM)
             };
-            // SAFETY: release the exact DC acquired from header above.
+            assert_eq!(
+                routed,
+                (CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT) as LRESULT
+            );
+            let guarded = {
+                let _list_update = ProgrammaticListUpdateGuard::begin();
+                // SAFETY: same live notification parent/payload. The guard must
+                // delegate instead of constructing a shared AppState reference
+                // during a synchronous programmatic update.
+                unsafe {
+                    SendMessageW(state.list_window, WM_NOTIFY, 0, (&raw mut custom) as LPARAM)
+                }
+            };
+            assert_eq!(guarded, 0);
+            custom.dwDrawStage = CDDS_POSTPAINT;
+            // SAFETY: same live notification parent and header DC for the
+            // postpaint gutter pass.
+            let postpaint = unsafe {
+                SendMessageW(state.list_window, WM_NOTIFY, 0, (&raw mut custom) as LPARAM)
+            };
+            assert_eq!(postpaint, CDRF_DODEFAULT as LRESULT);
+            // SAFETY: release the exact DC acquired from header above after all
+            // synchronous paint-stage probes have completed.
             unsafe { ReleaseDC(header, dc) };
-            assert_eq!(routed, CDRF_NOTIFYITEMDRAW as LRESULT);
             Ok(())
         })();
         // SAFETY: parent is the test-owned top-level HWND and destroys every

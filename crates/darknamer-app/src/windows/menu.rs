@@ -290,7 +290,6 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
     if state.list_window.is_null() {
         return Err(io::Error::last_os_error());
     }
-    install_list_view_notification_subclass(state)?;
     // SAFETY: state.list_window is live; each zeroed LVCOLUMNW is populated
     // before its synchronous message and its mutable text buffer stays allocated.
     unsafe {
@@ -358,6 +357,7 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
             )
         };
     }
+    install_list_view_notification_subclass(state)?;
     apply_native_appearance_nonblocking(window, state);
     arrange(window, state);
     refresh(state);
