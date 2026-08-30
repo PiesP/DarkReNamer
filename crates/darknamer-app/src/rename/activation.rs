@@ -205,6 +205,31 @@ pub fn execution_outcome_korean(outcome: &ExecutionOutcome) -> String {
     }
 }
 
+/// Presentation severity for a terminal execution outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutionOutcomePresentation {
+    /// Successful completion or a user-requested, fully restored cancellation.
+    NonModal,
+    /// A filesystem/journal failure or an outcome requiring recovery.
+    Modal,
+}
+
+/// Keeps failures modal while allowing successful and cancelled outcomes in status UI.
+#[must_use]
+pub const fn execution_outcome_presentation(
+    outcome: &ExecutionOutcome,
+) -> ExecutionOutcomePresentation {
+    match outcome {
+        ExecutionOutcome::Completed
+        | ExecutionOutcome::RolledBack {
+            failure: ExecutionFailure::Cancelled { .. },
+        } => ExecutionOutcomePresentation::NonModal,
+        ExecutionOutcome::RolledBack { .. } | ExecutionOutcome::RecoveryRequired { .. } => {
+            ExecutionOutcomePresentation::Modal
+        }
+    }
+}
+
 fn failure_korean(failure: ExecutionFailure) -> String {
     match failure {
         ExecutionFailure::Cancelled { .. } => "요청에 따라 변경을 취소했습니다.".to_owned(),
@@ -218,4 +243,49 @@ fn backend_error_korean(context: &str, error: BackendError) -> String {
         "{context} 실패: {:?}, Windows 코드 {}",
         error.operation, error.code
     )
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::*;
+    use crate::rename::{BackendOperation, JournalError, MutationCertainty};
+
+    #[test]
+    fn only_success_and_fully_rolled_back_cancellation_are_nonmodal() {
+        let backend = ExecutionOutcome::RolledBack {
+            failure: ExecutionFailure::Backend {
+                step: 1,
+                error: BackendError {
+                    operation: BackendOperation::Rename,
+                    code: 5,
+                    certainty: MutationCertainty::NotApplied,
+                },
+            },
+        };
+        let journal = ExecutionOutcome::RolledBack {
+            failure: ExecutionFailure::Journal {
+                step: 1,
+                error: JournalError::not_appended(7),
+            },
+        };
+
+        assert_eq!(
+            execution_outcome_presentation(&ExecutionOutcome::Completed),
+            ExecutionOutcomePresentation::NonModal
+        );
+        assert_eq!(
+            execution_outcome_presentation(&ExecutionOutcome::RolledBack {
+                failure: ExecutionFailure::Cancelled { step: 1 },
+            }),
+            ExecutionOutcomePresentation::NonModal
+        );
+        assert_eq!(
+            execution_outcome_presentation(&backend),
+            ExecutionOutcomePresentation::Modal
+        );
+        assert_eq!(
+            execution_outcome_presentation(&journal),
+            ExecutionOutcomePresentation::Modal
+        );
+    }
 }

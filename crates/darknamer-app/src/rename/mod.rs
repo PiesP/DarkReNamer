@@ -18,9 +18,10 @@ mod windows_backend;
 pub(crate) mod windows_native;
 
 pub use activation::{
-    JournalCleanupDecision, apply_execution_report, build_plan_request, cleanup_decision,
-    execute_error_korean, execution_outcome_korean, journal_capacity_error_korean,
-    next_model_revision, plan_error_korean, safe_mode_unify_path_message,
+    ExecutionOutcomePresentation, JournalCleanupDecision, apply_execution_report,
+    build_plan_request, cleanup_decision, execute_error_korean, execution_outcome_korean,
+    execution_outcome_presentation, journal_capacity_error_korean, next_model_revision,
+    plan_error_korean, safe_mode_unify_path_message,
 };
 pub use executor::{
     CancellationToken, EntryExecution, ExecuteError, ExecuteErrorKind, ExecutionControl,

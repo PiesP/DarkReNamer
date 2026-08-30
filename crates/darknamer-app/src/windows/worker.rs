@@ -345,7 +345,12 @@ pub(super) fn handle_completed_execution(
             if let Some(error) = cleanup.error {
                 message(window, &error.to_string(), "DarkReNamer - 저널 정리 실패");
             } else {
-                state.set_transient_status(text);
+                match execution_outcome_presentation(report.outcome()) {
+                    ExecutionOutcomePresentation::NonModal => state.set_transient_status(text),
+                    ExecutionOutcomePresentation::Modal => {
+                        message(window, &text, "DarkReNamer - 실행 실패");
+                    }
+                }
             }
         }
         ExecutionOutcome::RecoveryRequired { .. } => {

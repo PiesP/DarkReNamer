@@ -26,12 +26,13 @@ use crate::preferences::{
     save as save_column_preferences, shown_columns,
 };
 use crate::rename::{
-    CancellationToken, ExecuteError, ExecutionControl, ExecutionOutcome, ExecutionPhase,
-    ExecutionProgress, ExecutionReport, ExistingJournalOpenError, FileJournal, FileJournalError,
-    JournalCleanupDecision, JournalOpenFailure, JournalRoot, ModelRevision, PlanError,
-    RecoveryJournalEvidence, RecoveryOutcome, RenameBackend, RenameExecutor, RenamePlan,
-    RenamePlanner, RenameRecovery, WindowsRenameBackend, apply_execution_report,
-    build_plan_request, cleanup_decision, execute_error_korean, execution_outcome_korean,
+    CancellationToken, ExecuteError, ExecutionControl, ExecutionOutcome,
+    ExecutionOutcomePresentation, ExecutionPhase, ExecutionProgress, ExecutionReport,
+    ExistingJournalOpenError, FileJournal, FileJournalError, JournalCleanupDecision,
+    JournalOpenFailure, JournalRoot, ModelRevision, PlanError, RecoveryJournalEvidence,
+    RecoveryOutcome, RenameBackend, RenameExecutor, RenamePlan, RenamePlanner, RenameRecovery,
+    WindowsRenameBackend, apply_execution_report, build_plan_request, cleanup_decision,
+    execute_error_korean, execution_outcome_korean, execution_outcome_presentation,
     next_model_revision, plan_error_korean, preflight_plan, process_is_elevated,
     safe_mode_unify_path_message,
 };
