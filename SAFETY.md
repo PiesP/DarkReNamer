@@ -18,6 +18,14 @@ reopens and verifies those identities and performs handle-relative,
 no-replacement renames. Unsupported network, device, case-sensitive, elevated,
 cross-parent, reparse, and overlapping-source environments fail closed.
 
+Appearance preferences are non-authorizing input. Theme, command-rail density,
+preview emphasis, separators, tint, and empty-state copy may change presentation
+only. They are stored separately from rename journals and cannot alter model
+revision, plan identity, Apply confirmation, mutation locks, recovery locks, or
+active and candidate journal capabilities. Preference load or write failure uses
+safe presentation defaults and does not relax or create filesystem mutation
+authority.
+
 ## Transaction states
 
 ```text
