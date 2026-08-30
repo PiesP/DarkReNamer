@@ -509,15 +509,133 @@ pub(crate) enum DirectoryPromptChoice {
     Cancel,
 }
 
-/// Maps native YES/NO/CANCEL response values, failing closed for every unknown result.
+#[cfg(any(windows, test))]
+pub(crate) const DIRECTORY_DIRECT_BUTTON_ID: i32 = 1_001;
+#[cfg(any(windows, test))]
+pub(crate) const DIRECTORY_RECURSE_BUTTON_ID: i32 = 1_002;
+#[cfg(any(windows, test))]
+pub(crate) const APPLY_CONFIRM_BUTTON_ID: i32 = 1_101;
+#[cfg(any(windows, test))]
+pub(crate) const DISCARD_CONFIRM_BUTTON_ID: i32 = 1_201;
+
+/// Maps native task-dialog response values, failing closed for every unknown result.
 #[cfg(any(windows, test))]
 #[must_use]
 pub(crate) const fn directory_prompt_choice(result: i32) -> DirectoryPromptChoice {
     match result {
-        6 => DirectoryPromptChoice::Direct,
-        7 => DirectoryPromptChoice::Recurse,
+        DIRECTORY_DIRECT_BUTTON_ID => DirectoryPromptChoice::Direct,
+        DIRECTORY_RECURSE_BUTTON_ID => DirectoryPromptChoice::Recurse,
         _ => DirectoryPromptChoice::Cancel,
     }
+}
+
+/// Decision for a destructive custom-button task dialog.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DestructivePromptChoice {
+    Confirm,
+    Cancel,
+}
+
+/// Accepts only the exact custom affirmative button and cancels every other result.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn destructive_prompt_choice(
+    result: i32,
+    confirm_button_id: i32,
+) -> DestructivePromptChoice {
+    if result == confirm_button_id {
+        DestructivePromptChoice::Confirm
+    } else {
+        DestructivePromptChoice::Cancel
+    }
+}
+
+/// Non-authorizing counts shown before an exact rename plan is confirmed.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ApplyConfirmationSummary {
+    logical_changed: usize,
+    case_only: usize,
+    temporary_groups: usize,
+    primitive_steps: usize,
+}
+
+#[cfg(any(windows, test))]
+impl ApplyConfirmationSummary {
+    /// Summarizes one immutable plan using the backend's exact path-equivalence rule.
+    #[must_use]
+    pub(crate) fn from_plan(
+        plan: &crate::rename::RenamePlan,
+        primitive_steps: usize,
+        mut paths_equivalent: impl FnMut(
+            &darknamer_core::LegacyText,
+            &darknamer_core::LegacyText,
+        ) -> bool,
+    ) -> Option<Self> {
+        let case_only = plan
+            .rows()
+            .iter()
+            .filter(|row| paths_equivalent(row.source(), row.destination()))
+            .count();
+        Self::from_counts(plan.changed_count(), case_only, primitive_steps)
+    }
+
+    /// Builds a summary only when the scheduler counts are internally consistent.
+    #[must_use]
+    pub(crate) const fn from_counts(
+        logical_changed: usize,
+        case_only: usize,
+        primitive_steps: usize,
+    ) -> Option<Self> {
+        if case_only > logical_changed || primitive_steps < logical_changed {
+            return None;
+        }
+        Some(Self {
+            logical_changed,
+            case_only,
+            temporary_groups: primitive_steps - logical_changed,
+            primitive_steps,
+        })
+    }
+
+    #[must_use]
+    pub(crate) const fn logical_changed(self) -> usize {
+        self.logical_changed
+    }
+
+    #[must_use]
+    pub(crate) const fn case_only(self) -> usize {
+        self.case_only
+    }
+
+    #[must_use]
+    pub(crate) const fn cycle_groups(self) -> usize {
+        self.temporary_groups.saturating_sub(self.case_only)
+    }
+
+    #[must_use]
+    pub(crate) const fn primitive_steps(self) -> usize {
+        self.primitive_steps
+    }
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn apply_confirmation_primary(summary: ApplyConfirmationSummary) -> String {
+    format!(
+        "논리적 변경: {}개\n대소문자만 변경: {}개\n순환 변경 그룹: {}개\n파일 시스템 변경 단계: {}개",
+        summary.logical_changed(),
+        summary.case_only(),
+        summary.cycle_groups(),
+        summary.primitive_steps(),
+    )
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn apply_confirmation_detail(fingerprint: u64, revision: u64) -> String {
+    format!("계획 지문: {fingerprint:016X}\n목록 버전: {revision}")
 }
 
 /// Calculates a message-font-aware prompt layout for the active field combination.
@@ -2793,14 +2911,121 @@ mod tests {
 
     #[test]
     fn directory_prompt_closes_and_unknown_results_cancel() {
-        assert_eq!(directory_prompt_choice(6), DirectoryPromptChoice::Direct);
-        assert_eq!(directory_prompt_choice(7), DirectoryPromptChoice::Recurse);
-        for result in [0, 1, 2, 42] {
+        assert_eq!(
+            directory_prompt_choice(DIRECTORY_DIRECT_BUTTON_ID),
+            DirectoryPromptChoice::Direct
+        );
+        assert_eq!(
+            directory_prompt_choice(DIRECTORY_RECURSE_BUTTON_ID),
+            DirectoryPromptChoice::Recurse
+        );
+        for result in [0, 1, 2, 6, 7, 42] {
             assert_eq!(
                 directory_prompt_choice(result),
                 DirectoryPromptChoice::Cancel
             );
         }
+    }
+
+    #[test]
+    fn destructive_prompt_accepts_only_its_exact_custom_button() {
+        assert_eq!(
+            destructive_prompt_choice(APPLY_CONFIRM_BUTTON_ID, APPLY_CONFIRM_BUTTON_ID),
+            DestructivePromptChoice::Confirm
+        );
+        for result in [0, 1, 2, 42, DISCARD_CONFIRM_BUTTON_ID] {
+            assert_eq!(
+                destructive_prompt_choice(result, APPLY_CONFIRM_BUTTON_ID),
+                DestructivePromptChoice::Cancel
+            );
+        }
+    }
+
+    #[test]
+    fn apply_confirmation_summary_reports_exact_non_authorizing_counts() {
+        let summary = ApplyConfirmationSummary {
+            logical_changed: 4,
+            case_only: 1,
+            temporary_groups: 2,
+            primitive_steps: 6,
+        };
+        assert_eq!(
+            ApplyConfirmationSummary::from_counts(4, 1, 6),
+            Some(summary)
+        );
+
+        assert_eq!(summary.logical_changed(), 4);
+        assert_eq!(summary.case_only(), 1);
+        assert_eq!(summary.temporary_groups, 2);
+        assert_eq!(summary.cycle_groups(), 1);
+        assert_eq!(summary.primitive_steps(), 6);
+        let primary = apply_confirmation_primary(summary);
+        assert!(primary.contains("논리적 변경: 4개"));
+        assert!(primary.contains("대소문자만 변경: 1개"));
+        assert!(primary.contains("순환 변경 그룹: 1개"));
+        assert!(primary.contains("파일 시스템 변경 단계: 6개"));
+        assert!(!primary.contains("지문"));
+        assert!(!primary.contains("버전"));
+
+        let detail = apply_confirmation_detail(0xA5, 17);
+        assert!(detail.contains("00000000000000A5"));
+        assert!(detail.contains("목록 버전: 17"));
+    }
+
+    #[test]
+    fn apply_confirmation_summary_rejects_inconsistent_counts() {
+        assert_eq!(ApplyConfirmationSummary::from_counts(1, 2, 2), None);
+        assert_eq!(ApplyConfirmationSummary::from_counts(3, 1, 2), None);
+    }
+
+    #[test]
+    fn apply_confirmation_summary_counts_mixed_direct_cycle_and_case_only_plan()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::rename::{
+            EntryId, EntryKind, MemoryBackend, ModelRevision, PlanRequest, RenameBackend,
+            RenameIntent, RenamePlanner, preflight_plan,
+        };
+
+        let mut backend = MemoryBackend::new()
+            .with_file("C:\\work\\a.txt", 1)
+            .with_file("C:\\work\\b.txt", 2)
+            .with_file("C:\\work\\c.txt", 3)
+            .with_file("C:\\work\\D.TXT", 4);
+        let intent = |id, source, destination| {
+            RenameIntent::new(
+                EntryId::new(id),
+                format!("C:\\work\\{source}"),
+                "C:\\work",
+                destination,
+                EntryKind::File,
+            )
+        };
+        let plan = RenamePlanner::new(&backend).plan(PlanRequest::new(
+            ModelRevision::new(7),
+            vec![
+                intent(0, "a.txt", "x.txt"),
+                intent(1, "b.txt", "c.txt"),
+                intent(2, "c.txt", "b.txt"),
+                intent(3, "D.TXT", "d.txt"),
+            ],
+        ))?;
+        let requirements = preflight_plan(&plan, &mut backend)?;
+        let summary = ApplyConfirmationSummary::from_plan(
+            &plan,
+            requirements.primitive_steps(),
+            |source, destination| backend.path_key(source) == backend.path_key(destination),
+        );
+
+        assert_eq!(
+            summary,
+            Some(ApplyConfirmationSummary {
+                logical_changed: 4,
+                case_only: 1,
+                temporary_groups: 2,
+                primitive_steps: 6,
+            })
+        );
+        Ok(())
     }
 
     #[test]

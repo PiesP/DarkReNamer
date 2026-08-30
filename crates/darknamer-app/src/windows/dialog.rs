@@ -1,5 +1,163 @@
 use super::*;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct TaskDialogButtonSpec<'a> {
+    pub(super) id: i32,
+    pub(super) text: &'a str,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct TaskDialogSpec<'a> {
+    pub(super) title: &'a str,
+    pub(super) main_instruction: &'a str,
+    pub(super) content: &'a str,
+    pub(super) expanded_information: Option<&'a str>,
+    pub(super) buttons: &'a [TaskDialogButtonSpec<'a>],
+    pub(super) warning: bool,
+}
+
+struct OwnedTaskDialog {
+    _title: Vec<u16>,
+    _main_instruction: Vec<u16>,
+    _content: Vec<u16>,
+    _expanded_information: Option<Vec<u16>>,
+    _expanded_control_text: Option<Vec<u16>>,
+    _collapsed_control_text: Option<Vec<u16>>,
+    _button_texts: Vec<Vec<u16>>,
+    _buttons: Vec<TASKDIALOG_BUTTON>,
+    config: TASKDIALOGCONFIG,
+}
+
+impl OwnedTaskDialog {
+    fn new(owner: HWND, spec: TaskDialogSpec<'_>) -> io::Result<Self> {
+        if owner.is_null() {
+            return Err(io::Error::other("task dialog requires a live owner window"));
+        }
+        if spec.buttons.is_empty() {
+            return Err(io::Error::other(
+                "task dialog requires at least one explicit action",
+            ));
+        }
+        for (index, button) in spec.buttons.iter().enumerate() {
+            if button.id <= 0 || button.id == IDCANCEL || button.text.is_empty() {
+                return Err(io::Error::other(
+                    "task dialog button specification is invalid",
+                ));
+            }
+            if spec.buttons[..index]
+                .iter()
+                .any(|existing| existing.id == button.id)
+            {
+                return Err(io::Error::other(
+                    "task dialog button identifiers must be unique",
+                ));
+            }
+        }
+        let button_count = u32::try_from(spec.buttons.len())
+            .map_err(|_| io::Error::other("too many task dialog buttons"))?;
+        let title = wide(spec.title);
+        let main_instruction = wide(spec.main_instruction);
+        let content = wide(spec.content);
+        let expanded_information = spec.expanded_information.map(wide);
+        let expanded_control_text = expanded_information
+            .as_ref()
+            .map(|_| wide("진단 정보 숨기기"));
+        let collapsed_control_text = expanded_information
+            .as_ref()
+            .map(|_| wide("진단 정보 표시"));
+        let button_texts = spec
+            .buttons
+            .iter()
+            .map(|button| wide(button.text))
+            .collect::<Vec<_>>();
+        let buttons = spec
+            .buttons
+            .iter()
+            .zip(&button_texts)
+            .map(|(button, text)| TASKDIALOG_BUTTON {
+                nButtonID: button.id,
+                pszButtonText: text.as_ptr(),
+            })
+            .collect::<Vec<_>>();
+        let config = TASKDIALOGCONFIG {
+            cbSize: size_of::<TASKDIALOGCONFIG>() as u32,
+            hwndParent: owner,
+            hInstance: null_mut(),
+            dwFlags: TDF_ALLOW_DIALOG_CANCELLATION
+                | TDF_POSITION_RELATIVE_TO_WINDOW
+                | TDF_SIZE_TO_CONTENT
+                | TDF_USE_COMMAND_LINKS,
+            dwCommonButtons: TDCBF_CANCEL_BUTTON,
+            pszWindowTitle: title.as_ptr(),
+            Anonymous1: TASKDIALOGCONFIG_0 {
+                pszMainIcon: if spec.warning {
+                    TD_WARNING_ICON
+                } else {
+                    null()
+                },
+            },
+            pszMainInstruction: main_instruction.as_ptr(),
+            pszContent: content.as_ptr(),
+            cButtons: button_count,
+            pButtons: buttons.as_ptr(),
+            nDefaultButton: IDCANCEL,
+            cRadioButtons: 0,
+            pRadioButtons: null(),
+            nDefaultRadioButton: 0,
+            pszVerificationText: null(),
+            pszExpandedInformation: expanded_information
+                .as_ref()
+                .map_or(null(), |text| text.as_ptr()),
+            pszExpandedControlText: expanded_control_text
+                .as_ref()
+                .map_or(null(), |text| text.as_ptr()),
+            pszCollapsedControlText: collapsed_control_text
+                .as_ref()
+                .map_or(null(), |text| text.as_ptr()),
+            Anonymous2: TASKDIALOGCONFIG_1 {
+                pszFooterIcon: null(),
+            },
+            pszFooter: null(),
+            pfCallback: None,
+            lpCallbackData: 0,
+            cxWidth: 0,
+        };
+        Ok(Self {
+            _title: title,
+            _main_instruction: main_instruction,
+            _content: content,
+            _expanded_information: expanded_information,
+            _expanded_control_text: expanded_control_text,
+            _collapsed_control_text: collapsed_control_text,
+            _button_texts: button_texts,
+            _buttons: buttons,
+            config,
+        })
+    }
+}
+
+pub(super) fn task_dialog(owner: HWND, spec: TaskDialogSpec<'_>) -> io::Result<i32> {
+    let dialog = OwnedTaskDialog::new(owner, spec)?;
+    let mut selected_button = 0_i32;
+    // SAFETY: config owns pointers into heap allocations retained by `dialog`
+    // for this entire synchronous call. The owner is non-null, the custom-button
+    // array is immutable, and the selected-button output points to live storage.
+    let hresult =
+        unsafe { TaskDialogIndirect(&dialog.config, &mut selected_button, null_mut(), null_mut()) };
+    if hresult != 0 {
+        return Err(io::Error::other(format!(
+            "TaskDialogIndirect failed with HRESULT 0x{:08X}",
+            hresult as u32
+        )));
+    }
+    if selected_button == 0 {
+        return Err(io::Error::other(
+            "TaskDialogIndirect returned no selected button",
+        ));
+    }
+    Ok(selected_button)
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct PromptSpec {
     pub(super) title: String,
@@ -821,4 +979,82 @@ pub(super) fn set_status(status: HWND, text: &str) {
 pub(super) fn modal_native_dialog<T>(owner: HWND, dialog: impl FnOnce() -> T) -> T {
     let _owner_guard = OwnerEnableGuard::new(owner);
     dialog()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owned_task_dialog_keeps_cancel_default_and_all_native_buffers_live()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let owner = 1_usize as HWND;
+        let button_specs = [
+            TaskDialogButtonSpec {
+                id: DIRECTORY_DIRECT_BUTTON_ID,
+                text: "선택한 폴더만 추가",
+            },
+            TaskDialogButtonSpec {
+                id: DIRECTORY_RECURSE_BUTTON_ID,
+                text: "하위 파일을 모두 추가",
+            },
+        ];
+        let dialog = OwnedTaskDialog::new(
+            owner,
+            TaskDialogSpec {
+                title: "제목",
+                main_instruction: "선택",
+                content: "범위",
+                expanded_information: Some("진단"),
+                buttons: &button_specs,
+                warning: true,
+            },
+        )?;
+
+        let config = dialog.config;
+        let configured_owner = config.hwndParent;
+        let flags = config.dwFlags;
+        let common_buttons = config.dwCommonButtons;
+        let default_button = config.nDefaultButton;
+        let button_count = config.cButtons;
+        let button_pointer = config.pButtons;
+        let title_pointer = config.pszWindowTitle;
+        let instruction_pointer = config.pszMainInstruction;
+        let content_pointer = config.pszContent;
+        let expanded_pointer = config.pszExpandedInformation;
+        let expand_label_pointer = config.pszCollapsedControlText;
+        let collapse_label_pointer = config.pszExpandedControlText;
+        // SAFETY: Anonymous1 was initialized with the warning-icon pointer above.
+        let main_icon = unsafe { config.Anonymous1.pszMainIcon };
+        let first_button_id = dialog._buttons[0].nButtonID;
+        let second_button_id = dialog._buttons[1].nButtonID;
+        let first_button_text = dialog._buttons[0].pszButtonText;
+        let second_button_text = dialog._buttons[1].pszButtonText;
+
+        assert_eq!(configured_owner, owner);
+        assert_eq!(common_buttons, TDCBF_CANCEL_BUTTON);
+        assert_eq!(default_button, IDCANCEL);
+        assert_eq!(button_count, 2);
+        assert_eq!(button_pointer, dialog._buttons.as_ptr());
+        assert_eq!(first_button_id, DIRECTORY_DIRECT_BUTTON_ID);
+        assert_eq!(second_button_id, DIRECTORY_RECURSE_BUTTON_ID);
+        assert_eq!(main_icon, TD_WARNING_ICON);
+        assert_ne!(flags & TDF_USE_COMMAND_LINKS, 0);
+        assert_ne!(flags & TDF_ALLOW_DIALOG_CANCELLATION, 0);
+        assert_ne!(flags & TDF_POSITION_RELATIVE_TO_WINDOW, 0);
+        assert_ne!(flags & TDF_SIZE_TO_CONTENT, 0);
+        for pointer in [
+            title_pointer,
+            instruction_pointer,
+            content_pointer,
+            expanded_pointer,
+            expand_label_pointer,
+            collapse_label_pointer,
+            first_button_text,
+            second_button_text,
+        ] {
+            assert!(!pointer.is_null());
+        }
+        Ok(())
+    }
 }

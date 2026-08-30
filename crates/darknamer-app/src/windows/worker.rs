@@ -45,12 +45,13 @@ pub(super) enum PlanWorkerResult {
 
 pub(super) struct ReadyPlan {
     plan: RenamePlan,
-    journal: JournalRequirements,
+    summary: ApplyConfirmationSummary,
 }
 
 pub(super) enum ReadyPlanError {
     Plan(PlanError),
     Preflight(ExecuteError),
+    Summary,
 }
 
 pub(super) enum ApplyWorkerResult {
@@ -189,41 +190,60 @@ pub(super) fn handle_ready_plan(
             );
             return;
         }
+        Err(ReadyPlanError::Summary) => {
+            message(
+                window,
+                "실행 계획 요약이 내부 실행 단계와 일치하지 않습니다. 파일 변경은 시작되지 않았습니다.",
+                "DarkReNamer - 적용 차단",
+            );
+            return;
+        }
     };
     let plan = ready.plan;
     if plan.is_empty() {
         message(window, "변경할 항목이 없습니다.", "DarkReNamer");
         return;
     }
-    let confirmation = format!(
-        "{}개 항목의 실제 이름을 변경합니다.\n파일 시스템 변경 단계: {}개\n\n계속하려면 확인을 선택하세요. 기본 선택은 취소입니다.\n\n진단 정보\n계획 지문: {:016X}\n목록 버전: {}",
-        plan.changed_count(),
-        ready.journal.primitive_steps(),
-        plan.fingerprint(),
-        state.model_revision,
-    );
-    let prompt = wide(&confirmation);
-    let caption = wide("DarkReNamer - 안전한 적용 확인");
+    let primary = apply_confirmation_primary(ready.summary);
+    let detail = apply_confirmation_detail(plan.fingerprint(), state.model_revision);
+    let buttons = [TaskDialogButtonSpec {
+        id: APPLY_CONFIRM_BUTTON_ID,
+        text: "변경 적용",
+    }];
     state.mutation_locked = true;
     state.confirmation_pending = true;
     update_controls(state);
-    // SAFETY: window is the live application HWND and prompt/caption are owned
-    // NUL-terminated UTF-16 buffers retained through the modal MessageBoxW call.
-    let confirmed_by_user = unsafe {
-        MessageBoxW(
-            window,
-            prompt.as_ptr(),
-            caption.as_ptr(),
-            MB_OKCANCEL | MB_DEFBUTTON2 | MB_ICONWARNING,
-        )
-    } == IDOK;
+    let answer = task_dialog(
+        window,
+        TaskDialogSpec {
+            title: "DarkReNamer - 안전한 적용 확인",
+            main_instruction: "실제 파일 이름 변경을 적용하시겠습니까?",
+            content: &primary,
+            expanded_information: Some(&detail),
+            buttons: &buttons,
+            warning: true,
+        },
+    );
     state.mutation_locked = false;
     state.confirmation_pending = false;
     update_controls(state);
     if state.close_pending {
         return;
     }
-    if !confirmed_by_user {
+    let answer = match answer {
+        Ok(answer) => answer,
+        Err(error) => {
+            message(
+                window,
+                &format!("안전 확인 대화상자를 열지 못해 적용을 취소했습니다: {error}"),
+                "DarkReNamer - 적용 취소",
+            );
+            return;
+        }
+    };
+    if destructive_prompt_choice(answer, APPLY_CONFIRM_BUTTON_ID)
+        != DestructivePromptChoice::Confirm
+    {
         return;
     }
     if state.revision() != revision {
@@ -356,9 +376,17 @@ pub(super) fn start_plan_worker(
                     .plan(request)
                     .map_err(ReadyPlanError::Plan)
                     .and_then(|plan| {
-                        preflight_plan(&plan, &mut backend)
-                            .map(|journal| ReadyPlan { plan, journal })
-                            .map_err(ReadyPlanError::Preflight)
+                        let journal = preflight_plan(&plan, &mut backend)
+                            .map_err(ReadyPlanError::Preflight)?;
+                        let summary = ApplyConfirmationSummary::from_plan(
+                            &plan,
+                            journal.primitive_steps(),
+                            |source, destination| {
+                                backend.path_key(source) == backend.path_key(destination)
+                            },
+                        )
+                        .ok_or(ReadyPlanError::Summary)?;
+                        Ok(ReadyPlan { plan, summary })
                     });
                 if worker_cancellation.is_requested() {
                     PlanWorkerResult::Cancelled
@@ -866,23 +894,37 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
                 update_controls(state);
                 return;
             }
-            let text = wide(
-                "선택한 폴더를 목록에 직접 추가하려면 예를 선택하세요.\n폴더 안의 파일을 재귀적으로 추가하려면 아니요를 선택하세요.\n목록을 변경하지 않으려면 취소를 선택하세요.",
+            let directory_units = path_wide(&directory);
+            let directory_text = String::from_utf16_lossy(
+                directory_units
+                    .strip_suffix(&[0])
+                    .unwrap_or(&directory_units),
             );
-            let caption = path_wide(&directory);
+            let directory_detail = format!("선택한 폴더: {directory_text}");
+            let buttons = [
+                TaskDialogButtonSpec {
+                    id: DIRECTORY_DIRECT_BUTTON_ID,
+                    text: "선택한 폴더만 추가",
+                },
+                TaskDialogButtonSpec {
+                    id: DIRECTORY_RECURSE_BUTTON_ID,
+                    text: "하위 파일을 모두 추가",
+                },
+            ];
             state.mutation_locked = true;
             state.confirmation_pending = true;
             update_controls(state);
-            // SAFETY: window is the live owner and both UTF-16 buffers remain
-            // allocated throughout the synchronous modal call.
-            let answer = unsafe {
-                MessageBoxW(
-                    window,
-                    text.as_ptr(),
-                    caption.as_ptr(),
-                    MB_YESNOCANCEL | MB_DEFBUTTON2,
-                )
-            };
+            let answer = task_dialog(
+                window,
+                TaskDialogSpec {
+                    title: "DarkReNamer - 폴더 추가 방식",
+                    main_instruction: "선택한 폴더를 어떻게 추가할까요?",
+                    content: "목록에 추가할 범위를 선택하세요.",
+                    expanded_information: Some(&directory_detail),
+                    buttons: &buttons,
+                    warning: false,
+                },
+            );
             state.mutation_locked = false;
             state.confirmation_pending = false;
             if state.close_pending {
@@ -890,6 +932,20 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
                 unsafe { DestroyWindow(window) };
                 return;
             }
+            let answer = match answer {
+                Ok(answer) => answer,
+                Err(error) => {
+                    message(
+                        window,
+                        &format!(
+                            "폴더 추가 방식 대화상자를 열지 못해 추가를 취소했습니다: {error}"
+                        ),
+                        "DarkReNamer - 폴더 추가 취소",
+                    );
+                    update_controls(state);
+                    return;
+                }
+            };
             let mode = match directory_prompt_choice(answer) {
                 DirectoryPromptChoice::Direct => AdmissionMode::Direct,
                 DirectoryPromptChoice::Recurse => AdmissionMode::Recurse,
