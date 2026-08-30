@@ -548,6 +548,19 @@ unsafe extern "system" fn window_proc(
             arrange(window, unsafe { &mut *state_ptr });
             0
         }
+        WM_APP_EMPTY_SAFETY_COPY if !state_ptr.is_null() => {
+            // Copy the target HWND in a tiny UI-thread borrow that ends before
+            // SetWindowTextW can synchronously enter control/accessibility code.
+            // SAFETY: state_ptr is the live AppState published by this window.
+            let safety = unsafe { (*state_ptr).empty_safety };
+            let mode = if wparam == 0 {
+                RailMode::MenuOnly
+            } else {
+                RailMode::Compact
+            };
+            set_status(safety, empty_state_safety_copy(mode));
+            0
+        }
         WM_GETMINMAXINFO if !state_ptr.is_null() => {
             let info = lparam as *mut MINMAXINFO;
             if !info.is_null() {

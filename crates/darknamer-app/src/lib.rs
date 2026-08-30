@@ -27,9 +27,12 @@ pub(crate) const LIST_SCROLLBAR_ALLOWANCE_DIP: i32 = 17;
 pub(crate) const EMPTY_LIST_STATUS: &str = "파일이나 폴더를 끌어 놓거나 Ctrl+O로 추가하세요.";
 #[cfg(windows)]
 pub(crate) const EMPTY_STATE_INSTRUCTION: &str = "파일이나 폴더를 여기에 끌어오세요";
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 pub(crate) const EMPTY_STATE_SAFETY: &str =
     "‘변경 적용’을 누르기 전에는 실제 파일을 수정하지 않습니다.";
+#[cfg(any(windows, test))]
+pub(crate) const EMPTY_STATE_SAFETY_RAILS: &str =
+    "‘변경 적용’을 누르기 전에는\r\n실제 파일을 수정하지 않습니다.";
 #[cfg(windows)]
 pub(crate) const EMPTY_STATE_ADD_LABEL: &str = "파일 추가...";
 #[cfg(windows)]
@@ -942,7 +945,7 @@ pub(crate) fn calculate_appearance_dialog_layout(
             horizontal_margin,
             separator_y,
             content_width,
-            scale_dip(2, dpi),
+            scale_dip(1, dpi),
         ),
         reset: rect(horizontal_margin, buttons_y, reset_width, button_height),
         ok: rect(ok_x, buttons_y, button_width, button_height),
@@ -1197,6 +1200,15 @@ pub(crate) enum RailMode {
     Comfortable,
     Compact,
     MenuOnly,
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn empty_state_safety_copy(mode: RailMode) -> &'static str {
+    match mode {
+        RailMode::Comfortable | RailMode::Compact => EMPTY_STATE_SAFETY_RAILS,
+        RailMode::MenuOnly => EMPTY_STATE_SAFETY,
+    }
 }
 
 /// Nonnegative child-window geometry calculated without Win32 dependencies.
@@ -4943,6 +4955,7 @@ mod tests {
             ];
             assert!(layout.client.width <= width);
             assert!(layout.client.height <= height);
+            assert_eq!(layout.separator.height, scale_dip(1, dpi));
             for rect in rects {
                 assert!(rect.x >= 0 && rect.y >= 0 && rect.width >= 0 && rect.height >= 0);
                 assert!(rect.x.saturating_add(rect.width) <= layout.client.width);
@@ -5473,6 +5486,24 @@ mod tests {
             assert!(overlay.x + overlay.width <= comfortable.list.x + comfortable.list.width);
             assert!(overlay.bottom() <= comfortable.list.bottom());
         }
+    }
+
+    #[test]
+    fn rail_safety_copy_balances_without_forcing_menu_only_wrap() {
+        assert_eq!(
+            empty_state_safety_copy(RailMode::Comfortable),
+            EMPTY_STATE_SAFETY_RAILS
+        );
+        assert_eq!(
+            empty_state_safety_copy(RailMode::Compact),
+            EMPTY_STATE_SAFETY_RAILS
+        );
+        assert_eq!(
+            empty_state_safety_copy(RailMode::MenuOnly),
+            EMPTY_STATE_SAFETY
+        );
+        assert!(!EMPTY_STATE_SAFETY.contains('\r'));
+        assert!(!EMPTY_STATE_SAFETY.contains('\n'));
     }
 
     #[test]
