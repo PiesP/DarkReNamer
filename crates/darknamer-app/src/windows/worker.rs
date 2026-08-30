@@ -77,7 +77,7 @@ fn apply_preferences_events(state: &mut AppState, events: Vec<PreferenceWriteEve
                     }
                 }
             }
-            PreferenceWriteEvent::Stopped => {}
+            PreferenceWriteEvent::Stopped => state.preferences_terminal_observed = true,
             PreferenceWriteEvent::Failed { generation, error } => {
                 state.preferences_failure_generation = Some(generation);
                 if !state.close_pending {
@@ -87,6 +87,7 @@ fn apply_preferences_events(state: &mut AppState, events: Vec<PreferenceWriteEve
                 }
             }
             PreferenceWriteEvent::Panicked => {
+                state.preferences_terminal_observed = true;
                 if !state.close_pending {
                     state.set_transient_status(
                         "열 표시 설정 writer가 비정상 종료되었습니다. 현재 작업에는 영향이 없습니다.",
@@ -848,7 +849,7 @@ pub(super) fn try_finish_window_close(window: HWND, state: &mut AppState) {
     if state
         .preferences_writer
         .as_ref()
-        .is_some_and(|writer| !writer.is_finished())
+        .is_some_and(|writer| !state.preferences_terminal_observed && !writer.is_finished())
     {
         return;
     }

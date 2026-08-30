@@ -335,6 +335,82 @@ fn issue(
     }
 }
 
+fn sort_paths_cancellable(
+    paths: &mut Vec<PathBuf>,
+    compare_paths: impl Fn(&Path, &Path) -> Ordering + Copy,
+    cancellation_requested: &dyn Fn() -> bool,
+) -> Result<(), AdmissionCancelled> {
+    let len = paths.len();
+    if len < 2 {
+        return if cancellation_requested() {
+            Err(AdmissionCancelled)
+        } else {
+            Ok(())
+        };
+    }
+    let mut order = (0..len).collect::<Vec<_>>();
+    let mut merged = vec![0_usize; len];
+    let mut width = 1_usize;
+    while width < len {
+        let mut start = 0_usize;
+        while start < len {
+            let middle = start.saturating_add(width).min(len);
+            let end = middle.saturating_add(width).min(len);
+            let (mut left, mut right, mut output) = (start, middle, start);
+            while left < middle && right < end {
+                if cancellation_requested() {
+                    return Err(AdmissionCancelled);
+                }
+                let take_left =
+                    compare_paths(&paths[order[left]], &paths[order[right]]) != Ordering::Greater;
+                merged[output] = if take_left {
+                    let index = order[left];
+                    left += 1;
+                    index
+                } else {
+                    let index = order[right];
+                    right += 1;
+                    index
+                };
+                output += 1;
+            }
+            while left < middle {
+                if cancellation_requested() {
+                    return Err(AdmissionCancelled);
+                }
+                merged[output] = order[left];
+                left += 1;
+                output += 1;
+            }
+            while right < end {
+                if cancellation_requested() {
+                    return Err(AdmissionCancelled);
+                }
+                merged[output] = order[right];
+                right += 1;
+                output += 1;
+            }
+            start = end;
+        }
+        std::mem::swap(&mut order, &mut merged);
+        width = width.saturating_mul(2);
+    }
+    if cancellation_requested() {
+        return Err(AdmissionCancelled);
+    }
+    let mut slots = std::mem::take(paths)
+        .into_iter()
+        .map(Some)
+        .collect::<Vec<_>>();
+    paths.extend(
+        order
+            .into_iter()
+            .filter_map(|index| slots.get_mut(index).and_then(Option::take)),
+    );
+    debug_assert_eq!(paths.len(), len);
+    Ok(())
+}
+
 /// Collects sources iteratively in bounded depth-first order, sorting each
 /// bounded root/child subset without claiming a global lexical capped subset.
 pub fn collect_admission(
@@ -379,10 +455,7 @@ pub fn collect_admission_cancellable(
         ));
         roots.truncate(capacity);
     }
-    roots.sort_by(|left, right| compare_paths(left, right));
-    if cancellation_requested() {
-        return Err(AdmissionCancelled);
-    }
+    sort_paths_cancellable(&mut roots, compare_paths, &cancellation_requested)?;
     let mut stack = VecDeque::new();
     for root in roots.into_iter().rev() {
         if cancellation_requested() {
@@ -464,9 +537,11 @@ pub fn collect_admission_cancellable(
                 }
                 match adapter.read_children_cancellable(&path, remaining, &cancellation_requested) {
                     Ok(mut children) => {
-                        children
-                            .paths
-                            .sort_by(|left, right| compare_paths(left, right));
+                        sort_paths_cancellable(
+                            &mut children.paths,
+                            compare_paths,
+                            &cancellation_requested,
+                        )?;
                         for child in children.paths.into_iter().rev() {
                             if cancellation_requested() {
                                 return Err(AdmissionCancelled);

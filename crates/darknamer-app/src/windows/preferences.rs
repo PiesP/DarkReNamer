@@ -678,4 +678,52 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn terminal_event_allows_join_when_wake_arrives_before_thread_exit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("ui-columns-v1");
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let worker_wake_count = Arc::clone(&wake_count);
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let worker_gate = Arc::clone(&gate);
+        let (terminal_sender, terminal_receiver) = mpsc::channel();
+        let mut writer = PreferencesWriter::spawn(path, move || {
+            if worker_wake_count.fetch_add(1, Ordering::AcqRel) == 1 {
+                let _sent = terminal_sender.send(());
+                let (lock, available) = worker_gate.as_ref();
+                let mut released = lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                while !*released {
+                    released = available
+                        .wait(released)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+            }
+        })?;
+
+        writer.shutdown_with(customized_columns())?;
+        terminal_receiver.recv()?;
+        assert!(!writer.is_finished());
+        assert!(matches!(
+            writer.drain_events().as_slice(),
+            [
+                PreferenceWriteEvent::Saved { generation: 1 },
+                PreferenceWriteEvent::Stopped
+            ]
+        ));
+        {
+            let (lock, available) = gate.as_ref();
+            *lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            available.notify_one();
+        }
+        writer
+            .join()
+            .map_err(|_| io::Error::other("preference writer panicked"))?;
+        Ok(())
+    }
 }

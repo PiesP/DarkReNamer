@@ -234,6 +234,36 @@ fn cancellation_stops_during_child_enumeration_before_descendant_metadata() {
 }
 
 #[test]
+fn cancellation_stops_inside_root_sort_with_bounded_additional_comparisons() {
+    let root = test_root();
+    let roots = (0..MAX_ADMITTED_SOURCES)
+        .rev()
+        .map(|index| root.join(format!("long-sort-path-{index:05}-{}", "x".repeat(128))))
+        .collect::<Vec<_>>();
+    let cancelled = Cell::new(false);
+    let comparisons = Cell::new(0_usize);
+
+    let result = collect_admission_cancellable(
+        &FakeAdapter::default(),
+        roots,
+        AdmissionMode::Direct,
+        MAX_ADMITTED_SOURCES,
+        |left, right| {
+            let next = comparisons.get().saturating_add(1);
+            comparisons.set(next);
+            if next == 7 {
+                cancelled.set(true);
+            }
+            left.cmp(right)
+        },
+        || cancelled.get(),
+    );
+
+    assert_eq!(result, Err(darknamer_app::admission::AdmissionCancelled));
+    assert_eq!(comparisons.get(), 7);
+}
+
+#[test]
 fn relative_path_is_reported_without_metadata_access() {
     let report = collect_admission(
         &FakeAdapter::default(),
