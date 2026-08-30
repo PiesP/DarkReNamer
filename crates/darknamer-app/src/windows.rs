@@ -1,9 +1,11 @@
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::env;
 use std::ffi::c_void;
 use std::fs;
 use std::io;
 use std::mem::{size_of, zeroed};
+use std::num::NonZeroIsize;
 use std::os::windows::ffi::OsStringExt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -19,18 +21,28 @@ use crate::admission::{
     WindowsAdmissionAdapter, bounded_import_lines, bounded_selection, collect_admission,
 };
 use crate::icon_cache::{IconCacheKey, icon_cache_key};
+use crate::preferences::{
+    load_or_default as load_column_preferences, path_for_journal_root,
+    save as save_column_preferences, shown_columns,
+};
 use crate::rename::{
-    CancellationToken, ExecuteError, ExecutionControl, ExecutionOutcome, ExecutionPhase,
-    ExecutionProgress, ExecutionReport, ExistingJournalOpenError, FileJournal, FileJournalError,
-    JournalCleanupDecision, JournalOpenFailure, JournalRequirements, JournalRoot, ModelRevision,
-    PlanError, RecoveryJournalEvidence, RecoveryOutcome, RenameExecutor, RenamePlan, RenamePlanner,
-    RenameRecovery, WindowsRenameBackend, apply_execution_report, build_plan_request,
-    cleanup_decision, execute_error_korean, execution_outcome_korean, next_model_revision,
-    plan_error_korean, preflight_plan, process_is_elevated, safe_mode_unify_path_message,
+    CancellationToken, ExecuteError, ExecutionControl, ExecutionOutcome,
+    ExecutionOutcomePresentation, ExecutionPhase, ExecutionProgress, ExecutionReport,
+    ExistingJournalOpenError, FileJournal, FileJournalError, JournalCleanupDecision,
+    JournalOpenFailure, JournalRoot, ModelRevision, PlanError, RecoveryJournalEvidence,
+    RecoveryOutcome, RenameBackend, RenameExecutor, RenamePlan, RenamePlanner, RenameRecovery,
+    WindowsRenameBackend, apply_execution_report, build_plan_request, cleanup_decision,
+    execute_error_korean, execution_outcome_korean, execution_outcome_presentation,
+    next_model_revision, plan_error_korean, preflight_plan, process_is_elevated,
+    safe_mode_unify_path_message,
 };
 use darknamer_core::{
     LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,
     SortSemantics,
+};
+use raw_window_handle::{
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawWindowHandle,
+    Win32WindowHandle, WindowHandle,
 };
 
 mod application;
@@ -56,7 +68,8 @@ use drag_drop::*;
 #[cfg(test)]
 use list_view::changed_column_mask;
 use list_view::{
-    RenderedRow, refresh, update_column_visibility, update_dpi_metrics,
+    RenderedRow, handle_header_end_track, handle_list_infotip, refresh, refresh_all_rows,
+    refresh_changed_rows, refresh_proposal_rows, update_column_visibility, update_dpi_metrics,
     update_primary_column_widths,
 };
 use menu::*;
@@ -68,52 +81,65 @@ use safe_runtime::{
 };
 use text_io::{compare_windows, legacy_path, path_wide, read_legacy_text, wide, write_legacy_text};
 use windows_sys::Win32::Foundation::{FILETIME, HWND, LPARAM, LRESULT, RECT, SYSTEMTIME, WPARAM};
+use windows_sys::Win32::Globalization::{DATE_SHORTDATE, GetDateFormatEx, GetTimeFormatEx};
 use windows_sys::Win32::Graphics::Gdi::{
-    COLOR_WINDOW, CreateFontIndirectW, DeleteObject, GetMonitorInfoW, HFONT,
-    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, RDW_ALLCHILDREN, RDW_ERASE,
-    RDW_INVALIDATE, RedrawWindow, UpdateWindow,
+    COLOR_WINDOW, CreateFontIndirectW, DT_CALCRECT, DT_NOPREFIX, DT_SINGLELINE, DT_WORDBREAK,
+    DeleteObject, DrawTextW, GetDC, GetMonitorInfoW, HFONT, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromWindow, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RedrawWindow, ReleaseDC,
+    SelectObject, UpdateWindow,
 };
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
 use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::SystemServices::{SS_CENTERIMAGE, SS_ETCHEDHORZ, SS_SUNKEN};
-use windows_sys::Win32::System::Time::FileTimeToSystemTime;
-use windows_sys::Win32::UI::Controls::{
-    ICC_LISTVIEW_CLASSES, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_FMT,
-    LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT,
-    LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_DELETEITEM, LVM_ENSUREVISIBLE,
-    LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH,
-    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW,
-    LVM_SETITEMW, LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER,
-    LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS,
-    LVSIL_SMALL, NM_DBLCLK, NMHDR, NMLISTVIEW,
+use windows_sys::Win32::System::SystemServices::{
+    SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_ETCHEDHORZ, SS_NOPREFIX, SS_SUNKEN,
 };
-use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
-#[cfg(test)]
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTimeEx};
+use windows_sys::Win32::UI::Controls::{
+    HDI_WIDTH, HDN_ENDTRACKW, ICC_LISTVIEW_CLASSES, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX,
+    InitCommonControlsEx, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW,
+    LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS,
+    LVM_DELETEITEM, LVM_ENSUREVISIBLE, LVM_GETCOLUMNWIDTH, LVM_GETHEADER, LVM_GETNEXTITEM,
+    LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE,
+    LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVM_SETITEMW, LVN_GETINFOTIPW,
+    LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
+    LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS,
+    LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_DBLCLK, NM_SETFOCUS, NMHDR, NMHEADERW, NMLISTVIEW,
+    NMLVGETINFOTIPW, TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TASKDIALOGCONFIG_1,
+    TD_WARNING_ICON, TDCBF_CANCEL_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION,
+    TDF_POSITION_RELATIVE_TO_WINDOW, TDF_SIZE_TO_CONTENT, TDF_USE_COMMAND_LINKS,
+    TaskDialogIndirect,
+};
+use windows_sys::Win32::UI::HiDpi::{
+    AdjustWindowRectExForDpi, GetDpiForWindow, GetSystemMetricsForDpi, SystemParametersInfoForDpi,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, GetKeyState, SetFocus, VK_CONTROL, VK_DELETE, VK_ESCAPE, VK_SHIFT,
+    EnableWindow, GetFocus, IsWindowEnabled, SetFocus, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_F6,
+    VK_OEM_COMMA, VK_OEM_PERIOD, VK_UP,
 };
 use windows_sys::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, HDROP, SHFILEINFOW, SHGFI_SMALLICON,
     SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, BN_CLICKED, BS_DEFPUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL,
-    CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem,
-    CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, GWLP_USERDATA, GetClientRect, GetMessageW,
-    GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HMENU,
-    IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, KillTimer, LoadCursorW, LoadIconW, MB_OKCANCEL,
-    MB_YESNO, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW, PostMessageW,
-    PostQuitMessage, RegisterClassExW, SPI_GETNONCLIENTMETRICS, SW_SHOW, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND,
-    WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_FONTCHANGE, WM_GETMINMAXINFO,
-    WM_KEYDOWN, WM_KEYUP, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT,
+    ACCEL, AppendMenuW, BN_CLICKED, BN_SETFOCUS, BS_DEFPUSHBUTTON, BeginDeferWindowPos,
+    CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW,
+    CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem, CreateAcceleratorTableW, CreateMenu, CreatePopupMenu,
+    CreateWindowExW, DefWindowProcW, DeferWindowPos, DestroyAcceleratorTable, DestroyMenu,
+    DestroyWindow, DispatchMessageW, DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem,
+    EndDeferWindowPos, FCONTROL, FSHIFT, FVIRTKEY, GWLP_USERDATA, GetClientRect, GetMessageW,
+    GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HACCEL,
+    HMENU, IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, IsWindow, IsWindowVisible, KillTimer,
+    LoadCursorW, LoadIconW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP,
+    MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW, MoveWindow,
+    NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXVSCROLL,
+    SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW,
+    SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, TranslateAcceleratorW, TranslateMessage, WM_APP, WM_CLOSE,
+    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_FONTCHANGE,
+    WM_GETMINMAXINFO, WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT,
     WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER,
     WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_ACCEPTFILES,
     WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
@@ -126,7 +152,9 @@ use worker::*;
 use crate::*;
 
 const LIST_ID: usize = 1000;
-const STATUS_ID: usize = 1007;
+const STATUS_MESSAGE_ID: usize = 1007;
+const STATUS_COUNT_ID: usize = 1008;
+const CANCEL_WORKER_ID: u16 = 1009;
 const CANDIDATE_JOURNAL_LEAF: &str = "candidate.drj";
 const ACTIVE_JOURNAL_LEAF: &str = "active.drj";
 const EXPORT_RECOVERY_JOURNAL: u16 = 0x9000;
@@ -136,23 +164,28 @@ const WM_APP_APPLY_PROGRESS: u32 = WM_APP + 0x40;
 const WM_APP_APPLY_COMPLETE: u32 = WM_APP + 0x41;
 const WM_APP_PLAN_COMPLETE: u32 = WM_APP + 0x42;
 const WM_APP_ADMISSION_COMPLETE: u32 = WM_APP + 0x43;
+const WM_APP_RESTORE_FOCUS: u32 = WM_APP + 0x44;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 
 struct AppState {
     list_window: HWND,
-    status: HWND,
+    status_message: HWND,
+    status_count: HWND,
+    cancel_worker: HWND,
     menu: HMENU,
-    font: HFONT,
-    status_font: HFONT,
+    font: OwnedFont,
+    status_font: OwnedFont,
     left_rail: Option<CommandRail>,
     right_rail: Option<CommandRail>,
     model: LegacyList,
     shown_columns: [bool; 4],
+    column_states: [ColumnState; 7],
     dpi: u32,
     command_states: [bool; 34],
     model_revision: u64,
     mutation_locked: bool,
     recovery_locked: bool,
+    column_preferences_path: PathBuf,
     journal_root: JournalRoot,
     active_journal: Option<FileJournal>,
     staged_journal: Option<FileJournal>,
@@ -163,7 +196,10 @@ struct AppState {
     admission_worker: Option<AdmissionWorker>,
     close_pending: bool,
     confirmation_pending: bool,
-    startup_status: Option<String>,
+    font_metrics: MeasuredFontMetrics,
+    focus: FocusState,
+    rails_visible: bool,
+    ui_status: UiStatus,
     icon_cache: HashMap<IconCacheKey, i32>,
     rendered_rows: Vec<RenderedRow>,
     // Fields drop in declaration order. Keep the instance lock last so workers
@@ -173,21 +209,44 @@ struct AppState {
 
 impl AppState {
     fn new(runtime: SafeRuntime) -> Self {
+        let column_preferences_path = path_for_journal_root(runtime.root.path());
+        let loaded_columns =
+            load_column_preferences(&column_preferences_path, default_column_states());
+        let mut ui_status = runtime
+            .status
+            .clone()
+            .map_or_else(UiStatus::default, |status| {
+                if runtime.recovery_locked {
+                    UiStatus::with_recovery(status)
+                } else {
+                    UiStatus::with_transient(status)
+                }
+            });
+        if let Some(error) = loaded_columns.failure {
+            ui_status.set_transient(format!(
+                "열 표시 설정을 불러오지 못해 안전한 기본값을 사용합니다: {error}"
+            ));
+        }
+        let column_states = loaded_columns.columns;
         Self {
             list_window: null_mut(),
-            status: null_mut(),
+            status_message: null_mut(),
+            status_count: null_mut(),
+            cancel_worker: null_mut(),
             menu: null_mut(),
-            font: null_mut(),
-            status_font: null_mut(),
+            font: OwnedFont::default(),
+            status_font: OwnedFont::default(),
             left_rail: None,
             right_rail: None,
             model: LegacyList::new(),
-            shown_columns: [false; 4],
+            shown_columns: shown_columns(&column_states),
+            column_states,
             dpi: BASE_DPI,
             command_states: [false; 34],
             model_revision: 0,
             mutation_locked: false,
             recovery_locked: runtime.recovery_locked,
+            column_preferences_path,
             journal_root: runtime.root,
             _runtime_lock: runtime.runtime_lock,
             active_journal: runtime.active_journal,
@@ -199,7 +258,10 @@ impl AppState {
             admission_worker: None,
             close_pending: false,
             confirmation_pending: false,
-            startup_status: runtime.status,
+            font_metrics: MeasuredFontMetrics::default(),
+            focus: FocusState::default(),
+            rails_visible: true,
+            ui_status,
             icon_cache: HashMap::new(),
             rendered_rows: Vec::new(),
         }
@@ -209,8 +271,8 @@ impl AppState {
         ModelRevision::new(self.model_revision)
     }
 
-    fn commit_model_change(&mut self, before: &LegacyList) {
-        self.model_revision = next_model_revision(self.model_revision, &self.model != before);
+    fn commit_known_model_change(&mut self, changed: bool) {
+        self.model_revision = next_model_revision(self.model_revision, changed);
     }
 
     const fn apply_locked(&self) -> bool {
@@ -246,6 +308,71 @@ impl AppState {
                 .blocked_journals
                 .iter()
                 .any(|blocked| blocked.evidence().is_some())
+    }
+
+    fn render_status(&self) {
+        set_status(self.status_message, self.ui_status.message_text());
+        set_status(self.status_count, &self.ui_status.count_text());
+    }
+
+    fn worker_activity(&self) -> WorkerActivity {
+        WorkerActivity {
+            admission: self.admission_worker.is_some(),
+            plan: self.plan_worker.is_some(),
+            apply: self.apply_worker.is_some(),
+            cancellation_requested: self
+                .admission_worker
+                .as_ref()
+                .is_some_and(AdmissionWorker::cancellation_requested)
+                || self
+                    .plan_worker
+                    .as_ref()
+                    .is_some_and(PlanWorker::cancellation_requested)
+                || self
+                    .apply_worker
+                    .as_ref()
+                    .is_some_and(ApplyWorker::cancellation_requested),
+        }
+    }
+
+    fn set_status_item_count(&mut self) {
+        self.ui_status.set_item_count(self.model.len());
+        self.render_status();
+    }
+
+    fn set_transient_status(&mut self, message: impl Into<String>) {
+        self.ui_status.set_transient(message);
+        self.render_status();
+    }
+
+    fn persist_column_preferences(&mut self) {
+        if let Err(error) =
+            save_column_preferences(&self.column_preferences_path, &self.column_states)
+        {
+            self.set_transient_status(format!(
+                "열 표시 설정을 저장하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
+            ));
+        }
+    }
+
+    fn set_progress_status(&mut self, message: impl Into<String>) {
+        self.ui_status.set_progress(message);
+        self.render_status();
+    }
+
+    fn set_recovery_status(&mut self, message: impl Into<String>) {
+        self.ui_status.set_recovery(message);
+        self.render_status();
+    }
+
+    fn clear_progress_status(&mut self) {
+        self.ui_status.clear_progress();
+        self.render_status();
+    }
+
+    fn clear_recovery_status(&mut self) {
+        self.ui_status.clear_recovery();
+        self.render_status();
     }
 }
 
@@ -759,6 +886,54 @@ mod tests {
     }
 
     #[test]
+    fn native_modal_guard_restores_the_owner_enabled_state() -> io::Result<()> {
+        let class = wide("STATIC");
+        // SAFETY: the system STATIC class and null optional handles remain valid for this hidden owner.
+        let owner = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                320,
+                240,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if owner.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+
+        // SAFETY: owner is the live hidden test HWND.
+        assert_ne!(unsafe { IsWindowEnabled(owner) }, 0);
+        let disabled_during_modal = modal_native_dialog(owner, || {
+            // SAFETY: owner remains live throughout this synchronous closure.
+            unsafe { IsWindowEnabled(owner) == 0 }
+        });
+        assert!(disabled_during_modal);
+        // SAFETY: owner remains live after the synchronous guard drops.
+        assert_ne!(unsafe { IsWindowEnabled(owner) }, 0);
+
+        // SAFETY: owner is live and remains intentionally disabled after the second guard drops.
+        unsafe { EnableWindow(owner, 0) };
+        let remained_disabled = modal_native_dialog(owner, || {
+            // SAFETY: owner remains live throughout this synchronous closure.
+            unsafe { IsWindowEnabled(owner) == 0 }
+        });
+        assert!(remained_disabled);
+        // SAFETY: owner remains live and intentionally disabled.
+        assert_eq!(unsafe { IsWindowEnabled(owner) }, 0);
+        // SAFETY: owner is the hidden test HWND created above and is destroyed once.
+        unsafe { DestroyWindow(owner) };
+        Ok(())
+    }
+
+    #[test]
     fn native_command_rails_create_every_visible_button_with_expected_layout()
     -> Result<(), Box<dyn std::error::Error>> {
         let controls = INITCOMMONCONTROLSEX {
@@ -774,6 +949,57 @@ mod tests {
             verify_native_command_rails_at_dpi(instance, dpi)?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn native_status_controls_use_ellipsized_statics_and_accessible_cancel_button()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // SAFETY: null requests the current process module.
+        let instance = unsafe { GetModuleHandleW(null()) };
+        let class = wide("STATIC");
+        // SAFETY: the system STATIC class and current module remain valid for
+        // this hidden top-level test window.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                instance,
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let result = (|| -> io::Result<()> {
+            let (status_message, status_count, cancel) = create_status_controls(parent)?;
+            for status in [status_message, status_count] {
+                // SAFETY: status is a live native STATIC and GWL_STYLE is a
+                // pointer-free value query.
+                let style = unsafe { GetWindowLongPtrW(status, GWL_STYLE) } as u32;
+                assert_eq!(style & SS_NOPREFIX, SS_NOPREFIX);
+                assert_eq!(style & SS_ENDELLIPSIS, SS_ENDELLIPSIS);
+            }
+            // SAFETY: cancel is a live standard BUTTON and GWL_STYLE is a
+            // pointer-free value query.
+            let cancel_style = unsafe { GetWindowLongPtrW(cancel, GWL_STYLE) } as u32;
+            assert_ne!(cancel_style & WS_TABSTOP, 0);
+            assert_eq!(cancel_style & WS_VISIBLE, 0);
+            assert_eq!(window_text(cancel)?, STATUS_CANCEL_LABEL);
+            // SAFETY: cancel remains live and the enabled query has no pointers.
+            assert_eq!(unsafe { IsWindowEnabled(cancel) }, 0);
+            Ok(())
+        })();
+        // SAFETY: parent is the hidden test HWND and destroys all child controls.
+        unsafe { DestroyWindow(parent) };
+        result.map_err(Into::into)
     }
 
     fn verify_native_command_rails_at_dpi(
@@ -803,15 +1029,8 @@ mod tests {
             return Err(io::Error::last_os_error().into());
         }
 
-        let metrics = RailDensity::Comfortable.metrics(dpi);
-        let available_height = scale_dip(352, dpi);
-        let left_placements = calculate_command_rail_layout(&LEFT_RAIL, available_height, metrics)
-            .map_err(|error| io::Error::other(format!("test layout failed: {error:?}")))?;
-        let right_placements =
-            calculate_command_rail_layout(&RIGHT_RAIL, available_height, metrics)
-                .map_err(|error| io::Error::other(format!("test layout failed: {error:?}")))?;
-        let left = CommandRail::create(parent, &LEFT_RAIL, &LEFT_TOOLS)?;
-        let right = match CommandRail::create(parent, &RIGHT_RAIL, &RIGHT_TOOLS) {
+        let left = CommandRail::create(parent, &LEFT_RAIL)?;
+        let right = match CommandRail::create(parent, &RIGHT_RAIL) {
             Ok(rail) => rail,
             Err(error) => {
                 left.destroy();
@@ -820,32 +1039,58 @@ mod tests {
                 return Err(error.into());
             }
         };
+        let message_font = create_message_font(dpi);
+        let status_font = create_status_font(dpi);
+        if message_font.is_null() || status_font.is_null() {
+            left.destroy();
+            right.destroy();
+            // SAFETY: any non-null fonts and parent were created in this test.
+            unsafe {
+                if !message_font.is_null() {
+                    DeleteObject(message_font);
+                }
+                if !status_font.is_null() {
+                    DeleteObject(status_font);
+                }
+                DestroyWindow(parent);
+            }
+            return Err(io::Error::other("could not create native system fonts").into());
+        }
+        let measured = measure_font_metrics(parent, message_font, status_font);
+        assert!(measured.button_text_width > 0);
+        assert!(measured.button_text_height > 0);
+        assert!(measured.status_text_height > 0);
+        let metrics = measured.rail_metrics(RailDensity::Compact, dpi);
+        let available_height =
+            minimum_main_client_height(dpi, measured).saturating_sub(measured.status_height(dpi));
+        let left_placements = calculate_command_rail_layout(&LEFT_RAIL, available_height, metrics)
+            .map_err(|error| io::Error::other(format!("test layout failed: {error:?}")))?;
+        let right_placements =
+            calculate_command_rail_layout(&RIGHT_RAIL, available_height, metrics)
+                .map_err(|error| io::Error::other(format!("test layout failed: {error:?}")))?;
         assert_eq!(left.button_count(), 10);
         assert_eq!(right.button_count(), 9);
 
         let right_origin = metrics.rail_width + scale_dip(20, dpi);
+        left.apply_font(message_font);
+        right.apply_font(message_font);
+        left.set_tab_stop(Some(0));
+        right.set_tab_stop(Some(0));
         left.arrange(0, &left_placements);
         right.arrange(right_origin, &right_placements);
 
         let result = (|| -> io::Result<()> {
             let mut actual_ids = Vec::with_capacity(19);
-            for (rail, expected, tools, origin_x) in [
-                (&left, left_placements.as_slice(), LEFT_TOOLS.as_slice(), 0),
-                (
-                    &right,
-                    right_placements.as_slice(),
-                    RIGHT_TOOLS.as_slice(),
-                    right_origin,
-                ),
+            for (rail, expected, origin_x) in [
+                (&left, left_placements.as_slice(), 0),
+                (&right, right_placements.as_slice(), right_origin),
             ] {
-                for placement in expected {
+                for (index, placement) in expected.iter().enumerate() {
                     let button = rail
                         .command_hwnd(placement.command)
                         .ok_or_else(|| io::Error::other("native command button is missing"))?;
                     actual_ids.push(placement.command);
-                    let tool = tools
-                        .iter()
-                        .find(|tool| tool.id == placement.command)
+                    let tool = rail_tool_spec(placement.command)
                         .ok_or_else(|| io::Error::other("native command label is missing"))?;
                     assert_eq!(window_text(button)?, tool.label);
                     let rect = rail.command_rect(placement.command)?;
@@ -853,16 +1098,27 @@ mod tests {
                     assert_eq!(rect.top, placement.y);
                     assert_eq!(rect.right - rect.left, placement.width);
                     assert_eq!(rect.bottom - rect.top, placement.height);
+                    assert!(placement.width > measured.button_text_width);
+                    assert!(placement.height > measured.button_text_height);
                     // SAFETY: button is live and GWL_STYLE is a value query.
                     let style = unsafe { GetWindowLongPtrW(button, GWL_STYLE) } as u32;
                     assert_ne!(style & BS_MULTILINE as u32, 0);
-                    assert_ne!(style & WS_TABSTOP, 0);
+                    assert_eq!(style & WS_TABSTOP != 0, index == 0);
                     // SAFETY: button is live and the query has no pointers.
                     assert_ne!(unsafe { IsWindowEnabled(button) }, 0);
                     rail.set_enabled(placement.command, false);
                     // SAFETY: button remains live after EnableWindow.
                     assert_eq!(unsafe { IsWindowEnabled(button) }, 0);
                     rail.set_enabled(placement.command, true);
+                }
+                rail.set_tab_stop(Some(2));
+                for (index, placement) in expected.iter().enumerate() {
+                    let button = rail
+                        .command_hwnd(placement.command)
+                        .ok_or_else(|| io::Error::other("native command button is missing"))?;
+                    // SAFETY: button remains live and GWL_STYLE is a value query.
+                    let style = unsafe { GetWindowLongPtrW(button, GWL_STYLE) } as u32;
+                    assert_eq!(style & WS_TABSTOP != 0, index == 2);
                 }
             }
             actual_ids.sort_unstable();
@@ -874,8 +1130,12 @@ mod tests {
         left.destroy();
         right.destroy();
         // SAFETY: all command-rail controls and tooltip text relationships have
-        // been torn down; parent is the remaining hidden test window.
-        unsafe { DestroyWindow(parent) };
+        // been torn down; their fonts and parent remain owned by this test.
+        unsafe {
+            DeleteObject(message_font);
+            DeleteObject(status_font);
+            DestroyWindow(parent);
+        }
         result.map_err(Into::into)
     }
 

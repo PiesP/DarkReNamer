@@ -9,6 +9,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt;
+use std::mem;
 
 mod windows_leaf_name;
 
@@ -349,6 +350,33 @@ pub struct LegacyList {
     items: Vec<LegacyListItem>,
 }
 
+/// Exact outcome of moving selected rows while preserving legacy row results.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MoveRowsOutcome {
+    rows: Box<[usize]>,
+    changed: bool,
+}
+
+impl MoveRowsOutcome {
+    /// Returns the normalized selected rows after the move attempt.
+    #[must_use]
+    pub fn rows(&self) -> &[usize] {
+        &self.rows
+    }
+
+    /// Returns whether list order actually changed.
+    #[must_use]
+    pub const fn changed(&self) -> bool {
+        self.changed
+    }
+
+    /// Consumes the outcome and returns the normalized selected rows.
+    #[must_use]
+    pub fn into_rows(self) -> Box<[usize]> {
+        self.rows
+    }
+}
+
 impl LegacyList {
     /// Creates an empty list.
     #[must_use]
@@ -372,6 +400,13 @@ impl LegacyList {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    /// Clears all rows and reports whether the list changed.
+    pub fn clear(&mut self) -> bool {
+        let changed = !self.items.is_empty();
+        self.items.clear();
+        changed
     }
 
     /// Appends one row unless its path duplicates an existing row ignoring case.
@@ -441,43 +476,66 @@ impl LegacyList {
     /// As in the original ListView handler, selecting the first row makes the
     /// complete move command a no-op.
     pub fn move_rows_earlier(&mut self, selected: &[usize]) -> Box<[usize]> {
+        self.move_rows_earlier_changed(selected).into_rows()
+    }
+
+    /// Moves selected rows earlier and reports exact order-change state.
+    pub fn move_rows_earlier_changed(&mut self, selected: &[usize]) -> MoveRowsOutcome {
         let selected = normalized_indices(selected, self.len());
         if selected.first() == Some(&0) {
-            return selected.into_boxed_slice();
+            return MoveRowsOutcome {
+                rows: selected.into_boxed_slice(),
+                changed: false,
+            };
         }
         for index in &selected {
             self.items.swap(index - 1, *index);
         }
-        selected
+        let changed = !selected.is_empty();
+        let rows = selected
             .into_iter()
             .map(|index| index - 1)
             .collect::<Vec<_>>()
-            .into_boxed_slice()
+            .into_boxed_slice();
+        MoveRowsOutcome { rows, changed }
     }
 
     /// Moves caller-selected rows one position later.
     ///
     /// Selecting the final row makes the complete move command a no-op.
     pub fn move_rows_later(&mut self, selected: &[usize]) -> Box<[usize]> {
+        self.move_rows_later_changed(selected).into_rows()
+    }
+
+    /// Moves selected rows later and reports exact order-change state.
+    pub fn move_rows_later_changed(&mut self, selected: &[usize]) -> MoveRowsOutcome {
         let selected = normalized_indices(selected, self.len());
         if selected.last().is_some_and(|index| index + 1 == self.len()) {
-            return selected.into_boxed_slice();
+            return MoveRowsOutcome {
+                rows: selected.into_boxed_slice(),
+                changed: false,
+            };
         }
         for index in selected.iter().rev() {
             self.items.swap(*index, index + 1);
         }
-        selected
+        let changed = !selected.is_empty();
+        let rows = selected
             .into_iter()
             .map(|index| index + 1)
             .collect::<Vec<_>>()
-            .into_boxed_slice()
+            .into_boxed_slice();
+        MoveRowsOutcome { rows, changed }
     }
 
     /// Resets every proposed name to its current/original name (`Ctrl+Z`).
     pub fn reset_proposals(&mut self) {
-        for item in &mut self.items {
-            item.proposed_name.clone_from(&item.current_name);
-        }
+        let _ = self.reset_proposals_changed();
+    }
+
+    /// Resets proposals and returns exactly which proposal rows changed.
+    pub fn reset_proposals_changed(&mut self) -> Box<[usize]> {
+        changed_proposals(&mut self.items, |item| item.current_name.clone())
     }
 
     /// Directly changes one proposed name, returning `false` for an invalid row.
@@ -486,6 +544,23 @@ impl LegacyList {
             return false;
         };
         item.proposed_name = proposed_name.into();
+        true
+    }
+
+    /// Directly changes one proposal and reports whether its value changed.
+    pub fn manual_change_changed(
+        &mut self,
+        index: usize,
+        proposed_name: impl Into<LegacyText>,
+    ) -> bool {
+        let Some(item) = self.items.get_mut(index) else {
+            return false;
+        };
+        let proposed_name = proposed_name.into();
+        if item.proposed_name == proposed_name {
+            return false;
+        }
+        item.proposed_name = proposed_name;
         true
     }
 
@@ -508,48 +583,87 @@ impl LegacyList {
 
     /// Replaces all non-overlapping occurrences in the complete proposed name.
     pub fn replace_complete(&mut self, from: &LegacyText, to: &LegacyText) {
-        for item in &mut self.items {
-            item.proposed_name.replace_all(from, to);
-        }
+        let _ = self.replace_complete_changed(from, to);
+    }
+
+    /// Replaces complete names and returns exactly which proposal rows changed.
+    pub fn replace_complete_changed(&mut self, from: &LegacyText, to: &LegacyText) -> Box<[usize]> {
+        changed_proposals(&mut self.items, |item| {
+            let mut proposed = item.proposed_name.clone();
+            proposed.replace_all(from, to);
+            proposed
+        })
     }
 
     /// Prepends text to the complete proposed name, including its extension.
     pub fn prefix_complete(&mut self, prefix: &LegacyText) {
-        for item in &mut self.items {
-            item.proposed_name.insert_front(prefix);
+        let _ = self.prefix_complete_changed(prefix);
+    }
+
+    /// Prefixes complete names and returns exactly which proposal rows changed.
+    pub fn prefix_complete_changed(&mut self, prefix: &LegacyText) -> Box<[usize]> {
+        if prefix.is_empty() {
+            return Box::default();
         }
+        changed_proposals(&mut self.items, |item| {
+            let mut proposed = item.proposed_name.clone();
+            proposed.insert_front(prefix);
+            proposed
+        })
     }
 
     /// Appends text immediately before a file extension.
     pub fn suffix_before_extension(&mut self, suffix: &LegacyText) {
-        for item in &mut self.items {
+        let _ = self.suffix_before_extension_changed(suffix);
+    }
+
+    /// Suffixes stems and returns exactly which proposal rows changed.
+    pub fn suffix_before_extension_changed(&mut self, suffix: &LegacyText) -> Box<[usize]> {
+        if suffix.is_empty() {
+            return Box::default();
+        }
+        changed_proposals(&mut self.items, |item| {
             let (mut stem, extension) = split_stem_extension(item);
             stem.push(suffix);
             stem.push(&extension);
-            item.proposed_name = stem;
-        }
+            stem
+        })
     }
 
     /// Clears the name stem while preserving the file extension.
     pub fn clear_name(&mut self) {
-        for item in &mut self.items {
+        let _ = self.clear_name_changed();
+    }
+
+    /// Clears stems and returns exactly which proposal rows changed.
+    pub fn clear_name_changed(&mut self) -> Box<[usize]> {
+        changed_proposals(&mut self.items, |item| {
             let (_stem, extension) = split_stem_extension(item);
-            item.proposed_name = extension;
-        }
+            extension
+        })
     }
 
     /// Deletes a 1-based inclusive range from each stem.
     ///
     /// A zero start means one and a zero end means through the final code unit.
     pub fn delete_front_range(&mut self, start: usize, end: usize) -> Result<(), LegacyInputError> {
+        self.delete_front_range_changed(start, end).map(drop)
+    }
+
+    /// Deletes a front range and returns exactly which proposal rows changed.
+    pub fn delete_front_range_changed(
+        &mut self,
+        start: usize,
+        end: usize,
+    ) -> Result<Box<[usize]>, LegacyInputError> {
         if start == 0 && end == 0 {
-            return Ok(());
+            return Ok(Box::default());
         }
         let start = start.max(1);
         if end > 0 && start > end {
             return Err(LegacyInputError::ReversedPositionRange);
         }
-        for item in &mut self.items {
+        Ok(changed_proposals(&mut self.items, |item| {
             let (mut stem, extension) = split_stem_extension(item);
             if start <= stem.len() {
                 let last = if end > 0 && end < stem.len() {
@@ -560,20 +674,27 @@ impl LegacyList {
                 stem.units.drain(start - 1..last);
             }
             stem.push(&extension);
-            item.proposed_name = stem;
-        }
-        Ok(())
+            stem
+        }))
     }
 
     /// Deletes the last `count` UTF-16 code units from each stem.
     pub fn delete_last(&mut self, count: usize) {
-        for item in &mut self.items {
+        let _ = self.delete_last_changed(count);
+    }
+
+    /// Deletes final code units and returns exactly which proposal rows changed.
+    pub fn delete_last_changed(&mut self, count: usize) -> Box<[usize]> {
+        if count == 0 {
+            return Box::default();
+        }
+        changed_proposals(&mut self.items, |item| {
             let (mut stem, extension) = split_stem_extension(item);
             let count = count.min(stem.len());
             stem.units.truncate(stem.len() - count);
             stem.push(&extension);
-            item.proposed_name = stem;
-        }
+            stem
+        })
     }
 
     /// Deletes the first delimiter pair, including both delimiter code units.
@@ -584,13 +705,22 @@ impl LegacyList {
         start: &LegacyText,
         end: &LegacyText,
     ) -> Result<(), LegacyInputError> {
+        self.delete_first_delimited_changed(start, end).map(drop)
+    }
+
+    /// Deletes delimiter pairs and returns exactly which proposal rows changed.
+    pub fn delete_first_delimited_changed(
+        &mut self,
+        start: &LegacyText,
+        end: &LegacyText,
+    ) -> Result<Box<[usize]>, LegacyInputError> {
         let Some(start) = start.units().first().copied() else {
             return Err(LegacyInputError::EmptyDelimiter);
         };
         let Some(end) = end.units().first().copied() else {
             return Err(LegacyInputError::EmptyDelimiter);
         };
-        for item in &mut self.items {
+        Ok(changed_proposals(&mut self.items, |item| {
             let (mut stem, extension) = split_stem_extension(item);
             if let Some(start_index) = stem.units.iter().position(|unit| *unit == start) {
                 let search_start = start_index + 1;
@@ -603,36 +733,47 @@ impl LegacyList {
                 }
             }
             stem.push(&extension);
-            item.proposed_name = stem;
-        }
-        Ok(())
+            stem
+        }))
     }
 
     /// Retains only ASCII digits in each stem.
     pub fn keep_ascii_digits(&mut self) {
-        for item in &mut self.items {
+        let _ = self.keep_ascii_digits_changed();
+    }
+
+    /// Keeps ASCII digits and returns exactly which proposal rows changed.
+    pub fn keep_ascii_digits_changed(&mut self) -> Box<[usize]> {
+        changed_proposals(&mut self.items, |item| {
             let (mut stem, extension) = split_stem_extension(item);
             stem.units
                 .retain(|unit| (b'0' as u16..=b'9' as u16).contains(unit));
             stem.push(&extension);
-            item.proposed_name = stem;
-        }
+            stem
+        })
     }
 
     /// Pads the last digit run selected by the original reverse scan.
     pub fn pad_last_digit_run(&mut self, width: usize) -> Result<(), LegacyInputError> {
+        self.pad_last_digit_run_changed(width).map(drop)
+    }
+
+    /// Pads final digit runs and returns exactly which proposal rows changed.
+    pub fn pad_last_digit_run_changed(
+        &mut self,
+        width: usize,
+    ) -> Result<Box<[usize]>, LegacyInputError> {
         if width == 0 {
             return Err(LegacyInputError::NonPositiveWidth);
         }
-        for item in &mut self.items {
+        Ok(changed_proposals(&mut self.items, |item| {
             let (mut stem, extension) = split_stem_extension(item);
             if let Some((start, end)) = last_digit_run(stem.units()) {
                 insert_zero_padding(&mut stem, start, end, width);
             }
             stem.push(&extension);
-            item.proposed_name = stem;
-        }
-        Ok(())
+            stem
+        }))
     }
 
     /// Pads the first digit run selected by the original forward scan.
@@ -640,18 +781,25 @@ impl LegacyList {
     /// The MFC loop never assigned an end index when the run reached the end of
     /// the stem, so that particular run intentionally remains unchanged.
     pub fn pad_first_digit_run(&mut self, width: usize) -> Result<(), LegacyInputError> {
+        self.pad_first_digit_run_changed(width).map(drop)
+    }
+
+    /// Pads first digit runs and returns exactly which proposal rows changed.
+    pub fn pad_first_digit_run_changed(
+        &mut self,
+        width: usize,
+    ) -> Result<Box<[usize]>, LegacyInputError> {
         if width == 0 {
             return Err(LegacyInputError::NonPositiveWidth);
         }
-        for item in &mut self.items {
+        Ok(changed_proposals(&mut self.items, |item| {
             let (mut stem, extension) = split_stem_extension(item);
             if let Some((start, end)) = first_digit_run(stem.units()) {
                 insert_zero_padding(&mut stem, start, end, width);
             }
             stem.push(&extension);
-            item.proposed_name = stem;
-        }
-        Ok(())
+            stem
+        }))
     }
 
     /// Adds legacy sequence numbers without a separator.
@@ -662,6 +810,16 @@ impl LegacyList {
         mode: LegacySequenceMode,
     ) -> Result<(), LegacyInputError> {
         self.add_sequence_by(width, start, mode, LegacyText::case_insensitive_cmp)
+    }
+
+    /// Adds sequence numbers and returns exactly which proposal rows changed.
+    pub fn add_sequence_changed(
+        &mut self,
+        width: usize,
+        start: i32,
+        mode: LegacySequenceMode,
+    ) -> Result<Box<[usize]>, LegacyInputError> {
+        self.add_sequence_by_changed(width, start, mode, LegacyText::case_insensitive_cmp)
     }
 
     /// Adds sequence numbers with a caller-provided parent-path comparator.
@@ -675,11 +833,27 @@ impl LegacyList {
     where
         F: Fn(&LegacyText, &LegacyText) -> Ordering + Copy,
     {
+        self.add_sequence_by_changed(width, start, mode, compare_text)
+            .map(drop)
+    }
+
+    /// Adds sequence numbers with a comparator and returns changed proposal rows.
+    pub fn add_sequence_by_changed<F>(
+        &mut self,
+        width: usize,
+        start: i32,
+        mode: LegacySequenceMode,
+        compare_text: F,
+    ) -> Result<Box<[usize]>, LegacyInputError>
+    where
+        F: Fn(&LegacyText, &LegacyText) -> Ordering + Copy,
+    {
         if width == 0 {
             return Err(LegacyInputError::NonPositiveWidth);
         }
         let start = start.max(0);
         let mut current = start;
+        let mut changed = Vec::with_capacity(self.items.len());
         for index in 0..self.items.len() {
             if index > 0
                 && matches!(
@@ -706,66 +880,100 @@ impl LegacyList {
                 stem.insert_front(&number);
             }
             stem.push(&extension);
-            item.proposed_name = stem;
+            if item.proposed_name != stem {
+                item.proposed_name = stem;
+                changed.push(index);
+            }
             current = current.wrapping_add(1);
         }
-        Ok(())
+        Ok(changed.into_boxed_slice())
     }
 
     /// Removes the final extension from files and leaves directories unchanged.
     pub fn delete_extension(&mut self) {
-        for item in &mut self.items {
+        let _ = self.delete_extension_changed();
+    }
+
+    /// Deletes extensions and returns exactly which proposal rows changed.
+    pub fn delete_extension_changed(&mut self) -> Box<[usize]> {
+        changed_proposals(&mut self.items, |item| {
             let (stem, _extension) = split_stem_extension(item);
-            item.proposed_name = stem;
-        }
+            stem
+        })
     }
 
     /// Appends an extension to every complete proposed name.
     pub fn add_extension(&mut self, extension: &LegacyText) {
+        let _ = self.add_extension_changed(extension);
+    }
+
+    /// Adds an extension and returns exactly which proposal rows changed.
+    pub fn add_extension_changed(&mut self, extension: &LegacyText) -> Box<[usize]> {
         let Some(extension) = normalized_extension(extension) else {
-            return;
+            return Box::default();
         };
-        for item in &mut self.items {
-            item.proposed_name.push(&extension);
-        }
+        changed_proposals(&mut self.items, |item| {
+            let mut proposed = item.proposed_name.clone();
+            proposed.push(&extension);
+            proposed
+        })
     }
 
     /// Replaces the final file extension and appends to directory names.
     pub fn replace_extension(&mut self, extension: &LegacyText) {
+        let _ = self.replace_extension_changed(extension);
+    }
+
+    /// Replaces extensions and returns exactly which proposal rows changed.
+    pub fn replace_extension_changed(&mut self, extension: &LegacyText) -> Box<[usize]> {
         let Some(extension) = normalized_extension(extension) else {
-            return;
+            return Box::default();
         };
-        for item in &mut self.items {
+        changed_proposals(&mut self.items, |item| {
             let (mut stem, _old_extension) = split_stem_extension(item);
             stem.push(&extension);
-            item.proposed_name = stem;
-        }
+            stem
+        })
     }
 
     /// Prefixes the immediate parent folder plus an underscore.
     pub fn prefix_parent_folder(&mut self) {
-        for item in &mut self.items {
+        let _ = self.prefix_parent_folder_changed();
+    }
+
+    /// Prefixes parent folders and returns exactly which proposal rows changed.
+    pub fn prefix_parent_folder_changed(&mut self) -> Box<[usize]> {
+        changed_proposals(&mut self.items, |item| {
             if let Some(folder) = parent_folder_component(&item.root_path) {
                 let mut proposed = folder;
                 proposed.push_unit(b'_' as u16);
                 proposed.push(&item.proposed_name);
-                item.proposed_name = proposed;
+                proposed
+            } else {
+                item.proposed_name.clone()
             }
-        }
+        })
     }
 
     /// Suffixes an underscore and immediate parent folder before the extension.
     pub fn suffix_parent_folder(&mut self) {
-        for item in &mut self.items {
+        let _ = self.suffix_parent_folder_changed();
+    }
+
+    /// Suffixes parent folders and returns exactly which proposal rows changed.
+    pub fn suffix_parent_folder_changed(&mut self) -> Box<[usize]> {
+        changed_proposals(&mut self.items, |item| {
             if let Some(folder) = parent_folder_component(&item.root_path) {
                 let mut suffix = LegacyText::from("_");
                 suffix.push(&folder);
                 let (mut stem, extension) = split_stem_extension(item);
                 stem.push(&suffix);
                 stem.push(&extension);
-                item.proposed_name = stem;
+                stem
+            } else {
+                item.proposed_name.clone()
             }
-        }
+        })
     }
 
     /// Replaces every destination root, removing one trailing backslash.
@@ -792,6 +1000,18 @@ impl LegacyList {
         self.sort_by_with_semantics(mode, SortSemantics::LegacyDarkNamer080210, compare_text);
     }
 
+    /// Sorts using the legacy policy and reports whether order changed.
+    pub fn sort_by_changed<F>(&mut self, mode: LegacySortMode, compare_text: F) -> bool
+    where
+        F: Fn(&LegacyText, &LegacyText) -> Ordering + Copy,
+    {
+        self.sort_by_with_semantics_changed(
+            mode,
+            SortSemantics::LegacyDarkNamer080210,
+            compare_text,
+        )
+    }
+
     /// Sorts with an explicit modern or legacy file-size policy.
     pub fn sort_by_with_semantics<F>(
         &mut self,
@@ -801,7 +1021,20 @@ impl LegacyList {
     ) where
         F: Fn(&LegacyText, &LegacyText) -> Ordering + Copy,
     {
-        self.items.sort_by(|left, right| match mode {
+        let _ = self.sort_by_with_semantics_changed(mode, semantics, compare_text);
+    }
+
+    /// Sorts with explicit semantics and reports whether order changed.
+    pub fn sort_by_with_semantics_changed<F>(
+        &mut self,
+        mode: LegacySortMode,
+        semantics: SortSemantics,
+        compare_text: F,
+    ) -> bool
+    where
+        F: Fn(&LegacyText, &LegacyText) -> Ordering + Copy,
+    {
+        let compare_items = |left: &LegacyListItem, right: &LegacyListItem| match mode {
             LegacySortMode::NameAscending => {
                 compare_text(left.current_name(), right.current_name())
             }
@@ -828,7 +1061,28 @@ impl LegacyList {
             LegacySortMode::ModifiedDescending => left.modified.cmp(&right.modified).reverse(),
             LegacySortMode::CreatedAscending => left.created.cmp(&right.created),
             LegacySortMode::CreatedDescending => left.created.cmp(&right.created).reverse(),
-        });
+        };
+        let mut order = (0..self.items.len()).collect::<Vec<_>>();
+        order.sort_by(|left, right| compare_items(&self.items[*left], &self.items[*right]));
+        if order
+            .iter()
+            .enumerate()
+            .all(|(index, original)| index == *original)
+        {
+            return false;
+        }
+
+        let mut original = mem::take(&mut self.items)
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>();
+        self.items = Vec::with_capacity(original.len());
+        for index in order {
+            if let Some(item) = original[index].take() {
+                self.items.push(item);
+            }
+        }
+        true
     }
 
     /// Exports proposed names in list order with a trailing CRLF per row.
@@ -852,6 +1106,34 @@ impl LegacyList {
         }
         count
     }
+
+    /// Imports names and returns exactly which proposal rows changed.
+    pub fn import_names_changed(&mut self, text: &LegacyText) -> Box<[usize]> {
+        let names = parse_import_lines(text);
+        let mut changed = Vec::with_capacity(names.len().min(self.len()));
+        for (index, (item, name)) in self.items.iter_mut().zip(names).enumerate() {
+            if item.proposed_name != name {
+                item.proposed_name = name;
+                changed.push(index);
+            }
+        }
+        changed.into_boxed_slice()
+    }
+}
+
+fn changed_proposals(
+    items: &mut [LegacyListItem],
+    mut proposal: impl FnMut(&LegacyListItem) -> LegacyText,
+) -> Box<[usize]> {
+    let mut changed = Vec::with_capacity(items.len());
+    for (index, item) in items.iter_mut().enumerate() {
+        let next = proposal(item);
+        if item.proposed_name != next {
+            item.proposed_name = next;
+            changed.push(index);
+        }
+    }
+    changed.into_boxed_slice()
 }
 
 /// Splits LF-delimited import text, trims each line, and skips blank lines.

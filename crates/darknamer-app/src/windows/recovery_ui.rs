@@ -10,7 +10,7 @@ pub(super) fn export_recovery_journal(owner: HWND, state: &mut AppState) {
         return;
     }
     let Some(directory) = modal_native_dialog(owner, || {
-        rfd::FileDialog::new()
+        native_file_dialog(owner)
             .set_title("복구 저널 원본을 저장할 폴더 선택")
             .pick_folder()
     }) else {
@@ -87,13 +87,58 @@ pub(super) fn discard_staged_journal(owner: HWND, state: &mut AppState) {
         );
         return;
     }
-    let prompt = wide(
-        "활성화 전 실행 계획만 기록되어 있으며 파일 변경은 시작되지 않았습니다.\n이 저널을 폐기하고 새 적용을 허용하시겠습니까?",
+    let detail = state.staged_journal.as_ref().map_or_else(
+        || "보존된 활성화 전 저널 정보가 없습니다.".to_owned(),
+        |journal| {
+            format!(
+                "저널: {}\n크기: {} bytes\n레코드: {}개",
+                journal.path().display(),
+                journal.byte_len(),
+                journal.records().len()
+            )
+        },
     );
-    let caption = wide("DarkReNamer - 활성화 전 계획 폐기");
-    // SAFETY: owner is the live top-level HWND and both UTF-16 buffers remain
-    // allocated throughout this synchronous confirmation call.
-    if unsafe { MessageBoxW(owner, prompt.as_ptr(), caption.as_ptr(), MB_OKCANCEL) } != IDOK {
+    let buttons = [TaskDialogButtonSpec {
+        id: DISCARD_CONFIRM_BUTTON_ID,
+        text: "계획 폐기",
+    }];
+    state.mutation_locked = true;
+    state.confirmation_pending = true;
+    update_controls(state);
+    let answer = task_dialog(
+        owner,
+        TaskDialogSpec {
+            title: "DarkReNamer - 활성화 전 계획 폐기",
+            main_instruction: "활성화 전 실행 계획을 폐기하시겠습니까?",
+            content: "파일 변경은 시작되지 않았습니다. 폐기하면 새 적용을 다시 사용할 수 있습니다.",
+            expanded_information: Some(&detail),
+            buttons: &buttons,
+            warning: true,
+        },
+    );
+    state.mutation_locked = false;
+    state.confirmation_pending = false;
+    update_controls(state);
+    if state.close_pending {
+        // SAFETY: queueing WM_CLOSE carries no borrowed state. The current
+        // command dispatch must return before WM_CLOSE can reclaim AppState.
+        unsafe { PostMessageW(owner, WM_CLOSE, 0, 0) };
+        return;
+    }
+    let answer = match answer {
+        Ok(answer) => answer,
+        Err(error) => {
+            message(
+                owner,
+                &format!("안전 확인 대화상자를 열지 못해 폐기를 취소했습니다: {error}"),
+                "DarkReNamer - 폐기 취소",
+            );
+            return;
+        }
+    };
+    if destructive_prompt_choice(answer, DISCARD_CONFIRM_BUTTON_ID)
+        != DestructivePromptChoice::Confirm
+    {
         return;
     }
     if !state.can_discard_staged_intent() {
@@ -128,8 +173,8 @@ pub(super) fn discard_staged_journal(owner: HWND, state: &mut AppState) {
             "DarkReNamer - 복구 상태 확인 필요",
         );
     } else {
-        set_status(
-            state.status,
+        state.clear_recovery_status();
+        state.set_transient_status(
             "활성화 전 실행 계획을 폐기했습니다. 파일은 변경되지 않았습니다.",
         );
         message(

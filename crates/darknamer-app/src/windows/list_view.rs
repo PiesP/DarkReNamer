@@ -6,10 +6,11 @@ pub(super) struct RenderedRow {
     pub(super) icon: i32,
 }
 
-pub(super) fn update_column_visibility(state: &AppState, index: usize) {
+pub(super) fn update_column_visibility(state: &mut AppState, index: usize) {
     let column = index + 3;
-    let width = if state.shown_columns[index] {
-        scale_dip(if column == 4 { 80 } else { 120 }, state.dpi)
+    state.column_states[column].set_visible(state.shown_columns[index]);
+    let width = if state.column_states[column].visible {
+        state.column_states[column].width_px(state.dpi)
     } else {
         0
     };
@@ -24,7 +25,7 @@ pub(super) fn update_column_visibility(state: &AppState, index: usize) {
     }
 }
 
-pub(super) fn update_dpi_metrics(state: &AppState) {
+pub(super) fn update_dpi_metrics(state: &mut AppState) {
     for index in 0..state.shown_columns.len() {
         update_column_visibility(state, index);
     }
@@ -37,7 +38,16 @@ pub(super) fn update_primary_column_widths(state: &AppState) {
     if unsafe { GetClientRect(state.list_window, &mut rect) } == 0 {
         return;
     }
-    let widths = adaptive_primary_column_widths(rect.right - rect.left, state.dpi);
+    // SAFETY: this system-metric query has no pointer parameters and uses the
+    // live window's normalized DPI.
+    let scrollbar_allowance = unsafe { GetSystemMetricsForDpi(SM_CXVSCROLL, state.dpi) }
+        .max(scale_dip(LIST_SCROLLBAR_ALLOWANCE_DIP, state.dpi));
+    let widths = allocate_primary_column_widths(
+        rect.right - rect.left,
+        state.dpi,
+        &state.column_states,
+        scrollbar_allowance,
+    );
     for (column, width) in widths.into_iter().enumerate() {
         // SAFETY: list_window is live and the message carries a checked column
         // index and an adaptive pixel width without a pointer payload.
@@ -50,6 +60,98 @@ pub(super) fn update_primary_column_widths(state: &AppState) {
             )
         };
     }
+}
+
+pub(super) fn handle_header_end_track(state: &mut AppState, lparam: LPARAM) -> bool {
+    let header = lparam as *const NMHDR;
+    if header.is_null() {
+        return false;
+    }
+    // SAFETY: the ListView is live and LVM_GETHEADER returns its borrowed
+    // header child HWND without dereferencing caller memory.
+    let header_window = unsafe { SendMessageW(state.list_window, LVM_GETHEADER, 0, 0) } as HWND;
+    // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix for this synchronous
+    // callback; the pointer has been checked above.
+    let (source_window, code) = unsafe { ((*header).hwndFrom, (*header).code) };
+    // Depending on the common-controls version, the ListView can forward the
+    // embedded header notification while retaining either source HWND.
+    let from_header = source_window == header_window || source_window == state.list_window;
+    if header_window.is_null() || !from_header || code != HDN_ENDTRACKW {
+        return false;
+    }
+    let notification = lparam as *const NMHEADERW;
+    // SAFETY: HDN_ENDTRACKW supplies NMHEADERW storage with an NMHDR prefix.
+    let Ok(column) = usize::try_from(unsafe { (*notification).iItem }) else {
+        return true;
+    };
+    if column >= state.column_states.len() {
+        return true;
+    }
+    // SAFETY: notification is live NMHEADERW storage for this synchronous
+    // callback; pitem, when non-null, points to its readable HDITEMW payload.
+    let item = unsafe { (*notification).pitem };
+    // SAFETY: a non-null pitem points to the live HDITEMW payload owned by the
+    // header control for this synchronous notification.
+    let item_has_width = !item.is_null() && unsafe { (*item).mask & HDI_WIDTH != 0 };
+    let width = if item_has_width {
+        // SAFETY: the checked pitem contains the width field advertised by its
+        // HDI_WIDTH mask.
+        unsafe { (*item).cxy }
+    } else {
+        // SAFETY: the ListView is live and this message returns one integer
+        // column width without retaining caller memory.
+        unsafe { SendMessageW(state.list_window, LVM_GETCOLUMNWIDTH, column, 0) as i32 }
+    };
+    state.column_states[column].record_user_resize(width, state.dpi);
+    state.persist_column_preferences();
+    true
+}
+
+pub(super) fn handle_list_infotip(state: &AppState, lparam: LPARAM) -> bool {
+    let header = lparam as *const NMHDR;
+    if header.is_null()
+        // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix for this
+        // synchronous callback; the pointer was checked above.
+        || unsafe { (*header).hwndFrom } != state.list_window
+        // SAFETY: same live NMHDR storage as the hwndFrom read above.
+        || unsafe { (*header).code } != LVN_GETINFOTIPW
+    {
+        return false;
+    }
+    let notification = lparam as *mut NMLVGETINFOTIPW;
+    // SAFETY: LVN_GETINFOTIPW supplies writable NMLVGETINFOTIPW storage.
+    let Ok(row) = usize::try_from(unsafe { (*notification).iItem }) else {
+        return true;
+    };
+    let Some(item) = state.model.items().get(row) else {
+        return true;
+    };
+    let text = format!(
+        "{}\n{}\n정확한 크기: {}",
+        item.current_name(),
+        item.source_path(),
+        format_exact_bytes(item.actual_size())
+    );
+    let mut text = text.encode_utf16().collect::<Vec<_>>();
+    // SAFETY: notification is live writable storage and its buffer/count pair
+    // belongs to the ListView for this synchronous callback.
+    let destination = unsafe { (*notification).pszText };
+    // SAFETY: same NMLVGETINFOTIPW storage as destination.
+    let capacity = unsafe { (*notification).cchTextMax };
+    if destination.is_null() || capacity <= 0 {
+        return true;
+    }
+    let copy_len = text
+        .len()
+        .min(usize::try_from(capacity - 1).unwrap_or_default());
+    text.truncate(copy_len);
+    // SAFETY: destination has capacity UTF-16 units, copy_len is at most one
+    // less, source is live and non-overlapping, and the terminator is in-bounds.
+    unsafe {
+        destination.copy_from_nonoverlapping(text.as_ptr(), copy_len);
+        *destination.add(copy_len) = 0;
+    }
+    true
 }
 
 struct RedrawGuard {
@@ -84,6 +186,24 @@ impl Drop for RedrawGuard {
 }
 
 pub(super) fn refresh(state: &mut AppState) {
+    update_dpi_metrics(state);
+    let infotip_styles = LVS_EX_LABELTIP | LVS_EX_INFOTIP;
+    // SAFETY: state.list_window is live and the masked extended-style update
+    // carries no pointer while preserving unrelated ListView styles.
+    unsafe {
+        SendMessageW(
+            state.list_window,
+            LVM_SETEXTENDEDLISTVIEWSTYLE,
+            infotip_styles as usize,
+            infotip_styles as isize,
+        )
+    };
+    refresh_all_rows(state);
+    update_controls(state);
+    state.set_status_item_count();
+}
+
+pub(super) fn refresh_all_rows(state: &mut AppState) {
     let rows = {
         let model = &state.model;
         let icon_cache = &mut state.icon_cache;
@@ -93,6 +213,7 @@ pub(super) fn refresh(state: &mut AppState) {
             .map(|item| rendered_row(icon_cache, item))
             .collect::<Vec<_>>()
     };
+    let _list_update = ProgrammaticListUpdateGuard::begin();
     // SAFETY: state.list_window is live and the guard restores redraw.
     let _redraw = unsafe { RedrawGuard::suspend(state.list_window) };
     let selected = selected_indices(state.list_window);
@@ -101,17 +222,64 @@ pub(super) fn refresh(state: &mut AppState) {
     }
     state.rendered_rows = rows;
     select_rows(state.list_window, &selected);
-    update_controls(state);
-    let status = if state.model.is_empty() {
-        LegacyText::from(EMPTY_LIST_STATUS)
-    } else {
-        LegacyText::from(format!("{} 개", state.model.len()))
+}
+
+pub(super) fn refresh_changed_rows(state: &mut AppState, changed: &[usize]) {
+    if state.rendered_rows.len() != state.model.len() {
+        refresh(state);
+        return;
+    }
+    let mut changed = changed
+        .iter()
+        .copied()
+        .filter(|index| *index < state.model.len())
+        .collect::<Vec<_>>();
+    changed.sort_unstable();
+    changed.dedup();
+    let rows = {
+        let model = &state.model;
+        let icon_cache = &mut state.icon_cache;
+        changed
+            .iter()
+            .map(|index| (*index, rendered_row(icon_cache, &model.items()[*index])))
+            .collect::<Vec<_>>()
     };
-    let mut status = status.units().to_vec();
-    status.push(0);
-    // SAFETY: status is live and the terminated text outlives this call.
-    unsafe {
-        windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(state.status, status.as_ptr());
+    let _list_update = ProgrammaticListUpdateGuard::begin();
+    // SAFETY: state.list_window is live and the guard restores redraw.
+    let _redraw = unsafe { RedrawGuard::suspend(state.list_window) };
+    for (index, row) in rows {
+        if !apply_rendered_row(state.list_window, index, &state.rendered_rows[index], &row) {
+            drop(_redraw);
+            refresh(state);
+            return;
+        }
+        state.rendered_rows[index] = row;
+    }
+}
+
+pub(super) fn refresh_proposal_rows(state: &mut AppState, changed: &[usize]) {
+    let Some(plan) = proposal_refresh_plan(state.model.len(), state.rendered_rows.len(), changed)
+    else {
+        refresh(state);
+        return;
+    };
+    debug_assert_eq!(plan.proposal_cells, plan.rows.len());
+    debug_assert_eq!(plan.immutable_cells, 0);
+    debug_assert_eq!(plan.full_row_formats, 0);
+    let _list_update = ProgrammaticListUpdateGuard::begin();
+    // SAFETY: state.list_window is live and the guard restores redraw.
+    let _redraw = unsafe { RedrawGuard::suspend(state.list_window) };
+    for row in plan.rows {
+        let proposed = state.model.items()[row].proposed_name();
+        if state.rendered_rows[row].values[1] == *proposed {
+            continue;
+        }
+        if !set_native_subitem(state.list_window, row, 1, proposed) {
+            drop(_redraw);
+            refresh(state);
+            return;
+        }
+        state.rendered_rows[row].values[1].clone_from(proposed);
     }
 }
 
@@ -122,7 +290,7 @@ fn rendered_row(icon_cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyListIt
             item.proposed_name().clone(),
             item.root_path().clone(),
             item.source_path().clone(),
-            LegacyText::from(item.actual_size().to_string()),
+            LegacyText::from(format_iec_file_size(item.actual_size())),
             format_filetime(item.modified()),
             format_filetime(item.created()),
         ],
@@ -139,20 +307,27 @@ fn apply_incremental_rows(window: HWND, old: &[RenderedRow], new: &[RenderedRow]
     }
     let shared = old.len().min(new.len());
     for row in 0..shared {
-        let mask = changed_column_mask(&old[row], &new[row]);
-        if mask & 1 != 0 && !set_native_primary(window, row, &new[row]) {
+        if !apply_rendered_row(window, row, &old[row], &new[row]) {
             return false;
-        }
-        for column in 1..7 {
-            if mask & (1 << column) != 0
-                && !set_native_subitem(window, row, column, &new[row].values[column])
-            {
-                return false;
-            }
         }
     }
     for (row, value) in new.iter().enumerate().skip(old.len()) {
         if !insert_native_row(window, row, value) {
+            return false;
+        }
+    }
+    true
+}
+
+fn apply_rendered_row(window: HWND, row: usize, old: &RenderedRow, new: &RenderedRow) -> bool {
+    let mask = changed_column_mask(old, new);
+    if mask & 1 != 0 && !set_native_primary(window, row, new) {
+        return false;
+    }
+    for column in 1..7 {
+        if mask & (1 << column) != 0
+            && !set_native_subitem(window, row, column, &new.values[column])
+        {
             return false;
         }
     }
@@ -280,21 +455,100 @@ fn file_icon_index(cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyListItem
 }
 
 fn format_filetime(value: u64) -> LegacyText {
-    if value == 0 {
+    let Some(system) = local_systemtime_from_filetime(value) else {
         return LegacyText::default();
+    };
+    if let Some(localized) = format_local_systemtime(&system) {
+        return LegacyText::from(localized);
+    }
+    LegacyText::from(format_timestamp_fallback(
+        [system.wYear, system.wMonth, system.wDay],
+        [system.wHour, system.wMinute, system.wSecond],
+    ))
+}
+
+fn local_systemtime_from_filetime(value: u64) -> Option<SYSTEMTIME> {
+    if value == 0 {
+        return None;
     }
     let filetime = FILETIME {
         dwLowDateTime: value as u32,
         dwHighDateTime: (value >> 32) as u32,
     };
-    // SAFETY: SYSTEMTIME is valid zero-initialized output storage.
-    let mut system: SYSTEMTIME = unsafe { zeroed() };
-    // SAFETY: both structures remain valid through the synchronous conversion.
-    if unsafe { FileTimeToSystemTime(&filetime, &mut system) } == 0 {
-        return LegacyText::default();
+    // SAFETY: SYSTEMTIME has a valid all-zero representation for output.
+    let mut utc: SYSTEMTIME = unsafe { zeroed() };
+    // SAFETY: filetime is readable UTC input and utc remains writable through
+    // this synchronous representation conversion.
+    if unsafe { FileTimeToSystemTime(&filetime, &mut utc) } == 0 {
+        return None;
     }
-    LegacyText::from(format!(
-        "{}-{:02}-{:02} {:02}:{:02}:{:02}",
-        system.wYear, system.wMonth, system.wDay, system.wHour, system.wMinute, system.wSecond
-    ))
+    // SAFETY: SYSTEMTIME has a valid all-zero representation for output.
+    let mut local: SYSTEMTIME = unsafe { zeroed() };
+    // SAFETY: null selects the current dynamic Windows time zone, including
+    // its date-specific transition rules; utc is readable and local writable.
+    if unsafe { SystemTimeToTzSpecificLocalTimeEx(null(), &utc, &mut local) } == 0 {
+        return None;
+    }
+    Some(local)
+}
+
+fn format_local_systemtime(system: &SYSTEMTIME) -> Option<String> {
+    let date = format_locale_part(|buffer, capacity| {
+        // SAFETY: null locale selects the user's default locale, system is
+        // readable, and buffer/capacity are either the documented size query
+        // pair or writable storage supplied by format_locale_part.
+        unsafe {
+            GetDateFormatEx(
+                null(),
+                DATE_SHORTDATE,
+                system,
+                null(),
+                buffer,
+                capacity,
+                null(),
+            )
+        }
+    })?;
+    let time = format_locale_part(|buffer, capacity| {
+        // SAFETY: null locale selects the user's default locale, system is
+        // readable, and buffer/capacity follow the GetTimeFormatEx contract.
+        unsafe { GetTimeFormatEx(null(), 0, system, null(), buffer, capacity) }
+    })?;
+    Some(format!("{date} {time}"))
+}
+
+fn format_locale_part(mut format: impl FnMut(*mut u16, i32) -> i32) -> Option<String> {
+    let required = format(null_mut(), 0);
+    let capacity = usize::try_from(required).ok()?;
+    if capacity <= 1 {
+        return None;
+    }
+    let mut buffer = vec![0_u16; capacity];
+    let written = format(buffer.as_mut_ptr(), required);
+    if written <= 1 {
+        return None;
+    }
+    let text_len = usize::try_from(written - 1).ok()?;
+    String::from_utf16(buffer.get(..text_len)?).ok()
+}
+
+#[cfg(test)]
+mod native_tests {
+    use super::*;
+
+    #[test]
+    fn known_utc_filetime_uses_current_dynamic_timezone_without_mutation() {
+        // 2024-01-15 12:00:00 UTC. Every Windows time zone maps this to
+        // January 15 or 16, while the exact local clock remains environment-owned.
+        let local = local_systemtime_from_filetime(133_497_936_000_000_000);
+
+        assert!(local.is_some());
+        if let Some(local) = local {
+            assert_eq!(local.wYear, 2024);
+            assert_eq!(local.wMonth, 1);
+            assert!((15..=16).contains(&local.wDay));
+            assert!(local.wHour < 24);
+            assert!(!format_filetime(133_497_936_000_000_000).units().is_empty());
+        }
+    }
 }

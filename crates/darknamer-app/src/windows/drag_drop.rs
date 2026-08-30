@@ -25,6 +25,5 @@ pub(super) fn admit_drop(owner: HWND, state: &mut AppState, drop: HDROP) {
             "DarkReNamer - 추가 한도",
         );
     }
-    set_status(state.status, "처리중...");
     admit_paths(owner, state, paths);
 }
