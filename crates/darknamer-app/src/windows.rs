@@ -173,7 +173,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(test)]
-use windows_sys::Win32::UI::WindowsAndMessaging::{BS_FLAT, BS_MULTILINE, GWL_STYLE, GetDlgCtrlID};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    BS_FLAT, BS_MULTILINE, BS_TYPEMASK, GWL_STYLE, GetDlgCtrlID,
+};
 use worker::*;
 
 use appearance::*;
@@ -1784,9 +1786,7 @@ mod tests {
                     let style = unsafe { GetWindowLongPtrW(button, GWL_STYLE) } as u32;
                     assert_ne!(style & BS_MULTILINE as u32, 0);
                     assert_eq!(style & BS_FLAT as u32, 0);
-                    if placement.command == APPLY {
-                        assert_eq!(style & 0xF, BS_PUSHBUTTON as u32);
-                    }
+                    assert_eq!(style & BS_TYPEMASK as u32, BS_OWNERDRAW as u32);
                     assert_eq!(style & WS_TABSTOP != 0, index == 0);
                     // SAFETY: button is live and the query has no pointers.
                     assert_ne!(unsafe { IsWindowEnabled(button) }, 0);
