@@ -396,22 +396,40 @@ pub(super) fn start_plan_worker(
                     return PlanWorkerResult::Cancelled;
                 }
                 let mut backend = WindowsRenameBackend;
-                let plan = RenamePlanner::new(&backend)
-                    .plan(request)
-                    .map_err(ReadyPlanError::Plan)
-                    .and_then(|plan| {
-                        let journal = preflight_plan(&plan, &mut backend)
-                            .map_err(ReadyPlanError::Preflight)?;
-                        let summary = ApplyConfirmationSummary::from_plan(
-                            &plan,
-                            journal.primitive_steps(),
-                            |source, destination| {
-                                backend.path_key(source) == backend.path_key(destination)
-                            },
-                        )
-                        .ok_or(ReadyPlanError::Summary)?;
-                        Ok(ReadyPlan { plan, summary })
-                    });
+                let plan = match RenamePlanner::new(&backend)
+                    .plan_cancellable(request, || worker_cancellation.is_requested())
+                {
+                    Ok(plan) => plan,
+                    Err(PlanAttemptError::Cancelled) => return PlanWorkerResult::Cancelled,
+                    Err(PlanAttemptError::Plan(error)) => {
+                        return PlanWorkerResult::Finished {
+                            revision,
+                            plan: Err(ReadyPlanError::Plan(error)),
+                        };
+                    }
+                };
+                let journal = match preflight_plan_cancellable(&plan, &mut backend, || {
+                    worker_cancellation.is_requested()
+                }) {
+                    Ok(journal) => journal,
+                    Err(error) if error.kind == ExecuteErrorKind::Cancelled => {
+                        return PlanWorkerResult::Cancelled;
+                    }
+                    Err(error) => {
+                        return PlanWorkerResult::Finished {
+                            revision,
+                            plan: Err(ReadyPlanError::Preflight(error)),
+                        };
+                    }
+                };
+                let plan = ApplyConfirmationSummary::from_plan(
+                    &plan,
+                    journal.primitive_steps(),
+                    |source, destination| backend.path_key(source) == backend.path_key(destination),
+                )
+                .map_or(Err(ReadyPlanError::Summary), |summary| {
+                    Ok(ReadyPlan { plan, summary })
+                });
                 if worker_cancellation.is_requested() {
                     PlanWorkerResult::Cancelled
                 } else {
@@ -865,13 +883,16 @@ pub(super) fn start_admission_worker(
                     }
                     AdmissionMode::Direct
                 };
-                let report = collect_admission(&adapter, paths, mode, capacity, |left, right| {
-                    compare_windows(&legacy_path(left), &legacy_path(right))
-                });
-                if worker_cancellation.load(Ordering::Acquire) {
-                    AdmissionWorkerResult::Cancelled
-                } else {
-                    AdmissionWorkerResult::Finished { revision, report }
+                match collect_admission_cancellable(
+                    &adapter,
+                    paths,
+                    mode,
+                    capacity,
+                    |left, right| compare_windows(&legacy_path(left), &legacy_path(right)),
+                    || worker_cancellation.load(Ordering::Acquire),
+                ) {
+                    Ok(report) => AdmissionWorkerResult::Finished { revision, report },
+                    Err(_cancelled) => AdmissionWorkerResult::Cancelled,
                 }
             }))
             .unwrap_or(AdmissionWorkerResult::Panicked);

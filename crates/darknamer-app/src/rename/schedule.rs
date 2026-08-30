@@ -32,33 +32,41 @@ pub(super) struct ScheduleStep {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ScheduleError {
+    Cancelled,
     Invalid,
     Backend(BackendError),
     StaleParent(EntryId),
     TemporaryExhausted(EntryId),
 }
 
+#[cfg(test)]
 pub(super) fn build_schedule(
     plan: &RenamePlan,
     backend: &mut dyn RenameBackend,
 ) -> Result<Vec<ScheduleStep>, ScheduleError> {
-    let source_keys = plan
-        .entries
-        .iter()
-        .map(|entry| backend.path_key(&entry.source))
-        .collect::<Vec<_>>();
-    let destination_keys = plan
-        .entries
-        .iter()
-        .map(|entry| backend.path_key(&entry.destination))
-        .collect::<Vec<_>>();
-    let mut reserved = source_keys
-        .iter()
-        .chain(&destination_keys)
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    build_schedule_cancellable(plan, backend, &|| false)
+}
+
+pub(super) fn build_schedule_cancellable(
+    plan: &RenamePlan,
+    backend: &mut dyn RenameBackend,
+    cancellation_requested: &dyn Fn() -> bool,
+) -> Result<Vec<ScheduleStep>, ScheduleError> {
+    let mut source_keys = Vec::with_capacity(plan.entries.len());
+    let mut destination_keys = Vec::with_capacity(plan.entries.len());
+    for entry in &plan.entries {
+        check_cancelled(cancellation_requested)?;
+        source_keys.push(backend.path_key(&entry.source));
+        destination_keys.push(backend.path_key(&entry.destination));
+    }
+    let mut reserved = BTreeSet::new();
+    for key in source_keys.iter().chain(&destination_keys) {
+        check_cancelled(cancellation_requested)?;
+        reserved.insert(key.clone());
+    }
     let mut source_owners = BTreeMap::new();
     for (index, key) in source_keys.iter().cloned().enumerate() {
+        check_cancelled(cancellation_requested)?;
         if source_owners.insert(key, index).is_some() {
             return Err(ScheduleError::Invalid);
         }
@@ -66,6 +74,7 @@ pub(super) fn build_schedule(
     let mut dependencies = vec![None; plan.entries.len()];
     let mut predecessors = vec![None; plan.entries.len()];
     for (index, destination) in destination_keys.iter().enumerate() {
+        check_cancelled(cancellation_requested)?;
         let Some(owner) = source_owners.get(destination).copied() else {
             continue;
         };
@@ -76,15 +85,19 @@ pub(super) fn build_schedule(
     }
     let mut pending = vec![true; plan.entries.len()];
     let mut remaining = pending.len();
-    let mut remaining_indices = (0..plan.entries.len()).collect::<BTreeSet<_>>();
-    let mut ready = dependencies
-        .iter()
-        .enumerate()
-        .filter_map(|(index, dependency)| dependency.is_none().then_some(index))
-        .collect::<BTreeSet<_>>();
+    let mut remaining_indices = BTreeSet::new();
+    let mut ready = BTreeSet::new();
+    for (index, dependency) in dependencies.iter().enumerate() {
+        check_cancelled(cancellation_requested)?;
+        remaining_indices.insert(index);
+        if dependency.is_none() {
+            ready.insert(index);
+        }
+    }
     let mut schedule = Vec::with_capacity(plan.entries.len().saturating_mul(2));
 
     while remaining > 0 {
+        check_cancelled(cancellation_requested)?;
         if let Some(index) = ready.pop_first() {
             if !pending[index] {
                 return Err(ScheduleError::Invalid);
@@ -108,7 +121,13 @@ pub(super) fn build_schedule(
             .copied()
             .ok_or(ScheduleError::Invalid)?;
         let pivot_entry = &plan.entries[pivot];
-        let temporary = unique_temporary_path(plan, pivot_entry, backend, &mut reserved)?;
+        let temporary = unique_temporary_path(
+            plan,
+            pivot_entry,
+            backend,
+            &mut reserved,
+            cancellation_requested,
+        )?;
         let identity = source_identity(pivot_entry)?;
         schedule.push(ScheduleStep {
             entry: pivot_entry.id,
@@ -122,6 +141,7 @@ pub(super) fn build_schedule(
 
         let mut freed = pivot;
         while let Some(index) = predecessors[freed] {
+            check_cancelled(cancellation_requested)?;
             if index == pivot {
                 break;
             }
@@ -181,12 +201,15 @@ fn unique_temporary_path(
     pivot: &PlanRow,
     backend: &mut dyn RenameBackend,
     reserved: &mut BTreeSet<PathKey>,
+    cancellation_requested: &dyn Fn() -> bool,
 ) -> Result<LegacyText, ScheduleError> {
+    check_cancelled(cancellation_requested)?;
     let nonce = backend
         .next_transaction_nonce()
         .map_err(ScheduleError::Backend)?;
     let parent = parent_units(pivot.source.units());
     for ordinal in 0..MAX_TEMP_CANDIDATES {
+        check_cancelled(cancellation_requested)?;
         let leaf = format!(
             ".__darknamer_{:016x}_{nonce:032x}_{:08x}_{ordinal:02x}.tmp",
             plan.id.value(),
@@ -211,6 +234,14 @@ fn unique_temporary_path(
         }
     }
     Err(ScheduleError::TemporaryExhausted(pivot.id))
+}
+
+fn check_cancelled(cancellation_requested: &dyn Fn() -> bool) -> Result<(), ScheduleError> {
+    if cancellation_requested() {
+        Err(ScheduleError::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 fn parent_units(path: &[u16]) -> &[u16] {

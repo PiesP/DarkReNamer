@@ -26,7 +26,7 @@ pub use activation::{
 pub use executor::{
     CancellationToken, EntryExecution, ExecuteError, ExecuteErrorKind, ExecutionControl,
     ExecutionFailure, ExecutionOutcome, ExecutionPhase, ExecutionProgress, ExecutionReport,
-    RenameExecutor, RenameState, RollbackFailure, preflight_plan,
+    RenameExecutor, RenameState, RollbackFailure, preflight_plan, preflight_plan_cancellable,
 };
 pub use file_journal::{
     ExistingJournalOpenError, FileJournal, FileJournalError, FileJournalErrorKind,
@@ -46,7 +46,7 @@ pub use model::{
     PathSnapshot, PlanError, PlanId, PlanIssue, PlanIssueKind, PlanRequest, PlanRow, RenameIntent,
     RenamePlan,
 };
-pub use planner::{MAX_PLAN_PATH_DEPTH, RenamePlanner};
+pub use planner::{MAX_PLAN_PATH_DEPTH, PlanAttemptError, RenamePlanner};
 pub use ports::{
     AppendCertainty, AuthorizedJournal, BackendError, BackendOperation, JournalAuthorization,
     JournalError, JournalSnapshot, JournalStore, MutationCertainty, RenameBackend, RenameOperation,
