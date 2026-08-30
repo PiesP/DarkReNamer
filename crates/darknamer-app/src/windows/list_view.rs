@@ -139,16 +139,33 @@ pub(super) fn handle_list_custom_draw(state: &AppState, lparam: LPARAM) -> Optio
 
     // SAFETY: same live NMLVCUSTOMDRAW payload validated above.
     let row = unsafe { (*custom).nmcd.dwItemSpec };
-    // SAFETY: same payload; iSubItem and item state are integral fields.
-    let (subitem, item_state) = unsafe { ((*custom).iSubItem, (*custom).nmcd.uItemState) };
-    let selected = item_state & CDIS_SELECTED != 0;
-    let focused = item_state & CDIS_FOCUS != 0;
-    if subitem != 1 || selected || focused {
+    // SAFETY: same payload; iSubItem is an integral field.
+    let subitem = unsafe { (*custom).iSubItem };
+    if subitem < 1 {
         return Some(CDRF_DODEFAULT as LRESULT);
     }
     let Some(item) = state.model.items().get(row) else {
         return Some(CDRF_DODEFAULT as LRESULT);
     };
+    // NMCUSTOMDRAW.uItemState can report stale CDIS_SELECTED state for a
+    // ListView using LVS_SHOWSELALWAYS. Query the control's authoritative item
+    // state so native selection/focus rendering always takes precedence.
+    // SAFETY: list_window is the live notification source, row names an item
+    // already validated against the synchronized model, and the message uses
+    // only integral parameters without retaining caller memory.
+    let item_state = unsafe {
+        SendMessageW(
+            state.list_window,
+            LVM_GETITEMSTATE,
+            row,
+            (LVIS_SELECTED | LVIS_FOCUSED) as LPARAM,
+        )
+    } as u32;
+    let selected = item_state & LVIS_SELECTED != 0;
+    let focused = item_state & LVIS_FOCUSED != 0;
+    if selected || focused {
+        return Some(CDRF_DODEFAULT as LRESULT);
+    }
     if item.current_name() == item.proposed_name() {
         return Some(CDRF_DODEFAULT as LRESULT);
     }
@@ -174,6 +191,23 @@ pub(super) fn handle_list_custom_draw(state: &AppState, lparam: LPARAM) -> Optio
                 (*custom).clrTextBk = background;
             }
         }
+        // ListView custom draw requires this protocol return after changing
+        // subitem font or color fields.
+        return Some(CDRF_NEWFONT as LRESULT);
+    }
+    // The ListView reuses NMLVCUSTOMDRAW color fields across later subitems in
+    // the same row. Once subitem 1 was accented, explicitly restore semantic
+    // defaults so the proposed-name styling cannot leak into path/metadata.
+    if subitem > 1
+        && resolved.custom_colors_enabled
+        && let Some(palette) = semantic_palette(resolved.theme)
+    {
+        // SAFETY: same writable callback payload as the target-cell branch.
+        unsafe {
+            (*custom).clrText = palette.text_primary;
+            (*custom).clrTextBk = palette.surface_workspace;
+        }
+        return Some(CDRF_NEWFONT as LRESULT);
     }
     Some(CDRF_DODEFAULT as LRESULT)
 }
