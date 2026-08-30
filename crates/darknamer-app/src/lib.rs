@@ -1053,6 +1053,10 @@ pub(crate) const fn default_column_states() -> [ColumnState; 7] {
 }
 
 #[cfg(any(windows, test))]
+#[path = "windows/preferences.rs"]
+mod preferences;
+
+#[cfg(any(windows, test))]
 const fn unscale_px(value: i32, dpi: u32) -> i32 {
     if dpi == 0 {
         return value;

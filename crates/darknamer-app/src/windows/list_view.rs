@@ -103,6 +103,7 @@ pub(super) fn handle_header_end_track(state: &mut AppState, lparam: LPARAM) -> b
         unsafe { SendMessageW(state.list_window, LVM_GETCOLUMNWIDTH, column, 0) as i32 }
     };
     state.column_states[column].record_user_resize(width, state.dpi);
+    state.persist_column_preferences();
     true
 }
 
@@ -185,6 +186,7 @@ impl Drop for RedrawGuard {
 }
 
 pub(super) fn refresh(state: &mut AppState) {
+    update_dpi_metrics(state);
     let infotip_styles = LVS_EX_LABELTIP | LVS_EX_INFOTIP;
     // SAFETY: state.list_window is live and the masked extended-style update
     // carries no pointer while preserving unrelated ListView styles.

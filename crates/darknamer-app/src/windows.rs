@@ -21,6 +21,10 @@ use crate::admission::{
     WindowsAdmissionAdapter, bounded_import_lines, bounded_selection, collect_admission,
 };
 use crate::icon_cache::{IconCacheKey, icon_cache_key};
+use crate::preferences::{
+    load_or_default as load_column_preferences, path_for_journal_root,
+    save as save_column_preferences, shown_columns,
+};
 use crate::rename::{
     CancellationToken, ExecuteError, ExecutionControl, ExecutionOutcome, ExecutionPhase,
     ExecutionProgress, ExecutionReport, ExistingJournalOpenError, FileJournal, FileJournalError,
@@ -172,6 +176,7 @@ struct AppState {
     model_revision: u64,
     mutation_locked: bool,
     recovery_locked: bool,
+    column_preferences_path: PathBuf,
     journal_root: JournalRoot,
     active_journal: Option<FileJournal>,
     staged_journal: Option<FileJournal>,
@@ -195,7 +200,10 @@ struct AppState {
 
 impl AppState {
     fn new(runtime: SafeRuntime) -> Self {
-        let ui_status = runtime
+        let column_preferences_path = path_for_journal_root(runtime.root.path());
+        let loaded_columns =
+            load_column_preferences(&column_preferences_path, default_column_states());
+        let mut ui_status = runtime
             .status
             .clone()
             .map_or_else(UiStatus::default, |status| {
@@ -205,6 +213,12 @@ impl AppState {
                     UiStatus::with_transient(status)
                 }
             });
+        if let Some(error) = loaded_columns.failure {
+            ui_status.set_transient(format!(
+                "열 표시 설정을 불러오지 못해 안전한 기본값을 사용합니다: {error}"
+            ));
+        }
+        let column_states = loaded_columns.columns;
         Self {
             list_window: null_mut(),
             status: null_mut(),
@@ -214,13 +228,14 @@ impl AppState {
             left_rail: None,
             right_rail: None,
             model: LegacyList::new(),
-            shown_columns: [false; 4],
-            column_states: default_column_states(),
+            shown_columns: shown_columns(&column_states),
+            column_states,
             dpi: BASE_DPI,
             command_states: [false; 34],
             model_revision: 0,
             mutation_locked: false,
             recovery_locked: runtime.recovery_locked,
+            column_preferences_path,
             journal_root: runtime.root,
             _runtime_lock: runtime.runtime_lock,
             active_journal: runtime.active_journal,
@@ -300,6 +315,16 @@ impl AppState {
     fn set_transient_status(&mut self, message: impl Into<String>) {
         self.ui_status.set_transient(message);
         self.render_status();
+    }
+
+    fn persist_column_preferences(&mut self) {
+        if let Err(error) =
+            save_column_preferences(&self.column_preferences_path, &self.column_states)
+        {
+            self.set_transient_status(format!(
+                "열 표시 설정을 저장하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
+            ));
+        }
     }
 
     fn set_progress_status(&mut self, message: impl Into<String>) {

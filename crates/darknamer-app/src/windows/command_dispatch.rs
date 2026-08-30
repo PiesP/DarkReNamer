@@ -577,6 +577,7 @@ fn apply_command_outcome(
         UiEffect::ColumnsChanged(index) => {
             update_column_visibility(state, index);
             update_primary_column_widths(state);
+            state.persist_column_preferences();
             update_controls(state);
         }
         UiEffect::CloseRequested => request_window_close(window, state),
