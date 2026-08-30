@@ -49,6 +49,28 @@ pub(super) fn nonclient_metrics(dpi: u32) -> Option<NONCLIENTMETRICSW> {
     (success != 0).then_some(metrics)
 }
 
+pub(super) fn query_high_contrast_active() -> Option<bool> {
+    let mut contrast = HIGHCONTRASTW {
+        cbSize: u32::try_from(size_of::<HIGHCONTRASTW>()).ok()?,
+        ..HIGHCONTRASTW::default()
+    };
+    // SAFETY: contrast is writable HIGHCONTRASTW storage with its checked
+    // structure size; the synchronous query retains no pointer.
+    let succeeded = unsafe {
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            contrast.cbSize,
+            (&mut contrast as *mut HIGHCONTRASTW).cast(),
+            0,
+        )
+    };
+    (succeeded != 0).then_some(contrast.dwFlags & HCF_HIGHCONTRASTON != 0)
+}
+
+pub(super) fn refresh_forced_colors(state: &mut AppState) {
+    state.forced_colors = ForcedColorsState::from_high_contrast_query(query_high_contrast_active());
+}
+
 pub(super) fn create_message_font(dpi: u32) -> HFONT {
     let Some(metrics) = nonclient_metrics(dpi) else {
         return null_mut();
@@ -115,6 +137,12 @@ pub(super) fn measure_font_metrics(
         measure_text(window, status_font, STATUS_COUNT_SAMPLE, true).map_or(0, |(width, _)| width);
     let (cancel_text_width, cancel_text_height) =
         measure_text(window, message_font, STATUS_CANCEL_LABEL, true).unwrap_or_default();
+    let (empty_instruction_text_width, empty_instruction_text_height) =
+        measure_text(window, message_font, EMPTY_STATE_INSTRUCTION, true).unwrap_or_default();
+    let (empty_safety_text_width, empty_safety_text_height) =
+        measure_text(window, status_font, EMPTY_STATE_SAFETY, true).unwrap_or_default();
+    let (empty_add_text_width, empty_add_text_height) =
+        measure_text(window, message_font, EMPTY_STATE_ADD_LABEL, true).unwrap_or_default();
     MeasuredFontMetrics {
         button_text_width,
         button_text_height,
@@ -122,6 +150,12 @@ pub(super) fn measure_font_metrics(
         status_count_text_width,
         cancel_text_width,
         cancel_text_height,
+        empty_instruction_text_width,
+        empty_instruction_text_height,
+        empty_safety_text_width,
+        empty_safety_text_height,
+        empty_add_text_width,
+        empty_add_text_height,
     }
 }
 
@@ -163,6 +197,7 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
     // SAFETY: window is the live top-level HWND being initialized.
     let dpi = unsafe { GetDpiForWindow(window) };
     state.dpi = if dpi == 0 { BASE_DPI } else { dpi };
+    refresh_forced_colors(state);
     // SAFETY: A null module name requests the current process module and dereferences no caller memory.
     let instance = unsafe { GetModuleHandleW(null()) };
     let list_class = wide("SysListView32");
@@ -304,14 +339,14 @@ pub(super) fn create_empty_state_controls(parent: HWND) -> io::Result<(HWND, HWN
         "STATIC",
         EMPTY_STATE_INSTRUCTION,
         EMPTY_INSTRUCTION_ID,
-        SS_CENTER | SS_CENTERIMAGE | SS_NOPREFIX,
+        SS_CENTER | SS_NOPREFIX,
     )?;
     let safety = child(
         parent,
         "STATIC",
         EMPTY_STATE_SAFETY,
         EMPTY_SAFETY_ID,
-        SS_CENTER | SS_CENTERIMAGE | SS_NOPREFIX,
+        SS_CENTER | SS_NOPREFIX,
     )?;
     let add = child(
         parent,
@@ -726,9 +761,6 @@ pub(super) fn handle_focus_navigation(state: &mut AppState, message: &MSG) -> Op
 }
 
 pub(super) fn apply_command_states(state: &AppState) {
-    if let Some(rail) = &state.left_rail {
-        rail.set_primary(APPLY, state.command_states[0]);
-    }
     for id in LEFT_RAIL.commands() {
         if let Some(rail) = &state.left_rail {
             rail.set_enabled(id, state.command_states[usize::from(id - APPLY)]);

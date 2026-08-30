@@ -40,11 +40,17 @@ fn minimum_track_width(window: HWND, state: &AppState) -> i32 {
         .rail_metrics(RailDensity::Compact, state.dpi)
         .rail_width;
     let baseline_rail_width = RailDensity::Compact.metrics(state.dpi).rail_width;
-    let measured_content_width = scale_dip(minimum_content_width_dip(), state.dpi).saturating_add(
-        rail_width
-            .saturating_sub(baseline_rail_width)
-            .saturating_mul(2),
-    );
+    let measured_content_width = scale_dip(minimum_content_width_dip(), state.dpi)
+        .saturating_add(
+            rail_width
+                .saturating_sub(baseline_rail_width)
+                .saturating_mul(2),
+        )
+        .max(
+            rail_width
+                .saturating_mul(2)
+                .saturating_add(state.font_metrics.empty_state_minimum_width(state.dpi)),
+        );
     scale_dip(INITIAL_WIDTH, state.dpi).max(measured_content_width.saturating_add(nonclient_width))
 }
 
@@ -476,6 +482,7 @@ unsafe extern "system" fn window_proc(
         WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE if !state_ptr.is_null() => {
             // SAFETY: state_ptr is the live UI-thread AppState.
             let state = unsafe { &mut *state_ptr };
+            refresh_forced_colors(state);
             refresh_system_fonts(state);
             if let Err(error) = ensure_minimum_track_size(window, state) {
                 super::message(

@@ -151,6 +151,12 @@ pub(crate) struct MeasuredFontMetrics {
     pub(crate) status_count_text_width: i32,
     pub(crate) cancel_text_width: i32,
     pub(crate) cancel_text_height: i32,
+    pub(crate) empty_instruction_text_width: i32,
+    pub(crate) empty_instruction_text_height: i32,
+    pub(crate) empty_safety_text_width: i32,
+    pub(crate) empty_safety_text_height: i32,
+    pub(crate) empty_add_text_width: i32,
+    pub(crate) empty_add_text_height: i32,
 }
 
 #[cfg(any(windows, test))]
@@ -189,6 +195,106 @@ impl MeasuredFontMetrics {
                     .saturating_add(scale_dip(6, dpi)),
             )
     }
+
+    #[must_use]
+    pub(crate) fn empty_state_minimum_width(self, dpi: u32) -> i32 {
+        let text_padding = scale_dip(24, dpi);
+        scale_dip(240, dpi)
+            .max(
+                self.empty_instruction_text_width
+                    .max(0)
+                    .saturating_add(text_padding),
+            )
+            .max(
+                self.empty_add_text_width
+                    .max(0)
+                    .saturating_add(text_padding),
+            )
+    }
+
+    fn empty_state_content_metrics(
+        self,
+        dpi: u32,
+        available_width: i32,
+    ) -> EmptyStateContentMetrics {
+        let available_width = available_width.max(0);
+        let fallback_line_height = scale_dip(16, dpi);
+        let instruction_height = conservative_wrapped_text_height(
+            self.empty_instruction_text_width.max(0),
+            self.empty_instruction_text_height.max(fallback_line_height),
+            available_width,
+        );
+        let safety_height = conservative_wrapped_text_height(
+            self.empty_safety_text_width.max(0),
+            self.empty_safety_text_height.max(fallback_line_height),
+            available_width,
+        );
+        let add_width = self
+            .empty_add_text_width
+            .max(0)
+            .saturating_add(scale_dip(24, dpi))
+            .max(scale_dip(112, dpi))
+            .min(available_width);
+        let add_height = self
+            .empty_add_text_height
+            .max(fallback_line_height)
+            .saturating_add(scale_dip(10, dpi))
+            .max(scale_dip(28, dpi));
+        let gap = scale_dip(8, dpi);
+        EmptyStateContentMetrics {
+            instruction_height,
+            safety_height,
+            add_width,
+            add_height,
+            total_height: instruction_height
+                .saturating_add(gap)
+                .saturating_add(add_height)
+                .saturating_add(gap)
+                .saturating_add(safety_height),
+        }
+    }
+
+    fn empty_state_required_height(self, dpi: u32) -> i32 {
+        let content_width = self
+            .empty_state_minimum_width(dpi)
+            .saturating_sub(scale_dip(24, dpi));
+        self.empty_state_content_metrics(dpi, content_width)
+            .total_height
+            .saturating_add(scale_dip(24, dpi))
+    }
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct EmptyStateContentMetrics {
+    instruction_height: i32,
+    safety_height: i32,
+    add_width: i32,
+    add_height: i32,
+    total_height: i32,
+}
+
+#[cfg(any(windows, test))]
+fn conservative_wrapped_text_height(
+    unwrapped_width: i32,
+    line_height: i32,
+    available_width: i32,
+) -> i32 {
+    let line_height = line_height.max(0);
+    if available_width <= 0 {
+        return 0;
+    }
+    let width = unwrapped_width.max(0);
+    let mut lines = width
+        .saturating_add(available_width - 1)
+        .saturating_div(available_width)
+        .max(1);
+    if width > available_width {
+        // Native SS_CENTER wrapping can leave unused space at word boundaries.
+        // One conservative line prevents long localized safety copy clipping.
+        lines = lines.saturating_add(1);
+    }
+    line_height.saturating_mul(lines)
 }
 
 impl RailDensity {
@@ -1045,7 +1151,9 @@ pub(crate) fn minimum_main_client_height(dpi: u32, measured: MeasuredFontMetrics
     let metrics = measured.rail_metrics(RailDensity::Compact, dpi);
     let left = required_command_rail_height(&LEFT_RAIL, metrics).unwrap_or(i32::MAX);
     let right = required_command_rail_height(&RIGHT_RAIL, metrics).unwrap_or(i32::MAX);
-    left.max(right).saturating_add(measured.status_height(dpi))
+    left.max(right)
+        .max(measured.empty_state_required_height(dpi))
+        .saturating_add(measured.status_height(dpi))
 }
 
 #[cfg(any(windows, test))]
@@ -1054,7 +1162,9 @@ pub(crate) fn recommended_main_client_height(dpi: u32, measured: MeasuredFontMet
     let metrics = measured.rail_metrics(RailDensity::Comfortable, dpi);
     let left = required_command_rail_height(&LEFT_RAIL, metrics).unwrap_or(i32::MAX);
     let right = required_command_rail_height(&RIGHT_RAIL, metrics).unwrap_or(i32::MAX);
-    left.max(right).saturating_add(measured.status_height(dpi))
+    left.max(right)
+        .max(measured.empty_state_required_height(dpi))
+        .saturating_add(measured.status_height(dpi))
 }
 
 #[cfg(any(windows, test))]
@@ -1111,7 +1221,7 @@ pub(crate) fn calculate_main_layout(
         width: list_width,
         height: rail_height,
     };
-    let empty = calculate_empty_state_layout(list, dpi);
+    let empty = calculate_empty_state_layout(list, dpi, measured);
     MainLayout {
         rail_mode,
         rail_width,
@@ -1152,14 +1262,19 @@ struct EmptyStateLayout {
 
 #[cfg(any(windows, test))]
 #[must_use]
-fn calculate_empty_state_layout(list: LayoutRect, dpi: u32) -> EmptyStateLayout {
+fn calculate_empty_state_layout(
+    list: LayoutRect,
+    dpi: u32,
+    measured: MeasuredFontMetrics,
+) -> EmptyStateLayout {
     let horizontal_padding = scale_dip(12, dpi).min(list.width.saturating_div(2));
     let content_width = list
         .width
         .saturating_sub(horizontal_padding.saturating_mul(2));
-    let desired_instruction_height = scale_dip(24, dpi);
-    let desired_button_height = scale_dip(28, dpi);
-    let desired_safety_height = scale_dip(22, dpi);
+    let content = measured.empty_state_content_metrics(dpi, content_width);
+    let desired_instruction_height = content.instruction_height;
+    let desired_button_height = content.add_height;
+    let desired_safety_height = content.safety_height;
     let desired_gap = scale_dip(8, dpi);
     let desired_total = desired_instruction_height
         .saturating_add(desired_gap)
@@ -1183,7 +1298,7 @@ fn calculate_empty_state_layout(list: LayoutRect, dpi: u32) -> EmptyStateLayout 
     y = y.saturating_add(desired_gap.min(bottom.saturating_sub(y)).max(0));
     let safety_y = y;
     let safety_height = desired_safety_height.min(bottom.saturating_sub(y)).max(0);
-    let button_width = scale_dip(112, dpi).min(content_width).max(0);
+    let button_width = content.add_width;
     EmptyStateLayout {
         instruction: LayoutRect {
             x: list.x.saturating_add(horizontal_padding),
@@ -1217,23 +1332,37 @@ pub(crate) struct PreviewCounts {
     pub(crate) selected: usize,
 }
 
-/// Derives preview counts by exact current/proposed-name comparison.
+/// Cached model-only portion of preview counts.
 #[cfg(any(windows, test))]
-#[must_use]
-pub(crate) fn preview_counts<'a, T: PartialEq + ?Sized + 'a>(
-    names: impl IntoIterator<Item = (&'a T, &'a T)>,
-    selected: usize,
-) -> PreviewCounts {
-    let mut total = 0_usize;
-    let mut changed = 0_usize;
-    for (current, proposed) in names {
-        total = total.saturating_add(1);
-        changed = changed.saturating_add(usize::from(current != proposed));
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PreviewCountCache {
+    total: usize,
+    changed: usize,
+}
+
+#[cfg(any(windows, test))]
+impl PreviewCountCache {
+    /// Replaces the cache from the authoritative model projection.
+    pub(crate) fn refresh<'a, T: PartialEq + ?Sized + 'a>(
+        &mut self,
+        names: impl IntoIterator<Item = (&'a T, &'a T)>,
+    ) {
+        let mut total = 0_usize;
+        let mut changed = 0_usize;
+        for (current, proposed) in names {
+            total = total.saturating_add(1);
+            changed = changed.saturating_add(usize::from(current != proposed));
+        }
+        *self = Self { total, changed };
     }
-    PreviewCounts {
-        total,
-        changed,
-        selected,
+
+    #[must_use]
+    pub(crate) const fn with_selected(self, selected: usize) -> PreviewCounts {
+        PreviewCounts {
+            total: self.total,
+            changed: self.changed,
+            selected,
+        }
     }
 }
 
@@ -1310,6 +1439,32 @@ pub(crate) enum ProposedNameVisual {
     Changed,
 }
 
+/// Cached forced-colors state. Unknown queries fail closed like active mode.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum ForcedColorsState {
+    Inactive,
+    #[default]
+    ActiveOrUnknown,
+}
+
+#[cfg(any(windows, test))]
+impl ForcedColorsState {
+    #[must_use]
+    pub(crate) const fn from_high_contrast_query(active: Option<bool>) -> Self {
+        if matches!(active, Some(false)) {
+            Self::Inactive
+        } else {
+            Self::ActiveOrUnknown
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn custom_colors_enabled(self) -> bool {
+        matches!(self, Self::Inactive)
+    }
+}
+
 /// Inputs whose precedence decides whether one proposed-name cell is accented.
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1320,8 +1475,7 @@ pub(crate) struct ProposedNameVisualContext {
     pub(crate) changed: bool,
     pub(crate) selected: bool,
     pub(crate) focused: bool,
-    /// `None` means the native high-contrast query failed.
-    pub(crate) forced_colors: Option<bool>,
+    pub(crate) custom_colors_enabled: bool,
 }
 
 #[cfg(any(windows, test))]
@@ -1338,7 +1492,7 @@ pub(crate) const fn proposed_name_visual_decision(
         && context.changed
         && !context.selected
         && !context.focused
-        && matches!(context.forced_colors, Some(false))
+        && context.custom_colors_enabled
     {
         ProposedNameVisual::Changed
     } else {
@@ -3226,12 +3380,19 @@ mod tests {
             status_count_text_width: 72,
             cancel_text_width: 48,
             cancel_text_height: 30,
+            empty_instruction_text_width: 360,
+            empty_instruction_text_height: 38,
+            empty_safety_text_width: 960,
+            empty_safety_text_height: 32,
+            empty_add_text_width: 150,
+            empty_add_text_height: 34,
         };
 
         let compact = measured.rail_metrics(RailDensity::Compact, 96);
         assert!(compact.rail_width >= 100);
         assert!(compact.button_height >= 50);
         assert!(measured.status_height(96) >= 28);
+        assert!(measured.empty_state_minimum_width(96) >= 384);
         assert!(
             minimum_main_client_height(96, measured)
                 > minimum_main_client_height(96, MeasuredFontMetrics::default())
@@ -3239,6 +3400,51 @@ mod tests {
         assert!(
             recommended_main_client_height(96, measured) > minimum_main_client_height(96, measured)
         );
+
+        let client_width = compact
+            .rail_width
+            .saturating_mul(2)
+            .saturating_add(measured.empty_state_minimum_width(96));
+        let client_height = minimum_main_client_height(96, measured);
+        let layout = calculate_main_layout(client_width, client_height, 96, measured);
+        let empty = measured.empty_state_content_metrics(96, layout.empty_safety.width);
+        assert!(layout.empty_instruction.height >= empty.instruction_height);
+        assert!(layout.empty_safety.height >= empty.safety_height);
+        assert!(layout.empty_add.height >= empty.add_height);
+        assert!(layout.empty_add.width >= 174);
+        assert!(layout.empty_safety.bottom() <= layout.list.bottom());
+    }
+
+    #[test]
+    fn minimum_height_expands_for_large_wrapped_empty_state_copy() {
+        let measured = MeasuredFontMetrics {
+            empty_instruction_text_width: 320,
+            empty_instruction_text_height: 48,
+            empty_safety_text_width: 4_000,
+            empty_safety_text_height: 48,
+            empty_add_text_width: 180,
+            empty_add_text_height: 44,
+            ..MeasuredFontMetrics::default()
+        };
+        let rail_width = measured
+            .rail_metrics(RailDensity::Comfortable, 96)
+            .rail_width;
+        let client_width = rail_width
+            .saturating_mul(2)
+            .saturating_add(measured.empty_state_minimum_width(96));
+        let client_height = minimum_main_client_height(96, measured);
+        let rail_only_height =
+            required_command_rail_height(&LEFT_RAIL, RailDensity::Compact.metrics(96))
+                .unwrap_or_default()
+                .saturating_add(measured.status_height(96));
+        assert!(client_height > rail_only_height);
+
+        let layout = calculate_main_layout(client_width, client_height, 96, measured);
+        let content = measured.empty_state_content_metrics(96, layout.empty_safety.width);
+        assert!(layout.empty_instruction.height >= content.instruction_height);
+        assert!(layout.empty_safety.height >= content.safety_height);
+        assert!(layout.empty_add.height >= content.add_height);
+        assert!(layout.empty_safety.bottom() <= layout.list.bottom());
     }
 
     #[test]
@@ -3328,19 +3534,33 @@ mod tests {
     }
 
     #[test]
-    fn preview_counts_compare_exact_current_and_proposed_names() {
-        let names = [
+    fn preview_count_cache_updates_only_at_the_authoritative_refresh_boundary() {
+        let mut names = [
             ("photo.jpg", "photo.jpg"),
             ("photo.jpg", "PHOTO.jpg"),
             ("한글.txt", "한글-01.txt"),
         ];
+        let mut cache = PreviewCountCache::default();
+        cache.refresh(names.iter().copied());
 
         assert_eq!(
-            preview_counts(names.iter().copied(), 2),
+            cache.with_selected(2),
             PreviewCounts {
                 total: 3,
                 changed: 2,
                 selected: 2,
+            }
+        );
+
+        names[1].1 = "photo.jpg";
+        assert_eq!(cache.with_selected(1).changed, 2);
+        cache.refresh(names.iter().copied());
+        assert_eq!(
+            cache.with_selected(1),
+            PreviewCounts {
+                total: 3,
+                changed: 1,
+                selected: 1,
             }
         );
     }
@@ -3419,7 +3639,7 @@ mod tests {
 
     #[test]
     fn proposed_name_visual_preserves_system_selection_and_fail_safe_defaults() {
-        let changed = |selected, focused, forced_colors| {
+        let changed = |selected, focused, custom_colors_enabled| {
             proposed_name_visual_decision(ProposedNameVisualContext {
                 row: Some(0),
                 row_count: 1,
@@ -3427,26 +3647,22 @@ mod tests {
                 changed: true,
                 selected,
                 focused,
-                forced_colors,
+                custom_colors_enabled,
             })
         };
+        assert_eq!(changed(false, false, true), ProposedNameVisual::Changed);
+        assert_eq!(changed(true, false, true), ProposedNameVisual::Default);
+        assert_eq!(changed(false, true, true), ProposedNameVisual::Default);
+        assert_eq!(changed(false, false, false), ProposedNameVisual::Default);
         assert_eq!(
-            changed(false, false, Some(false)),
-            ProposedNameVisual::Changed
+            ForcedColorsState::from_high_contrast_query(Some(false)),
+            ForcedColorsState::Inactive
         );
-        assert_eq!(
-            changed(true, false, Some(false)),
-            ProposedNameVisual::Default
-        );
-        assert_eq!(
-            changed(false, true, Some(false)),
-            ProposedNameVisual::Default
-        );
-        assert_eq!(
-            changed(false, false, Some(true)),
-            ProposedNameVisual::Default
-        );
-        assert_eq!(changed(false, false, None), ProposedNameVisual::Default);
+        for query in [Some(true), None] {
+            let state = ForcedColorsState::from_high_contrast_query(query);
+            assert_eq!(state, ForcedColorsState::ActiveOrUnknown);
+            assert!(!state.custom_colors_enabled());
+        }
         assert_eq!(PROPOSED_CHANGED_TEXT_COLOR, 0x0033_268F);
         assert_eq!(PROPOSED_CHANGED_BACKGROUND_COLOR, 0x00F7_F7FF);
         assert_eq!(
@@ -3457,7 +3673,7 @@ mod tests {
                 changed: true,
                 selected: false,
                 focused: false,
-                forced_colors: Some(false),
+                custom_colors_enabled: true,
             }),
             ProposedNameVisual::Default
         );
@@ -3469,7 +3685,7 @@ mod tests {
                 changed: true,
                 selected: false,
                 focused: false,
-                forced_colors: Some(false),
+                custom_colors_enabled: true,
             }),
             ProposedNameVisual::Default
         );

@@ -216,6 +216,8 @@ struct AppState {
     focus: FocusState,
     rails_visible: bool,
     ui_status: UiStatus,
+    preview_count_cache: PreviewCountCache,
+    forced_colors: ForcedColorsState,
     icon_cache: HashMap<IconCacheKey, i32>,
     rendered_rows: Vec<RenderedRow>,
     // Fields drop in declaration order. Keep the instance lock last so workers
@@ -284,6 +286,8 @@ impl AppState {
             focus: FocusState::default(),
             rails_visible: true,
             ui_status,
+            preview_count_cache: PreviewCountCache::default(),
+            forced_colors: ForcedColorsState::default(),
             icon_cache: HashMap::new(),
             rendered_rows: Vec::new(),
         }
@@ -309,13 +313,7 @@ impl AppState {
     }
 
     fn preview_counts(&self, selected: usize) -> PreviewCounts {
-        preview_counts(
-            self.model
-                .items()
-                .iter()
-                .map(|item| (item.current_name(), item.proposed_name())),
-            selected,
-        )
+        self.preview_count_cache.with_selected(selected)
     }
 
     fn presentation(&self, selected: usize) -> UiPresentation {
@@ -1082,6 +1080,12 @@ mod tests {
             return Err(io::Error::last_os_error().into());
         }
         let result = (|| -> io::Result<()> {
+            let query = query_high_contrast_active();
+            let forced_colors = ForcedColorsState::from_high_contrast_query(query);
+            assert_eq!(
+                forced_colors.custom_colors_enabled(),
+                matches!(query, Some(false))
+            );
             let (instruction, safety, add) = create_empty_state_controls(parent)?;
             for control in [instruction, safety, add] {
                 // SAFETY: each control is a live direct child created above.
@@ -1102,6 +1106,8 @@ mod tests {
             let add_style = unsafe { GetWindowLongPtrW(add, GWL_STYLE) } as u32;
             assert_eq!(instruction_style & WS_TABSTOP, 0);
             assert_eq!(safety_style & WS_TABSTOP, 0);
+            assert_eq!(instruction_style & SS_CENTERIMAGE, 0);
+            assert_eq!(safety_style & SS_CENTERIMAGE, 0);
             assert_ne!(add_style & WS_TABSTOP, 0);
             assert_eq!(add_style & BS_FLAT as u32, 0);
 
@@ -1192,6 +1198,12 @@ mod tests {
         assert!(measured.button_text_width > 0);
         assert!(measured.button_text_height > 0);
         assert!(measured.status_text_height > 0);
+        assert!(measured.empty_instruction_text_width > 0);
+        assert!(measured.empty_instruction_text_height > 0);
+        assert!(measured.empty_safety_text_width > 0);
+        assert!(measured.empty_safety_text_height > 0);
+        assert!(measured.empty_add_text_width > 0);
+        assert!(measured.empty_add_text_height > 0);
         let metrics = measured.rail_metrics(RailDensity::Compact, dpi);
         let available_height =
             minimum_main_client_height(dpi, measured).saturating_sub(measured.status_height(dpi));
@@ -1238,6 +1250,9 @@ mod tests {
                     let style = unsafe { GetWindowLongPtrW(button, GWL_STYLE) } as u32;
                     assert_ne!(style & BS_MULTILINE as u32, 0);
                     assert_eq!(style & BS_FLAT as u32, 0);
+                    if placement.command == APPLY {
+                        assert_eq!(style & 0xF, BS_PUSHBUTTON as u32);
+                    }
                     assert_eq!(style & WS_TABSTOP != 0, index == 0);
                     // SAFETY: button is live and the query has no pointers.
                     assert_ne!(unsafe { IsWindowEnabled(button) }, 0);
@@ -1289,17 +1304,6 @@ mod tests {
             actual_ids.dedup();
             assert_eq!(actual_ids.len(), 19);
             assert!(!actual_ids.contains(&UNIFY_PATH));
-            left.set_primary(APPLY, true);
-            let apply = left
-                .command_hwnd(APPLY)
-                .ok_or_else(|| io::Error::other("Apply button is missing"))?;
-            // SAFETY: apply is a live standard BUTTON and GWL_STYLE reads its value.
-            let ready_style = unsafe { GetWindowLongPtrW(apply, GWL_STYLE) } as u32;
-            assert_eq!(ready_style & 0xF, BS_DEFPUSHBUTTON as u32);
-            left.set_primary(APPLY, false);
-            // SAFETY: same live BUTTON after the documented BM_SETSTYLE update.
-            let idle_style = unsafe { GetWindowLongPtrW(apply, GWL_STYLE) } as u32;
-            assert_eq!(idle_style & 0xF, BS_PUSHBUTTON as u32);
             Ok(())
         })();
         left.destroy();

@@ -17,10 +17,9 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BM_SETSTYLE, BS_CENTER, BS_DEFPUSHBUTTON, BS_MULTILINE, BS_NOTIFY, BS_PUSHBUTTON, BS_VCENTER,
-    CreateWindowExW, DestroyWindow, GWL_STYLE, GetWindowLongPtrW, SW_HIDE, SW_SHOW, SendMessageW,
-    SetWindowLongPtrW, ShowWindow, WM_SETFONT, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-    WS_TABSTOP, WS_VISIBLE,
+    BS_CENTER, BS_MULTILINE, BS_NOTIFY, BS_PUSHBUTTON, BS_VCENTER, CreateWindowExW, DestroyWindow,
+    GWL_STYLE, GetWindowLongPtrW, SW_HIDE, SW_SHOW, SendMessageW, SetWindowLongPtrW, ShowWindow,
+    WM_SETFONT, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -286,19 +285,6 @@ impl CommandRail {
         for separator in &self.separators {
             // SAFETY: each separator is a live decorative child owned by this rail.
             unsafe { ShowWindow(*separator, command) };
-        }
-    }
-
-    pub(super) fn set_primary(&self, command: CommandId, primary: bool) {
-        if let Some(button) = self.command_hwnd(command) {
-            let style = if primary {
-                BS_DEFPUSHBUTTON
-            } else {
-                BS_PUSHBUTTON
-            };
-            // SAFETY: button is the live standard BUTTON for this command; the
-            // documented message changes only its button type and redraws it.
-            unsafe { SendMessageW(button, BM_SETSTYLE, style as usize, 1) };
         }
     }
 
