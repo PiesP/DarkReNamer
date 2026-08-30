@@ -735,6 +735,17 @@ pub(crate) struct AppearanceDialogLayout {
     pub(crate) cancel: LayoutRect,
 }
 
+/// Text measurements that let the appearance dialog grow with system fonts.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct AppearanceDialogMetrics {
+    pub(crate) text_height: i32,
+    pub(crate) widest_option: i32,
+    pub(crate) widest_checkbox: i32,
+    pub(crate) button_text_height: i32,
+    pub(crate) widest_button: i32,
+}
+
 #[cfg(any(windows, test))]
 #[must_use]
 fn bounded_dialog_rect(x: i32, y: i32, width: i32, height: i32, client: LayoutRect) -> LayoutRect {
@@ -755,10 +766,56 @@ pub(crate) fn calculate_appearance_dialog_layout(
     maximum_width: i32,
     maximum_height: i32,
     show_forced_explanation: bool,
+    measured: AppearanceDialogMetrics,
 ) -> Option<AppearanceDialogLayout> {
-    let desired_width = scale_dip(456, dpi);
-    let explanation_band = if show_forced_explanation { 48 } else { 0 };
-    let desired_height = scale_dip(372 + explanation_band, dpi);
+    let button_width =
+        scale_dip(72, dpi).max(measured.widest_button.saturating_add(scale_dip(24, dpi)));
+    let reset_width = scale_dip(124, dpi).max(button_width);
+    let button_row_width = scale_dip(24, dpi)
+        .saturating_add(reset_width)
+        .saturating_add(button_width.saturating_mul(2))
+        .saturating_add(scale_dip(16, dpi));
+    let desired_width = scale_dip(456, dpi)
+        .max(measured.widest_option.saturating_add(scale_dip(64, dpi)))
+        .max(measured.widest_checkbox.saturating_add(scale_dip(48, dpi)))
+        .max(button_row_width);
+    let row_height = scale_dip(20, dpi).max(measured.text_height.saturating_add(scale_dip(6, dpi)));
+    let row_stride = row_height.saturating_add(scale_dip(2, dpi));
+    let group_height = scale_dip(22, dpi).saturating_add(row_stride.saturating_mul(3));
+    let checkbox_height =
+        scale_dip(22, dpi).max(measured.text_height.saturating_add(scale_dip(6, dpi)));
+    let checkbox_stride = checkbox_height.saturating_add(scale_dip(6, dpi));
+    let explanation_height = if show_forced_explanation {
+        scale_dip(40, dpi).max(measured.text_height.saturating_mul(2))
+    } else {
+        0
+    };
+    let explanation_band = if show_forced_explanation {
+        explanation_height.saturating_add(scale_dip(8, dpi))
+    } else {
+        0
+    };
+    let button_height = scale_dip(30, dpi).max(
+        measured
+            .button_text_height
+            .saturating_add(scale_dip(12, dpi)),
+    );
+    let horizontal_margin = scale_dip(12, dpi);
+    let density_y = horizontal_margin;
+    let emphasis_y = density_y
+        .saturating_add(group_height)
+        .saturating_add(scale_dip(8, dpi));
+    let content_y = emphasis_y
+        .saturating_add(group_height)
+        .saturating_add(scale_dip(8, dpi));
+    let checkbox_y = content_y.saturating_add(explanation_band);
+    let separator_y = checkbox_y
+        .saturating_add(checkbox_stride.saturating_mul(3))
+        .saturating_add(scale_dip(4, dpi));
+    let buttons_y = separator_y.saturating_add(scale_dip(20, dpi));
+    let desired_height = buttons_y
+        .saturating_add(button_height)
+        .saturating_add(scale_dip(30, dpi));
     if maximum_width < desired_width || maximum_height < desired_height {
         return None;
     }
@@ -768,43 +825,104 @@ pub(crate) fn calculate_appearance_dialog_layout(
         width: desired_width,
         height: desired_height,
     };
-    let rect = |x, y, width, height| {
-        bounded_dialog_rect(
-            scale_dip(x, dpi),
-            scale_dip(y, dpi),
-            scale_dip(width, dpi),
-            scale_dip(height, dpi),
-            client,
-        )
+    let content_width = desired_width.saturating_sub(horizontal_margin.saturating_mul(2));
+    let rect = |x, y, width, height| bounded_dialog_rect(x, y, width, height, client);
+    let option_x = scale_dip(28, dpi);
+    let option_width = desired_width.saturating_sub(scale_dip(64, dpi));
+    let group_option_y = |group_y: i32, index: i32| {
+        group_y
+            .saturating_add(scale_dip(22, dpi))
+            .saturating_add(row_stride.saturating_mul(index))
     };
+    let cancel_x = desired_width
+        .saturating_sub(horizontal_margin)
+        .saturating_sub(button_width);
+    let ok_x = cancel_x
+        .saturating_sub(scale_dip(8, dpi))
+        .saturating_sub(button_width);
     Some(AppearanceDialogLayout {
         client,
-        density_group: rect(12, 12, 432, 88),
+        density_group: rect(horizontal_margin, density_y, content_width, group_height),
         density_options: [
-            rect(28, 34, 392, 20),
-            rect(28, 56, 392, 20),
-            rect(28, 78, 392, 20),
+            rect(
+                option_x,
+                group_option_y(density_y, 0),
+                option_width,
+                row_height,
+            ),
+            rect(
+                option_x,
+                group_option_y(density_y, 1),
+                option_width,
+                row_height,
+            ),
+            rect(
+                option_x,
+                group_option_y(density_y, 2),
+                option_width,
+                row_height,
+            ),
         ],
-        emphasis_group: rect(12, 108, 432, 88),
+        emphasis_group: rect(horizontal_margin, emphasis_y, content_width, group_height),
         emphasis_options: [
-            rect(28, 130, 392, 20),
-            rect(28, 152, 392, 20),
-            rect(28, 174, 392, 20),
+            rect(
+                option_x,
+                group_option_y(emphasis_y, 0),
+                option_width,
+                row_height,
+            ),
+            rect(
+                option_x,
+                group_option_y(emphasis_y, 1),
+                option_width,
+                row_height,
+            ),
+            rect(
+                option_x,
+                group_option_y(emphasis_y, 2),
+                option_width,
+                row_height,
+            ),
         ],
         forced_explanation: if show_forced_explanation {
-            rect(12, 204, 432, 40)
+            rect(
+                horizontal_margin,
+                content_y,
+                content_width,
+                explanation_height,
+            )
         } else {
-            rect(12, 204, 0, 0)
+            rect(horizontal_margin, content_y, 0, 0)
         },
         checkboxes: [
-            rect(20, 204 + explanation_band, 416, 22),
-            rect(20, 232 + explanation_band, 416, 22),
-            rect(20, 260 + explanation_band, 416, 22),
+            rect(
+                scale_dip(20, dpi),
+                checkbox_y,
+                desired_width.saturating_sub(scale_dip(40, dpi)),
+                checkbox_height,
+            ),
+            rect(
+                scale_dip(20, dpi),
+                checkbox_y.saturating_add(checkbox_stride),
+                desired_width.saturating_sub(scale_dip(40, dpi)),
+                checkbox_height,
+            ),
+            rect(
+                scale_dip(20, dpi),
+                checkbox_y.saturating_add(checkbox_stride.saturating_mul(2)),
+                desired_width.saturating_sub(scale_dip(40, dpi)),
+                checkbox_height,
+            ),
         ],
-        separator: rect(12, 292 + explanation_band, 432, 2),
-        reset: rect(12, 312 + explanation_band, 124, 30),
-        ok: rect(292, 312 + explanation_band, 72, 30),
-        cancel: rect(372, 312 + explanation_band, 72, 30),
+        separator: rect(
+            horizontal_margin,
+            separator_y,
+            content_width,
+            scale_dip(2, dpi),
+        ),
+        reset: rect(horizontal_margin, buttons_y, reset_width, button_height),
+        ok: rect(ok_x, buttons_y, button_width, button_height),
+        cancel: rect(cancel_x, buttons_y, button_width, button_height),
     })
 }
 
@@ -834,6 +952,9 @@ pub(crate) struct MeasuredFontMetrics {
     pub(crate) empty_safety_text_height: i32,
     pub(crate) empty_add_text_width: i32,
     pub(crate) empty_add_text_height: i32,
+    pub(crate) empty_wrap_width: i32,
+    pub(crate) empty_instruction_wrapped_height: i32,
+    pub(crate) empty_safety_wrapped_height: i32,
     pub(crate) drop_overlay_text_width: i32,
     pub(crate) drop_overlay_text_height: i32,
 }
@@ -907,17 +1028,27 @@ impl MeasuredFontMetrics {
     ) -> EmptyStateContentMetrics {
         let available_width = available_width.max(0);
         let fallback_line_height = scale_dip(16, dpi);
-        let instruction_height = conservative_wrapped_text_height(
-            self.empty_instruction_text_width.max(0),
-            self.empty_instruction_text_height.max(fallback_line_height),
-            available_width,
-        );
-        let safety_height = if show_safety {
+        let instruction_height = if self.empty_wrap_width == available_width
+            && self.empty_instruction_wrapped_height > 0
+        {
+            self.empty_instruction_wrapped_height
+        } else {
             conservative_wrapped_text_height(
-                self.empty_safety_text_width.max(0),
-                self.empty_safety_text_height.max(fallback_line_height),
+                self.empty_instruction_text_width.max(0),
+                self.empty_instruction_text_height.max(fallback_line_height),
                 available_width,
             )
+        };
+        let safety_height = if show_safety {
+            if self.empty_wrap_width == available_width && self.empty_safety_wrapped_height > 0 {
+                self.empty_safety_wrapped_height
+            } else {
+                conservative_wrapped_text_height(
+                    self.empty_safety_text_width.max(0),
+                    self.empty_safety_text_height.max(fallback_line_height),
+                    available_width,
+                )
+            }
         } else {
             0
         };
@@ -4737,7 +4868,13 @@ mod tests {
     #[test]
     fn advanced_appearance_layout_keeps_every_control_inside_work_area_bounds() {
         for (dpi, width, height) in [(96, 456, 420), (144, 684, 630), (192, 912, 840)] {
-            let layout = calculate_appearance_dialog_layout(dpi, width, height, true);
+            let layout = calculate_appearance_dialog_layout(
+                dpi,
+                width,
+                height,
+                true,
+                AppearanceDialogMetrics::default(),
+            );
             assert!(layout.is_some(), "valid work area rejected at {dpi} DPI");
             let Some(layout) = layout else {
                 continue;
@@ -4769,14 +4906,32 @@ mod tests {
             }
         }
         assert_eq!(
-            calculate_appearance_dialog_layout(192, 320, 300, true),
+            calculate_appearance_dialog_layout(
+                192,
+                320,
+                300,
+                true,
+                AppearanceDialogMetrics::default(),
+            ),
             None
         );
         assert_eq!(
-            calculate_appearance_dialog_layout(192, 320, 300, false),
+            calculate_appearance_dialog_layout(
+                192,
+                320,
+                300,
+                false,
+                AppearanceDialogMetrics::default(),
+            ),
             None
         );
-        let layout = calculate_appearance_dialog_layout(96, 456, 420, true);
+        let layout = calculate_appearance_dialog_layout(
+            96,
+            456,
+            420,
+            true,
+            AppearanceDialogMetrics::default(),
+        );
         assert!(
             layout.is_some(),
             "baseline appearance dialog layout was rejected"
@@ -4813,8 +4968,20 @@ mod tests {
             }
         }
 
-        let ordinary = calculate_appearance_dialog_layout(96, 456, 420, false);
-        let forced = calculate_appearance_dialog_layout(96, 456, 420, true);
+        let ordinary = calculate_appearance_dialog_layout(
+            96,
+            456,
+            420,
+            false,
+            AppearanceDialogMetrics::default(),
+        );
+        let forced = calculate_appearance_dialog_layout(
+            96,
+            456,
+            420,
+            true,
+            AppearanceDialogMetrics::default(),
+        );
         let (Some(ordinary), Some(forced)) = (ordinary, forced) else {
             return;
         };
@@ -4833,6 +5000,51 @@ mod tests {
             ordinary.client.height - ordinary.cancel.bottom(),
             forced.client.height - forced.cancel.bottom(),
         );
+
+        let large = calculate_appearance_dialog_layout(
+            96,
+            900,
+            900,
+            true,
+            AppearanceDialogMetrics {
+                text_height: 36,
+                widest_option: 520,
+                widest_checkbox: 600,
+                button_text_height: 34,
+                widest_button: 180,
+            },
+        );
+        assert!(
+            large.is_some(),
+            "large measured system font should fit the supplied work area"
+        );
+        let Some(large) = large else {
+            return;
+        };
+        assert!(large.client.width > forced.client.width);
+        assert!(large.client.height > forced.client.height);
+        assert!(large.density_options[0].height >= 42);
+        assert!(large.cancel.height >= 46);
+    }
+
+    #[test]
+    fn empty_state_layout_uses_exact_second_pass_wrapped_heights() {
+        let measured = MeasuredFontMetrics {
+            empty_instruction_text_width: 2_000,
+            empty_instruction_text_height: 20,
+            empty_safety_text_width: 3_000,
+            empty_safety_text_height: 18,
+            empty_wrap_width: 300,
+            empty_instruction_wrapped_height: 41,
+            empty_safety_wrapped_height: 59,
+            ..MeasuredFontMetrics::default()
+        };
+
+        let content = measured.empty_state_content_metrics(96, 300, true);
+
+        assert_eq!(content.instruction_height, 41);
+        assert_eq!(content.safety_height, 59);
+        assert!(content.total_height >= 100);
     }
 
     #[test]
@@ -4904,6 +5116,9 @@ mod tests {
             empty_safety_text_height: 32,
             empty_add_text_width: 150,
             empty_add_text_height: 34,
+            empty_wrap_width: 0,
+            empty_instruction_wrapped_height: 0,
+            empty_safety_wrapped_height: 0,
             drop_overlay_text_width: 420,
             drop_overlay_text_height: 34,
         };

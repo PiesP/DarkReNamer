@@ -38,6 +38,16 @@ const SHOW_EMPTY_SAFETY_ID: u16 = 0xA123;
 const FORCED_EXPLANATION_ID: u16 = 0xA130;
 const RESET_DEFAULTS_ID: u16 = 0xA140;
 const APPEARANCE_FINISH_ACCEPTED: u32 = 1 << 31;
+const DENSITY_GROUP_LABEL: &str = "명령 버튼 간격";
+const DENSITY_LABELS: [&str; 3] = ["자동 (권장)", "여유 있게", "촘촘하게"];
+const EMPHASIS_GROUP_LABEL: &str = "변경 강조";
+const EMPHASIS_LABELS: [&str; 3] = ["약하게", "표준", "강하게"];
+const SEPARATOR_LABEL: &str = "기능 그룹 구분선 표시";
+const TINT_LABEL: &str = "변경된 이름의 배경 강조";
+const EMPTY_SAFETY_LABEL: &str = "파일을 추가하기 전 안전 안내 표시";
+const RESET_LABEL: &str = "기본값으로 복원";
+const OK_LABEL: &str = "확인";
+const CANCEL_LABEL: &str = "취소";
 
 pub(super) struct AppearanceDialogSession {
     pub(super) id: u32,
@@ -69,6 +79,7 @@ struct AppearanceDialogWindowState {
     ok: HWND,
     cancel: HWND,
     font: OwnedFont,
+    measured: AppearanceDialogMetrics,
     appearance_resources: Option<AppearanceResources>,
     system_theme: Option<ResolvedTheme>,
     dpi: u32,
@@ -348,6 +359,7 @@ fn create_appearance_dialog_window(
         ok: null_mut(),
         cancel: null_mut(),
         font: OwnedFont::default(),
+        measured: AppearanceDialogMetrics::default(),
         appearance_resources: None,
         system_theme,
         dpi: BASE_DPI,
@@ -398,7 +410,7 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
     state.density_group = child(
         window,
         "BUTTON",
-        "명령 영역 밀도",
+        DENSITY_GROUP_LABEL,
         0xA100,
         BS_GROUPBOX as u32,
     )?;
@@ -406,21 +418,21 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
         child(
             window,
             "BUTTON",
-            "자동 (권장)",
+            DENSITY_LABELS[0],
             DENSITY_AUTOMATIC_ID,
             BS_AUTORADIOBUTTON as u32 | WS_GROUP | WS_TABSTOP,
         )?,
         child(
             window,
             "BUTTON",
-            "편안하게",
+            DENSITY_LABELS[1],
             DENSITY_COMFORTABLE_ID,
             BS_AUTORADIOBUTTON as u32 | WS_TABSTOP,
         )?,
         child(
             window,
             "BUTTON",
-            "조밀하게",
+            DENSITY_LABELS[2],
             DENSITY_COMPACT_ID,
             BS_AUTORADIOBUTTON as u32 | WS_TABSTOP,
         )?,
@@ -428,7 +440,7 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
     state.emphasis_group = child(
         window,
         "BUTTON",
-        "변경 미리보기 강조",
+        EMPHASIS_GROUP_LABEL,
         0xA110,
         BS_GROUPBOX as u32,
     )?;
@@ -436,21 +448,21 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
         child(
             window,
             "BUTTON",
-            "절제",
+            EMPHASIS_LABELS[0],
             EMPHASIS_SUBTLE_ID,
             BS_AUTORADIOBUTTON as u32 | WS_GROUP | WS_TABSTOP,
         )?,
         child(
             window,
             "BUTTON",
-            "표준",
+            EMPHASIS_LABELS[1],
             EMPHASIS_STANDARD_ID,
             BS_AUTORADIOBUTTON as u32 | WS_TABSTOP,
         )?,
         child(
             window,
             "BUTTON",
-            "강하게",
+            EMPHASIS_LABELS[2],
             EMPHASIS_STRONG_ID,
             BS_AUTORADIOBUTTON as u32 | WS_TABSTOP,
         )?,
@@ -458,7 +470,7 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
     state.forced_explanation = child(
         window,
         "STATIC",
-        "고대비가 활성화되어 변경 강조와 tint는 시스템 색상을 사용합니다.",
+        "고대비가 활성화되어 변경 강조와 배경 강조는 시스템 색상을 사용합니다.",
         FORCED_EXPLANATION_ID,
         SS_NOPREFIX,
     )?;
@@ -466,21 +478,21 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
         child(
             window,
             "BUTTON",
-            "기능 그룹 구분선 표시",
+            SEPARATOR_LABEL,
             SHOW_SEPARATORS_ID,
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
         )?,
         child(
             window,
             "BUTTON",
-            "변경 후 이름 배경 tint 표시",
+            TINT_LABEL,
             SHOW_PREVIEW_TINT_ID,
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
         )?,
         child(
             window,
             "BUTTON",
-            "빈 목록 안전 안내 표시",
+            EMPTY_SAFETY_LABEL,
             SHOW_EMPTY_SAFETY_ID,
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
         )?,
@@ -489,21 +501,21 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
     state.reset = child(
         window,
         "BUTTON",
-        "기본값으로 복원",
+        RESET_LABEL,
         RESET_DEFAULTS_ID,
         WS_TABSTOP | BS_OWNERDRAW as u32,
     )?;
     state.ok = child(
         window,
         "BUTTON",
-        "확인",
+        OK_LABEL,
         IDOK as u16,
         WS_TABSTOP | BS_DEFPUSHBUTTON as u32 | BS_OWNERDRAW as u32,
     )?;
     state.cancel = child(
         window,
         "BUTTON",
-        "취소",
+        CANCEL_LABEL,
         IDCANCEL as u16,
         WS_TABSTOP | BS_OWNERDRAW as u32,
     )?;
@@ -681,7 +693,45 @@ fn recreate_font(state: &mut AppearanceDialogWindowState) {
         // SAFETY: every child is live and the font remains state-owned until replaced.
         unsafe { SendMessageW(control, WM_SETFONT, font as usize, 1) };
     }
+    state.measured = measure_appearance_dialog(window_for_control(state.density_group), font);
     state.font.replace(font);
+}
+
+fn window_for_control(control: HWND) -> HWND {
+    // SAFETY: control is a live child while dialog state is live.
+    unsafe { GetParent(control) }
+}
+
+fn measure_appearance_dialog(window: HWND, font: HFONT) -> AppearanceDialogMetrics {
+    let measure_many = |labels: &[&str]| {
+        labels
+            .iter()
+            .fold((0_i32, 0_i32), |(width, height), label| {
+                measure_text(window, font, label, true).map_or((width, height), |measured| {
+                    (width.max(measured.0), height.max(measured.1))
+                })
+            })
+    };
+    let (option_width, option_height) = measure_many(&[
+        DENSITY_GROUP_LABEL,
+        DENSITY_LABELS[0],
+        DENSITY_LABELS[1],
+        DENSITY_LABELS[2],
+        EMPHASIS_GROUP_LABEL,
+        EMPHASIS_LABELS[0],
+        EMPHASIS_LABELS[1],
+        EMPHASIS_LABELS[2],
+    ]);
+    let (checkbox_width, checkbox_height) =
+        measure_many(&[SEPARATOR_LABEL, TINT_LABEL, EMPTY_SAFETY_LABEL]);
+    let (button_width, button_height) = measure_many(&[RESET_LABEL, OK_LABEL, CANCEL_LABEL]);
+    AppearanceDialogMetrics {
+        text_height: option_height.max(checkbox_height),
+        widest_option: option_width,
+        widest_checkbox: checkbox_width,
+        button_text_height: button_height,
+        widest_button: button_width,
+    }
 }
 
 fn controls(state: &AppearanceDialogWindowState) -> impl Iterator<Item = HWND> + '_ {
@@ -725,8 +775,14 @@ fn appearance_dialog_fits_work_area(anchor: HWND, dpi: u32, show_forced_explanat
         .bottom
         .saturating_sub(info.rcWork.top)
         .saturating_sub(chrome.bottom.saturating_sub(chrome.top));
-    calculate_appearance_dialog_layout(dpi, maximum_width, maximum_height, show_forced_explanation)
-        .is_some()
+    calculate_appearance_dialog_layout(
+        dpi,
+        maximum_width,
+        maximum_height,
+        show_forced_explanation,
+        AppearanceDialogMetrics::default(),
+    )
+    .is_some()
 }
 
 fn arrange_dialog(window: HWND, state: &AppearanceDialogWindowState, center_owner: bool) -> bool {
@@ -768,6 +824,7 @@ fn arrange_dialog(window: HWND, state: &AppearanceDialogWindowState, center_owne
         maximum_client_width,
         maximum_client_height,
         show_forced_explanation,
+        state.measured,
     ) else {
         return false;
     };

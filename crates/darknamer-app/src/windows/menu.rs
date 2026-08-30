@@ -168,12 +168,20 @@ pub(super) fn measure_font_metrics(
         empty_safety_text_height,
         empty_add_text_width,
         empty_add_text_height,
+        empty_wrap_width: 0,
+        empty_instruction_wrapped_height: 0,
+        empty_safety_wrapped_height: 0,
         drop_overlay_text_width,
         drop_overlay_text_height,
     }
 }
 
-fn measure_text(window: HWND, font: HFONT, text: &str, single_line: bool) -> Option<(i32, i32)> {
+pub(super) fn measure_text(
+    window: HWND,
+    font: HFONT,
+    text: &str,
+    single_line: bool,
+) -> Option<(i32, i32)> {
     if window.is_null() || font.is_null() || text.is_empty() {
         return None;
     }
@@ -205,6 +213,44 @@ fn measure_text(window: HWND, font: HFONT, text: &str, single_line: bool) -> Opt
         (rect.right - rect.left).max(0),
         (rect.bottom - rect.top).max(0),
     ))
+}
+
+fn measure_wrapped_text(window: HWND, font: HFONT, text: &str, width: i32) -> Option<i32> {
+    if window.is_null() || font.is_null() || text.is_empty() || width <= 0 {
+        return None;
+    }
+    let text = wide(text);
+    let length = i32::try_from(text.len().checked_sub(1)?).ok()?;
+    // SAFETY: window/font are live UI-thread handles; the DC is released below.
+    let dc = unsafe { GetDC(window) };
+    if dc.is_null() {
+        return None;
+    }
+    // SAFETY: font remains AppState-owned beyond this synchronous measurement.
+    let previous = unsafe { SelectObject(dc, font) };
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: 0,
+    };
+    // SAFETY: text/rect/DC remain live for calculation-only word wrapping.
+    let measured = unsafe {
+        DrawTextW(
+            dc,
+            text.as_ptr(),
+            length,
+            &mut rect,
+            DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
+        )
+    };
+    if !previous.is_null() {
+        // SAFETY: restore the exact object returned by SelectObject.
+        unsafe { SelectObject(dc, previous) };
+    }
+    // SAFETY: release the DC acquired from this exact window.
+    unsafe { ReleaseDC(window, dc) };
+    (measured > 0).then_some((rect.bottom - rect.top).max(0))
 }
 
 pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> {
@@ -467,11 +513,41 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
     let appearance = state.resolved_appearance().appearance;
     let status_layout_input = current_status_layout_input(state);
     state.status_layout_input = status_layout_input;
-    let layout = calculate_main_layout_with_safety(
+    let preliminary = calculate_main_layout_with_safety(
         width,
         height,
         state.dpi,
         state.font_metrics,
+        appearance.density,
+        appearance.show_empty_safety,
+        status_layout_input,
+    );
+    let wrap_width = preliminary.empty_instruction.width;
+    let mut measured = state.font_metrics;
+    measured.empty_wrap_width = wrap_width;
+    measured.empty_instruction_wrapped_height = measure_wrapped_text(
+        state.empty_instruction,
+        state.font.as_raw(),
+        EMPTY_STATE_INSTRUCTION,
+        wrap_width,
+    )
+    .unwrap_or_default();
+    measured.empty_safety_wrapped_height = if appearance.show_empty_safety {
+        measure_wrapped_text(
+            state.empty_safety,
+            state.status_font.as_raw(),
+            EMPTY_STATE_SAFETY,
+            wrap_width,
+        )
+        .unwrap_or_default()
+    } else {
+        0
+    };
+    let layout = calculate_main_layout_with_safety(
+        width,
+        height,
+        state.dpi,
+        measured,
         appearance.density,
         appearance.show_empty_safety,
         status_layout_input,

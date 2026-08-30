@@ -368,6 +368,7 @@ fn rejected_safe_gate_performs_zero_metadata_or_enumeration_calls() {
     );
     assert_eq!(report.issues[0].code, Some(53));
     assert!(report.summary_korean(0).contains("Validation:53"));
+    assert_eq!(report.status_summary_korean(0), "파일 0개 추가 · 1개 제외");
 }
 
 #[test]

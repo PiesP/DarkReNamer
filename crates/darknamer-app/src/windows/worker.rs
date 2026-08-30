@@ -1266,10 +1266,14 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
                 let items = std::mem::take(&mut report.items);
                 let appended = state.model.append_batch_by(items, compare_windows);
                 state.commit_known_model_change(appended > 0);
-                let summary = report.summary_korean(appended);
-                state.set_transient_status(summary.clone());
+                let status_summary = report.status_summary_korean(appended);
+                state.set_transient_status(status_summary);
                 if !report.issues.is_empty() {
-                    message(window, &summary, "DarkReNamer - 일부 경로 제외");
+                    message(
+                        window,
+                        &report.summary_korean(appended),
+                        "DarkReNamer - 일부 경로 제외",
+                    );
                 }
                 refresh(state);
                 if appended > 0 {

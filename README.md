@@ -42,16 +42,15 @@ otherwise DarkReNamer leaves native rendering under Windows control. Forced
 Colors and an unavailable high-contrast query always take precedence over the
 stored appearance and disable custom colors.
 
-DarkReNamer applies its Light and Dark palettes only to app-owned workbench
-surfaces, changed-name emphasis, status text, and the Apply keyline. The native
-menu, standard command buttons, input controls, file dialogs, and confirmation
-TaskDialog continue to use Windows rendering. A supported Windows version may
-honor a best-effort DWM title-frame request; that request is not a contract for
-dark rendering of every standard Win32 control.
+DarkReNamer applies its Light and Dark palettes to the main workbench, native
+menus, command buttons, list headers, status surfaces, and the advanced
+appearance window. Standard input prompts, file dialogs, and confirmation
+TaskDialogs continue to use Windows rendering. Forced Colors keeps system
+colors and native focus and selection precedence across every surface.
 
 Advanced appearance controls are intentionally under **View > Appearance**.
-They offer semantic density and emphasis presets plus separator, preview tint,
-and empty-state safety-copy visibility. They do not affect the rename model,
+They offer semantic density and emphasis presets plus separator, changed-name
+background highlight, and empty-state safety-copy visibility. They do not affect the rename model,
 Apply authorization, journal, recovery state, or Undo data.
 
 The runnable product remains one `DarkReNamer.exe`. Column and appearance
