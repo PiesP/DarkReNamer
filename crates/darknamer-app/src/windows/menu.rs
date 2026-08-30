@@ -462,7 +462,8 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
     unsafe { GetClientRect(window, &mut rect) };
     let width = (rect.right - rect.left).max(0);
     let height = (rect.bottom - rect.top).max(0);
-    let layout = calculate_main_layout(width, height, state.dpi, state.font_metrics);
+    let density = state.resolved_appearance().appearance.density;
+    let layout = calculate_main_layout(width, height, state.dpi, state.font_metrics, density);
     let rails_visible = layout.rail_mode != RailMode::MenuOnly;
     let previously_focused = focused_child(state);
     let mut windows = Vec::with_capacity(main_layout_window_count(&layout));

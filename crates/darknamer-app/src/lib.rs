@@ -166,6 +166,123 @@ pub enum RailDensity {
     Compact,
 }
 
+/// Persisted application theme preference.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum AppThemeMode {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+/// Persisted command-rail density preference.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RailDensityPreference {
+    #[default]
+    Automatic,
+    Comfortable,
+    Compact,
+}
+
+impl RailDensityPreference {
+    const AUTOMATIC_CANDIDATES: [RailDensity; 2] = [RailDensity::Comfortable, RailDensity::Compact];
+    const COMFORTABLE_CANDIDATES: [RailDensity; 1] = [RailDensity::Comfortable];
+    const COMPACT_CANDIDATES: [RailDensity; 1] = [RailDensity::Compact];
+
+    #[must_use]
+    const fn candidates(self) -> &'static [RailDensity] {
+        match self {
+            Self::Automatic => &Self::AUTOMATIC_CANDIDATES,
+            Self::Comfortable => &Self::COMFORTABLE_CANDIDATES,
+            Self::Compact => &Self::COMPACT_CANDIDATES,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn minimum_density(self) -> RailDensity {
+        match self {
+            Self::Automatic | Self::Compact => RailDensity::Compact,
+            Self::Comfortable => RailDensity::Comfortable,
+        }
+    }
+
+    #[must_use]
+    #[cfg(any(windows, test))]
+    const fn recommended_density(self) -> RailDensity {
+        match self {
+            Self::Automatic | Self::Comfortable => RailDensity::Comfortable,
+            Self::Compact => RailDensity::Compact,
+        }
+    }
+}
+
+/// Persisted strength of proposed-name semantic emphasis.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum PreviewEmphasis {
+    Subtle,
+    #[default]
+    Standard,
+    Strong,
+}
+
+/// User-owned appearance preferences stored independently from column state.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct UiAppearance {
+    pub(crate) theme: AppThemeMode,
+    pub(crate) density: RailDensityPreference,
+    pub(crate) emphasis: PreviewEmphasis,
+    pub(crate) show_separators: bool,
+    pub(crate) show_preview_tint: bool,
+    pub(crate) show_empty_safety: bool,
+}
+
+#[cfg(any(windows, test))]
+impl Default for UiAppearance {
+    fn default() -> Self {
+        Self {
+            theme: AppThemeMode::System,
+            density: RailDensityPreference::Automatic,
+            emphasis: PreviewEmphasis::Standard,
+            show_separators: true,
+            show_preview_tint: true,
+            show_empty_safety: true,
+        }
+    }
+}
+
+/// Appearance after fail-closed Forced Colors precedence is applied.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedUiAppearance {
+    pub(crate) appearance: UiAppearance,
+    pub(crate) custom_colors_enabled: bool,
+}
+
+#[cfg(any(windows, test))]
+impl UiAppearance {
+    #[must_use]
+    pub(crate) const fn resolve(self, forced_colors: ForcedColorsState) -> ResolvedUiAppearance {
+        if forced_colors.custom_colors_enabled() {
+            ResolvedUiAppearance {
+                appearance: self,
+                custom_colors_enabled: true,
+            }
+        } else {
+            ResolvedUiAppearance {
+                appearance: Self {
+                    theme: AppThemeMode::System,
+                    show_preview_tint: false,
+                    ..self
+                },
+                custom_colors_enabled: false,
+            }
+        }
+    }
+}
+
 /// Pixel metrics used to place one command rail.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UiMetrics {
@@ -1211,7 +1328,20 @@ pub fn select_command_rail_density(
     available_height: i32,
     dpi: u32,
 ) -> Result<RailDensity, LayoutError> {
-    for density in [RailDensity::Comfortable, RailDensity::Compact] {
+    select_command_rail_density_with_preference(
+        available_height,
+        dpi,
+        RailDensityPreference::Automatic,
+    )
+}
+
+/// Selects the preferred density without substituting another explicit choice.
+pub fn select_command_rail_density_with_preference(
+    available_height: i32,
+    dpi: u32,
+    preference: RailDensityPreference,
+) -> Result<RailDensity, LayoutError> {
+    for density in preference.candidates().iter().copied() {
         let metrics = density.metrics(dpi);
         if required_command_rail_height(&LEFT_RAIL, metrics)? <= available_height
             && required_command_rail_height(&RIGHT_RAIL, metrics)? <= available_height
@@ -1219,7 +1349,8 @@ pub fn select_command_rail_density(
             return Ok(density);
         }
     }
-    let required = required_command_rail_height(&LEFT_RAIL, RailDensity::Compact.metrics(dpi))?;
+    let required =
+        required_command_rail_height(&LEFT_RAIL, preference.minimum_density().metrics(dpi))?;
     Err(LayoutError::InsufficientHeight {
         required,
         available: available_height,
@@ -1228,8 +1359,12 @@ pub fn select_command_rail_density(
 
 #[cfg(any(windows, test))]
 #[must_use]
-pub(crate) fn minimum_main_client_height(dpi: u32, measured: MeasuredFontMetrics) -> i32 {
-    let metrics = measured.rail_metrics(RailDensity::Compact, dpi);
+pub(crate) fn minimum_main_client_height(
+    dpi: u32,
+    measured: MeasuredFontMetrics,
+    preference: RailDensityPreference,
+) -> i32 {
+    let metrics = measured.rail_metrics(preference.minimum_density(), dpi);
     let left = required_command_rail_height(&LEFT_RAIL, metrics).unwrap_or(i32::MAX);
     let right = required_command_rail_height(&RIGHT_RAIL, metrics).unwrap_or(i32::MAX);
     left.max(right)
@@ -1239,8 +1374,12 @@ pub(crate) fn minimum_main_client_height(dpi: u32, measured: MeasuredFontMetrics
 
 #[cfg(any(windows, test))]
 #[must_use]
-pub(crate) fn recommended_main_client_height(dpi: u32, measured: MeasuredFontMetrics) -> i32 {
-    let metrics = measured.rail_metrics(RailDensity::Comfortable, dpi);
+pub(crate) fn recommended_main_client_height(
+    dpi: u32,
+    measured: MeasuredFontMetrics,
+    preference: RailDensityPreference,
+) -> i32 {
+    let metrics = measured.rail_metrics(preference.recommended_density(), dpi);
     let left = required_command_rail_height(&LEFT_RAIL, metrics).unwrap_or(i32::MAX);
     let right = required_command_rail_height(&RIGHT_RAIL, metrics).unwrap_or(i32::MAX);
     left.max(right)
@@ -1255,24 +1394,23 @@ pub(crate) fn calculate_main_layout(
     client_height: i32,
     dpi: u32,
     measured: MeasuredFontMetrics,
+    preference: RailDensityPreference,
 ) -> MainLayout {
     let width = client_width.max(0);
     let height = client_height.max(0);
     let status_height = measured.status_height(dpi).min(height);
     let rail_height = height.saturating_sub(status_height);
 
-    let selected = [RailDensity::Comfortable, RailDensity::Compact]
-        .into_iter()
-        .find_map(|density| {
-            let metrics = measured.rail_metrics(density, dpi);
-            let rails_width = metrics.rail_width.saturating_mul(2);
-            if rails_width >= width {
-                return None;
-            }
-            let left = calculate_command_rail_layout(&LEFT_RAIL, rail_height, metrics).ok()?;
-            let right = calculate_command_rail_layout(&RIGHT_RAIL, rail_height, metrics).ok()?;
-            Some((density, metrics.rail_width, left, right))
-        });
+    let selected = preference.candidates().iter().copied().find_map(|density| {
+        let metrics = measured.rail_metrics(density, dpi);
+        let rails_width = metrics.rail_width.saturating_mul(2);
+        if rails_width >= width {
+            return None;
+        }
+        let left = calculate_command_rail_layout(&LEFT_RAIL, rail_height, metrics).ok()?;
+        let right = calculate_command_rail_layout(&RIGHT_RAIL, rail_height, metrics).ok()?;
+        Some((density, metrics.rail_width, left, right))
+    });
 
     let (rail_mode, rail_width, left_buttons, right_buttons) = match selected {
         Some((RailDensity::Comfortable, rail_width, left, right)) => {
@@ -3575,6 +3713,93 @@ mod tests {
     }
 
     #[test]
+    fn appearance_defaults_and_forced_colors_precedence_are_fail_closed() {
+        let defaults = UiAppearance::default();
+        assert_eq!(defaults.theme, AppThemeMode::System);
+        assert_eq!(defaults.density, RailDensityPreference::Automatic);
+        assert_eq!(defaults.emphasis, PreviewEmphasis::Standard);
+        assert!(defaults.show_separators);
+        assert!(defaults.show_preview_tint);
+        assert!(defaults.show_empty_safety);
+
+        let custom = UiAppearance {
+            theme: AppThemeMode::Dark,
+            density: RailDensityPreference::Comfortable,
+            emphasis: PreviewEmphasis::Strong,
+            show_separators: false,
+            show_preview_tint: true,
+            show_empty_safety: false,
+        };
+        let ordinary = custom.resolve(ForcedColorsState::Inactive);
+        assert_eq!(ordinary.appearance, custom);
+        assert!(ordinary.custom_colors_enabled);
+
+        let forced = custom.resolve(ForcedColorsState::ActiveOrUnknown);
+        assert_eq!(forced.appearance.theme, AppThemeMode::System);
+        assert!(!forced.appearance.show_preview_tint);
+        assert!(!forced.custom_colors_enabled);
+        assert_eq!(forced.appearance.density, custom.density);
+        assert_eq!(
+            forced.appearance.show_empty_safety,
+            custom.show_empty_safety
+        );
+    }
+
+    #[test]
+    fn explicit_density_preferences_never_silently_substitute_the_other_density() {
+        assert_eq!(
+            select_command_rail_density_with_preference(
+                352,
+                96,
+                RailDensityPreference::Comfortable,
+            ),
+            Ok(RailDensity::Comfortable)
+        );
+        assert!(matches!(
+            select_command_rail_density_with_preference(
+                351,
+                96,
+                RailDensityPreference::Comfortable,
+            ),
+            Err(LayoutError::InsufficientHeight { .. })
+        ));
+        assert_eq!(
+            select_command_rail_density_with_preference(296, 96, RailDensityPreference::Compact),
+            Ok(RailDensity::Compact)
+        );
+        assert!(matches!(
+            select_command_rail_density_with_preference(295, 96, RailDensityPreference::Compact),
+            Err(LayoutError::InsufficientHeight { .. })
+        ));
+
+        let measured = MeasuredFontMetrics::default();
+        let automatic =
+            calculate_main_layout(464, 369, 96, measured, RailDensityPreference::Automatic);
+        let comfortable =
+            calculate_main_layout(464, 369, 96, measured, RailDensityPreference::Comfortable);
+        let compact = calculate_main_layout(464, 369, 96, measured, RailDensityPreference::Compact);
+        assert_eq!(automatic.rail_mode, RailMode::Compact);
+        assert_eq!(comfortable.rail_mode, RailMode::MenuOnly);
+        assert_eq!(compact.rail_mode, RailMode::Compact);
+        assert_eq!(
+            minimum_main_client_height(96, measured, RailDensityPreference::Automatic),
+            minimum_main_client_height(96, measured, RailDensityPreference::Compact)
+        );
+        assert!(
+            minimum_main_client_height(96, measured, RailDensityPreference::Comfortable)
+                > minimum_main_client_height(96, measured, RailDensityPreference::Compact)
+        );
+        assert_eq!(
+            recommended_main_client_height(96, measured, RailDensityPreference::Automatic),
+            recommended_main_client_height(96, measured, RailDensityPreference::Comfortable)
+        );
+        assert_eq!(
+            recommended_main_client_height(96, measured, RailDensityPreference::Compact),
+            minimum_main_client_height(96, measured, RailDensityPreference::Compact)
+        );
+    }
+
+    #[test]
     fn measured_font_metrics_expand_rail_and_status_geometry() {
         let measured = MeasuredFontMetrics {
             button_text_width: 90,
@@ -3599,19 +3824,31 @@ mod tests {
         assert!(measured.status_height(96) >= 28);
         assert!(measured.empty_state_minimum_width(96) >= 384);
         assert!(
-            minimum_main_client_height(96, measured)
-                > minimum_main_client_height(96, MeasuredFontMetrics::default())
+            minimum_main_client_height(96, measured, RailDensityPreference::Automatic)
+                > minimum_main_client_height(
+                    96,
+                    MeasuredFontMetrics::default(),
+                    RailDensityPreference::Automatic,
+                )
         );
         assert!(
-            recommended_main_client_height(96, measured) > minimum_main_client_height(96, measured)
+            recommended_main_client_height(96, measured, RailDensityPreference::Automatic)
+                > minimum_main_client_height(96, measured, RailDensityPreference::Automatic)
         );
 
         let client_width = compact
             .rail_width
             .saturating_mul(2)
             .saturating_add(measured.empty_state_minimum_width(96));
-        let client_height = minimum_main_client_height(96, measured);
-        let layout = calculate_main_layout(client_width, client_height, 96, measured);
+        let client_height =
+            minimum_main_client_height(96, measured, RailDensityPreference::Automatic);
+        let layout = calculate_main_layout(
+            client_width,
+            client_height,
+            96,
+            measured,
+            RailDensityPreference::Automatic,
+        );
         assert_eq!(layout.rail_mode, RailMode::Compact);
         let empty = measured.empty_state_content_metrics(96, layout.empty_safety.width);
         assert!(layout.empty_instruction.height >= empty.instruction_height);
@@ -3664,14 +3901,21 @@ mod tests {
         let client_width = rail_width
             .saturating_mul(2)
             .saturating_add(measured.empty_state_minimum_width(96));
-        let client_height = minimum_main_client_height(96, measured);
+        let client_height =
+            minimum_main_client_height(96, measured, RailDensityPreference::Automatic);
         let rail_only_height =
             required_command_rail_height(&LEFT_RAIL, RailDensity::Compact.metrics(96))
                 .unwrap_or_default()
                 .saturating_add(measured.status_height(96));
         assert!(client_height > rail_only_height);
 
-        let layout = calculate_main_layout(client_width, client_height, 96, measured);
+        let layout = calculate_main_layout(
+            client_width,
+            client_height,
+            96,
+            measured,
+            RailDensityPreference::Automatic,
+        );
         let content = measured.empty_state_content_metrics(96, layout.empty_safety.width);
         assert!(layout.empty_instruction.height >= content.instruction_height);
         assert!(layout.empty_safety.height >= content.safety_height);
@@ -3682,18 +3926,22 @@ mod tests {
     #[test]
     fn main_layout_falls_back_from_compact_to_menu_only_without_invalid_rectangles() {
         let measured = MeasuredFontMetrics::default();
-        let comfortable = calculate_main_layout(464, 370, 96, measured);
+        let comfortable =
+            calculate_main_layout(464, 370, 96, measured, RailDensityPreference::Automatic);
         assert_eq!(comfortable.rail_mode, RailMode::Comfortable);
         assert_eq!(main_layout_window_count(&comfortable), 34);
 
-        let compact = calculate_main_layout(464, 369, 96, measured);
+        let compact =
+            calculate_main_layout(464, 369, 96, measured, RailDensityPreference::Automatic);
         assert_eq!(compact.rail_mode, RailMode::Compact);
 
-        let vertical_menu_only = calculate_main_layout(464, 313, 96, measured);
+        let vertical_menu_only =
+            calculate_main_layout(464, 313, 96, measured, RailDensityPreference::Automatic);
         assert_eq!(vertical_menu_only.rail_mode, RailMode::MenuOnly);
         assert_eq!(main_layout_window_count(&vertical_menu_only), 8);
 
-        let menu_only = calculate_main_layout(80, 40, 96, measured);
+        let menu_only =
+            calculate_main_layout(80, 40, 96, measured, RailDensityPreference::Automatic);
         assert_eq!(menu_only.rail_mode, RailMode::MenuOnly);
         for rect in [
             menu_only.list,
@@ -4426,7 +4674,8 @@ mod tests {
     #[test]
     fn work_area_clamping_preserves_compact_then_menu_only_with_bounded_children() {
         let measured = MeasuredFontMetrics::default();
-        let minimum_height = minimum_main_client_height(96, measured);
+        let minimum_height =
+            minimum_main_client_height(96, measured, RailDensityPreference::Automatic);
         let normal = WindowTrackSize {
             width: INITIAL_WIDTH,
             height: minimum_height,
@@ -4435,7 +4684,13 @@ mod tests {
             constrain_minimum_track_size_to_work_area(normal.width, normal.height, 1_920, 1_040,),
             Some(normal)
         );
-        let compact = calculate_main_layout(normal.width, normal.height, 96, measured);
+        let compact = calculate_main_layout(
+            normal.width,
+            normal.height,
+            96,
+            measured,
+            RailDensityPreference::Automatic,
+        );
         assert_eq!(compact.rail_mode, RailMode::Compact);
 
         let constrained = WindowTrackSize {
@@ -4451,10 +4706,16 @@ mod tests {
             ),
             Some(constrained)
         );
-        let menu_only = calculate_main_layout(constrained.width, constrained.height, 96, measured);
+        let menu_only = calculate_main_layout(
+            constrained.width,
+            constrained.height,
+            96,
+            measured,
+            RailDensityPreference::Automatic,
+        );
         assert_eq!(menu_only.rail_mode, RailMode::MenuOnly);
 
-        let smallest = calculate_main_layout(1, 1, 96, measured);
+        let smallest = calculate_main_layout(1, 1, 96, measured, RailDensityPreference::Automatic);
 
         for (layout, bounds) in [
             (&compact, normal),

@@ -23,8 +23,9 @@ use crate::admission::{
 };
 use crate::icon_cache::{IconCacheKey, icon_cache_key};
 use crate::preferences::{
-    PreferenceWriteEvent, PreferencesWriter, load_or_default as load_column_preferences,
-    path_for_journal_root, shown_columns,
+    AppearancePreferencesWriter, PreferenceWriteEvent, PreferencesWriter,
+    appearance_path_for_journal_root, load_appearance_or_default,
+    load_or_default as load_column_preferences, path_for_journal_root, shown_columns,
 };
 use crate::rename::{
     CancellationToken, ExecuteError, ExecuteErrorKind, ExecutionControl, ExecutionOutcome,
@@ -207,12 +208,14 @@ struct AppState {
     model: LegacyList,
     shown_columns: [bool; 4],
     column_states: [ColumnState; 7],
+    appearance: UiAppearance,
     dpi: u32,
     command_states: [bool; 34],
     model_revision: u64,
     mutation_locked: bool,
     recovery_locked: bool,
     column_preferences_path: PathBuf,
+    appearance_preferences_path: PathBuf,
     journal_root: JournalRoot,
     active_journal: Option<FileJournal>,
     staged_journal: Option<FileJournal>,
@@ -224,6 +227,9 @@ struct AppState {
     preferences_writer: Option<PreferencesWriter>,
     preferences_failure_generation: Option<u64>,
     preferences_terminal_observed: bool,
+    appearance_writer: Option<AppearancePreferencesWriter>,
+    appearance_failure_generation: Option<u64>,
+    appearance_terminal_observed: bool,
     close_pending: bool,
     confirmation_pending: bool,
     font_metrics: MeasuredFontMetrics,
@@ -242,8 +248,10 @@ struct AppState {
 impl AppState {
     fn new(runtime: SafeRuntime) -> Self {
         let column_preferences_path = path_for_journal_root(runtime.root.path());
+        let appearance_preferences_path = appearance_path_for_journal_root(runtime.root.path());
         let loaded_columns =
             load_column_preferences(&column_preferences_path, default_column_states());
+        let loaded_appearance = load_appearance_or_default(&appearance_preferences_path);
         let mut ui_status = runtime
             .status
             .clone()
@@ -259,7 +267,13 @@ impl AppState {
                 "열 표시 설정을 불러오지 못해 안전한 기본값을 사용합니다: {error}"
             ));
         }
+        if let Some(error) = loaded_appearance.failure {
+            ui_status.set_transient(format!(
+                "모양 설정을 불러오지 못해 안전한 기본값을 사용합니다: {error}"
+            ));
+        }
         let column_states = loaded_columns.columns;
+        let appearance = loaded_appearance.appearance;
         Self {
             list_window: null_mut(),
             status_message: null_mut(),
@@ -278,12 +292,14 @@ impl AppState {
             model: LegacyList::new(),
             shown_columns: shown_columns(&column_states),
             column_states,
+            appearance,
             dpi: BASE_DPI,
             command_states: [false; 34],
             model_revision: 0,
             mutation_locked: false,
             recovery_locked: runtime.recovery_locked,
             column_preferences_path,
+            appearance_preferences_path,
             journal_root: runtime.root,
             _runtime_lock: runtime.runtime_lock,
             active_journal: runtime.active_journal,
@@ -296,6 +312,9 @@ impl AppState {
             preferences_writer: None,
             preferences_failure_generation: None,
             preferences_terminal_observed: false,
+            appearance_writer: None,
+            appearance_failure_generation: None,
+            appearance_terminal_observed: false,
             close_pending: false,
             confirmation_pending: false,
             font_metrics: MeasuredFontMetrics::default(),
@@ -311,6 +330,10 @@ impl AppState {
 
     fn revision(&self) -> ModelRevision {
         ModelRevision::new(self.model_revision)
+    }
+
+    fn resolved_appearance(&self) -> ResolvedUiAppearance {
+        self.appearance.resolve(self.forced_colors)
     }
 
     fn commit_known_model_change(&mut self, changed: bool) {
@@ -771,6 +794,30 @@ mod tests {
         assert!(!runtime.recovery_locked);
         assert!(runtime.staged_journal.is_none());
         assert!(!journal_directory.join(CANDIDATE_JOURNAL_LEAF).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn app_state_loads_appearance_independently_from_columns()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let runtime = initialize_safe_runtime_at(directory.path())?;
+        let path = appearance_path_for_journal_root(runtime.root.path());
+        let appearance = UiAppearance {
+            theme: AppThemeMode::Light,
+            density: RailDensityPreference::Compact,
+            emphasis: PreviewEmphasis::Subtle,
+            show_separators: false,
+            show_preview_tint: false,
+            show_empty_safety: true,
+        };
+        crate::preferences::save_appearance(&path, appearance)?;
+
+        let state = AppState::new(runtime);
+
+        assert_eq!(state.appearance, appearance);
+        assert_eq!(state.column_states, default_column_states());
+        assert_eq!(state.appearance_preferences_path, path);
         Ok(())
     }
 
@@ -1468,7 +1515,8 @@ mod tests {
         assert!(measured.drop_overlay_text_height > 0);
         let metrics = measured.rail_metrics(RailDensity::Compact, dpi);
         let available_height =
-            minimum_main_client_height(dpi, measured).saturating_sub(measured.status_height(dpi));
+            minimum_main_client_height(dpi, measured, RailDensityPreference::Automatic)
+                .saturating_sub(measured.status_height(dpi));
         let left_placements = calculate_command_rail_layout(&LEFT_RAIL, available_height, metrics)
             .map_err(|error| io::Error::other(format!("test layout failed: {error:?}")))?;
         let right_placements =

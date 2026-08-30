@@ -36,11 +36,12 @@ fn minimum_track_width(window: HWND, state: &AppState) -> i32 {
     } else {
         0
     };
+    let density = state.resolved_appearance().appearance.density;
     let rail_width = state
         .font_metrics
-        .rail_metrics(RailDensity::Compact, state.dpi)
+        .rail_metrics(density.minimum_density(), state.dpi)
         .rail_width;
-    let baseline_rail_width = RailDensity::Compact.metrics(state.dpi).rail_width;
+    let baseline_rail_width = density.minimum_density().metrics(state.dpi).rail_width;
     let measured_content_width = scale_dip(minimum_content_width_dip(), state.dpi)
         .saturating_add(
             rail_width
@@ -69,8 +70,12 @@ fn nonclient_height(window: HWND) -> i32 {
 }
 
 fn minimum_track_height(window: HWND, state: &AppState) -> i32 {
-    minimum_main_client_height(state.dpi, state.font_metrics)
-        .saturating_add(nonclient_height(window))
+    minimum_main_client_height(
+        state.dpi,
+        state.font_metrics,
+        state.resolved_appearance().appearance.density,
+    )
+    .saturating_add(nonclient_height(window))
 }
 
 fn requested_minimum_track_size(window: HWND, state: &AppState) -> WindowTrackSize {
@@ -117,8 +122,12 @@ fn effective_minimum_track_size(window: HWND, state: &AppState) -> io::Result<Wi
 }
 
 fn recommended_track_height(window: HWND, state: &AppState) -> i32 {
-    recommended_main_client_height(state.dpi, state.font_metrics)
-        .saturating_add(nonclient_height(window))
+    recommended_main_client_height(
+        state.dpi,
+        state.font_metrics,
+        state.resolved_appearance().appearance.density,
+    )
+    .saturating_add(nonclient_height(window))
 }
 
 fn initial_dpi_size(window: HWND, state: &AppState) -> (i32, i32) {
@@ -471,7 +480,7 @@ unsafe extern "system" fn window_proc(
             unsafe { (*current_state).drop_registrations = Some(registrations) };
             // SAFETY: child creation succeeded and state_ptr remains the live,
             // UI-thread-confined AppState for this top-level window.
-            start_preferences_writer(window, unsafe { &mut *current_state });
+            start_preferences_writers(window, unsafe { &mut *current_state });
             0
         }
         WM_SIZE if !state_ptr.is_null() => {
