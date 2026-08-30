@@ -73,16 +73,71 @@ fn minimum_track_height(window: HWND, state: &AppState) -> i32 {
         .saturating_add(nonclient_height(window))
 }
 
+fn requested_minimum_track_size(window: HWND, state: &AppState) -> WindowTrackSize {
+    WindowTrackSize {
+        width: minimum_track_width(window, state),
+        height: minimum_track_height(window, state),
+    }
+}
+
+fn nearest_monitor_work_area(window: HWND) -> io::Result<RECT> {
+    // SAFETY: window is live; the nearest-monitor query dereferences no caller
+    // memory and returns a borrowed monitor identifier.
+    let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let mut monitor_info = MONITORINFO {
+        cbSize: u32::try_from(size_of::<MONITORINFO>())
+            .map_err(|_| io::Error::other("invalid monitor info size"))?,
+        ..MONITORINFO::default()
+    };
+    // SAFETY: monitor is live and monitor_info has its exact structure size and
+    // remains writable for this synchronous query.
+    if unsafe { GetMonitorInfoW(monitor, &mut monitor_info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let work = monitor_info.rcWork;
+    if work.right <= work.left || work.bottom <= work.top {
+        return Err(io::Error::other("invalid monitor work area"));
+    }
+    Ok(work)
+}
+
+fn effective_minimum_track_size(window: HWND, state: &AppState) -> io::Result<WindowTrackSize> {
+    let requested = requested_minimum_track_size(window, state);
+    let work = nearest_monitor_work_area(window)?;
+    constrain_minimum_track_size_to_work_area(
+        requested.width,
+        requested.height,
+        work.right - work.left,
+        work.bottom - work.top,
+    )
+    .ok_or_else(|| io::Error::other("invalid minimum track size"))
+}
+
 fn recommended_track_height(window: HWND, state: &AppState) -> i32 {
     recommended_main_client_height(state.dpi, state.font_metrics)
         .saturating_add(nonclient_height(window))
 }
 
 fn initial_dpi_size(window: HWND, state: &AppState) -> (i32, i32) {
-    (
-        minimum_track_width(window, state),
-        scale_dip(INITIAL_HEIGHT, state.dpi).max(recommended_track_height(window, state)),
-    )
+    let requested = WindowTrackSize {
+        width: minimum_track_width(window, state),
+        height: scale_dip(INITIAL_HEIGHT, state.dpi).max(recommended_track_height(window, state)),
+    };
+    let effective = nearest_monitor_work_area(window)
+        .ok()
+        .and_then(|work| {
+            constrain_minimum_track_size_to_work_area(
+                requested.width,
+                requested.height,
+                work.right - work.left,
+                work.bottom - work.top,
+            )
+        })
+        .unwrap_or(requested);
+    (effective.width, effective.height)
 }
 
 fn resize_to_initial_dpi(window: HWND, width: i32, height: i32) -> io::Result<()> {
@@ -166,43 +221,31 @@ fn ensure_minimum_track_size(window: HWND, state: &AppState) -> io::Result<()> {
     if unsafe { GetWindowRect(window, &mut rect) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    let minimum_width = minimum_track_width(window, state);
-    let minimum_height = minimum_track_height(window, state);
+    let work = nearest_monitor_work_area(window)?;
+    let requested = requested_minimum_track_size(window, state);
+    let minimum = constrain_minimum_track_size_to_work_area(
+        requested.width,
+        requested.height,
+        work.right - work.left,
+        work.bottom - work.top,
+    )
+    .ok_or_else(|| io::Error::other("invalid minimum track size"))?;
     let current_width = rect.right - rect.left;
     let current_height = rect.bottom - rect.top;
-    if current_width >= minimum_width && current_height >= minimum_height {
+    if current_width >= minimum.width && current_height >= minimum.height {
         return Ok(());
-    }
-    // SAFETY: window is live; the nearest-monitor query dereferences no caller
-    // memory and returns a borrowed monitor identifier.
-    let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) };
-    if monitor.is_null() {
-        return Err(io::Error::last_os_error());
-    }
-    let mut monitor_info = MONITORINFO {
-        cbSize: u32::try_from(size_of::<MONITORINFO>())
-            .map_err(|_| io::Error::other("invalid monitor info size"))?,
-        ..MONITORINFO::default()
-    };
-    // SAFETY: monitor is live and monitor_info has its exact structure size and
-    // remains writable for this synchronous query.
-    if unsafe { GetMonitorInfoW(monitor, &mut monitor_info) } == 0 {
-        return Err(io::Error::last_os_error());
     }
     let placement = fit_widened_window_to_work_area(
         rect.left,
-        monitor_info.rcWork.left,
-        monitor_info.rcWork.right,
-        minimum_width.max(current_width),
+        work.left,
+        work.right,
+        minimum.width.max(current_width),
     )
     .ok_or_else(|| io::Error::other("invalid monitor work area"))?;
-    let work_height = monitor_info.rcWork.bottom - monitor_info.rcWork.top;
-    if work_height <= 0 {
-        return Err(io::Error::other("invalid monitor work area height"));
-    }
-    let height = minimum_height.max(current_height).min(work_height);
-    let latest_y = monitor_info.rcWork.bottom - height;
-    let y = rect.top.clamp(monitor_info.rcWork.top, latest_y);
+    let work_height = work.bottom - work.top;
+    let height = minimum.height.max(current_height).min(work_height);
+    let latest_y = work.bottom - height;
+    let y = rect.top.clamp(work.top, latest_y);
     // SAFETY: the live window is resized within the nearest monitor work area
     // without changing activation or z-order.
     if unsafe {
@@ -458,11 +501,15 @@ unsafe extern "system" fn window_proc(
         WM_GETMINMAXINFO if !state_ptr.is_null() => {
             let info = lparam as *mut MINMAXINFO;
             if !info.is_null() {
-                // SAFETY: WM_GETMINMAXINFO supplies writable MINMAXINFO storage
-                // for this callback and state_ptr is the live AppState.
-                unsafe {
-                    (*info).ptMinTrackSize.x = minimum_track_width(window, &*state_ptr);
-                    (*info).ptMinTrackSize.y = minimum_track_height(window, &*state_ptr);
+                // SAFETY: state_ptr is the live AppState. Query failure leaves
+                // the operating system's current tracking bounds unchanged.
+                if let Ok(minimum) = effective_minimum_track_size(window, unsafe { &*state_ptr }) {
+                    // SAFETY: WM_GETMINMAXINFO supplies writable MINMAXINFO
+                    // storage for the duration of this callback.
+                    unsafe {
+                        (*info).ptMinTrackSize.x = minimum.width;
+                        (*info).ptMinTrackSize.y = minimum.height;
+                    }
                 }
             }
             0

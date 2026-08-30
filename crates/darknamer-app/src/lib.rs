@@ -52,6 +52,32 @@ pub(crate) struct HorizontalWindowPlacement {
     pub(crate) width: i32,
 }
 
+/// Effective top-level minimum size after applying the nearest monitor bounds.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WindowTrackSize {
+    pub(crate) width: i32,
+    pub(crate) height: i32,
+}
+
+/// Constrains a requested top-level minimum size to a positive monitor work area.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn constrain_minimum_track_size_to_work_area(
+    minimum_width: i32,
+    minimum_height: i32,
+    work_width: i32,
+    work_height: i32,
+) -> Option<WindowTrackSize> {
+    if minimum_width <= 0 || minimum_height <= 0 || work_width <= 0 || work_height <= 0 {
+        return None;
+    }
+    Some(WindowTrackSize {
+        width: minimum_width.min(work_width),
+        height: minimum_height.min(work_height),
+    })
+}
+
 #[cfg(any(windows, test))]
 #[must_use]
 pub(crate) fn fit_widened_window_to_work_area(
@@ -3586,6 +3612,7 @@ mod tests {
             .saturating_add(measured.empty_state_minimum_width(96));
         let client_height = minimum_main_client_height(96, measured);
         let layout = calculate_main_layout(client_width, client_height, 96, measured);
+        assert_eq!(layout.rail_mode, RailMode::Compact);
         let empty = measured.empty_state_content_metrics(96, layout.empty_safety.width);
         assert!(layout.empty_instruction.height >= empty.instruction_height);
         assert!(layout.empty_safety.height >= empty.safety_height);
@@ -4356,6 +4383,116 @@ mod tests {
             Some(HorizontalWindowPlacement { x: 0, width: 480 })
         );
         assert_eq!(fit_widened_window_to_work_area(0, 10, 10, 560), None);
+    }
+
+    #[test]
+    fn minimum_track_size_is_clamped_per_axis_to_the_work_area() {
+        assert_eq!(
+            constrain_minimum_track_size_to_work_area(640, 520, 1_920, 1_040),
+            Some(WindowTrackSize {
+                width: 640,
+                height: 520,
+            })
+        );
+        assert_eq!(
+            constrain_minimum_track_size_to_work_area(640, 520, 480, 320),
+            Some(WindowTrackSize {
+                width: 480,
+                height: 320,
+            })
+        );
+        assert_eq!(
+            constrain_minimum_track_size_to_work_area(i32::MAX, i32::MAX, 1, 1),
+            Some(WindowTrackSize {
+                width: 1,
+                height: 1,
+            })
+        );
+        for invalid in [
+            (0, 520, 480, 320),
+            (640, 0, 480, 320),
+            (640, 520, 0, 320),
+            (640, 520, 480, 0),
+        ] {
+            assert_eq!(
+                constrain_minimum_track_size_to_work_area(
+                    invalid.0, invalid.1, invalid.2, invalid.3,
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn work_area_clamping_preserves_compact_then_menu_only_with_bounded_children() {
+        let measured = MeasuredFontMetrics::default();
+        let minimum_height = minimum_main_client_height(96, measured);
+        let normal = WindowTrackSize {
+            width: INITIAL_WIDTH,
+            height: minimum_height,
+        };
+        assert_eq!(
+            constrain_minimum_track_size_to_work_area(normal.width, normal.height, 1_920, 1_040,),
+            Some(normal)
+        );
+        let compact = calculate_main_layout(normal.width, normal.height, 96, measured);
+        assert_eq!(compact.rail_mode, RailMode::Compact);
+
+        let constrained = WindowTrackSize {
+            width: INITIAL_WIDTH,
+            height: minimum_height - 1,
+        };
+        assert_eq!(
+            constrain_minimum_track_size_to_work_area(
+                INITIAL_WIDTH,
+                minimum_height,
+                constrained.width,
+                constrained.height,
+            ),
+            Some(constrained)
+        );
+        let menu_only = calculate_main_layout(constrained.width, constrained.height, 96, measured);
+        assert_eq!(menu_only.rail_mode, RailMode::MenuOnly);
+
+        let smallest = calculate_main_layout(1, 1, 96, measured);
+
+        for (layout, bounds) in [
+            (&compact, normal),
+            (&menu_only, constrained),
+            (
+                &smallest,
+                WindowTrackSize {
+                    width: 1,
+                    height: 1,
+                },
+            ),
+        ] {
+            for rect in [
+                layout.list,
+                layout.status_message,
+                layout.status_count,
+                layout.cancel,
+                layout.empty_instruction,
+                layout.empty_safety,
+                layout.empty_add,
+                layout.drop_overlay,
+            ] {
+                assert!(rect.x >= 0);
+                assert!(rect.y >= 0);
+                assert!(rect.width >= 0);
+                assert!(rect.height >= 0);
+                assert!(rect.x.saturating_add(rect.width) <= bounds.width);
+                assert!(rect.bottom() <= bounds.height);
+            }
+            for placement in layout.left_buttons.iter().chain(&layout.right_buttons) {
+                assert!(placement.x >= 0);
+                assert!(placement.y >= 0);
+                assert!(placement.width >= 0);
+                assert!(placement.height >= 0);
+                assert!(placement.x.saturating_add(placement.width) <= layout.rail_width);
+                assert!(placement.bottom() <= layout.list.height);
+            }
+        }
     }
 
     #[test]
