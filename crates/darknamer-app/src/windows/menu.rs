@@ -168,12 +168,20 @@ pub(super) fn measure_font_metrics(
         empty_safety_text_height,
         empty_add_text_width,
         empty_add_text_height,
+        empty_wrap_width: 0,
+        empty_instruction_wrapped_height: 0,
+        empty_safety_wrapped_height: 0,
         drop_overlay_text_width,
         drop_overlay_text_height,
     }
 }
 
-fn measure_text(window: HWND, font: HFONT, text: &str, single_line: bool) -> Option<(i32, i32)> {
+pub(super) fn measure_text(
+    window: HWND,
+    font: HFONT,
+    text: &str,
+    single_line: bool,
+) -> Option<(i32, i32)> {
     if window.is_null() || font.is_null() || text.is_empty() {
         return None;
     }
@@ -205,6 +213,44 @@ fn measure_text(window: HWND, font: HFONT, text: &str, single_line: bool) -> Opt
         (rect.right - rect.left).max(0),
         (rect.bottom - rect.top).max(0),
     ))
+}
+
+fn measure_wrapped_text(window: HWND, font: HFONT, text: &str, width: i32) -> Option<i32> {
+    if window.is_null() || font.is_null() || text.is_empty() || width <= 0 {
+        return None;
+    }
+    let text = wide(text);
+    let length = i32::try_from(text.len().checked_sub(1)?).ok()?;
+    // SAFETY: window/font are live UI-thread handles; the DC is released below.
+    let dc = unsafe { GetDC(window) };
+    if dc.is_null() {
+        return None;
+    }
+    // SAFETY: font remains AppState-owned beyond this synchronous measurement.
+    let previous = unsafe { SelectObject(dc, font) };
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: 0,
+    };
+    // SAFETY: text/rect/DC remain live for calculation-only word wrapping.
+    let measured = unsafe {
+        DrawTextW(
+            dc,
+            text.as_ptr(),
+            length,
+            &mut rect,
+            DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
+        )
+    };
+    if !previous.is_null() {
+        // SAFETY: restore the exact object returned by SelectObject.
+        unsafe { SelectObject(dc, previous) };
+    }
+    // SAFETY: release the DC acquired from this exact window.
+    unsafe { ReleaseDC(window, dc) };
+    (measured > 0).then_some((rect.bottom - rect.top).max(0))
 }
 
 pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<()> {
@@ -337,7 +383,7 @@ pub(super) fn create_status_controls(parent: HWND) -> io::Result<(HWND, HWND, HW
         "BUTTON",
         STATUS_CANCEL_LABEL,
         CANCEL_WORKER_ID,
-        WS_TABSTOP,
+        WS_TABSTOP | BS_OWNERDRAW as u32,
     )?;
     // SAFETY: cancel is the newly created live worker-control HWND. It remains
     // hidden and disabled until one of the three cancellable workers is active.
@@ -368,7 +414,7 @@ pub(super) fn create_empty_state_controls(parent: HWND) -> io::Result<(HWND, HWN
         "BUTTON",
         EMPTY_STATE_ADD_LABEL,
         EMPTY_ADD_ID,
-        WS_TABSTOP | BS_PUSHBUTTON as u32,
+        WS_TABSTOP | BS_PUSHBUTTON as u32 | BS_OWNERDRAW as u32,
     )?;
     Ok((instruction, safety, add))
 }
@@ -465,13 +511,46 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
     let width = (rect.right - rect.left).max(0);
     let height = (rect.bottom - rect.top).max(0);
     let appearance = state.resolved_appearance().appearance;
-    let layout = calculate_main_layout_with_safety(
+    let status_layout_input = current_status_layout_input(state);
+    state.status_layout_input = status_layout_input;
+    let preliminary = calculate_main_layout_with_safety(
         width,
         height,
         state.dpi,
         state.font_metrics,
         appearance.density,
         appearance.show_empty_safety,
+        status_layout_input,
+    );
+    let wrap_width = preliminary.empty_instruction.width;
+    let mut measured = state.font_metrics;
+    measured.empty_wrap_width = wrap_width;
+    measured.empty_instruction_wrapped_height = measure_wrapped_text(
+        state.empty_instruction,
+        state.font.as_raw(),
+        EMPTY_STATE_INSTRUCTION,
+        wrap_width,
+    )
+    .unwrap_or_default();
+    measured.empty_safety_wrapped_height = if appearance.show_empty_safety {
+        measure_wrapped_text(
+            state.empty_safety,
+            state.status_font.as_raw(),
+            EMPTY_STATE_SAFETY,
+            wrap_width,
+        )
+        .unwrap_or_default()
+    } else {
+        0
+    };
+    let layout = calculate_main_layout_with_safety(
+        width,
+        height,
+        state.dpi,
+        measured,
+        appearance.density,
+        appearance.show_empty_safety,
+        status_layout_input,
     );
     let rails_visible = layout.rail_mode != RailMode::MenuOnly;
     let previously_focused = focused_child(state);
@@ -529,6 +608,19 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
             RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
         )
     };
+}
+
+fn current_status_layout_input(state: &AppState) -> StatusLayoutInput {
+    let count = state.ui_status.count_text();
+    let measured_count_width =
+        measure_text(state.status_count, state.status_font.as_raw(), &count, true)
+            .map_or(state.font_metrics.status_count_text_width, |(width, _)| {
+                width
+            });
+    StatusLayoutInput {
+        cancel_visible: cancel_control_state(state.worker_activity()).is_visible(),
+        measured_count_width,
+    }
 }
 
 fn apply_deferred_layout(windows: &[(HWND, LayoutRect)]) {
@@ -601,6 +693,7 @@ pub(super) fn update_controls(state: &mut AppState) {
     let presentation = state.presentation(selected_count);
     state.ui_status.set_preview_counts(presentation.counts);
     state.render_status();
+    let status_layout_changed = current_status_layout_input(state) != state.status_layout_input;
     for id in APPLY..=VERSION {
         state.command_states[usize::from(id - APPLY)] = if id == APPLY {
             matches!(presentation.apply, ApplyPresentation::Ready)
@@ -626,6 +719,17 @@ pub(super) fn update_controls(state: &mut AppState) {
     };
     if focused_target_changed {
         schedule_focus_restore(state);
+    }
+    if status_layout_changed {
+        // Re-layout can synchronously make Common Controls emit Header
+        // notifications. Post a pointer-free request so it runs only after
+        // this mutable AppState borrow has ended.
+        // SAFETY: list_window remains a live direct child while AppState is live.
+        let parent = unsafe { GetParent(state.list_window) };
+        if !parent.is_null() {
+            // SAFETY: parent is live and the message carries no pointer payload.
+            unsafe { PostMessageW(parent, WM_APP_LAYOUT, 0, 0) };
+        }
     }
 }
 
@@ -993,7 +1097,7 @@ impl OwnedMenu {
             .ok_or_else(io::Error::last_os_error)
     }
 
-    fn as_raw(&self) -> HMENU {
+    pub(super) fn as_raw(&self) -> HMENU {
         self.0
     }
 
@@ -1026,6 +1130,127 @@ struct MenuBuilder {
     menu: OwnedMenu,
 }
 
+const MENU_POPUP_FILE: usize = 0x1_0000;
+const MENU_POPUP_EDIT: usize = 0x1_0001;
+const MENU_POPUP_VIEW: usize = 0x1_0002;
+const MENU_POPUP_APPEARANCE: usize = 0x1_0003;
+const MENU_POPUP_THEME: usize = 0x1_0004;
+const MENU_POPUP_TOOLS: usize = 0x1_0005;
+const MENU_POPUP_RECOVERY: usize = 0x1_0006;
+
+fn menu_popup_data(label: &str) -> usize {
+    match label {
+        "파일(&F)" => MENU_POPUP_FILE,
+        "편집(&E)" => MENU_POPUP_EDIT,
+        "보기(&V)" => MENU_POPUP_VIEW,
+        "모양(&A)" => MENU_POPUP_APPEARANCE,
+        "테마(&T)" => MENU_POPUP_THEME,
+        "기능(&T)" => MENU_POPUP_TOOLS,
+        "복구(&R)" => MENU_POPUP_RECOVERY,
+        _ => 0,
+    }
+}
+
+pub(super) fn owner_menu_label(data: usize) -> Option<String> {
+    let popup = match data {
+        MENU_POPUP_FILE => Some("파일(&F)"),
+        MENU_POPUP_EDIT => Some("편집(&E)"),
+        MENU_POPUP_VIEW => Some("보기(&V)"),
+        MENU_POPUP_APPEARANCE => Some("모양(&A)"),
+        MENU_POPUP_THEME => Some("테마(&T)"),
+        MENU_POPUP_TOOLS => Some("기능(&T)"),
+        MENU_POPUP_RECOVERY => Some("복구(&R)"),
+        _ => None,
+    };
+    if let Some(popup) = popup {
+        return Some(popup.to_owned());
+    }
+    let id = u16::try_from(data).ok()?;
+    if let Some(spec) = command_ui_spec(id) {
+        return Some(command_menu_label(spec));
+    }
+    match id {
+        EXIT_COMMAND => Some(legacy_command_shortcut(EXIT_COMMAND).map_or_else(
+            || "종료(&X)".to_owned(),
+            |shortcut| format!("종료(&X)\t{}", shortcut.display),
+        )),
+        THEME_SYSTEM => Some("시스템 설정 사용(&S)".to_owned()),
+        THEME_LIGHT => Some("라이트(&L)".to_owned()),
+        THEME_DARK => Some("다크(&D)".to_owned()),
+        APPEARANCE_ADVANCED => Some("고급 모양 설정(&A)...".to_owned()),
+        EXPORT_RECOVERY_JOURNAL => Some("보존된 저널 바이트 내보내기...".to_owned()),
+        DISCARD_STAGED_JOURNAL => Some("활성화 전 실행 계획 폐기...".to_owned()),
+        SHOW_RECOVERY_STATUS => Some("복구 상태 보기...".to_owned()),
+        _ => None,
+    }
+}
+
+fn menu_mnemonic(label: &str) -> Option<char> {
+    let mut characters = label.chars();
+    while let Some(character) = characters.next() {
+        if character == '&' {
+            let mnemonic = characters.next()?;
+            if mnemonic != '&' {
+                return Some(mnemonic.to_ascii_uppercase());
+            }
+        }
+    }
+    None
+}
+
+pub(super) fn handle_owner_menu_char(wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let menu = lparam as HMENU;
+    if menu.is_null() {
+        return (MNC_IGNORE as LRESULT) << 16;
+    }
+    let requested = char::from_u32(u32::try_from(wparam & 0xFFFF).unwrap_or_default())
+        .map(|character| character.to_ascii_uppercase());
+    let Some(requested) = requested else {
+        return (MNC_IGNORE as LRESULT) << 16;
+    };
+    // SAFETY: menu is the current live menu supplied by WM_MENUCHAR.
+    let count = unsafe { GetMenuItemCount(menu) };
+    if count <= 0 {
+        return (MNC_IGNORE as LRESULT) << 16;
+    }
+    let mut matches = Vec::new();
+    for position in 0..count {
+        let mut info = MENUITEMINFOW {
+            cbSize: size_of::<MENUITEMINFOW>() as u32,
+            fMask: MIIM_DATA | MIIM_SUBMENU,
+            ..MENUITEMINFOW::default()
+        };
+        // SAFETY: info is writable and position is bounded by the current count.
+        if unsafe {
+            GetMenuItemInfoW(
+                menu,
+                u32::try_from(position).unwrap_or_default(),
+                1,
+                &mut info,
+            )
+        } == 0
+        {
+            continue;
+        }
+        if owner_menu_label(info.dwItemData)
+            .as_deref()
+            .and_then(menu_mnemonic)
+            == Some(requested)
+        {
+            matches.push(position);
+        }
+    }
+    let Some(position) = matches.first().copied() else {
+        return (MNC_IGNORE as LRESULT) << 16;
+    };
+    let action = if matches.len() == 1 {
+        MNC_EXECUTE
+    } else {
+        MNC_SELECT
+    };
+    (position as LRESULT) | ((action as LRESULT) << 16)
+}
+
 impl MenuBuilder {
     fn bar() -> io::Result<Self> {
         OwnedMenu::new_bar().map(|menu| Self { menu })
@@ -1037,20 +1262,20 @@ impl MenuBuilder {
 
     fn item(&mut self, id: u16, label: &str) -> io::Result<()> {
         let label = wide(label);
-        // SAFETY: the menu is live and label is retained terminated UTF-16 for
-        // the complete synchronous AppendMenuW call.
+        // SAFETY: MF_OWNERDRAW interprets lpNewItem as copied scalar item data,
+        // never dereferencing the encoded command ID.
         if unsafe {
             AppendMenuW(
                 self.menu.as_raw(),
-                MF_STRING,
+                MF_OWNERDRAW,
                 usize::from(id),
-                label.as_ptr(),
+                usize::from(id) as *const u16,
             )
         } == 0
         {
             Err(io::Error::last_os_error())
         } else {
-            Ok(())
+            set_last_menu_item_text(self.menu.as_raw(), &label)
         }
     }
 
@@ -1064,26 +1289,63 @@ impl MenuBuilder {
     }
 
     fn popup_child(&mut self, mut popup: Self, label: &str) -> io::Result<()> {
+        let data = menu_popup_data(label);
+        if data == 0 {
+            return Err(io::Error::other("owner-draw popup label is not catalogued"));
+        }
         let label = wide(label);
-        // SAFETY: both menus are unattached and live; success transfers popup
-        // ownership into the parent menu's recursive ownership tree.
+        // SAFETY: both menus are live; MF_OWNERDRAW copies the scalar item data
+        // and success transfers popup ownership into the parent menu tree.
         if unsafe {
             AppendMenuW(
                 self.menu.as_raw(),
-                MF_POPUP,
+                MF_POPUP | MF_OWNERDRAW,
                 popup.menu.as_raw() as usize,
-                label.as_ptr(),
+                data as *const u16,
             )
         } == 0
         {
             return Err(io::Error::last_os_error());
         }
+        // AppendMenuW transferred recursive destruction to the parent. Disarm
+        // the child owner before any later fallible metadata update.
         popup.menu.release();
+        set_last_menu_item_text(self.menu.as_raw(), &label)?;
         Ok(())
     }
 
     fn finish(self) -> OwnedMenu {
         self.menu
+    }
+}
+
+fn set_last_menu_item_text(menu: HMENU, label: &[u16]) -> io::Result<()> {
+    // SAFETY: menu is live and this value query retains no caller storage.
+    let count = unsafe { GetMenuItemCount(menu) };
+    if count <= 0 {
+        return Err(io::Error::other("owner-draw menu item was not appended"));
+    }
+    let mut info = MENUITEMINFOW {
+        cbSize: size_of::<MENUITEMINFOW>() as u32,
+        fMask: MIIM_STRING,
+        dwTypeData: label.as_ptr().cast_mut(),
+        cch: u32::try_from(label.len().saturating_sub(1)).unwrap_or(u32::MAX),
+        ..MENUITEMINFOW::default()
+    };
+    // SAFETY: label remains live through the synchronous copy; count-1 names
+    // the item appended immediately before this call.
+    if unsafe {
+        SetMenuItemInfoW(
+            menu,
+            u32::try_from(count - 1).unwrap_or_default(),
+            1,
+            &mut info,
+        )
+    } == 0
+    {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }
 

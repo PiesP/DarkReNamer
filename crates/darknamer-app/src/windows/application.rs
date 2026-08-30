@@ -538,6 +538,12 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
+        WM_APP_LAYOUT if !state_ptr.is_null() => {
+            // SAFETY: this posted pointer-free callback begins after the
+            // state mutation that requested it has returned.
+            arrange(window, unsafe { &mut *state_ptr });
+            0
+        }
         WM_GETMINMAXINFO if !state_ptr.is_null() => {
             let info = lparam as *mut MINMAXINFO;
             if !info.is_null() {
@@ -725,6 +731,38 @@ unsafe extern "system" fn window_proc(
             request_window_close(window, state);
             0
         }
+        WM_ERASEBKGND if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is live UI-thread state and wparam is the
+            // callback-owned paint DC for this exact top-level window.
+            let resources = unsafe { (*state_ptr).appearance_resources.as_ref() };
+            erase_themed_background(window, wparam as HDC, resources);
+            1
+        }
+        WM_DRAWITEM if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is live UI-thread state and the renderer reads
+            // only the synchronous WM_DRAWITEM payload.
+            let state = unsafe { &*state_ptr };
+            let resources = state.appearance_resources.as_ref();
+            if draw_owner_button(resources, lparam)
+                || draw_owner_menu(resources, state.font.as_raw(), lparam)
+            {
+                return 1;
+            }
+            // SAFETY: unrecognized owner-draw payloads retain system handling.
+            unsafe { DefWindowProcW(window, message, wparam, lparam) }
+        }
+        WM_MEASUREITEM if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is live UI-thread state and lparam is the
+            // synchronous writable measurement payload.
+            let state = unsafe { &*state_ptr };
+            if measure_owner_menu(window, state.font.as_raw(), state.dpi, lparam) {
+                1
+            } else {
+                // SAFETY: unrecognized measurement retains system handling.
+                unsafe { DefWindowProcW(window, message, wparam, lparam) }
+            }
+        }
+        WM_MENUCHAR if !state_ptr.is_null() => handle_owner_menu_char(wparam, lparam),
         WM_CTLCOLORSTATIC if !state_ptr.is_null() => {
             let child = lparam as HWND;
             // Copy all routing values in a tiny borrow that ends before any GDI
@@ -796,18 +834,23 @@ unsafe extern "system" fn window_proc(
         }
         WM_NOTIFY if !state_ptr.is_null() => {
             let header = lparam as *const NMHDR;
-            if !header.is_null()
-                // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix for this
-                // synchronous callback; no AppState access occurs on the
-                // deferred programmatic-selection path.
-                && unsafe { (*header).code } == LVN_ITEMCHANGED
-                && programmatic_list_update_active()
-            {
-                return 0;
+            if !header.is_null() && programmatic_list_update_active() {
+                // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix. This
+                // guard runs before constructing any AppState reference, so
+                // synchronous Common Controls re-entry cannot alias the
+                // mutable state held by the programmatic sender.
+                let code = unsafe { (*header).code };
+                if matches!(code, LVN_ITEMCHANGED | HDN_ITEMCHANGINGW | HDN_ITEMCHANGEDW) {
+                    return 0;
+                }
             }
             // SAFETY: state_ptr is the live UI-thread AppState and the custom
             // draw helper validates the synchronous WM_NOTIFY payload/source.
             if let Some(result) = handle_list_custom_draw(unsafe { &*state_ptr }, lparam) {
+                return result;
+            }
+            // SAFETY: same synchronous notification and live UI-thread state.
+            if let Some(result) = handle_header_custom_draw(unsafe { &*state_ptr }, lparam) {
                 return result;
             }
             // Header controls are ListView children, so their resize

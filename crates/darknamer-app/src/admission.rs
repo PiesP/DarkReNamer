@@ -284,7 +284,17 @@ pub struct AdmissionReport {
 }
 
 impl AdmissionReport {
-    /// Returns a concise Korean summary for the native status/message surface.
+    /// Returns the compact outcome kept visible in the native status strip.
+    #[must_use]
+    pub fn status_summary_korean(&self, appended: usize) -> String {
+        if self.issues.is_empty() {
+            format!("파일 {appended}개를 추가했습니다.")
+        } else {
+            format!("파일 {appended}개 추가 · {}개 제외", self.issues.len())
+        }
+    }
+
+    /// Returns the detailed Korean summary used by the exclusion dialog.
     #[must_use]
     pub fn summary_korean(&self, appended: usize) -> String {
         let count = |kind| {

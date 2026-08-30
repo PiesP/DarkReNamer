@@ -29,7 +29,7 @@ pub(crate) const EMPTY_LIST_STATUS: &str = "파일이나 폴더를 끌어 놓거
 pub(crate) const EMPTY_STATE_INSTRUCTION: &str = "파일이나 폴더를 여기에 끌어오세요";
 #[cfg(windows)]
 pub(crate) const EMPTY_STATE_SAFETY: &str =
-    "실제 파일은 ‘변경 적용’을 누르기 전까지 수정되지 않습니다.";
+    "‘변경 적용’을 누르기 전에는 실제 파일을 수정하지 않습니다.";
 #[cfg(windows)]
 pub(crate) const EMPTY_STATE_ADD_LABEL: &str = "파일 추가...";
 #[cfg(windows)]
@@ -280,14 +280,26 @@ pub(crate) const fn theme_from_foreground(red: u8, green: u8, blue: u8) -> Resol
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SemanticPalette {
+    pub(crate) surface_window: u32,
+    pub(crate) surface_panel: u32,
     pub(crate) surface_workspace: u32,
     pub(crate) surface_status: u32,
     pub(crate) surface_drop: u32,
+    pub(crate) surface_header: u32,
+    pub(crate) surface_dialog: u32,
+    pub(crate) control_normal: u32,
+    pub(crate) control_hover: u32,
+    pub(crate) control_pressed: u32,
+    pub(crate) control_disabled: u32,
     pub(crate) text_primary: u32,
     pub(crate) text_secondary: u32,
+    pub(crate) text_disabled: u32,
+    pub(crate) border: u32,
     pub(crate) changed_subtle: u32,
     pub(crate) changed_standard: u32,
     pub(crate) changed_strong: u32,
+    pub(crate) warning: u32,
+    pub(crate) collision: u32,
     pub(crate) preview_tint: u32,
     pub(crate) apply_keyline: u32,
 }
@@ -299,28 +311,52 @@ const fn color_ref(red: u8, green: u8, blue: u8) -> u32 {
 
 #[cfg(any(windows, test))]
 const PRECISION_LIGHT: SemanticPalette = SemanticPalette {
+    surface_window: color_ref(247, 248, 250),
+    surface_panel: color_ref(247, 248, 250),
     surface_workspace: color_ref(255, 255, 255),
     surface_status: color_ref(244, 245, 247),
     surface_drop: color_ref(245, 248, 255),
+    surface_header: color_ref(238, 240, 243),
+    surface_dialog: color_ref(247, 248, 250),
+    control_normal: color_ref(255, 255, 255),
+    control_hover: color_ref(240, 244, 250),
+    control_pressed: color_ref(226, 232, 240),
+    control_disabled: color_ref(235, 237, 240),
     text_primary: color_ref(27, 29, 32),
     text_secondary: color_ref(95, 102, 112),
+    text_disabled: color_ref(139, 145, 154),
+    border: color_ref(177, 183, 192),
     changed_subtle: color_ref(121, 43, 51),
     changed_standard: color_ref(143, 38, 51),
     changed_strong: color_ref(169, 22, 33),
+    warning: color_ref(142, 83, 0),
+    collision: color_ref(169, 22, 33),
     preview_tint: color_ref(245, 248, 255),
     apply_keyline: color_ref(217, 41, 50),
 };
 
 #[cfg(any(windows, test))]
 const GRAPHITE_DARK: SemanticPalette = SemanticPalette {
+    surface_window: color_ref(20, 22, 25),
+    surface_panel: color_ref(20, 22, 25),
     surface_workspace: color_ref(23, 25, 28),
     surface_status: color_ref(30, 32, 36),
     surface_drop: color_ref(32, 40, 51),
+    surface_header: color_ref(38, 41, 46),
+    surface_dialog: color_ref(26, 28, 32),
+    control_normal: color_ref(42, 45, 50),
+    control_hover: color_ref(52, 57, 64),
+    control_pressed: color_ref(32, 35, 40),
+    control_disabled: color_ref(34, 37, 41),
     text_primary: color_ref(242, 244, 247),
     text_secondary: color_ref(184, 190, 199),
+    text_disabled: color_ref(125, 131, 140),
+    border: color_ref(83, 89, 99),
     changed_subtle: color_ref(217, 164, 168),
     changed_standard: color_ref(255, 102, 112),
     changed_strong: color_ref(255, 137, 145),
+    warning: color_ref(255, 194, 92),
+    collision: color_ref(255, 137, 145),
     preview_tint: color_ref(32, 40, 51),
     apply_keyline: color_ref(255, 102, 112),
 };
@@ -349,16 +385,21 @@ pub(crate) const fn proposed_name_colors(
     resolved: ResolvedUiAppearance,
     visual: ProposedNameVisual,
 ) -> Option<ProposedNameColors> {
-    if !resolved.custom_colors_enabled || !matches!(visual, ProposedNameVisual::Changed) {
+    if !resolved.custom_colors_enabled || matches!(visual, ProposedNameVisual::Default) {
         return None;
     }
     let Some(palette) = semantic_palette(resolved.theme) else {
         return None;
     };
-    let text = match resolved.appearance.emphasis {
-        PreviewEmphasis::Subtle => palette.changed_subtle,
-        PreviewEmphasis::Standard => palette.changed_standard,
-        PreviewEmphasis::Strong => palette.changed_strong,
+    let text = match visual {
+        ProposedNameVisual::Warning => palette.warning,
+        ProposedNameVisual::Collision => palette.collision,
+        ProposedNameVisual::Changed => match resolved.appearance.emphasis {
+            PreviewEmphasis::Subtle => palette.changed_subtle,
+            PreviewEmphasis::Standard => palette.changed_standard,
+            PreviewEmphasis::Strong => palette.changed_strong,
+        },
+        ProposedNameVisual::Default => return None,
     };
     Some(ProposedNameColors {
         text,
@@ -694,6 +735,17 @@ pub(crate) struct AppearanceDialogLayout {
     pub(crate) cancel: LayoutRect,
 }
 
+/// Text measurements that let the appearance dialog grow with system fonts.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct AppearanceDialogMetrics {
+    pub(crate) text_height: i32,
+    pub(crate) widest_option: i32,
+    pub(crate) widest_checkbox: i32,
+    pub(crate) button_text_height: i32,
+    pub(crate) widest_button: i32,
+}
+
 #[cfg(any(windows, test))]
 #[must_use]
 fn bounded_dialog_rect(x: i32, y: i32, width: i32, height: i32, client: LayoutRect) -> LayoutRect {
@@ -714,10 +766,56 @@ pub(crate) fn calculate_appearance_dialog_layout(
     maximum_width: i32,
     maximum_height: i32,
     show_forced_explanation: bool,
+    measured: AppearanceDialogMetrics,
 ) -> Option<AppearanceDialogLayout> {
-    let desired_width = scale_dip(456, dpi);
-    let explanation_band = if show_forced_explanation { 48 } else { 0 };
-    let desired_height = scale_dip(372 + explanation_band, dpi);
+    let button_width =
+        scale_dip(72, dpi).max(measured.widest_button.saturating_add(scale_dip(24, dpi)));
+    let reset_width = scale_dip(124, dpi).max(button_width);
+    let button_row_width = scale_dip(24, dpi)
+        .saturating_add(reset_width)
+        .saturating_add(button_width.saturating_mul(2))
+        .saturating_add(scale_dip(16, dpi));
+    let desired_width = scale_dip(456, dpi)
+        .max(measured.widest_option.saturating_add(scale_dip(64, dpi)))
+        .max(measured.widest_checkbox.saturating_add(scale_dip(48, dpi)))
+        .max(button_row_width);
+    let row_height = scale_dip(20, dpi).max(measured.text_height.saturating_add(scale_dip(6, dpi)));
+    let row_stride = row_height.saturating_add(scale_dip(2, dpi));
+    let group_height = scale_dip(22, dpi).saturating_add(row_stride.saturating_mul(3));
+    let checkbox_height =
+        scale_dip(22, dpi).max(measured.text_height.saturating_add(scale_dip(6, dpi)));
+    let checkbox_stride = checkbox_height.saturating_add(scale_dip(6, dpi));
+    let explanation_height = if show_forced_explanation {
+        scale_dip(40, dpi).max(measured.text_height.saturating_mul(2))
+    } else {
+        0
+    };
+    let explanation_band = if show_forced_explanation {
+        explanation_height.saturating_add(scale_dip(8, dpi))
+    } else {
+        0
+    };
+    let button_height = scale_dip(30, dpi).max(
+        measured
+            .button_text_height
+            .saturating_add(scale_dip(12, dpi)),
+    );
+    let horizontal_margin = scale_dip(12, dpi);
+    let density_y = horizontal_margin;
+    let emphasis_y = density_y
+        .saturating_add(group_height)
+        .saturating_add(scale_dip(8, dpi));
+    let content_y = emphasis_y
+        .saturating_add(group_height)
+        .saturating_add(scale_dip(8, dpi));
+    let checkbox_y = content_y.saturating_add(explanation_band);
+    let separator_y = checkbox_y
+        .saturating_add(checkbox_stride.saturating_mul(3))
+        .saturating_add(scale_dip(4, dpi));
+    let buttons_y = separator_y.saturating_add(scale_dip(20, dpi));
+    let desired_height = buttons_y
+        .saturating_add(button_height)
+        .saturating_add(scale_dip(30, dpi));
     if maximum_width < desired_width || maximum_height < desired_height {
         return None;
     }
@@ -727,43 +825,104 @@ pub(crate) fn calculate_appearance_dialog_layout(
         width: desired_width,
         height: desired_height,
     };
-    let rect = |x, y, width, height| {
-        bounded_dialog_rect(
-            scale_dip(x, dpi),
-            scale_dip(y, dpi),
-            scale_dip(width, dpi),
-            scale_dip(height, dpi),
-            client,
-        )
+    let content_width = desired_width.saturating_sub(horizontal_margin.saturating_mul(2));
+    let rect = |x, y, width, height| bounded_dialog_rect(x, y, width, height, client);
+    let option_x = scale_dip(28, dpi);
+    let option_width = desired_width.saturating_sub(scale_dip(64, dpi));
+    let group_option_y = |group_y: i32, index: i32| {
+        group_y
+            .saturating_add(scale_dip(22, dpi))
+            .saturating_add(row_stride.saturating_mul(index))
     };
+    let cancel_x = desired_width
+        .saturating_sub(horizontal_margin)
+        .saturating_sub(button_width);
+    let ok_x = cancel_x
+        .saturating_sub(scale_dip(8, dpi))
+        .saturating_sub(button_width);
     Some(AppearanceDialogLayout {
         client,
-        density_group: rect(12, 12, 432, 88),
+        density_group: rect(horizontal_margin, density_y, content_width, group_height),
         density_options: [
-            rect(28, 34, 392, 20),
-            rect(28, 56, 392, 20),
-            rect(28, 78, 392, 20),
+            rect(
+                option_x,
+                group_option_y(density_y, 0),
+                option_width,
+                row_height,
+            ),
+            rect(
+                option_x,
+                group_option_y(density_y, 1),
+                option_width,
+                row_height,
+            ),
+            rect(
+                option_x,
+                group_option_y(density_y, 2),
+                option_width,
+                row_height,
+            ),
         ],
-        emphasis_group: rect(12, 108, 432, 88),
+        emphasis_group: rect(horizontal_margin, emphasis_y, content_width, group_height),
         emphasis_options: [
-            rect(28, 130, 392, 20),
-            rect(28, 152, 392, 20),
-            rect(28, 174, 392, 20),
+            rect(
+                option_x,
+                group_option_y(emphasis_y, 0),
+                option_width,
+                row_height,
+            ),
+            rect(
+                option_x,
+                group_option_y(emphasis_y, 1),
+                option_width,
+                row_height,
+            ),
+            rect(
+                option_x,
+                group_option_y(emphasis_y, 2),
+                option_width,
+                row_height,
+            ),
         ],
         forced_explanation: if show_forced_explanation {
-            rect(12, 204, 432, 40)
+            rect(
+                horizontal_margin,
+                content_y,
+                content_width,
+                explanation_height,
+            )
         } else {
-            rect(12, 204, 0, 0)
+            rect(horizontal_margin, content_y, 0, 0)
         },
         checkboxes: [
-            rect(20, 204 + explanation_band, 416, 22),
-            rect(20, 232 + explanation_band, 416, 22),
-            rect(20, 260 + explanation_band, 416, 22),
+            rect(
+                scale_dip(20, dpi),
+                checkbox_y,
+                desired_width.saturating_sub(scale_dip(40, dpi)),
+                checkbox_height,
+            ),
+            rect(
+                scale_dip(20, dpi),
+                checkbox_y.saturating_add(checkbox_stride),
+                desired_width.saturating_sub(scale_dip(40, dpi)),
+                checkbox_height,
+            ),
+            rect(
+                scale_dip(20, dpi),
+                checkbox_y.saturating_add(checkbox_stride.saturating_mul(2)),
+                desired_width.saturating_sub(scale_dip(40, dpi)),
+                checkbox_height,
+            ),
         ],
-        separator: rect(12, 292 + explanation_band, 432, 2),
-        reset: rect(12, 312 + explanation_band, 124, 30),
-        ok: rect(292, 312 + explanation_band, 72, 30),
-        cancel: rect(372, 312 + explanation_band, 72, 30),
+        separator: rect(
+            horizontal_margin,
+            separator_y,
+            content_width,
+            scale_dip(2, dpi),
+        ),
+        reset: rect(horizontal_margin, buttons_y, reset_width, button_height),
+        ok: rect(ok_x, buttons_y, button_width, button_height),
+        cancel: rect(cancel_x, buttons_y, button_width, button_height),
     })
 }
 
@@ -793,8 +952,19 @@ pub(crate) struct MeasuredFontMetrics {
     pub(crate) empty_safety_text_height: i32,
     pub(crate) empty_add_text_width: i32,
     pub(crate) empty_add_text_height: i32,
+    pub(crate) empty_wrap_width: i32,
+    pub(crate) empty_instruction_wrapped_height: i32,
+    pub(crate) empty_safety_wrapped_height: i32,
     pub(crate) drop_overlay_text_width: i32,
     pub(crate) drop_overlay_text_height: i32,
+}
+
+/// Dynamic status-strip widths derived from the content currently displayed.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct StatusLayoutInput {
+    pub(crate) cancel_visible: bool,
+    pub(crate) measured_count_width: i32,
 }
 
 #[cfg(any(windows, test))]
@@ -858,17 +1028,27 @@ impl MeasuredFontMetrics {
     ) -> EmptyStateContentMetrics {
         let available_width = available_width.max(0);
         let fallback_line_height = scale_dip(16, dpi);
-        let instruction_height = conservative_wrapped_text_height(
-            self.empty_instruction_text_width.max(0),
-            self.empty_instruction_text_height.max(fallback_line_height),
-            available_width,
-        );
-        let safety_height = if show_safety {
+        let instruction_height = if self.empty_wrap_width == available_width
+            && self.empty_instruction_wrapped_height > 0
+        {
+            self.empty_instruction_wrapped_height
+        } else {
             conservative_wrapped_text_height(
-                self.empty_safety_text_width.max(0),
-                self.empty_safety_text_height.max(fallback_line_height),
+                self.empty_instruction_text_width.max(0),
+                self.empty_instruction_text_height.max(fallback_line_height),
                 available_width,
             )
+        };
+        let safety_height = if show_safety {
+            if self.empty_wrap_width == available_width && self.empty_safety_wrapped_height > 0 {
+                self.empty_safety_wrapped_height
+            } else {
+                conservative_wrapped_text_height(
+                    self.empty_safety_text_width.max(0),
+                    self.empty_safety_text_height.max(fallback_line_height),
+                    available_width,
+                )
+            }
         } else {
             0
         };
@@ -1910,7 +2090,18 @@ pub(crate) fn calculate_main_layout(
     measured: MeasuredFontMetrics,
     preference: RailDensityPreference,
 ) -> MainLayout {
-    calculate_main_layout_with_safety(client_width, client_height, dpi, measured, preference, true)
+    calculate_main_layout_with_safety(
+        client_width,
+        client_height,
+        dpi,
+        measured,
+        preference,
+        true,
+        StatusLayoutInput {
+            cancel_visible: false,
+            measured_count_width: measured.status_count_text_width,
+        },
+    )
 }
 
 #[cfg(any(windows, test))]
@@ -1922,6 +2113,7 @@ pub(crate) fn calculate_main_layout_with_safety(
     measured: MeasuredFontMetrics,
     preference: RailDensityPreference,
     show_empty_safety: bool,
+    status: StatusLayoutInput,
 ) -> MainLayout {
     let width = client_width.max(0);
     let height = client_height.max(0);
@@ -1949,14 +2141,18 @@ pub(crate) fn calculate_main_layout_with_safety(
         None => (RailMode::MenuOnly, 0, Vec::new(), Vec::new()),
     };
     let list_width = width.saturating_sub(rail_width.saturating_mul(2));
-    let cancel_preferred = measured
-        .cancel_text_width
-        .max(scale_dip(36, dpi))
-        .saturating_add(scale_dip(16, dpi));
+    let cancel_preferred = if status.cancel_visible {
+        measured
+            .cancel_text_width
+            .max(scale_dip(36, dpi))
+            .saturating_add(scale_dip(16, dpi))
+    } else {
+        0
+    };
     let cancel_width = cancel_preferred.min(width);
     let after_cancel = width.saturating_sub(cancel_width);
-    let count_preferred = measured
-        .status_count_text_width
+    let count_preferred = status
+        .measured_count_width
         .max(scale_dip(44, dpi))
         .saturating_add(scale_dip(12, dpi));
     let count_width = count_preferred.min(after_cancel);
@@ -2112,6 +2308,135 @@ pub(crate) struct PreviewCounts {
 pub(crate) struct PreviewCountCache {
     total: usize,
     changed: usize,
+}
+
+/// Model-only warning/blocker attached to one proposed-name row.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum PreviewRowIssue {
+    #[default]
+    None,
+    EmptyStem,
+    DuplicateDestination,
+}
+
+/// Cached preview-only diagnostics. These never authorize filesystem work.
+#[cfg(any(windows, test))]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PreviewIssueCache {
+    rows: Vec<PreviewRowIssue>,
+    warning_rows: usize,
+    blocker_rows: usize,
+}
+
+#[cfg(any(windows, test))]
+impl PreviewIssueCache {
+    pub(crate) fn refresh_by<'a, F>(
+        &mut self,
+        rows: impl IntoIterator<
+            Item = (
+                &'a darknamer_core::LegacyText,
+                &'a darknamer_core::LegacyText,
+                &'a darknamer_core::LegacyText,
+                bool,
+            ),
+        >,
+        compare: F,
+    ) where
+        F: Fn(&darknamer_core::LegacyText, &darknamer_core::LegacyText) -> std::cmp::Ordering
+            + Copy,
+    {
+        let rows = rows.into_iter().collect::<Vec<_>>();
+        self.rows.clear();
+        self.rows.resize(rows.len(), PreviewRowIssue::None);
+        let mut destinations = Vec::new();
+        for (row, (parent, current, proposed, is_directory)) in rows.iter().copied().enumerate() {
+            if current == proposed {
+                continue;
+            }
+            if preview_name_has_empty_stem(proposed, is_directory) {
+                self.rows[row] = PreviewRowIssue::EmptyStem;
+            }
+            destinations.push((row, parent, proposed));
+        }
+        destinations
+            .sort_by(|left, right| compare(left.1, right.1).then_with(|| compare(left.2, right.2)));
+        let mut group_start = 0_usize;
+        while group_start < destinations.len() {
+            let mut group_end = group_start + 1;
+            while group_end < destinations.len()
+                && compare(destinations[group_start].1, destinations[group_end].1)
+                    == std::cmp::Ordering::Equal
+                && compare(destinations[group_start].2, destinations[group_end].2)
+                    == std::cmp::Ordering::Equal
+            {
+                group_end += 1;
+            }
+            if group_end - group_start > 1 {
+                for destination in &destinations[group_start..group_end] {
+                    self.rows[destination.0] = PreviewRowIssue::DuplicateDestination;
+                }
+            }
+            group_start = group_end;
+        }
+        self.warning_rows = self
+            .rows
+            .iter()
+            .filter(|issue| matches!(issue, PreviewRowIssue::EmptyStem))
+            .count();
+        self.blocker_rows = self
+            .rows
+            .iter()
+            .filter(|issue| matches!(issue, PreviewRowIssue::DuplicateDestination))
+            .count();
+    }
+
+    #[must_use]
+    pub(crate) fn issue(&self, row: usize) -> PreviewRowIssue {
+        self.rows.get(row).copied().unwrap_or_default()
+    }
+
+    #[must_use]
+    pub(crate) const fn has_blocker(&self) -> bool {
+        self.blocker_rows != 0
+    }
+
+    #[must_use]
+    pub(crate) fn blocker_rows(&self) -> Box<[usize]> {
+        self.rows
+            .iter()
+            .enumerate()
+            .filter_map(|(row, issue)| {
+                matches!(issue, PreviewRowIssue::DuplicateDestination).then_some(row)
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    }
+
+    #[must_use]
+    pub(crate) fn notice(&self) -> Option<String> {
+        if self.blocker_rows != 0 {
+            Some(format!(
+                "대상 이름 충돌 {}개 · 변경 적용이 차단되었습니다.",
+                self.blocker_rows
+            ))
+        } else if self.warning_rows != 0 {
+            Some(format!(
+                "이름 본체가 비어 있는 항목 {}개 · 변경 전에 확인하세요.",
+                self.warning_rows
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+fn preview_name_has_empty_stem(name: &darknamer_core::LegacyText, is_directory: bool) -> bool {
+    if is_directory {
+        return name.is_empty();
+    }
+    name.units().iter().rposition(|unit| *unit == b'.' as u16) == Some(0)
 }
 
 #[cfg(any(windows, test))]
@@ -2277,6 +2602,8 @@ impl UiPresentation {
 pub(crate) enum ProposedNameVisual {
     Default,
     Changed,
+    Warning,
+    Collision,
 }
 
 /// Cached forced-colors state. Unknown queries fail closed like active mode.
@@ -2325,6 +2652,7 @@ pub(crate) struct ProposedNameVisualContext {
     pub(crate) row_count: usize,
     pub(crate) subitem: i32,
     pub(crate) changed: bool,
+    pub(crate) issue: PreviewRowIssue,
     pub(crate) selected: bool,
     pub(crate) focused: bool,
     pub(crate) custom_colors_enabled: bool,
@@ -2343,10 +2671,13 @@ pub(crate) const fn proposed_name_visual_decision(
         && valid_row
         && context.changed
         && !context.selected
-        && !context.focused
         && context.custom_colors_enabled
     {
-        ProposedNameVisual::Changed
+        match context.issue {
+            PreviewRowIssue::None => ProposedNameVisual::Changed,
+            PreviewRowIssue::EmptyStem => ProposedNameVisual::Warning,
+            PreviewRowIssue::DuplicateDestination => ProposedNameVisual::Collision,
+        }
     } else {
         ProposedNameVisual::Default
     }
@@ -2364,6 +2695,7 @@ pub(crate) struct UiStatus {
     transient: Option<String>,
     progress: Option<String>,
     recovery: Option<String>,
+    preview_notice: Option<String>,
 }
 
 #[cfg(any(windows, test))]
@@ -2408,11 +2740,16 @@ impl UiStatus {
         self.recovery = None;
     }
 
+    pub(crate) fn set_preview_notice(&mut self, notice: Option<String>) {
+        self.preview_notice = notice;
+    }
+
     #[must_use]
     pub(crate) fn message_text(&self) -> &str {
         self.recovery
             .as_deref()
             .or(self.progress.as_deref())
+            .or(self.preview_notice.as_deref())
             .or(self.transient.as_deref())
             .unwrap_or(EMPTY_LIST_STATUS)
     }
@@ -4379,6 +4716,14 @@ mod tests {
         );
         assert_eq!(strong.and_then(|colors| colors.background), None);
         assert_eq!(
+            proposed_name_colors(light, ProposedNameVisual::Warning).map(|colors| colors.text),
+            Some(PRECISION_LIGHT.warning)
+        );
+        assert_eq!(
+            proposed_name_colors(light, ProposedNameVisual::Collision).map(|colors| colors.text),
+            Some(PRECISION_LIGHT.collision)
+        );
+        assert_eq!(
             proposed_name_colors(light, ProposedNameVisual::Default),
             None
         );
@@ -4523,7 +4868,13 @@ mod tests {
     #[test]
     fn advanced_appearance_layout_keeps_every_control_inside_work_area_bounds() {
         for (dpi, width, height) in [(96, 456, 420), (144, 684, 630), (192, 912, 840)] {
-            let layout = calculate_appearance_dialog_layout(dpi, width, height, true);
+            let layout = calculate_appearance_dialog_layout(
+                dpi,
+                width,
+                height,
+                true,
+                AppearanceDialogMetrics::default(),
+            );
             assert!(layout.is_some(), "valid work area rejected at {dpi} DPI");
             let Some(layout) = layout else {
                 continue;
@@ -4555,14 +4906,32 @@ mod tests {
             }
         }
         assert_eq!(
-            calculate_appearance_dialog_layout(192, 320, 300, true),
+            calculate_appearance_dialog_layout(
+                192,
+                320,
+                300,
+                true,
+                AppearanceDialogMetrics::default(),
+            ),
             None
         );
         assert_eq!(
-            calculate_appearance_dialog_layout(192, 320, 300, false),
+            calculate_appearance_dialog_layout(
+                192,
+                320,
+                300,
+                false,
+                AppearanceDialogMetrics::default(),
+            ),
             None
         );
-        let layout = calculate_appearance_dialog_layout(96, 456, 420, true);
+        let layout = calculate_appearance_dialog_layout(
+            96,
+            456,
+            420,
+            true,
+            AppearanceDialogMetrics::default(),
+        );
         assert!(
             layout.is_some(),
             "baseline appearance dialog layout was rejected"
@@ -4599,8 +4968,20 @@ mod tests {
             }
         }
 
-        let ordinary = calculate_appearance_dialog_layout(96, 456, 420, false);
-        let forced = calculate_appearance_dialog_layout(96, 456, 420, true);
+        let ordinary = calculate_appearance_dialog_layout(
+            96,
+            456,
+            420,
+            false,
+            AppearanceDialogMetrics::default(),
+        );
+        let forced = calculate_appearance_dialog_layout(
+            96,
+            456,
+            420,
+            true,
+            AppearanceDialogMetrics::default(),
+        );
         let (Some(ordinary), Some(forced)) = (ordinary, forced) else {
             return;
         };
@@ -4619,6 +5000,51 @@ mod tests {
             ordinary.client.height - ordinary.cancel.bottom(),
             forced.client.height - forced.cancel.bottom(),
         );
+
+        let large = calculate_appearance_dialog_layout(
+            96,
+            900,
+            900,
+            true,
+            AppearanceDialogMetrics {
+                text_height: 36,
+                widest_option: 520,
+                widest_checkbox: 600,
+                button_text_height: 34,
+                widest_button: 180,
+            },
+        );
+        assert!(
+            large.is_some(),
+            "large measured system font should fit the supplied work area"
+        );
+        let Some(large) = large else {
+            return;
+        };
+        assert!(large.client.width > forced.client.width);
+        assert!(large.client.height > forced.client.height);
+        assert!(large.density_options[0].height >= 42);
+        assert!(large.cancel.height >= 46);
+    }
+
+    #[test]
+    fn empty_state_layout_uses_exact_second_pass_wrapped_heights() {
+        let measured = MeasuredFontMetrics {
+            empty_instruction_text_width: 2_000,
+            empty_instruction_text_height: 20,
+            empty_safety_text_width: 3_000,
+            empty_safety_text_height: 18,
+            empty_wrap_width: 300,
+            empty_instruction_wrapped_height: 41,
+            empty_safety_wrapped_height: 59,
+            ..MeasuredFontMetrics::default()
+        };
+
+        let content = measured.empty_state_content_metrics(96, 300, true);
+
+        assert_eq!(content.instruction_height, 41);
+        assert_eq!(content.safety_height, 59);
+        assert!(content.total_height >= 100);
     }
 
     #[test]
@@ -4690,6 +5116,9 @@ mod tests {
             empty_safety_text_height: 32,
             empty_add_text_width: 150,
             empty_add_text_height: 34,
+            empty_wrap_width: 0,
+            empty_instruction_wrapped_height: 0,
+            empty_safety_wrapped_height: 0,
             drop_overlay_text_width: 420,
             drop_overlay_text_height: 34,
         };
@@ -4848,6 +5277,7 @@ mod tests {
             measured,
             RailDensityPreference::Automatic,
             false,
+            StatusLayoutInput::default(),
         );
         let hidden_content =
             measured.empty_state_content_metrics(96, hidden.empty_instruction.width, false);
@@ -4870,6 +5300,7 @@ mod tests {
             measured,
             RailDensityPreference::Automatic,
             true,
+            StatusLayoutInput::default(),
         );
         let shown_content =
             measured.empty_state_content_metrics(96, shown.empty_instruction.width, true);
@@ -4881,6 +5312,52 @@ mod tests {
                 .list
                 .y
                 .saturating_add(shown.list.height.saturating_sub(shown_content.total_height) / 2,),
+        );
+    }
+
+    #[test]
+    fn status_layout_returns_hidden_cancel_width_and_uses_current_count_width() {
+        let measured = MeasuredFontMetrics {
+            status_text_height: 16,
+            status_count_text_width: 400,
+            cancel_text_width: 52,
+            cancel_text_height: 20,
+            ..MeasuredFontMetrics::default()
+        };
+        let hidden = calculate_main_layout_with_safety(
+            800,
+            500,
+            96,
+            measured,
+            RailDensityPreference::Automatic,
+            true,
+            StatusLayoutInput {
+                cancel_visible: false,
+                measured_count_width: 120,
+            },
+        );
+        assert_eq!(hidden.cancel.width, 0);
+        assert_eq!(hidden.status_count.width, 132);
+        assert_eq!(hidden.status_message.width, 668);
+
+        let visible = calculate_main_layout_with_safety(
+            800,
+            500,
+            96,
+            measured,
+            RailDensityPreference::Automatic,
+            true,
+            StatusLayoutInput {
+                cancel_visible: true,
+                measured_count_width: 120,
+            },
+        );
+        assert_eq!(visible.cancel.width, 68);
+        assert_eq!(visible.status_count.width, 132);
+        assert_eq!(visible.status_message.width, 600);
+        assert_eq!(
+            visible.status_message.width + visible.status_count.width + visible.cancel.width,
+            800
         );
     }
 
@@ -4980,6 +5457,7 @@ mod tests {
         let mut status = UiStatus::with_recovery("복구 상태를 확인하세요.");
         status.set_transient("2개 경로를 제외했습니다.");
         status.set_progress("파일 이름 변경 중: 3/10 단계");
+        status.set_preview_notice(Some("대상 이름 충돌 2개".to_owned()));
         status.set_preview_counts(PreviewCounts {
             total: 120,
             changed: 37,
@@ -5000,6 +5478,8 @@ mod tests {
         status.clear_recovery();
         assert_eq!(status.message_text(), "파일 이름 변경 중: 3/10 단계");
         status.clear_progress();
+        assert_eq!(status.message_text(), "대상 이름 충돌 2개");
+        status.set_preview_notice(None);
         assert_eq!(status.message_text(), "2개 경로를 제외했습니다.");
 
         let empty = UiStatus::default();
@@ -5154,6 +5634,7 @@ mod tests {
                 row_count: 1,
                 subitem: 1,
                 changed: true,
+                issue: PreviewRowIssue::None,
                 selected,
                 focused,
                 custom_colors_enabled,
@@ -5161,7 +5642,7 @@ mod tests {
         };
         assert_eq!(changed(false, false, true), ProposedNameVisual::Changed);
         assert_eq!(changed(true, false, true), ProposedNameVisual::Default);
-        assert_eq!(changed(false, true, true), ProposedNameVisual::Default);
+        assert_eq!(changed(false, true, true), ProposedNameVisual::Changed);
         assert_eq!(changed(false, false, false), ProposedNameVisual::Default);
         assert_eq!(
             ForcedColorsState::from_high_contrast_query(Some(false)),
@@ -5179,6 +5660,7 @@ mod tests {
                 row_count: 1,
                 subitem: 1,
                 changed: true,
+                issue: PreviewRowIssue::None,
                 selected: false,
                 focused: false,
                 custom_colors_enabled: true,
@@ -5191,11 +5673,68 @@ mod tests {
                 row_count: 1,
                 subitem: 0,
                 changed: true,
+                issue: PreviewRowIssue::None,
                 selected: false,
                 focused: false,
                 custom_colors_enabled: true,
             }),
             ProposedNameVisual::Default
+        );
+        assert_eq!(
+            proposed_name_visual_decision(ProposedNameVisualContext {
+                row: Some(0),
+                row_count: 1,
+                subitem: 1,
+                changed: true,
+                issue: PreviewRowIssue::DuplicateDestination,
+                selected: false,
+                focused: true,
+                custom_colors_enabled: true,
+            }),
+            ProposedNameVisual::Collision
+        );
+    }
+
+    #[test]
+    fn preview_issues_distinguish_empty_stems_and_duplicate_destinations() {
+        use darknamer_core::LegacyText;
+
+        let parent = LegacyText::from(r"C:\work");
+        let other_parent = LegacyText::from(r"C:\other");
+        let current_one = LegacyText::from("photo01.jpg");
+        let current_two = LegacyText::from("photo02.jpg");
+        let current_three = LegacyText::from("photo03.jpg");
+        let duplicate = LegacyText::from(".jpg");
+        let warning_only = LegacyText::from(".png");
+        let mut cache = PreviewIssueCache::default();
+
+        cache.refresh_by(
+            [
+                (&parent, &current_one, &duplicate, false),
+                (&parent, &current_two, &duplicate, false),
+                (&other_parent, &current_three, &warning_only, false),
+            ],
+            LegacyText::case_insensitive_cmp,
+        );
+
+        assert_eq!(cache.issue(0), PreviewRowIssue::DuplicateDestination);
+        assert_eq!(cache.issue(1), PreviewRowIssue::DuplicateDestination);
+        assert_eq!(cache.issue(2), PreviewRowIssue::EmptyStem);
+        assert!(cache.has_blocker());
+        assert_eq!(cache.blocker_rows().as_ref(), &[0, 1]);
+        assert_eq!(
+            cache.notice().as_deref(),
+            Some("대상 이름 충돌 2개 · 변경 적용이 차단되었습니다.")
+        );
+
+        cache.refresh_by(
+            [(&other_parent, &current_three, &warning_only, false)],
+            LegacyText::case_insensitive_cmp,
+        );
+        assert!(!cache.has_blocker());
+        assert_eq!(
+            cache.notice().as_deref(),
+            Some("이름 본체가 비어 있는 항목 1개 · 변경 전에 확인하세요.")
         );
     }
 
