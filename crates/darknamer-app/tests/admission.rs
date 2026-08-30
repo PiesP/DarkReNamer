@@ -8,7 +8,7 @@ use darknamer_app::admission::{
     AdmissionAdapter, AdmissionAdapterError, AdmissionChildren, AdmissionIssueKind,
     AdmissionMetadata, AdmissionMode, AdmissionOperation, MAX_ADMISSION_DEPTH,
     MAX_ADMITTED_SOURCES, MAX_IMPORT_BYTES, bounded_import_lines, bounded_selection,
-    collect_admission, read_bounded_import,
+    collect_admission, collect_admission_cancellable, read_bounded_import,
 };
 use darknamer_app::rename::EntryIdentity;
 use darknamer_core::LegacyText;
@@ -48,6 +48,34 @@ impl AdmissionAdapter for FakeAdapter {
             paths: children.iter().take(limit).cloned().collect(),
             had_errors: false,
             truncated: children.len() > limit,
+        })
+    }
+
+    fn read_children_cancellable(
+        &self,
+        path: &Path,
+        limit: usize,
+        cancellation_requested: &dyn Fn() -> bool,
+    ) -> Result<AdmissionChildren, darknamer_app::admission::AdmissionReadError> {
+        self.enumeration_calls.set(self.enumeration_calls.get() + 1);
+        let children = self.children.get(path).ok_or_else(|| {
+            darknamer_app::admission::AdmissionReadError::Adapter(AdmissionAdapterError::new(
+                AdmissionOperation::ReadDirectory,
+            ))
+        })?;
+        let mut paths = Vec::with_capacity(limit.min(children.len()));
+        for child in children.iter().take(limit.saturating_add(1)) {
+            if cancellation_requested() {
+                return Err(darknamer_app::admission::AdmissionReadError::Cancelled);
+            }
+            paths.push(child.clone());
+        }
+        let truncated = paths.len() > limit;
+        paths.truncate(limit);
+        Ok(AdmissionChildren {
+            paths,
+            had_errors: false,
+            truncated,
         })
     }
 
@@ -174,6 +202,65 @@ fn hard_limit_stops_before_inspecting_additional_metadata() {
             .iter()
             .any(|issue| issue.kind == AdmissionIssueKind::LimitReached)
     );
+}
+
+#[test]
+fn cancellation_stops_during_child_enumeration_before_descendant_metadata() {
+    let root = test_root();
+    let children = (0..100)
+        .map(|index| root.join(format!("child-{index:03}.txt")))
+        .collect::<Vec<_>>();
+    let mut adapter = FakeAdapter::default();
+    adapter.metadata.insert(root.clone(), directory(1));
+    adapter.children.insert(root.clone(), children);
+    let checks = Cell::new(0_usize);
+
+    let result = collect_admission_cancellable(
+        &adapter,
+        vec![root],
+        AdmissionMode::Recurse,
+        MAX_ADMITTED_SOURCES,
+        compare,
+        || {
+            let next = checks.get().saturating_add(1);
+            checks.set(next);
+            next >= 12
+        },
+    );
+
+    assert_eq!(result, Err(darknamer_app::admission::AdmissionCancelled));
+    assert_eq!(adapter.enumeration_calls.get(), 1);
+    assert_eq!(adapter.metadata_calls.get(), 1);
+}
+
+#[test]
+fn cancellation_stops_inside_root_sort_with_bounded_additional_comparisons() {
+    let root = test_root();
+    let roots = (0..MAX_ADMITTED_SOURCES)
+        .rev()
+        .map(|index| root.join(format!("long-sort-path-{index:05}-{}", "x".repeat(128))))
+        .collect::<Vec<_>>();
+    let cancelled = Cell::new(false);
+    let comparisons = Cell::new(0_usize);
+
+    let result = collect_admission_cancellable(
+        &FakeAdapter::default(),
+        roots,
+        AdmissionMode::Direct,
+        MAX_ADMITTED_SOURCES,
+        |left, right| {
+            let next = comparisons.get().saturating_add(1);
+            comparisons.set(next);
+            if next == 7 {
+                cancelled.set(true);
+            }
+            left.cmp(right)
+        },
+        || cancelled.get(),
+    );
+
+    assert_eq!(result, Err(darknamer_app::admission::AdmissionCancelled));
+    assert_eq!(comparisons.get(), 7);
 }
 
 #[test]

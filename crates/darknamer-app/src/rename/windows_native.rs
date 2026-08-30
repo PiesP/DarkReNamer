@@ -343,6 +343,31 @@ pub(crate) fn query_directory_names(
     directory: &File,
     limit: usize,
 ) -> io::Result<(Vec<Vec<u16>>, bool)> {
+    match query_directory_names_cancellable(directory, limit, &|| false) {
+        Ok(result) => Ok(result),
+        Err(DirectoryQueryError::Io(error)) => Err(error),
+        Err(DirectoryQueryError::Cancelled) => {
+            unreachable!("the non-cancellable directory query cannot be cancelled")
+        }
+    }
+}
+
+pub(crate) enum DirectoryQueryError {
+    Cancelled,
+    Io(io::Error),
+}
+
+impl From<io::Error> for DirectoryQueryError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+pub(crate) fn query_directory_names_cancellable(
+    directory: &File,
+    limit: usize,
+    cancellation_requested: &dyn Fn() -> bool,
+) -> Result<(Vec<Vec<u16>>, bool), DirectoryQueryError> {
     let name_capacity = 255_usize;
     let bytes = offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileName)
         .checked_add(name_capacity * size_of::<u16>())
@@ -353,6 +378,9 @@ pub(crate) fn query_directory_names(
     let mut names = Vec::with_capacity(limit.min(name_capacity));
     let mut restart = true;
     loop {
+        if cancellation_requested() {
+            return Err(DirectoryQueryError::Cancelled);
+        }
         let mut buffer = vec![FILE_ID_BOTH_DIR_INFORMATION::default(); elements];
         let mut status_block = IO_STATUS_BLOCK::default();
         // SAFETY: directory is a retained directory handle; buffer and status
@@ -373,6 +401,9 @@ pub(crate) fn query_directory_names(
                 restart,
             )
         };
+        if cancellation_requested() {
+            return Err(DirectoryQueryError::Cancelled);
+        }
         restart = false;
         if status == STATUS_NO_MORE_FILES {
             return Ok((names, false));
@@ -380,15 +411,15 @@ pub(crate) fn query_directory_names(
         if status < 0 {
             // SAFETY: status came directly from NtQueryDirectoryFile.
             let code = unsafe { RtlNtStatusToDosErrorNoTeb(status) };
-            return Err(io::Error::from_raw_os_error(
+            return Err(DirectoryQueryError::Io(io::Error::from_raw_os_error(
                 i32::try_from(code).unwrap_or(i32::MAX),
-            ));
+            )));
         }
         let entry = &buffer[0];
         let name_units = usize::try_from(entry.FileNameLength / 2)
             .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
         if name_units > name_capacity {
-            return Err(io::Error::from(io::ErrorKind::InvalidData));
+            return Err(io::Error::from(io::ErrorKind::InvalidData).into());
         }
         // SAFETY: FileNameLength was returned for this initialized flexible
         // array and is bounded by the allocation above.

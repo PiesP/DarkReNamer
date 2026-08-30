@@ -2,6 +2,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, VecDeque};
+use std::fmt;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
@@ -170,6 +171,48 @@ pub struct AdmissionAdapterError {
     pub code: Option<u32>,
 }
 
+/// Cooperative cancellation observed while collecting admission sources.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AdmissionCancelled;
+
+/// One directory-read outcome kept separate from filesystem failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdmissionReadError {
+    /// The caller requested cooperative cancellation.
+    Cancelled,
+    /// The platform adapter could not enumerate the directory.
+    Adapter(AdmissionAdapterError),
+}
+
+impl fmt::Display for AdmissionCancelled {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("source admission was cancelled")
+    }
+}
+
+impl std::error::Error for AdmissionCancelled {}
+
+impl fmt::Display for AdmissionReadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled => formatter.write_str("directory admission was cancelled"),
+            Self::Adapter(error) => write!(
+                formatter,
+                "directory admission {:?} failed with code {:?}",
+                error.operation, error.code
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AdmissionReadError {}
+
+impl From<AdmissionAdapterError> for AdmissionReadError {
+    fn from(error: AdmissionAdapterError) -> Self {
+        Self::Adapter(error)
+    }
+}
+
 impl AdmissionAdapterError {
     /// Creates an adapter error without a native code.
     #[must_use]
@@ -205,6 +248,27 @@ pub trait AdmissionAdapter {
         path: &Path,
         limit: usize,
     ) -> Result<AdmissionChildren, AdmissionAdapterError>;
+
+    /// Reads children while polling cancellation between platform entries.
+    ///
+    /// The default keeps existing adapters source-compatible; production
+    /// adapters with incremental enumeration should override this method.
+    fn read_children_cancellable(
+        &self,
+        path: &Path,
+        limit: usize,
+        cancellation_requested: &dyn Fn() -> bool,
+    ) -> Result<AdmissionChildren, AdmissionReadError> {
+        if cancellation_requested() {
+            return Err(AdmissionReadError::Cancelled);
+        }
+        let children = self.read_children(path, limit)?;
+        if cancellation_requested() {
+            Err(AdmissionReadError::Cancelled)
+        } else {
+            Ok(children)
+        }
+    }
 
     /// Converts a platform path into exact legacy text.
     fn legacy_path(&self, path: &Path) -> LegacyText;
@@ -271,17 +335,118 @@ fn issue(
     }
 }
 
+fn sort_paths_cancellable(
+    paths: &mut Vec<PathBuf>,
+    compare_paths: impl Fn(&Path, &Path) -> Ordering + Copy,
+    cancellation_requested: &dyn Fn() -> bool,
+) -> Result<(), AdmissionCancelled> {
+    let len = paths.len();
+    if len < 2 {
+        return if cancellation_requested() {
+            Err(AdmissionCancelled)
+        } else {
+            Ok(())
+        };
+    }
+    let mut order = (0..len).collect::<Vec<_>>();
+    let mut merged = vec![0_usize; len];
+    let mut width = 1_usize;
+    while width < len {
+        let mut start = 0_usize;
+        while start < len {
+            let middle = start.saturating_add(width).min(len);
+            let end = middle.saturating_add(width).min(len);
+            let (mut left, mut right, mut output) = (start, middle, start);
+            while left < middle && right < end {
+                if cancellation_requested() {
+                    return Err(AdmissionCancelled);
+                }
+                let take_left =
+                    compare_paths(&paths[order[left]], &paths[order[right]]) != Ordering::Greater;
+                merged[output] = if take_left {
+                    let index = order[left];
+                    left += 1;
+                    index
+                } else {
+                    let index = order[right];
+                    right += 1;
+                    index
+                };
+                output += 1;
+            }
+            while left < middle {
+                if cancellation_requested() {
+                    return Err(AdmissionCancelled);
+                }
+                merged[output] = order[left];
+                left += 1;
+                output += 1;
+            }
+            while right < end {
+                if cancellation_requested() {
+                    return Err(AdmissionCancelled);
+                }
+                merged[output] = order[right];
+                right += 1;
+                output += 1;
+            }
+            start = end;
+        }
+        std::mem::swap(&mut order, &mut merged);
+        width = width.saturating_mul(2);
+    }
+    if cancellation_requested() {
+        return Err(AdmissionCancelled);
+    }
+    let mut slots = std::mem::take(paths)
+        .into_iter()
+        .map(Some)
+        .collect::<Vec<_>>();
+    paths.extend(
+        order
+            .into_iter()
+            .filter_map(|index| slots.get_mut(index).and_then(Option::take)),
+    );
+    debug_assert_eq!(paths.len(), len);
+    Ok(())
+}
+
 /// Collects sources iteratively in bounded depth-first order, sorting each
 /// bounded root/child subset without claiming a global lexical capped subset.
 pub fn collect_admission(
+    adapter: &dyn AdmissionAdapter,
+    roots: Vec<PathBuf>,
+    mode: AdmissionMode,
+    capacity: usize,
+    compare_paths: impl Fn(&Path, &Path) -> Ordering + Copy,
+) -> AdmissionReport {
+    match collect_admission_cancellable(adapter, roots, mode, capacity, compare_paths, || false) {
+        Ok(report) => report,
+        Err(AdmissionCancelled) => {
+            unreachable!("the non-cancellable admission wrapper cannot be cancelled")
+        }
+    }
+}
+
+/// Collects sources while polling cooperative cancellation throughout traversal.
+///
+/// # Errors
+///
+/// Returns [`AdmissionCancelled`] without manufacturing a path-scoped issue
+/// when the caller requests cancellation.
+pub fn collect_admission_cancellable(
     adapter: &dyn AdmissionAdapter,
     mut roots: Vec<PathBuf>,
     mode: AdmissionMode,
     capacity: usize,
     compare_paths: impl Fn(&Path, &Path) -> Ordering + Copy,
-) -> AdmissionReport {
+    cancellation_requested: impl Fn() -> bool,
+) -> Result<AdmissionReport, AdmissionCancelled> {
     let capacity = capacity.min(MAX_ADMITTED_SOURCES);
     let mut report = AdmissionReport::default();
+    if cancellation_requested() {
+        return Err(AdmissionCancelled);
+    }
     if roots.len() > capacity {
         report.issues.push(issue(
             roots[capacity].clone(),
@@ -290,15 +455,21 @@ pub fn collect_admission(
         ));
         roots.truncate(capacity);
     }
-    roots.sort_by(|left, right| compare_paths(left, right));
+    sort_paths_cancellable(&mut roots, compare_paths, &cancellation_requested)?;
     let mut stack = VecDeque::new();
     for root in roots.into_iter().rev() {
+        if cancellation_requested() {
+            return Err(AdmissionCancelled);
+        }
         stack.push_back((root, 0_usize));
     }
     let mut seen_directories = BTreeSet::new();
     let mut inspected = 0_usize;
 
     while let Some((path, depth)) = stack.pop_back() {
+        if cancellation_requested() {
+            return Err(AdmissionCancelled);
+        }
         if inspected >= capacity {
             report
                 .issues
@@ -318,6 +489,9 @@ pub fn collect_admission(
                 .push(issue(path, AdmissionIssueKind::Metadata, Some(error)));
             continue;
         }
+        if cancellation_requested() {
+            return Err(AdmissionCancelled);
+        }
         let metadata = match adapter.metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) => {
@@ -327,6 +501,9 @@ pub fn collect_admission(
                 continue;
             }
         };
+        if cancellation_requested() {
+            return Err(AdmissionCancelled);
+        }
         if metadata.is_reparse_point {
             report
                 .issues
@@ -358,12 +535,17 @@ pub fn collect_admission(
                         .push(issue(path, AdmissionIssueKind::LimitReached, None));
                     break;
                 }
-                match adapter.read_children(&path, remaining) {
+                match adapter.read_children_cancellable(&path, remaining, &cancellation_requested) {
                     Ok(mut children) => {
-                        children
-                            .paths
-                            .sort_by(|left, right| compare_paths(left, right));
+                        sort_paths_cancellable(
+                            &mut children.paths,
+                            compare_paths,
+                            &cancellation_requested,
+                        )?;
                         for child in children.paths.into_iter().rev() {
+                            if cancellation_requested() {
+                                return Err(AdmissionCancelled);
+                            }
                             stack.push_back((child, depth + 1));
                         }
                         if children.had_errors {
@@ -379,7 +561,8 @@ pub fn collect_admission(
                                 .push(issue(path, AdmissionIssueKind::LimitReached, None));
                         }
                     }
-                    Err(error) => report.issues.push(issue(
+                    Err(AdmissionReadError::Cancelled) => return Err(AdmissionCancelled),
+                    Err(AdmissionReadError::Adapter(error)) => report.issues.push(issue(
                         path,
                         AdmissionIssueKind::ReadDirectory,
                         Some(error),
@@ -397,7 +580,7 @@ pub fn collect_admission(
             metadata.modified,
         ));
     }
-    report
+    Ok(report)
 }
 
 #[cfg(windows)]
@@ -411,7 +594,8 @@ mod windows {
     use darknamer_core::validate_windows_leaf_name;
 
     use crate::rename::windows_native::{
-        NativeParent, file_identity, open_directory_entry, open_entry, query_directory_names,
+        DirectoryQueryError, NativeParent, file_identity, open_directory_entry, open_entry,
+        query_directory_names, query_directory_names_cancellable,
     };
 
     use super::*;
@@ -521,6 +705,47 @@ mod windows {
             let mut paths = Vec::with_capacity(names.len());
             let mut had_errors = false;
             for name in names {
+                let text = LegacyText::from_units(name.clone());
+                if validate_windows_leaf_name(&text).is_err() {
+                    had_errors = true;
+                    continue;
+                }
+                paths.push(path.join(std::ffi::OsString::from_wide(&name)));
+            }
+            Ok(AdmissionChildren {
+                paths,
+                had_errors,
+                truncated,
+            })
+        }
+
+        fn read_children_cancellable(
+            &self,
+            path: &Path,
+            limit: usize,
+            cancellation_requested: &dyn Fn() -> bool,
+        ) -> Result<AdmissionChildren, AdmissionReadError> {
+            let directories = self.directories.borrow();
+            let directory = directories
+                .get(path)
+                .ok_or_else(|| AdmissionAdapterError::new(AdmissionOperation::ReadDirectory))?;
+            let (names, truncated) =
+                query_directory_names_cancellable(directory, limit, cancellation_requested)
+                    .map_err(|error| match error {
+                        DirectoryQueryError::Cancelled => AdmissionReadError::Cancelled,
+                        DirectoryQueryError::Io(error) => {
+                            AdmissionReadError::Adapter(AdmissionAdapterError::from_io(
+                                AdmissionOperation::ReadDirectory,
+                                &error,
+                            ))
+                        }
+                    })?;
+            let mut paths = Vec::with_capacity(names.len());
+            let mut had_errors = false;
+            for name in names {
+                if cancellation_requested() {
+                    return Err(AdmissionReadError::Cancelled);
+                }
                 let text = LegacyText::from_units(name.clone());
                 if validate_windows_leaf_name(&text).is_err() {
                     had_errors = true;

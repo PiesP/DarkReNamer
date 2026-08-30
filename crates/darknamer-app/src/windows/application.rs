@@ -396,6 +396,9 @@ unsafe extern "system" fn window_proc(
             if create_children(window, unsafe { &mut *state_ptr }).is_err() {
                 return -1;
             }
+            // SAFETY: child creation succeeded and state_ptr remains the live,
+            // UI-thread-confined AppState for this top-level window.
+            start_preferences_writer(window, unsafe { &mut *state_ptr });
             0
         }
         WM_SIZE if !state_ptr.is_null() => {
@@ -516,6 +519,16 @@ unsafe extern "system" fn window_proc(
         WM_APP_ADMISSION_COMPLETE if !state_ptr.is_null() => {
             // SAFETY: state_ptr is the live UI-thread AppState for this window.
             handle_admission_completion(window, unsafe { &mut *state_ptr });
+            0
+        }
+        WM_APP_PREFERENCES_WAKE if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is the live UI-thread AppState for this window.
+            handle_preferences_wake(window, unsafe { &mut *state_ptr });
+            0
+        }
+        WM_TIMER if !state_ptr.is_null() && wparam == PREFERENCES_POLL_TIMER_ID => {
+            // SAFETY: state_ptr is the live UI-thread AppState for this window.
+            handle_preferences_wake(window, unsafe { &mut *state_ptr });
             0
         }
         WM_TIMER if !state_ptr.is_null() && wparam == APPLY_POLL_TIMER_ID => {
@@ -691,6 +704,8 @@ unsafe extern "system" fn window_proc(
                 // SAFETY: this timer identifier is process-owned; killing an
                 // absent timer is harmless during defensive teardown.
                 unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
+                // SAFETY: same defensive teardown for the preference poll timer.
+                unsafe { KillTimer(window, PREFERENCES_POLL_TIMER_ID) };
                 // SAFETY: state_ptr is the non-null Box::into_raw AppState stored at WM_NCCREATE; WM_NCDESTROY is its single reclamation point.
                 unsafe { drop(Box::from_raw(state_ptr)) };
             }

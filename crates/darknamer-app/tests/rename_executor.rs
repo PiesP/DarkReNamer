@@ -8,7 +8,7 @@ use darknamer_app::rename::{
     MAX_TEMP_CANDIDATES, MemoryBackend, MemoryJournal, ModelRevision, MutationCertainty, PathKey,
     PathSnapshot, PlanId, PlanRequest, RecoveryReason, RecoveryState, RenameBackend,
     RenameExecutor, RenameIntent, RenameOperation, RenamePlanner, RenameState, TemporaryPhase,
-    preflight_plan, replay_journal,
+    preflight_plan, preflight_plan_cancellable, replay_journal,
 };
 
 fn intent(id: u32, source_name: &str, destination_name: &str) -> RenameIntent {
@@ -35,6 +35,51 @@ fn confirmed_plan(
 struct CancelDuringRenameBackend {
     inner: MemoryBackend,
     token: Arc<CancellationToken>,
+}
+
+struct CancelDuringObserveBackend {
+    inner: MemoryBackend,
+    token: Arc<CancellationToken>,
+    observations: std::cell::Cell<usize>,
+    cancel_on_observation: usize,
+}
+
+impl RenameBackend for CancelDuringObserveBackend {
+    fn validate_path_environment(
+        &self,
+        path: &darknamer_core::LegacyText,
+    ) -> Result<(), BackendError> {
+        self.inner.validate_path_environment(path)
+    }
+
+    fn path_key(&self, path: &darknamer_core::LegacyText) -> PathKey {
+        self.inner.path_key(path)
+    }
+
+    fn observe(&self, path: &darknamer_core::LegacyText) -> Result<PathSnapshot, BackendError> {
+        let observations = self.observations.get().saturating_add(1);
+        self.observations.set(observations);
+        if observations == self.cancel_on_observation {
+            self.token.request();
+        }
+        self.inner.observe(path)
+    }
+
+    fn is_same_or_descendant(
+        &self,
+        ancestor: &darknamer_core::LegacyText,
+        candidate: &darknamer_core::LegacyText,
+    ) -> Result<bool, BackendError> {
+        self.inner.is_same_or_descendant(ancestor, candidate)
+    }
+
+    fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
+        self.inner.next_transaction_nonce()
+    }
+
+    fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+        self.inner.rename_no_replace(operation)
+    }
 }
 
 impl RenameBackend for CancelDuringRenameBackend {
@@ -160,6 +205,35 @@ fn preflight_reports_exact_primitive_steps_for_mixed_direct_cycle_and_case_only_
 
     assert_eq!(requirements.primitive_steps(), 6);
     assert!(requirements.intent_frame_bytes() < MAX_JOURNAL_FRAME_BYTES);
+    Ok(())
+}
+
+#[test]
+fn cancellation_stops_schedule_preflight_without_filesystem_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let count = 128_usize;
+    let mut backend = MemoryBackend::new();
+    let mut intents = Vec::with_capacity(count);
+    for index in 0..count {
+        let source = format!("source-{index:03}.txt");
+        let destination = format!("target-{index:03}.txt");
+        backend = backend.with_file(format!("C:\\work\\{source}"), index as u128 + 1);
+        intents.push(intent(index as u32, &source, &destination));
+    }
+    let plan =
+        RenamePlanner::new(&backend).plan(PlanRequest::new(ModelRevision::new(1), intents))?;
+    let checks = std::cell::Cell::new(0_usize);
+
+    let error = preflight_plan_cancellable(&plan, &mut backend, || {
+        let next = checks.get().saturating_add(1);
+        checks.set(next);
+        next >= 24
+    })
+    .err()
+    .ok_or_else(|| std::io::Error::other("cancelled preflight completed"))?;
+
+    assert_eq!(error.kind, ExecuteErrorKind::Cancelled);
+    assert_eq!(backend.mutation_count(), 0);
     Ok(())
 }
 
@@ -553,6 +627,40 @@ fn cancellation_before_begin_has_no_journal_or_filesystem_mutation()
     assert_eq!(error.kind, ExecuteErrorKind::Cancelled);
     assert_eq!(backend.mutation_count(), 0);
     assert!(journal.records().is_empty());
+    Ok(())
+}
+
+#[test]
+fn cancellation_during_freeze_stops_before_journal_begin_or_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let planned_backend = MemoryBackend::new()
+        .with_file("C:\\work\\a.txt", 1)
+        .with_file("C:\\work\\b.txt", 2);
+    let confirmed = confirmed_plan(
+        &planned_backend,
+        vec![
+            intent(0, "a.txt", "a-new.txt"),
+            intent(1, "b.txt", "b-new.txt"),
+        ],
+    )?;
+    let token = Arc::new(CancellationToken::new());
+    let mut backend = CancelDuringObserveBackend {
+        inner: planned_backend,
+        token: Arc::clone(&token),
+        observations: std::cell::Cell::new(0),
+        cancel_on_observation: 1,
+    };
+    let mut journal = MemoryJournal::new();
+
+    let error = RenameExecutor::new(&mut backend, &mut journal)
+        .execute_with_control(confirmed, token.as_ref())
+        .err()
+        .ok_or_else(|| std::io::Error::other("cancelled freeze began execution"))?;
+
+    assert_eq!(error.kind, ExecuteErrorKind::Cancelled);
+    assert_eq!(backend.inner.mutation_count(), 0);
+    assert!(journal.records().is_empty());
+    assert!(backend.observations.get() < 4);
     Ok(())
 }
 

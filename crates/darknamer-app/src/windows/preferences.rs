@@ -2,6 +2,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::ColumnState;
@@ -21,6 +24,185 @@ static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 pub(crate) struct ColumnPreferencesLoad {
     pub(crate) columns: [ColumnState; 7],
     pub(crate) failure: Option<io::Error>,
+}
+
+#[derive(Clone, Copy)]
+struct PreferenceRequest {
+    generation: u64,
+    columns: [ColumnState; COLUMN_COUNT],
+}
+
+#[derive(Default)]
+struct PreferenceQueue {
+    pending: Option<PreferenceRequest>,
+    shutdown: bool,
+}
+
+/// Terminal or per-generation result emitted by the durable settings writer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum PreferenceWriteEvent {
+    Saved { generation: u64 },
+    Failed { generation: u64, error: String },
+    Stopped,
+    Panicked,
+}
+
+type SavePreferences =
+    dyn Fn(&Path, &[ColumnState; COLUMN_COUNT]) -> io::Result<()> + Send + Sync + 'static;
+
+/// Single durable writer that coalesces pending UI preference snapshots.
+pub(crate) struct PreferencesWriter {
+    queue: Arc<(Mutex<PreferenceQueue>, Condvar)>,
+    events: Receiver<PreferenceWriteEvent>,
+    handle: Option<JoinHandle<()>>,
+    next_generation: u64,
+}
+
+impl PreferencesWriter {
+    pub(crate) fn spawn(
+        path: PathBuf,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> io::Result<Self> {
+        Self::spawn_with(path, wake, Arc::new(save))
+    }
+
+    fn spawn_with(
+        path: PathBuf,
+        wake: impl Fn() + Send + Sync + 'static,
+        save_preferences: Arc<SavePreferences>,
+    ) -> io::Result<Self> {
+        let queue = Arc::new((Mutex::new(PreferenceQueue::default()), Condvar::new()));
+        let worker_queue = Arc::clone(&queue);
+        let wake = Arc::new(wake);
+        let worker_wake = Arc::clone(&wake);
+        let (sender, events) = channel();
+        let handle = thread::Builder::new()
+            .name("darkrenamer-preferences".to_owned())
+            .spawn(move || {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    loop {
+                        let request = {
+                            let (lock, available) = worker_queue.as_ref();
+                            let mut state = lock
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            while state.pending.is_none() && !state.shutdown {
+                                state = available
+                                    .wait(state)
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            }
+                            match state.pending.take() {
+                                Some(request) => request,
+                                None => break,
+                            }
+                        };
+                        let event = match save_preferences(&path, &request.columns) {
+                            Ok(()) => PreferenceWriteEvent::Saved {
+                                generation: request.generation,
+                            },
+                            Err(error) => PreferenceWriteEvent::Failed {
+                                generation: request.generation,
+                                error: error.to_string(),
+                            },
+                        };
+                        let _sent = sender.send(event);
+                        worker_wake();
+                    }
+                }));
+                let terminal = if outcome.is_ok() {
+                    PreferenceWriteEvent::Stopped
+                } else {
+                    PreferenceWriteEvent::Panicked
+                };
+                let _sent = sender.send(terminal);
+                worker_wake();
+            })?;
+        Ok(Self {
+            queue,
+            events,
+            handle: Some(handle),
+            next_generation: 0,
+        })
+    }
+
+    pub(crate) fn submit(&mut self, columns: [ColumnState; COLUMN_COUNT]) -> io::Result<u64> {
+        if self.is_finished() {
+            return Err(io::Error::other("column preference writer has stopped"));
+        }
+        let generation = self.next_generation.saturating_add(1);
+        let (lock, available) = self.queue.as_ref();
+        let mut state = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.shutdown {
+            return Err(io::Error::other(
+                "column preference writer is shutting down",
+            ));
+        }
+        self.next_generation = generation;
+        state.pending = Some(PreferenceRequest {
+            generation,
+            columns,
+        });
+        available.notify_one();
+        Ok(generation)
+    }
+
+    pub(crate) fn shutdown_with(
+        &mut self,
+        columns: [ColumnState; COLUMN_COUNT],
+    ) -> io::Result<u64> {
+        if self.is_finished() {
+            return Err(io::Error::other("column preference writer has stopped"));
+        }
+        let generation = self.next_generation.saturating_add(1);
+        let (lock, available) = self.queue.as_ref();
+        let mut state = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.shutdown {
+            return Ok(self.next_generation);
+        }
+        self.next_generation = generation;
+        state.pending = Some(PreferenceRequest {
+            generation,
+            columns,
+        });
+        state.shutdown = true;
+        available.notify_one();
+        Ok(generation)
+    }
+
+    fn request_shutdown(&mut self) {
+        let (lock, available) = self.queue.as_ref();
+        let mut state = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.shutdown = true;
+        available.notify_one();
+    }
+
+    pub(crate) fn drain_events(&self) -> Vec<PreferenceWriteEvent> {
+        self.events.try_iter().collect()
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.handle.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    pub(crate) fn join(&mut self) -> thread::Result<()> {
+        self.request_shutdown();
+        self.handle.take().map_or(Ok(()), JoinHandle::join)
+    }
+}
+
+impl Drop for PreferencesWriter {
+    fn drop(&mut self) {
+        self.request_shutdown();
+        if let Some(handle) = self.handle.take() {
+            let _joined = handle.join();
+        }
+    }
 }
 
 pub(crate) fn path_for_journal_root(journal_root: &Path) -> PathBuf {
@@ -267,6 +449,8 @@ fn invalid_data(message: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
 
     use super::*;
     use crate::default_column_states;
@@ -364,6 +548,182 @@ mod tests {
         assert_eq!(reloaded.columns, second);
         assert!(reloaded.failure.is_none());
         assert_eq!(shown_columns(&reloaded.columns), [false, true, false, true]);
+        Ok(())
+    }
+
+    #[test]
+    fn writer_coalesces_pending_snapshots_and_flushes_latest_on_shutdown()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("ui-columns-v1");
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let worker_writes = Arc::clone(&writes);
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let worker_gate = Arc::clone(&gate);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let worker_calls = Arc::clone(&calls);
+        let (started_sender, started_receiver) = mpsc::channel();
+        let save_preferences = Arc::new(move |_path: &Path, columns: &[ColumnState; 7]| {
+            worker_writes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(*columns);
+            if worker_calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                let _sent = started_sender.send(());
+                let (lock, available) = worker_gate.as_ref();
+                let mut released = lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                while !*released {
+                    released = available
+                        .wait(released)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+            }
+            Ok(())
+        });
+        let mut writer = PreferencesWriter::spawn_with(path, || {}, save_preferences)?;
+        let first = customized_columns();
+        let mut second = first;
+        second[3].set_visible(false);
+        let mut third = second;
+        third[6].record_user_resize(900, 144);
+
+        writer.submit(first)?;
+        started_receiver.recv()?;
+        writer.submit(second)?;
+        writer.shutdown_with(third)?;
+        {
+            let (lock, available) = gate.as_ref();
+            *lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            available.notify_one();
+        }
+        writer
+            .join()
+            .map_err(|_| io::Error::other("preference writer panicked"))?;
+
+        assert_eq!(
+            *writes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![first, third]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn writer_reports_failure_then_persists_final_retry() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("ui-columns-v1");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let worker_calls = Arc::clone(&calls);
+        let (wake_sender, wake_receiver) = mpsc::channel();
+        let save_preferences = Arc::new(move |_path: &Path, _columns: &[ColumnState; 7]| {
+            if worker_calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                Err(io::Error::other("injected write failure"))
+            } else {
+                Ok(())
+            }
+        });
+        let mut writer = PreferencesWriter::spawn_with(
+            path,
+            move || {
+                let _sent = wake_sender.send(());
+            },
+            save_preferences,
+        )?;
+        let first = customized_columns();
+        let mut final_columns = first;
+        final_columns[4].set_visible(true);
+
+        writer.submit(first)?;
+        wake_receiver.recv()?;
+        assert!(matches!(
+            writer.drain_events().as_slice(),
+            [PreferenceWriteEvent::Failed { generation: 1, .. }]
+        ));
+        writer.shutdown_with(final_columns)?;
+        writer
+            .join()
+            .map_err(|_| io::Error::other("preference writer panicked"))?;
+        assert_eq!(
+            writer.drain_events(),
+            vec![
+                PreferenceWriteEvent::Saved { generation: 2 },
+                PreferenceWriteEvent::Stopped,
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_writer_flushes_final_snapshot_before_join() -> io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("ui-columns-v1");
+        let mut columns = customized_columns();
+        columns[5].set_visible(true);
+        let mut writer = PreferencesWriter::spawn(path.clone(), || {})?;
+
+        writer.shutdown_with(columns)?;
+        writer
+            .join()
+            .map_err(|_| io::Error::other("preference writer panicked"))?;
+
+        assert_eq!(
+            load_or_default(&path, default_column_states()).columns,
+            columns
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_event_allows_join_when_wake_arrives_before_thread_exit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("ui-columns-v1");
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let worker_wake_count = Arc::clone(&wake_count);
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let worker_gate = Arc::clone(&gate);
+        let (terminal_sender, terminal_receiver) = mpsc::channel();
+        let mut writer = PreferencesWriter::spawn(path, move || {
+            if worker_wake_count.fetch_add(1, Ordering::AcqRel) == 1 {
+                let _sent = terminal_sender.send(());
+                let (lock, available) = worker_gate.as_ref();
+                let mut released = lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                while !*released {
+                    released = available
+                        .wait(released)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+            }
+        })?;
+
+        writer.shutdown_with(customized_columns())?;
+        terminal_receiver.recv()?;
+        assert!(!writer.is_finished());
+        assert!(matches!(
+            writer.drain_events().as_slice(),
+            [
+                PreferenceWriteEvent::Saved { generation: 1 },
+                PreferenceWriteEvent::Stopped
+            ]
+        ));
+        {
+            let (lock, available) = gate.as_ref();
+            *lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            available.notify_one();
+        }
+        writer
+            .join()
+            .map_err(|_| io::Error::other("preference writer panicked"))?;
         Ok(())
     }
 }

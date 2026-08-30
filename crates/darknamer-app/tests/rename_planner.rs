@@ -2,8 +2,8 @@ use std::cell::Cell;
 
 use darknamer_app::rename::{
     BackendError, EntryId, EntryKind, MAX_PLAN_PATH_DEPTH, MemoryBackend, ModelRevision, PathKey,
-    PathSnapshot, PlanIssueKind, PlanRequest, RenameBackend, RenameIntent, RenameOperation,
-    RenamePlanner,
+    PathSnapshot, PlanAttemptError, PlanIssueKind, PlanRequest, RenameBackend, RenameIntent,
+    RenameOperation, RenamePlanner,
 };
 use darknamer_core::{LegacyText, WindowsLeafNameError};
 
@@ -467,4 +467,41 @@ fn direct_request_rejects_excessive_path_depth_before_backend_access()
     assert_eq!(backend.relationship_calls.get(), 0);
     assert_eq!(backend.inner.mutation_count(), 0);
     Ok(())
+}
+
+#[test]
+fn cancellation_stops_planner_before_all_backend_observations() {
+    let count = 128_usize;
+    let mut inner = MemoryBackend::new();
+    let mut intents = Vec::with_capacity(count);
+    for index in 0..count {
+        let source = format!("C:\\work\\source-{index:03}.txt");
+        inner = inner.with_file(source.clone(), index as u128 + 1);
+        intents.push(intent(
+            index as u32,
+            &source,
+            &format!("target-{index:03}.txt"),
+        ));
+    }
+    let backend = CountingBackend {
+        inner,
+        validation_calls: Cell::new(0),
+        key_calls: Cell::new(0),
+        observe_calls: Cell::new(0),
+        relationship_calls: Cell::new(0),
+    };
+    let checks = Cell::new(0_usize);
+
+    let result = RenamePlanner::new(&backend).plan_cancellable(
+        PlanRequest::new(ModelRevision::new(1), intents),
+        || {
+            let next = checks.get().saturating_add(1);
+            checks.set(next);
+            next >= 32
+        },
+    );
+
+    assert_eq!(result, Err(PlanAttemptError::Cancelled));
+    assert!(backend.observe_calls.get() < count * 2);
+    assert_eq!(backend.inner.mutation_count(), 0);
 }
