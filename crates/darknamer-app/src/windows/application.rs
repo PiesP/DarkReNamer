@@ -753,6 +753,7 @@ unsafe extern "system" fn window_proc(
                 unsafe { DefWindowProcW(window, message, wparam, lparam) }
             }
         }
+        WM_MENUCHAR if !state_ptr.is_null() => handle_owner_menu_char(wparam, lparam),
         WM_CTLCOLORSTATIC if !state_ptr.is_null() => {
             let child = lparam as HWND;
             // Copy all routing values in a tiny borrow that ends before any GDI

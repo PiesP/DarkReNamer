@@ -153,22 +153,23 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateAcceleratorTableW, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
     DeferWindowPos, DestroyAcceleratorTable, DestroyMenu, DestroyWindow, DispatchMessageW,
     DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, EndDeferWindowPos, FCONTROL, FSHIFT, FVIRTKEY,
-    GWLP_USERDATA, GetClientRect, GetMenuItemCount, GetMessageW, GetParent, GetWindowLongPtrW,
-    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HACCEL, HMENU, IDC_ARROW, IDCANCEL, IDOK,
-    IsDialogMessageW, IsWindow, IsWindowVisible, KillTimer, LoadCursorW, LoadIconW, MENUITEMINFOW,
-    MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_OWNERDRAW, MF_POPUP, MF_SEPARATOR,
-    MF_UNCHECKED, MIIM_STRING, MINMAXINFO, MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW,
+    GWLP_USERDATA, GetClientRect, GetMenuItemCount, GetMenuItemInfoW, GetMessageW, GetParent,
+    GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HACCEL, HMENU,
+    IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, IsWindow, IsWindowVisible, KillTimer, LoadCursorW,
+    LoadIconW, MENUITEMINFOW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_OWNERDRAW,
+    MF_POPUP, MF_SEPARATOR, MF_UNCHECKED, MIIM_DATA, MIIM_STRING, MIIM_SUBMENU, MINMAXINFO,
+    MNC_EXECUTE, MNC_IGNORE, MNC_SELECT, MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW,
     PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXVSCROLL, SPI_GETHIGHCONTRAST,
     SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW,
     SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetMenuItemInfoW, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateAcceleratorW,
     TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORSTATIC, WM_DESTROY,
     WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_KEYDOWN,
-    WM_MEASUREITEM, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW,
-    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW,
-    WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
-    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP,
-    WS_VISIBLE,
+    WM_MEASUREITEM, WM_MENUCHAR, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT,
+    WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER,
+    WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW,
+    WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU,
+    WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{BS_FLAT, BS_MULTILINE, GWL_STYLE, GetDlgCtrlID};
@@ -1280,6 +1281,17 @@ mod tests {
         // SAFETY: parent is the hidden test HWND and destroys all child controls.
         unsafe { DestroyWindow(parent) };
         result.map_err(Into::into)
+    }
+
+    #[test]
+    fn owner_draw_menu_preserves_alt_mnemonics() -> Result<(), Box<dyn std::error::Error>> {
+        let menu = create_menu()?;
+
+        let result = handle_owner_menu_char('f' as WPARAM, menu.as_raw() as LPARAM);
+
+        assert_eq!(result & 0xFFFF, 0);
+        assert_eq!((result >> 16) & 0xFFFF, MNC_EXECUTE as LRESULT);
+        Ok(())
     }
 
     #[test]

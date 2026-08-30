@@ -1093,7 +1093,7 @@ impl OwnedMenu {
             .ok_or_else(io::Error::last_os_error)
     }
 
-    fn as_raw(&self) -> HMENU {
+    pub(super) fn as_raw(&self) -> HMENU {
         self.0
     }
 
@@ -1179,6 +1179,72 @@ pub(super) fn owner_menu_label(data: usize) -> Option<String> {
         SHOW_RECOVERY_STATUS => Some("복구 상태 보기...".to_owned()),
         _ => None,
     }
+}
+
+fn menu_mnemonic(label: &str) -> Option<char> {
+    let mut characters = label.chars();
+    while let Some(character) = characters.next() {
+        if character == '&' {
+            let mnemonic = characters.next()?;
+            if mnemonic != '&' {
+                return Some(mnemonic.to_ascii_uppercase());
+            }
+        }
+    }
+    None
+}
+
+pub(super) fn handle_owner_menu_char(wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let menu = lparam as HMENU;
+    if menu.is_null() {
+        return (MNC_IGNORE as LRESULT) << 16;
+    }
+    let requested = char::from_u32(u32::try_from(wparam & 0xFFFF).unwrap_or_default())
+        .map(|character| character.to_ascii_uppercase());
+    let Some(requested) = requested else {
+        return (MNC_IGNORE as LRESULT) << 16;
+    };
+    // SAFETY: menu is the current live menu supplied by WM_MENUCHAR.
+    let count = unsafe { GetMenuItemCount(menu) };
+    if count <= 0 {
+        return (MNC_IGNORE as LRESULT) << 16;
+    }
+    let mut matches = Vec::new();
+    for position in 0..count {
+        let mut info = MENUITEMINFOW {
+            cbSize: size_of::<MENUITEMINFOW>() as u32,
+            fMask: MIIM_DATA | MIIM_SUBMENU,
+            ..MENUITEMINFOW::default()
+        };
+        // SAFETY: info is writable and position is bounded by the current count.
+        if unsafe {
+            GetMenuItemInfoW(
+                menu,
+                u32::try_from(position).unwrap_or_default(),
+                1,
+                &mut info,
+            )
+        } == 0
+        {
+            continue;
+        }
+        if owner_menu_label(info.dwItemData)
+            .as_deref()
+            .and_then(menu_mnemonic)
+            == Some(requested)
+        {
+            matches.push(position);
+        }
+    }
+    let Some(position) = matches.first().copied() else {
+        return (MNC_IGNORE as LRESULT) << 16;
+    };
+    let action = if matches.len() == 1 {
+        MNC_EXECUTE
+    } else {
+        MNC_SELECT
+    };
+    (position as LRESULT) | ((action as LRESULT) << 16)
 }
 
 impl MenuBuilder {
