@@ -1147,6 +1147,9 @@ mod tests {
         assert!(state.mutation_locked);
         assert!(state.admission_worker.is_none());
         assert_eq!(fake.get_calls.load(Ordering::Acquire), 1);
+        state.mutation_locked = false;
+        finalize_admission_start_failure(&mut state);
+        assert!(state.command_states[usize::from(ADD_FILES - APPLY)]);
         unpublish_test_state(owner);
         // SAFETY: target retains only its creator reference.
         assert_eq!(unsafe { drop_target_release(target.cast()) }, 0);

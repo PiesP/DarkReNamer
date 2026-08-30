@@ -870,7 +870,10 @@ pub(super) fn add_files_dialog(owner: HWND, state: &mut AppState) {
     };
     match admit_paths(owner, state, paths) {
         Ok(()) => finalize_admission_start(state),
-        Err(error) => report_admission_start_error(owner, &error),
+        Err(error) => {
+            finalize_admission_start_failure(state);
+            report_admission_start_error(owner, &error);
+        }
     }
 }
 
@@ -969,7 +972,10 @@ pub(super) fn import_paths_dialog(owner: HWND, state: &mut AppState) {
         .collect();
     match admit_paths(owner, state, paths) {
         Ok(()) => finalize_admission_start(state),
-        Err(error) => report_admission_start_error(owner, &error),
+        Err(error) => {
+            finalize_admission_start_failure(state);
+            report_admission_start_error(owner, &error);
+        }
     }
 }
 

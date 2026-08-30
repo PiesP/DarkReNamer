@@ -1039,6 +1039,10 @@ pub(super) fn finalize_admission_start(state: &mut AppState) {
     update_controls(state);
 }
 
+pub(super) fn finalize_admission_start_failure(state: &mut AppState) {
+    update_controls(state);
+}
+
 pub(super) fn report_admission_start_error(owner: HWND, error: &io::Error) {
     message(owner, &error.to_string(), "DarkReNamer - 추가 실패");
 }
@@ -1154,6 +1158,7 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
             match start_admission_worker(window, state, paths, Some(mode), capacity) {
                 Ok(()) => finalize_admission_start(state),
                 Err(error) => {
+                    finalize_admission_start_failure(state);
                     report_admission_start_error(window, &error);
                 }
             }
