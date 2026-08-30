@@ -73,9 +73,10 @@ use drag_drop::*;
 #[cfg(test)]
 use list_view::changed_column_mask;
 use list_view::{
-    RenderedRow, handle_header_custom_draw, handle_header_end_track, handle_list_custom_draw,
-    handle_list_infotip, refresh, refresh_all_rows, refresh_changed_rows, refresh_proposal_rows,
-    update_column_visibility, update_dpi_metrics, update_primary_column_widths,
+    RenderedRow, handle_header_end_track, handle_list_custom_draw, handle_list_infotip,
+    install_list_view_notification_subclass, refresh, refresh_all_rows, refresh_changed_rows,
+    refresh_proposal_rows, remove_list_view_notification_subclass, update_column_visibility,
+    update_dpi_metrics, update_primary_column_widths,
 };
 use menu::*;
 use recovery_ui::*;
@@ -144,8 +145,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VK_OEM_COMMA, VK_OEM_PERIOD, VK_UP,
 };
 use windows_sys::Win32::UI::Shell::{
-    DragQueryFileW, HDROP, SHFILEINFOW, SHGFI_SMALLICON, SHGFI_SYSICONINDEX,
-    SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
+    DefSubclassProc, DragQueryFileW, HDROP, RemoveWindowSubclass, SHFILEINFOW, SHGFI_SMALLICON,
+    SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW, SetWindowSubclass,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     ACCEL, AppendMenuW, BN_CLICKED, BN_SETFOCUS, BS_DEFPUSHBUTTON, BS_OWNERDRAW, BS_PUSHBUTTON,
@@ -1298,6 +1299,83 @@ mod tests {
         assert_eq!(result & 0xFFFF, 0);
         assert_eq!((result >> 16) & 0xFFFF, MNC_EXECUTE as LRESULT);
         Ok(())
+    }
+
+    #[test]
+    fn list_view_routes_header_custom_draw_at_its_actual_notification_parent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let controls = INITCOMMONCONTROLSEX {
+            dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+            dwICC: ICC_LISTVIEW_CLASSES | ICC_WIN95_CLASSES,
+        };
+        // SAFETY: controls has its exact structure size and remains readable for
+        // the synchronous common-controls initialization call.
+        unsafe { InitCommonControlsEx(&controls) };
+        let directory = tempfile::tempdir()?;
+        let mut state = Box::new(AppState::new(initialize_safe_runtime_at(directory.path())?));
+        state.appearance.theme = AppThemeMode::Dark;
+        state.forced_colors = ForcedColorsState::Inactive;
+        state.system_theme = Some(ResolvedTheme::Dark);
+        let class = wide("STATIC");
+        // SAFETY: the system STATIC class and current module remain valid for
+        // this hidden test owner.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let result = (|| -> io::Result<()> {
+            create_children(parent, &mut state)?;
+            // SAFETY: the live report ListView owns one header child and returns
+            // its borrowed HWND without retaining caller memory.
+            let header = unsafe { SendMessageW(state.list_window, LVM_GETHEADER, 0, 0) } as HWND;
+            if header.is_null() {
+                return Err(io::Error::other("native ListView header is missing"));
+            }
+            // SAFETY: the live header owns a drawable client DC released below.
+            let dc = unsafe { GetDC(header) };
+            if dc.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let mut custom = NMCUSTOMDRAW::default();
+            custom.hdr.hwndFrom = header;
+            custom.hdr.code = NM_CUSTOMDRAW;
+            custom.dwDrawStage = CDDS_PREPAINT;
+            custom.hdc = dc;
+            // SAFETY: list_window is the header's actual notification parent and
+            // custom remains writable for the complete synchronous dispatch.
+            let routed = unsafe {
+                SendMessageW(
+                    state.list_window,
+                    WM_NOTIFY,
+                    0,
+                    (&raw mut custom as *mut NMCUSTOMDRAW) as LPARAM,
+                )
+            };
+            // SAFETY: release the exact DC acquired from header above.
+            unsafe { ReleaseDC(header, dc) };
+            assert_eq!(routed, CDRF_NOTIFYITEMDRAW as LRESULT);
+            Ok(())
+        })();
+        // SAFETY: parent is the test-owned top-level HWND and destroys every
+        // child before the subclass refdata owner is dropped.
+        unsafe { DestroyWindow(parent) };
+        drop(state);
+        result.map_err(Into::into)
     }
 
     #[test]

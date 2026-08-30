@@ -849,10 +849,6 @@ unsafe extern "system" fn window_proc(
             if let Some(result) = handle_list_custom_draw(unsafe { &*state_ptr }, lparam) {
                 return result;
             }
-            // SAFETY: same synchronous notification and live UI-thread state.
-            if let Some(result) = handle_header_custom_draw(unsafe { &*state_ptr }, lparam) {
-                return result;
-            }
             // Header controls are ListView children, so their resize
             // notifications identify the header HWND rather than list_window.
             // SAFETY: state_ptr is the live UI-thread AppState and lparam is
@@ -906,6 +902,10 @@ unsafe extern "system" fn window_proc(
         }
         WM_DESTROY => {
             if !state_ptr.is_null() {
+                // Stop the ListView from retaining AppState refdata before any
+                // child teardown can reenter through common-controls messages.
+                // SAFETY: state_ptr is live and UI-thread confined here.
+                remove_list_view_notification_subclass(unsafe { (*state_ptr).list_window });
                 // SAFETY: defensive owner teardown rolls back and destroys any
                 // still-live appearance session before preference shutdown/drop.
                 cancel_appearance_dialog(window, unsafe { &mut *state_ptr });
@@ -936,6 +936,10 @@ unsafe extern "system" fn window_proc(
         }
         WM_NCDESTROY => {
             if !state_ptr.is_null() {
+                // Defensive idempotent fallback if creation failed before the
+                // ordinary WM_DESTROY path removed the ListView subclass.
+                // SAFETY: state_ptr remains live until the Box reclamation below.
+                remove_list_view_notification_subclass(unsafe { (*state_ptr).list_window });
                 // Defensive idempotent fallback if creation teardown reached
                 // WM_NCDESTROY without the ordinary WM_DESTROY path.
                 // SAFETY: state_ptr is still published and UI-thread confined.

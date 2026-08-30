@@ -1,5 +1,71 @@
 use super::*;
 
+const LIST_VIEW_NOTIFICATION_SUBCLASS_ID: usize = 1;
+
+pub(super) fn install_list_view_notification_subclass(state: &AppState) -> io::Result<()> {
+    // AppState is allocated in its final Box before child creation. The subclass
+    // is removed during owner teardown before that Box is reclaimed.
+    let state_ref = state as *const AppState as usize;
+    // SAFETY: list_window is a live UI-thread ListView, the callback has the
+    // documented SUBCLASSPROC ABI, and state_ref follows the lifetime contract
+    // described above.
+    if unsafe {
+        SetWindowSubclass(
+            state.list_window,
+            Some(list_view_notification_subclass),
+            LIST_VIEW_NOTIFICATION_SUBCLASS_ID,
+            state_ref,
+        )
+    } == 0
+    {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+pub(super) fn remove_list_view_notification_subclass(list_window: HWND) {
+    if list_window.is_null() {
+        return;
+    }
+    // SAFETY: removal is idempotent for the exact live-or-destroying ListView,
+    // callback, and identifier installed above.
+    unsafe {
+        RemoveWindowSubclass(
+            list_window,
+            Some(list_view_notification_subclass),
+            LIST_VIEW_NOTIFICATION_SUBCLASS_ID,
+        )
+    };
+}
+
+unsafe extern "system" fn list_view_notification_subclass(
+    window: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass_id: usize,
+    state_ref: usize,
+) -> LRESULT {
+    if message == WM_NCDESTROY {
+        remove_list_view_notification_subclass(window);
+        // SAFETY: the original parameters are forwarded exactly once after the
+        // subclass has stopped retaining AppState refdata.
+        return unsafe { DefSubclassProc(window, message, wparam, lparam) };
+    }
+    if message == WM_NOTIFY && state_ref != 0 {
+        // SAFETY: the owner removes this subclass before reclaiming the stable
+        // Box<AppState>; callbacks are synchronous on the owning UI thread.
+        let state = unsafe { &*(state_ref as *const AppState) };
+        if let Some(result) = handle_header_custom_draw(state, lparam) {
+            return result;
+        }
+    }
+    // SAFETY: every notification not owned by the header painter is forwarded
+    // unchanged through the common-controls subclass chain exactly once.
+    unsafe { DefSubclassProc(window, message, wparam, lparam) }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct RenderedRow {
     pub(super) values: [LegacyText; 7],
