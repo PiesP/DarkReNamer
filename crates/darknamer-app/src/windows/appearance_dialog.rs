@@ -29,6 +29,7 @@ use super::*;
 const DENSITY_AUTOMATIC_ID: u16 = 0xA101;
 const DENSITY_COMFORTABLE_ID: u16 = 0xA102;
 const DENSITY_COMPACT_ID: u16 = 0xA103;
+const DENSITY_MENU_ONLY_ID: u16 = 0xA104;
 const EMPHASIS_SUBTLE_ID: u16 = 0xA111;
 const EMPHASIS_STANDARD_ID: u16 = 0xA112;
 const EMPHASIS_STRONG_ID: u16 = 0xA113;
@@ -38,8 +39,8 @@ const SHOW_EMPTY_SAFETY_ID: u16 = 0xA123;
 const FORCED_EXPLANATION_ID: u16 = 0xA130;
 const RESET_DEFAULTS_ID: u16 = 0xA140;
 const APPEARANCE_FINISH_ACCEPTED: u32 = 1 << 31;
-const DENSITY_GROUP_LABEL: &str = "명령 버튼 간격";
-const DENSITY_LABELS: [&str; 3] = ["자동 (권장)", "여유 있게", "촘촘하게"];
+const DENSITY_GROUP_LABEL: &str = "명령 버튼 표시";
+const DENSITY_LABELS: [&str; 4] = ["자동 (권장)", "여유 있게", "촘촘하게", "메뉴만"];
 const EMPHASIS_GROUP_LABEL: &str = "변경 강조";
 const EMPHASIS_LABELS: [&str; 3] = ["약하게", "표준", "강하게"];
 const SEPARATOR_LABEL: &str = "기능 그룹 구분선 표시";
@@ -69,7 +70,7 @@ struct AppearanceDialogWindowState {
     session_id: u32,
     model: AppearanceDialogModel,
     density_group: HWND,
-    density: [HWND; 3],
+    density: [HWND; 4],
     emphasis_group: HWND,
     emphasis: [HWND; 3],
     forced_explanation: HWND,
@@ -349,7 +350,7 @@ fn create_appearance_dialog_window(
         session_id,
         model: AppearanceDialogModel::new(appearance, forced_colors),
         density_group: null_mut(),
-        density: [null_mut(); 3],
+        density: [null_mut(); 4],
         emphasis_group: null_mut(),
         emphasis: [null_mut(); 3],
         forced_explanation: null_mut(),
@@ -434,6 +435,13 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
             "BUTTON",
             DENSITY_LABELS[2],
             DENSITY_COMPACT_ID,
+            BS_AUTORADIOBUTTON as u32 | WS_TABSTOP,
+        )?,
+        child(
+            window,
+            "BUTTON",
+            DENSITY_LABELS[3],
+            DENSITY_MENU_ONLY_ID,
             BS_AUTORADIOBUTTON as u32 | WS_TABSTOP,
         )?,
     ];
@@ -528,6 +536,7 @@ fn sync_controls(state: &AppearanceDialogWindowState) {
         draft.density == RailDensityPreference::Automatic,
         draft.density == RailDensityPreference::Comfortable,
         draft.density == RailDensityPreference::Compact,
+        draft.density == RailDensityPreference::MenuOnly,
     ]) {
         set_checked(*control, checked);
     }
@@ -665,6 +674,9 @@ fn action_for_command(
         DENSITY_COMPACT_ID => Some(AppearanceDialogAction::Density(
             RailDensityPreference::Compact,
         )),
+        DENSITY_MENU_ONLY_ID => Some(AppearanceDialogAction::Density(
+            RailDensityPreference::MenuOnly,
+        )),
         EMPHASIS_SUBTLE_ID => Some(AppearanceDialogAction::Emphasis(PreviewEmphasis::Subtle)),
         EMPHASIS_STANDARD_ID => Some(AppearanceDialogAction::Emphasis(PreviewEmphasis::Standard)),
         EMPHASIS_STRONG_ID => Some(AppearanceDialogAction::Emphasis(PreviewEmphasis::Strong)),
@@ -717,6 +729,7 @@ fn measure_appearance_dialog(window: HWND, font: HFONT) -> AppearanceDialogMetri
         DENSITY_LABELS[0],
         DENSITY_LABELS[1],
         DENSITY_LABELS[2],
+        DENSITY_LABELS[3],
         EMPHASIS_GROUP_LABEL,
         EMPHASIS_LABELS[0],
         EMPHASIS_LABELS[1],
@@ -833,6 +846,7 @@ fn arrange_dialog(window: HWND, state: &AppearanceDialogWindowState, center_owne
         layout.density_options[0],
         layout.density_options[1],
         layout.density_options[2],
+        layout.density_options[3],
         layout.emphasis_group,
         layout.emphasis_options[0],
         layout.emphasis_options[1],
@@ -1106,7 +1120,8 @@ mod native_tests {
     use windows_sys::Win32::UI::Controls::{CDIS_DEFAULT, NM_CUSTOMDRAW, NMCUSTOMDRAW};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_RETURN;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        BS_TYPEMASK, GWL_STYLE, GetClientRect, GetWindowLongPtrW, IsDialogMessageW, MSG, WM_KEYDOWN,
+        BM_CLICK, BS_TYPEMASK, GWL_STYLE, GetClientRect, GetWindowLongPtrW, IsDialogMessageW, MSG,
+        WM_KEYDOWN,
     };
 
     #[test]
@@ -1154,10 +1169,11 @@ mod native_tests {
             return Err(io::Error::other("appearance dialog state is missing").into());
         }
         // SAFETY: state_ptr is live dialog-owned state for these copied HWNDs.
-        let (ok, radio, resources) = unsafe {
+        let (ok, radio, menu_only, resources) = unsafe {
             (
                 (*state_ptr).ok,
                 (*state_ptr).density[0],
+                (*state_ptr).density[3],
                 (*state_ptr).appearance_resources.as_ref(),
             )
         };
@@ -1193,6 +1209,14 @@ mod native_tests {
         );
         // SAFETY: dc came from this exact live button.
         unsafe { ReleaseDC(ok, dc) };
+
+        assert_eq!(window_text(menu_only), LegacyText::from(DENSITY_LABELS[3]));
+        // SAFETY: menu_only is the live fourth density radio. The unarmed dialog
+        // updates only its local preview model for this synchronous click.
+        unsafe { SendMessageW(menu_only, BM_CLICK, 0, 0) };
+        // SAFETY: state_ptr remains dialog-owned until Enter closes the window.
+        let draft_density = unsafe { (*state_ptr).model.draft().density };
+        assert_eq!(draft_density, RailDensityPreference::MenuOnly);
 
         let message = MSG {
             hwnd: radio,

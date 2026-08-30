@@ -37,11 +37,15 @@ fn minimum_track_width(window: HWND, state: &AppState) -> i32 {
         0
     };
     let density = state.resolved_appearance().appearance.density;
-    let rail_width = state
-        .font_metrics
-        .rail_metrics(density.minimum_density(), state.dpi)
-        .rail_width;
-    let baseline_rail_width = density.minimum_density().metrics(state.dpi).rail_width;
+    let rail_width = density.minimum_density().map_or(0, |minimum| {
+        state
+            .font_metrics
+            .rail_metrics(minimum, state.dpi)
+            .rail_width
+    });
+    let baseline_rail_width = density
+        .minimum_density()
+        .map_or(0, |minimum| minimum.metrics(state.dpi).rail_width);
     let measured_content_width = scale_dip(minimum_content_width_dip(), state.dpi)
         .saturating_add(
             rail_width

@@ -476,6 +476,7 @@ fn encode_appearance(appearance: UiAppearance) -> [u8; APPEARANCE_SERIALIZED_LEN
         RailDensityPreference::Automatic => 0,
         RailDensityPreference::Comfortable => 1,
         RailDensityPreference::Compact => 2,
+        RailDensityPreference::MenuOnly => 3,
     };
     output[offset + 2] = match appearance.emphasis {
         PreviewEmphasis::Subtle => 0,
@@ -529,6 +530,7 @@ fn decode_appearance(input: &[u8]) -> io::Result<UiAppearance> {
         0 => RailDensityPreference::Automatic,
         1 => RailDensityPreference::Comfortable,
         2 => RailDensityPreference::Compact,
+        3 => RailDensityPreference::MenuOnly,
         _ => return Err(invalid_data("appearance rail density is invalid")),
     };
     let emphasis = match input[offset + 2] {
@@ -1108,12 +1110,18 @@ mod tests {
         let encoded = encode_appearance(appearance);
         assert_eq!(decode_appearance(&encoded)?, appearance);
 
+        let menu_only = UiAppearance {
+            density: RailDensityPreference::MenuOnly,
+            ..appearance
+        };
+        assert_eq!(decode_appearance(&encode_appearance(menu_only))?, menu_only);
+
         for (offset, value) in [
             (8, 2),
             (9, 9),
             (10, 1),
             (APPEARANCE_HEADER_LEN, 3),
-            (APPEARANCE_HEADER_LEN + 1, 3),
+            (APPEARANCE_HEADER_LEN + 1, 4),
             (APPEARANCE_HEADER_LEN + 2, 3),
             (APPEARANCE_HEADER_LEN + 3, 2),
             (APPEARANCE_HEADER_LEN + 6, 1),
