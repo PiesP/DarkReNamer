@@ -211,6 +211,7 @@ pub(super) fn refresh_all_rows(state: &mut AppState) {
             .map(|item| rendered_row(icon_cache, item))
             .collect::<Vec<_>>()
     };
+    let _list_update = ProgrammaticListUpdateGuard::begin();
     // SAFETY: state.list_window is live and the guard restores redraw.
     let _redraw = unsafe { RedrawGuard::suspend(state.list_window) };
     let selected = selected_indices(state.list_window);
@@ -241,6 +242,7 @@ pub(super) fn refresh_changed_rows(state: &mut AppState, changed: &[usize]) {
             .map(|index| (*index, rendered_row(icon_cache, &model.items()[*index])))
             .collect::<Vec<_>>()
     };
+    let _list_update = ProgrammaticListUpdateGuard::begin();
     // SAFETY: state.list_window is live and the guard restores redraw.
     let _redraw = unsafe { RedrawGuard::suspend(state.list_window) };
     for (index, row) in rows {
@@ -250,6 +252,32 @@ pub(super) fn refresh_changed_rows(state: &mut AppState, changed: &[usize]) {
             return;
         }
         state.rendered_rows[index] = row;
+    }
+}
+
+pub(super) fn refresh_proposal_rows(state: &mut AppState, changed: &[usize]) {
+    let Some(plan) = proposal_refresh_plan(state.model.len(), state.rendered_rows.len(), changed)
+    else {
+        refresh(state);
+        return;
+    };
+    debug_assert_eq!(plan.proposal_cells, plan.rows.len());
+    debug_assert_eq!(plan.immutable_cells, 0);
+    debug_assert_eq!(plan.full_row_formats, 0);
+    let _list_update = ProgrammaticListUpdateGuard::begin();
+    // SAFETY: state.list_window is live and the guard restores redraw.
+    let _redraw = unsafe { RedrawGuard::suspend(state.list_window) };
+    for row in plan.rows {
+        let proposed = state.model.items()[row].proposed_name();
+        if state.rendered_rows[row].values[1] == *proposed {
+            continue;
+        }
+        if !set_native_subitem(state.list_window, row, 1, proposed) {
+            drop(_redraw);
+            refresh(state);
+            return;
+        }
+        state.rendered_rows[row].values[1].clone_from(proposed);
     }
 }
 

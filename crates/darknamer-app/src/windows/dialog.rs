@@ -749,7 +749,7 @@ pub(super) fn save_text_dialog(owner: HWND, text: LegacyText, names: bool) {
     }
 }
 
-pub(super) fn import_names_dialog(owner: HWND, state: &mut AppState) {
+pub(super) fn import_names_dialog(owner: HWND, state: &mut AppState) -> Box<[usize]> {
     let Some(path) = modal_native_dialog(owner, || {
         native_file_dialog(owner)
             .set_title("바꿀 파일 이름 불러오기")
@@ -757,17 +757,18 @@ pub(super) fn import_names_dialog(owner: HWND, state: &mut AppState) {
             .add_filter("All Files", &["*"])
             .pick_file()
     }) else {
-        return;
+        return Box::default();
     };
     match read_legacy_text(&path) {
-        Ok(text) => {
-            state.model.import_names(&text);
+        Ok(text) => state.model.import_names_changed(&text),
+        Err(error) => {
+            message(
+                owner,
+                &format!("가져오기 파일을 읽지 못했습니다: {error}"),
+                "DarkReNamer",
+            );
+            Box::default()
         }
-        Err(error) => message(
-            owner,
-            &format!("가져오기 파일을 읽지 못했습니다: {error}"),
-            "DarkReNamer",
-        ),
     }
 }
 

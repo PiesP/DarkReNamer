@@ -176,6 +176,7 @@ pub(super) fn handle_ready_plan(
             {
                 clear_selection(state.list_window);
                 select_rows(state.list_window, &rows);
+                update_controls(state);
                 message(window, &message_text, "DarkReNamer - 적용 차단");
             }
             return;

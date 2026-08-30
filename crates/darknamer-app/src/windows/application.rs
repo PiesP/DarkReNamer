@@ -590,6 +590,16 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_NOTIFY if !state_ptr.is_null() => {
+            let header = lparam as *const NMHDR;
+            if !header.is_null()
+                // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix for this
+                // synchronous callback; no AppState access occurs on the
+                // deferred programmatic-selection path.
+                && unsafe { (*header).code } == LVN_ITEMCHANGED
+                && programmatic_list_update_active()
+            {
+                return 0;
+            }
             // Header controls are ListView children, so their resize
             // notifications identify the header HWND rather than list_window.
             // SAFETY: state_ptr is the live UI-thread AppState and lparam is
@@ -601,7 +611,6 @@ unsafe extern "system" fn window_proc(
             if handle_list_infotip(unsafe { &*state_ptr }, lparam) {
                 return 0;
             }
-            let header = lparam as *const NMHDR;
             if !header.is_null()
                 // SAFETY: For WM_NOTIFY, non-null lparam points to an NMHDR prefix that remains readable throughout this synchronous callback.
                 && unsafe { (*header).hwndFrom } == unsafe { (*state_ptr).list_window }

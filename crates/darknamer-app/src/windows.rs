@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::env;
 use std::ffi::c_void;
@@ -62,7 +63,7 @@ use drag_drop::*;
 use list_view::changed_column_mask;
 use list_view::{
     RenderedRow, handle_header_end_track, handle_list_infotip, refresh, refresh_all_rows,
-    refresh_changed_rows, update_column_visibility, update_dpi_metrics,
+    refresh_changed_rows, refresh_proposal_rows, update_column_visibility, update_dpi_metrics,
     update_primary_column_widths,
 };
 use menu::*;
@@ -246,6 +247,10 @@ impl AppState {
 
     fn commit_model_change(&mut self, before: &LegacyList) {
         self.model_revision = next_model_revision(self.model_revision, &self.model != before);
+    }
+
+    fn commit_known_model_change(&mut self, changed: bool) {
+        self.model_revision = next_model_revision(self.model_revision, changed);
     }
 
     const fn apply_locked(&self) -> bool {

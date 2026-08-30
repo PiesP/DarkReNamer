@@ -1923,8 +1923,8 @@ pub fn command_menu_label(spec: &CommandUiSpec) -> String {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum UiEffect {
     None,
-    RowChanged(usize),
     RowsChanged(Box<[usize]>),
+    ProposalRowsChanged(Box<[usize]>),
     AllRowsChanged,
     ColumnsChanged(usize),
     CloseRequested,
@@ -1983,8 +1983,11 @@ pub fn command_ui_policy(command: CommandId) -> CommandUiPolicy {
 pub(crate) fn command_effect_fits_policy(command: CommandId, outcome: &CommandOutcome) -> bool {
     match &outcome.effect {
         UiEffect::None => true,
-        UiEffect::RowChanged(_) => command_ui_policy(command) == CommandUiPolicy::SingleRow,
         UiEffect::RowsChanged(_) => command_ui_policy(command) == CommandUiPolicy::MovedRows,
+        UiEffect::ProposalRowsChanged(_) => matches!(
+            command_ui_policy(command),
+            CommandUiPolicy::SingleRow | CommandUiPolicy::AllRows
+        ),
         UiEffect::AllRowsChanged => command_ui_policy(command) == CommandUiPolicy::AllRows,
         UiEffect::ColumnsChanged(_) => command_ui_policy(command) == CommandUiPolicy::Columns,
         UiEffect::CloseRequested => command == EXIT_COMMAND,
@@ -1997,6 +2000,39 @@ pub(crate) fn changed_move_rows(before: &[usize], after: &[usize]) -> Box<[usize
     changed.sort_unstable();
     changed.dedup();
     changed.into_boxed_slice()
+}
+
+/// Pure work plan for updating only the proposal projection of rendered rows.
+#[cfg(any(windows, test))]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ProposalRefreshPlan {
+    pub(crate) rows: Box<[usize]>,
+    pub(crate) proposal_cells: usize,
+    pub(crate) immutable_cells: usize,
+    pub(crate) full_row_formats: usize,
+}
+
+/// Validates and normalizes an exact proposal-row change set.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn proposal_refresh_plan(
+    model_rows: usize,
+    rendered_rows: usize,
+    changed: &[usize],
+) -> Option<ProposalRefreshPlan> {
+    if model_rows != rendered_rows || changed.iter().any(|row| *row >= model_rows) {
+        return None;
+    }
+    let mut rows = changed.to_vec();
+    rows.sort_unstable();
+    rows.dedup();
+    let proposal_cells = rows.len();
+    Some(ProposalRefreshPlan {
+        rows: rows.into_boxed_slice(),
+        proposal_cells,
+        immutable_cells: 0,
+        full_row_formats: 0,
+    })
 }
 
 /// One report-mode ListView column.
@@ -2367,8 +2403,14 @@ mod tests {
         let outcome = CommandOutcome::model(false, UiEffect::AllRowsChanged);
         assert_eq!(outcome.into_effect(), UiEffect::None);
 
-        let changed = CommandOutcome::model(true, UiEffect::RowChanged(42));
-        assert_eq!(changed.into_effect(), UiEffect::RowChanged(42));
+        let changed = CommandOutcome::model(
+            true,
+            UiEffect::ProposalRowsChanged(vec![42].into_boxed_slice()),
+        );
+        assert_eq!(
+            changed.into_effect(),
+            UiEffect::ProposalRowsChanged(vec![42].into_boxed_slice())
+        );
 
         for effect in [
             UiEffect::RowsChanged(vec![2, 3].into_boxed_slice()),
@@ -2383,11 +2425,15 @@ mod tests {
     fn command_outcomes_cannot_exceed_their_classified_render_scope() {
         assert!(command_effect_fits_policy(
             MANUAL_CHANGE,
-            &CommandOutcome::ui(UiEffect::RowChanged(7))
+            &CommandOutcome::ui(UiEffect::ProposalRowsChanged(vec![7].into_boxed_slice()))
         ));
         assert!(command_effect_fits_policy(
             MOVE_DOWN,
             &CommandOutcome::ui(UiEffect::RowsChanged(vec![6, 7].into_boxed_slice()))
+        ));
+        assert!(command_effect_fits_policy(
+            PREFIX,
+            &CommandOutcome::ui(UiEffect::ProposalRowsChanged(vec![1, 4].into_boxed_slice()))
         ));
         assert!(command_effect_fits_policy(
             SHOW_SIZE,
@@ -2404,6 +2450,27 @@ mod tests {
         assert_eq!(&*changed_move_rows(&[3], &[2]), &[2, 3]);
         assert_eq!(&*changed_move_rows(&[1, 3], &[0, 2]), &[0, 1, 2, 3]);
         assert_eq!(&*changed_move_rows(&[4, 5], &[4, 5]), &[4, 5]);
+    }
+
+    #[test]
+    fn ten_thousand_row_proposal_plan_formats_no_immutable_columns() {
+        let changed = (0..10_000).collect::<Vec<_>>();
+        let plan = proposal_refresh_plan(10_000, 10_000, &changed);
+        assert!(plan.is_some());
+        let plan = plan.unwrap_or_default();
+
+        assert_eq!(plan.rows.len(), 10_000);
+        assert_eq!(plan.proposal_cells, 10_000);
+        assert_eq!(plan.immutable_cells, 0);
+        assert_eq!(plan.full_row_formats, 0);
+
+        let one = proposal_refresh_plan(10_000, 10_000, &[9_999, 9_999]);
+        assert!(one.is_some());
+        let one = one.unwrap_or_default();
+        assert_eq!(&*one.rows, &[9_999]);
+        assert_eq!(one.proposal_cells, 1);
+        assert!(proposal_refresh_plan(10_000, 9_999, &[0]).is_none());
+        assert!(proposal_refresh_plan(10_000, 10_000, &[10_000]).is_none());
     }
 
     #[test]

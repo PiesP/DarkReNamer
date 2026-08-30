@@ -90,6 +90,20 @@ mod accelerator_tests {
         bindings.dedup();
         assert_eq!(bindings.len(), entries.len());
     }
+
+    #[test]
+    fn programmatic_list_update_deferral_is_scoped_and_nestable() {
+        assert!(!programmatic_list_update_active());
+        let outer = ProgrammaticListUpdateGuard::begin();
+        assert!(programmatic_list_update_active());
+        {
+            let _inner = ProgrammaticListUpdateGuard::begin();
+            assert!(programmatic_list_update_active());
+        }
+        assert!(programmatic_list_update_active());
+        drop(outer);
+        assert!(!programmatic_list_update_active());
+    }
 }
 
 pub(super) fn selected_indices(list: HWND) -> Vec<usize> {
@@ -114,6 +128,29 @@ pub(super) fn selected_indices(list: HWND) -> Vec<usize> {
     indices
 }
 
+thread_local! {
+    static PROGRAMMATIC_LIST_UPDATE_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+pub(super) struct ProgrammaticListUpdateGuard;
+
+impl ProgrammaticListUpdateGuard {
+    pub(super) fn begin() -> Self {
+        PROGRAMMATIC_LIST_UPDATE_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+        Self
+    }
+}
+
+impl Drop for ProgrammaticListUpdateGuard {
+    fn drop(&mut self) {
+        PROGRAMMATIC_LIST_UPDATE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+pub(super) fn programmatic_list_update_active() -> bool {
+    PROGRAMMATIC_LIST_UPDATE_DEPTH.with(|depth| depth.get() != 0)
+}
+
 pub(super) fn select_rows(list: HWND, rows: &[usize]) {
     select_rows_with_focus(list, rows, rows.first().copied());
 }
@@ -126,6 +163,7 @@ pub(super) fn focused_index(list: HWND) -> Option<usize> {
 }
 
 pub(super) fn select_rows_with_focus(list: HWND, rows: &[usize], focused: Option<usize>) {
+    let _selection_guard = ProgrammaticListUpdateGuard::begin();
     for row in rows {
         let mut item = LVITEMW {
             stateMask: LVIS_SELECTED | LVIS_FOCUSED,
@@ -225,31 +263,29 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
             apply_changes(window, state);
             CommandOutcome::ui(UiEffect::None)
         }
-        RESET => model_mutation(state, |state| {
-            state.model.reset_proposals();
-            UiEffect::AllRowsChanged
-        }),
-        CLEAR_LIST => model_mutation(state, |state| {
-            state.model = LegacyList::new();
-            UiEffect::AllRowsChanged
-        }),
+        RESET => proposal_mutation(state, LegacyList::reset_proposals_changed),
+        CLEAR_LIST => {
+            let changed = state.model.clear();
+            model_outcome(state, changed, UiEffect::AllRowsChanged)
+        }
         DELETE_SELECTED_COMMAND => {
             let selected = selected_indices(state.list_window);
             selection_restore = Some(SelectionRestore::default());
-            model_mutation(state, |state| {
-                state.model.remove_rows(&selected);
-                UiEffect::AllRowsChanged
-            })
+            let changed = state.model.remove_rows(&selected) != 0;
+            model_outcome(state, changed, UiEffect::AllRowsChanged)
         }
         MOVE_UP => {
             let selected = selected_indices(state.list_window);
             let focused_position = focused_index(state.list_window)
                 .and_then(|focused| selected.iter().position(|index| *index == focused));
-            let mut moved = Box::default();
-            let outcome = model_mutation(state, |state| {
-                moved = state.model.move_rows_earlier(&selected);
-                UiEffect::RowsChanged(changed_move_rows(&selected, &moved))
-            });
+            let movement = state.model.move_rows_earlier_changed(&selected);
+            let changed = movement.changed();
+            let moved = movement.into_rows();
+            let outcome = model_outcome(
+                state,
+                changed,
+                UiEffect::RowsChanged(changed_move_rows(&selected, &moved)),
+            );
             let focused = focused_position.and_then(|position| moved.get(position).copied());
             selection_restore = Some(SelectionRestore {
                 rows: moved,
@@ -261,11 +297,14 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
             let selected = selected_indices(state.list_window);
             let focused_position = focused_index(state.list_window)
                 .and_then(|focused| selected.iter().position(|index| *index == focused));
-            let mut moved = Box::default();
-            let outcome = model_mutation(state, |state| {
-                moved = state.model.move_rows_later(&selected);
-                UiEffect::RowsChanged(changed_move_rows(&selected, &moved))
-            });
+            let movement = state.model.move_rows_later_changed(&selected);
+            let changed = movement.changed();
+            let moved = movement.into_rows();
+            let outcome = model_outcome(
+                state,
+                changed,
+                UiEffect::RowsChanged(changed_move_rows(&selected, &moved)),
+            );
             let focused = focused_position.and_then(|position| moved.get(position).copied());
             selection_restore = Some(SelectionRestore {
                 rows: moved,
@@ -289,10 +328,12 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
                         ),
                     )
                 } {
-                    model_mutation(state, |state| {
-                        state.model.manual_change(index, result.value_one);
-                        UiEffect::RowChanged(index)
-                    })
+                    let changed = state.model.manual_change_changed(index, result.value_one);
+                    model_outcome(
+                        state,
+                        changed,
+                        UiEffect::ProposalRowsChanged(vec![index].into_boxed_slice()),
+                    )
                 } else {
                     CommandOutcome::ui(UiEffect::None)
                 }
@@ -314,11 +355,8 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
                     ),
                 )
             } {
-                model_mutation(state, |state| {
-                    state
-                        .model
-                        .replace_complete(&result.value_one, &result.value_two);
-                    UiEffect::AllRowsChanged
+                proposal_mutation(state, |model| {
+                    model.replace_complete_changed(&result.value_one, &result.value_two)
                 })
             } else {
                 CommandOutcome::ui(UiEffect::None)
@@ -338,9 +376,8 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
                     ),
                 )
             } {
-                model_mutation(state, |state| {
-                    state.model.prefix_complete(&result.value_one);
-                    UiEffect::AllRowsChanged
+                proposal_mutation(state, |model| {
+                    model.prefix_complete_changed(&result.value_one)
                 })
             } else {
                 CommandOutcome::ui(UiEffect::None)
@@ -360,24 +397,17 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
                     ),
                 )
             } {
-                model_mutation(state, |state| {
-                    state.model.suffix_before_extension(&result.value_one);
-                    UiEffect::AllRowsChanged
+                proposal_mutation(state, |model| {
+                    model.suffix_before_extension_changed(&result.value_one)
                 })
             } else {
                 CommandOutcome::ui(UiEffect::None)
             }
         }
-        CLEAR_NAME => model_mutation(state, |state| {
-            state.model.clear_name();
-            UiEffect::AllRowsChanged
-        }),
+        CLEAR_NAME => proposal_mutation(state, LegacyList::clear_name_changed),
         DELETE_POSITION => delete_position_command(window, state),
         DELETE_DELIMITED => delete_delimited_command(window, state),
-        KEEP_DIGITS => model_mutation(state, |state| {
-            state.model.keep_ascii_digits();
-            UiEffect::AllRowsChanged
-        }),
+        KEEP_DIGITS => proposal_mutation(state, LegacyList::keep_ascii_digits_changed),
         PAD_DIGITS => pad_digits_command(window, state),
         SEQUENCE => sequence_command(window, state),
         SORT => {
@@ -385,10 +415,7 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
             selection_restore = restore;
             outcome
         }
-        EXT_DELETE => model_mutation(state, |state| {
-            state.model.delete_extension();
-            UiEffect::AllRowsChanged
-        }),
+        EXT_DELETE => proposal_mutation(state, LegacyList::delete_extension_changed),
         EXT_ADD => {
             if let Some(result) = {
                 prompt_input_or_report(
@@ -403,9 +430,8 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
                     ),
                 )
             } {
-                model_mutation(state, |state| {
-                    state.model.add_extension(&result.value_one);
-                    UiEffect::AllRowsChanged
+                proposal_mutation(state, |model| {
+                    model.add_extension_changed(&result.value_one)
                 })
             } else {
                 CommandOutcome::ui(UiEffect::None)
@@ -425,22 +451,15 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
                     ),
                 )
             } {
-                model_mutation(state, |state| {
-                    state.model.replace_extension(&result.value_one);
-                    UiEffect::AllRowsChanged
+                proposal_mutation(state, |model| {
+                    model.replace_extension_changed(&result.value_one)
                 })
             } else {
                 CommandOutcome::ui(UiEffect::None)
             }
         }
-        PARENT_PREFIX => model_mutation(state, |state| {
-            state.model.prefix_parent_folder();
-            UiEffect::AllRowsChanged
-        }),
-        PARENT_SUFFIX => model_mutation(state, |state| {
-            state.model.suffix_parent_folder();
-            UiEffect::AllRowsChanged
-        }),
+        PARENT_PREFIX => proposal_mutation(state, LegacyList::prefix_parent_folder_changed),
+        PARENT_SUFFIX => proposal_mutation(state, LegacyList::suffix_parent_folder_changed),
         UNIFY_PATH => {
             message(
                 window,
@@ -469,10 +488,10 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
             save_text_dialog(window, state.model.export_paths(), false);
             CommandOutcome::ui(UiEffect::None)
         }
-        IMPORT_NAMES => model_mutation(state, |state| {
-            import_names_dialog(window, state);
-            UiEffect::AllRowsChanged
-        }),
+        IMPORT_NAMES => {
+            let changed = import_names_dialog(window, state);
+            proposal_outcome(state, changed)
+        }
         IMPORT_PATHS => {
             import_paths_dialog(window, state);
             CommandOutcome::ui(UiEffect::None)
@@ -511,15 +530,22 @@ struct SelectionRestore {
     focused: Option<usize>,
 }
 
-fn model_mutation(
-    state: &mut AppState,
-    mutation: impl FnOnce(&mut AppState) -> UiEffect,
-) -> CommandOutcome {
-    let before = state.model.clone();
-    let effect = mutation(state);
-    let changed = state.model != before;
-    state.commit_model_change(&before);
+fn model_outcome(state: &mut AppState, changed: bool, effect: UiEffect) -> CommandOutcome {
+    state.commit_known_model_change(changed);
     CommandOutcome::model(changed, effect)
+}
+
+fn proposal_outcome(state: &mut AppState, changed: Box<[usize]>) -> CommandOutcome {
+    let did_change = !changed.is_empty();
+    model_outcome(state, did_change, UiEffect::ProposalRowsChanged(changed))
+}
+
+fn proposal_mutation(
+    state: &mut AppState,
+    mutation: impl FnOnce(&mut LegacyList) -> Box<[usize]>,
+) -> CommandOutcome {
+    let changed = mutation(&mut state.model);
+    proposal_outcome(state, changed)
 }
 
 fn apply_command_outcome(
@@ -530,13 +556,13 @@ fn apply_command_outcome(
 ) {
     match outcome.into_effect() {
         UiEffect::None => {}
-        UiEffect::RowChanged(row) => {
-            refresh_changed_rows(state, slice::from_ref(&row));
-            update_controls(state);
-        }
         UiEffect::RowsChanged(rows) => {
             refresh_changed_rows(state, &rows);
             restore_selection(state, selection);
+            update_controls(state);
+        }
+        UiEffect::ProposalRowsChanged(rows) => {
+            refresh_proposal_rows(state, &rows);
             update_controls(state);
         }
         UiEffect::AllRowsChanged => {
@@ -651,17 +677,21 @@ fn pad_digits_command(window: HWND, state: &mut AppState) -> CommandOutcome {
         message(window, "자리수 입력이 잘못되었습니다.", "DarkReNamer");
         return CommandOutcome::ui(UiEffect::None);
     }
-    model_mutation(state, |state| {
+    let changed = {
         let outcome = if result.choice == 0 {
-            state.model.pad_last_digit_run(width as usize)
+            state.model.pad_last_digit_run_changed(width as usize)
         } else {
-            state.model.pad_first_digit_run(width as usize)
+            state.model.pad_first_digit_run_changed(width as usize)
         };
-        if outcome.is_err() {
-            message(window, "자리수 입력이 잘못되었습니다.", "DarkReNamer");
+        match outcome {
+            Ok(changed) => changed,
+            Err(_) => {
+                message(window, "자리수 입력이 잘못되었습니다.", "DarkReNamer");
+                Box::default()
+            }
         }
-        UiEffect::AllRowsChanged
-    })
+    };
+    proposal_outcome(state, changed)
 }
 
 fn sequence_command(window: HWND, state: &mut AppState) -> CommandOutcome {
@@ -696,15 +726,16 @@ fn sequence_command(window: HWND, state: &mut AppState) -> CommandOutcome {
         2 => LegacySequenceMode::AppendRestartPerFolder,
         _ => LegacySequenceMode::PrependRestartPerFolder,
     };
-    model_mutation(state, |state| {
-        let _ = state.model.add_sequence_by(
+    let changed = state
+        .model
+        .add_sequence_by_changed(
             width as usize,
             legacy_atoi(&result.value_two),
             mode,
             compare_windows,
-        );
-        UiEffect::AllRowsChanged
-    })
+        )
+        .unwrap_or_default();
+    proposal_outcome(state, changed)
 }
 
 fn delete_position_command(window: HWND, state: &mut AppState) -> CommandOutcome {
@@ -745,14 +776,17 @@ fn delete_position_command(window: HWND, state: &mut AppState) -> CommandOutcome
         );
         return CommandOutcome::ui(UiEffect::None);
     }
-    model_mutation(state, |state| {
+    let changed = {
         if result.choice == 0 {
-            let _ = state.model.delete_front_range(start as usize, end as usize);
+            state
+                .model
+                .delete_front_range_changed(start as usize, end as usize)
+                .unwrap_or_default()
         } else {
-            state.model.delete_last(end as usize);
+            state.model.delete_last_changed(end as usize)
         }
-        UiEffect::AllRowsChanged
-    })
+    };
+    proposal_outcome(state, changed)
 }
 
 fn delete_delimited_command(window: HWND, state: &mut AppState) -> CommandOutcome {
@@ -771,20 +805,22 @@ fn delete_delimited_command(window: HWND, state: &mut AppState) -> CommandOutcom
     }) else {
         return CommandOutcome::ui(UiEffect::None);
     };
-    model_mutation(state, |state| {
-        if state
-            .model
-            .delete_first_delimited(&result.value_one, &result.value_two)
-            == Err(LegacyInputError::EmptyDelimiter)
-        {
+    let changed = match state
+        .model
+        .delete_first_delimited_changed(&result.value_one, &result.value_two)
+    {
+        Ok(changed) => changed,
+        Err(LegacyInputError::EmptyDelimiter) => {
             message(
                 window,
                 "시작/끝 문자가 정확하게 지정되지 않았습니다.",
                 "DarkReNamer",
             );
+            Box::default()
         }
-        UiEffect::AllRowsChanged
-    })
+        Err(_) => Box::default(),
+    };
+    proposal_outcome(state, changed)
 }
 
 fn sort_command(window: HWND, state: &mut AppState) -> (CommandOutcome, Option<SelectionRestore>) {
@@ -832,14 +868,12 @@ fn sort_command(window: HWND, state: &mut AppState) -> (CommandOutcome, Option<S
         let tokens = selection_tokens(&state.model, &selected);
         let focused =
             focused_index(state.list_window).and_then(|index| selection_token(&state.model, index));
-        let outcome = model_mutation(state, |state| {
-            state.model.sort_by_with_semantics(
-                *mode,
-                SortSemantics::SafeActualSize,
-                compare_windows,
-            );
-            UiEffect::AllRowsChanged
-        });
+        let changed = state.model.sort_by_with_semantics_changed(
+            *mode,
+            SortSemantics::SafeActualSize,
+            compare_windows,
+        );
+        let outcome = model_outcome(state, changed, UiEffect::AllRowsChanged);
         let moved = rows_for_tokens(&state.model, &tokens);
         let focused = focused.as_ref().and_then(|token| {
             rows_for_tokens(&state.model, slice::from_ref(token))
@@ -858,6 +892,7 @@ fn sort_command(window: HWND, state: &mut AppState) -> (CommandOutcome, Option<S
 }
 
 pub(super) fn clear_selection(list: HWND) {
+    let _selection_guard = ProgrammaticListUpdateGuard::begin();
     let mut item = LVITEMW {
         stateMask: LVIS_SELECTED | LVIS_FOCUSED,
         state: 0,

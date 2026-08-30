@@ -450,3 +450,74 @@ fn export_and_blank_line_import_preserve_order_crlf_and_utf16_text() {
         [LegacyText::from(r"C:\a"), LegacyText::from(r"C:\b")]
     );
 }
+
+#[test]
+fn changed_aware_mutations_report_exact_no_ops_without_changing_legacy_results() {
+    let mut list = list(&[
+        (r"C:\root\a.txt", false),
+        (r"C:\root\b.txt", false),
+        (r"C:\root\c.txt", false),
+    ]);
+
+    assert!(!list.manual_change_changed(0, "a.txt"));
+    assert!(list.manual_change_changed(1, "renamed.txt"));
+    assert_eq!(&*list.reset_proposals_changed(), &[1]);
+    assert!(list.reset_proposals_changed().is_empty());
+
+    let blocked = list.move_rows_earlier_changed(&[0, 2]);
+    assert!(!blocked.changed());
+    assert_eq!(blocked.rows(), &[0, 2]);
+    let moved = list.move_rows_later_changed(&[0]);
+    assert!(moved.changed());
+    assert_eq!(moved.rows(), &[1]);
+
+    assert!(
+        list.sort_by_changed(LegacySortMode::NameAscending, |left, right| {
+            left.units().cmp(right.units())
+        })
+    );
+    assert!(
+        !list.sort_by_changed(LegacySortMode::NameAscending, |left, right| {
+            left.units().cmp(right.units())
+        })
+    );
+
+    assert!(
+        list.import_names_changed(&LegacyText::from("a.txt\r\nb.txt\r\nc.txt\r\n"))
+            .is_empty()
+    );
+    assert_eq!(
+        &*list.import_names_changed(&LegacyText::from("a.txt\r\nchanged.txt\r\nc.txt\r\n")),
+        &[1]
+    );
+    assert!(list.clear());
+    assert!(!list.clear());
+}
+
+#[test]
+fn ten_thousand_row_proposal_transforms_return_pure_exact_change_sets() {
+    let mut list = LegacyList::new();
+    let rows = (0..10_000)
+        .map(|index| item(&format!(r"C:\root\{index:05}.txt"), false))
+        .collect::<Vec<_>>();
+    assert_eq!(list.append_batch(rows), 10_000);
+
+    assert!(
+        list.prefix_complete_changed(&LegacyText::default())
+            .is_empty()
+    );
+    let changed = list.prefix_complete_changed(&LegacyText::from("x-"));
+    assert_eq!(changed.len(), 10_000);
+    assert_eq!(changed.first(), Some(&0));
+    assert_eq!(changed.last(), Some(&9_999));
+    assert!(
+        changed
+            .iter()
+            .enumerate()
+            .all(|(expected, actual)| expected == *actual)
+    );
+
+    let reset = list.reset_proposals_changed();
+    assert_eq!(reset, changed);
+    assert!(list.reset_proposals_changed().is_empty());
+}
