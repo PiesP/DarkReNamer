@@ -608,20 +608,30 @@ unsafe extern "system" fn window_proc(
         }
         WM_CTLCOLORSTATIC if !state_ptr.is_null() => {
             let child = lparam as HWND;
-            // SAFETY: state_ptr is the live UI-thread AppState. Each rail
-            // returns its brush only for its exact owned keyline HWND.
-            let state = unsafe { &*state_ptr };
-            let brush = state
-                .left_rail
-                .as_ref()
-                .and_then(|rail| rail.apply_keyline_brush_for(child))
-                .or_else(|| {
-                    state
-                        .right_rail
-                        .as_ref()
-                        .and_then(|rail| rail.apply_keyline_brush_for(child))
-                });
-            if let Some(brush) = brush {
+            // Copy all routing values in a tiny borrow that ends before any GDI
+            // call. Keyline matching remains the first and exact route.
+            // SAFETY: state_ptr is live UI-thread state for this callback.
+            let (keyline_brush, instruction, safety) = unsafe {
+                let state = &*state_ptr;
+                let keyline_brush = state
+                    .left_rail
+                    .as_ref()
+                    .and_then(|rail| rail.apply_keyline_brush_for(child))
+                    .or_else(|| {
+                        state
+                            .right_rail
+                            .as_ref()
+                            .and_then(|rail| rail.apply_keyline_brush_for(child))
+                    });
+                (keyline_brush, state.empty_instruction, state.empty_safety)
+            };
+            if let Some(brush) = route_static_control_colors(
+                keyline_brush,
+                instruction,
+                safety,
+                child,
+                wparam as HDC,
+            ) {
                 return brush as LRESULT;
             }
             // SAFETY: unrecognized STATIC children retain the system default
@@ -783,5 +793,27 @@ unsafe extern "system" fn window_proc(
             // SAFETY: window, message, wparam, and lparam are unchanged values from the active Windows callback.
             unsafe { DefWindowProcW(window, message, wparam, lparam) }
         }
+    }
+}
+
+pub(super) fn route_static_control_colors(
+    keyline_brush: Option<HBRUSH>,
+    empty_instruction: HWND,
+    empty_safety: HWND,
+    child: HWND,
+    dc: HDC,
+) -> Option<HBRUSH> {
+    if let Some(brush) = keyline_brush {
+        return Some(brush);
+    }
+    if child != empty_instruction && child != empty_safety {
+        return None;
+    }
+    // SAFETY: WM_CTLCOLORSTATIC supplies a live HDC. System colors and the
+    // cached system brush automatically follow high-contrast/theme changes.
+    unsafe {
+        SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+        SetBkColor(dc, GetSysColor(COLOR_WINDOW));
+        Some(GetSysColorBrush(COLOR_WINDOW))
     }
 }

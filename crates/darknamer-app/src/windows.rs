@@ -88,13 +88,14 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Globalization::{DATE_SHORTDATE, GetDateFormatEx, GetTimeFormatEx};
 use windows_sys::Win32::Graphics::Gdi::{
-    COLOR_WINDOW, CreateFontIndirectW, DT_CALCRECT, DT_NOPREFIX, DT_SINGLELINE, DT_WORDBREAK,
-    DeleteObject, DrawTextW, GetDC, GetMonitorInfoW, HFONT, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromWindow, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RedrawWindow, ReleaseDC,
-    SelectObject, UpdateWindow,
+    COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW, DT_CALCRECT, DT_NOPREFIX, DT_SINGLELINE,
+    DT_WORDBREAK, DeleteObject, DrawTextW, GetDC, GetMonitorInfoW, GetSysColor, GetSysColorBrush,
+    HBRUSH, HDC, HFONT, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, RDW_ALLCHILDREN,
+    RDW_ERASE, RDW_INVALIDATE, RedrawWindow, ReleaseDC, SelectObject, SetBkColor, SetTextColor,
+    UpdateWindow,
 };
 #[cfg(test)]
-use windows_sys::Win32::Graphics::Gdi::{GetObjectType, OBJ_BRUSH};
+use windows_sys::Win32::Graphics::Gdi::{GetBkColor, GetObjectType, GetTextColor, OBJ_BRUSH};
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
 use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
@@ -1282,6 +1283,119 @@ mod tests {
             Ok(())
         })();
         // SAFETY: parent destroys its overlay child.
+        unsafe { DestroyWindow(parent) };
+        result.map_err(Into::into)
+    }
+
+    #[test]
+    fn native_empty_state_color_routing_uses_workspace_system_colors_only()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let controls = INITCOMMONCONTROLSEX {
+            dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+            dwICC: ICC_WIN95_CLASSES,
+        };
+        // SAFETY: controls has its exact size for synchronous initialization.
+        unsafe { InitCommonControlsEx(&controls) };
+        // SAFETY: null requests the current process module.
+        let instance = unsafe { GetModuleHandleW(null()) };
+        let class = wide("STATIC");
+        // SAFETY: the system class/current module remain live for this hidden window.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                instance,
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let rail = match CommandRail::create(parent, &LEFT_RAIL) {
+            Ok(rail) => rail,
+            Err(error) => {
+                // SAFETY: parent is the hidden test window created above.
+                unsafe { DestroyWindow(parent) };
+                return Err(error.into());
+            }
+        };
+        let result = (|| -> io::Result<()> {
+            let (instruction, safety, _add) = create_empty_state_controls(parent)?;
+            let (status, _count, _cancel) = create_status_controls(parent)?;
+            let drop_overlay = create_drop_overlay(parent)?;
+            let keyline = rail
+                .apply_keyline_window()
+                .ok_or_else(|| io::Error::other("Apply keyline is missing"))?;
+            let keyline_brush = rail
+                .apply_keyline_brush_for(keyline)
+                .ok_or_else(|| io::Error::other("Apply keyline brush is missing"))?;
+            // SAFETY: parent is live and the returned DC is released below.
+            let dc = unsafe { GetDC(parent) };
+            if dc.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: dc is live; sentinel colors make accidental mutation visible.
+            unsafe {
+                SetTextColor(dc, 0x0012_3456);
+                SetBkColor(dc, 0x0065_4321);
+            }
+            assert_eq!(
+                application::route_static_control_colors(
+                    Some(keyline_brush),
+                    instruction,
+                    safety,
+                    keyline,
+                    dc,
+                ),
+                Some(keyline_brush)
+            );
+            // SAFETY: keyline routing must not alter the live DC colors.
+            assert_eq!(unsafe { GetTextColor(dc) }, 0x0012_3456);
+            // SAFETY: same live DC.
+            assert_eq!(unsafe { GetBkColor(dc) }, 0x0065_4321);
+
+            for empty in [instruction, safety] {
+                assert_eq!(
+                    application::route_static_control_colors(None, instruction, safety, empty, dc,),
+                    // SAFETY: this is the cached system-owned workspace brush.
+                    Some(unsafe { GetSysColorBrush(COLOR_WINDOW) })
+                );
+                // SAFETY: route wrote current system colors to the live DC.
+                assert_eq!(unsafe { GetTextColor(dc) }, unsafe {
+                    GetSysColor(COLOR_WINDOWTEXT)
+                });
+                // SAFETY: same live DC and current workspace background color.
+                assert_eq!(unsafe { GetBkColor(dc) }, unsafe {
+                    GetSysColor(COLOR_WINDOW)
+                });
+            }
+
+            for unrelated in [status, drop_overlay, rail.separator_windows()[0]] {
+                assert_eq!(
+                    application::route_static_control_colors(
+                        rail.apply_keyline_brush_for(unrelated),
+                        instruction,
+                        safety,
+                        unrelated,
+                        dc,
+                    ),
+                    None
+                );
+            }
+            // SAFETY: dc came from this exact parent and is released once.
+            unsafe { ReleaseDC(parent, dc) };
+            Ok(())
+        })();
+        rail.destroy();
+        // SAFETY: parent is the hidden test HWND and destroys remaining children.
         unsafe { DestroyWindow(parent) };
         result.map_err(Into::into)
     }
