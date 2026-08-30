@@ -69,9 +69,9 @@ use drag_drop::*;
 #[cfg(test)]
 use list_view::changed_column_mask;
 use list_view::{
-    RenderedRow, handle_header_end_track, handle_list_infotip, refresh, refresh_all_rows,
-    refresh_changed_rows, refresh_proposal_rows, update_column_visibility, update_dpi_metrics,
-    update_primary_column_widths,
+    RenderedRow, handle_header_end_track, handle_list_custom_draw, handle_list_infotip, refresh,
+    refresh_all_rows, refresh_changed_rows, refresh_proposal_rows, update_column_visibility,
+    update_dpi_metrics, update_primary_column_widths,
 };
 use menu::*;
 use recovery_ui::*;
@@ -94,24 +94,28 @@ use windows_sys::Win32::Storage::FileSystem::MoveFileW;
 use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+#[cfg(test)]
+use windows_sys::Win32::System::SystemServices::SS_TYPEMASK;
 use windows_sys::Win32::System::SystemServices::{
-    SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_ETCHEDHORZ, SS_NOPREFIX, SS_SUNKEN,
+    SS_CENTER, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_ETCHEDHORZ, SS_NOPREFIX, SS_SUNKEN,
 };
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTimeEx};
+use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows_sys::Win32::UI::Controls::{
-    HDI_WIDTH, HDN_ENDTRACKW, ICC_LISTVIEW_CLASSES, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX,
-    InitCommonControlsEx, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW,
-    LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS,
-    LVM_DELETEITEM, LVM_ENSUREVISIBLE, LVM_GETCOLUMNWIDTH, LVM_GETHEADER, LVM_GETNEXTITEM,
-    LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE,
-    LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVM_SETITEMW, LVN_GETINFOTIPW,
-    LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
-    LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS,
-    LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_DBLCLK, NM_SETFOCUS, NMHDR, NMHEADERW, NMLISTVIEW,
-    NMLVGETINFOTIPW, TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TASKDIALOGCONFIG_1,
-    TD_WARNING_ICON, TDCBF_CANCEL_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION,
-    TDF_POSITION_RELATIVE_TO_WINDOW, TDF_SIZE_TO_CONTENT, TDF_USE_COMMAND_LINKS,
-    TaskDialogIndirect,
+    CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDIS_FOCUS, CDIS_SELECTED, CDRF_DODEFAULT,
+    CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYSUBITEMDRAW, HDI_WIDTH, HDN_ENDTRACKW, ICC_LISTVIEW_CLASSES,
+    ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH,
+    LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED, LVIS_SELECTED,
+    LVITEMW, LVM_DELETEALLITEMS, LVM_DELETEITEM, LVM_ENSUREVISIBLE, LVM_GETCOLUMNWIDTH,
+    LVM_GETHEADER, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH,
+    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW,
+    LVM_SETITEMW, LVN_GETINFOTIPW, LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED,
+    LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_NOSORTHEADER,
+    LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_CUSTOMDRAW, NM_DBLCLK,
+    NM_SETFOCUS, NMHDR, NMHEADERW, NMLISTVIEW, NMLVCUSTOMDRAW, NMLVGETINFOTIPW, TASKDIALOG_BUTTON,
+    TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TASKDIALOGCONFIG_1, TD_WARNING_ICON, TDCBF_CANCEL_BUTTON,
+    TDF_ALLOW_DIALOG_CANCELLATION, TDF_POSITION_RELATIVE_TO_WINDOW, TDF_SIZE_TO_CONTENT,
+    TDF_USE_COMMAND_LINKS, TaskDialogIndirect,
 };
 use windows_sys::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForWindow, GetSystemMetricsForDpi, SystemParametersInfoForDpi,
@@ -125,29 +129,29 @@ use windows_sys::Win32::UI::Shell::{
     SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    ACCEL, AppendMenuW, BN_CLICKED, BN_SETFOCUS, BS_DEFPUSHBUTTON, BeginDeferWindowPos,
-    CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CREATESTRUCTW, CS_HREDRAW,
-    CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem, CreateAcceleratorTableW, CreateMenu, CreatePopupMenu,
-    CreateWindowExW, DefWindowProcW, DeferWindowPos, DestroyAcceleratorTable, DestroyMenu,
-    DestroyWindow, DispatchMessageW, DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem,
+    ACCEL, AppendMenuW, BN_CLICKED, BN_SETFOCUS, BS_DEFPUSHBUTTON, BS_PUSHBUTTON,
+    BeginDeferWindowPos, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CREATESTRUCTW,
+    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem, CreateAcceleratorTableW, CreateMenu,
+    CreatePopupMenu, CreateWindowExW, DefWindowProcW, DeferWindowPos, DestroyAcceleratorTable,
+    DestroyMenu, DestroyWindow, DispatchMessageW, DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem,
     EndDeferWindowPos, FCONTROL, FSHIFT, FVIRTKEY, GWLP_USERDATA, GetClientRect, GetMessageW,
     GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HACCEL,
     HMENU, IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, IsWindow, IsWindowVisible, KillTimer,
     LoadCursorW, LoadIconW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP,
     MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW, MoveWindow,
     NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXVSCROLL,
-    SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW,
-    SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, TranslateAcceleratorW, TranslateMessage, WM_APP, WM_CLOSE,
-    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_FONTCHANGE,
-    WM_GETMINMAXINFO, WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT,
-    WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER,
-    WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_ACCEPTFILES,
-    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
-    WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    SPI_GETHIGHCONTRAST, SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOREDRAW, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateAcceleratorW,
+    TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
+    WM_DROPFILES, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY,
+    WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
+    WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(test)]
-use windows_sys::Win32::UI::WindowsAndMessaging::{BS_MULTILINE, GWL_STYLE};
+use windows_sys::Win32::UI::WindowsAndMessaging::{BS_FLAT, BS_MULTILINE, GWL_STYLE};
 use worker::*;
 
 use crate::*;
@@ -156,6 +160,9 @@ const LIST_ID: usize = 1000;
 const STATUS_MESSAGE_ID: usize = 1007;
 const STATUS_COUNT_ID: usize = 1008;
 const CANCEL_WORKER_ID: u16 = 1009;
+const EMPTY_INSTRUCTION_ID: u16 = 1010;
+const EMPTY_SAFETY_ID: u16 = 1011;
+const EMPTY_ADD_ID: u16 = ADD_FILES;
 const CANDIDATE_JOURNAL_LEAF: &str = "candidate.drj";
 const ACTIVE_JOURNAL_LEAF: &str = "active.drj";
 const EXPORT_RECOVERY_JOURNAL: u16 = 0x9000;
@@ -175,6 +182,9 @@ struct AppState {
     status_message: HWND,
     status_count: HWND,
     cancel_worker: HWND,
+    empty_instruction: HWND,
+    empty_safety: HWND,
+    empty_add: HWND,
     menu: HMENU,
     font: OwnedFont,
     status_font: OwnedFont,
@@ -239,6 +249,9 @@ impl AppState {
             status_message: null_mut(),
             status_count: null_mut(),
             cancel_worker: null_mut(),
+            empty_instruction: null_mut(),
+            empty_safety: null_mut(),
+            empty_add: null_mut(),
             menu: null_mut(),
             font: OwnedFont::default(),
             status_font: OwnedFont::default(),
@@ -295,6 +308,31 @@ impl AppState {
             || self.admission_worker.is_some()
     }
 
+    fn preview_counts(&self, selected: usize) -> PreviewCounts {
+        preview_counts(
+            self.model
+                .items()
+                .iter()
+                .map(|item| (item.current_name(), item.proposed_name())),
+            selected,
+        )
+    }
+
+    fn presentation(&self, selected: usize) -> UiPresentation {
+        let activity = self.worker_activity();
+        let worker_active = activity.admission || activity.plan || activity.apply;
+        UiPresentation::derive(
+            self.preview_counts(selected),
+            PresentationLocks {
+                // ApplyPresentation::Ready is intentionally non-authorizing:
+                // dispatch still enters apply_changes and its apply_locked gate.
+                apply_locked: self.apply_locked(),
+                empty_locked: self.read_only_locked() || self.mutation_locked,
+                worker_active,
+            },
+        )
+    }
+
     const fn read_only_locked(&self) -> bool {
         self.recovery_locked
     }
@@ -345,7 +383,9 @@ impl AppState {
     }
 
     fn set_status_item_count(&mut self) {
-        self.ui_status.set_item_count(self.model.len());
+        let selected = selected_indices(self.list_window).len();
+        self.ui_status
+            .set_preview_counts(self.preview_counts(selected));
         self.render_status();
     }
 
@@ -1014,6 +1054,86 @@ mod tests {
         result.map_err(Into::into)
     }
 
+    #[test]
+    fn native_empty_state_uses_direct_standard_controls_and_only_cta_is_focusable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // SAFETY: null requests the current process module.
+        let instance = unsafe { GetModuleHandleW(null()) };
+        let class = wide("STATIC");
+        // SAFETY: the system class and current module remain valid for this
+        // hidden top-level test window.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                instance,
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let result = (|| -> io::Result<()> {
+            let (instruction, safety, add) = create_empty_state_controls(parent)?;
+            for control in [instruction, safety, add] {
+                // SAFETY: each control is a live direct child created above.
+                assert_eq!(unsafe { GetParent(control) }, parent);
+            }
+            for text in [
+                (instruction, EMPTY_STATE_INSTRUCTION),
+                (safety, EMPTY_STATE_SAFETY),
+                (add, EMPTY_STATE_ADD_LABEL),
+            ] {
+                assert_eq!(window_text(text.0)?, text.1);
+            }
+            // SAFETY: each HWND is live and GWL_STYLE is a pointer-free query.
+            let instruction_style = unsafe { GetWindowLongPtrW(instruction, GWL_STYLE) } as u32;
+            // SAFETY: same as above for the second STATIC.
+            let safety_style = unsafe { GetWindowLongPtrW(safety, GWL_STYLE) } as u32;
+            // SAFETY: same as above for the standard CTA BUTTON.
+            let add_style = unsafe { GetWindowLongPtrW(add, GWL_STYLE) } as u32;
+            assert_eq!(instruction_style & WS_TABSTOP, 0);
+            assert_eq!(safety_style & WS_TABSTOP, 0);
+            assert_ne!(add_style & WS_TABSTOP, 0);
+            assert_eq!(add_style & BS_FLAT as u32, 0);
+
+            set_empty_state_controls(
+                instruction,
+                safety,
+                add,
+                EmptyStatePresentation::Unavailable,
+            );
+            for control in [instruction, safety, add] {
+                // SAFETY: each HWND remains live and this reads integral style.
+                let style = unsafe { GetWindowLongPtrW(control, GWL_STYLE) } as u32;
+                assert_eq!(style & WS_VISIBLE, 0);
+            }
+            // SAFETY: add remains a live standard BUTTON.
+            assert_eq!(unsafe { IsWindowEnabled(add) }, 0);
+
+            set_empty_state_controls(instruction, safety, add, EmptyStatePresentation::ReadyToAdd);
+            for control in [instruction, safety, add] {
+                // SAFETY: each HWND remains live and this reads integral style.
+                let style = unsafe { GetWindowLongPtrW(control, GWL_STYLE) } as u32;
+                assert_ne!(style & WS_VISIBLE, 0);
+            }
+            // SAFETY: add remains a live standard BUTTON.
+            assert_ne!(unsafe { IsWindowEnabled(add) }, 0);
+            Ok(())
+        })();
+        // SAFETY: parent is the hidden test HWND and destroys all children.
+        unsafe { DestroyWindow(parent) };
+        result.map_err(Into::into)
+    }
+
     fn verify_native_command_rails_at_dpi(
         instance: windows_sys::Win32::Foundation::HINSTANCE,
         dpi: u32,
@@ -1082,14 +1202,16 @@ mod tests {
                 .map_err(|error| io::Error::other(format!("test layout failed: {error:?}")))?;
         assert_eq!(left.button_count(), 10);
         assert_eq!(right.button_count(), 9);
+        assert_eq!(left.separator_windows().len(), 3);
+        assert_eq!(right.separator_windows().len(), 3);
 
         let right_origin = metrics.rail_width + scale_dip(20, dpi);
         left.apply_font(message_font);
         right.apply_font(message_font);
         left.set_tab_stop(Some(0));
         right.set_tab_stop(Some(0));
-        left.arrange(0, &left_placements);
-        right.arrange(right_origin, &right_placements);
+        left.arrange(0, &left_placements, dpi);
+        right.arrange(right_origin, &right_placements, dpi);
 
         let result = (|| -> io::Result<()> {
             let mut actual_ids = Vec::with_capacity(19);
@@ -1115,6 +1237,7 @@ mod tests {
                     // SAFETY: button is live and GWL_STYLE is a value query.
                     let style = unsafe { GetWindowLongPtrW(button, GWL_STYLE) } as u32;
                     assert_ne!(style & BS_MULTILINE as u32, 0);
+                    assert_eq!(style & BS_FLAT as u32, 0);
                     assert_eq!(style & WS_TABSTOP != 0, index == 0);
                     // SAFETY: button is live and the query has no pointers.
                     assert_ne!(unsafe { IsWindowEnabled(button) }, 0);
@@ -1122,6 +1245,35 @@ mod tests {
                     // SAFETY: button remains live after EnableWindow.
                     assert_eq!(unsafe { IsWindowEnabled(button) }, 0);
                     rail.set_enabled(placement.command, true);
+                }
+                let separator_layout = calculate_command_rail_separator_layout(expected, dpi);
+                for (index, (separator, expected_rect)) in rail
+                    .separator_windows()
+                    .iter()
+                    .zip(separator_layout)
+                    .enumerate()
+                {
+                    // SAFETY: separator is live and GWL_STYLE is a value query.
+                    let style = unsafe { GetWindowLongPtrW(*separator, GWL_STYLE) } as u32;
+                    assert_eq!(style & WS_TABSTOP, 0);
+                    assert_eq!(style & SS_TYPEMASK, SS_ETCHEDHORZ);
+                    let rect = rail.separator_rect(index)?;
+                    assert_eq!(rect.left, origin_x + expected_rect.x);
+                    assert_eq!(rect.top, expected_rect.y);
+                    assert_eq!(rect.right - rect.left, expected_rect.width);
+                    assert_eq!(rect.bottom - rect.top, expected_rect.height);
+                }
+                rail.set_visible(false);
+                for separator in rail.separator_windows() {
+                    // SAFETY: separator remains live and this reads integral style.
+                    let style = unsafe { GetWindowLongPtrW(*separator, GWL_STYLE) } as u32;
+                    assert_eq!(style & WS_VISIBLE, 0);
+                }
+                rail.set_visible(true);
+                for separator in rail.separator_windows() {
+                    // SAFETY: separator remains live and this reads integral style.
+                    let style = unsafe { GetWindowLongPtrW(*separator, GWL_STYLE) } as u32;
+                    assert_ne!(style & WS_VISIBLE, 0);
                 }
                 rail.set_tab_stop(Some(2));
                 for (index, placement) in expected.iter().enumerate() {
@@ -1137,6 +1289,17 @@ mod tests {
             actual_ids.dedup();
             assert_eq!(actual_ids.len(), 19);
             assert!(!actual_ids.contains(&UNIFY_PATH));
+            left.set_primary(APPLY, true);
+            let apply = left
+                .command_hwnd(APPLY)
+                .ok_or_else(|| io::Error::other("Apply button is missing"))?;
+            // SAFETY: apply is a live standard BUTTON and GWL_STYLE reads its value.
+            let ready_style = unsafe { GetWindowLongPtrW(apply, GWL_STYLE) } as u32;
+            assert_eq!(ready_style & 0xF, BS_DEFPUSHBUTTON as u32);
+            left.set_primary(APPLY, false);
+            // SAFETY: same live BUTTON after the documented BM_SETSTYLE update.
+            let idle_style = unsafe { GetWindowLongPtrW(apply, GWL_STYLE) } as u32;
+            assert_eq!(idle_style & 0xF, BS_PUSHBUTTON as u32);
             Ok(())
         })();
         left.destroy();

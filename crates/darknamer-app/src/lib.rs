@@ -26,7 +26,14 @@ pub(crate) const LIST_SCROLLBAR_ALLOWANCE_DIP: i32 = 17;
 #[cfg(any(windows, test))]
 pub(crate) const EMPTY_LIST_STATUS: &str = "파일이나 폴더를 끌어 놓거나 Ctrl+O로 추가하세요.";
 #[cfg(windows)]
-pub(crate) const STATUS_COUNT_SAMPLE: &str = "10000 개";
+pub(crate) const EMPTY_STATE_INSTRUCTION: &str = "파일이나 폴더를 여기에 끌어오세요";
+#[cfg(windows)]
+pub(crate) const EMPTY_STATE_SAFETY: &str =
+    "실제 파일은 ‘변경 적용’을 누르기 전까지 수정되지 않습니다.";
+#[cfg(windows)]
+pub(crate) const EMPTY_STATE_ADD_LABEL: &str = "파일 추가...";
+#[cfg(windows)]
+pub(crate) const STATUS_COUNT_SAMPLE: &str = "전체 10000 · 변경 10000 · 선택 10000";
 #[cfg(windows)]
 pub(crate) const STATUS_CANCEL_LABEL: &str = "취소";
 
@@ -265,6 +272,9 @@ pub(crate) struct MainLayout {
     pub(crate) status_message: LayoutRect,
     pub(crate) status_count: LayoutRect,
     pub(crate) cancel: LayoutRect,
+    pub(crate) empty_instruction: LayoutRect,
+    pub(crate) empty_safety: LayoutRect,
+    pub(crate) empty_add: LayoutRect,
 }
 
 /// Major focus regions in the native workbench.
@@ -471,12 +481,69 @@ fn adjacent_enabled_index(current: usize, enabled: &[bool], forward: bool) -> Op
 
 #[cfg(any(windows, test))]
 #[must_use]
-pub(crate) const fn main_layout_window_count(layout: &MainLayout) -> usize {
+pub(crate) fn main_layout_window_count(layout: &MainLayout) -> usize {
     layout
         .left_buttons
         .len()
         .saturating_add(layout.right_buttons.len())
-        .saturating_add(4)
+        .saturating_add(command_rail_separator_count(&layout.left_buttons))
+        .saturating_add(command_rail_separator_count(&layout.right_buttons))
+        .saturating_add(7)
+}
+
+#[cfg(any(windows, test))]
+fn command_group(command: CommandId) -> Option<u8> {
+    let mut index = 0_usize;
+    while index < COMMAND_UI_SPECS.len() {
+        let spec = COMMAND_UI_SPECS[index];
+        if spec.id == command {
+            return spec.rail.map(|placement| placement.group);
+        }
+        index += 1;
+    }
+    None
+}
+
+#[cfg(any(windows, test))]
+fn command_rail_separator_count(placements: &[CommandPlacement]) -> usize {
+    let mut count = 0_usize;
+    let mut index = 1_usize;
+    while index < placements.len() {
+        if command_group(placements[index - 1].command) != command_group(placements[index].command)
+        {
+            count += 1;
+        }
+        index += 1;
+    }
+    count
+}
+
+/// Calculates centered, non-focusable separator rectangles inside group gaps.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn calculate_command_rail_separator_layout(
+    placements: &[CommandPlacement],
+    dpi: u32,
+) -> Vec<LayoutRect> {
+    let mut separators = Vec::with_capacity(command_rail_separator_count(placements));
+    for pair in placements.windows(2) {
+        if command_group(pair[0].command) == command_group(pair[1].command) {
+            continue;
+        }
+        let gap_top = pair[0].bottom();
+        let gap = pair[1].y.saturating_sub(gap_top).max(0);
+        let height = scale_dip(2, dpi).max(1).min(gap);
+        let inset = scale_dip(6, dpi)
+            .max(0)
+            .min(pair[0].width.saturating_div(2));
+        separators.push(LayoutRect {
+            x: pair[0].x.saturating_add(inset),
+            y: gap_top.saturating_add(gap.saturating_sub(height) / 2),
+            width: pair[0].width.saturating_sub(inset.saturating_mul(2)),
+            height,
+        });
+    }
+    separators
 }
 
 /// Message-font measurements used by the native prompt layout.
@@ -1038,17 +1105,19 @@ pub(crate) fn calculate_main_layout(
         .saturating_add(scale_dip(12, dpi));
     let count_width = count_preferred.min(after_cancel);
     let message_width = after_cancel.saturating_sub(count_width);
+    let list = LayoutRect {
+        x: rail_width,
+        y: 0,
+        width: list_width,
+        height: rail_height,
+    };
+    let empty = calculate_empty_state_layout(list, dpi);
     MainLayout {
         rail_mode,
         rail_width,
         left_buttons,
         right_buttons,
-        list: LayoutRect {
-            x: rail_width,
-            y: 0,
-            width: list_width,
-            height: rail_height,
-        },
+        list,
         status_message: LayoutRect {
             x: 0,
             y: rail_height,
@@ -1067,14 +1136,227 @@ pub(crate) fn calculate_main_layout(
             width: cancel_width,
             height: status_height,
         },
+        empty_instruction: empty.instruction,
+        empty_safety: empty.safety,
+        empty_add: empty.add,
     }
 }
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct EmptyStateLayout {
+    instruction: LayoutRect,
+    safety: LayoutRect,
+    add: LayoutRect,
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+fn calculate_empty_state_layout(list: LayoutRect, dpi: u32) -> EmptyStateLayout {
+    let horizontal_padding = scale_dip(12, dpi).min(list.width.saturating_div(2));
+    let content_width = list
+        .width
+        .saturating_sub(horizontal_padding.saturating_mul(2));
+    let desired_instruction_height = scale_dip(24, dpi);
+    let desired_button_height = scale_dip(28, dpi);
+    let desired_safety_height = scale_dip(22, dpi);
+    let desired_gap = scale_dip(8, dpi);
+    let desired_total = desired_instruction_height
+        .saturating_add(desired_gap)
+        .saturating_add(desired_button_height)
+        .saturating_add(desired_gap)
+        .saturating_add(desired_safety_height);
+    let top = list
+        .y
+        .saturating_add(list.height.saturating_sub(desired_total).max(0) / 2);
+    let bottom = list.bottom();
+    let mut y = top;
+    let instruction_y = y;
+    let instruction_height = desired_instruction_height
+        .min(bottom.saturating_sub(y))
+        .max(0);
+    y = y.saturating_add(instruction_height);
+    y = y.saturating_add(desired_gap.min(bottom.saturating_sub(y)).max(0));
+    let button_y = y;
+    let button_height = desired_button_height.min(bottom.saturating_sub(y)).max(0);
+    y = y.saturating_add(button_height);
+    y = y.saturating_add(desired_gap.min(bottom.saturating_sub(y)).max(0));
+    let safety_y = y;
+    let safety_height = desired_safety_height.min(bottom.saturating_sub(y)).max(0);
+    let button_width = scale_dip(112, dpi).min(content_width).max(0);
+    EmptyStateLayout {
+        instruction: LayoutRect {
+            x: list.x.saturating_add(horizontal_padding),
+            y: instruction_y,
+            width: content_width,
+            height: instruction_height,
+        },
+        safety: LayoutRect {
+            x: list.x.saturating_add(horizontal_padding),
+            y: safety_y,
+            width: content_width,
+            height: safety_height,
+        },
+        add: LayoutRect {
+            x: list
+                .x
+                .saturating_add(list.width.saturating_sub(button_width) / 2),
+            y: button_y,
+            width: button_width,
+            height: button_height,
+        },
+    }
+}
+
+/// Exact, non-authorizing counts shown by the native preview workbench.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PreviewCounts {
+    pub(crate) total: usize,
+    pub(crate) changed: usize,
+    pub(crate) selected: usize,
+}
+
+/// Derives preview counts by exact current/proposed-name comparison.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn preview_counts<'a, T: PartialEq + ?Sized + 'a>(
+    names: impl IntoIterator<Item = (&'a T, &'a T)>,
+    selected: usize,
+) -> PreviewCounts {
+    let mut total = 0_usize;
+    let mut changed = 0_usize;
+    for (current, proposed) in names {
+        total = total.saturating_add(1);
+        changed = changed.saturating_add(usize::from(current != proposed));
+    }
+    PreviewCounts {
+        total,
+        changed,
+        selected,
+    }
+}
+
+/// Visual readiness of the filesystem Apply command.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ApplyPresentation {
+    NoChanges,
+    Ready,
+    Blocked,
+    Working,
+}
+
+/// Visibility state for the empty-list onboarding controls.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EmptyStatePresentation {
+    Hidden,
+    ReadyToAdd,
+    Unavailable,
+}
+
+/// Existing authorization boundaries supplied to the pure presentation model.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PresentationLocks {
+    pub(crate) apply_locked: bool,
+    pub(crate) empty_locked: bool,
+    pub(crate) worker_active: bool,
+}
+
+/// Pure native workbench presentation derived from model, selection, and locks.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct UiPresentation {
+    pub(crate) counts: PreviewCounts,
+    pub(crate) apply: ApplyPresentation,
+    pub(crate) empty: EmptyStatePresentation,
+}
+
+#[cfg(any(windows, test))]
+impl UiPresentation {
+    #[must_use]
+    pub(crate) const fn derive(counts: PreviewCounts, locks: PresentationLocks) -> Self {
+        let apply = if locks.worker_active {
+            ApplyPresentation::Working
+        } else if counts.changed == 0 {
+            ApplyPresentation::NoChanges
+        } else if locks.apply_locked {
+            ApplyPresentation::Blocked
+        } else {
+            ApplyPresentation::Ready
+        };
+        let empty = if counts.total != 0 {
+            EmptyStatePresentation::Hidden
+        } else if locks.empty_locked || locks.worker_active {
+            EmptyStatePresentation::Unavailable
+        } else {
+            EmptyStatePresentation::ReadyToAdd
+        };
+        Self {
+            counts,
+            apply,
+            empty,
+        }
+    }
+}
+
+/// Proposed-name cell styling selected without replacing native drawing.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProposedNameVisual {
+    Default,
+    Changed,
+}
+
+/// Inputs whose precedence decides whether one proposed-name cell is accented.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProposedNameVisualContext {
+    pub(crate) row: Option<usize>,
+    pub(crate) row_count: usize,
+    pub(crate) subitem: i32,
+    pub(crate) changed: bool,
+    pub(crate) selected: bool,
+    pub(crate) focused: bool,
+    /// `None` means the native high-contrast query failed.
+    pub(crate) forced_colors: Option<bool>,
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn proposed_name_visual_decision(
+    context: ProposedNameVisualContext,
+) -> ProposedNameVisual {
+    let valid_row = match context.row {
+        Some(row) => row < context.row_count,
+        None => false,
+    };
+    if context.subitem == 1
+        && valid_row
+        && context.changed
+        && !context.selected
+        && !context.focused
+        && matches!(context.forced_colors, Some(false))
+    {
+        ProposedNameVisual::Changed
+    } else {
+        ProposedNameVisual::Default
+    }
+}
+
+/// Restrained native light-theme colors used only for changed proposal cells.
+#[cfg(any(windows, test))]
+pub(crate) const PROPOSED_CHANGED_TEXT_COLOR: u32 = 0x0033_268F;
+#[cfg(any(windows, test))]
+pub(crate) const PROPOSED_CHANGED_BACKGROUND_COLOR: u32 = 0x00F7_F7FF;
 
 /// Structured status content whose independent channels survive row refreshes.
 #[cfg(any(windows, test))]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct UiStatus {
-    item_count: usize,
+    counts: PreviewCounts,
     transient: Option<String>,
     progress: Option<String>,
     recovery: Option<String>,
@@ -1098,8 +1380,8 @@ impl UiStatus {
         }
     }
 
-    pub(crate) fn set_item_count(&mut self, item_count: usize) {
-        self.item_count = item_count;
+    pub(crate) fn set_preview_counts(&mut self, counts: PreviewCounts) {
+        self.counts = counts;
     }
 
     pub(crate) fn set_transient(&mut self, message: impl Into<String>) {
@@ -1133,7 +1415,10 @@ impl UiStatus {
 
     #[must_use]
     pub(crate) fn count_text(&self) -> String {
-        format!("{} 개", self.item_count)
+        format!(
+            "전체 {} · 변경 {} · 선택 {}",
+            self.counts.total, self.counts.changed, self.counts.selected
+        )
     }
 }
 
@@ -2267,7 +2552,7 @@ pub const COLUMNS: [ColumnSpec; 7] = [
         default_width: 150,
     },
     ColumnSpec {
-        label: "변경할 이름",
+        label: "변경 후 이름",
         default_width: 150,
     },
     ColumnSpec {
@@ -2847,6 +3132,14 @@ mod tests {
                 metrics.group_gap
             );
         }
+        let separators = calculate_command_rail_separator_layout(&placements, 96);
+        assert_eq!(separators.len(), 3);
+        for (separator, start) in separators.iter().zip([1, 4, 7]) {
+            assert!(separator.y >= placements[start - 1].bottom());
+            assert!(separator.bottom() <= placements[start].y);
+            assert!(separator.width > 0);
+            assert!(separator.height > 0);
+        }
 
         let right = calculate_command_rail_layout(&RIGHT_RAIL, 352, metrics)?;
         for start in [1, 4, 6] {
@@ -2953,14 +3246,14 @@ mod tests {
         let measured = MeasuredFontMetrics::default();
         let comfortable = calculate_main_layout(464, 370, 96, measured);
         assert_eq!(comfortable.rail_mode, RailMode::Comfortable);
-        assert_eq!(main_layout_window_count(&comfortable), 23);
+        assert_eq!(main_layout_window_count(&comfortable), 32);
 
         let compact = calculate_main_layout(464, 369, 96, measured);
         assert_eq!(compact.rail_mode, RailMode::Compact);
 
         let vertical_menu_only = calculate_main_layout(464, 313, 96, measured);
         assert_eq!(vertical_menu_only.rail_mode, RailMode::MenuOnly);
-        assert_eq!(main_layout_window_count(&vertical_menu_only), 4);
+        assert_eq!(main_layout_window_count(&vertical_menu_only), 7);
 
         let menu_only = calculate_main_layout(80, 40, 96, measured);
         assert_eq!(menu_only.rail_mode, RailMode::MenuOnly);
@@ -2969,6 +3262,9 @@ mod tests {
             menu_only.status_message,
             menu_only.status_count,
             menu_only.cancel,
+            menu_only.empty_instruction,
+            menu_only.empty_safety,
+            menu_only.empty_add,
         ] {
             assert!(rect.x >= 0);
             assert!(rect.y >= 0);
@@ -2983,6 +3279,16 @@ mod tests {
             80
         );
         assert_eq!(menu_only.list.height + menu_only.status_message.height, 40);
+        for overlay in [
+            comfortable.empty_instruction,
+            comfortable.empty_add,
+            comfortable.empty_safety,
+        ] {
+            assert!(overlay.x >= comfortable.list.x);
+            assert!(overlay.y >= comfortable.list.y);
+            assert!(overlay.x + overlay.width <= comfortable.list.x + comfortable.list.width);
+            assert!(overlay.bottom() <= comfortable.list.bottom());
+        }
     }
 
     #[test]
@@ -2990,14 +3296,22 @@ mod tests {
         let mut status = UiStatus::with_recovery("복구 상태를 확인하세요.");
         status.set_transient("2개 경로를 제외했습니다.");
         status.set_progress("파일 이름 변경 중: 3/10 단계");
-        status.set_item_count(120);
+        status.set_preview_counts(PreviewCounts {
+            total: 120,
+            changed: 37,
+            selected: 2,
+        });
 
         assert_eq!(status.message_text(), "복구 상태를 확인하세요.");
-        assert_eq!(status.count_text(), "120 개");
+        assert_eq!(status.count_text(), "전체 120 · 변경 37 · 선택 2");
 
-        status.set_item_count(121);
+        status.set_preview_counts(PreviewCounts {
+            total: 121,
+            changed: 38,
+            selected: 3,
+        });
         assert_eq!(status.message_text(), "복구 상태를 확인하세요.");
-        assert_eq!(status.count_text(), "121 개");
+        assert_eq!(status.count_text(), "전체 121 · 변경 38 · 선택 3");
 
         status.clear_recovery();
         assert_eq!(status.message_text(), "파일 이름 변경 중: 3/10 단계");
@@ -3006,11 +3320,159 @@ mod tests {
 
         let empty = UiStatus::default();
         assert_eq!(empty.message_text(), EMPTY_LIST_STATUS);
-        assert_eq!(empty.count_text(), "0 개");
+        assert_eq!(empty.count_text(), "전체 0 · 변경 0 · 선택 0");
 
         let mut promoted = UiStatus::with_transient("일시 상태");
         promoted.set_recovery("복구 상태");
         assert_eq!(promoted.message_text(), "복구 상태");
+    }
+
+    #[test]
+    fn preview_counts_compare_exact_current_and_proposed_names() {
+        let names = [
+            ("photo.jpg", "photo.jpg"),
+            ("photo.jpg", "PHOTO.jpg"),
+            ("한글.txt", "한글-01.txt"),
+        ];
+
+        assert_eq!(
+            preview_counts(names.iter().copied(), 2),
+            PreviewCounts {
+                total: 3,
+                changed: 2,
+                selected: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn workbench_presentation_keeps_apply_authorization_and_empty_state_typed() {
+        let changed = PreviewCounts {
+            total: 3,
+            changed: 2,
+            selected: 1,
+        };
+        assert_eq!(
+            UiPresentation::derive(changed, PresentationLocks::default()).apply,
+            ApplyPresentation::Ready
+        );
+        assert_eq!(
+            UiPresentation::derive(
+                changed,
+                PresentationLocks {
+                    apply_locked: true,
+                    empty_locked: false,
+                    worker_active: false,
+                }
+            )
+            .apply,
+            ApplyPresentation::Blocked
+        );
+        assert_eq!(
+            UiPresentation::derive(
+                changed,
+                PresentationLocks {
+                    worker_active: true,
+                    ..PresentationLocks::default()
+                }
+            )
+            .apply,
+            ApplyPresentation::Working
+        );
+
+        let empty = PreviewCounts::default();
+        assert_eq!(
+            UiPresentation::derive(empty, PresentationLocks::default()).empty,
+            EmptyStatePresentation::ReadyToAdd
+        );
+        assert_eq!(
+            UiPresentation::derive(
+                empty,
+                PresentationLocks {
+                    empty_locked: true,
+                    ..PresentationLocks::default()
+                }
+            )
+            .empty,
+            EmptyStatePresentation::Unavailable
+        );
+        assert_eq!(
+            UiPresentation::derive(
+                empty,
+                PresentationLocks {
+                    worker_active: true,
+                    ..PresentationLocks::default()
+                }
+            )
+            .empty,
+            EmptyStatePresentation::Unavailable
+        );
+        assert_eq!(
+            UiPresentation::derive(changed, PresentationLocks::default()).empty,
+            EmptyStatePresentation::Hidden
+        );
+        assert_eq!(
+            UiPresentation::derive(empty, PresentationLocks::default()).apply,
+            ApplyPresentation::NoChanges
+        );
+    }
+
+    #[test]
+    fn proposed_name_visual_preserves_system_selection_and_fail_safe_defaults() {
+        let changed = |selected, focused, forced_colors| {
+            proposed_name_visual_decision(ProposedNameVisualContext {
+                row: Some(0),
+                row_count: 1,
+                subitem: 1,
+                changed: true,
+                selected,
+                focused,
+                forced_colors,
+            })
+        };
+        assert_eq!(
+            changed(false, false, Some(false)),
+            ProposedNameVisual::Changed
+        );
+        assert_eq!(
+            changed(true, false, Some(false)),
+            ProposedNameVisual::Default
+        );
+        assert_eq!(
+            changed(false, true, Some(false)),
+            ProposedNameVisual::Default
+        );
+        assert_eq!(
+            changed(false, false, Some(true)),
+            ProposedNameVisual::Default
+        );
+        assert_eq!(changed(false, false, None), ProposedNameVisual::Default);
+        assert_eq!(PROPOSED_CHANGED_TEXT_COLOR, 0x0033_268F);
+        assert_eq!(PROPOSED_CHANGED_BACKGROUND_COLOR, 0x00F7_F7FF);
+        assert_eq!(
+            proposed_name_visual_decision(ProposedNameVisualContext {
+                row: Some(1),
+                row_count: 1,
+                subitem: 1,
+                changed: true,
+                selected: false,
+                focused: false,
+                forced_colors: Some(false),
+            }),
+            ProposedNameVisual::Default
+        );
+        assert_eq!(
+            proposed_name_visual_decision(ProposedNameVisualContext {
+                row: Some(0),
+                row_count: 1,
+                subitem: 0,
+                changed: true,
+                selected: false,
+                focused: false,
+                forced_colors: Some(false),
+            }),
+            ProposedNameVisual::Default
+        );
     }
 
     #[test]
@@ -3420,7 +3882,7 @@ mod tests {
             COLUMNS.map(|column| column.label),
             [
                 "현재 이름",
-                "변경할 이름",
+                "변경 후 이름",
                 "파일 위치",
                 "전체경로",
                 "파일크기",

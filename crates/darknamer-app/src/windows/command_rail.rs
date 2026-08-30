@@ -9,6 +9,7 @@ use windows_sys::Win32::Graphics::Gdi::HFONT;
 #[cfg(test)]
 use windows_sys::Win32::Graphics::Gdi::MapWindowPoints;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::SystemServices::SS_ETCHEDHORZ;
 use windows_sys::Win32::UI::Controls::{
     TOOLTIPS_CLASSW, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTS_ALWAYSTIP, TTTOOLINFOW,
 };
@@ -16,17 +17,20 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BS_CENTER, BS_FLAT, BS_MULTILINE, BS_NOTIFY, BS_PUSHBUTTON, BS_VCENTER, CreateWindowExW,
-    DestroyWindow, GWL_STYLE, GetWindowLongPtrW, SW_HIDE, SW_SHOW, SendMessageW, SetWindowLongPtrW,
-    ShowWindow, WM_SETFONT, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP,
-    WS_VISIBLE,
+    BM_SETSTYLE, BS_CENTER, BS_DEFPUSHBUTTON, BS_MULTILINE, BS_NOTIFY, BS_PUSHBUTTON, BS_VCENTER,
+    CreateWindowExW, DestroyWindow, GWL_STYLE, GetWindowLongPtrW, SW_HIDE, SW_SHOW, SendMessageW,
+    SetWindowLongPtrW, ShowWindow, WM_SETFONT, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     SWP_NOACTIVATE, SWP_NOREDRAW, SWP_NOZORDER, SetWindowPos,
 };
 
-use super::{CommandId, CommandPlacement, CommandRailSpec, LayoutRect, command_ui_spec, wide};
+use super::{
+    CommandId, CommandPlacement, CommandRailSpec, LayoutRect,
+    calculate_command_rail_separator_layout, command_ui_spec, wide,
+};
 
 #[derive(Debug)]
 struct CommandButton {
@@ -63,6 +67,7 @@ pub(super) struct CommandRail {
     parent: HWND,
     spec: &'static CommandRailSpec,
     buttons: Vec<CommandButton>,
+    separators: Vec<HWND>,
     tooltip: OwnedTooltip,
     tooltip_texts: Vec<Box<[u16]>>,
 }
@@ -74,6 +79,7 @@ impl CommandRail {
             parent,
             spec,
             buttons: Vec::with_capacity(spec.command_count()),
+            separators: Vec::with_capacity(spec.group_count().saturating_sub(1)),
             tooltip,
             tooltip_texts: Vec::with_capacity(spec.command_count()),
         };
@@ -106,7 +112,6 @@ impl CommandRail {
                         | BS_PUSHBUTTON as u32
                         | BS_NOTIFY as u32
                         | BS_MULTILINE as u32
-                        | BS_FLAT as u32
                         | BS_CENTER as u32
                         | BS_VCENTER as u32,
                     0,
@@ -127,6 +132,32 @@ impl CommandRail {
                 window: button,
             });
             self.add_tooltip(button, command_spec.tooltip_label)?;
+        }
+        for _ in 1..self.spec.group_count() {
+            // A themed STATIC separator is decorative and deliberately omits
+            // WS_TABSTOP, an identifier, and custom drawing.
+            // SAFETY: parent is a live top-level window and the system STATIC
+            // class retains no caller-owned storage from this creation call.
+            let separator = unsafe {
+                CreateWindowExW(
+                    0,
+                    wide("STATIC").as_ptr(),
+                    null(),
+                    WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
+                    0,
+                    0,
+                    0,
+                    0,
+                    self.parent,
+                    null_mut(),
+                    GetModuleHandleW(null()),
+                    null_mut(),
+                )
+            };
+            if separator.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            self.separators.push(separator);
         }
         Ok(())
     }
@@ -167,7 +198,7 @@ impl CommandRail {
     }
 
     #[cfg(test)]
-    pub(super) fn arrange(&self, origin_x: i32, placements: &[CommandPlacement]) {
+    pub(super) fn arrange(&self, origin_x: i32, placements: &[CommandPlacement], dpi: u32) {
         for placement in placements {
             let Some(button) = self.command_hwnd(placement.command) else {
                 continue;
@@ -186,12 +217,32 @@ impl CommandRail {
                 )
             };
         }
+        for (separator, rect) in self
+            .separators
+            .iter()
+            .zip(calculate_command_rail_separator_layout(placements, dpi))
+        {
+            // SAFETY: separator is a live direct child owned by this rail and
+            // the pure layout is bounded by its neighboring group buttons.
+            unsafe {
+                SetWindowPos(
+                    *separator,
+                    null_mut(),
+                    origin_x.saturating_add(rect.x),
+                    rect.y,
+                    rect.width,
+                    rect.height,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
+                )
+            };
+        }
     }
 
     pub(super) fn append_placements(
         &self,
         origin_x: i32,
         placements: &[CommandPlacement],
+        dpi: u32,
         windows: &mut Vec<(HWND, LayoutRect)>,
     ) {
         windows.extend(placements.iter().filter_map(|placement| {
@@ -207,6 +258,16 @@ impl CommandRail {
                 )
             })
         }));
+        windows.extend(
+            self.separators
+                .iter()
+                .copied()
+                .zip(calculate_command_rail_separator_layout(placements, dpi))
+                .map(|(window, mut rect)| {
+                    rect.x = rect.x.saturating_add(origin_x);
+                    (window, rect)
+                }),
+        );
     }
 
     pub(super) fn set_enabled(&self, command: CommandId, enabled: bool) {
@@ -221,6 +282,23 @@ impl CommandRail {
         for button in &self.buttons {
             // SAFETY: each button is a live child owned by this command rail.
             unsafe { ShowWindow(button.window, command) };
+        }
+        for separator in &self.separators {
+            // SAFETY: each separator is a live decorative child owned by this rail.
+            unsafe { ShowWindow(*separator, command) };
+        }
+    }
+
+    pub(super) fn set_primary(&self, command: CommandId, primary: bool) {
+        if let Some(button) = self.command_hwnd(command) {
+            let style = if primary {
+                BS_DEFPUSHBUTTON
+            } else {
+                BS_PUSHBUTTON
+            };
+            // SAFETY: button is the live standard BUTTON for this command; the
+            // documented message changes only its button type and redraws it.
+            unsafe { SendMessageW(button, BM_SETSTYLE, style as usize, 1) };
         }
     }
 
@@ -269,6 +347,10 @@ impl CommandRail {
 
     fn destroy_partial(&mut self) {
         self.tooltip.destroy();
+        for separator in self.separators.drain(..) {
+            // SAFETY: this rail owns each still-live decorative child.
+            unsafe { DestroyWindow(separator) };
+        }
         for button in self.buttons.drain(..) {
             // SAFETY: partial construction created this still-live child and no
             // successful CommandRail can observe it after this error cleanup.
@@ -283,6 +365,29 @@ impl CommandRail {
     #[cfg(test)]
     pub(super) fn button_count(&self) -> usize {
         self.buttons.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn separator_windows(&self) -> &[HWND] {
+        &self.separators
+    }
+
+    #[cfg(test)]
+    pub(super) fn separator_rect(&self, index: usize) -> io::Result<RECT> {
+        let separator = self
+            .separators
+            .get(index)
+            .copied()
+            .ok_or_else(|| io::Error::other("command rail separator is missing"))?;
+        let mut rect = RECT::default();
+        // SAFETY: separator is live and rect is writable for this query.
+        if unsafe { GetWindowRect(separator, &mut rect) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: rect is two consecutive POINT-compatible coordinate pairs;
+        // parent is the live client-coordinate target.
+        unsafe { MapWindowPoints(null_mut(), self.parent, (&mut rect as *mut RECT).cast(), 2) };
+        Ok(rect)
     }
 
     #[cfg(test)]

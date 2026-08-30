@@ -626,6 +626,11 @@ unsafe extern "system" fn window_proc(
             {
                 return 0;
             }
+            // SAFETY: state_ptr is the live UI-thread AppState and the custom
+            // draw helper validates the synchronous WM_NOTIFY payload/source.
+            if let Some(result) = handle_list_custom_draw(unsafe { &*state_ptr }, lparam) {
+                return result;
+            }
             // Header controls are ListView children, so their resize
             // notifications identify the header HWND rather than list_window.
             // SAFETY: state_ptr is the live UI-thread AppState and lparam is

@@ -107,6 +107,84 @@ pub(super) fn handle_header_end_track(state: &mut AppState, lparam: LPARAM) -> b
     true
 }
 
+/// Applies restrained colors only to an unselected changed proposed-name cell.
+/// Every other stage and state remains under the native ListView renderer.
+pub(super) fn handle_list_custom_draw(state: &AppState, lparam: LPARAM) -> Option<LRESULT> {
+    let header = lparam as *const NMHDR;
+    if header.is_null()
+        // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix for this
+        // synchronous callback; the pointer was checked above.
+        || unsafe { (*header).hwndFrom } != state.list_window
+        // SAFETY: same live NMHDR storage as the source-window read above.
+        || unsafe { (*header).code } != NM_CUSTOMDRAW
+    {
+        return None;
+    }
+    let custom = lparam as *mut NMLVCUSTOMDRAW;
+    if custom.is_null() {
+        return Some(CDRF_DODEFAULT as LRESULT);
+    }
+    // SAFETY: NM_CUSTOMDRAW from a ListView supplies NMLVCUSTOMDRAW storage for
+    // the duration of this synchronous notification.
+    let stage = unsafe { (*custom).nmcd.dwDrawStage };
+    if stage == CDDS_PREPAINT {
+        return Some(CDRF_NOTIFYITEMDRAW as LRESULT);
+    }
+    if stage == CDDS_ITEMPREPAINT {
+        return Some(CDRF_NOTIFYSUBITEMDRAW as LRESULT);
+    }
+    if stage != (CDDS_ITEMPREPAINT | CDDS_SUBITEM) {
+        return Some(CDRF_DODEFAULT as LRESULT);
+    }
+
+    // SAFETY: same live NMLVCUSTOMDRAW payload validated above.
+    let row = unsafe { (*custom).nmcd.dwItemSpec };
+    // SAFETY: same payload; iSubItem and item state are integral fields.
+    let (subitem, item_state) = unsafe { ((*custom).iSubItem, (*custom).nmcd.uItemState) };
+    let changed = state
+        .model
+        .items()
+        .get(row)
+        .is_some_and(|item| item.current_name() != item.proposed_name());
+    let visual = proposed_name_visual_decision(ProposedNameVisualContext {
+        row: Some(row),
+        row_count: state.model.len(),
+        subitem,
+        changed,
+        selected: item_state & CDIS_SELECTED != 0,
+        focused: item_state & CDIS_FOCUS != 0,
+        forced_colors: high_contrast_active(),
+    });
+    if visual == ProposedNameVisual::Changed {
+        // SAFETY: this callback owns writable NMLVCUSTOMDRAW fields until it
+        // returns. Default drawing consumes the colors; no font/text/focus
+        // rendering is replaced and no caller pointer is retained.
+        unsafe {
+            (*custom).clrText = PROPOSED_CHANGED_TEXT_COLOR;
+            (*custom).clrTextBk = PROPOSED_CHANGED_BACKGROUND_COLOR;
+        }
+    }
+    Some(CDRF_DODEFAULT as LRESULT)
+}
+
+fn high_contrast_active() -> Option<bool> {
+    let mut contrast = HIGHCONTRASTW {
+        cbSize: u32::try_from(size_of::<HIGHCONTRASTW>()).ok()?,
+        ..HIGHCONTRASTW::default()
+    };
+    // SAFETY: contrast is writable HIGHCONTRASTW storage with its checked
+    // structure size; the synchronous query retains no pointer.
+    let succeeded = unsafe {
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            contrast.cbSize,
+            (&mut contrast as *mut HIGHCONTRASTW).cast(),
+            0,
+        )
+    };
+    (succeeded != 0).then_some(contrast.dwFlags & HCF_HIGHCONTRASTON != 0)
+}
+
 pub(super) fn handle_list_infotip(state: &AppState, lparam: LPARAM) -> bool {
     let header = lparam as *const NMHDR;
     if header.is_null()
