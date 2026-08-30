@@ -249,6 +249,7 @@ struct AppState {
     rails_visible: bool,
     ui_status: UiStatus,
     preview_count_cache: PreviewCountCache,
+    preview_issue_cache: PreviewIssueCache,
     status_layout_input: StatusLayoutInput,
     forced_colors: ForcedColorsState,
     system_theme: Option<ResolvedTheme>,
@@ -340,6 +341,7 @@ impl AppState {
             rails_visible: true,
             ui_status,
             preview_count_cache: PreviewCountCache::default(),
+            preview_issue_cache: PreviewIssueCache::default(),
             status_layout_input: StatusLayoutInput::default(),
             forced_colors: ForcedColorsState::default(),
             system_theme: None,
@@ -388,7 +390,7 @@ impl AppState {
             PresentationLocks {
                 // ApplyPresentation::Ready is intentionally non-authorizing:
                 // dispatch still enters apply_changes and its apply_locked gate.
-                apply_locked: self.apply_locked(),
+                apply_locked: self.apply_locked() || self.preview_issue_cache.has_blocker(),
                 empty_locked: self.read_only_locked() || self.mutation_locked,
                 worker_active,
             },

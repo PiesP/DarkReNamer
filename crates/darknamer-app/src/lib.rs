@@ -288,6 +288,8 @@ pub(crate) struct SemanticPalette {
     pub(crate) changed_subtle: u32,
     pub(crate) changed_standard: u32,
     pub(crate) changed_strong: u32,
+    pub(crate) warning: u32,
+    pub(crate) collision: u32,
     pub(crate) preview_tint: u32,
     pub(crate) apply_keyline: u32,
 }
@@ -307,6 +309,8 @@ const PRECISION_LIGHT: SemanticPalette = SemanticPalette {
     changed_subtle: color_ref(121, 43, 51),
     changed_standard: color_ref(143, 38, 51),
     changed_strong: color_ref(169, 22, 33),
+    warning: color_ref(142, 83, 0),
+    collision: color_ref(169, 22, 33),
     preview_tint: color_ref(245, 248, 255),
     apply_keyline: color_ref(217, 41, 50),
 };
@@ -321,6 +325,8 @@ const GRAPHITE_DARK: SemanticPalette = SemanticPalette {
     changed_subtle: color_ref(217, 164, 168),
     changed_standard: color_ref(255, 102, 112),
     changed_strong: color_ref(255, 137, 145),
+    warning: color_ref(255, 194, 92),
+    collision: color_ref(255, 137, 145),
     preview_tint: color_ref(32, 40, 51),
     apply_keyline: color_ref(255, 102, 112),
 };
@@ -349,16 +355,21 @@ pub(crate) const fn proposed_name_colors(
     resolved: ResolvedUiAppearance,
     visual: ProposedNameVisual,
 ) -> Option<ProposedNameColors> {
-    if !resolved.custom_colors_enabled || !matches!(visual, ProposedNameVisual::Changed) {
+    if !resolved.custom_colors_enabled || matches!(visual, ProposedNameVisual::Default) {
         return None;
     }
     let Some(palette) = semantic_palette(resolved.theme) else {
         return None;
     };
-    let text = match resolved.appearance.emphasis {
-        PreviewEmphasis::Subtle => palette.changed_subtle,
-        PreviewEmphasis::Standard => palette.changed_standard,
-        PreviewEmphasis::Strong => palette.changed_strong,
+    let text = match visual {
+        ProposedNameVisual::Warning => palette.warning,
+        ProposedNameVisual::Collision => palette.collision,
+        ProposedNameVisual::Changed => match resolved.appearance.emphasis {
+            PreviewEmphasis::Subtle => palette.changed_subtle,
+            PreviewEmphasis::Standard => palette.changed_standard,
+            PreviewEmphasis::Strong => palette.changed_strong,
+        },
+        ProposedNameVisual::Default => return None,
     };
     Some(ProposedNameColors {
         text,
@@ -2138,6 +2149,135 @@ pub(crate) struct PreviewCountCache {
     changed: usize,
 }
 
+/// Model-only warning/blocker attached to one proposed-name row.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum PreviewRowIssue {
+    #[default]
+    None,
+    EmptyStem,
+    DuplicateDestination,
+}
+
+/// Cached preview-only diagnostics. These never authorize filesystem work.
+#[cfg(any(windows, test))]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PreviewIssueCache {
+    rows: Vec<PreviewRowIssue>,
+    warning_rows: usize,
+    blocker_rows: usize,
+}
+
+#[cfg(any(windows, test))]
+impl PreviewIssueCache {
+    pub(crate) fn refresh_by<'a, F>(
+        &mut self,
+        rows: impl IntoIterator<
+            Item = (
+                &'a darknamer_core::LegacyText,
+                &'a darknamer_core::LegacyText,
+                &'a darknamer_core::LegacyText,
+                bool,
+            ),
+        >,
+        compare: F,
+    ) where
+        F: Fn(&darknamer_core::LegacyText, &darknamer_core::LegacyText) -> std::cmp::Ordering
+            + Copy,
+    {
+        let rows = rows.into_iter().collect::<Vec<_>>();
+        self.rows.clear();
+        self.rows.resize(rows.len(), PreviewRowIssue::None);
+        let mut destinations = Vec::new();
+        for (row, (parent, current, proposed, is_directory)) in rows.iter().copied().enumerate() {
+            if current == proposed {
+                continue;
+            }
+            if preview_name_has_empty_stem(proposed, is_directory) {
+                self.rows[row] = PreviewRowIssue::EmptyStem;
+            }
+            destinations.push((row, parent, proposed));
+        }
+        destinations
+            .sort_by(|left, right| compare(left.1, right.1).then_with(|| compare(left.2, right.2)));
+        let mut group_start = 0_usize;
+        while group_start < destinations.len() {
+            let mut group_end = group_start + 1;
+            while group_end < destinations.len()
+                && compare(destinations[group_start].1, destinations[group_end].1)
+                    == std::cmp::Ordering::Equal
+                && compare(destinations[group_start].2, destinations[group_end].2)
+                    == std::cmp::Ordering::Equal
+            {
+                group_end += 1;
+            }
+            if group_end - group_start > 1 {
+                for destination in &destinations[group_start..group_end] {
+                    self.rows[destination.0] = PreviewRowIssue::DuplicateDestination;
+                }
+            }
+            group_start = group_end;
+        }
+        self.warning_rows = self
+            .rows
+            .iter()
+            .filter(|issue| matches!(issue, PreviewRowIssue::EmptyStem))
+            .count();
+        self.blocker_rows = self
+            .rows
+            .iter()
+            .filter(|issue| matches!(issue, PreviewRowIssue::DuplicateDestination))
+            .count();
+    }
+
+    #[must_use]
+    pub(crate) fn issue(&self, row: usize) -> PreviewRowIssue {
+        self.rows.get(row).copied().unwrap_or_default()
+    }
+
+    #[must_use]
+    pub(crate) const fn has_blocker(&self) -> bool {
+        self.blocker_rows != 0
+    }
+
+    #[must_use]
+    pub(crate) fn blocker_rows(&self) -> Box<[usize]> {
+        self.rows
+            .iter()
+            .enumerate()
+            .filter_map(|(row, issue)| {
+                matches!(issue, PreviewRowIssue::DuplicateDestination).then_some(row)
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    }
+
+    #[must_use]
+    pub(crate) fn notice(&self) -> Option<String> {
+        if self.blocker_rows != 0 {
+            Some(format!(
+                "대상 이름 충돌 {}개 · 변경 적용이 차단되었습니다.",
+                self.blocker_rows
+            ))
+        } else if self.warning_rows != 0 {
+            Some(format!(
+                "이름 본체가 비어 있는 항목 {}개 · 변경 전에 확인하세요.",
+                self.warning_rows
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+fn preview_name_has_empty_stem(name: &darknamer_core::LegacyText, is_directory: bool) -> bool {
+    if is_directory {
+        return name.is_empty();
+    }
+    name.units().iter().rposition(|unit| *unit == b'.' as u16) == Some(0)
+}
+
 #[cfg(any(windows, test))]
 impl PreviewCountCache {
     /// Replaces the cache from the authoritative model projection.
@@ -2301,6 +2441,8 @@ impl UiPresentation {
 pub(crate) enum ProposedNameVisual {
     Default,
     Changed,
+    Warning,
+    Collision,
 }
 
 /// Cached forced-colors state. Unknown queries fail closed like active mode.
@@ -2349,6 +2491,7 @@ pub(crate) struct ProposedNameVisualContext {
     pub(crate) row_count: usize,
     pub(crate) subitem: i32,
     pub(crate) changed: bool,
+    pub(crate) issue: PreviewRowIssue,
     pub(crate) selected: bool,
     pub(crate) focused: bool,
     pub(crate) custom_colors_enabled: bool,
@@ -2367,10 +2510,13 @@ pub(crate) const fn proposed_name_visual_decision(
         && valid_row
         && context.changed
         && !context.selected
-        && !context.focused
         && context.custom_colors_enabled
     {
-        ProposedNameVisual::Changed
+        match context.issue {
+            PreviewRowIssue::None => ProposedNameVisual::Changed,
+            PreviewRowIssue::EmptyStem => ProposedNameVisual::Warning,
+            PreviewRowIssue::DuplicateDestination => ProposedNameVisual::Collision,
+        }
     } else {
         ProposedNameVisual::Default
     }
@@ -2388,6 +2534,7 @@ pub(crate) struct UiStatus {
     transient: Option<String>,
     progress: Option<String>,
     recovery: Option<String>,
+    preview_notice: Option<String>,
 }
 
 #[cfg(any(windows, test))]
@@ -2432,11 +2579,16 @@ impl UiStatus {
         self.recovery = None;
     }
 
+    pub(crate) fn set_preview_notice(&mut self, notice: Option<String>) {
+        self.preview_notice = notice;
+    }
+
     #[must_use]
     pub(crate) fn message_text(&self) -> &str {
         self.recovery
             .as_deref()
             .or(self.progress.as_deref())
+            .or(self.preview_notice.as_deref())
             .or(self.transient.as_deref())
             .unwrap_or(EMPTY_LIST_STATUS)
     }
@@ -4403,6 +4555,14 @@ mod tests {
         );
         assert_eq!(strong.and_then(|colors| colors.background), None);
         assert_eq!(
+            proposed_name_colors(light, ProposedNameVisual::Warning).map(|colors| colors.text),
+            Some(PRECISION_LIGHT.warning)
+        );
+        assert_eq!(
+            proposed_name_colors(light, ProposedNameVisual::Collision).map(|colors| colors.text),
+            Some(PRECISION_LIGHT.collision)
+        );
+        assert_eq!(
             proposed_name_colors(light, ProposedNameVisual::Default),
             None
         );
@@ -5052,6 +5212,7 @@ mod tests {
         let mut status = UiStatus::with_recovery("복구 상태를 확인하세요.");
         status.set_transient("2개 경로를 제외했습니다.");
         status.set_progress("파일 이름 변경 중: 3/10 단계");
+        status.set_preview_notice(Some("대상 이름 충돌 2개".to_owned()));
         status.set_preview_counts(PreviewCounts {
             total: 120,
             changed: 37,
@@ -5072,6 +5233,8 @@ mod tests {
         status.clear_recovery();
         assert_eq!(status.message_text(), "파일 이름 변경 중: 3/10 단계");
         status.clear_progress();
+        assert_eq!(status.message_text(), "대상 이름 충돌 2개");
+        status.set_preview_notice(None);
         assert_eq!(status.message_text(), "2개 경로를 제외했습니다.");
 
         let empty = UiStatus::default();
@@ -5226,6 +5389,7 @@ mod tests {
                 row_count: 1,
                 subitem: 1,
                 changed: true,
+                issue: PreviewRowIssue::None,
                 selected,
                 focused,
                 custom_colors_enabled,
@@ -5233,7 +5397,7 @@ mod tests {
         };
         assert_eq!(changed(false, false, true), ProposedNameVisual::Changed);
         assert_eq!(changed(true, false, true), ProposedNameVisual::Default);
-        assert_eq!(changed(false, true, true), ProposedNameVisual::Default);
+        assert_eq!(changed(false, true, true), ProposedNameVisual::Changed);
         assert_eq!(changed(false, false, false), ProposedNameVisual::Default);
         assert_eq!(
             ForcedColorsState::from_high_contrast_query(Some(false)),
@@ -5251,6 +5415,7 @@ mod tests {
                 row_count: 1,
                 subitem: 1,
                 changed: true,
+                issue: PreviewRowIssue::None,
                 selected: false,
                 focused: false,
                 custom_colors_enabled: true,
@@ -5263,11 +5428,68 @@ mod tests {
                 row_count: 1,
                 subitem: 0,
                 changed: true,
+                issue: PreviewRowIssue::None,
                 selected: false,
                 focused: false,
                 custom_colors_enabled: true,
             }),
             ProposedNameVisual::Default
+        );
+        assert_eq!(
+            proposed_name_visual_decision(ProposedNameVisualContext {
+                row: Some(0),
+                row_count: 1,
+                subitem: 1,
+                changed: true,
+                issue: PreviewRowIssue::DuplicateDestination,
+                selected: false,
+                focused: true,
+                custom_colors_enabled: true,
+            }),
+            ProposedNameVisual::Collision
+        );
+    }
+
+    #[test]
+    fn preview_issues_distinguish_empty_stems_and_duplicate_destinations() {
+        use darknamer_core::LegacyText;
+
+        let parent = LegacyText::from(r"C:\work");
+        let other_parent = LegacyText::from(r"C:\other");
+        let current_one = LegacyText::from("photo01.jpg");
+        let current_two = LegacyText::from("photo02.jpg");
+        let current_three = LegacyText::from("photo03.jpg");
+        let duplicate = LegacyText::from(".jpg");
+        let warning_only = LegacyText::from(".png");
+        let mut cache = PreviewIssueCache::default();
+
+        cache.refresh_by(
+            [
+                (&parent, &current_one, &duplicate, false),
+                (&parent, &current_two, &duplicate, false),
+                (&other_parent, &current_three, &warning_only, false),
+            ],
+            LegacyText::case_insensitive_cmp,
+        );
+
+        assert_eq!(cache.issue(0), PreviewRowIssue::DuplicateDestination);
+        assert_eq!(cache.issue(1), PreviewRowIssue::DuplicateDestination);
+        assert_eq!(cache.issue(2), PreviewRowIssue::EmptyStem);
+        assert!(cache.has_blocker());
+        assert_eq!(cache.blocker_rows().as_ref(), &[0, 1]);
+        assert_eq!(
+            cache.notice().as_deref(),
+            Some("대상 이름 충돌 2개 · 변경 적용이 차단되었습니다.")
+        );
+
+        cache.refresh_by(
+            [(&other_parent, &current_three, &warning_only, false)],
+            LegacyText::case_insensitive_cmp,
+        );
+        assert!(!cache.has_blocker());
+        assert_eq!(
+            cache.notice().as_deref(),
+            Some("이름 본체가 비어 있는 항목 1개 · 변경 전에 확인하세요.")
         );
     }
 

@@ -163,7 +163,7 @@ pub(super) fn handle_list_custom_draw(state: &AppState, lparam: LPARAM) -> Optio
     } as u32;
     let selected = item_state & LVIS_SELECTED != 0;
     let focused = item_state & LVIS_FOCUSED != 0;
-    if selected || focused {
+    if selected {
         return Some(CDRF_DODEFAULT as LRESULT);
     }
     if item.current_name() == item.proposed_name() {
@@ -177,6 +177,7 @@ pub(super) fn handle_list_custom_draw(state: &AppState, lparam: LPARAM) -> Optio
         row_count: state.model.len(),
         subitem,
         changed: true,
+        issue: state.preview_issue_cache.issue(row),
         selected,
         focused,
         custom_colors_enabled: resolved.custom_colors_enabled,
@@ -231,8 +232,14 @@ pub(super) fn handle_list_infotip(state: &AppState, lparam: LPARAM) -> bool {
     let Some(item) = state.model.items().get(row) else {
         return true;
     };
+    let preview = match state.preview_issue_cache.issue(row) {
+        PreviewRowIssue::DuplicateDestination => "대상 이름 충돌 · 변경 적용 차단",
+        PreviewRowIssue::EmptyStem => "이름 본체가 비어 있음 · 변경 전 확인 필요",
+        PreviewRowIssue::None if item.current_name() != item.proposed_name() => "변경 예정",
+        PreviewRowIssue::None => "변경 없음",
+    };
     let text = format!(
-        "{}\n{}\n정확한 크기: {}",
+        "{preview}\n{}\n{}\n정확한 크기: {}",
         item.current_name(),
         item.source_path(),
         format_exact_bytes(item.actual_size())
@@ -399,6 +406,20 @@ fn refresh_preview_count_cache(state: &mut AppState) {
             .iter()
             .map(|item| (item.current_name(), item.proposed_name())),
     );
+    state.preview_issue_cache.refresh_by(
+        state.model.items().iter().map(|item| {
+            (
+                item.root_path(),
+                item.current_name(),
+                item.proposed_name(),
+                item.is_directory(),
+            )
+        }),
+        compare_windows,
+    );
+    state
+        .ui_status
+        .set_preview_notice(state.preview_issue_cache.notice());
 }
 
 fn rendered_row(icon_cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyListItem) -> RenderedRow {

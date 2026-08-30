@@ -300,6 +300,17 @@ pub(super) const fn execution_phase_code(phase: ExecutionPhase) -> u8 {
 }
 
 pub(super) fn apply_changes(window: HWND, state: &mut AppState) {
+    if state.preview_issue_cache.has_blocker() {
+        clear_selection(state.list_window);
+        select_rows(state.list_window, &state.preview_issue_cache.blocker_rows());
+        update_controls(state);
+        message(
+            window,
+            "같은 폴더에서 둘 이상의 항목이 같은 대상 이름을 사용합니다. 표시된 행의 이름을 다르게 지정해 주세요.",
+            "DarkReNamer - 적용 차단",
+        );
+        return;
+    }
     if state.apply_locked() {
         message(
             window,
