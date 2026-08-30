@@ -46,10 +46,12 @@ byte-for-byte reproducible. Desktop acceptance and power-loss durability remain
 separate from packaging validation.
 
 Formal desktop acceptance is complete only when the external evidence passes
-the [full release gate](SAFETY.md#windows-acceptance-evidence) and
-[`validate-release-acceptance.ps1`](scripts/validate-release-acceptance.ps1)
-cross-checks it against the checkout HEAD and the actual Actions handoff. A
-valid handoff alone is packaging evidence, not desktop acceptance.
+the full release gate documented in repository file `SAFETY.md` and repository
+script `scripts/validate-release-acceptance.ps1` cross-checks it against the
+checkout HEAD and the actual Actions handoff. Use the exact source commit named
+by `release-handoff.json`; this standalone policy file does not embed or link to
+a potentially newer repository revision. A valid handoff alone is packaging
+evidence, not desktop acceptance.
 
 ## Future Authenticode boundary
 
