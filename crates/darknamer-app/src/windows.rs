@@ -116,14 +116,14 @@ use windows_sys::Win32::System::SystemServices::{SS_NOTIFY, SS_TYPEMASK};
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTimeEx};
 use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows_sys::Win32::UI::Controls::{
-    CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDIS_FOCUS, CDIS_SELECTED, CDRF_DODEFAULT,
+    CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDRF_DODEFAULT, CDRF_NEWFONT,
     CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYSUBITEMDRAW, HDI_WIDTH, HDN_ENDTRACKW, ICC_LISTVIEW_CLASSES,
     ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH,
     LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED, LVIS_SELECTED,
     LVITEMW, LVM_DELETEALLITEMS, LVM_DELETEITEM, LVM_ENSUREVISIBLE, LVM_GETCOLUMNWIDTH,
-    LVM_GETHEADER, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH,
-    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW,
-    LVM_SETITEMW, LVN_GETINFOTIPW, LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED,
+    LVM_GETHEADER, LVM_GETITEMSTATE, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
+    LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE,
+    LVM_SETITEMTEXTW, LVM_SETITEMW, LVN_GETINFOTIPW, LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED,
     LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_NOSORTHEADER,
     LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_CUSTOMDRAW, NM_DBLCLK,
     NM_SETFOCUS, NMHDR, NMHEADERW, NMLISTVIEW, NMLVCUSTOMDRAW, NMLVGETINFOTIPW, TASKDIALOG_BUTTON,
@@ -131,6 +131,8 @@ use windows_sys::Win32::UI::Controls::{
     TDF_ALLOW_DIALOG_CANCELLATION, TDF_POSITION_RELATIVE_TO_WINDOW, TDF_SIZE_TO_CONTENT,
     TDF_USE_COMMAND_LINKS, TaskDialogIndirect,
 };
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::{CDIS_FOCUS, CDIS_SELECTED};
 use windows_sys::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForWindow, GetSystemMetricsForDpi, SystemParametersInfoForDpi,
 };
@@ -852,6 +854,50 @@ mod tests {
         assert_eq!(state.appearance, appearance);
         assert_eq!(state.column_states, default_column_states());
         assert_eq!(state.appearance_preferences_path, path);
+        Ok(())
+    }
+
+    #[test]
+    fn changed_subitem_custom_draw_commits_and_contains_semantic_colors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+        state.appearance.theme = AppThemeMode::Light;
+        state.forced_colors = ForcedColorsState::Inactive;
+        assert!(
+            state
+                .model
+                .append(LegacyListItem::new(r"C:\work\photo01.jpg", false, 4, 0, 0,))
+        );
+        assert_eq!(state.model.clear_name_changed().as_ref(), &[0]);
+
+        // SAFETY: NMLVCUSTOMDRAW is C-compatible and every field read by the
+        // production handler is initialized explicitly below before the call.
+        let mut custom: NMLVCUSTOMDRAW = unsafe { zeroed() };
+        custom.nmcd.hdr.hwndFrom = state.list_window;
+        custom.nmcd.hdr.code = NM_CUSTOMDRAW;
+        custom.nmcd.dwDrawStage = CDDS_ITEMPREPAINT | CDDS_SUBITEM;
+        custom.nmcd.dwItemSpec = 0;
+        // LVS_SHOWSELALWAYS custom draw can report stale CDIS flags. The live
+        // ListView item state is authoritative and this null test HWND reports
+        // no LVIS selection or focus.
+        custom.nmcd.uItemState = CDIS_SELECTED | CDIS_FOCUS;
+        custom.iSubItem = 1;
+
+        let result =
+            handle_list_custom_draw(&state, (&raw mut custom as *mut NMLVCUSTOMDRAW) as LPARAM);
+        let palette = semantic_palette(ResolvedTheme::Light)
+            .ok_or_else(|| io::Error::other("Light semantic palette is missing"))?;
+        assert_eq!(result, Some(CDRF_NEWFONT as LRESULT));
+        assert_eq!(custom.clrText, palette.changed_standard);
+        assert_eq!(custom.clrTextBk, palette.preview_tint);
+
+        custom.iSubItem = 2;
+        let result =
+            handle_list_custom_draw(&state, (&raw mut custom as *mut NMLVCUSTOMDRAW) as LPARAM);
+        assert_eq!(result, Some(CDRF_NEWFONT as LRESULT));
+        assert_eq!(custom.clrText, palette.text_primary);
+        assert_eq!(custom.clrTextBk, palette.surface_workspace);
         Ok(())
     }
 
