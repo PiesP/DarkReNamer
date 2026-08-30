@@ -357,6 +357,7 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
             )
         };
     }
+    install_list_view_notification_subclass(state)?;
     apply_native_appearance_nonblocking(window, state);
     arrange(window, state);
     refresh(state);
@@ -1137,6 +1138,31 @@ const MENU_POPUP_APPEARANCE: usize = 0x1_0003;
 const MENU_POPUP_THEME: usize = 0x1_0004;
 const MENU_POPUP_TOOLS: usize = 0x1_0005;
 const MENU_POPUP_RECOVERY: usize = 0x1_0006;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OwnerMenuKind {
+    Bar,
+    Popup,
+}
+
+pub(super) fn owner_menu_kind(data: usize) -> OwnerMenuKind {
+    if matches!(
+        data,
+        MENU_POPUP_FILE
+            | MENU_POPUP_EDIT
+            | MENU_POPUP_VIEW
+            | MENU_POPUP_TOOLS
+            | MENU_POPUP_RECOVERY
+    ) || u16::try_from(data)
+        .ok()
+        .and_then(command_ui_spec)
+        .is_some_and(|spec| spec.menu.group == MenuGroup::About)
+    {
+        OwnerMenuKind::Bar
+    } else {
+        OwnerMenuKind::Popup
+    }
+}
 
 fn menu_popup_data(label: &str) -> usize {
     match label {

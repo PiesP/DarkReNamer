@@ -37,11 +37,15 @@ fn minimum_track_width(window: HWND, state: &AppState) -> i32 {
         0
     };
     let density = state.resolved_appearance().appearance.density;
-    let rail_width = state
-        .font_metrics
-        .rail_metrics(density.minimum_density(), state.dpi)
-        .rail_width;
-    let baseline_rail_width = density.minimum_density().metrics(state.dpi).rail_width;
+    let rail_width = density.minimum_density().map_or(0, |minimum| {
+        state
+            .font_metrics
+            .rail_metrics(minimum, state.dpi)
+            .rail_width
+    });
+    let baseline_rail_width = density
+        .minimum_density()
+        .map_or(0, |minimum| minimum.metrics(state.dpi).rail_width);
     let measured_content_width = scale_dip(minimum_content_width_dip(), state.dpi)
         .saturating_add(
             rail_width
@@ -744,7 +748,7 @@ unsafe extern "system" fn window_proc(
             let state = unsafe { &*state_ptr };
             let resources = state.appearance_resources.as_ref();
             if draw_owner_button(resources, lparam)
-                || draw_owner_menu(resources, state.font.as_raw(), lparam)
+                || draw_owner_menu(resources, state.font.as_raw(), state.dpi, lparam)
             {
                 return 1;
             }
@@ -849,10 +853,6 @@ unsafe extern "system" fn window_proc(
             if let Some(result) = handle_list_custom_draw(unsafe { &*state_ptr }, lparam) {
                 return result;
             }
-            // SAFETY: same synchronous notification and live UI-thread state.
-            if let Some(result) = handle_header_custom_draw(unsafe { &*state_ptr }, lparam) {
-                return result;
-            }
             // Header controls are ListView children, so their resize
             // notifications identify the header HWND rather than list_window.
             // SAFETY: state_ptr is the live UI-thread AppState and lparam is
@@ -906,6 +906,10 @@ unsafe extern "system" fn window_proc(
         }
         WM_DESTROY => {
             if !state_ptr.is_null() {
+                // Stop the ListView from retaining AppState refdata before any
+                // child teardown can reenter through common-controls messages.
+                // SAFETY: state_ptr is live and UI-thread confined here.
+                remove_list_view_notification_subclass(unsafe { (*state_ptr).list_window });
                 // SAFETY: defensive owner teardown rolls back and destroys any
                 // still-live appearance session before preference shutdown/drop.
                 cancel_appearance_dialog(window, unsafe { &mut *state_ptr });
@@ -936,6 +940,10 @@ unsafe extern "system" fn window_proc(
         }
         WM_NCDESTROY => {
             if !state_ptr.is_null() {
+                // Defensive idempotent fallback if creation failed before the
+                // ordinary WM_DESTROY path removed the ListView subclass.
+                // SAFETY: state_ptr remains live until the Box reclamation below.
+                remove_list_view_notification_subclass(unsafe { (*state_ptr).list_window });
                 // Defensive idempotent fallback if creation teardown reached
                 // WM_NCDESTROY without the ordinary WM_DESTROY path.
                 // SAFETY: state_ptr is still published and UI-thread confined.

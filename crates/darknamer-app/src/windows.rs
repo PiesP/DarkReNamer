@@ -73,9 +73,10 @@ use drag_drop::*;
 #[cfg(test)]
 use list_view::changed_column_mask;
 use list_view::{
-    RenderedRow, handle_header_custom_draw, handle_header_end_track, handle_list_custom_draw,
-    handle_list_infotip, refresh, refresh_all_rows, refresh_changed_rows, refresh_proposal_rows,
-    update_column_visibility, update_dpi_metrics, update_primary_column_widths,
+    RenderedRow, handle_header_end_track, handle_list_custom_draw, handle_list_infotip,
+    install_list_view_notification_subclass, refresh, refresh_all_rows, refresh_changed_rows,
+    refresh_proposal_rows, remove_list_view_notification_subclass, update_column_visibility,
+    update_dpi_metrics, update_primary_column_widths,
 };
 use menu::*;
 use recovery_ui::*;
@@ -119,9 +120,10 @@ use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::CDIS_FOCUS;
 use windows_sys::Win32::UI::Controls::{
-    CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDIS_HOT, CDIS_SELECTED, CDRF_DODEFAULT,
-    CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, HDI_TEXT,
-    HDI_WIDTH, HDITEMW, HDM_GETITEMW, HDN_ENDTRACKW, HDN_ITEMCHANGEDW, HDN_ITEMCHANGINGW,
+    CDDS_ITEMPREPAINT, CDDS_POSTPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDIS_HOT, CDIS_SELECTED,
+    CDRF_DODEFAULT, CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYPOSTPAINT,
+    CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, HDI_TEXT, HDI_WIDTH, HDITEMW, HDM_GETITEMCOUNT,
+    HDM_GETITEMRECT, HDM_GETITEMW, HDN_ENDTRACKW, HDN_ITEMCHANGEDW, HDN_ITEMCHANGINGW,
     ICC_LISTVIEW_CLASSES, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_FMT,
     LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT,
     LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_DELETEITEM, LVM_ENSUREVISIBLE,
@@ -136,6 +138,8 @@ use windows_sys::Win32::UI::Controls::{
     TDF_POSITION_RELATIVE_TO_WINDOW, TDF_SIZE_TO_CONTENT, TDF_USE_COMMAND_LINKS,
     TaskDialogIndirect,
 };
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::{MEASUREITEMSTRUCT, ODT_MENU};
 use windows_sys::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForWindow, GetSystemMetricsForDpi, SystemParametersInfoForDpi,
 };
@@ -144,8 +148,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VK_OEM_COMMA, VK_OEM_PERIOD, VK_UP,
 };
 use windows_sys::Win32::UI::Shell::{
-    DragQueryFileW, HDROP, SHFILEINFOW, SHGFI_SMALLICON, SHGFI_SYSICONINDEX,
-    SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
+    DefSubclassProc, DragQueryFileW, HDROP, RemoveWindowSubclass, SHFILEINFOW, SHGFI_SMALLICON,
+    SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW, SetWindowSubclass,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     ACCEL, AppendMenuW, BN_CLICKED, BN_SETFOCUS, BS_DEFPUSHBUTTON, BS_OWNERDRAW, BS_PUSHBUTTON,
@@ -1293,11 +1297,177 @@ mod tests {
     fn owner_draw_menu_preserves_alt_mnemonics() -> Result<(), Box<dyn std::error::Error>> {
         let menu = create_menu()?;
 
-        let result = handle_owner_menu_char('f' as WPARAM, menu.as_raw() as LPARAM);
-
-        assert_eq!(result & 0xFFFF, 0);
-        assert_eq!((result >> 16) & 0xFFFF, MNC_EXECUTE as LRESULT);
+        for (position, mnemonic) in ['f', 'e', 'v', 't', 'r', 'h'].into_iter().enumerate() {
+            let result = handle_owner_menu_char(mnemonic as WPARAM, menu.as_raw() as LPARAM);
+            assert_eq!(result & 0xFFFF, position as LRESULT);
+            assert_eq!((result >> 16) & 0xFFFF, MNC_EXECUTE as LRESULT);
+        }
         Ok(())
+    }
+
+    #[test]
+    fn owner_draw_top_level_menu_fits_the_parity_width_at_two_hundred_percent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const DPI: u32 = 192;
+        let class = wide("STATIC");
+        // SAFETY: the system class/current module remain live for this hidden
+        // measurement owner.
+        let owner = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                scale_dip(INITIAL_WIDTH, DPI),
+                scale_dip(INITIAL_HEIGHT, DPI),
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if owner.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let menu = create_menu()?;
+        let mut font = OwnedFont::default();
+        let message_font = create_message_font(DPI);
+        if message_font.is_null() {
+            // SAFETY: owner is the test-owned hidden HWND.
+            unsafe { DestroyWindow(owner) };
+            return Err(io::Error::last_os_error().into());
+        }
+        font.replace(message_font);
+        let mut total_width = 0_u32;
+        for position in 0..6_u32 {
+            let mut info = MENUITEMINFOW {
+                cbSize: size_of::<MENUITEMINFOW>() as u32,
+                fMask: MIIM_DATA,
+                ..MENUITEMINFOW::default()
+            };
+            // SAFETY: menu is live, position is one of its six root items, and
+            // info remains writable for the synchronous query.
+            if unsafe { GetMenuItemInfoW(menu.as_raw(), position, 1, &mut info) } == 0 {
+                // SAFETY: owner is the test-owned hidden HWND.
+                unsafe { DestroyWindow(owner) };
+                return Err(io::Error::last_os_error().into());
+            }
+            let mut measure = MEASUREITEMSTRUCT {
+                CtlType: ODT_MENU,
+                itemData: info.dwItemData,
+                ..MEASUREITEMSTRUCT::default()
+            };
+            assert!(measure_owner_menu(
+                owner,
+                font.as_raw(),
+                DPI,
+                (&raw mut measure) as LPARAM,
+            ));
+            total_width = total_width.saturating_add(measure.itemWidth);
+        }
+        // SAFETY: owner is the test-owned hidden HWND.
+        unsafe { DestroyWindow(owner) };
+        let menu_budget = scale_dip(INITIAL_WIDTH.saturating_sub(80), DPI);
+        assert!(
+            total_width <= u32::try_from(menu_budget).unwrap_or(u32::MAX),
+            "top-level menu measured {total_width}px for a {menu_budget}px content budget",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn list_view_routes_header_custom_draw_at_its_actual_notification_parent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let controls = INITCOMMONCONTROLSEX {
+            dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+            dwICC: ICC_LISTVIEW_CLASSES | ICC_WIN95_CLASSES,
+        };
+        // SAFETY: controls has its exact structure size and remains readable for
+        // the synchronous common-controls initialization call.
+        unsafe { InitCommonControlsEx(&controls) };
+        let directory = tempfile::tempdir()?;
+        let mut state = Box::new(AppState::new(initialize_safe_runtime_at(directory.path())?));
+        state.appearance.theme = AppThemeMode::Dark;
+        state.forced_colors = ForcedColorsState::Inactive;
+        state.system_theme = Some(ResolvedTheme::Dark);
+        let class = wide("STATIC");
+        // SAFETY: the system STATIC class and current module remain valid for
+        // this hidden test owner.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let result = (|| -> io::Result<()> {
+            create_children(parent, &mut state)?;
+            // SAFETY: the live report ListView owns one header child and returns
+            // its borrowed HWND without retaining caller memory.
+            let header = unsafe { SendMessageW(state.list_window, LVM_GETHEADER, 0, 0) } as HWND;
+            if header.is_null() {
+                return Err(io::Error::other("native ListView header is missing"));
+            }
+            // SAFETY: the live header owns a drawable client DC released below.
+            let dc = unsafe { GetDC(header) };
+            if dc.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let mut custom = NMCUSTOMDRAW::default();
+            custom.hdr.hwndFrom = header;
+            custom.hdr.code = NM_CUSTOMDRAW;
+            custom.dwDrawStage = CDDS_PREPAINT;
+            custom.hdc = dc;
+            // SAFETY: list_window is the header's actual notification parent and
+            // custom remains writable for the complete synchronous dispatch.
+            let routed = unsafe {
+                SendMessageW(state.list_window, WM_NOTIFY, 0, (&raw mut custom) as LPARAM)
+            };
+            assert_eq!(
+                routed,
+                (CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT) as LRESULT
+            );
+            let guarded = {
+                let _list_update = ProgrammaticListUpdateGuard::begin();
+                // SAFETY: same live notification parent/payload. The guard must
+                // delegate instead of constructing a shared AppState reference
+                // during a synchronous programmatic update.
+                unsafe {
+                    SendMessageW(state.list_window, WM_NOTIFY, 0, (&raw mut custom) as LPARAM)
+                }
+            };
+            assert_eq!(guarded, 0);
+            custom.dwDrawStage = CDDS_POSTPAINT;
+            // SAFETY: same live notification parent and header DC for the
+            // postpaint gutter pass.
+            let postpaint = unsafe {
+                SendMessageW(state.list_window, WM_NOTIFY, 0, (&raw mut custom) as LPARAM)
+            };
+            assert_eq!(postpaint, CDRF_DODEFAULT as LRESULT);
+            // SAFETY: release the exact DC acquired from header above after all
+            // synchronous paint-stage probes have completed.
+            unsafe { ReleaseDC(header, dc) };
+            Ok(())
+        })();
+        // SAFETY: parent is the test-owned top-level HWND and destroys every
+        // child before the subclass refdata owner is dropped.
+        unsafe { DestroyWindow(parent) };
+        drop(state);
+        result.map_err(Into::into)
     }
 
     #[test]

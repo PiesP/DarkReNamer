@@ -183,12 +183,14 @@ pub enum RailDensityPreference {
     Automatic,
     Comfortable,
     Compact,
+    MenuOnly,
 }
 
 impl RailDensityPreference {
     const AUTOMATIC_CANDIDATES: [RailDensity; 2] = [RailDensity::Comfortable, RailDensity::Compact];
     const COMFORTABLE_CANDIDATES: [RailDensity; 1] = [RailDensity::Comfortable];
     const COMPACT_CANDIDATES: [RailDensity; 1] = [RailDensity::Compact];
+    const MENU_ONLY_CANDIDATES: [RailDensity; 0] = [];
 
     #[must_use]
     const fn candidates(self) -> &'static [RailDensity] {
@@ -196,23 +198,26 @@ impl RailDensityPreference {
             Self::Automatic => &Self::AUTOMATIC_CANDIDATES,
             Self::Comfortable => &Self::COMFORTABLE_CANDIDATES,
             Self::Compact => &Self::COMPACT_CANDIDATES,
+            Self::MenuOnly => &Self::MENU_ONLY_CANDIDATES,
         }
     }
 
     #[must_use]
-    pub(crate) const fn minimum_density(self) -> RailDensity {
+    pub(crate) const fn minimum_density(self) -> Option<RailDensity> {
         match self {
-            Self::Automatic | Self::Compact => RailDensity::Compact,
-            Self::Comfortable => RailDensity::Comfortable,
+            Self::Automatic | Self::Compact => Some(RailDensity::Compact),
+            Self::Comfortable => Some(RailDensity::Comfortable),
+            Self::MenuOnly => None,
         }
     }
 
     #[must_use]
     #[cfg(any(windows, test))]
-    const fn recommended_density(self) -> RailDensity {
+    const fn recommended_density(self) -> Option<RailDensity> {
         match self {
-            Self::Automatic | Self::Comfortable => RailDensity::Comfortable,
-            Self::Compact => RailDensity::Compact,
+            Self::Automatic | Self::Comfortable => Some(RailDensity::Comfortable),
+            Self::Compact => Some(RailDensity::Compact),
+            Self::MenuOnly => None,
         }
     }
 }
@@ -670,6 +675,7 @@ pub(crate) const fn pack_ui_appearance(appearance: UiAppearance) -> u32 {
         RailDensityPreference::Automatic => 0,
         RailDensityPreference::Comfortable => 1,
         RailDensityPreference::Compact => 2,
+        RailDensityPreference::MenuOnly => 3,
     };
     let emphasis = match appearance.emphasis {
         PreviewEmphasis::Subtle => 0,
@@ -700,6 +706,7 @@ pub(crate) const fn unpack_ui_appearance(packed: u32) -> Option<UiAppearance> {
         0 => RailDensityPreference::Automatic,
         1 => RailDensityPreference::Comfortable,
         2 => RailDensityPreference::Compact,
+        3 => RailDensityPreference::MenuOnly,
         _ => return None,
     };
     let emphasis = match (packed >> 4) & 0x3 {
@@ -724,7 +731,7 @@ pub(crate) const fn unpack_ui_appearance(packed: u32) -> Option<UiAppearance> {
 pub(crate) struct AppearanceDialogLayout {
     pub(crate) client: LayoutRect,
     pub(crate) density_group: LayoutRect,
-    pub(crate) density_options: [LayoutRect; 3],
+    pub(crate) density_options: [LayoutRect; 4],
     pub(crate) emphasis_group: LayoutRect,
     pub(crate) emphasis_options: [LayoutRect; 3],
     pub(crate) forced_explanation: LayoutRect,
@@ -781,7 +788,8 @@ pub(crate) fn calculate_appearance_dialog_layout(
         .max(button_row_width);
     let row_height = scale_dip(20, dpi).max(measured.text_height.saturating_add(scale_dip(6, dpi)));
     let row_stride = row_height.saturating_add(scale_dip(2, dpi));
-    let group_height = scale_dip(22, dpi).saturating_add(row_stride.saturating_mul(3));
+    let density_group_height = scale_dip(22, dpi).saturating_add(row_stride.saturating_mul(4));
+    let emphasis_group_height = scale_dip(22, dpi).saturating_add(row_stride.saturating_mul(3));
     let checkbox_height =
         scale_dip(22, dpi).max(measured.text_height.saturating_add(scale_dip(6, dpi)));
     let checkbox_stride = checkbox_height.saturating_add(scale_dip(6, dpi));
@@ -803,19 +811,19 @@ pub(crate) fn calculate_appearance_dialog_layout(
     let horizontal_margin = scale_dip(12, dpi);
     let density_y = horizontal_margin;
     let emphasis_y = density_y
-        .saturating_add(group_height)
-        .saturating_add(scale_dip(8, dpi));
+        .saturating_add(density_group_height)
+        .saturating_add(scale_dip(6, dpi));
     let content_y = emphasis_y
-        .saturating_add(group_height)
-        .saturating_add(scale_dip(8, dpi));
+        .saturating_add(emphasis_group_height)
+        .saturating_add(scale_dip(6, dpi));
     let checkbox_y = content_y.saturating_add(explanation_band);
     let separator_y = checkbox_y
         .saturating_add(checkbox_stride.saturating_mul(3))
         .saturating_add(scale_dip(4, dpi));
-    let buttons_y = separator_y.saturating_add(scale_dip(20, dpi));
+    let buttons_y = separator_y.saturating_add(scale_dip(14, dpi));
     let desired_height = buttons_y
         .saturating_add(button_height)
-        .saturating_add(scale_dip(30, dpi));
+        .saturating_add(scale_dip(18, dpi));
     if maximum_width < desired_width || maximum_height < desired_height {
         return None;
     }
@@ -842,7 +850,12 @@ pub(crate) fn calculate_appearance_dialog_layout(
         .saturating_sub(button_width);
     Some(AppearanceDialogLayout {
         client,
-        density_group: rect(horizontal_margin, density_y, content_width, group_height),
+        density_group: rect(
+            horizontal_margin,
+            density_y,
+            content_width,
+            density_group_height,
+        ),
         density_options: [
             rect(
                 option_x,
@@ -862,8 +875,19 @@ pub(crate) fn calculate_appearance_dialog_layout(
                 option_width,
                 row_height,
             ),
+            rect(
+                option_x,
+                group_option_y(density_y, 3),
+                option_width,
+                row_height,
+            ),
         ],
-        emphasis_group: rect(horizontal_margin, emphasis_y, content_width, group_height),
+        emphasis_group: rect(
+            horizontal_margin,
+            emphasis_y,
+            content_width,
+            emphasis_group_height,
+        ),
         emphasis_options: [
             rect(
                 option_x,
@@ -2021,8 +2045,9 @@ pub fn select_command_rail_density_with_preference(
             return Ok(density);
         }
     }
-    let required =
-        required_command_rail_height(&LEFT_RAIL, preference.minimum_density().metrics(dpi))?;
+    let required = preference.minimum_density().map_or(Ok(0), |density| {
+        required_command_rail_height(&LEFT_RAIL, density.metrics(dpi))
+    })?;
     Err(LayoutError::InsufficientHeight {
         required,
         available: available_height,
@@ -2047,10 +2072,13 @@ pub(crate) fn minimum_main_client_height_with_safety(
     preference: RailDensityPreference,
     show_empty_safety: bool,
 ) -> i32 {
-    let metrics = measured.rail_metrics(preference.minimum_density(), dpi);
-    let left = required_command_rail_height(&LEFT_RAIL, metrics).unwrap_or(i32::MAX);
-    let right = required_command_rail_height(&RIGHT_RAIL, metrics).unwrap_or(i32::MAX);
-    left.max(right)
+    let rail_height = preference.minimum_density().map_or(0, |density| {
+        let metrics = measured.rail_metrics(density, dpi);
+        let left = required_command_rail_height(&LEFT_RAIL, metrics).unwrap_or(i32::MAX);
+        let right = required_command_rail_height(&RIGHT_RAIL, metrics).unwrap_or(i32::MAX);
+        left.max(right)
+    });
+    rail_height
         .max(measured.empty_state_required_height(dpi, show_empty_safety))
         .saturating_add(measured.status_height(dpi))
 }
@@ -2073,10 +2101,13 @@ pub(crate) fn recommended_main_client_height_with_safety(
     preference: RailDensityPreference,
     show_empty_safety: bool,
 ) -> i32 {
-    let metrics = measured.rail_metrics(preference.recommended_density(), dpi);
-    let left = required_command_rail_height(&LEFT_RAIL, metrics).unwrap_or(i32::MAX);
-    let right = required_command_rail_height(&RIGHT_RAIL, metrics).unwrap_or(i32::MAX);
-    left.max(right)
+    let rail_height = preference.recommended_density().map_or(0, |density| {
+        let metrics = measured.rail_metrics(density, dpi);
+        let left = required_command_rail_height(&LEFT_RAIL, metrics).unwrap_or(i32::MAX);
+        let right = required_command_rail_height(&RIGHT_RAIL, metrics).unwrap_or(i32::MAX);
+        left.max(right)
+    });
+    rail_height
         .max(measured.empty_state_required_height(dpi, show_empty_safety))
         .saturating_add(measured.status_height(dpi))
 }
@@ -4797,6 +4828,17 @@ mod tests {
         );
         assert_eq!(model.draft(), original);
 
+        let mut menu_only = AppearanceDialogModel::new(original, ForcedColorsState::Inactive);
+        assert_eq!(
+            menu_only.apply(AppearanceDialogAction::Density(
+                RailDensityPreference::MenuOnly,
+            )),
+            AppearanceDialogEffect::Preview(UiAppearance {
+                density: RailDensityPreference::MenuOnly,
+                ..original
+            })
+        );
+
         let mut forced = AppearanceDialogModel::new(original, ForcedColorsState::ActiveOrUnknown);
         assert_eq!(forced.forced_colors(), ForcedColorsState::ActiveOrUnknown);
         assert_eq!(
@@ -4830,6 +4872,7 @@ mod tests {
                 RailDensityPreference::Automatic,
                 RailDensityPreference::Comfortable,
                 RailDensityPreference::Compact,
+                RailDensityPreference::MenuOnly,
             ] {
                 for emphasis in [
                     PreviewEmphasis::Subtle,
@@ -4853,7 +4896,7 @@ mod tests {
                 }
             }
         }
-        for invalid in [0x3, 0xC, 0x30, 1 << 9, u32::MAX] {
+        for invalid in [0x3, 0x30, 1 << 9, u32::MAX] {
             assert_eq!(unpack_ui_appearance(invalid), None);
         }
     }
@@ -4884,6 +4927,7 @@ mod tests {
                 layout.density_options[0],
                 layout.density_options[1],
                 layout.density_options[2],
+                layout.density_options[3],
                 layout.emphasis_group,
                 layout.emphasis_options[0],
                 layout.emphasis_options[1],
@@ -4943,6 +4987,7 @@ mod tests {
             layout.density_options[0],
             layout.density_options[1],
             layout.density_options[2],
+            layout.density_options[3],
             layout.emphasis_options[0],
             layout.emphasis_options[1],
             layout.emphasis_options[2],
@@ -5080,9 +5125,14 @@ mod tests {
         let comfortable =
             calculate_main_layout(464, 369, 96, measured, RailDensityPreference::Comfortable);
         let compact = calculate_main_layout(464, 369, 96, measured, RailDensityPreference::Compact);
+        let menu_only =
+            calculate_main_layout(464, 369, 96, measured, RailDensityPreference::MenuOnly);
         assert_eq!(automatic.rail_mode, RailMode::Compact);
         assert_eq!(comfortable.rail_mode, RailMode::MenuOnly);
         assert_eq!(compact.rail_mode, RailMode::Compact);
+        assert_eq!(menu_only.rail_mode, RailMode::MenuOnly);
+        assert!(menu_only.left_buttons.is_empty());
+        assert!(menu_only.right_buttons.is_empty());
         assert_eq!(
             minimum_main_client_height(96, measured, RailDensityPreference::Automatic),
             minimum_main_client_height(96, measured, RailDensityPreference::Compact)
@@ -5098,6 +5148,14 @@ mod tests {
         assert_eq!(
             recommended_main_client_height(96, measured, RailDensityPreference::Compact),
             minimum_main_client_height(96, measured, RailDensityPreference::Compact)
+        );
+        assert_eq!(
+            recommended_main_client_height(96, measured, RailDensityPreference::MenuOnly),
+            minimum_main_client_height(96, measured, RailDensityPreference::MenuOnly)
+        );
+        assert!(
+            minimum_main_client_height(96, measured, RailDensityPreference::MenuOnly)
+                < minimum_main_client_height(96, measured, RailDensityPreference::Compact)
         );
     }
 

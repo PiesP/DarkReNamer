@@ -4,12 +4,14 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    COLOR_WINDOW, FillRect, GetMonitorInfoW, GetSysColorBrush, MONITOR_DEFAULTTONEAREST,
-    MONITORINFO, MonitorFromWindow, SetBkColor, SetTextColor, UpdateWindow,
+    BeginPaint, COLOR_WINDOW, DT_CALCRECT, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
+    DrawTextW, EndPaint, FillRect, FrameRect, GetMonitorInfoW, GetSysColorBrush,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, PAINTSTRUCT, SelectObject, SetBkMode,
+    SetTextColor, TRANSPARENT, UpdateWindow,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::{SS_ETCHEDHORZ, SS_NOPREFIX};
-use windows_sys::Win32::UI::Controls::{BST_CHECKED, BST_UNCHECKED};
+use windows_sys::Win32::UI::Controls::{BST_CHECKED, BST_UNCHECKED, SetWindowTheme};
 use windows_sys::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -19,9 +21,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     IsWindow, PostMessageW, RegisterClassExW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
     SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CLOSE,
     WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DPICHANGED, WM_DRAWITEM,
-    WM_ERASEBKGND, WM_FONTCHANGE, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFONT,
-    WM_SETTINGCHANGE, WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_GROUP,
-    WS_POPUP, WS_SYSMENU, WS_TABSTOP,
+    WM_ERASEBKGND, WM_FONTCHANGE, WM_GETFONT, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT,
+    WM_PRINTCLIENT, WM_SETFONT, WM_SETTINGCHANGE, WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN,
+    WS_EX_TOOLWINDOW, WS_GROUP, WS_POPUP, WS_SYSMENU, WS_TABSTOP,
 };
 
 use super::*;
@@ -29,6 +31,7 @@ use super::*;
 const DENSITY_AUTOMATIC_ID: u16 = 0xA101;
 const DENSITY_COMFORTABLE_ID: u16 = 0xA102;
 const DENSITY_COMPACT_ID: u16 = 0xA103;
+const DENSITY_MENU_ONLY_ID: u16 = 0xA104;
 const EMPHASIS_SUBTLE_ID: u16 = 0xA111;
 const EMPHASIS_STANDARD_ID: u16 = 0xA112;
 const EMPHASIS_STRONG_ID: u16 = 0xA113;
@@ -38,8 +41,9 @@ const SHOW_EMPTY_SAFETY_ID: u16 = 0xA123;
 const FORCED_EXPLANATION_ID: u16 = 0xA130;
 const RESET_DEFAULTS_ID: u16 = 0xA140;
 const APPEARANCE_FINISH_ACCEPTED: u32 = 1 << 31;
-const DENSITY_GROUP_LABEL: &str = "명령 버튼 간격";
-const DENSITY_LABELS: [&str; 3] = ["자동 (권장)", "여유 있게", "촘촘하게"];
+const APPEARANCE_GROUP_SUBCLASS_ID: usize = 1;
+const DENSITY_GROUP_LABEL: &str = "명령 버튼 표시";
+const DENSITY_LABELS: [&str; 4] = ["자동 (권장)", "여유 있게", "촘촘하게", "메뉴만"];
 const EMPHASIS_GROUP_LABEL: &str = "변경 강조";
 const EMPHASIS_LABELS: [&str; 3] = ["약하게", "표준", "강하게"];
 const SEPARATOR_LABEL: &str = "기능 그룹 구분선 표시";
@@ -69,8 +73,10 @@ struct AppearanceDialogWindowState {
     session_id: u32,
     model: AppearanceDialogModel,
     density_group: HWND,
-    density: [HWND; 3],
+    density_group_state: *mut AppearanceGroupSubclassState,
+    density: [HWND; 4],
     emphasis_group: HWND,
+    emphasis_group_state: *mut AppearanceGroupSubclassState,
     emphasis: [HWND; 3],
     forced_explanation: HWND,
     checkboxes: [HWND; 3],
@@ -90,6 +96,18 @@ struct AppearanceDialogWindowState {
 struct AppearanceDialogInit {
     state: *mut AppearanceDialogWindowState,
     adopted: *mut bool,
+}
+
+#[derive(Clone, Copy)]
+struct AppearanceGroupStyle {
+    background: HBRUSH,
+    border: HBRUSH,
+    text: u32,
+}
+
+struct AppearanceGroupSubclassState {
+    label: &'static str,
+    style: Option<AppearanceGroupStyle>,
 }
 
 pub(super) fn open_appearance_dialog(owner: HWND, state: &mut AppState) {
@@ -349,8 +367,10 @@ fn create_appearance_dialog_window(
         session_id,
         model: AppearanceDialogModel::new(appearance, forced_colors),
         density_group: null_mut(),
-        density: [null_mut(); 3],
+        density_group_state: null_mut(),
+        density: [null_mut(); 4],
         emphasis_group: null_mut(),
+        emphasis_group_state: null_mut(),
         emphasis: [null_mut(); 3],
         forced_explanation: null_mut(),
         checkboxes: [null_mut(); 3],
@@ -414,6 +434,8 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
         0xA100,
         BS_GROUPBOX as u32,
     )?;
+    state.density_group_state =
+        install_appearance_group_subclass(state.density_group, DENSITY_GROUP_LABEL)?;
     state.density = [
         child(
             window,
@@ -436,6 +458,13 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
             DENSITY_COMPACT_ID,
             BS_AUTORADIOBUTTON as u32 | WS_TABSTOP,
         )?,
+        child(
+            window,
+            "BUTTON",
+            DENSITY_LABELS[3],
+            DENSITY_MENU_ONLY_ID,
+            BS_AUTORADIOBUTTON as u32 | WS_TABSTOP,
+        )?,
     ];
     state.emphasis_group = child(
         window,
@@ -444,6 +473,8 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
         0xA110,
         BS_GROUPBOX as u32,
     )?;
+    state.emphasis_group_state =
+        install_appearance_group_subclass(state.emphasis_group, EMPHASIS_GROUP_LABEL)?;
     state.emphasis = [
         child(
             window,
@@ -528,6 +559,7 @@ fn sync_controls(state: &AppearanceDialogWindowState) {
         draft.density == RailDensityPreference::Automatic,
         draft.density == RailDensityPreference::Comfortable,
         draft.density == RailDensityPreference::Compact,
+        draft.density == RailDensityPreference::MenuOnly,
     ]) {
         set_checked(*control, checked);
     }
@@ -637,9 +669,33 @@ fn apply_dialog_appearance(window: HWND, state: &mut AppearanceDialogWindowState
         .model
         .draft()
         .resolve(state.model.forced_colors(), state.system_theme);
-    state.appearance_resources = semantic_palette(resolved.theme)
-        .and_then(|palette| AppearanceResources::create(palette).ok());
-    apply_auxiliary_dwm_title_frame(window, resolved.theme);
+    let mut replacement = semantic_palette(resolved.theme).and_then(|palette| {
+        set_native_control_theme_disabled(state, true)
+            .then(|| AppearanceResources::create(palette).ok())
+            .flatten()
+    });
+    if replacement.as_ref().is_none_or(|resources| {
+        !update_appearance_group_styles(
+            [state.density_group_state, state.emphasis_group_state],
+            Some(resources),
+        )
+    }) {
+        set_native_control_theme_disabled(state, false);
+        update_appearance_group_styles(
+            [state.density_group_state, state.emphasis_group_state],
+            None,
+        );
+        replacement = None;
+    }
+    state.appearance_resources = replacement;
+    apply_auxiliary_dwm_title_frame(
+        window,
+        if state.appearance_resources.is_some() {
+            resolved.theme
+        } else {
+            ResolvedTheme::NativeSystem
+        },
+    );
     // SAFETY: window is live and resources are installed before invalidation.
     unsafe {
         RedrawWindow(
@@ -649,6 +705,211 @@ fn apply_dialog_appearance(window: HWND, state: &mut AppearanceDialogWindowState
             RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
         )
     };
+}
+
+fn install_appearance_group_subclass(
+    window: HWND,
+    label: &'static str,
+) -> io::Result<*mut AppearanceGroupSubclassState> {
+    let state = Box::into_raw(Box::new(AppearanceGroupSubclassState {
+        label,
+        style: None,
+    }));
+    // SAFETY: window is a live dialog-owned group box, the callback has the
+    // documented ABI, and state is reclaimed by that window's WM_NCDESTROY.
+    if unsafe {
+        SetWindowSubclass(
+            window,
+            Some(appearance_group_subclass),
+            APPEARANCE_GROUP_SUBCLASS_ID,
+            state as usize,
+        )
+    } == 0
+    {
+        // SAFETY: installation failed, so no callback owns this allocation.
+        unsafe { drop(Box::from_raw(state)) };
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(state)
+    }
+}
+
+fn update_appearance_group_styles(
+    groups: [*mut AppearanceGroupSubclassState; 2],
+    resources: Option<&AppearanceResources>,
+) -> bool {
+    let style = resources.map(|resources| AppearanceGroupStyle {
+        background: resources.dialog_brush(),
+        border: resources.border_brush(),
+        text: resources.palette().text_primary,
+    });
+    let mut updated_all = true;
+    for group in groups {
+        if !group.is_null() {
+            // SAFETY: each pointer is the callback-owned Box returned at install
+            // time and remains live until its child WM_NCDESTROY. Dialog state is
+            // UI-thread confined and updates it without sending a window message.
+            unsafe { (*group).style = style };
+        } else {
+            updated_all = false;
+        }
+    }
+    updated_all
+}
+
+unsafe extern "system" fn appearance_group_subclass(
+    window: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass_id: usize,
+    state_ref: usize,
+) -> LRESULT {
+    if message == WM_NCDESTROY {
+        // SAFETY: this exact callback/id pair was installed on window above.
+        unsafe {
+            RemoveWindowSubclass(
+                window,
+                Some(appearance_group_subclass),
+                APPEARANCE_GROUP_SUBCLASS_ID,
+            )
+        };
+        // SAFETY: forward final destruction while the callback state remains live.
+        let result = unsafe { DefSubclassProc(window, message, wparam, lparam) };
+        if state_ref != 0 {
+            // SAFETY: WM_NCDESTROY is the single reclamation point for this
+            // Box::into_raw allocation.
+            unsafe {
+                drop(Box::from_raw(
+                    state_ref as *mut AppearanceGroupSubclassState,
+                ))
+            };
+        }
+        return result;
+    }
+    if state_ref == 0 {
+        // SAFETY: no callback-owned state exists, so retain native handling.
+        return unsafe { DefSubclassProc(window, message, wparam, lparam) };
+    }
+    // SAFETY: refdata is the live callback-owned allocation until WM_NCDESTROY.
+    let state = unsafe { &*(state_ref as *const AppearanceGroupSubclassState) };
+    match message {
+        WM_ERASEBKGND if state.style.is_some() => 1,
+        WM_PAINT if state.style.is_some() => {
+            let mut paint = PAINTSTRUCT::default();
+            // SAFETY: window is live and paint remains writable until EndPaint.
+            let dc = unsafe { BeginPaint(window, &mut paint) };
+            if !dc.is_null() {
+                paint_appearance_group(window, dc, state);
+            }
+            // SAFETY: balance the exact BeginPaint call above.
+            unsafe { EndPaint(window, &paint) };
+            0
+        }
+        WM_PRINTCLIENT if state.style.is_some() && wparam != 0 => {
+            paint_appearance_group(window, wparam as HDC, state);
+            1
+        }
+        _ => {
+            // SAFETY: every unowned message is forwarded unchanged exactly once.
+            unsafe { DefSubclassProc(window, message, wparam, lparam) }
+        }
+    }
+}
+
+fn paint_appearance_group(window: HWND, dc: HDC, state: &AppearanceGroupSubclassState) {
+    let Some(style) = state.style else {
+        return;
+    };
+    let mut client = RECT::default();
+    // SAFETY: window/DC/brushes are live and client is writable.
+    unsafe {
+        GetClientRect(window, &mut client);
+        FillRect(dc, &client, style.background);
+    }
+    let label = wide(state.label);
+    // SAFETY: the live group box returns its borrowed font handle.
+    let font = unsafe { SendMessageW(window, WM_GETFONT, 0, 0) } as HFONT;
+    let previous = if font.is_null() {
+        null_mut()
+    } else {
+        // SAFETY: font remains control-owned for this synchronous paint.
+        unsafe { SelectObject(dc, font) }
+    };
+    let mut measured = RECT::default();
+    // SAFETY: label/DC/measured remain live for this calculation-only draw.
+    unsafe {
+        DrawTextW(
+            dc,
+            label.as_ptr(),
+            i32::try_from(label.len().saturating_sub(1)).unwrap_or(i32::MAX),
+            &mut measured,
+            DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+        )
+    };
+    // SAFETY: window is the live group box and this value query retains nothing.
+    let dpi = unsafe { GetDpiForWindow(window) }.max(BASE_DPI);
+    let text_height = (measured.bottom - measured.top).max(scale_dip(12, dpi));
+    let horizontal_padding = scale_dip(8, dpi);
+    let label_gap = scale_dip(4, dpi);
+    let mut frame = client;
+    frame.top = frame.top.saturating_add(text_height / 2);
+    // SAFETY: frame/DC/border are live and client-bounded.
+    unsafe { FrameRect(dc, &frame, style.border) };
+    let mut label_background = RECT {
+        left: client.left.saturating_add(horizontal_padding),
+        top: client.top,
+        right: client
+            .left
+            .saturating_add(horizontal_padding)
+            .saturating_add((measured.right - measured.left).max(0))
+            .saturating_add(label_gap.saturating_mul(2)),
+        bottom: client.top.saturating_add(text_height),
+    };
+    label_background.right = label_background.right.min(client.right);
+    // SAFETY: label band and palette resources remain live for this paint.
+    unsafe {
+        FillRect(dc, &label_background, style.background);
+        SetBkMode(dc, TRANSPARENT as i32);
+        SetTextColor(dc, style.text);
+    }
+    let mut text = label_background;
+    text.left = text.left.saturating_add(label_gap);
+    text.right = text.right.saturating_sub(label_gap);
+    // SAFETY: label/DC/text remain live for this synchronous draw.
+    unsafe {
+        DrawTextW(
+            dc,
+            label.as_ptr(),
+            i32::try_from(label.len().saturating_sub(1)).unwrap_or(i32::MAX),
+            &mut text,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        )
+    };
+    if !previous.is_null() {
+        // SAFETY: restore the exact object returned by SelectObject.
+        unsafe { SelectObject(dc, previous) };
+    }
+}
+
+fn native_themed_controls(state: &AppearanceDialogWindowState) -> impl Iterator<Item = HWND> + '_ {
+    state
+        .density
+        .into_iter()
+        .chain(state.emphasis)
+        .chain(state.checkboxes)
+}
+
+fn set_native_control_theme_disabled(state: &AppearanceDialogWindowState, disabled: bool) -> bool {
+    let empty = [0_u16];
+    let theme = if disabled { empty.as_ptr() } else { null() };
+    native_themed_controls(state).fold(true, |all_applied, control| {
+        // SAFETY: every control is a live dialog child. Empty strings disable
+        // visual styles so documented WM_CTLCOLOR colors remain authoritative;
+        // null pointers restore the system theme.
+        let applied = (unsafe { SetWindowTheme(control, theme, theme) }) >= 0;
+        all_applied && applied
+    })
 }
 
 fn action_for_command(
@@ -664,6 +925,9 @@ fn action_for_command(
         )),
         DENSITY_COMPACT_ID => Some(AppearanceDialogAction::Density(
             RailDensityPreference::Compact,
+        )),
+        DENSITY_MENU_ONLY_ID => Some(AppearanceDialogAction::Density(
+            RailDensityPreference::MenuOnly,
         )),
         EMPHASIS_SUBTLE_ID => Some(AppearanceDialogAction::Emphasis(PreviewEmphasis::Subtle)),
         EMPHASIS_STANDARD_ID => Some(AppearanceDialogAction::Emphasis(PreviewEmphasis::Standard)),
@@ -717,6 +981,7 @@ fn measure_appearance_dialog(window: HWND, font: HFONT) -> AppearanceDialogMetri
         DENSITY_LABELS[0],
         DENSITY_LABELS[1],
         DENSITY_LABELS[2],
+        DENSITY_LABELS[3],
         EMPHASIS_GROUP_LABEL,
         EMPHASIS_LABELS[0],
         EMPHASIS_LABELS[1],
@@ -833,6 +1098,7 @@ fn arrange_dialog(window: HWND, state: &AppearanceDialogWindowState, center_owne
         layout.density_options[0],
         layout.density_options[1],
         layout.density_options[2],
+        layout.density_options[3],
         layout.emphasis_group,
         layout.emphasis_options[0],
         layout.emphasis_options[1],
@@ -1005,7 +1271,7 @@ unsafe extern "system" fn appearance_dialog_proc(
                 // SAFETY: wparam is the callback-owned control DC.
                 unsafe {
                     SetTextColor(wparam as HDC, palette.text_primary);
-                    SetBkColor(wparam as HDC, palette.surface_dialog);
+                    SetBkMode(wparam as HDC, TRANSPARENT as i32);
                 }
                 resources.dialog_brush() as LRESULT
             } else {
@@ -1103,10 +1369,13 @@ unsafe extern "system" fn appearance_dialog_proc(
 mod native_tests {
     use super::*;
     use windows_sys::Win32::Graphics::Gdi::{GetDC, ReleaseDC};
-    use windows_sys::Win32::UI::Controls::{CDIS_DEFAULT, NM_CUSTOMDRAW, NMCUSTOMDRAW};
+    use windows_sys::Win32::UI::Controls::{
+        CDIS_DEFAULT, GetWindowTheme, NM_CUSTOMDRAW, NMCUSTOMDRAW,
+    };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_RETURN;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        BS_TYPEMASK, GWL_STYLE, GetClientRect, GetWindowLongPtrW, IsDialogMessageW, MSG, WM_KEYDOWN,
+        BM_CLICK, BS_TYPEMASK, GWL_STYLE, GetClientRect, GetWindowLongPtrW, IsDialogMessageW, MSG,
+        WM_KEYDOWN,
     };
 
     #[test]
@@ -1154,16 +1423,21 @@ mod native_tests {
             return Err(io::Error::other("appearance dialog state is missing").into());
         }
         // SAFETY: state_ptr is live dialog-owned state for these copied HWNDs.
-        let (ok, radio, resources) = unsafe {
+        let (ok, radio, menu_only, density_group, resources) = unsafe {
             (
                 (*state_ptr).ok,
                 (*state_ptr).density[0],
+                (*state_ptr).density[3],
+                (*state_ptr).density_group,
                 (*state_ptr).appearance_resources.as_ref(),
             )
         };
         // SAFETY: ok is a live native BUTTON and style is an integral query.
         let style = unsafe { GetWindowLongPtrW(ok, GWL_STYLE) } as u32;
         assert_eq!(style & BS_TYPEMASK as u32, BS_DEFPUSHBUTTON as u32);
+        // SAFETY: density_group is a live BUTTON and style is an integral query.
+        let group_style = unsafe { GetWindowLongPtrW(density_group, GWL_STYLE) } as u32;
+        assert_eq!(group_style & BS_TYPEMASK as u32, BS_GROUPBOX as u32);
 
         // SAFETY: ok remains live and the returned DC is released below.
         let dc = unsafe { GetDC(ok) };
@@ -1193,6 +1467,34 @@ mod native_tests {
         );
         // SAFETY: dc came from this exact live button.
         unsafe { ReleaseDC(ok, dc) };
+
+        // SAFETY: density_group remains live and the DC is released below.
+        let group_dc = unsafe { GetDC(density_group) };
+        if group_dc.is_null() {
+            // SAFETY: both windows are test-owned and live.
+            unsafe {
+                DestroyWindow(dialog);
+                DestroyWindow(owner);
+            }
+            return Err(io::Error::last_os_error().into());
+        }
+        // SAFETY: the subclass copies no pointer and paints synchronously into
+        // this exact live group-box DC.
+        let painted = unsafe { SendMessageW(density_group, WM_PRINTCLIENT, group_dc as WPARAM, 0) };
+        assert_eq!(painted, 1);
+        // SAFETY: group_dc came from this exact live control.
+        unsafe { ReleaseDC(density_group, group_dc) };
+
+        assert_eq!(window_text(menu_only), LegacyText::from(DENSITY_LABELS[3]));
+        // SAFETY: menu_only is live and the borrowed theme handle query retains
+        // no caller storage. Custom colors require the classic paint path.
+        assert_eq!(unsafe { GetWindowTheme(menu_only) }, 0);
+        // SAFETY: menu_only is the live fourth density radio. The unarmed dialog
+        // updates only its local preview model for this synchronous click.
+        unsafe { SendMessageW(menu_only, BM_CLICK, 0, 0) };
+        // SAFETY: state_ptr remains dialog-owned until Enter closes the window.
+        let draft_density = unsafe { (*state_ptr).model.draft().density };
+        assert_eq!(draft_density, RailDensityPreference::MenuOnly);
 
         let message = MSG {
             hwnd: radio,
