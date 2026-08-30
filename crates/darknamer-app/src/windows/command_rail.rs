@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::io;
 use std::ptr::{null, null_mut};
@@ -5,9 +6,9 @@ use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::HWND;
 #[cfg(test)]
 use windows_sys::Win32::Foundation::RECT;
-use windows_sys::Win32::Graphics::Gdi::HFONT;
 #[cfg(test)]
 use windows_sys::Win32::Graphics::Gdi::MapWindowPoints;
+use windows_sys::Win32::Graphics::Gdi::{CreateSolidBrush, DeleteObject, HBRUSH, HFONT};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::SS_ETCHEDHORZ;
 use windows_sys::Win32::UI::Controls::{
@@ -27,8 +28,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::{
-    CommandId, CommandPlacement, CommandRailSpec, LayoutRect,
-    calculate_command_rail_separator_layout, command_ui_spec, wide,
+    APPLY, APPLY_KEYLINE_COLOR, CommandId, CommandPlacement, CommandRailSpec, LayoutRect,
+    calculate_apply_keyline_layout, calculate_command_rail_separator_layout, command_ui_spec, wide,
 };
 
 #[derive(Debug)]
@@ -61,12 +62,42 @@ impl Drop for OwnedTooltip {
     }
 }
 
+#[derive(Debug)]
+struct OwnedApplyKeyline {
+    window: HWND,
+    brush: HBRUSH,
+}
+
+impl Drop for OwnedApplyKeyline {
+    fn drop(&mut self) {
+        if !self.window.is_null() {
+            // SAFETY: this object solely owns the decorative child HWND. Hide
+            // it before synchronous destruction so no new paint can request
+            // the brush while teardown proceeds.
+            unsafe {
+                ShowWindow(self.window, SW_HIDE);
+                DestroyWindow(self.window);
+            }
+            self.window = null_mut();
+        }
+        if !self.brush.is_null() {
+            // SAFETY: the STATIC is gone, so no paint can retain this object's
+            // solely owned solid brush after deletion.
+            unsafe { DeleteObject(self.brush) };
+            self.brush = null_mut();
+        }
+    }
+}
+
 /// Owns the native controls that render one side of the command rail.
 pub(super) struct CommandRail {
     parent: HWND,
     spec: &'static CommandRailSpec,
     buttons: Vec<CommandButton>,
     separators: Vec<HWND>,
+    apply_keyline: Option<OwnedApplyKeyline>,
+    rail_visible: Cell<bool>,
+    apply_keyline_requested: Cell<bool>,
     tooltip: OwnedTooltip,
     tooltip_texts: Vec<Box<[u16]>>,
 }
@@ -79,6 +110,9 @@ impl CommandRail {
             spec,
             buttons: Vec::with_capacity(spec.command_count()),
             separators: Vec::with_capacity(spec.group_count().saturating_sub(1)),
+            apply_keyline: None,
+            rail_visible: Cell::new(true),
+            apply_keyline_requested: Cell::new(false),
             tooltip,
             tooltip_texts: Vec::with_capacity(spec.command_count()),
         };
@@ -158,6 +192,9 @@ impl CommandRail {
             }
             self.separators.push(separator);
         }
+        if self.spec.commands().any(|command| command == APPLY) {
+            self.apply_keyline = Some(create_apply_keyline(self.parent)?);
+        }
         Ok(())
     }
 
@@ -235,6 +272,24 @@ impl CommandRail {
                 )
             };
         }
+        if let (Some(keyline), Some(rect)) = (
+            self.apply_keyline.as_ref(),
+            calculate_apply_keyline_layout(placements, dpi),
+        ) {
+            // SAFETY: keyline.window is a live direct child and the pure rect
+            // is bounded outside the Apply button hit target.
+            unsafe {
+                SetWindowPos(
+                    keyline.window,
+                    null_mut(),
+                    origin_x.saturating_add(rect.x),
+                    rect.y,
+                    rect.width,
+                    rect.height,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
+                )
+            };
+        }
     }
 
     pub(super) fn append_placements(
@@ -267,6 +322,13 @@ impl CommandRail {
                     (window, rect)
                 }),
         );
+        if let (Some(keyline), Some(mut rect)) = (
+            self.apply_keyline.as_ref(),
+            calculate_apply_keyline_layout(placements, dpi),
+        ) {
+            rect.x = rect.x.saturating_add(origin_x);
+            windows.push((keyline.window, rect));
+        }
     }
 
     pub(super) fn set_enabled(&self, command: CommandId, enabled: bool) {
@@ -277,6 +339,7 @@ impl CommandRail {
     }
 
     pub(super) fn set_visible(&self, visible: bool) {
+        self.rail_visible.set(visible);
         let command = if visible { SW_SHOW } else { SW_HIDE };
         for button in &self.buttons {
             // SAFETY: each button is a live child owned by this command rail.
@@ -286,6 +349,28 @@ impl CommandRail {
             // SAFETY: each separator is a live decorative child owned by this rail.
             unsafe { ShowWindow(*separator, command) };
         }
+        self.update_apply_keyline_visibility();
+    }
+
+    pub(super) fn set_apply_keyline_visible(&self, visible: bool) {
+        self.apply_keyline_requested.set(visible);
+        self.update_apply_keyline_visibility();
+    }
+
+    fn update_apply_keyline_visibility(&self) {
+        let Some(keyline) = &self.apply_keyline else {
+            return;
+        };
+        let visible = self.rail_visible.get() && self.apply_keyline_requested.get();
+        // SAFETY: keyline.window is the live decorative STATIC owned by this rail.
+        unsafe { ShowWindow(keyline.window, if visible { SW_SHOW } else { SW_HIDE }) };
+    }
+
+    pub(super) fn apply_keyline_brush_for(&self, window: HWND) -> Option<HBRUSH> {
+        self.apply_keyline
+            .as_ref()
+            .filter(|keyline| keyline.window == window)
+            .map(|keyline| keyline.brush)
     }
 
     pub(super) fn apply_font(&self, font: HFONT) {
@@ -333,6 +418,7 @@ impl CommandRail {
 
     fn destroy_partial(&mut self) {
         self.tooltip.destroy();
+        drop(self.apply_keyline.take());
         for separator in self.separators.drain(..) {
             // SAFETY: this rail owns each still-live decorative child.
             unsafe { DestroyWindow(separator) };
@@ -356,6 +442,33 @@ impl CommandRail {
     #[cfg(test)]
     pub(super) fn separator_windows(&self) -> &[HWND] {
         &self.separators
+    }
+
+    #[cfg(test)]
+    pub(super) fn apply_keyline_window(&self) -> Option<HWND> {
+        self.apply_keyline.as_ref().map(|keyline| keyline.window)
+    }
+
+    #[cfg(test)]
+    pub(super) fn apply_keyline_brush(&self) -> Option<HBRUSH> {
+        self.apply_keyline.as_ref().map(|keyline| keyline.brush)
+    }
+
+    #[cfg(test)]
+    pub(super) fn apply_keyline_rect(&self) -> io::Result<RECT> {
+        let keyline = self
+            .apply_keyline
+            .as_ref()
+            .ok_or_else(|| io::Error::other("Apply keyline is missing"))?;
+        let mut rect = RECT::default();
+        // SAFETY: keyline.window is live and rect is writable for this query.
+        if unsafe { GetWindowRect(keyline.window, &mut rect) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: rect is two POINT-compatible coordinate pairs and parent is
+        // the live target coordinate space.
+        unsafe { MapWindowPoints(null_mut(), self.parent, (&mut rect as *mut RECT).cast(), 2) };
+        Ok(rect)
     }
 
     #[cfg(test)]
@@ -417,4 +530,39 @@ fn create_tooltip(parent: HWND) -> io::Result<OwnedTooltip> {
     } else {
         Ok(OwnedTooltip(tooltip))
     }
+}
+
+fn create_apply_keyline(parent: HWND) -> io::Result<OwnedApplyKeyline> {
+    // SAFETY: the COLORREF is an integral constant and the returned brush is
+    // owned by the wrapper below.
+    let brush = unsafe { CreateSolidBrush(APPLY_KEYLINE_COLOR) };
+    if brush.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // An empty standard STATIC uses the parent-provided WM_CTLCOLORSTATIC brush
+    // as its background. It has no identifier, notifications, or focus style.
+    // SAFETY: parent is live, the system class is process-global, and no caller
+    // storage is retained by this direct-child creation.
+    let window = unsafe {
+        CreateWindowExW(
+            0,
+            wide("STATIC").as_ptr(),
+            null(),
+            WS_CHILD,
+            0,
+            0,
+            0,
+            0,
+            parent,
+            null_mut(),
+            GetModuleHandleW(null()),
+            null_mut(),
+        )
+    };
+    if window.is_null() {
+        // SAFETY: brush is the still-unshared object created above.
+        unsafe { DeleteObject(brush) };
+        return Err(io::Error::last_os_error());
+    }
+    Ok(OwnedApplyKeyline { window, brush })
 }

@@ -136,6 +136,7 @@ pub enum RailDensity {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UiMetrics {
     pub rail_padding: i32,
+    pub apply_keyline_inset: i32,
     pub button_height: i32,
     pub group_gap: i32,
     pub rail_width: i32,
@@ -307,6 +308,7 @@ impl RailDensity {
         };
         UiMetrics {
             rail_padding: scale_dip(rail_padding, dpi),
+            apply_keyline_inset: scale_dip(4, dpi),
             button_height: scale_dip(button_height, dpi),
             group_gap: scale_dip(group_gap, dpi),
             rail_width: scale_dip(rail_width, dpi),
@@ -594,6 +596,13 @@ pub(crate) fn main_layout_window_count(layout: &MainLayout) -> usize {
         .saturating_add(layout.right_buttons.len())
         .saturating_add(command_rail_separator_count(&layout.left_buttons))
         .saturating_add(command_rail_separator_count(&layout.right_buttons))
+        .saturating_add(usize::from(
+            layout
+                .left_buttons
+                .iter()
+                .chain(&layout.right_buttons)
+                .any(|placement| placement.command == APPLY),
+        ))
         .saturating_add(7)
 }
 
@@ -639,17 +648,47 @@ pub(crate) fn calculate_command_rail_separator_layout(
         let gap_top = pair[0].bottom();
         let gap = pair[1].y.saturating_sub(gap_top).max(0);
         let height = scale_dip(2, dpi).max(1).min(gap);
-        let inset = scale_dip(6, dpi)
-            .max(0)
-            .min(pair[0].width.saturating_div(2));
+        let left = pair[0].x.min(pair[1].x);
+        let right = pair[0]
+            .x
+            .saturating_add(pair[0].width)
+            .max(pair[1].x.saturating_add(pair[1].width));
+        let rail_width = right.saturating_sub(left);
+        let inset = scale_dip(6, dpi).max(0).min(rail_width.saturating_div(2));
         separators.push(LayoutRect {
-            x: pair[0].x.saturating_add(inset),
+            x: left.saturating_add(inset),
             y: gap_top.saturating_add(gap.saturating_sub(height) / 2),
-            width: pair[0].width.saturating_sub(inset.saturating_mul(2)),
+            width: rail_width.saturating_sub(inset.saturating_mul(2)),
             height,
         });
     }
     separators
+}
+
+/// Derives the decorative pending-Apply keyline inside the Apply button's
+/// reserved left rail padding. The returned rectangle never overlaps Apply.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn calculate_apply_keyline_layout(
+    placements: &[CommandPlacement],
+    dpi: u32,
+) -> Option<LayoutRect> {
+    let apply = placements
+        .iter()
+        .find(|placement| placement.command == APPLY)?;
+    let gap = scale_dip(2, dpi).max(0).min(apply.x);
+    let right = apply.x.saturating_sub(gap);
+    let width = scale_dip(2, dpi).max(0).min(right);
+    let vertical_inset = scale_dip(6, dpi).max(0).min(apply.height.saturating_div(2));
+    let height = apply
+        .height
+        .saturating_sub(vertical_inset.saturating_mul(2));
+    (width > 0 && height > 0).then_some(LayoutRect {
+        x: right.saturating_sub(width),
+        y: apply.y.saturating_add(vertical_inset),
+        width,
+        height,
+    })
 }
 
 /// Message-font measurements used by the native prompt layout.
@@ -1111,11 +1150,16 @@ pub fn calculate_command_rail_layout(
                 .ok_or(LayoutError::Overflow)?;
         }
         previous_group = Some(group);
+        let apply_inset = if command_spec.id == APPLY {
+            metrics.apply_keyline_inset.min(metrics.rail_width).max(0)
+        } else {
+            0
+        };
         placements.push(CommandPlacement {
             command: command_spec.id,
-            x: 0,
+            x: apply_inset,
             y,
-            width: metrics.rail_width,
+            width: metrics.rail_width.saturating_sub(apply_inset),
             height: metrics.button_height,
         });
         y = y
@@ -1465,6 +1509,18 @@ impl ForcedColorsState {
     }
 }
 
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn apply_keyline_visible(
+    apply: ApplyPresentation,
+    forced_colors: ForcedColorsState,
+    rails_visible: bool,
+) -> bool {
+    rails_visible
+        && matches!(apply, ApplyPresentation::Ready)
+        && forced_colors.custom_colors_enabled()
+}
+
 /// Inputs whose precedence decides whether one proposed-name cell is accented.
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1505,6 +1561,8 @@ pub(crate) const fn proposed_name_visual_decision(
 pub(crate) const PROPOSED_CHANGED_TEXT_COLOR: u32 = 0x0033_268F;
 #[cfg(any(windows, test))]
 pub(crate) const PROPOSED_CHANGED_BACKGROUND_COLOR: u32 = 0x00F7_F7FF;
+#[cfg(any(windows, test))]
+pub(crate) const APPLY_KEYLINE_COLOR: u32 = 0x0032_29D9;
 
 /// Structured status content whose independent channels survive row refreshes.
 #[cfg(any(windows, test))]
@@ -3264,8 +3322,9 @@ mod tests {
 
         assert_eq!(placements.len(), 10);
         assert!(placements.iter().all(|placement| {
-            placement.x == 0
-                && placement.width == 52
+            let expected_inset = if placement.command == APPLY { 4 } else { 0 };
+            placement.x == expected_inset
+                && placement.width == 52 - expected_inset
                 && placement.height == 32
                 && placement.bottom() <= 348
         }));
@@ -3294,6 +3353,14 @@ mod tests {
             assert!(separator.width > 0);
             assert!(separator.height > 0);
         }
+        let keyline = calculate_apply_keyline_layout(&placements, 96).unwrap_or_default();
+        let apply = placements[0];
+        assert!(keyline.x >= 0);
+        assert!(keyline.x + keyline.width <= apply.x);
+        assert!(keyline.y >= apply.y);
+        assert!(keyline.bottom() <= apply.bottom());
+        assert!(keyline.width > 0);
+        assert!(keyline.height > 0);
 
         let right = calculate_command_rail_layout(&RIGHT_RAIL, 352, metrics)?;
         for start in [1, 4, 6] {
@@ -3312,24 +3379,28 @@ mod tests {
             [
                 UiMetrics {
                     rail_padding: 4,
+                    apply_keyline_inset: 4,
                     button_height: 32,
                     group_gap: 8,
                     rail_width: 52
                 },
                 UiMetrics {
                     rail_padding: 5,
+                    apply_keyline_inset: 5,
                     button_height: 40,
                     group_gap: 10,
                     rail_width: 65
                 },
                 UiMetrics {
                     rail_padding: 6,
+                    apply_keyline_inset: 6,
                     button_height: 48,
                     group_gap: 12,
                     rail_width: 78
                 },
                 UiMetrics {
                     rail_padding: 8,
+                    apply_keyline_inset: 8,
                     button_height: 64,
                     group_gap: 16,
                     rail_width: 104
@@ -3452,7 +3523,7 @@ mod tests {
         let measured = MeasuredFontMetrics::default();
         let comfortable = calculate_main_layout(464, 370, 96, measured);
         assert_eq!(comfortable.rail_mode, RailMode::Comfortable);
-        assert_eq!(main_layout_window_count(&comfortable), 32);
+        assert_eq!(main_layout_window_count(&comfortable), 33);
 
         let compact = calculate_main_layout(464, 369, 96, measured);
         assert_eq!(compact.rail_mode, RailMode::Compact);
@@ -3635,6 +3706,37 @@ mod tests {
             UiPresentation::derive(empty, PresentationLocks::default()).apply,
             ApplyPresentation::NoChanges
         );
+
+        assert!(apply_keyline_visible(
+            ApplyPresentation::Ready,
+            ForcedColorsState::Inactive,
+            true
+        ));
+        for (apply, forced_colors, rails_visible) in [
+            (
+                ApplyPresentation::NoChanges,
+                ForcedColorsState::Inactive,
+                true,
+            ),
+            (
+                ApplyPresentation::Blocked,
+                ForcedColorsState::Inactive,
+                true,
+            ),
+            (
+                ApplyPresentation::Working,
+                ForcedColorsState::Inactive,
+                true,
+            ),
+            (
+                ApplyPresentation::Ready,
+                ForcedColorsState::ActiveOrUnknown,
+                true,
+            ),
+            (ApplyPresentation::Ready, ForcedColorsState::Inactive, false),
+        ] {
+            assert!(!apply_keyline_visible(apply, forced_colors, rails_visible));
+        }
     }
 
     #[test]
@@ -3665,6 +3767,7 @@ mod tests {
         }
         assert_eq!(PROPOSED_CHANGED_TEXT_COLOR, 0x0033_268F);
         assert_eq!(PROPOSED_CHANGED_BACKGROUND_COLOR, 0x00F7_F7FF);
+        assert_eq!(APPLY_KEYLINE_COLOR, 0x0032_29D9);
         assert_eq!(
             proposed_name_visual_decision(ProposedNameVisualContext {
                 row: Some(1),

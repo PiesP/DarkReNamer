@@ -483,6 +483,10 @@ unsafe extern "system" fn window_proc(
             // SAFETY: state_ptr is the live UI-thread AppState.
             let state = unsafe { &mut *state_ptr };
             refresh_forced_colors(state);
+            let apply = state
+                .presentation(selected_indices(state.list_window).len())
+                .apply;
+            refresh_apply_keyline(state, apply);
             refresh_system_fonts(state);
             if let Err(error) = ensure_minimum_track_size(window, state) {
                 super::message(
@@ -571,6 +575,28 @@ unsafe extern "system" fn window_proc(
             // SAFETY: state_ptr is the live UI-thread AppState for this window.
             request_window_close(window, unsafe { &mut *state_ptr });
             0
+        }
+        WM_CTLCOLORSTATIC if !state_ptr.is_null() => {
+            let child = lparam as HWND;
+            // SAFETY: state_ptr is the live UI-thread AppState. Each rail
+            // returns its brush only for its exact owned keyline HWND.
+            let state = unsafe { &*state_ptr };
+            let brush = state
+                .left_rail
+                .as_ref()
+                .and_then(|rail| rail.apply_keyline_brush_for(child))
+                .or_else(|| {
+                    state
+                        .right_rail
+                        .as_ref()
+                        .and_then(|rail| rail.apply_keyline_brush_for(child))
+                });
+            if let Some(brush) = brush {
+                return brush as LRESULT;
+            }
+            // SAFETY: unrecognized STATIC children retain the system default
+            // color handling with the original message arguments.
+            unsafe { DefWindowProcW(window, message, wparam, lparam) }
         }
         WM_COMMAND if !state_ptr.is_null() => {
             let command = (wparam & 0xFFFF) as u16;

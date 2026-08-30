@@ -431,6 +431,14 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
         }
     }
     state.rails_visible = rails_visible;
+    refresh_apply_keyline(
+        state,
+        if state.command_states[0] {
+            ApplyPresentation::Ready
+        } else {
+            ApplyPresentation::NoChanges
+        },
+    );
     repair_focus_state(state);
     if !rails_visible && previously_focused.is_some_and(|(child, _)| child != FocusChild::List) {
         schedule_focus_restore(state);
@@ -529,6 +537,7 @@ pub(super) fn update_controls(state: &mut AppState) {
         };
     }
     apply_command_states(state);
+    refresh_apply_keyline(state, presentation.apply);
     apply_cancel_control_state(state);
     apply_empty_state_presentation(state, presentation.empty);
     repair_focus_state(state);
@@ -543,6 +552,16 @@ pub(super) fn update_controls(state: &mut AppState) {
     };
     if focused_target_changed {
         schedule_focus_restore(state);
+    }
+}
+
+pub(super) fn refresh_apply_keyline(state: &AppState, apply: ApplyPresentation) {
+    let requested = apply_keyline_visible(apply, state.forced_colors, state.rails_visible);
+    if let Some(rail) = &state.left_rail {
+        rail.set_apply_keyline_visible(requested);
+    }
+    if let Some(rail) = &state.right_rail {
+        rail.set_apply_keyline_visible(requested);
     }
 }
 

@@ -90,15 +90,17 @@ use windows_sys::Win32::Graphics::Gdi::{
     SelectObject, UpdateWindow,
 };
 #[cfg(test)]
+use windows_sys::Win32::Graphics::Gdi::{GetObjectType, OBJ_BRUSH};
+#[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
 use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-#[cfg(test)]
-use windows_sys::Win32::System::SystemServices::SS_TYPEMASK;
 use windows_sys::Win32::System::SystemServices::{
     SS_CENTER, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_ETCHEDHORZ, SS_NOPREFIX, SS_SUNKEN,
 };
+#[cfg(test)]
+use windows_sys::Win32::System::SystemServices::{SS_NOTIFY, SS_TYPEMASK};
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTimeEx};
 use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows_sys::Win32::UI::Controls::{
@@ -143,15 +145,15 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SPI_GETHIGHCONTRAST, SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOREDRAW, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateAcceleratorW,
-    TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
-    WM_DROPFILES, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY,
-    WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
-    WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
-    WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
-    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORSTATIC, WM_DESTROY,
+    WM_DPICHANGED, WM_DROPFILES, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_NCCREATE,
+    WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE,
+    WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD,
+    WS_CLIPCHILDREN, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
+    WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(test)]
-use windows_sys::Win32::UI::WindowsAndMessaging::{BS_FLAT, BS_MULTILINE, GWL_STYLE};
+use windows_sys::Win32::UI::WindowsAndMessaging::{BS_FLAT, BS_MULTILINE, GWL_STYLE, GetDlgCtrlID};
 use worker::*;
 
 use crate::*;
@@ -1002,6 +1004,70 @@ mod tests {
     }
 
     #[test]
+    fn native_apply_keyline_releases_its_single_owned_window_and_brush()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let controls = INITCOMMONCONTROLSEX {
+            dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+            dwICC: ICC_WIN95_CLASSES,
+        };
+        // SAFETY: controls has its exact size for synchronous initialization.
+        unsafe { InitCommonControlsEx(&controls) };
+        // SAFETY: null requests the current process module.
+        let instance = unsafe { GetModuleHandleW(null()) };
+        let class = wide("STATIC");
+        // SAFETY: the system class and current module remain valid during this
+        // hidden test-window creation.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                instance,
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let rail = match CommandRail::create(parent, &LEFT_RAIL) {
+            Ok(rail) => rail,
+            Err(error) => {
+                // SAFETY: parent is the hidden test window created above.
+                unsafe { DestroyWindow(parent) };
+                return Err(error.into());
+            }
+        };
+        let (Some(keyline), Some(brush)) =
+            (rail.apply_keyline_window(), rail.apply_keyline_brush())
+        else {
+            rail.destroy();
+            // SAFETY: parent is the hidden test window created above.
+            unsafe { DestroyWindow(parent) };
+            return Err(io::Error::other("Apply keyline resources are missing").into());
+        };
+        // SAFETY: brush is the live object solely owned by rail.
+        assert_eq!(unsafe { GetObjectType(brush) }, OBJ_BRUSH as u32);
+        rail.destroy();
+        let result: io::Result<()> = {
+            // SAFETY: the consumed owner must have destroyed both resources.
+            assert_eq!(unsafe { IsWindow(keyline) }, 0);
+            // SAFETY: querying the released handle must no longer report a brush.
+            assert_eq!(unsafe { GetObjectType(brush) }, 0);
+            Ok(())
+        };
+        // SAFETY: parent remains the test-owned hidden HWND.
+        unsafe { DestroyWindow(parent) };
+        result.map_err(Into::into)
+    }
+
+    #[test]
     fn native_status_controls_use_ellipsized_statics_and_accessible_cancel_button()
     -> Result<(), Box<dyn std::error::Error>> {
         // SAFETY: null requests the current process module.
@@ -1226,6 +1292,61 @@ mod tests {
         right.arrange(right_origin, &right_placements, dpi);
 
         let result = (|| -> io::Result<()> {
+            let keyline = left
+                .apply_keyline_window()
+                .ok_or_else(|| io::Error::other("Apply keyline is missing"))?;
+            assert!(right.apply_keyline_window().is_none());
+            // SAFETY: keyline is a live standard STATIC and these are
+            // pointer-free style/identifier queries.
+            let keyline_style = unsafe { GetWindowLongPtrW(keyline, GWL_STYLE) } as u32;
+            assert_eq!(keyline_style & WS_TABSTOP, 0);
+            assert_eq!(keyline_style & SS_NOTIFY, 0);
+            // SAFETY: same live direct child with no assigned control ID.
+            assert_eq!(unsafe { GetDlgCtrlID(keyline) }, 0);
+            assert_eq!(keyline_style & WS_VISIBLE, 0);
+            let expected_keyline = calculate_apply_keyline_layout(&left_placements, dpi)
+                .ok_or_else(|| io::Error::other("Apply keyline layout is missing"))?;
+            let keyline_rect = left.apply_keyline_rect()?;
+            assert_eq!(keyline_rect.left, expected_keyline.x);
+            assert_eq!(keyline_rect.top, expected_keyline.y);
+            assert_eq!(
+                keyline_rect.right - keyline_rect.left,
+                expected_keyline.width
+            );
+            assert_eq!(
+                keyline_rect.bottom - keyline_rect.top,
+                expected_keyline.height
+            );
+            let apply_rect = left.command_rect(APPLY)?;
+            assert!(keyline_rect.right <= apply_rect.left);
+            let brush = left
+                .apply_keyline_brush()
+                .ok_or_else(|| io::Error::other("Apply keyline brush is missing"))?;
+            assert_eq!(left.apply_keyline_brush_for(keyline), Some(brush));
+            let apply_button = left
+                .command_hwnd(APPLY)
+                .ok_or_else(|| io::Error::other("Apply button is missing"))?;
+            assert_eq!(left.apply_keyline_brush_for(apply_button), None);
+
+            left.set_apply_keyline_visible(true);
+            // SAFETY: keyline remains live and style reflects ShowWindow.
+            let ready_style = unsafe { GetWindowLongPtrW(keyline, GWL_STYLE) } as u32;
+            assert_ne!(ready_style & WS_VISIBLE, 0);
+            left.set_apply_keyline_visible(false);
+            // SAFETY: same live keyline after the visibility update.
+            let idle_style = unsafe { GetWindowLongPtrW(keyline, GWL_STYLE) } as u32;
+            assert_eq!(idle_style & WS_VISIBLE, 0);
+            left.set_apply_keyline_visible(true);
+            left.set_visible(false);
+            // SAFETY: MenuOnly-style rail hiding keeps the keyline hidden.
+            let menu_only_style = unsafe { GetWindowLongPtrW(keyline, GWL_STYLE) } as u32;
+            assert_eq!(menu_only_style & WS_VISIBLE, 0);
+            left.set_visible(true);
+            // SAFETY: the retained Ready request is visible when rails return.
+            let restored_style = unsafe { GetWindowLongPtrW(keyline, GWL_STYLE) } as u32;
+            assert_ne!(restored_style & WS_VISIBLE, 0);
+            left.set_apply_keyline_visible(false);
+
             let mut actual_ids = Vec::with_capacity(19);
             for (rail, expected, origin_x) in [
                 (&left, left_placements.as_slice(), 0),
