@@ -118,10 +118,8 @@ pub(super) fn handle_header_custom_draw(state: &AppState, lparam: LPARAM) -> Opt
     // SAFETY: list_window is live and returns its borrowed Header child.
     let header_window = unsafe { SendMessageW(state.list_window, LVM_GETHEADER, 0, 0) } as HWND;
     // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix synchronously.
-    if header_window.is_null()
-        || unsafe { (*header).hwndFrom } != header_window
-        || unsafe { (*header).code } != NM_CUSTOMDRAW
-    {
+    let (source, code) = unsafe { ((*header).hwndFrom, (*header).code) };
+    if header_window.is_null() || source != header_window || code != NM_CUSTOMDRAW {
         return None;
     }
     let custom = lparam as *const NMCUSTOMDRAW;
@@ -177,8 +175,9 @@ pub(super) fn handle_header_custom_draw(state: &AppState, lparam: LPARAM) -> Opt
     } else {
         resources.header_brush()
     };
-    // SAFETY: same live callback storage and resource-owned brushes.
+    // SAFETY: the item rectangle is copied from the same live callback storage.
     let mut rect = unsafe { (*custom).rc };
+    // SAFETY: the callback DC and resource-owned brushes remain live for this draw.
     unsafe {
         FillRect((*custom).hdc, &rect, background);
         FrameRect((*custom).hdc, &rect, resources.border_brush());

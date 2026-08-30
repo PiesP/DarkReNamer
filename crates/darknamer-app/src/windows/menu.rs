@@ -1325,7 +1325,7 @@ fn set_last_menu_item_text(menu: HMENU, label: &[u16]) -> io::Result<()> {
     if count <= 0 {
         return Err(io::Error::other("owner-draw menu item was not appended"));
     }
-    let mut info = MENUITEMINFOW {
+    let info = MENUITEMINFOW {
         cbSize: size_of::<MENUITEMINFOW>() as u32,
         fMask: MIIM_STRING,
         dwTypeData: label.as_ptr().cast_mut(),
@@ -1334,14 +1334,8 @@ fn set_last_menu_item_text(menu: HMENU, label: &[u16]) -> io::Result<()> {
     };
     // SAFETY: label remains live through the synchronous copy; count-1 names
     // the item appended immediately before this call.
-    if unsafe {
-        SetMenuItemInfoW(
-            menu,
-            u32::try_from(count - 1).unwrap_or_default(),
-            1,
-            &mut info,
-        )
-    } == 0
+    if unsafe { SetMenuItemInfoW(menu, u32::try_from(count - 1).unwrap_or_default(), 1, &info) }
+        == 0
     {
         Err(io::Error::last_os_error())
     } else {
