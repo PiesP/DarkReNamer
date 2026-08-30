@@ -437,10 +437,18 @@ pub(super) fn handle_list_infotip(state: &AppState, lparam: LPARAM) -> bool {
         return true;
     };
     let preview = match state.preview_issue_cache.issue(row) {
-        PreviewRowIssue::DuplicateDestination => "대상 이름 충돌 · 변경 적용 차단",
-        PreviewRowIssue::EmptyStem => "이름 본체가 비어 있음 · 변경 전 확인 필요",
-        PreviewRowIssue::None if item.current_name() != item.proposed_name() => "변경 예정",
-        PreviewRowIssue::None => "변경 없음",
+        PreviewRowIssue::InvalidName(error) => format!(
+            "잘못된 대상 이름: {} · Windows에서 사용할 수 있는 이름으로 수정하세요.",
+            windows_leaf_name_error_korean(error)
+        ),
+        PreviewRowIssue::DuplicateDestination => {
+            "대상 이름 충돌 · 같은 폴더의 대상 이름과 다르게 수정하세요.".to_owned()
+        }
+        PreviewRowIssue::EmptyStem => "이름 본체가 비어 있음 · 변경 전 확인 필요".to_owned(),
+        PreviewRowIssue::None if item.current_name() != item.proposed_name() => {
+            "변경 예정".to_owned()
+        }
+        PreviewRowIssue::None => "변경 없음".to_owned(),
     };
     let text = format!(
         "{preview}\n{}\n{}\n정확한 크기: {}",
