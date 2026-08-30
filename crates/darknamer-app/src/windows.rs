@@ -1106,7 +1106,7 @@ mod tests {
     }
 
     #[test]
-    fn native_apply_keyline_releases_its_single_owned_window_and_brush()
+    fn native_apply_keyline_replaces_brush_and_releases_owned_window()
     -> Result<(), Box<dyn std::error::Error>> {
         let controls = INITCOMMONCONTROLSEX {
             dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
@@ -1161,16 +1161,15 @@ mod tests {
             .apply_keyline_brush()
             .ok_or_else(|| io::Error::other("replacement Apply keyline brush is missing"))?;
         assert_ne!(brush, original_brush);
-        // SAFETY: replacement was created before the original was released.
-        assert_eq!(unsafe { GetObjectType(original_brush) }, 0);
         // SAFETY: brush is the new live object solely owned by rail.
         assert_eq!(unsafe { GetObjectType(brush) }, OBJ_BRUSH as u32);
         rail.destroy();
         let result: io::Result<()> = {
-            // SAFETY: the consumed owner must have destroyed both resources.
+            // SAFETY: the consumed owner must have destroyed its child window.
+            // GDI handle values are intentionally not queried after deletion:
+            // parallel tests may immediately reuse the numeric value for an
+            // unrelated brush in this process.
             assert_eq!(unsafe { IsWindow(keyline) }, 0);
-            // SAFETY: querying the released handle must no longer report a brush.
-            assert_eq!(unsafe { GetObjectType(brush) }, 0);
             Ok(())
         };
         // SAFETY: parent remains the test-owned hidden HWND.
