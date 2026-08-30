@@ -291,6 +291,9 @@ fn run_unsafe() -> io::Result<()> {
         )));
     }
     let _ole = OleGuard;
+    // A failed WinRT initialization does not block the native workbench. System
+    // theme resolution then falls back to the documented light/native path.
+    let _winrt = WinRtGuard::initialize();
     let controls = INITCOMMONCONTROLSEX {
         dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
         dwICC: ICC_LISTVIEW_CLASSES | ICC_WIN95_CLASSES,
@@ -563,10 +566,8 @@ unsafe extern "system" fn window_proc(
             // SAFETY: state_ptr is the live UI-thread AppState.
             let state = unsafe { &mut *state_ptr };
             refresh_forced_colors(state);
-            let apply = state
-                .presentation(selected_indices(state.list_window).len())
-                .apply;
-            refresh_apply_keyline(state, apply);
+            refresh_system_theme(state);
+            apply_native_appearance_nonblocking(window, state);
             refresh_system_fonts(state);
             if let Err(error) = ensure_minimum_track_size(window, state) {
                 super::message(
@@ -575,6 +576,7 @@ unsafe extern "system" fn window_proc(
                     "DarkReNamer - 표시 설정",
                 );
             }
+            update_controls(state);
             arrange(window, state);
             0
         }
@@ -667,7 +669,7 @@ unsafe extern "system" fn window_proc(
             // Copy all routing values in a tiny borrow that ends before any GDI
             // call. Keyline matching remains the first and exact route.
             // SAFETY: state_ptr is live UI-thread state for this callback.
-            let (keyline_brush, instruction, safety) = unsafe {
+            let (keyline_brush, custom_colors, instruction, safety) = unsafe {
                 let state = &*state_ptr;
                 let keyline_brush = state
                     .left_rail
@@ -679,10 +681,16 @@ unsafe extern "system" fn window_proc(
                             .as_ref()
                             .and_then(|rail| rail.apply_keyline_brush_for(child))
                     });
-                (keyline_brush, state.empty_instruction, state.empty_safety)
+                (
+                    keyline_brush,
+                    static_control_colors(state, child),
+                    state.empty_instruction,
+                    state.empty_safety,
+                )
             };
             if let Some(brush) = route_static_control_colors(
                 keyline_brush,
+                custom_colors,
                 instruction,
                 safety,
                 child,
@@ -854,6 +862,7 @@ unsafe extern "system" fn window_proc(
 
 pub(super) fn route_static_control_colors(
     keyline_brush: Option<HBRUSH>,
+    custom_colors: Option<StaticControlColors>,
     empty_instruction: HWND,
     empty_safety: HWND,
     child: HWND,
@@ -861,6 +870,15 @@ pub(super) fn route_static_control_colors(
 ) -> Option<HBRUSH> {
     if let Some(brush) = keyline_brush {
         return Some(brush);
+    }
+    if let Some(colors) = custom_colors {
+        // SAFETY: WM_CTLCOLORSTATIC supplies a live HDC. AppState owns the
+        // selected brush through this synchronous paint callback.
+        unsafe {
+            SetTextColor(dc, colors.text);
+            SetBkColor(dc, colors.background);
+        }
+        return Some(colors.brush);
     }
     if child != empty_instruction && child != empty_safety {
         return None;

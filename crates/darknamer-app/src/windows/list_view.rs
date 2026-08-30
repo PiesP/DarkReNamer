@@ -152,11 +152,9 @@ pub(super) fn handle_list_custom_draw(state: &AppState, lparam: LPARAM) -> Optio
     if item.current_name() == item.proposed_name() {
         return Some(CDRF_DODEFAULT as LRESULT);
     }
-    // Read the cached system state only after every cheaper semantic/native
-    // precedence gate. Unknown query results disable custom colors.
-    if !state.forced_colors.custom_colors_enabled() {
-        return Some(CDRF_DODEFAULT as LRESULT);
-    }
+    // Resolve cached system state only after every cheaper semantic/native
+    // precedence gate. Forced Colors and unknown queries disable custom colors.
+    let resolved = state.resolved_appearance();
     let visual = proposed_name_visual_decision(ProposedNameVisualContext {
         row: Some(row),
         row_count: state.model.len(),
@@ -164,15 +162,17 @@ pub(super) fn handle_list_custom_draw(state: &AppState, lparam: LPARAM) -> Optio
         changed: true,
         selected,
         focused,
-        custom_colors_enabled: true,
+        custom_colors_enabled: resolved.custom_colors_enabled,
     });
-    if visual == ProposedNameVisual::Changed {
+    if let Some(colors) = proposed_name_colors(resolved, visual) {
         // SAFETY: this callback owns writable NMLVCUSTOMDRAW fields until it
         // returns. Default drawing consumes the colors; no font/text/focus
         // rendering is replaced and no caller pointer is retained.
         unsafe {
-            (*custom).clrText = PROPOSED_CHANGED_TEXT_COLOR;
-            (*custom).clrTextBk = PROPOSED_CHANGED_BACKGROUND_COLOR;
+            (*custom).clrText = colors.text;
+            if let Some(background) = colors.background {
+                (*custom).clrTextBk = background;
+            }
         }
     }
     Some(CDRF_DODEFAULT as LRESULT)

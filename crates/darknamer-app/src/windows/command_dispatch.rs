@@ -244,15 +244,20 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
     if state.read_only_locked() && !recovery_command_allowed(command) {
         message(
             window,
-            "복구 잠금 상태에서는 진단 저널 내보내기, 정보 보기, 종료만 사용할 수 있습니다.",
+            "복구 잠금 상태에서는 진단 저널 내보내기, 테마 변경, 정보 보기, 종료만 사용할 수 있습니다.",
             "DarkReNamer - 읽기 전용",
         );
         return;
     }
-    if state.mutation_locked && !matches!(command, VERSION | EXIT_COMMAND) {
+    let activity = state.worker_activity();
+    let worker_active = activity.admission || activity.plan || activity.apply;
+    if state.mutation_locked
+        && !matches!(command, VERSION | EXIT_COMMAND)
+        && !appearance_command_allowed(command, worker_active)
+    {
         message(
             window,
-            "파일 변경이 끝날 때까지 정보 보기와 종료 요청만 사용할 수 있습니다.",
+            "파일 변경이 끝날 때까지 테마 변경, 정보 보기와 종료 요청만 사용할 수 있습니다.",
             "DarkReNamer - 변경 중",
         );
         return;
@@ -517,6 +522,17 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
             show_recovery_status(window, state);
             CommandOutcome::ui(UiEffect::None)
         }
+        THEME_SYSTEM | THEME_LIGHT | THEME_DARK => {
+            let Some(appearance) = appearance_after_theme_command(state.appearance, command) else {
+                return;
+            };
+            if appearance == state.appearance {
+                CommandOutcome::ui(UiEffect::None)
+            } else {
+                state.appearance = appearance;
+                CommandOutcome::ui(UiEffect::AppearanceChanged)
+            }
+        }
         EXIT_COMMAND => CommandOutcome::ui(UiEffect::CloseRequested),
         _ => CommandOutcome::ui(UiEffect::None),
     };
@@ -580,6 +596,12 @@ fn apply_command_outcome(
             state.persist_column_preferences();
             update_controls(state);
         }
+        UiEffect::AppearanceChanged => {
+            state.persist_appearance_preferences();
+            apply_native_appearance_nonblocking(window, state);
+            update_controls(state);
+            arrange(window, state);
+        }
         UiEffect::CloseRequested => request_window_close(window, state),
     }
 }
@@ -593,14 +615,15 @@ fn restore_selection(state: &mut AppState, selection: Option<SelectionRestore>) 
 }
 
 pub(super) const fn recovery_command_allowed(command: u16) -> bool {
-    matches!(
-        command,
-        VERSION
-            | EXPORT_RECOVERY_JOURNAL
-            | DISCARD_STAGED_JOURNAL
-            | SHOW_RECOVERY_STATUS
-            | EXIT_COMMAND
-    )
+    appearance_command_allowed(command, false)
+        || matches!(
+            command,
+            VERSION
+                | EXPORT_RECOVERY_JOURNAL
+                | DISCARD_STAGED_JOURNAL
+                | SHOW_RECOVERY_STATUS
+                | EXIT_COMMAND
+        )
 }
 
 pub(super) fn prompt_spec(

@@ -48,6 +48,7 @@ use raw_window_handle::{
 };
 use windows_sys::core::{GUID, HRESULT, IID_IUnknown};
 
+mod appearance;
 mod application;
 mod clipboard;
 mod command_dispatch;
@@ -143,28 +144,30 @@ use windows_sys::Win32::UI::Shell::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     ACCEL, AppendMenuW, BN_CLICKED, BN_SETFOCUS, BS_DEFPUSHBUTTON, BS_PUSHBUTTON,
     BeginDeferWindowPos, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CREATESTRUCTW,
-    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem, CreateAcceleratorTableW, CreateMenu,
-    CreatePopupMenu, CreateWindowExW, DefWindowProcW, DeferWindowPos, DestroyAcceleratorTable,
-    DestroyMenu, DestroyWindow, DispatchMessageW, DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem,
-    EndDeferWindowPos, FCONTROL, FSHIFT, FVIRTKEY, GWLP_USERDATA, GetClientRect, GetMessageW,
-    GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HACCEL,
-    HMENU, IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, IsWindow, IsWindowVisible, KillTimer,
-    LoadCursorW, LoadIconW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP,
-    MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO, MSG, MessageBoxW, MoveWindow,
-    NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXVSCROLL,
-    SPI_GETHIGHCONTRAST, SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOREDRAW, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateAcceleratorW,
-    TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_DPICHANGED, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY,
-    WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
-    WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
-    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
-    WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem, CheckMenuRadioItem,
+    CreateAcceleratorTableW, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+    DeferWindowPos, DestroyAcceleratorTable, DestroyMenu, DestroyWindow, DispatchMessageW,
+    DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, EndDeferWindowPos, FCONTROL, FSHIFT, FVIRTKEY,
+    GWLP_USERDATA, GetClientRect, GetMessageW, GetParent, GetWindowLongPtrW, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, HACCEL, HMENU, IDC_ARROW, IDCANCEL, IDOK,
+    IsDialogMessageW, IsWindow, IsWindowVisible, KillTimer, LoadCursorW, LoadIconW, MF_BYCOMMAND,
+    MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MINMAXINFO,
+    MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW, PostMessageW, PostQuitMessage,
+    RegisterClassExW, SM_CXVSCROLL, SPI_GETHIGHCONTRAST, SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW, SWP_NOZORDER, SendMessageW, SetForegroundWindow,
+    SetMenu, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW,
+    TranslateAcceleratorW, TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE,
+    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_KEYDOWN,
+    WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE,
+    WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION,
+    WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{BS_FLAT, BS_MULTILINE, GWL_STYLE, GetDlgCtrlID};
 use worker::*;
+
+use appearance::*;
 
 use crate::*;
 
@@ -238,6 +241,8 @@ struct AppState {
     ui_status: UiStatus,
     preview_count_cache: PreviewCountCache,
     forced_colors: ForcedColorsState,
+    system_theme: Option<ResolvedTheme>,
+    appearance_resources: Option<AppearanceResources>,
     icon_cache: HashMap<IconCacheKey, i32>,
     rendered_rows: Vec<RenderedRow>,
     // Fields drop in declaration order. Keep the instance lock last so workers
@@ -323,6 +328,8 @@ impl AppState {
             ui_status,
             preview_count_cache: PreviewCountCache::default(),
             forced_colors: ForcedColorsState::default(),
+            system_theme: None,
+            appearance_resources: None,
             icon_cache: HashMap::new(),
             rendered_rows: Vec::new(),
         }
@@ -333,7 +340,8 @@ impl AppState {
     }
 
     fn resolved_appearance(&self) -> ResolvedUiAppearance {
-        self.appearance.resolve(self.forced_colors)
+        self.appearance
+            .resolve(self.forced_colors, self.system_theme)
     }
 
     fn commit_known_model_change(&mut self, changed: bool) {
@@ -444,6 +452,19 @@ impl AppState {
         if let Err(error) = result {
             self.set_transient_status(format!(
                 "열 표시 설정을 저장하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
+            ));
+        }
+    }
+
+    fn persist_appearance_preferences(&mut self) {
+        let result = self
+            .appearance_writer
+            .as_mut()
+            .ok_or_else(|| io::Error::other("appearance preference writer is unavailable"))
+            .and_then(|writer| writer.submit(self.appearance).map(|_| ()));
+        if let Err(error) = result {
+            self.set_transient_status(format!(
+                "모양 설정을 저장하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
             ));
         }
     }
@@ -953,12 +974,15 @@ mod tests {
     }
 
     #[test]
-    fn recovery_lock_allows_only_diagnostics_about_and_exit() {
+    fn recovery_lock_allows_diagnostics_appearance_about_and_exit() {
         assert!(recovery_command_allowed(EXPORT_RECOVERY_JOURNAL));
         assert!(recovery_command_allowed(DISCARD_STAGED_JOURNAL));
         assert!(recovery_command_allowed(SHOW_RECOVERY_STATUS));
         assert!(recovery_command_allowed(VERSION));
         assert!(recovery_command_allowed(2));
+        for command in [THEME_SYSTEM, THEME_LIGHT, THEME_DARK, APPEARANCE_ADVANCED] {
+            assert!(recovery_command_allowed(command));
+        }
         for command in [APPLY, ADD_FILES, IMPORT_PATHS, REPLACE, RESET, 0xFFFF] {
             assert!(!recovery_command_allowed(command));
         }
@@ -1101,7 +1125,7 @@ mod tests {
         if parent.is_null() {
             return Err(io::Error::last_os_error().into());
         }
-        let rail = match CommandRail::create(parent, &LEFT_RAIL) {
+        let mut rail = match CommandRail::create(parent, &LEFT_RAIL) {
             Ok(rail) => rail,
             Err(error) => {
                 // SAFETY: parent is the hidden test window created above.
@@ -1109,7 +1133,7 @@ mod tests {
                 return Err(error.into());
             }
         };
-        let (Some(keyline), Some(brush)) =
+        let (Some(keyline), Some(original_brush)) =
             (rail.apply_keyline_window(), rail.apply_keyline_brush())
         else {
             rail.destroy();
@@ -1117,7 +1141,16 @@ mod tests {
             unsafe { DestroyWindow(parent) };
             return Err(io::Error::other("Apply keyline resources are missing").into());
         };
-        // SAFETY: brush is the live object solely owned by rail.
+        // SAFETY: original_brush is the live object solely owned by rail.
+        assert_eq!(unsafe { GetObjectType(original_brush) }, OBJ_BRUSH as u32);
+        rail.set_apply_keyline_color(GRAPHITE_DARK.apply_keyline)?;
+        let brush = rail
+            .apply_keyline_brush()
+            .ok_or_else(|| io::Error::other("replacement Apply keyline brush is missing"))?;
+        assert_ne!(brush, original_brush);
+        // SAFETY: replacement was created before the original was released.
+        assert_eq!(unsafe { GetObjectType(original_brush) }, 0);
+        // SAFETY: brush is the new live object solely owned by rail.
         assert_eq!(unsafe { GetObjectType(brush) }, OBJ_BRUSH as u32);
         rail.destroy();
         let result: io::Result<()> = {
@@ -1247,6 +1280,7 @@ mod tests {
                 safety,
                 add,
                 EmptyStatePresentation::Unavailable,
+                true,
             );
             for control in [instruction, safety, add] {
                 // SAFETY: each HWND remains live and this reads integral style.
@@ -1256,7 +1290,13 @@ mod tests {
             // SAFETY: add remains a live standard BUTTON.
             assert_eq!(unsafe { IsWindowEnabled(add) }, 0);
 
-            set_empty_state_controls(instruction, safety, add, EmptyStatePresentation::ReadyToAdd);
+            set_empty_state_controls(
+                instruction,
+                safety,
+                add,
+                EmptyStatePresentation::ReadyToAdd,
+                true,
+            );
             for control in [instruction, safety, add] {
                 // SAFETY: each HWND remains live and this reads integral style.
                 let style = unsafe { GetWindowLongPtrW(control, GWL_STYLE) } as u32;
@@ -1264,6 +1304,23 @@ mod tests {
             }
             // SAFETY: add remains a live standard BUTTON.
             assert_ne!(unsafe { IsWindowEnabled(add) }, 0);
+
+            set_empty_state_controls(
+                instruction,
+                safety,
+                add,
+                EmptyStatePresentation::ReadyToAdd,
+                false,
+            );
+            // SAFETY: these live HWND style queries verify presentation only.
+            let instruction_style = unsafe { GetWindowLongPtrW(instruction, GWL_STYLE) } as u32;
+            // SAFETY: same live safety STATIC, intentionally hidden by preference.
+            let safety_style = unsafe { GetWindowLongPtrW(safety, GWL_STYLE) } as u32;
+            // SAFETY: same live CTA BUTTON, unaffected by the safety-copy toggle.
+            let add_style = unsafe { GetWindowLongPtrW(add, GWL_STYLE) } as u32;
+            assert_ne!(instruction_style & WS_VISIBLE, 0);
+            assert_eq!(safety_style & WS_VISIBLE, 0);
+            assert_ne!(add_style & WS_VISIBLE, 0);
             Ok(())
         })();
         // SAFETY: parent is the hidden test HWND and destroys all children.
@@ -1397,6 +1454,7 @@ mod tests {
             assert_eq!(
                 application::route_static_control_colors(
                     Some(keyline_brush),
+                    None,
                     instruction,
                     safety,
                     keyline,
@@ -1411,7 +1469,14 @@ mod tests {
 
             for empty in [instruction, safety] {
                 assert_eq!(
-                    application::route_static_control_colors(None, instruction, safety, empty, dc,),
+                    application::route_static_control_colors(
+                        None,
+                        None,
+                        instruction,
+                        safety,
+                        empty,
+                        dc,
+                    ),
                     // SAFETY: this is the cached system-owned workspace brush.
                     Some(unsafe { GetSysColorBrush(COLOR_WINDOW) })
                 );
@@ -1425,10 +1490,32 @@ mod tests {
                 });
             }
 
+            let custom = StaticControlColors {
+                brush: keyline_brush,
+                text: GRAPHITE_DARK.text_primary,
+                background: GRAPHITE_DARK.surface_status,
+            };
+            assert_eq!(
+                application::route_static_control_colors(
+                    None,
+                    Some(custom),
+                    instruction,
+                    safety,
+                    status,
+                    dc,
+                ),
+                Some(keyline_brush)
+            );
+            // SAFETY: custom route wrote semantic values to the live DC.
+            assert_eq!(unsafe { GetTextColor(dc) }, custom.text);
+            // SAFETY: same live DC and semantic background.
+            assert_eq!(unsafe { GetBkColor(dc) }, custom.background);
+
             for unrelated in [status, drop_overlay, rail.separator_windows()[0]] {
                 assert_eq!(
                     application::route_static_control_colors(
                         rail.apply_keyline_brush_for(unrelated),
+                        None,
                         instruction,
                         safety,
                         unrelated,

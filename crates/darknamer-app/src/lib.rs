@@ -258,29 +258,212 @@ impl Default for UiAppearance {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedUiAppearance {
     pub(crate) appearance: UiAppearance,
+    pub(crate) theme: ResolvedTheme,
     pub(crate) custom_colors_enabled: bool,
+}
+
+/// Theme resolved for app-owned surfaces after system and accessibility policy.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResolvedTheme {
+    NativeSystem,
+    Light,
+    Dark,
+}
+
+/// Resolves background theme from the official UISettings foreground color.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn theme_from_foreground(red: u8, green: u8, blue: u8) -> ResolvedTheme {
+    let luminance = (red as u32) * 299 + (green as u32) * 587 + (blue as u32) * 114;
+    if luminance >= 128_000 {
+        ResolvedTheme::Dark
+    } else {
+        ResolvedTheme::Light
+    }
+}
+
+/// Semantic colors for the small set of app-owned native surfaces.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SemanticPalette {
+    pub(crate) surface_workspace: u32,
+    pub(crate) surface_status: u32,
+    pub(crate) surface_drop: u32,
+    pub(crate) text_primary: u32,
+    pub(crate) text_secondary: u32,
+    pub(crate) changed_subtle: u32,
+    pub(crate) changed_standard: u32,
+    pub(crate) changed_strong: u32,
+    pub(crate) preview_tint: u32,
+    pub(crate) apply_keyline: u32,
+}
+
+#[cfg(any(windows, test))]
+const fn color_ref(red: u8, green: u8, blue: u8) -> u32 {
+    (red as u32) | ((green as u32) << 8) | ((blue as u32) << 16)
+}
+
+#[cfg(any(windows, test))]
+const PRECISION_LIGHT: SemanticPalette = SemanticPalette {
+    surface_workspace: color_ref(255, 255, 255),
+    surface_status: color_ref(244, 245, 247),
+    surface_drop: color_ref(245, 248, 255),
+    text_primary: color_ref(27, 29, 32),
+    text_secondary: color_ref(95, 102, 112),
+    changed_subtle: color_ref(121, 43, 51),
+    changed_standard: color_ref(143, 38, 51),
+    changed_strong: color_ref(169, 22, 33),
+    preview_tint: color_ref(245, 248, 255),
+    apply_keyline: color_ref(217, 41, 50),
+};
+
+#[cfg(any(windows, test))]
+const GRAPHITE_DARK: SemanticPalette = SemanticPalette {
+    surface_workspace: color_ref(23, 25, 28),
+    surface_status: color_ref(30, 32, 36),
+    surface_drop: color_ref(32, 40, 51),
+    text_primary: color_ref(242, 244, 247),
+    text_secondary: color_ref(184, 190, 199),
+    changed_subtle: color_ref(217, 164, 168),
+    changed_standard: color_ref(255, 102, 112),
+    changed_strong: color_ref(255, 137, 145),
+    preview_tint: color_ref(32, 40, 51),
+    apply_keyline: color_ref(255, 102, 112),
+};
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn semantic_palette(theme: ResolvedTheme) -> Option<SemanticPalette> {
+    match theme {
+        ResolvedTheme::NativeSystem => None,
+        ResolvedTheme::Light => Some(PRECISION_LIGHT),
+        ResolvedTheme::Dark => Some(GRAPHITE_DARK),
+    }
+}
+
+/// Custom colors for one changed proposed-name cell.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProposedNameColors {
+    pub(crate) text: u32,
+    pub(crate) background: Option<u32>,
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn proposed_name_colors(
+    resolved: ResolvedUiAppearance,
+    visual: ProposedNameVisual,
+) -> Option<ProposedNameColors> {
+    if !resolved.custom_colors_enabled || !matches!(visual, ProposedNameVisual::Changed) {
+        return None;
+    }
+    let Some(palette) = semantic_palette(resolved.theme) else {
+        return None;
+    };
+    let text = match resolved.appearance.emphasis {
+        PreviewEmphasis::Subtle => palette.changed_subtle,
+        PreviewEmphasis::Standard => palette.changed_standard,
+        PreviewEmphasis::Strong => palette.changed_strong,
+    };
+    Some(ProposedNameColors {
+        text,
+        background: if resolved.appearance.show_preview_tint {
+            Some(palette.preview_tint)
+        } else {
+            None
+        },
+    })
 }
 
 #[cfg(any(windows, test))]
 impl UiAppearance {
     #[must_use]
-    pub(crate) const fn resolve(self, forced_colors: ForcedColorsState) -> ResolvedUiAppearance {
-        if forced_colors.custom_colors_enabled() {
-            ResolvedUiAppearance {
-                appearance: self,
-                custom_colors_enabled: true,
-            }
-        } else {
-            ResolvedUiAppearance {
+    pub(crate) const fn resolve(
+        self,
+        forced_colors: ForcedColorsState,
+        system_theme: Option<ResolvedTheme>,
+    ) -> ResolvedUiAppearance {
+        if !forced_colors.custom_colors_enabled() {
+            return ResolvedUiAppearance {
                 appearance: Self {
                     theme: AppThemeMode::System,
                     show_preview_tint: false,
                     ..self
                 },
+                theme: ResolvedTheme::NativeSystem,
                 custom_colors_enabled: false,
-            }
+            };
+        }
+        let theme = match self.theme {
+            AppThemeMode::Light => ResolvedTheme::Light,
+            AppThemeMode::Dark => ResolvedTheme::Dark,
+            AppThemeMode::System => match system_theme {
+                Some(ResolvedTheme::Dark) => ResolvedTheme::Dark,
+                Some(ResolvedTheme::Light | ResolvedTheme::NativeSystem) | None => {
+                    ResolvedTheme::Light
+                }
+            },
+        };
+        ResolvedUiAppearance {
+            appearance: self,
+            theme,
+            custom_colors_enabled: true,
         }
     }
+}
+
+/// Auxiliary appearance commands stay outside the contiguous legacy catalog.
+#[cfg(any(windows, test))]
+pub(crate) const THEME_SYSTEM: u16 = 0x9010;
+#[cfg(any(windows, test))]
+pub(crate) const THEME_LIGHT: u16 = 0x9011;
+#[cfg(any(windows, test))]
+pub(crate) const THEME_DARK: u16 = 0x9012;
+#[cfg(any(windows, test))]
+pub(crate) const APPEARANCE_ADVANCED: u16 = 0x9013;
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn theme_mode_for_command(command: u16) -> Option<AppThemeMode> {
+    match command {
+        THEME_SYSTEM => Some(AppThemeMode::System),
+        THEME_LIGHT => Some(AppThemeMode::Light),
+        THEME_DARK => Some(AppThemeMode::Dark),
+        _ => None,
+    }
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn theme_command_for_mode(mode: AppThemeMode) -> u16 {
+    match mode {
+        AppThemeMode::System => THEME_SYSTEM,
+        AppThemeMode::Light => THEME_LIGHT,
+        AppThemeMode::Dark => THEME_DARK,
+    }
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn appearance_command_allowed(command: u16, worker_active: bool) -> bool {
+    theme_mode_for_command(command).is_some() || (command == APPEARANCE_ADVANCED && !worker_active)
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn appearance_after_theme_command(
+    appearance: UiAppearance,
+    command: u16,
+) -> Option<UiAppearance> {
+    let Some(theme) = theme_mode_for_command(command) else {
+        return None;
+    };
+    Some(UiAppearance {
+        theme,
+        ..appearance
+    })
 }
 
 /// Pixel metrics used to place one command rail.
@@ -1826,11 +2009,7 @@ pub(crate) const fn proposed_name_visual_decision(
     }
 }
 
-/// Restrained native light-theme colors used only for changed proposal cells.
-#[cfg(any(windows, test))]
-pub(crate) const PROPOSED_CHANGED_TEXT_COLOR: u32 = 0x0033_268F;
-#[cfg(any(windows, test))]
-pub(crate) const PROPOSED_CHANGED_BACKGROUND_COLOR: u32 = 0x00F7_F7FF;
+/// Initial Apply keyline color before appearance resources are installed.
 #[cfg(any(windows, test))]
 pub(crate) const APPLY_KEYLINE_COLOR: u32 = 0x0032_29D9;
 
@@ -2913,6 +3092,7 @@ pub(crate) enum UiEffect {
     ProposalRowsChanged(Box<[usize]>),
     AllRowsChanged,
     ColumnsChanged(usize),
+    AppearanceChanged,
     CloseRequested,
 }
 
@@ -2976,6 +3156,7 @@ pub(crate) fn command_effect_fits_policy(command: CommandId, outcome: &CommandOu
         ),
         UiEffect::AllRowsChanged => command_ui_policy(command) == CommandUiPolicy::AllRows,
         UiEffect::ColumnsChanged(_) => command_ui_policy(command) == CommandUiPolicy::Columns,
+        UiEffect::AppearanceChanged => appearance_command_allowed(command, false),
         UiEffect::CloseRequested => command == EXIT_COMMAND,
     }
 }
@@ -3730,18 +3911,135 @@ mod tests {
             show_preview_tint: true,
             show_empty_safety: false,
         };
-        let ordinary = custom.resolve(ForcedColorsState::Inactive);
+        let ordinary = custom.resolve(ForcedColorsState::Inactive, Some(ResolvedTheme::Dark));
         assert_eq!(ordinary.appearance, custom);
+        assert_eq!(ordinary.theme, ResolvedTheme::Dark);
         assert!(ordinary.custom_colors_enabled);
 
-        let forced = custom.resolve(ForcedColorsState::ActiveOrUnknown);
+        let forced = custom.resolve(
+            ForcedColorsState::ActiveOrUnknown,
+            Some(ResolvedTheme::Dark),
+        );
         assert_eq!(forced.appearance.theme, AppThemeMode::System);
+        assert_eq!(forced.theme, ResolvedTheme::NativeSystem);
         assert!(!forced.appearance.show_preview_tint);
         assert!(!forced.custom_colors_enabled);
         assert_eq!(forced.appearance.density, custom.density);
         assert_eq!(
             forced.appearance.show_empty_safety,
             custom.show_empty_safety
+        );
+
+        let system = UiAppearance::default();
+        assert_eq!(
+            system
+                .resolve(ForcedColorsState::Inactive, Some(ResolvedTheme::Dark))
+                .theme,
+            ResolvedTheme::Dark
+        );
+        assert_eq!(
+            system.resolve(ForcedColorsState::Inactive, None).theme,
+            ResolvedTheme::Light
+        );
+        assert_eq!(theme_from_foreground(245, 245, 245), ResolvedTheme::Dark);
+        assert_eq!(theme_from_foreground(24, 24, 24), ResolvedTheme::Light);
+    }
+
+    #[test]
+    fn auxiliary_theme_commands_are_presentation_only_and_safely_classified() {
+        let original = UiAppearance {
+            theme: AppThemeMode::System,
+            density: RailDensityPreference::Compact,
+            emphasis: PreviewEmphasis::Strong,
+            show_separators: false,
+            show_preview_tint: false,
+            show_empty_safety: true,
+        };
+        for (command, theme) in [
+            (THEME_SYSTEM, AppThemeMode::System),
+            (THEME_LIGHT, AppThemeMode::Light),
+            (THEME_DARK, AppThemeMode::Dark),
+        ] {
+            assert!(command > VERSION);
+            assert!(command_ui_spec(command).is_none());
+            assert_eq!(theme_mode_for_command(command), Some(theme));
+            assert_eq!(theme_command_for_mode(theme), command);
+            assert!(appearance_command_allowed(command, false));
+            assert!(appearance_command_allowed(command, true));
+            let updated = appearance_after_theme_command(original, command);
+            assert_eq!(updated.map(|appearance| appearance.theme), Some(theme));
+            assert_eq!(
+                updated.map(|appearance| appearance.density),
+                Some(original.density)
+            );
+            assert_eq!(
+                updated.map(|appearance| appearance.emphasis),
+                Some(original.emphasis)
+            );
+        }
+        assert!(appearance_command_allowed(APPEARANCE_ADVANCED, false));
+        assert!(!appearance_command_allowed(APPEARANCE_ADVANCED, true));
+        assert_eq!(appearance_after_theme_command(original, VERSION), None);
+        let outcome = CommandOutcome::ui(UiEffect::AppearanceChanged);
+        assert!(command_effect_fits_policy(THEME_DARK, &outcome));
+        assert!(!command_effect_fits_policy(COPY_NAMES, &outcome));
+    }
+
+    #[test]
+    fn preview_emphasis_tint_and_native_precedence_are_semantic() {
+        let base = UiAppearance::default();
+        let light = base.resolve(ForcedColorsState::Inactive, Some(ResolvedTheme::Light));
+        let subtle = proposed_name_colors(
+            ResolvedUiAppearance {
+                appearance: UiAppearance {
+                    emphasis: PreviewEmphasis::Subtle,
+                    ..base
+                },
+                ..light
+            },
+            ProposedNameVisual::Changed,
+        );
+        let strong = proposed_name_colors(
+            ResolvedUiAppearance {
+                appearance: UiAppearance {
+                    emphasis: PreviewEmphasis::Strong,
+                    show_preview_tint: false,
+                    ..base
+                },
+                ..light
+            },
+            ProposedNameVisual::Changed,
+        );
+        assert_eq!(
+            subtle.map(|colors| colors.text),
+            Some(PRECISION_LIGHT.changed_subtle)
+        );
+        assert_eq!(
+            subtle.and_then(|colors| colors.background),
+            Some(PRECISION_LIGHT.preview_tint)
+        );
+        assert_eq!(
+            strong.map(|colors| colors.text),
+            Some(PRECISION_LIGHT.changed_strong)
+        );
+        assert_eq!(strong.and_then(|colors| colors.background), None);
+        assert_eq!(
+            proposed_name_colors(light, ProposedNameVisual::Default),
+            None
+        );
+
+        let forced = base.resolve(
+            ForcedColorsState::ActiveOrUnknown,
+            Some(ResolvedTheme::Dark),
+        );
+        assert_eq!(semantic_palette(forced.theme), None);
+        assert_eq!(
+            proposed_name_colors(forced, ProposedNameVisual::Changed),
+            None
+        );
+        assert_ne!(
+            semantic_palette(ResolvedTheme::Light),
+            semantic_palette(ResolvedTheme::Dark)
         );
     }
 
@@ -4211,8 +4509,6 @@ mod tests {
             assert_eq!(state, ForcedColorsState::ActiveOrUnknown);
             assert!(!state.custom_colors_enabled());
         }
-        assert_eq!(PROPOSED_CHANGED_TEXT_COLOR, 0x0033_268F);
-        assert_eq!(PROPOSED_CHANGED_BACKGROUND_COLOR, 0x00F7_F7FF);
         assert_eq!(APPLY_KEYLINE_COLOR, 0x0032_29D9);
         assert_eq!(
             proposed_name_visual_decision(ProposedNameVisualContext {

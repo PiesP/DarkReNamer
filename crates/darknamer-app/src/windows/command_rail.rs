@@ -8,7 +8,9 @@ use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Foundation::RECT;
 #[cfg(test)]
 use windows_sys::Win32::Graphics::Gdi::MapWindowPoints;
-use windows_sys::Win32::Graphics::Gdi::{CreateSolidBrush, DeleteObject, HBRUSH, HFONT};
+use windows_sys::Win32::Graphics::Gdi::{
+    CreateSolidBrush, DeleteObject, HBRUSH, HFONT, InvalidateRect,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::SS_ETCHEDHORZ;
 use windows_sys::Win32::UI::Controls::{
@@ -89,6 +91,25 @@ impl Drop for OwnedApplyKeyline {
     }
 }
 
+impl OwnedApplyKeyline {
+    fn replace_brush(&mut self, color: u32) -> io::Result<()> {
+        // SAFETY: color is a validated integral COLORREF and the returned brush
+        // remains solely owned until it is swapped below.
+        let replacement = unsafe { CreateSolidBrush(color) };
+        if replacement.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let previous = core::mem::replace(&mut self.brush, replacement);
+        // SAFETY: window is live and now resolves the replacement brush before
+        // the previous unselected brush is deleted.
+        unsafe {
+            InvalidateRect(self.window, null(), 1);
+            DeleteObject(previous);
+        }
+        Ok(())
+    }
+}
+
 /// Owns the native controls that render one side of the command rail.
 pub(super) struct CommandRail {
     parent: HWND,
@@ -97,6 +118,7 @@ pub(super) struct CommandRail {
     separators: Vec<HWND>,
     apply_keyline: Option<OwnedApplyKeyline>,
     rail_visible: Cell<bool>,
+    separators_requested: Cell<bool>,
     apply_keyline_requested: Cell<bool>,
     tooltip: OwnedTooltip,
     tooltip_texts: Vec<Box<[u16]>>,
@@ -112,6 +134,7 @@ impl CommandRail {
             separators: Vec::with_capacity(spec.group_count().saturating_sub(1)),
             apply_keyline: None,
             rail_visible: Cell::new(true),
+            separators_requested: Cell::new(true),
             apply_keyline_requested: Cell::new(false),
             tooltip,
             tooltip_texts: Vec::with_capacity(spec.command_count()),
@@ -345,11 +368,21 @@ impl CommandRail {
             // SAFETY: each button is a live child owned by this command rail.
             unsafe { ShowWindow(button.window, command) };
         }
+        self.update_separator_visibility();
+        self.update_apply_keyline_visibility();
+    }
+
+    pub(super) fn set_separators_visible(&self, visible: bool) {
+        self.separators_requested.set(visible);
+        self.update_separator_visibility();
+    }
+
+    fn update_separator_visibility(&self) {
+        let visible = self.rail_visible.get() && self.separators_requested.get();
         for separator in &self.separators {
             // SAFETY: each separator is a live decorative child owned by this rail.
-            unsafe { ShowWindow(*separator, command) };
+            unsafe { ShowWindow(*separator, if visible { SW_SHOW } else { SW_HIDE }) };
         }
-        self.update_apply_keyline_visibility();
     }
 
     pub(super) fn set_apply_keyline_visible(&self, visible: bool) {
@@ -371,6 +404,12 @@ impl CommandRail {
             .as_ref()
             .filter(|keyline| keyline.window == window)
             .map(|keyline| keyline.brush)
+    }
+
+    pub(super) fn set_apply_keyline_color(&mut self, color: u32) -> io::Result<()> {
+        self.apply_keyline
+            .as_mut()
+            .map_or(Ok(()), |keyline| keyline.replace_brush(color))
     }
 
     pub(super) fn apply_font(&self, font: HFONT) {

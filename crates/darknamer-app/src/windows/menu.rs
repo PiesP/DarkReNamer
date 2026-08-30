@@ -212,6 +212,7 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
     let dpi = unsafe { GetDpiForWindow(window) };
     state.dpi = if dpi == 0 { BASE_DPI } else { dpi };
     refresh_forced_colors(state);
+    refresh_system_theme(state);
     // SAFETY: A null module name requests the current process module and dereferences no caller memory.
     let instance = unsafe { GetModuleHandleW(null()) };
     let list_class = wide("SysListView32");
@@ -310,6 +311,7 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
             )
         };
     }
+    apply_native_appearance_nonblocking(window, state);
     arrange(window, state);
     refresh(state);
     Ok(())
@@ -639,6 +641,7 @@ fn apply_empty_state_presentation(state: &AppState, presentation: EmptyStatePres
         state.empty_safety,
         state.empty_add,
         presentation,
+        state.resolved_appearance().appearance.show_empty_safety,
     );
     // Hiding a focused CTA clears focus; restore the durable ListView target
     // through the existing non-reentrant focus path.
@@ -654,15 +657,23 @@ pub(super) fn set_empty_state_controls(
     safety: HWND,
     add: HWND,
     presentation: EmptyStatePresentation,
+    show_safety: bool,
 ) {
     let visible = matches!(presentation, EmptyStatePresentation::ReadyToAdd);
     // SAFETY: these are live standard direct children owned by AppState or a
     // hidden native test parent. Only the CTA is ever enabled for interaction.
     unsafe {
         EnableWindow(add, i32::from(visible));
-        for control in [instruction, safety, add] {
-            ShowWindow(control, if visible { SW_SHOW } else { SW_HIDE });
-        }
+        ShowWindow(instruction, if visible { SW_SHOW } else { SW_HIDE });
+        ShowWindow(add, if visible { SW_SHOW } else { SW_HIDE });
+        ShowWindow(
+            safety,
+            if visible && show_safety {
+                SW_SHOW
+            } else {
+                SW_HIDE
+            },
+        );
     }
 }
 
@@ -919,6 +930,18 @@ pub(super) fn apply_command_states(state: &AppState) {
             );
         }
     }
+    // SAFETY: the three appearance commands are contiguous auxiliary menu IDs
+    // owned by this process. The checked item reflects persisted preference,
+    // not the forced-colors or system-resolved rendering result.
+    unsafe {
+        CheckMenuRadioItem(
+            state.menu,
+            u32::from(THEME_SYSTEM),
+            u32::from(THEME_DARK),
+            u32::from(theme_command_for_mode(state.appearance.theme)),
+            MF_BYCOMMAND,
+        )
+    };
     if !state.menu.is_null() {
         // SAFETY: AppState's menu and parent HWND are live and command IDs are validated resource values.
         unsafe { DrawMenuBar(GetParent(state.list_window)) };
@@ -1043,7 +1066,7 @@ pub(super) fn create_menu() -> io::Result<OwnedMenu> {
     let mut menu = MenuBuilder::bar()?;
     append_catalog_popup(&mut menu, MenuGroup::File, "파일(&F)")?;
     append_catalog_popup(&mut menu, MenuGroup::Edit, "편집(&E)")?;
-    append_catalog_popup(&mut menu, MenuGroup::View, "보기(&V)")?;
+    append_view_popup(&mut menu)?;
     append_catalog_popup(&mut menu, MenuGroup::Tools, "기능(&T)")?;
     let mut recovery = MenuBuilder::popup()?;
     recovery.item(EXPORT_RECOVERY_JOURNAL, "보존된 저널 바이트 내보내기...")?;
@@ -1052,6 +1075,18 @@ pub(super) fn create_menu() -> io::Result<OwnedMenu> {
     menu.popup_child(recovery, "복구(&R)")?;
     append_catalog_items(&mut menu, MenuGroup::About)?;
     Ok(menu.finish())
+}
+
+fn append_view_popup(menu: &mut MenuBuilder) -> io::Result<()> {
+    let mut view = MenuBuilder::popup()?;
+    append_catalog_items(&mut view, MenuGroup::View)?;
+    view.separator()?;
+    let mut theme = MenuBuilder::popup()?;
+    theme.item(THEME_SYSTEM, "시스템 설정 사용(&S)")?;
+    theme.item(THEME_LIGHT, "라이트(&L)")?;
+    theme.item(THEME_DARK, "다크(&D)")?;
+    view.popup_child(theme, "테마(&T)")?;
+    menu.popup_child(view, "보기(&V)")
 }
 
 fn append_catalog_popup(menu: &mut MenuBuilder, group: MenuGroup, label: &str) -> io::Result<()> {

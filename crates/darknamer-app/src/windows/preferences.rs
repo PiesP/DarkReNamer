@@ -311,10 +311,6 @@ impl AppearancePreferencesWriter {
         })
     }
 
-    #[allow(
-        dead_code,
-        reason = "appearance commands submit live snapshots in the next staged UI commit"
-    )]
     pub(crate) fn submit(&mut self, appearance: UiAppearance) -> io::Result<u64> {
         if self.is_finished() {
             return Err(io::Error::other("appearance preference writer has stopped"));
