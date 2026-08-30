@@ -144,6 +144,17 @@ pub(super) fn measure_font_metrics(
         measure_text(window, status_font, EMPTY_STATE_SAFETY, true).unwrap_or_default();
     let (empty_add_text_width, empty_add_text_height) =
         measure_text(window, message_font, EMPTY_STATE_ADD_LABEL, true).unwrap_or_default();
+    let (drop_overlay_text_width, drop_overlay_text_height) = [
+        DROP_ACCEPTING_TEXT,
+        DROP_LOCKED_TEXT,
+        DROP_UNSUPPORTED_TEXT,
+        DROP_FULL_TEXT,
+    ]
+    .into_iter()
+    .filter_map(|text| measure_text(window, message_font, text, true))
+    .fold((0_i32, 0_i32), |(width, height), measured| {
+        (width.max(measured.0), height.max(measured.1))
+    });
     MeasuredFontMetrics {
         button_text_width,
         button_text_height,
@@ -157,6 +168,8 @@ pub(super) fn measure_font_metrics(
         empty_safety_text_height,
         empty_add_text_width,
         empty_add_text_height,
+        drop_overlay_text_width,
+        drop_overlay_text_height,
     }
 }
 
@@ -299,7 +312,6 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
     }
     arrange(window, state);
     refresh(state);
-    state.drop_registration = Some(register_drop_target(window)?);
     Ok(())
 }
 
@@ -369,7 +381,7 @@ pub(super) fn create_drop_overlay(parent: HWND) -> io::Result<HWND> {
             0,
             class.as_ptr(),
             null(),
-            WS_CHILD | SS_CENTER | SS_CENTERIMAGE | SS_NOPREFIX,
+            WS_CHILD | SS_CENTER | SS_NOPREFIX,
             0,
             0,
             0,
@@ -387,16 +399,13 @@ pub(super) fn create_drop_overlay(parent: HWND) -> io::Result<HWND> {
     }
 }
 
-pub(super) fn set_drop_presentation(state: &AppState, presentation: DropPresentation) {
-    set_drop_overlay_control(state.drop_overlay, presentation);
-}
-
 pub(super) fn set_drop_overlay_control(overlay: HWND, presentation: DropPresentation) {
     let text = match presentation {
         DropPresentation::Inactive => "",
         DropPresentation::Accepting => DROP_ACCEPTING_TEXT,
         DropPresentation::Locked => DROP_LOCKED_TEXT,
         DropPresentation::Unsupported => DROP_UNSUPPORTED_TEXT,
+        DropPresentation::Full => DROP_FULL_TEXT,
     };
     set_status(overlay, text);
     // SAFETY: drop_overlay is the live noninteractive STATIC owned by AppState.

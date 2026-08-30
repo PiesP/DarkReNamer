@@ -39,6 +39,8 @@ pub(crate) const DROP_LOCKED_TEXT: &str = "현재 작업 중에는 추가할 수
 #[cfg(windows)]
 pub(crate) const DROP_UNSUPPORTED_TEXT: &str = "파일 또는 폴더만 추가할 수 있습니다.";
 #[cfg(windows)]
+pub(crate) const DROP_FULL_TEXT: &str = "목록에 더 추가할 수 없습니다.";
+#[cfg(windows)]
 pub(crate) const STATUS_COUNT_SAMPLE: &str = "전체 10000 · 변경 10000 · 선택 10000";
 #[cfg(windows)]
 pub(crate) const STATUS_CANCEL_LABEL: &str = "취소";
@@ -164,6 +166,8 @@ pub(crate) struct MeasuredFontMetrics {
     pub(crate) empty_safety_text_height: i32,
     pub(crate) empty_add_text_width: i32,
     pub(crate) empty_add_text_height: i32,
+    pub(crate) drop_overlay_text_width: i32,
+    pub(crate) drop_overlay_text_height: i32,
 }
 
 #[cfg(any(windows, test))]
@@ -1316,11 +1320,11 @@ fn calculate_drop_overlay_layout(
     let width = list
         .width
         .saturating_sub(horizontal_padding.saturating_mul(2));
-    let desired_height = measured
-        .empty_instruction_text_height
-        .max(scale_dip(16, dpi))
-        .saturating_add(scale_dip(10, dpi))
-        .max(scale_dip(28, dpi));
+    let line_height = measured.drop_overlay_text_height.max(scale_dip(16, dpi));
+    let desired_height =
+        conservative_wrapped_text_height(measured.drop_overlay_text_width, line_height, width)
+            .saturating_add(scale_dip(10, dpi))
+            .max(scale_dip(28, dpi));
     let height = desired_height.min(list.height).max(0);
     LayoutRect {
         x: list.x.saturating_add(horizontal_padding),
@@ -1475,6 +1479,7 @@ pub(crate) enum DropPresentation {
     Accepting,
     Locked,
     Unsupported,
+    Full,
 }
 
 #[cfg(any(windows, test))]
@@ -1491,14 +1496,30 @@ pub(crate) const DROP_EFFECT_COPY: u32 = 1;
 
 #[cfg(any(windows, test))]
 #[must_use]
+pub(crate) const fn drop_effect_after_admission_start(started: bool) -> u32 {
+    if started {
+        DROP_EFFECT_COPY
+    } else {
+        DROP_EFFECT_NONE
+    }
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
 pub(crate) const fn negotiate_drop_effect(
     format_supported: bool,
     ui_locked: bool,
+    remaining_capacity: usize,
     source_effects: u32,
 ) -> DropNegotiation {
     if !format_supported || source_effects & DROP_EFFECT_COPY == 0 {
         DropNegotiation {
             presentation: DropPresentation::Unsupported,
+            effect: DROP_EFFECT_NONE,
+        }
+    } else if remaining_capacity == 0 {
+        DropNegotiation {
+            presentation: DropPresentation::Full,
             effect: DROP_EFFECT_NONE,
         }
     } else if ui_locked {
@@ -3542,6 +3563,8 @@ mod tests {
             empty_safety_text_height: 32,
             empty_add_text_width: 150,
             empty_add_text_height: 34,
+            drop_overlay_text_width: 420,
+            drop_overlay_text_height: 34,
         };
 
         let compact = measured.rail_metrics(RailDensity::Compact, 96);
@@ -3569,6 +3592,32 @@ mod tests {
         assert!(layout.empty_add.height >= empty.add_height);
         assert!(layout.empty_add.width >= 174);
         assert!(layout.empty_safety.bottom() <= layout.list.bottom());
+    }
+
+    #[test]
+    fn drop_overlay_wraps_large_text_inside_a_narrow_list() {
+        let measured = MeasuredFontMetrics {
+            drop_overlay_text_width: 1_000,
+            drop_overlay_text_height: 40,
+            ..MeasuredFontMetrics::default()
+        };
+        let list = LayoutRect {
+            x: 10,
+            y: 5,
+            width: 120,
+            height: 800,
+        };
+        let overlay = calculate_drop_overlay_layout(list, 96, measured);
+        let expected_text_height = conservative_wrapped_text_height(
+            measured.drop_overlay_text_width,
+            measured.drop_overlay_text_height,
+            overlay.width,
+        );
+        assert!(overlay.height >= expected_text_height + scale_dip(10, 96));
+        assert!(overlay.x >= list.x);
+        assert!(overlay.y >= list.y);
+        assert!(overlay.x + overlay.width <= list.x + list.width);
+        assert!(overlay.bottom() <= list.bottom());
     }
 
     #[test]
@@ -3658,27 +3707,36 @@ mod tests {
     #[test]
     fn drop_negotiation_requires_file_format_unlocked_ui_and_copy_effect() {
         assert_eq!(
-            negotiate_drop_effect(true, false, DROP_EFFECT_COPY | 2),
+            negotiate_drop_effect(true, false, 1, DROP_EFFECT_COPY | 2),
             DropNegotiation {
                 presentation: DropPresentation::Accepting,
                 effect: DROP_EFFECT_COPY,
             }
         );
         assert_eq!(
-            negotiate_drop_effect(true, true, DROP_EFFECT_COPY),
+            negotiate_drop_effect(true, true, 1, DROP_EFFECT_COPY),
             DropNegotiation {
                 presentation: DropPresentation::Locked,
                 effect: DROP_EFFECT_NONE,
             }
         );
         for negotiation in [
-            negotiate_drop_effect(false, false, DROP_EFFECT_COPY),
-            negotiate_drop_effect(true, false, 2),
+            negotiate_drop_effect(false, false, 1, DROP_EFFECT_COPY),
+            negotiate_drop_effect(true, false, 1, 2),
         ] {
             assert_eq!(negotiation.presentation, DropPresentation::Unsupported);
             assert_eq!(negotiation.effect, DROP_EFFECT_NONE);
         }
+        assert_eq!(
+            negotiate_drop_effect(true, false, 0, DROP_EFFECT_COPY),
+            DropNegotiation {
+                presentation: DropPresentation::Full,
+                effect: DROP_EFFECT_NONE,
+            }
+        );
         assert_eq!(DropPresentation::default(), DropPresentation::Inactive);
+        assert_eq!(drop_effect_after_admission_start(true), DROP_EFFECT_COPY);
+        assert_eq!(drop_effect_after_admission_start(false), DROP_EFFECT_NONE);
     }
 
     #[test]

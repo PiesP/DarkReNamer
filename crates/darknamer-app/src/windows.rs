@@ -201,7 +201,7 @@ struct AppState {
     status_font: OwnedFont,
     left_rail: Option<CommandRail>,
     right_rail: Option<CommandRail>,
-    drop_registration: Option<DropTargetRegistration>,
+    drop_registrations: Option<DropTargetRegistrations>,
     model: LegacyList,
     shown_columns: [bool; 4],
     column_states: [ColumnState; 7],
@@ -272,7 +272,7 @@ impl AppState {
             status_font: OwnedFont::default(),
             left_rail: None,
             right_rail: None,
-            drop_registration: None,
+            drop_registrations: None,
             model: LegacyList::new(),
             shown_columns: shown_columns(&column_states),
             column_states,
@@ -1256,6 +1256,7 @@ mod tests {
             let style = unsafe { GetWindowLongPtrW(overlay, GWL_STYLE) } as u32;
             assert_eq!(style & WS_TABSTOP, 0);
             assert_eq!(style & SS_NOTIFY, 0);
+            assert_eq!(style & SS_CENTERIMAGE, 0);
             // SAFETY: overlay was deliberately created without an ID.
             assert_eq!(unsafe { GetDlgCtrlID(overlay) }, 0);
             assert_eq!(style & WS_VISIBLE, 0);
@@ -1264,6 +1265,7 @@ mod tests {
                 (DropPresentation::Accepting, DROP_ACCEPTING_TEXT),
                 (DropPresentation::Locked, DROP_LOCKED_TEXT),
                 (DropPresentation::Unsupported, DROP_UNSUPPORTED_TEXT),
+                (DropPresentation::Full, DROP_FULL_TEXT),
             ] {
                 set_drop_overlay_control(overlay, presentation);
                 assert_eq!(window_text(overlay)?, text);
@@ -1347,6 +1349,8 @@ mod tests {
         assert!(measured.empty_safety_text_height > 0);
         assert!(measured.empty_add_text_width > 0);
         assert!(measured.empty_add_text_height > 0);
+        assert!(measured.drop_overlay_text_width > 0);
+        assert!(measured.drop_overlay_text_height > 0);
         let metrics = measured.rail_metrics(RailDensity::Compact, dpi);
         let available_height =
             minimum_main_client_height(dpi, measured).saturating_sub(measured.status_height(dpi));

@@ -45,17 +45,18 @@ struct DropTargetVTable {
 struct DropTarget {
     vtable: *const DropTargetVTable,
     refs: AtomicUsize,
-    owner: HWND,
+    state_owner: HWND,
     format_supported: AtomicBool,
+    #[cfg(test)]
+    drop_observer: Option<Arc<AtomicUsize>>,
 }
-
-#[cfg(test)]
-static DROP_TARGET_DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 impl Drop for DropTarget {
     fn drop(&mut self) {
         #[cfg(test)]
-        DROP_TARGET_DROP_COUNT.fetch_add(1, Ordering::AcqRel);
+        if let Some(observer) = &self.drop_observer {
+            observer.fetch_add(1, Ordering::AcqRel);
+        }
     }
 }
 
@@ -69,26 +70,48 @@ static DROP_TARGET_VTABLE: DropTargetVTable = DropTargetVTable {
     drop: drop_target_drop,
 };
 
+struct CallbackSelfReference(*mut c_void);
+
+impl CallbackSelfReference {
+    unsafe fn acquire(this: *mut c_void) -> Option<Self> {
+        if this.is_null() {
+            return None;
+        }
+        // SAFETY: this is the live interface pointer supplied for the callback.
+        unsafe { drop_target_add_ref(this) };
+        Some(Self(this))
+    }
+}
+
+impl Drop for CallbackSelfReference {
+    fn drop(&mut self) {
+        // SAFETY: acquire took exactly one callback-local reference.
+        unsafe { drop_target_release(self.0) };
+    }
+}
+
 pub(super) struct DropTargetRegistration {
-    owner: HWND,
+    registered_hwnd: HWND,
     target: *mut DropTarget,
     registered: bool,
 }
 
 impl DropTargetRegistration {
-    fn register(owner: HWND) -> io::Result<Self> {
-        if owner.is_null() {
-            return Err(io::Error::other("drop target owner is null"));
+    fn register(registered_hwnd: HWND, state_owner: HWND) -> io::Result<Self> {
+        if registered_hwnd.is_null() || state_owner.is_null() {
+            return Err(io::Error::other("drop target window is null"));
         }
         let target = Box::into_raw(Box::new(DropTarget {
             vtable: &raw const DROP_TARGET_VTABLE,
             refs: AtomicUsize::new(1),
-            owner,
+            state_owner,
             format_supported: AtomicBool::new(false),
+            #[cfg(test)]
+            drop_observer: None,
         }));
         // SAFETY: target begins with the exact IDropTarget vtable pointer and
         // keeps its creator reference while OLE takes its documented AddRef.
-        let status = unsafe { RegisterDragDrop(owner, target.cast()) };
+        let status = unsafe { RegisterDragDrop(registered_hwnd, target.cast()) };
         if status < 0 {
             // SAFETY: failed registration did not transfer the creator-owned
             // object; this is its one terminal Release.
@@ -99,7 +122,7 @@ impl DropTargetRegistration {
             )));
         }
         Ok(Self {
-            owner,
+            registered_hwnd,
             target,
             registered: true,
         })
@@ -110,6 +133,11 @@ impl DropTargetRegistration {
         // SAFETY: registration retains the creator reference for target.
         unsafe { (*self.target).refs.load(Ordering::Acquire) }
     }
+
+    #[cfg(test)]
+    fn registered_hwnd(&self) -> HWND {
+        self.registered_hwnd
+    }
 }
 
 impl Drop for DropTargetRegistration {
@@ -117,7 +145,7 @@ impl Drop for DropTargetRegistration {
         if self.registered {
             // SAFETY: owner is the exact HWND successfully registered once by
             // this object. Revoke releases OLE's registration reference.
-            unsafe { RevokeDragDrop(self.owner) };
+            unsafe { RevokeDragDrop(self.registered_hwnd) };
             self.registered = false;
         }
         if !self.target.is_null() {
@@ -129,8 +157,39 @@ impl Drop for DropTargetRegistration {
     }
 }
 
-pub(super) fn register_drop_target(owner: HWND) -> io::Result<DropTargetRegistration> {
-    DropTargetRegistration::register(owner)
+pub(super) struct DropTargetRegistrations {
+    _list: DropTargetRegistration,
+    _overlay: DropTargetRegistration,
+}
+
+impl DropTargetRegistrations {
+    fn register(list: HWND, overlay: HWND, state_owner: HWND) -> io::Result<Self> {
+        let list = DropTargetRegistration::register(list, state_owner)?;
+        let overlay = match DropTargetRegistration::register(overlay, state_owner) {
+            Ok(overlay) => overlay,
+            Err(error) => {
+                drop(list);
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            _list: list,
+            _overlay: overlay,
+        })
+    }
+
+    #[cfg(test)]
+    fn registrations(&self) -> [&DropTargetRegistration; 2] {
+        [&self._list, &self._overlay]
+    }
+}
+
+pub(super) fn register_drop_targets(
+    list: HWND,
+    overlay: HWND,
+    state_owner: HWND,
+) -> io::Result<DropTargetRegistrations> {
+    DropTargetRegistrations::register(list, overlay, state_owner)
 }
 
 #[must_use]
@@ -261,12 +320,17 @@ unsafe extern "system" fn drop_target_drag_enter(
     _point: POINTL,
     effect: *mut u32,
 ) -> HRESULT {
+    // SAFETY: COM supplies this for the callback; the guard prevents reentrant
+    // RevokeDragDrop from freeing the object before return.
+    let Some(_self_reference) = (unsafe { CallbackSelfReference::acquire(this) }) else {
+        return invalid_target_effect(effect);
+    };
     drop_callback(effect, || {
         // SAFETY: COM supplies the registered interface pointer for this call.
         let target = unsafe { target_ref(this)? };
         if data.is_null() {
             target.format_supported.store(false, Ordering::Release);
-            set_overlay_for_owner(target.owner, DropPresentation::Unsupported);
+            set_overlay_for_owner(target.state_owner, DropPresentation::Unsupported);
             // SAFETY: drop_callback validated effect before invoking this body.
             unsafe { *effect = DROP_EFFECT_NONE };
             return Some(E_POINTER);
@@ -276,8 +340,8 @@ unsafe extern "system" fn drop_target_drag_enter(
         target.format_supported.store(supported, Ordering::Release);
         // SAFETY: drop_callback validated effect and it remains live.
         let source_effects = unsafe { *effect };
-        let negotiation = negotiate_for_owner(target.owner, supported, source_effects);
-        set_overlay_for_owner(target.owner, negotiation.presentation);
+        let negotiation = negotiate_for_owner(target.state_owner, supported, source_effects);
+        set_overlay_for_owner(target.state_owner, negotiation.presentation);
         // SAFETY: same validated output pointer.
         unsafe { *effect = negotiation.effect };
         Some(S_OK)
@@ -290,14 +354,18 @@ unsafe extern "system" fn drop_target_drag_over(
     _point: POINTL,
     effect: *mut u32,
 ) -> HRESULT {
+    // SAFETY: same callback-local lifetime protection as DragEnter.
+    let Some(_self_reference) = (unsafe { CallbackSelfReference::acquire(this) }) else {
+        return invalid_target_effect(effect);
+    };
     drop_callback(effect, || {
         // SAFETY: COM supplies the registered interface pointer for this call.
         let target = unsafe { target_ref(this)? };
         let supported = target.format_supported.load(Ordering::Acquire);
         // SAFETY: drop_callback validated effect and it remains live.
         let source_effects = unsafe { *effect };
-        let negotiation = negotiate_for_owner(target.owner, supported, source_effects);
-        set_overlay_for_owner(target.owner, negotiation.presentation);
+        let negotiation = negotiate_for_owner(target.state_owner, supported, source_effects);
+        set_overlay_for_owner(target.state_owner, negotiation.presentation);
         // SAFETY: same validated output pointer.
         unsafe { *effect = negotiation.effect };
         Some(S_OK)
@@ -305,13 +373,17 @@ unsafe extern "system" fn drop_target_drag_over(
 }
 
 unsafe extern "system" fn drop_target_drag_leave(this: *mut c_void) -> HRESULT {
+    // SAFETY: same callback-local lifetime protection as DragEnter.
+    let Some(_self_reference) = (unsafe { CallbackSelfReference::acquire(this) }) else {
+        return E_POINTER;
+    };
     let result = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: COM supplies the registered interface pointer for this call.
         let Some(target) = (unsafe { target_ref(this) }) else {
             return E_POINTER;
         };
         target.format_supported.store(false, Ordering::Release);
-        set_overlay_for_owner(target.owner, DropPresentation::Inactive);
+        set_overlay_for_owner(target.state_owner, DropPresentation::Inactive);
         S_OK
     }));
     result.unwrap_or(E_FAIL)
@@ -324,6 +396,10 @@ unsafe extern "system" fn drop_target_drop(
     _point: POINTL,
     effect: *mut u32,
 ) -> HRESULT {
+    // SAFETY: same callback-local lifetime protection as DragEnter.
+    let Some(_self_reference) = (unsafe { CallbackSelfReference::acquire(this) }) else {
+        return invalid_target_effect(effect);
+    };
     drop_callback(effect, || {
         // SAFETY: COM supplies the registered interface pointer for this call.
         let target = unsafe { target_ref(this)? };
@@ -332,11 +408,14 @@ unsafe extern "system" fn drop_target_drop(
         let source_effects = unsafe { *effect };
         // SAFETY: same validated output pointer.
         unsafe { *effect = DROP_EFFECT_NONE };
-        set_overlay_for_owner(target.owner, DropPresentation::Inactive);
+        set_overlay_for_owner(target.state_owner, DropPresentation::Inactive);
         if !format_supported
             || source_effects & DROPEFFECT_COPY == 0
-            || drop_locked(target.owner) != Some(false)
+            || drop_locked(target.state_owner) != Some(false)
         {
+            return Some(S_OK);
+        }
+        if remaining_capacity(target.state_owner).is_none_or(|remaining| remaining == 0) {
             return Some(S_OK);
         }
         if data.is_null() {
@@ -357,30 +436,30 @@ unsafe extern "system" fn drop_target_drop(
             drop(medium);
             return Some(S_OK);
         };
-        let Some(remaining) = remaining_capacity(target.owner) else {
+        let Some(remaining) = remaining_capacity(target.state_owner) else {
             drop(medium);
             return Some(S_OK);
         };
         let (paths, truncated) = extract_drop_paths(drop_handle, remaining);
         drop(medium);
 
-        if drop_locked(target.owner) != Some(false) {
+        if drop_locked(target.state_owner) != Some(false) {
             return Some(S_OK);
         }
         if truncated {
             message(
-                target.owner,
+                target.state_owner,
                 "선택 항목이 남은 10,000개 한도를 초과해 제한된 수만 처리합니다.",
                 "DarkReNamer - 추가 한도",
             );
         }
-        if drop_locked(target.owner) != Some(false) {
+        if drop_locked(target.state_owner) != Some(false) {
             return Some(S_OK);
         }
         if paths.is_empty() {
             return Some(S_OK);
         }
-        let state = window_state_ptr(target.owner);
+        let state = window_state_ptr(target.state_owner);
         if state.is_null() {
             return Some(S_OK);
         }
@@ -391,9 +470,9 @@ unsafe extern "system" fn drop_target_drop(
         }
         // SAFETY: same fresh pointer; this is the one admission dispatch and no
         // IDataObject/STGMEDIUM/HGLOBAL is retained across the worker start.
-        unsafe { admit_paths(target.owner, &mut *state, paths) };
+        let started = unsafe { admit_paths(target.state_owner, &mut *state, paths) };
         // SAFETY: drop_callback validated effect and it remains live.
-        unsafe { *effect = DROP_EFFECT_COPY };
+        unsafe { *effect = drop_effect_after_admission_start(started) };
         Some(S_OK)
     })
 }
@@ -415,6 +494,14 @@ fn drop_callback(effect: *mut u32, body: impl FnOnce() -> Option<HRESULT>) -> HR
             E_FAIL
         }
     }
+}
+
+fn invalid_target_effect(effect: *mut u32) -> HRESULT {
+    if !effect.is_null() {
+        // SAFETY: a non-null effect is writable callback storage by contract.
+        unsafe { *effect = DROP_EFFECT_NONE };
+    }
+    E_POINTER
 }
 
 unsafe fn target_ref<'a>(this: *mut c_void) -> Option<&'a DropTarget> {
@@ -462,6 +549,7 @@ fn negotiate_for_owner(
     negotiate_drop_effect(
         format_supported,
         drop_locked(owner).unwrap_or(true),
+        remaining_capacity(owner).unwrap_or(0),
         source_effects,
     )
 }
@@ -493,10 +581,11 @@ fn remaining_capacity(owner: HWND) -> Option<usize> {
 
 fn set_overlay_for_owner(owner: HWND, presentation: DropPresentation) {
     let state = window_state_ptr(owner);
-    // SAFETY: the mutable borrow is local to the UI update and no provider call
-    // occurs while it is live.
-    if let Some(state) = unsafe { state.as_mut() } {
-        set_drop_presentation(state, presentation);
+    // SAFETY: copy the HWND in a tiny shared borrow that ends before any
+    // SetWindowTextW/UpdateWindow/ShowWindow reentrancy.
+    let overlay = unsafe { state.as_ref().map(|state| state.drop_overlay) };
+    if let Some(overlay) = overlay {
+        set_drop_overlay_control(overlay, presentation);
     }
 }
 
@@ -834,8 +923,9 @@ mod tests {
         let target = Box::into_raw(Box::new(DropTarget {
             vtable: &raw const DROP_TARGET_VTABLE,
             refs: AtomicUsize::new(1),
-            owner: null_mut(),
+            state_owner: null_mut(),
             format_supported: AtomicBool::new(false),
+            drop_observer: None,
         }));
         let mut object = null_mut();
         // SAFETY: target is a live private COM object and object is writable.
@@ -959,17 +1049,52 @@ mod tests {
     }
 
     #[test]
-    fn ole_registration_addrefs_revokes_and_releases_target()
+    fn ole_registration_owns_exact_list_and_overlay_pair_and_revokes_both()
     -> Result<(), Box<dyn std::error::Error>> {
         let _ole = TestOle::initialize()?;
         let owner = create_test_owner()?;
-        let drops_before = DROP_TARGET_DROP_COUNT.load(Ordering::Acquire);
-        let registration = DropTargetRegistration::register(owner)?;
-        assert!(registration.reference_count() >= 2);
-        drop(registration);
-        assert!(DROP_TARGET_DROP_COUNT.load(Ordering::Acquire) > drops_before);
+        let list = create_test_list(owner)?;
+        let overlay = create_drop_overlay(owner)?;
+        let registrations = DropTargetRegistrations::register(list, overlay, owner)?;
+        for (registration, expected) in registrations
+            .registrations()
+            .into_iter()
+            .zip([list, overlay])
+        {
+            assert_eq!(registration.registered_hwnd(), expected);
+            assert!(registration.reference_count() >= 2);
+        }
+        drop(registrations);
+        // Both HWNDs can be registered again only if both previous entries
+        // were revoked by the aggregate teardown.
+        let second = DropTargetRegistrations::register(list, overlay, owner)?;
+        drop(second);
         // SAFETY: owner is the hidden test HWND and registration is revoked.
         unsafe { DestroyWindow(owner) };
+        Ok(())
+    }
+
+    #[test]
+    fn callback_self_reference_is_target_specific_and_outlives_creator_release()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let observer = Arc::new(AtomicUsize::new(0));
+        let target = Box::into_raw(Box::new(DropTarget {
+            vtable: &raw const DROP_TARGET_VTABLE,
+            refs: AtomicUsize::new(1),
+            state_owner: null_mut(),
+            format_supported: AtomicBool::new(false),
+            drop_observer: Some(Arc::clone(&observer)),
+        }));
+        // SAFETY: target is live and the guard takes one local reference.
+        let guard = unsafe { CallbackSelfReference::acquire(target.cast()) }
+            .ok_or_else(|| io::Error::other("callback guard was not acquired"))?;
+        // SAFETY: target remains live with creator+callback references.
+        assert_eq!(unsafe { (*target).refs.load(Ordering::Acquire) }, 2);
+        // SAFETY: simulate reentrant revoke/owner teardown releasing creator.
+        assert_eq!(unsafe { drop_target_release(target.cast()) }, 1);
+        assert_eq!(observer.load(Ordering::Acquire), 0);
+        drop(guard);
+        assert_eq!(observer.load(Ordering::Acquire), 1);
         Ok(())
     }
 
@@ -1005,7 +1130,6 @@ mod tests {
         assert!(state.mutation_locked);
         assert!(state.admission_worker.is_none());
         assert_eq!(fake.get_calls.load(Ordering::Acquire), 1);
-
         unpublish_test_state(owner);
         // SAFETY: target retains only its creator reference.
         assert_eq!(unsafe { drop_target_release(target.cast()) }, 0);
@@ -1078,8 +1202,9 @@ mod tests {
         Box::into_raw(Box::new(DropTarget {
             vtable: &raw const DROP_TARGET_VTABLE,
             refs: AtomicUsize::new(1),
-            owner,
+            state_owner: owner,
             format_supported: AtomicBool::new(true),
+            drop_observer: None,
         }))
     }
 

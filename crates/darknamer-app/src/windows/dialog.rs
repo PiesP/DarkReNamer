@@ -868,7 +868,7 @@ pub(super) fn add_files_dialog(owner: HWND, state: &mut AppState) {
     }) else {
         return;
     };
-    admit_paths(owner, state, paths);
+    let _started = admit_paths(owner, state, paths);
 }
 
 pub(super) fn copy_clipboard_or_report(owner: HWND, text: &LegacyText) {
@@ -964,7 +964,7 @@ pub(super) fn import_paths_dialog(owner: HWND, state: &mut AppState) {
         .into_iter()
         .map(|line| PathBuf::from(std::ffi::OsString::from_wide(line.units())))
         .collect();
-    admit_paths(owner, state, paths);
+    let _started = admit_paths(owner, state, paths);
 }
 
 pub(super) fn set_status(status: HWND, text: &str) {

@@ -407,9 +407,28 @@ unsafe extern "system" fn window_proc(
             if create_children(window, unsafe { &mut *state_ptr }).is_err() {
                 return -1;
             }
+            // Copy child hit surfaces in a tiny borrow, then release it before
+            // RegisterDragDrop can enter OLE.
+            // SAFETY: state_ptr is live UI-thread state for this callback.
+            let (list, overlay) = unsafe {
+                let state = &*state_ptr;
+                (state.list_window, state.drop_overlay)
+            };
+            let registrations = match register_drop_targets(list, overlay, window) {
+                Ok(registrations) => registrations,
+                Err(_) => return -1,
+            };
+            let current_state = window_state_ptr(window);
+            if current_state.is_null() {
+                drop(registrations);
+                return -1;
+            }
+            // SAFETY: state was freshly re-resolved after both OLE calls and no
+            // further reentrant call occurs during this field assignment.
+            unsafe { (*current_state).drop_registrations = Some(registrations) };
             // SAFETY: child creation succeeded and state_ptr remains the live,
             // UI-thread-confined AppState for this top-level window.
-            start_preferences_writer(window, unsafe { &mut *state_ptr });
+            start_preferences_writer(window, unsafe { &mut *current_state });
             0
         }
         WM_SIZE if !state_ptr.is_null() => {
@@ -706,12 +725,12 @@ unsafe extern "system" fn window_proc(
                 // Take the registration without retaining an AppState borrow;
                 // RevokeDragDrop may synchronously release the COM target.
                 // SAFETY: state_ptr is live UI-thread state for this callback.
-                let registration = unsafe {
+                let (overlay, registrations) = unsafe {
                     let state = &mut *state_ptr;
-                    set_drop_presentation(state, DropPresentation::Inactive);
-                    state.drop_registration.take()
+                    (state.drop_overlay, state.drop_registrations.take())
                 };
-                drop(registration);
+                set_drop_overlay_control(overlay, DropPresentation::Inactive);
+                drop(registrations);
                 // Destroy tooltip windows before their CommandRail-owned text
                 // buffers are released, then destroy the direct child buttons.
                 // SAFETY: state_ptr is the live window-thread AppState and this
@@ -733,12 +752,12 @@ unsafe extern "system" fn window_proc(
                 // Defensive idempotent fallback if creation teardown reached
                 // WM_NCDESTROY without the ordinary WM_DESTROY path.
                 // SAFETY: state_ptr is still published and UI-thread confined.
-                let registration = unsafe {
+                let (overlay, registrations) = unsafe {
                     let state = &mut *state_ptr;
-                    set_drop_presentation(state, DropPresentation::Inactive);
-                    state.drop_registration.take()
+                    (state.drop_overlay, state.drop_registrations.take())
                 };
-                drop(registration);
+                set_drop_overlay_control(overlay, DropPresentation::Inactive);
+                drop(registrations);
                 // Clear the published pointer before reclaiming it so queued
                 // worker/input messages cannot recover freed AppState storage.
                 // SAFETY: this callback owns the exact GWLP_USERDATA slot.

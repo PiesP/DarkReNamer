@@ -930,9 +930,9 @@ pub(super) fn request_active_worker_cancel(state: &mut AppState) {
     }
 }
 
-pub(super) fn admit_paths(owner: HWND, state: &mut AppState, paths: Vec<PathBuf>) {
+pub(super) fn admit_paths(owner: HWND, state: &mut AppState, paths: Vec<PathBuf>) -> bool {
     let capacity = MAX_ADMITTED_SOURCES.saturating_sub(state.model.len());
-    start_admission_worker(owner, state, paths, None, capacity);
+    start_admission_worker(owner, state, paths, None, capacity)
 }
 
 pub(super) fn start_admission_worker(
@@ -941,7 +941,7 @@ pub(super) fn start_admission_worker(
     paths: Vec<PathBuf>,
     mode: Option<AdmissionMode>,
     capacity: usize,
-) {
+) -> bool {
     let revision = state.revision();
     let cancellation = Arc::new(AtomicBool::new(false));
     let worker_cancellation = Arc::clone(&cancellation);
@@ -957,7 +957,7 @@ pub(super) fn start_admission_worker(
             "DarkReNamer - 추가 실패",
         );
         update_controls(state);
-        return;
+        return false;
     }
     let window_value = window as usize;
     let handle = match thread::Builder::new()
@@ -1025,7 +1025,7 @@ pub(super) fn start_admission_worker(
                 "DarkReNamer - 추가 실패",
             );
             update_controls(state);
-            return;
+            return false;
         }
     };
     state.mutation_locked = true;
@@ -1036,6 +1036,7 @@ pub(super) fn start_admission_worker(
     });
     state.set_progress_status("선택한 경로를 확인하고 있습니다...");
     update_controls(state);
+    true
 }
 
 pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
@@ -1146,7 +1147,7 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
                     return;
                 }
             };
-            start_admission_worker(window, state, paths, Some(mode), capacity);
+            let _started = start_admission_worker(window, state, paths, Some(mode), capacity);
             return;
         }
         Ok(AdmissionWorkerResult::Finished {
