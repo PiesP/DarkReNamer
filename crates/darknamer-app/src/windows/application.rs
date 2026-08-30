@@ -538,6 +538,12 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
+        WM_APP_LAYOUT if !state_ptr.is_null() => {
+            // SAFETY: this posted pointer-free callback begins after the
+            // state mutation that requested it has returned.
+            arrange(window, unsafe { &mut *state_ptr });
+            0
+        }
         WM_GETMINMAXINFO if !state_ptr.is_null() => {
             let info = lparam as *mut MINMAXINFO;
             if !info.is_null() {
@@ -735,8 +741,11 @@ unsafe extern "system" fn window_proc(
         WM_DRAWITEM if !state_ptr.is_null() => {
             // SAFETY: state_ptr is live UI-thread state and the renderer reads
             // only the synchronous WM_DRAWITEM payload.
-            let resources = unsafe { (*state_ptr).appearance_resources.as_ref() };
-            if draw_owner_button(resources, lparam) || draw_owner_menu(resources, lparam) {
+            let state = unsafe { &*state_ptr };
+            let resources = state.appearance_resources.as_ref();
+            if draw_owner_button(resources, lparam)
+                || draw_owner_menu(resources, state.font.as_raw(), lparam)
+            {
                 return 1;
             }
             // SAFETY: unrecognized owner-draw payloads retain system handling.
@@ -825,14 +834,15 @@ unsafe extern "system" fn window_proc(
         }
         WM_NOTIFY if !state_ptr.is_null() => {
             let header = lparam as *const NMHDR;
-            if !header.is_null()
-                // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix for this
-                // synchronous callback; no AppState access occurs on the
-                // deferred programmatic-selection path.
-                && unsafe { (*header).code } == LVN_ITEMCHANGED
-                && programmatic_list_update_active()
-            {
-                return 0;
+            if !header.is_null() && programmatic_list_update_active() {
+                // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix. This
+                // guard runs before constructing any AppState reference, so
+                // synchronous Common Controls re-entry cannot alias the
+                // mutable state held by the programmatic sender.
+                let code = unsafe { (*header).code };
+                if matches!(code, LVN_ITEMCHANGED | HDN_ITEMCHANGINGW | HDN_ITEMCHANGEDW) {
+                    return 0;
+                }
             }
             // SAFETY: state_ptr is the live UI-thread AppState and the custom
             // draw helper validates the synchronous WM_NOTIFY payload/source.

@@ -721,10 +721,14 @@ pub(super) fn update_controls(state: &mut AppState) {
         schedule_focus_restore(state);
     }
     if status_layout_changed {
+        // Re-layout can synchronously make Common Controls emit Header
+        // notifications. Post a pointer-free request so it runs only after
+        // this mutable AppState borrow has ended.
         // SAFETY: list_window remains a live direct child while AppState is live.
         let parent = unsafe { GetParent(state.list_window) };
         if !parent.is_null() {
-            arrange(parent, state);
+            // SAFETY: parent is live and the message carries no pointer payload.
+            unsafe { PostMessageW(parent, WM_APP_LAYOUT, 0, 0) };
         }
     }
 }
@@ -1303,8 +1307,10 @@ impl MenuBuilder {
         {
             return Err(io::Error::last_os_error());
         }
-        set_last_menu_item_text(self.menu.as_raw(), &label)?;
+        // AppendMenuW transferred recursive destruction to the parent. Disarm
+        // the child owner before any later fallible metadata update.
         popup.menu.release();
+        set_last_menu_item_text(self.menu.as_raw(), &label)?;
         Ok(())
     }
 

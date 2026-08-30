@@ -19,9 +19,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     IsWindow, PostMessageW, RegisterClassExW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
     SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CLOSE,
     WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DPICHANGED, WM_DRAWITEM,
-    WM_ERASEBKGND, WM_FONTCHANGE, WM_NCCREATE, WM_NCDESTROY, WM_SETFONT, WM_SETTINGCHANGE,
-    WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_GROUP, WS_POPUP, WS_SYSMENU,
-    WS_TABSTOP,
+    WM_ERASEBKGND, WM_FONTCHANGE, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFONT,
+    WM_SETTINGCHANGE, WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN, WS_EX_TOOLWINDOW, WS_GROUP,
+    WS_POPUP, WS_SYSMENU, WS_TABSTOP,
 };
 
 use super::*;
@@ -510,7 +510,7 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
         "BUTTON",
         OK_LABEL,
         IDOK as u16,
-        WS_TABSTOP | BS_DEFPUSHBUTTON as u32 | BS_OWNERDRAW as u32,
+        WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
     )?;
     state.cancel = child(
         window,
@@ -957,6 +957,19 @@ unsafe extern "system" fn appearance_dialog_proc(
             }
             0
         }
+        WM_NOTIFY if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is live dialog state and lparam is the
+            // synchronous button custom-draw notification.
+            let state = unsafe { &*state_ptr };
+            if let Some(result) =
+                draw_custom_button(state.appearance_resources.as_ref(), state.ok, lparam)
+            {
+                result
+            } else {
+                // SAFETY: unrelated notifications retain system handling.
+                unsafe { DefWindowProcW(window, message, wparam, lparam) }
+            }
+        }
         WM_ERASEBKGND if !state_ptr.is_null() => {
             // SAFETY: state_ptr and paint DC are live for this callback.
             let state = unsafe { &*state_ptr };
@@ -1083,5 +1096,116 @@ unsafe extern "system" fn appearance_dialog_proc(
             // SAFETY: arguments are unchanged values from the active callback.
             unsafe { DefWindowProcW(window, message, wparam, lparam) }
         }
+    }
+}
+
+#[cfg(test)]
+mod native_tests {
+    use super::*;
+    use windows_sys::Win32::Graphics::Gdi::{GetDC, ReleaseDC};
+    use windows_sys::Win32::UI::Controls::{CDIS_DEFAULT, NM_CUSTOMDRAW, NMCUSTOMDRAW};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_RETURN;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        BS_TYPEMASK, GWL_STYLE, GetClientRect, GetWindowLongPtrW, IsDialogMessageW, MSG, WM_KEYDOWN,
+    };
+
+    #[test]
+    fn default_ok_keeps_native_contract_and_enter_activation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // SAFETY: null requests the current process module.
+        let instance = unsafe { GetModuleHandleW(null()) };
+        let owner = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                800,
+                600,
+                null_mut(),
+                null_mut(),
+                instance,
+                null_mut(),
+            )
+        };
+        if owner.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let dialog = create_appearance_dialog_window(
+            owner,
+            1,
+            UiAppearance::default(),
+            ForcedColorsState::Inactive,
+            Some(ResolvedTheme::Light),
+        )?;
+        // SAFETY: dialog owns this state pointer until WM_NCDESTROY.
+        let state_ptr =
+            unsafe { GetWindowLongPtrW(dialog, GWLP_USERDATA) } as *mut AppearanceDialogWindowState;
+        if state_ptr.is_null() {
+            // SAFETY: both windows are test-owned and live.
+            unsafe {
+                DestroyWindow(dialog);
+                DestroyWindow(owner);
+            }
+            return Err(io::Error::other("appearance dialog state is missing").into());
+        }
+        // SAFETY: state_ptr is live dialog-owned state for these copied HWNDs.
+        let (ok, radio, resources) = unsafe {
+            (
+                (*state_ptr).ok,
+                (*state_ptr).density[0],
+                (*state_ptr).appearance_resources.as_ref(),
+            )
+        };
+        // SAFETY: ok is a live native BUTTON and style is an integral query.
+        let style = unsafe { GetWindowLongPtrW(ok, GWL_STYLE) } as u32;
+        assert_eq!(style & BS_TYPEMASK as u32, BS_DEFPUSHBUTTON as u32);
+
+        // SAFETY: ok remains live and the returned DC is released below.
+        let dc = unsafe { GetDC(ok) };
+        if dc.is_null() {
+            // SAFETY: both windows are test-owned and live.
+            unsafe {
+                DestroyWindow(dialog);
+                DestroyWindow(owner);
+            }
+            return Err(io::Error::last_os_error().into());
+        }
+        let mut custom = NMCUSTOMDRAW::default();
+        custom.hdr.hwndFrom = ok;
+        custom.hdr.code = NM_CUSTOMDRAW;
+        custom.dwDrawStage = CDDS_PREPAINT;
+        custom.uItemState = CDIS_DEFAULT;
+        custom.hdc = dc;
+        // SAFETY: ok is live and rc is writable.
+        unsafe { GetClientRect(ok, &mut custom.rc) };
+        assert_eq!(
+            draw_custom_button(
+                resources,
+                ok,
+                (&raw mut custom as *mut NMCUSTOMDRAW) as LPARAM,
+            ),
+            Some(CDRF_SKIPDEFAULT as LRESULT)
+        );
+        // SAFETY: dc came from this exact live button.
+        unsafe { ReleaseDC(ok, dc) };
+
+        let mut message = MSG {
+            hwnd: radio,
+            message: WM_KEYDOWN,
+            wParam: VK_RETURN as WPARAM,
+            ..MSG::default()
+        };
+        // SAFETY: dialog/radio/message are live and synchronous. The unarmed
+        // dialog accepts locally without sending an owner state pointer.
+        let handled = unsafe { IsDialogMessageW(dialog, &mut message) };
+        assert_ne!(handled, 0);
+        // SAFETY: IsWindow is a non-owning value query.
+        assert_eq!(unsafe { IsWindow(dialog) }, 0);
+        // SAFETY: owner remains test-owned after the dialog closes.
+        unsafe { DestroyWindow(owner) };
+        Ok(())
     }
 }

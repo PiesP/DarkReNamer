@@ -14,6 +14,7 @@ pub(super) fn update_column_visibility(state: &mut AppState, index: usize) {
     } else {
         0
     };
+    let _list_update = ProgrammaticListUpdateGuard::begin();
     // SAFETY: state.list_window is live and the message carries scaled integers.
     unsafe {
         SendMessageW(
@@ -48,6 +49,7 @@ pub(super) fn update_primary_column_widths(state: &AppState) {
         &state.column_states,
         scrollbar_allowance,
     );
+    let _list_update = ProgrammaticListUpdateGuard::begin();
     for (column, width) in widths.into_iter().enumerate() {
         // SAFETY: list_window is live and the message carries a checked column
         // index and an adaptive pixel width without a pointer payload.

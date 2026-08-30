@@ -10,20 +10,22 @@ use windows_sys::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWin
 use windows_sys::Win32::Graphics::Gdi::{
     COLOR_3DSHADOW, COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_GRAYTEXT, COLOR_HIGHLIGHT,
     COLOR_HIGHLIGHTTEXT, COLOR_MENU, COLOR_MENUTEXT, COLOR_WINDOW, COLOR_WINDOWFRAME,
-    COLOR_WINDOWTEXT, CreateSolidBrush, DT_CALCRECT, DT_CENTER, DT_HIDEPREFIX, DT_LEFT,
-    DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteObject, DrawFocusRect,
-    DrawTextW, FillRect, FrameRect, GetDC, GetSysColor, GetSysColorBrush, HBRUSH, RDW_ALLCHILDREN,
-    RDW_ERASE, RDW_INVALIDATE, RedrawWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor,
-    TRANSPARENT,
+    COLOR_WINDOWTEXT, CreateSolidBrush, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_HIDEPREFIX,
+    DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteObject,
+    DrawFocusRect, DrawTextW, FillRect, FrameRect, GetDC, GetSysColor, GetSysColorBrush, HBRUSH,
+    RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RedrawWindow, ReleaseDC, SelectObject, SetBkMode,
+    SetTextColor, TRANSPARENT,
 };
 use windows_sys::Win32::UI::Controls::{
-    DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODS_CHECKED, ODS_DISABLED, ODS_FOCUS, ODS_GRAYED,
-    ODS_HOTLIGHT, ODS_NOACCEL, ODS_SELECTED, ODT_BUTTON, ODT_MENU,
+    CDDS_PREPAINT, CDIS_DEFAULT, CDIS_DISABLED, CDIS_FOCUS, CDIS_HOT, CDIS_SELECTED,
+    CDRF_DODEFAULT, CDRF_SKIPDEFAULT, DRAWITEMSTRUCT, MEASUREITEMSTRUCT, NM_CUSTOMDRAW,
+    NMCUSTOMDRAW, ODS_CHECKED, ODS_DEFAULT, ODS_DISABLED, ODS_FOCUS, ODS_GRAYED, ODS_HOTLIGHT,
+    ODS_NOACCEL, ODS_SELECTED, ODT_BUTTON, ODT_MENU,
 };
 use windows_sys::Win32::UI::Controls::{LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowTextLengthW, GetWindowTextW, MENUINFO, MIM_APPLYTOSUBMENUS, MIM_BACKGROUND,
-    SendMessageW, SetMenuInfo,
+    SendMessageW, SetMenuInfo, WM_GETFONT,
 };
 
 use super::*;
@@ -252,9 +254,83 @@ pub(super) fn draw_owner_button(resources: Option<&AppearanceResources>, lparam:
     if draw.CtlType != ODT_BUTTON || draw.hwndItem.is_null() || draw.hDC.is_null() {
         return false;
     }
-    let disabled = draw.itemState & (ODS_DISABLED | ODS_GRAYED) != 0;
-    let pressed = draw.itemState & ODS_SELECTED != 0;
-    let hot = draw.itemState & ODS_HOTLIGHT != 0;
+    paint_button(
+        resources,
+        draw.hwndItem,
+        draw.hDC,
+        draw.rcItem,
+        ButtonDrawState {
+            disabled: draw.itemState & (ODS_DISABLED | ODS_GRAYED) != 0,
+            pressed: draw.itemState & ODS_SELECTED != 0,
+            hot: draw.itemState & ODS_HOTLIGHT != 0,
+            focused: draw.itemState & ODS_FOCUS != 0,
+            default: draw.itemState & ODS_DEFAULT != 0,
+        },
+    );
+    true
+}
+
+pub(super) fn draw_custom_button(
+    resources: Option<&AppearanceResources>,
+    button: HWND,
+    lparam: LPARAM,
+) -> Option<LRESULT> {
+    let custom = lparam as *const NMCUSTOMDRAW;
+    if custom.is_null() {
+        return None;
+    }
+    // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix synchronously.
+    if unsafe { (*custom).hdr.hwndFrom } != button || unsafe { (*custom).hdr.code } != NM_CUSTOMDRAW
+    {
+        return None;
+    }
+    // SAFETY: same live button custom-draw payload.
+    if unsafe { (*custom).dwDrawStage } != CDDS_PREPAINT {
+        return Some(CDRF_DODEFAULT as LRESULT);
+    }
+    // SAFETY: all copied fields belong to the synchronous notification.
+    let state = unsafe { (*custom).uItemState };
+    paint_button(
+        resources,
+        button,
+        // SAFETY: the DC is live for this custom-draw stage.
+        unsafe { (*custom).hdc },
+        // SAFETY: the rectangle is copied integral callback data.
+        unsafe { (*custom).rc },
+        ButtonDrawState {
+            disabled: state & CDIS_DISABLED != 0,
+            pressed: state & CDIS_SELECTED != 0,
+            hot: state & CDIS_HOT != 0,
+            focused: state & CDIS_FOCUS != 0,
+            default: state & CDIS_DEFAULT != 0,
+        },
+    );
+    Some(CDRF_SKIPDEFAULT as LRESULT)
+}
+
+#[derive(Clone, Copy)]
+struct ButtonDrawState {
+    disabled: bool,
+    pressed: bool,
+    hot: bool,
+    focused: bool,
+    default: bool,
+}
+
+fn paint_button(
+    resources: Option<&AppearanceResources>,
+    button: HWND,
+    dc: HDC,
+    rect: windows_sys::Win32::Foundation::RECT,
+    state: ButtonDrawState,
+) {
+    let ButtonDrawState {
+        disabled,
+        pressed,
+        hot,
+        focused,
+        default,
+    } = state;
     let (background, border, text) = if let Some(resources) = resources {
         let palette = resources.palette;
         let background = resources.control_brush(pressed, hot, disabled);
@@ -285,53 +361,116 @@ pub(super) fn draw_owner_button(resources: Option<&AppearanceResources>, lparam:
             )
         }
     };
-    // SAFETY: draw fields and GDI objects remain live through this synchronous paint.
+    // SAFETY: callback DC and GDI objects remain live through this paint.
     unsafe {
-        FillRect(draw.hDC, &draw.rcItem, background);
-        FrameRect(draw.hDC, &draw.rcItem, border);
-        SetBkMode(draw.hDC, TRANSPARENT as i32);
-        SetTextColor(draw.hDC, text);
+        FillRect(dc, &rect, background);
+        FrameRect(dc, &rect, border);
+        SetBkMode(dc, TRANSPARENT as i32);
+        SetTextColor(dc, text);
     }
-    // SAFETY: hwndItem is the live owner-draw button.
-    let length = unsafe { GetWindowTextLengthW(draw.hwndItem) };
+    if default {
+        let mut inner = rect;
+        inner.left = inner.left.saturating_add(1);
+        inner.top = inner.top.saturating_add(1);
+        inner.right = inner.right.saturating_sub(1);
+        inner.bottom = inner.bottom.saturating_sub(1);
+        // SAFETY: inner remains inside rect and the border brush is live.
+        unsafe { FrameRect(dc, &inner, border) };
+    }
+    // SAFETY: button is the live native BUTTON being drawn.
+    let length = unsafe { GetWindowTextLengthW(button) };
     if length > 0 {
         let capacity = usize::try_from(length)
             .unwrap_or_default()
             .saturating_add(1);
         let mut label = vec![0_u16; capacity];
-        // SAFETY: label has length+1 writable units and hwndItem remains live.
-        let copied = unsafe { GetWindowTextW(draw.hwndItem, label.as_mut_ptr(), length + 1) };
+        // SAFETY: label has length+1 writable units and button remains live.
+        let copied = unsafe { GetWindowTextW(button, label.as_mut_ptr(), length + 1) };
         if copied > 0 {
-            let mut text_rect = draw.rcItem;
+            // SAFETY: WM_GETFONT returns the borrowed font installed on button.
+            let font = unsafe { SendMessageW(button, WM_GETFONT, 0, 0) } as HFONT;
+            let previous = if font.is_null() {
+                null_mut()
+            } else {
+                // SAFETY: font remains control-owned through this callback.
+                unsafe { SelectObject(dc, font) }
+            };
+            let mut text_rect = rect;
             if pressed {
                 text_rect.left = text_rect.left.saturating_add(1);
                 text_rect.top = text_rect.top.saturating_add(1);
             }
-            // SAFETY: label contains copied readable UTF-16 and text_rect is writable.
-            unsafe {
-                DrawTextW(
-                    draw.hDC,
-                    label.as_ptr(),
-                    copied,
-                    &mut text_rect,
-                    DT_CENTER | DT_VCENTER | DT_WORDBREAK | DT_NOPREFIX,
-                )
-            };
+            let copied_len = usize::try_from(copied).unwrap_or_default();
+            let multiline = label
+                .get(..copied_len)
+                .is_some_and(|units| units.contains(&(b'\n' as u16)));
+            if multiline {
+                let mut measured = windows_sys::Win32::Foundation::RECT {
+                    left: text_rect.left,
+                    top: 0,
+                    right: text_rect.right,
+                    bottom: 0,
+                };
+                // SAFETY: label/DC/measurement rect remain live and writable.
+                unsafe {
+                    DrawTextW(
+                        dc,
+                        label.as_ptr(),
+                        copied,
+                        &mut measured,
+                        DT_CALCRECT | DT_CENTER | DT_WORDBREAK | DT_NOPREFIX,
+                    )
+                };
+                let available = (text_rect.bottom - text_rect.top).max(0);
+                let block = (measured.bottom - measured.top).max(0).min(available);
+                text_rect.top = text_rect
+                    .top
+                    .saturating_add(available.saturating_sub(block) / 2);
+                text_rect.bottom = text_rect.top.saturating_add(block);
+                // SAFETY: same live resources and vertically centered rect.
+                unsafe {
+                    DrawTextW(
+                        dc,
+                        label.as_ptr(),
+                        copied,
+                        &mut text_rect,
+                        DT_CENTER | DT_WORDBREAK | DT_NOPREFIX,
+                    )
+                };
+            } else {
+                // SAFETY: same live resources and single-line text rectangle.
+                unsafe {
+                    DrawTextW(
+                        dc,
+                        label.as_ptr(),
+                        copied,
+                        &mut text_rect,
+                        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+                    )
+                };
+            }
+            if !previous.is_null() {
+                // SAFETY: restore the exact object returned by SelectObject.
+                unsafe { SelectObject(dc, previous) };
+            }
         }
     }
-    if draw.itemState & ODS_FOCUS != 0 {
-        let mut focus = draw.rcItem;
+    if focused {
+        let mut focus = rect;
         focus.left = focus.left.saturating_add(3);
         focus.top = focus.top.saturating_add(3);
         focus.right = focus.right.saturating_sub(3);
         focus.bottom = focus.bottom.saturating_sub(3);
         // SAFETY: dc is live and focus remains inside the item rectangle.
-        unsafe { DrawFocusRect(draw.hDC, &focus) };
+        unsafe { DrawFocusRect(dc, &focus) };
     }
-    true
 }
 
-pub(super) fn draw_owner_menu(resources: Option<&AppearanceResources>, lparam: LPARAM) -> bool {
+pub(super) fn draw_owner_menu(
+    resources: Option<&AppearanceResources>,
+    font: HFONT,
+    lparam: LPARAM,
+) -> bool {
     let draw = lparam as *const DRAWITEMSTRUCT;
     if draw.is_null() {
         return false;
@@ -385,6 +524,12 @@ pub(super) fn draw_owner_menu(resources: Option<&AppearanceResources>, lparam: L
         SetBkMode(draw.hDC, TRANSPARENT as i32);
         SetTextColor(draw.hDC, text);
     }
+    let previous = if font.is_null() {
+        null_mut()
+    } else {
+        // SAFETY: font remains AppState-owned through this callback.
+        unsafe { SelectObject(draw.hDC, font) }
+    };
     let item_height = (draw.rcItem.bottom - draw.rcItem.top).max(1);
     let padding = item_height / 3;
     let mut content = draw.rcItem;
@@ -439,6 +584,10 @@ pub(super) fn draw_owner_menu(resources: Option<&AppearanceResources>, lparam: L
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
             )
         };
+    }
+    if !previous.is_null() {
+        // SAFETY: restore the exact object returned by SelectObject.
+        unsafe { SelectObject(draw.hDC, previous) };
     }
     true
 }
@@ -495,9 +644,9 @@ pub(super) fn measure_owner_menu(window: HWND, font: HFONT, dpi: u32, lparam: LP
     true
 }
 
-fn apply_menu_background(menu: HMENU, resources: Option<&AppearanceResources>) {
+fn apply_menu_background(menu: HMENU, resources: Option<&AppearanceResources>) -> io::Result<()> {
     if menu.is_null() {
-        return;
+        return Ok(());
     }
     let background = resources.map_or_else(
         || {
@@ -513,7 +662,11 @@ fn apply_menu_background(menu: HMENU, resources: Option<&AppearanceResources>) {
         ..MENUINFO::default()
     };
     // SAFETY: menu is live and info is readable for this synchronous update.
-    unsafe { SetMenuInfo(menu, &info) };
+    if unsafe { SetMenuInfo(menu, &info) } == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io::Result<()> {
@@ -530,8 +683,17 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
         }
     }
 
-    state.appearance_resources = replacement;
-    apply_menu_background(state.menu, state.appearance_resources.as_ref());
+    // Install the replacement brush while both old and new resources remain
+    // alive. Only a successful menu update permits dropping the old brush set.
+    if let Err(error) = apply_menu_background(state.menu, replacement.as_ref()) {
+        // MIM_APPLYTOSUBMENUS does not document transactional failure. Retain
+        // every custom brush set from a failed attempt so any partially
+        // updated submenu can never reference a deleted GDI object.
+        if let Some(replacement) = replacement {
+            state.menu_fallback_resources.push(replacement);
+        }
+        return Err(error);
+    }
     let (list_background, list_text) = palette.map_or_else(
         || {
             // SAFETY: these process-global system colors are integral values
@@ -560,6 +722,8 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
     for rail in [&state.left_rail, &state.right_rail].into_iter().flatten() {
         rail.set_separators_visible(resolved.appearance.show_separators);
     }
+    state.appearance_resources = replacement;
+    state.menu_fallback_resources.clear();
     apply_dwm_title_frame(window, state, resolved.theme);
     // SAFETY: window is the live top-level HWND. One invalidation repaints all
     // children after every brush and ListView color has been installed.
