@@ -106,6 +106,7 @@ pub(super) fn refresh_system_fonts(state: &mut AppState) {
         );
         SendMessageW(state.empty_safety, WM_SETFONT, status_font as usize, 1);
         SendMessageW(state.empty_add, WM_SETFONT, message_font as usize, 1);
+        SendMessageW(state.drop_overlay, WM_SETFONT, message_font as usize, 1);
     }
     if let Some(rail) = &state.left_rail {
         rail.apply_font(message_font);
@@ -268,9 +269,8 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
     state.right_rail = Some(CommandRail::create(window, &RIGHT_RAIL)?);
     (state.empty_instruction, state.empty_safety, state.empty_add) =
         create_empty_state_controls(window)?;
+    state.drop_overlay = create_drop_overlay(window)?;
     refresh_system_fonts(state);
-    // SAFETY: window is the live top-level HWND and DragAcceptFiles stores no borrowed pointer.
-    unsafe { DragAcceptFiles(window, 1) };
     state.menu = create_menu()?.attach(window)?;
     // SAFETY: SHFILEINFOW is a C-compatible output structure whose all-zero state is valid before the shell fills it.
     let mut shell_info: SHFILEINFOW = unsafe { zeroed() };
@@ -299,6 +299,7 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
     }
     arrange(window, state);
     refresh(state);
+    state.drop_registration = Some(register_drop_target(window)?);
     Ok(())
 }
 
@@ -356,6 +357,59 @@ pub(super) fn create_empty_state_controls(parent: HWND) -> io::Result<(HWND, HWN
         WS_TABSTOP | BS_PUSHBUTTON as u32,
     )?;
     Ok((instruction, safety, add))
+}
+
+pub(super) fn create_drop_overlay(parent: HWND) -> io::Result<HWND> {
+    let class = wide("STATIC");
+    // This direct child starts hidden and has no ID, focus, notification, or
+    // command semantics. Its system STATIC renderer supplies colors/fonts.
+    // SAFETY: parent is live and the system class retains no caller storage.
+    let overlay = unsafe {
+        CreateWindowExW(
+            0,
+            class.as_ptr(),
+            null(),
+            WS_CHILD | SS_CENTER | SS_CENTERIMAGE | SS_NOPREFIX,
+            0,
+            0,
+            0,
+            0,
+            parent,
+            null_mut(),
+            GetModuleHandleW(null()),
+            null_mut(),
+        )
+    };
+    if overlay.is_null() {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(overlay)
+    }
+}
+
+pub(super) fn set_drop_presentation(state: &AppState, presentation: DropPresentation) {
+    set_drop_overlay_control(state.drop_overlay, presentation);
+}
+
+pub(super) fn set_drop_overlay_control(overlay: HWND, presentation: DropPresentation) {
+    let text = match presentation {
+        DropPresentation::Inactive => "",
+        DropPresentation::Accepting => DROP_ACCEPTING_TEXT,
+        DropPresentation::Locked => DROP_LOCKED_TEXT,
+        DropPresentation::Unsupported => DROP_UNSUPPORTED_TEXT,
+    };
+    set_status(overlay, text);
+    // SAFETY: drop_overlay is the live noninteractive STATIC owned by AppState.
+    unsafe {
+        ShowWindow(
+            overlay,
+            if presentation == DropPresentation::Inactive {
+                SW_HIDE
+            } else {
+                SW_SHOW
+            },
+        )
+    };
 }
 
 pub(super) fn child(
@@ -418,6 +472,7 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
     windows.push((state.empty_instruction, layout.empty_instruction));
     windows.push((state.empty_safety, layout.empty_safety));
     windows.push((state.empty_add, layout.empty_add));
+    windows.push((state.drop_overlay, layout.drop_overlay));
     windows.push((state.status_message, layout.status_message));
     windows.push((state.status_count, layout.status_count));
     windows.push((state.cancel_worker, layout.cancel));
