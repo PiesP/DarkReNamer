@@ -4,14 +4,16 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, COLOR_WINDOW, DT_CALCRECT, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
-    DrawTextW, EndPaint, FillRect, FrameRect, GetMonitorInfoW, GetSysColorBrush,
+    BeginPaint, COLOR_3DSHADOW, COLOR_WINDOW, DT_CALCRECT, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE,
+    DT_VCENTER, DrawTextW, EndPaint, FillRect, FrameRect, GetMonitorInfoW, GetSysColorBrush,
     MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, PAINTSTRUCT, SelectObject, SetBkMode,
     SetTextColor, TRANSPARENT, UpdateWindow,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::SystemServices::{SS_ETCHEDHORZ, SS_NOPREFIX};
-use windows_sys::Win32::UI::Controls::{BST_CHECKED, BST_UNCHECKED, SetWindowTheme};
+use windows_sys::Win32::System::SystemServices::{SS_NOPREFIX, SS_OWNERDRAW};
+use windows_sys::Win32::UI::Controls::{
+    BST_CHECKED, BST_UNCHECKED, DRAWITEMSTRUCT, ODT_STATIC, SetWindowTheme,
+};
 use windows_sys::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -528,7 +530,7 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
         )?,
     ];
-    state.separator = child(window, "STATIC", "", 0xA131, SS_ETCHEDHORZ)?;
+    state.separator = child(window, "STATIC", "", 0xA131, SS_OWNERDRAW)?;
     state.reset = child(
         window,
         "BUTTON",
@@ -890,6 +892,34 @@ fn paint_appearance_group(window: HWND, dc: HDC, state: &AppearanceGroupSubclass
         // SAFETY: restore the exact object returned by SelectObject.
         unsafe { SelectObject(dc, previous) };
     }
+}
+
+fn draw_appearance_separator(
+    resources: Option<&AppearanceResources>,
+    separator: HWND,
+    lparam: LPARAM,
+) -> bool {
+    let draw = lparam as *const DRAWITEMSTRUCT;
+    if draw.is_null() {
+        return false;
+    }
+    // SAFETY: WM_DRAWITEM supplies readable DRAWITEMSTRUCT storage synchronously.
+    let draw = unsafe { &*draw };
+    if draw.CtlType != ODT_STATIC || draw.hwndItem != separator || draw.hDC.is_null() {
+        return false;
+    }
+    let brush = resources.map_or_else(
+        || {
+            // SAFETY: system color brushes are process-global cached objects and
+            // retain native/Forced Colors behavior.
+            unsafe { GetSysColorBrush(COLOR_3DSHADOW) }
+        },
+        AppearanceResources::border_brush,
+    );
+    // SAFETY: callback DC/rect and selected palette-or-system brush are live for
+    // this decorative synchronous fill.
+    unsafe { FillRect(draw.hDC, &draw.rcItem, brush) };
+    true
 }
 
 fn native_themed_controls(state: &AppearanceDialogWindowState) -> impl Iterator<Item = HWND> + '_ {
@@ -1255,8 +1285,11 @@ unsafe extern "system" fn appearance_dialog_proc(
         }
         WM_DRAWITEM if !state_ptr.is_null() => {
             // SAFETY: state_ptr is live and draw payload is synchronous.
-            let resources = unsafe { (*state_ptr).appearance_resources.as_ref() };
-            if draw_owner_button(resources, lparam) {
+            let state = unsafe { &*state_ptr };
+            let resources = state.appearance_resources.as_ref();
+            if draw_appearance_separator(resources, state.separator, lparam)
+                || draw_owner_button(resources, lparam)
+            {
                 1
             } else {
                 // SAFETY: unrecognized payload retains system handling.
@@ -1369,6 +1402,7 @@ unsafe extern "system" fn appearance_dialog_proc(
 mod native_tests {
     use super::*;
     use windows_sys::Win32::Graphics::Gdi::{GetDC, ReleaseDC};
+    use windows_sys::Win32::System::SystemServices::{SS_OWNERDRAW, SS_TYPEMASK};
     use windows_sys::Win32::UI::Controls::{
         CDIS_DEFAULT, GetWindowTheme, NM_CUSTOMDRAW, NMCUSTOMDRAW,
     };
@@ -1423,12 +1457,13 @@ mod native_tests {
             return Err(io::Error::other("appearance dialog state is missing").into());
         }
         // SAFETY: state_ptr is live dialog-owned state for these copied HWNDs.
-        let (ok, radio, menu_only, density_group, resources) = unsafe {
+        let (ok, radio, menu_only, density_group, separator, resources) = unsafe {
             (
                 (*state_ptr).ok,
                 (*state_ptr).density[0],
                 (*state_ptr).density[3],
                 (*state_ptr).density_group,
+                (*state_ptr).separator,
                 (*state_ptr).appearance_resources.as_ref(),
             )
         };
@@ -1438,6 +1473,35 @@ mod native_tests {
         // SAFETY: density_group is a live BUTTON and style is an integral query.
         let group_style = unsafe { GetWindowLongPtrW(density_group, GWL_STYLE) } as u32;
         assert_eq!(group_style & BS_TYPEMASK as u32, BS_GROUPBOX as u32);
+        // SAFETY: separator is a live STATIC and style is an integral query.
+        let separator_style = unsafe { GetWindowLongPtrW(separator, GWL_STYLE) } as u32;
+        assert_eq!(separator_style & SS_TYPEMASK, SS_OWNERDRAW);
+
+        // SAFETY: separator is live and the returned DC is released below.
+        let separator_dc = unsafe { GetDC(separator) };
+        if separator_dc.is_null() {
+            // SAFETY: both windows are test-owned and live.
+            unsafe {
+                DestroyWindow(dialog);
+                DestroyWindow(owner);
+            }
+            return Err(io::Error::last_os_error().into());
+        }
+        let mut separator_draw = DRAWITEMSTRUCT {
+            CtlType: ODT_STATIC,
+            hDC: separator_dc,
+            hwndItem: separator,
+            ..DRAWITEMSTRUCT::default()
+        };
+        // SAFETY: separator is live and its client rectangle is writable.
+        unsafe { GetClientRect(separator, &mut separator_draw.rcItem) };
+        assert!(draw_appearance_separator(
+            resources,
+            separator,
+            (&raw mut separator_draw) as LPARAM,
+        ));
+        // SAFETY: separator_dc came from this exact live control.
+        unsafe { ReleaseDC(separator, separator_dc) };
 
         // SAFETY: ok remains live and the returned DC is released below.
         let dc = unsafe { GetDC(ok) };

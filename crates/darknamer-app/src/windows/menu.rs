@@ -406,7 +406,7 @@ pub(super) fn create_empty_state_controls(parent: HWND) -> io::Result<(HWND, HWN
     let safety = child(
         parent,
         "STATIC",
-        EMPTY_STATE_SAFETY,
+        EMPTY_STATE_SAFETY_RAILS,
         EMPTY_SAFETY_ID,
         SS_CENTER | SS_NOPREFIX,
     )?;
@@ -523,6 +523,8 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
         appearance.show_empty_safety,
         status_layout_input,
     );
+    let safety_copy = empty_state_safety_copy(preliminary.rail_mode);
+    set_status(state.empty_safety, safety_copy);
     let wrap_width = preliminary.empty_instruction.width;
     let mut measured = state.font_metrics;
     measured.empty_wrap_width = wrap_width;
@@ -537,7 +539,7 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
         measure_wrapped_text(
             state.empty_safety,
             state.status_font.as_raw(),
-            EMPTY_STATE_SAFETY,
+            safety_copy,
             wrap_width,
         )
         .unwrap_or_default()

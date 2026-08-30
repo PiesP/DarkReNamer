@@ -1511,7 +1511,10 @@ mod tests {
             }
             for text in [
                 (instruction, EMPTY_STATE_INSTRUCTION),
-                (safety, EMPTY_STATE_SAFETY),
+                (
+                    safety,
+                    "‘변경 적용’을 누르기 전에는\r\n실제 파일을 수정하지 않습니다.",
+                ),
                 (add, EMPTY_STATE_ADD_LABEL),
             ] {
                 assert_eq!(window_text(text.0)?, text.1);
