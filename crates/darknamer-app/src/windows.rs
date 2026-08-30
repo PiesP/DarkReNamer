@@ -30,7 +30,7 @@ use crate::rename::{
     CancellationToken, ExecuteError, ExecuteErrorKind, ExecutionControl, ExecutionOutcome,
     ExecutionOutcomePresentation, ExecutionPhase, ExecutionProgress, ExecutionReport,
     ExistingJournalOpenError, FileJournal, FileJournalError, JournalCleanupDecision,
-    JournalOpenFailure, JournalRoot, ModelRevision, PlanAttemptError, PlanError,
+    JournalOpenFailure, JournalRoot, MAX_PATH_UNITS, ModelRevision, PlanAttemptError, PlanError,
     RecoveryJournalEvidence, RecoveryOutcome, RenameBackend, RenameExecutor, RenamePlan,
     RenamePlanner, RenameRecovery, WindowsRenameBackend, apply_execution_report,
     build_plan_request, cleanup_decision, execute_error_korean, execution_outcome_korean,
@@ -45,6 +45,7 @@ use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawWindowHandle,
     Win32WindowHandle, WindowHandle,
 };
+use windows_sys::core::{GUID, HRESULT, IID_IUnknown};
 
 mod application;
 mod clipboard;
@@ -81,7 +82,10 @@ use safe_runtime::{
     JournalRole, SafeRuntime, StartupJournalBlock, cleanup_file_journal, initialize_safe_runtime,
 };
 use text_io::{compare_windows, legacy_path, path_wide, read_legacy_text, wide, write_legacy_text};
-use windows_sys::Win32::Foundation::{FILETIME, HWND, LPARAM, LRESULT, RECT, SYSTEMTIME, WPARAM};
+use windows_sys::Win32::Foundation::{
+    E_FAIL, E_NOINTERFACE, E_POINTER, FILETIME, HWND, LPARAM, LRESULT, POINTL, RECT, S_OK,
+    SYSTEMTIME, WPARAM,
+};
 use windows_sys::Win32::Globalization::{DATE_SHORTDATE, GetDateFormatEx, GetTimeFormatEx};
 use windows_sys::Win32::Graphics::Gdi::{
     COLOR_WINDOW, CreateFontIndirectW, DT_CALCRECT, DT_NOPREFIX, DT_SINGLELINE, DT_WORDBREAK,
@@ -94,8 +98,12 @@ use windows_sys::Win32::Graphics::Gdi::{GetObjectType, OBJ_BRUSH};
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
 use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
-use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+use windows_sys::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, STGMEDIUM, TYMED_HGLOBAL};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Ole::{
+    CF_HDROP, DROPEFFECT_COPY, OleInitialize, OleUninitialize, RegisterDragDrop, ReleaseStgMedium,
+    RevokeDragDrop,
+};
 use windows_sys::Win32::System::SystemServices::{
     SS_CENTER, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_ETCHEDHORZ, SS_NOPREFIX, SS_SUNKEN,
 };
@@ -127,8 +135,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VK_OEM_COMMA, VK_OEM_PERIOD, VK_UP,
 };
 use windows_sys::Win32::UI::Shell::{
-    DragAcceptFiles, DragFinish, DragQueryFileW, HDROP, SHFILEINFOW, SHGFI_SMALLICON,
-    SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
+    DragQueryFileW, HDROP, SHFILEINFOW, SHGFI_SMALLICON, SHGFI_SYSICONINDEX,
+    SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     ACCEL, AppendMenuW, BN_CLICKED, BN_SETFOCUS, BS_DEFPUSHBUTTON, BS_PUSHBUTTON,
@@ -146,11 +154,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SWP_NOREDRAW, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateAcceleratorW,
     TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_DPICHANGED, WM_DROPFILES, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_NCCREATE,
-    WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE,
-    WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD,
-    WS_CLIPCHILDREN, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
-    WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    WM_DPICHANGED, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY,
+    WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
+    WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
+    WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{BS_FLAT, BS_MULTILINE, GWL_STYLE, GetDlgCtrlID};
@@ -176,6 +184,7 @@ const WM_APP_PLAN_COMPLETE: u32 = WM_APP + 0x42;
 const WM_APP_ADMISSION_COMPLETE: u32 = WM_APP + 0x43;
 const WM_APP_RESTORE_FOCUS: u32 = WM_APP + 0x44;
 const WM_APP_PREFERENCES_WAKE: u32 = WM_APP + 0x45;
+const WM_APP_ADMISSION_STARTED: u32 = WM_APP + 0x46;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 const PREFERENCES_POLL_TIMER_ID: usize = 0xD4A2;
 
@@ -187,11 +196,13 @@ struct AppState {
     empty_instruction: HWND,
     empty_safety: HWND,
     empty_add: HWND,
+    drop_overlay: HWND,
     menu: HMENU,
     font: OwnedFont,
     status_font: OwnedFont,
     left_rail: Option<CommandRail>,
     right_rail: Option<CommandRail>,
+    drop_registrations: Option<DropTargetRegistrations>,
     model: LegacyList,
     shown_columns: [bool; 4],
     column_states: [ColumnState; 7],
@@ -256,11 +267,13 @@ impl AppState {
             empty_instruction: null_mut(),
             empty_safety: null_mut(),
             empty_add: null_mut(),
+            drop_overlay: null_mut(),
             menu: null_mut(),
             font: OwnedFont::default(),
             status_font: OwnedFont::default(),
             left_rail: None,
             right_rail: None,
+            drop_registrations: None,
             model: LegacyList::new(),
             shown_columns: shown_columns(&column_states),
             column_states,
@@ -335,6 +348,10 @@ impl AppState {
 
     const fn read_only_locked(&self) -> bool {
         self.recovery_locked
+    }
+
+    const fn drop_locked(&self) -> bool {
+        self.apply_locked() || self.read_only_locked()
     }
 
     fn can_discard_staged_intent(&self) -> bool {
@@ -1206,6 +1223,69 @@ mod tests {
         result.map_err(Into::into)
     }
 
+    #[test]
+    fn native_drop_overlay_is_noninteractive_and_visible_only_during_drag()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // SAFETY: null requests the current process module.
+        let instance = unsafe { GetModuleHandleW(null()) };
+        let class = wide("STATIC");
+        // SAFETY: the system STATIC class/current module remain live.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                instance,
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let result = (|| -> io::Result<()> {
+            let overlay = create_drop_overlay(parent)?;
+            // SAFETY: overlay is the live direct child created above.
+            assert_eq!(unsafe { GetParent(overlay) }, parent);
+            // SAFETY: style and ID queries carry no pointers.
+            let style = unsafe { GetWindowLongPtrW(overlay, GWL_STYLE) } as u32;
+            assert_eq!(style & WS_TABSTOP, 0);
+            assert_eq!(style & SS_NOTIFY, 0);
+            assert_eq!(style & SS_CENTERIMAGE, 0);
+            // SAFETY: overlay was deliberately created without an ID.
+            assert_eq!(unsafe { GetDlgCtrlID(overlay) }, 0);
+            assert_eq!(style & WS_VISIBLE, 0);
+
+            for (presentation, text) in [
+                (DropPresentation::Accepting, DROP_ACCEPTING_TEXT),
+                (DropPresentation::Locked, DROP_LOCKED_TEXT),
+                (DropPresentation::Unsupported, DROP_UNSUPPORTED_TEXT),
+                (DropPresentation::Full, DROP_FULL_TEXT),
+            ] {
+                set_drop_overlay_control(overlay, presentation);
+                assert_eq!(window_text(overlay)?, text);
+                // SAFETY: overlay remains live and this reads integral style.
+                let style = unsafe { GetWindowLongPtrW(overlay, GWL_STYLE) } as u32;
+                assert_ne!(style & WS_VISIBLE, 0);
+            }
+            set_drop_overlay_control(overlay, DropPresentation::Inactive);
+            assert_eq!(window_text(overlay)?, "");
+            // SAFETY: overlay remains live and this reads integral style.
+            let style = unsafe { GetWindowLongPtrW(overlay, GWL_STYLE) } as u32;
+            assert_eq!(style & WS_VISIBLE, 0);
+            Ok(())
+        })();
+        // SAFETY: parent destroys its overlay child.
+        unsafe { DestroyWindow(parent) };
+        result.map_err(Into::into)
+    }
+
     fn verify_native_command_rails_at_dpi(
         instance: windows_sys::Win32::Foundation::HINSTANCE,
         dpi: u32,
@@ -1270,6 +1350,8 @@ mod tests {
         assert!(measured.empty_safety_text_height > 0);
         assert!(measured.empty_add_text_width > 0);
         assert!(measured.empty_add_text_height > 0);
+        assert!(measured.drop_overlay_text_width > 0);
+        assert!(measured.drop_overlay_text_height > 0);
         let metrics = measured.rail_metrics(RailDensity::Compact, dpi);
         let available_height =
             minimum_main_client_height(dpi, measured).saturating_sub(measured.status_height(dpi));
