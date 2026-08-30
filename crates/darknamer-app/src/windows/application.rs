@@ -744,7 +744,7 @@ unsafe extern "system" fn window_proc(
             let state = unsafe { &*state_ptr };
             let resources = state.appearance_resources.as_ref();
             if draw_owner_button(resources, lparam)
-                || draw_owner_menu(resources, state.font.as_raw(), lparam)
+                || draw_owner_menu(resources, state.font.as_raw(), state.dpi, lparam)
             {
                 return 1;
             }

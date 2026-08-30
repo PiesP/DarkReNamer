@@ -137,6 +137,8 @@ use windows_sys::Win32::UI::Controls::{
     TDF_POSITION_RELATIVE_TO_WINDOW, TDF_SIZE_TO_CONTENT, TDF_USE_COMMAND_LINKS,
     TaskDialogIndirect,
 };
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::{MEASUREITEMSTRUCT, ODT_MENU};
 use windows_sys::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForWindow, GetSystemMetricsForDpi, SystemParametersInfoForDpi,
 };
@@ -1294,10 +1296,83 @@ mod tests {
     fn owner_draw_menu_preserves_alt_mnemonics() -> Result<(), Box<dyn std::error::Error>> {
         let menu = create_menu()?;
 
-        let result = handle_owner_menu_char('f' as WPARAM, menu.as_raw() as LPARAM);
+        for (position, mnemonic) in ['f', 'e', 'v', 't', 'r', 'h'].into_iter().enumerate() {
+            let result = handle_owner_menu_char(mnemonic as WPARAM, menu.as_raw() as LPARAM);
+            assert_eq!(result & 0xFFFF, position as LRESULT);
+            assert_eq!((result >> 16) & 0xFFFF, MNC_EXECUTE as LRESULT);
+        }
+        Ok(())
+    }
 
-        assert_eq!(result & 0xFFFF, 0);
-        assert_eq!((result >> 16) & 0xFFFF, MNC_EXECUTE as LRESULT);
+    #[test]
+    fn owner_draw_top_level_menu_fits_the_parity_width_at_two_hundred_percent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const DPI: u32 = 192;
+        let class = wide("STATIC");
+        // SAFETY: the system class/current module remain live for this hidden
+        // measurement owner.
+        let owner = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                scale_dip(INITIAL_WIDTH, DPI),
+                scale_dip(INITIAL_HEIGHT, DPI),
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if owner.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let menu = create_menu()?;
+        let mut font = OwnedFont::default();
+        let message_font = create_message_font(DPI);
+        if message_font.is_null() {
+            // SAFETY: owner is the test-owned hidden HWND.
+            unsafe { DestroyWindow(owner) };
+            return Err(io::Error::last_os_error().into());
+        }
+        font.replace(message_font);
+        let mut total_width = 0_u32;
+        for position in 0..6_u32 {
+            let mut info = MENUITEMINFOW {
+                cbSize: size_of::<MENUITEMINFOW>() as u32,
+                fMask: MIIM_DATA,
+                ..MENUITEMINFOW::default()
+            };
+            // SAFETY: menu is live, position is one of its six root items, and
+            // info remains writable for the synchronous query.
+            if unsafe { GetMenuItemInfoW(menu.as_raw(), position, 1, &mut info) } == 0 {
+                // SAFETY: owner is the test-owned hidden HWND.
+                unsafe { DestroyWindow(owner) };
+                return Err(io::Error::last_os_error().into());
+            }
+            let mut measure = MEASUREITEMSTRUCT {
+                CtlType: ODT_MENU,
+                itemData: info.dwItemData,
+                ..MEASUREITEMSTRUCT::default()
+            };
+            assert!(measure_owner_menu(
+                owner,
+                font.as_raw(),
+                DPI,
+                (&raw mut measure) as LPARAM,
+            ));
+            total_width = total_width.saturating_add(measure.itemWidth);
+        }
+        // SAFETY: owner is the test-owned hidden HWND.
+        unsafe { DestroyWindow(owner) };
+        let menu_budget = scale_dip(INITIAL_WIDTH.saturating_sub(80), DPI);
+        assert!(
+            total_width <= u32::try_from(menu_budget).unwrap_or(u32::MAX),
+            "top-level menu measured {total_width}px for a {menu_budget}px content budget",
+        );
         Ok(())
     }
 

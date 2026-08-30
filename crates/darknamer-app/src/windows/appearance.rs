@@ -469,6 +469,7 @@ fn paint_button(
 pub(super) fn draw_owner_menu(
     resources: Option<&AppearanceResources>,
     font: HFONT,
+    dpi: u32,
     lparam: LPARAM,
 ) -> bool {
     let draw = lparam as *const DRAWITEMSTRUCT;
@@ -531,13 +532,11 @@ pub(super) fn draw_owner_menu(
         unsafe { SelectObject(draw.hDC, font) }
     };
     let item_height = (draw.rcItem.bottom - draw.rcItem.top).max(1);
-    let padding = item_height / 3;
+    let kind = owner_menu_kind(draw.itemData);
+    let insets = owner_menu_horizontal_insets(kind, item_height, dpi);
     let mut content = draw.rcItem;
-    content.left = content
-        .left
-        .saturating_add(item_height)
-        .saturating_add(padding);
-    content.right = content.right.saturating_sub(padding);
+    content.left = content.left.saturating_add(insets.leading);
+    content.right = content.right.saturating_sub(insets.trailing);
     let prefix = if draw.itemState & ODS_NOACCEL != 0 {
         DT_HIDEPREFIX
     } else {
@@ -547,6 +546,11 @@ pub(super) fn draw_owner_menu(
         .split_once('\t')
         .map_or((label.as_str(), None), |parts| (parts.0, Some(parts.1)));
     let primary = wide(primary);
+    let primary_alignment = if kind == OwnerMenuKind::Bar {
+        DT_CENTER
+    } else {
+        DT_LEFT
+    };
     // SAFETY: text buffers and rect remain live for synchronous menu drawing.
     unsafe {
         DrawTextW(
@@ -554,10 +558,12 @@ pub(super) fn draw_owner_menu(
             primary.as_ptr(),
             i32::try_from(primary.len().saturating_sub(1)).unwrap_or(i32::MAX),
             &mut content,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | prefix,
+            primary_alignment | DT_VCENTER | DT_SINGLELINE | prefix,
         )
     };
-    if let Some(shortcut) = shortcut {
+    if kind == OwnerMenuKind::Popup
+        && let Some(shortcut) = shortcut
+    {
         let shortcut = wide(shortcut);
         // SAFETY: same live DC/rect and terminated shortcut buffer.
         unsafe {
@@ -570,7 +576,7 @@ pub(super) fn draw_owner_menu(
             )
         };
     }
-    if draw.itemState & ODS_CHECKED != 0 {
+    if kind == OwnerMenuKind::Popup && draw.itemState & ODS_CHECKED != 0 {
         let check = wide("✓");
         let mut check_rect = draw.rcItem;
         check_rect.right = check_rect.left.saturating_add(item_height);
@@ -590,6 +596,36 @@ pub(super) fn draw_owner_menu(
         unsafe { SelectObject(draw.hDC, previous) };
     }
     true
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OwnerMenuHorizontalInsets {
+    leading: i32,
+    trailing: i32,
+}
+
+fn owner_menu_horizontal_insets(
+    kind: OwnerMenuKind,
+    item_height: i32,
+    dpi: u32,
+) -> OwnerMenuHorizontalInsets {
+    let item_height = item_height.max(1);
+    match kind {
+        OwnerMenuKind::Bar => {
+            let padding = scale_dip(8, dpi.max(BASE_DPI));
+            OwnerMenuHorizontalInsets {
+                leading: padding,
+                trailing: padding,
+            }
+        }
+        OwnerMenuKind::Popup => {
+            let padding = item_height / 3;
+            OwnerMenuHorizontalInsets {
+                leading: item_height.saturating_add(padding),
+                trailing: padding,
+            }
+        }
+    }
 }
 
 pub(super) fn measure_owner_menu(window: HWND, font: HFONT, dpi: u32, lparam: LPARAM) -> bool {
@@ -629,18 +665,18 @@ pub(super) fn measure_owner_menu(window: HWND, font: HFONT, dpi: u32, lparam: LP
         // SAFETY: release the DC acquired from this exact window.
         unsafe { ReleaseDC(window, dc) };
     }
+    let item_height = (rect.bottom - rect.top)
+        .max(scale_dip(16, dpi))
+        .saturating_add(scale_dip(8, dpi));
+    let insets = owner_menu_horizontal_insets(owner_menu_kind(measure.itemData), item_height, dpi);
     measure.itemWidth = u32::try_from(
         (rect.right - rect.left)
             .max(0)
-            .saturating_add(scale_dip(36, dpi)),
+            .saturating_add(insets.leading)
+            .saturating_add(insets.trailing),
     )
     .unwrap_or(u32::MAX);
-    measure.itemHeight = u32::try_from(
-        (rect.bottom - rect.top)
-            .max(scale_dip(16, dpi))
-            .saturating_add(scale_dip(8, dpi)),
-    )
-    .unwrap_or(u32::MAX);
+    measure.itemHeight = u32::try_from(item_height).unwrap_or(u32::MAX);
     true
 }
 
