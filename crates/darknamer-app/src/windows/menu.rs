@@ -465,6 +465,8 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
     let width = (rect.right - rect.left).max(0);
     let height = (rect.bottom - rect.top).max(0);
     let appearance = state.resolved_appearance().appearance;
+    let status_layout_input = current_status_layout_input(state);
+    state.status_layout_input = status_layout_input;
     let layout = calculate_main_layout_with_safety(
         width,
         height,
@@ -472,6 +474,7 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
         state.font_metrics,
         appearance.density,
         appearance.show_empty_safety,
+        status_layout_input,
     );
     let rails_visible = layout.rail_mode != RailMode::MenuOnly;
     let previously_focused = focused_child(state);
@@ -529,6 +532,19 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
             RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
         )
     };
+}
+
+fn current_status_layout_input(state: &AppState) -> StatusLayoutInput {
+    let count = state.ui_status.count_text();
+    let measured_count_width =
+        measure_text(state.status_count, state.status_font.as_raw(), &count, true)
+            .map_or(state.font_metrics.status_count_text_width, |(width, _)| {
+                width
+            });
+    StatusLayoutInput {
+        cancel_visible: cancel_control_state(state.worker_activity()).is_visible(),
+        measured_count_width,
+    }
 }
 
 fn apply_deferred_layout(windows: &[(HWND, LayoutRect)]) {
@@ -601,6 +617,7 @@ pub(super) fn update_controls(state: &mut AppState) {
     let presentation = state.presentation(selected_count);
     state.ui_status.set_preview_counts(presentation.counts);
     state.render_status();
+    let status_layout_changed = current_status_layout_input(state) != state.status_layout_input;
     for id in APPLY..=VERSION {
         state.command_states[usize::from(id - APPLY)] = if id == APPLY {
             matches!(presentation.apply, ApplyPresentation::Ready)
@@ -626,6 +643,13 @@ pub(super) fn update_controls(state: &mut AppState) {
     };
     if focused_target_changed {
         schedule_focus_restore(state);
+    }
+    if status_layout_changed {
+        // SAFETY: list_window remains a live direct child while AppState is live.
+        let parent = unsafe { GetParent(state.list_window) };
+        if !parent.is_null() {
+            arrange(parent, state);
+        }
     }
 }
 

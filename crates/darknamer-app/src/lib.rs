@@ -29,7 +29,7 @@ pub(crate) const EMPTY_LIST_STATUS: &str = "파일이나 폴더를 끌어 놓거
 pub(crate) const EMPTY_STATE_INSTRUCTION: &str = "파일이나 폴더를 여기에 끌어오세요";
 #[cfg(windows)]
 pub(crate) const EMPTY_STATE_SAFETY: &str =
-    "실제 파일은 ‘변경 적용’을 누르기 전까지 수정되지 않습니다.";
+    "‘변경 적용’을 누르기 전에는 실제 파일을 수정하지 않습니다.";
 #[cfg(windows)]
 pub(crate) const EMPTY_STATE_ADD_LABEL: &str = "파일 추가...";
 #[cfg(windows)]
@@ -795,6 +795,14 @@ pub(crate) struct MeasuredFontMetrics {
     pub(crate) empty_add_text_height: i32,
     pub(crate) drop_overlay_text_width: i32,
     pub(crate) drop_overlay_text_height: i32,
+}
+
+/// Dynamic status-strip widths derived from the content currently displayed.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct StatusLayoutInput {
+    pub(crate) cancel_visible: bool,
+    pub(crate) measured_count_width: i32,
 }
 
 #[cfg(any(windows, test))]
@@ -1910,7 +1918,18 @@ pub(crate) fn calculate_main_layout(
     measured: MeasuredFontMetrics,
     preference: RailDensityPreference,
 ) -> MainLayout {
-    calculate_main_layout_with_safety(client_width, client_height, dpi, measured, preference, true)
+    calculate_main_layout_with_safety(
+        client_width,
+        client_height,
+        dpi,
+        measured,
+        preference,
+        true,
+        StatusLayoutInput {
+            cancel_visible: false,
+            measured_count_width: measured.status_count_text_width,
+        },
+    )
 }
 
 #[cfg(any(windows, test))]
@@ -1922,6 +1941,7 @@ pub(crate) fn calculate_main_layout_with_safety(
     measured: MeasuredFontMetrics,
     preference: RailDensityPreference,
     show_empty_safety: bool,
+    status: StatusLayoutInput,
 ) -> MainLayout {
     let width = client_width.max(0);
     let height = client_height.max(0);
@@ -1949,14 +1969,18 @@ pub(crate) fn calculate_main_layout_with_safety(
         None => (RailMode::MenuOnly, 0, Vec::new(), Vec::new()),
     };
     let list_width = width.saturating_sub(rail_width.saturating_mul(2));
-    let cancel_preferred = measured
-        .cancel_text_width
-        .max(scale_dip(36, dpi))
-        .saturating_add(scale_dip(16, dpi));
+    let cancel_preferred = if status.cancel_visible {
+        measured
+            .cancel_text_width
+            .max(scale_dip(36, dpi))
+            .saturating_add(scale_dip(16, dpi))
+    } else {
+        0
+    };
     let cancel_width = cancel_preferred.min(width);
     let after_cancel = width.saturating_sub(cancel_width);
-    let count_preferred = measured
-        .status_count_text_width
+    let count_preferred = status
+        .measured_count_width
         .max(scale_dip(44, dpi))
         .saturating_add(scale_dip(12, dpi));
     let count_width = count_preferred.min(after_cancel);
@@ -4848,6 +4872,7 @@ mod tests {
             measured,
             RailDensityPreference::Automatic,
             false,
+            StatusLayoutInput::default(),
         );
         let hidden_content =
             measured.empty_state_content_metrics(96, hidden.empty_instruction.width, false);
@@ -4870,6 +4895,7 @@ mod tests {
             measured,
             RailDensityPreference::Automatic,
             true,
+            StatusLayoutInput::default(),
         );
         let shown_content =
             measured.empty_state_content_metrics(96, shown.empty_instruction.width, true);
@@ -4881,6 +4907,52 @@ mod tests {
                 .list
                 .y
                 .saturating_add(shown.list.height.saturating_sub(shown_content.total_height) / 2,),
+        );
+    }
+
+    #[test]
+    fn status_layout_returns_hidden_cancel_width_and_uses_current_count_width() {
+        let measured = MeasuredFontMetrics {
+            status_text_height: 16,
+            status_count_text_width: 400,
+            cancel_text_width: 52,
+            cancel_text_height: 20,
+            ..MeasuredFontMetrics::default()
+        };
+        let hidden = calculate_main_layout_with_safety(
+            800,
+            500,
+            96,
+            measured,
+            RailDensityPreference::Automatic,
+            true,
+            StatusLayoutInput {
+                cancel_visible: false,
+                measured_count_width: 120,
+            },
+        );
+        assert_eq!(hidden.cancel.width, 0);
+        assert_eq!(hidden.status_count.width, 132);
+        assert_eq!(hidden.status_message.width, 668);
+
+        let visible = calculate_main_layout_with_safety(
+            800,
+            500,
+            96,
+            measured,
+            RailDensityPreference::Automatic,
+            true,
+            StatusLayoutInput {
+                cancel_visible: true,
+                measured_count_width: 120,
+            },
+        );
+        assert_eq!(visible.cancel.width, 68);
+        assert_eq!(visible.status_count.width, 132);
+        assert_eq!(visible.status_message.width, 600);
+        assert_eq!(
+            visible.status_message.width + visible.status_count.width + visible.cancel.width,
+            800
         );
     }
 
