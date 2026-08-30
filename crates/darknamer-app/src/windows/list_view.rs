@@ -107,6 +107,77 @@ pub(super) fn handle_header_end_track(state: &mut AppState, lparam: LPARAM) -> b
     true
 }
 
+/// Applies restrained colors only to an unselected changed proposed-name cell.
+/// Every other stage and state remains under the native ListView renderer.
+pub(super) fn handle_list_custom_draw(state: &AppState, lparam: LPARAM) -> Option<LRESULT> {
+    let header = lparam as *const NMHDR;
+    if header.is_null()
+        // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix for this
+        // synchronous callback; the pointer was checked above.
+        || unsafe { (*header).hwndFrom } != state.list_window
+        // SAFETY: same live NMHDR storage as the source-window read above.
+        || unsafe { (*header).code } != NM_CUSTOMDRAW
+    {
+        return None;
+    }
+    let custom = lparam as *mut NMLVCUSTOMDRAW;
+    if custom.is_null() {
+        return Some(CDRF_DODEFAULT as LRESULT);
+    }
+    // SAFETY: NM_CUSTOMDRAW from a ListView supplies NMLVCUSTOMDRAW storage for
+    // the duration of this synchronous notification.
+    let stage = unsafe { (*custom).nmcd.dwDrawStage };
+    if stage == CDDS_PREPAINT {
+        return Some(CDRF_NOTIFYITEMDRAW as LRESULT);
+    }
+    if stage == CDDS_ITEMPREPAINT {
+        return Some(CDRF_NOTIFYSUBITEMDRAW as LRESULT);
+    }
+    if stage != (CDDS_ITEMPREPAINT | CDDS_SUBITEM) {
+        return Some(CDRF_DODEFAULT as LRESULT);
+    }
+
+    // SAFETY: same live NMLVCUSTOMDRAW payload validated above.
+    let row = unsafe { (*custom).nmcd.dwItemSpec };
+    // SAFETY: same payload; iSubItem and item state are integral fields.
+    let (subitem, item_state) = unsafe { ((*custom).iSubItem, (*custom).nmcd.uItemState) };
+    let selected = item_state & CDIS_SELECTED != 0;
+    let focused = item_state & CDIS_FOCUS != 0;
+    if subitem != 1 || selected || focused {
+        return Some(CDRF_DODEFAULT as LRESULT);
+    }
+    let Some(item) = state.model.items().get(row) else {
+        return Some(CDRF_DODEFAULT as LRESULT);
+    };
+    if item.current_name() == item.proposed_name() {
+        return Some(CDRF_DODEFAULT as LRESULT);
+    }
+    // Read the cached system state only after every cheaper semantic/native
+    // precedence gate. Unknown query results disable custom colors.
+    if !state.forced_colors.custom_colors_enabled() {
+        return Some(CDRF_DODEFAULT as LRESULT);
+    }
+    let visual = proposed_name_visual_decision(ProposedNameVisualContext {
+        row: Some(row),
+        row_count: state.model.len(),
+        subitem,
+        changed: true,
+        selected,
+        focused,
+        custom_colors_enabled: true,
+    });
+    if visual == ProposedNameVisual::Changed {
+        // SAFETY: this callback owns writable NMLVCUSTOMDRAW fields until it
+        // returns. Default drawing consumes the colors; no font/text/focus
+        // rendering is replaced and no caller pointer is retained.
+        unsafe {
+            (*custom).clrText = PROPOSED_CHANGED_TEXT_COLOR;
+            (*custom).clrTextBk = PROPOSED_CHANGED_BACKGROUND_COLOR;
+        }
+    }
+    Some(CDRF_DODEFAULT as LRESULT)
+}
+
 pub(super) fn handle_list_infotip(state: &AppState, lparam: LPARAM) -> bool {
     let header = lparam as *const NMHDR;
     if header.is_null()
@@ -204,6 +275,7 @@ pub(super) fn refresh(state: &mut AppState) {
 }
 
 pub(super) fn refresh_all_rows(state: &mut AppState) {
+    refresh_preview_count_cache(state);
     let rows = {
         let model = &state.model;
         let icon_cache = &mut state.icon_cache;
@@ -229,6 +301,7 @@ pub(super) fn refresh_changed_rows(state: &mut AppState, changed: &[usize]) {
         refresh(state);
         return;
     }
+    refresh_preview_count_cache(state);
     let mut changed = changed
         .iter()
         .copied()
@@ -263,6 +336,7 @@ pub(super) fn refresh_proposal_rows(state: &mut AppState, changed: &[usize]) {
         refresh(state);
         return;
     };
+    refresh_preview_count_cache(state);
     debug_assert_eq!(plan.proposal_cells, plan.rows.len());
     debug_assert_eq!(plan.immutable_cells, 0);
     debug_assert_eq!(plan.full_row_formats, 0);
@@ -281,6 +355,16 @@ pub(super) fn refresh_proposal_rows(state: &mut AppState, changed: &[usize]) {
         }
         state.rendered_rows[row].values[1].clone_from(proposed);
     }
+}
+
+fn refresh_preview_count_cache(state: &mut AppState) {
+    state.preview_count_cache.refresh(
+        state
+            .model
+            .items()
+            .iter()
+            .map(|item| (item.current_name(), item.proposed_name())),
+    );
 }
 
 fn rendered_row(icon_cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyListItem) -> RenderedRow {

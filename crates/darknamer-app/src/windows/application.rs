@@ -40,11 +40,17 @@ fn minimum_track_width(window: HWND, state: &AppState) -> i32 {
         .rail_metrics(RailDensity::Compact, state.dpi)
         .rail_width;
     let baseline_rail_width = RailDensity::Compact.metrics(state.dpi).rail_width;
-    let measured_content_width = scale_dip(minimum_content_width_dip(), state.dpi).saturating_add(
-        rail_width
-            .saturating_sub(baseline_rail_width)
-            .saturating_mul(2),
-    );
+    let measured_content_width = scale_dip(minimum_content_width_dip(), state.dpi)
+        .saturating_add(
+            rail_width
+                .saturating_sub(baseline_rail_width)
+                .saturating_mul(2),
+        )
+        .max(
+            rail_width
+                .saturating_mul(2)
+                .saturating_add(state.font_metrics.empty_state_minimum_width(state.dpi)),
+        );
     scale_dip(INITIAL_WIDTH, state.dpi).max(measured_content_width.saturating_add(nonclient_width))
 }
 
@@ -476,6 +482,11 @@ unsafe extern "system" fn window_proc(
         WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE if !state_ptr.is_null() => {
             // SAFETY: state_ptr is the live UI-thread AppState.
             let state = unsafe { &mut *state_ptr };
+            refresh_forced_colors(state);
+            let apply = state
+                .presentation(selected_indices(state.list_window).len())
+                .apply;
+            refresh_apply_keyline(state, apply);
             refresh_system_fonts(state);
             if let Err(error) = ensure_minimum_track_size(window, state) {
                 super::message(
@@ -565,6 +576,28 @@ unsafe extern "system" fn window_proc(
             request_window_close(window, unsafe { &mut *state_ptr });
             0
         }
+        WM_CTLCOLORSTATIC if !state_ptr.is_null() => {
+            let child = lparam as HWND;
+            // SAFETY: state_ptr is the live UI-thread AppState. Each rail
+            // returns its brush only for its exact owned keyline HWND.
+            let state = unsafe { &*state_ptr };
+            let brush = state
+                .left_rail
+                .as_ref()
+                .and_then(|rail| rail.apply_keyline_brush_for(child))
+                .or_else(|| {
+                    state
+                        .right_rail
+                        .as_ref()
+                        .and_then(|rail| rail.apply_keyline_brush_for(child))
+                });
+            if let Some(brush) = brush {
+                return brush as LRESULT;
+            }
+            // SAFETY: unrecognized STATIC children retain the system default
+            // color handling with the original message arguments.
+            unsafe { DefWindowProcW(window, message, wparam, lparam) }
+        }
         WM_COMMAND if !state_ptr.is_null() => {
             let command = (wparam & 0xFFFF) as u16;
             let notification = u32::try_from((wparam >> 16) & 0xFFFF).unwrap_or_default();
@@ -625,6 +658,11 @@ unsafe extern "system" fn window_proc(
                 && programmatic_list_update_active()
             {
                 return 0;
+            }
+            // SAFETY: state_ptr is the live UI-thread AppState and the custom
+            // draw helper validates the synchronous WM_NOTIFY payload/source.
+            if let Some(result) = handle_list_custom_draw(unsafe { &*state_ptr }, lparam) {
+                return result;
             }
             // Header controls are ListView children, so their resize
             // notifications identify the header HWND rather than list_window.
