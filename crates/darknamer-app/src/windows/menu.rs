@@ -524,7 +524,6 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
         status_layout_input,
     );
     let safety_copy = empty_state_safety_copy(preliminary.rail_mode);
-    set_status(state.empty_safety, safety_copy);
     let wrap_width = preliminary.empty_instruction.width;
     let mut measured = state.font_metrics;
     measured.empty_wrap_width = wrap_width;
@@ -585,6 +584,19 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
         if let Some(rail) = &state.right_rail {
             rail.set_visible(rails_visible);
         }
+        // Defer SetWindowTextW until the current AppState borrow and layout
+        // callback have ended. The scalar payload carries only the selected
+        // presentation family and no borrowed pointer.
+        // SAFETY: window is the live top-level owner; posting copies both scalar
+        // parameters into its UI-thread queue.
+        unsafe {
+            PostMessageW(
+                window,
+                WM_APP_EMPTY_SAFETY_COPY,
+                usize::from(rails_visible),
+                0,
+            )
+        };
     }
     state.rails_visible = rails_visible;
     refresh_apply_keyline(

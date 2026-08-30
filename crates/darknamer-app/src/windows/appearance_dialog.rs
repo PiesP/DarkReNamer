@@ -899,6 +899,9 @@ fn draw_appearance_separator(
     separator: HWND,
     lparam: LPARAM,
 ) -> bool {
+    if separator.is_null() {
+        return false;
+    }
     let draw = lparam as *const DRAWITEMSTRUCT;
     if draw.is_null() {
         return false;
@@ -1487,6 +1490,38 @@ mod native_tests {
             }
             return Err(io::Error::last_os_error().into());
         }
+        let mut null_target = DRAWITEMSTRUCT {
+            CtlType: ODT_STATIC,
+            hDC: separator_dc,
+            hwndItem: null_mut(),
+            ..DRAWITEMSTRUCT::default()
+        };
+        assert!(!draw_appearance_separator(
+            resources,
+            null_mut(),
+            (&raw mut null_target) as LPARAM,
+        ));
+        let mut wrong_target = DRAWITEMSTRUCT {
+            CtlType: ODT_STATIC,
+            hDC: separator_dc,
+            hwndItem: ok,
+            ..DRAWITEMSTRUCT::default()
+        };
+        assert!(!draw_appearance_separator(
+            resources,
+            separator,
+            (&raw mut wrong_target) as LPARAM,
+        ));
+        let mut null_dc = DRAWITEMSTRUCT {
+            CtlType: ODT_STATIC,
+            hwndItem: separator,
+            ..DRAWITEMSTRUCT::default()
+        };
+        assert!(!draw_appearance_separator(
+            resources,
+            separator,
+            (&raw mut null_dc) as LPARAM,
+        ));
         let mut separator_draw = DRAWITEMSTRUCT {
             CtlType: ODT_STATIC,
             hDC: separator_dc,
