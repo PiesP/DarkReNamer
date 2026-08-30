@@ -37,6 +37,80 @@ impl AdmissionWorker {
     }
 }
 
+pub(super) fn start_preferences_writer(window: HWND, state: &mut AppState) {
+    let window_value = window as usize;
+    let writer = PreferencesWriter::spawn(state.column_preferences_path.clone(), move || {
+        // SAFETY: the integer value is the top-level HWND captured before the
+        // writer starts. The wake contains no pointer payload or borrowed data.
+        unsafe { PostMessageW(window_value as HWND, WM_APP_PREFERENCES_WAKE, 0, 0) };
+    });
+    match writer {
+        Ok(writer) => state.preferences_writer = Some(writer),
+        Err(error) => {
+            state.set_transient_status(format!(
+                "열 표시 설정 writer를 시작하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
+            ));
+            return;
+        }
+    }
+    // SAFETY: the timer belongs to the live top-level window and supplies a
+    // loss-safe completion poll if a coalesced PostMessageW wake is missed.
+    if unsafe { SetTimer(window, PREFERENCES_POLL_TIMER_ID, 250, None) } == 0 {
+        state.set_transient_status(format!(
+            "열 표시 설정 완료 감시 timer를 시작하지 못했습니다: {}",
+            io::Error::last_os_error()
+        ));
+    }
+}
+
+fn apply_preferences_events(state: &mut AppState, events: Vec<PreferenceWriteEvent>) {
+    for event in events {
+        match event {
+            PreferenceWriteEvent::Saved { generation } => {
+                if state
+                    .preferences_failure_generation
+                    .is_some_and(|failed| generation >= failed)
+                {
+                    state.preferences_failure_generation = None;
+                    if !state.close_pending {
+                        state.set_transient_status("열 표시 설정을 다시 저장했습니다.");
+                    }
+                }
+            }
+            PreferenceWriteEvent::Stopped => {}
+            PreferenceWriteEvent::Failed { generation, error } => {
+                state.preferences_failure_generation = Some(generation);
+                if !state.close_pending {
+                    state.set_transient_status(format!(
+                        "열 표시 설정을 저장하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
+                    ));
+                }
+            }
+            PreferenceWriteEvent::Panicked => {
+                if !state.close_pending {
+                    state.set_transient_status(
+                        "열 표시 설정 writer가 비정상 종료되었습니다. 현재 작업에는 영향이 없습니다.",
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn drain_preferences_events(state: &mut AppState) {
+    let events = state
+        .preferences_writer
+        .as_ref()
+        .map(PreferencesWriter::drain_events)
+        .unwrap_or_default();
+    apply_preferences_events(state, events);
+}
+
+pub(super) fn handle_preferences_wake(window: HWND, state: &mut AppState) {
+    drain_preferences_events(state);
+    try_finish_window_close(window, state);
+}
+
 pub(super) enum AdmissionWorkerResult {
     NeedsDirectoryMode {
         revision: ModelRevision,
@@ -246,6 +320,7 @@ pub(super) fn handle_ready_plan(
     state.confirmation_pending = false;
     update_controls(state);
     if state.close_pending {
+        try_finish_window_close(window, state);
         return;
     }
     let answer = match answer {
@@ -479,8 +554,7 @@ pub(super) fn handle_plan_completion(window: HWND, state: &mut AppState) {
     state.mutation_locked = false;
     state.clear_progress_status();
     if state.close_pending {
-        // SAFETY: planning performs no mutation and the worker has joined.
-        unsafe { DestroyWindow(window) };
+        try_finish_window_close(window, state);
         return;
     }
     if joined.is_err() {
@@ -496,9 +570,7 @@ pub(super) fn handle_plan_completion(window: HWND, state: &mut AppState) {
         Ok(PlanWorkerResult::Finished { revision, plan }) => {
             handle_ready_plan(window, state, revision, plan);
             if state.close_pending {
-                // SAFETY: the confirmation callback has returned and no worker
-                // owns state, so deferred close can now destroy the window.
-                unsafe { DestroyWindow(window) };
+                try_finish_window_close(window, state);
                 return;
             }
         }
@@ -653,9 +725,7 @@ pub(super) fn handle_apply_completion(window: HWND, state: &mut AppState) {
     apply_cancel_control_state(state);
     finalize_apply_worker(window, state, worker);
     if state.close_pending {
-        // SAFETY: terminal worker handoff is complete and AppState no longer
-        // owns a running thread, so the top-level window may now be destroyed.
-        unsafe { DestroyWindow(window) };
+        try_finish_window_close(window, state);
     }
 }
 
@@ -736,26 +806,76 @@ pub(super) fn finish_apply_after_message_loop_failure(window: HWND) {
         let _joined = worker.handle.join();
         state.mutation_locked = false;
     }
-    let Some(worker) = state.apply_worker.take() else {
-        return;
-    };
-    worker.cancellation.request();
+    if let Some(worker) = state.apply_worker.take() {
+        worker.cancellation.request();
+        // SAFETY: this exact timer belongs to the still-live top-level window.
+        unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
+        finalize_apply_worker(window, state, worker);
+    }
+    if let Some(mut writer) = state.preferences_writer.take() {
+        let _shutdown = writer.shutdown_with(state.column_states);
+        let _joined = writer.join();
+    }
     // SAFETY: this exact timer belongs to the still-live top-level window.
-    unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
-    finalize_apply_worker(window, state, worker);
+    unsafe { KillTimer(window, PREFERENCES_POLL_TIMER_ID) };
     if state.close_pending {
         state.close_pending = false;
     }
 }
 
+fn request_preferences_shutdown(state: &mut AppState) {
+    let result = state
+        .preferences_writer
+        .as_mut()
+        .map(|writer| writer.shutdown_with(state.column_states));
+    if let Some(Err(error)) = result {
+        state.set_transient_status(format!(
+            "종료 전 열 표시 설정을 저장하도록 요청하지 못했습니다: {error}"
+        ));
+    }
+}
+
+pub(super) fn try_finish_window_close(window: HWND, state: &mut AppState) {
+    if !state.close_pending
+        || state.confirmation_pending
+        || state.admission_worker.is_some()
+        || state.plan_worker.is_some()
+        || state.apply_worker.is_some()
+    {
+        return;
+    }
+    drain_preferences_events(state);
+    if state
+        .preferences_writer
+        .as_ref()
+        .is_some_and(|writer| !writer.is_finished())
+    {
+        return;
+    }
+    if let Some(mut writer) = state.preferences_writer.take() {
+        let _joined = writer.join();
+        apply_preferences_events(state, writer.drain_events());
+    }
+    // SAFETY: the preference writer is terminal and this timer belongs to the
+    // live top-level window. No worker retains UI-owned state at this point.
+    unsafe { KillTimer(window, PREFERENCES_POLL_TIMER_ID) };
+    // SAFETY: all worker handles are joined and modal callbacks have returned,
+    // so the top-level window can reclaim its AppState.
+    unsafe { DestroyWindow(window) };
+}
+
 pub(super) fn request_window_close(window: HWND, state: &mut AppState) {
-    if state.confirmation_pending {
+    if !state.close_pending {
         state.close_pending = true;
+        state.mutation_locked = true;
+        request_preferences_shutdown(state);
+        update_controls(state);
+    }
+    if state.confirmation_pending {
         return;
     }
     if let Some(worker) = state.admission_worker.as_ref() {
-        if !state.close_pending {
-            state.close_pending = true;
+        if !worker.cancellation_requested() {
             worker.cancellation.store(true, Ordering::Release);
             state.set_progress_status(
                 "종료 요청을 받았습니다. 현재 경로 확인이 끝나는 즉시 종료합니다...",
@@ -765,8 +885,7 @@ pub(super) fn request_window_close(window: HWND, state: &mut AppState) {
         return;
     }
     if let Some(worker) = state.plan_worker.as_ref() {
-        if !state.close_pending {
-            state.close_pending = true;
+        if !worker.cancellation_requested() {
             worker.cancellation.request();
             state.set_progress_status(
                 "종료 요청을 받았습니다. 파일 시스템 확인이 끝나는 즉시 종료합니다...",
@@ -776,8 +895,7 @@ pub(super) fn request_window_close(window: HWND, state: &mut AppState) {
         return;
     }
     if let Some(worker) = state.apply_worker.as_ref() {
-        if !state.close_pending {
-            state.close_pending = true;
+        if !worker.cancellation_requested() {
             worker.cancellation.request();
             state.set_progress_status(
                 "종료 요청을 받았습니다. 현재 단계를 마친 뒤 안전하게 취소·복원합니다...",
@@ -786,9 +904,7 @@ pub(super) fn request_window_close(window: HWND, state: &mut AppState) {
         }
         return;
     }
-    // SAFETY: no worker owns journal or filesystem mutation state, so the
-    // top-level window can be destroyed immediately.
-    unsafe { DestroyWindow(window) };
+    try_finish_window_close(window, state);
 }
 
 pub(super) fn request_active_worker_cancel(state: &mut AppState) {
@@ -939,8 +1055,7 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
     state.mutation_locked = false;
     state.clear_progress_status();
     if state.close_pending {
-        // SAFETY: admission performs no mutation and the worker has joined.
-        unsafe { DestroyWindow(window) };
+        try_finish_window_close(window, state);
         return;
     }
     if joined.is_err() {
@@ -1002,8 +1117,7 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
             state.mutation_locked = false;
             state.confirmation_pending = false;
             if state.close_pending {
-                // SAFETY: the modal callback returned and no worker owns state.
-                unsafe { DestroyWindow(window) };
+                try_finish_window_close(window, state);
                 return;
             }
             let answer = match answer {

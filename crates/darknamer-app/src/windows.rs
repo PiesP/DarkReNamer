@@ -23,8 +23,8 @@ use crate::admission::{
 };
 use crate::icon_cache::{IconCacheKey, icon_cache_key};
 use crate::preferences::{
-    load_or_default as load_column_preferences, path_for_journal_root,
-    save as save_column_preferences, shown_columns,
+    PreferenceWriteEvent, PreferencesWriter, load_or_default as load_column_preferences,
+    path_for_journal_root, shown_columns,
 };
 use crate::rename::{
     CancellationToken, ExecuteError, ExecuteErrorKind, ExecutionControl, ExecutionOutcome,
@@ -166,7 +166,9 @@ const WM_APP_APPLY_COMPLETE: u32 = WM_APP + 0x41;
 const WM_APP_PLAN_COMPLETE: u32 = WM_APP + 0x42;
 const WM_APP_ADMISSION_COMPLETE: u32 = WM_APP + 0x43;
 const WM_APP_RESTORE_FOCUS: u32 = WM_APP + 0x44;
+const WM_APP_PREFERENCES_WAKE: u32 = WM_APP + 0x45;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
+const PREFERENCES_POLL_TIMER_ID: usize = 0xD4A2;
 
 struct AppState {
     list_window: HWND,
@@ -195,6 +197,8 @@ struct AppState {
     apply_worker: Option<ApplyWorker>,
     plan_worker: Option<PlanWorker>,
     admission_worker: Option<AdmissionWorker>,
+    preferences_writer: Option<PreferencesWriter>,
+    preferences_failure_generation: Option<u64>,
     close_pending: bool,
     confirmation_pending: bool,
     font_metrics: MeasuredFontMetrics,
@@ -257,6 +261,8 @@ impl AppState {
             apply_worker: None,
             plan_worker: None,
             admission_worker: None,
+            preferences_writer: None,
+            preferences_failure_generation: None,
             close_pending: false,
             confirmation_pending: false,
             font_metrics: MeasuredFontMetrics::default(),
@@ -347,9 +353,12 @@ impl AppState {
     }
 
     fn persist_column_preferences(&mut self) {
-        if let Err(error) =
-            save_column_preferences(&self.column_preferences_path, &self.column_states)
-        {
+        let result = self
+            .preferences_writer
+            .as_mut()
+            .ok_or_else(|| io::Error::other("column preference writer is unavailable"))
+            .and_then(|writer| writer.submit(self.column_states).map(|_| ()));
+        if let Err(error) = result {
             self.set_transient_status(format!(
                 "열 표시 설정을 저장하지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
             ));
