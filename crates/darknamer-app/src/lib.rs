@@ -713,9 +713,11 @@ pub(crate) fn calculate_appearance_dialog_layout(
     dpi: u32,
     maximum_width: i32,
     maximum_height: i32,
+    show_forced_explanation: bool,
 ) -> Option<AppearanceDialogLayout> {
     let desired_width = scale_dip(456, dpi);
-    let desired_height = scale_dip(420, dpi);
+    let explanation_band = if show_forced_explanation { 48 } else { 0 };
+    let desired_height = scale_dip(372 + explanation_band, dpi);
     if maximum_width < desired_width || maximum_height < desired_height {
         return None;
     }
@@ -748,16 +750,20 @@ pub(crate) fn calculate_appearance_dialog_layout(
             rect(28, 152, 392, 20),
             rect(28, 174, 392, 20),
         ],
-        forced_explanation: rect(12, 204, 432, 40),
+        forced_explanation: if show_forced_explanation {
+            rect(12, 204, 432, 40)
+        } else {
+            rect(12, 204, 0, 0)
+        },
         checkboxes: [
-            rect(20, 252, 416, 22),
-            rect(20, 280, 416, 22),
-            rect(20, 308, 416, 22),
+            rect(20, 204 + explanation_band, 416, 22),
+            rect(20, 232 + explanation_band, 416, 22),
+            rect(20, 260 + explanation_band, 416, 22),
         ],
-        separator: rect(12, 340, 432, 2),
-        reset: rect(12, 360, 124, 30),
-        ok: rect(292, 360, 72, 30),
-        cancel: rect(372, 360, 72, 30),
+        separator: rect(12, 292 + explanation_band, 432, 2),
+        reset: rect(12, 312 + explanation_band, 124, 30),
+        ok: rect(292, 312 + explanation_band, 72, 30),
+        cancel: rect(372, 312 + explanation_band, 72, 30),
     })
 }
 
@@ -2046,11 +2052,7 @@ fn calculate_empty_state_layout(
     let desired_button_height = content.add_height;
     let desired_safety_height = content.safety_height;
     let desired_gap = scale_dip(8, dpi);
-    let desired_total = desired_instruction_height
-        .saturating_add(desired_gap)
-        .saturating_add(desired_button_height)
-        .saturating_add(desired_gap)
-        .saturating_add(desired_safety_height);
+    let desired_total = content.total_height;
     let top = list
         .y
         .saturating_add(list.height.saturating_sub(desired_total).max(0) / 2);
@@ -4521,7 +4523,7 @@ mod tests {
     #[test]
     fn advanced_appearance_layout_keeps_every_control_inside_work_area_bounds() {
         for (dpi, width, height) in [(96, 456, 420), (144, 684, 630), (192, 912, 840)] {
-            let layout = calculate_appearance_dialog_layout(dpi, width, height);
+            let layout = calculate_appearance_dialog_layout(dpi, width, height, true);
             assert!(layout.is_some(), "valid work area rejected at {dpi} DPI");
             let Some(layout) = layout else {
                 continue;
@@ -4552,8 +4554,15 @@ mod tests {
                 assert!(rect.bottom() <= layout.client.height);
             }
         }
-        assert_eq!(calculate_appearance_dialog_layout(192, 320, 300), None);
-        let layout = calculate_appearance_dialog_layout(96, 456, 420);
+        assert_eq!(
+            calculate_appearance_dialog_layout(192, 320, 300, true),
+            None
+        );
+        assert_eq!(
+            calculate_appearance_dialog_layout(192, 320, 300, false),
+            None
+        );
+        let layout = calculate_appearance_dialog_layout(96, 456, 420, true);
         assert!(
             layout.is_some(),
             "baseline appearance dialog layout was rejected"
@@ -4589,6 +4598,27 @@ mod tests {
                 assert!(!overlaps);
             }
         }
+
+        let ordinary = calculate_appearance_dialog_layout(96, 456, 420, false);
+        let forced = calculate_appearance_dialog_layout(96, 456, 420, true);
+        let (Some(ordinary), Some(forced)) = (ordinary, forced) else {
+            return;
+        };
+        assert_eq!(ordinary.client.height, scale_dip(372, 96));
+        assert_eq!(forced.client.height, scale_dip(420, 96));
+        assert_eq!(ordinary.forced_explanation.width, 0);
+        assert_eq!(ordinary.forced_explanation.height, 0);
+        assert!(forced.forced_explanation.width > 0);
+        assert!(forced.forced_explanation.height > 0);
+        assert_eq!(
+            forced.checkboxes[0].y - ordinary.checkboxes[0].y,
+            scale_dip(48, 96)
+        );
+        assert_eq!(forced.reset.y - ordinary.reset.y, scale_dip(48, 96));
+        assert_eq!(
+            ordinary.client.height - ordinary.cancel.bottom(),
+            forced.client.height - forced.cancel.bottom(),
+        );
     }
 
     #[test]
@@ -4819,8 +4849,20 @@ mod tests {
             RailDensityPreference::Automatic,
             false,
         );
+        let hidden_content =
+            measured.empty_state_content_metrics(96, hidden.empty_instruction.width, false);
         assert_eq!(hidden.empty_safety.height, 0);
         assert_eq!(hidden.empty_safety.y, hidden.empty_add.bottom());
+        assert_eq!(
+            hidden.empty_instruction.y,
+            hidden.list.y.saturating_add(
+                hidden
+                    .list
+                    .height
+                    .saturating_sub(hidden_content.total_height)
+                    / 2,
+            ),
+        );
         let shown = calculate_main_layout_with_safety(
             width,
             with_safety,
@@ -4829,8 +4871,17 @@ mod tests {
             RailDensityPreference::Automatic,
             true,
         );
+        let shown_content =
+            measured.empty_state_content_metrics(96, shown.empty_instruction.width, true);
         assert!(shown.empty_safety.height > 0);
         assert!(shown.empty_safety.y > shown.empty_add.bottom());
+        assert_eq!(
+            shown.empty_instruction.y,
+            shown
+                .list
+                .y
+                .saturating_add(shown.list.height.saturating_sub(shown_content.total_height) / 2,),
+        );
     }
 
     #[test]

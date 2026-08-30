@@ -265,7 +265,8 @@ fn create_appearance_dialog_window(
     }
     // SAFETY: owner is the live top-level HWND used only for its current DPI.
     let owner_dpi = unsafe { GetDpiForWindow(owner) }.max(BASE_DPI);
-    if !appearance_dialog_fits_work_area(owner, owner_dpi) {
+    let show_forced_explanation = matches!(forced_colors, ForcedColorsState::ActiveOrUnknown);
+    if !appearance_dialog_fits_work_area(owner, owner_dpi, show_forced_explanation) {
         return Err(io::Error::other(
             "monitor work area is too small for the appearance dialog",
         ));
@@ -626,7 +627,7 @@ fn controls(state: &AppearanceDialogWindowState) -> impl Iterator<Item = HWND> +
         .chain([state.separator, state.reset, state.ok, state.cancel])
 }
 
-fn appearance_dialog_fits_work_area(anchor: HWND, dpi: u32) -> bool {
+fn appearance_dialog_fits_work_area(anchor: HWND, dpi: u32, show_forced_explanation: bool) -> bool {
     // SAFETY: anchor is a live top-level HWND and no pointer is retained.
     let monitor = unsafe { MonitorFromWindow(anchor, MONITOR_DEFAULTTONEAREST) };
     if monitor.is_null() {
@@ -656,7 +657,8 @@ fn appearance_dialog_fits_work_area(anchor: HWND, dpi: u32) -> bool {
         .bottom
         .saturating_sub(info.rcWork.top)
         .saturating_sub(chrome.bottom.saturating_sub(chrome.top));
-    calculate_appearance_dialog_layout(dpi, maximum_width, maximum_height).is_some()
+    calculate_appearance_dialog_layout(dpi, maximum_width, maximum_height, show_forced_explanation)
+        .is_some()
 }
 
 fn arrange_dialog(window: HWND, state: &AppearanceDialogWindowState, center_owner: bool) -> bool {
@@ -689,9 +691,16 @@ fn arrange_dialog(window: HWND, state: &AppearanceDialogWindowState, center_owne
     let maximum_client_height = work_height
         .saturating_sub(chrome.bottom.saturating_sub(chrome.top))
         .max(1);
-    let Some(layout) =
-        calculate_appearance_dialog_layout(state.dpi, maximum_client_width, maximum_client_height)
-    else {
+    let show_forced_explanation = matches!(
+        state.model.forced_colors(),
+        ForcedColorsState::ActiveOrUnknown
+    );
+    let Some(layout) = calculate_appearance_dialog_layout(
+        state.dpi,
+        maximum_client_width,
+        maximum_client_height,
+        show_forced_explanation,
+    ) else {
         return false;
     };
     for (control, rect) in controls(state).zip([
@@ -859,6 +868,9 @@ unsafe extern "system" fn appearance_dialog_proc(
                     ForcedColorsState::ActiveOrUnknown
                 });
                 sync_controls(state);
+                if !arrange_dialog(window, state, false) {
+                    apply_action(window, state, AppearanceDialogAction::Cancel);
+                }
             }
             0
         }
