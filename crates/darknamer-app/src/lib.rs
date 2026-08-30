@@ -2377,7 +2377,7 @@ pub(crate) struct PreviewIssueCache {
 
 #[cfg(any(windows, test))]
 impl PreviewIssueCache {
-    pub(crate) fn refresh_by<'a, F>(
+    pub(crate) fn refresh_by<'a, F, K>(
         &mut self,
         rows: impl IntoIterator<
             Item = (
@@ -2387,10 +2387,10 @@ impl PreviewIssueCache {
                 bool,
             ),
         >,
-        compare: F,
+        mut destination_key: F,
     ) where
-        F: Fn(&darknamer_core::LegacyText, &darknamer_core::LegacyText) -> std::cmp::Ordering
-            + Copy,
+        F: FnMut(&darknamer_core::LegacyText, &darknamer_core::LegacyText) -> K,
+        K: Ord,
     {
         let rows = rows.into_iter().collect::<Vec<_>>();
         self.rows.clear();
@@ -2413,24 +2413,20 @@ impl PreviewIssueCache {
                 self.rows[row] = PreviewRowIssue::EmptyStem;
             }
             let effective_name = if changed { proposed } else { current };
-            destinations.push((row, parent, effective_name, changed, valid));
+            destinations.push((row, destination_key(parent, effective_name), changed, valid));
         }
-        destinations
-            .sort_by(|left, right| compare(left.1, right.1).then_with(|| compare(left.2, right.2)));
+        destinations.sort_by(|left, right| left.1.cmp(&right.1));
         let mut group_start = 0_usize;
         while group_start < destinations.len() {
             let mut group_end = group_start + 1;
             while group_end < destinations.len()
-                && compare(destinations[group_start].1, destinations[group_end].1)
-                    == std::cmp::Ordering::Equal
-                && compare(destinations[group_start].2, destinations[group_end].2)
-                    == std::cmp::Ordering::Equal
+                && destinations[group_start].1 == destinations[group_end].1
             {
                 group_end += 1;
             }
             if group_end - group_start > 1 {
                 for destination in &destinations[group_start..group_end] {
-                    if destination.3 && destination.4 {
+                    if destination.2 && destination.3 {
                         self.rows[destination.0] = PreviewRowIssue::DuplicateDestination;
                     }
                 }
@@ -5876,6 +5872,56 @@ mod tests {
         );
     }
 
+    fn preview_test_destination_key(
+        parent: &darknamer_core::LegacyText,
+        leaf: &darknamer_core::LegacyText,
+    ) -> (Box<[u16]>, Box<[u16]>) {
+        fn ascii_fold(text: &darknamer_core::LegacyText) -> Box<[u16]> {
+            text.units()
+                .iter()
+                .map(|unit| {
+                    if (b'A' as u16..=b'Z' as u16).contains(unit) {
+                        unit + u16::from(b'a' - b'A')
+                    } else {
+                        *unit
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        }
+
+        (ascii_fold(parent), ascii_fold(leaf))
+    }
+
+    #[test]
+    fn preview_issues_compute_each_final_destination_key_once() {
+        use std::cell::Cell;
+
+        use darknamer_core::LegacyText;
+
+        let parent = LegacyText::from(r"C:\work");
+        let current_a = LegacyText::from("a.txt");
+        let current_b = LegacyText::from("b.txt");
+        let proposed_b = LegacyText::from("b.txt");
+        let calls = Cell::new(0_usize);
+        let mut cache = PreviewIssueCache::default();
+
+        cache.refresh_by(
+            [
+                (&parent, &current_a, &proposed_b, false),
+                (&parent, &current_b, &current_b, false),
+            ],
+            |destination_parent, destination_leaf| {
+                calls.set(calls.get().saturating_add(1));
+                preview_test_destination_key(destination_parent, destination_leaf)
+            },
+        );
+
+        assert_eq!(calls.get(), 2);
+        assert_eq!(cache.issue(0), PreviewRowIssue::DuplicateDestination);
+        assert_eq!(cache.issue(1), PreviewRowIssue::None);
+    }
+
     #[test]
     fn preview_issues_block_a_changed_name_that_occupies_an_unchanged_destination() {
         use darknamer_core::LegacyText;
@@ -5891,7 +5937,7 @@ mod tests {
                 (&parent, &current_a, &proposed_b, false),
                 (&parent, &current_b, &current_b, false),
             ],
-            LegacyText::case_insensitive_cmp,
+            preview_test_destination_key,
         );
 
         assert_eq!(cache.issue(0), PreviewRowIssue::DuplicateDestination);
@@ -5925,13 +5971,13 @@ mod tests {
                 (&parent, &b, &c, false),
                 (&parent, &c, &d, false),
             ],
-            LegacyText::case_insensitive_cmp,
+            preview_test_destination_key,
         );
         assert!(!cache.has_blocker(), "a rename chain remains schedulable");
 
         cache.refresh_by(
             [(&parent, &a, &b, false), (&parent, &b, &a, false)],
-            LegacyText::case_insensitive_cmp,
+            preview_test_destination_key,
         );
         assert!(!cache.has_blocker(), "a swap remains schedulable");
 
@@ -5940,7 +5986,7 @@ mod tests {
                 (&parent, &a, &same, false),
                 (&other_parent, &b, &same, false),
             ],
-            LegacyText::case_insensitive_cmp,
+            preview_test_destination_key,
         );
         assert!(
             !cache.has_blocker(),
@@ -5949,7 +5995,7 @@ mod tests {
 
         cache.refresh_by(
             [(&parent, &a, &upper_a, false)],
-            LegacyText::case_insensitive_cmp,
+            preview_test_destination_key,
         );
         assert!(!cache.has_blocker(), "a case-only rename remains valid");
     }
@@ -5973,7 +6019,7 @@ mod tests {
                 (&parent, &current_b, &reserved, false),
                 (&parent, &current_c, &forbidden, false),
             ],
-            LegacyText::case_insensitive_cmp,
+            preview_test_destination_key,
         );
 
         assert_eq!(
@@ -6003,7 +6049,7 @@ mod tests {
         let trailing = LegacyText::from("trailing.");
         cache.refresh_by(
             [(&parent, &current_a, &trailing, false)],
-            LegacyText::case_insensitive_cmp,
+            preview_test_destination_key,
         );
         assert_eq!(
             cache.issue(0),
@@ -6028,7 +6074,7 @@ mod tests {
 
         cache.refresh_by(
             [(&parent, &current_a, &dot_jpg, false)],
-            LegacyText::case_insensitive_cmp,
+            preview_test_destination_key,
         );
         assert_eq!(cache.issue(0), PreviewRowIssue::EmptyStem);
         assert!(!cache.has_blocker());
@@ -6038,14 +6084,14 @@ mod tests {
                 (&parent, &current_a, &dot_jpg, false),
                 (&parent, &current_b, &dot_jpg, false),
             ],
-            LegacyText::case_insensitive_cmp,
+            preview_test_destination_key,
         );
         assert_eq!(cache.issue(0), PreviewRowIssue::DuplicateDestination);
         assert_eq!(cache.issue(1), PreviewRowIssue::DuplicateDestination);
 
         cache.refresh_by(
             [(&parent, &dot_env, &dot_env, false)],
-            LegacyText::case_insensitive_cmp,
+            preview_test_destination_key,
         );
         assert_eq!(cache.issue(0), PreviewRowIssue::None);
         assert_eq!(cache.notice(), None);
@@ -6072,7 +6118,7 @@ mod tests {
                 (&parent, &duplicate_current_b, &duplicate, false),
                 (&parent, &warning_current, &warning, false),
             ],
-            LegacyText::case_insensitive_cmp,
+            preview_test_destination_key,
         );
 
         assert_eq!(cache.blocker_rows().as_ref(), &[0, 1, 2]);
