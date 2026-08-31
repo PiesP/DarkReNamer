@@ -1782,10 +1782,7 @@ mod tests {
         // the synchronous common-controls initialization call.
         unsafe { InitCommonControlsEx(&controls) };
         let directory = tempfile::tempdir()?;
-        let mut state = Box::new(AppState::new(initialize_safe_runtime_at(directory.path())?));
-        state.appearance.theme = AppThemeMode::Dark;
-        state.forced_colors = ForcedColorsState::Inactive;
-        state.system_theme = Some(ResolvedTheme::Dark);
+        let state = AppState::new(initialize_safe_runtime_at(directory.path())?);
         let class = wide("STATIC");
         // SAFETY: the system STATIC class and current module remain valid for
         // this hidden test owner.
@@ -1808,11 +1805,24 @@ mod tests {
         if parent.is_null() {
             return Err(io::Error::last_os_error().into());
         }
+        let state_slot: *mut AppStateSlot = CallbackState::into_raw(state);
+        // SAFETY: the hidden owner and UI-thread slot remain live until the
+        // paired cleanup below clears publication and reclaims the slot.
+        unsafe { SetWindowLongPtrW(parent, GWLP_USERDATA, state_slot as isize) };
         let result = (|| -> io::Result<()> {
-            create_children(parent, &mut state)?;
+            // SAFETY: the test owns the published slot and no callback lease is active.
+            let mut state_lease = unsafe { CallbackState::try_lease(state_slot) }
+                .ok_or_else(|| io::Error::other("test AppState lease is unavailable"))?;
+            let state = state_lease.state_mut();
+            state.appearance.theme = AppThemeMode::Dark;
+            state.forced_colors = ForcedColorsState::Inactive;
+            state.system_theme = Some(ResolvedTheme::Dark);
+            create_children(parent, state)?;
+            let list_window = state.list_window;
+            drop(state_lease);
             // SAFETY: the live report ListView owns one header child and returns
             // its borrowed HWND without retaining caller memory.
-            let header = unsafe { SendMessageW(state.list_window, LVM_GETHEADER, 0, 0) } as HWND;
+            let header = unsafe { SendMessageW(list_window, LVM_GETHEADER, 0, 0) } as HWND;
             if header.is_null() {
                 return Err(io::Error::other("native ListView header is missing"));
             }
@@ -1828,9 +1838,8 @@ mod tests {
             custom.hdc = dc;
             // SAFETY: list_window is the header's actual notification parent and
             // custom remains writable for the complete synchronous dispatch.
-            let routed = unsafe {
-                SendMessageW(state.list_window, WM_NOTIFY, 0, (&raw mut custom) as LPARAM)
-            };
+            let routed =
+                unsafe { SendMessageW(list_window, WM_NOTIFY, 0, (&raw mut custom) as LPARAM) };
             assert_eq!(
                 routed,
                 (CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT) as LRESULT
@@ -1840,27 +1849,29 @@ mod tests {
                 // SAFETY: same live notification parent/payload. The guard must
                 // delegate instead of constructing a shared AppState reference
                 // during a synchronous programmatic update.
-                unsafe {
-                    SendMessageW(state.list_window, WM_NOTIFY, 0, (&raw mut custom) as LPARAM)
-                }
+                unsafe { SendMessageW(list_window, WM_NOTIFY, 0, (&raw mut custom) as LPARAM) }
             };
             assert_eq!(guarded, 0);
             custom.dwDrawStage = CDDS_POSTPAINT;
             // SAFETY: same live notification parent and header DC for the
             // postpaint gutter pass.
-            let postpaint = unsafe {
-                SendMessageW(state.list_window, WM_NOTIFY, 0, (&raw mut custom) as LPARAM)
-            };
+            let postpaint =
+                unsafe { SendMessageW(list_window, WM_NOTIFY, 0, (&raw mut custom) as LPARAM) };
             assert_eq!(postpaint, CDRF_DODEFAULT as LRESULT);
             // SAFETY: release the exact DC acquired from header above after all
             // synchronous paint-stage probes have completed.
             unsafe { ReleaseDC(header, dc) };
             Ok(())
         })();
+        // SAFETY: publication is cleared before the hidden owner and its child
+        // subclass are destroyed, preventing callbacks from reaching stale state.
+        unsafe { SetWindowLongPtrW(parent, GWLP_USERDATA, 0) };
         // SAFETY: parent is the test-owned top-level HWND and destroys every
-        // child before the subclass refdata owner is dropped.
+        // child after the state publication above was cleared.
         unsafe { DestroyWindow(parent) };
-        drop(state);
+        // SAFETY: no lease remains and the test has cleared the slot publication.
+        let disposition = unsafe { CallbackState::request_reclaim(state_slot) };
+        assert_eq!(disposition, ReclaimDisposition::Reclaimed);
         result.map_err(Into::into)
     }
 
