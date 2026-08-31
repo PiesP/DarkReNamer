@@ -103,7 +103,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Selected dependency audit failed.' }
           cargo deny check
           if ($LASTEXITCODE -ne 0) { throw 'Selected dependency policy check failed.' }
-          cargo test --workspace --all-targets --all-features --locked
+          $env:DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'
+          cargo test --workspace --all-targets --all-features --locked -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'Selected workspace tests failed.' }
           cargo build --release --locked --package darknamer-app --bin DarkReNamer
           if ($LASTEXITCODE -ne 0) { throw 'Selected Windows build failed.' }

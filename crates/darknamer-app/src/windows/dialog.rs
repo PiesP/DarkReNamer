@@ -1114,7 +1114,17 @@ pub(super) fn import_names_dialog(owner: HWND, state: &mut AppState) -> Box<[usi
         return Box::default();
     };
     match read_legacy_text(&path) {
-        Ok(text) => state.model.import_names_changed(&text),
+        Ok(text) => match state.model.import_names_changed(&text) {
+            Ok(changed) => changed,
+            Err(error) => {
+                message(
+                    owner,
+                    proposal_mutation_error_korean(error),
+                    "DarkReNamer - 이름 가져오기",
+                );
+                Box::default()
+            }
+        },
         Err(error) => {
             message(
                 owner,

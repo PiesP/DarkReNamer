@@ -15,6 +15,10 @@ use darknamer_app::admission::{
 use darknamer_app::rename::EntryIdentity;
 use darknamer_core::LegacyText;
 
+#[cfg(windows)]
+#[path = "support/windows_capabilities.rs"]
+mod windows_capabilities;
+
 #[derive(Default)]
 struct FakeAdapter {
     metadata: BTreeMap<PathBuf, AdmissionMetadata>,
@@ -306,12 +310,24 @@ fn windows_reparse_loop_is_not_followed_and_missing_metadata_is_reported()
     if let Err(error) = WindowsRenameBackend.validate_path_environment(&probe)
         && matches!(error.code, 87 | 120)
     {
+        windows_capabilities::unavailable(
+            "case-sensitive-query",
+            Some(error.code as i32),
+            "unsupported",
+        )?;
         return Ok(());
     }
     let loop_path = root.join("loop");
     let symlink_available = match symlink_dir(&root, &loop_path) {
         Ok(()) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => false,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            windows_capabilities::unavailable(
+                "symlink-creation",
+                error.raw_os_error(),
+                "permission-denied",
+            )?;
+            false
+        }
         Err(error) => return Err(error.into()),
     };
     let missing = directory.path().join("missing.txt");

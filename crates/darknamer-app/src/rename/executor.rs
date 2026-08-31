@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -221,6 +222,76 @@ impl EntryExecution {
     }
 }
 
+struct IndexedEntryExecutions {
+    values: Vec<EntryExecution>,
+    by_id: BTreeMap<EntryId, usize>,
+    #[cfg(test)]
+    lookups: usize,
+}
+
+impl IndexedEntryExecutions {
+    fn from_plan(entries: &[PlanRow]) -> Result<Self, ExecuteError> {
+        let mut values = Vec::with_capacity(entries.len());
+        let mut by_id = BTreeMap::new();
+        for entry in entries {
+            let index = values.len();
+            if by_id.insert(entry.id, index).is_some() {
+                return Err(ExecuteError {
+                    entry: Some(entry.id),
+                    kind: ExecuteErrorKind::InvalidSchedule,
+                });
+            }
+            values.push(EntryExecution {
+                entry: entry.id,
+                state: RenameState::Restored,
+            });
+        }
+        Ok(Self {
+            values,
+            by_id,
+            #[cfg(test)]
+            lookups: 0,
+        })
+    }
+
+    fn validate_schedule(&self, schedule: &[ScheduleStep]) -> Result<(), ExecuteError> {
+        for step in schedule {
+            if !self.by_id.contains_key(&step.entry) {
+                return Err(ExecuteError {
+                    entry: Some(step.entry),
+                    kind: ExecuteErrorKind::InvalidSchedule,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn plan_row<'a>(&mut self, entries: &'a [PlanRow], entry: EntryId) -> Option<&'a PlanRow> {
+        #[cfg(test)]
+        {
+            self.lookups = self.lookups.saturating_add(1);
+        }
+        self.by_id.get(&entry).and_then(|index| entries.get(*index))
+    }
+
+    fn set_state(&mut self, entry: EntryId, state: RenameState) {
+        #[cfg(test)]
+        {
+            self.lookups = self.lookups.saturating_add(1);
+        }
+        if let Some(index) = self.by_id.get(&entry)
+            && let Some(result) = self.values.get_mut(*index)
+        {
+            debug_assert_eq!(result.entry, entry);
+            result.state = state;
+        }
+    }
+
+    fn into_boxed_slice(self) -> Box<[EntryExecution]> {
+        self.values.into_boxed_slice()
+    }
+}
+
 /// Complete result returned after journalling or mutation began.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionReport {
@@ -341,17 +412,11 @@ impl<'a> RenameExecutor<'a> {
         if control.cancellation_requested() {
             return Err(cancelled_before_begin());
         }
-        let mut entries = plan
-            .entries
-            .iter()
-            .map(|row| EntryExecution {
-                entry: row.id,
-                state: RenameState::Restored,
-            })
-            .collect::<Vec<_>>();
+        let mut entries = IndexedEntryExecutions::from_plan(&plan.entries)?;
         let schedule =
             build_schedule_cancellable(&plan, self.backend, &|| control.cancellation_requested())
                 .map_err(schedule_error)?;
+        entries.validate_schedule(&schedule)?;
         let mut manifest = Vec::with_capacity(schedule.len());
         for step in &schedule {
             if control.cancellation_requested() {
@@ -363,7 +428,7 @@ impl<'a> RenameExecutor<'a> {
             entry: None,
             kind: ExecuteErrorKind::JournalCapacity(error),
         })?;
-        self.freeze(&plan.entries, &schedule, control)?;
+        self.freeze(&plan.entries, &schedule, &mut entries, control)?;
         if control.cancellation_requested() {
             return Err(cancelled_before_begin());
         }
@@ -439,7 +504,7 @@ impl<'a> RenameExecutor<'a> {
             super::failpoint::hit(&format!("forward-prepared-{step_index}"));
             if let Err(error) = self.backend.rename_no_replace(&forward_operation(step)) {
                 if error.certainty == MutationCertainty::MayHaveApplied {
-                    set_state(&mut entries, step.entry, RenameState::Indeterminate);
+                    entries.set_state(step.entry, RenameState::Indeterminate);
                     return Ok(ExecutionReport {
                         plan: plan.id,
                         outcome: ExecutionOutcome::RecoveryRequired {
@@ -485,17 +550,13 @@ impl<'a> RenameExecutor<'a> {
             }
             #[cfg(test)]
             super::failpoint::hit(&format!("forward-rename-{step_index}"));
-            set_state(
-                &mut entries,
-                step.entry,
-                forward_state(step.temporary_phase),
-            );
+            entries.set_state(step.entry, forward_state(step.temporary_phase));
             completed.push((step_index, step.clone()));
             if let Err(error) = self
                 .journal
                 .completed(step_index, JournalDirection::Forward)
             {
-                set_state(&mut entries, step.entry, RenameState::Indeterminate);
+                entries.set_state(step.entry, RenameState::Indeterminate);
                 return Ok(ExecutionReport {
                     plan: plan.id,
                     outcome: ExecutionOutcome::RecoveryRequired {
@@ -559,6 +620,7 @@ impl<'a> RenameExecutor<'a> {
         &self,
         entries: &[PlanRow],
         schedule: &[ScheduleStep],
+        indexed_entries: &mut IndexedEntryExecutions,
         control: &dyn ExecutionControl,
     ) -> Result<(), ExecuteError> {
         for entry in entries {
@@ -629,7 +691,7 @@ impl<'a> RenameExecutor<'a> {
             if control.cancellation_requested() {
                 return Err(cancelled_before_begin());
             }
-            let planned = entries.iter().find(|entry| entry.id == step.entry);
+            let planned = indexed_entries.plan_row(entries, step.entry);
             let Some(planned) = planned else {
                 return Err(ExecuteError {
                     entry: Some(step.entry),
@@ -657,7 +719,7 @@ impl<'a> RenameExecutor<'a> {
         plan: PlanId,
         failure: ExecutionFailure,
         completed: &[(usize, ScheduleStep)],
-        mut entries: Vec<EntryExecution>,
+        mut entries: IndexedEntryExecutions,
         control: &dyn ExecutionControl,
     ) -> ExecutionReport {
         let mut rollback_failures = Vec::new();
@@ -676,7 +738,7 @@ impl<'a> RenameExecutor<'a> {
                     step: *step_index,
                     error,
                 });
-                set_state(&mut entries, step.entry, RenameState::Indeterminate);
+                entries.set_state(step.entry, RenameState::Indeterminate);
                 break;
             }
             #[cfg(test)]
@@ -703,16 +765,12 @@ impl<'a> RenameExecutor<'a> {
                     step: *step_index,
                     error,
                 });
-                set_state(&mut entries, step.entry, RenameState::Indeterminate);
+                entries.set_state(step.entry, RenameState::Indeterminate);
                 break;
             }
             #[cfg(test)]
             super::failpoint::hit(&format!("rollback-rename-{step_index}"));
-            set_state(
-                &mut entries,
-                step.entry,
-                rollback_state(step.temporary_phase),
-            );
+            entries.set_state(step.entry, rollback_state(step.temporary_phase));
             if let Err(error) = self
                 .journal
                 .completed(*step_index, JournalDirection::Rollback)
@@ -721,7 +779,7 @@ impl<'a> RenameExecutor<'a> {
                     step: *step_index,
                     error,
                 });
-                set_state(&mut entries, step.entry, RenameState::Indeterminate);
+                entries.set_state(step.entry, RenameState::Indeterminate);
                 break;
             }
             #[cfg(test)]
@@ -805,12 +863,6 @@ const fn rollback_state(phase: TemporaryPhase) -> RenameState {
     }
 }
 
-fn set_state(entries: &mut [EntryExecution], entry: EntryId, state: RenameState) {
-    if let Some(result) = entries.iter_mut().find(|result| result.entry == entry) {
-        result.state = state;
-    }
-}
-
 const fn cancelled_before_begin() -> ExecuteError {
     ExecuteError {
         entry: None,
@@ -837,5 +889,82 @@ fn schedule_error(error: ScheduleError) -> ExecuteError {
             entry: Some(entry),
             kind: ExecuteErrorKind::TemporaryExhausted,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use darknamer_core::LegacyText;
+
+    use super::super::model::ObservedEntry;
+    use super::super::{EntryIdentity, EntryKind, PathSnapshot};
+    use super::*;
+
+    fn plan_row(id: EntryId) -> PlanRow {
+        let parent = EntryIdentity::new(1, 1);
+        let entry = ObservedEntry {
+            identity: EntryIdentity::new(1, u128::from(id.row_index()) + 2),
+            kind: EntryKind::File,
+            is_reparse_point: false,
+        };
+        PlanRow {
+            id,
+            source: LegacyText::from("source"),
+            destination: LegacyText::from("destination"),
+            kind: EntryKind::File,
+            source_snapshot: PathSnapshot {
+                parent,
+                entry: Some(entry),
+            },
+            destination_snapshot: PathSnapshot {
+                parent,
+                entry: None,
+            },
+        }
+    }
+
+    #[test]
+    fn ten_thousand_execution_rows_use_one_index_lookup_per_state_update() {
+        let rows = (0..10_000)
+            .rev()
+            .map(|value| plan_row(EntryId::new(value)))
+            .collect::<Vec<_>>();
+        let result = IndexedEntryExecutions::from_plan(&rows);
+        assert!(result.is_ok());
+        let Some(mut entries) = result.ok() else {
+            return;
+        };
+
+        for value in 0..10_000 {
+            entries.set_state(EntryId::new(value), RenameState::Applied);
+        }
+
+        assert_eq!(entries.lookups, 10_000);
+        assert!(
+            entries
+                .values
+                .iter()
+                .all(|entry| entry.state == RenameState::Applied)
+        );
+        for row in &rows {
+            assert_eq!(entries.plan_row(&rows, row.id), Some(row));
+        }
+        assert_eq!(entries.lookups, 20_000);
+    }
+
+    #[test]
+    fn duplicate_execution_entry_ids_fail_before_schedule_or_journal_work() {
+        let duplicate = EntryId::new(7);
+        let rows = [plan_row(duplicate), plan_row(duplicate)];
+
+        let error = IndexedEntryExecutions::from_plan(&rows).err();
+
+        assert_eq!(
+            error,
+            Some(ExecuteError {
+                entry: Some(duplicate),
+                kind: ExecuteErrorKind::InvalidSchedule,
+            })
+        );
     }
 }

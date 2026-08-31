@@ -4,6 +4,9 @@
     reason = "this Windows integration target exercises the audited native backend with OS handles"
 )]
 
+#[path = "support/windows_capabilities.rs"]
+mod windows_capabilities;
+
 use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
@@ -50,7 +53,14 @@ fn case_query_supported(parent: &std::path::Path) -> Result<bool, Box<dyn std::e
     let backend = WindowsRenameBackend;
     match backend.validate_path_environment(&legacy_path(&parent.join("case-query-probe"))) {
         Ok(()) => Ok(true),
-        Err(error) if matches!(error.code, 87 | 120) => Ok(false),
+        Err(error) if matches!(error.code, 87 | 120) => {
+            windows_capabilities::unavailable(
+                "case-sensitive-query",
+                Some(error.code as i32),
+                "unsupported",
+            )?;
+            Ok(false)
+        }
         Err(error) => Err(error.into()),
     }
 }
@@ -271,6 +281,11 @@ fn intermediate_reparse_and_unsupported_prefix_are_rejected_when_available()
     let link = directory.path().join("junction");
     if let Err(error) = symlink_dir(&target, &link) {
         if error.kind() == std::io::ErrorKind::PermissionDenied {
+            windows_capabilities::unavailable(
+                "symlink-creation",
+                error.raw_os_error(),
+                "permission-denied",
+            )?;
             return Ok(());
         }
         return Err(error.into());
@@ -388,6 +403,11 @@ fn case_sensitive_parent_is_explicitly_unsupported_when_platform_allows_fixture(
     let source = parent.join("a.txt");
     if let Err(error) = set_directory_case_sensitive(&parent, true) {
         if matches!(error.raw_os_error(), Some(5 | 50 | 87)) {
+            windows_capabilities::unavailable(
+                "case-sensitive-directory-fixture",
+                error.raw_os_error(),
+                "fixture-setup-failed",
+            )?;
             return Ok(());
         }
         return Err(error.into());
@@ -438,6 +458,11 @@ fn final_reparse_and_journal_root_reparse_are_rejected_when_fixture_is_available
     }
     if let Err(error) = symlink_file(&target, &link) {
         if error.kind() == std::io::ErrorKind::PermissionDenied {
+            windows_capabilities::unavailable(
+                "symlink-creation",
+                error.raw_os_error(),
+                "permission-denied",
+            )?;
             return Ok(());
         }
         return Err(error.into());
@@ -508,7 +533,7 @@ fn planner_file_journal_backend_and_model_complete_one_production_path()
     fs::write(&source, b"content")?;
     let mut model = LegacyList::new();
     assert!(model.append(LegacyListItem::new(legacy_path(&source), false, 7, 8, 9,)));
-    assert!(model.manual_change(0, "after.txt"));
+    assert_eq!(model.manual_change(0, "after.txt"), Ok(true));
     let mut backend = WindowsRenameBackend;
     let root = JournalRoot::open(directory.path())?;
     let substituted_root = directory.path().with_extension("substituted-root");

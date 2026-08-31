@@ -5,6 +5,7 @@
 
 use darknamer_core::{
     LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,
+    MAX_PROPOSED_NAME_UTF16_UNITS, MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS, ProposalMutationError,
     parse_import_lines,
 };
 
@@ -79,16 +80,19 @@ fn moving_one_same_path_duplicate_returns_its_new_row_identity() {
 #[test]
 fn stem_commands_discard_manual_path_prefix_like_get_name() {
     let mut list = list(&[(r"C:\root\source.txt", false)]);
-    assert!(list.manual_change(0, r"subdir\manual.name.txt"));
-    list.suffix_before_extension(&LegacyText::from("-tail"));
+    assert_eq!(list.manual_change(0, r"subdir\manual.name.txt"), Ok(true));
+    assert!(
+        list.suffix_before_extension(&LegacyText::from("-tail"))
+            .is_ok()
+    );
     assert_eq!(proposed(&list), ["manual.name-tail.txt"]);
 
-    assert!(list.manual_change(0, r"subdir\manual.name.txt"));
+    assert_eq!(list.manual_change(0, r"subdir\manual.name.txt"), Ok(true));
     list.clear_name();
     assert_eq!(proposed(&list), [".txt"]);
 
-    assert!(list.manual_change(0, r"subdir\manual.name.txt"));
-    list.replace_extension(&LegacyText::from("new"));
+    assert_eq!(list.manual_change(0, r"subdir\manual.name.txt"), Ok(true));
+    assert!(list.replace_extension(&LegacyText::from("new")).is_ok());
     assert_eq!(proposed(&list), ["manual.name.new"]);
 }
 
@@ -101,8 +105,11 @@ fn complete_replace_prefix_and_pre_extension_suffix_match_name_commands() {
         (r"C:\root\folder.name", true),
     ]);
 
-    list.replace_complete(&LegacyText::from("."), &LegacyText::from("_"));
-    list.prefix_complete(&LegacyText::from("pre-"));
+    assert!(
+        list.replace_complete(&LegacyText::from("."), &LegacyText::from("_"))
+            .is_ok()
+    );
+    assert!(list.prefix_complete(&LegacyText::from("pre-")).is_ok());
     assert_eq!(
         proposed(&list),
         [
@@ -114,7 +121,10 @@ fn complete_replace_prefix_and_pre_extension_suffix_match_name_commands() {
     );
 
     list.reset_proposals();
-    list.suffix_before_extension(&LegacyText::from("-tail"));
+    assert!(
+        list.suffix_before_extension(&LegacyText::from("-tail"))
+            .is_ok()
+    );
     assert_eq!(
         proposed(&list),
         [
@@ -157,7 +167,10 @@ fn name_empty_and_position_delete_preserve_last_dot_extension_rules() {
 #[test]
 fn cstring_position_deletion_can_split_a_non_bmp_surrogate_pair() {
     let mut list = list(&[(r"C:\root\unicode.txt", false)]);
-    assert!(list.manual_change(0, LegacyText::from("A😀BC.txt")));
+    assert_eq!(
+        list.manual_change(0, LegacyText::from("A😀BC.txt")),
+        Ok(true)
+    );
 
     assert_eq!(list.delete_front_range(2, 2), Ok(()));
 
@@ -209,8 +222,110 @@ fn number_only_and_first_last_digit_padding_preserve_source_scan_quirks() {
     assert_eq!(proposed(&first), ["a001b23c.txt", "a001b23.txt", "123.txt"]);
     assert_eq!(
         first.pad_first_digit_run(0),
-        Err(LegacyInputError::NonPositiveWidth)
+        Err(ProposalMutationError::InvalidInput(
+            LegacyInputError::NonPositiveWidth
+        ))
     );
+}
+
+#[test]
+fn oversized_digit_width_is_rejected_without_changing_any_proposal() {
+    let mut list = list(&[
+        ("C:\\work\\file1.txt", false),
+        ("C:\\work\\file2.txt", false),
+    ]);
+    let before = list.clone();
+
+    let result = list.pad_last_digit_run(256);
+
+    assert!(result.is_err());
+    assert_eq!(list, before);
+}
+
+#[test]
+fn proposal_growth_limits_fail_before_any_row_changes() {
+    let maximum_name = "a".repeat(MAX_PROPOSED_NAME_UTF16_UNITS);
+    let mut per_name = list(&[
+        (maximum_name.as_str(), false),
+        (r"C:\work\small.txt", false),
+    ]);
+    let before_per_name = per_name.clone();
+    assert_eq!(
+        per_name.prefix_complete(&LegacyText::from("x")),
+        Err(ProposalMutationError::NameBudgetExceeded {
+            row: 0,
+            requested_units: MAX_PROPOSED_NAME_UTF16_UNITS + 1,
+            maximum_units: MAX_PROPOSED_NAME_UTF16_UNITS,
+        })
+    );
+    assert_eq!(per_name, before_per_name);
+
+    let leaf_units = MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS / 10_000;
+    let leaf = "b".repeat(leaf_units);
+    let rows = (0..10_000)
+        .map(|_| item(leaf.as_str(), false))
+        .collect::<Vec<_>>();
+    let mut aggregate = LegacyList::new();
+    assert_eq!(aggregate.append_batch(rows), 10_000);
+    let before_aggregate = aggregate.clone();
+    let result = aggregate.prefix_complete(&LegacyText::from("x"));
+    assert!(matches!(
+        result,
+        Err(ProposalMutationError::AggregateBudgetExceeded { .. })
+    ));
+    assert_eq!(aggregate, before_aggregate);
+}
+
+#[test]
+fn repeated_replacement_and_extreme_sequence_width_stop_at_the_budget() {
+    let mut replacement = list(&[(r"C:\work\a", false)]);
+    for _ in 0..7 {
+        assert!(
+            replacement
+                .replace_complete(&LegacyText::from("a"), &LegacyText::from("aa"))
+                .is_ok()
+        );
+    }
+    assert_eq!(replacement.items()[0].proposed_name().len(), 128);
+    let before_replacement = replacement.clone();
+    assert!(matches!(
+        replacement.replace_complete(&LegacyText::from("a"), &LegacyText::from("aa")),
+        Err(ProposalMutationError::NameBudgetExceeded { .. })
+    ));
+    assert_eq!(replacement, before_replacement);
+
+    let mut sequence = list(&[(r"C:\work\file.txt", false)]);
+    let before_sequence = sequence.clone();
+    assert_eq!(
+        sequence.add_sequence(usize::MAX, 1, LegacySequenceMode::Append),
+        Err(ProposalMutationError::NameBudgetExceeded {
+            row: 0,
+            requested_units: usize::MAX,
+            maximum_units: MAX_PROPOSED_NAME_UTF16_UNITS,
+        })
+    );
+    assert_eq!(sequence, before_sequence);
+}
+
+#[test]
+fn manual_and_imported_names_share_the_atomic_proposal_budget() {
+    let oversized = "x".repeat(MAX_PROPOSED_NAME_UTF16_UNITS + 1);
+    let mut manual = list(&[(r"C:\work\one.txt", false)]);
+    let before_manual = manual.clone();
+    assert!(matches!(
+        manual.manual_change(0, oversized.as_str()),
+        Err(ProposalMutationError::NameBudgetExceeded { row: 0, .. })
+    ));
+    assert_eq!(manual, before_manual);
+
+    let mut imported = list(&[(r"C:\work\one.txt", false), (r"C:\work\two.txt", false)]);
+    let before_import = imported.clone();
+    let input = LegacyText::from(format!("first.txt\r\n{oversized}\r\n"));
+    assert!(matches!(
+        imported.import_names_changed(&input),
+        Err(ProposalMutationError::NameBudgetExceeded { row: 1, .. })
+    ));
+    assert_eq!(imported, before_import);
 }
 
 #[test]
@@ -267,7 +382,7 @@ fn extension_commands_reproduce_dotfile_directory_and_dot_normalization_rules() 
     );
 
     let mut added = list(&paths);
-    added.add_extension(&LegacyText::from("bak"));
+    assert!(added.add_extension(&LegacyText::from("bak")).is_ok());
     assert_eq!(
         proposed(&added),
         [
@@ -279,7 +394,11 @@ fn extension_commands_reproduce_dotfile_directory_and_dot_normalization_rules() 
     );
 
     let mut replaced = list(&paths);
-    replaced.replace_extension(&LegacyText::from(".new"));
+    assert!(
+        replaced
+            .replace_extension(&LegacyText::from(".new"))
+            .is_ok()
+    );
     assert_eq!(
         proposed(&replaced),
         ["archive.tar.new", ".new", "README.new", "folder.name.new"]
@@ -293,14 +412,14 @@ fn parent_folder_commands_and_root_unification_match_root_column_behavior() {
         (r"C:\drive-root.txt", false),
         (r"C:\parent\folder.name", true),
     ]);
-    prefixed.prefix_parent_folder();
+    assert!(prefixed.prefix_parent_folder().is_ok());
     assert_eq!(
         proposed(&prefixed),
         ["parent_file.ext", "drive-root.txt", "parent_folder.name"]
     );
 
     prefixed.reset_proposals();
-    prefixed.suffix_parent_folder();
+    assert!(prefixed.suffix_parent_folder().is_ok());
     assert_eq!(
         proposed(&prefixed),
         ["file_parent.ext", "drive-root.txt", "folder.name_parent"]
@@ -335,9 +454,9 @@ fn selected_row_movement_remove_manual_change_and_ctrl_z_are_list_state_only() {
     assert_eq!(&*list.move_rows_later(&[1, 3]), [1, 3]);
     assert_eq!(current(&list), before);
 
-    assert!(list.manual_change(1, "manual.name"));
-    assert!(!list.manual_change(99, "ignored"));
-    list.prefix_complete(&LegacyText::from("x-"));
+    assert_eq!(list.manual_change(1, "manual.name"), Ok(true));
+    assert_eq!(list.manual_change(99, "ignored"), Ok(false));
+    assert!(list.prefix_complete(&LegacyText::from("x-")).is_ok());
     list.reset_proposals();
     assert_eq!(proposed(&list), current(&list));
 
@@ -348,7 +467,7 @@ fn selected_row_movement_remove_manual_change_and_ctrl_z_are_list_state_only() {
 #[test]
 fn successful_move_record_updates_only_that_row_for_partial_success() {
     let mut list = list(&[(r"C:\one\a.txt", false), (r"C:\two\b.txt", false)]);
-    list.prefix_complete(&LegacyText::from("new-"));
+    assert!(list.prefix_complete(&LegacyText::from("new-")).is_ok());
     assert!(list.record_move_success(0));
 
     assert_eq!(
@@ -418,7 +537,7 @@ fn all_ten_sort_modes_use_original_metadata_not_proposals() {
 
     for (mode, expected) in cases {
         let mut list = make_list();
-        assert!(list.manual_change(0, "000.txt"));
+        assert_eq!(list.manual_change(0, "000.txt"), Ok(true));
         list.sort(mode);
         assert_eq!(current(&list), expected, "mode: {mode:?}");
     }
@@ -431,8 +550,8 @@ fn export_and_blank_line_import_preserve_order_crlf_and_utf16_text() {
         (r"C:\root\two.txt", false),
         (r"C:\root\three.txt", false),
     ]);
-    assert!(list.manual_change(0, "first"));
-    assert!(list.manual_change(1, "second"));
+    assert_eq!(list.manual_change(0, "first"), Ok(true));
+    assert_eq!(list.manual_change(1, "second"), Ok(true));
     assert_eq!(
         list.export_names(),
         LegacyText::from("first\r\nsecond\r\nthree.txt\r\n")
@@ -443,7 +562,7 @@ fn export_and_blank_line_import_preserve_order_crlf_and_utf16_text() {
     );
 
     let imported = LegacyText::from("  alpha  \r\n\r\n beta\n \t\r\n😀gamma \r\nignored\n");
-    assert_eq!(list.import_names(&imported), 3);
+    assert_eq!(list.import_names(&imported), Ok(3));
     assert_eq!(proposed(&list), ["alpha", "beta", "😀gamma"]);
     assert_eq!(
         parse_import_lines(&LegacyText::from(" C:\\a \r\n\n C:\\b\r\n")),
@@ -459,8 +578,8 @@ fn changed_aware_mutations_report_exact_no_ops_without_changing_legacy_results()
         (r"C:\root\c.txt", false),
     ]);
 
-    assert!(!list.manual_change_changed(0, "a.txt"));
-    assert!(list.manual_change_changed(1, "renamed.txt"));
+    assert_eq!(list.manual_change_changed(0, "a.txt"), Ok(false));
+    assert_eq!(list.manual_change_changed(1, "renamed.txt"), Ok(true));
     assert_eq!(&*list.reset_proposals_changed(), &[1]);
     assert!(list.reset_proposals_changed().is_empty());
 
@@ -484,11 +603,12 @@ fn changed_aware_mutations_report_exact_no_ops_without_changing_legacy_results()
 
     assert!(
         list.import_names_changed(&LegacyText::from("a.txt\r\nb.txt\r\nc.txt\r\n"))
-            .is_empty()
+            .is_ok_and(|changed| changed.is_empty())
     );
     assert_eq!(
-        &*list.import_names_changed(&LegacyText::from("a.txt\r\nchanged.txt\r\nc.txt\r\n")),
-        &[1]
+        list.import_names_changed(&LegacyText::from("a.txt\r\nchanged.txt\r\nc.txt\r\n"))
+            .as_deref(),
+        Ok(&[1][..])
     );
     assert!(list.clear());
     assert!(!list.clear());
@@ -504,9 +624,11 @@ fn ten_thousand_row_proposal_transforms_return_pure_exact_change_sets() {
 
     assert!(
         list.prefix_complete_changed(&LegacyText::default())
-            .is_empty()
+            .is_ok_and(|changed| changed.is_empty())
     );
-    let changed = list.prefix_complete_changed(&LegacyText::from("x-"));
+    let changed_result = list.prefix_complete_changed(&LegacyText::from("x-"));
+    assert!(changed_result.is_ok());
+    let changed = changed_result.unwrap_or_default();
     assert_eq!(changed.len(), 10_000);
     assert_eq!(changed.first(), Some(&0));
     assert_eq!(changed.last(), Some(&9_999));

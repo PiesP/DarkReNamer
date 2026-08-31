@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::ptr::{null, null_mut};
 use std::rc::Rc;
-use std::slice;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
@@ -43,7 +42,7 @@ use crate::rename::{
 };
 use darknamer_core::{
     LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,
-    SortSemantics,
+    ProposalMutationError, SortSemantics,
 };
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawWindowHandle,
@@ -67,6 +66,25 @@ mod resource_ids;
 mod safe_runtime;
 mod text_io;
 mod worker;
+
+fn proposal_mutation_error_korean(error: ProposalMutationError) -> &'static str {
+    match error {
+        ProposalMutationError::InvalidInput(LegacyInputError::NonPositiveWidth) => {
+            "자리수 입력이 잘못되었습니다."
+        }
+        ProposalMutationError::InvalidInput(_) => {
+            "입력값이 올바르지 않아 목록을 변경하지 않았습니다."
+        }
+        ProposalMutationError::NameBudgetExceeded { .. }
+        | ProposalMutationError::AggregateBudgetExceeded { .. }
+        | ProposalMutationError::ArithmeticOverflow => {
+            "변경 결과가 안전 한도를 초과했습니다. 목록은 변경되지 않았습니다. 입력 내용을 줄여 다시 시도하세요."
+        }
+        ProposalMutationError::AllocationFailed => {
+            "변경 결과를 준비할 메모리가 부족합니다. 목록은 변경되지 않았습니다. 다른 프로그램을 닫고 다시 시도하세요."
+        }
+    }
+}
 
 use clipboard::copy_clipboard;
 use command_dispatch::*;
@@ -769,6 +787,22 @@ pub(crate) fn atomic_replace_preferences(source: &Path, destination: &Path) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proposal_mutation_errors_keep_failure_copy_actionable_and_path_free() {
+        assert_eq!(
+            proposal_mutation_error_korean(ProposalMutationError::NameBudgetExceeded {
+                row: 7,
+                requested_units: 256,
+                maximum_units: 255,
+            }),
+            "변경 결과가 안전 한도를 초과했습니다. 목록은 변경되지 않았습니다. 입력 내용을 줄여 다시 시도하세요."
+        );
+        assert_eq!(
+            proposal_mutation_error_korean(ProposalMutationError::AllocationFailed),
+            "변경 결과를 준비할 메모리가 부족합니다. 목록은 변경되지 않았습니다. 다른 프로그램을 닫고 다시 시도하세요."
+        );
+    }
 
     struct CallbackDropProbe(Rc<Cell<usize>>);
 

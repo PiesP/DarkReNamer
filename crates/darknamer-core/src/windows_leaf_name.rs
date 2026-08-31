@@ -4,7 +4,8 @@ use std::fmt;
 
 use crate::LegacyText;
 
-const MAX_LEAF_UNITS: usize = 255;
+/// Maximum number of UTF-16 code units in one Windows leaf name.
+pub const MAX_WINDOWS_LEAF_NAME_UTF16_UNITS: usize = 255;
 
 /// A reason an exact UTF-16 leaf name cannot be used safely on Windows.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,7 +57,7 @@ pub fn validate_windows_leaf_name(name: &LegacyText) -> Result<(), WindowsLeafNa
     if units.is_empty() {
         return Err(WindowsLeafNameError::Empty);
     }
-    if units.len() > MAX_LEAF_UNITS {
+    if units.len() > MAX_WINDOWS_LEAF_NAME_UTF16_UNITS {
         return Err(WindowsLeafNameError::TooLong);
     }
     if units == [b'.' as u16] || units == [b'.' as u16, b'.' as u16] {
