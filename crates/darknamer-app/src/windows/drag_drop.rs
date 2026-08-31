@@ -517,27 +517,30 @@ unsafe extern "system" fn drop_target_drop(
             drop(medium);
             return Some(S_OK);
         };
-        let Some(remaining) = remaining_capacity(target.state_owner) else {
+        let Some(limits) = remaining_admission_limits(target.state_owner) else {
             drop(medium);
             return Some(S_OK);
         };
-        let (paths, truncated) = extract_drop_paths(drop_handle, remaining);
+        let extracted = extract_drop_paths(drop_handle, limits.remaining_count, limits.path_budget);
         drop(medium);
 
         if drop_locked(target.state_owner) != Some(false) {
             return Some(S_OK);
         }
-        if truncated {
-            message(
-                target.state_owner,
-                "선택 항목이 남은 10,000개 한도를 초과해 제한된 수만 처리합니다.",
-                "DarkReNamer - 추가 한도",
-            );
+        if extracted.count_truncated || extracted.path_budget_exhausted {
+            let detail = if extracted.count_truncated && extracted.path_budget_exhausted {
+                "선택 항목이 남은 개수와 UTF-16 경로 용량 안전 한도를 초과해 제한된 수만 처리합니다."
+            } else if extracted.count_truncated {
+                "선택 항목이 남은 개수 한도를 초과해 제한된 수만 처리합니다."
+            } else {
+                "선택 경로가 UTF-16 경로 용량 안전 한도를 초과해 이미 확인한 항목만 처리합니다."
+            };
+            message(target.state_owner, detail, "DarkReNamer - 추가 한도");
         }
         if drop_locked(target.state_owner) != Some(false) {
             return Some(S_OK);
         }
-        if paths.is_empty() {
+        if extracted.paths.is_empty() {
             return Some(S_OK);
         }
         let Some(mut state_lease) = try_app_state(target.state_owner) else {
@@ -546,7 +549,8 @@ unsafe extern "system" fn drop_target_drop(
         if state_lease.state().drop_locked() {
             return Some(S_OK);
         }
-        let start_result = admit_paths(target.state_owner, state_lease.state_mut(), paths);
+        let start_result =
+            admit_paths(target.state_owner, state_lease.state_mut(), extracted.paths);
         drop(state_lease);
         // SAFETY: drop_callback validated effect and it remains live.
         unsafe { *effect = drop_effect_after_admission_start(start_result.is_ok()) };
@@ -653,6 +657,30 @@ fn remaining_capacity(owner: HWND) -> Option<usize> {
         .map(|state_lease| MAX_ADMITTED_SOURCES.saturating_sub(state_lease.state().model.len()))
 }
 
+#[derive(Clone, Copy)]
+struct RemainingAdmissionLimits {
+    remaining_count: usize,
+    path_budget: PathBudget,
+}
+
+fn remaining_admission_limits(owner: HWND) -> Option<RemainingAdmissionLimits> {
+    try_app_state(owner).map(|state_lease| {
+        let state = state_lease.state();
+        let mut path_budget = PathBudget::new();
+        for item in state.model.items() {
+            if path_budget.reserve_utf16_units(item.source_path().units().len())
+                == PathBudgetReservation::Exhausted
+            {
+                break;
+            }
+        }
+        RemainingAdmissionLimits {
+            remaining_count: MAX_ADMITTED_SOURCES.saturating_sub(state.model.len()),
+            path_budget,
+        }
+    })
+}
+
 fn set_overlay_for_owner(owner: HWND, presentation: DropPresentation) {
     let overlay = try_app_state(owner).map(|state_lease| state_lease.state().drop_overlay);
     if let Some(overlay) = overlay {
@@ -660,11 +688,26 @@ fn set_overlay_for_owner(owner: HWND, presentation: DropPresentation) {
     }
 }
 
-fn extract_drop_paths(drop: HDROP, remaining: usize) -> (Vec<PathBuf>, bool) {
+struct DropPathExtraction {
+    paths: Vec<PathBuf>,
+    count_truncated: bool,
+    path_budget_exhausted: bool,
+}
+
+fn reserve_drop_path_allocation(path_budget: &mut PathBudget, utf16_units: usize) -> bool {
+    path_budget.reserve_utf16_units(utf16_units) == PathBudgetReservation::Reserved
+}
+
+fn extract_drop_paths(
+    drop: HDROP,
+    remaining: usize,
+    mut path_budget: PathBudget,
+) -> DropPathExtraction {
     // SAFETY: drop is the live HGLOBAL-backed HDROP retained by OwnedStgMedium.
     let reported = unsafe { DragQueryFileW(drop, u32::MAX, null_mut(), 0) } as usize;
     let bounded = bounded_selection(reported, remaining);
     let mut paths = Vec::with_capacity(bounded.take);
+    let mut path_budget_exhausted = false;
     for index in 0..bounded.take {
         let native_index = u32::try_from(index).unwrap_or(u32::MAX);
         // SAFETY: drop remains live and this length query writes no buffer.
@@ -674,6 +717,10 @@ fn extract_drop_paths(drop: HDROP, remaining: usize) -> (Vec<PathBuf>, bool) {
         };
         if length == 0 || length > MAX_PATH_UNITS {
             continue;
+        }
+        if !reserve_drop_path_allocation(&mut path_budget, length) {
+            path_budget_exhausted = true;
+            break;
         }
         let Some(capacity) = length.checked_add(1) else {
             continue;
@@ -695,7 +742,11 @@ fn extract_drop_paths(drop: HDROP, remaining: usize) -> (Vec<PathBuf>, bool) {
         buffer.truncate(length);
         paths.push(PathBuf::from(std::ffi::OsString::from_wide(&buffer)));
     }
-    (paths, bounded.truncated)
+    DropPathExtraction {
+        paths,
+        count_truncated: bounded.truncated,
+        path_budget_exhausted,
+    }
 }
 
 #[cfg(test)]
@@ -985,6 +1036,23 @@ mod tests {
         assert_eq!(format.lindex, -1);
         assert_eq!(format.tymed, TYMED_HGLOBAL as u32);
         assert_eq!(DROP_EFFECT_COPY, DROPEFFECT_COPY);
+    }
+
+    #[test]
+    fn long_drop_length_reports_stop_before_next_buffer_allocation() {
+        let one_path_bytes = MAX_PATH_UNITS * size_of::<u16>();
+        let mut path_budget = PathBudget::from_remaining_bytes(one_path_bytes);
+        let mut allocations = 0_usize;
+
+        for _length_report in 0..MAX_ADMITTED_SOURCES {
+            if !reserve_drop_path_allocation(&mut path_budget, MAX_PATH_UNITS) {
+                break;
+            }
+            allocations += 1;
+        }
+
+        assert_eq!(allocations, 1);
+        assert_eq!(path_budget.remaining_bytes(), 0);
     }
 
     #[test]

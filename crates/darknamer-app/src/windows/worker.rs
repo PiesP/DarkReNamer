@@ -1049,6 +1049,14 @@ pub(super) fn start_admission_worker(
     capacity: usize,
 ) -> io::Result<()> {
     let revision = state.revision();
+    let mut path_budget = PathBudget::new();
+    for item in state.model.items() {
+        if path_budget.reserve_utf16_units(item.source_path().units().len())
+            == PathBudgetReservation::Exhausted
+        {
+            break;
+        }
+    }
     let cancellation = Arc::new(AtomicBool::new(false));
     let worker_cancellation = Arc::clone(&cancellation);
     let (sender, receiver) = sync_channel(1);
@@ -1100,11 +1108,12 @@ pub(super) fn start_admission_worker(
                     }
                     AdmissionMode::Direct
                 };
-                match collect_admission_cancellable(
+                match collect_admission_cancellable_with_budget(
                     &adapter,
                     paths,
                     mode,
                     capacity,
+                    path_budget,
                     |left, right| compare_windows(&legacy_path(left), &legacy_path(right)),
                     || worker_cancellation.load(Ordering::Acquire),
                 ) {

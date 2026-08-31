@@ -20,9 +20,9 @@ use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
 use std::thread::{self, JoinHandle};
 
 use crate::admission::{
-    AdmissionAdapter, AdmissionMode, AdmissionReport, MAX_ADMITTED_SOURCES,
-    WindowsAdmissionAdapter, bounded_import_lines, bounded_selection,
-    collect_admission_cancellable,
+    AdmissionAdapter, AdmissionMode, AdmissionReport, MAX_ADMITTED_SOURCES, PathBudget,
+    PathBudgetReservation, WindowsAdmissionAdapter, bounded_import_lines, bounded_selection,
+    collect_admission_cancellable_with_budget,
 };
 use crate::icon_cache::{IconCacheKey, icon_cache_key};
 use crate::preferences::{
