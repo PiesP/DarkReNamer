@@ -62,19 +62,22 @@ unsafe extern "system" fn list_view_notification_subclass(
             // SAFETY: window is the live ListView and this value query retains no
             // caller storage.
             let header = unsafe { SendMessageW(window, LVM_GETHEADER, 0, 0) } as HWND;
+            // SAFETY: the owner removes this subclass before reclaiming the
+            // stable Box<AppState>, and this user-driven path is excluded while
+            // programmatic ListView messages retain a mutable state borrow.
+            let state = unsafe { &*(state_ref as *const AppState) };
+            if let Some(result) =
+                handle_fixed_status_header_double_click(window, header, state.dpi, lparam)
+            {
+                return result;
+            }
             // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix synchronously.
             let is_header_draw = !header.is_null()
                 && unsafe {
                     (*notification).hwndFrom == header && (*notification).code == NM_CUSTOMDRAW
                 };
-            if is_header_draw {
-                // SAFETY: the owner removes this subclass before reclaiming the
-                // stable Box<AppState>. The programmatic re-entry guard above
-                // excludes synchronous callers that retain &mut AppState.
-                let state = unsafe { &*(state_ref as *const AppState) };
-                if let Some(result) = handle_header_custom_draw(state, lparam) {
-                    return result;
-                }
+            if is_header_draw && let Some(result) = handle_header_custom_draw(state, lparam) {
+                return result;
             }
         }
     }
@@ -117,16 +120,50 @@ pub(super) fn update_dpi_metrics(state: &mut AppState) {
 }
 
 fn set_native_status_column_width(state: &AppState) {
+    set_native_status_column_width_for(state.list_window, state.dpi);
+}
+
+fn set_native_status_column_width_for(list_window: HWND, dpi: u32) {
     // SAFETY: list_window is live and the fixed native-only column index and
     // DPI-scaled width are integral values retained by the control.
     unsafe {
         SendMessageW(
-            state.list_window,
+            list_window,
             LVM_SETCOLUMNWIDTH,
             NATIVE_STATUS_COLUMN_INDEX,
-            scale_dip(NATIVE_STATUS_COLUMN_WIDTH_DIP, state.dpi) as isize,
+            scale_dip(NATIVE_STATUS_COLUMN_WIDTH_DIP, dpi) as isize,
         )
     };
+}
+
+fn handle_fixed_status_header_double_click(
+    list_window: HWND,
+    header_window: HWND,
+    dpi: u32,
+    lparam: LPARAM,
+) -> Option<LRESULT> {
+    let header = lparam as *const NMHDR;
+    if header.is_null() || header_window.is_null() {
+        return None;
+    }
+    // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix synchronously.
+    let (source_window, code) = unsafe { ((*header).hwndFrom, (*header).code) };
+    if source_window != header_window || code != HDN_DIVIDERDBLCLICKW {
+        return None;
+    }
+    let notification = lparam as *const NMHEADERW;
+    // SAFETY: HDN_DIVIDERDBLCLICKW supplies NMHEADERW storage with an NMHDR prefix.
+    let Ok(column) = usize::try_from(unsafe { (*notification).iItem }) else {
+        return None;
+    };
+    if column != NATIVE_STATUS_COLUMN_INDEX {
+        return None;
+    }
+    let _list_update = ProgrammaticListUpdateGuard::begin();
+    set_native_status_column_width_for(list_window, dpi);
+    // Returning nonzero to the Header control's direct parent prevents its
+    // default divider-double-click auto-sizing for this fixed native column.
+    Some(1)
 }
 
 pub(super) fn update_primary_column_widths(state: &AppState) {
@@ -175,14 +212,26 @@ pub(super) fn handle_header_end_track(state: &mut AppState, lparam: LPARAM) -> b
     // Depending on the common-controls version, the ListView can forward the
     // embedded header notification while retaining either source HWND.
     let from_header = source_window == header_window || source_window == state.list_window;
-    if header_window.is_null() || !from_header || code != HDN_ENDTRACKW {
+    if header_window.is_null() || !from_header {
         return false;
     }
     let notification = lparam as *const NMHEADERW;
-    // SAFETY: HDN_ENDTRACKW supplies NMHEADERW storage with an NMHDR prefix.
+    // SAFETY: both handled header notifications supply NMHEADERW storage with
+    // an NMHDR prefix.
     let Ok(column) = usize::try_from(unsafe { (*notification).iItem }) else {
-        return true;
+        return code == HDN_ENDTRACKW;
     };
+    if code == HDN_DIVIDERDBLCLICKW {
+        if column == NATIVE_STATUS_COLUMN_INDEX {
+            let _list_update = ProgrammaticListUpdateGuard::begin();
+            set_native_status_column_width(state);
+            return true;
+        }
+        return false;
+    }
+    if code != HDN_ENDTRACKW {
+        return false;
+    }
     if column == NATIVE_STATUS_COLUMN_INDEX {
         let _list_update = ProgrammaticListUpdateGuard::begin();
         set_native_status_column_width(state);
@@ -1077,6 +1126,37 @@ mod native_tests {
                     return Err(io::Error::other("could not insert native test column"));
                 }
             }
+            // SAFETY: list is live and the message carries only integral width data.
+            unsafe { SendMessageW(list, LVM_SETCOLUMNWIDTH, NATIVE_STATUS_COLUMN_INDEX, 400) };
+            // SAFETY: list is live and returns its borrowed Header child HWND.
+            let header = unsafe { SendMessageW(list, LVM_GETHEADER, 0, 0) } as HWND;
+            let mut double_click = NMHEADERW {
+                hdr: NMHDR {
+                    hwndFrom: header,
+                    idFrom: 0,
+                    code: HDN_DIVIDERDBLCLICKW,
+                },
+                iItem: NATIVE_STATUS_COLUMN_INDEX as i32,
+                // SAFETY: the remaining notification fields are unused by the
+                // fixed-column handler and have valid null/zero representations.
+                ..unsafe { zeroed() }
+            };
+            assert_eq!(
+                handle_fixed_status_header_double_click(
+                    list,
+                    header,
+                    192,
+                    (&raw mut double_click) as LPARAM,
+                ),
+                Some(1)
+            );
+            // SAFETY: list is live and the message returns one integral width.
+            let restored_width =
+                unsafe { SendMessageW(list, LVM_GETCOLUMNWIDTH, NATIVE_STATUS_COLUMN_INDEX, 0) };
+            assert_eq!(
+                restored_width,
+                scale_dip(NATIVE_STATUS_COLUMN_WIDTH_DIP, 192) as isize
+            );
             let row = RenderedRow {
                 values: core::array::from_fn(|column| {
                     if column == NATIVE_STATUS_COLUMN_INDEX {
