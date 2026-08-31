@@ -72,6 +72,21 @@ journal or mutation. After begin it is observed only between complete primitive
 steps and uses the same durable reverse-order rollback. Cancellation is ignored
 from `Prepared` through rename reconciliation and throughout rollback.
 
+## Release panic policy
+
+The root `Cargo.toml` `[profile.release]` is the canonical panic policy. Release
+builds use `panic = "abort"`: an unexpected Rust panic terminates the process
+instead of unwinding into same-process UI recovery. Expected input, resource,
+and I/O failures remain explicit `Result` paths and do not rely on panic
+handling.
+
+Worker `catch_unwind` and `Panicked` result branches provide supplemental
+diagnostics only in unwind-enabled development and test builds. They are not a
+release guarantee. If a release panic occurs after journal creation or
+activation, recovery is delegated to the next launch's retained-journal
+discovery and reconciliation. The terminated process makes no claim that it
+rolled back or cleaned up uncertain journal evidence.
+
 ## Startup recovery and corrupt evidence
 
 Startup first holds an exclusive runtime lock, then opens both fixed journal
