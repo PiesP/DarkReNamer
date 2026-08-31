@@ -31,6 +31,7 @@ const BACKSLASH: u16 = b'\\' as u16;
 const DOT: u16 = b'.' as u16;
 const CR: u16 = b'\r' as u16;
 const LF: u16 = b'\n' as u16;
+const APPEND_INDEX_CHUNK_CAPACITY: usize = 128;
 
 /// An owned string with the same indexing unit as MFC `CString` in the
 /// original `_UNICODE` build.
@@ -386,7 +387,19 @@ pub struct LegacyAppendIndex<F> {
     compare_text: F,
     model_identity: Weak<()>,
     source_revision: u64,
-    sorted_sources: Vec<LegacyText>,
+    chunks: Vec<Vec<LegacyText>>,
+    #[cfg(test)]
+    test_metrics: AppendIndexTestMetrics,
+    #[cfg(test)]
+    fail_cache_update_after: Option<usize>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct AppendIndexTestMetrics {
+    source_relocations: usize,
+    maximum_source_relocations: usize,
+    outer_chunk_moves: usize,
 }
 
 impl<F> LegacyAppendIndex<F> {
@@ -397,7 +410,11 @@ impl<F> LegacyAppendIndex<F> {
             compare_text,
             model_identity: Weak::new(),
             source_revision: 0,
-            sorted_sources: Vec::new(),
+            chunks: Vec::new(),
+            #[cfg(test)]
+            test_metrics: AppendIndexTestMetrics::default(),
+            #[cfg(test)]
+            fail_cache_update_after: None,
         }
     }
 
@@ -413,6 +430,41 @@ impl<F> LegacyAppendIndex<F> {
         self.model_identity = Arc::downgrade(&list.identity);
         self.source_revision = list.source_revision;
     }
+
+    fn clear_binding(&mut self) {
+        self.model_identity = Weak::new();
+        self.source_revision = 0;
+        self.chunks.clear();
+    }
+
+    #[cfg(test)]
+    fn reset_test_metrics(&mut self) {
+        self.test_metrics = AppendIndexTestMetrics::default();
+    }
+
+    #[cfg(test)]
+    fn record_source_relocations(&mut self, relocations: usize) {
+        self.test_metrics.source_relocations = self
+            .test_metrics
+            .source_relocations
+            .saturating_add(relocations);
+        self.test_metrics.maximum_source_relocations = self
+            .test_metrics
+            .maximum_source_relocations
+            .max(relocations);
+    }
+
+    #[cfg(not(test))]
+    fn record_source_relocations(&mut self, _relocations: usize) {}
+
+    #[cfg(test)]
+    fn record_outer_chunk_moves(&mut self, moves: usize) {
+        self.test_metrics.outer_chunk_moves =
+            self.test_metrics.outer_chunk_moves.saturating_add(moves);
+    }
+
+    #[cfg(not(test))]
+    fn record_outer_chunk_moves(&mut self, _moves: usize) {}
 }
 
 impl<F> fmt::Debug for LegacyAppendIndex<F> {
@@ -420,9 +472,138 @@ impl<F> fmt::Debug for LegacyAppendIndex<F> {
         formatter
             .debug_struct("LegacyAppendIndex")
             .field("source_revision", &self.source_revision)
-            .field("sorted_sources", &self.sorted_sources)
+            .field("chunks", &self.chunks)
             .finish_non_exhaustive()
     }
+}
+
+impl<F> LegacyAppendIndex<F>
+where
+    F: Fn(&LegacyText, &LegacyText) -> Ordering,
+{
+    fn contains(&self, source: &LegacyText) -> bool {
+        source_chunks_contain(&self.chunks, &self.compare_text, source)
+    }
+
+    fn insertion_location(&self, source: &LegacyText) -> (usize, usize) {
+        let chunk_index = self.chunks.partition_point(|chunk| {
+            let Some(last) = chunk.last() else {
+                return true;
+            };
+            (self.compare_text)(last, source) == Ordering::Less
+        });
+        if chunk_index == self.chunks.len() {
+            return self.chunks.last().map_or((0, 0), |last| {
+                if last.len() < APPEND_INDEX_CHUNK_CAPACITY {
+                    (self.chunks.len() - 1, last.len())
+                } else {
+                    (self.chunks.len(), 0)
+                }
+            });
+        }
+        let position = self.chunks[chunk_index]
+            .binary_search_by(|existing| (self.compare_text)(existing, source))
+            .unwrap_or_else(|position| position);
+        (chunk_index, position)
+    }
+
+    fn try_insert_source(&mut self, source: LegacyText) -> Result<(), ProposalMutationError> {
+        #[cfg(test)]
+        if let Some(remaining) = &mut self.fail_cache_update_after {
+            if *remaining == 0 {
+                return Err(ProposalMutationError::AllocationFailed);
+            }
+            *remaining -= 1;
+        }
+
+        let (chunk_index, position) = self.insertion_location(&source);
+        if chunk_index == self.chunks.len() {
+            let mut chunk = Vec::new();
+            chunk
+                .try_reserve_exact(APPEND_INDEX_CHUNK_CAPACITY)
+                .map_err(|_| ProposalMutationError::AllocationFailed)?;
+            self.chunks
+                .try_reserve(1)
+                .map_err(|_| ProposalMutationError::AllocationFailed)?;
+            chunk.push(source);
+            self.chunks.push(chunk);
+            return Ok(());
+        }
+
+        if self.chunks[chunk_index].len() < APPEND_INDEX_CHUNK_CAPACITY {
+            let relocations = self.chunks[chunk_index].len() - position;
+            self.chunks[chunk_index].insert(position, source);
+            self.record_source_relocations(relocations);
+            return Ok(());
+        }
+
+        let split_at = APPEND_INDEX_CHUNK_CAPACITY / 2;
+        let mut right = Vec::new();
+        right
+            .try_reserve_exact(APPEND_INDEX_CHUNK_CAPACITY)
+            .map_err(|_| ProposalMutationError::AllocationFailed)?;
+        self.chunks
+            .try_reserve(1)
+            .map_err(|_| ProposalMutationError::AllocationFailed)?;
+
+        right.extend(self.chunks[chunk_index].drain(split_at..));
+        let split_relocations = right.len();
+        let outer_moves = self.chunks.len() - chunk_index - 1;
+        self.chunks.insert(chunk_index + 1, right);
+        self.record_outer_chunk_moves(outer_moves);
+
+        let (target_chunk, target_position) = if position < split_at {
+            (chunk_index, position)
+        } else {
+            (chunk_index + 1, position - split_at)
+        };
+        let relocations = split_relocations + self.chunks[target_chunk].len() - target_position;
+        self.chunks[target_chunk].insert(target_position, source);
+        self.record_source_relocations(relocations);
+        Ok(())
+    }
+}
+
+fn source_chunks_contain<F>(
+    chunks: &[Vec<LegacyText>],
+    compare_text: &F,
+    source: &LegacyText,
+) -> bool
+where
+    F: Fn(&LegacyText, &LegacyText) -> Ordering,
+{
+    let chunk_index = chunks.partition_point(|chunk| {
+        let Some(last) = chunk.last() else {
+            return true;
+        };
+        compare_text(last, source) == Ordering::Less
+    });
+    chunks.get(chunk_index).is_some_and(|chunk| {
+        chunk
+            .binary_search_by(|existing| compare_text(existing, source))
+            .is_ok()
+    })
+}
+
+fn try_chunk_sorted_sources(
+    sorted_sources: Vec<LegacyText>,
+) -> Result<Vec<Vec<LegacyText>>, ProposalMutationError> {
+    let chunk_count = sorted_sources.len().div_ceil(APPEND_INDEX_CHUNK_CAPACITY);
+    let mut chunks = Vec::new();
+    chunks
+        .try_reserve_exact(chunk_count)
+        .map_err(|_| ProposalMutationError::AllocationFailed)?;
+    let mut sources = sorted_sources.into_iter();
+    while let Some(first) = sources.next() {
+        let mut chunk = Vec::new();
+        chunk
+            .try_reserve_exact(APPEND_INDEX_CHUNK_CAPACITY)
+            .map_err(|_| ProposalMutationError::AllocationFailed)?;
+        chunk.push(first);
+        chunk.extend(sources.by_ref().take(APPEND_INDEX_CHUNK_CAPACITY - 1));
+        chunks.push(chunk);
+    }
+    Ok(chunks)
 }
 
 /// Ordered, cumulative DarkNamer list state.
@@ -623,8 +804,8 @@ impl LegacyList {
     /// # Errors
     ///
     /// Returns [`ProposalMutationError`] under the same conditions as
-    /// [`LegacyList::append_batch_indexed`]. The list and index retain their
-    /// logical contents on error.
+    /// [`LegacyList::append_batch_indexed`]. The list remains unchanged on
+    /// error; the derived index remains valid or is cleared for a later rebuild.
     pub fn append_indexed<F>(
         &mut self,
         index: &mut LegacyAppendIndex<F>,
@@ -648,8 +829,9 @@ impl LegacyList {
     ///
     /// Returns [`ProposalMutationError`] if rebuilding or extending the index
     /// cannot be staged, a proposal budget would be exceeded, checked size
-    /// arithmetic overflows, or another bounded allocation fails. The list and
-    /// index retain their logical contents on error.
+    /// arithmetic overflows, or another bounded allocation fails. The list
+    /// remains unchanged on error. A cache-update allocation failure clears the
+    /// derived index so a later call transparently rebuilds it.
     pub fn append_batch_indexed<F>(
         &mut self,
         index: &mut LegacyAppendIndex<F>,
@@ -658,7 +840,7 @@ impl LegacyList {
     where
         F: Fn(&LegacyText, &LegacyText) -> Ordering,
     {
-        let mut rebuilt_sources = if index.is_current_for(self) {
+        let rebuilt_chunks = if index.is_current_for(self) {
             None
         } else {
             let mut rebuilt = Vec::new();
@@ -669,15 +851,15 @@ impl LegacyList {
                 rebuilt.push(try_clone_text(item.source_path())?);
             }
             rebuilt.sort_unstable_by(|left, right| (index.compare_text)(left, right));
-            Some(rebuilt)
+            Some(try_chunk_sorted_sources(rebuilt)?)
         };
-        let existing_sources = rebuilt_sources.as_deref().unwrap_or(&index.sorted_sources);
 
         let mut accepted = Vec::new();
         for item in items {
-            let duplicate_existing = existing_sources
-                .binary_search_by(|existing| (index.compare_text)(existing, item.source_path()))
-                .is_ok();
+            let duplicate_existing = rebuilt_chunks.as_ref().map_or_else(
+                || index.contains(item.source_path()),
+                |chunks| source_chunks_contain(chunks, &index.compare_text, item.source_path()),
+            );
             if duplicate_existing {
                 continue;
             }
@@ -689,8 +871,8 @@ impl LegacyList {
         }
 
         if accepted.is_empty() {
-            if let Some(rebuilt) = rebuilt_sources {
-                index.sorted_sources = rebuilt;
+            if let Some(rebuilt) = rebuilt_chunks {
+                index.chunks = rebuilt;
                 index.bind_to(self);
             }
             return Ok(0);
@@ -735,33 +917,20 @@ impl LegacyList {
         self.items
             .try_reserve_exact(count)
             .map_err(|_| ProposalMutationError::AllocationFailed)?;
-        if let Some(rebuilt) = &mut rebuilt_sources {
-            rebuilt
-                .try_reserve_exact(count)
-                .map_err(|_| ProposalMutationError::AllocationFailed)?;
-        } else {
-            index
-                .sorted_sources
-                .try_reserve_exact(count)
-                .map_err(|_| ProposalMutationError::AllocationFailed)?;
+        if let Some(rebuilt) = rebuilt_chunks {
+            index.chunks = rebuilt;
         }
 
-        let sorted_sources = rebuilt_sources
-            .as_mut()
-            .unwrap_or(&mut index.sorted_sources);
         for source in staged_sources {
-            let position = sorted_sources
-                .binary_search_by(|existing| (index.compare_text)(existing, &source))
-                .unwrap_or_else(|position| position);
-            sorted_sources.insert(position, source);
+            if let Err(error) = index.try_insert_source(source) {
+                index.clear_binding();
+                return Err(error);
+            }
         }
-        if let Some(rebuilt) = rebuilt_sources {
-            index.sorted_sources = rebuilt;
-        }
+        self.invalidate_source_index();
         self.items
             .extend(accepted.into_iter().map(|(_, item)| item));
         self.proposed_name_utf16_units = requested_units;
-        self.invalidate_source_index();
         index.bind_to(self);
         Ok(count)
     }
@@ -1924,4 +2093,140 @@ fn export_lines<'a>(lines: impl IntoIterator<Item = &'a LegacyText>) -> LegacyTe
         exported.push_unit(LF);
     }
     exported
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    fn item(path: String) -> LegacyListItem {
+        LegacyListItem::new(path, false, 0, 0, 0)
+    }
+
+    fn assert_bounded_chunks<F>(index: &LegacyAppendIndex<F>, source_count: usize)
+    where
+        F: Fn(&LegacyText, &LegacyText) -> Ordering,
+    {
+        assert_eq!(
+            index.chunks.iter().map(Vec::len).sum::<usize>(),
+            source_count
+        );
+        assert!(
+            index
+                .chunks
+                .iter()
+                .all(|chunk| !chunk.is_empty() && chunk.len() <= APPEND_INDEX_CHUNK_CAPACITY)
+        );
+        let maximum_chunks = source_count
+            .div_ceil(APPEND_INDEX_CHUNK_CAPACITY)
+            .saturating_mul(2)
+            .saturating_add(2);
+        assert!(index.chunks.len() <= maximum_chunks);
+        let mut previous = None;
+        for source in index.chunks.iter().flatten() {
+            if let Some(previous) = previous {
+                assert_ne!((index.compare_text)(previous, source), Ordering::Greater);
+            }
+            previous = Some(source);
+        }
+    }
+
+    #[test]
+    fn front_batch_insertions_bound_source_relocations_to_chunk_size() {
+        let comparisons = Cell::new(0_usize);
+        let compare = |left: &LegacyText, right: &LegacyText| {
+            comparisons.set(comparisons.get() + 1);
+            left.units().cmp(right.units())
+        };
+        let mut index = LegacyAppendIndex::new(compare);
+        let mut list = LegacyList::new();
+        let existing = (0..5_000).map(|value| item(format!(r"C:\z\{value:05}.txt")));
+        assert_eq!(list.append_batch_indexed(&mut index, existing), Ok(5_000));
+        comparisons.set(0);
+        index.reset_test_metrics();
+
+        let incoming = (0..5_000)
+            .rev()
+            .map(|value| item(format!(r"C:\a\{value:05}.txt")));
+        assert_eq!(list.append_batch_indexed(&mut index, incoming), Ok(5_000));
+
+        let metrics = index.test_metrics;
+        eprintln!(
+            "front 5k+5k: {} comparisons, {} source relocations, {} outer chunk moves, {} chunks",
+            comparisons.get(),
+            metrics.source_relocations,
+            metrics.outer_chunk_moves,
+            index.chunks.len()
+        );
+        assert!(comparisons.get() < 300_000);
+        assert!(metrics.maximum_source_relocations <= APPEND_INDEX_CHUNK_CAPACITY);
+        assert!(
+            metrics.source_relocations <= 5_000_usize.saturating_mul(APPEND_INDEX_CHUNK_CAPACITY)
+        );
+        assert!(metrics.outer_chunk_moves < 100_000);
+        assert_bounded_chunks(&index, 10_000);
+    }
+
+    #[test]
+    fn reverse_single_insertions_remain_bounded_by_chunk_size() {
+        let comparisons = Cell::new(0_usize);
+        let compare = |left: &LegacyText, right: &LegacyText| {
+            comparisons.set(comparisons.get() + 1);
+            left.units().cmp(right.units())
+        };
+        let mut index = LegacyAppendIndex::new(compare);
+        let mut list = LegacyList::new();
+
+        for value in (0..5_000).rev() {
+            assert_eq!(
+                list.append_indexed(&mut index, item(format!(r"C:\r\{value:05}.txt"))),
+                Ok(true)
+            );
+        }
+
+        let metrics = index.test_metrics;
+        eprintln!(
+            "reverse 5k singles: {} comparisons, {} source relocations, {} outer chunk moves, {} chunks",
+            comparisons.get(),
+            metrics.source_relocations,
+            metrics.outer_chunk_moves,
+            index.chunks.len()
+        );
+        assert!(comparisons.get() < 150_000);
+        assert!(metrics.maximum_source_relocations <= APPEND_INDEX_CHUNK_CAPACITY);
+        assert!(
+            metrics.source_relocations <= 5_000_usize.saturating_mul(APPEND_INDEX_CHUNK_CAPACITY)
+        );
+        assert!(metrics.outer_chunk_moves < 100_000);
+        assert_bounded_chunks(&index, 5_000);
+    }
+
+    #[test]
+    fn cache_update_allocation_failure_clears_partial_index_before_retry() {
+        let mut index = LegacyAppendIndex::new(LegacyText::case_insensitive_cmp);
+        let mut list = LegacyList::new();
+        let existing = (0..100).map(|value| item(format!(r"C:\old\{value:03}.txt")));
+        assert_eq!(list.append_batch_indexed(&mut index, existing), Ok(100));
+        let incoming = (0..10)
+            .map(|value| item(format!(r"C:\new\{value:03}.txt")))
+            .collect::<Vec<_>>();
+        let before = list.clone();
+        let before_units = list.proposed_name_utf16_units();
+        index.fail_cache_update_after = Some(3);
+
+        assert_eq!(
+            list.append_batch_indexed(&mut index, incoming.clone()),
+            Err(ProposalMutationError::AllocationFailed)
+        );
+        assert_eq!(list, before);
+        assert_eq!(list.proposed_name_utf16_units(), before_units);
+        assert!(index.chunks.is_empty());
+        assert!(!index.is_current_for(&list));
+
+        index.fail_cache_update_after = None;
+        assert_eq!(list.append_batch_indexed(&mut index, incoming), Ok(10));
+        assert_bounded_chunks(&index, 110);
+    }
 }
