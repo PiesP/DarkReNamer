@@ -324,6 +324,36 @@ fn torn_candidates_are_neither_physically_empty_nor_complete_intent()
     Ok(())
 }
 
+#[test]
+fn active_terminal_prefix_with_torn_next_frame_header_is_not_deletable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let Some(root) = supported_journal_root(directory.path())? else {
+        return Ok(());
+    };
+    let path = directory.path().join("active.drj");
+    let mut records = complete_records();
+    let terminal_bytes = encode_journal_records(&records)?.len();
+    records.push(JournalRecord::Prepared {
+        step: 0,
+        direction: JournalDirection::Forward,
+    });
+    let mut bytes = encode_journal_records(&records)?;
+    bytes.truncate(terminal_bytes + 8);
+    fs::write(path, bytes)?;
+
+    let mut journal = FileJournal::open_existing(&root, "active.drj")?;
+    assert_eq!(
+        journal.tail_issue(),
+        Some(JournalTailIssue::TruncatedHeader)
+    );
+    assert!(matches!(
+        journal.mark_delete_if_safe(),
+        Err(error) if error.kind == FileJournalErrorKind::UnsafeCleanupState
+    ));
+    Ok(())
+}
+
 #[cfg(windows)]
 #[test]
 fn intent_candidate_discard_requires_active_absence_and_deletes_by_retained_handle()
