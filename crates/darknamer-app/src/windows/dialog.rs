@@ -342,8 +342,7 @@ pub(super) fn prompt_input(
         ShowWindow(dialog, SW_SHOW);
         UpdateWindow(dialog);
     }
-    // SAFETY: MSG is a C-compatible structure for which all-zero is a valid pre-GetMessageW state.
-    let mut message: MSG = unsafe { zeroed() };
+    let mut message = MSG::default();
     while !state.done {
         // SAFETY: message is writable MSG storage outliving GetMessageW; null HWND requests this thread queue.
         let status = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };

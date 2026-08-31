@@ -4024,6 +4024,10 @@ fn selection_command_state_changed(changed: u32, old_state: u32, new_state: u32)
 }
 
 #[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "the native Win32 UI boundary audits raw handles, callback pointers, and FFI lifetimes"
+)]
 mod windows;
 
 /// Runs the native application.

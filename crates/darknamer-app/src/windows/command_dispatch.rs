@@ -173,9 +173,7 @@ pub(super) fn select_rows_with_focus(list: HWND, rows: &[usize], focused: Option
                 } else {
                     0
                 },
-            // SAFETY: LVITEMW is C-compatible; zero initializes the unused pointer
-            // fields before stateMask/state are passed synchronously for this row.
-            ..unsafe { zeroed() }
+            ..LVITEMW::default()
         };
         // SAFETY: list is live and item is writable LVITEMW storage retained until
         // synchronous LVM_SETITEMSTATE returns.
@@ -941,8 +939,7 @@ pub(super) fn clear_selection(list: HWND) {
     let mut item = LVITEMW {
         stateMask: LVIS_SELECTED | LVIS_FOCUSED,
         state: 0,
-        // SAFETY: LVITEMW is C-compatible; zero initializes optional fields before its explicit message fields are set.
-        ..unsafe { zeroed() }
+        ..LVITEMW::default()
     };
     // SAFETY: list is live and item remains writable LVITEMW storage through the
     // synchronous all-items LVM_SETITEMSTATE call.

@@ -4,6 +4,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
 use std::io::{self, Read};
+use std::mem::size_of;
 use std::path::{Path, PathBuf};
 
 use darknamer_core::{LegacyListItem, LegacyText};
@@ -16,6 +17,75 @@ pub const MAX_ADMITTED_SOURCES: usize = 10_000;
 pub const MAX_ADMISSION_DEPTH: usize = 256;
 /// Maximum imported text bytes read into memory.
 pub const MAX_IMPORT_BYTES: usize = 2 * 1024 * 1024;
+/// Aggregate UTF-16 bytes retained for all admitted source paths.
+///
+/// Four MiB keeps 10,000 ordinary paths practical while leaving substantial
+/// headroom below the separate 16 MiB journal Intent-frame rejection boundary.
+pub const MAX_ADMITTED_PATH_BYTES: usize = 4 * 1024 * 1024;
+
+/// Outcome of reserving one encoded source path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PathBudgetReservation {
+    /// The complete path fits and its bytes are now reserved.
+    Reserved,
+    /// The complete path would exceed the remaining aggregate budget.
+    Exhausted,
+}
+
+/// Remaining aggregate UTF-16 source-path budget.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PathBudget {
+    remaining_bytes: usize,
+}
+
+impl PathBudget {
+    /// Creates the full application source-path budget.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            remaining_bytes: MAX_ADMITTED_PATH_BYTES,
+        }
+    }
+
+    /// Creates a budget from an already-derived remaining byte count.
+    #[must_use]
+    pub const fn from_remaining_bytes(remaining_bytes: usize) -> Self {
+        Self {
+            remaining_bytes: if remaining_bytes < MAX_ADMITTED_PATH_BYTES {
+                remaining_bytes
+            } else {
+                MAX_ADMITTED_PATH_BYTES
+            },
+        }
+    }
+
+    /// Returns the bytes still available for complete encoded paths.
+    #[must_use]
+    pub const fn remaining_bytes(self) -> usize {
+        self.remaining_bytes
+    }
+
+    /// Reserves one complete path measured in UTF-16 code units.
+    pub fn reserve_utf16_units(&mut self, units: usize) -> PathBudgetReservation {
+        let Some(bytes) = units.checked_mul(size_of::<u16>()) else {
+            self.remaining_bytes = 0;
+            return PathBudgetReservation::Exhausted;
+        };
+        if bytes > self.remaining_bytes {
+            self.remaining_bytes = 0;
+            PathBudgetReservation::Exhausted
+        } else {
+            self.remaining_bytes -= bytes;
+            PathBudgetReservation::Reserved
+        }
+    }
+}
+
+impl Default for PathBudget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Bounded count selected from an external picker/drop report.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,6 +178,8 @@ pub enum AdmissionIssueKind {
     RepeatedDirectory,
     /// Directory nesting exceeded the bounded admission depth.
     DepthExceeded,
+    /// Retaining the encoded source path would exceed the aggregate byte budget.
+    PathBudgetExceeded,
 }
 
 /// One path-scoped admission issue.
@@ -304,7 +376,7 @@ impl AdmissionReport {
                 .count()
         };
         let mut summary = format!(
-            "{}개 추가, {}개 제외/중단 (상대경로 {}, 메타데이터 {}, 폴더읽기 {}, 재분석지점 {}, 한도 {}, 반복폴더 {}, 깊이 {})",
+            "{}개 추가, {}개 제외/중단 (상대경로 {}, 메타데이터 {}, 폴더읽기 {}, 재분석지점 {}, 개수 한도 {}, 반복폴더 {}, 깊이 {}, 경로 용량 {})",
             appended,
             self.issues.len(),
             count(AdmissionIssueKind::RelativePath),
@@ -314,6 +386,7 @@ impl AdmissionReport {
             count(AdmissionIssueKind::LimitReached),
             count(AdmissionIssueKind::RepeatedDirectory),
             count(AdmissionIssueKind::DepthExceeded),
+            count(AdmissionIssueKind::PathBudgetExceeded),
         );
         let codes = self
             .issues
@@ -446,9 +519,35 @@ pub fn collect_admission(
 /// when the caller requests cancellation.
 pub fn collect_admission_cancellable(
     adapter: &dyn AdmissionAdapter,
+    roots: Vec<PathBuf>,
+    mode: AdmissionMode,
+    capacity: usize,
+    compare_paths: impl Fn(&Path, &Path) -> Ordering + Copy,
+    cancellation_requested: impl Fn() -> bool,
+) -> Result<AdmissionReport, AdmissionCancelled> {
+    collect_admission_cancellable_with_budget(
+        adapter,
+        roots,
+        mode,
+        capacity,
+        PathBudget::new(),
+        compare_paths,
+        cancellation_requested,
+    )
+}
+
+/// Collects sources with an aggregate budget already reduced by retained rows.
+///
+/// # Errors
+///
+/// Returns [`AdmissionCancelled`] without manufacturing a path-scoped issue
+/// when the caller requests cancellation.
+pub fn collect_admission_cancellable_with_budget(
+    adapter: &dyn AdmissionAdapter,
     mut roots: Vec<PathBuf>,
     mode: AdmissionMode,
     capacity: usize,
+    mut path_budget: PathBudget,
     compare_paths: impl Fn(&Path, &Path) -> Ordering + Copy,
     cancellation_requested: impl Fn() -> bool,
 ) -> Result<AdmissionReport, AdmissionCancelled> {
@@ -581,8 +680,17 @@ pub fn collect_admission_cancellable(
                 continue;
             }
         }
+        let legacy_path = adapter.legacy_path(&path);
+        if path_budget.reserve_utf16_units(legacy_path.units().len())
+            == PathBudgetReservation::Exhausted
+        {
+            report
+                .issues
+                .push(issue(path, AdmissionIssueKind::PathBudgetExceeded, None));
+            break;
+        }
         report.items.push(LegacyListItem::new_with_actual_size(
-            adapter.legacy_path(&path),
+            legacy_path,
             metadata.is_directory,
             metadata.actual_size as u32,
             metadata.actual_size,

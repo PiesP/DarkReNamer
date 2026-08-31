@@ -1,15 +1,18 @@
-use std::cell::Cell;
+use std::cell::{Cell, UnsafeCell};
 use std::collections::HashMap;
 use std::env;
 use std::ffi::c_void;
 use std::fs;
 use std::io;
-use std::mem::{size_of, zeroed};
+use std::marker::PhantomData;
+use std::mem::size_of;
 use std::num::NonZeroIsize;
-use std::os::windows::ffi::OsStringExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::ptr::NonNull;
 use std::ptr::{null, null_mut};
+use std::rc::Rc;
 use std::slice;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -17,9 +20,9 @@ use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
 use std::thread::{self, JoinHandle};
 
 use crate::admission::{
-    AdmissionAdapter, AdmissionMode, AdmissionReport, MAX_ADMITTED_SOURCES,
-    WindowsAdmissionAdapter, bounded_import_lines, bounded_selection,
-    collect_admission_cancellable,
+    AdmissionAdapter, AdmissionMode, AdmissionReport, MAX_ADMITTED_SOURCES, PathBudget,
+    PathBudgetReservation, WindowsAdmissionAdapter, bounded_import_lines, bounded_selection,
+    collect_admission_cancellable_with_budget,
 };
 use crate::icon_cache::{IconCacheKey, icon_cache_key};
 use crate::preferences::{
@@ -103,7 +106,10 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::Graphics::Gdi::{GetBkColor, GetObjectType, GetTextColor, OBJ_BRUSH};
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
-use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, MOVEFILE_REPLACE_EXISTING,
+    MOVEFILE_WRITE_THROUGH, MoveFileExW,
+};
 use windows_sys::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, STGMEDIUM, TYMED_HGLOBAL};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Ole::{
@@ -216,8 +222,165 @@ const WM_APP_APPEARANCE_ARM: u32 = WM_APP + 0x4B;
 const WM_APP_LAYOUT: u32 = WM_APP + 0x4C;
 const WM_APP_EMPTY_SAFETY_COPY: u32 = WM_APP + 0x4D;
 const WM_APP_APPEARANCE_RESTORE_FOCUS: u32 = WM_APP + 0x4E;
+const WM_APP_FINISH_CLOSE: u32 = WM_APP + 0x4F;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 const PREFERENCES_POLL_TIMER_ID: usize = 0xD4A2;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CallbackStateStatus {
+    Available,
+    Leased,
+    ReclaimPending,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReclaimDisposition {
+    Reclaimed,
+    Deferred,
+}
+
+/// Owns callback state separately from the lease cell used to guard it.
+///
+/// Windows publishes a raw pointer to this allocation. Callback entry first
+/// touches only `status`; it does not create a reference to `value` unless the
+/// lease changes from `Available` to `Leased`. All access is confined to the UI
+/// thread.
+struct CallbackState<T, R = ()> {
+    status: Cell<CallbackStateStatus>,
+    retirement: UnsafeCell<Option<R>>,
+    value: UnsafeCell<T>,
+}
+
+struct CallbackStateLease<T, R = ()> {
+    slot: NonNull<CallbackState<T, R>>,
+    _ui_thread_only: PhantomData<Rc<()>>,
+}
+
+impl<T, R> CallbackState<T, R> {
+    fn into_raw(value: T) -> *mut Self {
+        Box::into_raw(Box::new(Self {
+            status: Cell::new(CallbackStateStatus::Available),
+            retirement: UnsafeCell::new(None),
+            value: UnsafeCell::new(value),
+        }))
+    }
+
+    unsafe fn try_lease(slot: *mut Self) -> Option<CallbackStateLease<T, R>> {
+        let slot = NonNull::new(slot)?;
+        // SAFETY: the caller guarantees that `slot` is either the currently
+        // published allocation or a still-live allocation whose reclamation is
+        // pending on its sole lease. `status` is disjoint from `value`.
+        let status = unsafe { &*std::ptr::addr_of!((*slot.as_ptr()).status) };
+        if status.get() != CallbackStateStatus::Available {
+            return None;
+        }
+        status.set(CallbackStateStatus::Leased);
+        Some(CallbackStateLease {
+            slot,
+            _ui_thread_only: PhantomData,
+        })
+    }
+
+    unsafe fn request_reclaim(slot: *mut Self) -> ReclaimDisposition {
+        let Some(slot) = NonNull::new(slot) else {
+            return ReclaimDisposition::Deferred;
+        };
+        // SAFETY: the caller has unpublished this UI-thread-owned allocation,
+        // so no new callback can acquire it. A pending outer lease keeps the
+        // allocation live until `CallbackStateLease::drop`.
+        let previous = {
+            // SAFETY: the slot remains live until the state transition decides
+            // whether reclamation is immediate or deferred.
+            let status = unsafe { &*std::ptr::addr_of!((*slot.as_ptr()).status) };
+            status.replace(CallbackStateStatus::ReclaimPending)
+        };
+        match previous {
+            CallbackStateStatus::Available => {
+                // SAFETY: publication was cleared and no lease exists. This is
+                // the allocation's unique immediate reclamation path.
+                unsafe { drop(Box::from_raw(slot.as_ptr())) };
+                ReclaimDisposition::Reclaimed
+            }
+            CallbackStateStatus::Leased | CallbackStateStatus::ReclaimPending => {
+                ReclaimDisposition::Deferred
+            }
+        }
+    }
+
+    unsafe fn install_retirement(slot: *mut Self, retirement: R) -> Result<(), R> {
+        let Some(slot) = NonNull::new(slot) else {
+            return Err(retirement);
+        };
+        // SAFETY: the caller owns this UI-thread slot and accesses only the
+        // sidecar UnsafeCell, which is disjoint from any leased state value.
+        let sidecar = unsafe { &mut *(*slot.as_ptr()).retirement.get() };
+        if sidecar.is_some() {
+            Err(retirement)
+        } else {
+            *sidecar = Some(retirement);
+            Ok(())
+        }
+    }
+
+    unsafe fn take_retirement(slot: *mut Self) -> Option<R> {
+        let slot = NonNull::new(slot)?;
+        // SAFETY: all access is serialized on the owning UI thread and touches
+        // only the sidecar UnsafeCell, never the possibly leased state value.
+        unsafe { (&mut *(*slot.as_ptr()).retirement.get()).take() }
+    }
+}
+
+impl<T, R> CallbackStateLease<T, R> {
+    fn state(&self) -> &T {
+        // SAFETY: this lease is the only lease for `value`, and shared access is
+        // bounded by this borrow of the lease.
+        unsafe { &*(*self.slot.as_ptr()).value.get() }
+    }
+
+    fn state_mut(&mut self) -> &mut T {
+        // SAFETY: this lease is the only lease for `value`, and mutable access is
+        // bounded by this exclusive borrow of the lease.
+        unsafe { &mut *(*self.slot.as_ptr()).value.get() }
+    }
+}
+
+impl<T, R> Drop for CallbackStateLease<T, R> {
+    fn drop(&mut self) {
+        // SAFETY: the slot remains live for the duration of its sole lease.
+        let reclaim = {
+            // SAFETY: the slot remains live until this sole lease decides
+            // whether it must perform deferred reclamation.
+            let status = unsafe { &*std::ptr::addr_of!((*self.slot.as_ptr()).status) };
+            match status.replace(CallbackStateStatus::Available) {
+                CallbackStateStatus::Leased => false,
+                CallbackStateStatus::ReclaimPending => true,
+                CallbackStateStatus::Available => false,
+            }
+        };
+        if reclaim {
+            // SAFETY: reclamation was requested after publication was cleared,
+            // and this is the sole lease ending, so exactly one owner remains.
+            unsafe { drop(Box::from_raw(self.slot.as_ptr())) };
+        }
+    }
+}
+
+type AppStateSlot = CallbackState<AppState, DropTargetRegistrations>;
+
+fn app_state_slot(window: HWND) -> *mut AppStateSlot {
+    if window.is_null() {
+        return null_mut();
+    }
+    // SAFETY: this value query reads only the slot pointer published for this
+    // exact window and creates no Rust reference.
+    unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) as *mut AppStateSlot }
+}
+
+fn try_app_state(window: HWND) -> Option<CallbackStateLease<AppState, DropTargetRegistrations>> {
+    // SAFETY: GWLP_USERDATA is cleared before reclamation, and all callbacks
+    // accessing it are confined to the owning UI thread.
+    unsafe { CallbackState::try_lease(app_state_slot(window)) }
+}
 
 struct AppState {
     list_window: HWND,
@@ -233,7 +396,6 @@ struct AppState {
     status_font: OwnedFont,
     left_rail: Option<CommandRail>,
     right_rail: Option<CommandRail>,
-    drop_registrations: Option<DropTargetRegistrations>,
     model: LegacyList,
     shown_columns: [bool; 4],
     column_states: [ColumnState; 7],
@@ -325,7 +487,6 @@ impl AppState {
             status_font: OwnedFont::default(),
             left_rail: None,
             right_rail: None,
-            drop_registrations: None,
             model: LegacyList::new(),
             shown_columns: shown_columns(&column_states),
             column_states,
@@ -556,9 +717,113 @@ const fn int_resource(id: u16) -> *const u16 {
     id as usize as *const u16
 }
 
+pub(crate) fn atomic_replace_preferences(source: &Path, destination: &Path) -> io::Result<()> {
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(core::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(core::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both paths are owned, NUL-terminated UTF-16 buffers retained for
+    // this synchronous call; the source is the exact same-directory temp file
+    // created by this process and the destination is the settings leaf.
+    if unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct CallbackDropProbe(Rc<Cell<usize>>);
+
+    impl Drop for CallbackDropProbe {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    #[test]
+    fn callback_state_rejects_nested_entry_and_defers_one_reclamation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state_drops = Rc::new(Cell::new(0));
+        let retirement_drops = Rc::new(Cell::new(0));
+        let slot: *mut CallbackState<CallbackDropProbe, CallbackDropProbe> =
+            CallbackState::into_raw(CallbackDropProbe(Rc::clone(&state_drops)));
+        // SAFETY: the test owns the live, UI-thread-confined slot.
+        let outer = unsafe { CallbackState::try_lease(slot) }
+            .ok_or_else(|| io::Error::other("outer callback lease was rejected"))?;
+        // SAFETY: installation touches only the sidecar disjoint from the
+        // actively leased state value.
+        unsafe {
+            CallbackState::install_retirement(slot, CallbackDropProbe(Rc::clone(&retirement_drops)))
+        }
+        .map_err(|_retirement| io::Error::other("retirement sidecar was occupied"))?;
+
+        // SAFETY: the slot remains live under `outer`; same-state nested entry
+        // must inspect only the lease cell and reject value access.
+        assert!(unsafe { CallbackState::try_lease(slot) }.is_none());
+        // SAFETY: this models WM_NCDESTROY after publication has been cleared.
+        let disposition = unsafe { CallbackState::request_reclaim(slot) };
+        assert_eq!(disposition, ReclaimDisposition::Deferred);
+        // SAFETY: reclaim-pending keeps the allocation live under `outer`; the
+        // sidecar remains independently takeable without a state reference.
+        let retirement = unsafe { CallbackState::take_retirement(slot) }
+            .ok_or_else(|| io::Error::other("retirement sidecar was missing"))?;
+        drop(retirement);
+        // SAFETY: the first take cleared the live sidecar atomically on this UI thread.
+        assert!(unsafe { CallbackState::take_retirement(slot) }.is_none());
+        assert_eq!(retirement_drops.get(), 1);
+        assert_eq!(state_drops.get(), 0);
+        // A repeated defensive retirement while the slot is still lease-owned
+        // cannot create a second reclamation path.
+        // SAFETY: deferred reclamation keeps the slot live until `outer` drops.
+        let disposition = unsafe { CallbackState::request_reclaim(slot) };
+        assert_eq!(disposition, ReclaimDisposition::Deferred);
+        assert_eq!(state_drops.get(), 0);
+
+        drop(outer);
+        assert_eq!(state_drops.get(), 1);
+        assert_eq!(retirement_drops.get(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn close_decision_is_applied_only_after_callback_lease_ends()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let slot: *mut CallbackState<bool> = CallbackState::into_raw(true);
+        // SAFETY: the test owns the live, UI-thread-confined slot.
+        let lease = unsafe { CallbackState::try_lease(slot) }
+            .ok_or_else(|| io::Error::other("close-decision lease was rejected"))?;
+        let close = *lease.state();
+        drop(lease);
+
+        // Applying the copied decision can reacquire the slot, proving that no
+        // state lease/reference survives into the external close action.
+        // SAFETY: the original lease ended and the slot remains live.
+        let action_probe = unsafe { CallbackState::try_lease(slot) }
+            .ok_or_else(|| io::Error::other("close action ran before lease release"))?;
+        assert!(close);
+        drop(action_probe);
+        // SAFETY: no lease remains and the test is retiring its unique slot.
+        let disposition = unsafe { CallbackState::request_reclaim(slot) };
+        assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+        Ok(())
+    }
     use std::process::Command;
 
     use crate::rename::{
@@ -902,9 +1167,7 @@ mod tests {
         );
         assert_eq!(state.model.clear_name_changed().as_ref(), &[0]);
 
-        // SAFETY: NMLVCUSTOMDRAW is C-compatible and every field read by the
-        // production handler is initialized explicitly below before the call.
-        let mut custom: NMLVCUSTOMDRAW = unsafe { zeroed() };
+        let mut custom = NMLVCUSTOMDRAW::default();
         custom.nmcd.hdr.hwndFrom = state.list_window;
         custom.nmcd.hdr.code = NM_CUSTOMDRAW;
         custom.nmcd.dwDrawStage = CDDS_ITEMPREPAINT | CDDS_SUBITEM;

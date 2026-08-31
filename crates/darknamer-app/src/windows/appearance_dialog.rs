@@ -103,8 +103,20 @@ struct AppearanceDialogWindowState {
     finished: bool,
 }
 
+impl Drop for AppearanceDialogWindowState {
+    fn drop(&mut self) {
+        if appearance_dialog_should_notify_cancel(self.armed, self.finished) {
+            let effect = self.model.apply(AppearanceDialogAction::Cancel);
+            send_effect(self, effect);
+            self.finished = true;
+        }
+    }
+}
+
+type AppearanceDialogStateSlot = CallbackState<AppearanceDialogWindowState>;
+
 struct AppearanceDialogInit {
-    state: *mut AppearanceDialogWindowState,
+    state: *mut AppearanceDialogStateSlot,
     adopted: *mut bool,
 }
 
@@ -364,7 +376,7 @@ fn create_appearance_dialog_window(
     // synchronous registration. Re-registration failure is harmless when the
     // process-local class already exists.
     unsafe { RegisterClassExW(&class) };
-    let state_ptr = Box::into_raw(Box::new(AppearanceDialogWindowState {
+    let state_ptr = CallbackState::into_raw(AppearanceDialogWindowState {
         owner,
         session_id,
         model: AppearanceDialogModel::new(appearance, forced_colors),
@@ -390,7 +402,7 @@ fn create_appearance_dialog_window(
         dpi: BASE_DPI,
         armed: false,
         finished: false,
-    }));
+    });
     let mut adopted = false;
     let mut init = AppearanceDialogInit {
         state: state_ptr,
@@ -454,14 +466,16 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
     if state.viewport.is_null() {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: the dialog-owned state has a stable Box address until the dialog
-    // reaches WM_NCDESTROY; viewport refdata stores only that pointer.
+    // Store only the copied dialog HWND. The viewport callback resolves the
+    // currently published dialog slot and acquires the same lease boundary.
+    // SAFETY: viewport is a live UI-thread child, the callback has the required
+    // ABI, and copied dialog HWND refdata contains no Rust reference.
     if unsafe {
         SetWindowSubclass(
             state.viewport,
             Some(appearance_viewport_subclass),
             APPEARANCE_VIEWPORT_SUBCLASS_ID,
-            (state as *mut AppearanceDialogWindowState) as usize,
+            window as usize,
         )
     } == 0
     {
@@ -1456,13 +1470,30 @@ fn schedule_appearance_focus_repair(
     };
 }
 
+fn appearance_dialog_state_slot(window: HWND) -> *mut AppearanceDialogStateSlot {
+    if window.is_null() {
+        return null_mut();
+    }
+    // SAFETY: this value query reads only the slot pointer published for this
+    // exact dialog and creates no Rust reference.
+    unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) as *mut AppearanceDialogStateSlot }
+}
+
+fn try_appearance_dialog_state(
+    window: HWND,
+) -> Option<CallbackStateLease<AppearanceDialogWindowState>> {
+    // SAFETY: dialog publication is cleared before reclamation and all callback
+    // access is confined to the owning UI thread.
+    unsafe { CallbackState::try_lease(appearance_dialog_state_slot(window)) }
+}
+
 unsafe extern "system" fn appearance_viewport_subclass(
     window: HWND,
     message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
     _subclass_id: usize,
-    state_ref: usize,
+    dialog_ref: usize,
 ) -> LRESULT {
     if message == WM_NCDESTROY {
         // SAFETY: remove this exact callback/id pair before the parent-owned
@@ -1477,15 +1508,18 @@ unsafe extern "system" fn appearance_viewport_subclass(
         // SAFETY: the standard STATIC receives final destruction unchanged.
         return unsafe { DefSubclassProc(window, message, wparam, lparam) };
     }
-    if state_ref == 0 {
+    if dialog_ref == 0 {
         // SAFETY: null refdata cannot be dereferenced; retain standard handling.
         return unsafe { DefSubclassProc(window, message, wparam, lparam) };
     }
     match message {
         WM_VSCROLL => {
-            // SAFETY: refdata is only the stable parent-owned dialog-state
-            // pointer and this message cannot destroy the parent.
-            let state = unsafe { &mut *(state_ref as *mut AppearanceDialogWindowState) };
+            let Some(mut state_lease) = try_appearance_dialog_state(dialog_ref as HWND) else {
+                // SAFETY: a nested same-state entry retains standard handling
+                // without constructing a second Rust state reference.
+                return unsafe { DefSubclassProc(window, message, wparam, lparam) };
+            };
+            let state = state_lease.state_mut();
             let command = (wparam & 0xFFFF) as i32;
             let line = scale_dip(24, state.dpi).max(state.measured.text_height);
             let page = state.layout.map_or(line, |layout| {
@@ -1518,8 +1552,11 @@ unsafe extern "system" fn appearance_viewport_subclass(
             0
         }
         WM_MOUSEWHEEL => {
-            // SAFETY: refdata is the live parent-owned dialog-state pointer.
-            let state = unsafe { &mut *(state_ref as *mut AppearanceDialogWindowState) };
+            let Some(mut state_lease) = try_appearance_dialog_state(dialog_ref as HWND) else {
+                // SAFETY: retain standard handling while the dialog state is busy.
+                return unsafe { DefSubclassProc(window, message, wparam, lparam) };
+            };
+            let state = state_lease.state_mut();
             let delta = ((wparam >> 16) as u16) as i16 as i32;
             let line = scale_dip(24, state.dpi).max(state.measured.text_height);
             let steps = delta / 120;
@@ -1533,10 +1570,11 @@ unsafe extern "system" fn appearance_viewport_subclass(
         }
         WM_COMMAND | WM_NOTIFY | WM_CTLCOLORBTN | WM_CTLCOLORSTATIC | WM_DRAWITEM => {
             if message == WM_COMMAND && ((wparam >> 16) & 0xFFFF) as u32 == BN_SETFOCUS {
-                // SAFETY: focus notification cannot destroy the dialog, and
-                // this borrow ends before forwarding any command to its owner.
-                let state = unsafe { &mut *(state_ref as *mut AppearanceDialogWindowState) };
-                ensure_appearance_control_visible(state, lparam as HWND);
+                if let Some(mut state_lease) = try_appearance_dialog_state(dialog_ref as HWND) {
+                    ensure_appearance_control_visible(state_lease.state_mut(), lparam as HWND);
+                } else {
+                    return 0;
+                }
             }
             // SAFETY: the immediate parent is the live dialog; notification
             // payloads remain valid for this synchronous forwarding call.
@@ -1549,8 +1587,11 @@ unsafe extern "system" fn appearance_viewport_subclass(
             }
         }
         WM_ERASEBKGND => {
-            // SAFETY: refdata is the live parent-owned dialog-state pointer.
-            let state = unsafe { &*(state_ref as *const AppearanceDialogWindowState) };
+            let Some(state_lease) = try_appearance_dialog_state(dialog_ref as HWND) else {
+                // SAFETY: retain standard erasing while dialog state is busy.
+                return unsafe { DefSubclassProc(window, message, wparam, lparam) };
+            };
+            let state = state_lease.state();
             let mut rect = RECT::default();
             // SAFETY: viewport/DC are live for this synchronous erase callback.
             unsafe { GetClientRect(window, &mut rect) };
@@ -1594,10 +1635,30 @@ unsafe extern "system" fn appearance_dialog_proc(
             }
         }
     }
-    // SAFETY: the slot contains only the Box pointer installed above and is
-    // cleared before the unique reclamation in WM_NCDESTROY.
-    let state_ptr =
-        unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *mut AppearanceDialogWindowState;
+    let state_slot = appearance_dialog_state_slot(window);
+    if message == WM_NCDESTROY {
+        if !state_slot.is_null() {
+            // SAFETY: this final callback owns the publication slot and clears
+            // it before immediate or deferred unique reclamation.
+            unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, 0) };
+            // SAFETY: publication is cleared. State Drop performs any fail-closed
+            // Cancel notification only after an outer lease/reference has ended.
+            unsafe { CallbackState::request_reclaim(state_slot) };
+        }
+        // SAFETY: arguments are unchanged values from the final callback.
+        return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+    }
+    // SAFETY: the slot is the current UI-thread publication and remains live
+    // until this callback either releases or defers reclamation of its lease.
+    let Some(mut state_lease) = (unsafe { CallbackState::try_lease(state_slot) }) else {
+        if message == WM_COMMAND || message == WM_CLOSE || message >= WM_APP {
+            return 0;
+        }
+        // SAFETY: standard handling receives copied callback arguments while a
+        // same-state nested entry is rejected before constructing a reference.
+        return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+    };
+    let state_ptr = state_lease.state_mut() as *mut AppearanceDialogWindowState;
     match message {
         WM_CREATE if !state_ptr.is_null() => {
             // SAFETY: state_ptr is the dialog-owned Box on this UI thread.
@@ -1628,9 +1689,11 @@ unsafe extern "system" fn appearance_dialog_proc(
                         .is_some_and(|action| apply_action(window, state, action))
                 };
                 if close {
-                    // SAFETY: the state borrow ended above. DestroyWindow may
-                    // now reenter WM_NCDESTROY and reclaim the dialog-owned Box.
+                    drop(state_lease);
+                    // SAFETY: the state lease and reference ended above, so
+                    // destruction can reclaim immediately without aliasing.
                     unsafe { DestroyWindow(window) };
+                    return 0;
                 }
             }
             0
@@ -1700,8 +1763,9 @@ unsafe extern "system" fn appearance_dialog_proc(
                 let state = unsafe { &mut *state_ptr };
                 let _close = apply_action(window, state, AppearanceDialogAction::Cancel);
             }
-            // SAFETY: the state borrow ended above, so destruction may reenter
-            // WM_NCDESTROY and reclaim the dialog-owned Box without aliasing.
+            drop(state_lease);
+            // SAFETY: the state lease and reference ended above, so destruction
+            // may reclaim the dialog-owned slot without aliasing.
             unsafe { DestroyWindow(window) };
             0
         }
@@ -1781,6 +1845,7 @@ unsafe extern "system" fn appearance_dialog_proc(
                     null_mut()
                 }
             };
+            drop(state_lease);
             if !target.is_null() {
                 // SAFETY: target is a live enabled dialog child copied only after
                 // the mutable state borrow ended, preventing reentrant aliasing.
@@ -1807,24 +1872,6 @@ unsafe extern "system" fn appearance_dialog_proc(
                 0
             }
         }
-        WM_NCDESTROY if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is still the dialog-owned Box for this final
-            // callback. Unexpected destruction fails closed as Cancel.
-            let state = unsafe { &mut *state_ptr };
-            if appearance_dialog_should_notify_cancel(state.armed, state.finished) {
-                let effect = state.model.apply(AppearanceDialogAction::Cancel);
-                send_effect(state, effect);
-                state.finished = true;
-            }
-            // SAFETY: this callback owns the userdata slot and clears it before
-            // reclaiming its Box exactly once.
-            unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, 0) };
-            // SAFETY: state_ptr came from the single Box ownership transfer
-            // adopted by this exact HWND.
-            unsafe { drop(Box::from_raw(state_ptr)) };
-            // SAFETY: arguments are unchanged values from the active callback.
-            unsafe { DefWindowProcW(window, message, wparam, lparam) }
-        }
         _ => {
             // SAFETY: arguments are unchanged values from the active callback.
             unsafe { DefWindowProcW(window, message, wparam, lparam) }
@@ -1845,6 +1892,53 @@ mod native_tests {
         BM_CLICK, BS_TYPEMASK, GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetWindowLongPtrW,
         IsDialogMessageW, MSG, WM_KEYDOWN,
     };
+
+    #[test]
+    fn appearance_dialog_rejects_nested_state_lease() -> Result<(), Box<dyn std::error::Error>> {
+        // SAFETY: null requests the current process module.
+        let instance = unsafe { GetModuleHandleW(null()) };
+        // SAFETY: the system STATIC class and current module remain live for
+        // this hidden, test-owned top-level owner.
+        let owner = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                instance,
+                null_mut(),
+            )
+        };
+        if owner.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let dialog = create_appearance_dialog_window(
+            owner,
+            7,
+            UiAppearance::default(),
+            ForcedColorsState::Inactive,
+            Some(ResolvedTheme::Light),
+        )?;
+        let outer = try_appearance_dialog_state(dialog)
+            .ok_or_else(|| io::Error::other("outer appearance lease was rejected"))?;
+        assert!(try_appearance_dialog_state(dialog).is_none());
+        drop(outer);
+        let reacquired = try_appearance_dialog_state(dialog)
+            .ok_or_else(|| io::Error::other("appearance lease did not release"))?;
+        drop(reacquired);
+        // SAFETY: both windows are test-owned and no state lease remains.
+        unsafe {
+            DestroyWindow(dialog);
+            DestroyWindow(owner);
+        }
+        Ok(())
+    }
 
     #[test]
     fn default_ok_keeps_native_contract_and_enter_activation()
@@ -1879,18 +1973,14 @@ mod native_tests {
             ForcedColorsState::Inactive,
             Some(ResolvedTheme::Light),
         )?;
-        // SAFETY: dialog owns this state pointer until WM_NCDESTROY.
-        let state_ptr =
-            unsafe { GetWindowLongPtrW(dialog, GWLP_USERDATA) } as *mut AppearanceDialogWindowState;
-        if state_ptr.is_null() {
+        let Some(state_lease) = try_appearance_dialog_state(dialog) else {
             // SAFETY: both windows are test-owned and live.
             unsafe {
                 DestroyWindow(dialog);
                 DestroyWindow(owner);
             }
             return Err(io::Error::other("appearance dialog state is missing").into());
-        }
-        // SAFETY: state_ptr is live dialog-owned state for these copied HWNDs.
+        };
         let (
             viewport,
             ok,
@@ -1901,21 +1991,21 @@ mod native_tests {
             density_group,
             last_checkbox,
             separator,
-            resources,
-        ) = unsafe {
+        ) = {
+            let state = state_lease.state();
             (
-                (*state_ptr).viewport,
-                (*state_ptr).ok,
-                (*state_ptr).cancel,
-                (*state_ptr).density[0],
-                (*state_ptr).emphasis[0],
-                (*state_ptr).density[3],
-                (*state_ptr).density_group,
-                (*state_ptr).checkboxes[2],
-                (*state_ptr).separator,
-                (*state_ptr).appearance_resources.as_ref(),
+                state.viewport,
+                state.ok,
+                state.cancel,
+                state.density[0],
+                state.emphasis[0],
+                state.density[3],
+                state.density_group,
+                state.checkboxes[2],
+                state.separator,
             )
         };
+        drop(state_lease);
         // SAFETY: owner/dialog/radio are live test-owned windows on this thread;
         // activation makes subsequent focus-transfer assertions meaningful.
         unsafe {
@@ -1990,6 +2080,9 @@ mod native_tests {
             hwndItem: null_mut(),
             ..DRAWITEMSTRUCT::default()
         };
+        let state_lease = try_appearance_dialog_state(dialog)
+            .ok_or_else(|| io::Error::other("appearance dialog state is busy"))?;
+        let resources = state_lease.state().appearance_resources.as_ref();
         assert!(!draw_owner_separator(
             resources,
             null_mut(),
@@ -2029,6 +2122,7 @@ mod native_tests {
             separator,
             (&raw mut separator_draw) as LPARAM,
         ));
+        drop(state_lease);
         // SAFETY: separator_dc came from this exact live control.
         unsafe { ReleaseDC(separator, separator_dc) };
 
@@ -2050,6 +2144,9 @@ mod native_tests {
         custom.hdc = dc;
         // SAFETY: ok is live and rc is writable.
         unsafe { GetClientRect(ok, &mut custom.rc) };
+        let state_lease = try_appearance_dialog_state(dialog)
+            .ok_or_else(|| io::Error::other("appearance dialog state is busy"))?;
+        let resources = state_lease.state().appearance_resources.as_ref();
         assert_eq!(
             draw_custom_button(
                 resources,
@@ -2058,6 +2155,7 @@ mod native_tests {
             ),
             Some(CDRF_SKIPDEFAULT as LRESULT)
         );
+        drop(state_lease);
         // SAFETY: dc came from this exact live button.
         unsafe { ReleaseDC(ok, dc) };
 
@@ -2085,9 +2183,10 @@ mod native_tests {
 
         // Constrain the pure viewport page to exercise scrollbar commands and
         // focus visibility without relying on the host monitor dimensions.
-        // SAFETY: state_ptr remains dialog-owned and UI-thread confined.
-        unsafe {
-            let state = &mut *state_ptr;
+        {
+            let mut state_lease = try_appearance_dialog_state(dialog)
+                .ok_or_else(|| io::Error::other("appearance dialog state is busy"))?;
+            let state = state_lease.state_mut();
             let Some(mut layout) = state.layout else {
                 return Err(io::Error::other("appearance layout is missing").into());
             };
@@ -2110,8 +2209,10 @@ mod native_tests {
             SendMessageW(viewport, WM_DRAWITEM, 0, 0);
             SendMessageW(viewport, WM_VSCROLL, SB_BOTTOM as WPARAM, 0);
         }
-        // SAFETY: state_ptr is still live before Enter destroys the dialog.
-        let bottom_scroll = unsafe { (*state_ptr).scroll_y };
+        let bottom_scroll = try_appearance_dialog_state(dialog)
+            .ok_or_else(|| io::Error::other("appearance dialog state is busy"))?
+            .state()
+            .scroll_y;
         assert!(bottom_scroll > 0);
         // SAFETY: focusing the live last checkbox exercises the real forwarded
         // BN_SETFOCUS path. Scrolling back to the top leaves that control focused
@@ -2121,26 +2222,31 @@ mod native_tests {
             SendMessageW(viewport, WM_VSCROLL, SB_TOP as WPARAM, 0);
             SendMessageW(dialog, WM_APP_APPEARANCE_RESTORE_FOCUS, 0, 1);
         }
-        // SAFETY: focus visibility must scroll the last body control into view.
-        assert!(unsafe { (*state_ptr).scroll_y } > 0);
-        // SAFETY: state_ptr and controls remain dialog-owned. Forced Colors
-        // disables emphasis, after which the repair message must transfer focus
-        // to the first always-enabled density radio outside the state borrow.
+        assert!(
+            try_appearance_dialog_state(dialog)
+                .ok_or_else(|| io::Error::other("appearance dialog state is busy"))?
+                .state()
+                .scroll_y
+                > 0
+        );
+        // Forced Colors disables emphasis, after which the repair message must
+        // transfer focus to the first always-enabled density radio.
+        // SAFETY: both HWNDs are live test-owned controls and messages are
+        // synchronous; no state lease is held while entering either callback.
         unsafe {
             SetFocus(emphasis_control);
             SendMessageW(viewport, WM_VSCROLL, SB_BOTTOM as WPARAM, 0);
-            let repair_disabled_focus = {
-                let state = &*state_ptr;
-                appearance_control_disabled_by_forced_colors(state, emphasis_control)
-            };
+            let mut state_lease = try_appearance_dialog_state(dialog)
+                .ok_or_else(|| io::Error::other("appearance dialog state is busy"))?;
+            let state = state_lease.state_mut();
+            let repair_disabled_focus =
+                appearance_control_disabled_by_forced_colors(state, emphasis_control);
             assert!(repair_disabled_focus);
-            {
-                let state = &mut *state_ptr;
-                state
-                    .model
-                    .set_forced_colors(ForcedColorsState::ActiveOrUnknown);
-                sync_controls(state);
-            }
+            state
+                .model
+                .set_forced_colors(ForcedColorsState::ActiveOrUnknown);
+            sync_controls(state);
+            drop(state_lease);
             SendMessageW(
                 dialog,
                 WM_APP_APPEARANCE_RESTORE_FOCUS,
@@ -2148,13 +2254,15 @@ mod native_tests {
                 1,
             );
         }
-        // SAFETY: state_ptr remains dialog-owned; the forced repair branch must
-        // scroll the first enabled density radio fully into the viewport even
-        // when this hidden test window cannot acquire foreground keyboard focus.
-        let (repaired_scroll, repaired_layout) = unsafe {
+        // The forced repair branch must scroll the first enabled density radio
+        // fully into the viewport even when this hidden test cannot get focus.
+        let (repaired_scroll, repaired_layout) = {
+            let state_lease = try_appearance_dialog_state(dialog)
+                .ok_or_else(|| io::Error::other("appearance dialog state is busy"))?;
+            let state = state_lease.state();
             (
-                (*state_ptr).scroll_y,
-                (*state_ptr)
+                state.scroll_y,
+                state
                     .layout
                     .ok_or_else(|| io::Error::other("appearance layout is missing"))?,
             )
@@ -2173,8 +2281,12 @@ mod native_tests {
             SetFocus(menu_only);
             SendMessageW(menu_only, BM_CLICK, 0, 0);
         };
-        // SAFETY: state_ptr remains dialog-owned until Enter closes the window.
-        let draft_density = unsafe { (*state_ptr).model.draft().density };
+        let draft_density = try_appearance_dialog_state(dialog)
+            .ok_or_else(|| io::Error::other("appearance dialog state is busy"))?
+            .state()
+            .model
+            .draft()
+            .density;
         assert_eq!(draft_density, RailDensityPreference::MenuOnly);
 
         let message = MSG {

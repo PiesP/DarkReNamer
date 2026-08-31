@@ -2,13 +2,15 @@ use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::io::Cursor;
+use std::mem::size_of;
 use std::path::{Path, PathBuf};
 
 use darknamer_app::admission::{
     AdmissionAdapter, AdmissionAdapterError, AdmissionChildren, AdmissionIssueKind,
     AdmissionMetadata, AdmissionMode, AdmissionOperation, MAX_ADMISSION_DEPTH,
-    MAX_ADMITTED_SOURCES, MAX_IMPORT_BYTES, bounded_import_lines, bounded_selection,
-    collect_admission, collect_admission_cancellable, read_bounded_import,
+    MAX_ADMITTED_PATH_BYTES, MAX_ADMITTED_SOURCES, MAX_IMPORT_BYTES, PathBudget,
+    PathBudgetReservation, bounded_import_lines, bounded_selection, collect_admission,
+    collect_admission_cancellable, collect_admission_cancellable_with_budget, read_bounded_import,
 };
 use darknamer_app::rename::EntryIdentity;
 use darknamer_core::LegacyText;
@@ -18,6 +20,7 @@ struct FakeAdapter {
     metadata: BTreeMap<PathBuf, AdmissionMetadata>,
     children: BTreeMap<PathBuf, Vec<PathBuf>>,
     rejected: BTreeMap<PathBuf, AdmissionAdapterError>,
+    legacy_paths: BTreeMap<PathBuf, LegacyText>,
     metadata_calls: Cell<usize>,
     enumeration_calls: Cell<usize>,
 }
@@ -80,7 +83,10 @@ impl AdmissionAdapter for FakeAdapter {
     }
 
     fn legacy_path(&self, path: &Path) -> LegacyText {
-        LegacyText::from(path.to_string_lossy().into_owned())
+        self.legacy_paths
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| LegacyText::from(path.to_string_lossy().into_owned()))
     }
 }
 
@@ -433,6 +439,113 @@ fn external_selection_is_bounded_before_path_allocation() {
 }
 
 #[test]
+fn utf16_path_budget_accepts_exact_boundary_and_rejects_first_overflow() {
+    let mut budget = PathBudget::new();
+    assert_eq!(
+        budget.reserve_utf16_units(MAX_ADMITTED_PATH_BYTES / size_of::<u16>()),
+        PathBudgetReservation::Reserved
+    );
+    assert_eq!(budget.remaining_bytes(), 0);
+    assert_eq!(
+        budget.reserve_utf16_units(1),
+        PathBudgetReservation::Exhausted
+    );
+    assert_eq!(
+        PathBudget::new().reserve_utf16_units(usize::MAX),
+        PathBudgetReservation::Exhausted
+    );
+}
+
+#[test]
+fn recursive_admission_reports_aggregate_path_budget_exhaustion() {
+    let root = test_root();
+    let children = [root.join("one"), root.join("two"), root.join("three")];
+    let mut adapter = FakeAdapter::default();
+    adapter.metadata.insert(root.clone(), directory(1));
+    adapter.children.insert(root.clone(), children.to_vec());
+    for path in &children {
+        adapter.metadata.insert(path.clone(), file());
+        adapter
+            .legacy_paths
+            .insert(path.clone(), LegacyText::from_units(vec![b'x' as u16; 2]));
+    }
+
+    let report = collect_admission_cancellable_with_budget(
+        &adapter,
+        vec![root],
+        AdmissionMode::Recurse,
+        MAX_ADMITTED_SOURCES,
+        PathBudget::from_remaining_bytes(8),
+        compare,
+        || false,
+    )
+    .unwrap_or_default();
+
+    assert_eq!(report.items.len(), 2);
+    assert_eq!(report.issues.len(), 1);
+    assert_eq!(
+        report.issues[0].kind,
+        AdmissionIssueKind::PathBudgetExceeded
+    );
+    assert!(report.summary_korean(2).contains("경로 용량 1"));
+}
+
+#[test]
+fn repeated_batches_reduce_one_global_path_budget() {
+    let root = test_root();
+    let paths = [
+        root.join("first"),
+        root.join("second"),
+        root.join("third"),
+        root.join("fourth"),
+    ];
+    let mut adapter = FakeAdapter::default();
+    for path in &paths {
+        adapter.metadata.insert(path.clone(), file());
+        adapter
+            .legacy_paths
+            .insert(path.clone(), LegacyText::from_units(vec![b'x' as u16; 2]));
+    }
+
+    let first = collect_admission_cancellable_with_budget(
+        &adapter,
+        paths[..2].to_vec(),
+        AdmissionMode::Direct,
+        MAX_ADMITTED_SOURCES,
+        PathBudget::from_remaining_bytes(12),
+        compare,
+        || false,
+    )
+    .unwrap_or_default();
+    assert_eq!(first.items.len(), 2);
+
+    let mut remaining = PathBudget::from_remaining_bytes(12);
+    for item in &first.items {
+        assert_eq!(
+            remaining.reserve_utf16_units(item.source_path().units().len()),
+            PathBudgetReservation::Reserved
+        );
+    }
+    let second = collect_admission_cancellable_with_budget(
+        &adapter,
+        paths[2..].to_vec(),
+        AdmissionMode::Direct,
+        MAX_ADMITTED_SOURCES,
+        remaining,
+        compare,
+        || false,
+    )
+    .unwrap_or_default();
+
+    assert_eq!(second.items.len(), 1);
+    assert_eq!(second.issues.len(), 1);
+    assert_eq!(
+        second.issues[0].kind,
+        AdmissionIssueKind::PathBudgetExceeded
+    );
+}
+
+#[test]
 fn import_reader_and_line_parser_are_bounded() -> Result<(), Box<dyn std::error::Error>> {
     let bytes = read_bounded_import(Cursor::new(vec![b'a'; MAX_IMPORT_BYTES]))?;
     assert_eq!(bytes.len(), MAX_IMPORT_BYTES);
@@ -448,6 +561,29 @@ fn import_reader_and_line_parser_are_bounded() -> Result<(), Box<dyn std::error:
         vec!["one", "two", "three"]
     );
     assert!(truncated);
+
+    let root = test_root();
+    let imported = [LegacyText::from("one"), LegacyText::from("two")];
+    let paths = [root.join("one"), root.join("two")];
+    let mut adapter = FakeAdapter::default();
+    for (path, legacy) in paths.iter().zip(imported) {
+        adapter.metadata.insert(path.clone(), file());
+        adapter.legacy_paths.insert(path.clone(), legacy);
+    }
+    let report = collect_admission_cancellable_with_budget(
+        &adapter,
+        paths.to_vec(),
+        AdmissionMode::Direct,
+        MAX_ADMITTED_SOURCES,
+        PathBudget::from_remaining_bytes(6),
+        compare,
+        || false,
+    )?;
+    assert_eq!(report.items.len(), 1);
+    assert_eq!(
+        report.issues[0].kind,
+        AdmissionIssueKind::PathBudgetExceeded
+    );
     Ok(())
 }
 

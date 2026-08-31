@@ -290,7 +290,7 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
     if state.list_window.is_null() {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: state.list_window is live; each zeroed LVCOLUMNW is populated
+    // SAFETY: state.list_window is live; each default LVCOLUMNW is populated
     // before its synchronous message and its mutable text buffer stays allocated.
     unsafe {
         SendMessageW(
@@ -310,7 +310,7 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
                 },
                 cx: scale_dip(column.default_width, state.dpi),
                 pszText: text.as_mut_ptr(),
-                ..zeroed()
+                ..LVCOLUMNW::default()
             };
             SendMessageW(
                 state.list_window,
@@ -325,7 +325,7 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
             fmt: LVCFMT_LEFT,
             cx: scale_dip(NATIVE_STATUS_COLUMN_WIDTH_DIP, state.dpi),
             pszText: status_text.as_mut_ptr(),
-            ..zeroed()
+            ..LVCOLUMNW::default()
         };
         SendMessageW(
             state.list_window,
@@ -346,8 +346,7 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
     state.drop_overlay = create_drop_overlay(window)?;
     refresh_system_fonts(state);
     state.menu = create_menu()?.attach(window)?;
-    // SAFETY: SHFILEINFOW is a C-compatible output structure whose all-zero state is valid before the shell fills it.
-    let mut shell_info: SHFILEINFOW = unsafe { zeroed() };
+    let mut shell_info = SHFILEINFOW::default();
     let empty = wide("");
     // SAFETY: The lookup path is owned terminated UTF-16 and info is writable SHFILEINFOW retained for the shell query.
     let image_list = unsafe {
@@ -519,8 +518,7 @@ pub(super) fn child(
 }
 
 pub(super) fn arrange(window: HWND, state: &mut AppState) {
-    // SAFETY: RECT is a C-compatible integer structure for which all-zero is a valid writable initial state.
-    let mut rect: RECT = unsafe { zeroed() };
+    let mut rect = RECT::default();
     // SAFETY: window is live and rect is writable RECT storage retained until GetClientRect returns.
     unsafe { GetClientRect(window, &mut rect) };
     let width = (rect.right - rect.left).max(0);

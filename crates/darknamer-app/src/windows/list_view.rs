@@ -3,18 +3,18 @@ use super::*;
 const LIST_VIEW_NOTIFICATION_SUBCLASS_ID: usize = 1;
 
 pub(super) fn install_list_view_notification_subclass(state: &AppState) -> io::Result<()> {
-    // AppState is allocated in its final Box before child creation. The subclass
-    // is removed during owner teardown before that Box is reclaimed.
-    let state_ref = state as *const AppState as usize;
+    // Store only the copied owner HWND. Each callback resolves and leases the
+    // owner's currently published state instead of retaining an AppState pointer.
+    // SAFETY: list_window is a live direct child during installation.
+    let owner_ref = unsafe { GetParent(state.list_window) } as usize;
     // SAFETY: list_window is a live UI-thread ListView, the callback has the
-    // documented SUBCLASSPROC ABI, and state_ref follows the lifetime contract
-    // described above.
+    // documented SUBCLASSPROC ABI, and owner_ref is a copied HWND value.
     if unsafe {
         SetWindowSubclass(
             state.list_window,
             Some(list_view_notification_subclass),
             LIST_VIEW_NOTIFICATION_SUBCLASS_ID,
-            state_ref,
+            owner_ref,
         )
     } == 0
     {
@@ -45,7 +45,7 @@ unsafe extern "system" fn list_view_notification_subclass(
     wparam: WPARAM,
     lparam: LPARAM,
     _subclass_id: usize,
-    state_ref: usize,
+    owner_ref: usize,
 ) -> LRESULT {
     if message == WM_NCDESTROY {
         remove_list_view_notification_subclass(window);
@@ -53,7 +53,7 @@ unsafe extern "system" fn list_view_notification_subclass(
         // subclass has stopped retaining AppState refdata.
         return unsafe { DefSubclassProc(window, message, wparam, lparam) };
     }
-    if message == WM_NOTIFY && state_ref != 0 && !programmatic_list_update_active() {
+    if message == WM_NOTIFY && owner_ref != 0 && !programmatic_list_update_active() {
         let notification = lparam as *const NMHDR;
         // Validate the pointer-free native routing boundary before borrowing
         // AppState. Programmatic SendMessage callers retain their existing
@@ -62,10 +62,13 @@ unsafe extern "system" fn list_view_notification_subclass(
             // SAFETY: window is the live ListView and this value query retains no
             // caller storage.
             let header = unsafe { SendMessageW(window, LVM_GETHEADER, 0, 0) } as HWND;
-            // SAFETY: the owner removes this subclass before reclaiming the
-            // stable Box<AppState>, and this user-driven path is excluded while
-            // programmatic ListView messages retain a mutable state borrow.
-            let state = unsafe { &*(state_ref as *const AppState) };
+            let owner = owner_ref as HWND;
+            let Some(state_lease) = try_app_state(owner) else {
+                // SAFETY: same-state reentry must not reconstruct AppState;
+                // preserve the common-control chain unchanged instead.
+                return unsafe { DefSubclassProc(window, message, wparam, lparam) };
+            };
+            let state = state_lease.state();
             if let Some(result) =
                 handle_fixed_status_header_double_click(window, header, state.dpi, lparam)
             {
@@ -167,8 +170,7 @@ fn handle_fixed_status_header_double_click(
 }
 
 pub(super) fn update_primary_column_widths(state: &AppState) {
-    // SAFETY: RECT is a C-compatible integer structure with valid zero state.
-    let mut rect: RECT = unsafe { zeroed() };
+    let mut rect = RECT::default();
     // SAFETY: list_window is live and rect remains writable through this call.
     if unsafe { GetClientRect(state.list_window, &mut rect) } == 0 {
         return;
@@ -862,8 +864,7 @@ fn insert_native_row(window: HWND, row: usize, value: &RenderedRow) -> bool {
         iSubItem: 0,
         pszText: text.as_mut_ptr(),
         iImage: value.icon,
-        // SAFETY: LVITEMW is C-compatible and zero is valid for unused fields.
-        ..unsafe { zeroed() }
+        ..LVITEMW::default()
     };
     // SAFETY: window is live; native and text outlive the synchronous message.
     if unsafe {
@@ -890,8 +891,7 @@ fn set_native_primary(window: HWND, row: usize, value: &RenderedRow) -> bool {
         iSubItem: 0,
         pszText: text.as_mut_ptr(),
         iImage: value.icon,
-        // SAFETY: LVITEMW is C-compatible and zero is valid for unused fields.
-        ..unsafe { zeroed() }
+        ..LVITEMW::default()
     };
     // SAFETY: window is live; native and text outlive the synchronous message.
     unsafe {
@@ -910,8 +910,7 @@ fn set_native_subitem(window: HWND, row: usize, column: usize, value: &LegacyTex
     let mut native = LVITEMW {
         iSubItem: i32::try_from(column).unwrap_or(i32::MAX),
         pszText: text.as_mut_ptr(),
-        // SAFETY: LVITEMW is C-compatible and zero is valid for unused fields.
-        ..unsafe { zeroed() }
+        ..LVITEMW::default()
     };
     // SAFETY: window is live; native and text outlive the synchronous message.
     unsafe {
@@ -940,8 +939,7 @@ fn file_icon_index(cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyListItem
     if let Some(index) = cache.get(&key) {
         return *index;
     }
-    // SAFETY: SHFILEINFOW is a valid output structure when zero initialized.
-    let mut info: SHFILEINFOW = unsafe { zeroed() };
+    let mut info = SHFILEINFOW::default();
     let path = key.lookup_text();
     let mut path = path.units().to_vec();
     path.push(0);
@@ -985,15 +983,13 @@ fn local_systemtime_from_filetime(value: u64) -> Option<SYSTEMTIME> {
         dwLowDateTime: value as u32,
         dwHighDateTime: (value >> 32) as u32,
     };
-    // SAFETY: SYSTEMTIME has a valid all-zero representation for output.
-    let mut utc: SYSTEMTIME = unsafe { zeroed() };
+    let mut utc = SYSTEMTIME::default();
     // SAFETY: filetime is readable UTC input and utc remains writable through
     // this synchronous representation conversion.
     if unsafe { FileTimeToSystemTime(&filetime, &mut utc) } == 0 {
         return None;
     }
-    // SAFETY: SYSTEMTIME has a valid all-zero representation for output.
-    let mut local: SYSTEMTIME = unsafe { zeroed() };
+    let mut local = SYSTEMTIME::default();
     // SAFETY: null selects the current dynamic Windows time zone, including
     // its date-specific transition rules; utc is readable and local writable.
     if unsafe { SystemTimeToTzSpecificLocalTimeEx(null(), &utc, &mut local) } == 0 {
@@ -1110,8 +1106,7 @@ mod native_tests {
                     fmt: LVCFMT_LEFT,
                     cx: 112,
                     pszText: label.as_mut_ptr(),
-                    // SAFETY: LVCOLUMNW has a valid all-zero remainder.
-                    ..unsafe { zeroed() }
+                    ..LVCOLUMNW::default()
                 };
                 // SAFETY: list is live and column/label outlive this synchronous message.
                 if unsafe {
@@ -1137,9 +1132,7 @@ mod native_tests {
                     code: HDN_DIVIDERDBLCLICKW,
                 },
                 iItem: NATIVE_STATUS_COLUMN_INDEX as i32,
-                // SAFETY: the remaining notification fields are unused by the
-                // fixed-column handler and have valid null/zero representations.
-                ..unsafe { zeroed() }
+                ..NMHEADERW::default()
             };
             assert_eq!(
                 handle_fixed_status_header_double_click(
@@ -1173,8 +1166,7 @@ mod native_tests {
             let mut selected = LVITEMW {
                 stateMask: LVIS_SELECTED | LVIS_FOCUSED,
                 state: LVIS_SELECTED | LVIS_FOCUSED,
-                // SAFETY: LVITEMW has a valid all-zero remainder.
-                ..unsafe { zeroed() }
+                ..LVITEMW::default()
             };
             // SAFETY: list and selected remain live for this synchronous state update.
             if unsafe {
@@ -1193,8 +1185,7 @@ mod native_tests {
                 iSubItem: NATIVE_STATUS_COLUMN_INDEX as i32,
                 pszText: buffer.as_mut_ptr(),
                 cchTextMax: i32::try_from(buffer.len()).unwrap_or(i32::MAX),
-                // SAFETY: LVITEMW has a valid all-zero remainder.
-                ..unsafe { zeroed() }
+                ..LVITEMW::default()
             };
             // SAFETY: list is live and query/buffer are writable for this
             // synchronous native text retrieval.
