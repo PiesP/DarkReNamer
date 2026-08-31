@@ -299,7 +299,23 @@ pub(super) const fn execution_phase_code(phase: ExecutionPhase) -> u8 {
     }
 }
 
+fn preview_is_ready_for_apply(window: HWND, state: &AppState) -> bool {
+    if !state.preview_synchronization.is_synchronized() {
+        message(
+            window,
+            PREVIEW_SYNC_BLOCK_MESSAGE,
+            "DarkReNamer - 적용 차단",
+        );
+        false
+    } else {
+        true
+    }
+}
+
 pub(super) fn apply_changes(window: HWND, state: &mut AppState) {
+    if !preview_is_ready_for_apply(window, state) {
+        return;
+    }
     if state.preview_issue_cache.has_blocker() {
         let blocker_explanation = state
             .preview_issue_cache
@@ -359,6 +375,9 @@ pub(super) fn handle_ready_plan(
             return;
         }
     };
+    if !preview_is_ready_for_apply(window, state) {
+        return;
+    }
     let plan = ready.plan;
     if plan.is_empty() {
         message(window, "변경할 항목이 없습니다.", "DarkReNamer");
@@ -405,6 +424,9 @@ pub(super) fn handle_ready_plan(
     if destructive_prompt_choice(answer, APPLY_CONFIRM_BUTTON_ID)
         != DestructivePromptChoice::Confirm
     {
+        return;
+    }
+    if !preview_is_ready_for_apply(window, state) {
         return;
     }
     if state.revision() != revision {

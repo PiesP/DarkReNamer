@@ -466,6 +466,7 @@ struct AppState {
     ui_status: UiStatus,
     preview_count_cache: PreviewCountCache,
     preview_issue_cache: PreviewIssueCache,
+    preview_synchronization: PreviewSynchronization,
     status_layout_input: StatusLayoutInput,
     forced_colors: ForcedColorsState,
     system_theme: Option<ResolvedTheme>,
@@ -564,6 +565,7 @@ impl AppState {
             ui_status,
             preview_count_cache: PreviewCountCache::default(),
             preview_issue_cache: PreviewIssueCache::default(),
+            preview_synchronization: PreviewSynchronization::default(),
             status_layout_input: StatusLayoutInput::default(),
             forced_colors: ForcedColorsState::default(),
             system_theme: None,
@@ -621,7 +623,9 @@ impl AppState {
             PresentationLocks {
                 // ApplyPresentation::Ready is intentionally non-authorizing:
                 // dispatch still enters apply_changes and its apply_locked gate.
-                apply_locked: self.apply_locked() || self.preview_issue_cache.has_blocker(),
+                apply_locked: self.apply_locked()
+                    || self.preview_issue_cache.has_blocker()
+                    || !self.preview_synchronization.is_synchronized(),
                 empty_locked: self.read_only_locked() || self.mutation_locked,
                 worker_active,
             },
@@ -691,6 +695,16 @@ impl AppState {
     fn set_transient_status(&mut self, message: impl Into<String>) {
         self.ui_status.set_transient(message);
         self.render_status();
+    }
+
+    fn mark_preview_synchronized(&mut self) {
+        self.preview_synchronization.mark_synchronized();
+        self.ui_status.set_preview_sync_failed(false);
+    }
+
+    fn mark_preview_sync_failed(&mut self) {
+        self.preview_synchronization.mark_failed();
+        self.ui_status.set_preview_sync_failed(true);
     }
 
     fn persist_column_preferences(&mut self) {

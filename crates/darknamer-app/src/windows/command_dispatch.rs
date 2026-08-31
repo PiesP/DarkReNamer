@@ -621,6 +621,9 @@ fn apply_command_outcome(
 }
 
 fn restore_selection(state: &mut AppState, selection: Option<SelectionRestore>) {
+    if !state.preview_synchronization.is_synchronized() {
+        return;
+    }
     let Some(selection) = selection else {
         return;
     };

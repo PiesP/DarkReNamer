@@ -37,6 +37,11 @@ pub(crate) const LIST_SCROLLBAR_ALLOWANCE_DIP: i32 = 17;
 pub(crate) const NATIVE_STATUS_COLUMN_WIDTH_DIP: i32 = 112;
 #[cfg(any(windows, test))]
 pub(crate) const EMPTY_LIST_STATUS: &str = "파일이나 폴더를 끌어 놓거나 Ctrl+O로 추가하세요.";
+#[cfg(any(windows, test))]
+pub(crate) const PREVIEW_SYNC_FAILURE_STATUS: &str =
+    "미리보기를 표시하지 못해 적용을 잠갔습니다. 목록 작업을 다시 시도하거나 앱을 다시 시작하세요.";
+#[cfg(windows)]
+pub(crate) const PREVIEW_SYNC_BLOCK_MESSAGE: &str = "미리보기 표시가 동기화되지 않아 적용할 수 없습니다. 목록 작업을 다시 시도하거나 앱을 다시 시작하세요.";
 #[cfg(windows)]
 pub(crate) const EMPTY_STATE_INSTRUCTION: &str = "파일이나 폴더를 여기에 끌어오세요";
 #[cfg(any(windows, test))]
@@ -2581,6 +2586,32 @@ pub(crate) struct PresentationLocks {
     pub(crate) worker_active: bool,
 }
 
+/// Whether the native preview is known to represent the current model.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum PreviewSynchronization {
+    #[default]
+    Pending,
+    Synchronized,
+    Failed,
+}
+
+#[cfg(any(windows, test))]
+impl PreviewSynchronization {
+    #[must_use]
+    pub(crate) const fn is_synchronized(self) -> bool {
+        matches!(self, Self::Synchronized)
+    }
+
+    pub(crate) fn mark_synchronized(&mut self) {
+        *self = Self::Synchronized;
+    }
+
+    pub(crate) fn mark_failed(&mut self) {
+        *self = Self::Failed;
+    }
+}
+
 /// Pure native workbench presentation derived from model, selection, and locks.
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2718,6 +2749,7 @@ pub(crate) struct UiStatus {
     transient: Option<String>,
     progress: Option<String>,
     recovery: Option<String>,
+    preview_sync_failed: bool,
     preview_notice: Option<String>,
 }
 
@@ -2763,6 +2795,10 @@ impl UiStatus {
         self.recovery = None;
     }
 
+    pub(crate) fn set_preview_sync_failed(&mut self, failed: bool) {
+        self.preview_sync_failed = failed;
+    }
+
     pub(crate) fn set_preview_notice(&mut self, notice: Option<String>) {
         self.preview_notice = notice;
     }
@@ -2772,6 +2808,9 @@ impl UiStatus {
         self.recovery
             .as_deref()
             .or(self.progress.as_deref())
+            .or(self
+                .preview_sync_failed
+                .then_some(PREVIEW_SYNC_FAILURE_STATUS))
             .or(self.preview_notice.as_deref())
             .or(self.transient.as_deref())
             .unwrap_or(EMPTY_LIST_STATUS)
@@ -5661,6 +5700,9 @@ mod tests {
         status.clear_recovery();
         assert_eq!(status.message_text(), "파일 이름 변경 중: 3/10 단계");
         status.clear_progress();
+        status.set_preview_sync_failed(true);
+        assert_eq!(status.message_text(), PREVIEW_SYNC_FAILURE_STATUS);
+        status.set_preview_sync_failed(false);
         assert_eq!(status.message_text(), "대상 이름 충돌 2개");
         status.set_preview_notice(None);
         assert_eq!(status.message_text(), "2개 경로를 제외했습니다.");
@@ -5672,6 +5714,22 @@ mod tests {
         let mut promoted = UiStatus::with_transient("일시 상태");
         promoted.set_recovery("복구 상태");
         assert_eq!(promoted.message_text(), "복구 상태");
+    }
+
+    #[test]
+    fn preview_synchronization_only_authorizes_apply_after_a_confirmed_refresh() {
+        let mut synchronization = PreviewSynchronization::default();
+        assert!(!synchronization.is_synchronized());
+
+        synchronization.mark_failed();
+        assert_eq!(synchronization, PreviewSynchronization::Failed);
+        assert!(!synchronization.is_synchronized());
+
+        synchronization.mark_synchronized();
+        assert!(synchronization.is_synchronized());
+
+        synchronization.mark_failed();
+        assert!(!synchronization.is_synchronized());
     }
 
     #[test]

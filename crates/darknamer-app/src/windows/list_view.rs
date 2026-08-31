@@ -717,10 +717,18 @@ pub(super) fn refresh_all_rows(state: &mut AppState) {
     // SAFETY: state.list_window is live and the guard restores redraw.
     let _redraw = unsafe { RedrawGuard::suspend(state.list_window) };
     let selected = selected_indices(state.list_window);
-    if !apply_incremental_rows(state.list_window, &state.rendered_rows, &rows) {
-        rebuild_native_rows(state.list_window, &rows);
+    let synchronized = if state.preview_synchronization.is_synchronized() {
+        apply_incremental_rows(state.list_window, &state.rendered_rows, &rows)
+            || rebuild_native_rows(state.list_window, &rows)
+    } else {
+        rebuild_native_rows(state.list_window, &rows)
+    };
+    if !synchronized {
+        state.mark_preview_sync_failed();
+        return;
     }
     state.rendered_rows = rows;
+    state.mark_preview_synchronized();
     select_rows(state.list_window, &selected);
 }
 
@@ -764,6 +772,7 @@ pub(super) fn refresh_changed_rows(state: &mut AppState, changed: &[usize]) {
     let _redraw = unsafe { RedrawGuard::suspend(state.list_window) };
     for (index, row) in rows {
         if !apply_rendered_row(state.list_window, index, &state.rendered_rows[index], &row) {
+            state.mark_preview_sync_failed();
             drop(_redraw);
             refresh(state);
             return;
@@ -771,6 +780,7 @@ pub(super) fn refresh_changed_rows(state: &mut AppState, changed: &[usize]) {
         state.rendered_rows[index] = row;
     }
     if !update_status_rows(state, &status_rows) {
+        state.mark_preview_sync_failed();
         drop(_redraw);
         refresh(state);
     }
@@ -831,6 +841,7 @@ pub(super) fn refresh_proposal_rows(state: &mut AppState, changed: &[usize]) {
             continue;
         }
         if !set_native_subitem(state.list_window, row, 1, proposed) {
+            state.mark_preview_sync_failed();
             drop(_redraw);
             refresh(state);
             return;
@@ -838,6 +849,7 @@ pub(super) fn refresh_proposal_rows(state: &mut AppState, changed: &[usize]) {
         state.rendered_rows[row].values[1].clone_from(proposed);
     }
     if !update_status_rows(state, &status_rows) {
+        state.mark_preview_sync_failed();
         drop(_redraw);
         refresh(state);
     }
@@ -1054,19 +1066,18 @@ fn set_native_subitem(window: HWND, row: usize, column: usize, value: &LegacyTex
             LVM_SETITEMTEXTW,
             row,
             (&mut native as *mut LVITEMW) as isize,
-        )
-    };
-    true
+        ) != 0
+    }
 }
 
-fn rebuild_native_rows(window: HWND, rows: &[RenderedRow]) {
+fn rebuild_native_rows(window: HWND, rows: &[RenderedRow]) -> bool {
     // SAFETY: window is live and the message carries no pointer.
-    unsafe { SendMessageW(window, LVM_DELETEALLITEMS, 0, 0) };
-    for (row, value) in rows.iter().enumerate() {
-        if !insert_native_row(window, row, value) {
-            break;
-        }
+    if unsafe { SendMessageW(window, LVM_DELETEALLITEMS, 0, 0) } == 0 {
+        return false;
     }
+    rows.iter()
+        .enumerate()
+        .all(|(row, value)| insert_native_row(window, row, value))
 }
 
 fn file_icon_index(cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyListItem) -> i32 {
@@ -1413,8 +1424,26 @@ mod native_tests {
                 }),
                 icon: 0,
             };
-            if !insert_native_row(list, 0, &row) {
-                return Err(io::Error::other("could not insert native test row"));
+            let runtime_directory = tempfile::tempdir()?;
+            let mut state = AppState::new(initialize_safe_runtime_at(runtime_directory.path())?);
+            refresh_all_rows(&mut state);
+            assert_eq!(
+                state.preview_synchronization,
+                PreviewSynchronization::Failed
+            );
+            assert_eq!(state.ui_status.message_text(), PREVIEW_SYNC_FAILURE_STATUS);
+            state.list_window = list;
+            refresh_all_rows(&mut state);
+            assert!(state.preview_synchronization.is_synchronized());
+            assert_ne!(state.ui_status.message_text(), PREVIEW_SYNC_FAILURE_STATUS);
+
+            assert!(!set_native_subitem(null_mut(), 0, 1, &row.values[1]));
+            assert!(!rebuild_native_rows(
+                null_mut(),
+                core::slice::from_ref(&row)
+            ));
+            if !rebuild_native_rows(list, core::slice::from_ref(&row)) {
+                return Err(io::Error::other("could not rebuild native test rows"));
             }
             let mut selected = LVITEMW {
                 stateMask: LVIS_SELECTED | LVIS_FOCUSED,
