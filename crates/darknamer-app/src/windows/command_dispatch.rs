@@ -389,7 +389,7 @@ pub(super) fn dispatch_command(
             apply_changes(window, state);
             CommandOutcome::ui(UiEffect::None)
         }
-        RESET => proposal_mutation(state, LegacyList::reset_proposals_changed),
+        RESET => proposal_mutation(state, |model| Ok(model.reset_proposals_changed())),
         CLEAR_LIST => {
             let changed = state.model.clear();
             model_outcome(state, changed, UiEffect::AllRowsChanged)
@@ -438,9 +438,9 @@ pub(super) fn dispatch_command(
             });
             outcome
         }
-        CLEAR_NAME => proposal_mutation(state, LegacyList::clear_name_changed),
-        KEEP_DIGITS => proposal_mutation(state, LegacyList::keep_ascii_digits_changed),
-        EXT_DELETE => proposal_mutation(state, LegacyList::delete_extension_changed),
+        CLEAR_NAME => proposal_mutation(state, |model| Ok(model.clear_name_changed())),
+        KEEP_DIGITS => proposal_mutation(state, |model| Ok(model.keep_ascii_digits_changed())),
+        EXT_DELETE => proposal_mutation(state, |model| Ok(model.delete_extension_changed())),
         PARENT_PREFIX => proposal_mutation(state, LegacyList::prefix_parent_folder_changed),
         PARENT_SUFFIX => proposal_mutation(state, LegacyList::suffix_parent_folder_changed),
         UNIFY_PATH => {
@@ -539,10 +539,15 @@ fn proposal_outcome(state: &mut AppState, changed: Box<[usize]>) -> CommandOutco
 
 fn proposal_mutation(
     state: &mut AppState,
-    mutation: impl FnOnce(&mut LegacyList) -> Box<[usize]>,
+    mutation: impl FnOnce(&mut LegacyList) -> Result<Box<[usize]>, ProposalMutationError>,
 ) -> CommandOutcome {
-    let changed = mutation(&mut state.model);
-    proposal_outcome(state, changed)
+    match mutation(&mut state.model) {
+        Ok(changed) => proposal_outcome(state, changed),
+        Err(error) => {
+            state.set_transient_status(proposal_mutation_error_korean(error));
+            CommandOutcome::ui(UiEffect::None)
+        }
+    }
 }
 
 fn apply_command_outcome(
@@ -886,12 +891,17 @@ fn finish_prompt_command(
 ) -> (CommandOutcome, Option<SelectionRestore>) {
     let outcome = match continuation {
         PromptContinuation::ManualChange { row } => {
-            let changed = state.model.manual_change_changed(row, result.value_one);
-            model_outcome(
-                state,
-                changed,
-                UiEffect::ProposalRowsChanged(vec![row].into_boxed_slice()),
-            )
+            match state.model.manual_change_changed(row, result.value_one) {
+                Ok(changed) => model_outcome(
+                    state,
+                    changed,
+                    UiEffect::ProposalRowsChanged(vec![row].into_boxed_slice()),
+                ),
+                Err(error) => {
+                    state.set_transient_status(proposal_mutation_error_korean(error));
+                    CommandOutcome::ui(UiEffect::None)
+                }
+            }
         }
         PromptContinuation::Replace => proposal_mutation(state, |model| {
             model.replace_complete_changed(&result.value_one, &result.value_two)
@@ -931,21 +941,13 @@ fn finish_pad_digits_command(
         state.set_transient_status("자리수 입력이 잘못되었습니다.");
         return CommandOutcome::ui(UiEffect::None);
     }
-    let changed = {
-        let outcome = if result.choice == 0 {
-            state.model.pad_last_digit_run_changed(width as usize)
+    proposal_mutation(state, |model| {
+        if result.choice == 0 {
+            model.pad_last_digit_run_changed(width as usize)
         } else {
-            state.model.pad_first_digit_run_changed(width as usize)
-        };
-        match outcome {
-            Ok(changed) => changed,
-            Err(_) => {
-                state.set_transient_status("자리수 입력이 잘못되었습니다.");
-                Box::default()
-            }
+            model.pad_first_digit_run_changed(width as usize)
         }
-    };
-    proposal_outcome(state, changed)
+    })
 }
 
 fn finish_sequence_command(
@@ -964,16 +966,14 @@ fn finish_sequence_command(
         2 => LegacySequenceMode::AppendRestartPerFolder,
         _ => LegacySequenceMode::PrependRestartPerFolder,
     };
-    let changed = state
-        .model
-        .add_sequence_by_changed(
+    proposal_mutation(state, |model| {
+        model.add_sequence_by_changed(
             width as usize,
             legacy_atoi(&result.value_two),
             mode,
             compare_windows,
         )
-        .unwrap_or_default();
-    proposal_outcome(state, changed)
+    })
 }
 
 fn finish_delete_position_command(

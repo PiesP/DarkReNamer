@@ -508,7 +508,7 @@ fn planner_file_journal_backend_and_model_complete_one_production_path()
     fs::write(&source, b"content")?;
     let mut model = LegacyList::new();
     assert!(model.append(LegacyListItem::new(legacy_path(&source), false, 7, 8, 9,)));
-    assert!(model.manual_change(0, "after.txt"));
+    assert_eq!(model.manual_change(0, "after.txt"), Ok(true));
     let mut backend = WindowsRenameBackend;
     let root = JournalRoot::open(directory.path())?;
     let substituted_root = directory.path().with_extension("substituted-root");

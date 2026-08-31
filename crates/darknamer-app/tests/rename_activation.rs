@@ -11,7 +11,7 @@ use darknamer_core::{LegacyList, LegacyListItem, LegacyText};
 fn model() -> LegacyList {
     let mut model = LegacyList::new();
     assert!(model.append(LegacyListItem::new("C:\\work\\a.txt", false, 1, 2, 3)));
-    assert!(model.manual_change(0, "b.txt"));
+    assert_eq!(model.manual_change(0, "b.txt"), Ok(true));
     model
 }
 
@@ -77,7 +77,7 @@ fn rolled_back_report_leaves_model_and_incomplete_journal_is_retained()
 fn blocker_message_is_structured_and_selects_affected_rows() {
     let mut model = model();
     assert!(model.append(LegacyListItem::new("C:\\work\\c.txt", false, 1, 2, 3)));
-    assert!(model.manual_change(1, "b.txt"));
+    assert_eq!(model.manual_change(1, "b.txt"), Ok(true));
     let backend = MemoryBackend::new()
         .with_file("C:\\work\\a.txt", 1)
         .with_file("C:\\work\\c.txt", 2);
