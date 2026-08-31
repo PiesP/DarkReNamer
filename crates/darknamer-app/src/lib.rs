@@ -2360,6 +2360,7 @@ pub(crate) enum PreviewRowIssue {
     #[default]
     None,
     EmptyStem,
+    InvalidName(darknamer_core::WindowsLeafNameError),
     DuplicateDestination,
 }
 
@@ -2369,12 +2370,14 @@ pub(crate) enum PreviewRowIssue {
 pub(crate) struct PreviewIssueCache {
     rows: Vec<PreviewRowIssue>,
     warning_rows: usize,
+    invalid_name_rows: usize,
+    duplicate_destination_rows: usize,
     blocker_rows: usize,
 }
 
 #[cfg(any(windows, test))]
 impl PreviewIssueCache {
-    pub(crate) fn refresh_by<'a, F>(
+    pub(crate) fn refresh_by<'a, F, K>(
         &mut self,
         rows: impl IntoIterator<
             Item = (
@@ -2384,40 +2387,48 @@ impl PreviewIssueCache {
                 bool,
             ),
         >,
-        compare: F,
+        mut destination_key: F,
     ) where
-        F: Fn(&darknamer_core::LegacyText, &darknamer_core::LegacyText) -> std::cmp::Ordering
-            + Copy,
+        F: FnMut(&darknamer_core::LegacyText, &darknamer_core::LegacyText) -> K,
+        K: Ord,
     {
         let rows = rows.into_iter().collect::<Vec<_>>();
         self.rows.clear();
         self.rows.resize(rows.len(), PreviewRowIssue::None);
         let mut destinations = Vec::new();
         for (row, (parent, current, proposed, is_directory)) in rows.iter().copied().enumerate() {
-            if current == proposed {
-                continue;
-            }
-            if preview_name_has_empty_stem(proposed, is_directory) {
+            let changed = current != proposed;
+            let valid = if changed {
+                match darknamer_core::validate_windows_leaf_name(proposed) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        self.rows[row] = PreviewRowIssue::InvalidName(error);
+                        false
+                    }
+                }
+            } else {
+                true
+            };
+            if changed && valid && preview_name_has_empty_stem(proposed, is_directory) {
                 self.rows[row] = PreviewRowIssue::EmptyStem;
             }
-            destinations.push((row, parent, proposed));
+            let effective_name = if changed { proposed } else { current };
+            destinations.push((row, destination_key(parent, effective_name), changed, valid));
         }
-        destinations
-            .sort_by(|left, right| compare(left.1, right.1).then_with(|| compare(left.2, right.2)));
+        destinations.sort_by(|left, right| left.1.cmp(&right.1));
         let mut group_start = 0_usize;
         while group_start < destinations.len() {
             let mut group_end = group_start + 1;
             while group_end < destinations.len()
-                && compare(destinations[group_start].1, destinations[group_end].1)
-                    == std::cmp::Ordering::Equal
-                && compare(destinations[group_start].2, destinations[group_end].2)
-                    == std::cmp::Ordering::Equal
+                && destinations[group_start].1 == destinations[group_end].1
             {
                 group_end += 1;
             }
             if group_end - group_start > 1 {
                 for destination in &destinations[group_start..group_end] {
-                    self.rows[destination.0] = PreviewRowIssue::DuplicateDestination;
+                    if destination.2 && destination.3 {
+                        self.rows[destination.0] = PreviewRowIssue::DuplicateDestination;
+                    }
                 }
             }
             group_start = group_end;
@@ -2427,11 +2438,19 @@ impl PreviewIssueCache {
             .iter()
             .filter(|issue| matches!(issue, PreviewRowIssue::EmptyStem))
             .count();
-        self.blocker_rows = self
+        self.invalid_name_rows = self
+            .rows
+            .iter()
+            .filter(|issue| matches!(issue, PreviewRowIssue::InvalidName(_)))
+            .count();
+        self.duplicate_destination_rows = self
             .rows
             .iter()
             .filter(|issue| matches!(issue, PreviewRowIssue::DuplicateDestination))
             .count();
+        self.blocker_rows = self
+            .invalid_name_rows
+            .saturating_add(self.duplicate_destination_rows);
     }
 
     #[must_use]
@@ -2450,27 +2469,82 @@ impl PreviewIssueCache {
             .iter()
             .enumerate()
             .filter_map(|(row, issue)| {
-                matches!(issue, PreviewRowIssue::DuplicateDestination).then_some(row)
+                matches!(
+                    issue,
+                    PreviewRowIssue::InvalidName(_) | PreviewRowIssue::DuplicateDestination
+                )
+                .then_some(row)
             })
             .collect::<Vec<_>>()
             .into_boxed_slice()
     }
 
     #[must_use]
-    pub(crate) fn notice(&self) -> Option<String> {
-        if self.blocker_rows != 0 {
-            Some(format!(
-                "대상 이름 충돌 {}개 · 변경 적용이 차단되었습니다.",
-                self.blocker_rows
-            ))
-        } else if self.warning_rows != 0 {
-            Some(format!(
-                "이름 본체가 비어 있는 항목 {}개 · 변경 전에 확인하세요.",
-                self.warning_rows
-            ))
-        } else {
-            None
+    pub(crate) const fn blocker_explanation(&self) -> Option<&'static str> {
+        match (
+            self.invalid_name_rows != 0,
+            self.duplicate_destination_rows != 0,
+        ) {
+            (true, true) => Some(
+                "Windows에서 사용할 수 없는 대상 이름과 같은 폴더의 대상 이름 충돌이 있습니다. 표시된 행의 이름을 Windows 이름 규칙에 맞고 서로 다르게 수정해 주세요.",
+            ),
+            (true, false) => Some(
+                "Windows에서 사용할 수 없는 대상 이름이 있습니다. 표시된 행의 이름을 Windows 이름 규칙에 맞게 수정해 주세요.",
+            ),
+            (false, true) => Some(
+                "같은 폴더에서 둘 이상의 항목이 같은 대상 이름을 사용합니다. 표시된 행의 이름을 다르게 지정해 주세요.",
+            ),
+            (false, false) => None,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn notice(&self) -> Option<String> {
+        let mut counts = Vec::new();
+        if self.invalid_name_rows != 0 {
+            counts.push(format!("잘못된 대상 이름 {}개", self.invalid_name_rows));
+        }
+        if self.duplicate_destination_rows != 0 {
+            counts.push(format!(
+                "대상 이름 충돌 {}개",
+                self.duplicate_destination_rows
+            ));
+        }
+        if self.warning_rows != 0 {
+            counts.push(format!(
+                "이름 본체가 비어 있는 항목 {}개",
+                self.warning_rows
+            ));
+        }
+        if counts.is_empty() {
+            return None;
+        }
+        let action = if self.blocker_rows != 0 {
+            "변경 적용이 차단되었습니다."
+        } else {
+            "변경 전에 확인하세요."
+        };
+        Some(format!("{} · {action}", counts.join(" · ")))
+    }
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn windows_leaf_name_error_korean(
+    error: darknamer_core::WindowsLeafNameError,
+) -> &'static str {
+    use darknamer_core::WindowsLeafNameError;
+
+    match error {
+        WindowsLeafNameError::Empty => "이름이 비어 있음",
+        WindowsLeafNameError::ContainsNul => "NUL 문자가 포함됨",
+        WindowsLeafNameError::ContainsSeparator => "경로 구분자가 포함됨",
+        WindowsLeafNameError::DotComponent => "점 경로 구성 요소(.) 또는 (..)임",
+        WindowsLeafNameError::InvalidCharacter => "Windows에서 금지된 문자가 포함됨",
+        WindowsLeafNameError::ReservedDeviceName => "Windows 예약 장치 이름임",
+        WindowsLeafNameError::TrailingDotOrSpace => "점 또는 공백으로 끝남",
+        WindowsLeafNameError::TooLong => "Windows 이름 길이 제한을 초과함",
+        _ => "Windows 이름 규칙에 맞지 않음",
     }
 }
 
@@ -2719,6 +2793,7 @@ pub(crate) const fn proposed_name_visual_decision(
         match context.issue {
             PreviewRowIssue::None => ProposedNameVisual::Changed,
             PreviewRowIssue::EmptyStem => ProposedNameVisual::Warning,
+            PreviewRowIssue::InvalidName(_) => ProposedNameVisual::Collision,
             PreviewRowIssue::DuplicateDestination => ProposedNameVisual::Collision,
         }
     } else {
@@ -5782,48 +5857,282 @@ mod tests {
             }),
             ProposedNameVisual::Collision
         );
+        assert_eq!(
+            proposed_name_visual_decision(ProposedNameVisualContext {
+                row: Some(0),
+                row_count: 1,
+                subitem: 1,
+                changed: true,
+                issue: PreviewRowIssue::InvalidName(darknamer_core::WindowsLeafNameError::Empty,),
+                selected: false,
+                focused: true,
+                custom_colors_enabled: true,
+            }),
+            ProposedNameVisual::Collision
+        );
+    }
+
+    fn preview_test_destination_key(
+        parent: &darknamer_core::LegacyText,
+        leaf: &darknamer_core::LegacyText,
+    ) -> (Box<[u16]>, Box<[u16]>) {
+        fn ascii_fold(text: &darknamer_core::LegacyText) -> Box<[u16]> {
+            text.units()
+                .iter()
+                .map(|unit| {
+                    if (b'A' as u16..=b'Z' as u16).contains(unit) {
+                        unit + u16::from(b'a' - b'A')
+                    } else {
+                        *unit
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        }
+
+        (ascii_fold(parent), ascii_fold(leaf))
     }
 
     #[test]
-    fn preview_issues_distinguish_empty_stems_and_duplicate_destinations() {
+    fn preview_issues_compute_each_final_destination_key_once() {
+        use std::cell::Cell;
+
         use darknamer_core::LegacyText;
 
         let parent = LegacyText::from(r"C:\work");
-        let other_parent = LegacyText::from(r"C:\other");
-        let current_one = LegacyText::from("photo01.jpg");
-        let current_two = LegacyText::from("photo02.jpg");
-        let current_three = LegacyText::from("photo03.jpg");
-        let duplicate = LegacyText::from(".jpg");
-        let warning_only = LegacyText::from(".png");
+        let current_a = LegacyText::from("a.txt");
+        let current_b = LegacyText::from("b.txt");
+        let proposed_b = LegacyText::from("b.txt");
+        let calls = Cell::new(0_usize);
         let mut cache = PreviewIssueCache::default();
 
         cache.refresh_by(
             [
-                (&parent, &current_one, &duplicate, false),
-                (&parent, &current_two, &duplicate, false),
-                (&other_parent, &current_three, &warning_only, false),
+                (&parent, &current_a, &proposed_b, false),
+                (&parent, &current_b, &current_b, false),
             ],
-            LegacyText::case_insensitive_cmp,
+            |destination_parent, destination_leaf| {
+                calls.set(calls.get().saturating_add(1));
+                preview_test_destination_key(destination_parent, destination_leaf)
+            },
+        );
+
+        assert_eq!(calls.get(), 2);
+        assert_eq!(cache.issue(0), PreviewRowIssue::DuplicateDestination);
+        assert_eq!(cache.issue(1), PreviewRowIssue::None);
+    }
+
+    #[test]
+    fn preview_issues_block_a_changed_name_that_occupies_an_unchanged_destination() {
+        use darknamer_core::LegacyText;
+
+        let parent = LegacyText::from(r"C:\work");
+        let current_a = LegacyText::from("a.txt");
+        let current_b = LegacyText::from("b.txt");
+        let proposed_b = LegacyText::from("b.txt");
+        let mut cache = PreviewIssueCache::default();
+
+        cache.refresh_by(
+            [
+                (&parent, &current_a, &proposed_b, false),
+                (&parent, &current_b, &current_b, false),
+            ],
+            preview_test_destination_key,
         );
 
         assert_eq!(cache.issue(0), PreviewRowIssue::DuplicateDestination);
-        assert_eq!(cache.issue(1), PreviewRowIssue::DuplicateDestination);
-        assert_eq!(cache.issue(2), PreviewRowIssue::EmptyStem);
-        assert!(cache.has_blocker());
-        assert_eq!(cache.blocker_rows().as_ref(), &[0, 1]);
+        assert_eq!(cache.issue(1), PreviewRowIssue::None);
+        assert_eq!(cache.blocker_rows().as_ref(), &[0]);
         assert_eq!(
-            cache.notice().as_deref(),
-            Some("대상 이름 충돌 2개 · 변경 적용이 차단되었습니다.")
+            cache.blocker_explanation(),
+            Some(
+                "같은 폴더에서 둘 이상의 항목이 같은 대상 이름을 사용합니다. 표시된 행의 이름을 다르게 지정해 주세요."
+            )
+        );
+    }
+
+    #[test]
+    fn preview_issues_preserve_chains_swaps_cross_parent_names_and_case_only_renames() {
+        use darknamer_core::LegacyText;
+
+        let parent = LegacyText::from(r"C:\work");
+        let other_parent = LegacyText::from(r"C:\other");
+        let a = LegacyText::from("a.txt");
+        let upper_a = LegacyText::from("A.txt");
+        let b = LegacyText::from("b.txt");
+        let c = LegacyText::from("c.txt");
+        let d = LegacyText::from("d.txt");
+        let same = LegacyText::from("same.txt");
+        let mut cache = PreviewIssueCache::default();
+
+        cache.refresh_by(
+            [
+                (&parent, &a, &b, false),
+                (&parent, &b, &c, false),
+                (&parent, &c, &d, false),
+            ],
+            preview_test_destination_key,
+        );
+        assert!(!cache.has_blocker(), "a rename chain remains schedulable");
+
+        cache.refresh_by(
+            [(&parent, &a, &b, false), (&parent, &b, &a, false)],
+            preview_test_destination_key,
+        );
+        assert!(!cache.has_blocker(), "a swap remains schedulable");
+
+        cache.refresh_by(
+            [
+                (&parent, &a, &same, false),
+                (&other_parent, &b, &same, false),
+            ],
+            preview_test_destination_key,
+        );
+        assert!(
+            !cache.has_blocker(),
+            "same names in different parents are valid"
         );
 
         cache.refresh_by(
-            [(&other_parent, &current_three, &warning_only, false)],
-            LegacyText::case_insensitive_cmp,
+            [(&parent, &a, &upper_a, false)],
+            preview_test_destination_key,
         );
-        assert!(!cache.has_blocker());
+        assert!(!cache.has_blocker(), "a case-only rename remains valid");
+    }
+
+    #[test]
+    fn preview_issues_block_invalid_changed_windows_leaf_names() {
+        use darknamer_core::{LegacyText, WindowsLeafNameError};
+
+        let parent = LegacyText::from(r"C:\work");
+        let current_a = LegacyText::from("a.txt");
+        let current_b = LegacyText::from("b.txt");
+        let current_c = LegacyText::from("c.txt");
+        let empty = LegacyText::from("");
+        let reserved = LegacyText::from("CON.txt");
+        let forbidden = LegacyText::from("bad?.txt");
+        let mut cache = PreviewIssueCache::default();
+
+        cache.refresh_by(
+            [
+                (&parent, &current_a, &empty, false),
+                (&parent, &current_b, &reserved, false),
+                (&parent, &current_c, &forbidden, false),
+            ],
+            preview_test_destination_key,
+        );
+
+        assert_eq!(
+            cache.issue(0),
+            PreviewRowIssue::InvalidName(WindowsLeafNameError::Empty)
+        );
+        assert_eq!(
+            cache.issue(1),
+            PreviewRowIssue::InvalidName(WindowsLeafNameError::ReservedDeviceName)
+        );
+        assert_eq!(
+            cache.issue(2),
+            PreviewRowIssue::InvalidName(WindowsLeafNameError::InvalidCharacter)
+        );
+        assert_eq!(cache.blocker_rows().as_ref(), &[0, 1, 2]);
         assert_eq!(
             cache.notice().as_deref(),
-            Some("이름 본체가 비어 있는 항목 1개 · 변경 전에 확인하세요.")
+            Some("잘못된 대상 이름 3개 · 변경 적용이 차단되었습니다.")
+        );
+        assert_eq!(
+            cache.blocker_explanation(),
+            Some(
+                "Windows에서 사용할 수 없는 대상 이름이 있습니다. 표시된 행의 이름을 Windows 이름 규칙에 맞게 수정해 주세요."
+            )
+        );
+
+        let trailing = LegacyText::from("trailing.");
+        cache.refresh_by(
+            [(&parent, &current_a, &trailing, false)],
+            preview_test_destination_key,
+        );
+        assert_eq!(
+            cache.issue(0),
+            PreviewRowIssue::InvalidName(WindowsLeafNameError::TrailingDotOrSpace)
+        );
+        assert_eq!(
+            windows_leaf_name_error_korean(WindowsLeafNameError::TrailingDotOrSpace),
+            "점 또는 공백으로 끝남"
+        );
+    }
+
+    #[test]
+    fn preview_issues_keep_valid_dotfile_boundaries_as_warnings_or_collisions() {
+        use darknamer_core::LegacyText;
+
+        let parent = LegacyText::from(r"C:\work");
+        let current_a = LegacyText::from("a.jpg");
+        let current_b = LegacyText::from("b.jpg");
+        let dot_jpg = LegacyText::from(".jpg");
+        let dot_env = LegacyText::from(".env");
+        let mut cache = PreviewIssueCache::default();
+
+        cache.refresh_by(
+            [(&parent, &current_a, &dot_jpg, false)],
+            preview_test_destination_key,
+        );
+        assert_eq!(cache.issue(0), PreviewRowIssue::EmptyStem);
+        assert!(!cache.has_blocker());
+
+        cache.refresh_by(
+            [
+                (&parent, &current_a, &dot_jpg, false),
+                (&parent, &current_b, &dot_jpg, false),
+            ],
+            preview_test_destination_key,
+        );
+        assert_eq!(cache.issue(0), PreviewRowIssue::DuplicateDestination);
+        assert_eq!(cache.issue(1), PreviewRowIssue::DuplicateDestination);
+
+        cache.refresh_by(
+            [(&parent, &dot_env, &dot_env, false)],
+            preview_test_destination_key,
+        );
+        assert_eq!(cache.issue(0), PreviewRowIssue::None);
+        assert_eq!(cache.notice(), None);
+    }
+
+    #[test]
+    fn preview_issues_aggregate_invalid_duplicate_and_warning_counts_in_priority_order() {
+        use darknamer_core::LegacyText;
+
+        let parent = LegacyText::from(r"C:\work");
+        let invalid_current = LegacyText::from("invalid.txt");
+        let duplicate_current_a = LegacyText::from("a.txt");
+        let duplicate_current_b = LegacyText::from("b.txt");
+        let warning_current = LegacyText::from("photo.png");
+        let empty = LegacyText::from("");
+        let duplicate = LegacyText::from("same.txt");
+        let warning = LegacyText::from(".png");
+        let mut cache = PreviewIssueCache::default();
+
+        cache.refresh_by(
+            [
+                (&parent, &invalid_current, &empty, false),
+                (&parent, &duplicate_current_a, &duplicate, false),
+                (&parent, &duplicate_current_b, &duplicate, false),
+                (&parent, &warning_current, &warning, false),
+            ],
+            preview_test_destination_key,
+        );
+
+        assert_eq!(cache.blocker_rows().as_ref(), &[0, 1, 2]);
+        assert_eq!(
+            cache.notice().as_deref(),
+            Some(
+                "잘못된 대상 이름 1개 · 대상 이름 충돌 2개 · 이름 본체가 비어 있는 항목 1개 · 변경 적용이 차단되었습니다."
+            )
+        );
+        assert_eq!(
+            cache.blocker_explanation(),
+            Some(
+                "Windows에서 사용할 수 없는 대상 이름과 같은 폴더의 대상 이름 충돌이 있습니다. 표시된 행의 이름을 Windows 이름 규칙에 맞고 서로 다르게 수정해 주세요."
+            )
         );
     }
 

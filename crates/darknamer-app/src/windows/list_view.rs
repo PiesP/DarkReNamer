@@ -437,10 +437,18 @@ pub(super) fn handle_list_infotip(state: &AppState, lparam: LPARAM) -> bool {
         return true;
     };
     let preview = match state.preview_issue_cache.issue(row) {
-        PreviewRowIssue::DuplicateDestination => "대상 이름 충돌 · 변경 적용 차단",
-        PreviewRowIssue::EmptyStem => "이름 본체가 비어 있음 · 변경 전 확인 필요",
-        PreviewRowIssue::None if item.current_name() != item.proposed_name() => "변경 예정",
-        PreviewRowIssue::None => "변경 없음",
+        PreviewRowIssue::InvalidName(error) => format!(
+            "잘못된 대상 이름: {} · Windows에서 사용할 수 있는 이름으로 수정하세요.",
+            windows_leaf_name_error_korean(error)
+        ),
+        PreviewRowIssue::DuplicateDestination => {
+            "대상 이름 충돌 · 같은 폴더의 대상 이름과 다르게 수정하세요.".to_owned()
+        }
+        PreviewRowIssue::EmptyStem => "이름 본체가 비어 있음 · 변경 전 확인 필요".to_owned(),
+        PreviewRowIssue::None if item.current_name() != item.proposed_name() => {
+            "변경 예정".to_owned()
+        }
+        PreviewRowIssue::None => "변경 없음".to_owned(),
     };
     let text = format!(
         "{preview}\n{}\n{}\n정확한 크기: {}",
@@ -619,11 +627,30 @@ fn refresh_preview_count_cache(state: &mut AppState) {
                 item.is_directory(),
             )
         }),
-        compare_windows,
+        preview_destination_key,
     );
     state
         .ui_status
         .set_preview_notice(state.preview_issue_cache.notice());
+}
+
+fn preview_destination_key(
+    destination_parent: &LegacyText,
+    destination_leaf: &LegacyText,
+) -> crate::rename::PathKey {
+    let mut destination_units =
+        Vec::with_capacity(destination_parent.len() + 1 + destination_leaf.len());
+    destination_units.extend_from_slice(destination_parent.units());
+    if !destination_parent
+        .units()
+        .last()
+        .is_some_and(|unit| *unit == b'\\' as u16 || *unit == b'/' as u16)
+    {
+        destination_units.push(b'\\' as u16);
+    }
+    destination_units.extend_from_slice(destination_leaf.units());
+    let destination = LegacyText::from_units(destination_units);
+    RenameBackend::path_key(&WindowsRenameBackend, &destination)
 }
 
 fn rendered_row(icon_cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyListItem) -> RenderedRow {
@@ -878,6 +905,27 @@ fn format_locale_part(mut format: impl FnMut(*mut u16, i32) -> i32) -> Option<St
 #[cfg(test)]
 mod native_tests {
     use super::*;
+
+    #[test]
+    fn preview_destination_key_matches_planner_windows_path_policy() {
+        let backend = WindowsRenameBackend;
+        for (parent, leaf, expected) in [
+            (r"C:\work", "item.txt", r"C:\work\item.txt"),
+            (r"C:\work\", "item.txt", r"C:\work\item.txt"),
+            ("C:/work/", "item.txt", "C:/work/item.txt"),
+        ] {
+            assert_eq!(
+                preview_destination_key(&LegacyText::from(parent), &LegacyText::from(leaf)),
+                RenameBackend::path_key(&backend, &LegacyText::from(expected))
+            );
+        }
+
+        assert_eq!(
+            preview_destination_key(&LegacyText::from(r"C:\Locale"), &LegacyText::from("I.txt"),),
+            preview_destination_key(&LegacyText::from("c:/locale"), &LegacyText::from("i.TXT"),),
+            "invariant Windows folding must not depend on the user's locale",
+        );
+    }
 
     #[test]
     fn known_utc_filetime_uses_current_dynamic_timezone_without_mutation() {
