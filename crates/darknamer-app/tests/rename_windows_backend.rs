@@ -280,11 +280,11 @@ fn intermediate_reparse_and_unsupported_prefix_are_rejected_when_available()
     }
     let link = directory.path().join("junction");
     if let Err(error) = symlink_dir(&target, &link) {
-        if error.kind() == std::io::ErrorKind::PermissionDenied {
+        if windows_capabilities::is_symlink_creation_capability_error(&error) {
             windows_capabilities::unavailable(
                 "symlink-creation",
                 error.raw_os_error(),
-                "permission-denied",
+                "permission-denied-or-privilege-not-held",
             )?;
             return Ok(());
         }
@@ -457,11 +457,11 @@ fn final_reparse_and_journal_root_reparse_are_rejected_when_fixture_is_available
         return Ok(());
     }
     if let Err(error) = symlink_file(&target, &link) {
-        if error.kind() == std::io::ErrorKind::PermissionDenied {
+        if windows_capabilities::is_symlink_creation_capability_error(&error) {
             windows_capabilities::unavailable(
                 "symlink-creation",
                 error.raw_os_error(),
-                "permission-denied",
+                "permission-denied-or-privilege-not-held",
             )?;
             return Ok(());
         }
@@ -484,7 +484,17 @@ fn final_reparse_and_journal_root_reparse_are_rejected_when_fixture_is_available
     let root_target = directory.path().join("journal-root");
     let root_link = directory.path().join("journal-link");
     fs::create_dir(&root_target)?;
-    symlink_dir(&root_target, &root_link)?;
+    if let Err(error) = symlink_dir(&root_target, &root_link) {
+        if windows_capabilities::is_symlink_creation_capability_error(&error) {
+            windows_capabilities::unavailable(
+                "symlink-creation",
+                error.raw_os_error(),
+                "permission-denied-or-privilege-not-held",
+            )?;
+            return Ok(());
+        }
+        return Err(error.into());
+    }
     assert!(JournalRoot::open(root_link).is_err());
     Ok(())
 }

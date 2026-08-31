@@ -1,8 +1,8 @@
 //! Exact lexical budget for the package's explicitly allowed native unsafe code.
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::path::{Component, Path, PathBuf};
+
+include!(concat!(env!("OUT_DIR"), "/test_source_manifest.rs"));
 
 const POLICY_FILE: &str = "tests/unsafe_policy.rs";
 
@@ -129,24 +129,14 @@ const EXPECTED: &[(&str, UnsafeCounts)] = &[
 
 #[test]
 fn unsafe_source_inventory_matches_the_reviewed_budget() -> Result<(), Box<dyn std::error::Error>> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let mut files = Vec::new();
-    collect_rust_files(&root, &mut files)?;
-    files.sort();
-
     let mut actual = BTreeMap::new();
-    for file in files {
-        if !file.is_file() {
-            continue;
-        }
-        let relative = normalized_relative_path(&root, &file)?;
+    for &(relative, source) in BUILD_SOURCE_FILES {
         if relative == POLICY_FILE {
             continue;
         }
-        let source = fs::read_to_string(&file)?;
-        let counts = UnsafeCounts::from_source(&source);
+        let counts = UnsafeCounts::from_source(source);
         if !counts.is_empty() {
-            actual.insert(relative, counts);
+            actual.insert(relative.to_owned(), counts);
         }
     }
 
@@ -159,6 +149,20 @@ fn unsafe_source_inventory_matches_the_reviewed_budget() -> Result<(), Box<dyn s
         "unsafe inventory changed; review the native boundary and update exact budgets for both increases and reductions"
     );
     Ok(())
+}
+
+#[test]
+fn build_source_manifest_is_sorted_unique_and_contains_the_policy() {
+    assert!(
+        BUILD_SOURCE_FILES
+            .windows(2)
+            .all(|pair| pair[0].0 < pair[1].0)
+    );
+    assert!(
+        BUILD_SOURCE_FILES
+            .iter()
+            .any(|(path, source)| *path == POLICY_FILE && source.contains("const EXPECTED"))
+    );
 }
 
 #[test]
@@ -295,33 +299,4 @@ const fn is_identifier_start(byte: u8) -> bool {
 
 const fn is_identifier_continue(byte: u8) -> bool {
     is_identifier_start(byte) || byte.is_ascii_digit()
-}
-
-fn collect_rust_files(
-    directory: &Path,
-    files: &mut Vec<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    for entry in fs::read_dir(directory)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            collect_rust_files(&path, files)?;
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
-            files.push(path);
-        }
-    }
-    Ok(())
-}
-
-fn normalized_relative_path(
-    root: &Path,
-    file: &Path,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let relative = file.strip_prefix(root)?;
-    let mut components = Vec::new();
-    for component in relative.components() {
-        if let Component::Normal(component) = component {
-            components.push(component.to_string_lossy());
-        }
-    }
-    Ok(components.join("/"))
 }

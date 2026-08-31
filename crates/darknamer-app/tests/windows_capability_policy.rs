@@ -2,10 +2,18 @@
 mod windows_capabilities;
 
 use std::ffi::OsStr;
-use std::fs;
-use std::path::Path;
+use std::io;
 
 use windows_capabilities::{GateMode, gate_mode_from, unavailable_in_mode};
+
+#[test]
+fn privilege_not_held_is_a_symlink_creation_capability_error() {
+    let error = io::Error::from_raw_os_error(1_314);
+
+    assert!(windows_capabilities::is_symlink_creation_capability_error(
+        &error
+    ));
+}
 
 #[test]
 fn local_optional_mode_emits_an_explicit_skip_outcome() {
@@ -54,15 +62,16 @@ fn invalid_required_mode_configuration_fails_closed() {
 #[test]
 fn hosted_windows_and_release_gates_require_capabilities_with_visible_output()
 -> Result<(), Box<dyn std::error::Error>> {
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| std::io::Error::other("repository root is unavailable"))?;
-    for workflow in [
-        ".github/workflows/ci.yaml",
-        ".github/workflows/release.yaml",
+    for (workflow, source) in [
+        (
+            ".github/workflows/ci.yaml",
+            include_str!("../../../.github/workflows/ci.yaml"),
+        ),
+        (
+            ".github/workflows/release.yaml",
+            include_str!("../../../.github/workflows/release.yaml"),
+        ),
     ] {
-        let source = fs::read_to_string(repository.join(workflow))?;
         assert!(
             source.contains("DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'"),
             "{workflow} must enable required Windows backend capabilities"

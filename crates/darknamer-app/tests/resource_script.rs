@@ -2,6 +2,9 @@
 mod resource_ids;
 #[path = "../build_support/resource_script.rs"]
 mod resource_script;
+#[cfg(unix)]
+#[path = "../build_support/test_source_manifest.rs"]
+mod test_source_manifest;
 
 use std::path::Path;
 
@@ -50,4 +53,24 @@ fn embedded_manifest_enables_common_controls_and_per_monitor_v2() {
     assert!(manifest.contains("version=\"6.0.0.0\""));
     assert!(manifest.contains(">true/pm</dpiAware>"));
     assert!(manifest.contains(">PerMonitorV2, PerMonitor, system</dpiAwareness>"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_source_manifest_rejects_symlink_entries() -> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+
+    let fixture = tempfile::tempdir()?;
+    let source = fixture.path().join("source.rs");
+    fs::write(&source, b"fn source() {}\n")?;
+    symlink(&source, fixture.path().join("linked.rs"))?;
+
+    let error = test_source_manifest::render(fixture.path())
+        .err()
+        .ok_or_else(|| std::io::Error::other("symlinked source entry was accepted"))?;
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("rejects symlink entry"));
+    Ok(())
 }

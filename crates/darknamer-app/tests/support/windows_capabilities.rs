@@ -3,6 +3,16 @@ use std::ffi::OsStr;
 use std::io;
 
 pub const REQUIRED_CAPABILITIES_ENV: &str = "DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES";
+const ERROR_PRIVILEGE_NOT_HELD: i32 = 1_314;
+
+#[allow(
+    dead_code,
+    reason = "some integration targets share capability policy without creating symlink fixtures"
+)]
+pub fn is_symlink_creation_capability_error(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::PermissionDenied
+        || error.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GateMode {
