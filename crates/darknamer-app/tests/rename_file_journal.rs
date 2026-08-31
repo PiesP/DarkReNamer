@@ -10,6 +10,10 @@ use darknamer_app::rename::{
 };
 use darknamer_core::LegacyText;
 
+#[cfg(windows)]
+#[path = "support/windows_capabilities.rs"]
+mod windows_capabilities;
+
 fn step(entry: u32, source: LegacyText, destination: LegacyText) -> JournalStep {
     step_with_phase(entry, source, destination, TemporaryPhase::None)
 }
@@ -111,7 +115,14 @@ fn supported_journal_root(
     match JournalRoot::open(path) {
         Ok(root) => Ok(Some(root)),
         #[cfg(windows)]
-        Err(error) if matches!(error.os_code, Some(87 | 120)) => Ok(None),
+        Err(error) if matches!(error.os_code, Some(87 | 120)) => {
+            windows_capabilities::unavailable(
+                "journal-root-case-query",
+                error.os_code,
+                "unsupported",
+            )?;
+            Ok(None)
+        }
         Err(error) => Err(error.into()),
     }
 }

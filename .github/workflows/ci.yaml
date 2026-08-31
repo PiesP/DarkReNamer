@@ -145,7 +145,8 @@ jobs:
         run: |
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
           if ($LASTEXITCODE -ne 0) { throw 'The Windows Clippy gate failed.' }
-          cargo test --workspace --all-targets --all-features --locked
+          $env:DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'
+          cargo test --workspace --all-targets --all-features --locked -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'The Windows test gate failed.' }
 
       - name: Build the compatibility executable
