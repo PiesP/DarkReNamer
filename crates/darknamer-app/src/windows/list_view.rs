@@ -3,18 +3,18 @@ use super::*;
 const LIST_VIEW_NOTIFICATION_SUBCLASS_ID: usize = 1;
 
 pub(super) fn install_list_view_notification_subclass(state: &AppState) -> io::Result<()> {
-    // AppState is allocated in its final Box before child creation. The subclass
-    // is removed during owner teardown before that Box is reclaimed.
-    let state_ref = state as *const AppState as usize;
+    // Store only the copied owner HWND. Each callback resolves and leases the
+    // owner's currently published state instead of retaining an AppState pointer.
+    // SAFETY: list_window is a live direct child during installation.
+    let owner_ref = unsafe { GetParent(state.list_window) } as usize;
     // SAFETY: list_window is a live UI-thread ListView, the callback has the
-    // documented SUBCLASSPROC ABI, and state_ref follows the lifetime contract
-    // described above.
+    // documented SUBCLASSPROC ABI, and owner_ref is a copied HWND value.
     if unsafe {
         SetWindowSubclass(
             state.list_window,
             Some(list_view_notification_subclass),
             LIST_VIEW_NOTIFICATION_SUBCLASS_ID,
-            state_ref,
+            owner_ref,
         )
     } == 0
     {
@@ -45,7 +45,7 @@ unsafe extern "system" fn list_view_notification_subclass(
     wparam: WPARAM,
     lparam: LPARAM,
     _subclass_id: usize,
-    state_ref: usize,
+    owner_ref: usize,
 ) -> LRESULT {
     if message == WM_NCDESTROY {
         remove_list_view_notification_subclass(window);
@@ -53,7 +53,7 @@ unsafe extern "system" fn list_view_notification_subclass(
         // subclass has stopped retaining AppState refdata.
         return unsafe { DefSubclassProc(window, message, wparam, lparam) };
     }
-    if message == WM_NOTIFY && state_ref != 0 && !programmatic_list_update_active() {
+    if message == WM_NOTIFY && owner_ref != 0 && !programmatic_list_update_active() {
         let notification = lparam as *const NMHDR;
         // Validate the pointer-free native routing boundary before borrowing
         // AppState. Programmatic SendMessage callers retain their existing
@@ -62,10 +62,13 @@ unsafe extern "system" fn list_view_notification_subclass(
             // SAFETY: window is the live ListView and this value query retains no
             // caller storage.
             let header = unsafe { SendMessageW(window, LVM_GETHEADER, 0, 0) } as HWND;
-            // SAFETY: the owner removes this subclass before reclaiming the
-            // stable Box<AppState>, and this user-driven path is excluded while
-            // programmatic ListView messages retain a mutable state borrow.
-            let state = unsafe { &*(state_ref as *const AppState) };
+            let owner = owner_ref as HWND;
+            let Some(state_lease) = try_app_state(owner) else {
+                // SAFETY: same-state reentry must not reconstruct AppState;
+                // preserve the common-control chain unchanged instead.
+                return unsafe { DefSubclassProc(window, message, wparam, lparam) };
+            };
+            let state = state_lease.state();
             if let Some(result) =
                 handle_fixed_status_header_double_click(window, header, state.dpi, lparam)
             {

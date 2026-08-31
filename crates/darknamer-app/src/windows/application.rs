@@ -1,7 +1,7 @@
 use super::*;
 
 struct WindowInit {
-    state: *mut AppState,
+    state: *mut AppStateSlot,
     adopted: *mut bool,
 }
 
@@ -178,14 +178,8 @@ fn resize_to_initial_dpi(window: HWND, width: i32, height: i32) -> io::Result<()
     Ok(())
 }
 
-fn window_state_ptr(window: HWND) -> *mut AppState {
-    // SAFETY: this value query reads only the pointer installed in this exact
-    // window's user-data slot and does not create a Rust reference.
-    unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) as *mut AppState }
-}
-
 fn has_window_state(window: HWND) -> bool {
-    !window_state_ptr(window).is_null()
+    !app_state_slot(window).is_null()
 }
 
 fn valid_focus_target(window: HWND, target: HWND) -> bool {
@@ -204,23 +198,14 @@ fn valid_focus_target(window: HWND, target: HWND) -> bool {
 }
 
 fn navigation_focus_target(window: HWND, message: &MSG) -> Option<HWND> {
-    let state_ptr = window_state_ptr(window);
-    if state_ptr.is_null() {
-        return None;
-    }
-    // SAFETY: the pointer was resolved from the live window immediately above;
-    // this borrow ends before any target validation or SetFocus call.
-    let target = unsafe { handle_focus_navigation(&mut *state_ptr, message) }?;
+    let mut state_lease = try_app_state(window)?;
+    let target = handle_focus_navigation(state_lease.state_mut(), message)?;
+    drop(state_lease);
     valid_focus_target(window, target).then_some(target)
 }
 
-fn restored_focus_target(window: HWND, state_ptr: *mut AppState) -> Option<HWND> {
-    if state_ptr.is_null() {
-        return None;
-    }
-    // SAFETY: state_ptr is the current value from this callback window's user
-    // data. The mutable borrow ends before the reentrant SetFocus boundary.
-    let target = unsafe { restore_child_focus(&mut *state_ptr) }?;
+fn restored_focus_target(window: HWND, state: &mut AppState) -> Option<HWND> {
+    let target = restore_child_focus(state)?;
     valid_focus_target(window, target).then_some(target)
 }
 
@@ -338,7 +323,7 @@ fn run_unsafe() -> io::Result<()> {
     let title = wide("DarkReNamer");
     let runtime = initialize_safe_runtime()?;
     let startup_notice = runtime.status.clone();
-    let state = Box::into_raw(Box::new(AppState::new(runtime)));
+    let state: *mut AppStateSlot = CallbackState::into_raw(AppState::new(runtime));
     let mut adopted = false;
     let mut init = WindowInit {
         state,
@@ -369,16 +354,14 @@ fn run_unsafe() -> io::Result<()> {
         }
         return Err(io::Error::last_os_error());
     }
-    let state_ptr = window_state_ptr(window);
-    if state_ptr.is_null() {
+    let Some(state_lease) = try_app_state(window) else {
         // SAFETY: the created window did not retain its required AppState and
         // is destroyed before returning the initialization failure.
         unsafe { DestroyWindow(window) };
         return Err(io::Error::other("window state was not adopted"));
-    }
-    // SAFETY: state_ptr was resolved from the live window. Only copied geometry
-    // leaves this block, so SetWindowPos cannot reenter while the borrow exists.
-    let (initial_width, initial_height) = unsafe { initial_dpi_size(window, &*state_ptr) };
+    };
+    let (initial_width, initial_height) = initial_dpi_size(window, state_lease.state());
+    drop(state_lease);
     if let Err(error) = resize_to_initial_dpi(window, initial_width, initial_height) {
         // SAFETY: window is still hidden and owns the adopted AppState. Its
         // normal teardown reclaims children, GDI resources, and the state.
@@ -409,11 +392,8 @@ fn run_unsafe() -> io::Result<()> {
         let result = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
         if result == -1 {
             let error = io::Error::last_os_error();
-            let state_ptr = window_state_ptr(window);
-            if !state_ptr.is_null() {
-                // SAFETY: the failed message loop is no longer dispatching and
-                // this short borrow rolls back any uncommitted dialog preview.
-                cancel_appearance_dialog(window, unsafe { &mut *state_ptr });
+            if let Some(mut state_lease) = try_app_state(window) {
+                cancel_appearance_dialog(window, state_lease.state_mut());
             }
             finish_apply_after_message_loop_failure(window);
             // SAFETY: window is the live top-level HWND created above and this
@@ -426,11 +406,8 @@ fn run_unsafe() -> io::Result<()> {
         }
         let state_is_live = has_window_state(window);
         let appearance_dialog = if state_is_live {
-            let state_ptr = window_state_ptr(window);
-            // SAFETY: the pointer is live and only a copied HWND leaves this borrow.
-            (!state_ptr.is_null())
-                .then(|| active_appearance_dialog(unsafe { &*state_ptr }))
-                .flatten()
+            try_app_state(window)
+                .and_then(|state_lease| active_appearance_dialog(state_lease.state()))
         } else {
             None
         };
@@ -485,8 +462,53 @@ unsafe extern "system" fn window_proc(
             }
         }
     }
-    // SAFETY: window is the active callback HWND; GWLP_USERDATA is read only to recover the pointer installed during creation.
-    let state_ptr = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *mut AppState;
+    let state_slot = app_state_slot(window);
+    if message == WM_NCDESTROY {
+        if !state_slot.is_null() {
+            // SAFETY: this final callback owns the publication slot. Clearing it
+            // prevents any nested or queued callback from reaching the state.
+            unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, 0) };
+            // SAFETY: both identifiers belong to this exact top-level window;
+            // killing absent timers is harmless during defensive teardown.
+            unsafe {
+                KillTimer(window, APPLY_POLL_TIMER_ID);
+                KillTimer(window, PREFERENCES_POLL_TIMER_ID);
+            }
+            // SAFETY: the slot is still live. Its sidecar is disjoint from a
+            // possibly leased AppState value and is taken at most once.
+            drop(unsafe { CallbackState::take_retirement(state_slot) });
+            // SAFETY: publication was cleared above. An outer callback lease, if
+            // present, defers the unique Box reclamation until its reference ends.
+            unsafe { CallbackState::request_reclaim(state_slot) };
+        }
+        // SAFETY: arguments are unchanged values from the final callback.
+        return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+    }
+    // SAFETY: the slot is the current UI-thread publication and remains live
+    // until this callback either releases or defers reclamation of its lease.
+    let Some(mut state_lease) = (unsafe { CallbackState::try_lease(state_slot) }) else {
+        if message == WM_DESTROY {
+            // SAFETY: same-state reentry cannot access AppState, but the OLE
+            // registration sidecar is disjoint and must be revoked now.
+            drop(unsafe { CallbackState::take_retirement(state_slot) });
+            // SAFETY: the window is being destroyed during another callback;
+            // ending the UI loop requires no state reference.
+            unsafe { PostQuitMessage(0) };
+            return 0;
+        }
+        if message == WM_COMMAND
+            || message == WM_NOTIFY
+            || message == WM_CLOSE
+            || message == WM_TIMER
+            || message >= WM_APP
+        {
+            return 0;
+        }
+        // SAFETY: a same-state nested entry must not construct another Rust
+        // reference. Standard handling receives only copied callback arguments.
+        return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+    };
+    let state_ptr = state_lease.state_mut() as *mut AppState;
     match message {
         WM_CREATE if !state_ptr.is_null() => {
             // SAFETY: state_ptr is the non-null Box::into_raw AppState stored for
@@ -501,21 +523,12 @@ unsafe extern "system" fn window_proc(
                 let state = &*state_ptr;
                 (state.list_window, state.drop_overlay)
             };
-            let registrations = match register_drop_targets(list, overlay, window) {
-                Ok(registrations) => registrations,
-                Err(_) => return -1,
-            };
-            let current_state = window_state_ptr(window);
-            if current_state.is_null() {
-                drop(registrations);
+            if register_drop_targets(list, overlay, window, state_slot).is_err() {
                 return -1;
             }
-            // SAFETY: state was freshly re-resolved after both OLE calls and no
-            // further reentrant call occurs during this field assignment.
-            unsafe { (*current_state).drop_registrations = Some(registrations) };
-            // SAFETY: child creation succeeded and state_ptr remains the live,
-            // UI-thread-confined AppState for this top-level window.
-            start_preferences_writers(window, unsafe { &mut *current_state });
+            // SAFETY: child creation succeeded and this callback retains the
+            // allocation's sole AppState lease.
+            start_preferences_writers(window, unsafe { &mut *state_ptr });
             0
         }
         WM_SIZE if !state_ptr.is_null() => {
@@ -525,7 +538,10 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_SETFOCUS if !state_ptr.is_null() => {
-            if let Some(target) = restored_focus_target(window, state_ptr) {
+            // SAFETY: this callback owns the sole state lease.
+            let target = restored_focus_target(window, unsafe { &mut *state_ptr });
+            drop(state_lease);
+            if let Some(target) = target {
                 apply_focus_target(target);
             }
             0
@@ -533,12 +549,26 @@ unsafe extern "system" fn window_proc(
         WM_APP_RESTORE_FOCUS if !state_ptr.is_null() => {
             let requested = wparam as HWND;
             let target = if requested.is_null() {
-                restored_focus_target(window, state_ptr)
+                // SAFETY: this callback owns the sole state lease.
+                restored_focus_target(window, unsafe { &mut *state_ptr })
             } else {
                 valid_focus_target(window, requested).then_some(requested)
             };
+            drop(state_lease);
             if let Some(target) = target {
                 apply_focus_target(target);
+            }
+            0
+        }
+        WM_APP_FINISH_CLOSE if !state_ptr.is_null() => {
+            // SAFETY: the callback owns the sole AppState lease. The boolean
+            // decision contains no borrowed state.
+            let close = prepare_window_close(window, unsafe { &mut *state_ptr });
+            drop(state_lease);
+            if close {
+                // SAFETY: the state lease and its AppState reference ended
+                // before synchronous WM_DESTROY/WM_NCDESTROY reentry.
+                unsafe { DestroyWindow(window) };
             }
             0
         }
@@ -926,13 +956,13 @@ unsafe extern "system" fn window_proc(
                 // SAFETY: defensive owner teardown rolls back and destroys any
                 // still-live appearance session before preference shutdown/drop.
                 cancel_appearance_dialog(window, unsafe { &mut *state_ptr });
-                // Take the registration without retaining an AppState borrow;
-                // RevokeDragDrop may synchronously release the COM target.
-                // SAFETY: state_ptr is live UI-thread state for this callback.
-                let (overlay, registrations) = unsafe {
-                    let state = &mut *state_ptr;
-                    (state.drop_overlay, state.drop_registrations.take())
-                };
+                // Copy overlay identity, then revoke the disjoint OLE sidecar
+                // without extending the AppState reference into COM teardown.
+                // SAFETY: this callback owns the sole AppState lease.
+                let overlay = unsafe { (*state_ptr).drop_overlay };
+                // SAFETY: the sidecar is UI-thread confined, disjoint from the
+                // leased state value, and taken at most once.
+                let registrations = unsafe { CallbackState::take_retirement(state_slot) };
                 set_drop_overlay_control(overlay, DropPresentation::Inactive);
                 drop(registrations);
                 // Destroy tooltip windows before their CommandRail-owned text
@@ -950,36 +980,6 @@ unsafe extern "system" fn window_proc(
             // SAFETY: PostQuitMessage targets the current thread queue and accepts no borrowed pointers.
             unsafe { PostQuitMessage(0) };
             0
-        }
-        WM_NCDESTROY => {
-            if !state_ptr.is_null() {
-                // Defensive idempotent fallback if creation failed before the
-                // ordinary WM_DESTROY path removed the ListView subclass.
-                // SAFETY: state_ptr remains live until the Box reclamation below.
-                remove_list_view_notification_subclass(unsafe { (*state_ptr).list_window });
-                // Defensive idempotent fallback if creation teardown reached
-                // WM_NCDESTROY without the ordinary WM_DESTROY path.
-                // SAFETY: state_ptr is still published and UI-thread confined.
-                let (overlay, registrations) = unsafe {
-                    let state = &mut *state_ptr;
-                    (state.drop_overlay, state.drop_registrations.take())
-                };
-                set_drop_overlay_control(overlay, DropPresentation::Inactive);
-                drop(registrations);
-                // Clear the published pointer before reclaiming it so queued
-                // worker/input messages cannot recover freed AppState storage.
-                // SAFETY: this callback owns the exact GWLP_USERDATA slot.
-                unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, 0) };
-                // SAFETY: this timer identifier is process-owned; killing an
-                // absent timer is harmless during defensive teardown.
-                unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
-                // SAFETY: same defensive teardown for the preference poll timer.
-                unsafe { KillTimer(window, PREFERENCES_POLL_TIMER_ID) };
-                // SAFETY: state_ptr is the non-null Box::into_raw AppState stored at WM_NCCREATE; WM_NCDESTROY is its single reclamation point.
-                unsafe { drop(Box::from_raw(state_ptr)) };
-            }
-            // SAFETY: window, message, wparam, and lparam are unchanged values from the active Windows callback.
-            unsafe { DefWindowProcW(window, message, wparam, lparam) }
         }
         _ => {
             // SAFETY: window, message, wparam, and lparam are unchanged values from the active Windows callback.

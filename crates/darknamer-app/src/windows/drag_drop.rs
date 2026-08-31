@@ -158,11 +158,19 @@ impl Drop for DropTargetRegistration {
 }
 
 pub(super) struct DropTargetRegistrations {
-    _list: DropTargetRegistration,
-    _overlay: DropTargetRegistration,
+    list: Option<DropTargetRegistration>,
+    overlay: Option<DropTargetRegistration>,
 }
 
 impl DropTargetRegistrations {
+    const fn empty() -> Self {
+        Self {
+            list: None,
+            overlay: None,
+        }
+    }
+
+    #[cfg(test)]
     fn register(list: HWND, overlay: HWND, state_owner: HWND) -> io::Result<Self> {
         let list = DropTargetRegistration::register(list, state_owner)?;
         let overlay = match DropTargetRegistration::register(overlay, state_owner) {
@@ -173,14 +181,32 @@ impl DropTargetRegistrations {
             }
         };
         Ok(Self {
-            _list: list,
-            _overlay: overlay,
+            list: Some(list),
+            overlay: Some(overlay),
         })
     }
 
+    fn install_list(&mut self, registration: DropTargetRegistration) -> Result<(), io::Error> {
+        if self.list.is_some() {
+            return Err(io::Error::other("list drop target is already registered"));
+        }
+        self.list = Some(registration);
+        Ok(())
+    }
+
+    fn install_overlay(&mut self, registration: DropTargetRegistration) -> Result<(), io::Error> {
+        if self.overlay.is_some() {
+            return Err(io::Error::other(
+                "overlay drop target is already registered",
+            ));
+        }
+        self.overlay = Some(registration);
+        Ok(())
+    }
+
     #[cfg(test)]
-    fn registrations(&self) -> [&DropTargetRegistration; 2] {
-        [&self._list, &self._overlay]
+    fn registrations(&self) -> impl Iterator<Item = &DropTargetRegistration> {
+        self.list.iter().chain(self.overlay.iter())
     }
 }
 
@@ -188,8 +214,63 @@ pub(super) fn register_drop_targets(
     list: HWND,
     overlay: HWND,
     state_owner: HWND,
-) -> io::Result<DropTargetRegistrations> {
-    DropTargetRegistrations::register(list, overlay, state_owner)
+    state_slot: *mut AppStateSlot,
+) -> io::Result<()> {
+    // Install the empty owner before the first OLE call. RegisterDragDrop's
+    // documented synchronous target callback is IUnknown::AddRef, and this
+    // implementation's AddRef performs no FFI or message dispatch. Every
+    // successful individual registration is still transferred into the
+    // sidecar before the next OLE call so prior registrations remain revocable
+    // if later setup triggers window teardown.
+    // SAFETY: state_slot is the currently leased UI-thread slot and its sidecar
+    // is disjoint from AppState.
+    unsafe { CallbackState::install_retirement(state_slot, DropTargetRegistrations::empty()) }
+        .map_err(|_registrations| io::Error::other("drop registration sidecar is occupied"))?;
+
+    let result = (|| {
+        let list_registration = DropTargetRegistration::register(list, state_owner)?;
+        install_drop_registration(state_slot, list_registration, true)?;
+        let overlay_registration = DropTargetRegistration::register(overlay, state_owner)?;
+        install_drop_registration(state_slot, overlay_registration, false)
+    })();
+    if result.is_err() {
+        // SAFETY: failure leaves no future registration call. Taking the
+        // sidecar immediately revokes every successfully transferred target.
+        drop(unsafe { CallbackState::take_retirement(state_slot) });
+    }
+    result
+}
+
+fn install_drop_registration(
+    state_slot: *mut AppStateSlot,
+    registration: DropTargetRegistration,
+    is_list: bool,
+) -> io::Result<()> {
+    // SAFETY: the just-completed RegisterDragDrop call returned. This immediate
+    // sidecar take performs no Win32 call and detects reentrant destruction.
+    let Some(mut registrations) = (unsafe { CallbackState::take_retirement(state_slot) }) else {
+        drop(registration);
+        return Err(io::Error::other(
+            "window was destroyed during drop target registration",
+        ));
+    };
+    let installed = if is_list {
+        registrations.install_list(registration)
+    } else {
+        registrations.install_overlay(registration)
+    };
+    if let Err(error) = installed {
+        drop(registrations);
+        return Err(error);
+    }
+    // SAFETY: no reentrant operation occurred since taking the sidecar. Restore
+    // it before any subsequent RegisterDragDrop call can enter window teardown.
+    unsafe { CallbackState::install_retirement(state_slot, registrations) }.map_err(
+        |registrations| {
+            drop(registrations);
+            io::Error::other("drop registration sidecar was retired")
+        },
+    )
 }
 
 #[must_use]
@@ -459,22 +540,14 @@ unsafe extern "system" fn drop_target_drop(
         if paths.is_empty() {
             return Some(S_OK);
         }
-        let state = window_state_ptr(target.state_owner);
-        if state.is_null() {
+        let Some(mut state_lease) = try_app_state(target.state_owner) else {
             return Some(S_OK);
-        }
-        // SAFETY: the pointer was freshly resolved after every provider,
-        // medium, and modal boundary and remains UI-thread confined.
-        if unsafe { (*state).drop_locked() } {
-            return Some(S_OK);
-        }
-        // The tiny borrow ends before PostMessageW or the error reporter can
-        // reenter the window. No IDataObject/STGMEDIUM/HGLOBAL is retained.
-        // SAFETY: state was freshly resolved after all external boundaries.
-        let start_result = unsafe {
-            let state = &mut *state;
-            admit_paths(target.state_owner, state, paths)
         };
+        if state_lease.state().drop_locked() {
+            return Some(S_OK);
+        }
+        let start_result = admit_paths(target.state_owner, state_lease.state_mut(), paths);
+        drop(state_lease);
         // SAFETY: drop_callback validated effect and it remains live.
         unsafe { *effect = drop_effect_after_admission_start(start_result.is_ok()) };
         match start_result {
@@ -571,36 +644,17 @@ fn negotiate_for_owner(
     )
 }
 
-fn window_state_ptr(owner: HWND) -> *mut AppState {
-    if owner.is_null() {
-        return null_mut();
-    }
-    // SAFETY: owner is the registered UI-thread HWND and this is a value query.
-    unsafe { GetWindowLongPtrW(owner, GWLP_USERDATA) as *mut AppState }
-}
-
 fn drop_locked(owner: HWND) -> Option<bool> {
-    let state = window_state_ptr(owner);
-    // SAFETY: GWLP_USERDATA is cleared before AppState reclamation and this
-    // borrow ends before return.
-    unsafe { state.as_ref().map(AppState::drop_locked) }
+    try_app_state(owner).map(|state_lease| state_lease.state().drop_locked())
 }
 
 fn remaining_capacity(owner: HWND) -> Option<usize> {
-    let state = window_state_ptr(owner);
-    // SAFETY: same short UI-thread-confined read as drop_locked.
-    unsafe {
-        state
-            .as_ref()
-            .map(|state| MAX_ADMITTED_SOURCES.saturating_sub(state.model.len()))
-    }
+    try_app_state(owner)
+        .map(|state_lease| MAX_ADMITTED_SOURCES.saturating_sub(state_lease.state().model.len()))
 }
 
 fn set_overlay_for_owner(owner: HWND, presentation: DropPresentation) {
-    let state = window_state_ptr(owner);
-    // SAFETY: copy the HWND in a tiny shared borrow that ends before any
-    // SetWindowTextW/UpdateWindow/ShowWindow reentrancy.
-    let overlay = unsafe { state.as_ref().map(|state| state.drop_overlay) };
+    let overlay = try_app_state(owner).map(|state_lease| state_lease.state().drop_overlay);
     if let Some(overlay) = overlay {
         set_drop_overlay_control(overlay, presentation);
     }
@@ -752,12 +806,10 @@ mod tests {
         if fake.get_status < 0 {
             return fake.get_status;
         }
-        if !fake.lock_owner_during_get.is_null() {
-            let state = window_state_ptr(fake.lock_owner_during_get);
-            if !state.is_null() {
-                // SAFETY: test callback runs synchronously on the owner UI thread.
-                unsafe { (*state).mutation_locked = true };
-            }
+        if !fake.lock_owner_during_get.is_null()
+            && let Some(mut state_lease) = try_app_state(fake.lock_owner_during_get)
+        {
+            state_lease.state_mut().mutation_locked = true;
         }
         // SAFETY: medium is writable provider output. Ownership of global is
         // transferred to the receiver exactly once.
@@ -1073,11 +1125,7 @@ mod tests {
         let list = create_test_list(owner)?;
         let overlay = create_drop_overlay(owner)?;
         let registrations = DropTargetRegistrations::register(list, overlay, owner)?;
-        for (registration, expected) in registrations
-            .registrations()
-            .into_iter()
-            .zip([list, overlay])
-        {
+        for (registration, expected) in registrations.registrations().zip([list, overlay]) {
             assert_eq!(registration.registered_hwnd(), expected);
             assert!(registration.reference_count() >= 2);
         }
@@ -1125,7 +1173,7 @@ mod tests {
         };
         let owner = create_test_owner()?;
         state.list_window = create_test_list(owner)?;
-        publish_test_state(owner, &mut state);
+        let state_slot = publish_test_state(owner, state);
 
         let mut fake = FakeDataObject::new(S_OK, S_OK);
         fake.global = create_drop_global(&[local.path().join("locked.txt")])?;
@@ -1144,13 +1192,18 @@ mod tests {
         };
         assert_eq!(status, S_OK);
         assert_eq!(effect, DROP_EFFECT_NONE);
+        // SAFETY: the test owns the live slot published to this owner.
+        let mut state_lease = unsafe { CallbackState::try_lease(state_slot) }
+            .ok_or_else(|| io::Error::other("test state lease unavailable"))?;
+        let state = state_lease.state_mut();
         assert!(state.mutation_locked);
         assert!(state.admission_worker.is_none());
         assert_eq!(fake.get_calls.load(Ordering::Acquire), 1);
         state.mutation_locked = false;
-        finalize_admission_start_failure(&mut state);
+        finalize_admission_start_failure(state);
         assert!(state.command_states[usize::from(ADD_FILES - APPLY)]);
-        unpublish_test_state(owner);
+        drop(state_lease);
+        unpublish_test_state(owner, state_slot);
         // SAFETY: target retains only its creator reference.
         assert_eq!(unsafe { drop_target_release(target.cast()) }, 0);
         // SAFETY: owner destroys its ListView child.
@@ -1170,7 +1223,7 @@ mod tests {
         };
         let owner = create_test_owner()?;
         state.list_window = create_test_list(owner)?;
-        publish_test_state(owner, &mut state);
+        let state_slot = publish_test_state(owner, state);
 
         let mut fake = FakeDataObject::new(S_OK, S_OK);
         fake.global = create_drop_global(&[source])?;
@@ -1189,6 +1242,10 @@ mod tests {
         assert_eq!(status, S_OK);
         assert_eq!(effect, DROP_EFFECT_COPY);
         assert_eq!(fake.get_calls.load(Ordering::Acquire), 1);
+        // SAFETY: the test owns the live slot published to this owner.
+        let mut state_lease = unsafe { CallbackState::try_lease(state_slot) }
+            .ok_or_else(|| io::Error::other("test state lease unavailable"))?;
+        let state = state_lease.state_mut();
         assert!(state.admission_worker.is_some());
 
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1210,7 +1267,8 @@ mod tests {
         unsafe { KillTimer(owner, APPLY_POLL_TIMER_ID) };
         state.mutation_locked = false;
 
-        unpublish_test_state(owner);
+        drop(state_lease);
+        unpublish_test_state(owner, state_slot);
         // SAFETY: target retains only its creator reference.
         assert_eq!(unsafe { drop_target_release(target.cast()) }, 0);
         // SAFETY: owner destroys its ListView child.
@@ -1306,14 +1364,20 @@ mod tests {
         }
     }
 
-    fn publish_test_state(owner: HWND, state: &mut AppState) {
-        // SAFETY: state outlives every synchronous callback in the test and is
-        // unpublished before either state or owner is destroyed.
-        unsafe { SetWindowLongPtrW(owner, GWLP_USERDATA, (state as *mut AppState) as isize) };
+    fn publish_test_state(owner: HWND, state: AppState) -> *mut AppStateSlot {
+        let state_slot = CallbackState::into_raw(state);
+        // SAFETY: the slot is UI-thread owned and remains published until the
+        // paired test cleanup retires and reclaims it.
+        unsafe { SetWindowLongPtrW(owner, GWLP_USERDATA, state_slot as isize) };
+        state_slot
     }
 
-    fn unpublish_test_state(owner: HWND) {
-        // SAFETY: owner is live and this clears its test-only borrowed pointer.
+    fn unpublish_test_state(owner: HWND, state_slot: *mut AppStateSlot) {
+        // SAFETY: owner is live and this clears its test-owned slot before its
+        // unique immediate reclamation.
         unsafe { SetWindowLongPtrW(owner, GWLP_USERDATA, 0) };
+        // SAFETY: publication was cleared and every test lease has ended.
+        let disposition = unsafe { CallbackState::request_reclaim(state_slot) };
+        assert_eq!(disposition, ReclaimDisposition::Reclaimed);
     }
 }

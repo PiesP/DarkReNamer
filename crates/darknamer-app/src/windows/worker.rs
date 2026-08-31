@@ -851,15 +851,10 @@ pub(super) fn finalize_apply_worker(window: HWND, state: &mut AppState, worker: 
 }
 
 pub(super) fn finish_apply_after_message_loop_failure(window: HWND) {
-    // SAFETY: window is still live and GWLP_USERDATA retains the UI-owned
-    // AppState until the subsequent DestroyWindow call.
-    let state_ptr = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *mut AppState;
-    if state_ptr.is_null() {
+    let Some(mut state_lease) = try_app_state(window) else {
         return;
-    }
-    // SAFETY: the message loop has failed on this same UI thread, so this is
-    // the sole mutable access to the still-live AppState.
-    let state = unsafe { &mut *state_ptr };
+    };
+    let state = state_lease.state_mut();
     if let Some(worker) = state.admission_worker.take() {
         worker.cancellation.store(true, Ordering::Release);
         // SAFETY: this exact timer belongs to the still-live top-level window.
@@ -945,12 +940,31 @@ pub(super) fn try_finish_window_close(window: HWND, state: &mut AppState) {
         let _joined = writer.join();
         apply_appearance_preferences_events(state, writer.drain_events());
     }
-    // SAFETY: the preference writer is terminal and this timer belongs to the
-    // live top-level window. No worker retains UI-owned state at this point.
+    // SAFETY: the message carries no pointer. The later callback rechecks the
+    // close decision and releases its AppState lease before DestroyWindow.
+    if unsafe { PostMessageW(window, WM_APP_FINISH_CLOSE, 0, 0) } == 0 {
+        state.set_transient_status(format!(
+            "종료 준비 메시지를 예약하지 못했습니다: {}",
+            io::Error::last_os_error()
+        ));
+    }
+}
+
+pub(super) fn prepare_window_close(window: HWND, state: &mut AppState) -> bool {
+    if !state.close_pending
+        || state.confirmation_pending
+        || state.admission_worker.is_some()
+        || state.plan_worker.is_some()
+        || state.apply_worker.is_some()
+        || state.preferences_writer.is_some()
+        || state.appearance_writer.is_some()
+    {
+        return false;
+    }
+    // SAFETY: all workers are absent and this exact timer belongs to the live
+    // top-level window. The caller applies the copied decision after its lease.
     unsafe { KillTimer(window, PREFERENCES_POLL_TIMER_ID) };
-    // SAFETY: all worker handles are joined and modal callbacks have returned,
-    // so the top-level window can reclaim its AppState.
-    unsafe { DestroyWindow(window) };
+    true
 }
 
 pub(super) fn request_window_close(window: HWND, state: &mut AppState) {
