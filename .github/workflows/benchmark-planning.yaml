@@ -1,0 +1,94 @@
+name: Planning benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: Entry count
+        required: true
+        type: choice
+        default: all
+        options:
+          - all
+          - "100"
+          - "1000"
+          - "10000"
+      topology:
+        description: Parent topology
+        required: true
+        type: choice
+        default: all
+        options:
+          - all
+          - same-parent
+          - unique-parent
+          - deep-parent
+      repetitions:
+        description: Recorded repetitions after each warmup
+        required: true
+        type: choice
+        default: "3"
+        options:
+          - "1"
+          - "3"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: planning-benchmark-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: benchmark/planning-directional
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - name: Checkout selected source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: rustup toolchain install 1.97.1 --profile minimal
+
+      - name: Measure planning directionally on virtual storage
+        shell: pwsh
+        env:
+          SELECTED_COUNT: ${{ inputs.count }}
+          SELECTED_TOPOLOGY: ${{ inputs.topology }}
+          RECORDED_REPETITIONS: ${{ inputs.repetitions }}
+        run: |
+          $counts = if ($env:SELECTED_COUNT -eq 'all') {
+            @(100, 1000, 10000)
+          } else {
+            @([int]$env:SELECTED_COUNT)
+          }
+          $topologies = if ($env:SELECTED_TOPOLOGY -eq 'all') {
+            @('same-parent', 'unique-parent', 'deep-parent')
+          } else {
+            @($env:SELECTED_TOPOLOGY)
+          }
+          $repetitions = [int]$env:RECORDED_REPETITIONS
+
+          $env:DARKRENAMER_BENCH_ROOT = $env:RUNNER_TEMP
+          $env:DARKRENAMER_BENCH_ROOT_PRIVATE = '1'
+          $env:DARKRENAMER_BENCH_EVIDENCE_CLASS = 'directional-hosted'
+          $env:DARKRENAMER_BENCH_MEDIA = 'virtual'
+          $env:DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'
+
+          foreach ($count in $counts) {
+            $env:DARKRENAMER_BENCH_COUNT = "$count"
+            foreach ($topology in $topologies) {
+              $env:DARKRENAMER_BENCH_TOPOLOGY = $topology
+              foreach ($iteration in 0..$repetitions) {
+                $env:DARKRENAMER_BENCH_ITERATION = "$iteration"
+                cargo test --package darknamer-app --test rename_windows_backend benchmark_durable_production_path --locked --release -- --ignored --exact --nocapture --test-threads=1
+                if ($LASTEXITCODE -ne 0) {
+                  throw "Planning benchmark failed: count=$count topology=$topology iteration=$iteration"
+                }
+              }
+            }
+          }

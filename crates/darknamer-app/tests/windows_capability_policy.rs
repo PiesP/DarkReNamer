@@ -85,3 +85,43 @@ fn hosted_windows_and_release_gates_require_capabilities_with_visible_output()
     }
     Ok(())
 }
+
+#[test]
+fn planning_benchmark_workflow_is_manual_least_privilege_and_directional() {
+    let workflow = include_str!("../../../.github/workflows/benchmark-planning.yaml");
+
+    assert!(workflow.contains("on:\n  workflow_dispatch:"));
+    assert!(!workflow.contains("\n  push:"));
+    assert!(!workflow.contains("\n  pull_request:"));
+    assert!(workflow.contains(
+        "count:\n        description: Entry count\n        required: true\n        type: choice\n        default: all\n        options:\n          - all\n          - \"100\"\n          - \"1000\"\n          - \"10000\""
+    ));
+    assert!(workflow.contains(
+        "topology:\n        description: Parent topology\n        required: true\n        type: choice\n        default: all\n        options:\n          - all\n          - same-parent\n          - unique-parent\n          - deep-parent"
+    ));
+    assert!(workflow.contains(
+        "repetitions:\n        description: Recorded repetitions after each warmup\n        required: true\n        type: choice\n        default: \"3\"\n        options:\n          - \"1\"\n          - \"3\""
+    ));
+    assert!(workflow.contains("permissions:\n  contents: read"));
+    assert!(!workflow.contains(": write"));
+    assert!(workflow.contains("cancel-in-progress: false"));
+    assert!(workflow.contains("runs-on: windows-2025"));
+    assert!(workflow.contains("timeout-minutes: 45"));
+    assert!(
+        workflow
+            .contains("uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1")
+    );
+    assert!(workflow.contains("persist-credentials: false"));
+    assert!(workflow.contains("rustup toolchain install 1.97.1 --profile minimal"));
+    assert!(workflow.contains("$env:DARKRENAMER_BENCH_ROOT = $env:RUNNER_TEMP"));
+    assert!(workflow.contains("$env:DARKRENAMER_BENCH_ROOT_PRIVATE = '1'"));
+    assert!(workflow.contains("$env:DARKRENAMER_BENCH_EVIDENCE_CLASS = 'directional-hosted'"));
+    assert!(workflow.contains("$env:DARKRENAMER_BENCH_MEDIA = 'virtual'"));
+    assert!(workflow.contains("$env:DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'"));
+    assert!(workflow.contains("foreach ($iteration in 0..$repetitions)"));
+    assert!(workflow.contains(
+        "cargo test --package darknamer-app --test rename_windows_backend benchmark_durable_production_path --locked --release -- --ignored --exact --nocapture --test-threads=1"
+    ));
+    assert!(!workflow.contains("actions/upload-artifact"));
+    assert!(!workflow.contains("actions/cache"));
+}
