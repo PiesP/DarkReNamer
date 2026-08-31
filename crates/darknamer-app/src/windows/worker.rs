@@ -1289,20 +1289,36 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
                 );
             } else {
                 let items = std::mem::take(&mut report.items);
-                let appended = state.model.append_batch_by(items, compare_windows);
-                state.commit_known_model_change(appended > 0);
-                let status_summary = report.status_summary_korean(appended);
-                state.set_transient_status(status_summary);
-                if !report.issues.is_empty() {
-                    message(
-                        window,
-                        &report.summary_korean(appended),
-                        "DarkReNamer - 일부 경로 제외",
-                    );
-                }
-                refresh(state);
-                if appended > 0 {
-                    schedule_focus_target(window, state.list_window);
+                match state.model.append_batch_by(items, compare_windows) {
+                    Ok(appended) => {
+                        state.commit_known_model_change(appended > 0);
+                        let status_summary = report.status_summary_korean(appended);
+                        state.set_transient_status(status_summary);
+                        if !report.issues.is_empty() {
+                            message(
+                                window,
+                                &report.summary_korean(appended),
+                                "DarkReNamer - 일부 경로 제외",
+                            );
+                        }
+                        refresh(state);
+                        if appended > 0 {
+                            schedule_focus_target(window, state.list_window);
+                        }
+                    }
+                    Err(error) => {
+                        let error_message = proposal_mutation_error_korean(error);
+                        state.set_transient_status(format!(
+                            "{error_message} 기존 목록은 그대로 유지됩니다."
+                        ));
+                        message(
+                            window,
+                            &format!(
+                                "{error_message}\n\n경로 확인 결과를 반영하지 않았으며 기존 목록은 그대로 유지됩니다."
+                            ),
+                            "DarkReNamer - 추가 오류",
+                        );
+                    }
                 }
             }
         }

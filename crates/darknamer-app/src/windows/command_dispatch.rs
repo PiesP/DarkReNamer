@@ -1137,7 +1137,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        assert_eq!(model.append_batch(rows), 10_000);
+        assert_eq!(model.append_batch(rows), Ok(10_000));
         let selected = (0..10_000).collect::<Vec<_>>();
 
         let snapshot = SelectionSnapshot::capture(&model);

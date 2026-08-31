@@ -3,6 +3,8 @@
 //! `NameAddNum`, `NameEmpty`, `NameDelPos`, `NameDelToken`, the `Ext*` commands,
 //! `NameAddPath*`, `NameSamePath`, `SortList`/`Compare`, and import/export.
 
+use std::cell::Cell;
+
 use darknamer_core::{
     LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,
     MAX_PROPOSED_NAME_UTF16_UNITS, MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS, ProposalMutationError,
@@ -20,7 +22,7 @@ fn item_with_metadata(path: &str, size: u32, created: u64, modified: u64) -> Leg
 fn list(paths: &[(&str, bool)]) -> LegacyList {
     let mut list = LegacyList::new();
     for (path, is_directory) in paths {
-        assert!(list.append(item(path, *is_directory)));
+        assert_eq!(list.append(item(path, *is_directory)), Ok(true));
     }
     list
 }
@@ -42,14 +44,14 @@ fn current(list: &LegacyList) -> Vec<String> {
 #[test]
 fn file_list_add_skips_existing_duplicates_but_keeps_same_batch_duplicates() {
     let mut list = LegacyList::new();
-    assert!(list.append(item(r"C:\Alpha\a.txt", false)));
+    assert_eq!(list.append(item(r"C:\Alpha\a.txt", false)), Ok(true));
     assert_eq!(
         list.append_batch([
             item(r"c:\alpha\A.TXT", false),
             item(r"C:\Zeta\b.txt", false),
             item(r"c:\zeta\B.TXT", false),
         ]),
-        2
+        Ok(2)
     );
 
     assert_eq!(current(&list), ["a.txt", "B.TXT", "b.txt"]);
@@ -63,10 +65,13 @@ fn file_list_add_skips_existing_duplicates_but_keeps_same_batch_duplicates() {
 #[test]
 fn moving_one_same_path_duplicate_returns_its_new_row_identity() {
     let mut list = LegacyList::new();
-    list.append_batch([
-        LegacyListItem::new(r"C:\same.txt", false, 1, 0, 0),
-        LegacyListItem::new(r"C:\same.txt", false, 2, 0, 0),
-    ]);
+    assert_eq!(
+        list.append_batch([
+            LegacyListItem::new(r"C:\same.txt", false, 1, 0, 0),
+            LegacyListItem::new(r"C:\same.txt", false, 2, 0, 0),
+        ]),
+        Ok(2)
+    );
 
     let selected_size = list.items()[1].size();
     let other_size = list.items()[0].size();
@@ -266,7 +271,7 @@ fn proposal_growth_limits_fail_before_any_row_changes() {
         .map(|_| item(leaf.as_str(), false))
         .collect::<Vec<_>>();
     let mut aggregate = LegacyList::new();
-    assert_eq!(aggregate.append_batch(rows), 10_000);
+    assert_eq!(aggregate.append_batch(rows), Ok(10_000));
     let before_aggregate = aggregate.clone();
     let result = aggregate.prefix_complete(&LegacyText::from("x"));
     assert!(matches!(
@@ -499,9 +504,18 @@ fn successful_move_record_updates_only_that_row_for_partial_success() {
 fn all_ten_sort_modes_use_original_metadata_not_proposals() {
     let make_list = || {
         let mut list = LegacyList::new();
-        assert!(list.append(item_with_metadata(r"C:\root\b.txt", 20, 3, 2)));
-        assert!(list.append(item_with_metadata(r"C:\root\a.txt", 30, 1, 3)));
-        assert!(list.append(item_with_metadata(r"C:\root\c.txt", 10, 2, 1)));
+        assert_eq!(
+            list.append(item_with_metadata(r"C:\root\b.txt", 20, 3, 2)),
+            Ok(true)
+        );
+        assert_eq!(
+            list.append(item_with_metadata(r"C:\root\a.txt", 30, 1, 3)),
+            Ok(true)
+        );
+        assert_eq!(
+            list.append(item_with_metadata(r"C:\root\c.txt", 10, 2, 1)),
+            Ok(true)
+        );
         list
     };
     let cases = [
@@ -620,7 +634,7 @@ fn ten_thousand_row_proposal_transforms_return_pure_exact_change_sets() {
     let rows = (0..10_000)
         .map(|index| item(&format!(r"C:\root\{index:05}.txt"), false))
         .collect::<Vec<_>>();
-    assert_eq!(list.append_batch(rows), 10_000);
+    assert_eq!(list.append_batch(rows), Ok(10_000));
 
     assert!(
         list.prefix_complete_changed(&LegacyText::default())
@@ -642,4 +656,111 @@ fn ten_thousand_row_proposal_transforms_return_pure_exact_change_sets() {
     let reset = list.reset_proposals_changed();
     assert_eq!(reset, changed);
     assert!(list.reset_proposals_changed().is_empty());
+}
+
+#[test]
+fn appending_five_thousand_rows_uses_a_subquadratic_number_of_comparisons() {
+    let mut list = LegacyList::new();
+    let existing = (0..5_000)
+        .map(|index| item(&format!(r"C:\existing\{index:05}.txt"), false))
+        .collect::<Vec<_>>();
+    assert_eq!(list.append_batch(existing), Ok(5_000));
+
+    let comparisons = Cell::new(0_usize);
+    let incoming = (0..5_000)
+        .rev()
+        .map(|index| item(&format!(r"C:\incoming\{index:05}.txt"), false))
+        .collect::<Vec<_>>();
+    let result = list.append_batch_by(incoming, |left, right| {
+        comparisons.set(comparisons.get() + 1);
+        left.units().cmp(right.units())
+    });
+
+    assert_eq!(result, Ok(5_000));
+    assert!(
+        comparisons.get() < 1_000_000,
+        "5k+5k append used {} comparator calls",
+        comparisons.get()
+    );
+}
+
+#[test]
+fn transformed_names_reject_an_over_budget_append_atomically() {
+    let mut list = LegacyList::new();
+    let existing = (0..8_000)
+        .map(|index| item(&format!(r"C:\existing\{index:05}\a"), false))
+        .collect::<Vec<_>>();
+    assert_eq!(list.append_batch(existing), Ok(8_000));
+    assert_eq!(
+        list.prefix_complete(&LegacyText::from("x".repeat(254))),
+        Ok(())
+    );
+    assert!(
+        list.items()
+            .iter()
+            .all(|row| row.proposed_name().len() == 255)
+    );
+    let before = list.clone();
+
+    let appended_leaf = "b".repeat(100);
+    let incoming = (0..2_000)
+        .map(|index| item(&format!(r"C:\incoming\{index:05}\{appended_leaf}"), false))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        list.append_batch(incoming),
+        Err(ProposalMutationError::AggregateBudgetExceeded {
+            requested_units: 2_240_000,
+            maximum_units: MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS,
+        })
+    );
+    assert_eq!(list, before);
+}
+
+#[test]
+fn duplicate_only_batch_succeeds_at_the_exact_aggregate_budget() {
+    let mut list = LegacyList::new();
+    let maximum_leaf = "z".repeat(MAX_PROPOSED_NAME_UTF16_UNITS);
+    let short_leaf = "s".repeat(
+        MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS
+            - (MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS / MAX_PROPOSED_NAME_UTF16_UNITS)
+                * MAX_PROPOSED_NAME_UTF16_UNITS,
+    );
+    let full_rows = MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS / MAX_PROPOSED_NAME_UTF16_UNITS;
+    let rows = (0..full_rows)
+        .map(|index| item(&format!(r"C:\full\{index:05}\{maximum_leaf}"), false))
+        .chain(std::iter::once(item(
+            &format!(r"C:\short\{short_leaf}"),
+            false,
+        )))
+        .collect::<Vec<_>>();
+    assert_eq!(list.append_batch(rows), Ok(full_rows + 1));
+    assert_eq!(
+        list.items()
+            .iter()
+            .map(|row| row.proposed_name().len())
+            .sum::<usize>(),
+        MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS
+    );
+    let duplicates = list.items().to_vec();
+    let before = list.clone();
+
+    assert_eq!(list.append_batch(duplicates), Ok(0));
+    assert_eq!(list, before);
+}
+
+#[test]
+fn oversized_appended_name_is_rejected_atomically() {
+    let mut list = list(&[(r"C:\existing\ok.txt", false)]);
+    let before = list.clone();
+    let oversized = "x".repeat(MAX_PROPOSED_NAME_UTF16_UNITS + 1);
+
+    assert_eq!(
+        list.append(item(&format!(r"C:\incoming\{oversized}"), false)),
+        Err(ProposalMutationError::NameBudgetExceeded {
+            row: 1,
+            requested_units: MAX_PROPOSED_NAME_UTF16_UNITS + 1,
+            maximum_units: MAX_PROPOSED_NAME_UTF16_UNITS,
+        })
+    );
+    assert_eq!(list, before);
 }

@@ -1215,10 +1215,11 @@ mod tests {
         let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
         state.appearance.theme = AppThemeMode::Light;
         state.forced_colors = ForcedColorsState::Inactive;
-        assert!(
+        assert_eq!(
             state
                 .model
-                .append(LegacyListItem::new(r"C:\work\photo01.jpg", false, 4, 0, 0,))
+                .append(LegacyListItem::new(r"C:\work\photo01.jpg", false, 4, 0, 0,)),
+            Ok(true)
         );
         assert_eq!(state.model.clear_name_changed().as_ref(), &[0]);
 

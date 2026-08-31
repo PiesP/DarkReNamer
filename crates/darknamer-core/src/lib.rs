@@ -442,56 +442,135 @@ impl LegacyList {
     }
 
     /// Appends one row unless its path duplicates an existing row ignoring case.
-    pub fn append(&mut self, item: LegacyListItem) -> bool {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProposalMutationError`] if the appended proposal would exceed
+    /// a name budget, checked size arithmetic overflows, or staging allocation
+    /// fails. The list remains unchanged on error.
+    pub fn append(&mut self, item: LegacyListItem) -> Result<bool, ProposalMutationError> {
         self.append_by(item, LegacyText::case_insensitive_cmp)
     }
 
     /// Appends one row with a caller-provided locale comparator.
-    pub fn append_by(
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProposalMutationError`] under the same conditions as
+    /// [`LegacyList::append_batch_by`]. The list remains unchanged on error.
+    pub fn append_by<F>(
         &mut self,
         item: LegacyListItem,
-        compare_text: impl Fn(&LegacyText, &LegacyText) -> Ordering,
-    ) -> bool {
-        if self.items.iter().any(|existing| {
-            compare_text(existing.source_path(), item.source_path()) == Ordering::Equal
-        }) {
-            return false;
-        }
-        self.items.push(item);
-        true
+        compare_text: F,
+    ) -> Result<bool, ProposalMutationError>
+    where
+        F: Fn(&LegacyText, &LegacyText) -> Ordering,
+    {
+        self.append_batch_by(std::iter::once(item), &compare_text)
+            .map(|appended| appended != 0)
     }
 
     /// Appends a picker/drop/import batch in the source application's sorted
     /// full-path order, skipping paths already present in the list.
-    pub fn append_batch(&mut self, items: impl IntoIterator<Item = LegacyListItem>) -> usize {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProposalMutationError`] if any appended proposal would exceed
+    /// a name budget, checked size arithmetic overflows, or staging allocation
+    /// fails. The list remains unchanged on error.
+    pub fn append_batch(
+        &mut self,
+        items: impl IntoIterator<Item = LegacyListItem>,
+    ) -> Result<usize, ProposalMutationError> {
         self.append_batch_by(items, LegacyText::case_insensitive_cmp)
     }
 
     /// Appends a batch with a caller-provided locale comparator.
+    ///
+    /// Duplicate detection is limited to paths already in the model. Equal
+    /// paths within the incoming batch remain present and retain the source
+    /// application's reverse-equal ordering.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProposalMutationError`] if any appended proposal would exceed
+    /// a name budget, checked size arithmetic overflows, or staging allocation
+    /// fails. Duplicate-only batches succeed without revalidating skipped rows.
+    /// The list remains unchanged on error.
     pub fn append_batch_by<F>(
         &mut self,
         items: impl IntoIterator<Item = LegacyListItem>,
         compare_text: F,
-    ) -> usize
+    ) -> Result<usize, ProposalMutationError>
     where
         F: Fn(&LegacyText, &LegacyText) -> Ordering + Copy,
     {
+        let mut existing_sources = Vec::new();
+        existing_sources
+            .try_reserve_exact(self.items.len())
+            .map_err(|_| ProposalMutationError::AllocationFailed)?;
+        existing_sources.extend(self.items.iter().map(LegacyListItem::source_path));
+        existing_sources.sort_unstable_by(|left, right| compare_text(left, right));
+
         let mut accepted = Vec::new();
         for item in items {
-            let duplicate_existing = self.items.iter().any(|existing| {
-                compare_text(existing.source_path(), item.source_path()) == Ordering::Equal
-            });
-            if !duplicate_existing {
-                accepted.push(item);
+            let duplicate_existing = existing_sources
+                .binary_search_by(|existing| compare_text(existing, item.source_path()))
+                .is_ok();
+            if duplicate_existing {
+                continue;
             }
+            accepted
+                .try_reserve(1)
+                .map_err(|_| ProposalMutationError::AllocationFailed)?;
+            let position = accepted.len();
+            accepted.push((position, item));
         }
-        // AddFileItem inserted before existing equal keys, reversing equal
-        // paths collected within one picker/drop/import batch.
-        accepted.reverse();
-        accepted.sort_by(|left, right| compare_text(left.source_path(), right.source_path()));
+        drop(existing_sources);
+
+        if accepted.is_empty() {
+            return Ok(0);
+        }
+
+        // AddFileItem inserted before existing equal keys. Comparing the
+        // original batch position in descending order makes that legacy
+        // reverse-equal result explicit while permitting an allocation-free
+        // unstable sort.
+        accepted.sort_unstable_by(|(left_position, left), (right_position, right)| {
+            compare_text(left.source_path(), right.source_path())
+                .then_with(|| right_position.cmp(left_position))
+        });
+
+        let mut requested_units = self.items.iter().try_fold(0_usize, |total, item| {
+            total
+                .checked_add(item.proposed_name().len())
+                .ok_or(ProposalMutationError::ArithmeticOverflow)
+        })?;
+        for (batch_row, (_, item)) in accepted.iter().enumerate() {
+            let row = self
+                .items
+                .len()
+                .checked_add(batch_row)
+                .ok_or(ProposalMutationError::ArithmeticOverflow)?;
+            validate_proposal_units(row, item.proposed_name().len())?;
+            requested_units = requested_units
+                .checked_add(item.proposed_name().len())
+                .ok_or(ProposalMutationError::ArithmeticOverflow)?;
+        }
+        if requested_units > MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS {
+            return Err(ProposalMutationError::AggregateBudgetExceeded {
+                requested_units,
+                maximum_units: MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS,
+            });
+        }
+
         let count = accepted.len();
-        self.items.extend(accepted);
-        count
+        self.items
+            .try_reserve_exact(count)
+            .map_err(|_| ProposalMutationError::AllocationFailed)?;
+        self.items
+            .extend(accepted.into_iter().map(|(_, item)| item));
+        Ok(count)
     }
 
     /// Removes caller-selected row indices and returns the number removed.
