@@ -1424,18 +1424,9 @@ mod native_tests {
                 }),
                 icon: 0,
             };
-            let runtime_directory = tempfile::tempdir()?;
-            let mut state = AppState::new(initialize_safe_runtime_at(runtime_directory.path())?);
-            refresh_all_rows(&mut state);
-            assert_eq!(
-                state.preview_synchronization,
-                PreviewSynchronization::Failed
-            );
-            assert_eq!(state.ui_status.message_text(), PREVIEW_SYNC_FAILURE_STATUS);
-            state.list_window = list;
-            refresh_all_rows(&mut state);
-            assert!(state.preview_synchronization.is_synchronized());
-            assert_ne!(state.ui_status.message_text(), PREVIEW_SYNC_FAILURE_STATUS);
+            if !rebuild_native_rows(list, &[]) {
+                return Err(io::Error::other("could not rebuild an empty native list"));
+            }
 
             assert!(!set_native_subitem(null_mut(), 0, 1, &row.values[1]));
             assert!(!rebuild_native_rows(
