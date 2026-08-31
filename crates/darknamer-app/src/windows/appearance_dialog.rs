@@ -21,9 +21,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     BS_GROUPBOX, BS_MULTILINE, BS_NOTIFY, BS_OWNERDRAW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetScrollInfo,
     GetWindowLongPtrW, GetWindowRect, IDCANCEL, IDOK, IsWindow, PostMessageW, RegisterClassExW,
-    SB_BOTTOM, SB_CTL, SB_ENDSCROLL, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP,
-    SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP, SCROLLINFO, SIF_PAGE, SIF_POS, SIF_RANGE,
-    SIF_TRACKPOS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOREDRAW, SWP_NOZORDER, SendMessageW,
+    SB_BOTTOM, SB_ENDSCROLL, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION,
+    SB_THUMBTRACK, SB_TOP, SB_VERT, SCROLLINFO, SIF_PAGE, SIF_POS, SIF_RANGE, SIF_TRACKPOS,
+    SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOREDRAW, SWP_NOZORDER, SendMessageW,
     SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CLOSE, WM_COMMAND,
     WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
     WM_FONTCHANGE, WM_GETFONT, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT,
@@ -1329,7 +1329,7 @@ fn apply_appearance_dialog_layout(
         ..SCROLLINFO::default()
     };
     // SAFETY: viewport is live and scroll contains copied bounded values.
-    unsafe { SetScrollInfo(state.viewport, SB_CTL, &raw const scroll, 1) };
+    unsafe { SetScrollInfo(state.viewport, SB_VERT, &raw const scroll, 1) };
     // Redraw the dialog rather than only the viewport: both batches use
     // SWP_NOREDRAW, and footer controls are siblings of the viewport.
     // SAFETY: viewport is live and its direct parent is the live dialog.
@@ -1505,7 +1505,7 @@ unsafe extern "system" fn appearance_viewport_subclass(
                         ..SCROLLINFO::default()
                     };
                     // SAFETY: viewport is live and info is exact writable storage.
-                    if unsafe { GetScrollInfo(window, SB_CTL, &mut info) } != 0 {
+                    if unsafe { GetScrollInfo(window, SB_VERT, &mut info) } != 0 {
                         info.nTrackPos
                     } else {
                         state.scroll_y
@@ -1926,9 +1926,8 @@ mod native_tests {
         // SAFETY: viewport and controls are live and these are value-only queries.
         let viewport_style = unsafe { GetWindowLongPtrW(viewport, GWL_STYLE) } as u32;
         assert_eq!(
-            viewport_style
-                & (WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS | WS_VSCROLL),
-            WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS | WS_VSCROLL
+            viewport_style & (WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS),
+            WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS
         );
         // SAFETY: all queried HWNDs are live and these calls retain no storage.
         let (viewport_ex_style, density_parent, separator_parent, ok_parent, cancel_parent) = unsafe {
@@ -1955,6 +1954,16 @@ mod native_tests {
         assert!(viewport_rect.bottom > viewport_rect.top);
         assert!(ok_rect.right > ok_rect.left);
         assert!(ok_rect.bottom > ok_rect.top);
+        let mut viewport_scroll = SCROLLINFO {
+            cbSize: size_of::<SCROLLINFO>() as u32,
+            fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
+            ..SCROLLINFO::default()
+        };
+        // SAFETY: viewport is a live WS_VSCROLL window and the structure is
+        // exact writable storage for its vertical window scrollbar.
+        let got_scroll = unsafe { GetScrollInfo(viewport, SB_VERT, &mut viewport_scroll) };
+        assert_ne!(got_scroll, 0);
+        assert!(viewport_scroll.nPage > 0);
         // SAFETY: ok is a live native BUTTON and style is an integral query.
         let style = unsafe { GetWindowLongPtrW(ok, GWL_STYLE) } as u32;
         assert_eq!(style & BS_TYPEMASK as u32, BS_DEFPUSHBUTTON as u32);
@@ -2091,6 +2100,10 @@ mod native_tests {
             state.scroll_y = 0;
             apply_appearance_dialog_layout(state, layout);
         }
+        // SAFETY: the constrained layout has a nonzero range, so Windows must
+        // expose the vertical window scrollbar style for the live viewport.
+        let constrained_style = unsafe { GetWindowLongPtrW(viewport, GWL_STYLE) } as u32;
+        assert_ne!(constrained_style & WS_VSCROLL, 0);
         // SAFETY: viewport forwards scalar/null notifications synchronously.
         unsafe {
             SendMessageW(viewport, WM_NOTIFY, 0, 0);
