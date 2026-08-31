@@ -6,9 +6,9 @@
 use std::cell::Cell;
 
 use darknamer_core::{
-    LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,
-    MAX_PROPOSED_NAME_UTF16_UNITS, MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS, ProposalMutationError,
-    parse_import_lines,
+    LegacyAppendIndex, LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode,
+    LegacySortMode, LegacyText, MAX_PROPOSED_NAME_UTF16_UNITS, MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS,
+    ProposalMutationError, parse_import_lines,
 };
 
 fn item(path: &str, is_directory: bool) -> LegacyListItem {
@@ -763,4 +763,264 @@ fn oversized_appended_name_is_rejected_atomically() {
         })
     );
     assert_eq!(list, before);
+}
+
+#[test]
+fn indexed_single_row_appends_reuse_the_source_index() {
+    let comparisons = Cell::new(0_usize);
+    let compare = |left: &LegacyText, right: &LegacyText| {
+        comparisons.set(comparisons.get() + 1);
+        left.units().cmp(right.units())
+    };
+    let mut index = LegacyAppendIndex::new(compare);
+    let mut list = LegacyList::new();
+
+    for value in 0..5_000 {
+        assert_eq!(
+            list.append_indexed(
+                &mut index,
+                item(&format!(r"C:\single\{value:05}.txt"), false),
+            ),
+            Ok(true)
+        );
+    }
+
+    eprintln!(
+        "5k indexed single-row appends: {} comparator calls",
+        comparisons.get()
+    );
+    assert!(
+        comparisons.get() < 150_000,
+        "5k indexed single-row appends used {} comparator calls",
+        comparisons.get()
+    );
+}
+
+#[test]
+fn indexed_five_thousand_plus_five_thousand_is_subquadratic() {
+    let comparisons = Cell::new(0_usize);
+    let compare = |left: &LegacyText, right: &LegacyText| {
+        comparisons.set(comparisons.get() + 1);
+        left.units().cmp(right.units())
+    };
+    let mut index = LegacyAppendIndex::new(compare);
+    let mut list = LegacyList::new();
+    let existing = (0..5_000).map(|value| item(&format!(r"C:\existing\{value:05}.txt"), false));
+    assert_eq!(list.append_batch_indexed(&mut index, existing), Ok(5_000));
+    comparisons.set(0);
+
+    let incoming = (0..5_000)
+        .rev()
+        .map(|value| item(&format!(r"C:\incoming\{value:05}.txt"), false));
+    assert_eq!(list.append_batch_indexed(&mut index, incoming), Ok(5_000));
+
+    eprintln!(
+        "indexed 5k+5k second append: {} comparator calls",
+        comparisons.get()
+    );
+    assert!(
+        comparisons.get() < 300_000,
+        "indexed 5k+5k append used {} comparator calls",
+        comparisons.get()
+    );
+}
+
+#[test]
+fn indexed_append_preserves_custom_order_and_batch_internal_duplicates() {
+    let mut index = LegacyAppendIndex::new(|left: &LegacyText, right: &LegacyText| {
+        left.units().cmp(right.units()).reverse()
+    });
+    let mut list = LegacyList::new();
+    assert_eq!(
+        list.append_batch_indexed(
+            &mut index,
+            [
+                LegacyListItem::new(r"C:\same.txt", false, 1, 0, 0),
+                LegacyListItem::new(r"C:\z.txt", false, 2, 0, 0),
+                LegacyListItem::new(r"C:\same.txt", false, 3, 0, 0),
+                LegacyListItem::new(r"C:\a.txt", false, 4, 0, 0),
+            ],
+        ),
+        Ok(4)
+    );
+
+    assert_eq!(
+        list.items()
+            .iter()
+            .map(LegacyListItem::size)
+            .collect::<Vec<_>>(),
+        [2, 3, 1, 4]
+    );
+    assert_eq!(
+        list.append_indexed(
+            &mut index,
+            LegacyListItem::new(r"C:\same.txt", false, 5, 0, 0),
+        ),
+        Ok(false)
+    );
+}
+
+#[test]
+fn indexed_append_rebuilds_only_after_source_set_changes() {
+    let comparisons = Cell::new(0_usize);
+    let compare = |left: &LegacyText, right: &LegacyText| {
+        comparisons.set(comparisons.get() + 1);
+        left.units().cmp(right.units())
+    };
+    let mut index = LegacyAppendIndex::new(compare);
+    let mut list = LegacyList::new();
+    let rows = (0..1_024).map(|value| item(&format!(r"C:\root\{value:04}.txt"), false));
+    assert_eq!(list.append_batch_indexed(&mut index, rows), Ok(1_024));
+
+    assert_eq!(list.manual_change_changed(0, "renamed.txt"), Ok(true));
+    assert!(list.move_rows_later_changed(&[0]).changed());
+    comparisons.set(0);
+    assert_eq!(
+        list.append_indexed(&mut index, item(r"C:\root\new.txt", false)),
+        Ok(true)
+    );
+    assert!(
+        comparisons.get() < 64,
+        "proposal edit or row reorder rebuilt the source index"
+    );
+
+    assert_eq!(list.remove_rows(&[10]), 1);
+    comparisons.set(0);
+    assert_eq!(
+        list.append_indexed(&mut index, item(r"C:\root\0010.txt", false)),
+        Ok(true)
+    );
+    assert!(
+        comparisons.get() > 1_000,
+        "remove did not rebuild the index"
+    );
+
+    assert_eq!(list.manual_change_changed(0, "moved.txt"), Ok(true));
+    let old_source = list.items()[0].source_path().clone();
+    assert!(list.record_move_success(0));
+    comparisons.set(0);
+    assert_eq!(
+        list.append_indexed(&mut index, LegacyListItem::new(old_source, false, 0, 0, 0),),
+        Ok(true)
+    );
+    assert!(
+        comparisons.get() > 1_000,
+        "successful source move did not rebuild the index"
+    );
+
+    assert!(list.clear());
+    comparisons.set(0);
+    assert_eq!(
+        list.append_indexed(&mut index, item(r"C:\root\0000.txt", false)),
+        Ok(true)
+    );
+    assert_eq!(comparisons.get(), 0);
+}
+
+#[test]
+fn clone_is_semantically_equal_but_does_not_share_an_index_binding() {
+    let comparisons = Cell::new(0_usize);
+    let compare = |left: &LegacyText, right: &LegacyText| {
+        comparisons.set(comparisons.get() + 1);
+        left.units().cmp(right.units())
+    };
+    let mut index = LegacyAppendIndex::new(compare);
+    let mut original = LegacyList::new();
+    let rows = (0..512).map(|value| item(&format!(r"C:\root\{value:04}.txt"), false));
+    assert_eq!(original.append_batch_indexed(&mut index, rows), Ok(512));
+    let mut cloned = original.clone();
+    assert_eq!(cloned, original);
+
+    comparisons.set(0);
+    assert_eq!(
+        cloned.append_indexed(&mut index, item(r"C:\root\0511.txt", false)),
+        Ok(false)
+    );
+    assert!(
+        comparisons.get() > 500,
+        "the clone incorrectly reused the original model binding"
+    );
+}
+
+#[test]
+fn cached_proposal_units_stay_exact_across_composed_mutations() {
+    let mut index = LegacyAppendIndex::new(LegacyText::case_insensitive_cmp);
+    let mut list = LegacyList::new();
+    assert_eq!(
+        list.append_batch_indexed(
+            &mut index,
+            [
+                item(r"C:\root\a.txt", false),
+                item(r"C:\root\bb.txt", false)
+            ],
+        ),
+        Ok(2)
+    );
+    assert_eq!(list.proposed_name_utf16_units(), 11);
+
+    assert!(list.prefix_complete(&LegacyText::from("xy")).is_ok());
+    assert_eq!(list.proposed_name_utf16_units(), 15);
+    assert_eq!(
+        list.append_indexed(&mut index, item(r"C:\root\ccc.txt", false)),
+        Ok(true)
+    );
+    assert_eq!(list.proposed_name_utf16_units(), 22);
+
+    assert_eq!(list.manual_change_changed(1, "z"), Ok(true));
+    assert_eq!(list.proposed_name_utf16_units(), 15);
+    assert!(list.suffix_before_extension(&LegacyText::from("q")).is_ok());
+    assert_eq!(
+        list.proposed_name_utf16_units(),
+        list.items()
+            .iter()
+            .map(|row| row.proposed_name().len())
+            .sum::<usize>()
+    );
+    assert!(
+        list.import_names_changed(&LegacyText::from("u\r\nvv\r\nwww\r\n"))
+            .is_ok()
+    );
+    assert_eq!(list.proposed_name_utf16_units(), 6);
+    list.reset_proposals();
+    assert_eq!(list.proposed_name_utf16_units(), 18);
+    assert_eq!(list.remove_rows(&[1]), 1);
+    assert_eq!(list.proposed_name_utf16_units(), 12);
+}
+
+#[test]
+fn rejected_indexed_append_does_not_poison_the_index_and_retry_succeeds() {
+    let mut index = LegacyAppendIndex::new(LegacyText::case_insensitive_cmp);
+    let mut list = LegacyList::new();
+    let oversized = "x".repeat(MAX_PROPOSED_NAME_UTF16_UNITS + 1);
+    assert!(matches!(
+        list.append_indexed(
+            &mut index,
+            item(&format!(r"C:\incoming\{oversized}"), false),
+        ),
+        Err(ProposalMutationError::NameBudgetExceeded { .. })
+    ));
+    assert_eq!(
+        list.append_indexed(&mut index, item(r"C:\incoming\x", false)),
+        Ok(true)
+    );
+
+    let existing = (0..8_000).map(|value| item(&format!(r"C:\full\{value:04}\a"), false));
+    assert_eq!(list.append_batch_indexed(&mut index, existing), Ok(8_000));
+    assert!(
+        list.prefix_complete(&LegacyText::from("y".repeat(254)))
+            .is_ok()
+    );
+    let incoming_leaf = "b".repeat(100);
+    let incoming = (0..2_000)
+        .map(|value| item(&format!(r"C:\retry\{value:04}\{incoming_leaf}"), false))
+        .collect::<Vec<_>>();
+    let before = list.clone();
+    assert!(matches!(
+        list.append_batch_indexed(&mut index, incoming.clone()),
+        Err(ProposalMutationError::AggregateBudgetExceeded { .. })
+    ));
+    assert_eq!(list, before);
+
+    list.reset_proposals();
+    assert_eq!(list.append_batch_indexed(&mut index, incoming), Ok(2_000));
 }

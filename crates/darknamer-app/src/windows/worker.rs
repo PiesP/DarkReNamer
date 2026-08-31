@@ -1289,7 +1289,10 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
                 );
             } else {
                 let items = std::mem::take(&mut report.items);
-                match state.model.append_batch_by(items, compare_windows) {
+                match state
+                    .model
+                    .append_batch_indexed(&mut state.append_index, items)
+                {
                     Ok(appended) => {
                         state.commit_known_model_change(appended > 0);
                         let status_summary = report.status_summary_korean(appended);
