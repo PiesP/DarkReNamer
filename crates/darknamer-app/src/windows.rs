@@ -112,10 +112,17 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, STGMEDIUM, TYMED_HGLOBAL};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+#[cfg(test)]
+use windows_sys::Win32::System::Memory::{
+    MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE, VirtualAlloc, VirtualFree,
+    VirtualProtect,
+};
 use windows_sys::Win32::System::Ole::{
     CF_HDROP, DROPEFFECT_COPY, OleInitialize, OleUninitialize, RegisterDragDrop, ReleaseStgMedium,
     RevokeDragDrop,
 };
+#[cfg(test)]
+use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 use windows_sys::Win32::System::SystemServices::{
     SS_CENTER, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_NOPREFIX, SS_OWNERDRAW, SS_SUNKEN,
 };

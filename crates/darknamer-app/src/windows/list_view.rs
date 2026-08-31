@@ -200,38 +200,69 @@ pub(super) fn update_primary_column_widths(state: &AppState) {
     }
 }
 
-pub(super) fn handle_header_end_track(state: &mut AppState, lparam: LPARAM) -> bool {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HeaderColumnNotification {
+    EndTrack(Option<usize>),
+    DividerDoubleClick(Option<usize>),
+}
+
+fn header_column_notification(
+    header_window: HWND,
+    list_window: HWND,
+    lparam: LPARAM,
+) -> Option<HeaderColumnNotification> {
     let header = lparam as *const NMHDR;
     if header.is_null() {
-        return false;
+        return None;
     }
-    // SAFETY: the ListView is live and LVM_GETHEADER returns its borrowed
-    // header child HWND without dereferencing caller memory.
-    let header_window = unsafe { SendMessageW(state.list_window, LVM_GETHEADER, 0, 0) } as HWND;
     // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix for this synchronous
     // callback; the pointer has been checked above.
     let (source_window, code) = unsafe { ((*header).hwndFrom, (*header).code) };
     // Depending on the common-controls version, the ListView can forward the
     // embedded header notification while retaining either source HWND.
-    let from_header = source_window == header_window || source_window == state.list_window;
-    if header_window.is_null() || !from_header {
-        return false;
+    let from_header = source_window == header_window || source_window == list_window;
+    if header_window.is_null()
+        || !from_header
+        || !matches!(code, HDN_ENDTRACKW | HDN_DIVIDERDBLCLICKW)
+    {
+        return None;
     }
     let notification = lparam as *const NMHEADERW;
-    // SAFETY: both handled header notifications supply NMHEADERW storage with
-    // an NMHDR prefix.
-    let Ok(column) = usize::try_from(unsafe { (*notification).iItem }) else {
-        return code == HDN_ENDTRACKW;
+    // SAFETY: the source and notification code were narrowed above to the two
+    // Header contracts that supply NMHEADERW storage. In particular, ListView
+    // notifications such as NM_SETFOCUS expose only the NMHDR prefix and return
+    // before this extended-field read.
+    let column = usize::try_from(unsafe { (*notification).iItem }).ok();
+    Some(if code == HDN_DIVIDERDBLCLICKW {
+        HeaderColumnNotification::DividerDoubleClick(column)
+    } else {
+        HeaderColumnNotification::EndTrack(column)
+    })
+}
+
+pub(super) fn handle_header_end_track(state: &mut AppState, lparam: LPARAM) -> bool {
+    // SAFETY: the ListView is live and LVM_GETHEADER returns its borrowed
+    // header child HWND without dereferencing caller memory.
+    let header_window = unsafe { SendMessageW(state.list_window, LVM_GETHEADER, 0, 0) } as HWND;
+    let Some(notification) = header_column_notification(header_window, state.list_window, lparam)
+    else {
+        return false;
     };
-    if code == HDN_DIVIDERDBLCLICKW {
+    let column = match notification {
+        HeaderColumnNotification::EndTrack(None) => return true,
+        HeaderColumnNotification::DividerDoubleClick(None) => return false,
+        HeaderColumnNotification::EndTrack(Some(column))
+        | HeaderColumnNotification::DividerDoubleClick(Some(column)) => column,
+    };
+    if matches!(
+        notification,
+        HeaderColumnNotification::DividerDoubleClick(_)
+    ) {
         if column == NATIVE_STATUS_COLUMN_INDEX {
             let _list_update = ProgrammaticListUpdateGuard::begin();
             set_native_status_column_width(state);
             return true;
         }
-        return false;
-    }
-    if code != HDN_ENDTRACKW {
         return false;
     }
     if column == NATIVE_STATUS_COLUMN_INDEX {
@@ -242,9 +273,11 @@ pub(super) fn handle_header_end_track(state: &mut AppState, lparam: LPARAM) -> b
     if column >= state.column_states.len() {
         return true;
     }
-    // SAFETY: notification is live NMHEADERW storage for this synchronous
-    // callback; pitem, when non-null, points to its readable HDITEMW payload.
-    let item = unsafe { (*notification).pitem };
+    // SAFETY: header_column_notification established that this callback carries
+    // live NMHEADERW storage; pitem, when non-null, points to its readable
+    // HDITEMW payload.
+    let header_fields = lparam as *const NMHEADERW;
+    let item = unsafe { (*header_fields).pitem };
     // SAFETY: a non-null pitem points to the live HDITEMW payload owned by the
     // header control for this synchronous notification.
     let item_has_width = !item.is_null() && unsafe { (*item).mask & HDI_WIDTH != 0 };
@@ -1040,7 +1073,124 @@ fn format_locale_part(mut format: impl FnMut(*mut u16, i32) -> i32) -> Option<St
 
 #[cfg(test)]
 mod native_tests {
+    use std::process::Command;
+
     use super::*;
+
+    #[test]
+    fn header_notification_type_is_narrowed_before_extended_fields_are_read()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const CHILD_MODE: &str = "DARKRENAMER_TEST_NMHDR_BOUNDARY_CHILD";
+        if env::var_os(CHILD_MODE).is_some() {
+            let mut system_info = SYSTEM_INFO::default();
+            // SAFETY: this source-bound child probe owns both virtual-memory
+            // pages. NMHDR ends at the first committed page boundary and the
+            // next page is made inaccessible, so the production parser can
+            // prove that NM_SETFOCUS never reaches NMHEADERW::iItem. All memory
+            // is released before the child emits its success sentinel.
+            unsafe {
+                GetSystemInfo(&mut system_info);
+                let page_size = usize::try_from(system_info.dwPageSize)?;
+                let allocation_size = page_size
+                    .checked_mul(2)
+                    .ok_or_else(|| io::Error::other("test allocation size overflow"))?;
+                let allocation = VirtualAlloc(
+                    null(),
+                    allocation_size,
+                    MEM_RESERVE | MEM_COMMIT,
+                    PAGE_READWRITE,
+                );
+                if allocation.is_null() {
+                    return Err(io::Error::last_os_error().into());
+                }
+                let inaccessible = allocation.cast::<u8>().add(page_size);
+                let mut old_protection = 0;
+                if VirtualProtect(
+                    inaccessible.cast(),
+                    page_size,
+                    PAGE_NOACCESS,
+                    &mut old_protection,
+                ) == 0
+                {
+                    let error = io::Error::last_os_error();
+                    VirtualFree(allocation, 0, MEM_RELEASE);
+                    return Err(error.into());
+                }
+                let payload = inaccessible.sub(size_of::<NMHDR>()).cast::<NMHDR>();
+                payload.write(NMHDR {
+                    hwndFrom: 2_usize as HWND,
+                    idFrom: 0,
+                    code: NM_SETFOCUS,
+                });
+                let rejected =
+                    header_column_notification(1_usize as HWND, 2_usize as HWND, payload as LPARAM)
+                        .is_none();
+                if VirtualFree(allocation, 0, MEM_RELEASE) == 0 {
+                    return Err(io::Error::last_os_error().into());
+                }
+                if rejected {
+                    std::process::exit(86);
+                }
+                return Err(io::Error::other("NMHDR-only notification was accepted").into());
+            }
+        }
+
+        let status = Command::new(std::env::current_exe()?)
+            .arg("--exact")
+            .arg("windows::list_view::native_tests::header_notification_type_is_narrowed_before_extended_fields_are_read")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(CHILD_MODE, "1")
+            .status()?;
+        assert_eq!(status.code(), Some(86));
+
+        let header_window = 1_usize as HWND;
+        let list_window = 2_usize as HWND;
+        let mut focus = NMHDR {
+            hwndFrom: list_window,
+            idFrom: 0,
+            code: NM_SETFOCUS,
+        };
+
+        assert_eq!(
+            header_column_notification(header_window, list_window, (&raw mut focus) as LPARAM,),
+            None,
+        );
+
+        let mut end_track = NMHEADERW {
+            hdr: NMHDR {
+                hwndFrom: header_window,
+                idFrom: 0,
+                code: HDN_ENDTRACKW,
+            },
+            iItem: 3,
+            ..NMHEADERW::default()
+        };
+        assert_eq!(
+            header_column_notification(header_window, list_window, (&raw mut end_track) as LPARAM,),
+            Some(HeaderColumnNotification::EndTrack(Some(3))),
+        );
+        let mut double_click = NMHEADERW {
+            hdr: NMHDR {
+                hwndFrom: list_window,
+                idFrom: 0,
+                code: HDN_DIVIDERDBLCLICKW,
+            },
+            iItem: NATIVE_STATUS_COLUMN_INDEX as i32,
+            ..NMHEADERW::default()
+        };
+        assert_eq!(
+            header_column_notification(
+                header_window,
+                list_window,
+                (&raw mut double_click) as LPARAM,
+            ),
+            Some(HeaderColumnNotification::DividerDoubleClick(Some(
+                NATIVE_STATUS_COLUMN_INDEX,
+            ))),
+        );
+        Ok(())
+    }
 
     #[test]
     fn native_selected_row_exposes_status_through_listview_text_api() -> io::Result<()> {

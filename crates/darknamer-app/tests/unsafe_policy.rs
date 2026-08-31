@@ -116,7 +116,7 @@ const EXPECTED: &[(&str, UnsafeCounts)] = &[
     ),
     ("src/windows/dialog.rs", UnsafeCounts::new(69, 0, 1, 0)),
     ("src/windows/drag_drop.rs", UnsafeCounts::new(103, 5, 38, 0)),
-    ("src/windows/list_view.rs", UnsafeCounts::new(77, 1, 1, 0)),
+    ("src/windows/list_view.rs", UnsafeCounts::new(78, 1, 1, 0)),
     ("src/windows/menu.rs", UnsafeCounts::new(62, 0, 0, 0)),
     ("src/windows/recovery_ui.rs", UnsafeCounts::new(1, 0, 0, 0)),
     ("src/windows/text_io.rs", UnsafeCounts::new(3, 0, 0, 0)),
