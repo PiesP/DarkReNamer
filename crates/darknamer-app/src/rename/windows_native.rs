@@ -357,6 +357,32 @@ pub(crate) enum DirectoryQueryError {
     Io(io::Error),
 }
 
+fn validated_directory_name_units(
+    bytes_written: usize,
+    buffer_bytes: usize,
+    file_name_bytes: u32,
+    name_capacity: usize,
+) -> io::Result<usize> {
+    let fixed_bytes = offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileName);
+    let file_name_bytes = usize::try_from(file_name_bytes)
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    let returned_name_bytes = bytes_written
+        .checked_sub(fixed_bytes)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+    let maximum_name_bytes = name_capacity
+        .checked_mul(size_of::<u16>())
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+    if bytes_written > buffer_bytes
+        || file_name_bytes == 0
+        || file_name_bytes % size_of::<u16>() != 0
+        || file_name_bytes > returned_name_bytes
+        || file_name_bytes > maximum_name_bytes
+    {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    Ok(file_name_bytes / size_of::<u16>())
+}
+
 impl From<io::Error> for DirectoryQueryError {
     fn from(error: io::Error) -> Self {
         Self::Io(error)
@@ -377,11 +403,11 @@ pub(crate) fn query_directory_names_cancellable(
         u32::try_from(bytes).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
     let mut names = Vec::with_capacity(limit.min(name_capacity));
     let mut restart = true;
+    let mut buffer = vec![FILE_ID_BOTH_DIR_INFORMATION::default(); elements];
     loop {
         if cancellation_requested() {
             return Err(DirectoryQueryError::Cancelled);
         }
-        let mut buffer = vec![FILE_ID_BOTH_DIR_INFORMATION::default(); elements];
         let mut status_block = IO_STATUS_BLOCK::default();
         // SAFETY: directory is a retained directory handle; buffer and status
         // block are writable and correctly sized. Single-entry mode bounds each
@@ -416,11 +442,12 @@ pub(crate) fn query_directory_names_cancellable(
             )));
         }
         let entry = &buffer[0];
-        let name_units = usize::try_from(entry.FileNameLength / 2)
-            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
-        if name_units > name_capacity {
-            return Err(io::Error::from(io::ErrorKind::InvalidData).into());
-        }
+        let name_units = validated_directory_name_units(
+            status_block.Information,
+            bytes,
+            entry.FileNameLength,
+            name_capacity,
+        )?;
         // SAFETY: FileNameLength was returned for this initialized flexible
         // array and is bounded by the allocation above.
         let name =
@@ -615,6 +642,27 @@ mod tests {
     use windows_sys::Win32::System::WindowsProgramming::{
         DRIVE_NO_ROOT_DIR, DRIVE_REMOTE, DRIVE_UNKNOWN,
     };
+
+    #[test]
+    fn directory_name_length_rejects_zero_byte_success_and_stale_buffer_content() {
+        let fixed_bytes = offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileName);
+        assert!(validated_directory_name_units(0, 1024, 8, 255).is_err());
+        assert!(validated_directory_name_units(fixed_bytes, 1024, 0, 255).is_err());
+        assert!(validated_directory_name_units(fixed_bytes + 2, 1024, 4, 255).is_err());
+    }
+
+    #[test]
+    fn directory_name_length_accepts_only_complete_bounded_utf16_names() -> io::Result<()> {
+        let fixed_bytes = offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileName);
+        assert_eq!(
+            validated_directory_name_units(fixed_bytes + 8, 1024, 8, 255)?,
+            4
+        );
+        assert!(validated_directory_name_units(fixed_bytes + 3, 1024, 3, 255).is_err());
+        assert!(validated_directory_name_units(fixed_bytes + 512, 1024, 512, 255).is_err());
+        assert!(validated_directory_name_units(1025, 1024, 2, 255).is_err());
+        Ok(())
+    }
 
     #[test]
     fn case_sensitive_flag_interpretation_is_fail_closed() {
