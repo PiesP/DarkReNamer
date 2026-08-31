@@ -1302,22 +1302,23 @@ fn apply_appearance_dialog_layout(
     state: &AppearanceDialogWindowState,
     layout: AppearanceDialogLayout,
 ) {
-    let mut windows = Vec::with_capacity(18);
-    windows.push((state.viewport, layout.body_viewport));
-    windows.extend(
-        body_controls(state)
-            .zip(body_rects(layout))
-            .map(|(window, mut rect)| {
-                rect.y = rect.y.saturating_sub(state.scroll_y);
-                (window, rect)
-            }),
-    );
-    windows.extend([
+    // DeferWindowPos batches child coordinates relative to their shared parent.
+    // Keep dialog children and viewport children in separate batches; mixing
+    // parents can report success while leaving zero-sized child geometry.
+    apply_appearance_deferred_layout(&[
+        (state.viewport, layout.body_viewport),
         (state.reset, layout.reset),
         (state.ok, layout.ok),
         (state.cancel, layout.cancel),
     ]);
-    apply_appearance_deferred_layout(&windows);
+    let body_windows = body_controls(state)
+        .zip(body_rects(layout))
+        .map(|(window, mut rect)| {
+            rect.y = rect.y.saturating_sub(state.scroll_y);
+            (window, rect)
+        })
+        .collect::<Vec<_>>();
+    apply_appearance_deferred_layout(&body_windows);
     let scroll = SCROLLINFO {
         cbSize: size_of::<SCROLLINFO>() as u32,
         fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
@@ -1329,10 +1330,19 @@ fn apply_appearance_dialog_layout(
     };
     // SAFETY: viewport is live and scroll contains copied bounded values.
     unsafe { SetScrollInfo(state.viewport, SB_CTL, &raw const scroll, 1) };
-    // SAFETY: dialog/viewport children are live and one batched redraw follows.
+    // Redraw the dialog rather than only the viewport: both batches use
+    // SWP_NOREDRAW, and footer controls are siblings of the viewport.
+    // SAFETY: viewport is live and its direct parent is the live dialog.
+    let dialog = unsafe { GetParent(state.viewport) };
+    let redraw_target = if dialog.is_null() {
+        state.viewport
+    } else {
+        dialog
+    };
+    // SAFETY: target and all dialog/viewport children are live after layout.
     unsafe {
         RedrawWindow(
-            state.viewport,
+            redraw_target,
             null(),
             null_mut(),
             RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
@@ -1935,6 +1945,16 @@ mod native_tests {
         assert_eq!(separator_parent, viewport);
         assert_eq!(ok_parent, dialog);
         assert_eq!(cancel_parent, dialog);
+        let mut viewport_rect = RECT::default();
+        let mut ok_rect = RECT::default();
+        // SAFETY: viewport/OK are live and both rectangles are writable.
+        assert_ne!(unsafe { GetWindowRect(viewport, &mut viewport_rect) }, 0);
+        // SAFETY: same value-only query for the fixed footer OK button.
+        assert_ne!(unsafe { GetWindowRect(ok, &mut ok_rect) }, 0);
+        assert!(viewport_rect.right > viewport_rect.left);
+        assert!(viewport_rect.bottom > viewport_rect.top);
+        assert!(ok_rect.right > ok_rect.left);
+        assert!(ok_rect.bottom > ok_rect.top);
         // SAFETY: ok is a live native BUTTON and style is an integral query.
         let style = unsafe { GetWindowLongPtrW(ok, GWL_STYLE) } as u32;
         assert_eq!(style & BS_TYPEMASK as u32, BS_DEFPUSHBUTTON as u32);
