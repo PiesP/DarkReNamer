@@ -1,14 +1,14 @@
 use std::sync::{Arc, Mutex};
 
 use darknamer_app::rename::{
-    AppendCertainty, BackendError, CancellationToken, EntryId, EntryKind, ExecuteErrorKind,
-    ExecutionControl, ExecutionFailure, ExecutionOutcome, ExecutionPhase, ExecutionProgress,
-    JournalCapacityKind, JournalCorruption, JournalDirection, JournalError, JournalRecord,
-    JournalStep, JournalStore, JournalTerminal, MAX_JOURNAL_FRAME_BYTES, MAX_JOURNAL_STEPS,
-    MAX_TEMP_CANDIDATES, MemoryBackend, MemoryJournal, ModelRevision, MutationCertainty, PathKey,
-    PathSnapshot, PlanId, PlanRequest, RecoveryReason, RecoveryState, RenameBackend,
-    RenameExecutor, RenameIntent, RenameOperation, RenamePlanner, RenameState, TemporaryPhase,
-    preflight_plan, preflight_plan_cancellable, replay_journal,
+    AppendCertainty, BackendError, BackendOperation, CancellationToken, EntryId, EntryKind,
+    ExecuteErrorKind, ExecutionControl, ExecutionFailure, ExecutionOutcome, ExecutionPhase,
+    ExecutionProgress, JournalCapacityKind, JournalCorruption, JournalDirection, JournalError,
+    JournalRecord, JournalStep, JournalStore, JournalTerminal, MAX_JOURNAL_FRAME_BYTES,
+    MAX_JOURNAL_STEPS, MAX_TEMP_CANDIDATES, MemoryBackend, MemoryJournal, ModelRevision,
+    MutationCertainty, PathKey, PathSnapshot, PlanId, PlanRequest, RecoveryReason, RecoveryState,
+    RenameBackend, RenameExecutor, RenameIntent, RenameOperation, RenamePlanner, RenameState,
+    TemporaryPhase, preflight_plan, preflight_plan_cancellable, replay_journal,
 };
 
 fn intent(id: u32, source_name: &str, destination_name: &str) -> RenameIntent {
@@ -30,6 +30,105 @@ fn confirmed_plan(
     let id = plan.id();
     let revision = plan.revision();
     Ok(plan.confirm_presented(id, revision)?)
+}
+
+#[derive(Clone, Copy)]
+enum ObserveFailureTarget {
+    Exact(&'static str),
+    Temporary,
+}
+
+struct FailingObserveBackend {
+    inner: MemoryBackend,
+    target: ObserveFailureTarget,
+    matching_observations: std::cell::Cell<usize>,
+    fail_on_matching_observation: usize,
+    error: BackendError,
+}
+
+impl RenameBackend for FailingObserveBackend {
+    fn validate_path_environment(
+        &self,
+        path: &darknamer_core::LegacyText,
+    ) -> Result<(), BackendError> {
+        self.inner.validate_path_environment(path)
+    }
+
+    fn path_key(&self, path: &darknamer_core::LegacyText) -> PathKey {
+        self.inner.path_key(path)
+    }
+
+    fn observe(&self, path: &darknamer_core::LegacyText) -> Result<PathSnapshot, BackendError> {
+        let path_text = path.to_string_lossy();
+        let matches = match self.target {
+            ObserveFailureTarget::Exact(expected) => path_text == expected,
+            ObserveFailureTarget::Temporary => {
+                path_text.contains(".__darknamer_") && path_text.ends_with(".tmp")
+            }
+        };
+        if matches {
+            let matching_observations = self.matching_observations.get().saturating_add(1);
+            self.matching_observations.set(matching_observations);
+            if matching_observations == self.fail_on_matching_observation {
+                return Err(self.error);
+            }
+        }
+        self.inner.observe(path)
+    }
+
+    fn is_same_or_descendant(
+        &self,
+        ancestor: &darknamer_core::LegacyText,
+        candidate: &darknamer_core::LegacyText,
+    ) -> Result<bool, BackendError> {
+        self.inner.is_same_or_descendant(ancestor, candidate)
+    }
+
+    fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
+        self.inner.next_transaction_nonce()
+    }
+
+    fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+        self.inner.rename_no_replace(operation)
+    }
+}
+
+fn assert_freeze_observe_error_is_preserved(
+    planned_backend: MemoryBackend,
+    intents: Vec<RenameIntent>,
+    target: ObserveFailureTarget,
+    fail_on_matching_observation: usize,
+    code: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let confirmed = confirmed_plan(&planned_backend, intents)?;
+    let expected = BackendError {
+        operation: BackendOperation::Observe,
+        code,
+        certainty: MutationCertainty::NotApplied,
+    };
+    let mut backend = FailingObserveBackend {
+        inner: planned_backend,
+        target,
+        matching_observations: std::cell::Cell::new(0),
+        fail_on_matching_observation,
+        error: expected,
+    };
+    let mut journal = MemoryJournal::new();
+
+    let error = RenameExecutor::new(&mut backend, &mut journal)
+        .execute(confirmed)
+        .err()
+        .ok_or_else(|| std::io::Error::other("freeze observe failure was ignored"))?;
+
+    assert_eq!(error.entry, Some(EntryId::new(0)));
+    assert_eq!(error.kind, ExecuteErrorKind::Backend(expected));
+    assert_eq!(
+        backend.matching_observations.get(),
+        fail_on_matching_observation
+    );
+    assert_eq!(backend.inner.mutation_count(), 0);
+    assert!(journal.records().is_empty());
+    Ok(())
 }
 
 struct CancelDuringRenameBackend {
@@ -385,6 +484,41 @@ fn two_and_three_entry_cycles_use_one_temporary_hop_each() -> Result<(), Box<dyn
     assert_eq!(three.file_id("C:\\work\\b.txt"), Some(1));
     assert_eq!(three.file_id("C:\\work\\c.txt"), Some(2));
     Ok(())
+}
+
+#[test]
+fn freeze_observe_source_error_preserves_backend_error() -> Result<(), Box<dyn std::error::Error>> {
+    assert_freeze_observe_error_is_preserved(
+        MemoryBackend::new().with_file("C:\\work\\a.txt", 1),
+        vec![intent(0, "a.txt", "b.txt")],
+        ObserveFailureTarget::Exact("C:\\work\\a.txt"),
+        1,
+        5,
+    )
+}
+
+#[test]
+fn freeze_observe_destination_error_preserves_backend_error()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_freeze_observe_error_is_preserved(
+        MemoryBackend::new().with_file("C:\\work\\a.txt", 1),
+        vec![intent(0, "a.txt", "b.txt")],
+        ObserveFailureTarget::Exact("C:\\work\\b.txt"),
+        1,
+        32,
+    )
+}
+
+#[test]
+fn freeze_observe_temporary_error_preserves_backend_error() -> Result<(), Box<dyn std::error::Error>>
+{
+    assert_freeze_observe_error_is_preserved(
+        MemoryBackend::new().with_file("C:\\work\\A.TXT", 1),
+        vec![intent(0, "A.TXT", "a.txt")],
+        ObserveFailureTarget::Temporary,
+        2,
+        995,
+    )
 }
 
 #[test]
