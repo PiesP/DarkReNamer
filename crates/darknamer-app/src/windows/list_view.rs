@@ -346,6 +346,7 @@ pub(super) fn handle_header_end_track(state: &mut AppState, lparam: LPARAM) -> b
     // live NMHEADERW storage; pitem, when non-null, points to its readable
     // HDITEMW payload.
     let header_fields = lparam as *const NMHEADERW;
+    // SAFETY: the validated synchronous callback owns live NMHEADERW storage.
     let item = unsafe { (*header_fields).pitem };
     // SAFETY: a non-null pitem points to the live HDITEMW payload owned by the
     // header control for this synchronous notification.

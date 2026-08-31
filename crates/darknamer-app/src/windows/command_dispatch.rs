@@ -111,27 +111,69 @@ mod accelerator_tests {
         assert!(prompt_result_can_apply(
             Some(3),
             3,
-            false,
-            false,
-            false,
-            false,
+            PromptCompletionLocks::default(),
             revision,
             revision,
         ));
         for blocked in [
-            prompt_result_can_apply(Some(4), 3, false, false, false, false, revision, revision),
-            prompt_result_can_apply(None, 3, false, false, false, false, revision, revision),
-            prompt_result_can_apply(Some(3), 3, true, false, false, false, revision, revision),
-            prompt_result_can_apply(Some(3), 3, false, true, false, false, revision, revision),
-            prompt_result_can_apply(Some(3), 3, false, false, true, false, revision, revision),
-            prompt_result_can_apply(Some(3), 3, false, false, false, true, revision, revision),
+            prompt_result_can_apply(
+                Some(4),
+                3,
+                PromptCompletionLocks::default(),
+                revision,
+                revision,
+            ),
+            prompt_result_can_apply(
+                None,
+                3,
+                PromptCompletionLocks::default(),
+                revision,
+                revision,
+            ),
             prompt_result_can_apply(
                 Some(3),
                 3,
-                false,
-                false,
-                false,
-                false,
+                PromptCompletionLocks {
+                    close_pending: true,
+                    ..PromptCompletionLocks::default()
+                },
+                revision,
+                revision,
+            ),
+            prompt_result_can_apply(
+                Some(3),
+                3,
+                PromptCompletionLocks {
+                    read_only_locked: true,
+                    ..PromptCompletionLocks::default()
+                },
+                revision,
+                revision,
+            ),
+            prompt_result_can_apply(
+                Some(3),
+                3,
+                PromptCompletionLocks {
+                    mutation_locked: true,
+                    ..PromptCompletionLocks::default()
+                },
+                revision,
+                revision,
+            ),
+            prompt_result_can_apply(
+                Some(3),
+                3,
+                PromptCompletionLocks {
+                    worker_active: true,
+                    ..PromptCompletionLocks::default()
+                },
+                revision,
+                revision,
+            ),
+            prompt_result_can_apply(
+                Some(3),
+                3,
+                PromptCompletionLocks::default(),
                 ModelRevision::new(8),
                 revision,
             ),
@@ -295,6 +337,14 @@ enum PromptContinuation {
     Sort,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PromptCompletionLocks {
+    close_pending: bool,
+    read_only_locked: bool,
+    mutation_locked: bool,
+    worker_active: bool,
+}
+
 pub(super) fn dispatch_command(
     window: HWND,
     state: &mut AppState,
@@ -451,9 +501,7 @@ pub(super) fn dispatch_command(
             CommandOutcome::ui(UiEffect::None)
         }
         THEME_SYSTEM | THEME_LIGHT | THEME_DARK => {
-            let Some(appearance) = appearance_after_theme_command(state.appearance, command) else {
-                return None;
-            };
+            let appearance = appearance_after_theme_command(state.appearance, command)?;
             if appearance == state.appearance {
                 CommandOutcome::ui(UiEffect::None)
             } else {
@@ -781,10 +829,12 @@ pub(super) fn run_prepared_prompt(window: HWND, prompt: PreparedPrompt) {
     let completion_current = prompt_result_can_apply(
         state.active_prompt,
         prompt.session_id,
-        state.close_pending,
-        state.read_only_locked(),
-        state.mutation_locked,
-        worker_active,
+        PromptCompletionLocks {
+            close_pending: state.close_pending,
+            read_only_locked: state.read_only_locked(),
+            mutation_locked: state.mutation_locked,
+            worker_active,
+        },
         state.revision(),
         prompt.expected_revision,
     );
@@ -816,18 +866,15 @@ pub(super) fn run_prepared_prompt(window: HWND, prompt: PreparedPrompt) {
 fn prompt_result_can_apply(
     active_session: Option<u64>,
     session_id: u64,
-    close_pending: bool,
-    read_only_locked: bool,
-    mutation_locked: bool,
-    worker_active: bool,
+    locks: PromptCompletionLocks,
     current_revision: ModelRevision,
     expected_revision: ModelRevision,
 ) -> bool {
     active_session == Some(session_id)
-        && !close_pending
-        && !read_only_locked
-        && !mutation_locked
-        && !worker_active
+        && !locks.close_pending
+        && !locks.read_only_locked
+        && !locks.mutation_locked
+        && !locks.worker_active
         && current_revision == expected_revision
 }
 
