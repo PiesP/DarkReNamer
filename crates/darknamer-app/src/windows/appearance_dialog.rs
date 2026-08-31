@@ -4,16 +4,16 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, COLOR_3DSHADOW, COLOR_WINDOW, DT_CALCRECT, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE,
-    DT_VCENTER, DrawTextW, EndPaint, FillRect, FrameRect, GetMonitorInfoW, GetSysColorBrush,
+    BeginPaint, COLOR_WINDOW, DT_CALCRECT, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
+    DrawTextW, EndPaint, FillRect, FrameRect, GetMonitorInfoW, GetSysColorBrush,
     MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, PAINTSTRUCT, SelectObject, SetBkMode,
     SetTextColor, TRANSPARENT, UpdateWindow,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::{SS_NOPREFIX, SS_OWNERDRAW};
-use windows_sys::Win32::UI::Controls::{
-    BST_CHECKED, BST_UNCHECKED, DRAWITEMSTRUCT, ODT_STATIC, SetWindowTheme,
-};
+#[cfg(test)]
+use windows_sys::Win32::UI::Controls::ODT_STATIC;
+use windows_sys::Win32::UI::Controls::{BST_CHECKED, BST_UNCHECKED, SetWindowTheme};
 use windows_sys::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -894,37 +894,6 @@ fn paint_appearance_group(window: HWND, dc: HDC, state: &AppearanceGroupSubclass
     }
 }
 
-fn draw_appearance_separator(
-    resources: Option<&AppearanceResources>,
-    separator: HWND,
-    lparam: LPARAM,
-) -> bool {
-    if separator.is_null() {
-        return false;
-    }
-    let draw = lparam as *const DRAWITEMSTRUCT;
-    if draw.is_null() {
-        return false;
-    }
-    // SAFETY: WM_DRAWITEM supplies readable DRAWITEMSTRUCT storage synchronously.
-    let draw = unsafe { &*draw };
-    if draw.CtlType != ODT_STATIC || draw.hwndItem != separator || draw.hDC.is_null() {
-        return false;
-    }
-    let brush = resources.map_or_else(
-        || {
-            // SAFETY: system color brushes are process-global cached objects and
-            // retain native/Forced Colors behavior.
-            unsafe { GetSysColorBrush(COLOR_3DSHADOW) }
-        },
-        AppearanceResources::border_brush,
-    );
-    // SAFETY: callback DC/rect and selected palette-or-system brush are live for
-    // this decorative synchronous fill.
-    unsafe { FillRect(draw.hDC, &draw.rcItem, brush) };
-    true
-}
-
 fn native_themed_controls(state: &AppearanceDialogWindowState) -> impl Iterator<Item = HWND> + '_ {
     state
         .density
@@ -1290,7 +1259,7 @@ unsafe extern "system" fn appearance_dialog_proc(
             // SAFETY: state_ptr is live and draw payload is synchronous.
             let state = unsafe { &*state_ptr };
             let resources = state.appearance_resources.as_ref();
-            if draw_appearance_separator(resources, state.separator, lparam)
+            if draw_owner_separator(resources, state.separator, lparam)
                 || draw_owner_button(resources, lparam)
             {
                 1
@@ -1496,7 +1465,7 @@ mod native_tests {
             hwndItem: null_mut(),
             ..DRAWITEMSTRUCT::default()
         };
-        assert!(!draw_appearance_separator(
+        assert!(!draw_owner_separator(
             resources,
             null_mut(),
             (&raw mut null_target) as LPARAM,
@@ -1507,7 +1476,7 @@ mod native_tests {
             hwndItem: ok,
             ..DRAWITEMSTRUCT::default()
         };
-        assert!(!draw_appearance_separator(
+        assert!(!draw_owner_separator(
             resources,
             separator,
             (&raw mut wrong_target) as LPARAM,
@@ -1517,7 +1486,7 @@ mod native_tests {
             hwndItem: separator,
             ..DRAWITEMSTRUCT::default()
         };
-        assert!(!draw_appearance_separator(
+        assert!(!draw_owner_separator(
             resources,
             separator,
             (&raw mut null_dc) as LPARAM,
@@ -1530,7 +1499,7 @@ mod native_tests {
         };
         // SAFETY: separator is live and its client rectangle is writable.
         unsafe { GetClientRect(separator, &mut separator_draw.rcItem) };
-        assert!(draw_appearance_separator(
+        assert!(draw_owner_separator(
             resources,
             separator,
             (&raw mut separator_draw) as LPARAM,

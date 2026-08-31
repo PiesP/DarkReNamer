@@ -111,10 +111,10 @@ use windows_sys::Win32::System::Ole::{
     RevokeDragDrop,
 };
 use windows_sys::Win32::System::SystemServices::{
-    SS_CENTER, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_ETCHEDHORZ, SS_NOPREFIX, SS_SUNKEN,
+    SS_CENTER, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_NOPREFIX, SS_OWNERDRAW, SS_SUNKEN,
 };
 #[cfg(test)]
-use windows_sys::Win32::System::SystemServices::{SS_NOTIFY, SS_TYPEMASK};
+use windows_sys::Win32::System::SystemServices::{SS_ETCHEDHORZ, SS_NOTIFY, SS_TYPEMASK};
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTimeEx};
 use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 #[cfg(test)]
@@ -139,7 +139,7 @@ use windows_sys::Win32::UI::Controls::{
     TaskDialogIndirect,
 };
 #[cfg(test)]
-use windows_sys::Win32::UI::Controls::{MEASUREITEMSTRUCT, ODT_MENU};
+use windows_sys::Win32::UI::Controls::{DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODT_BUTTON, ODT_MENU};
 use windows_sys::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForWindow, GetSystemMetricsForDpi, SystemParametersInfoForDpi,
 };
@@ -168,17 +168,17 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW,
     SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetMenuItemInfoW, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateAcceleratorW,
-    TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_KEYDOWN,
-    WM_MEASUREITEM, WM_MENUCHAR, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT,
-    WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER,
-    WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW,
-    WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE,
+    TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
+    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_FONTCHANGE,
+    WM_GETMINMAXINFO, WM_KEYDOWN, WM_MEASUREITEM, WM_MENUCHAR, WM_NCCREATE, WM_NCDESTROY,
+    WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
+    WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
+    WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BS_FLAT, BS_MULTILINE, BS_TYPEMASK, GWL_STYLE, GetDlgCtrlID,
+    BS_FLAT, BS_MULTILINE, BS_TYPEMASK, GWL_STYLE, GetClassNameW, GetDlgCtrlID,
 };
 use worker::*;
 
@@ -377,6 +377,14 @@ impl AppState {
     fn resolved_appearance(&self) -> ResolvedUiAppearance {
         self.appearance
             .resolve(self.forced_colors, self.system_theme)
+    }
+
+    fn prompt_appearance(&self) -> PromptAppearance {
+        PromptAppearance {
+            preference: self.appearance,
+            forced_colors: self.forced_colors,
+            system_theme: self.system_theme,
+        }
     }
 
     fn commit_known_model_change(&mut self, changed: bool) {
@@ -1468,6 +1476,142 @@ mod tests {
         // child before the subclass refdata owner is dropped.
         unsafe { DestroyWindow(parent) };
         drop(state);
+        result.map_err(Into::into)
+    }
+
+    #[test]
+    fn native_input_prompt_preserves_standard_controls_ids_and_default_button()
+    -> Result<(), Box<dyn std::error::Error>> {
+        fn class_name(window: HWND) -> io::Result<String> {
+            let mut buffer = [0_u16; 32];
+            // SAFETY: window is live and buffer is writable for its full capacity.
+            let copied = unsafe {
+                GetClassNameW(
+                    window,
+                    buffer.as_mut_ptr(),
+                    i32::try_from(buffer.len()).unwrap_or(i32::MAX),
+                )
+            };
+            if copied == 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(String::from_utf16_lossy(&buffer[..copied as usize]))
+            }
+        }
+
+        // SAFETY: the system STATIC class/current module remain live for this hidden owner.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let result = (|| -> io::Result<()> {
+            let mut state = PromptState {
+                spec: prompt_spec(
+                    "입력",
+                    "첫째",
+                    "둘째",
+                    LegacyText::default(),
+                    LegacyText::default(),
+                    &["선택"],
+                ),
+                result: None,
+                done: false,
+                owner: parent,
+                title: null_mut(),
+                label_one: null_mut(),
+                label_two: null_mut(),
+                edit_one: null_mut(),
+                edit_two: null_mut(),
+                combo: null_mut(),
+                separator: null_mut(),
+                ok: null_mut(),
+                cancel: null_mut(),
+                font: OwnedFont::default(),
+                appearance: PromptAppearance {
+                    preference: UiAppearance::default(),
+                    forced_colors: ForcedColorsState::Inactive,
+                    system_theme: Some(ResolvedTheme::Light),
+                },
+                appearance_resources: None,
+                creation_error: None,
+                dpi: BASE_DPI,
+            };
+            create_prompt_children(parent, &mut state)?;
+
+            for (control, expected_class, expected_id) in [
+                (state.edit_one, "EDIT", 1004),
+                (state.edit_two, "EDIT", 1005),
+                (state.combo, "COMBOBOX", 1006),
+                (state.ok, "BUTTON", IDOK),
+                (state.cancel, "BUTTON", IDCANCEL),
+            ] {
+                assert!(class_name(control)?.eq_ignore_ascii_case(expected_class));
+                // SAFETY: control is live and the integral ID query retains nothing.
+                assert_eq!(unsafe { GetDlgCtrlID(control) }, expected_id);
+            }
+            for (control, expected_id) in [
+                (state.title, 1001),
+                (state.label_one, 1002),
+                (state.label_two, 1003),
+                (state.separator, 1010),
+            ] {
+                assert!(class_name(control)?.eq_ignore_ascii_case("STATIC"));
+                // SAFETY: control is live and the integral ID query retains nothing.
+                assert_eq!(unsafe { GetDlgCtrlID(control) }, expected_id);
+            }
+
+            // SAFETY: these live controls expose integral style values only.
+            let edit_style = unsafe { GetWindowLongPtrW(state.edit_one, GWL_STYLE) } as u32;
+            // SAFETY: same live style query for the standard combo box.
+            let combo_style = unsafe { GetWindowLongPtrW(state.combo, GWL_STYLE) } as u32;
+            // SAFETY: same live style query for the default push button.
+            let ok_style = unsafe { GetWindowLongPtrW(state.ok, GWL_STYLE) } as u32;
+            // SAFETY: same live style query for the ordinary cancel button.
+            let cancel_style = unsafe { GetWindowLongPtrW(state.cancel, GWL_STYLE) } as u32;
+            // SAFETY: same live style query for the owner-drawn footer separator.
+            let separator_style = unsafe { GetWindowLongPtrW(state.separator, GWL_STYLE) } as u32;
+            assert_eq!(
+                edit_style & (WS_BORDER | WS_TABSTOP),
+                WS_BORDER | WS_TABSTOP
+            );
+            assert_eq!(combo_style & 0b11, CBS_DROPDOWNLIST as u32);
+            assert_ne!(combo_style & WS_TABSTOP, 0);
+            assert_eq!(ok_style & BS_TYPEMASK as u32, BS_DEFPUSHBUTTON as u32);
+            assert_ne!(ok_style & WS_TABSTOP, 0);
+            assert_eq!(cancel_style & BS_TYPEMASK as u32, BS_PUSHBUTTON as u32);
+            assert_ne!(cancel_style & WS_TABSTOP, 0);
+            assert_eq!(separator_style & SS_TYPEMASK, SS_OWNERDRAW);
+
+            assert_eq!(draw_custom_button(None, state.ok, 0), None);
+            let invalid_separator = DRAWITEMSTRUCT {
+                CtlType: ODT_BUTTON,
+                hwndItem: state.separator,
+                ..DRAWITEMSTRUCT::default()
+            };
+            assert!(!draw_owner_separator(
+                None,
+                state.separator,
+                (&raw const invalid_separator) as LPARAM,
+            ));
+            Ok(())
+        })();
+        // SAFETY: parent is test-owned and destroys every prompt child.
+        unsafe { DestroyWindow(parent) };
         result.map_err(Into::into)
     }
 

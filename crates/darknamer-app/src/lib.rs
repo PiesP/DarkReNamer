@@ -379,6 +379,20 @@ pub(crate) const fn semantic_palette(theme: ResolvedTheme) -> Option<SemanticPal
     }
 }
 
+/// Whether one app-owned input prompt can install its custom palette atomically.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn prompt_custom_theme_enabled(
+    resolved: ResolvedUiAppearance,
+    resources_complete: bool,
+    control_theme_complete: bool,
+) -> bool {
+    resolved.custom_colors_enabled
+        && !matches!(resolved.theme, ResolvedTheme::NativeSystem)
+        && resources_complete
+        && control_theme_complete
+}
+
 /// Custom colors for one changed proposed-name cell.
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4753,6 +4767,26 @@ mod tests {
         );
         assert_eq!(theme_from_foreground(245, 245, 245), ResolvedTheme::Dark);
         assert_eq!(theme_from_foreground(24, 24, 24), ResolvedTheme::Light);
+    }
+
+    #[test]
+    fn input_prompt_theme_requires_complete_resources_and_control_routing() {
+        let custom = UiAppearance {
+            theme: AppThemeMode::Dark,
+            ..UiAppearance::default()
+        }
+        .resolve(ForcedColorsState::Inactive, Some(ResolvedTheme::Light));
+        assert!(prompt_custom_theme_enabled(custom, true, true));
+        assert!(!prompt_custom_theme_enabled(custom, false, true));
+        assert!(!prompt_custom_theme_enabled(custom, true, false));
+
+        let native = UiAppearance::default().resolve(ForcedColorsState::Inactive, None);
+        assert!(!prompt_custom_theme_enabled(native, true, true));
+        let forced = UiAppearance::default().resolve(
+            ForcedColorsState::ActiveOrUnknown,
+            Some(ResolvedTheme::Dark),
+        );
+        assert!(!prompt_custom_theme_enabled(forced, true, true));
     }
 
     #[test]
