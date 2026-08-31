@@ -111,10 +111,10 @@ use windows_sys::Win32::System::Ole::{
     RevokeDragDrop,
 };
 use windows_sys::Win32::System::SystemServices::{
-    SS_CENTER, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_ETCHEDHORZ, SS_NOPREFIX, SS_SUNKEN,
+    SS_CENTER, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_NOPREFIX, SS_OWNERDRAW, SS_SUNKEN,
 };
 #[cfg(test)]
-use windows_sys::Win32::System::SystemServices::{SS_NOTIFY, SS_TYPEMASK};
+use windows_sys::Win32::System::SystemServices::{SS_ETCHEDHORZ, SS_NOTIFY, SS_TYPEMASK};
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTimeEx};
 use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 #[cfg(test)]
@@ -123,23 +123,25 @@ use windows_sys::Win32::UI::Controls::{
     CDDS_ITEMPREPAINT, CDDS_POSTPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDIS_HOT, CDIS_SELECTED,
     CDRF_DODEFAULT, CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYPOSTPAINT,
     CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, HDI_TEXT, HDI_WIDTH, HDITEMW, HDM_GETITEMCOUNT,
-    HDM_GETITEMRECT, HDM_GETITEMW, HDN_ENDTRACKW, HDN_ITEMCHANGEDW, HDN_ITEMCHANGINGW,
-    ICC_LISTVIEW_CLASSES, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_FMT,
-    LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT,
-    LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_DELETEITEM, LVM_ENSUREVISIBLE,
-    LVM_GETCOLUMNWIDTH, LVM_GETHEADER, LVM_GETITEMSTATE, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW,
-    LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST,
-    LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVM_SETITEMW, LVN_GETINFOTIPW, LVN_ITEMCHANGED,
-    LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP,
-    LVS_EX_LABELTIP, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS,
-    LVSIL_SMALL, NM_CUSTOMDRAW, NM_DBLCLK, NM_SETFOCUS, NMCUSTOMDRAW, NMHDR, NMHEADERW, NMLISTVIEW,
-    NMLVCUSTOMDRAW, NMLVGETINFOTIPW, TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0,
-    TASKDIALOGCONFIG_1, TD_WARNING_ICON, TDCBF_CANCEL_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION,
-    TDF_POSITION_RELATIVE_TO_WINDOW, TDF_SIZE_TO_CONTENT, TDF_USE_COMMAND_LINKS,
-    TaskDialogIndirect,
+    HDM_GETITEMRECT, HDM_GETITEMW, HDN_DIVIDERDBLCLICKW, HDN_ENDTRACKW, HDN_ITEMCHANGEDW,
+    HDN_ITEMCHANGINGW, ICC_LISTVIEW_CLASSES, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX,
+    InitCommonControlsEx, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW,
+    LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS,
+    LVM_DELETEITEM, LVM_ENSUREVISIBLE, LVM_GETCOLUMNWIDTH, LVM_GETHEADER, LVM_GETITEMSTATE,
+    LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH,
+    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW,
+    LVM_SETITEMW, LVN_GETINFOTIPW, LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED,
+    LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_NOSORTHEADER,
+    LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_CUSTOMDRAW, NM_DBLCLK,
+    NM_SETFOCUS, NMCUSTOMDRAW, NMHDR, NMHEADERW, NMLISTVIEW, NMLVCUSTOMDRAW, NMLVGETINFOTIPW,
+    TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TASKDIALOGCONFIG_1, TD_WARNING_ICON,
+    TDCBF_CANCEL_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION, TDF_POSITION_RELATIVE_TO_WINDOW,
+    TDF_SIZE_TO_CONTENT, TDF_USE_COMMAND_LINKS, TaskDialogIndirect,
 };
 #[cfg(test)]
-use windows_sys::Win32::UI::Controls::{MEASUREITEMSTRUCT, ODT_MENU};
+use windows_sys::Win32::UI::Controls::{
+    DRAWITEMSTRUCT, LVM_GETITEMTEXTW, MEASUREITEMSTRUCT, ODT_BUTTON, ODT_MENU,
+};
 use windows_sys::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForWindow, GetSystemMetricsForDpi, SystemParametersInfoForDpi,
 };
@@ -168,17 +170,17 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW,
     SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetMenuItemInfoW, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateAcceleratorW,
-    TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_KEYDOWN,
-    WM_MEASUREITEM, WM_MENUCHAR, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT,
-    WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER,
-    WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW,
-    WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE,
+    TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
+    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_FONTCHANGE,
+    WM_GETMINMAXINFO, WM_KEYDOWN, WM_MEASUREITEM, WM_MENUCHAR, WM_NCCREATE, WM_NCDESTROY,
+    WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
+    WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
+    WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BS_FLAT, BS_MULTILINE, BS_TYPEMASK, GWL_STYLE, GetDlgCtrlID,
+    BM_CLICK, BS_FLAT, BS_MULTILINE, BS_TYPEMASK, GWL_STYLE, GetClassNameW, GetDlgCtrlID,
 };
 use worker::*;
 
@@ -213,6 +215,7 @@ const WM_APP_APPEARANCE_DISMISS: u32 = WM_APP + 0x4A;
 const WM_APP_APPEARANCE_ARM: u32 = WM_APP + 0x4B;
 const WM_APP_LAYOUT: u32 = WM_APP + 0x4C;
 const WM_APP_EMPTY_SAFETY_COPY: u32 = WM_APP + 0x4D;
+const WM_APP_APPEARANCE_RESTORE_FOCUS: u32 = WM_APP + 0x4E;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 const PREFERENCES_POLL_TIMER_ID: usize = 0xD4A2;
 
@@ -377,6 +380,14 @@ impl AppState {
     fn resolved_appearance(&self) -> ResolvedUiAppearance {
         self.appearance
             .resolve(self.forced_colors, self.system_theme)
+    }
+
+    fn prompt_appearance(&self) -> PromptAppearance {
+        PromptAppearance {
+            preference: self.appearance,
+            forced_colors: self.forced_colors,
+            system_theme: self.system_theme,
+        }
     }
 
     fn commit_known_model_change(&mut self, changed: bool) {
@@ -1081,6 +1092,13 @@ mod tests {
         proposal.values[1] = LegacyText::from("changed");
         assert_eq!(changed_column_mask(&original, &proposal), 1 << 1);
 
+        let mut status = original.clone();
+        status.values[NATIVE_STATUS_COLUMN_INDEX] = LegacyText::from("차단: 충돌");
+        assert_eq!(
+            changed_column_mask(&original, &status),
+            1 << NATIVE_STATUS_COLUMN_INDEX
+        );
+
         let mut icon = original.clone();
         icon.icon = 8;
         assert_eq!(changed_column_mask(&original, &icon), 1);
@@ -1168,6 +1186,118 @@ mod tests {
         for dpi in [96, 120, 144, 192] {
             verify_native_command_rails_at_dpi(instance, dpi)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn native_owner_draw_rail_button_bm_click_sends_one_command_notification()
+    -> Result<(), Box<dyn std::error::Error>> {
+        static COMMAND_COUNT: AtomicUsize = AtomicUsize::new(0);
+        static COMMAND_WPARAM: AtomicUsize = AtomicUsize::new(0);
+        static COMMAND_SOURCE: AtomicUsize = AtomicUsize::new(0);
+
+        unsafe extern "system" fn command_probe(
+            window: HWND,
+            message: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+            _subclass_id: usize,
+            _ref_data: usize,
+        ) -> LRESULT {
+            if message == WM_COMMAND {
+                COMMAND_COUNT.fetch_add(1, Ordering::SeqCst);
+                COMMAND_WPARAM.store(wparam, Ordering::SeqCst);
+                COMMAND_SOURCE.store(lparam as usize, Ordering::SeqCst);
+            }
+            // SAFETY: the original message and scalar parameters are forwarded
+            // unchanged through the system subclass chain exactly once.
+            unsafe { DefSubclassProc(window, message, wparam, lparam) }
+        }
+
+        COMMAND_COUNT.store(0, Ordering::SeqCst);
+        COMMAND_WPARAM.store(0, Ordering::SeqCst);
+        COMMAND_SOURCE.store(0, Ordering::SeqCst);
+        let controls = INITCOMMONCONTROLSEX {
+            dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+            dwICC: ICC_WIN95_CLASSES,
+        };
+        // SAFETY: controls has its exact structure size for initialization.
+        unsafe { InitCommonControlsEx(&controls) };
+        // SAFETY: the system STATIC class and current module are process-global.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        // SAFETY: parent is a live UI-thread test window and the callback uses
+        // the documented SUBCLASSPROC ABI without retaining borrowed storage.
+        if unsafe { SetWindowSubclass(parent, Some(command_probe), 0xD4B1, 0) } == 0 {
+            // SAFETY: parent is the test-owned hidden HWND.
+            unsafe { DestroyWindow(parent) };
+            return Err(io::Error::last_os_error().into());
+        }
+        let rail = match CommandRail::create(parent, &LEFT_RAIL) {
+            Ok(rail) => rail,
+            Err(error) => {
+                // SAFETY: removes the exact callback and ID installed above.
+                unsafe { RemoveWindowSubclass(parent, Some(command_probe), 0xD4B1) };
+                // SAFETY: parent is the test-owned hidden HWND.
+                unsafe { DestroyWindow(parent) };
+                return Err(error.into());
+            }
+        };
+        let button = rail
+            .command_hwnd(APPLY)
+            .ok_or_else(|| io::Error::other("Apply rail button is missing"))?;
+
+        let placements = calculate_command_rail_layout(
+            &LEFT_RAIL,
+            800,
+            RailDensity::Comfortable.metrics(BASE_DPI),
+        )
+        .map_err(|error| io::Error::other(format!("rail layout failed: {error:?}")))?;
+        rail.arrange(0, &placements, BASE_DPI);
+        // SAFETY: parent/button are live test-owned windows. Giving the standard
+        // button focus before BM_CLICK matches its documented interactive path;
+        // the counters are reset afterward so BN_SETFOCUS is not mistaken for
+        // the click notification under test.
+        unsafe {
+            ShowWindow(parent, SW_SHOW);
+            UpdateWindow(parent);
+            SetFocus(button);
+        }
+        COMMAND_COUNT.store(0, Ordering::SeqCst);
+        COMMAND_WPARAM.store(0, Ordering::SeqCst);
+        COMMAND_SOURCE.store(0, Ordering::SeqCst);
+
+        // SAFETY: button is the live standard owner-draw BUTTON created by the
+        // production rail and BM_CLICK synchronously follows native semantics.
+        unsafe { SendMessageW(button, BM_CLICK, 0, 0) };
+
+        assert_eq!(COMMAND_COUNT.load(Ordering::SeqCst), 1);
+        let notification = COMMAND_WPARAM.load(Ordering::SeqCst);
+        assert_eq!(notification & 0xFFFF, usize::from(APPLY));
+        assert_eq!((notification >> 16) & 0xFFFF, BN_CLICKED as usize);
+        assert_eq!(COMMAND_SOURCE.load(Ordering::SeqCst), button as usize);
+        rail.destroy();
+        // SAFETY: removes the exact callback and ID installed above.
+        unsafe { RemoveWindowSubclass(parent, Some(command_probe), 0xD4B1) };
+        // SAFETY: parent is the test-owned hidden HWND and is destroyed once.
+        unsafe { DestroyWindow(parent) };
         Ok(())
     }
 
@@ -1468,6 +1598,140 @@ mod tests {
         // child before the subclass refdata owner is dropped.
         unsafe { DestroyWindow(parent) };
         drop(state);
+        result.map_err(Into::into)
+    }
+
+    #[test]
+    fn native_input_prompt_preserves_standard_controls_ids_and_default_button()
+    -> Result<(), Box<dyn std::error::Error>> {
+        fn class_name(window: HWND) -> io::Result<String> {
+            let mut buffer = [0_u16; 32];
+            // SAFETY: window is live and buffer is writable for its full capacity.
+            let copied = unsafe {
+                GetClassNameW(
+                    window,
+                    buffer.as_mut_ptr(),
+                    i32::try_from(buffer.len()).unwrap_or(i32::MAX),
+                )
+            };
+            if copied == 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(String::from_utf16_lossy(&buffer[..copied as usize]))
+            }
+        }
+
+        // SAFETY: the system STATIC class/current module remain live for this hidden owner.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let result = (|| -> io::Result<()> {
+            let mut state = PromptState {
+                spec: prompt_spec(
+                    "입력",
+                    "첫째",
+                    "둘째",
+                    LegacyText::default(),
+                    LegacyText::default(),
+                    &["선택"],
+                ),
+                result: None,
+                done: false,
+                owner: parent,
+                title: null_mut(),
+                label_one: null_mut(),
+                label_two: null_mut(),
+                edit_one: null_mut(),
+                edit_two: null_mut(),
+                combo: null_mut(),
+                separator: null_mut(),
+                ok: null_mut(),
+                cancel: null_mut(),
+                font: OwnedFont::default(),
+                appearance: PromptAppearance {
+                    preference: UiAppearance::default(),
+                    forced_colors: ForcedColorsState::Inactive,
+                    system_theme: Some(ResolvedTheme::Light),
+                },
+                appearance_resources: None,
+                creation_error: None,
+                dpi: BASE_DPI,
+            };
+            create_prompt_children(parent, &mut state)?;
+
+            for (control, expected_class, expected_id) in [
+                (state.edit_one, "EDIT", 1004),
+                (state.edit_two, "EDIT", 1005),
+                (state.combo, "COMBOBOX", 1006),
+                (state.ok, "BUTTON", IDOK),
+                (state.cancel, "BUTTON", IDCANCEL),
+            ] {
+                assert!(class_name(control)?.eq_ignore_ascii_case(expected_class));
+                // SAFETY: control is live and the integral ID query retains nothing.
+                assert_eq!(unsafe { GetDlgCtrlID(control) }, expected_id);
+            }
+            for (control, expected_id) in [
+                (state.title, 1001),
+                (state.label_one, 1002),
+                (state.label_two, 1003),
+                (state.separator, 1010),
+            ] {
+                assert!(class_name(control)?.eq_ignore_ascii_case("STATIC"));
+                // SAFETY: control is live and the integral ID query retains nothing.
+                assert_eq!(unsafe { GetDlgCtrlID(control) }, expected_id);
+            }
+
+            // SAFETY: these live controls expose integral style values only.
+            let edit_style = unsafe { GetWindowLongPtrW(state.edit_one, GWL_STYLE) } as u32;
+            // SAFETY: same live style query for the standard combo box.
+            let combo_style = unsafe { GetWindowLongPtrW(state.combo, GWL_STYLE) } as u32;
+            // SAFETY: same live style query for the default push button.
+            let ok_style = unsafe { GetWindowLongPtrW(state.ok, GWL_STYLE) } as u32;
+            // SAFETY: same live style query for the ordinary cancel button.
+            let cancel_style = unsafe { GetWindowLongPtrW(state.cancel, GWL_STYLE) } as u32;
+            // SAFETY: same live style query for the owner-drawn footer separator.
+            let separator_style = unsafe { GetWindowLongPtrW(state.separator, GWL_STYLE) } as u32;
+            assert_ne!(edit_style & WS_TABSTOP, 0);
+            assert_ne!(edit_style & ES_AUTOHSCROLL as u32, 0);
+            assert_eq!(combo_style & 0b11, CBS_DROPDOWNLIST as u32);
+            assert_ne!(combo_style & WS_TABSTOP, 0);
+            assert_eq!(ok_style & BS_TYPEMASK as u32, BS_DEFPUSHBUTTON as u32);
+            assert_ne!(ok_style & WS_TABSTOP, 0);
+            assert_eq!(cancel_style & BS_TYPEMASK as u32, BS_PUSHBUTTON as u32);
+            assert_ne!(cancel_style & WS_TABSTOP, 0);
+            assert_eq!(separator_style & SS_TYPEMASK, SS_OWNERDRAW);
+
+            assert_eq!(draw_custom_button(None, state.ok, 0), None);
+            let invalid_separator = DRAWITEMSTRUCT {
+                CtlType: ODT_BUTTON,
+                hwndItem: state.separator,
+                ..DRAWITEMSTRUCT::default()
+            };
+            assert!(!draw_owner_separator(
+                None,
+                state.separator,
+                (&raw const invalid_separator) as LPARAM,
+            ));
+            Ok(())
+        })();
+        // SAFETY: parent is test-owned and destroys every prompt child.
+        unsafe { DestroyWindow(parent) };
         result.map_err(Into::into)
     }
 

@@ -6,8 +6,18 @@
 pub mod admission;
 /// Bounded shell-icon cache key derivation.
 pub mod icon_cache;
+#[cfg(any(windows, test))]
+mod preview;
 /// Safe rename planning and execution foundation.
 pub mod rename;
+
+#[cfg(windows)]
+pub(crate) use preview::{
+    PreviewCountCache, PreviewCounts, PreviewIssueCache, PreviewRowIssue,
+    preview_status_delta_rows, preview_status_label, windows_leaf_name_error_korean,
+};
+#[cfg(all(test, not(windows)))]
+pub(crate) use preview::{PreviewCounts, PreviewRowIssue};
 
 /// Original outer window width used by the parity shell.
 pub const INITIAL_WIDTH: i32 = 464;
@@ -23,6 +33,8 @@ pub(crate) const NAME_COLUMN_MINIMUM: i32 = 120;
 pub(crate) const LOCATION_COLUMN_MINIMUM: i32 = 80;
 #[cfg(any(windows, test))]
 pub(crate) const LIST_SCROLLBAR_ALLOWANCE_DIP: i32 = 17;
+#[cfg(any(windows, test))]
+pub(crate) const NATIVE_STATUS_COLUMN_WIDTH_DIP: i32 = 112;
 #[cfg(any(windows, test))]
 pub(crate) const EMPTY_LIST_STATUS: &str = "파일이나 폴더를 끌어 놓거나 Ctrl+O로 추가하세요.";
 #[cfg(windows)]
@@ -379,6 +391,20 @@ pub(crate) const fn semantic_palette(theme: ResolvedTheme) -> Option<SemanticPal
     }
 }
 
+/// Whether one app-owned input prompt can install its custom palette atomically.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn prompt_custom_theme_enabled(
+    resolved: ResolvedUiAppearance,
+    resources_complete: bool,
+    control_theme_complete: bool,
+) -> bool {
+    resolved.custom_colors_enabled
+        && !matches!(resolved.theme, ResolvedTheme::NativeSystem)
+        && resources_complete
+        && control_theme_complete
+}
+
 /// Custom colors for one changed proposed-name cell.
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -733,6 +759,12 @@ pub(crate) const fn unpack_ui_appearance(packed: u32) -> Option<UiAppearance> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AppearanceDialogLayout {
     pub(crate) client: LayoutRect,
+    pub(crate) body_viewport: LayoutRect,
+    pub(crate) body_content_height: i32,
+    pub(crate) scroll_max: i32,
+    pub(crate) scroll_page: i32,
+    pub(crate) footer: LayoutRect,
+    pub(crate) compact_footer: bool,
     pub(crate) density_group: LayoutRect,
     pub(crate) density_options: [LayoutRect; 4],
     pub(crate) emphasis_group: LayoutRect,
@@ -754,18 +786,36 @@ pub(crate) struct AppearanceDialogMetrics {
     pub(crate) widest_checkbox: i32,
     pub(crate) button_text_height: i32,
     pub(crate) widest_button: i32,
+    pub(crate) wrapped_option_height: i32,
+    pub(crate) wrapped_checkbox_height: i32,
+    pub(crate) forced_explanation_height: i32,
 }
 
 #[cfg(any(windows, test))]
 #[must_use]
-fn bounded_dialog_rect(x: i32, y: i32, width: i32, height: i32, client: LayoutRect) -> LayoutRect {
-    let x = x.max(0).min(client.width);
-    let y = y.max(0).min(client.height);
+fn bounded_dialog_rect(x: i32, y: i32, width: i32, height: i32, bounds: LayoutRect) -> LayoutRect {
+    let x = x.max(0).min(bounds.width);
+    let y = y.max(0).min(bounds.height);
     LayoutRect {
         x,
         y,
-        width: width.max(0).min(client.width.saturating_sub(x)),
-        height: height.max(0).min(client.height.saturating_sub(y)),
+        width: width.max(0).min(bounds.width.saturating_sub(x)),
+        height: height.max(0).min(bounds.height.saturating_sub(y)),
+    }
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn clamp_appearance_dialog_scroll(
+    layout: AppearanceDialogLayout,
+    scroll_y: i32,
+) -> i32 {
+    if scroll_y < 0 {
+        0
+    } else if scroll_y > layout.scroll_max {
+        layout.scroll_max
+    } else {
+        scroll_y
     }
 }
 
@@ -789,15 +839,33 @@ pub(crate) fn calculate_appearance_dialog_layout(
         .max(measured.widest_option.saturating_add(scale_dip(64, dpi)))
         .max(measured.widest_checkbox.saturating_add(scale_dip(48, dpi)))
         .max(button_row_width);
-    let row_height = scale_dip(20, dpi).max(measured.text_height.saturating_add(scale_dip(6, dpi)));
+    let minimum_width = scale_dip(240, dpi).max(horizontal_footer_minimum_width(dpi, button_width));
+    if maximum_width < minimum_width || maximum_height <= 0 {
+        return None;
+    }
+    let client_width = desired_width.min(maximum_width);
+    let row_height = scale_dip(20, dpi)
+        .max(measured.text_height.saturating_add(scale_dip(6, dpi)))
+        .max(
+            measured
+                .wrapped_option_height
+                .saturating_add(scale_dip(4, dpi)),
+        );
     let row_stride = row_height.saturating_add(scale_dip(2, dpi));
     let density_group_height = scale_dip(22, dpi).saturating_add(row_stride.saturating_mul(4));
     let emphasis_group_height = scale_dip(22, dpi).saturating_add(row_stride.saturating_mul(3));
-    let checkbox_height =
-        scale_dip(22, dpi).max(measured.text_height.saturating_add(scale_dip(6, dpi)));
+    let checkbox_height = scale_dip(22, dpi)
+        .max(measured.text_height.saturating_add(scale_dip(6, dpi)))
+        .max(
+            measured
+                .wrapped_checkbox_height
+                .saturating_add(scale_dip(4, dpi)),
+        );
     let checkbox_stride = checkbox_height.saturating_add(scale_dip(6, dpi));
     let explanation_height = if show_forced_explanation {
-        scale_dip(40, dpi).max(measured.text_height.saturating_mul(2))
+        scale_dip(40, dpi)
+            .max(measured.text_height.saturating_mul(2))
+            .max(measured.forced_explanation_height)
     } else {
         0
     };
@@ -823,36 +891,105 @@ pub(crate) fn calculate_appearance_dialog_layout(
     let separator_y = checkbox_y
         .saturating_add(checkbox_stride.saturating_mul(3))
         .saturating_add(scale_dip(4, dpi));
-    let buttons_y = separator_y.saturating_add(scale_dip(14, dpi));
-    let desired_height = buttons_y
-        .saturating_add(button_height)
-        .saturating_add(scale_dip(18, dpi));
-    if maximum_width < desired_width || maximum_height < desired_height {
+    let body_content_height = separator_y
+        .saturating_add(scale_dip(1, dpi))
+        .saturating_add(scale_dip(12, dpi));
+    let available_footer_width = client_width.saturating_sub(horizontal_margin.saturating_mul(2));
+    let compact_footer =
+        available_footer_width < button_row_width.saturating_sub(scale_dip(24, dpi));
+    let footer_height = if compact_footer {
+        button_height
+            .saturating_mul(2)
+            .saturating_add(scale_dip(26, dpi))
+    } else {
+        button_height.saturating_add(scale_dip(18, dpi))
+    };
+    let minimum_viewport_height = scale_dip(48, dpi);
+    if maximum_height < footer_height.saturating_add(minimum_viewport_height) {
         return None;
     }
+    let desired_height = body_content_height.saturating_add(footer_height);
+    let client_height = desired_height.min(maximum_height);
     let client = LayoutRect {
         x: 0,
         y: 0,
-        width: desired_width,
-        height: desired_height,
+        width: client_width,
+        height: client_height,
     };
-    let content_width = desired_width.saturating_sub(horizontal_margin.saturating_mul(2));
-    let rect = |x, y, width, height| bounded_dialog_rect(x, y, width, height, client);
+    let body_viewport = LayoutRect {
+        x: 0,
+        y: 0,
+        width: client_width,
+        height: client_height.saturating_sub(footer_height),
+    };
+    let footer = LayoutRect {
+        x: 0,
+        y: body_viewport.height,
+        width: client_width,
+        height: footer_height,
+    };
+    let body_bounds = LayoutRect {
+        x: 0,
+        y: 0,
+        width: client_width.saturating_sub(scale_dip(18, dpi)),
+        height: body_content_height,
+    };
+    let content_width = body_bounds
+        .width
+        .saturating_sub(horizontal_margin.saturating_mul(2));
+    let rect = |x, y, width, height| bounded_dialog_rect(x, y, width, height, body_bounds);
     let option_x = scale_dip(28, dpi);
-    let option_width = desired_width.saturating_sub(scale_dip(64, dpi));
+    let option_width = body_bounds.width.saturating_sub(scale_dip(64, dpi));
     let group_option_y = |group_y: i32, index: i32| {
         group_y
             .saturating_add(scale_dip(22, dpi))
             .saturating_add(row_stride.saturating_mul(index))
     };
-    let cancel_x = desired_width
+    let footer_button_width = if compact_footer {
+        available_footer_width.saturating_sub(scale_dip(8, dpi)) / 2
+    } else {
+        button_width
+    };
+    let cancel_x = client_width
         .saturating_sub(horizontal_margin)
-        .saturating_sub(button_width);
+        .saturating_sub(footer_button_width);
     let ok_x = cancel_x
         .saturating_sub(scale_dip(8, dpi))
-        .saturating_sub(button_width);
+        .saturating_sub(footer_button_width);
+    let buttons_y = if compact_footer {
+        footer
+            .y
+            .saturating_add(scale_dip(10, dpi))
+            .saturating_add(button_height)
+            .saturating_add(scale_dip(6, dpi))
+    } else {
+        footer.y.saturating_add(scale_dip(9, dpi))
+    };
+    let reset_rect = if compact_footer {
+        bounded_dialog_rect(
+            horizontal_margin,
+            footer.y.saturating_add(scale_dip(8, dpi)),
+            available_footer_width,
+            button_height,
+            client,
+        )
+    } else {
+        bounded_dialog_rect(
+            horizontal_margin,
+            buttons_y,
+            reset_width,
+            button_height,
+            client,
+        )
+    };
     Some(AppearanceDialogLayout {
         client,
+        body_viewport,
+        body_content_height,
+        scroll_max: body_content_height.saturating_sub(body_viewport.height),
+        scroll_page: body_viewport.height,
+        footer,
+        compact_footer,
         density_group: rect(
             horizontal_margin,
             density_y,
@@ -925,19 +1062,19 @@ pub(crate) fn calculate_appearance_dialog_layout(
             rect(
                 scale_dip(20, dpi),
                 checkbox_y,
-                desired_width.saturating_sub(scale_dip(40, dpi)),
+                body_bounds.width.saturating_sub(scale_dip(40, dpi)),
                 checkbox_height,
             ),
             rect(
                 scale_dip(20, dpi),
                 checkbox_y.saturating_add(checkbox_stride),
-                desired_width.saturating_sub(scale_dip(40, dpi)),
+                body_bounds.width.saturating_sub(scale_dip(40, dpi)),
                 checkbox_height,
             ),
             rect(
                 scale_dip(20, dpi),
                 checkbox_y.saturating_add(checkbox_stride.saturating_mul(2)),
-                desired_width.saturating_sub(scale_dip(40, dpi)),
+                body_bounds.width.saturating_sub(scale_dip(40, dpi)),
                 checkbox_height,
             ),
         ],
@@ -947,10 +1084,24 @@ pub(crate) fn calculate_appearance_dialog_layout(
             content_width,
             scale_dip(1, dpi),
         ),
-        reset: rect(horizontal_margin, buttons_y, reset_width, button_height),
-        ok: rect(ok_x, buttons_y, button_width, button_height),
-        cancel: rect(cancel_x, buttons_y, button_width, button_height),
+        reset: reset_rect,
+        ok: bounded_dialog_rect(ok_x, buttons_y, footer_button_width, button_height, client),
+        cancel: bounded_dialog_rect(
+            cancel_x,
+            buttons_y,
+            footer_button_width,
+            button_height,
+            client,
+        ),
     })
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+const fn horizontal_footer_minimum_width(dpi: u32, button_width: i32) -> i32 {
+    scale_dip(24, dpi)
+        .saturating_add(button_width.saturating_mul(2))
+        .saturating_add(scale_dip(8, dpi))
 }
 
 /// Pixel metrics used to place one command rail.
@@ -2336,252 +2487,6 @@ fn calculate_empty_state_layout(
     }
 }
 
-/// Exact, non-authorizing counts shown by the native preview workbench.
-#[cfg(any(windows, test))]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct PreviewCounts {
-    pub(crate) total: usize,
-    pub(crate) changed: usize,
-    pub(crate) selected: usize,
-}
-
-/// Cached model-only portion of preview counts.
-#[cfg(any(windows, test))]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct PreviewCountCache {
-    total: usize,
-    changed: usize,
-}
-
-/// Model-only warning/blocker attached to one proposed-name row.
-#[cfg(any(windows, test))]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum PreviewRowIssue {
-    #[default]
-    None,
-    EmptyStem,
-    InvalidName(darknamer_core::WindowsLeafNameError),
-    DuplicateDestination,
-}
-
-/// Cached preview-only diagnostics. These never authorize filesystem work.
-#[cfg(any(windows, test))]
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct PreviewIssueCache {
-    rows: Vec<PreviewRowIssue>,
-    warning_rows: usize,
-    invalid_name_rows: usize,
-    duplicate_destination_rows: usize,
-    blocker_rows: usize,
-}
-
-#[cfg(any(windows, test))]
-impl PreviewIssueCache {
-    pub(crate) fn refresh_by<'a, F, K>(
-        &mut self,
-        rows: impl IntoIterator<
-            Item = (
-                &'a darknamer_core::LegacyText,
-                &'a darknamer_core::LegacyText,
-                &'a darknamer_core::LegacyText,
-                bool,
-            ),
-        >,
-        mut destination_key: F,
-    ) where
-        F: FnMut(&darknamer_core::LegacyText, &darknamer_core::LegacyText) -> K,
-        K: Ord,
-    {
-        let rows = rows.into_iter().collect::<Vec<_>>();
-        self.rows.clear();
-        self.rows.resize(rows.len(), PreviewRowIssue::None);
-        let mut destinations = Vec::new();
-        for (row, (parent, current, proposed, is_directory)) in rows.iter().copied().enumerate() {
-            let changed = current != proposed;
-            let valid = if changed {
-                match darknamer_core::validate_windows_leaf_name(proposed) {
-                    Ok(()) => true,
-                    Err(error) => {
-                        self.rows[row] = PreviewRowIssue::InvalidName(error);
-                        false
-                    }
-                }
-            } else {
-                true
-            };
-            if changed && valid && preview_name_has_empty_stem(proposed, is_directory) {
-                self.rows[row] = PreviewRowIssue::EmptyStem;
-            }
-            let effective_name = if changed { proposed } else { current };
-            destinations.push((row, destination_key(parent, effective_name), changed, valid));
-        }
-        destinations.sort_by(|left, right| left.1.cmp(&right.1));
-        let mut group_start = 0_usize;
-        while group_start < destinations.len() {
-            let mut group_end = group_start + 1;
-            while group_end < destinations.len()
-                && destinations[group_start].1 == destinations[group_end].1
-            {
-                group_end += 1;
-            }
-            if group_end - group_start > 1 {
-                for destination in &destinations[group_start..group_end] {
-                    if destination.2 && destination.3 {
-                        self.rows[destination.0] = PreviewRowIssue::DuplicateDestination;
-                    }
-                }
-            }
-            group_start = group_end;
-        }
-        self.warning_rows = self
-            .rows
-            .iter()
-            .filter(|issue| matches!(issue, PreviewRowIssue::EmptyStem))
-            .count();
-        self.invalid_name_rows = self
-            .rows
-            .iter()
-            .filter(|issue| matches!(issue, PreviewRowIssue::InvalidName(_)))
-            .count();
-        self.duplicate_destination_rows = self
-            .rows
-            .iter()
-            .filter(|issue| matches!(issue, PreviewRowIssue::DuplicateDestination))
-            .count();
-        self.blocker_rows = self
-            .invalid_name_rows
-            .saturating_add(self.duplicate_destination_rows);
-    }
-
-    #[must_use]
-    pub(crate) fn issue(&self, row: usize) -> PreviewRowIssue {
-        self.rows.get(row).copied().unwrap_or_default()
-    }
-
-    #[must_use]
-    pub(crate) const fn has_blocker(&self) -> bool {
-        self.blocker_rows != 0
-    }
-
-    #[must_use]
-    pub(crate) fn blocker_rows(&self) -> Box<[usize]> {
-        self.rows
-            .iter()
-            .enumerate()
-            .filter_map(|(row, issue)| {
-                matches!(
-                    issue,
-                    PreviewRowIssue::InvalidName(_) | PreviewRowIssue::DuplicateDestination
-                )
-                .then_some(row)
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice()
-    }
-
-    #[must_use]
-    pub(crate) const fn blocker_explanation(&self) -> Option<&'static str> {
-        match (
-            self.invalid_name_rows != 0,
-            self.duplicate_destination_rows != 0,
-        ) {
-            (true, true) => Some(
-                "Windows에서 사용할 수 없는 대상 이름과 같은 폴더의 대상 이름 충돌이 있습니다. 표시된 행의 이름을 Windows 이름 규칙에 맞고 서로 다르게 수정해 주세요.",
-            ),
-            (true, false) => Some(
-                "Windows에서 사용할 수 없는 대상 이름이 있습니다. 표시된 행의 이름을 Windows 이름 규칙에 맞게 수정해 주세요.",
-            ),
-            (false, true) => Some(
-                "같은 폴더에서 둘 이상의 항목이 같은 대상 이름을 사용합니다. 표시된 행의 이름을 다르게 지정해 주세요.",
-            ),
-            (false, false) => None,
-        }
-    }
-
-    #[must_use]
-    pub(crate) fn notice(&self) -> Option<String> {
-        let mut counts = Vec::new();
-        if self.invalid_name_rows != 0 {
-            counts.push(format!("잘못된 대상 이름 {}개", self.invalid_name_rows));
-        }
-        if self.duplicate_destination_rows != 0 {
-            counts.push(format!(
-                "대상 이름 충돌 {}개",
-                self.duplicate_destination_rows
-            ));
-        }
-        if self.warning_rows != 0 {
-            counts.push(format!(
-                "이름 본체가 비어 있는 항목 {}개",
-                self.warning_rows
-            ));
-        }
-        if counts.is_empty() {
-            return None;
-        }
-        let action = if self.blocker_rows != 0 {
-            "변경 적용이 차단되었습니다."
-        } else {
-            "변경 전에 확인하세요."
-        };
-        Some(format!("{} · {action}", counts.join(" · ")))
-    }
-}
-
-#[cfg(any(windows, test))]
-#[must_use]
-pub(crate) fn windows_leaf_name_error_korean(
-    error: darknamer_core::WindowsLeafNameError,
-) -> &'static str {
-    use darknamer_core::WindowsLeafNameError;
-
-    match error {
-        WindowsLeafNameError::Empty => "이름이 비어 있음",
-        WindowsLeafNameError::ContainsNul => "NUL 문자가 포함됨",
-        WindowsLeafNameError::ContainsSeparator => "경로 구분자가 포함됨",
-        WindowsLeafNameError::DotComponent => "점 경로 구성 요소(.) 또는 (..)임",
-        WindowsLeafNameError::InvalidCharacter => "Windows에서 금지된 문자가 포함됨",
-        WindowsLeafNameError::ReservedDeviceName => "Windows 예약 장치 이름임",
-        WindowsLeafNameError::TrailingDotOrSpace => "점 또는 공백으로 끝남",
-        WindowsLeafNameError::TooLong => "Windows 이름 길이 제한을 초과함",
-        _ => "Windows 이름 규칙에 맞지 않음",
-    }
-}
-
-#[cfg(any(windows, test))]
-fn preview_name_has_empty_stem(name: &darknamer_core::LegacyText, is_directory: bool) -> bool {
-    if is_directory {
-        return name.is_empty();
-    }
-    name.units().iter().rposition(|unit| *unit == b'.' as u16) == Some(0)
-}
-
-#[cfg(any(windows, test))]
-impl PreviewCountCache {
-    /// Replaces the cache from the authoritative model projection.
-    pub(crate) fn refresh<'a, T: PartialEq + ?Sized + 'a>(
-        &mut self,
-        names: impl IntoIterator<Item = (&'a T, &'a T)>,
-    ) {
-        let mut total = 0_usize;
-        let mut changed = 0_usize;
-        for (current, proposed) in names {
-            total = total.saturating_add(1);
-            changed = changed.saturating_add(usize::from(current != proposed));
-        }
-        *self = Self { total, changed };
-    }
-
-    #[must_use]
-    pub(crate) const fn with_selected(self, selected: usize) -> PreviewCounts {
-        PreviewCounts {
-            total: self.total,
-            changed: self.changed,
-            selected,
-        }
-    }
-}
-
 /// Visual readiness of the filesystem Apply command.
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3045,6 +2950,7 @@ pub(crate) fn allocate_primary_column_widths(
     let budget = client_width
         .max(0)
         .saturating_sub(scrollbar_allowance.max(0))
+        .saturating_sub(scale_dip(NATIVE_STATUS_COLUMN_WIDTH_DIP, dpi))
         .saturating_sub(optional_width);
     let minimum = [
         scale_dip(NAME_COLUMN_MINIMUM, dpi),
@@ -3161,6 +3067,7 @@ pub(crate) const fn minimum_content_width_dip() -> i32 {
     RailDensity::Comfortable.metrics(BASE_DPI).rail_width * 2
         + NAME_COLUMN_MINIMUM * 2
         + LOCATION_COLUMN_MINIMUM
+        + NATIVE_STATUS_COLUMN_WIDTH_DIP
         + LIST_SCROLLBAR_ALLOWANCE_DIP
 }
 /// Public product name used by the executable and user-facing diagnostics.
@@ -4038,6 +3945,20 @@ pub const COLUMNS: [ColumnSpec; 7] = [
     },
 ];
 
+/// Fixed native-only column. It is deliberately absent from `COLUMNS` and
+/// the seven-column `ui-columns-v1` persistence contract.
+#[cfg(any(windows, test))]
+pub(crate) const NATIVE_STATUS_COLUMN: ColumnSpec = ColumnSpec {
+    label: "상태",
+    default_width: NATIVE_STATUS_COLUMN_WIDTH_DIP,
+};
+/// Report-mode index of the fixed native-only Status column.
+#[cfg(any(windows, test))]
+pub(crate) const NATIVE_STATUS_COLUMN_INDEX: usize = COLUMNS.len();
+/// Total columns rendered by the native report ListView.
+#[cfg(any(windows, test))]
+pub(crate) const NATIVE_LIST_COLUMN_COUNT: usize = COLUMNS.len() + 1;
+
 /// Command with its visible native rail-button text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ToolSpec {
@@ -4756,6 +4677,26 @@ mod tests {
     }
 
     #[test]
+    fn input_prompt_theme_requires_complete_resources_and_control_routing() {
+        let custom = UiAppearance {
+            theme: AppThemeMode::Dark,
+            ..UiAppearance::default()
+        }
+        .resolve(ForcedColorsState::Inactive, Some(ResolvedTheme::Light));
+        assert!(prompt_custom_theme_enabled(custom, true, true));
+        assert!(!prompt_custom_theme_enabled(custom, false, true));
+        assert!(!prompt_custom_theme_enabled(custom, true, false));
+
+        let native = UiAppearance::default().resolve(ForcedColorsState::Inactive, None);
+        assert!(!prompt_custom_theme_enabled(native, true, true));
+        let forced = UiAppearance::default().resolve(
+            ForcedColorsState::ActiveOrUnknown,
+            Some(ResolvedTheme::Dark),
+        );
+        assert!(!prompt_custom_theme_enabled(forced, true, true));
+    }
+
+    #[test]
     fn auxiliary_theme_commands_are_presentation_only_and_safely_classified() {
         let original = UiAppearance {
             theme: AppThemeMode::System,
@@ -4997,7 +4938,14 @@ mod tests {
 
     #[test]
     fn advanced_appearance_layout_keeps_every_control_inside_work_area_bounds() {
-        for (dpi, width, height) in [(96, 456, 420), (144, 684, 630), (192, 912, 840)] {
+        for (dpi, width, height) in [
+            (96, 360, 300),
+            (120, 450, 360),
+            (144, 540, 400),
+            (192, 720, 500),
+            (240, 900, 600),
+            (288, 1_080, 700),
+        ] {
             let layout = calculate_appearance_dialog_layout(
                 dpi,
                 width,
@@ -5009,7 +4957,7 @@ mod tests {
             let Some(layout) = layout else {
                 continue;
             };
-            let rects = [
+            let body_rects = [
                 layout.density_group,
                 layout.density_options[0],
                 layout.density_options[1],
@@ -5024,15 +4972,25 @@ mod tests {
                 layout.checkboxes[1],
                 layout.checkboxes[2],
                 layout.separator,
-                layout.reset,
-                layout.ok,
-                layout.cancel,
             ];
             assert!(layout.client.width <= width);
             assert!(layout.client.height <= height);
+            assert_eq!(layout.body_viewport.y, 0);
+            assert_eq!(layout.footer.y, layout.body_viewport.height);
+            assert_eq!(layout.footer.bottom(), layout.client.height);
+            assert_eq!(layout.scroll_page, layout.body_viewport.height);
+            assert_eq!(
+                layout.scroll_max,
+                layout.body_content_height - layout.scroll_page
+            );
             assert_eq!(layout.separator.height, scale_dip(1, dpi));
-            for rect in rects {
+            for rect in body_rects {
                 assert!(rect.x >= 0 && rect.y >= 0 && rect.width >= 0 && rect.height >= 0);
+                assert!(rect.x.saturating_add(rect.width) <= layout.client.width);
+                assert!(rect.bottom() <= layout.body_content_height);
+            }
+            for rect in [layout.reset, layout.ok, layout.cancel] {
+                assert!(rect.x >= 0 && rect.y >= layout.footer.y);
                 assert!(rect.x.saturating_add(rect.width) <= layout.client.width);
                 assert!(rect.bottom() <= layout.client.height);
             }
@@ -5059,8 +5017,8 @@ mod tests {
         );
         let layout = calculate_appearance_dialog_layout(
             96,
-            456,
-            420,
+            360,
+            300,
             true,
             AppearanceDialogMetrics::default(),
         );
@@ -5071,7 +5029,7 @@ mod tests {
         let Some(layout) = layout else {
             return;
         };
-        let interactive = [
+        let body_interactive = [
             layout.density_options[0],
             layout.density_options[1],
             layout.density_options[2],
@@ -5082,17 +5040,14 @@ mod tests {
             layout.checkboxes[0],
             layout.checkboxes[1],
             layout.checkboxes[2],
-            layout.reset,
-            layout.ok,
-            layout.cancel,
         ];
         assert!(
-            interactive
+            body_interactive
                 .iter()
                 .all(|rect| rect.width > 0 && rect.height > 0)
         );
-        for (index, left) in interactive.iter().enumerate() {
-            for right in &interactive[index + 1..] {
+        for (index, left) in body_interactive.iter().enumerate() {
+            for right in &body_interactive[index + 1..] {
                 let overlaps = left.x < right.x.saturating_add(right.width)
                     && right.x < left.x.saturating_add(left.width)
                     && left.y < right.bottom()
@@ -5103,23 +5058,21 @@ mod tests {
 
         let ordinary = calculate_appearance_dialog_layout(
             96,
-            456,
-            420,
+            360,
+            300,
             false,
             AppearanceDialogMetrics::default(),
         );
         let forced = calculate_appearance_dialog_layout(
             96,
-            456,
-            420,
+            360,
+            300,
             true,
             AppearanceDialogMetrics::default(),
         );
         let (Some(ordinary), Some(forced)) = (ordinary, forced) else {
             return;
         };
-        assert_eq!(ordinary.client.height, scale_dip(372, 96));
-        assert_eq!(forced.client.height, scale_dip(420, 96));
         assert_eq!(ordinary.forced_explanation.width, 0);
         assert_eq!(ordinary.forced_explanation.height, 0);
         assert!(forced.forced_explanation.width > 0);
@@ -5128,11 +5081,11 @@ mod tests {
             forced.checkboxes[0].y - ordinary.checkboxes[0].y,
             scale_dip(48, 96)
         );
-        assert_eq!(forced.reset.y - ordinary.reset.y, scale_dip(48, 96));
-        assert_eq!(
-            ordinary.client.height - ordinary.cancel.bottom(),
-            forced.client.height - forced.cancel.bottom(),
-        );
+        assert_eq!(ordinary.footer, forced.footer);
+        assert_eq!(ordinary.reset, forced.reset);
+        assert_eq!(ordinary.ok, forced.ok);
+        assert_eq!(ordinary.cancel, forced.cancel);
+        assert!(forced.scroll_max > ordinary.scroll_max);
 
         let large = calculate_appearance_dialog_layout(
             96,
@@ -5145,6 +5098,9 @@ mod tests {
                 widest_checkbox: 600,
                 button_text_height: 34,
                 widest_button: 180,
+                wrapped_option_height: 72,
+                wrapped_checkbox_height: 80,
+                forced_explanation_height: 110,
             },
         );
         assert!(
@@ -5155,9 +5111,58 @@ mod tests {
             return;
         };
         assert!(large.client.width > forced.client.width);
-        assert!(large.client.height > forced.client.height);
         assert!(large.density_options[0].height >= 42);
         assert!(large.cancel.height >= 46);
+        assert!(large.forced_explanation.height >= 110);
+    }
+
+    #[test]
+    fn advanced_appearance_layout_reflows_footer_and_clamps_scroll() {
+        let layout = calculate_appearance_dialog_layout(
+            96,
+            260,
+            220,
+            true,
+            AppearanceDialogMetrics::default(),
+        );
+        assert!(layout.is_some());
+        let Some(layout) = layout else {
+            return;
+        };
+        assert!(layout.compact_footer);
+        assert!(layout.reset.bottom() <= layout.ok.y);
+        assert_eq!(layout.ok.y, layout.cancel.y);
+        assert!(layout.footer.y >= layout.body_viewport.bottom());
+        assert!(layout.scroll_max > 0);
+        assert_eq!(clamp_appearance_dialog_scroll(layout, -10), 0);
+        assert_eq!(
+            clamp_appearance_dialog_scroll(layout, i32::MAX),
+            layout.scroll_max
+        );
+    }
+
+    #[test]
+    fn appearance_model_draft_survives_relayout_inputs() {
+        let original = UiAppearance::default();
+        let mut model = AppearanceDialogModel::new(original, ForcedColorsState::Inactive);
+        assert!(matches!(
+            model.apply(AppearanceDialogAction::Density(
+                RailDensityPreference::MenuOnly
+            )),
+            AppearanceDialogEffect::Preview(_)
+        ));
+        let draft = model.draft();
+        for dpi in [96, 120, 144, 192, 240, 288] {
+            let layout = calculate_appearance_dialog_layout(
+                dpi,
+                scale_dip(360, dpi),
+                scale_dip(240, dpi),
+                false,
+                AppearanceDialogMetrics::default(),
+            );
+            assert!(layout.is_some());
+            assert_eq!(model.draft(), draft);
+        }
     }
 
     #[test]
@@ -5656,38 +5661,6 @@ mod tests {
     }
 
     #[test]
-    fn preview_count_cache_updates_only_at_the_authoritative_refresh_boundary() {
-        let mut names = [
-            ("photo.jpg", "photo.jpg"),
-            ("photo.jpg", "PHOTO.jpg"),
-            ("한글.txt", "한글-01.txt"),
-        ];
-        let mut cache = PreviewCountCache::default();
-        cache.refresh(names.iter().copied());
-
-        assert_eq!(
-            cache.with_selected(2),
-            PreviewCounts {
-                total: 3,
-                changed: 2,
-                selected: 2,
-            }
-        );
-
-        names[1].1 = "photo.jpg";
-        assert_eq!(cache.with_selected(1).changed, 2);
-        cache.refresh(names.iter().copied());
-        assert_eq!(
-            cache.with_selected(1),
-            PreviewCounts {
-                total: 3,
-                changed: 1,
-                selected: 1,
-            }
-        );
-    }
-
-    #[test]
     fn workbench_presentation_keeps_apply_authorization_and_empty_state_typed() {
         let changed = PreviewCounts {
             total: 3,
@@ -5869,270 +5842,6 @@ mod tests {
                 custom_colors_enabled: true,
             }),
             ProposedNameVisual::Collision
-        );
-    }
-
-    fn preview_test_destination_key(
-        parent: &darknamer_core::LegacyText,
-        leaf: &darknamer_core::LegacyText,
-    ) -> (Box<[u16]>, Box<[u16]>) {
-        fn ascii_fold(text: &darknamer_core::LegacyText) -> Box<[u16]> {
-            text.units()
-                .iter()
-                .map(|unit| {
-                    if (b'A' as u16..=b'Z' as u16).contains(unit) {
-                        unit + u16::from(b'a' - b'A')
-                    } else {
-                        *unit
-                    }
-                })
-                .collect::<Vec<_>>()
-                .into_boxed_slice()
-        }
-
-        (ascii_fold(parent), ascii_fold(leaf))
-    }
-
-    #[test]
-    fn preview_issues_compute_each_final_destination_key_once() {
-        use std::cell::Cell;
-
-        use darknamer_core::LegacyText;
-
-        let parent = LegacyText::from(r"C:\work");
-        let current_a = LegacyText::from("a.txt");
-        let current_b = LegacyText::from("b.txt");
-        let proposed_b = LegacyText::from("b.txt");
-        let calls = Cell::new(0_usize);
-        let mut cache = PreviewIssueCache::default();
-
-        cache.refresh_by(
-            [
-                (&parent, &current_a, &proposed_b, false),
-                (&parent, &current_b, &current_b, false),
-            ],
-            |destination_parent, destination_leaf| {
-                calls.set(calls.get().saturating_add(1));
-                preview_test_destination_key(destination_parent, destination_leaf)
-            },
-        );
-
-        assert_eq!(calls.get(), 2);
-        assert_eq!(cache.issue(0), PreviewRowIssue::DuplicateDestination);
-        assert_eq!(cache.issue(1), PreviewRowIssue::None);
-    }
-
-    #[test]
-    fn preview_issues_block_a_changed_name_that_occupies_an_unchanged_destination() {
-        use darknamer_core::LegacyText;
-
-        let parent = LegacyText::from(r"C:\work");
-        let current_a = LegacyText::from("a.txt");
-        let current_b = LegacyText::from("b.txt");
-        let proposed_b = LegacyText::from("b.txt");
-        let mut cache = PreviewIssueCache::default();
-
-        cache.refresh_by(
-            [
-                (&parent, &current_a, &proposed_b, false),
-                (&parent, &current_b, &current_b, false),
-            ],
-            preview_test_destination_key,
-        );
-
-        assert_eq!(cache.issue(0), PreviewRowIssue::DuplicateDestination);
-        assert_eq!(cache.issue(1), PreviewRowIssue::None);
-        assert_eq!(cache.blocker_rows().as_ref(), &[0]);
-        assert_eq!(
-            cache.blocker_explanation(),
-            Some(
-                "같은 폴더에서 둘 이상의 항목이 같은 대상 이름을 사용합니다. 표시된 행의 이름을 다르게 지정해 주세요."
-            )
-        );
-    }
-
-    #[test]
-    fn preview_issues_preserve_chains_swaps_cross_parent_names_and_case_only_renames() {
-        use darknamer_core::LegacyText;
-
-        let parent = LegacyText::from(r"C:\work");
-        let other_parent = LegacyText::from(r"C:\other");
-        let a = LegacyText::from("a.txt");
-        let upper_a = LegacyText::from("A.txt");
-        let b = LegacyText::from("b.txt");
-        let c = LegacyText::from("c.txt");
-        let d = LegacyText::from("d.txt");
-        let same = LegacyText::from("same.txt");
-        let mut cache = PreviewIssueCache::default();
-
-        cache.refresh_by(
-            [
-                (&parent, &a, &b, false),
-                (&parent, &b, &c, false),
-                (&parent, &c, &d, false),
-            ],
-            preview_test_destination_key,
-        );
-        assert!(!cache.has_blocker(), "a rename chain remains schedulable");
-
-        cache.refresh_by(
-            [(&parent, &a, &b, false), (&parent, &b, &a, false)],
-            preview_test_destination_key,
-        );
-        assert!(!cache.has_blocker(), "a swap remains schedulable");
-
-        cache.refresh_by(
-            [
-                (&parent, &a, &same, false),
-                (&other_parent, &b, &same, false),
-            ],
-            preview_test_destination_key,
-        );
-        assert!(
-            !cache.has_blocker(),
-            "same names in different parents are valid"
-        );
-
-        cache.refresh_by(
-            [(&parent, &a, &upper_a, false)],
-            preview_test_destination_key,
-        );
-        assert!(!cache.has_blocker(), "a case-only rename remains valid");
-    }
-
-    #[test]
-    fn preview_issues_block_invalid_changed_windows_leaf_names() {
-        use darknamer_core::{LegacyText, WindowsLeafNameError};
-
-        let parent = LegacyText::from(r"C:\work");
-        let current_a = LegacyText::from("a.txt");
-        let current_b = LegacyText::from("b.txt");
-        let current_c = LegacyText::from("c.txt");
-        let empty = LegacyText::from("");
-        let reserved = LegacyText::from("CON.txt");
-        let forbidden = LegacyText::from("bad?.txt");
-        let mut cache = PreviewIssueCache::default();
-
-        cache.refresh_by(
-            [
-                (&parent, &current_a, &empty, false),
-                (&parent, &current_b, &reserved, false),
-                (&parent, &current_c, &forbidden, false),
-            ],
-            preview_test_destination_key,
-        );
-
-        assert_eq!(
-            cache.issue(0),
-            PreviewRowIssue::InvalidName(WindowsLeafNameError::Empty)
-        );
-        assert_eq!(
-            cache.issue(1),
-            PreviewRowIssue::InvalidName(WindowsLeafNameError::ReservedDeviceName)
-        );
-        assert_eq!(
-            cache.issue(2),
-            PreviewRowIssue::InvalidName(WindowsLeafNameError::InvalidCharacter)
-        );
-        assert_eq!(cache.blocker_rows().as_ref(), &[0, 1, 2]);
-        assert_eq!(
-            cache.notice().as_deref(),
-            Some("잘못된 대상 이름 3개 · 변경 적용이 차단되었습니다.")
-        );
-        assert_eq!(
-            cache.blocker_explanation(),
-            Some(
-                "Windows에서 사용할 수 없는 대상 이름이 있습니다. 표시된 행의 이름을 Windows 이름 규칙에 맞게 수정해 주세요."
-            )
-        );
-
-        let trailing = LegacyText::from("trailing.");
-        cache.refresh_by(
-            [(&parent, &current_a, &trailing, false)],
-            preview_test_destination_key,
-        );
-        assert_eq!(
-            cache.issue(0),
-            PreviewRowIssue::InvalidName(WindowsLeafNameError::TrailingDotOrSpace)
-        );
-        assert_eq!(
-            windows_leaf_name_error_korean(WindowsLeafNameError::TrailingDotOrSpace),
-            "점 또는 공백으로 끝남"
-        );
-    }
-
-    #[test]
-    fn preview_issues_keep_valid_dotfile_boundaries_as_warnings_or_collisions() {
-        use darknamer_core::LegacyText;
-
-        let parent = LegacyText::from(r"C:\work");
-        let current_a = LegacyText::from("a.jpg");
-        let current_b = LegacyText::from("b.jpg");
-        let dot_jpg = LegacyText::from(".jpg");
-        let dot_env = LegacyText::from(".env");
-        let mut cache = PreviewIssueCache::default();
-
-        cache.refresh_by(
-            [(&parent, &current_a, &dot_jpg, false)],
-            preview_test_destination_key,
-        );
-        assert_eq!(cache.issue(0), PreviewRowIssue::EmptyStem);
-        assert!(!cache.has_blocker());
-
-        cache.refresh_by(
-            [
-                (&parent, &current_a, &dot_jpg, false),
-                (&parent, &current_b, &dot_jpg, false),
-            ],
-            preview_test_destination_key,
-        );
-        assert_eq!(cache.issue(0), PreviewRowIssue::DuplicateDestination);
-        assert_eq!(cache.issue(1), PreviewRowIssue::DuplicateDestination);
-
-        cache.refresh_by(
-            [(&parent, &dot_env, &dot_env, false)],
-            preview_test_destination_key,
-        );
-        assert_eq!(cache.issue(0), PreviewRowIssue::None);
-        assert_eq!(cache.notice(), None);
-    }
-
-    #[test]
-    fn preview_issues_aggregate_invalid_duplicate_and_warning_counts_in_priority_order() {
-        use darknamer_core::LegacyText;
-
-        let parent = LegacyText::from(r"C:\work");
-        let invalid_current = LegacyText::from("invalid.txt");
-        let duplicate_current_a = LegacyText::from("a.txt");
-        let duplicate_current_b = LegacyText::from("b.txt");
-        let warning_current = LegacyText::from("photo.png");
-        let empty = LegacyText::from("");
-        let duplicate = LegacyText::from("same.txt");
-        let warning = LegacyText::from(".png");
-        let mut cache = PreviewIssueCache::default();
-
-        cache.refresh_by(
-            [
-                (&parent, &invalid_current, &empty, false),
-                (&parent, &duplicate_current_a, &duplicate, false),
-                (&parent, &duplicate_current_b, &duplicate, false),
-                (&parent, &warning_current, &warning, false),
-            ],
-            preview_test_destination_key,
-        );
-
-        assert_eq!(cache.blocker_rows().as_ref(), &[0, 1, 2]);
-        assert_eq!(
-            cache.notice().as_deref(),
-            Some(
-                "잘못된 대상 이름 1개 · 대상 이름 충돌 2개 · 이름 본체가 비어 있는 항목 1개 · 변경 적용이 차단되었습니다."
-            )
-        );
-        assert_eq!(
-            cache.blocker_explanation(),
-            Some(
-                "Windows에서 사용할 수 없는 대상 이름과 같은 폴더의 대상 이름 충돌이 있습니다. 표시된 행의 이름을 Windows 이름 규칙에 맞고 서로 다르게 수정해 주세요."
-            )
         );
     }
 
@@ -6428,7 +6137,7 @@ mod tests {
 
     #[test]
     fn adaptive_primary_columns_fit_command_rail_minimum() {
-        assert_eq!(minimum_content_width_dip(), 441);
+        assert_eq!(minimum_content_width_dip(), 553);
 
         for (dpi, available, expected) in [
             (96, 320, [120, 120, 80]),
@@ -6469,6 +6178,24 @@ mod tests {
 
         assert_eq!(widths, [120, 120, 80]);
         assert_eq!(widths.iter().sum::<i32>(), 320);
+    }
+
+    #[test]
+    fn native_status_column_is_fixed_outside_seven_column_preferences() {
+        assert_eq!(COLUMNS.len(), 7);
+        assert_eq!(default_column_states().len(), 7);
+        assert_eq!(
+            preferences::shown_columns(&default_column_states()).len(),
+            4
+        );
+        assert_eq!(NATIVE_STATUS_COLUMN_INDEX, 7);
+        assert_eq!(NATIVE_LIST_COLUMN_COUNT, 8);
+        assert_eq!(NATIVE_STATUS_COLUMN.label, "상태");
+        assert_eq!(NATIVE_STATUS_COLUMN.default_width, 112);
+
+        let widths = allocate_primary_column_widths(449, 96, &default_column_states(), 17);
+        assert_eq!(widths, [120, 120, 80]);
+        assert_eq!(widths.iter().sum::<i32>(), 449 - 17 - 112);
     }
 
     #[test]

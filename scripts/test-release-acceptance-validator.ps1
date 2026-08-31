@@ -33,7 +33,7 @@ function New-CompleteEvidence {
 
     $uiMatrix = @(
         foreach ($product in 'Windows 10', 'Windows 11') {
-            foreach ($dpi in 100, 125, 150, 200) {
+            foreach ($dpi in 100, 125, 150, 200, 250, 300) {
                 foreach ($contrast in 'normal', 'high-contrast') {
                     [pscustomobject]@{
                         windows_product = $product

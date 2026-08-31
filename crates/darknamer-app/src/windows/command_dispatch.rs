@@ -329,6 +329,7 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
                 if let Some(result) = {
                     prompt_input_or_report(
                         window,
+                        state.prompt_appearance(),
                         prompt_spec(
                             format!("{} 를", current.to_string_lossy()),
                             "으로",
@@ -356,6 +357,7 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
             if let Some(result) = {
                 prompt_input_or_report(
                     window,
+                    state.prompt_appearance(),
                     prompt_spec(
                         "이름에 들어있는 문자열을 바꿉니다.",
                         "를",
@@ -377,6 +379,7 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
             if let Some(result) = {
                 prompt_input_or_report(
                     window,
+                    state.prompt_appearance(),
                     prompt_spec(
                         "이름의 앞에 지정한 문자열을 붙여줍니다.",
                         "붙일 문자열",
@@ -398,6 +401,7 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
             if let Some(result) = {
                 prompt_input_or_report(
                     window,
+                    state.prompt_appearance(),
                     prompt_spec(
                         "이름의 뒤에 지정한 문자열을 붙여줍니다.",
                         "붙일 문자열",
@@ -431,6 +435,7 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
             if let Some(result) = {
                 prompt_input_or_report(
                     window,
+                    state.prompt_appearance(),
                     prompt_spec(
                         "확장자를 뒤에 붙입니다.",
                         "붙일 확장자",
@@ -452,6 +457,7 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
             if let Some(result) = {
                 prompt_input_or_report(
                     window,
+                    state.prompt_appearance(),
                     prompt_spec(
                         "확장자를 바꿔 줍니다.",
                         "바꿀 확장자",
@@ -694,6 +700,7 @@ fn pad_digits_command(window: HWND, state: &mut AppState) -> CommandOutcome {
     let Some(result) = ({
         prompt_input_or_report(
             window,
+            state.prompt_appearance(),
             prompt_spec(
                 "숫자부분의 자리수를 맞춰 0을 붙입니다.",
                 "자리수",
@@ -732,6 +739,7 @@ fn sequence_command(window: HWND, state: &mut AppState) -> CommandOutcome {
     let Some(result) = ({
         prompt_input_or_report(
             window,
+            state.prompt_appearance(),
             prompt_spec(
                 "붙일 숫자의 자리수와 시작값을 지정합니다.",
                 "자리수",
@@ -776,6 +784,7 @@ fn delete_position_command(window: HWND, state: &mut AppState) -> CommandOutcome
     let Some(result) = ({
         prompt_input_or_report(
             window,
+            state.prompt_appearance(),
             prompt_spec(
                 "지정위치를 삭제합니다.(첫글자는 1번째)",
                 "번째부터",
@@ -827,6 +836,7 @@ fn delete_delimited_command(window: HWND, state: &mut AppState) -> CommandOutcom
     let Some(result) = ({
         prompt_input_or_report(
             window,
+            state.prompt_appearance(),
             prompt_spec(
                 "지정된 문자로 묶인 부분을 삭제합니다.",
                 ":시작문자",
@@ -873,6 +883,7 @@ fn sort_command(window: HWND, state: &mut AppState) -> (CommandOutcome, Option<S
     let Some(result) = ({
         prompt_input_or_report(
             window,
+            state.prompt_appearance(),
             prompt_spec(
                 "정렬 기준 설정",
                 "",

@@ -1,4 +1,5 @@
 use super::*;
+use windows_sys::Win32::UI::Controls::SetWindowTheme;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct TaskDialogButtonSpec<'a> {
@@ -175,6 +176,13 @@ pub(super) struct PromptResult {
     pub(super) choice: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PromptAppearance {
+    pub(super) preference: UiAppearance,
+    pub(super) forced_colors: ForcedColorsState,
+    pub(super) system_theme: Option<ResolvedTheme>,
+}
+
 pub(super) struct PromptState {
     pub(super) spec: PromptSpec,
     pub(super) result: Option<PromptResult>,
@@ -190,6 +198,8 @@ pub(super) struct PromptState {
     pub(super) ok: HWND,
     pub(super) cancel: HWND,
     pub(super) font: OwnedFont,
+    pub(super) appearance: PromptAppearance,
+    pub(super) appearance_resources: Option<AppearanceResources>,
     pub(super) creation_error: Option<io::Error>,
     pub(super) dpi: u32,
 }
@@ -251,7 +261,11 @@ pub(super) fn native_file_dialog(owner: HWND) -> rfd::FileDialog {
     rfd::FileDialog::new().set_parent(&parent)
 }
 
-pub(super) fn prompt_input(owner: HWND, spec: PromptSpec) -> io::Result<Option<PromptResult>> {
+pub(super) fn prompt_input(
+    owner: HWND,
+    appearance: PromptAppearance,
+    spec: PromptSpec,
+) -> io::Result<Option<PromptResult>> {
     // SAFETY: A null module name requests the current process module and dereferences no caller memory.
     let instance = unsafe { GetModuleHandleW(null()) };
     let class_name = wide("DarkReNamerInputWindow");
@@ -291,6 +305,8 @@ pub(super) fn prompt_input(owner: HWND, spec: PromptSpec) -> io::Result<Option<P
         ok: null_mut(),
         cancel: null_mut(),
         font: OwnedFont::default(),
+        appearance,
+        appearance_resources: None,
         creation_error: None,
         dpi,
     });
@@ -361,8 +377,12 @@ pub(super) fn prompt_input(owner: HWND, spec: PromptSpec) -> io::Result<Option<P
     Ok(state.result.take())
 }
 
-pub(super) fn prompt_input_or_report(owner: HWND, spec: PromptSpec) -> Option<PromptResult> {
-    match prompt_input(owner, spec) {
+pub(super) fn prompt_input_or_report(
+    owner: HWND,
+    appearance: PromptAppearance,
+    spec: PromptSpec,
+) -> Option<PromptResult> {
+    match prompt_input(owner, appearance, spec) {
         Ok(result) => result,
         Err(error) => {
             message(
@@ -390,6 +410,92 @@ fn prompt_controls(state: &PromptState) -> [HWND; 9] {
         state.ok,
         state.cancel,
     ]
+}
+
+fn prompt_native_themed_controls(state: &PromptState) -> impl Iterator<Item = HWND> + '_ {
+    [
+        state.edit_one,
+        state.edit_two,
+        state.combo,
+        state.ok,
+        state.cancel,
+    ]
+    .into_iter()
+    .filter(|control| !control.is_null())
+}
+
+fn set_prompt_control_theme_disabled(state: &PromptState, disabled: bool) -> bool {
+    let empty = [0_u16];
+    let theme = if disabled { empty.as_ptr() } else { null() };
+    prompt_native_themed_controls(state).fold(true, |all_applied, control| {
+        // SAFETY: every control is a live prompt child. Empty strings disable
+        // visual styles for palette drawing; null restores native rendering.
+        let applied = unsafe { SetWindowTheme(control, theme, theme) } >= 0;
+        all_applied && applied
+    })
+}
+
+fn apply_prompt_appearance(window: HWND, state: &mut PromptState) {
+    let resolved = state.appearance.preference.resolve(
+        state.appearance.forced_colors,
+        state.appearance.system_theme,
+    );
+    let replacement = semantic_palette(resolved.theme)
+        .and_then(|palette| AppearanceResources::create(palette).ok());
+    let resources_complete = replacement.is_some();
+    let controls_complete = resources_complete && set_prompt_control_theme_disabled(state, true);
+    let custom = prompt_custom_theme_enabled(resolved, resources_complete, controls_complete);
+    if custom {
+        state.appearance_resources = replacement;
+    } else {
+        set_prompt_control_theme_disabled(state, false);
+        state.appearance_resources = None;
+    }
+    apply_auxiliary_dwm_title_frame(
+        window,
+        if custom {
+            resolved.theme
+        } else {
+            ResolvedTheme::NativeSystem
+        },
+    );
+    // SAFETY: window is live and PromptState owns the installed resources before
+    // every child is invalidated synchronously on this UI thread.
+    unsafe {
+        RedrawWindow(
+            window,
+            null(),
+            null_mut(),
+            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
+        )
+    };
+}
+
+fn requery_prompt_appearance(window: HWND, state: &mut PromptState) {
+    state.appearance.forced_colors =
+        ForcedColorsState::from_high_contrast_query(query_high_contrast_active());
+    state.appearance.system_theme = query_system_theme();
+    apply_prompt_appearance(window, state);
+}
+
+fn prompt_static_color(resources: &AppearanceResources, dc: HDC) -> LRESULT {
+    let palette = resources.palette();
+    // SAFETY: dc is live for the synchronous WM_CTLCOLORSTATIC callback.
+    unsafe {
+        SetTextColor(dc, palette.text_primary);
+        SetBkMode(dc, TRANSPARENT as i32);
+    }
+    resources.dialog_brush() as LRESULT
+}
+
+fn prompt_input_color(resources: &AppearanceResources, dc: HDC) -> LRESULT {
+    let palette = resources.palette();
+    // SAFETY: dc is live for the synchronous edit/list-box color callback.
+    unsafe {
+        SetTextColor(dc, palette.text_primary);
+        SetBkColor(dc, palette.control_normal);
+    }
+    resources.control_normal_brush() as LRESULT
 }
 
 fn recreate_prompt_font(state: &mut PromptState) {
@@ -647,6 +753,70 @@ fn arrange_prompt(window: HWND, state: &PromptState, center_on_owner: bool) {
     position_prompt(window, state, layout.client, center_on_owner);
 }
 
+pub(super) fn create_prompt_children(window: HWND, state: &mut PromptState) -> io::Result<()> {
+    state.title = child(window, "STATIC", &state.spec.title, 1001, SS_NOPREFIX)?;
+    if !state.spec.label_one.is_empty() {
+        state.edit_one = child(
+            window,
+            "EDIT",
+            &state.spec.value_one.to_string_lossy(),
+            1004,
+            WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
+        )?;
+        state.label_one = child(window, "STATIC", &state.spec.label_one, 1002, SS_NOPREFIX)?;
+    }
+    if !state.spec.label_two.is_empty() {
+        state.edit_two = child(
+            window,
+            "EDIT",
+            &state.spec.value_two.to_string_lossy(),
+            1005,
+            WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
+        )?;
+        state.label_two = child(window, "STATIC", &state.spec.label_two, 1003, SS_NOPREFIX)?;
+    }
+    if !state.spec.choices.is_empty() {
+        let combo = child(
+            window,
+            "COMBOBOX",
+            "",
+            1006,
+            WS_TABSTOP | CBS_DROPDOWNLIST as u32,
+        )?;
+        for choice in &state.spec.choices {
+            let choice = wide(choice);
+            // SAFETY: combo is live and each terminated choice is retained through
+            // this synchronous message.
+            let added = unsafe { SendMessageW(combo, CB_ADDSTRING, 0, choice.as_ptr() as isize) };
+            validate_combo_result(ComboOperation::AddString, added).map_err(|error| {
+                io::Error::other(match error {
+                    ComboControlError::Rejected => "combo box rejected a prompt choice",
+                    ComboControlError::OutOfSpace => {
+                        "combo box ran out of space for prompt choices"
+                    }
+                })
+            })?;
+        }
+        // SAFETY: combo is live and choice zero exists because choices is non-empty.
+        let selected = unsafe { SendMessageW(combo, CB_SETCURSEL, 0, 0) };
+        validate_combo_result(ComboOperation::Select, selected).map_err(|error| {
+            debug_assert_eq!(error, ComboControlError::Rejected);
+            io::Error::other("combo box could not select the first prompt choice")
+        })?;
+        state.combo = combo;
+    }
+    state.ok = child(
+        window,
+        "BUTTON",
+        "확인",
+        IDOK as u16,
+        WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
+    )?;
+    state.cancel = child(window, "BUTTON", "취소", IDCANCEL as u16, WS_TABSTOP)?;
+    state.separator = child(window, "STATIC", "", 1010, SS_OWNERDRAW)?;
+    Ok(())
+}
+
 pub(super) unsafe extern "system" fn prompt_proc(
     window: HWND,
     message: u32,
@@ -669,82 +839,13 @@ pub(super) unsafe extern "system" fn prompt_proc(
             // SAFETY: state_ptr borrows prompt_input's live local Box and is
             // confined to this modal callback thread until WM_NCDESTROY clears it.
             let state = unsafe { &mut *state_ptr };
-            let created = (|| -> io::Result<()> {
-                state.title = child(window, "STATIC", &state.spec.title, 1001, SS_NOPREFIX)?;
-                if !state.spec.label_one.is_empty() {
-                    state.edit_one = child(
-                        window,
-                        "EDIT",
-                        &state.spec.value_one.to_string_lossy(),
-                        1004,
-                        WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
-                    )?;
-                    state.label_one =
-                        child(window, "STATIC", &state.spec.label_one, 1002, SS_NOPREFIX)?;
-                }
-                if !state.spec.label_two.is_empty() {
-                    state.edit_two = child(
-                        window,
-                        "EDIT",
-                        &state.spec.value_two.to_string_lossy(),
-                        1005,
-                        WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
-                    )?;
-                    state.label_two =
-                        child(window, "STATIC", &state.spec.label_two, 1003, SS_NOPREFIX)?;
-                }
-                if !state.spec.choices.is_empty() {
-                    let combo = child(
-                        window,
-                        "COMBOBOX",
-                        "",
-                        1006,
-                        WS_TABSTOP | CBS_DROPDOWNLIST as u32,
-                    )?;
-                    for choice in &state.spec.choices {
-                        let choice = wide(choice);
-                        // SAFETY: combo is live and each choice pointer is owned terminated UTF-16 retained through synchronous SendMessageW.
-                        let added = unsafe {
-                            SendMessageW(combo, CB_ADDSTRING, 0, choice.as_ptr() as isize)
-                        };
-                        validate_combo_result(ComboOperation::AddString, added).map_err(
-                            |error| {
-                                io::Error::other(match error {
-                                    ComboControlError::Rejected => {
-                                        "combo box rejected a prompt choice"
-                                    }
-                                    ComboControlError::OutOfSpace => {
-                                        "combo box ran out of space for prompt choices"
-                                    }
-                                })
-                            },
-                        )?;
-                    }
-                    // SAFETY: combo is the live dialog ComboBox and selection zero
-                    // is valid because the choices collection is non-empty.
-                    let selected = unsafe { SendMessageW(combo, CB_SETCURSEL, 0, 0) };
-                    validate_combo_result(ComboOperation::Select, selected).map_err(|error| {
-                        debug_assert_eq!(error, ComboControlError::Rejected);
-                        io::Error::other("combo box could not select the first prompt choice")
-                    })?;
-                    state.combo = combo;
-                }
-                state.ok = child(
-                    window,
-                    "BUTTON",
-                    "확인",
-                    IDOK as u16,
-                    WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
-                )?;
-                state.cancel = child(window, "BUTTON", "취소", IDCANCEL as u16, WS_TABSTOP)?;
-                state.separator = child(window, "STATIC", "", 1010, SS_ETCHEDHORZ)?;
-                Ok(())
-            })();
+            let created = create_prompt_children(window, state);
             if let Err(error) = created {
                 state.creation_error = Some(error);
                 return -1;
             }
             recreate_prompt_font(state);
+            apply_prompt_appearance(window, state);
             arrange_prompt(window, state, true);
             let first = if !state.edit_one.is_null() {
                 state.edit_one
@@ -756,6 +857,75 @@ pub(super) unsafe extern "system" fn prompt_proc(
                 unsafe { SetFocus(first) };
             }
             0
+        }
+        WM_ERASEBKGND if !state_ptr.is_null() => {
+            // SAFETY: state_ptr is live prompt state and wparam is this callback's DC.
+            let state = unsafe { &*state_ptr };
+            if let Some(resources) = state.appearance_resources.as_ref() {
+                let mut rect = RECT::default();
+                // SAFETY: window/DC are live and rect is writable.
+                unsafe {
+                    GetClientRect(window, &mut rect);
+                    FillRect(wparam as HDC, &rect, resources.dialog_brush());
+                }
+                1
+            } else {
+                // SAFETY: native fallback retains the system class background path.
+                unsafe { DefWindowProcW(window, message, wparam, lparam) }
+            }
+        }
+        WM_DRAWITEM if !state_ptr.is_null() => {
+            // SAFETY: state_ptr and the synchronous draw payload are live.
+            let state = unsafe { &*state_ptr };
+            if draw_owner_separator(state.appearance_resources.as_ref(), state.separator, lparam) {
+                1
+            } else {
+                // SAFETY: unrecognized payload retains standard handling.
+                unsafe { DefWindowProcW(window, message, wparam, lparam) }
+            }
+        }
+        WM_NOTIFY if !state_ptr.is_null() => {
+            // SAFETY: state_ptr and the synchronous notification are live.
+            let state = unsafe { &*state_ptr };
+            let resources = state.appearance_resources.as_ref();
+            if resources.is_some()
+                && let Some(result) = draw_custom_button(resources, state.ok, lparam)
+                    .or_else(|| draw_custom_button(resources, state.cancel, lparam))
+            {
+                result
+            } else {
+                // SAFETY: native fallback and unrelated notifications retain default handling.
+                unsafe { DefWindowProcW(window, message, wparam, lparam) }
+            }
+        }
+        WM_CTLCOLORSTATIC if !state_ptr.is_null() => {
+            // SAFETY: state_ptr and callback DC/control HWND are live synchronously.
+            let state = unsafe { &*state_ptr };
+            let resources = state.appearance_resources.as_ref();
+            resources.map_or_else(
+                || {
+                    // SAFETY: native fallback retains system control coloring.
+                    unsafe { DefWindowProcW(window, message, wparam, lparam) }
+                },
+                |resources| {
+                    if lparam as HWND == state.combo {
+                        prompt_input_color(resources, wparam as HDC)
+                    } else {
+                        prompt_static_color(resources, wparam as HDC)
+                    }
+                },
+            )
+        }
+        WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX if !state_ptr.is_null() => {
+            // SAFETY: state_ptr and callback DC are live synchronously.
+            let resources = unsafe { (*state_ptr).appearance_resources.as_ref() };
+            resources.map_or_else(
+                || {
+                    // SAFETY: native fallback retains system edit/list-box coloring.
+                    unsafe { DefWindowProcW(window, message, wparam, lparam) }
+                },
+                |resources| prompt_input_color(resources, wparam as HDC),
+            )
         }
         WM_DPICHANGED if !state_ptr.is_null() => {
             // SAFETY: state_ptr borrows the live prompt state on its owning UI thread.
@@ -783,7 +953,24 @@ pub(super) unsafe extern "system" fn prompt_proc(
             arrange_prompt(window, state, false);
             0
         }
-        WM_SETTINGCHANGE | WM_FONTCHANGE if !state_ptr.is_null() => {
+        WM_THEMECHANGED | WM_SYSCOLORCHANGE if !state_ptr.is_null() => {
+            // SAFETY: state_ptr borrows the live prompt state on its owning UI thread.
+            let state = unsafe { &mut *state_ptr };
+            requery_prompt_appearance(window, state);
+            0
+        }
+        WM_SETTINGCHANGE if !state_ptr.is_null() => {
+            // SAFETY: state_ptr borrows the live prompt state on its owning UI thread.
+            let state = unsafe { &mut *state_ptr };
+            // SAFETY: window is the live prompt HWND.
+            let dpi = unsafe { GetDpiForWindow(window) };
+            state.dpi = if dpi == 0 { BASE_DPI } else { dpi };
+            recreate_prompt_font(state);
+            requery_prompt_appearance(window, state);
+            arrange_prompt(window, state, false);
+            0
+        }
+        WM_FONTCHANGE if !state_ptr.is_null() => {
             // SAFETY: state_ptr borrows the live prompt state on its owning UI thread.
             let state = unsafe { &mut *state_ptr };
             // SAFETY: window is the live prompt HWND.

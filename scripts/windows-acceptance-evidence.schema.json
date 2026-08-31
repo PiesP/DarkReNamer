@@ -141,7 +141,7 @@
           "enum": ["Windows 10", "Windows 11"]
         },
         "dpi_percent": {
-          "enum": [100, 125, 150, 200]
+          "enum": [100, 125, 150, 200, 250, 300]
         },
         "contrast": {
           "enum": ["normal", "high-contrast"]
@@ -414,7 +414,7 @@
         },
         "target": {
           "type": "string",
-          "pattern": "^(?:ui\\|Windows (?:10|11)\\|(?:100|125|150|200)\\|(?:normal|high-contrast)|scenario\\|Windows (?:10|11)\\|[a-z-]+|benchmark\\|(?:ssd|hdd)\\|(?:100|1000|10000)|durability\\|[a-z-]+)$"
+          "pattern": "^(?:ui\\|Windows (?:10|11)\\|(?:100|125|150|200|250|300)\\|(?:normal|high-contrast)|scenario\\|Windows (?:10|11)\\|[a-z-]+|benchmark\\|(?:ssd|hdd)\\|(?:100|1000|10000)|durability\\|[a-z-]+)$"
         },
         "reason_code": {
           "enum": [

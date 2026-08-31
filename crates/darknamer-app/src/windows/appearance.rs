@@ -20,7 +20,7 @@ use windows_sys::Win32::UI::Controls::{
     CDDS_PREPAINT, CDIS_DEFAULT, CDIS_DISABLED, CDIS_FOCUS, CDIS_HOT, CDIS_SELECTED,
     CDRF_DODEFAULT, CDRF_SKIPDEFAULT, DRAWITEMSTRUCT, MEASUREITEMSTRUCT, NM_CUSTOMDRAW,
     NMCUSTOMDRAW, ODS_CHECKED, ODS_DEFAULT, ODS_DISABLED, ODS_FOCUS, ODS_GRAYED, ODS_HOTLIGHT,
-    ODS_NOACCEL, ODS_SELECTED, ODT_BUTTON, ODT_MENU,
+    ODS_NOACCEL, ODS_SELECTED, ODT_BUTTON, ODT_MENU, ODT_STATIC,
 };
 use windows_sys::Win32::UI::Controls::{LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -148,6 +148,10 @@ impl AppearanceResources {
     pub(super) const fn border_brush(&self) -> HBRUSH {
         self.border.as_raw()
     }
+
+    pub(super) const fn control_normal_brush(&self) -> HBRUSH {
+        self.control_normal.as_raw()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -267,6 +271,37 @@ pub(super) fn draw_owner_button(resources: Option<&AppearanceResources>, lparam:
             default: draw.itemState & ODS_DEFAULT != 0,
         },
     );
+    true
+}
+
+pub(super) fn draw_owner_separator(
+    resources: Option<&AppearanceResources>,
+    separator: HWND,
+    lparam: LPARAM,
+) -> bool {
+    if separator.is_null() {
+        return false;
+    }
+    let draw = lparam as *const DRAWITEMSTRUCT;
+    if draw.is_null() {
+        return false;
+    }
+    // SAFETY: WM_DRAWITEM supplies readable DRAWITEMSTRUCT storage synchronously.
+    let draw = unsafe { &*draw };
+    if draw.CtlType != ODT_STATIC || draw.hwndItem != separator || draw.hDC.is_null() {
+        return false;
+    }
+    let brush = resources.map_or_else(
+        || {
+            // SAFETY: system color brushes are process-global cached objects and
+            // retain native/Forced Colors behavior.
+            unsafe { GetSysColorBrush(COLOR_3DSHADOW) }
+        },
+        AppearanceResources::border_brush,
+    );
+    // SAFETY: callback DC/rect and selected palette-or-system brush are live for
+    // this decorative synchronous fill.
+    unsafe { FillRect(draw.hDC, &draw.rcItem, brush) };
     true
 }
 

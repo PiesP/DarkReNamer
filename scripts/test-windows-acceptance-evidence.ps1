@@ -150,7 +150,7 @@ function Assert-EvidencePathspec {
 function New-CompleteEvidence {
     $uiMatrix = @(
         foreach ($product in 'Windows 10', 'Windows 11') {
-            foreach ($dpi in 100, 125, 150, 200) {
+            foreach ($dpi in 100, 125, 150, 200, 250, 300) {
                 foreach ($contrast in 'normal', 'high-contrast') {
                     [pscustomobject]@{
                         windows_product = $product
@@ -311,7 +311,7 @@ try {
     $draft.unexecuted = @(
         [pscustomobject]@{
             id = 'ui-cell-deferred'
-            target = 'ui|Windows 11|200|high-contrast'
+            target = 'ui|Windows 11|300|high-contrast'
             reason_code = 'environment-unavailable'
         },
         [pscustomobject]@{

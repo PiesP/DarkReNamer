@@ -13,10 +13,11 @@ That matched source and resource set defines the compatibility target.
 ## Current status
 
 The Rust workspace provides a native Win32 implementation of the Korean menu,
-command IDs, native command rails, seven-column ListView, input dialogs,
-keyboard commands, bounded file and directory admission, sorting, and
-import/export. The UTF-16 name transformations retain DarkNamer 08.02.10
-compatibility, while Apply uses the maintained safe execution path.
+command IDs, native command rails, a ListView with seven persisted data columns
+and a fixed status column, input dialogs, keyboard commands, bounded file and
+directory admission, sorting, and import/export. The UTF-16 name transformations
+retain DarkNamer 08.02.10 compatibility, while Apply uses the maintained safe
+execution path.
 
 Apply validates Windows leaf names and current file identities before showing
 confirmation. It executes local same-folder renames with handle-relative,
@@ -44,14 +45,20 @@ stored appearance and disable custom colors.
 
 DarkReNamer applies its Light and Dark palettes to the main workbench, native
 menus, command buttons, list headers, status surfaces, and the advanced
-appearance window. Standard input prompts, file dialogs, and confirmation
-TaskDialogs continue to use Windows rendering. Forced Colors keeps system
-colors and native focus and selection precedence across every surface.
+appearance window. App-owned input prompts use the same palette while retaining
+standard Windows edit, combo-box, and button controls. File dialogs and
+confirmation TaskDialogs continue to use Windows rendering. Forced Colors keeps
+system colors and native focus and selection precedence across every surface.
 
 Advanced appearance controls are intentionally under **View > Appearance**.
 They offer semantic density and emphasis presets plus separator, changed-name
-background highlight, and empty-state safety-copy visibility. They do not affect the rename model,
-Apply authorization, journal, recovery state, or Undo data.
+background highlight, and empty-state safety-copy visibility. The native dialog
+keeps Reset, OK, and Cancel in a fixed footer while its settings body scrolls at
+narrow work-area sizes, large system fonts, and high DPI. The acceptance
+evidence contract includes 250% and 300% targets, but those targets remain
+unexecuted until source-bound results from real Windows hosts are recorded.
+Appearance settings do not affect the rename model, Apply authorization,
+journal, recovery state, or Undo data.
 
 The runnable product remains one `DarkReNamer.exe`. Column and appearance
 preferences are stored below `%LOCALAPPDATA%\DarkReNamer`; no configuration
