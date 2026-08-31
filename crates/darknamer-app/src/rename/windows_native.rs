@@ -377,11 +377,11 @@ pub(crate) fn query_directory_names_cancellable(
         u32::try_from(bytes).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
     let mut names = Vec::with_capacity(limit.min(name_capacity));
     let mut restart = true;
+    let mut buffer = vec![FILE_ID_BOTH_DIR_INFORMATION::default(); elements];
     loop {
         if cancellation_requested() {
             return Err(DirectoryQueryError::Cancelled);
         }
-        let mut buffer = vec![FILE_ID_BOTH_DIR_INFORMATION::default(); elements];
         let mut status_block = IO_STATUS_BLOCK::default();
         // SAFETY: directory is a retained directory handle; buffer and status
         // block are writable and correctly sized. Single-entry mode bounds each
