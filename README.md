@@ -13,10 +13,11 @@ That matched source and resource set defines the compatibility target.
 ## Current status
 
 The Rust workspace provides a native Win32 implementation of the Korean menu,
-command IDs, native command rails, seven-column ListView, input dialogs,
-keyboard commands, bounded file and directory admission, sorting, and
-import/export. The UTF-16 name transformations retain DarkNamer 08.02.10
-compatibility, while Apply uses the maintained safe execution path.
+command IDs, native command rails, a ListView with seven persisted data columns
+and a fixed status column, input dialogs, keyboard commands, bounded file and
+directory admission, sorting, and import/export. The UTF-16 name transformations
+retain DarkNamer 08.02.10 compatibility, while Apply uses the maintained safe
+execution path.
 
 Apply validates Windows leaf names and current file identities before showing
 confirmation. It executes local same-folder renames with handle-relative,

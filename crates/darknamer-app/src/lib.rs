@@ -24,6 +24,8 @@ pub(crate) const LOCATION_COLUMN_MINIMUM: i32 = 80;
 #[cfg(any(windows, test))]
 pub(crate) const LIST_SCROLLBAR_ALLOWANCE_DIP: i32 = 17;
 #[cfg(any(windows, test))]
+pub(crate) const NATIVE_STATUS_COLUMN_WIDTH_DIP: i32 = 112;
+#[cfg(any(windows, test))]
 pub(crate) const EMPTY_LIST_STATUS: &str = "파일이나 폴더를 끌어 놓거나 Ctrl+O로 추가하세요.";
 #[cfg(windows)]
 pub(crate) const EMPTY_STATE_INSTRUCTION: &str = "파일이나 폴더를 여기에 끌어오세요";
@@ -2378,6 +2380,45 @@ pub(crate) enum PreviewRowIssue {
     DuplicateDestination,
 }
 
+/// Short, non-authorizing text rendered in the fixed native Status column.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn preview_status_label(issue: PreviewRowIssue, changed: bool) -> &'static str {
+    match issue {
+        PreviewRowIssue::None if changed => "변경 예정",
+        PreviewRowIssue::None => "",
+        PreviewRowIssue::EmptyStem => "주의: 이름 본체",
+        PreviewRowIssue::InvalidName(_) => "차단: 이름",
+        PreviewRowIssue::DuplicateDestination => "차단: 충돌",
+    }
+}
+
+/// Finds rows whose rendered Status cell differs from refreshed preview state.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn preview_status_delta_rows<'a>(
+    previous: impl IntoIterator<Item = &'a darknamer_core::LegacyText>,
+    refreshed: impl IntoIterator<Item = (PreviewRowIssue, bool)>,
+) -> Option<Box<[usize]>> {
+    let mut previous = previous.into_iter();
+    let mut refreshed = refreshed.into_iter();
+    let mut changed_rows = Vec::new();
+    let mut row = 0_usize;
+    loop {
+        match (previous.next(), refreshed.next()) {
+            (Some(previous), Some((issue, changed))) => {
+                let expected = preview_status_label(issue, changed);
+                if !previous.units().iter().copied().eq(expected.encode_utf16()) {
+                    changed_rows.push(row);
+                }
+                row = row.saturating_add(1);
+            }
+            (None, None) => return Some(changed_rows.into_boxed_slice()),
+            (Some(_), None) | (None, Some(_)) => return None,
+        }
+    }
+}
+
 /// Cached preview-only diagnostics. These never authorize filesystem work.
 #[cfg(any(windows, test))]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -3059,6 +3100,7 @@ pub(crate) fn allocate_primary_column_widths(
     let budget = client_width
         .max(0)
         .saturating_sub(scrollbar_allowance.max(0))
+        .saturating_sub(scale_dip(NATIVE_STATUS_COLUMN_WIDTH_DIP, dpi))
         .saturating_sub(optional_width);
     let minimum = [
         scale_dip(NAME_COLUMN_MINIMUM, dpi),
@@ -3175,6 +3217,7 @@ pub(crate) const fn minimum_content_width_dip() -> i32 {
     RailDensity::Comfortable.metrics(BASE_DPI).rail_width * 2
         + NAME_COLUMN_MINIMUM * 2
         + LOCATION_COLUMN_MINIMUM
+        + NATIVE_STATUS_COLUMN_WIDTH_DIP
         + LIST_SCROLLBAR_ALLOWANCE_DIP
 }
 /// Public product name used by the executable and user-facing diagnostics.
@@ -4051,6 +4094,20 @@ pub const COLUMNS: [ColumnSpec; 7] = [
         default_width: 0,
     },
 ];
+
+/// Fixed native-only column. It is deliberately absent from `COLUMNS` and
+/// the seven-column `ui-columns-v1` persistence contract.
+#[cfg(any(windows, test))]
+pub(crate) const NATIVE_STATUS_COLUMN: ColumnSpec = ColumnSpec {
+    label: "상태",
+    default_width: NATIVE_STATUS_COLUMN_WIDTH_DIP,
+};
+/// Report-mode index of the fixed native-only Status column.
+#[cfg(any(windows, test))]
+pub(crate) const NATIVE_STATUS_COLUMN_INDEX: usize = COLUMNS.len();
+/// Total columns rendered by the native report ListView.
+#[cfg(any(windows, test))]
+pub(crate) const NATIVE_LIST_COLUMN_COUNT: usize = COLUMNS.len() + 1;
 
 /// Command with its visible native rail-button text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5957,6 +6014,145 @@ mod tests {
     }
 
     #[test]
+    fn native_preview_status_labels_are_short_korean_text_without_filename_prefixes() {
+        use darknamer_core::WindowsLeafNameError;
+
+        assert_eq!(preview_status_label(PreviewRowIssue::None, false), "");
+        assert_eq!(
+            preview_status_label(PreviewRowIssue::None, true),
+            "변경 예정"
+        );
+        assert_eq!(
+            preview_status_label(PreviewRowIssue::EmptyStem, true),
+            "주의: 이름 본체"
+        );
+        assert_eq!(
+            preview_status_label(
+                PreviewRowIssue::InvalidName(WindowsLeafNameError::InvalidCharacter),
+                true,
+            ),
+            "차단: 이름"
+        );
+        assert_eq!(
+            preview_status_label(PreviewRowIssue::DuplicateDestination, true),
+            "차단: 충돌"
+        );
+    }
+
+    #[test]
+    fn status_delta_includes_collision_peers_when_collision_appears_and_clears() {
+        use darknamer_core::LegacyText;
+
+        let parent = LegacyText::from(r"C:\work");
+        let current_a = LegacyText::from("a.txt");
+        let current_b = LegacyText::from("b.txt");
+        let proposed_a = LegacyText::from("first.txt");
+        let mut proposed_b = LegacyText::from("second.txt");
+        let mut cache = PreviewIssueCache::default();
+        cache.refresh_by(
+            [
+                (&parent, &current_a, &proposed_a, false),
+                (&parent, &current_b, &proposed_b, false),
+            ],
+            preview_test_destination_key,
+        );
+        let ordinary =
+            [0, 1].map(|row| LegacyText::from(preview_status_label(cache.issue(row), true)));
+
+        proposed_b = proposed_a.clone();
+        cache.refresh_by(
+            [
+                (&parent, &current_a, &proposed_a, false),
+                (&parent, &current_b, &proposed_b, false),
+            ],
+            preview_test_destination_key,
+        );
+        let introduced =
+            preview_status_delta_rows(ordinary.iter(), [0, 1].map(|row| (cache.issue(row), true)));
+        assert_eq!(introduced.as_deref(), Some([0, 1].as_slice()));
+
+        let collision =
+            [0, 1].map(|row| LegacyText::from(preview_status_label(cache.issue(row), true)));
+        proposed_b = LegacyText::from("second.txt");
+        cache.refresh_by(
+            [
+                (&parent, &current_a, &proposed_a, false),
+                (&parent, &current_b, &proposed_b, false),
+            ],
+            preview_test_destination_key,
+        );
+        let removed =
+            preview_status_delta_rows(collision.iter(), [0, 1].map(|row| (cache.issue(row), true)));
+        assert_eq!(removed.as_deref(), Some([0, 1].as_slice()));
+    }
+
+    #[test]
+    fn ten_thousand_row_preview_validation_derives_one_key_per_row_and_exact_counts() {
+        use std::cell::Cell;
+
+        use darknamer_core::LegacyText;
+
+        let parent = LegacyText::from(r"C:\work");
+        let mut names = (0..9_996)
+            .map(|row| {
+                let name = LegacyText::from(format!("item-{row}.txt"));
+                (name.clone(), name)
+            })
+            .collect::<Vec<_>>();
+        names.extend([
+            (LegacyText::from("a.txt"), LegacyText::from("collision.txt")),
+            (LegacyText::from("b.txt"), LegacyText::from("collision.txt")),
+            (LegacyText::from("c.txt"), LegacyText::from("bad?.txt")),
+            (LegacyText::from("d.txt"), LegacyText::from(".txt")),
+        ]);
+        let calls = Cell::new(0_usize);
+        let mut cache = PreviewIssueCache::default();
+
+        cache.refresh_by(
+            names
+                .iter()
+                .map(|(current, proposed)| (&parent, current, proposed, false)),
+            |destination_parent, destination_leaf| {
+                calls.set(calls.get().saturating_add(1));
+                preview_test_destination_key(destination_parent, destination_leaf)
+            },
+        );
+
+        assert_eq!(calls.get(), 10_000);
+        assert_eq!(cache.rows.len(), 10_000);
+        assert_eq!(cache.warning_rows, 1);
+        assert_eq!(cache.invalid_name_rows, 1);
+        assert_eq!(cache.duplicate_destination_rows, 2);
+        assert_eq!(cache.blocker_rows, 3);
+    }
+
+    #[test]
+    #[ignore = "manual release-mode measurement; reports duration without a CI threshold"]
+    fn measure_ten_thousand_row_preview_validation_duration() {
+        use darknamer_core::LegacyText;
+
+        let parent = LegacyText::from(r"C:\work");
+        let names = (0..10_000)
+            .map(|row| {
+                let name = LegacyText::from(format!("item-{row}.txt"));
+                (name.clone(), name)
+            })
+            .collect::<Vec<_>>();
+        let mut cache = PreviewIssueCache::default();
+        let started = std::time::Instant::now();
+        cache.refresh_by(
+            names
+                .iter()
+                .map(|(current, proposed)| (&parent, current, proposed, false)),
+            preview_test_destination_key,
+        );
+        let elapsed = started.elapsed();
+
+        eprintln!("10,000-row preview validation: {elapsed:?}");
+        assert_eq!(cache.rows.len(), 10_000);
+    }
+
+    #[test]
     fn preview_issues_block_a_changed_name_that_occupies_an_unchanged_destination() {
         use darknamer_core::LegacyText;
 
@@ -6462,7 +6658,7 @@ mod tests {
 
     #[test]
     fn adaptive_primary_columns_fit_command_rail_minimum() {
-        assert_eq!(minimum_content_width_dip(), 441);
+        assert_eq!(minimum_content_width_dip(), 553);
 
         for (dpi, available, expected) in [
             (96, 320, [120, 120, 80]),
@@ -6503,6 +6699,24 @@ mod tests {
 
         assert_eq!(widths, [120, 120, 80]);
         assert_eq!(widths.iter().sum::<i32>(), 320);
+    }
+
+    #[test]
+    fn native_status_column_is_fixed_outside_seven_column_preferences() {
+        assert_eq!(COLUMNS.len(), 7);
+        assert_eq!(default_column_states().len(), 7);
+        assert_eq!(
+            preferences::shown_columns(&default_column_states()).len(),
+            4
+        );
+        assert_eq!(NATIVE_STATUS_COLUMN_INDEX, 7);
+        assert_eq!(NATIVE_LIST_COLUMN_COUNT, 8);
+        assert_eq!(NATIVE_STATUS_COLUMN.label, "상태");
+        assert_eq!(NATIVE_STATUS_COLUMN.default_width, 112);
+
+        let widths = allocate_primary_column_widths(449, 96, &default_column_states(), 17);
+        assert_eq!(widths, [120, 120, 80]);
+        assert_eq!(widths.iter().sum::<i32>(), 449 - 17 - 112);
     }
 
     #[test]

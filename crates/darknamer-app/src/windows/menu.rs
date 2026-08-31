@@ -319,6 +319,20 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
                 (&mut native as *mut LVCOLUMNW) as isize,
             );
         }
+        let mut status_text = wide(NATIVE_STATUS_COLUMN.label);
+        let mut status_column = LVCOLUMNW {
+            mask: LVCF_TEXT | LVCF_WIDTH | LVCF_FMT,
+            fmt: LVCFMT_LEFT,
+            cx: scale_dip(NATIVE_STATUS_COLUMN_WIDTH_DIP, state.dpi),
+            pszText: status_text.as_mut_ptr(),
+            ..zeroed()
+        };
+        SendMessageW(
+            state.list_window,
+            LVM_INSERTCOLUMNW,
+            NATIVE_STATUS_COLUMN_INDEX,
+            (&mut status_column as *mut LVCOLUMNW) as isize,
+        );
     }
     (
         state.status_message,

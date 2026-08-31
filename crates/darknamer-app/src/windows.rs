@@ -139,7 +139,9 @@ use windows_sys::Win32::UI::Controls::{
     TaskDialogIndirect,
 };
 #[cfg(test)]
-use windows_sys::Win32::UI::Controls::{DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODT_BUTTON, ODT_MENU};
+use windows_sys::Win32::UI::Controls::{
+    DRAWITEMSTRUCT, LVM_GETITEMTEXTW, MEASUREITEMSTRUCT, ODT_BUTTON, ODT_MENU,
+};
 use windows_sys::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForWindow, GetSystemMetricsForDpi, SystemParametersInfoForDpi,
 };
@@ -178,7 +180,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BS_FLAT, BS_MULTILINE, BS_TYPEMASK, GWL_STYLE, GetClassNameW, GetDlgCtrlID,
+    BM_CLICK, BS_FLAT, BS_MULTILINE, BS_TYPEMASK, GWL_STYLE, GetClassNameW, GetDlgCtrlID,
 };
 use worker::*;
 
@@ -1089,6 +1091,13 @@ mod tests {
         proposal.values[1] = LegacyText::from("changed");
         assert_eq!(changed_column_mask(&original, &proposal), 1 << 1);
 
+        let mut status = original.clone();
+        status.values[NATIVE_STATUS_COLUMN_INDEX] = LegacyText::from("차단: 충돌");
+        assert_eq!(
+            changed_column_mask(&original, &status),
+            1 << NATIVE_STATUS_COLUMN_INDEX
+        );
+
         let mut icon = original.clone();
         icon.icon = 8;
         assert_eq!(changed_column_mask(&original, &icon), 1);
@@ -1176,6 +1185,118 @@ mod tests {
         for dpi in [96, 120, 144, 192] {
             verify_native_command_rails_at_dpi(instance, dpi)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn native_owner_draw_rail_button_bm_click_sends_one_command_notification()
+    -> Result<(), Box<dyn std::error::Error>> {
+        static COMMAND_COUNT: AtomicUsize = AtomicUsize::new(0);
+        static COMMAND_WPARAM: AtomicUsize = AtomicUsize::new(0);
+        static COMMAND_SOURCE: AtomicUsize = AtomicUsize::new(0);
+
+        unsafe extern "system" fn command_probe(
+            window: HWND,
+            message: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+            _subclass_id: usize,
+            _ref_data: usize,
+        ) -> LRESULT {
+            if message == WM_COMMAND {
+                COMMAND_COUNT.fetch_add(1, Ordering::SeqCst);
+                COMMAND_WPARAM.store(wparam, Ordering::SeqCst);
+                COMMAND_SOURCE.store(lparam as usize, Ordering::SeqCst);
+            }
+            // SAFETY: the original message and scalar parameters are forwarded
+            // unchanged through the system subclass chain exactly once.
+            unsafe { DefSubclassProc(window, message, wparam, lparam) }
+        }
+
+        COMMAND_COUNT.store(0, Ordering::SeqCst);
+        COMMAND_WPARAM.store(0, Ordering::SeqCst);
+        COMMAND_SOURCE.store(0, Ordering::SeqCst);
+        let controls = INITCOMMONCONTROLSEX {
+            dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+            dwICC: ICC_WIN95_CLASSES,
+        };
+        // SAFETY: controls has its exact structure size for initialization.
+        unsafe { InitCommonControlsEx(&controls) };
+        // SAFETY: the system STATIC class and current module are process-global.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        // SAFETY: parent is a live UI-thread test window and the callback uses
+        // the documented SUBCLASSPROC ABI without retaining borrowed storage.
+        if unsafe { SetWindowSubclass(parent, Some(command_probe), 0xD4B1, 0) } == 0 {
+            // SAFETY: parent is the test-owned hidden HWND.
+            unsafe { DestroyWindow(parent) };
+            return Err(io::Error::last_os_error().into());
+        }
+        let rail = match CommandRail::create(parent, &LEFT_RAIL) {
+            Ok(rail) => rail,
+            Err(error) => {
+                // SAFETY: removes the exact callback and ID installed above.
+                unsafe { RemoveWindowSubclass(parent, Some(command_probe), 0xD4B1) };
+                // SAFETY: parent is the test-owned hidden HWND.
+                unsafe { DestroyWindow(parent) };
+                return Err(error.into());
+            }
+        };
+        let button = rail
+            .command_hwnd(APPLY)
+            .ok_or_else(|| io::Error::other("Apply rail button is missing"))?;
+
+        let placements = calculate_command_rail_layout(
+            &LEFT_RAIL,
+            800,
+            RailDensity::Comfortable.metrics(BASE_DPI),
+        )
+        .map_err(|error| io::Error::other(format!("rail layout failed: {error:?}")))?;
+        rail.arrange(0, &placements, BASE_DPI);
+        // SAFETY: parent/button are live test-owned windows. Giving the standard
+        // button focus before BM_CLICK matches its documented interactive path;
+        // the counters are reset afterward so BN_SETFOCUS is not mistaken for
+        // the click notification under test.
+        unsafe {
+            ShowWindow(parent, SW_SHOW);
+            UpdateWindow(parent);
+            SetFocus(button);
+        }
+        COMMAND_COUNT.store(0, Ordering::SeqCst);
+        COMMAND_WPARAM.store(0, Ordering::SeqCst);
+        COMMAND_SOURCE.store(0, Ordering::SeqCst);
+
+        // SAFETY: button is the live standard owner-draw BUTTON created by the
+        // production rail and BM_CLICK synchronously follows native semantics.
+        unsafe { SendMessageW(button, BM_CLICK, 0, 0) };
+
+        assert_eq!(COMMAND_COUNT.load(Ordering::SeqCst), 1);
+        let notification = COMMAND_WPARAM.load(Ordering::SeqCst);
+        assert_eq!(notification & 0xFFFF, usize::from(APPLY));
+        assert_eq!((notification >> 16) & 0xFFFF, BN_CLICKED as usize);
+        assert_eq!(COMMAND_SOURCE.load(Ordering::SeqCst), button as usize);
+        rail.destroy();
+        // SAFETY: removes the exact callback and ID installed above.
+        unsafe { RemoveWindowSubclass(parent, Some(command_probe), 0xD4B1) };
+        // SAFETY: parent is the test-owned hidden HWND and is destroyed once.
+        unsafe { DestroyWindow(parent) };
         Ok(())
     }
 
@@ -1585,10 +1706,8 @@ mod tests {
             let cancel_style = unsafe { GetWindowLongPtrW(state.cancel, GWL_STYLE) } as u32;
             // SAFETY: same live style query for the owner-drawn footer separator.
             let separator_style = unsafe { GetWindowLongPtrW(state.separator, GWL_STYLE) } as u32;
-            assert_eq!(
-                edit_style & (WS_BORDER | WS_TABSTOP),
-                WS_BORDER | WS_TABSTOP
-            );
+            assert_ne!(edit_style & WS_TABSTOP, 0);
+            assert_ne!(edit_style & ES_AUTOHSCROLL as u32, 0);
             assert_eq!(combo_style & 0b11, CBS_DROPDOWNLIST as u32);
             assert_ne!(combo_style & WS_TABSTOP, 0);
             assert_eq!(ok_style & BS_TYPEMASK as u32, BS_DEFPUSHBUTTON as u32);

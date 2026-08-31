@@ -85,7 +85,7 @@ unsafe extern "system" fn list_view_notification_subclass(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct RenderedRow {
-    pub(super) values: [LegacyText; 7],
+    pub(super) values: [LegacyText; NATIVE_LIST_COLUMN_COUNT],
     pub(super) icon: i32,
 }
 
@@ -113,6 +113,20 @@ pub(super) fn update_dpi_metrics(state: &mut AppState) {
     for index in 0..state.shown_columns.len() {
         update_column_visibility(state, index);
     }
+    set_native_status_column_width(state);
+}
+
+fn set_native_status_column_width(state: &AppState) {
+    // SAFETY: list_window is live and the fixed native-only column index and
+    // DPI-scaled width are integral values retained by the control.
+    unsafe {
+        SendMessageW(
+            state.list_window,
+            LVM_SETCOLUMNWIDTH,
+            NATIVE_STATUS_COLUMN_INDEX,
+            scale_dip(NATIVE_STATUS_COLUMN_WIDTH_DIP, state.dpi) as isize,
+        )
+    };
 }
 
 pub(super) fn update_primary_column_widths(state: &AppState) {
@@ -169,6 +183,11 @@ pub(super) fn handle_header_end_track(state: &mut AppState, lparam: LPARAM) -> b
     let Ok(column) = usize::try_from(unsafe { (*notification).iItem }) else {
         return true;
     };
+    if column == NATIVE_STATUS_COLUMN_INDEX {
+        let _list_update = ProgrammaticListUpdateGuard::begin();
+        set_native_status_column_width(state);
+        return true;
+    }
     if column >= state.column_states.len() {
         return true;
     }
@@ -531,11 +550,13 @@ pub(super) fn refresh_all_rows(state: &mut AppState) {
     refresh_preview_count_cache(state);
     let rows = {
         let model = &state.model;
+        let issue_cache = &state.preview_issue_cache;
         let icon_cache = &mut state.icon_cache;
         model
             .items()
             .iter()
-            .map(|item| rendered_row(icon_cache, item))
+            .enumerate()
+            .map(|(row, item)| rendered_row(icon_cache, item, issue_cache.issue(row)))
             .collect::<Vec<_>>()
     };
     let _list_update = ProgrammaticListUpdateGuard::begin();
@@ -555,6 +576,10 @@ pub(super) fn refresh_changed_rows(state: &mut AppState, changed: &[usize]) {
         return;
     }
     refresh_preview_count_cache(state);
+    let Some(status_rows) = status_delta_rows(state) else {
+        refresh(state);
+        return;
+    };
     let mut changed = changed
         .iter()
         .copied()
@@ -564,10 +589,20 @@ pub(super) fn refresh_changed_rows(state: &mut AppState, changed: &[usize]) {
     changed.dedup();
     let rows = {
         let model = &state.model;
+        let issue_cache = &state.preview_issue_cache;
         let icon_cache = &mut state.icon_cache;
         changed
             .iter()
-            .map(|index| (*index, rendered_row(icon_cache, &model.items()[*index])))
+            .map(|index| {
+                (
+                    *index,
+                    rendered_row(
+                        icon_cache,
+                        &model.items()[*index],
+                        issue_cache.issue(*index),
+                    ),
+                )
+            })
             .collect::<Vec<_>>()
     };
     let _list_update = ProgrammaticListUpdateGuard::begin();
@@ -581,6 +616,10 @@ pub(super) fn refresh_changed_rows(state: &mut AppState, changed: &[usize]) {
         }
         state.rendered_rows[index] = row;
     }
+    if !update_status_rows(state, &status_rows) {
+        drop(_redraw);
+        refresh(state);
+    }
 }
 
 pub(super) fn refresh_proposal_rows(state: &mut AppState, changed: &[usize]) {
@@ -590,6 +629,10 @@ pub(super) fn refresh_proposal_rows(state: &mut AppState, changed: &[usize]) {
         return;
     };
     refresh_preview_count_cache(state);
+    let Some(status_rows) = status_delta_rows(state) else {
+        refresh(state);
+        return;
+    };
     debug_assert_eq!(plan.proposal_cells, plan.rows.len());
     debug_assert_eq!(plan.immutable_cells, 0);
     debug_assert_eq!(plan.full_row_formats, 0);
@@ -608,6 +651,45 @@ pub(super) fn refresh_proposal_rows(state: &mut AppState, changed: &[usize]) {
         }
         state.rendered_rows[row].values[1].clone_from(proposed);
     }
+    if !update_status_rows(state, &status_rows) {
+        drop(_redraw);
+        refresh(state);
+    }
+}
+
+fn status_delta_rows(state: &AppState) -> Option<Box<[usize]>> {
+    preview_status_delta_rows(
+        state
+            .rendered_rows
+            .iter()
+            .map(|row| &row.values[NATIVE_STATUS_COLUMN_INDEX]),
+        state.model.items().iter().enumerate().map(|(row, item)| {
+            (
+                state.preview_issue_cache.issue(row),
+                item.current_name() != item.proposed_name(),
+            )
+        }),
+    )
+}
+
+fn update_status_rows(state: &mut AppState, rows: &[usize]) -> bool {
+    for &row in rows {
+        let Some(item) = state.model.items().get(row) else {
+            return false;
+        };
+        let value = LegacyText::from(preview_status_label(
+            state.preview_issue_cache.issue(row),
+            item.current_name() != item.proposed_name(),
+        ));
+        if state.rendered_rows[row].values[NATIVE_STATUS_COLUMN_INDEX] == value {
+            continue;
+        }
+        if !set_native_subitem(state.list_window, row, NATIVE_STATUS_COLUMN_INDEX, &value) {
+            return false;
+        }
+        state.rendered_rows[row].values[NATIVE_STATUS_COLUMN_INDEX].clone_from(&value);
+    }
+    true
 }
 
 fn refresh_preview_count_cache(state: &mut AppState) {
@@ -653,7 +735,11 @@ fn preview_destination_key(
     RenameBackend::path_key(&WindowsRenameBackend, &destination)
 }
 
-fn rendered_row(icon_cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyListItem) -> RenderedRow {
+fn rendered_row(
+    icon_cache: &mut HashMap<IconCacheKey, i32>,
+    item: &LegacyListItem,
+    issue: PreviewRowIssue,
+) -> RenderedRow {
     RenderedRow {
         values: [
             item.current_name().clone(),
@@ -663,6 +749,10 @@ fn rendered_row(icon_cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyListIt
             LegacyText::from(format_iec_file_size(item.actual_size())),
             format_filetime(item.modified()),
             format_filetime(item.created()),
+            LegacyText::from(preview_status_label(
+                issue,
+                item.current_name() != item.proposed_name(),
+            )),
         ],
         icon: file_icon_index(icon_cache, item),
     }
@@ -694,7 +784,7 @@ fn apply_rendered_row(window: HWND, row: usize, old: &RenderedRow, new: &Rendere
     if mask & 1 != 0 && !set_native_primary(window, row, new) {
         return false;
     }
-    for column in 1..7 {
+    for column in 1..NATIVE_LIST_COLUMN_COUNT {
         if mask & (1 << column) != 0
             && !set_native_subitem(window, row, column, &new.values[column])
         {
@@ -706,7 +796,7 @@ fn apply_rendered_row(window: HWND, row: usize, old: &RenderedRow, new: &Rendere
 
 pub(super) fn changed_column_mask(old: &RenderedRow, new: &RenderedRow) -> u8 {
     let mut mask = u8::from(old.icon != new.icon);
-    for column in 0..7 {
+    for column in 0..NATIVE_LIST_COLUMN_COUNT {
         if old.values[column] != new.values[column] {
             mask |= 1 << column;
         }
@@ -738,7 +828,8 @@ fn insert_native_row(window: HWND, row: usize, value: &RenderedRow) -> bool {
     {
         return false;
     }
-    (1..7).all(|column| set_native_subitem(window, row, column, &value.values[column]))
+    (1..NATIVE_LIST_COLUMN_COUNT)
+        .all(|column| set_native_subitem(window, row, column, &value.values[column]))
 }
 
 fn set_native_primary(window: HWND, row: usize, value: &RenderedRow) -> bool {
@@ -905,6 +996,145 @@ fn format_locale_part(mut format: impl FnMut(*mut u16, i32) -> i32) -> Option<St
 #[cfg(test)]
 mod native_tests {
     use super::*;
+
+    #[test]
+    fn native_selected_row_exposes_status_through_listview_text_api() -> io::Result<()> {
+        let controls = INITCOMMONCONTROLSEX {
+            dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+            dwICC: ICC_LISTVIEW_CLASSES,
+        };
+        // SAFETY: controls has its exact structure size for initialization.
+        unsafe { InitCommonControlsEx(&controls) };
+        // SAFETY: the system STATIC class and current module are process-global.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the initialized report ListView class retains no caller-owned
+        // creation data and parent remains live until the test completes.
+        let list = unsafe {
+            CreateWindowExW(
+                0,
+                wide("SysListView32").as_ptr(),
+                null(),
+                WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS,
+                0,
+                0,
+                640,
+                480,
+                parent,
+                LIST_ID as *mut c_void,
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if list.is_null() {
+            // SAFETY: parent is the test-owned hidden HWND.
+            unsafe { DestroyWindow(parent) };
+            return Err(io::Error::last_os_error());
+        }
+        let result = (|| -> io::Result<()> {
+            for (index, label) in COLUMNS
+                .iter()
+                .map(|column| column.label)
+                .chain(core::iter::once(NATIVE_STATUS_COLUMN.label))
+                .enumerate()
+            {
+                let mut label = wide(label);
+                let mut column = LVCOLUMNW {
+                    mask: LVCF_TEXT | LVCF_WIDTH | LVCF_FMT,
+                    fmt: LVCFMT_LEFT,
+                    cx: 112,
+                    pszText: label.as_mut_ptr(),
+                    // SAFETY: LVCOLUMNW has a valid all-zero remainder.
+                    ..unsafe { zeroed() }
+                };
+                // SAFETY: list is live and column/label outlive this synchronous message.
+                if unsafe {
+                    SendMessageW(
+                        list,
+                        LVM_INSERTCOLUMNW,
+                        index,
+                        (&mut column as *mut LVCOLUMNW) as isize,
+                    )
+                } < 0
+                {
+                    return Err(io::Error::other("could not insert native test column"));
+                }
+            }
+            let row = RenderedRow {
+                values: core::array::from_fn(|column| {
+                    if column == NATIVE_STATUS_COLUMN_INDEX {
+                        LegacyText::from("차단: 충돌")
+                    } else {
+                        LegacyText::from(format!("value-{column}"))
+                    }
+                }),
+                icon: 0,
+            };
+            if !insert_native_row(list, 0, &row) {
+                return Err(io::Error::other("could not insert native test row"));
+            }
+            let mut selected = LVITEMW {
+                stateMask: LVIS_SELECTED | LVIS_FOCUSED,
+                state: LVIS_SELECTED | LVIS_FOCUSED,
+                // SAFETY: LVITEMW has a valid all-zero remainder.
+                ..unsafe { zeroed() }
+            };
+            // SAFETY: list and selected remain live for this synchronous state update.
+            if unsafe {
+                SendMessageW(
+                    list,
+                    LVM_SETITEMSTATE,
+                    0,
+                    (&mut selected as *mut LVITEMW) as isize,
+                )
+            } == 0
+            {
+                return Err(io::Error::other("could not select native test row"));
+            }
+            let mut buffer = [0_u16; 64];
+            let mut query = LVITEMW {
+                iSubItem: NATIVE_STATUS_COLUMN_INDEX as i32,
+                pszText: buffer.as_mut_ptr(),
+                cchTextMax: i32::try_from(buffer.len()).unwrap_or(i32::MAX),
+                // SAFETY: LVITEMW has a valid all-zero remainder.
+                ..unsafe { zeroed() }
+            };
+            // SAFETY: list is live and query/buffer are writable for this
+            // synchronous native text retrieval.
+            let copied = unsafe {
+                SendMessageW(
+                    list,
+                    LVM_GETITEMTEXTW,
+                    0,
+                    (&mut query as *mut LVITEMW) as isize,
+                )
+            };
+            let copied = usize::try_from(copied).unwrap_or_default();
+            assert_eq!(String::from_utf16_lossy(&buffer[..copied]), "차단: 충돌");
+            assert_eq!(selected_indices(list), vec![0]);
+            Ok(())
+        })();
+        // SAFETY: parent owns and destroys the native ListView child exactly once.
+        unsafe { DestroyWindow(parent) };
+        result
+    }
 
     #[test]
     fn preview_destination_key_matches_planner_windows_path_policy() {
