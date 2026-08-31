@@ -6,6 +6,10 @@ use std::io;
 
 use windows_capabilities::{GateMode, gate_mode_from, unavailable_in_mode};
 
+fn normalize_workflow_source(source: &str) -> String {
+    source.replace("\r\n", "\n")
+}
+
 #[test]
 fn privilege_not_held_is_a_symlink_creation_capability_error() {
     let error = io::Error::from_raw_os_error(1_314);
@@ -88,7 +92,9 @@ fn hosted_windows_and_release_gates_require_capabilities_with_visible_output()
 
 #[test]
 fn planning_benchmark_workflow_is_manual_least_privilege_and_directional() {
-    let workflow = include_str!("../../../.github/workflows/benchmark-planning.yaml");
+    let workflow = normalize_workflow_source(include_str!(
+        "../../../.github/workflows/benchmark-planning.yaml"
+    ));
 
     assert!(workflow.contains("on:\n  workflow_dispatch:"));
     assert!(!workflow.contains("\n  push:"));
@@ -124,4 +130,12 @@ fn planning_benchmark_workflow_is_manual_least_privilege_and_directional() {
     ));
     assert!(!workflow.contains("actions/upload-artifact"));
     assert!(!workflow.contains("actions/cache"));
+}
+
+#[test]
+fn workflow_contract_normalizes_windows_line_endings() {
+    assert_eq!(
+        normalize_workflow_source("on:\r\n  workflow_dispatch:\r\n"),
+        "on:\n  workflow_dispatch:\n"
+    );
 }
