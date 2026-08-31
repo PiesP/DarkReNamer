@@ -26,6 +26,23 @@ active and candidate journal capabilities. Preference load or write failure uses
 safe presentation defaults and does not relax or create filesystem mutation
 authority.
 
+## Preview resource boundary
+
+Name transformations are bounded before they can update the preview model.
+`MAX_PROPOSED_NAME_UTF16_UNITS` owns the per-name UTF-16 limit and shares its
+Windows component boundary with `MAX_WINDOWS_LEAF_NAME_UTF16_UNITS`.
+`MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS` owns the independent aggregate model
+budget. Growing transforms calculate sizes with checked arithmetic, reserve
+bounded staging storage fallibly, and commit changed rows only after every
+candidate fits. A rejected parameter, size, aggregate budget, or staging
+allocation leaves every proposal and the model revision unchanged.
+
+Manual edits and imported names use the same boundary as prefix, suffix,
+replacement, extension, parent-folder, digit-padding, and sequence commands.
+The canonical values and error variants live in
+`crates/darknamer-core/src/lib.rs`; Windows command error mapping lives in
+`proposal_mutation_error_korean`.
+
 ## Transaction states
 
 ```text
@@ -91,6 +108,12 @@ tests terminate after each durable/mutation boundary and restart through the
 production recovery path. They assert expected original or committed names,
 unchanged sentinel files, no temporary names, and either terminal cleanup or an
 explicit recovery lock.
+
+Capability-dependent Windows tests may report a structured local skip through
+`tests/support/windows_capabilities.rs`. The hosted Windows and prerelease gates
+set that module's required mode, so an unavailable case-sensitivity query,
+reparse fixture, or journal-root capability is a failing gate rather than a
+successful test. Hosted commands retain the capability result in their logs.
 
 ### Unsafe boundary policy
 
