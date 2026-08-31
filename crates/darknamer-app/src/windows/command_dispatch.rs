@@ -270,49 +270,77 @@ pub(super) fn select_rows_with_focus(list: HWND, rows: &[usize], focused: Option
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) struct SelectionToken {
     path: LegacyText,
     occurrence: usize,
 }
 
-pub(super) fn selection_tokens(model: &LegacyList, selected: &[usize]) -> Vec<SelectionToken> {
-    selected
-        .iter()
-        .filter_map(|index| model.items().get(*index).map(|item| (*index, item)))
-        .map(|(index, item)| SelectionToken {
-            path: item.source_path().clone(),
-            occurrence: model.items()[..index]
-                .iter()
-                .filter(|previous| previous.source_path() == item.source_path())
-                .count(),
-        })
-        .collect()
+struct SelectionSnapshot {
+    by_row: Vec<SelectionToken>,
+    #[cfg(test)]
+    rows_scanned: usize,
 }
 
-pub(super) fn selection_token(model: &LegacyList, index: usize) -> Option<SelectionToken> {
-    model.items().get(index).map(|item| SelectionToken {
-        path: item.source_path().clone(),
-        occurrence: model.items()[..index]
-            .iter()
-            .filter(|previous| previous.source_path() == item.source_path())
-            .count(),
-    })
+impl SelectionSnapshot {
+    fn capture(model: &LegacyList) -> Self {
+        let mut occurrences = HashMap::<&LegacyText, usize>::new();
+        let mut by_row = Vec::with_capacity(model.len());
+        for item in model.items() {
+            let occurrence = occurrences.entry(item.source_path()).or_default();
+            by_row.push(SelectionToken {
+                path: item.source_path().clone(),
+                occurrence: *occurrence,
+            });
+            *occurrence += 1;
+        }
+        Self {
+            by_row,
+            #[cfg(test)]
+            rows_scanned: model.len(),
+        }
+    }
+
+    fn token(&self, row: usize) -> Option<&SelectionToken> {
+        self.by_row.get(row)
+    }
+
+    fn tokens(&self, rows: &[usize]) -> Vec<SelectionToken> {
+        rows.iter()
+            .filter_map(|row| self.token(*row).cloned())
+            .collect()
+    }
 }
 
-pub(super) fn rows_for_tokens(model: &LegacyList, tokens: &[SelectionToken]) -> Vec<usize> {
-    tokens
-        .iter()
-        .filter_map(|token| {
-            model
-                .items()
-                .iter()
-                .enumerate()
-                .filter(|(_index, item)| item.source_path() == &token.path)
-                .nth(token.occurrence)
-                .map(|(index, _item)| index)
-        })
-        .collect()
+struct SelectionRowIndex {
+    by_token: HashMap<SelectionToken, usize>,
+    #[cfg(test)]
+    rows_scanned: usize,
+}
+
+impl SelectionRowIndex {
+    fn build(model: &LegacyList) -> Self {
+        let snapshot = SelectionSnapshot::capture(model);
+        let by_token = snapshot
+            .by_row
+            .into_iter()
+            .enumerate()
+            .map(|(row, token)| (token, row))
+            .collect();
+        Self {
+            by_token,
+            #[cfg(test)]
+            rows_scanned: snapshot.rows_scanned,
+        }
+    }
+
+    fn row(&self, token: &SelectionToken) -> Option<usize> {
+        self.by_token.get(token).copied()
+    }
+
+    fn rows(&self, tokens: &[SelectionToken]) -> Vec<usize> {
+        tokens.iter().filter_map(|token| self.row(token)).collect()
+    }
 }
 
 pub(super) struct PreparedPrompt {
@@ -1045,21 +1073,19 @@ fn finish_sort_command(
     ];
     if let Some(mode) = modes.get(choice) {
         let selected = selected_indices(state.list_window);
-        let tokens = selection_tokens(&state.model, &selected);
-        let focused =
-            focused_index(state.list_window).and_then(|index| selection_token(&state.model, index));
+        let selection_snapshot = SelectionSnapshot::capture(&state.model);
+        let tokens = selection_snapshot.tokens(&selected);
+        let focused = focused_index(state.list_window)
+            .and_then(|index| selection_snapshot.token(index).cloned());
         let changed = state.model.sort_by_with_semantics_changed(
             *mode,
             SortSemantics::SafeActualSize,
             compare_windows,
         );
         let outcome = model_outcome(state, changed, UiEffect::AllRowsChanged);
-        let moved = rows_for_tokens(&state.model, &tokens);
-        let focused = focused.as_ref().and_then(|token| {
-            rows_for_tokens(&state.model, slice::from_ref(token))
-                .first()
-                .copied()
-        });
+        let row_index = SelectionRowIndex::build(&state.model);
+        let moved = row_index.rows(&tokens);
+        let focused = focused.as_ref().and_then(|token| row_index.row(token));
         return (
             outcome,
             Some(SelectionRestore {
@@ -1086,6 +1112,57 @@ pub(super) fn clear_selection(list: HWND) {
             LVM_SETITEMSTATE,
             usize::MAX,
             (&mut item as *mut LVITEMW) as isize,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    #[test]
+    fn ten_thousand_selected_rows_restore_with_two_linear_index_scans() {
+        let mut model = LegacyList::new();
+        let rows = (0..10_000)
+            .map(|row| {
+                LegacyListItem::new_with_actual_size(
+                    format!(r"C:\root\duplicate-{:03}.txt", row % 100),
+                    false,
+                    row,
+                    u64::from(row),
+                    0,
+                    0,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(model.append_batch(rows), 10_000);
+        let selected = (0..10_000).collect::<Vec<_>>();
+
+        let snapshot = SelectionSnapshot::capture(&model);
+        let tokens = snapshot.tokens(&selected);
+        let focused = snapshot.token(4_321).cloned();
+        let focused_actual_size = model.items()[4_321].actual_size();
+        assert_eq!(snapshot.rows_scanned, 10_000);
+        assert_eq!(tokens.len(), 10_000);
+
+        assert!(model.sort_by_with_semantics_changed(
+            LegacySortMode::SizeDescending,
+            SortSemantics::SafeActualSize,
+            |left, right| left.units().cmp(right.units()),
+        ));
+        let row_index = SelectionRowIndex::build(&model);
+        let restored = row_index.rows(&tokens);
+        assert_eq!(row_index.rows_scanned, 10_000);
+        assert_eq!(restored.len(), 10_000);
+        assert_eq!(
+            restored.iter().copied().collect::<BTreeSet<_>>().len(),
+            10_000
+        );
+        assert_eq!(
+            focused.as_ref().and_then(|token| row_index.row(token)),
+            usize::try_from(9_999 - focused_actual_size).ok()
         );
     }
 }

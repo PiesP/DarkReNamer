@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::ptr::{null, null_mut};
 use std::rc::Rc;
-use std::slice;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
