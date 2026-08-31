@@ -1449,6 +1449,36 @@ mod native_tests {
     }
 
     #[test]
+    #[ignore = "manual Windows release-mode measurement with the production path key"]
+    fn measure_preview_validation_with_production_windows_path_keys() {
+        let parent = LegacyText::from(r"C:\work");
+        for count in [100_usize, 1_000, 10_000] {
+            let names = (0..count)
+                .map(|row| {
+                    let name = LegacyText::from(format!("항목-{row:05}-İ-ß.txt"));
+                    (name.clone(), name)
+                })
+                .collect::<Vec<_>>();
+            let mut cache = PreviewIssueCache::default();
+            let started = std::time::Instant::now();
+
+            cache.refresh_by(
+                names
+                    .iter()
+                    .map(|(current, proposed)| (&parent, current, proposed, false)),
+                preview_destination_key,
+            );
+
+            println!(
+                "darkrenamer_preview_path_key,count={count},validation_us={}",
+                started.elapsed().as_micros(),
+            );
+            assert_eq!(cache.issue(count - 1), PreviewRowIssue::None);
+            assert!(cache.blocker_rows().is_empty());
+        }
+    }
+
+    #[test]
     fn known_utc_filetime_uses_current_dynamic_timezone_without_mutation() {
         // 2024-01-15 12:00:00 UTC. Every Windows time zone maps this to
         // January 15 or 16, while the exact local clock remains environment-owned.
