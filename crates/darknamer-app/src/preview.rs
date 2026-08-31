@@ -1,6 +1,11 @@
 //! Pure preview counts and diagnostics for the native workbench.
 
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
+use std::rc::Rc;
+
 use darknamer_core::{LegacyText, WindowsLeafNameError};
+
+use crate::rename::PathKey;
 
 /// Exact, non-authorizing counts shown by the native preview workbench.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -30,6 +35,32 @@ impl PreviewCountCache {
             changed = changed.saturating_add(usize::from(current != proposed));
         }
         *self = Self { total, changed };
+    }
+
+    /// Updates the changed count for one row without rescanning the model.
+    ///
+    /// Returns `false` without mutation when the cached total does not match
+    /// the authoritative model length or the requested transition contradicts
+    /// the cached count.
+    pub(crate) fn refresh_one(
+        &mut self,
+        model_len: usize,
+        previous_changed: bool,
+        current_changed: bool,
+    ) -> bool {
+        if self.total != model_len {
+            return false;
+        }
+        let next_changed = match (previous_changed, current_changed) {
+            (false, true) => self.changed.checked_add(1),
+            (true, false) => self.changed.checked_sub(1),
+            (false, false) | (true, true) => Some(self.changed),
+        };
+        let Some(next_changed) = next_changed.filter(|changed| *changed <= self.total) else {
+            return false;
+        };
+        self.changed = next_changed;
+        true
     }
 
     #[must_use]
@@ -89,10 +120,28 @@ pub(crate) fn preview_status_delta_rows<'a>(
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CachedPreviewRow {
+    destination_key: Rc<PathKey>,
+    base_issue: PreviewRowIssue,
+    issue: PreviewRowIssue,
+    changed: bool,
+}
+
+/// Exact preview-cache effects of one proposed-name edit.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PreviewIssueUpdate {
+    pub(crate) affected_rows: Box<[usize]>,
+    pub(crate) previous_changed: bool,
+    pub(crate) current_changed: bool,
+}
+
 /// Cached preview-only diagnostics. These never authorize filesystem work.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct PreviewIssueCache {
-    rows: Vec<PreviewRowIssue>,
+    initialized: bool,
+    rows: Vec<CachedPreviewRow>,
+    destination_rows: BTreeMap<Rc<PathKey>, BTreeSet<usize>>,
     warning_rows: usize,
     invalid_name_rows: usize,
     duplicate_destination_rows: usize,
@@ -100,78 +149,192 @@ pub(crate) struct PreviewIssueCache {
 }
 
 impl PreviewIssueCache {
-    pub(crate) fn refresh_by<'a, F, K>(
+    pub(crate) fn refresh_by<'a, F>(
         &mut self,
         rows: impl IntoIterator<Item = (&'a LegacyText, &'a LegacyText, &'a LegacyText, bool)>,
         mut destination_key: F,
     ) where
-        F: FnMut(&LegacyText, &LegacyText) -> K,
-        K: Ord,
+        F: FnMut(&LegacyText, &LegacyText) -> PathKey,
     {
-        let rows = rows.into_iter().collect::<Vec<_>>();
-        self.rows.clear();
-        self.rows.resize(rows.len(), PreviewRowIssue::None);
-        let mut destinations = Vec::new();
-        for (row, (parent, current, proposed, is_directory)) in rows.iter().copied().enumerate() {
+        let mut next = Self {
+            initialized: true,
+            ..Self::default()
+        };
+        for (parent, current, proposed, is_directory) in rows {
+            let row = next.rows.len();
             let changed = current != proposed;
-            let valid = if changed {
-                match darknamer_core::validate_windows_leaf_name(proposed) {
-                    Ok(()) => true,
-                    Err(error) => {
-                        self.rows[row] = PreviewRowIssue::InvalidName(error);
-                        false
-                    }
-                }
-            } else {
-                true
-            };
-            if changed && valid && preview_name_has_empty_stem(proposed, is_directory) {
-                self.rows[row] = PreviewRowIssue::EmptyStem;
-            }
+            let base_issue = preview_base_issue(current, proposed, is_directory);
             let effective_name = if changed { proposed } else { current };
-            destinations.push((row, destination_key(parent, effective_name), changed, valid));
+            let computed_key = Rc::new(destination_key(parent, effective_name));
+            let destination_key = match next.destination_rows.entry(computed_key) {
+                Entry::Occupied(mut entry) => {
+                    let key = Rc::clone(entry.key());
+                    entry.get_mut().insert(row);
+                    key
+                }
+                Entry::Vacant(entry) => {
+                    let key = Rc::clone(entry.key());
+                    entry.insert(BTreeSet::from([row]));
+                    key
+                }
+            };
+            next.rows.push(CachedPreviewRow {
+                destination_key,
+                base_issue,
+                issue: base_issue,
+                changed,
+            });
         }
-        destinations.sort_by(|left, right| left.1.cmp(&right.1));
-        let mut group_start = 0_usize;
-        while group_start < destinations.len() {
-            let mut group_end = group_start + 1;
-            while group_end < destinations.len()
-                && destinations[group_start].1 == destinations[group_end].1
-            {
-                group_end += 1;
-            }
-            if group_end - group_start > 1 {
-                for destination in &destinations[group_start..group_end] {
-                    if destination.2 && destination.3 {
-                        self.rows[destination.0] = PreviewRowIssue::DuplicateDestination;
+
+        for group in next.destination_rows.values() {
+            let colliding = group.len() > 1;
+            for &row in group {
+                let cached = &mut next.rows[row];
+                cached.issue = resolved_preview_issue(cached.base_issue, cached.changed, colliding);
+                match cached.issue {
+                    PreviewRowIssue::None => {}
+                    PreviewRowIssue::EmptyStem => next.warning_rows += 1,
+                    PreviewRowIssue::InvalidName(_) => next.invalid_name_rows += 1,
+                    PreviewRowIssue::DuplicateDestination => {
+                        next.duplicate_destination_rows += 1;
                     }
                 }
             }
-            group_start = group_end;
         }
-        self.warning_rows = self
-            .rows
-            .iter()
-            .filter(|issue| matches!(issue, PreviewRowIssue::EmptyStem))
-            .count();
-        self.invalid_name_rows = self
-            .rows
-            .iter()
-            .filter(|issue| matches!(issue, PreviewRowIssue::InvalidName(_)))
-            .count();
-        self.duplicate_destination_rows = self
-            .rows
-            .iter()
-            .filter(|issue| matches!(issue, PreviewRowIssue::DuplicateDestination))
-            .count();
+        next.blocker_rows = next
+            .invalid_name_rows
+            .saturating_add(next.duplicate_destination_rows);
+        *self = next;
+    }
+
+    /// Incrementally refreshes one row after a proposed-name edit.
+    ///
+    /// The destination callback is invoked exactly once after the cache/model
+    /// boundary has been validated. `None` requests a full-refresh fallback and
+    /// leaves the cache unchanged.
+    pub(crate) fn refresh_one_by<F>(
+        &mut self,
+        model_len: usize,
+        row: usize,
+        values: (&LegacyText, &LegacyText, &LegacyText, bool),
+        mut destination_key: F,
+    ) -> Option<PreviewIssueUpdate>
+    where
+        F: FnMut(&LegacyText, &LegacyText) -> PathKey,
+    {
+        if !self.initialized || self.rows.len() != model_len || row >= model_len {
+            return None;
+        }
+        let (parent, current, proposed, is_directory) = values;
+        let old_key = Rc::clone(&self.rows[row].destination_key);
+        let old_group = self
+            .destination_rows
+            .get(&old_key)
+            .filter(|group| group.contains(&row))?;
+        let mut affected_rows = old_group.clone();
+        let previous_changed = self.rows[row].changed;
+        let current_changed = current != proposed;
+        let base_issue = preview_base_issue(current, proposed, is_directory);
+        let effective_name = if current_changed { proposed } else { current };
+        let computed_key = destination_key(parent, effective_name);
+
+        let canonical_key = if old_key.as_ref() == &computed_key {
+            Rc::clone(&old_key)
+        } else {
+            match self.destination_rows.entry(Rc::clone(&old_key)) {
+                Entry::Occupied(mut entry) => {
+                    entry.get_mut().remove(&row);
+                    if entry.get().is_empty() {
+                        entry.remove();
+                    }
+                }
+                Entry::Vacant(_) => return None,
+            }
+            let computed_key = Rc::new(computed_key);
+            match self.destination_rows.entry(computed_key) {
+                Entry::Occupied(mut entry) => {
+                    let key = Rc::clone(entry.key());
+                    entry.get_mut().insert(row);
+                    key
+                }
+                Entry::Vacant(entry) => {
+                    let key = Rc::clone(entry.key());
+                    entry.insert(BTreeSet::from([row]));
+                    key
+                }
+            }
+        };
+        if old_key.as_ref() == canonical_key.as_ref() {
+            debug_assert!(
+                self.destination_rows
+                    .get(&canonical_key)
+                    .is_some_and(|group| group.contains(&row))
+            );
+        } else if let Some(new_group) = self.destination_rows.get(&canonical_key) {
+            affected_rows.extend(new_group.iter().copied());
+        }
+
+        self.rows[row].destination_key = canonical_key;
+        self.rows[row].base_issue = base_issue;
+        self.rows[row].changed = current_changed;
+        for affected in affected_rows.iter().copied() {
+            let cached = &self.rows[affected];
+            let colliding = self
+                .destination_rows
+                .get(&cached.destination_key)
+                .is_some_and(|group| group.len() > 1);
+            let issue = resolved_preview_issue(cached.base_issue, cached.changed, colliding);
+            self.replace_issue(affected, issue);
+        }
         self.blocker_rows = self
             .invalid_name_rows
             .saturating_add(self.duplicate_destination_rows);
+
+        Some(PreviewIssueUpdate {
+            affected_rows: affected_rows
+                .into_iter()
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            previous_changed,
+            current_changed,
+        })
+    }
+
+    fn replace_issue(&mut self, row: usize, issue: PreviewRowIssue) {
+        let previous = self.rows[row].issue;
+        if previous == issue {
+            return;
+        }
+        match previous {
+            PreviewRowIssue::None => {}
+            PreviewRowIssue::EmptyStem => {
+                debug_assert!(self.warning_rows > 0);
+                self.warning_rows = self.warning_rows.saturating_sub(1);
+            }
+            PreviewRowIssue::InvalidName(_) => {
+                debug_assert!(self.invalid_name_rows > 0);
+                self.invalid_name_rows = self.invalid_name_rows.saturating_sub(1);
+            }
+            PreviewRowIssue::DuplicateDestination => {
+                debug_assert!(self.duplicate_destination_rows > 0);
+                self.duplicate_destination_rows = self.duplicate_destination_rows.saturating_sub(1);
+            }
+        }
+        match issue {
+            PreviewRowIssue::None => {}
+            PreviewRowIssue::EmptyStem => self.warning_rows += 1,
+            PreviewRowIssue::InvalidName(_) => self.invalid_name_rows += 1,
+            PreviewRowIssue::DuplicateDestination => self.duplicate_destination_rows += 1,
+        }
+        self.rows[row].issue = issue;
     }
 
     #[must_use]
     pub(crate) fn issue(&self, row: usize) -> PreviewRowIssue {
-        self.rows.get(row).copied().unwrap_or_default()
+        self.rows
+            .get(row)
+            .map(|cached| cached.issue)
+            .unwrap_or_default()
     }
 
     #[must_use]
@@ -184,9 +347,9 @@ impl PreviewIssueCache {
         self.rows
             .iter()
             .enumerate()
-            .filter_map(|(row, issue)| {
+            .filter_map(|(row, cached)| {
                 matches!(
-                    issue,
+                    cached.issue,
                     PreviewRowIssue::InvalidName(_) | PreviewRowIssue::DuplicateDestination
                 )
                 .then_some(row)
@@ -241,6 +404,35 @@ impl PreviewIssueCache {
             "변경 전에 확인하세요."
         };
         Some(format!("{} · {action}", counts.join(" · ")))
+    }
+}
+
+fn preview_base_issue(
+    current: &LegacyText,
+    proposed: &LegacyText,
+    is_directory: bool,
+) -> PreviewRowIssue {
+    if current == proposed {
+        return PreviewRowIssue::None;
+    }
+    match darknamer_core::validate_windows_leaf_name(proposed) {
+        Err(error) => PreviewRowIssue::InvalidName(error),
+        Ok(()) if preview_name_has_empty_stem(proposed, is_directory) => PreviewRowIssue::EmptyStem,
+        Ok(()) => PreviewRowIssue::None,
+    }
+}
+
+fn resolved_preview_issue(
+    base_issue: PreviewRowIssue,
+    changed: bool,
+    colliding: bool,
+) -> PreviewRowIssue {
+    if matches!(base_issue, PreviewRowIssue::InvalidName(_)) {
+        base_issue
+    } else if changed && colliding {
+        PreviewRowIssue::DuplicateDestination
+    } else {
+        base_issue
     }
 }
 
@@ -302,25 +494,236 @@ mod tests {
         );
     }
 
+    #[test]
+    fn preview_count_cache_updates_one_row_only_from_prior_and_current_state() {
+        let mut cache = PreviewCountCache::default();
+        cache.refresh(
+            [(1, 1), (2, 3), (4, 4)]
+                .iter()
+                .map(|(current, proposed)| (current, proposed)),
+        );
+
+        assert!(cache.refresh_one(3, true, false));
+        assert_eq!(cache.with_selected(0).changed, 0);
+        assert!(cache.refresh_one(3, false, true));
+        assert_eq!(cache.with_selected(0).changed, 1);
+        assert!(cache.refresh_one(3, true, true));
+        assert_eq!(cache.with_selected(0).changed, 1);
+        let before = cache;
+        assert!(!cache.refresh_one(4, false, true));
+        assert_eq!(cache, before);
+    }
+
     fn preview_test_destination_key(
         parent: &darknamer_core::LegacyText,
         leaf: &darknamer_core::LegacyText,
-    ) -> (Box<[u16]>, Box<[u16]>) {
-        fn ascii_fold(text: &darknamer_core::LegacyText) -> Box<[u16]> {
-            text.units()
-                .iter()
-                .map(|unit| {
-                    if (b'A' as u16..=b'Z' as u16).contains(unit) {
-                        unit + u16::from(b'a' - b'A')
-                    } else {
-                        *unit
-                    }
-                })
-                .collect::<Vec<_>>()
-                .into_boxed_slice()
+    ) -> crate::rename::PathKey {
+        fn push_ascii_folded(output: &mut Vec<u16>, text: &darknamer_core::LegacyText) {
+            output.extend(text.units().iter().map(|unit| {
+                if (b'A' as u16..=b'Z' as u16).contains(unit) {
+                    unit + u16::from(b'a' - b'A')
+                } else {
+                    *unit
+                }
+            }));
         }
 
-        (ascii_fold(parent), ascii_fold(leaf))
+        let mut path = Vec::with_capacity(parent.len() + 1 + leaf.len());
+        push_ascii_folded(&mut path, parent);
+        path.push(b'\\' as u16);
+        push_ascii_folded(&mut path, leaf);
+        crate::rename::PathKey::exact(&darknamer_core::LegacyText::from_units(path))
+    }
+
+    struct PreviewTestRow {
+        parent: LegacyText,
+        current: LegacyText,
+        proposed: LegacyText,
+        is_directory: bool,
+    }
+
+    fn refresh_test_rows(cache: &mut PreviewIssueCache, rows: &[PreviewTestRow]) {
+        cache.refresh_by(
+            rows.iter()
+                .map(|row| (&row.parent, &row.current, &row.proposed, row.is_directory)),
+            preview_test_destination_key,
+        );
+    }
+
+    fn rendered_test_statuses(
+        cache: &PreviewIssueCache,
+        rows: &[PreviewTestRow],
+    ) -> Vec<&'static str> {
+        rows.iter()
+            .enumerate()
+            .map(|(row, item)| {
+                preview_status_label(cache.issue(row), item.current != item.proposed)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn incremental_preview_matches_full_refresh_across_collision_boundaries() {
+        use std::cell::Cell;
+
+        let work = LegacyText::from(r"C:\work");
+        let other = LegacyText::from(r"C:\other");
+        let mut rows = vec![
+            PreviewTestRow {
+                parent: work.clone(),
+                current: LegacyText::from("a.txt"),
+                proposed: LegacyText::from("first.txt"),
+                is_directory: false,
+            },
+            PreviewTestRow {
+                parent: work.clone(),
+                current: LegacyText::from("b.txt"),
+                proposed: LegacyText::from("second.txt"),
+                is_directory: false,
+            },
+            PreviewTestRow {
+                parent: work.clone(),
+                current: LegacyText::from("occupied.txt"),
+                proposed: LegacyText::from("occupied.txt"),
+                is_directory: false,
+            },
+            PreviewTestRow {
+                parent: other,
+                current: LegacyText::from("c.txt"),
+                proposed: LegacyText::from("first.txt"),
+                is_directory: false,
+            },
+            PreviewTestRow {
+                parent: work.clone(),
+                current: LegacyText::from("d.txt"),
+                proposed: LegacyText::from("clean.txt"),
+                is_directory: false,
+            },
+            PreviewTestRow {
+                parent: work.clone(),
+                current: LegacyText::from("e.jpg"),
+                proposed: LegacyText::from(".txt"),
+                is_directory: false,
+            },
+            PreviewTestRow {
+                parent: work.clone(),
+                current: LegacyText::from("f.jpg"),
+                proposed: LegacyText::from("spare.txt"),
+                is_directory: false,
+            },
+            PreviewTestRow {
+                parent: work,
+                current: LegacyText::from("bad?.txt"),
+                proposed: LegacyText::from("bad?.txt"),
+                is_directory: false,
+            },
+        ];
+        let mut incremental = PreviewIssueCache::default();
+        refresh_test_rows(&mut incremental, &rows);
+
+        for (edited_row, proposal) in [
+            (1, "FIRST.txt"),
+            (0, "occupied.txt"),
+            (1, "OCCUPIED.TXT"),
+            (4, "bad?.txt"),
+            (3, "occupied.txt"),
+            (6, ".TXT"),
+            (6, "spare.txt"),
+            (0, "first.txt"),
+            (0, "FIRST.TXT"),
+        ] {
+            let before_statuses = rendered_test_statuses(&incremental, &rows);
+            let previous_changed = rows[edited_row].current != rows[edited_row].proposed;
+            rows[edited_row].proposed = LegacyText::from(proposal);
+            let current_changed = rows[edited_row].current != rows[edited_row].proposed;
+            let calls = Cell::new(0_usize);
+            let update = incremental.refresh_one_by(
+                rows.len(),
+                edited_row,
+                (
+                    &rows[edited_row].parent,
+                    &rows[edited_row].current,
+                    &rows[edited_row].proposed,
+                    rows[edited_row].is_directory,
+                ),
+                |parent, leaf| {
+                    calls.set(calls.get() + 1);
+                    preview_test_destination_key(parent, leaf)
+                },
+            );
+            assert!(
+                update.is_some(),
+                "incremental update rejected row {edited_row}"
+            );
+            let update = update.unwrap_or_default();
+            assert_eq!(calls.get(), 1, "row {edited_row}");
+            assert_eq!(update.previous_changed, previous_changed);
+            assert_eq!(update.current_changed, current_changed);
+
+            let mut full = PreviewIssueCache::default();
+            refresh_test_rows(&mut full, &rows);
+            let after_statuses = rendered_test_statuses(&full, &rows);
+            let status_changes = before_statuses
+                .iter()
+                .zip(&after_statuses)
+                .enumerate()
+                .filter_map(|(row, (before, after))| (before != after).then_some(row))
+                .collect::<Vec<_>>();
+            assert!(
+                status_changes
+                    .iter()
+                    .all(|row| update.affected_rows.contains(row)),
+                "row {edited_row}: missing status rows {status_changes:?} from {:?}",
+                update.affected_rows
+            );
+            assert_eq!(incremental, full, "row {edited_row}: {proposal}");
+        }
+
+        assert_eq!(
+            incremental.issue(4),
+            PreviewRowIssue::InvalidName(WindowsLeafNameError::InvalidCharacter)
+        );
+        assert_eq!(incremental.issue(5), PreviewRowIssue::EmptyStem);
+        assert_eq!(incremental.issue(7), PreviewRowIssue::None);
+    }
+
+    #[test]
+    fn incremental_preview_falls_back_without_mutating_an_invalid_cache_boundary() {
+        use std::cell::Cell;
+
+        let parent = LegacyText::from(r"C:\work");
+        let current = LegacyText::from("a.txt");
+        let proposed = LegacyText::from("b.txt");
+        let calls = Cell::new(0_usize);
+        let key = |parent: &LegacyText, leaf: &LegacyText| {
+            calls.set(calls.get() + 1);
+            preview_test_destination_key(parent, leaf)
+        };
+        let mut uninitialized = PreviewIssueCache::default();
+        let before_uninitialized = uninitialized.clone();
+        assert!(
+            uninitialized
+                .refresh_one_by(1, 0, (&parent, &current, &proposed, false), key)
+                .is_none()
+        );
+        assert_eq!(uninitialized, before_uninitialized);
+        assert_eq!(calls.get(), 0);
+
+        let mut initialized = PreviewIssueCache::default();
+        initialized.refresh_by(
+            [(&parent, &current, &current, false)],
+            preview_test_destination_key,
+        );
+        for (model_len, row) in [(2, 0), (1, 1)] {
+            let before = initialized.clone();
+            assert!(
+                initialized
+                    .refresh_one_by(model_len, row, (&parent, &current, &proposed, false), key,)
+                    .is_none()
+            );
+            assert_eq!(initialized, before);
+        }
+        assert_eq!(calls.get(), 0);
     }
 
     #[test]
@@ -350,6 +753,10 @@ mod tests {
         assert_eq!(calls.get(), 2);
         assert_eq!(cache.issue(0), PreviewRowIssue::DuplicateDestination);
         assert_eq!(cache.issue(1), PreviewRowIssue::None);
+        assert!(Rc::ptr_eq(
+            &cache.rows[0].destination_key,
+            &cache.rows[1].destination_key
+        ));
     }
 
     #[test]
