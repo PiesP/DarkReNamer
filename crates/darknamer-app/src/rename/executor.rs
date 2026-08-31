@@ -630,9 +630,9 @@ impl<'a> RenameExecutor<'a> {
             let current_source =
                 self.backend
                     .observe(&entry.source)
-                    .map_err(|_error| ExecuteError {
+                    .map_err(|error| ExecuteError {
                         entry: Some(entry.id),
-                        kind: ExecuteErrorKind::StaleSource,
+                        kind: ExecuteErrorKind::Backend(error),
                     })?;
             if control.cancellation_requested() {
                 return Err(cancelled_before_begin());
@@ -653,9 +653,9 @@ impl<'a> RenameExecutor<'a> {
             let current_destination =
                 self.backend
                     .observe(&entry.destination)
-                    .map_err(|_error| ExecuteError {
+                    .map_err(|error| ExecuteError {
                         entry: Some(entry.id),
-                        kind: ExecuteErrorKind::DestinationChanged,
+                        kind: ExecuteErrorKind::Backend(error),
                     })?;
             if control.cancellation_requested() {
                 return Err(cancelled_before_begin());
@@ -684,9 +684,9 @@ impl<'a> RenameExecutor<'a> {
             let temporary =
                 self.backend
                     .observe(&step.destination)
-                    .map_err(|_error| ExecuteError {
+                    .map_err(|error| ExecuteError {
                         entry: Some(step.entry),
-                        kind: ExecuteErrorKind::TemporaryOccupied,
+                        kind: ExecuteErrorKind::Backend(error),
                     })?;
             if control.cancellation_requested() {
                 return Err(cancelled_before_begin());

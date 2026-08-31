@@ -324,6 +324,47 @@ fn torn_candidates_are_neither_physically_empty_nor_complete_intent()
     Ok(())
 }
 
+#[test]
+fn active_terminal_prefix_with_torn_next_frame_header_or_payload_is_not_deletable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let Some(root) = supported_journal_root(directory.path())? else {
+        return Ok(());
+    };
+    let mut records = complete_records();
+    let terminal_prefix_bytes = encode_journal_records(&records)?.len();
+    records.push(JournalRecord::Prepared {
+        step: 0,
+        direction: JournalDirection::Forward,
+    });
+    let complete_bytes = encode_journal_records(&records)?;
+
+    for (leaf, truncated_bytes, expected_issue) in [
+        (
+            "active-torn-header.drj",
+            terminal_prefix_bytes + 8,
+            JournalTailIssue::TruncatedHeader,
+        ),
+        (
+            "active-torn-payload.drj",
+            complete_bytes.len().saturating_sub(1),
+            JournalTailIssue::TruncatedPayload,
+        ),
+    ] {
+        let mut bytes = complete_bytes.clone();
+        bytes.truncate(truncated_bytes);
+        fs::write(directory.path().join(leaf), bytes)?;
+
+        let mut journal = FileJournal::open_existing(&root, leaf)?;
+        assert_eq!(journal.tail_issue(), Some(expected_issue));
+        assert!(matches!(
+            journal.mark_delete_if_safe(),
+            Err(error) if error.kind == FileJournalErrorKind::UnsafeCleanupState
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 #[test]
 fn intent_candidate_discard_requires_active_absence_and_deletes_by_retained_handle()

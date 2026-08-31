@@ -1470,9 +1470,11 @@ impl FileJournal {
         let safe = !self.poisoned
             && match &self.phase {
                 FileJournalPhase::Active => {
-                    self.records.is_empty()
-                        || self.is_terminal()
-                            && replay_journal(&self.records) == RecoveryState::Clean
+                    self.torn_prefix.is_none()
+                        && self.tail_issue.is_none()
+                        && (self.records.is_empty()
+                            || self.is_terminal()
+                                && replay_journal(&self.records) == RecoveryState::Clean)
                 }
                 FileJournalPhase::Candidate { .. } => self.is_physically_empty_candidate(),
                 FileJournalPhase::PromotionUncertain => false,

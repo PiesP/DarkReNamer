@@ -1184,6 +1184,51 @@ mod tests {
     }
 
     #[test]
+    fn terminal_active_journal_with_torn_payload_stays_locked_retained_and_undeleted()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let journal_directory = create_startup_journal_directory(directory.path())?;
+        let active = journal_directory.join(ACTIVE_JOURNAL_LEAF);
+        let mut bytes = crate::rename::encode_journal_records(&[
+            crate::rename::JournalRecord::Intent {
+                plan: crate::rename::PlanId::from_fingerprint(78),
+                steps: Vec::new().into_boxed_slice(),
+            },
+            crate::rename::JournalRecord::Terminal(crate::rename::JournalTerminal::Committed),
+            crate::rename::JournalRecord::Prepared {
+                step: 0,
+                direction: crate::rename::JournalDirection::Forward,
+            },
+        ])?;
+        bytes
+            .pop()
+            .ok_or_else(|| io::Error::other("startup torn-payload fixture was empty"))?;
+        fs::write(&active, &bytes)?;
+
+        let runtime = initialize_safe_runtime_at(directory.path())?;
+
+        assert!(runtime.recovery_locked);
+        let retained = runtime
+            .active_journal
+            .as_ref()
+            .ok_or_else(|| io::Error::other("torn terminal journal was not retained"))?;
+        assert_eq!(
+            retained.tail_issue(),
+            Some(crate::rename::JournalTailIssue::TruncatedPayload)
+        );
+        assert!(
+            runtime
+                .status
+                .as_deref()
+                .unwrap_or_default()
+                .contains("저널 삭제 실패: file journal error: UnsafeCleanupState")
+        );
+        drop(runtime);
+        assert_eq!(fs::read(active)?, bytes);
+        Ok(())
+    }
+
+    #[test]
     fn physically_empty_candidate_is_deleted_and_startup_unlocks()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;

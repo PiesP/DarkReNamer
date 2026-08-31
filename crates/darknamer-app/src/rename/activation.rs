@@ -251,6 +251,23 @@ mod presentation_tests {
     use crate::rename::{BackendOperation, JournalError, MutationCertainty};
 
     #[test]
+    fn execute_backend_observe_error_retains_operation_and_windows_code() {
+        let error = ExecuteError {
+            entry: Some(EntryId::new(0)),
+            kind: ExecuteErrorKind::Backend(BackendError {
+                operation: BackendOperation::Observe,
+                code: 32,
+                certainty: MutationCertainty::NotApplied,
+            }),
+        };
+
+        assert_eq!(
+            execute_error_korean(&error),
+            "실행 준비 실패: Observe, Windows 코드 32"
+        );
+    }
+
+    #[test]
     fn only_success_and_fully_rolled_back_cancellation_are_nonmodal() {
         let backend = ExecutionOutcome::RolledBack {
             failure: ExecutionFailure::Backend {
