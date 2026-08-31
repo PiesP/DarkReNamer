@@ -914,6 +914,7 @@ fn request_preferences_shutdown(state: &mut AppState) {
 pub(super) fn try_finish_window_close(window: HWND, state: &mut AppState) {
     if !state.close_pending
         || state.confirmation_pending
+        || state.active_prompt.is_some()
         || state.admission_worker.is_some()
         || state.plan_worker.is_some()
         || state.apply_worker.is_some()
@@ -953,6 +954,7 @@ pub(super) fn try_finish_window_close(window: HWND, state: &mut AppState) {
 pub(super) fn prepare_window_close(window: HWND, state: &mut AppState) -> bool {
     if !state.close_pending
         || state.confirmation_pending
+        || state.active_prompt.is_some()
         || state.admission_worker.is_some()
         || state.plan_worker.is_some()
         || state.apply_worker.is_some()

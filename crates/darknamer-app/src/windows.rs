@@ -372,6 +372,14 @@ impl<T, R> Drop for CallbackStateLease<T, R> {
     }
 }
 
+fn run_after_callback_state_release<T, R, O>(
+    lease: CallbackStateLease<T, R>,
+    action: impl FnOnce() -> O,
+) -> O {
+    drop(lease);
+    action()
+}
+
 type AppStateSlot = CallbackState<AppState, DropTargetRegistrations>;
 
 fn app_state_slot(window: HWND) -> *mut AppStateSlot {
@@ -430,6 +438,8 @@ struct AppState {
     appearance_terminal_observed: bool,
     close_pending: bool,
     confirmation_pending: bool,
+    active_prompt: Option<u64>,
+    next_prompt_id: u64,
     font_metrics: MeasuredFontMetrics,
     focus: FocusState,
     rails_visible: bool,
@@ -522,6 +532,8 @@ impl AppState {
             appearance_terminal_observed: false,
             close_pending: false,
             confirmation_pending: false,
+            active_prompt: None,
+            next_prompt_id: 0,
             font_metrics: MeasuredFontMetrics::default(),
             focus: FocusState::default(),
             rails_visible: true,
@@ -817,13 +829,13 @@ mod tests {
         let lease = unsafe { CallbackState::try_lease(slot) }
             .ok_or_else(|| io::Error::other("close-decision lease was rejected"))?;
         let close = *lease.state();
-        drop(lease);
-
-        // Applying the copied decision can reacquire the slot, proving that no
-        // state lease/reference survives into the external close action.
-        // SAFETY: the original lease ended and the slot remains live.
-        let action_probe = unsafe { CallbackState::try_lease(slot) }
-            .ok_or_else(|| io::Error::other("close action ran before lease release"))?;
+        let action_probe = run_after_callback_state_release(lease, || {
+            // Applying the copied decision can reacquire the slot, proving that
+            // no state lease/reference survives into the external action.
+            // SAFETY: the helper ended the original lease and the slot is live.
+            unsafe { CallbackState::try_lease(slot) }
+                .ok_or_else(|| io::Error::other("close action ran before lease release"))
+        })?;
         assert!(close);
         drop(action_probe);
         // SAFETY: no lease remains and the test is retiring its unique slot.
