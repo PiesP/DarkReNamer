@@ -213,3 +213,20 @@ durations and the required storage context in the external evidence artifact;
 never copy the benchmark root into it. The media label is operator-supplied
 context, not an automatic hardware claim, and results from virtual CI storage
 do not substitute for either physical-media pass.
+
+### Preview path-key benchmark
+
+The ignored Windows-only preview benchmark measures the complete preview
+diagnostic pass at 100, 1,000, and 10,000 rows using the production
+`WindowsRenameBackend::path_key` implementation, including invariant Windows
+UTF-16 case folding. Run it in release mode on the source under acceptance:
+
+```powershell
+cargo test -p darknamer-app --lib `
+  windows::list_view::native_tests::measure_preview_validation_with_production_windows_path_keys `
+  --locked --release -- --ignored --exact --nocapture --test-threads=1
+```
+
+The emitted `validation_us` values measure validation and path-key generation;
+they do not measure native ListView repaint latency. Record interactive preview
+responsiveness separately in the source-bound Windows UI acceptance session.

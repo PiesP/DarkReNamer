@@ -345,6 +345,7 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
         create_empty_state_controls(window)?;
     state.drop_overlay = create_drop_overlay(window)?;
     refresh_system_fonts(state);
+    update_dpi_metrics(state);
     state.menu = create_menu()?.attach(window)?;
     let mut shell_info = SHFILEINFOW::default();
     let empty = wide("");

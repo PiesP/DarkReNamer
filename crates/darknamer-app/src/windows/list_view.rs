@@ -1,6 +1,14 @@
 use super::*;
 
 const LIST_VIEW_NOTIFICATION_SUBCLASS_ID: usize = 1;
+const STATUS_COLUMN_TEXT_PADDING_DIP: i32 = 24;
+const STATUS_COLUMN_TEXT_SAMPLES: [&str; 5] = [
+    NATIVE_STATUS_COLUMN.label,
+    "변경 예정",
+    "주의: 이름 본체",
+    "차단: 이름",
+    "차단: 충돌",
+];
 
 pub(super) fn install_list_view_notification_subclass(state: &AppState) -> io::Result<()> {
     // Store only the copied owner HWND. Each callback resolves and leases the
@@ -63,15 +71,21 @@ unsafe extern "system" fn list_view_notification_subclass(
             // caller storage.
             let header = unsafe { SendMessageW(window, LVM_GETHEADER, 0, 0) } as HWND;
             let owner = owner_ref as HWND;
-            let Some(state_lease) = try_app_state(owner) else {
+            let Some(mut state_lease) = try_app_state(owner) else {
                 // SAFETY: same-state reentry must not reconstruct AppState;
                 // preserve the common-control chain unchanged instead.
                 return unsafe { DefSubclassProc(window, message, wparam, lparam) };
             };
-            let state = state_lease.state();
-            if let Some(result) =
-                handle_fixed_status_header_double_click(window, header, state.dpi, lparam)
-            {
+            let state = state_lease.state_mut();
+            if let Some(result) = handle_status_header_double_click(
+                state.list_window,
+                header,
+                state.font.as_raw(),
+                state.dpi,
+                lparam,
+            ) {
+                state.status_column_width_dip = NATIVE_STATUS_COLUMN_WIDTH_DIP;
+                update_primary_column_widths(state);
                 return result;
             }
             // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix synchronously.
@@ -123,10 +137,10 @@ pub(super) fn update_dpi_metrics(state: &mut AppState) {
 }
 
 fn set_native_status_column_width(state: &AppState) {
-    set_native_status_column_width_for(state.list_window, state.dpi);
+    set_native_status_column_width_for(state.list_window, native_status_column_width_px(state));
 }
 
-fn set_native_status_column_width_for(list_window: HWND, dpi: u32) {
+fn set_native_status_column_width_for(list_window: HWND, width: i32) {
     // SAFETY: list_window is live and the fixed native-only column index and
     // DPI-scaled width are integral values retained by the control.
     unsafe {
@@ -134,14 +148,40 @@ fn set_native_status_column_width_for(list_window: HWND, dpi: u32) {
             list_window,
             LVM_SETCOLUMNWIDTH,
             NATIVE_STATUS_COLUMN_INDEX,
-            scale_dip(NATIVE_STATUS_COLUMN_WIDTH_DIP, dpi) as isize,
+            width.max(0) as isize,
         )
     };
 }
 
-fn handle_fixed_status_header_double_click(
+fn native_status_column_minimum_px(state: &AppState) -> i32 {
+    native_status_column_minimum_px_for(state.list_window, state.font.as_raw(), state.dpi)
+}
+
+fn native_status_column_minimum_px_for(list_window: HWND, font: HFONT, dpi: u32) -> i32 {
+    let measured = STATUS_COLUMN_TEXT_SAMPLES
+        .into_iter()
+        .filter_map(|text| measure_text(list_window, font, text, true))
+        .map(|(width, _height)| width)
+        .max()
+        .unwrap_or_default()
+        .saturating_add(scale_dip(STATUS_COLUMN_TEXT_PADDING_DIP, dpi));
+    scale_dip(NATIVE_STATUS_COLUMN_WIDTH_DIP, dpi).max(measured)
+}
+
+fn native_status_column_width_px(state: &AppState) -> i32 {
+    scale_dip(state.status_column_width_dip, state.dpi).max(native_status_column_minimum_px(state))
+}
+
+fn reset_native_status_column_width(state: &mut AppState) {
+    state.status_column_width_dip = NATIVE_STATUS_COLUMN_WIDTH_DIP;
+    set_native_status_column_width(state);
+    update_primary_column_widths(state);
+}
+
+fn handle_status_header_double_click(
     list_window: HWND,
     header_window: HWND,
+    font: HFONT,
     dpi: u32,
     lparam: LPARAM,
 ) -> Option<LRESULT> {
@@ -163,9 +203,12 @@ fn handle_fixed_status_header_double_click(
         return None;
     }
     let _list_update = ProgrammaticListUpdateGuard::begin();
-    set_native_status_column_width_for(list_window, dpi);
-    // Returning nonzero to the Header control's direct parent prevents its
-    // default divider-double-click auto-sizing for this fixed native column.
+    set_native_status_column_width_for(
+        list_window,
+        native_status_column_minimum_px_for(list_window, font, dpi),
+    );
+    // Returning nonzero to the Header control's direct parent replaces default
+    // auto-sizing with the measured minimum for this native-only column.
     Some(1)
 }
 
@@ -179,8 +222,10 @@ pub(super) fn update_primary_column_widths(state: &AppState) {
     // live window's normalized DPI.
     let scrollbar_allowance = unsafe { GetSystemMetricsForDpi(SM_CXVSCROLL, state.dpi) }
         .max(scale_dip(LIST_SCROLLBAR_ALLOWANCE_DIP, state.dpi));
+    let status_extra = native_status_column_width_px(state)
+        .saturating_sub(scale_dip(NATIVE_STATUS_COLUMN_WIDTH_DIP, state.dpi));
     let widths = allocate_primary_column_widths(
-        rect.right - rect.left,
+        (rect.right - rect.left).saturating_sub(status_extra),
         state.dpi,
         &state.column_states,
         scrollbar_allowance,
@@ -200,51 +245,109 @@ pub(super) fn update_primary_column_widths(state: &AppState) {
     }
 }
 
-pub(super) fn handle_header_end_track(state: &mut AppState, lparam: LPARAM) -> bool {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HeaderColumnNotification {
+    EndTrack(Option<usize>),
+    DividerDoubleClick(Option<usize>),
+}
+
+fn header_column_notification(
+    header_window: HWND,
+    list_window: HWND,
+    lparam: LPARAM,
+) -> Option<HeaderColumnNotification> {
     let header = lparam as *const NMHDR;
     if header.is_null() {
-        return false;
+        return None;
     }
-    // SAFETY: the ListView is live and LVM_GETHEADER returns its borrowed
-    // header child HWND without dereferencing caller memory.
-    let header_window = unsafe { SendMessageW(state.list_window, LVM_GETHEADER, 0, 0) } as HWND;
     // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix for this synchronous
     // callback; the pointer has been checked above.
     let (source_window, code) = unsafe { ((*header).hwndFrom, (*header).code) };
     // Depending on the common-controls version, the ListView can forward the
     // embedded header notification while retaining either source HWND.
-    let from_header = source_window == header_window || source_window == state.list_window;
-    if header_window.is_null() || !from_header {
-        return false;
+    let from_header = source_window == header_window || source_window == list_window;
+    if header_window.is_null()
+        || !from_header
+        || !matches!(code, HDN_ENDTRACKW | HDN_DIVIDERDBLCLICKW)
+    {
+        return None;
     }
     let notification = lparam as *const NMHEADERW;
-    // SAFETY: both handled header notifications supply NMHEADERW storage with
-    // an NMHDR prefix.
-    let Ok(column) = usize::try_from(unsafe { (*notification).iItem }) else {
-        return code == HDN_ENDTRACKW;
+    // SAFETY: the source and notification code were narrowed above to the two
+    // Header contracts that supply NMHEADERW storage. In particular, ListView
+    // notifications such as NM_SETFOCUS expose only the NMHDR prefix and return
+    // before this extended-field read.
+    let column = usize::try_from(unsafe { (*notification).iItem }).ok();
+    Some(if code == HDN_DIVIDERDBLCLICKW {
+        HeaderColumnNotification::DividerDoubleClick(column)
+    } else {
+        HeaderColumnNotification::EndTrack(column)
+    })
+}
+
+pub(super) fn handle_header_end_track(state: &mut AppState, lparam: LPARAM) -> bool {
+    // SAFETY: the ListView is live and LVM_GETHEADER returns its borrowed
+    // header child HWND without dereferencing caller memory.
+    let header_window = unsafe { SendMessageW(state.list_window, LVM_GETHEADER, 0, 0) } as HWND;
+    let Some(notification) = header_column_notification(header_window, state.list_window, lparam)
+    else {
+        return false;
     };
-    if code == HDN_DIVIDERDBLCLICKW {
+    let column = match notification {
+        HeaderColumnNotification::EndTrack(None) => return true,
+        HeaderColumnNotification::DividerDoubleClick(None) => return false,
+        HeaderColumnNotification::EndTrack(Some(column))
+        | HeaderColumnNotification::DividerDoubleClick(Some(column)) => column,
+    };
+    if matches!(
+        notification,
+        HeaderColumnNotification::DividerDoubleClick(_)
+    ) {
         if column == NATIVE_STATUS_COLUMN_INDEX {
             let _list_update = ProgrammaticListUpdateGuard::begin();
-            set_native_status_column_width(state);
+            reset_native_status_column_width(state);
             return true;
         }
         return false;
     }
-    if code != HDN_ENDTRACKW {
-        return false;
-    }
     if column == NATIVE_STATUS_COLUMN_INDEX {
+        let requested_width = {
+            let header_fields = lparam as *const NMHEADERW;
+            // SAFETY: header_column_notification established a live NMHEADERW;
+            // its non-null pitem advertises cxy through HDI_WIDTH. Otherwise the
+            // live ListView returns the current integral width without retaining
+            // caller memory.
+            unsafe {
+                let item = (*header_fields).pitem;
+                if !item.is_null() && (*item).mask & HDI_WIDTH != 0 {
+                    (*item).cxy
+                } else {
+                    SendMessageW(
+                        state.list_window,
+                        LVM_GETCOLUMNWIDTH,
+                        NATIVE_STATUS_COLUMN_INDEX,
+                        0,
+                    ) as i32
+                }
+            }
+        };
+        let minimum = native_status_column_minimum_px(state);
+        state.status_column_width_dip =
+            status_column_width_after_resize(requested_width, minimum, state.dpi);
         let _list_update = ProgrammaticListUpdateGuard::begin();
         set_native_status_column_width(state);
+        update_primary_column_widths(state);
         return true;
     }
     if column >= state.column_states.len() {
         return true;
     }
-    // SAFETY: notification is live NMHEADERW storage for this synchronous
-    // callback; pitem, when non-null, points to its readable HDITEMW payload.
-    let item = unsafe { (*notification).pitem };
+    // SAFETY: header_column_notification established that this callback carries
+    // live NMHEADERW storage; pitem, when non-null, points to its readable
+    // HDITEMW payload.
+    let header_fields = lparam as *const NMHEADERW;
+    // SAFETY: the validated synchronous callback owns live NMHEADERW storage.
+    let item = unsafe { (*header_fields).pitem };
     // SAFETY: a non-null pitem points to the live HDITEMW payload owned by the
     // header control for this synchronous notification.
     let item_has_width = !item.is_null() && unsafe { (*item).mask & HDI_WIDTH != 0 };
@@ -1040,7 +1143,124 @@ fn format_locale_part(mut format: impl FnMut(*mut u16, i32) -> i32) -> Option<St
 
 #[cfg(test)]
 mod native_tests {
+    use std::process::Command;
+
     use super::*;
+
+    #[test]
+    fn header_notification_type_is_narrowed_before_extended_fields_are_read()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const CHILD_MODE: &str = "DARKRENAMER_TEST_NMHDR_BOUNDARY_CHILD";
+        if env::var_os(CHILD_MODE).is_some() {
+            let mut system_info = SYSTEM_INFO::default();
+            // SAFETY: this source-bound child probe owns both virtual-memory
+            // pages. NMHDR ends at the first committed page boundary and the
+            // next page is made inaccessible, so the production parser can
+            // prove that NM_SETFOCUS never reaches NMHEADERW::iItem. All memory
+            // is released before the child emits its success sentinel.
+            unsafe {
+                GetSystemInfo(&mut system_info);
+                let page_size = usize::try_from(system_info.dwPageSize)?;
+                let allocation_size = page_size
+                    .checked_mul(2)
+                    .ok_or_else(|| io::Error::other("test allocation size overflow"))?;
+                let allocation = VirtualAlloc(
+                    null(),
+                    allocation_size,
+                    MEM_RESERVE | MEM_COMMIT,
+                    PAGE_READWRITE,
+                );
+                if allocation.is_null() {
+                    return Err(io::Error::last_os_error().into());
+                }
+                let inaccessible = allocation.cast::<u8>().add(page_size);
+                let mut old_protection = 0;
+                if VirtualProtect(
+                    inaccessible.cast(),
+                    page_size,
+                    PAGE_NOACCESS,
+                    &mut old_protection,
+                ) == 0
+                {
+                    let error = io::Error::last_os_error();
+                    VirtualFree(allocation, 0, MEM_RELEASE);
+                    return Err(error.into());
+                }
+                let payload = inaccessible.sub(size_of::<NMHDR>()).cast::<NMHDR>();
+                payload.write(NMHDR {
+                    hwndFrom: 2_usize as HWND,
+                    idFrom: 0,
+                    code: NM_SETFOCUS,
+                });
+                let rejected =
+                    header_column_notification(1_usize as HWND, 2_usize as HWND, payload as LPARAM)
+                        .is_none();
+                if VirtualFree(allocation, 0, MEM_RELEASE) == 0 {
+                    return Err(io::Error::last_os_error().into());
+                }
+                if rejected {
+                    std::process::exit(86);
+                }
+                return Err(io::Error::other("NMHDR-only notification was accepted").into());
+            }
+        }
+
+        let status = Command::new(std::env::current_exe()?)
+            .arg("--exact")
+            .arg("windows::list_view::native_tests::header_notification_type_is_narrowed_before_extended_fields_are_read")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(CHILD_MODE, "1")
+            .status()?;
+        assert_eq!(status.code(), Some(86));
+
+        let header_window = 1_usize as HWND;
+        let list_window = 2_usize as HWND;
+        let mut focus = NMHDR {
+            hwndFrom: list_window,
+            idFrom: 0,
+            code: NM_SETFOCUS,
+        };
+
+        assert_eq!(
+            header_column_notification(header_window, list_window, (&raw mut focus) as LPARAM,),
+            None,
+        );
+
+        let mut end_track = NMHEADERW {
+            hdr: NMHDR {
+                hwndFrom: header_window,
+                idFrom: 0,
+                code: HDN_ENDTRACKW,
+            },
+            iItem: 3,
+            ..NMHEADERW::default()
+        };
+        assert_eq!(
+            header_column_notification(header_window, list_window, (&raw mut end_track) as LPARAM,),
+            Some(HeaderColumnNotification::EndTrack(Some(3))),
+        );
+        let mut double_click = NMHEADERW {
+            hdr: NMHDR {
+                hwndFrom: list_window,
+                idFrom: 0,
+                code: HDN_DIVIDERDBLCLICKW,
+            },
+            iItem: NATIVE_STATUS_COLUMN_INDEX as i32,
+            ..NMHEADERW::default()
+        };
+        assert_eq!(
+            header_column_notification(
+                header_window,
+                list_window,
+                (&raw mut double_click) as LPARAM,
+            ),
+            Some(HeaderColumnNotification::DividerDoubleClick(Some(
+                NATIVE_STATUS_COLUMN_INDEX,
+            ))),
+        );
+        Ok(())
+    }
 
     #[test]
     fn native_selected_row_exposes_status_through_listview_text_api() -> io::Result<()> {
@@ -1135,9 +1355,10 @@ mod native_tests {
                 ..NMHEADERW::default()
             };
             assert_eq!(
-                handle_fixed_status_header_double_click(
+                handle_status_header_double_click(
                     list,
                     header,
+                    null_mut(),
                     192,
                     (&raw mut double_click) as LPARAM,
                 ),
@@ -1226,6 +1447,36 @@ mod native_tests {
             preview_destination_key(&LegacyText::from("c:/locale"), &LegacyText::from("i.TXT"),),
             "invariant Windows folding must not depend on the user's locale",
         );
+    }
+
+    #[test]
+    #[ignore = "manual Windows release-mode measurement with the production path key"]
+    fn measure_preview_validation_with_production_windows_path_keys() {
+        let parent = LegacyText::from(r"C:\work");
+        for count in [100_usize, 1_000, 10_000] {
+            let names = (0..count)
+                .map(|row| {
+                    let name = LegacyText::from(format!("항목-{row:05}-İ-ß.txt"));
+                    (name.clone(), name)
+                })
+                .collect::<Vec<_>>();
+            let mut cache = PreviewIssueCache::default();
+            let started = std::time::Instant::now();
+
+            cache.refresh_by(
+                names
+                    .iter()
+                    .map(|(current, proposed)| (&parent, current, proposed, false)),
+                preview_destination_key,
+            );
+
+            println!(
+                "darkrenamer_preview_path_key,count={count},validation_us={}",
+                started.elapsed().as_micros(),
+            );
+            assert_eq!(cache.issue(count - 1), PreviewRowIssue::None);
+            assert!(cache.blocker_rows().is_empty());
+        }
     }
 
     #[test]

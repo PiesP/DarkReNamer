@@ -645,6 +645,7 @@ unsafe extern "system" fn window_proc(
             notify_appearance_dialog_accessibility(state);
             apply_native_appearance_nonblocking(window, state);
             refresh_system_fonts(state);
+            update_dpi_metrics(state);
             if let Err(error) = ensure_minimum_track_size(window, state) {
                 super::message(
                     window,
@@ -690,6 +691,7 @@ unsafe extern "system" fn window_proc(
             // SAFETY: state_ptr is the live UI-thread AppState.
             let state = unsafe { &mut *state_ptr };
             refresh_system_fonts(state);
+            update_dpi_metrics(state);
             if let Err(error) = ensure_minimum_track_size(window, state) {
                 super::message(
                     window,
@@ -870,7 +872,12 @@ unsafe extern "system" fn window_proc(
             }
             // SAFETY: state_ptr is the non-null, window-thread-confined AppState
             // installed in GWLP_USERDATA and is uniquely borrowed for dispatch.
-            dispatch_command(window, unsafe { &mut *state_ptr }, command);
+            let prompt = dispatch_command(window, unsafe { &mut *state_ptr }, command);
+            run_after_callback_state_release(state_lease, || {
+                if let Some(prompt) = prompt {
+                    run_prepared_prompt(window, prompt);
+                }
+            });
             0
         }
         WM_NOTIFY if !state_ptr.is_null() => {
@@ -936,7 +943,14 @@ unsafe extern "system" fn window_proc(
                 } else if unsafe { (*header).code } == NM_DBLCLK {
                     // SAFETY: state_ptr is the non-null AppState installed for
                     // this HWND and remains exclusively callback-thread owned.
-                    dispatch_command(window, unsafe { &mut *state_ptr }, MANUAL_CHANGE);
+                    let prompt =
+                        dispatch_command(window, unsafe { &mut *state_ptr }, MANUAL_CHANGE);
+                    run_after_callback_state_release(state_lease, || {
+                        if let Some(prompt) = prompt {
+                            run_prepared_prompt(window, prompt);
+                        }
+                    });
+                    return 0;
                 }
             }
             0

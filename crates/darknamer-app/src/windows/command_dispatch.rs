@@ -104,6 +104,83 @@ mod accelerator_tests {
         drop(outer);
         assert!(!programmatic_list_update_active());
     }
+
+    #[test]
+    fn prompt_completion_requires_the_same_session_revision_and_unlocked_state() {
+        let revision = ModelRevision::new(7);
+        assert!(prompt_result_can_apply(
+            Some(3),
+            3,
+            PromptCompletionLocks::default(),
+            revision,
+            revision,
+        ));
+        for blocked in [
+            prompt_result_can_apply(
+                Some(4),
+                3,
+                PromptCompletionLocks::default(),
+                revision,
+                revision,
+            ),
+            prompt_result_can_apply(
+                None,
+                3,
+                PromptCompletionLocks::default(),
+                revision,
+                revision,
+            ),
+            prompt_result_can_apply(
+                Some(3),
+                3,
+                PromptCompletionLocks {
+                    close_pending: true,
+                    ..PromptCompletionLocks::default()
+                },
+                revision,
+                revision,
+            ),
+            prompt_result_can_apply(
+                Some(3),
+                3,
+                PromptCompletionLocks {
+                    read_only_locked: true,
+                    ..PromptCompletionLocks::default()
+                },
+                revision,
+                revision,
+            ),
+            prompt_result_can_apply(
+                Some(3),
+                3,
+                PromptCompletionLocks {
+                    mutation_locked: true,
+                    ..PromptCompletionLocks::default()
+                },
+                revision,
+                revision,
+            ),
+            prompt_result_can_apply(
+                Some(3),
+                3,
+                PromptCompletionLocks {
+                    worker_active: true,
+                    ..PromptCompletionLocks::default()
+                },
+                revision,
+                revision,
+            ),
+            prompt_result_can_apply(
+                Some(3),
+                3,
+                PromptCompletionLocks::default(),
+                ModelRevision::new(8),
+                revision,
+            ),
+        ] {
+            assert!(!blocked);
+        }
+    }
 }
 
 pub(super) fn selected_indices(list: HWND) -> Vec<usize> {
@@ -238,12 +315,49 @@ pub(super) fn rows_for_tokens(model: &LegacyList, tokens: &[SelectionToken]) -> 
         .collect()
 }
 
-pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16) {
+pub(super) struct PreparedPrompt {
+    session_id: u64,
+    expected_revision: ModelRevision,
+    appearance: PromptAppearance,
+    spec: PromptSpec,
+    continuation: PromptContinuation,
+}
+
+enum PromptContinuation {
+    ManualChange { row: usize },
+    Replace,
+    Prefix,
+    Suffix,
+    ExtensionAdd,
+    ExtensionReplace,
+    PadDigits,
+    Sequence,
+    DeletePosition,
+    DeleteDelimited,
+    Sort,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PromptCompletionLocks {
+    close_pending: bool,
+    read_only_locked: bool,
+    mutation_locked: bool,
+    worker_active: bool,
+}
+
+pub(super) fn dispatch_command(
+    window: HWND,
+    state: &mut AppState,
+    command: u16,
+) -> Option<PreparedPrompt> {
+    if state.active_prompt.is_some() {
+        return None;
+    }
     if let Some(dialog) = active_appearance_dialog(state) {
         // SAFETY: dialog is the live owned modal surface; owner commands remain
         // inert until the dialog reaches OK or Cancel.
         unsafe { SetForegroundWindow(dialog) };
-        return;
+        return None;
     }
     if state.read_only_locked() && !recovery_command_allowed(command) {
         message(
@@ -251,7 +365,7 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
             "복구 잠금 상태에서는 진단 저널 내보내기, 테마 변경, 정보 보기, 종료만 사용할 수 있습니다.",
             "DarkReNamer - 읽기 전용",
         );
-        return;
+        return None;
     }
     let activity = state.worker_activity();
     let worker_active = activity.admission || activity.plan || activity.apply;
@@ -264,7 +378,10 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
             "파일 변경이 끝날 때까지 테마 변경, 정보 보기와 종료 요청만 사용할 수 있습니다.",
             "DarkReNamer - 변경 중",
         );
-        return;
+        return None;
+    }
+    if let Some(prompt) = prepare_prompt_command(state, command) {
+        return Some(prompt);
     }
     let mut selection_restore = None;
     let outcome = match command {
@@ -321,158 +438,9 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
             });
             outcome
         }
-        MANUAL_CHANGE => {
-            if let Some(index) = selected_indices(state.list_window).first().copied() {
-                let current = state.model.items()[index].proposed_name().clone();
-                if let Some(result) = {
-                    prompt_input_or_report(
-                        window,
-                        state.prompt_appearance(),
-                        prompt_spec(
-                            format!("{} 를", current.to_string_lossy()),
-                            "으로",
-                            "",
-                            current,
-                            LegacyText::default(),
-                            &[],
-                        ),
-                    )
-                } {
-                    let changed = state.model.manual_change_changed(index, result.value_one);
-                    model_outcome(
-                        state,
-                        changed,
-                        UiEffect::ProposalRowsChanged(vec![index].into_boxed_slice()),
-                    )
-                } else {
-                    CommandOutcome::ui(UiEffect::None)
-                }
-            } else {
-                CommandOutcome::ui(UiEffect::None)
-            }
-        }
-        REPLACE => {
-            if let Some(result) = {
-                prompt_input_or_report(
-                    window,
-                    state.prompt_appearance(),
-                    prompt_spec(
-                        "이름에 들어있는 문자열을 바꿉니다.",
-                        "를",
-                        "으로",
-                        LegacyText::default(),
-                        LegacyText::default(),
-                        &[],
-                    ),
-                )
-            } {
-                proposal_mutation(state, |model| {
-                    model.replace_complete_changed(&result.value_one, &result.value_two)
-                })
-            } else {
-                CommandOutcome::ui(UiEffect::None)
-            }
-        }
-        PREFIX => {
-            if let Some(result) = {
-                prompt_input_or_report(
-                    window,
-                    state.prompt_appearance(),
-                    prompt_spec(
-                        "이름의 앞에 지정한 문자열을 붙여줍니다.",
-                        "붙일 문자열",
-                        "",
-                        LegacyText::default(),
-                        LegacyText::default(),
-                        &[],
-                    ),
-                )
-            } {
-                proposal_mutation(state, |model| {
-                    model.prefix_complete_changed(&result.value_one)
-                })
-            } else {
-                CommandOutcome::ui(UiEffect::None)
-            }
-        }
-        SUFFIX => {
-            if let Some(result) = {
-                prompt_input_or_report(
-                    window,
-                    state.prompt_appearance(),
-                    prompt_spec(
-                        "이름의 뒤에 지정한 문자열을 붙여줍니다.",
-                        "붙일 문자열",
-                        "",
-                        LegacyText::default(),
-                        LegacyText::default(),
-                        &[],
-                    ),
-                )
-            } {
-                proposal_mutation(state, |model| {
-                    model.suffix_before_extension_changed(&result.value_one)
-                })
-            } else {
-                CommandOutcome::ui(UiEffect::None)
-            }
-        }
         CLEAR_NAME => proposal_mutation(state, LegacyList::clear_name_changed),
-        DELETE_POSITION => delete_position_command(window, state),
-        DELETE_DELIMITED => delete_delimited_command(window, state),
         KEEP_DIGITS => proposal_mutation(state, LegacyList::keep_ascii_digits_changed),
-        PAD_DIGITS => pad_digits_command(window, state),
-        SEQUENCE => sequence_command(window, state),
-        SORT => {
-            let (outcome, restore) = sort_command(window, state);
-            selection_restore = restore;
-            outcome
-        }
         EXT_DELETE => proposal_mutation(state, LegacyList::delete_extension_changed),
-        EXT_ADD => {
-            if let Some(result) = {
-                prompt_input_or_report(
-                    window,
-                    state.prompt_appearance(),
-                    prompt_spec(
-                        "확장자를 뒤에 붙입니다.",
-                        "붙일 확장자",
-                        "",
-                        LegacyText::default(),
-                        LegacyText::default(),
-                        &[],
-                    ),
-                )
-            } {
-                proposal_mutation(state, |model| {
-                    model.add_extension_changed(&result.value_one)
-                })
-            } else {
-                CommandOutcome::ui(UiEffect::None)
-            }
-        }
-        EXT_REPLACE => {
-            if let Some(result) = {
-                prompt_input_or_report(
-                    window,
-                    state.prompt_appearance(),
-                    prompt_spec(
-                        "확장자를 바꿔 줍니다.",
-                        "바꿀 확장자",
-                        "",
-                        LegacyText::default(),
-                        LegacyText::default(),
-                        &[],
-                    ),
-                )
-            } {
-                proposal_mutation(state, |model| {
-                    model.replace_extension_changed(&result.value_one)
-                })
-            } else {
-                CommandOutcome::ui(UiEffect::None)
-            }
-        }
         PARENT_PREFIX => proposal_mutation(state, LegacyList::prefix_parent_folder_changed),
         PARENT_SUFFIX => proposal_mutation(state, LegacyList::suffix_parent_folder_changed),
         UNIFY_PATH => {
@@ -533,9 +501,7 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
             CommandOutcome::ui(UiEffect::None)
         }
         THEME_SYSTEM | THEME_LIGHT | THEME_DARK => {
-            let Some(appearance) = appearance_after_theme_command(state.appearance, command) else {
-                return;
-            };
+            let appearance = appearance_after_theme_command(state.appearance, command)?;
             if appearance == state.appearance {
                 CommandOutcome::ui(UiEffect::None)
             } else {
@@ -552,6 +518,7 @@ pub(super) fn dispatch_command(window: HWND, state: &mut AppState, command: u16)
     };
     debug_assert!(command_effect_fits_policy(command, &outcome));
     apply_command_outcome(window, state, outcome, selection_restore);
+    None
 }
 
 #[derive(Default)]
@@ -694,11 +661,79 @@ pub(super) fn legacy_atoi(text: &LegacyText) -> i32 {
     }
 }
 
-fn pad_digits_command(window: HWND, state: &mut AppState) -> CommandOutcome {
-    let Some(result) = ({
-        prompt_input_or_report(
-            window,
-            state.prompt_appearance(),
+fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<PreparedPrompt> {
+    let (spec, continuation) = match command {
+        MANUAL_CHANGE => {
+            let row = selected_indices(state.list_window).first().copied()?;
+            let current = state.model.items().get(row)?.proposed_name().clone();
+            (
+                prompt_spec(
+                    format!("{} 를", current.to_string_lossy()),
+                    "으로",
+                    "",
+                    current,
+                    LegacyText::default(),
+                    &[],
+                ),
+                PromptContinuation::ManualChange { row },
+            )
+        }
+        REPLACE => (
+            prompt_spec(
+                "이름에 들어있는 문자열을 바꿉니다.",
+                "를",
+                "으로",
+                LegacyText::default(),
+                LegacyText::default(),
+                &[],
+            ),
+            PromptContinuation::Replace,
+        ),
+        PREFIX => (
+            prompt_spec(
+                "이름의 앞에 지정한 문자열을 붙여줍니다.",
+                "붙일 문자열",
+                "",
+                LegacyText::default(),
+                LegacyText::default(),
+                &[],
+            ),
+            PromptContinuation::Prefix,
+        ),
+        SUFFIX => (
+            prompt_spec(
+                "이름의 뒤에 지정한 문자열을 붙여줍니다.",
+                "붙일 문자열",
+                "",
+                LegacyText::default(),
+                LegacyText::default(),
+                &[],
+            ),
+            PromptContinuation::Suffix,
+        ),
+        EXT_ADD => (
+            prompt_spec(
+                "확장자를 뒤에 붙입니다.",
+                "붙일 확장자",
+                "",
+                LegacyText::default(),
+                LegacyText::default(),
+                &[],
+            ),
+            PromptContinuation::ExtensionAdd,
+        ),
+        EXT_REPLACE => (
+            prompt_spec(
+                "확장자를 바꿔 줍니다.",
+                "바꿀 확장자",
+                "",
+                LegacyText::default(),
+                LegacyText::default(),
+                &[],
+            ),
+            PromptContinuation::ExtensionReplace,
+        ),
+        PAD_DIGITS => (
             prompt_spec(
                 "숫자부분의 자리수를 맞춰 0을 붙입니다.",
                 "자리수",
@@ -707,37 +742,9 @@ fn pad_digits_command(window: HWND, state: &mut AppState) -> CommandOutcome {
                 LegacyText::default(),
                 &["제일 뒷번호 맞춤", "제일 앞번호 맞춤"],
             ),
-        )
-    }) else {
-        return CommandOutcome::ui(UiEffect::None);
-    };
-    let width = legacy_atoi(&result.value_one);
-    if width <= 0 {
-        message(window, "자리수 입력이 잘못되었습니다.", "DarkReNamer");
-        return CommandOutcome::ui(UiEffect::None);
-    }
-    let changed = {
-        let outcome = if result.choice == 0 {
-            state.model.pad_last_digit_run_changed(width as usize)
-        } else {
-            state.model.pad_first_digit_run_changed(width as usize)
-        };
-        match outcome {
-            Ok(changed) => changed,
-            Err(_) => {
-                message(window, "자리수 입력이 잘못되었습니다.", "DarkReNamer");
-                Box::default()
-            }
-        }
-    };
-    proposal_outcome(state, changed)
-}
-
-fn sequence_command(window: HWND, state: &mut AppState) -> CommandOutcome {
-    let Some(result) = ({
-        prompt_input_or_report(
-            window,
-            state.prompt_appearance(),
+            PromptContinuation::PadDigits,
+        ),
+        SEQUENCE => (
             prompt_spec(
                 "붙일 숫자의 자리수와 시작값을 지정합니다.",
                 "자리수",
@@ -751,13 +758,204 @@ fn sequence_command(window: HWND, state: &mut AppState) -> CommandOutcome {
                     "폴더별로 앞 번호붙임",
                 ],
             ),
-        )
-    }) else {
-        return CommandOutcome::ui(UiEffect::None);
+            PromptContinuation::Sequence,
+        ),
+        DELETE_POSITION => (
+            prompt_spec(
+                "지정위치를 삭제합니다.(첫글자는 1번째)",
+                "번째부터",
+                "번째까지",
+                LegacyText::default(),
+                LegacyText::default(),
+                &["앞에서부터 삭제", "제일 뒤부터 삭제"],
+            ),
+            PromptContinuation::DeletePosition,
+        ),
+        DELETE_DELIMITED => (
+            prompt_spec(
+                "지정된 문자로 묶인 부분을 삭제합니다.",
+                ":시작문자",
+                ":끝문자",
+                LegacyText::default(),
+                LegacyText::default(),
+                &[],
+            ),
+            PromptContinuation::DeleteDelimited,
+        ),
+        SORT => (
+            prompt_spec(
+                "정렬 기준 설정",
+                "",
+                "",
+                LegacyText::default(),
+                LegacyText::default(),
+                &[
+                    "파일 이름에 따라 오름차순",
+                    "파일 이름에 따라 내림차순",
+                    "전체경로에 따라 오름차순",
+                    "전체경로에 따라 내림차순",
+                    "실제 파일 크기에 따라 오름차순",
+                    "실제 파일 크기에 따라 내림차순",
+                    "수정한 시각에 따라 오름차순",
+                    "수정한 시각에 따라 내림차순",
+                    "만든 시각에 따라 오름차순",
+                    "만든 시각에 따라 내림차순",
+                ],
+            ),
+            PromptContinuation::Sort,
+        ),
+        _ => return None,
     };
+    state.next_prompt_id = state.next_prompt_id.wrapping_add(1).max(1);
+    let session_id = state.next_prompt_id;
+    state.active_prompt = Some(session_id);
+    Some(PreparedPrompt {
+        session_id,
+        expected_revision: state.revision(),
+        appearance: state.prompt_appearance(),
+        spec,
+        continuation,
+    })
+}
+
+pub(super) fn run_prepared_prompt(window: HWND, prompt: PreparedPrompt) {
+    let result = prompt_input_or_report(window, prompt.appearance, prompt.spec);
+    let Some(mut state_lease) = try_app_state(window) else {
+        return;
+    };
+    let state = state_lease.state_mut();
+    let worker_activity = state.worker_activity();
+    let worker_active = worker_activity.admission || worker_activity.plan || worker_activity.apply;
+    let completion_current = prompt_result_can_apply(
+        state.active_prompt,
+        prompt.session_id,
+        PromptCompletionLocks {
+            close_pending: state.close_pending,
+            read_only_locked: state.read_only_locked(),
+            mutation_locked: state.mutation_locked,
+            worker_active,
+        },
+        state.revision(),
+        prompt.expected_revision,
+    );
+    if state.active_prompt != Some(prompt.session_id) {
+        return;
+    }
+    state.active_prompt = None;
+    let Some(result) = result else {
+        if state.close_pending {
+            try_finish_window_close(window, state);
+        }
+        return;
+    };
+    if !completion_current {
+        state.set_transient_status(
+            "입력창이 열린 동안 목록 또는 작업 상태가 바뀌어 입력을 적용하지 않았습니다.",
+        );
+        update_controls(state);
+        if state.close_pending {
+            try_finish_window_close(window, state);
+        }
+        return;
+    }
+    let (outcome, selection_restore) =
+        finish_prompt_command(window, state, prompt.continuation, result);
+    apply_command_outcome(window, state, outcome, selection_restore);
+}
+
+fn prompt_result_can_apply(
+    active_session: Option<u64>,
+    session_id: u64,
+    locks: PromptCompletionLocks,
+    current_revision: ModelRevision,
+    expected_revision: ModelRevision,
+) -> bool {
+    active_session == Some(session_id)
+        && !locks.close_pending
+        && !locks.read_only_locked
+        && !locks.mutation_locked
+        && !locks.worker_active
+        && current_revision == expected_revision
+}
+
+fn finish_prompt_command(
+    window: HWND,
+    state: &mut AppState,
+    continuation: PromptContinuation,
+    result: PromptResult,
+) -> (CommandOutcome, Option<SelectionRestore>) {
+    let outcome = match continuation {
+        PromptContinuation::ManualChange { row } => {
+            let changed = state.model.manual_change_changed(row, result.value_one);
+            model_outcome(
+                state,
+                changed,
+                UiEffect::ProposalRowsChanged(vec![row].into_boxed_slice()),
+            )
+        }
+        PromptContinuation::Replace => proposal_mutation(state, |model| {
+            model.replace_complete_changed(&result.value_one, &result.value_two)
+        }),
+        PromptContinuation::Prefix => proposal_mutation(state, |model| {
+            model.prefix_complete_changed(&result.value_one)
+        }),
+        PromptContinuation::Suffix => proposal_mutation(state, |model| {
+            model.suffix_before_extension_changed(&result.value_one)
+        }),
+        PromptContinuation::ExtensionAdd => proposal_mutation(state, |model| {
+            model.add_extension_changed(&result.value_one)
+        }),
+        PromptContinuation::ExtensionReplace => proposal_mutation(state, |model| {
+            model.replace_extension_changed(&result.value_one)
+        }),
+        PromptContinuation::PadDigits => finish_pad_digits_command(window, state, &result),
+        PromptContinuation::Sequence => finish_sequence_command(window, state, &result),
+        PromptContinuation::DeletePosition => {
+            finish_delete_position_command(window, state, &result)
+        }
+        PromptContinuation::DeleteDelimited => {
+            finish_delete_delimited_command(window, state, &result)
+        }
+        PromptContinuation::Sort => return finish_sort_command(state, result.choice),
+    };
+    (outcome, None)
+}
+
+fn finish_pad_digits_command(
+    _window: HWND,
+    state: &mut AppState,
+    result: &PromptResult,
+) -> CommandOutcome {
     let width = legacy_atoi(&result.value_one);
     if width <= 0 {
-        message(window, "자리수 입력이 잘못되었습니다.", "DarkReNamer");
+        state.set_transient_status("자리수 입력이 잘못되었습니다.");
+        return CommandOutcome::ui(UiEffect::None);
+    }
+    let changed = {
+        let outcome = if result.choice == 0 {
+            state.model.pad_last_digit_run_changed(width as usize)
+        } else {
+            state.model.pad_first_digit_run_changed(width as usize)
+        };
+        match outcome {
+            Ok(changed) => changed,
+            Err(_) => {
+                state.set_transient_status("자리수 입력이 잘못되었습니다.");
+                Box::default()
+            }
+        }
+    };
+    proposal_outcome(state, changed)
+}
+
+fn finish_sequence_command(
+    _window: HWND,
+    state: &mut AppState,
+    result: &PromptResult,
+) -> CommandOutcome {
+    let width = legacy_atoi(&result.value_one);
+    if width <= 0 {
+        state.set_transient_status("자리수 입력이 잘못되었습니다.");
         return CommandOutcome::ui(UiEffect::None);
     }
     let mode = match result.choice {
@@ -778,43 +976,23 @@ fn sequence_command(window: HWND, state: &mut AppState) -> CommandOutcome {
     proposal_outcome(state, changed)
 }
 
-fn delete_position_command(window: HWND, state: &mut AppState) -> CommandOutcome {
-    let Some(result) = ({
-        prompt_input_or_report(
-            window,
-            state.prompt_appearance(),
-            prompt_spec(
-                "지정위치를 삭제합니다.(첫글자는 1번째)",
-                "번째부터",
-                "번째까지",
-                LegacyText::default(),
-                LegacyText::default(),
-                &["앞에서부터 삭제", "제일 뒤부터 삭제"],
-            ),
-        )
-    }) else {
-        return CommandOutcome::ui(UiEffect::None);
-    };
+fn finish_delete_position_command(
+    _window: HWND,
+    state: &mut AppState,
+    result: &PromptResult,
+) -> CommandOutcome {
     let start = legacy_atoi(&result.value_one);
     let end = legacy_atoi(&result.value_two);
     if start < 0 || end < 0 {
-        message(
-            window,
-            "음수값이나 잘못된 값이 입력되었습니다.",
-            "DarkReNamer",
-        );
+        state.set_transient_status("음수값이나 잘못된 값이 입력되었습니다.");
         return CommandOutcome::ui(UiEffect::None);
     }
     if result.choice == 0 && end > 0 && start > end {
-        message(window, "시작점이 끝점보다 뒤에 있습니다.", "DarkReNamer");
+        state.set_transient_status("시작점이 끝점보다 뒤에 있습니다.");
         return CommandOutcome::ui(UiEffect::None);
     }
     if result.choice == 1 && start != 0 {
-        message(
-            window,
-            "맨 뒤에서부터 삭제할때는 '~까지'만 필요합니다.",
-            "DarkReNamer",
-        );
+        state.set_transient_status("맨 뒤에서부터 삭제할때는 '~까지'만 필요합니다.");
         return CommandOutcome::ui(UiEffect::None);
     }
     let changed = {
@@ -830,34 +1008,18 @@ fn delete_position_command(window: HWND, state: &mut AppState) -> CommandOutcome
     proposal_outcome(state, changed)
 }
 
-fn delete_delimited_command(window: HWND, state: &mut AppState) -> CommandOutcome {
-    let Some(result) = ({
-        prompt_input_or_report(
-            window,
-            state.prompt_appearance(),
-            prompt_spec(
-                "지정된 문자로 묶인 부분을 삭제합니다.",
-                ":시작문자",
-                ":끝문자",
-                LegacyText::default(),
-                LegacyText::default(),
-                &[],
-            ),
-        )
-    }) else {
-        return CommandOutcome::ui(UiEffect::None);
-    };
+fn finish_delete_delimited_command(
+    _window: HWND,
+    state: &mut AppState,
+    result: &PromptResult,
+) -> CommandOutcome {
     let changed = match state
         .model
         .delete_first_delimited_changed(&result.value_one, &result.value_two)
     {
         Ok(changed) => changed,
         Err(LegacyInputError::EmptyDelimiter) => {
-            message(
-                window,
-                "시작/끝 문자가 정확하게 지정되지 않았습니다.",
-                "DarkReNamer",
-            );
+            state.set_transient_status("시작/끝 문자가 정확하게 지정되지 않았습니다.");
             Box::default()
         }
         Err(_) => Box::default(),
@@ -865,35 +1027,10 @@ fn delete_delimited_command(window: HWND, state: &mut AppState) -> CommandOutcom
     proposal_outcome(state, changed)
 }
 
-fn sort_command(window: HWND, state: &mut AppState) -> (CommandOutcome, Option<SelectionRestore>) {
-    let choices = [
-        "파일 이름에 따라 오름차순",
-        "파일 이름에 따라 내림차순",
-        "전체경로에 따라 오름차순",
-        "전체경로에 따라 내림차순",
-        "실제 파일 크기에 따라 오름차순",
-        "실제 파일 크기에 따라 내림차순",
-        "수정한 시각에 따라 오름차순",
-        "수정한 시각에 따라 내림차순",
-        "만든 시각에 따라 오름차순",
-        "만든 시각에 따라 내림차순",
-    ];
-    let Some(result) = ({
-        prompt_input_or_report(
-            window,
-            state.prompt_appearance(),
-            prompt_spec(
-                "정렬 기준 설정",
-                "",
-                "",
-                LegacyText::default(),
-                LegacyText::default(),
-                &choices,
-            ),
-        )
-    }) else {
-        return (CommandOutcome::ui(UiEffect::None), None);
-    };
+fn finish_sort_command(
+    state: &mut AppState,
+    choice: usize,
+) -> (CommandOutcome, Option<SelectionRestore>) {
     let modes = [
         LegacySortMode::NameAscending,
         LegacySortMode::NameDescending,
@@ -906,7 +1043,7 @@ fn sort_command(window: HWND, state: &mut AppState) -> (CommandOutcome, Option<S
         LegacySortMode::CreatedAscending,
         LegacySortMode::CreatedDescending,
     ];
-    if let Some(mode) = modes.get(result.choice) {
+    if let Some(mode) = modes.get(choice) {
         let selected = selected_indices(state.list_window);
         let tokens = selection_tokens(&state.model, &selected);
         let focused =

@@ -112,10 +112,17 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, STGMEDIUM, TYMED_HGLOBAL};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+#[cfg(test)]
+use windows_sys::Win32::System::Memory::{
+    MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE, VirtualAlloc, VirtualFree,
+    VirtualProtect,
+};
 use windows_sys::Win32::System::Ole::{
     CF_HDROP, DROPEFFECT_COPY, OleInitialize, OleUninitialize, RegisterDragDrop, ReleaseStgMedium,
     RevokeDragDrop,
 };
+#[cfg(test)]
+use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 use windows_sys::Win32::System::SystemServices::{
     SS_CENTER, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_NOPREFIX, SS_OWNERDRAW, SS_SUNKEN,
 };
@@ -365,6 +372,14 @@ impl<T, R> Drop for CallbackStateLease<T, R> {
     }
 }
 
+fn run_after_callback_state_release<T, R, O>(
+    lease: CallbackStateLease<T, R>,
+    action: impl FnOnce() -> O,
+) -> O {
+    drop(lease);
+    action()
+}
+
 type AppStateSlot = CallbackState<AppState, DropTargetRegistrations>;
 
 fn app_state_slot(window: HWND) -> *mut AppStateSlot {
@@ -399,6 +414,7 @@ struct AppState {
     model: LegacyList,
     shown_columns: [bool; 4],
     column_states: [ColumnState; 7],
+    status_column_width_dip: i32,
     appearance: UiAppearance,
     dpi: u32,
     command_states: [bool; 34],
@@ -423,6 +439,8 @@ struct AppState {
     appearance_terminal_observed: bool,
     close_pending: bool,
     confirmation_pending: bool,
+    active_prompt: Option<u64>,
+    next_prompt_id: u64,
     font_metrics: MeasuredFontMetrics,
     focus: FocusState,
     rails_visible: bool,
@@ -490,6 +508,7 @@ impl AppState {
             model: LegacyList::new(),
             shown_columns: shown_columns(&column_states),
             column_states,
+            status_column_width_dip: NATIVE_STATUS_COLUMN_WIDTH_DIP,
             appearance,
             dpi: BASE_DPI,
             command_states: [false; 34],
@@ -515,6 +534,8 @@ impl AppState {
             appearance_terminal_observed: false,
             close_pending: false,
             confirmation_pending: false,
+            active_prompt: None,
+            next_prompt_id: 0,
             font_metrics: MeasuredFontMetrics::default(),
             focus: FocusState::default(),
             rails_visible: true,
@@ -810,13 +831,13 @@ mod tests {
         let lease = unsafe { CallbackState::try_lease(slot) }
             .ok_or_else(|| io::Error::other("close-decision lease was rejected"))?;
         let close = *lease.state();
-        drop(lease);
-
-        // Applying the copied decision can reacquire the slot, proving that no
-        // state lease/reference survives into the external close action.
-        // SAFETY: the original lease ended and the slot remains live.
-        let action_probe = unsafe { CallbackState::try_lease(slot) }
-            .ok_or_else(|| io::Error::other("close action ran before lease release"))?;
+        let action_probe = run_after_callback_state_release(lease, || {
+            // Applying the copied decision can reacquire the slot, proving that
+            // no state lease/reference survives into the external action.
+            // SAFETY: the helper ended the original lease and the slot is live.
+            unsafe { CallbackState::try_lease(slot) }
+                .ok_or_else(|| io::Error::other("close action ran before lease release"))
+        })?;
         assert!(close);
         drop(action_probe);
         // SAFETY: no lease remains and the test is retiring its unique slot.
