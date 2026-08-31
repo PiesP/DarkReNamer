@@ -38,12 +38,22 @@ enum ObserveFailureTarget {
     Temporary,
 }
 
+#[derive(Clone, Copy)]
+enum MatchingObserveOverride {
+    Error {
+        observation: usize,
+        error: BackendError,
+    },
+    Occupied {
+        observation: usize,
+    },
+}
+
 struct FailingObserveBackend {
     inner: MemoryBackend,
     target: ObserveFailureTarget,
     matching_observations: std::cell::Cell<usize>,
-    fail_on_matching_observation: usize,
-    error: BackendError,
+    result_override: MatchingObserveOverride,
 }
 
 impl RenameBackend for FailingObserveBackend {
@@ -69,8 +79,25 @@ impl RenameBackend for FailingObserveBackend {
         if matches {
             let matching_observations = self.matching_observations.get().saturating_add(1);
             self.matching_observations.set(matching_observations);
-            if matching_observations == self.fail_on_matching_observation {
-                return Err(self.error);
+            match self.result_override {
+                MatchingObserveOverride::Error { observation, error }
+                    if matching_observations == observation =>
+                {
+                    return Err(error);
+                }
+                MatchingObserveOverride::Occupied { observation }
+                    if matching_observations == observation =>
+                {
+                    let mut snapshot = self.inner.observe(path)?;
+                    snapshot.entry = self
+                        .inner
+                        .observe(&darknamer_core::LegacyText::from(
+                            "C:\\work\\occupied.fixture",
+                        ))?
+                        .entry;
+                    return Ok(snapshot);
+                }
+                _ => {}
             }
         }
         self.inner.observe(path)
@@ -110,8 +137,10 @@ fn assert_freeze_observe_error_is_preserved(
         inner: planned_backend,
         target,
         matching_observations: std::cell::Cell::new(0),
-        fail_on_matching_observation,
-        error: expected,
+        result_override: MatchingObserveOverride::Error {
+            observation: fail_on_matching_observation,
+            error: expected,
+        },
     };
     let mut journal = MemoryJournal::new();
 
@@ -519,6 +548,34 @@ fn freeze_observe_temporary_error_preserves_backend_error() -> Result<(), Box<dy
         2,
         995,
     )
+}
+
+#[test]
+fn temporary_occupied_between_schedule_and_freeze_is_rejected_before_journal_or_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let planned_backend = MemoryBackend::new()
+        .with_file("C:\\work\\A.TXT", 1)
+        .with_file("C:\\work\\occupied.fixture", 999);
+    let confirmed = confirmed_plan(&planned_backend, vec![intent(0, "A.TXT", "a.txt")])?;
+    let mut backend = FailingObserveBackend {
+        inner: planned_backend,
+        target: ObserveFailureTarget::Temporary,
+        matching_observations: std::cell::Cell::new(0),
+        result_override: MatchingObserveOverride::Occupied { observation: 2 },
+    };
+    let mut journal = MemoryJournal::new();
+
+    let error = RenameExecutor::new(&mut backend, &mut journal)
+        .execute(confirmed)
+        .err()
+        .ok_or_else(|| std::io::Error::other("occupied temporary endpoint was executed"))?;
+
+    assert_eq!(error.entry, Some(EntryId::new(0)));
+    assert_eq!(error.kind, ExecuteErrorKind::TemporaryOccupied);
+    assert_eq!(backend.matching_observations.get(), 2);
+    assert_eq!(backend.inner.mutation_count(), 0);
+    assert!(journal.records().is_empty());
+    Ok(())
 }
 
 #[test]
