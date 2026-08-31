@@ -1,6 +1,14 @@
 use super::*;
 
 const LIST_VIEW_NOTIFICATION_SUBCLASS_ID: usize = 1;
+const STATUS_COLUMN_TEXT_PADDING_DIP: i32 = 24;
+const STATUS_COLUMN_TEXT_SAMPLES: [&str; 5] = [
+    NATIVE_STATUS_COLUMN.label,
+    "변경 예정",
+    "주의: 이름 본체",
+    "차단: 이름",
+    "차단: 충돌",
+];
 
 pub(super) fn install_list_view_notification_subclass(state: &AppState) -> io::Result<()> {
     // Store only the copied owner HWND. Each callback resolves and leases the
@@ -63,15 +71,21 @@ unsafe extern "system" fn list_view_notification_subclass(
             // caller storage.
             let header = unsafe { SendMessageW(window, LVM_GETHEADER, 0, 0) } as HWND;
             let owner = owner_ref as HWND;
-            let Some(state_lease) = try_app_state(owner) else {
+            let Some(mut state_lease) = try_app_state(owner) else {
                 // SAFETY: same-state reentry must not reconstruct AppState;
                 // preserve the common-control chain unchanged instead.
                 return unsafe { DefSubclassProc(window, message, wparam, lparam) };
             };
-            let state = state_lease.state();
-            if let Some(result) =
-                handle_fixed_status_header_double_click(window, header, state.dpi, lparam)
-            {
+            let state = state_lease.state_mut();
+            if let Some(result) = handle_status_header_double_click(
+                state.list_window,
+                header,
+                state.font.as_raw(),
+                state.dpi,
+                lparam,
+            ) {
+                state.status_column_width_dip = NATIVE_STATUS_COLUMN_WIDTH_DIP;
+                update_primary_column_widths(state);
                 return result;
             }
             // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix synchronously.
@@ -123,10 +137,10 @@ pub(super) fn update_dpi_metrics(state: &mut AppState) {
 }
 
 fn set_native_status_column_width(state: &AppState) {
-    set_native_status_column_width_for(state.list_window, state.dpi);
+    set_native_status_column_width_for(state.list_window, native_status_column_width_px(state));
 }
 
-fn set_native_status_column_width_for(list_window: HWND, dpi: u32) {
+fn set_native_status_column_width_for(list_window: HWND, width: i32) {
     // SAFETY: list_window is live and the fixed native-only column index and
     // DPI-scaled width are integral values retained by the control.
     unsafe {
@@ -134,14 +148,40 @@ fn set_native_status_column_width_for(list_window: HWND, dpi: u32) {
             list_window,
             LVM_SETCOLUMNWIDTH,
             NATIVE_STATUS_COLUMN_INDEX,
-            scale_dip(NATIVE_STATUS_COLUMN_WIDTH_DIP, dpi) as isize,
+            width.max(0) as isize,
         )
     };
 }
 
-fn handle_fixed_status_header_double_click(
+fn native_status_column_minimum_px(state: &AppState) -> i32 {
+    native_status_column_minimum_px_for(state.list_window, state.font.as_raw(), state.dpi)
+}
+
+fn native_status_column_minimum_px_for(list_window: HWND, font: HFONT, dpi: u32) -> i32 {
+    let measured = STATUS_COLUMN_TEXT_SAMPLES
+        .into_iter()
+        .filter_map(|text| measure_text(list_window, font, text, true))
+        .map(|(width, _height)| width)
+        .max()
+        .unwrap_or_default()
+        .saturating_add(scale_dip(STATUS_COLUMN_TEXT_PADDING_DIP, dpi));
+    scale_dip(NATIVE_STATUS_COLUMN_WIDTH_DIP, dpi).max(measured)
+}
+
+fn native_status_column_width_px(state: &AppState) -> i32 {
+    scale_dip(state.status_column_width_dip, state.dpi).max(native_status_column_minimum_px(state))
+}
+
+fn reset_native_status_column_width(state: &mut AppState) {
+    state.status_column_width_dip = NATIVE_STATUS_COLUMN_WIDTH_DIP;
+    set_native_status_column_width(state);
+    update_primary_column_widths(state);
+}
+
+fn handle_status_header_double_click(
     list_window: HWND,
     header_window: HWND,
+    font: HFONT,
     dpi: u32,
     lparam: LPARAM,
 ) -> Option<LRESULT> {
@@ -163,9 +203,12 @@ fn handle_fixed_status_header_double_click(
         return None;
     }
     let _list_update = ProgrammaticListUpdateGuard::begin();
-    set_native_status_column_width_for(list_window, dpi);
-    // Returning nonzero to the Header control's direct parent prevents its
-    // default divider-double-click auto-sizing for this fixed native column.
+    set_native_status_column_width_for(
+        list_window,
+        native_status_column_minimum_px_for(list_window, font, dpi),
+    );
+    // Returning nonzero to the Header control's direct parent replaces default
+    // auto-sizing with the measured minimum for this native-only column.
     Some(1)
 }
 
@@ -179,8 +222,10 @@ pub(super) fn update_primary_column_widths(state: &AppState) {
     // live window's normalized DPI.
     let scrollbar_allowance = unsafe { GetSystemMetricsForDpi(SM_CXVSCROLL, state.dpi) }
         .max(scale_dip(LIST_SCROLLBAR_ALLOWANCE_DIP, state.dpi));
+    let status_extra = native_status_column_width_px(state)
+        .saturating_sub(scale_dip(NATIVE_STATUS_COLUMN_WIDTH_DIP, state.dpi));
     let widths = allocate_primary_column_widths(
-        rect.right - rect.left,
+        (rect.right - rect.left).saturating_sub(status_extra),
         state.dpi,
         &state.column_states,
         scrollbar_allowance,
@@ -260,14 +305,38 @@ pub(super) fn handle_header_end_track(state: &mut AppState, lparam: LPARAM) -> b
     ) {
         if column == NATIVE_STATUS_COLUMN_INDEX {
             let _list_update = ProgrammaticListUpdateGuard::begin();
-            set_native_status_column_width(state);
+            reset_native_status_column_width(state);
             return true;
         }
         return false;
     }
     if column == NATIVE_STATUS_COLUMN_INDEX {
+        let requested_width = {
+            let header_fields = lparam as *const NMHEADERW;
+            // SAFETY: header_column_notification established a live NMHEADERW;
+            // its non-null pitem advertises cxy through HDI_WIDTH. Otherwise the
+            // live ListView returns the current integral width without retaining
+            // caller memory.
+            unsafe {
+                let item = (*header_fields).pitem;
+                if !item.is_null() && (*item).mask & HDI_WIDTH != 0 {
+                    (*item).cxy
+                } else {
+                    SendMessageW(
+                        state.list_window,
+                        LVM_GETCOLUMNWIDTH,
+                        NATIVE_STATUS_COLUMN_INDEX,
+                        0,
+                    ) as i32
+                }
+            }
+        };
+        let minimum = native_status_column_minimum_px(state);
+        state.status_column_width_dip =
+            status_column_width_after_resize(requested_width, minimum, state.dpi);
         let _list_update = ProgrammaticListUpdateGuard::begin();
         set_native_status_column_width(state);
+        update_primary_column_widths(state);
         return true;
     }
     if column >= state.column_states.len() {
@@ -1285,9 +1354,10 @@ mod native_tests {
                 ..NMHEADERW::default()
             };
             assert_eq!(
-                handle_fixed_status_header_double_click(
+                handle_status_header_double_click(
                     list,
                     header,
+                    null_mut(),
                     192,
                     (&raw mut double_click) as LPARAM,
                 ),

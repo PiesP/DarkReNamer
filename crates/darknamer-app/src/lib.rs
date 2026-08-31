@@ -2917,6 +2917,16 @@ pub(crate) const fn default_column_states() -> [ColumnState; 7] {
 }
 
 #[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn status_column_width_after_resize(
+    requested_width_px: i32,
+    measured_minimum_px: i32,
+    dpi: u32,
+) -> i32 {
+    unscale_px(requested_width_px.max(measured_minimum_px), dpi).max(NATIVE_STATUS_COLUMN_WIDTH_DIP)
+}
+
+#[cfg(any(windows, test))]
 #[path = "windows/preferences.rs"]
 mod preferences;
 
@@ -6185,7 +6195,7 @@ mod tests {
     }
 
     #[test]
-    fn native_status_column_is_fixed_outside_seven_column_preferences() {
+    fn native_status_column_is_runtime_only_outside_seven_column_preferences() {
         assert_eq!(COLUMNS.len(), 7);
         assert_eq!(default_column_states().len(), 7);
         assert_eq!(
@@ -6200,6 +6210,10 @@ mod tests {
         let widths = allocate_primary_column_widths(449, 96, &default_column_states(), 17);
         assert_eq!(widths, [120, 120, 80]);
         assert_eq!(widths.iter().sum::<i32>(), 449 - 17 - 112);
+
+        assert_eq!(status_column_width_after_resize(80, 146, 96), 146);
+        assert_eq!(status_column_width_after_resize(240, 146, 96), 240);
+        assert_eq!(status_column_width_after_resize(480, 292, 192), 240);
     }
 
     #[test]

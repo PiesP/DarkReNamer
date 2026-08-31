@@ -645,6 +645,7 @@ unsafe extern "system" fn window_proc(
             notify_appearance_dialog_accessibility(state);
             apply_native_appearance_nonblocking(window, state);
             refresh_system_fonts(state);
+            update_dpi_metrics(state);
             if let Err(error) = ensure_minimum_track_size(window, state) {
                 super::message(
                     window,
@@ -690,6 +691,7 @@ unsafe extern "system" fn window_proc(
             // SAFETY: state_ptr is the live UI-thread AppState.
             let state = unsafe { &mut *state_ptr };
             refresh_system_fonts(state);
+            update_dpi_metrics(state);
             if let Err(error) = ensure_minimum_track_size(window, state) {
                 super::message(
                     window,
