@@ -754,36 +754,7 @@ impl Drop for OwnedTemp {
 
 #[cfg(windows)]
 fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(core::iter::once(0))
-        .collect::<Vec<_>>();
-    let destination = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(core::iter::once(0))
-        .collect::<Vec<_>>();
-    // SAFETY: both paths are owned, NUL-terminated UTF-16 buffers retained for
-    // this synchronous call; the source is the exact same-directory temp file
-    // created by this process and the destination is the settings leaf.
-    if unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    } == 0
-    {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    crate::windows::atomic_replace_preferences(source, destination)
 }
 
 #[cfg(not(windows))]

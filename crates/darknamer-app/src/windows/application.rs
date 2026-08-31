@@ -20,11 +20,8 @@ pub(super) fn run() -> io::Result<()> {
 }
 
 fn minimum_track_width(window: HWND, state: &AppState) -> i32 {
-    // SAFETY: both structures are C-compatible integer rectangles with valid
-    // all-zero initial states for the two synchronous geometry queries.
-    let mut outer: RECT = unsafe { zeroed() };
-    // SAFETY: see above.
-    let mut client: RECT = unsafe { zeroed() };
+    let mut outer = RECT::default();
+    let mut client = RECT::default();
     // SAFETY: window is the live top-level HWND and outer remains writable for
     // the duration of this synchronous query.
     let got_outer = unsafe { GetWindowRect(window, &mut outer) } != 0;
@@ -216,9 +213,7 @@ fn apply_focus_target(target: HWND) {
 }
 
 fn ensure_minimum_track_size(window: HWND, state: &AppState) -> io::Result<()> {
-    // SAFETY: RECT has a valid all-zero representation and remains writable for
-    // the synchronous top-level window geometry query.
-    let mut rect: RECT = unsafe { zeroed() };
+    let mut rect = RECT::default();
     // SAFETY: window is the live top-level HWND owned by this UI thread.
     if unsafe { GetWindowRect(window, &mut rect) } == 0 {
         return Err(io::Error::last_os_error());
@@ -385,8 +380,7 @@ fn run_unsafe() -> io::Result<()> {
     if let Some(notice) = startup_notice {
         message(window, &notice, "DarkReNamer - 복구 상태");
     }
-    // SAFETY: MSG is a C-compatible structure for which all-zero is a valid pre-GetMessageW state.
-    let mut message: MSG = unsafe { zeroed() };
+    let mut message = MSG::default();
     loop {
         // SAFETY: message is writable MSG storage outliving GetMessageW; null HWND requests this thread queue.
         let result = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };

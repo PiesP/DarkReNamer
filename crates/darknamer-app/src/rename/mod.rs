@@ -13,8 +13,16 @@ mod ports;
 mod recovery;
 mod schedule;
 #[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "the Windows rename backend is the audited handle-relative filesystem boundary"
+)]
 mod windows_backend;
 #[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "the Windows native adapter owns audited raw handle and NT API calls"
+)]
 pub(crate) mod windows_native;
 
 pub use activation::{

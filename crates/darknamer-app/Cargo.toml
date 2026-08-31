@@ -52,7 +52,7 @@ windows-sys = { version = "0.61.2", features = [
 ] }
 
 [lints.rust]
-unsafe_code = "allow"
+unsafe_code = "deny"
 unsafe_op_in_unsafe_fn = "deny"
 
 [lints.clippy]

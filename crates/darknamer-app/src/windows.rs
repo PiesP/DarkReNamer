@@ -5,9 +5,9 @@ use std::ffi::c_void;
 use std::fs;
 use std::io;
 use std::marker::PhantomData;
-use std::mem::{size_of, zeroed};
+use std::mem::size_of;
 use std::num::NonZeroIsize;
-use std::os::windows::ffi::OsStringExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
@@ -106,7 +106,10 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::Graphics::Gdi::{GetBkColor, GetObjectType, GetTextColor, OBJ_BRUSH};
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
-use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, MOVEFILE_REPLACE_EXISTING,
+    MOVEFILE_WRITE_THROUGH, MoveFileExW,
+};
 use windows_sys::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, STGMEDIUM, TYMED_HGLOBAL};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Ole::{
@@ -714,6 +717,34 @@ const fn int_resource(id: u16) -> *const u16 {
     id as usize as *const u16
 }
 
+pub(crate) fn atomic_replace_preferences(source: &Path, destination: &Path) -> io::Result<()> {
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(core::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(core::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both paths are owned, NUL-terminated UTF-16 buffers retained for
+    // this synchronous call; the source is the exact same-directory temp file
+    // created by this process and the destination is the settings leaf.
+    if unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1136,9 +1167,7 @@ mod tests {
         );
         assert_eq!(state.model.clear_name_changed().as_ref(), &[0]);
 
-        // SAFETY: NMLVCUSTOMDRAW is C-compatible and every field read by the
-        // production handler is initialized explicitly below before the call.
-        let mut custom: NMLVCUSTOMDRAW = unsafe { zeroed() };
+        let mut custom = NMLVCUSTOMDRAW::default();
         custom.nmcd.hdr.hwndFrom = state.list_window;
         custom.nmcd.hdr.code = NM_CUSTOMDRAW;
         custom.nmcd.dwDrawStage = CDDS_ITEMPREPAINT | CDDS_SUBITEM;

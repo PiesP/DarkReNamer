@@ -92,6 +92,27 @@ production recovery path. They assert expected original or committed names,
 unchanged sentinel files, no temporary names, and either terminal cleanup or an
 explicit recovery lock.
 
+### Unsafe boundary policy
+
+`darknamer-app` denies unsafe code by default, and the non-Windows library raises
+that policy to `forbid`. Narrow exceptions are attached only to the native UI
+module declaration in `src/lib.rs`, the two Windows rename adapter declarations
+in `src/rename/mod.rs`, and the native backend integration-test crate. Code
+outside those boundaries must remain safe Rust.
+
+`unsafe_source_inventory_matches_the_reviewed_budget` in
+`tests/unsafe_policy.rs` enforces exact per-file lexical budgets. Those budgets
+are review caps rather than evidence of soundness: additions fail, and removals
+must lower the corresponding budget in the same reviewed change. Every modified
+exception still requires a local `SAFETY` justification and must pass the
+Windows Clippy gate while `undocumented_unsafe_blocks` and
+`unsafe_op_in_unsafe_fn` remain denied.
+
+Rust toolchain or Windows binding upgrades, and every release-candidate review,
+must re-evaluate whether safe `Default`, RAII ownership, typed COM wrappers, or
+typed native APIs can replace any remaining exception before accepting the
+current budget.
+
 Those child-process terminations verify recovery after application-process
 loss. They do not establish behavior across an operating-system crash, abrupt
 VM or hardware power loss, storage write-cache loss, or power-loss durability

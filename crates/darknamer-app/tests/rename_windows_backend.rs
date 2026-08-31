@@ -1,4 +1,8 @@
 #![cfg(windows)]
+#![allow(
+    unsafe_code,
+    reason = "this Windows integration target exercises the audited native backend with OS handles"
+)]
 
 use std::fs;
 use std::os::windows::ffi::OsStrExt;
