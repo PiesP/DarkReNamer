@@ -1,5 +1,8 @@
 //! Exact lexical budget for the package's explicitly allowed native unsafe code.
 
+#[path = "support/source_root.rs"]
+mod source_root;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -129,7 +132,7 @@ const EXPECTED: &[(&str, UnsafeCounts)] = &[
 
 #[test]
 fn unsafe_source_inventory_matches_the_reviewed_budget() -> Result<(), Box<dyn std::error::Error>> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = source_root::repository_root()?.join("crates/darknamer-app");
     let mut files = Vec::new();
     collect_rust_files(&root, &mut files)?;
     files.sort();

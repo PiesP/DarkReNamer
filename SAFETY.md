@@ -114,6 +114,12 @@ Capability-dependent Windows tests may report a structured local skip through
 set that module's required mode, so an unavailable case-sensitivity query,
 reparse fixture, or journal-root capability is a failing gate rather than a
 successful test. Hosted commands retain the capability result in their logs.
+Source-inspection tests built on one host and executed beside a copied checkout
+may set `DARKRENAMER_TEST_SOURCE_ROOT` to that checkout's absolute repository
+root. The test support validates repository markers before reading source; an
+explicit invalid root fails instead of falling back to the compile-time Cargo
+path. Ordinary Cargo, CI, and prerelease runs leave the variable unset and
+inspect their own checkout.
 
 ### Unsafe boundary policy
 

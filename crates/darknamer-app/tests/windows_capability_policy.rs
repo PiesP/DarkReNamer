@@ -1,11 +1,63 @@
+#[path = "support/source_root.rs"]
+mod source_root;
 #[path = "support/windows_capabilities.rs"]
 mod windows_capabilities;
 
 use std::ffi::OsStr;
 use std::fs;
+use std::io;
 use std::path::Path;
 
 use windows_capabilities::{GateMode, gate_mode_from, unavailable_in_mode};
+
+#[test]
+fn privilege_not_held_is_a_symlink_creation_capability_error() {
+    let error = io::Error::from_raw_os_error(1_314);
+
+    assert!(windows_capabilities::is_symlink_creation_capability_error(
+        &error
+    ));
+}
+
+#[test]
+fn explicit_test_source_root_replaces_the_embedded_build_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = tempfile::tempdir()?;
+    let repository = fixture.path();
+    fs::create_dir_all(repository.join(".github/workflows"))?;
+    fs::create_dir_all(repository.join("crates/darknamer-app"))?;
+    fs::write(repository.join("Cargo.toml"), b"[workspace]\n")?;
+    fs::write(repository.join(".github/workflows/ci.yaml"), b"name: CI\n")?;
+    fs::write(
+        repository.join("crates/darknamer-app/Cargo.toml"),
+        b"[package]\nname = \"darknamer-app\"\n",
+    )?;
+
+    let resolved = source_root::repository_root_from(
+        Some(repository.as_os_str()),
+        Path::new("/missing/wsl-build/crates/darknamer-app"),
+    )?;
+
+    assert_eq!(resolved, repository);
+    Ok(())
+}
+
+#[test]
+fn explicit_test_source_root_without_repository_markers_fails_closed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = tempfile::tempdir()?;
+
+    let error = source_root::repository_root_from(
+        Some(fixture.path().as_os_str()),
+        Path::new("/missing/wsl-build/crates/darknamer-app"),
+    )
+    .err()
+    .ok_or_else(|| io::Error::other("invalid test source root was accepted"))?;
+
+    assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    assert!(error.to_string().contains("repository marker"));
+    Ok(())
+}
 
 #[test]
 fn local_optional_mode_emits_an_explicit_skip_outcome() {
@@ -54,10 +106,7 @@ fn invalid_required_mode_configuration_fails_closed() {
 #[test]
 fn hosted_windows_and_release_gates_require_capabilities_with_visible_output()
 -> Result<(), Box<dyn std::error::Error>> {
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| std::io::Error::other("repository root is unavailable"))?;
+    let repository = source_root::repository_root()?;
     for workflow in [
         ".github/workflows/ci.yaml",
         ".github/workflows/release.yaml",

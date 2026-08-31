@@ -320,11 +320,11 @@ fn windows_reparse_loop_is_not_followed_and_missing_metadata_is_reported()
     let loop_path = root.join("loop");
     let symlink_available = match symlink_dir(&root, &loop_path) {
         Ok(()) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+        Err(error) if windows_capabilities::is_symlink_creation_capability_error(&error) => {
             windows_capabilities::unavailable(
                 "symlink-creation",
                 error.raw_os_error(),
-                "permission-denied",
+                "permission-denied-or-privilege-not-held",
             )?;
             false
         }
