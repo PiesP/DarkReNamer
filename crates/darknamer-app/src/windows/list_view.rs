@@ -782,10 +782,42 @@ pub(super) fn refresh_proposal_rows(state: &mut AppState, changed: &[usize]) {
         refresh(state);
         return;
     };
-    refresh_preview_count_cache(state);
-    let Some(status_rows) = status_delta_rows(state) else {
-        refresh(state);
-        return;
+    let status_rows = if let [row] = plan.rows.as_ref() {
+        let item = &state.model.items()[*row];
+        let update = state.preview_issue_cache.refresh_one_by(
+            state.model.len(),
+            *row,
+            (
+                item.root_path(),
+                item.current_name(),
+                item.proposed_name(),
+                item.is_directory(),
+            ),
+            preview_destination_key,
+        );
+        let Some(update) = update else {
+            refresh(state);
+            return;
+        };
+        if !state.preview_count_cache.refresh_one(
+            state.model.len(),
+            update.previous_changed,
+            update.current_changed,
+        ) {
+            refresh(state);
+            return;
+        }
+        state
+            .ui_status
+            .set_preview_notice(state.preview_issue_cache.notice());
+        update.affected_rows
+    } else {
+        refresh_preview_count_cache(state);
+        let Some(status_rows) = status_delta_rows(state) else {
+            refresh(state);
+            return;
+        };
+        status_rows
     };
     debug_assert_eq!(plan.proposal_cells, plan.rows.len());
     debug_assert_eq!(plan.immutable_cells, 0);

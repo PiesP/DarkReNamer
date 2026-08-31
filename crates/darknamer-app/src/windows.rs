@@ -41,8 +41,8 @@ use crate::rename::{
     preflight_plan_cancellable, process_is_elevated, safe_mode_unify_path_message,
 };
 use darknamer_core::{
-    LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,
-    ProposalMutationError, SortSemantics,
+    LegacyAppendIndex, LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode,
+    LegacySortMode, LegacyText, ProposalMutationError, SortSemantics,
 };
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawWindowHandle,
@@ -430,6 +430,7 @@ struct AppState {
     left_rail: Option<CommandRail>,
     right_rail: Option<CommandRail>,
     model: LegacyList,
+    append_index: LegacyAppendIndex<fn(&LegacyText, &LegacyText) -> std::cmp::Ordering>,
     shown_columns: [bool; 4],
     column_states: [ColumnState; 7],
     status_column_width_dip: i32,
@@ -524,6 +525,9 @@ impl AppState {
             left_rail: None,
             right_rail: None,
             model: LegacyList::new(),
+            append_index: LegacyAppendIndex::new(
+                compare_windows as fn(&LegacyText, &LegacyText) -> std::cmp::Ordering,
+            ),
             shown_columns: shown_columns(&column_states),
             column_states,
             status_column_width_dip: NATIVE_STATUS_COLUMN_WIDTH_DIP,
@@ -1215,10 +1219,11 @@ mod tests {
         let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
         state.appearance.theme = AppThemeMode::Light;
         state.forced_colors = ForcedColorsState::Inactive;
-        assert!(
+        assert_eq!(
             state
                 .model
-                .append(LegacyListItem::new(r"C:\work\photo01.jpg", false, 4, 0, 0,))
+                .append(LegacyListItem::new(r"C:\work\photo01.jpg", false, 4, 0, 0,)),
+            Ok(true)
         );
         assert_eq!(state.model.clear_name_changed().as_ref(), &[0]);
 

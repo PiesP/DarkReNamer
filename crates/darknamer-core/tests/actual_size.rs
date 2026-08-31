@@ -10,22 +10,28 @@ fn legacy_constructor_preserves_legacy_and_actual_size() {
 #[test]
 fn safe_size_policy_orders_by_full_actual_size() {
     let mut list = LegacyList::new();
-    assert!(list.append(LegacyListItem::new_with_actual_size(
-        "C:\\large.bin",
-        false,
-        1,
-        u64::from(u32::MAX) + 2,
-        1,
-        2,
-    )));
-    assert!(list.append(LegacyListItem::new_with_actual_size(
-        "C:\\small.bin",
-        false,
-        2,
-        2,
-        1,
-        2,
-    )));
+    assert_eq!(
+        list.append(LegacyListItem::new_with_actual_size(
+            "C:\\large.bin",
+            false,
+            1,
+            u64::from(u32::MAX) + 2,
+            1,
+            2,
+        )),
+        Ok(true)
+    );
+    assert_eq!(
+        list.append(LegacyListItem::new_with_actual_size(
+            "C:\\small.bin",
+            false,
+            2,
+            2,
+            1,
+            2,
+        )),
+        Ok(true)
+    );
 
     list.sort_by_with_semantics(
         LegacySortMode::SizeAscending,
@@ -42,22 +48,28 @@ fn safe_size_policy_orders_by_full_actual_size() {
 #[test]
 fn actual_size_is_display_metadata_while_sort_remains_legacy_compatible() {
     let mut list = LegacyList::new();
-    assert!(list.append(LegacyListItem::new_with_actual_size(
-        "C:\\large.bin",
-        false,
-        1,
-        u64::from(u32::MAX) + 2,
-        1,
-        2,
-    )));
-    assert!(list.append(LegacyListItem::new_with_actual_size(
-        "C:\\small.bin",
-        false,
-        2,
-        2,
-        1,
-        2,
-    )));
+    assert_eq!(
+        list.append(LegacyListItem::new_with_actual_size(
+            "C:\\large.bin",
+            false,
+            1,
+            u64::from(u32::MAX) + 2,
+            1,
+            2,
+        )),
+        Ok(true)
+    );
+    assert_eq!(
+        list.append(LegacyListItem::new_with_actual_size(
+            "C:\\small.bin",
+            false,
+            2,
+            2,
+            1,
+            2,
+        )),
+        Ok(true)
+    );
 
     list.sort(LegacySortMode::SizeAscending);
 
