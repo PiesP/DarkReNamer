@@ -52,8 +52,13 @@ system colors and native focus and selection precedence across every surface.
 
 Advanced appearance controls are intentionally under **View > Appearance**.
 They offer semantic density and emphasis presets plus separator, changed-name
-background highlight, and empty-state safety-copy visibility. They do not affect the rename model,
-Apply authorization, journal, recovery state, or Undo data.
+background highlight, and empty-state safety-copy visibility. The native dialog
+keeps Reset, OK, and Cancel in a fixed footer while its settings body scrolls at
+narrow work-area sizes, large system fonts, and high DPI. The acceptance
+evidence contract includes 250% and 300% targets, but those targets remain
+unexecuted until source-bound results from real Windows hosts are recorded.
+Appearance settings do not affect the rename model, Apply authorization,
+journal, recovery state, or Undo data.
 
 The runnable product remains one `DarkReNamer.exe`. Column and appearance
 preferences are stored below `%LOCALAPPDATA%\DarkReNamer`; no configuration

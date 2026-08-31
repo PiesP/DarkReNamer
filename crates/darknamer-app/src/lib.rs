@@ -749,6 +749,12 @@ pub(crate) const fn unpack_ui_appearance(packed: u32) -> Option<UiAppearance> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AppearanceDialogLayout {
     pub(crate) client: LayoutRect,
+    pub(crate) body_viewport: LayoutRect,
+    pub(crate) body_content_height: i32,
+    pub(crate) scroll_max: i32,
+    pub(crate) scroll_page: i32,
+    pub(crate) footer: LayoutRect,
+    pub(crate) compact_footer: bool,
     pub(crate) density_group: LayoutRect,
     pub(crate) density_options: [LayoutRect; 4],
     pub(crate) emphasis_group: LayoutRect,
@@ -770,18 +776,36 @@ pub(crate) struct AppearanceDialogMetrics {
     pub(crate) widest_checkbox: i32,
     pub(crate) button_text_height: i32,
     pub(crate) widest_button: i32,
+    pub(crate) wrapped_option_height: i32,
+    pub(crate) wrapped_checkbox_height: i32,
+    pub(crate) forced_explanation_height: i32,
 }
 
 #[cfg(any(windows, test))]
 #[must_use]
-fn bounded_dialog_rect(x: i32, y: i32, width: i32, height: i32, client: LayoutRect) -> LayoutRect {
-    let x = x.max(0).min(client.width);
-    let y = y.max(0).min(client.height);
+fn bounded_dialog_rect(x: i32, y: i32, width: i32, height: i32, bounds: LayoutRect) -> LayoutRect {
+    let x = x.max(0).min(bounds.width);
+    let y = y.max(0).min(bounds.height);
     LayoutRect {
         x,
         y,
-        width: width.max(0).min(client.width.saturating_sub(x)),
-        height: height.max(0).min(client.height.saturating_sub(y)),
+        width: width.max(0).min(bounds.width.saturating_sub(x)),
+        height: height.max(0).min(bounds.height.saturating_sub(y)),
+    }
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn clamp_appearance_dialog_scroll(
+    layout: AppearanceDialogLayout,
+    scroll_y: i32,
+) -> i32 {
+    if scroll_y < 0 {
+        0
+    } else if scroll_y > layout.scroll_max {
+        layout.scroll_max
+    } else {
+        scroll_y
     }
 }
 
@@ -805,15 +829,33 @@ pub(crate) fn calculate_appearance_dialog_layout(
         .max(measured.widest_option.saturating_add(scale_dip(64, dpi)))
         .max(measured.widest_checkbox.saturating_add(scale_dip(48, dpi)))
         .max(button_row_width);
-    let row_height = scale_dip(20, dpi).max(measured.text_height.saturating_add(scale_dip(6, dpi)));
+    let minimum_width = scale_dip(240, dpi).max(horizontal_footer_minimum_width(dpi, button_width));
+    if maximum_width < minimum_width || maximum_height <= 0 {
+        return None;
+    }
+    let client_width = desired_width.min(maximum_width);
+    let row_height = scale_dip(20, dpi)
+        .max(measured.text_height.saturating_add(scale_dip(6, dpi)))
+        .max(
+            measured
+                .wrapped_option_height
+                .saturating_add(scale_dip(4, dpi)),
+        );
     let row_stride = row_height.saturating_add(scale_dip(2, dpi));
     let density_group_height = scale_dip(22, dpi).saturating_add(row_stride.saturating_mul(4));
     let emphasis_group_height = scale_dip(22, dpi).saturating_add(row_stride.saturating_mul(3));
-    let checkbox_height =
-        scale_dip(22, dpi).max(measured.text_height.saturating_add(scale_dip(6, dpi)));
+    let checkbox_height = scale_dip(22, dpi)
+        .max(measured.text_height.saturating_add(scale_dip(6, dpi)))
+        .max(
+            measured
+                .wrapped_checkbox_height
+                .saturating_add(scale_dip(4, dpi)),
+        );
     let checkbox_stride = checkbox_height.saturating_add(scale_dip(6, dpi));
     let explanation_height = if show_forced_explanation {
-        scale_dip(40, dpi).max(measured.text_height.saturating_mul(2))
+        scale_dip(40, dpi)
+            .max(measured.text_height.saturating_mul(2))
+            .max(measured.forced_explanation_height)
     } else {
         0
     };
@@ -839,36 +881,105 @@ pub(crate) fn calculate_appearance_dialog_layout(
     let separator_y = checkbox_y
         .saturating_add(checkbox_stride.saturating_mul(3))
         .saturating_add(scale_dip(4, dpi));
-    let buttons_y = separator_y.saturating_add(scale_dip(14, dpi));
-    let desired_height = buttons_y
-        .saturating_add(button_height)
-        .saturating_add(scale_dip(18, dpi));
-    if maximum_width < desired_width || maximum_height < desired_height {
+    let body_content_height = separator_y
+        .saturating_add(scale_dip(1, dpi))
+        .saturating_add(scale_dip(12, dpi));
+    let available_footer_width = client_width.saturating_sub(horizontal_margin.saturating_mul(2));
+    let compact_footer =
+        available_footer_width < button_row_width.saturating_sub(scale_dip(24, dpi));
+    let footer_height = if compact_footer {
+        button_height
+            .saturating_mul(2)
+            .saturating_add(scale_dip(26, dpi))
+    } else {
+        button_height.saturating_add(scale_dip(18, dpi))
+    };
+    let minimum_viewport_height = scale_dip(48, dpi);
+    if maximum_height < footer_height.saturating_add(minimum_viewport_height) {
         return None;
     }
+    let desired_height = body_content_height.saturating_add(footer_height);
+    let client_height = desired_height.min(maximum_height);
     let client = LayoutRect {
         x: 0,
         y: 0,
-        width: desired_width,
-        height: desired_height,
+        width: client_width,
+        height: client_height,
     };
-    let content_width = desired_width.saturating_sub(horizontal_margin.saturating_mul(2));
-    let rect = |x, y, width, height| bounded_dialog_rect(x, y, width, height, client);
+    let body_viewport = LayoutRect {
+        x: 0,
+        y: 0,
+        width: client_width,
+        height: client_height.saturating_sub(footer_height),
+    };
+    let footer = LayoutRect {
+        x: 0,
+        y: body_viewport.height,
+        width: client_width,
+        height: footer_height,
+    };
+    let body_bounds = LayoutRect {
+        x: 0,
+        y: 0,
+        width: client_width.saturating_sub(scale_dip(18, dpi)),
+        height: body_content_height,
+    };
+    let content_width = body_bounds
+        .width
+        .saturating_sub(horizontal_margin.saturating_mul(2));
+    let rect = |x, y, width, height| bounded_dialog_rect(x, y, width, height, body_bounds);
     let option_x = scale_dip(28, dpi);
-    let option_width = desired_width.saturating_sub(scale_dip(64, dpi));
+    let option_width = body_bounds.width.saturating_sub(scale_dip(64, dpi));
     let group_option_y = |group_y: i32, index: i32| {
         group_y
             .saturating_add(scale_dip(22, dpi))
             .saturating_add(row_stride.saturating_mul(index))
     };
-    let cancel_x = desired_width
+    let footer_button_width = if compact_footer {
+        available_footer_width.saturating_sub(scale_dip(8, dpi)) / 2
+    } else {
+        button_width
+    };
+    let cancel_x = client_width
         .saturating_sub(horizontal_margin)
-        .saturating_sub(button_width);
+        .saturating_sub(footer_button_width);
     let ok_x = cancel_x
         .saturating_sub(scale_dip(8, dpi))
-        .saturating_sub(button_width);
+        .saturating_sub(footer_button_width);
+    let buttons_y = if compact_footer {
+        footer
+            .y
+            .saturating_add(scale_dip(10, dpi))
+            .saturating_add(button_height)
+            .saturating_add(scale_dip(6, dpi))
+    } else {
+        footer.y.saturating_add(scale_dip(9, dpi))
+    };
+    let reset_rect = if compact_footer {
+        bounded_dialog_rect(
+            horizontal_margin,
+            footer.y.saturating_add(scale_dip(8, dpi)),
+            available_footer_width,
+            button_height,
+            client,
+        )
+    } else {
+        bounded_dialog_rect(
+            horizontal_margin,
+            buttons_y,
+            reset_width,
+            button_height,
+            client,
+        )
+    };
     Some(AppearanceDialogLayout {
         client,
+        body_viewport,
+        body_content_height,
+        scroll_max: body_content_height.saturating_sub(body_viewport.height),
+        scroll_page: body_viewport.height,
+        footer,
+        compact_footer,
         density_group: rect(
             horizontal_margin,
             density_y,
@@ -941,19 +1052,19 @@ pub(crate) fn calculate_appearance_dialog_layout(
             rect(
                 scale_dip(20, dpi),
                 checkbox_y,
-                desired_width.saturating_sub(scale_dip(40, dpi)),
+                body_bounds.width.saturating_sub(scale_dip(40, dpi)),
                 checkbox_height,
             ),
             rect(
                 scale_dip(20, dpi),
                 checkbox_y.saturating_add(checkbox_stride),
-                desired_width.saturating_sub(scale_dip(40, dpi)),
+                body_bounds.width.saturating_sub(scale_dip(40, dpi)),
                 checkbox_height,
             ),
             rect(
                 scale_dip(20, dpi),
                 checkbox_y.saturating_add(checkbox_stride.saturating_mul(2)),
-                desired_width.saturating_sub(scale_dip(40, dpi)),
+                body_bounds.width.saturating_sub(scale_dip(40, dpi)),
                 checkbox_height,
             ),
         ],
@@ -963,10 +1074,24 @@ pub(crate) fn calculate_appearance_dialog_layout(
             content_width,
             scale_dip(1, dpi),
         ),
-        reset: rect(horizontal_margin, buttons_y, reset_width, button_height),
-        ok: rect(ok_x, buttons_y, button_width, button_height),
-        cancel: rect(cancel_x, buttons_y, button_width, button_height),
+        reset: reset_rect,
+        ok: bounded_dialog_rect(ok_x, buttons_y, footer_button_width, button_height, client),
+        cancel: bounded_dialog_rect(
+            cancel_x,
+            buttons_y,
+            footer_button_width,
+            button_height,
+            client,
+        ),
     })
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+const fn horizontal_footer_minimum_width(dpi: u32, button_width: i32) -> i32 {
+    scale_dip(24, dpi)
+        .saturating_add(button_width.saturating_mul(2))
+        .saturating_add(scale_dip(8, dpi))
 }
 
 /// Pixel metrics used to place one command rail.
@@ -5088,7 +5213,14 @@ mod tests {
 
     #[test]
     fn advanced_appearance_layout_keeps_every_control_inside_work_area_bounds() {
-        for (dpi, width, height) in [(96, 456, 420), (144, 684, 630), (192, 912, 840)] {
+        for (dpi, width, height) in [
+            (96, 360, 300),
+            (120, 450, 360),
+            (144, 540, 400),
+            (192, 720, 500),
+            (240, 900, 600),
+            (288, 1_080, 700),
+        ] {
             let layout = calculate_appearance_dialog_layout(
                 dpi,
                 width,
@@ -5100,7 +5232,7 @@ mod tests {
             let Some(layout) = layout else {
                 continue;
             };
-            let rects = [
+            let body_rects = [
                 layout.density_group,
                 layout.density_options[0],
                 layout.density_options[1],
@@ -5115,15 +5247,25 @@ mod tests {
                 layout.checkboxes[1],
                 layout.checkboxes[2],
                 layout.separator,
-                layout.reset,
-                layout.ok,
-                layout.cancel,
             ];
             assert!(layout.client.width <= width);
             assert!(layout.client.height <= height);
+            assert_eq!(layout.body_viewport.y, 0);
+            assert_eq!(layout.footer.y, layout.body_viewport.height);
+            assert_eq!(layout.footer.bottom(), layout.client.height);
+            assert_eq!(layout.scroll_page, layout.body_viewport.height);
+            assert_eq!(
+                layout.scroll_max,
+                layout.body_content_height - layout.scroll_page
+            );
             assert_eq!(layout.separator.height, scale_dip(1, dpi));
-            for rect in rects {
+            for rect in body_rects {
                 assert!(rect.x >= 0 && rect.y >= 0 && rect.width >= 0 && rect.height >= 0);
+                assert!(rect.x.saturating_add(rect.width) <= layout.client.width);
+                assert!(rect.bottom() <= layout.body_content_height);
+            }
+            for rect in [layout.reset, layout.ok, layout.cancel] {
+                assert!(rect.x >= 0 && rect.y >= layout.footer.y);
                 assert!(rect.x.saturating_add(rect.width) <= layout.client.width);
                 assert!(rect.bottom() <= layout.client.height);
             }
@@ -5150,8 +5292,8 @@ mod tests {
         );
         let layout = calculate_appearance_dialog_layout(
             96,
-            456,
-            420,
+            360,
+            300,
             true,
             AppearanceDialogMetrics::default(),
         );
@@ -5162,7 +5304,7 @@ mod tests {
         let Some(layout) = layout else {
             return;
         };
-        let interactive = [
+        let body_interactive = [
             layout.density_options[0],
             layout.density_options[1],
             layout.density_options[2],
@@ -5173,17 +5315,14 @@ mod tests {
             layout.checkboxes[0],
             layout.checkboxes[1],
             layout.checkboxes[2],
-            layout.reset,
-            layout.ok,
-            layout.cancel,
         ];
         assert!(
-            interactive
+            body_interactive
                 .iter()
                 .all(|rect| rect.width > 0 && rect.height > 0)
         );
-        for (index, left) in interactive.iter().enumerate() {
-            for right in &interactive[index + 1..] {
+        for (index, left) in body_interactive.iter().enumerate() {
+            for right in &body_interactive[index + 1..] {
                 let overlaps = left.x < right.x.saturating_add(right.width)
                     && right.x < left.x.saturating_add(left.width)
                     && left.y < right.bottom()
@@ -5194,23 +5333,21 @@ mod tests {
 
         let ordinary = calculate_appearance_dialog_layout(
             96,
-            456,
-            420,
+            360,
+            300,
             false,
             AppearanceDialogMetrics::default(),
         );
         let forced = calculate_appearance_dialog_layout(
             96,
-            456,
-            420,
+            360,
+            300,
             true,
             AppearanceDialogMetrics::default(),
         );
         let (Some(ordinary), Some(forced)) = (ordinary, forced) else {
             return;
         };
-        assert_eq!(ordinary.client.height, scale_dip(372, 96));
-        assert_eq!(forced.client.height, scale_dip(420, 96));
         assert_eq!(ordinary.forced_explanation.width, 0);
         assert_eq!(ordinary.forced_explanation.height, 0);
         assert!(forced.forced_explanation.width > 0);
@@ -5219,11 +5356,11 @@ mod tests {
             forced.checkboxes[0].y - ordinary.checkboxes[0].y,
             scale_dip(48, 96)
         );
-        assert_eq!(forced.reset.y - ordinary.reset.y, scale_dip(48, 96));
-        assert_eq!(
-            ordinary.client.height - ordinary.cancel.bottom(),
-            forced.client.height - forced.cancel.bottom(),
-        );
+        assert_eq!(ordinary.footer, forced.footer);
+        assert_eq!(ordinary.reset, forced.reset);
+        assert_eq!(ordinary.ok, forced.ok);
+        assert_eq!(ordinary.cancel, forced.cancel);
+        assert!(forced.scroll_max > ordinary.scroll_max);
 
         let large = calculate_appearance_dialog_layout(
             96,
@@ -5236,6 +5373,9 @@ mod tests {
                 widest_checkbox: 600,
                 button_text_height: 34,
                 widest_button: 180,
+                wrapped_option_height: 72,
+                wrapped_checkbox_height: 80,
+                forced_explanation_height: 110,
             },
         );
         assert!(
@@ -5246,9 +5386,58 @@ mod tests {
             return;
         };
         assert!(large.client.width > forced.client.width);
-        assert!(large.client.height > forced.client.height);
         assert!(large.density_options[0].height >= 42);
         assert!(large.cancel.height >= 46);
+        assert!(large.forced_explanation.height >= 110);
+    }
+
+    #[test]
+    fn advanced_appearance_layout_reflows_footer_and_clamps_scroll() {
+        let layout = calculate_appearance_dialog_layout(
+            96,
+            260,
+            220,
+            true,
+            AppearanceDialogMetrics::default(),
+        );
+        assert!(layout.is_some());
+        let Some(layout) = layout else {
+            return;
+        };
+        assert!(layout.compact_footer);
+        assert!(layout.reset.bottom() <= layout.ok.y);
+        assert_eq!(layout.ok.y, layout.cancel.y);
+        assert!(layout.footer.y >= layout.body_viewport.bottom());
+        assert!(layout.scroll_max > 0);
+        assert_eq!(clamp_appearance_dialog_scroll(layout, -10), 0);
+        assert_eq!(
+            clamp_appearance_dialog_scroll(layout, i32::MAX),
+            layout.scroll_max
+        );
+    }
+
+    #[test]
+    fn appearance_model_draft_survives_relayout_inputs() {
+        let original = UiAppearance::default();
+        let mut model = AppearanceDialogModel::new(original, ForcedColorsState::Inactive);
+        assert!(matches!(
+            model.apply(AppearanceDialogAction::Density(
+                RailDensityPreference::MenuOnly
+            )),
+            AppearanceDialogEffect::Preview(_)
+        ));
+        let draft = model.draft();
+        for dpi in [96, 120, 144, 192, 240, 288] {
+            let layout = calculate_appearance_dialog_layout(
+                dpi,
+                scale_dip(360, dpi),
+                scale_dip(240, dpi),
+                false,
+                AppearanceDialogMetrics::default(),
+            );
+            assert!(layout.is_some());
+            assert_eq!(model.draft(), draft);
+        }
     }
 
     #[test]

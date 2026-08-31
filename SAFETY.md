@@ -129,8 +129,9 @@ promotes missing work to release evidence.
 
 Complete release-gate evidence requires all of the following:
 
-- one unique UI result for Windows 10 and Windows 11 at 100%, 125%, 150%, and
-  200% DPI in both normal and high-contrast modes (16 cells total), all passed;
+- one unique UI result for Windows 10 and Windows 11 at 100%, 125%, 150%, 200%,
+  250%, and 300% DPI in both normal and high-contrast modes (24 cells total),
+  all passed;
 - one passed result per operating system for keyboard-only operation,
   accessibility inspection with tool and version, Explorer drag-and-drop,
   common dialogs, clipboard, worker cancellation, worker close, startup

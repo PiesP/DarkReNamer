@@ -5,27 +5,31 @@ use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, COLOR_WINDOW, DT_CALCRECT, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
-    DrawTextW, EndPaint, FillRect, FrameRect, GetMonitorInfoW, GetSysColorBrush,
-    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, PAINTSTRUCT, SelectObject, SetBkMode,
-    SetTextColor, TRANSPARENT, UpdateWindow,
+    DT_WORDBREAK, DrawTextW, EndPaint, FillRect, FrameRect, GetDC, GetMonitorInfoW,
+    GetSysColorBrush, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, MonitorFromWindow,
+    PAINTSTRUCT, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::SystemServices::{SS_NOPREFIX, SS_OWNERDRAW};
+use windows_sys::Win32::System::SystemServices::{SS_EDITCONTROL, SS_NOPREFIX, SS_OWNERDRAW};
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::ODT_STATIC;
-use windows_sys::Win32::UI::Controls::{BST_CHECKED, BST_UNCHECKED, SetWindowTheme};
+use windows_sys::Win32::UI::Controls::{BST_CHECKED, BST_UNCHECKED, SetScrollInfo, SetWindowTheme};
 use windows_sys::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_DEFPUSHBUTTON,
-    BS_GROUPBOX, BS_OWNERDRAW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW,
-    DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, GetWindowRect, IDCANCEL, IDOK,
-    IsWindow, PostMessageW, RegisterClassExW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
-    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CLOSE,
-    WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DPICHANGED, WM_DRAWITEM,
-    WM_ERASEBKGND, WM_FONTCHANGE, WM_GETFONT, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT,
-    WM_PRINTCLIENT, WM_SETFONT, WM_SETTINGCHANGE, WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN,
-    WS_EX_TOOLWINDOW, WS_GROUP, WS_POPUP, WS_SYSMENU, WS_TABSTOP,
+    BS_GROUPBOX, BS_MULTILINE, BS_NOTIFY, BS_OWNERDRAW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetScrollInfo,
+    GetWindowLongPtrW, GetWindowRect, IDCANCEL, IDOK, IsWindow, PostMessageW, RegisterClassExW,
+    SB_BOTTOM, SB_CTL, SB_ENDSCROLL, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP,
+    SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP, SCROLLINFO, SIF_PAGE, SIF_POS, SIF_RANGE,
+    SIF_TRACKPOS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOREDRAW, SWP_NOZORDER, SendMessageW,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CLOSE, WM_COMMAND,
+    WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
+    WM_FONTCHANGE, WM_GETFONT, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT,
+    WM_PRINTCLIENT, WM_SETFONT, WM_SETTINGCHANGE, WM_VSCROLL, WNDCLASSEXW, WS_CAPTION,
+    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT, WS_EX_TOOLWINDOW, WS_GROUP, WS_POPUP,
+    WS_SYSMENU, WS_TABSTOP, WS_VSCROLL,
 };
 
 use super::*;
@@ -44,6 +48,7 @@ const FORCED_EXPLANATION_ID: u16 = 0xA130;
 const RESET_DEFAULTS_ID: u16 = 0xA140;
 const APPEARANCE_FINISH_ACCEPTED: u32 = 1 << 31;
 const APPEARANCE_GROUP_SUBCLASS_ID: usize = 1;
+const APPEARANCE_VIEWPORT_SUBCLASS_ID: usize = 2;
 const DENSITY_GROUP_LABEL: &str = "명령 버튼 표시";
 const DENSITY_LABELS: [&str; 4] = ["자동 (권장)", "여유 있게", "촘촘하게", "메뉴만"];
 const EMPHASIS_GROUP_LABEL: &str = "변경 강조";
@@ -74,6 +79,7 @@ struct AppearanceDialogWindowState {
     owner: HWND,
     session_id: u32,
     model: AppearanceDialogModel,
+    viewport: HWND,
     density_group: HWND,
     density_group_state: *mut AppearanceGroupSubclassState,
     density: [HWND; 4],
@@ -88,6 +94,8 @@ struct AppearanceDialogWindowState {
     cancel: HWND,
     font: OwnedFont,
     measured: AppearanceDialogMetrics,
+    layout: Option<AppearanceDialogLayout>,
+    scroll_y: i32,
     appearance_resources: Option<AppearanceResources>,
     system_theme: Option<ResolvedTheme>,
     dpi: u32,
@@ -332,14 +340,6 @@ fn create_appearance_dialog_window(
     if instance.is_null() {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: owner is the live top-level HWND used only for its current DPI.
-    let owner_dpi = unsafe { GetDpiForWindow(owner) }.max(BASE_DPI);
-    let show_forced_explanation = matches!(forced_colors, ForcedColorsState::ActiveOrUnknown);
-    if !appearance_dialog_fits_work_area(owner, owner_dpi, show_forced_explanation) {
-        return Err(io::Error::other(
-            "monitor work area is too small for the appearance dialog",
-        ));
-    }
     let class_name = wide("DarkReNamerAppearanceDialog");
     // SAFETY: null instance plus IDC_ARROW requests the predefined cursor.
     let cursor = unsafe {
@@ -368,6 +368,7 @@ fn create_appearance_dialog_window(
         owner,
         session_id,
         model: AppearanceDialogModel::new(appearance, forced_colors),
+        viewport: null_mut(),
         density_group: null_mut(),
         density_group_state: null_mut(),
         density: [null_mut(); 4],
@@ -382,6 +383,8 @@ fn create_appearance_dialog_window(
         cancel: null_mut(),
         font: OwnedFont::default(),
         measured: AppearanceDialogMetrics::default(),
+        layout: None,
+        scroll_y: 0,
         appearance_resources: None,
         system_theme,
         dpi: BASE_DPI,
@@ -429,8 +432,44 @@ fn create_appearance_dialog_window(
 }
 
 fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io::Result<()> {
+    let static_class = wide("STATIC");
+    // SAFETY: the standard STATIC class, parent, and current module are live;
+    // WS_EX_CONTROLPARENT preserves dialog-manager traversal into body controls.
+    state.viewport = unsafe {
+        CreateWindowExW(
+            WS_EX_CONTROLPARENT,
+            static_class.as_ptr(),
+            null(),
+            WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS | WS_VSCROLL,
+            0,
+            0,
+            0,
+            0,
+            window,
+            0xA0F0_usize as *mut c_void,
+            GetModuleHandleW(null()),
+            null_mut(),
+        )
+    };
+    if state.viewport.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the dialog-owned state has a stable Box address until the dialog
+    // reaches WM_NCDESTROY; viewport refdata stores only that pointer.
+    if unsafe {
+        SetWindowSubclass(
+            state.viewport,
+            Some(appearance_viewport_subclass),
+            APPEARANCE_VIEWPORT_SUBCLASS_ID,
+            (state as *mut AppearanceDialogWindowState) as usize,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let body = state.viewport;
     state.density_group = child(
-        window,
+        body,
         "BUTTON",
         DENSITY_GROUP_LABEL,
         0xA100,
@@ -440,36 +479,40 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
         install_appearance_group_subclass(state.density_group, DENSITY_GROUP_LABEL)?;
     state.density = [
         child(
-            window,
+            body,
             "BUTTON",
             DENSITY_LABELS[0],
             DENSITY_AUTOMATIC_ID,
-            BS_AUTORADIOBUTTON as u32 | WS_GROUP | WS_TABSTOP,
+            BS_AUTORADIOBUTTON as u32
+                | BS_MULTILINE as u32
+                | BS_NOTIFY as u32
+                | WS_GROUP
+                | WS_TABSTOP,
         )?,
         child(
-            window,
+            body,
             "BUTTON",
             DENSITY_LABELS[1],
             DENSITY_COMFORTABLE_ID,
-            BS_AUTORADIOBUTTON as u32 | WS_TABSTOP,
+            BS_AUTORADIOBUTTON as u32 | BS_MULTILINE as u32 | BS_NOTIFY as u32 | WS_TABSTOP,
         )?,
         child(
-            window,
+            body,
             "BUTTON",
             DENSITY_LABELS[2],
             DENSITY_COMPACT_ID,
-            BS_AUTORADIOBUTTON as u32 | WS_TABSTOP,
+            BS_AUTORADIOBUTTON as u32 | BS_MULTILINE as u32 | BS_NOTIFY as u32 | WS_TABSTOP,
         )?,
         child(
-            window,
+            body,
             "BUTTON",
             DENSITY_LABELS[3],
             DENSITY_MENU_ONLY_ID,
-            BS_AUTORADIOBUTTON as u32 | WS_TABSTOP,
+            BS_AUTORADIOBUTTON as u32 | BS_MULTILINE as u32 | BS_NOTIFY as u32 | WS_TABSTOP,
         )?,
     ];
     state.emphasis_group = child(
-        window,
+        body,
         "BUTTON",
         EMPHASIS_GROUP_LABEL,
         0xA110,
@@ -479,58 +522,62 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
         install_appearance_group_subclass(state.emphasis_group, EMPHASIS_GROUP_LABEL)?;
     state.emphasis = [
         child(
-            window,
+            body,
             "BUTTON",
             EMPHASIS_LABELS[0],
             EMPHASIS_SUBTLE_ID,
-            BS_AUTORADIOBUTTON as u32 | WS_GROUP | WS_TABSTOP,
+            BS_AUTORADIOBUTTON as u32
+                | BS_MULTILINE as u32
+                | BS_NOTIFY as u32
+                | WS_GROUP
+                | WS_TABSTOP,
         )?,
         child(
-            window,
+            body,
             "BUTTON",
             EMPHASIS_LABELS[1],
             EMPHASIS_STANDARD_ID,
-            BS_AUTORADIOBUTTON as u32 | WS_TABSTOP,
+            BS_AUTORADIOBUTTON as u32 | BS_MULTILINE as u32 | BS_NOTIFY as u32 | WS_TABSTOP,
         )?,
         child(
-            window,
+            body,
             "BUTTON",
             EMPHASIS_LABELS[2],
             EMPHASIS_STRONG_ID,
-            BS_AUTORADIOBUTTON as u32 | WS_TABSTOP,
+            BS_AUTORADIOBUTTON as u32 | BS_MULTILINE as u32 | BS_NOTIFY as u32 | WS_TABSTOP,
         )?,
     ];
     state.forced_explanation = child(
-        window,
+        body,
         "STATIC",
         "고대비가 활성화되어 변경 강조와 배경 강조는 시스템 색상을 사용합니다.",
         FORCED_EXPLANATION_ID,
-        SS_NOPREFIX,
+        SS_NOPREFIX | SS_EDITCONTROL,
     )?;
     state.checkboxes = [
         child(
-            window,
+            body,
             "BUTTON",
             SEPARATOR_LABEL,
             SHOW_SEPARATORS_ID,
-            BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
+            BS_AUTOCHECKBOX as u32 | BS_MULTILINE as u32 | BS_NOTIFY as u32 | WS_TABSTOP,
         )?,
         child(
-            window,
+            body,
             "BUTTON",
             TINT_LABEL,
             SHOW_PREVIEW_TINT_ID,
-            BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
+            BS_AUTOCHECKBOX as u32 | BS_MULTILINE as u32 | BS_NOTIFY as u32 | WS_TABSTOP,
         )?,
         child(
-            window,
+            body,
             "BUTTON",
             EMPTY_SAFETY_LABEL,
             SHOW_EMPTY_SAFETY_ID,
-            BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
+            BS_AUTOCHECKBOX as u32 | BS_MULTILINE as u32 | BS_NOTIFY as u32 | WS_TABSTOP,
         )?,
     ];
-    state.separator = child(window, "STATIC", "", 0xA131, SS_OWNERDRAW)?;
+    state.separator = child(body, "STATIC", "", 0xA131, SS_OWNERDRAW)?;
     state.reset = child(
         window,
         "BUTTON",
@@ -644,7 +691,7 @@ fn apply_action(
     window: HWND,
     state: &mut AppearanceDialogWindowState,
     action: AppearanceDialogAction,
-) {
+) -> bool {
     let close = matches!(
         action,
         AppearanceDialogAction::Accept | AppearanceDialogAction::Cancel
@@ -660,10 +707,7 @@ fn apply_action(
         apply_dialog_appearance(window, state);
     }
     send_effect(state, effect);
-    if close {
-        // SAFETY: window is the live appearance dialog and closes once per terminal action.
-        unsafe { DestroyWindow(window) };
-    }
+    close
 }
 
 fn apply_dialog_appearance(window: HWND, state: &mut AppearanceDialogWindowState) {
@@ -998,6 +1042,89 @@ fn measure_appearance_dialog(window: HWND, font: HFONT) -> AppearanceDialogMetri
         widest_checkbox: checkbox_width,
         button_text_height: button_height,
         widest_button: button_width,
+        wrapped_option_height: 0,
+        wrapped_checkbox_height: 0,
+        forced_explanation_height: 0,
+    }
+}
+
+fn measure_wrapped_text(window: HWND, font: HFONT, text: &str, width: i32) -> i32 {
+    if window.is_null() || font.is_null() || text.is_empty() || width <= 0 {
+        return 0;
+    }
+    let text = wide(text);
+    let Ok(length) = i32::try_from(text.len().saturating_sub(1)) else {
+        return 0;
+    };
+    // SAFETY: window/font are live UI-thread handles and the DC is released
+    // before return. The selected state-owned font outlives this measurement.
+    let dc = unsafe { GetDC(window) };
+    if dc.is_null() {
+        return 0;
+    }
+    // SAFETY: font remains state-owned for the synchronous calculation.
+    let previous = unsafe { SelectObject(dc, font) };
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: 0,
+    };
+    // SAFETY: UTF-16 storage and rectangle remain live for this calculation.
+    let measured = unsafe {
+        DrawTextW(
+            dc,
+            text.as_ptr(),
+            length,
+            &mut rect,
+            DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
+        )
+    };
+    if !previous.is_null() {
+        // SAFETY: restore the exact object returned by SelectObject.
+        unsafe { SelectObject(dc, previous) };
+    }
+    // SAFETY: dc was acquired from this exact window above.
+    unsafe { ReleaseDC(window, dc) };
+    if measured > 0 {
+        (rect.bottom - rect.top).max(0)
+    } else {
+        0
+    }
+}
+
+fn measure_wrapped_appearance_dialog(
+    state: &AppearanceDialogWindowState,
+    layout: AppearanceDialogLayout,
+) -> AppearanceDialogMetrics {
+    let font = state.font.as_raw();
+    let option_width = layout.density_options[0]
+        .width
+        .saturating_sub(scale_dip(22, state.dpi));
+    let checkbox_width = layout.checkboxes[0]
+        .width
+        .saturating_sub(scale_dip(22, state.dpi));
+    let wrapped_option_height = DENSITY_LABELS
+        .iter()
+        .chain(EMPHASIS_LABELS.iter())
+        .map(|label| measure_wrapped_text(state.viewport, font, label, option_width))
+        .max()
+        .unwrap_or(0);
+    let wrapped_checkbox_height = [SEPARATOR_LABEL, TINT_LABEL, EMPTY_SAFETY_LABEL]
+        .iter()
+        .map(|label| measure_wrapped_text(state.viewport, font, label, checkbox_width))
+        .max()
+        .unwrap_or(0);
+    AppearanceDialogMetrics {
+        wrapped_option_height,
+        wrapped_checkbox_height,
+        forced_explanation_height: measure_wrapped_text(
+            state.viewport,
+            font,
+            "고대비가 활성화되어 변경 강조와 배경 강조는 시스템 색상을 사용합니다.",
+            layout.forced_explanation.width,
+        ),
+        ..state.measured
     }
 }
 
@@ -1012,50 +1139,46 @@ fn controls(state: &AppearanceDialogWindowState) -> impl Iterator<Item = HWND> +
         .chain([state.separator, state.reset, state.ok, state.cancel])
 }
 
-fn appearance_dialog_fits_work_area(anchor: HWND, dpi: u32, show_forced_explanation: bool) -> bool {
-    // SAFETY: anchor is a live top-level HWND and no pointer is retained.
-    let monitor = unsafe { MonitorFromWindow(anchor, MONITOR_DEFAULTTONEAREST) };
-    if monitor.is_null() {
-        return false;
-    }
-    let mut info = MONITORINFO {
-        cbSize: size_of::<MONITORINFO>() as u32,
-        ..MONITORINFO::default()
-    };
-    // SAFETY: monitor is live and info is writable with its exact size.
-    if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
-        return false;
-    }
-    let style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
-    let mut chrome = RECT::default();
-    // SAFETY: chrome is writable RECT storage and style/DPI are copied values.
-    if unsafe { AdjustWindowRectExForDpi(&mut chrome, style, 0, WS_EX_TOOLWINDOW, dpi) } == 0 {
-        return false;
-    }
-    let maximum_width = info
-        .rcWork
-        .right
-        .saturating_sub(info.rcWork.left)
-        .saturating_sub(chrome.right.saturating_sub(chrome.left));
-    let maximum_height = info
-        .rcWork
-        .bottom
-        .saturating_sub(info.rcWork.top)
-        .saturating_sub(chrome.bottom.saturating_sub(chrome.top));
-    calculate_appearance_dialog_layout(
-        dpi,
-        maximum_width,
-        maximum_height,
-        show_forced_explanation,
-        AppearanceDialogMetrics::default(),
-    )
-    .is_some()
+fn body_controls(state: &AppearanceDialogWindowState) -> impl Iterator<Item = HWND> + '_ {
+    [state.density_group]
+        .into_iter()
+        .chain(state.density)
+        .chain([state.emphasis_group])
+        .chain(state.emphasis)
+        .chain([state.forced_explanation])
+        .chain(state.checkboxes)
+        .chain([state.separator])
 }
 
-fn arrange_dialog(window: HWND, state: &AppearanceDialogWindowState, center_owner: bool) -> bool {
-    let anchor = if center_owner { state.owner } else { window };
-    // SAFETY: anchor is a live top-level owner/dialog HWND and no pointer is retained.
-    let monitor = unsafe { MonitorFromWindow(anchor, MONITOR_DEFAULTTONEAREST) };
+#[derive(Clone, Copy)]
+enum AppearanceDialogPlacement {
+    CenterOwner,
+    KeepCurrent,
+    DpiSuggested(RECT),
+}
+
+fn arrange_dialog(
+    window: HWND,
+    state: &mut AppearanceDialogWindowState,
+    placement: AppearanceDialogPlacement,
+) -> bool {
+    let anchor = match placement {
+        AppearanceDialogPlacement::CenterOwner => state.owner,
+        AppearanceDialogPlacement::KeepCurrent | AppearanceDialogPlacement::DpiSuggested(_) => {
+            window
+        }
+    };
+    // SAFETY: anchor/suggested rectangle remain live for this value query.
+    let monitor = match placement {
+        AppearanceDialogPlacement::DpiSuggested(suggested) => {
+            // SAFETY: suggested is copied RECT storage valid for this query.
+            unsafe { MonitorFromRect(&suggested, MONITOR_DEFAULTTONEAREST) }
+        }
+        _ => {
+            // SAFETY: anchor is a live top-level owner or dialog HWND.
+            unsafe { MonitorFromWindow(anchor, MONITOR_DEFAULTTONEAREST) }
+        }
+    };
     let mut info = MONITORINFO {
         cbSize: size_of::<MONITORINFO>() as u32,
         ..MONITORINFO::default()
@@ -1086,7 +1209,7 @@ fn arrange_dialog(window: HWND, state: &AppearanceDialogWindowState, center_owne
         state.model.forced_colors(),
         ForcedColorsState::ActiveOrUnknown
     );
-    let Some(layout) = calculate_appearance_dialog_layout(
+    let Some(preliminary) = calculate_appearance_dialog_layout(
         state.dpi,
         maximum_client_width,
         maximum_client_height,
@@ -1095,7 +1218,69 @@ fn arrange_dialog(window: HWND, state: &AppearanceDialogWindowState, center_owne
     ) else {
         return false;
     };
-    for (control, rect) in controls(state).zip([
+    let measured = measure_wrapped_appearance_dialog(state, preliminary);
+    let Some(layout) = calculate_appearance_dialog_layout(
+        state.dpi,
+        maximum_client_width,
+        maximum_client_height,
+        show_forced_explanation,
+        measured,
+    ) else {
+        return false;
+    };
+    let mut outer = RECT {
+        left: 0,
+        top: 0,
+        right: layout.client.width,
+        bottom: layout.client.height,
+    };
+    // SAFETY: outer is writable desired-client geometry for the same style/DPI.
+    if unsafe { AdjustWindowRectExForDpi(&mut outer, style, 0, WS_EX_TOOLWINDOW, state.dpi) } == 0 {
+        return false;
+    }
+    let width = (outer.right - outer.left).min(work_width).max(1);
+    let height = (outer.bottom - outer.top).min(work_height).max(1);
+    let mut anchor_rect = match placement {
+        AppearanceDialogPlacement::DpiSuggested(suggested) => suggested,
+        _ => RECT::default(),
+    };
+    if !matches!(placement, AppearanceDialogPlacement::DpiSuggested(_)) {
+        // SAFETY: anchor is live and anchor_rect is writable for this value query.
+        if unsafe { GetWindowRect(anchor, &mut anchor_rect) } == 0 {
+            return false;
+        }
+    }
+    let x = anchor_rect
+        .left
+        .saturating_add((anchor_rect.right - anchor_rect.left - width) / 2)
+        .clamp(info.rcWork.left, info.rcWork.right.saturating_sub(width));
+    let y = anchor_rect
+        .top
+        .saturating_add((anchor_rect.bottom - anchor_rect.top - height) / 2)
+        .clamp(info.rcWork.top, info.rcWork.bottom.saturating_sub(height));
+    // SAFETY: window is live and outer geometry is clamped to the monitor work area.
+    if unsafe {
+        SetWindowPos(
+            window,
+            null_mut(),
+            x,
+            y,
+            width,
+            height,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        )
+    } == 0
+    {
+        return false;
+    }
+    state.layout = Some(layout);
+    state.scroll_y = clamp_appearance_dialog_scroll(layout, state.scroll_y);
+    apply_appearance_dialog_layout(state, layout);
+    true
+}
+
+fn body_rects(layout: AppearanceDialogLayout) -> [LayoutRect; 14] {
+    [
         layout.density_group,
         layout.density_options[0],
         layout.density_options[1],
@@ -1110,61 +1295,271 @@ fn arrange_dialog(window: HWND, state: &AppearanceDialogWindowState, center_owne
         layout.checkboxes[1],
         layout.checkboxes[2],
         layout.separator,
-        layout.reset,
-        layout.ok,
-        layout.cancel,
-    ]) {
-        // SAFETY: each control is live and rect is pure bounded geometry.
+    ]
+}
+
+fn apply_appearance_dialog_layout(
+    state: &AppearanceDialogWindowState,
+    layout: AppearanceDialogLayout,
+) {
+    let mut windows = Vec::with_capacity(18);
+    windows.push((state.viewport, layout.body_viewport));
+    windows.extend(
+        body_controls(state)
+            .zip(body_rects(layout))
+            .map(|(window, mut rect)| {
+                rect.y = rect.y.saturating_sub(state.scroll_y);
+                (window, rect)
+            }),
+    );
+    windows.extend([
+        (state.reset, layout.reset),
+        (state.ok, layout.ok),
+        (state.cancel, layout.cancel),
+    ]);
+    apply_appearance_deferred_layout(&windows);
+    let scroll = SCROLLINFO {
+        cbSize: size_of::<SCROLLINFO>() as u32,
+        fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
+        nMin: 0,
+        nMax: layout.body_content_height.saturating_sub(1),
+        nPage: u32::try_from(layout.scroll_page).unwrap_or(u32::MAX),
+        nPos: state.scroll_y,
+        ..SCROLLINFO::default()
+    };
+    // SAFETY: viewport is live and scroll contains copied bounded values.
+    unsafe { SetScrollInfo(state.viewport, SB_CTL, &raw const scroll, 1) };
+    // SAFETY: dialog/viewport children are live and one batched redraw follows.
+    unsafe {
+        RedrawWindow(
+            state.viewport,
+            null(),
+            null_mut(),
+            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
+        )
+    };
+}
+
+fn apply_appearance_deferred_layout(windows: &[(HWND, LayoutRect)]) {
+    let count = i32::try_from(windows.len()).unwrap_or(i32::MAX);
+    // SAFETY: count is the bounded number of live dialog controls below.
+    let mut batch = unsafe { BeginDeferWindowPos(count) };
+    if !batch.is_null() {
+        for (window, rect) in windows {
+            // SAFETY: batch/window/rect remain live through this synchronous operation.
+            batch = unsafe {
+                DeferWindowPos(
+                    batch,
+                    *window,
+                    null_mut(),
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    rect.height,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
+                )
+            };
+            if batch.is_null() {
+                break;
+            }
+        }
+    }
+    if !batch.is_null() {
+        // SAFETY: EndDeferWindowPos consumes the live final batch once.
+        if unsafe { EndDeferWindowPos(batch) } != 0 {
+            return;
+        }
+    }
+    for (window, rect) in windows {
+        // SAFETY: fallback applies identical bounded geometry without repaint.
         unsafe {
             SetWindowPos(
-                control,
+                *window,
                 null_mut(),
                 rect.x,
                 rect.y,
                 rect.width,
                 rect.height,
-                SWP_NOACTIVATE | SWP_NOZORDER,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
             )
         };
     }
-    let mut outer = RECT {
-        left: 0,
-        top: 0,
-        right: layout.client.width,
-        bottom: layout.client.height,
+}
+
+fn set_appearance_dialog_scroll(state: &mut AppearanceDialogWindowState, scroll_y: i32) -> bool {
+    let Some(layout) = state.layout else {
+        return false;
     };
-    // SAFETY: outer is writable desired-client geometry for the same style/DPI.
-    if unsafe { AdjustWindowRectExForDpi(&mut outer, style, 0, WS_EX_TOOLWINDOW, state.dpi) } == 0 {
+    let scroll_y = clamp_appearance_dialog_scroll(layout, scroll_y);
+    if scroll_y == state.scroll_y {
         return false;
     }
-    let width = (outer.right - outer.left).min(work_width).max(1);
-    let height = (outer.bottom - outer.top).min(work_height).max(1);
-    let mut anchor_rect = RECT::default();
-    // SAFETY: anchor is live and anchor_rect is writable for this value query.
-    if unsafe { GetWindowRect(anchor, &mut anchor_rect) } == 0 {
+    state.scroll_y = scroll_y;
+    apply_appearance_dialog_layout(state, layout);
+    true
+}
+
+fn ensure_appearance_control_visible(
+    state: &mut AppearanceDialogWindowState,
+    control: HWND,
+) -> bool {
+    let Some(layout) = state.layout else {
         return false;
-    }
-    let x = anchor_rect
-        .left
-        .saturating_add((anchor_rect.right - anchor_rect.left - width) / 2)
-        .clamp(info.rcWork.left, info.rcWork.right.saturating_sub(width));
-    let y = anchor_rect
-        .top
-        .saturating_add((anchor_rect.bottom - anchor_rect.top - height) / 2)
-        .clamp(info.rcWork.top, info.rcWork.bottom.saturating_sub(height));
-    // SAFETY: window is live and outer geometry is clamped to the monitor work area.
+    };
+    let Some((_, rect)) = body_controls(state)
+        .zip(body_rects(layout))
+        .find(|(candidate, _)| *candidate == control)
+    else {
+        return false;
+    };
+    let target = if rect.y < state.scroll_y {
+        rect.y
+    } else if rect.bottom() > state.scroll_y.saturating_add(layout.scroll_page) {
+        rect.bottom().saturating_sub(layout.scroll_page)
+    } else {
+        state.scroll_y
+    };
+    set_appearance_dialog_scroll(state, target)
+}
+
+fn appearance_control_disabled_by_forced_colors(
+    state: &AppearanceDialogWindowState,
+    control: HWND,
+) -> bool {
+    state.emphasis.contains(&control) || state.checkboxes[1] == control
+}
+
+fn schedule_appearance_focus_repair(
+    window: HWND,
+    state: &AppearanceDialogWindowState,
+    force_initial: bool,
+) {
+    // SAFETY: window remains owned by this dialog state and the message carries
+    // only a boolean flag plus the copied session identifier.
     unsafe {
-        SetWindowPos(
+        PostMessageW(
             window,
-            null_mut(),
-            x,
-            y,
-            width,
-            height,
-            SWP_NOACTIVATE | SWP_NOZORDER,
+            WM_APP_APPEARANCE_RESTORE_FOCUS,
+            usize::from(force_initial),
+            state.session_id as isize,
         )
     };
-    true
+}
+
+unsafe extern "system" fn appearance_viewport_subclass(
+    window: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass_id: usize,
+    state_ref: usize,
+) -> LRESULT {
+    if message == WM_NCDESTROY {
+        // SAFETY: remove this exact callback/id pair before the parent-owned
+        // dialog state can be reclaimed.
+        unsafe {
+            RemoveWindowSubclass(
+                window,
+                Some(appearance_viewport_subclass),
+                APPEARANCE_VIEWPORT_SUBCLASS_ID,
+            )
+        };
+        // SAFETY: the standard STATIC receives final destruction unchanged.
+        return unsafe { DefSubclassProc(window, message, wparam, lparam) };
+    }
+    if state_ref == 0 {
+        // SAFETY: null refdata cannot be dereferenced; retain standard handling.
+        return unsafe { DefSubclassProc(window, message, wparam, lparam) };
+    }
+    match message {
+        WM_VSCROLL => {
+            // SAFETY: refdata is only the stable parent-owned dialog-state
+            // pointer and this message cannot destroy the parent.
+            let state = unsafe { &mut *(state_ref as *mut AppearanceDialogWindowState) };
+            let command = (wparam & 0xFFFF) as i32;
+            let line = scale_dip(24, state.dpi).max(state.measured.text_height);
+            let page = state.layout.map_or(line, |layout| {
+                layout.scroll_page.saturating_sub(line).max(line)
+            });
+            let target = match command {
+                SB_TOP => 0,
+                SB_BOTTOM => i32::MAX,
+                SB_LINEUP => state.scroll_y.saturating_sub(line),
+                SB_LINEDOWN => state.scroll_y.saturating_add(line),
+                SB_PAGEUP => state.scroll_y.saturating_sub(page),
+                SB_PAGEDOWN => state.scroll_y.saturating_add(page),
+                SB_THUMBPOSITION | SB_THUMBTRACK => {
+                    let mut info = SCROLLINFO {
+                        cbSize: size_of::<SCROLLINFO>() as u32,
+                        fMask: SIF_TRACKPOS,
+                        ..SCROLLINFO::default()
+                    };
+                    // SAFETY: viewport is live and info is exact writable storage.
+                    if unsafe { GetScrollInfo(window, SB_CTL, &mut info) } != 0 {
+                        info.nTrackPos
+                    } else {
+                        state.scroll_y
+                    }
+                }
+                SB_ENDSCROLL => state.scroll_y,
+                _ => state.scroll_y,
+            };
+            set_appearance_dialog_scroll(state, target);
+            0
+        }
+        WM_MOUSEWHEEL => {
+            // SAFETY: refdata is the live parent-owned dialog-state pointer.
+            let state = unsafe { &mut *(state_ref as *mut AppearanceDialogWindowState) };
+            let delta = ((wparam >> 16) as u16) as i16 as i32;
+            let line = scale_dip(24, state.dpi).max(state.measured.text_height);
+            let steps = delta / 120;
+            set_appearance_dialog_scroll(
+                state,
+                state
+                    .scroll_y
+                    .saturating_sub(steps.saturating_mul(line).saturating_mul(3)),
+            );
+            0
+        }
+        WM_COMMAND | WM_NOTIFY | WM_CTLCOLORBTN | WM_CTLCOLORSTATIC | WM_DRAWITEM => {
+            if message == WM_COMMAND && ((wparam >> 16) & 0xFFFF) as u32 == BN_SETFOCUS {
+                // SAFETY: focus notification cannot destroy the dialog, and
+                // this borrow ends before forwarding any command to its owner.
+                let state = unsafe { &mut *(state_ref as *mut AppearanceDialogWindowState) };
+                ensure_appearance_control_visible(state, lparam as HWND);
+            }
+            // SAFETY: the immediate parent is the live dialog; notification
+            // payloads remain valid for this synchronous forwarding call.
+            let parent = unsafe { GetParent(window) };
+            if parent.is_null() {
+                0
+            } else {
+                // SAFETY: parent is live and payload lifetime is synchronous.
+                unsafe { SendMessageW(parent, message, wparam, lparam) }
+            }
+        }
+        WM_ERASEBKGND => {
+            // SAFETY: refdata is the live parent-owned dialog-state pointer.
+            let state = unsafe { &*(state_ref as *const AppearanceDialogWindowState) };
+            let mut rect = RECT::default();
+            // SAFETY: viewport/DC are live for this synchronous erase callback.
+            unsafe { GetClientRect(window, &mut rect) };
+            let brush = state.appearance_resources.as_ref().map_or_else(
+                || {
+                    // SAFETY: system color brush is process-global and cached.
+                    unsafe { GetSysColorBrush(COLOR_WINDOW) }
+                },
+                AppearanceResources::dialog_brush,
+            );
+            // SAFETY: callback DC, client rectangle, and brush are live.
+            unsafe { FillRect(wparam as HDC, &rect, brush) };
+            1
+        }
+        _ => {
+            // SAFETY: all unowned messages retain standard STATIC handling.
+            unsafe { DefSubclassProc(window, message, wparam, lparam) }
+        }
+    }
 }
 
 unsafe extern "system" fn appearance_dialog_proc(
@@ -1206,21 +1601,26 @@ unsafe extern "system" fn appearance_dialog_proc(
             recreate_font(state);
             sync_controls(state);
             apply_dialog_appearance(window, state);
-            if !arrange_dialog(window, state, true) {
+            if !arrange_dialog(window, state, AppearanceDialogPlacement::CenterOwner) {
                 return -1;
             }
-            // SAFETY: first radio is a live tab-stop native child.
-            unsafe { SetFocus(state.density[0]) };
+            schedule_appearance_focus_repair(window, state, true);
             0
         }
         WM_COMMAND if !state_ptr.is_null() => {
             let id = (wparam & 0xFFFF) as u16;
             let notification = ((wparam >> 16) & 0xFFFF) as u32;
             if notification == BN_CLICKED {
-                // SAFETY: state_ptr is the dialog-owned Box on this UI thread.
-                let state = unsafe { &mut *state_ptr };
-                if let Some(action) = action_for_command(state, id) {
-                    apply_action(window, state, action);
+                let close = {
+                    // SAFETY: state_ptr is the dialog-owned Box on this UI thread.
+                    let state = unsafe { &mut *state_ptr };
+                    action_for_command(state, id)
+                        .is_some_and(|action| apply_action(window, state, action))
+                };
+                if close {
+                    // SAFETY: the state borrow ended above. DestroyWindow may
+                    // now reenter WM_NCDESTROY and reclaim the dialog-owned Box.
+                    unsafe { DestroyWindow(window) };
                 }
             }
             0
@@ -1285,9 +1685,14 @@ unsafe extern "system" fn appearance_dialog_proc(
             }
         }
         WM_CLOSE if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the dialog-owned Box for this close callback.
-            let state = unsafe { &mut *state_ptr };
-            apply_action(window, state, AppearanceDialogAction::Cancel);
+            {
+                // SAFETY: state_ptr is the dialog-owned Box for this close callback.
+                let state = unsafe { &mut *state_ptr };
+                let _close = apply_action(window, state, AppearanceDialogAction::Cancel);
+            }
+            // SAFETY: the state borrow ended above, so destruction may reenter
+            // WM_NCDESTROY and reclaim the dialog-owned Box without aliasing.
+            unsafe { DestroyWindow(window) };
             0
         }
         WM_DPICHANGED if !state_ptr.is_null() => {
@@ -1295,9 +1700,15 @@ unsafe extern "system" fn appearance_dialog_proc(
             let state = unsafe { &mut *state_ptr };
             state.dpi = ((wparam & 0xFFFF) as u32).max(BASE_DPI);
             recreate_font(state);
-            if !arrange_dialog(window, state, false) {
-                apply_action(window, state, AppearanceDialogAction::Cancel);
-            }
+            let placement = if lparam == 0 {
+                AppearanceDialogPlacement::KeepCurrent
+            } else {
+                // SAFETY: WM_DPICHANGED supplies a readable suggested RECT for
+                // the duration of this synchronous callback.
+                AppearanceDialogPlacement::DpiSuggested(unsafe { *(lparam as *const RECT) })
+            };
+            arrange_dialog(window, state, placement);
+            schedule_appearance_focus_repair(window, state, false);
             0
         }
         WM_SETTINGCHANGE | WM_FONTCHANGE if !state_ptr.is_null() => {
@@ -1306,9 +1717,8 @@ unsafe extern "system" fn appearance_dialog_proc(
             // SAFETY: window is the live appearance dialog HWND.
             state.dpi = unsafe { GetDpiForWindow(window) }.max(BASE_DPI);
             recreate_font(state);
-            if !arrange_dialog(window, state, false) {
-                apply_action(window, state, AppearanceDialogAction::Cancel);
-            }
+            arrange_dialog(window, state, AppearanceDialogPlacement::KeepCurrent);
+            schedule_appearance_focus_repair(window, state, false);
             0
         }
         WM_APP_APPEARANCE_ACCESSIBILITY if !state_ptr.is_null() => {
@@ -1316,13 +1726,55 @@ unsafe extern "system" fn appearance_dialog_proc(
             let state = unsafe { &mut *state_ptr };
             if u32::try_from(lparam).ok() == Some(state.session_id) {
                 let (forced_colors, system_theme) = unpack_appearance_environment(wparam);
+                // SAFETY: GetFocus returns only a borrowed HWND. Capture whether
+                // Forced Colors will disable it before EnableWindow clears focus.
+                let focused = unsafe { GetFocus() };
+                let repair_disabled_focus = !forced_colors.custom_colors_enabled()
+                    && appearance_control_disabled_by_forced_colors(state, focused);
                 state.model.set_forced_colors(forced_colors);
                 state.system_theme = system_theme;
                 sync_controls(state);
                 apply_dialog_appearance(window, state);
-                if !arrange_dialog(window, state, false) {
-                    apply_action(window, state, AppearanceDialogAction::Cancel);
+                arrange_dialog(window, state, AppearanceDialogPlacement::KeepCurrent);
+                schedule_appearance_focus_repair(window, state, repair_disabled_focus);
+            }
+            0
+        }
+        WM_APP_APPEARANCE_RESTORE_FOCUS if !state_ptr.is_null() => {
+            let session_matches = u32::try_from(lparam)
+                .ok()
+                // SAFETY: state_ptr is the live dialog-owned Box on this UI thread.
+                .is_some_and(|session_id| session_id == unsafe { (*state_ptr).session_id });
+            if !session_matches {
+                return 0;
+            }
+            let target = {
+                // SAFETY: state_ptr is uniquely borrowed only inside this block;
+                // the borrow ends before any SetFocus call below.
+                let state = unsafe { &mut *state_ptr };
+                // SAFETY: GetFocus returns a borrowed HWND and retains no storage.
+                let focused = unsafe { GetFocus() };
+                let focused_is_body = body_controls(state).any(|control| control == focused);
+                if focused_is_body {
+                    // SAFETY: focused is one of the live body controls above.
+                    if unsafe { IsWindowEnabled(focused) } != 0 {
+                        ensure_appearance_control_visible(state, focused);
+                        null_mut()
+                    } else {
+                        ensure_appearance_control_visible(state, state.density[0]);
+                        state.density[0]
+                    }
+                } else if wparam != 0 {
+                    ensure_appearance_control_visible(state, state.density[0]);
+                    state.density[0]
+                } else {
+                    null_mut()
                 }
+            };
+            if !target.is_null() {
+                // SAFETY: target is a live enabled dialog child copied only after
+                // the mutable state borrow ended, preventing reentrant aliasing.
+                unsafe { SetFocus(target) };
             }
             0
         }
@@ -1380,8 +1832,8 @@ mod native_tests {
     };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_RETURN;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        BM_CLICK, BS_TYPEMASK, GWL_STYLE, GetClientRect, GetWindowLongPtrW, IsDialogMessageW, MSG,
-        WM_KEYDOWN,
+        BM_CLICK, BS_TYPEMASK, GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetWindowLongPtrW,
+        IsDialogMessageW, MSG, WM_KEYDOWN,
     };
 
     #[test]
@@ -1429,16 +1881,60 @@ mod native_tests {
             return Err(io::Error::other("appearance dialog state is missing").into());
         }
         // SAFETY: state_ptr is live dialog-owned state for these copied HWNDs.
-        let (ok, radio, menu_only, density_group, separator, resources) = unsafe {
+        let (
+            viewport,
+            ok,
+            cancel,
+            radio,
+            emphasis_control,
+            menu_only,
+            density_group,
+            last_checkbox,
+            separator,
+            resources,
+        ) = unsafe {
             (
+                (*state_ptr).viewport,
                 (*state_ptr).ok,
+                (*state_ptr).cancel,
                 (*state_ptr).density[0],
+                (*state_ptr).emphasis[0],
                 (*state_ptr).density[3],
                 (*state_ptr).density_group,
+                (*state_ptr).checkboxes[2],
                 (*state_ptr).separator,
                 (*state_ptr).appearance_resources.as_ref(),
             )
         };
+        // SAFETY: owner/dialog/radio are live test-owned windows on this thread;
+        // activation makes subsequent focus-transfer assertions meaningful.
+        unsafe {
+            ShowWindow(owner, SW_SHOW);
+            SetForegroundWindow(dialog);
+            SetFocus(radio);
+        }
+        // SAFETY: viewport and controls are live and these are value-only queries.
+        let viewport_style = unsafe { GetWindowLongPtrW(viewport, GWL_STYLE) } as u32;
+        assert_eq!(
+            viewport_style
+                & (WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS | WS_VSCROLL),
+            WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS | WS_VSCROLL
+        );
+        // SAFETY: all queried HWNDs are live and these calls retain no storage.
+        let (viewport_ex_style, density_parent, separator_parent, ok_parent, cancel_parent) = unsafe {
+            (
+                GetWindowLongPtrW(viewport, GWL_EXSTYLE) as u32,
+                GetParent(density_group),
+                GetParent(separator),
+                GetParent(ok),
+                GetParent(cancel),
+            )
+        };
+        assert_ne!(viewport_ex_style & WS_EX_CONTROLPARENT, 0);
+        assert_eq!(density_parent, viewport);
+        assert_eq!(separator_parent, viewport);
+        assert_eq!(ok_parent, dialog);
+        assert_eq!(cancel_parent, dialog);
         // SAFETY: ok is a live native BUTTON and style is an integral query.
         let style = unsafe { GetWindowLongPtrW(ok, GWL_STYLE) } as u32;
         assert_eq!(style & BS_TYPEMASK as u32, BS_DEFPUSHBUTTON as u32);
@@ -1557,9 +2053,93 @@ mod native_tests {
         // SAFETY: menu_only is live and the borrowed theme handle query retains
         // no caller storage. Custom colors require the classic paint path.
         assert_eq!(unsafe { GetWindowTheme(menu_only) }, 0);
+
+        // Constrain the pure viewport page to exercise scrollbar commands and
+        // focus visibility without relying on the host monitor dimensions.
+        // SAFETY: state_ptr remains dialog-owned and UI-thread confined.
+        unsafe {
+            let state = &mut *state_ptr;
+            let Some(mut layout) = state.layout else {
+                return Err(io::Error::other("appearance layout is missing").into());
+            };
+            layout.body_viewport.height = scale_dip(70, state.dpi);
+            layout.scroll_page = layout.body_viewport.height;
+            layout.scroll_max = layout
+                .body_content_height
+                .saturating_sub(layout.scroll_page);
+            state.layout = Some(layout);
+            state.scroll_y = 0;
+            apply_appearance_dialog_layout(state, layout);
+        }
+        // SAFETY: viewport forwards scalar/null notifications synchronously.
+        unsafe {
+            SendMessageW(viewport, WM_NOTIFY, 0, 0);
+            SendMessageW(viewport, WM_DRAWITEM, 0, 0);
+            SendMessageW(viewport, WM_VSCROLL, SB_BOTTOM as WPARAM, 0);
+        }
+        // SAFETY: state_ptr is still live before Enter destroys the dialog.
+        let bottom_scroll = unsafe { (*state_ptr).scroll_y };
+        assert!(bottom_scroll > 0);
+        // SAFETY: focusing the live last checkbox exercises the real forwarded
+        // BN_SETFOCUS path. Scrolling back to the top leaves that control focused
+        // but hidden so the pointer-free relayout repair message must reveal it.
+        unsafe {
+            SetFocus(last_checkbox);
+            SendMessageW(viewport, WM_VSCROLL, SB_TOP as WPARAM, 0);
+            SendMessageW(dialog, WM_APP_APPEARANCE_RESTORE_FOCUS, 0, 1);
+        }
+        // SAFETY: focus visibility must scroll the last body control into view.
+        assert!(unsafe { (*state_ptr).scroll_y } > 0);
+        // SAFETY: state_ptr and controls remain dialog-owned. Forced Colors
+        // disables emphasis, after which the repair message must transfer focus
+        // to the first always-enabled density radio outside the state borrow.
+        unsafe {
+            SetFocus(emphasis_control);
+            SendMessageW(viewport, WM_VSCROLL, SB_BOTTOM as WPARAM, 0);
+            let repair_disabled_focus = {
+                let state = &*state_ptr;
+                appearance_control_disabled_by_forced_colors(state, emphasis_control)
+            };
+            assert!(repair_disabled_focus);
+            {
+                let state = &mut *state_ptr;
+                state
+                    .model
+                    .set_forced_colors(ForcedColorsState::ActiveOrUnknown);
+                sync_controls(state);
+            }
+            SendMessageW(
+                dialog,
+                WM_APP_APPEARANCE_RESTORE_FOCUS,
+                usize::from(repair_disabled_focus),
+                1,
+            );
+        }
+        // SAFETY: state_ptr remains dialog-owned; the forced repair branch must
+        // scroll the first enabled density radio fully into the viewport even
+        // when this hidden test window cannot acquire foreground keyboard focus.
+        let (repaired_scroll, repaired_layout) = unsafe {
+            (
+                (*state_ptr).scroll_y,
+                (*state_ptr)
+                    .layout
+                    .ok_or_else(|| io::Error::other("appearance layout is missing"))?,
+            )
+        };
+        assert!(repaired_layout.density_options[0].y >= repaired_scroll);
+        assert!(
+            repaired_layout.density_options[0].bottom()
+                <= repaired_scroll.saturating_add(repaired_layout.scroll_page)
+        );
+        // SAFETY: radio remains a live test-owned BUTTON for this value query.
+        assert_ne!(unsafe { IsWindowEnabled(radio) }, 0);
         // SAFETY: menu_only is the live fourth density radio. The unarmed dialog
-        // updates only its local preview model for this synchronous click.
-        unsafe { SendMessageW(menu_only, BM_CLICK, 0, 0) };
+        // scrolls the newly focused control into view, then updates only its
+        // local preview model for this synchronous click.
+        unsafe {
+            SetFocus(menu_only);
+            SendMessageW(menu_only, BM_CLICK, 0, 0);
+        };
         // SAFETY: state_ptr remains dialog-owned until Enter closes the window.
         let draft_density = unsafe { (*state_ptr).model.draft().density };
         assert_eq!(draft_density, RailDensityPreference::MenuOnly);
@@ -1574,8 +2154,10 @@ mod native_tests {
         // dialog accepts locally without sending an owner state pointer.
         let handled = unsafe { IsDialogMessageW(dialog, &message) };
         assert_ne!(handled, 0);
-        // SAFETY: IsWindow is a non-owning value query.
-        assert_eq!(unsafe { IsWindow(dialog) }, 0);
+        // SAFETY: both IsWindow calls are non-owning value queries.
+        let (dialog_live, viewport_live) = unsafe { (IsWindow(dialog), IsWindow(viewport)) };
+        assert_eq!(dialog_live, 0);
+        assert_eq!(viewport_live, 0);
         // SAFETY: owner remains test-owned after the dialog closes.
         unsafe { DestroyWindow(owner) };
         Ok(())
