@@ -180,7 +180,12 @@ impl Drop for TokenHandle {
     }
 }
 
-pub(crate) fn process_is_elevated() -> io::Result<bool> {
+/// Returns whether the current process token is elevated.
+///
+/// # Errors
+///
+/// Returns the native token-query failure when elevation cannot be determined.
+pub fn process_is_elevated() -> io::Result<bool> {
     let mut token = ptr::null_mut();
     // SAFETY: GetCurrentProcess returns the current pseudo-handle and token is
     // a writable output pointer retained only for this synchronous call.

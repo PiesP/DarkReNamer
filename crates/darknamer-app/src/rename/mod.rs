@@ -64,4 +64,4 @@ pub use schedule::{MAX_TEMP_CANDIDATES, TemporaryPhase};
 #[cfg(windows)]
 pub use windows_backend::WindowsRenameBackend;
 #[cfg(windows)]
-pub(crate) use windows_native::process_is_elevated;
+pub use windows_native::process_is_elevated;

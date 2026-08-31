@@ -199,8 +199,8 @@ Complete release-gate evidence requires all of the following:
   accessibility inspection with tool and version, Explorer drag-and-drop,
   common dialogs, clipboard, worker cancellation, worker close, startup
   recovery, recovery export, and Intent-only candidate discard;
-- one benchmark each for 100, 1,000, and 10,000 entries on physical SSD and
-  HDD media, with planning and execution durations, storage model and
+- one same-parent benchmark each for 100, 1,000, and 10,000 entries on physical
+  SSD and HDD media, with planning and execution durations, storage model and
   connection, free-space bucket, power mode, and a clean cleanup observation;
   and
 - a passed application-process crash trial plus at least one separately
@@ -236,25 +236,75 @@ document.
 The ignored Windows integration benchmark exercises the production planner,
 `FileJournal`, and handle-relative rename backend on a caller-selected physical
 volume. The root must already exist; the test creates and removes only its own
-uniquely named child directory. Run all three counts once on an SSD root and
-again on an HDD root:
+uniquely named child directory. Use a dedicated root whose access is private to
+the benchmark operator and run it from a non-elevated PowerShell session. The
+private-root environment setting below is an explicit operator acknowledgment,
+not an ACL check.
+
+The authoritative physical matrix is SSD and HDD media crossed with counts 100,
+1,000, and 10,000 and the `same-parent`, `unique-parent`, and `deep-parent`
+topologies. Run iteration 0 once as a warmup for every matrix cell, then record
+iterations 1 through 5. Select the correct dedicated root and media value for
+each physical device:
 
 ```powershell
 $env:DARKRENAMER_BENCH_ROOT = 'D:\darkrenamer-benchmark-root'
 $env:DARKRENAMER_BENCH_MEDIA = 'hdd'
+$env:DARKRENAMER_BENCH_ROOT_PRIVATE = '1'
+$env:DARKRENAMER_BENCH_EVIDENCE_CLASS = 'physical'
+$env:DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'
 foreach ($count in 100, 1000, 10000) {
-  $env:DARKRENAMER_BENCH_COUNT = "$count"
-  cargo test -p darknamer-app --test rename_windows_backend `
-    benchmark_durable_production_path --locked --release -- `
-    --ignored --exact --nocapture --test-threads=1
+  foreach ($topology in 'same-parent', 'unique-parent', 'deep-parent') {
+    foreach ($iteration in 0..5) {
+      $env:DARKRENAMER_BENCH_COUNT = "$count"
+      $env:DARKRENAMER_BENCH_TOPOLOGY = $topology
+      $env:DARKRENAMER_BENCH_ITERATION = "$iteration"
+      cargo test --package darknamer-app --test rename_windows_backend `
+        benchmark_durable_production_path --locked --release -- `
+        --ignored --exact --nocapture --test-threads=1
+      if ($LASTEXITCODE -ne 0) { throw 'Benchmark failed.' }
+    }
+  }
 }
 ```
 
-Use `ssd` for `DARKRENAMER_BENCH_MEDIA` on the SSD pass. Record the emitted
-durations and the required storage context in the external evidence artifact;
-never copy the benchmark root into it. The media label is operator-supplied
-context, not an automatic hardware claim, and results from virtual CI storage
-do not substitute for either physical-media pass.
+Use `ssd` and the SSD's dedicated root for the SSD pass. Only the six
+`same-parent` cells (two media classes by three counts) map to the existing
+release-acceptance benchmark rows. Keep `unique-parent` and `deep-parent`
+results as separate, source-SHA-bound, path-free diagnostic evidence; they do
+not add or replace release rows. Record only iterations 1 through 5. Iteration 0
+is warmup output and must not be promoted to evidence.
+
+For each of the six `same-parent` release rows, record the median
+`planning_ms` and median `execution_ms` from the five recorded iterations.
+All five iterations must have emitted their result lines after clean fixture
+cleanup. Preserve all five raw path-free metric line sets in the external,
+source-SHA-bound performance record. Never select a single or best-performing
+iteration, and never include warmup iteration 0 in the median. The
+`unique-parent` and `deep-parent` samples remain diagnostic and are not
+aggregated into release-acceptance rows.
+
+The summary line reports the whole `planning` and `preflight` phases and, for
+physical evidence, the durable `execution` phase. Backend lines report
+`planning`, `preflight`, and `execution` call counts and observer timings;
+journal lines report the execution journal phases. The per-call observers add
+measurement overhead, so their microseconds are diagnostic attribution and do
+not sum exactly to wall-clock duration. The benchmark removes its fixture
+before emitting any result lines: missing output after work begins can indicate
+cleanup failure and is not a usable measurement.
+
+Establish a fresh five-iteration baseline from the unchanged comparison SHA on
+the same machine, volume, power mode, toolchain, count, and topology before
+evaluating a planning optimization. Compare the candidate SHA under the same
+conditions. A prior baseline is not reusable after any of those conditions or
+the benchmark instrumentation changes.
+
+The media label is operator-supplied context, not an automatic hardware claim.
+The manual `Planning benchmark` Actions workflow uses ephemeral runner storage,
+`directional-hosted` evidence, `virtual` media, iteration 0 warmups, and one or
+three recorded repetitions. Its planning-only output is useful for directional
+regression checks, but is neither physical-media evidence nor release-acceptance
+evidence and does not replace the physical matrix above.
 
 ### Preview path-key benchmark
 
