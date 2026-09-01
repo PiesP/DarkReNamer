@@ -2,12 +2,19 @@
 mod windows_capabilities;
 
 use std::ffi::OsStr;
+use std::fs;
 use std::io;
+use std::path::PathBuf;
 
 use windows_capabilities::{GateMode, gate_mode_from, unavailable_in_mode};
 
 fn normalize_workflow_source(source: &str) -> String {
     source.replace("\r\n", "\n")
+}
+
+fn repository_file(path: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    Ok(fs::read_to_string(repository.join(path))?)
 }
 
 #[test]
@@ -87,6 +94,88 @@ fn hosted_windows_and_release_gates_require_capabilities_with_visible_output()
             "{workflow} must retain capability output in the hosted log"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn release_workflows_promote_the_immutable_candidate_without_rebuilding()
+-> Result<(), Box<dyn std::error::Error>> {
+    let candidate = normalize_workflow_source(&repository_file(".github/workflows/release.yaml")?);
+    let promotion =
+        normalize_workflow_source(&repository_file(".github/workflows/promote-release.yaml")?);
+    let ci = normalize_workflow_source(&repository_file(".github/workflows/ci.yaml")?);
+
+    assert!(candidate.contains("on:\n  workflow_dispatch:"));
+    assert!(!candidate.contains("\n  push:"));
+    assert!(candidate.contains("if: github.ref == 'refs/heads/master'"));
+    assert!(candidate.contains("ref: master"));
+    assert!(candidate.contains("git ls-remote origin refs/heads/master"));
+    assert!(candidate.contains("name: Attest candidate build provenance"));
+    assert!(candidate.contains("name: Attest candidate executable SBOM"));
+    assert!(candidate.contains("id: candidate_artifact"));
+    assert!(candidate.contains("artifact-id: ${{ steps.candidate_artifact.outputs.artifact-id }}"));
+    assert!(!candidate.contains("gh release create"));
+
+    assert!(promotion.contains("on:\n  workflow_dispatch:\n    inputs:"));
+    for input in [
+        "candidate_run_id:",
+        "candidate_run_attempt:",
+        "candidate_artifact_id:",
+        "candidate_source_sha:",
+        "expected_exe_sha256:",
+        "release_tag:",
+    ] {
+        assert!(
+            promotion.contains(input),
+            "missing promotion input: {input}"
+        );
+    }
+    assert!(promotion.contains("actions: read"));
+    assert!(promotion.contains("contents: write"));
+    assert!(promotion.contains("runs-on: windows-2025"));
+    assert!(!promotion.contains("runs-on: ubuntu-24.04"));
+    assert!(promotion.contains("artifact-ids: ${{ inputs.candidate_artifact_id }}"));
+    assert!(promotion.contains("github-token: ${{ github.token }}"));
+    assert!(promotion.contains("repository: ${{ github.repository }}"));
+    assert!(promotion.contains("run-id: ${{ inputs.candidate_run_id }}"));
+    assert!(promotion.contains("./scripts/validate-release-candidate-metadata.ps1"));
+    assert!(promotion.contains("./scripts/validate-release-handoff.ps1"));
+    assert!(promotion.contains("gh attestation verify"));
+    assert!(promotion.contains("--signer-workflow"));
+    assert!(promotion.contains("--source-digest $env:CANDIDATE_SOURCE_SHA"));
+    assert!(promotion.contains("--source-ref refs/heads/master"));
+    assert!(promotion.contains("--deny-self-hosted-runners"));
+    assert_eq!(
+        promotion
+            .matches("git ls-remote origin refs/heads/master")
+            .count(),
+        1,
+        "promotion must revalidate live master immediately before publication"
+    );
+    assert!(promotion.contains("gh release create $env:RELEASE_TAG"));
+    assert!(!promotion.contains("gh release view"));
+    assert!(promotion.contains("GitHub prerelease publication failed"));
+    assert!(promotion.contains("--verify-tag"));
+    assert!(promotion.contains("--prerelease"));
+    assert!(promotion.contains("Source-complete Windows prerelease"));
+    for forbidden in [
+        "cargo build",
+        "cargo test",
+        "rustup toolchain install",
+        "actions/attest@",
+    ] {
+        assert!(
+            !promotion.contains(forbidden),
+            "promotion workflow must not rebuild or replace provenance: {forbidden}"
+        );
+    }
+    assert!(!promotion.contains("-ExpectedRunId '${{"));
+    assert_eq!(
+        ci.matches("./scripts/test-release-candidate-metadata-validator.ps1")
+            .count(),
+        2,
+        "candidate metadata policy must run in both quality and Windows CI"
+    );
     Ok(())
 }
 

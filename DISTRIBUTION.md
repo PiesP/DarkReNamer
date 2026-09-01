@@ -1,10 +1,12 @@
 # Distribution policy
 
-DarkReNamer publishes Windows builds only from a version tag whose commit is on
-`master` and whose name exactly matches the Cargo workspace version. The tag
-workflow creates a GitHub **prerelease**. A manual run packages and validates
-the selected source commit and retains an Actions handoff artifact, but cannot
-create a tag, release, or attestation.
+DarkReNamer publishes Windows builds only from a version tag whose commit is the
+current `master` and whose name exactly matches the Cargo workspace version. The
+manual Portable prerelease candidate workflow packages and validates the
+selected `master` commit, attests those exact files, and retains an immutable
+Actions handoff artifact. It cannot create a tag or release. The separate
+promotion workflow downloads that artifact by its immutable artifact ID and
+creates a GitHub **prerelease** without rebuilding it.
 
 ## Current unsigned handoff
 
@@ -21,14 +23,14 @@ published prerelease contains:
 - a CycloneDX JSON SBOM;
 - a zipped PDB;
 - license, attribution, and this distribution policy;
-- GitHub build-provenance and SBOM attestations.
+- the original candidate workflow's GitHub build-provenance and SBOM
+  attestations.
 
 `DarkReNamer.exe` is the only runnable product file and requires no adjacent
-configuration file. The workflow name “Portable prerelease” means an
-installer-free executable; it does not make preferences self-contained with the
-download. UI preferences remain in the current user's
-`%LOCALAPPDATA%\DarkReNamer` directory, while the executable can be replaced or
-moved independently.
+configuration file. “Portable” means an installer-free executable; it does not
+make preferences self-contained with the download. UI preferences remain in the
+current user's `%LOCALAPPDATA%\DarkReNamer` directory, while the executable can
+be replaced or moved independently.
 
 Every successful packaging run also retains the complete Actions handoff,
 including the raw PDB. The handoff validator checks the exact file layout,
@@ -38,17 +40,32 @@ sizes, Cargo lockfile package count, executable bytes, and byte-identical copies
 of the repository license and policy files. The metrics are information only;
 the workflow does not apply release size or dependency-count thresholds.
 
-Verify the checksum before running the executable. GitHub attestations can be
-verified with `gh attestation verify` against this repository. A valid checksum
-or attestation identifies the produced bytes; it does not replace Authenticode
+Verify the checksum before running the executable. Verify candidate provenance
+against the repository, signer workflow, protected source ref, and exact source
+digest recorded in `release-handoff.json`:
+
+```text
+gh attestation verify DarkReNamer.exe \
+  --repo PiesP/DarkReNamer \
+  --signer-workflow PiesP/DarkReNamer/.github/workflows/release.yaml \
+  --source-ref refs/heads/master \
+  --source-digest <release-handoff source_sha> \
+  --deny-self-hosted-runners
+```
+
+Repository-only verification is not the release policy because another ref or
+workflow can produce a different attestation. A valid checksum or strict
+attestation identifies the produced bytes; it does not replace Authenticode
 publisher identity.
 
 ## Publish-free packaging validation
 
-Run the Portable prerelease workflow manually on the source ref to exercise the
-same Windows test, build, SBOM, packaging, and handoff-validation path without
-running the publication or attestation job. Inspect the retained dry-run
-artifact before creating a release tag.
+Run the Portable prerelease candidate workflow manually on `master` to exercise
+the Windows test, build, SBOM, packaging, handoff-validation, and attestation
+path without publishing a release. Inspect the retained artifact and its Actions
+summary before creating a release tag. The summary identifies the immutable
+artifact ID, run ID, and run attempt required by the promotion workflow;
+`release-handoff.json` identifies the source and executable digest.
 
 After handoff validation, the workflow copies the effective values from
 `release-metrics.json` into the Actions job summary. Use the retained JSON as
@@ -60,6 +77,27 @@ the release build. This supplies stable source-time metadata to tools that honor
 the variable; it is not a claim that independent EXE or PDB builds are
 byte-for-byte reproducible. Desktop acceptance and power-loss durability remain
 separate from packaging validation.
+
+## Immutable prerelease promotion
+
+After inspecting the candidate, create the version tag on that exact `master`
+commit and dispatch the Promote portable prerelease workflow. Supply the
+candidate run ID, run attempt, immutable artifact ID, source SHA, executable
+SHA-256 from `release-handoff.json`, and version tag. Promotion fails unless all
+of those values agree with current `origin/master`, the successful candidate
+workflow metadata, the unexpired artifact metadata, the downloaded handoff
+bytes, the original candidate attestation, and the existing remote tag.
+
+Promotion does not install a toolchain, run tests, build an executable, replace
+an artifact, or create a new provenance claim. It publishes the exact files from
+the candidate handoff. An existing release for the tag is rejected instead of
+being overwritten.
+
+The published item is a **source-complete prerelease**. Its release notes state
+that real Windows desktop acceptance and physical SSD evidence remain separate;
+hosted Windows checks do not establish those claims. This disclosure remains in
+place unless a future policy defines a controlled way to provide the external
+acceptance evidence to the publication boundary.
 
 Formal desktop acceptance is complete only when the external evidence passes
 the full release gate documented in repository file `SAFETY.md` and repository
@@ -84,4 +122,4 @@ workflow must then require a successful signature status instead of `NotSigned`.
 
 MSIX or Microsoft Store distribution is a separate future channel with its own
 identity, update, and signing review. It is not implied by the GitHub portable
-prerelease workflow.
+candidate and promotion workflows.

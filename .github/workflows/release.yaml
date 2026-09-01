@@ -1,29 +1,31 @@
-name: Portable prerelease
+name: Portable prerelease candidate
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-candidate-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   windows:
-    name: prerelease/build-windows
+    name: candidate/build-windows
+    if: github.ref == 'refs/heads/master'
     runs-on: windows-2025
     timeout-minutes: 45
-    outputs:
-      source_commit: ${{ steps.source.outputs.source_commit }}
-      handoff_name: ${{ steps.source.outputs.handoff_name }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - name: Checkout selected source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: master
           fetch-depth: 0
           persist-credentials: false
 
@@ -33,42 +35,22 @@ jobs:
         run: |
           $sourceCommit = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0) { throw 'The selected source commit could not be resolved.' }
+          $remoteMaster = @(& git ls-remote origin refs/heads/master)
+          if ($LASTEXITCODE -ne 0 -or $remoteMaster.Count -ne 1 -or
+              ($remoteMaster[0] -split "`t")[0] -cne $sourceCommit) {
+            throw 'The candidate source must match the live origin/master commit.'
+          }
           $epoch = git show -s --format=%ct HEAD
           if ($LASTEXITCODE -ne 0 -or $epoch -notmatch '^\d+$') {
             throw 'The selected source commit timestamp could not be resolved.'
           }
-          if ($env:GITHUB_EVENT_NAME -eq 'push') {
-            $label = $env:GITHUB_REF_NAME
-          } else {
-            $label = "dry-run-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          }
+          $label = "dry-run-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           "source_commit=$sourceCommit" | Out-File `
             -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "handoff_name=DarkReNamer-$label-windows" | Out-File `
             -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "SOURCE_DATE_EPOCH=$epoch" | Out-File `
             -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Validate tag authority and version
-        if: github.event_name == 'push'
-        shell: pwsh
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          $taggedCommit = git rev-parse HEAD
-          if ($LASTEXITCODE -ne 0) { throw 'The tagged commit could not be resolved.' }
-          $masterCommit = git rev-parse origin/master
-          if ($LASTEXITCODE -ne 0) { throw 'The current origin/master could not be resolved.' }
-          if ($taggedCommit -ne $masterCommit) {
-            throw 'The release tag must point to the current origin/master commit.'
-          }
-          $cargo = Get-Content Cargo.toml -Raw
-          $match = [regex]::Match($cargo, '(?m)^version = "([^"]+)"$')
-          if (-not $match.Success) { throw 'Workspace version was not found.' }
-          $expected = "v$($match.Groups[1].Value)"
-          if ($env:RELEASE_TAG -ne $expected) {
-            throw "Tag $env:RELEASE_TAG does not match $expected."
-          }
 
       - name: Install pinned Rust and verified SBOM tool
         shell: pwsh
@@ -220,7 +202,19 @@ jobs:
               Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           }
 
-      - name: Retain complete release handoff
+      - name: Attest candidate build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*
+
+      - name: Attest candidate executable SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/DarkReNamer.exe
+          sbom-path: dist/DarkReNamer.cdx.json
+
+      - name: Retain immutable release candidate handoff
+        id: candidate_artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.source.outputs.handoff_name }}
@@ -228,67 +222,16 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  publish:
-    name: prerelease/publish
-    needs: windows
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions:
-      contents: write
-      id-token: write
-      attestations: write
-      artifact-metadata: write
-    steps:
-      - name: Download verified build handoff
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ${{ needs.windows.outputs.handoff_name }}
-          path: dist
-
-      - name: Revalidate tag target
-        env:
-          EXPECTED_COMMIT: ${{ needs.windows.outputs.source_commit }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          remote_commit="$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" "refs/tags/$RELEASE_TAG^{}" | cut -f1)"
-          if [ -z "$remote_commit" ]; then
-            remote_commit="$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" "refs/tags/$RELEASE_TAG" | cut -f1)"
-          fi
-          if [ "$remote_commit" != "$EXPECTED_COMMIT" ]; then
-            echo 'The release tag moved after the verified build.' >&2
-            exit 1
-          fi
-
-      - name: Attest build provenance
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: dist/*
-
-      - name: Attest executable SBOM
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: dist/DarkReNamer.exe
-          sbom-path: dist/DarkReNamer.cdx.json
-
-      - name: Publish unsigned GitHub prerelease
+      - name: Summarize immutable candidate identity
         shell: pwsh
-        env:
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release create $env:RELEASE_TAG `
-            --verify-tag `
-            --prerelease `
-            --title "DarkReNamer $env:RELEASE_TAG" `
-            --notes "Unsigned Windows prerelease. Verify SHA256SUMS.txt and the GitHub artifact attestations before use." `
-            dist/DarkReNamer.exe `
-            dist/DarkReNamer.cdx.json `
-            dist/DarkReNamer-debug-symbols.zip `
-            dist/SHA256SUMS.txt `
-            dist/LICENSE `
-            dist/THIRD_PARTY_NOTICES.md `
-            dist/DISTRIBUTION.md `
-            dist/release-handoff.json `
-            dist/release-metrics.json
+          @(
+            ''
+            '## Immutable candidate artifact'
+            ''
+            '- artifact-id: ${{ steps.candidate_artifact.outputs.artifact-id }}'
+            '- artifact-digest: ${{ steps.candidate_artifact.outputs.artifact-digest }}'
+            '- artifact-url: ${{ steps.candidate_artifact.outputs.artifact-url }}'
+            '- run-id: ${{ github.run_id }}'
+            '- run-attempt: ${{ github.run_attempt }}'
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
