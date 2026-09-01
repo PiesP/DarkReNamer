@@ -73,6 +73,10 @@ jobs:
         shell: pwsh
         run: ./scripts/test-new-windows-acceptance-draft.ps1
 
+      - name: Test Windows acceptance benchmark augmentation
+        shell: pwsh
+        run: ./scripts/test-add-windows-acceptance-benchmark.ps1
+
       - name: Test release acceptance cross-validation
         shell: pwsh
         run: ./scripts/test-release-acceptance-validator.ps1
@@ -136,6 +140,10 @@ jobs:
       - name: Test Windows acceptance draft generation
         shell: pwsh
         run: ./scripts/test-new-windows-acceptance-draft.ps1
+
+      - name: Test Windows acceptance benchmark augmentation
+        shell: pwsh
+        run: ./scripts/test-add-windows-acceptance-benchmark.ps1
 
       - name: Test release acceptance cross-validation
         shell: pwsh

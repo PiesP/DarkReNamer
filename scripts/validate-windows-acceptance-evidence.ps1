@@ -1,9 +1,15 @@
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Path')]
 param(
-    [Parameter(Mandatory)]
+    [Parameter(Mandatory, ParameterSetName = 'Path')]
     [string] $EvidencePath,
 
-    [switch] $Draft
+    [Parameter(Mandatory, ParameterSetName = 'Json')]
+    [AllowEmptyString()]
+    [string] $EvidenceJson,
+
+    [switch] $Draft,
+
+    [switch] $PassThru
 )
 
 Set-StrictMode -Version Latest
@@ -51,6 +57,26 @@ function Assert-ObjectShape {
     foreach ($name in $Required) {
         if (-not (Test-Property -Object $Object -Name $name) -or $null -eq $Object.$name) {
             throw "$Location is missing required field: $name."
+        }
+    }
+}
+
+function Assert-UniqueJsonProperties {
+    param([Text.Json.JsonElement] $Element, [string] $Location)
+    if ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Object) {
+        $observed = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($property in $Element.EnumerateObject()) {
+            if (-not $observed.Add($property.Name)) {
+                throw "$Location contains a duplicate field: $($property.Name)."
+            }
+            Assert-UniqueJsonProperties -Element $property.Value -Location "$Location.$($property.Name)"
+        }
+    }
+    elseif ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Array) {
+        $index = 0
+        foreach ($item in $Element.EnumerateArray()) {
+            Assert-UniqueJsonProperties -Element $item -Location "$Location[$index]"
+            $index++
         }
     }
 }
@@ -240,16 +266,19 @@ if ($schemaDocument.'$schema' -ne 'https://json-schema.org/draft/2020-12/schema'
 $expectedSchemaVersion = $schemaDocument.properties.schema_version.const
 $schemaDefinitions = $schemaDocument.'$defs'
 
-if (-not (Test-Path -LiteralPath $EvidencePath -PathType Leaf)) {
-    throw "Evidence file does not exist: $EvidencePath"
+if ($PSCmdlet.ParameterSetName -eq 'Path') {
+    if (-not (Test-Path -LiteralPath $EvidencePath -PathType Leaf)) {
+        throw "Evidence file does not exist: $EvidencePath"
+    }
+    $evidenceJson = Get-Content -LiteralPath $EvidencePath -Raw
 }
 try {
-    $evidenceJson = Get-Content -LiteralPath $EvidencePath -Raw
     $jsonDocument = [Text.Json.JsonDocument]::Parse($evidenceJson)
     try {
         if ($jsonDocument.RootElement.ValueKind -ne [Text.Json.JsonValueKind]::Object) {
             throw 'Evidence root must be a JSON object.'
         }
+        Assert-UniqueJsonProperties -Element $jsonDocument.RootElement -Location 'evidence'
         $recordedAtElement = [Text.Json.JsonElement]::new()
         if (-not $jsonDocument.RootElement.TryGetProperty('recorded_at_utc', [ref] $recordedAtElement) -or
             $recordedAtElement.ValueKind -ne [Text.Json.JsonValueKind]::String) {
@@ -721,5 +750,8 @@ elseif ($completeHddUnavailable) {
 }
 else {
     'complete release-gate'
+}
+if ($PassThru) {
+    return $evidence
 }
 Write-Host "Validated $mode Windows acceptance evidence for source $($evidence.source_sha)."
