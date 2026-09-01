@@ -6,12 +6,14 @@ $ErrorActionPreference = 'Stop'
 
 $validator = Join-Path $PSScriptRoot 'validate-windows-acceptance-evidence.ps1'
 $schema = Join-Path $PSScriptRoot 'windows-acceptance-evidence.schema.json'
+$visualFixture = Join-Path $PSScriptRoot 'test-visual-evidence-fixture.ps1'
 if (-not (Test-Path -LiteralPath $validator -PathType Leaf)) {
     throw "Windows acceptance evidence validator is missing: $validator"
 }
 if (-not (Test-Path -LiteralPath $schema -PathType Leaf)) {
     throw "Windows acceptance evidence schema is missing: $schema"
 }
+. $visualFixture
 
 function Copy-Evidence {
     param(
@@ -254,14 +256,7 @@ function Write-VisualEvidenceFiles {
     )
     foreach ($capture in $Evidence.visual_captures) {
         $path = Join-Path $Root $capture.image.filename
-        $header = [byte[]](
-            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-            0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-            0x08, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-        )
-        $suffix = [Text.Encoding]::UTF8.GetBytes($capture.id)
-        [IO.File]::WriteAllBytes($path, [byte[]] ($header + $suffix))
+        Write-VisualPngFixture -Path $path -Marker $capture.id
         $capture.image.pixel_width = 1
         $capture.image.pixel_height = 1
         $capture.image.sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -509,14 +504,61 @@ try {
         -ExpectedFragment 'PNG dimensions do not match' `
         -VisualEvidenceRoot $visualRoot
 
-    [IO.File]::AppendAllText(
-        (Join-Path $visualRoot $complete.visual_captures[0].image.filename),
-        'tampered'
-    )
+    $firstVisualPath = Join-Path $visualRoot $complete.visual_captures[0].image.filename
+    Write-VisualPngFixture -Path $firstVisualPath -Marker 'different-valid-image'
     Assert-ValidatorFails `
         -Evidence $complete `
         -Name 'visual-root-hash-mismatch' `
         -ExpectedFragment 'image SHA-256 does not match VisualEvidenceRoot bytes' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
+    $invalidCrcEvidence = Copy-Evidence $complete
+    $invalidCrcBytes = [IO.File]::ReadAllBytes($firstVisualPath)
+    $invalidCrcBytes[60] = $invalidCrcBytes[60] -bxor 1
+    [IO.File]::WriteAllBytes($firstVisualPath, $invalidCrcBytes)
+    $invalidCrcEvidence.visual_captures[0].image.sha256 =
+        (Get-FileHash -LiteralPath $firstVisualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ValidatorFails `
+        -Evidence $invalidCrcEvidence `
+        -Name 'visual-root-invalid-crc' `
+        -ExpectedFragment 'not a bounded decodable PNG' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
+    $missingImageDataEvidence = Copy-Evidence $complete
+    $headerOnly = [byte[]](
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+        0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    )
+    [IO.File]::WriteAllBytes($firstVisualPath, $headerOnly)
+    $missingImageDataEvidence.visual_captures[0].image.sha256 =
+        (Get-FileHash -LiteralPath $firstVisualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ValidatorFails `
+        -Evidence $missingImageDataEvidence `
+        -Name 'visual-root-missing-image-data' `
+        -ExpectedFragment 'not a bounded decodable PNG' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
+    $oversizedVisual = [IO.FileStream]::new(
+        $firstVisualPath,
+        [IO.FileMode]::Create,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::None
+    )
+    try {
+        $oversizedVisual.SetLength((64 * 1024 * 1024) + 1)
+    }
+    finally {
+        $oversizedVisual.Dispose()
+    }
+    Assert-ValidatorFails `
+        -Evidence $complete `
+        -Name 'visual-root-oversized-image' `
+        -ExpectedFragment 'encoded size is outside' `
         -VisualEvidenceRoot $visualRoot
     Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
 
@@ -543,6 +585,18 @@ try {
         -Evidence $wrongVisualAppearance `
         -Name 'wrong-high-contrast-appearance' `
         -ExpectedFragment 'appearance does not match its UI contrast target'
+
+    $mainAppearanceBypass = Copy-Evidence $complete
+    foreach ($capture in $mainAppearanceBypass.visual_captures) {
+        if ($capture.surface -eq 'main-workbench' -and
+            $capture.ui_target -like 'ui|*|normal') {
+            $capture.appearance = 'system'
+        }
+    }
+    Assert-ValidatorFails `
+        -Evidence $mainAppearanceBypass `
+        -Name 'main-workbench-appearance-bypass' `
+        -ExpectedFragment 'missing normal main-workbench appearance coverage: light'
 
     $missingVisualSurface = Copy-Evidence $complete
     $missingVisualSurface.visual_captures = @(

@@ -5,9 +5,11 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $validator = Join-Path $PSScriptRoot 'validate-release-acceptance.ps1'
+$visualFixture = Join-Path $PSScriptRoot 'test-visual-evidence-fixture.ps1'
 if (-not (Test-Path -LiteralPath $validator -PathType Leaf)) {
     throw "Release acceptance validator is missing: $validator"
 }
+. $visualFixture
 
 function Write-Utf8NoBom {
     param([Parameter(Mandatory)][string] $Path, [Parameter(Mandatory)][string] $Content)
@@ -45,16 +47,7 @@ function New-ReleaseVisualCaptures {
                 $id = "main-$productId-$dpi-$contrast"
                 $filename = "$id.png"
                 $imagePath = Join-Path $Root $filename
-                $header = [byte[]](
-                    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-                    0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-                    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-                    0x08, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-                )
-                [IO.File]::WriteAllBytes(
-                    $imagePath,
-                    [byte[]] ($header + [Text.Encoding]::UTF8.GetBytes($id))
-                )
+                Write-VisualPngFixture -Path $imagePath -Marker $id
                 $captures.Add([pscustomobject][ordered]@{
                     id = $id
                     image = [pscustomobject][ordered]@{
@@ -83,16 +76,7 @@ function New-ReleaseVisualCaptures {
         )) {
         $filename = "$($extra.Id).png"
         $imagePath = Join-Path $Root $filename
-        $header = [byte[]](
-            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-            0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-            0x08, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-        )
-        [IO.File]::WriteAllBytes(
-            $imagePath,
-            [byte[]] ($header + [Text.Encoding]::UTF8.GetBytes($extra.Id))
-        )
+        Write-VisualPngFixture -Path $imagePath -Marker $extra.Id
         $capture = [ordered]@{
             id = $extra.Id
             image = [pscustomobject][ordered]@{
@@ -404,10 +388,9 @@ try {
     Write-Provenance -Path (Join-Path $handoffRoot 'release-handoff.json') -SourceSha $sourceSha -ExecutableSha $exeSha -WorkflowRun $workflowRun
     Write-Checksums -HandoffRoot $handoffRoot
     Write-JsonObject -Value $complete -Path $evidencePath
-    [IO.File]::AppendAllText(
-        (Join-Path $visualEvidenceRoot $complete.visual_captures[0].image.filename),
-        'tampered'
-    )
+    Write-VisualPngFixture `
+        -Path (Join-Path $visualEvidenceRoot $complete.visual_captures[0].image.filename) `
+        -Marker 'different-valid-image'
     Assert-ValidatorFails `
         -ExpectedFragment 'image SHA-256 does not match VisualEvidenceRoot bytes' `
         -SourceRoot $sourceRoot `

@@ -186,8 +186,9 @@ This cross-check requires the evidence to identify `actions-handoff` and match
 the handoff's source SHA, workflow run, executable filename, executable digest,
 and actual executable bytes. Supply the external screenshot directory through
 `-VisualEvidenceRoot`; the validator rejects reparse-point roots or images and
-checks each PNG's digest and recorded dimensions. Packaging validation by
-itself does not satisfy the acceptance matrix below.
+checks each PNG's encoded-size bound, chunk order and CRCs, decoded scanlines,
+digest, and recorded dimensions. Packaging validation by itself does not
+satisfy the acceptance matrix below.
 
 The visual-root checks reject static aliases but do not prevent another local
 process from replacing a file between metadata, dimension, and digest reads.
