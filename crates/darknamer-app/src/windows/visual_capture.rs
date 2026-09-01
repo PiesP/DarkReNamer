@@ -29,6 +29,12 @@ pub(super) struct CaptureMeasurement {
     pub(super) used_window_dc_fallback: bool,
 }
 
+struct VisualCaptureRecord {
+    filename: &'static str,
+    measurement: CaptureMeasurement,
+    custom_colors_active: bool,
+}
+
 struct CaptureResources {
     screen_dc: HDC,
     memory_dc: HDC,
@@ -389,10 +395,7 @@ fn write_appearance_dialog_visual_gallery() -> Result<(), Box<dyn std::error::Er
         return Err(io::Error::last_os_error().into());
     }
 
-    let result = (|| -> Result<
-        Vec<(&'static str, CaptureMeasurement, bool)>,
-        Box<dyn std::error::Error>,
-    > {
+    let result = (|| -> Result<Vec<VisualCaptureRecord>, Box<dyn std::error::Error>> {
         let mut captures = Vec::with_capacity(3);
         for (filename, theme, forced_colors, system_theme) in [
             (
@@ -418,20 +421,19 @@ fn write_appearance_dialog_visual_gallery() -> Result<(), Box<dyn std::error::Er
                 theme,
                 ..UiAppearance::default()
             };
-            let dialog = create_appearance_dialog_window(
-                owner,
-                1,
-                appearance,
-                forced_colors,
-                system_theme,
-            )?;
+            let dialog =
+                create_appearance_dialog_window(owner, 1, appearance, forced_colors, system_theme)?;
             let custom_colors_active = visual_custom_colors_active(dialog)
                 .ok_or_else(|| io::Error::other("appearance dialog state is busy"))?;
             let capture = write_window_bmp(dialog, &output.join(filename));
             // SAFETY: dialog is the live test-owned window returned above and is
             // destroyed once after the synchronous capture attempt.
             unsafe { DestroyWindow(dialog) };
-            captures.push((filename, capture?, custom_colors_active));
+            captures.push(VisualCaptureRecord {
+                filename,
+                measurement: capture?,
+                custom_colors_active,
+            });
         }
         Ok(captures)
     })();
@@ -452,17 +454,21 @@ fn write_appearance_dialog_visual_gallery() -> Result<(), Box<dyn std::error::Er
     manifest.push_str(
         "  \"surface\": \"appearance-dialog\",\n  \"acceptance\": false,\n  \"captures\": [\n",
     );
-    for (index, (filename, measurement, custom_colors_active)) in captures.iter().enumerate() {
+    for (index, capture) in captures.iter().enumerate() {
         let comma = if index + 1 == captures.len() { "" } else { "," };
-        let backend = if measurement.used_window_dc_fallback {
+        let backend = if capture.measurement.used_window_dc_fallback {
             "window-dc-bitblt-fallback"
         } else {
             "print-window"
         };
         writeln!(
             &mut manifest,
-            "    {{\"filename\": \"{filename}\", \"width\": {}, \"height\": {}, \"distinct_colors_at_least\": {}, \"capture_backend\": \"{backend}\", \"custom_colors_active\": {custom_colors_active}}}{comma}",
-            measurement.width, measurement.height, measurement.distinct_colors,
+            "    {{\"filename\": \"{}\", \"width\": {}, \"height\": {}, \"distinct_colors_at_least\": {}, \"capture_backend\": \"{backend}\", \"custom_colors_active\": {}}}{comma}",
+            capture.filename,
+            capture.measurement.width,
+            capture.measurement.height,
+            capture.measurement.distinct_colors,
+            capture.custom_colors_active,
         )?;
     }
     manifest.push_str("  ]\n}\n");
