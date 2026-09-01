@@ -103,7 +103,7 @@ const EXPECTED: &[(&str, UnsafeCounts)] = &[
     ),
     (
         "src/windows/application.rs",
-        UnsafeCounts::new(117, 0, 1, 0),
+        UnsafeCounts::new(115, 0, 1, 0),
     ),
     ("src/windows/clipboard.rs", UnsafeCounts::new(11, 0, 0, 0)),
     (
