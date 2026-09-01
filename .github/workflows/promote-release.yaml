@@ -64,11 +64,11 @@ jobs:
           EXPECTED_EXE_SHA256: ${{ inputs.expected_exe_sha256 }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          foreach ($entry in [ordered]@{
+          foreach ($entry in ([ordered]@{
               CANDIDATE_RUN_ID = $env:CANDIDATE_RUN_ID
               CANDIDATE_RUN_ATTEMPT = $env:CANDIDATE_RUN_ATTEMPT
               CANDIDATE_ARTIFACT_ID = $env:CANDIDATE_ARTIFACT_ID
-            }.GetEnumerator()) {
+            }).GetEnumerator()) {
             if ($entry.Value -notmatch '^[1-9][0-9]*$') {
               throw "$($entry.Key) must be a positive decimal integer."
             }

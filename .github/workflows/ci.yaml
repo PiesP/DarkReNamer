@@ -69,6 +69,10 @@ jobs:
         shell: pwsh
         run: ./scripts/test-prepare-release-cyclonedx.ps1
 
+      - name: Test release workflow PowerShell syntax
+        shell: pwsh
+        run: ./scripts/test-release-workflow-powershell-syntax.ps1
+
       - name: Test immutable release candidate metadata validation
         shell: pwsh
         run: ./scripts/test-release-candidate-metadata-validator.ps1
@@ -152,6 +156,10 @@ jobs:
       - name: Test release CycloneDX preparation
         shell: pwsh
         run: ./scripts/test-prepare-release-cyclonedx.ps1
+
+      - name: Test release workflow PowerShell syntax
+        shell: pwsh
+        run: ./scripts/test-release-workflow-powershell-syntax.ps1
 
       - name: Test Windows acceptance draft generation
         shell: pwsh
