@@ -163,6 +163,24 @@ function Assert-ValidatorFails {
     throw "Expected validator failure containing '$ExpectedFragment', but validation succeeded."
 }
 
+function Get-FlattenedValidatorOutput {
+    param(
+        [Parameter(Mandatory)][string] $SourceRoot,
+        [Parameter(Mandatory)][string] $HandoffRoot,
+        [Parameter(Mandatory)][string] $EvidencePath
+    )
+
+    $output = @(
+        & $validator `
+            -SourceRoot $SourceRoot `
+            -HandoffRoot $HandoffRoot `
+            -EvidencePath $EvidencePath `
+            6>&1
+    )
+    $text = (($output | ForEach-Object { "$_" }) -join ' ')
+    return (($text -split '\s+') -join ' ').Trim()
+}
+
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "darkrenamer-release-acceptance-$([Guid]::NewGuid())"
 $sourceRoot = Join-Path $testRoot 'source'
 $handoffRoot = Join-Path $testRoot 'dist'
@@ -199,7 +217,31 @@ try {
 
     $complete = New-CompleteEvidence -SourceSha $sourceSha -ExecutableSha $exeSha -WorkflowRun $workflowRun
     Write-JsonObject -Value $complete -Path $evidencePath
-    & $validator -SourceRoot $sourceRoot -HandoffRoot $handoffRoot -EvidencePath $evidencePath | Out-Null
+    $completeOutput = Get-FlattenedValidatorOutput `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot `
+        -EvidencePath $evidencePath
+    if ($completeOutput -like '*HDD-unavailable limitation*') {
+        throw "Full-HDD acceptance output must not report an HDD-unavailable limitation: $completeOutput"
+    }
+
+    $hddUnavailable = Copy-JsonObject $complete
+    $hddUnavailable.benchmarks = @(
+        $hddUnavailable.benchmarks | Where-Object { $_.media -ne 'hdd' }
+    )
+    $hddUnavailable.unexecuted += @(
+        [pscustomobject]@{ id = 'hdd-100-unavailable'; target = 'benchmark|hdd|100'; reason_code = 'hardware-unavailable' },
+        [pscustomobject]@{ id = 'hdd-1000-unavailable'; target = 'benchmark|hdd|1000'; reason_code = 'hardware-unavailable' },
+        [pscustomobject]@{ id = 'hdd-10000-unavailable'; target = 'benchmark|hdd|10000'; reason_code = 'hardware-unavailable' }
+    )
+    Write-JsonObject -Value $hddUnavailable -Path $evidencePath
+    $hddUnavailableOutput = Get-FlattenedValidatorOutput `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot `
+        -EvidencePath $evidencePath
+    if ($hddUnavailableOutput -notlike '*with HDD-unavailable limitation*') {
+        throw "HDD-unavailable acceptance output must retain the limitation: $hddUnavailableOutput"
+    }
 
     $sourceMismatch = Copy-JsonObject $complete
     $sourceMismatch.source_sha = 'a' * 40

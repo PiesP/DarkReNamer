@@ -40,16 +40,26 @@ function Assert-ValidatorPasses {
         [object] $Evidence,
         [Parameter(Mandatory)]
         [string] $Name,
-        [switch] $Draft
+        [switch] $Draft,
+        [string] $ExpectedOutput,
+        [string] $ForbiddenOutput
     )
 
     $path = Join-Path $script:testRoot "$Name.json"
     Write-Evidence -Evidence $Evidence -Path $path
     if ($Draft) {
-        & $validator -EvidencePath $path -Draft | Out-Null
+        $output = @(& $validator -EvidencePath $path -Draft 6>&1)
     }
     else {
-        & $validator -EvidencePath $path | Out-Null
+        $output = @(& $validator -EvidencePath $path 6>&1)
+    }
+    $flattenedOutput = (($output | ForEach-Object { "$_" }) -join ' ')
+    $flattenedOutput = (($flattenedOutput -split '\s+') -join ' ').Trim()
+    if ($ExpectedOutput -and $flattenedOutput -notlike "*$ExpectedOutput*") {
+        throw "Expected '$Name' output to contain '$ExpectedOutput', got: $flattenedOutput"
+    }
+    if ($ForbiddenOutput -and $flattenedOutput -like "*$ForbiddenOutput*") {
+        throw "Expected '$Name' output not to contain '$ForbiddenOutput', got: $flattenedOutput"
     }
 }
 
@@ -267,13 +277,120 @@ function New-CompleteEvidence {
     }
 }
 
+function New-HddUnavailableEvidence {
+    param(
+        [Parameter(Mandatory)]
+        [object] $CompleteEvidence
+    )
+
+    $evidence = Copy-Evidence $CompleteEvidence
+    $evidence.benchmarks = @($evidence.benchmarks | Where-Object { $_.media -ne 'hdd' })
+    $evidence.unexecuted += @(
+        [pscustomobject]@{
+            id = 'hdd-100-unavailable'
+            target = 'benchmark|hdd|100'
+            reason_code = 'hardware-unavailable'
+        },
+        [pscustomobject]@{
+            id = 'hdd-1000-unavailable'
+            target = 'benchmark|hdd|1000'
+            reason_code = 'hardware-unavailable'
+        },
+        [pscustomobject]@{
+            id = 'hdd-10000-unavailable'
+            target = 'benchmark|hdd|10000'
+            reason_code = 'hardware-unavailable'
+        }
+    )
+    return $evidence
+}
+
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "darkrenamer-acceptance-validator-$([Guid]::NewGuid())"
 try {
     New-Item -ItemType Directory -Path $testRoot | Out-Null
     Assert-EvidencePathspec -TestRoot $testRoot
 
     $complete = New-CompleteEvidence
-    Assert-ValidatorPasses -Evidence $complete -Name 'valid-complete'
+    Assert-ValidatorPasses `
+        -Evidence $complete `
+        -Name 'valid-complete' `
+        -ForbiddenOutput 'HDD-unavailable limitation'
+
+    $hddUnavailable = New-HddUnavailableEvidence -CompleteEvidence $complete
+    Assert-ValidatorPasses `
+        -Evidence $hddUnavailable `
+        -Name 'valid-complete-hdd-unavailable' `
+        -ExpectedOutput 'complete release-gate with HDD-unavailable limitation'
+
+    $partialHdd = Copy-Evidence $complete
+    $partialHdd.benchmarks = @(
+        $partialHdd.benchmarks |
+            Where-Object { $_.media -ne 'hdd' -or $_.count -ne 10000 }
+    )
+    $partialHdd.unexecuted += [pscustomobject]@{
+        id = 'hdd-10000-unavailable'
+        target = 'benchmark|hdd|10000'
+        reason_code = 'hardware-unavailable'
+    }
+    Assert-ValidatorFails `
+        -Evidence $partialHdd `
+        -Name 'partial-hdd-complete' `
+        -ExpectedFragment 'all three HDD benchmark rows or no HDD benchmark rows'
+    Assert-ValidatorPasses -Evidence $partialHdd -Name 'partial-hdd-draft' -Draft
+
+    $mixedHdd = Copy-Evidence $complete
+    $mixedHdd.unexecuted += [pscustomobject]@{
+        id = 'hdd-100-unavailable'
+        target = 'benchmark|hdd|100'
+        reason_code = 'hardware-unavailable'
+    }
+    Assert-ValidatorFails `
+        -Evidence $mixedHdd `
+        -Name 'mixed-hdd-rows-and-reasons' `
+        -ExpectedFragment 'Unexecuted reason is not referenced'
+
+    $uncleanHdd = Copy-Evidence $complete
+    $uncleanHdd.benchmarks |
+        Where-Object { $_.media -eq 'hdd' -and $_.count -eq 1000 } |
+        ForEach-Object { $_.cleanup_observation = 'residue-found' }
+    Assert-ValidatorFails `
+        -Evidence $uncleanHdd `
+        -Name 'unclean-hdd-complete' `
+        -ExpectedFragment 'requires clean benchmark cleanup observations'
+
+    $missingHddReason = New-HddUnavailableEvidence -CompleteEvidence $complete
+    $missingHddReason.unexecuted = @(
+        $missingHddReason.unexecuted |
+            Where-Object { $_.target -ne 'benchmark|hdd|10000' }
+    )
+    Assert-ValidatorFails `
+        -Evidence $missingHddReason `
+        -Name 'missing-hdd-unavailable-reason' `
+        -ExpectedFragment 'must explain unavailable HDD benchmark target'
+
+    $wrongHddReason = New-HddUnavailableEvidence -CompleteEvidence $complete
+    $wrongHddReason.unexecuted |
+        Where-Object { $_.target -eq 'benchmark|hdd|1000' } |
+        ForEach-Object { $_.reason_code = 'environment-unavailable' }
+    Assert-ValidatorFails `
+        -Evidence $wrongHddReason `
+        -Name 'non-hardware-hdd-unavailable-reason' `
+        -ExpectedFragment 'must use reason_code hardware-unavailable'
+
+    $missingSsd = Copy-Evidence $hddUnavailable
+    $missingSsd.benchmarks = @(
+        $missingSsd.benchmarks |
+            Where-Object { $_.media -ne 'ssd' -or $_.count -ne 10000 }
+    )
+    $missingSsd.unexecuted += [pscustomobject]@{
+        id = 'ssd-10000-unavailable'
+        target = 'benchmark|ssd|10000'
+        reason_code = 'hardware-unavailable'
+    }
+    Assert-ValidatorFails `
+        -Evidence $missingSsd `
+        -Name 'ssd-unavailable-is-not-complete' `
+        -ExpectedFragment 'missing SSD benchmark target'
 
     $uiStatusMismatch = Copy-Evidence $complete
     $uiStatusMismatch.ui_matrix[0].observation_code = 'layout-defect'

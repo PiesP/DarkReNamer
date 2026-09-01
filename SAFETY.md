@@ -200,11 +200,20 @@ Complete release-gate evidence requires all of the following:
   common dialogs, clipboard, worker cancellation, worker close, startup
   recovery, recovery export, and Intent-only candidate discard;
 - one same-parent benchmark each for 100, 1,000, and 10,000 entries on physical
-  SSD and HDD media, with planning and execution durations, storage model and
+  SSD media, with planning and execution durations, storage model and
   connection, free-space bucket, power mode, and a clean cleanup observation;
-  and
+- either the same three clean benchmark rows on physical HDD media or no HDD
+  rows plus one target-bound `hardware-unavailable` reason for each count; and
 - a passed application-process crash trial plus at least one separately
   authorized and passed VM hard-reset or storage-fault trial.
+
+The HDD-unavailable form records a personal development hardware limitation; it
+does not claim or simulate HDD coverage. Partial HDD rows, mixed HDD rows and
+unexecuted reasons, or a non-hardware reason do not pass the release gate. SSD
+rows remain mandatory and cannot be replaced by an unexecuted reason.
+This form applies only when no physical HDD is present before any HDD run starts.
+A failed or residue-producing HDD attempt cannot be reclassified as unavailable;
+retain its source-bound external raw record as failed acceptance evidence.
 
 Physical power-loss evidence is an optional stronger trial. Process exit, VM
 hard reset, storage fault injection, and physical power loss remain distinct
@@ -242,11 +251,11 @@ root whose access is private to the benchmark operator and run it from a
 non-elevated PowerShell session. The private-root environment setting below is
 an explicit operator acknowledgment, not an ACL check.
 
-The authoritative physical matrix is SSD and HDD media crossed with counts 100,
-1,000, and 10,000 and the `same-parent`, `unique-parent`, and `deep-parent`
-topologies. Run iteration 0 once as a warmup for every matrix cell, then record
-iterations 1 through 5. Select the correct dedicated root and media value for
-each physical device:
+When the hardware is available, the authoritative physical matrix is SSD and
+HDD media crossed with counts 100, 1,000, and 10,000 and the `same-parent`,
+`unique-parent`, and `deep-parent` topologies. Run iteration 0 once as a warmup
+for every matrix cell, then record iterations 1 through 5. Select the correct
+dedicated root and media value for each physical device:
 
 ```powershell
 $env:DARKRENAMER_BENCH_ROOT = 'D:\darkrenamer-benchmark-root'
@@ -275,15 +284,19 @@ foreach ($count in 100, 1000, 10000) {
 }
 ```
 
-Use `ssd` and the SSD's dedicated root for the SSD pass. Only the six
-`same-parent` cells (two media classes by three counts) map to the existing
+Use `ssd` and the SSD's dedicated root for the SSD pass. Up to six
+`same-parent` cells (two media classes by three counts) map to
 release-acceptance benchmark rows, and those rows must use `variant=baseline`.
+The three SSD cells are mandatory. If no physical HDD is available, omit all
+three HDD rows and record the three exact `hardware-unavailable` reasons instead;
+the limitation stays visible in the evidence artifact. Do not relabel SSD,
+virtual, or ephemeral runner storage as an HDD result.
 Keep `unique-parent` and `deep-parent` results as separate, source-SHA-bound,
 path-free diagnostic evidence; they do not add or replace release rows. Record
 only iterations 1 through 5. Iteration 0 is warmup output and must not be
 promoted to evidence.
 
-For each of the six `same-parent` release rows, record the median
+For each recorded `same-parent` release row, record the median
 `planning_ms` and median `execution_ms` from the five recorded iterations.
 All five iterations must have emitted their result lines after clean fixture
 cleanup. Preserve all five raw path-free metric line sets in the external,
@@ -332,7 +345,9 @@ authority across the planning boundary. A production decision additionally
 requires separate paired physical evidence showing stable median improvement
 across SSD and HDD media at 100, 1,000, and 10,000 entries for all three
 topologies, plus safety and execution regression coverage. The skip estimate
-cannot satisfy or waive either requirement.
+cannot satisfy or waive either requirement. An HDD-unavailable release artifact
+also does not waive the physical HDD evidence required for that production
+optimization decision.
 
 The media label is operator-supplied context, not an automatic hardware claim.
 The manual `Planning benchmark` Actions workflow uses ephemeral runner storage,
