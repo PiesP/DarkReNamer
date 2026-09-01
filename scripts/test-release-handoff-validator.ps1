@@ -33,6 +33,7 @@ function Write-Checksums {
         'DISTRIBUTION.md'
         'LICENSE'
         'release-handoff.json'
+        'release-metrics.json'
         'THIRD_PARTY_NOTICES.md'
     )
     $lines = foreach ($name in $subjects) {
@@ -73,6 +74,45 @@ function Write-Provenance {
         -Content (($provenance | ConvertTo-Json -Depth 4) + "`n")
 }
 
+function Write-Metrics {
+    param(
+        [Parameter(Mandatory)]
+        [string] $HandoffRoot,
+        [Parameter(Mandatory)]
+        [string] $SourceSha,
+        [object] $SchemaVersion = 1,
+        [object] $RustcVersion = 'rustc 1.97.1 (fixture 2026-08-01)',
+        [object] $TargetTriple = 'x86_64-pc-windows-msvc',
+        [object] $ExecutableBytes,
+        [object] $DebugSymbolsBytes,
+        [object] $SbomBytes,
+        [object] $CargoLockPackageCount = 2
+    )
+
+    if (-not $PSBoundParameters.ContainsKey('ExecutableBytes')) {
+        $ExecutableBytes = (Get-Item -LiteralPath (Join-Path $HandoffRoot 'DarkReNamer.exe')).Length
+    }
+    if (-not $PSBoundParameters.ContainsKey('DebugSymbolsBytes')) {
+        $DebugSymbolsBytes = (Get-Item -LiteralPath (Join-Path $HandoffRoot 'DarkReNamer-debug-symbols.zip')).Length
+    }
+    if (-not $PSBoundParameters.ContainsKey('SbomBytes')) {
+        $SbomBytes = (Get-Item -LiteralPath (Join-Path $HandoffRoot 'DarkReNamer.cdx.json')).Length
+    }
+    $metrics = [ordered]@{
+        schema_version = $SchemaVersion
+        source_sha = $SourceSha
+        rustc_version = $RustcVersion
+        target_triple = $TargetTriple
+        darkrenamer_exe_bytes = $ExecutableBytes
+        debug_symbols_zip_bytes = $DebugSymbolsBytes
+        sbom_bytes = $SbomBytes
+        cargo_lock_package_count = $CargoLockPackageCount
+    }
+    Write-Utf8NoBom `
+        -Path (Join-Path $HandoffRoot 'release-metrics.json') `
+        -Content (($metrics | ConvertTo-Json -Depth 3) + "`n")
+}
+
 function Assert-ValidatorFails {
     param(
         [Parameter(Mandatory)]
@@ -106,12 +146,18 @@ try {
         Write-Utf8NoBom -Path (Join-Path $sourceRoot $name) -Content "$name source policy`n"
         Copy-Item -LiteralPath (Join-Path $sourceRoot $name) -Destination $handoffRoot
     }
+    Write-Utf8NoBom `
+        -Path (Join-Path $sourceRoot 'rust-toolchain.toml') `
+        -Content "[toolchain]`nchannel = `"1.97.1`"`n"
+    Write-Utf8NoBom `
+        -Path (Join-Path $sourceRoot 'Cargo.lock') `
+        -Content "version = 4`n`n[[package]]`nname = `"fixture-a`"`nversion = `"0.1.0`"`n`n[[package]]`nname = `"fixture-b`"`nversion = `"0.2.0`"`n"
 
     & git -C $sourceRoot init --quiet
     if ($LASTEXITCODE -ne 0) { throw 'Failed to initialize source fixture repository.' }
     & git -C $sourceRoot config user.name 'DarkReNamer test'
     & git -C $sourceRoot config user.email 'darkrenamer-test@example.invalid'
-    & git -C $sourceRoot add -- LICENSE THIRD_PARTY_NOTICES.md DISTRIBUTION.md
+    & git -C $sourceRoot add -- LICENSE THIRD_PARTY_NOTICES.md DISTRIBUTION.md rust-toolchain.toml Cargo.lock
     & git -C $sourceRoot commit --quiet -m 'test: initialize release source fixture'
     if ($LASTEXITCODE -ne 0) { throw 'Failed to commit source fixture repository.' }
     $sourceSha = (& git -C $sourceRoot rev-parse HEAD).Trim()
@@ -126,6 +172,7 @@ try {
         -LiteralPath (Join-Path $handoffRoot 'DarkReNamer.pdb') `
         -DestinationPath (Join-Path $handoffRoot 'DarkReNamer-debug-symbols.zip')
     Write-Provenance -HandoffRoot $handoffRoot -SourceSha $sourceSha
+    Write-Metrics -HandoffRoot $handoffRoot -SourceSha $sourceSha
     Write-Checksums -HandoffRoot $handoffRoot
 
     $global:DarkReNamerTestAuthenticodeStatus = 'NotSigned'
@@ -138,6 +185,158 @@ try {
     }
 
     & $validator -SourceRoot $sourceRoot -HandoffRoot $handoffRoot
+
+    Remove-Item -LiteralPath (Join-Path $handoffRoot 'release-metrics.json')
+    Assert-ValidatorFails `
+        -ExpectedFragment 'Release handoff layout mismatch' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+    Write-Metrics -HandoffRoot $handoffRoot -SourceSha $sourceSha
+
+    Write-Utf8NoBom `
+        -Path (Join-Path $handoffRoot 'release-metrics.json') `
+        -Content "{not-json`n"
+    Assert-ValidatorFails `
+        -ExpectedFragment 'release-metrics.json is not valid JSON' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+
+    $exeBytes = (Get-Item -LiteralPath (Join-Path $handoffRoot 'DarkReNamer.exe')).Length
+    $debugSymbolsBytes = (Get-Item -LiteralPath (Join-Path $handoffRoot 'DarkReNamer-debug-symbols.zip')).Length
+    $sbomBytes = (Get-Item -LiteralPath (Join-Path $handoffRoot 'DarkReNamer.cdx.json')).Length
+    Write-Utf8NoBom `
+        -Path (Join-Path $handoffRoot 'release-metrics.json') `
+        -Content "{`"schema_version`":1,`"source_sha`":`"$sourceSha`",`"source_sha`":`"$sourceSha`",`"rustc_version`":`"rustc 1.97.1 (fixture 2026-08-01)`",`"target_triple`":`"x86_64-pc-windows-msvc`",`"darkrenamer_exe_bytes`":$exeBytes,`"debug_symbols_zip_bytes`":$debugSymbolsBytes,`"sbom_bytes`":$sbomBytes,`"cargo_lock_package_count`":2}`n"
+    Assert-ValidatorFails `
+        -ExpectedFragment 'release-metrics contains a duplicate field: source_sha' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+
+    $missingField = [ordered]@{
+        schema_version = 1
+        source_sha = $sourceSha
+        rustc_version = 'rustc 1.97.1 (fixture 2026-08-01)'
+        target_triple = 'x86_64-pc-windows-msvc'
+        darkrenamer_exe_bytes = $exeBytes
+        debug_symbols_zip_bytes = $debugSymbolsBytes
+        sbom_bytes = $sbomBytes
+    }
+    Write-Utf8NoBom `
+        -Path (Join-Path $handoffRoot 'release-metrics.json') `
+        -Content (($missingField | ConvertTo-Json -Depth 3) + "`n")
+    Assert-ValidatorFails `
+        -ExpectedFragment 'release-metrics is missing required field: cargo_lock_package_count' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+
+    $extraField = [ordered]@{
+        schema_version = 1
+        source_sha = $sourceSha
+        rustc_version = 'rustc 1.97.1 (fixture 2026-08-01)'
+        target_triple = 'x86_64-pc-windows-msvc'
+        darkrenamer_exe_bytes = $exeBytes
+        debug_symbols_zip_bytes = $debugSymbolsBytes
+        sbom_bytes = $sbomBytes
+        cargo_lock_package_count = 2
+        note = 'unsupported'
+    }
+    Write-Utf8NoBom `
+        -Path (Join-Path $handoffRoot 'release-metrics.json') `
+        -Content (($extraField | ConvertTo-Json -Depth 3) + "`n")
+    Assert-ValidatorFails `
+        -ExpectedFragment 'release-metrics contains an unsupported field: note' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+
+    Write-Metrics -HandoffRoot $handoffRoot -SourceSha $sourceSha -SchemaVersion 2
+    Assert-ValidatorFails `
+        -ExpectedFragment 'schema_version must be the JSON integer 1' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+
+    Write-Metrics -HandoffRoot $handoffRoot -SourceSha ('a' * 40)
+    Assert-ValidatorFails `
+        -ExpectedFragment 'source_sha does not match release-handoff.source_sha and source HEAD' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+
+    Write-Metrics -HandoffRoot $handoffRoot -SourceSha $sourceSha -RustcVersion ''
+    Assert-ValidatorFails `
+        -ExpectedFragment 'rustc_version must be a nonempty single-line string' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+
+    Write-Metrics `
+        -HandoffRoot $handoffRoot `
+        -SourceSha $sourceSha `
+        -RustcVersion ('rustc 1.97.1 ' + ('x' * 260))
+    Assert-ValidatorFails `
+        -ExpectedFragment 'rustc_version must be a nonempty single-line string' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+
+    Write-Metrics -HandoffRoot $handoffRoot -SourceSha $sourceSha -RustcVersion 'rustc 1.96.0 (fixture)'
+    Assert-ValidatorFails `
+        -ExpectedFragment 'rustc_version does not match rust-toolchain.toml channel' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+
+    Write-Metrics -HandoffRoot $handoffRoot -SourceSha $sourceSha -TargetTriple 'aarch64-pc-windows-msvc'
+    Assert-ValidatorFails `
+        -ExpectedFragment 'target_triple must be x86_64-pc-windows-msvc' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+
+    Write-Metrics -HandoffRoot $handoffRoot -SourceSha $sourceSha -ExecutableBytes "$exeBytes"
+    Assert-ValidatorFails `
+        -ExpectedFragment 'darkrenamer_exe_bytes must be a positive JSON integer' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+
+    Write-Metrics -HandoffRoot $handoffRoot -SourceSha $sourceSha -DebugSymbolsBytes 1.5
+    Assert-ValidatorFails `
+        -ExpectedFragment 'debug_symbols_zip_bytes must be a positive JSON integer' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+
+    Write-Metrics -HandoffRoot $handoffRoot -SourceSha $sourceSha -CargoLockPackageCount $true
+    Assert-ValidatorFails `
+        -ExpectedFragment 'cargo_lock_package_count must be a positive JSON integer' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+
+    Write-Metrics -HandoffRoot $handoffRoot -SourceSha $sourceSha -SbomBytes 0
+    Assert-ValidatorFails `
+        -ExpectedFragment 'sbom_bytes must be a positive JSON integer' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+
+    Write-Metrics -HandoffRoot $handoffRoot -SourceSha $sourceSha -ExecutableBytes ($exeBytes + 1)
+    Assert-ValidatorFails `
+        -ExpectedFragment 'darkrenamer_exe_bytes does not match the handoff file bytes' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+
+    Write-Metrics -HandoffRoot $handoffRoot -SourceSha $sourceSha -DebugSymbolsBytes ($debugSymbolsBytes + 1)
+    Assert-ValidatorFails `
+        -ExpectedFragment 'debug_symbols_zip_bytes does not match the handoff file bytes' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+
+    Write-Metrics -HandoffRoot $handoffRoot -SourceSha $sourceSha -SbomBytes ($sbomBytes + 1)
+    Assert-ValidatorFails `
+        -ExpectedFragment 'sbom_bytes does not match the handoff file bytes' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+
+    Write-Metrics -HandoffRoot $handoffRoot -SourceSha $sourceSha -CargoLockPackageCount 3
+    Assert-ValidatorFails `
+        -ExpectedFragment 'cargo_lock_package_count does not match source Cargo.lock' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+
+    Write-Metrics -HandoffRoot $handoffRoot -SourceSha $sourceSha
+    Write-Checksums -HandoffRoot $handoffRoot
 
     Remove-Item -LiteralPath (Join-Path $handoffRoot 'release-handoff.json')
     Assert-ValidatorFails `

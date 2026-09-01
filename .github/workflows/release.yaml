@@ -129,6 +129,32 @@ jobs:
           Copy-Item DISTRIBUTION.md dist/DISTRIBUTION.md
           Compress-Archive -Path dist/DarkReNamer.pdb `
             -DestinationPath dist/DarkReNamer-debug-symbols.zip
+          $rustcVersion = (& rustc --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($rustcVersion)) {
+            throw 'The release rustc version could not be resolved.'
+          }
+          $cargoLockPackageCount = [regex]::Matches(
+            (Get-Content -LiteralPath Cargo.lock -Raw),
+            '(?m)^\[\[package\]\]\s*$'
+          ).Count
+          if ($cargoLockPackageCount -le 0) {
+            throw 'Cargo.lock did not contain any package tables.'
+          }
+          $metrics = [ordered]@{
+            schema_version = 1
+            source_sha = '${{ steps.source.outputs.source_commit }}'
+            rustc_version = $rustcVersion
+            target_triple = 'x86_64-pc-windows-msvc'
+            darkrenamer_exe_bytes = (Get-Item -LiteralPath dist/DarkReNamer.exe).Length
+            debug_symbols_zip_bytes = (Get-Item -LiteralPath dist/DarkReNamer-debug-symbols.zip).Length
+            sbom_bytes = (Get-Item -LiteralPath dist/DarkReNamer.cdx.json).Length
+            cargo_lock_package_count = $cargoLockPackageCount
+          }
+          [IO.File]::WriteAllText(
+            (Join-Path $PWD 'dist/release-metrics.json'),
+            (($metrics | ConvertTo-Json -Depth 3) + "`n"),
+            [Text.UTF8Encoding]::new($false)
+          )
           $executableHash = (Get-FileHash `
               -Algorithm SHA256 `
               -LiteralPath dist/DarkReNamer.exe).Hash.ToLowerInvariant()
@@ -165,6 +191,34 @@ jobs:
           ./scripts/validate-release-handoff.ps1
           -SourceRoot $PWD
           -HandoffRoot (Join-Path $PWD 'dist')
+
+      - name: Summarize information-only release metrics
+        shell: pwsh
+        run: |
+          $metrics = Get-Content -LiteralPath dist/release-metrics.json -Raw | ConvertFrom-Json
+          $rows = [ordered]@{
+            schema_version = $metrics.schema_version
+            source_sha = $metrics.source_sha
+            rustc_version = $metrics.rustc_version
+            target_triple = $metrics.target_triple
+            darkrenamer_exe_bytes = $metrics.darkrenamer_exe_bytes
+            debug_symbols_zip_bytes = $metrics.debug_symbols_zip_bytes
+            sbom_bytes = $metrics.sbom_bytes
+            cargo_lock_package_count = $metrics.cargo_lock_package_count
+          }
+          @(
+            '## Release metrics (information only)'
+            ''
+            'These observed values are not release size or dependency-count thresholds.'
+            ''
+            '| Field | Value |'
+            '| --- | --- |'
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          foreach ($entry in $rows.GetEnumerator()) {
+            $value = "$($entry.Value)".Replace('|', '\|')
+            "| ``$($entry.Key)`` | ``$value`` |" |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          }
 
       - name: Retain complete release handoff
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -236,4 +290,5 @@ jobs:
             dist/LICENSE `
             dist/THIRD_PARTY_NOTICES.md `
             dist/DISTRIBUTION.md `
-            dist/release-handoff.json
+            dist/release-handoff.json `
+            dist/release-metrics.json
