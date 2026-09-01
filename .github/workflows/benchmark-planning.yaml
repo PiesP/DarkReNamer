@@ -23,6 +23,14 @@ on:
           - same-parent
           - unique-parent
           - deep-parent
+      variant:
+        description: Planning measurement variant
+        required: true
+        type: choice
+        default: baseline
+        options:
+          - baseline
+          - validation-skip-estimate
       repetitions:
         description: Recorded repetitions after each warmup
         required: true
@@ -59,6 +67,7 @@ jobs:
         env:
           SELECTED_COUNT: ${{ inputs.count }}
           SELECTED_TOPOLOGY: ${{ inputs.topology }}
+          SELECTED_VARIANT: ${{ inputs.variant }}
           RECORDED_REPETITIONS: ${{ inputs.repetitions }}
         run: |
           $counts = if ($env:SELECTED_COUNT -eq 'all') {
@@ -77,6 +86,8 @@ jobs:
           $env:DARKRENAMER_BENCH_ROOT_PRIVATE = '1'
           $env:DARKRENAMER_BENCH_EVIDENCE_CLASS = 'directional-hosted'
           $env:DARKRENAMER_BENCH_MEDIA = 'virtual'
+          $env:DARKRENAMER_BENCH_VARIANT = $env:SELECTED_VARIANT
+          $env:DARKRENAMER_BENCH_SOURCE_SHA = $env:GITHUB_SHA
           $env:DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'
 
           foreach ($count in $counts) {
