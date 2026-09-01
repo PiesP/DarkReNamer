@@ -184,7 +184,39 @@ try {
         }
     }
 
-    & $validator -SourceRoot $sourceRoot -HandoffRoot $handoffRoot
+    $defaultOutput = @(
+        & $validator -SourceRoot $sourceRoot -HandoffRoot $handoffRoot 6>&1
+    )
+    $defaultText = (($defaultOutput | ForEach-Object { "$_" }) -join ' ')
+    if ($defaultText -notlike '*Validated unsigned release handoff*') {
+        throw "Default validation did not retain its human success output: $defaultText"
+    }
+
+    $passThruOutput = @(
+        & $validator -SourceRoot $sourceRoot -HandoffRoot $handoffRoot -PassThru 6>&1
+    )
+    if ($passThruOutput.Count -ne 1 -or $passThruOutput[0] -isnot [pscustomobject]) {
+        throw 'PassThru validation must return exactly one provenance object and no human success output.'
+    }
+    $validatedProvenance = $passThruOutput[0]
+    if (($validatedProvenance.PSObject.Properties.Name -join ',') -cne
+        'schema_version,source_sha,workflow_run,executable') {
+        throw 'PassThru provenance fields do not match the validated handoff contract.'
+    }
+    if (($validatedProvenance.executable.PSObject.Properties.Name -join ',') -cne
+        'filename,sha256') {
+        throw 'PassThru executable fields do not match the validated handoff contract.'
+    }
+    $expectedExecutableHash = (Get-FileHash `
+        -LiteralPath (Join-Path $handoffRoot 'DarkReNamer.exe') `
+        -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($validatedProvenance.schema_version -ne 1 -or
+        $validatedProvenance.source_sha -cne $sourceSha -or
+        $validatedProvenance.workflow_run -cne '33257061299' -or
+        $validatedProvenance.executable.filename -cne 'DarkReNamer.exe' -or
+        $validatedProvenance.executable.sha256 -cne $expectedExecutableHash) {
+        throw 'PassThru provenance values do not match the validated handoff.'
+    }
 
     Remove-Item -LiteralPath (Join-Path $handoffRoot 'release-metrics.json')
     Assert-ValidatorFails `

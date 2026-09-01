@@ -226,6 +226,8 @@ $sourceRoot = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Pat
 $sourceSha = (& git -C $sourceRoot rev-parse HEAD).Trim()
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "darkrenamer-acceptance-draft-$([Guid]::NewGuid())"
 $insideRepositoryOutput = Join-Path $sourceRoot '.stage4-generator-test-output.json'
+$reparseParent = $null
+$reparseTargetOutput = $null
 
 try {
     New-Item -ItemType Directory -Path $testRoot | Out-Null
@@ -253,6 +255,42 @@ try {
     $executablePath = Join-Path $testRoot 'DarkReNamer.exe'
     [IO.File]::WriteAllBytes($executablePath, [byte[]](0x4d, 0x5a, 0x10, 0x20))
     $executableHash = (Get-FileHash -LiteralPath $executablePath -Algorithm SHA256).Hash.ToLowerInvariant()
+
+    $reparseParent = Join-Path $testRoot 'apparently-external-parent'
+    $reparseLeaf = ".stage5-reparse-output-$([Guid]::NewGuid().ToString('N')).json"
+    $reparseTargetOutput = Join-Path (Join-Path $sourceRoot 'scripts') $reparseLeaf
+    if (Test-Path -LiteralPath $reparseTargetOutput) {
+        throw "Reserved reparse regression target already exists: $reparseTargetOutput"
+    }
+    if ($IsWindows) {
+        New-Item `
+            -ItemType Junction `
+            -Path $reparseParent `
+            -Target (Join-Path $sourceRoot 'scripts') |
+            Out-Null
+    }
+    else {
+        New-Item `
+            -ItemType SymbolicLink `
+            -Path $reparseParent `
+            -Target (Join-Path $sourceRoot 'scripts') |
+            Out-Null
+    }
+    $reparseOutput = Join-Path $reparseParent $reparseLeaf
+    Assert-GeneratorFails `
+        -Command {
+            & $generator `
+                -SourceRoot $sourceRoot `
+                -OutputPath $reparseOutput `
+                -ExecutablePath $executablePath
+        } `
+        -ExpectedFragment 'reparse point' `
+        -OutputPath $reparseOutput
+    if (Test-Path -LiteralPath $reparseTargetOutput) {
+        throw 'Reparse-parent rejection created an output inside SourceRoot.'
+    }
+    Assert-NoOwnedTemporaryFiles -OutputPath $reparseOutput
+
     $localOutput = Join-Path $testRoot 'local-draft.json'
     & $generator -SourceRoot $sourceRoot -OutputPath $localOutput -ExecutablePath $executablePath
     Assert-Draft `
@@ -375,6 +413,13 @@ finally {
     Remove-Variable DarkReNamerTestAuthenticodeStatus -Scope Global -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $insideRepositoryOutput -PathType Leaf) {
         Remove-Item -LiteralPath $insideRepositoryOutput -Force
+    }
+    if ($null -ne $reparseTargetOutput -and
+        (Test-Path -LiteralPath $reparseTargetOutput -PathType Leaf)) {
+        Remove-Item -LiteralPath $reparseTargetOutput -Force
+    }
+    if ($null -ne $reparseParent -and (Test-Path -LiteralPath $reparseParent)) {
+        Remove-Item -LiteralPath $reparseParent -Force
     }
     if (Test-Path -LiteralPath $testRoot) {
         Remove-Item -LiteralPath $testRoot -Recurse -Force

@@ -63,6 +63,24 @@ function Test-PathWithinRoot {
         $Candidate.StartsWith($rootWithSeparator, $Comparison)
 }
 
+function Assert-NoReparsePointInOutputAncestors {
+    param(
+        [Parameter(Mandatory)]
+        [string] $ParentPath
+    )
+
+    $currentPath = [IO.Path]::GetFullPath($ParentPath)
+    while ($null -ne $currentPath) {
+        $item = Get-Item -LiteralPath $currentPath -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq
+            [IO.FileAttributes]::ReparsePoint) {
+            throw "OutputPath parent chain contains a reparse point: $currentPath"
+        }
+        $parent = [IO.Directory]::GetParent($currentPath)
+        $currentPath = if ($null -eq $parent) { $null } else { $parent.FullName }
+    }
+}
+
 $sourcePath = (Resolve-Path -LiteralPath $SourceRoot).Path
 $sourceTopLevel = @(& git -C $sourcePath rev-parse --show-toplevel 2>$null)
 if ($LASTEXITCODE -ne 0 -or $sourceTopLevel.Count -ne 1) {
@@ -105,6 +123,7 @@ if ([string]::IsNullOrEmpty($requestedParent) -or
 }
 $resolvedOutputParent = (Resolve-Path -LiteralPath $requestedParent).Path
 $resolvedOutputPath = [IO.Path]::GetFullPath((Join-Path $resolvedOutputParent $outputLeaf))
+Assert-NoReparsePointInOutputAncestors -ParentPath $requestedParent
 if (Test-PathWithinRoot `
         -Candidate $resolvedOutputPath `
         -Root $resolvedSourceRoot `
@@ -123,14 +142,10 @@ if ($PSCmdlet.ParameterSetName -eq 'ActionsHandoff') {
         throw "Release handoff validator is missing: $handoffValidator"
     }
     $resolvedHandoffRoot = (Resolve-Path -LiteralPath $HandoffRoot).Path
-    & $handoffValidator `
+    $handoff = & $handoffValidator `
         -SourceRoot $resolvedSourceRoot `
-        -HandoffRoot $resolvedHandoffRoot
-
-    $handoff = Get-Content `
-        -LiteralPath (Join-Path $resolvedHandoffRoot 'release-handoff.json') `
-        -Raw |
-        ConvertFrom-Json
+        -HandoffRoot $resolvedHandoffRoot `
+        -PassThru
     $evidenceSourceSha = $handoff.source_sha
     $artifact = [ordered]@{
         filename = $handoff.executable.filename
@@ -279,6 +294,7 @@ $temporaryPath = Join-Path `
     ".$outputLeaf.$([Guid]::NewGuid().ToString('N')).tmp"
 $temporaryOwned = $false
 try {
+    Assert-NoReparsePointInOutputAncestors -ParentPath $requestedParent
     $stream = [IO.FileStream]::new(
         $temporaryPath,
         [IO.FileMode]::CreateNew,
@@ -296,6 +312,7 @@ try {
     }
 
     & $evidenceValidator -EvidencePath $temporaryPath -Draft
+    Assert-NoReparsePointInOutputAncestors -ParentPath $requestedParent
     [IO.File]::Move($temporaryPath, $resolvedOutputPath)
     $temporaryOwned = $false
 }

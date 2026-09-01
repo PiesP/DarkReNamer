@@ -204,7 +204,15 @@ downloaded Actions handoff. The latter validates the complete handoff before it
 reads provenance. `-OutputPath` must be an absolute new file outside the source
 worktree whose parent directory already exists; the generator validates a
 same-directory temporary file in `-Draft` mode and never overwrites an existing
-destination.
+destination. It rejects output-parent chains containing symbolic links,
+junctions, or other reparse points and rechecks that chain while publishing the
+validated draft.
+
+Those checks close static reparse-parent aliases but do not eliminate a
+malicious local process concurrently replacing or retargeting a directory
+between checks. The no-overwrite move still prevents replacement of an existing
+destination; generate into a parent directory that untrusted local users cannot
+modify.
 
 The schema remains the truth for target enumerations and allowed reason codes,
 and the validator remains the truth for draft and release-gate semantics. A new

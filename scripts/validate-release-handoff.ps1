@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory)]
     [string] $SourceRoot,
     [Parameter(Mandatory)]
-    [string] $HandoffRoot
+    [string] $HandoffRoot,
+    [switch] $PassThru
 )
 
 Set-StrictMode -Version Latest
@@ -406,4 +407,7 @@ for ($index = 0; $index -lt $checksumLines.Count; $index++) {
     }
 }
 
+if ($PassThru) {
+    return $provenance
+}
 Write-Host "Validated unsigned release handoff at $handoffPath."
