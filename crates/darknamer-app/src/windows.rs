@@ -1268,9 +1268,20 @@ mod tests {
                 .status
                 .as_deref()
                 .unwrap_or_default()
+                .contains("명시적인 복구 확인이 필요")
+        );
+        let mut state = AppState::new(runtime);
+        assert!(state.can_confirm_active_recovery());
+        let presentation = recover_confirmed_active_journal(&mut state);
+        assert!(!presentation.completed);
+        assert!(
+            presentation
+                .status
                 .contains("저널 삭제 실패: file journal error: UnsafeCleanupState")
         );
-        drop(runtime);
+        assert!(state.recovery_locked);
+        assert!(state.active_journal.is_some());
+        drop(state);
         assert_eq!(fs::read(active)?, bytes);
         Ok(())
     }
