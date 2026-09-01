@@ -373,6 +373,9 @@ pub(super) fn prompt_input(
             }
         }
     }
+    if let Some(error) = state.creation_error.take() {
+        return Err(error);
+    }
     Ok(state.result.take())
 }
 
@@ -384,12 +387,12 @@ pub(super) fn prompt_input_or_report(
     match prompt_input(owner, appearance, spec) {
         Ok(result) => result,
         Err(error) => {
+            let detail = error
+                .raw_os_error()
+                .map_or_else(|| error.to_string(), |code| format!("OS {code}"));
             message(
                 owner,
-                &format!(
-                    "입력창을 처리하지 못했습니다. OS {:?}",
-                    error.raw_os_error()
-                ),
+                &format!("입력창을 처리하지 못했습니다. {detail}"),
                 "DarkReNamer",
             );
             None
@@ -755,23 +758,11 @@ fn arrange_prompt(window: HWND, state: &PromptState, center_on_owner: bool) {
 pub(super) fn create_prompt_children(window: HWND, state: &mut PromptState) -> io::Result<()> {
     state.title = child(window, "STATIC", &state.spec.title, 1001, SS_NOPREFIX)?;
     if !state.spec.label_one.is_empty() {
-        state.edit_one = child(
-            window,
-            "EDIT",
-            &state.spec.value_one.to_string_lossy(),
-            1004,
-            WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
-        )?;
+        state.edit_one = create_prompt_edit(window, &state.spec.value_one, 1004)?;
         state.label_one = child(window, "STATIC", &state.spec.label_one, 1002, SS_NOPREFIX)?;
     }
     if !state.spec.label_two.is_empty() {
-        state.edit_two = child(
-            window,
-            "EDIT",
-            &state.spec.value_two.to_string_lossy(),
-            1005,
-            WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
-        )?;
+        state.edit_two = create_prompt_edit(window, &state.spec.value_two, 1005)?;
         state.label_two = child(window, "STATIC", &state.spec.label_two, 1003, SS_NOPREFIX)?;
     }
     if !state.spec.choices.is_empty() {
@@ -986,17 +977,10 @@ pub(super) unsafe extern "system" fn prompt_proc(
                 // SAFETY: state_ptr borrows prompt_input's live local Box and is
                 // confined to this modal callback thread until WM_NCDESTROY clears it.
                 let state = unsafe { &mut *state_ptr };
-                state.result = Some(PromptResult {
-                    value_one: { window_text(state.edit_one) },
-                    value_two: { window_text(state.edit_two) },
-                    choice: if state.combo.is_null() {
-                        0
-                    } else {
-                        // SAFETY: combo is live and each choice pointer is owned terminated UTF-16 retained through synchronous SendMessageW.
-                        usize::try_from(unsafe { SendMessageW(state.combo, CB_GETCURSEL, 0, 0) })
-                            .unwrap_or(0)
-                    },
-                });
+                match prompt_result(state) {
+                    Ok(result) => state.result = Some(result),
+                    Err(error) => state.creation_error = Some(error),
+                }
                 state.done = true;
                 // SAFETY: window is the live prompt HWND and IDOK has not yet
                 // destroyed it on this callback path.
@@ -1033,20 +1017,110 @@ pub(super) unsafe extern "system" fn prompt_proc(
     }
 }
 
-pub(super) fn window_text(window: HWND) -> LegacyText {
+const MAX_PROMPT_TEXT_UTF16_UNITS: usize = darknamer_core::MAX_PROPOSED_NAME_UTF16_UNITS;
+// Retain one sentinel unit above the valid command boundary. An oversized
+// paste is therefore preserved as invalid input instead of being silently
+// truncated into a valid 255-unit command, while allocation stays bounded.
+const MAX_PROMPT_CONTROL_UTF16_UNITS: usize = MAX_PROMPT_TEXT_UTF16_UNITS + 1;
+
+fn prompt_text_too_long(length: usize) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("입력값이 너무 깁니다(UTF-16 {length}/{MAX_PROMPT_TEXT_UTF16_UNITS}자)."),
+    )
+}
+
+fn create_prompt_edit(parent: HWND, value: &LegacyText, id: u16) -> io::Result<HWND> {
+    if value.len() > MAX_PROMPT_TEXT_UTF16_UNITS {
+        return Err(prompt_text_too_long(value.len()));
+    }
+    let edit = child(
+        parent,
+        "EDIT",
+        &value.to_string_lossy(),
+        id,
+        WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
+    )?;
+    // SAFETY: edit is the live standard EDIT just created above. The message
+    // copies no pointer payload and the UTF-16-unit bound excludes the null.
+    unsafe {
+        SendMessageW(
+            edit,
+            windows_sys::Win32::UI::Controls::EM_SETLIMITTEXT,
+            MAX_PROMPT_CONTROL_UTF16_UNITS,
+            0,
+        )
+    };
+    Ok(edit)
+}
+
+fn prompt_result(state: &PromptState) -> io::Result<PromptResult> {
+    let value_one = prompt_window_text(state.edit_one)?;
+    let value_two = prompt_window_text(state.edit_two)?;
+    Ok(PromptResult {
+        value_one,
+        value_two,
+        choice: if state.combo.is_null() {
+            0
+        } else {
+            // SAFETY: combo is live and each choice pointer is owned terminated
+            // UTF-16 retained through synchronous SendMessageW.
+            usize::try_from(unsafe { SendMessageW(state.combo, CB_GETCURSEL, 0, 0) }).unwrap_or(0)
+        },
+    })
+}
+
+fn prompt_window_text(window: HWND) -> io::Result<LegacyText> {
     if window.is_null() {
-        return LegacyText::default();
+        return Ok(LegacyText::default());
     }
     // SAFETY: window is a live edit HWND and this call uses no caller output pointer.
     let length = unsafe { GetWindowTextLengthW(window) };
     if length <= 0 {
-        return LegacyText::default();
+        return Ok(LegacyText::default());
     }
-    let mut value = vec![0_u16; length as usize + 1];
-    // SAFETY: value owns length-plus-terminator writable u16 capacity and remains allocated through GetWindowTextW.
-    let copied = unsafe { GetWindowTextW(window, value.as_mut_ptr(), value.len() as i32) };
-    value.truncate(copied.max(0) as usize);
-    LegacyText::from_units(value)
+    let length = usize::try_from(length)
+        .map_err(|_| io::Error::other("invalid native prompt text length"))?;
+    if length > MAX_PROMPT_TEXT_UTF16_UNITS {
+        return Err(prompt_text_too_long(length));
+    }
+    let mut value = vec![0_u16; MAX_PROMPT_TEXT_UTF16_UNITS + 1];
+    // SAFETY: value is writable for the fixed maximum plus terminator and
+    // remains allocated through the synchronous copy from this live control.
+    let copied = unsafe {
+        GetWindowTextW(
+            window,
+            value.as_mut_ptr(),
+            i32::try_from(value.len())
+                .map_err(|_| io::Error::other("native prompt text limit is invalid"))?,
+        )
+    };
+    let copied = usize::try_from(copied)
+        .map_err(|_| io::Error::other("invalid native prompt text copy length"))?;
+    // A programmatic WM_SETTEXT can bypass EM_SETLIMITTEXT. Re-query after the
+    // bounded copy so a changed or misbehaving control cannot turn truncation
+    // into an accepted command.
+    // SAFETY: window remains the same live edit HWND and this call has no
+    // caller output pointer.
+    let final_length = unsafe { GetWindowTextLengthW(window) };
+    let final_length = usize::try_from(final_length)
+        .map_err(|_| io::Error::other("invalid native prompt text length"))?;
+    if final_length > MAX_PROMPT_TEXT_UTF16_UNITS {
+        return Err(prompt_text_too_long(final_length));
+    }
+    if copied != final_length || final_length > length {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "입력값이 읽는 동안 변경되어 적용하지 않았습니다.",
+        ));
+    }
+    value.truncate(copied);
+    Ok(LegacyText::from_units(value))
+}
+
+#[cfg(test)]
+pub(super) fn window_text(window: HWND) -> LegacyText {
+    prompt_window_text(window).unwrap_or_default()
 }
 
 pub(super) fn add_files_dialog(owner: HWND, state: &mut AppState) {
@@ -1195,6 +1269,114 @@ pub(super) fn modal_native_dialog<T>(owner: HWND, dialog: impl FnOnce() -> T) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_prompt_bounds_both_edits_and_rejects_programmatic_limit_bypass()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // SAFETY: the system STATIC class and current module remain live for
+        // this hidden, test-owned prompt parent.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+
+        let result = (|| -> io::Result<()> {
+            let maximum_value = LegacyText::from_units(vec![
+                u16::from(b'a');
+                darknamer_core::MAX_PROPOSED_NAME_UTF16_UNITS
+            ]);
+            let ordinary_second_value = LegacyText::from("둘째 값");
+            let mut state = PromptState {
+                spec: PromptSpec {
+                    title: "입력".to_owned(),
+                    label_one: "첫째".to_owned(),
+                    label_two: "둘째".to_owned(),
+                    value_one: maximum_value.clone(),
+                    value_two: ordinary_second_value.clone(),
+                    choices: Vec::new(),
+                },
+                result: None,
+                done: false,
+                owner: parent,
+                title: null_mut(),
+                label_one: null_mut(),
+                label_two: null_mut(),
+                edit_one: null_mut(),
+                edit_two: null_mut(),
+                combo: null_mut(),
+                separator: null_mut(),
+                ok: null_mut(),
+                cancel: null_mut(),
+                font: OwnedFont::default(),
+                appearance: PromptAppearance {
+                    preference: UiAppearance::default(),
+                    forced_colors: ForcedColorsState::Inactive,
+                    system_theme: Some(ResolvedTheme::Light),
+                },
+                appearance_resources: None,
+                creation_error: None,
+                dpi: BASE_DPI,
+            };
+            create_prompt_children(parent, &mut state)?;
+
+            for edit in [state.edit_one, state.edit_two] {
+                assert_eq!(
+                    // SAFETY: edit is a live test-owned standard EDIT control
+                    // and EM_GETLIMITTEXT has no pointer payload.
+                    unsafe {
+                        SendMessageW(
+                            edit,
+                            windows_sys::Win32::UI::Controls::EM_GETLIMITTEXT,
+                            0,
+                            0,
+                        )
+                    },
+                    (darknamer_core::MAX_PROPOSED_NAME_UTF16_UNITS + 1) as LRESULT
+                );
+            }
+            assert_eq!(prompt_window_text(state.edit_one)?, maximum_value);
+            assert_eq!(prompt_window_text(state.edit_two)?, ordinary_second_value);
+
+            let oversized = wide(&"x".repeat(darknamer_core::MAX_PROPOSED_NAME_UTF16_UNITS + 1));
+            assert_ne!(
+                // SAFETY: edit_two is live and oversized is terminated and
+                // retained through this synchronous programmatic WM_SETTEXT
+                // path. EM_SETLIMITTEXT does not constrain this path.
+                unsafe {
+                    windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(
+                        state.edit_two,
+                        oversized.as_ptr(),
+                    )
+                },
+                0
+            );
+            let error = match prompt_window_text(state.edit_two) {
+                Ok(_) => return Err(io::Error::other("oversized prompt text was accepted")),
+                Err(error) => error,
+            };
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            Ok(())
+        })();
+
+        // SAFETY: parent is test-owned and destroys every prompt child.
+        unsafe { DestroyWindow(parent) };
+        result.map_err(Into::into)
+    }
 
     #[test]
     fn owned_task_dialog_keeps_cancel_default_and_all_native_buffers_live()
