@@ -36,6 +36,16 @@ function Write-Evidence {
     [IO.File]::WriteAllText($Path, $json, [Text.UTF8Encoding]::new($false))
 }
 
+function New-FifoFixture {
+    param([Parameter(Mandatory)][string] $Path)
+    $mkfifo = Get-Command mkfifo -CommandType Application -ErrorAction Stop |
+        Select-Object -First 1
+    & $mkfifo.Source -- $Path
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not create FIFO fixture: $Path"
+    }
+}
+
 function Assert-ValidatorPasses {
     param(
         [Parameter(Mandatory)]
@@ -525,12 +535,7 @@ try {
 
     if (-not $IsWindows) {
         $fifoEvidencePath = Join-Path $testRoot 'fifo-evidence.json'
-        $mkfifo = Get-Command mkfifo -CommandType Application -ErrorAction Stop |
-            Select-Object -First 1
-        & $mkfifo.Source -- $fifoEvidencePath
-        if ($LASTEXITCODE -ne 0) {
-            throw 'Could not create the FIFO evidence regression fixture.'
-        }
+        New-FifoFixture -Path $fifoEvidencePath
         Assert-EvidenceFileFails `
             -Path $fifoEvidencePath `
             -ExpectedFragment 'must be a regular non-reparse file'
@@ -735,6 +740,18 @@ try {
         -ExpectedFragment 'encoded size is outside' `
         -VisualEvidenceRoot $visualRoot
     Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
+    if (-not $IsWindows) {
+        Remove-Item -LiteralPath $firstVisualPath
+        New-FifoFixture -Path $firstVisualPath
+        Assert-ValidatorFails `
+            -Evidence $complete `
+            -Name 'visual-root-fifo-image' `
+            -ExpectedFragment 'must be a regular non-reparse file' `
+            -VisualEvidenceRoot $visualRoot
+        Remove-Item -LiteralPath $firstVisualPath
+        Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+    }
 
     $tooManyChunksEvidence = Copy-Evidence $complete
     $validPng = [IO.File]::ReadAllBytes($firstVisualPath)

@@ -44,7 +44,25 @@ function Read-StrictUtf8FileOnce {
     if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
         throw "$Label must be a regular non-reparse file."
     }
-    $stream = [IO.FileStream]::new($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        if ($IsWindows) {
+            $stream = [IO.FileStream]::new(
+                $item.FullName,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::Read,
+                [IO.FileShare]::Read
+            )
+        }
+        else {
+            if (-not ('DarkReNamer.AcceptanceEvidenceFile' -as [type])) {
+                throw 'The acceptance evidence validator did not initialize regular-file validation.'
+            }
+            $stream = [DarkReNamer.AcceptanceEvidenceFile]::OpenReadRegular($item.FullName)
+        }
+    }
+    catch {
+        throw "$Label must be a regular non-reparse file: $($_.Exception.Message)"
+    }
     try {
         if ($stream.Length -gt $MaximumBytes) { throw "$Label exceeds its byte limit." }
         $bytes = [byte[]]::new([int] $stream.Length)

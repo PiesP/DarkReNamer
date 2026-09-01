@@ -95,6 +95,33 @@ namespace DarkReNamer
 '@
 }
 
+function Open-RegularFileReadOnce {
+    param(
+        [Parameter(Mandatory)]
+        [IO.FileInfo] $Item,
+        [Parameter(Mandatory)]
+        [string] $Label,
+        [IO.FileOptions] $WindowsFileOptions = [IO.FileOptions]::None
+    )
+
+    try {
+        if ($IsWindows) {
+            return [IO.FileStream]::new(
+                $Item.FullName,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::Read,
+                [IO.FileShare]::Read,
+                4096,
+                $WindowsFileOptions
+            )
+        }
+        return [DarkReNamer.AcceptanceEvidenceFile]::OpenReadRegular($Item.FullName)
+    }
+    catch {
+        throw "$Label must be a regular non-reparse file: $($_.Exception.Message)"
+    }
+}
+
 function Read-StrictUtf8RegularFileOnce {
     param(
         [Parameter(Mandatory)]
@@ -112,22 +139,7 @@ function Read-StrictUtf8RegularFileOnce {
         throw "$Label must be a regular non-reparse file."
     }
 
-    try {
-        if ($IsWindows) {
-            $stream = [IO.FileStream]::new(
-                $item.FullName,
-                [IO.FileMode]::Open,
-                [IO.FileAccess]::Read,
-                [IO.FileShare]::Read
-            )
-        }
-        else {
-            $stream = [DarkReNamer.AcceptanceEvidenceFile]::OpenReadRegular($item.FullName)
-        }
-    }
-    catch {
-        throw "$Label must be a regular non-reparse file: $($_.Exception.Message)"
-    }
+    $stream = Open-RegularFileReadOnce -Item $item -Label $Label
     try {
         $length = $stream.Length
         if ($length -gt $MaximumBytes) {
@@ -447,15 +459,9 @@ namespace DarkReNamerAcceptance
             { 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a };
         private static readonly uint[] CrcTable = BuildCrcTable();
 
-        public static PngDimensions Validate(string path)
+        public static PngDimensions Validate(FileStream stream)
         {
-            using (FileStream stream = new FileStream(
-                path,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                4096,
-                FileOptions.SequentialScan))
+            using (stream)
             {
                 if (stream.Length < 57 || stream.Length > MaximumEncodedBytes)
                     throw new InvalidDataException("PNG encoded size is outside the 57-byte through 64-MiB limit.");
@@ -685,8 +691,19 @@ namespace DarkReNamerAcceptance
 
 function Get-PngDimensions {
     param([Parameter(Mandatory)][string] $Path)
+    $stream = $null
     try {
-        $dimensions = [DarkReNamerAcceptance.StrictPngValidator]::Validate($Path)
+        $item = Get-Item -LiteralPath $Path -Force
+        if ($item -isnot [IO.FileInfo] -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq
+                [IO.FileAttributes]::ReparsePoint) {
+            throw 'Visual capture must be a regular non-reparse file.'
+        }
+        $stream = Open-RegularFileReadOnce `
+            -Item $item `
+            -Label 'Visual capture' `
+            -WindowsFileOptions ([IO.FileOptions]::SequentialScan)
+        $dimensions = [DarkReNamerAcceptance.StrictPngValidator]::Validate($stream)
     }
     catch {
         $detail = if ($null -ne $_.Exception.InnerException) {
@@ -696,6 +713,11 @@ function Get-PngDimensions {
             $_.Exception.Message
         }
         throw "Visual capture is not a bounded decodable PNG: $detail"
+    }
+    finally {
+        if ($null -ne $stream) {
+            $stream.Dispose()
+        }
     }
     return [pscustomobject]@{
         width = [uint64] $dimensions.Width

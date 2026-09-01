@@ -14,6 +14,13 @@ function Write-Utf8([string]$Path, [string]$Content) { [IO.File]::WriteAllText($
 function Write-Json([string]$Path, [object]$Value) { Write-Utf8 $Path (($Value | ConvertTo-Json -Depth 20) + "`n") }
 function Copy-Json([object]$Value) { return $Value | ConvertTo-Json -Depth 20 | ConvertFrom-Json }
 
+function New-FifoFixture([string]$Path) {
+    $mkfifo = Get-Command mkfifo -CommandType Application -ErrorAction Stop |
+        Select-Object -First 1
+    & $mkfifo.Source -- $Path
+    if ($LASTEXITCODE -ne 0) { throw "Could not create FIFO fixture: $Path" }
+}
+
 function Write-Context(
     [string]$Directory,
     [string]$StorageModel = 'Fixture SSD Model',
@@ -203,6 +210,26 @@ try {
     $long=New-Case 'long-line';Mutate-FirstLog $long {param($t)('x'*8193)+"`n"+$t};Assert-Fails {&$augmenter -SourceRoot $sourceRoot -EvidencePath $long.Evidence -LogDirectory $long.Logs -OutputPath $long.Output} 'overlong line' $long.Output
     $badUtf=New-Case 'bad-utf8';[IO.File]::WriteAllBytes((Join-Path $badUtf.Logs 'iteration-1.log'),[byte[]](0xff,0xfe));Assert-Fails {&$augmenter -SourceRoot $sourceRoot -EvidencePath $badUtf.Evidence -LogDirectory $badUtf.Logs -OutputPath $badUtf.Output} 'strict UTF-8' $badUtf.Output
     $large=New-Case 'large-log';[IO.File]::WriteAllBytes((Join-Path $large.Logs 'iteration-1.log'),[byte[]]::new(4*1024*1024+1));Assert-Fails {&$augmenter -SourceRoot $sourceRoot -EvidencePath $large.Evidence -LogDirectory $large.Logs -OutputPath $large.Output} 'byte limit' $large.Output
+
+    if (-not $IsWindows) {
+        $fifoContext = New-Case 'fifo-context'
+        $fifoContextPath = Join-Path $fifoContext.Logs 'benchmark-context.json'
+        Remove-Item -LiteralPath $fifoContextPath
+        New-FifoFixture $fifoContextPath
+        Assert-Fails `
+            { & $augmenter -SourceRoot $sourceRoot -EvidencePath $fifoContext.Evidence -LogDirectory $fifoContext.Logs -OutputPath $fifoContext.Output } `
+            'must be a regular non-reparse file' `
+            $fifoContext.Output
+
+        $fifoLog = New-Case 'fifo-log'
+        $fifoLogPath = Join-Path $fifoLog.Logs 'iteration-1.log'
+        Remove-Item -LiteralPath $fifoLogPath
+        New-FifoFixture $fifoLogPath
+        Assert-Fails `
+            { & $augmenter -SourceRoot $sourceRoot -EvidencePath $fifoLog.Evidence -LogDirectory $fifoLog.Logs -OutputPath $fifoLog.Output } `
+            'must be a regular non-reparse file' `
+            $fifoLog.Output
+    }
 
     $badContext=New-Case 'bad-context'; Write-Context $badContext.Logs 'Drive 192.0.2.10'
     $watcher = [IO.FileSystemWatcher]::new($badContext.Root)
