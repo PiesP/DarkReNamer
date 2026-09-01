@@ -583,32 +583,67 @@ namespace DarkReNamerAcceptance
                     byte[] filtered = new byte[rowLength + 1];
                     byte[] row = new byte[rowLength];
                     byte[] previousRow = new byte[rowLength];
+                    byte[] canonicalRow = new byte[checked((int)width * 4)];
                     HashSet<uint> colors = new HashSet<uint>();
                     compressed.Position = 0;
                     using (IncrementalHash rasterHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
                     using (ZLibStream decoder = new ZLibStream(compressed, CompressionMode.Decompress, true))
                     {
-                        rasterHash.AppendData(headerData);
+                        rasterHash.AppendData(headerData, 0, 8);
                         for (uint y = 0; y < height; y++)
                         {
                             ReadExactly(decoder, filtered, 0, filtered.Length);
                             if (filtered[0] > 4)
                                 throw new InvalidDataException("PNG scanline uses an invalid filter.");
                             Unfilter(filtered[0], filtered, row, previousRow, bytesPerPixel);
-                            rasterHash.AppendData(row);
                             for (int offset = 0; offset < row.Length; offset += bytesPerPixel)
                             {
-                                if ((colorType == 4 && row[offset + 1] != 255) ||
-                                    (colorType == 6 && row[offset + 3] != 255))
+                                byte red;
+                                byte green;
+                                byte blue;
+                                byte alpha;
+                                switch (colorType)
+                                {
+                                    case 0:
+                                        red = green = blue = row[offset];
+                                        alpha = 255;
+                                        break;
+                                    case 2:
+                                        red = row[offset];
+                                        green = row[offset + 1];
+                                        blue = row[offset + 2];
+                                        alpha = 255;
+                                        break;
+                                    case 4:
+                                        red = green = blue = row[offset];
+                                        alpha = row[offset + 1];
+                                        break;
+                                    case 6:
+                                        red = row[offset];
+                                        green = row[offset + 1];
+                                        blue = row[offset + 2];
+                                        alpha = row[offset + 3];
+                                        break;
+                                    default:
+                                        throw new InvalidDataException("PNG color type is unsupported.");
+                                }
+                                if (alpha != 255)
                                     throw new InvalidDataException("PNG screenshot pixels must be fully opaque.");
+                                int canonicalOffset = (offset / bytesPerPixel) * 4;
+                                canonicalRow[canonicalOffset] = red;
+                                canonicalRow[canonicalOffset + 1] = green;
+                                canonicalRow[canonicalOffset + 2] = blue;
+                                canonicalRow[canonicalOffset + 3] = alpha;
                                 if (colors.Count <= 64)
                                 {
-                                    uint color = 0;
-                                    for (int channel = 0; channel < bytesPerPixel; channel++)
-                                        color = (color << 8) | row[offset + channel];
+                                    uint color = ((uint)red << 24) |
+                                        ((uint)green << 16) |
+                                        ((uint)blue << 8) |
+                                        alpha;
                                     colors.Add(color);
                                 }
                             }
+                            rasterHash.AppendData(canonicalRow);
                             byte[] swap = previousRow;
                             previousRow = row;
                             row = swap;

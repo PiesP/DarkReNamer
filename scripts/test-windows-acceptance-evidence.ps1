@@ -703,6 +703,24 @@ try {
         -VisualEvidenceRoot $visualRoot
     Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
 
+    $duplicateColorModel = Copy-Evidence $complete
+    $secondVisualPath = Join-Path $visualRoot $duplicateColorModel.visual_captures[1].image.filename
+    Write-VisualPngFixture `
+        -Path $secondVisualPath `
+        -Marker 'same-raster-truecolor' `
+        -Width 640 `
+        -Height 360 `
+        -Seed 1 `
+        -TruecolorOpaque
+    $duplicateColorModel.visual_captures[1].image.sha256 =
+        (Get-FileHash -LiteralPath $secondVisualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ValidatorFails `
+        -Evidence $duplicateColorModel `
+        -Name 'visual-root-duplicate-color-model' `
+        -ExpectedFragment 'Duplicate visual capture decoded raster' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
     Write-VisualPngFixture `
         -Path $firstVisualPath `
         -Marker 'different-valid-image' `

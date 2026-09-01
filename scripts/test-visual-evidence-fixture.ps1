@@ -53,23 +53,29 @@ function Write-VisualPngFixture {
         [Parameter(Mandatory)][ValidateRange(1, 255)][int] $Seed,
         [switch] $Solid,
         [switch] $Transparent,
+        [switch] $TruecolorOpaque,
         [switch] $TruecolorTransparency,
         [ValidateRange(0, 255)][int] $OpaquePrefixPixels = 0
     )
     if ($Width -lt 1 -or $Height -lt 1) {
         throw 'PNG fixture dimensions must be positive.'
     }
-    if ($TruecolorTransparency -and ($Transparent -or $OpaquePrefixPixels -gt 0)) {
+    if ($TruecolorOpaque -and $TruecolorTransparency) {
+        throw 'Only one truecolor fixture mode may be selected.'
+    }
+    if (($TruecolorOpaque -or $TruecolorTransparency) -and
+        ($Transparent -or $OpaquePrefixPixels -gt 0)) {
         throw 'Truecolor transparency cannot be combined with alpha-channel fixture modes.'
     }
-    $colorType = if ($TruecolorTransparency) { 2 } else { 6 }
-    $bytesPerPixel = if ($TruecolorTransparency) { 3 } else { 4 }
+    $truecolor = $TruecolorOpaque -or $TruecolorTransparency
+    $colorType = if ($truecolor) { 2 } else { 6 }
+    $bytesPerPixel = if ($truecolor) { 3 } else { 4 }
     $header = [byte[]] (
         (ConvertTo-VisualFixtureBigEndian -Value ([uint32] $Width)) +
         (ConvertTo-VisualFixtureBigEndian -Value ([uint32] $Height)) +
         [byte[]](8, $colorType, 0, 0, 0)
     )
-    $colors = if ($TruecolorTransparency) {
+    $colors = if ($truecolor) {
         @(
             [byte[]]($Seed, 17, 33),
             [byte[]]($Seed, 97, 53),
