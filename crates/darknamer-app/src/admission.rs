@@ -221,6 +221,40 @@ pub struct AdmissionChildren {
     pub had_errors: bool,
     /// More children existed than the supplied bound.
     pub truncated: bool,
+    /// At least one additional complete child path exceeded the supplied
+    /// temporary frontier byte budget.
+    pub path_budget_exhausted: bool,
+}
+
+/// Bounds one directory read before complete child paths are materialized.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AdmissionReadBudget {
+    path_limit: usize,
+    remaining_path_bytes: usize,
+}
+
+impl AdmissionReadBudget {
+    /// Creates a child-read budget from the remaining count and temporary
+    /// complete-path frontier bytes.
+    #[must_use]
+    pub const fn new(path_limit: usize, remaining_path_bytes: usize) -> Self {
+        Self {
+            path_limit,
+            remaining_path_bytes,
+        }
+    }
+
+    /// Returns the maximum number of complete child paths to materialize.
+    #[must_use]
+    pub const fn path_limit(self) -> usize {
+        self.path_limit
+    }
+
+    /// Returns the aggregate UTF-16 bytes available for complete child paths.
+    #[must_use]
+    pub const fn remaining_path_bytes(self) -> usize {
+        self.remaining_path_bytes
+    }
 }
 
 /// Adapter operation failure without leaking native paths or error strings.
@@ -314,27 +348,30 @@ pub trait AdmissionAdapter {
     /// Inspects one candidate without following its final component.
     fn metadata(&self, path: &Path) -> Result<AdmissionMetadata, AdmissionAdapterError>;
 
-    /// Reads at most `limit` deterministic children.
+    /// Reads deterministic children within both supplied bounds.
+    ///
+    /// Implementations must apply the aggregate complete-path byte bound
+    /// before retaining each returned [`PathBuf`].
     fn read_children(
         &self,
         path: &Path,
-        limit: usize,
+        budget: AdmissionReadBudget,
     ) -> Result<AdmissionChildren, AdmissionAdapterError>;
 
     /// Reads children while polling cancellation between platform entries.
     ///
-    /// The default keeps existing adapters source-compatible; production
-    /// adapters with incremental enumeration should override this method.
+    /// The default keeps the non-cancellable implementation as the single
+    /// required enumeration method; incremental adapters should override it.
     fn read_children_cancellable(
         &self,
         path: &Path,
-        limit: usize,
+        budget: AdmissionReadBudget,
         cancellation_requested: &dyn Fn() -> bool,
     ) -> Result<AdmissionChildren, AdmissionReadError> {
         if cancellation_requested() {
             return Err(AdmissionReadError::Cancelled);
         }
-        let children = self.read_children(path, limit)?;
+        let children = self.read_children(path, budget)?;
         if cancellation_requested() {
             Err(AdmissionReadError::Cancelled)
         } else {
@@ -344,6 +381,12 @@ pub trait AdmissionAdapter {
 
     /// Converts a platform path into exact legacy text.
     fn legacy_path(&self, path: &Path) -> LegacyText;
+
+    /// Measures a complete platform path in UTF-16 units without retaining a
+    /// second encoded copy when the platform supports that directly.
+    fn path_utf16_units(&self, path: &Path) -> usize {
+        self.legacy_path(path).units().len()
+    }
 }
 
 /// Complete accepted rows plus visible issues.
@@ -566,16 +609,22 @@ pub fn collect_admission_cancellable_with_budget(
     }
     sort_paths_cancellable(&mut roots, compare_paths, &cancellation_requested)?;
     let mut stack = VecDeque::new();
+    let mut stack_path_bytes = 0_usize;
     for root in roots.into_iter().rev() {
         if cancellation_requested() {
             return Err(AdmissionCancelled);
         }
-        stack.push_back((root, 0_usize));
+        let path_bytes = adapter
+            .path_utf16_units(&root)
+            .saturating_mul(size_of::<u16>());
+        stack_path_bytes = stack_path_bytes.saturating_add(path_bytes);
+        stack.push_back((root, 0_usize, path_bytes));
     }
     let mut seen_directories = BTreeSet::new();
     let mut inspected = 0_usize;
 
-    while let Some((path, depth)) = stack.pop_back() {
+    while let Some((path, depth, path_bytes)) = stack.pop_back() {
+        stack_path_bytes = stack_path_bytes.saturating_sub(path_bytes);
         if cancellation_requested() {
             return Err(AdmissionCancelled);
         }
@@ -644,8 +693,42 @@ pub fn collect_admission_cancellable_with_budget(
                         .push(issue(path, AdmissionIssueKind::LimitReached, None));
                     break;
                 }
-                match adapter.read_children_cancellable(&path, remaining, &cancellation_requested) {
+                let read_budget = AdmissionReadBudget::new(
+                    remaining,
+                    path_budget
+                        .remaining_bytes()
+                        .saturating_sub(stack_path_bytes),
+                );
+                match adapter.read_children_cancellable(&path, read_budget, &cancellation_requested)
+                {
                     Ok(mut children) => {
+                        if children.paths.len() > read_budget.path_limit() {
+                            children.paths.truncate(read_budget.path_limit());
+                            children.truncated = true;
+                        }
+                        let mut verified_path_bytes = 0_usize;
+                        let mut verified_len = 0_usize;
+                        for child in &children.paths {
+                            let Some(child_bytes) = adapter
+                                .path_utf16_units(child)
+                                .checked_mul(size_of::<u16>())
+                            else {
+                                children.path_budget_exhausted = true;
+                                break;
+                            };
+                            let Some(next_bytes) = verified_path_bytes.checked_add(child_bytes)
+                            else {
+                                children.path_budget_exhausted = true;
+                                break;
+                            };
+                            if next_bytes > read_budget.remaining_path_bytes() {
+                                children.path_budget_exhausted = true;
+                                break;
+                            }
+                            verified_path_bytes = next_bytes;
+                            verified_len += 1;
+                        }
+                        children.paths.truncate(verified_len);
                         sort_paths_cancellable(
                             &mut children.paths,
                             compare_paths,
@@ -655,7 +738,11 @@ pub fn collect_admission_cancellable_with_budget(
                             if cancellation_requested() {
                                 return Err(AdmissionCancelled);
                             }
-                            stack.push_back((child, depth + 1));
+                            let child_bytes = adapter
+                                .path_utf16_units(&child)
+                                .saturating_mul(size_of::<u16>());
+                            stack_path_bytes = stack_path_bytes.saturating_add(child_bytes);
+                            stack.push_back((child, depth + 1, child_bytes));
                         }
                         if children.had_errors {
                             report.issues.push(issue(
@@ -665,9 +752,18 @@ pub fn collect_admission_cancellable_with_budget(
                             ));
                         }
                         if children.truncated {
-                            report
-                                .issues
-                                .push(issue(path, AdmissionIssueKind::LimitReached, None));
+                            report.issues.push(issue(
+                                path.clone(),
+                                AdmissionIssueKind::LimitReached,
+                                None,
+                            ));
+                        }
+                        if children.path_budget_exhausted {
+                            report.issues.push(issue(
+                                path,
+                                AdmissionIssueKind::PathBudgetExceeded,
+                                None,
+                            ));
                         }
                     }
                     Err(AdmissionReadError::Cancelled) => return Err(AdmissionCancelled),
@@ -748,6 +844,23 @@ mod windows {
             }
             Ok((parent, leaf))
         }
+
+        fn child_path_prefix_units(path: &Path) -> Result<usize, AdmissionAdapterError> {
+            let mut parent_units = 0_usize;
+            let mut final_unit = None;
+            for unit in path.as_os_str().encode_wide() {
+                parent_units = parent_units
+                    .checked_add(1)
+                    .ok_or_else(|| AdmissionAdapterError::new(AdmissionOperation::ReadDirectory))?;
+                final_unit = Some(unit);
+            }
+            let separator_units = usize::from(
+                final_unit.is_none_or(|unit| unit != b'\\' as u16 && unit != b'/' as u16),
+            );
+            parent_units
+                .checked_add(separator_units)
+                .ok_or_else(|| AdmissionAdapterError::new(AdmissionOperation::ReadDirectory))
+        }
     }
 
     impl AdmissionAdapter for WindowsAdmissionAdapter {
@@ -811,16 +924,26 @@ mod windows {
         fn read_children(
             &self,
             path: &Path,
-            limit: usize,
+            budget: AdmissionReadBudget,
         ) -> Result<AdmissionChildren, AdmissionAdapterError> {
             let directories = self.directories.borrow();
             let directory = directories.get(path).ok_or(AdmissionAdapterError::new(
                 AdmissionOperation::ReadDirectory,
             ))?;
-            let (names, truncated) = query_directory_names(directory, limit).map_err(|error| {
+            let path_prefix_units = Self::child_path_prefix_units(path)?;
+            let (names, truncated, path_budget_exhausted) = query_directory_names(
+                directory,
+                budget.path_limit(),
+                path_prefix_units,
+                budget.remaining_path_bytes(),
+            )
+            .map_err(|error| {
                 AdmissionAdapterError::from_io(AdmissionOperation::ReadDirectory, &error)
             })?;
-            let mut paths = Vec::with_capacity(names.len());
+            let mut paths = Vec::new();
+            paths
+                .try_reserve(names.len())
+                .map_err(|_| AdmissionAdapterError::new(AdmissionOperation::ReadDirectory))?;
             let mut had_errors = false;
             for name in names {
                 let text = LegacyText::from_units(name.clone());
@@ -834,31 +957,40 @@ mod windows {
                 paths,
                 had_errors,
                 truncated,
+                path_budget_exhausted,
             })
         }
 
         fn read_children_cancellable(
             &self,
             path: &Path,
-            limit: usize,
+            budget: AdmissionReadBudget,
             cancellation_requested: &dyn Fn() -> bool,
         ) -> Result<AdmissionChildren, AdmissionReadError> {
             let directories = self.directories.borrow();
             let directory = directories
                 .get(path)
                 .ok_or_else(|| AdmissionAdapterError::new(AdmissionOperation::ReadDirectory))?;
-            let (names, truncated) =
-                query_directory_names_cancellable(directory, limit, cancellation_requested)
-                    .map_err(|error| match error {
-                        DirectoryQueryError::Cancelled => AdmissionReadError::Cancelled,
-                        DirectoryQueryError::Io(error) => {
-                            AdmissionReadError::Adapter(AdmissionAdapterError::from_io(
-                                AdmissionOperation::ReadDirectory,
-                                &error,
-                            ))
-                        }
-                    })?;
-            let mut paths = Vec::with_capacity(names.len());
+            let path_prefix_units = Self::child_path_prefix_units(path)?;
+            let (names, truncated, path_budget_exhausted) = query_directory_names_cancellable(
+                directory,
+                budget.path_limit(),
+                path_prefix_units,
+                budget.remaining_path_bytes(),
+                cancellation_requested,
+            )
+            .map_err(|error| match error {
+                DirectoryQueryError::Cancelled => AdmissionReadError::Cancelled,
+                DirectoryQueryError::Io(error) => AdmissionReadError::Adapter(
+                    AdmissionAdapterError::from_io(AdmissionOperation::ReadDirectory, &error),
+                ),
+            })?;
+            let mut paths = Vec::new();
+            paths.try_reserve(names.len()).map_err(|_| {
+                AdmissionReadError::Adapter(AdmissionAdapterError::new(
+                    AdmissionOperation::ReadDirectory,
+                ))
+            })?;
             let mut had_errors = false;
             for name in names {
                 if cancellation_requested() {
@@ -875,11 +1007,16 @@ mod windows {
                 paths,
                 had_errors,
                 truncated,
+                path_budget_exhausted,
             })
         }
 
         fn legacy_path(&self, path: &Path) -> LegacyText {
             LegacyText::from_units(path.as_os_str().encode_wide().collect::<Vec<_>>())
+        }
+
+        fn path_utf16_units(&self, path: &Path) -> usize {
+            path.as_os_str().encode_wide().count()
         }
     }
 }

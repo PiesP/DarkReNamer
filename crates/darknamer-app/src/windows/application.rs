@@ -317,7 +317,14 @@ fn run_unsafe() -> io::Result<()> {
     }
     let title = wide("DarkReNamer");
     let runtime = initialize_safe_runtime()?;
-    let startup_notice = runtime.status.clone();
+    let startup_recovery_pending = runtime.recovery_locked
+        && !runtime.collision_observed
+        && runtime.active_journal.is_some()
+        && runtime.staged_journal.is_none()
+        && runtime.blocked_journals.is_empty();
+    let startup_notice = (!startup_recovery_pending)
+        .then(|| runtime.status.clone())
+        .flatten();
     let state: *mut AppStateSlot = CallbackState::into_raw(AppState::new(runtime));
     let mut adopted = false;
     let mut init = WindowInit {
@@ -383,7 +390,9 @@ fn run_unsafe() -> io::Result<()> {
         ShowWindow(window, SW_SHOW);
         UpdateWindow(window);
     }
-    if let Some(notice) = startup_notice {
+    if startup_recovery_pending {
+        confirm_startup_recovery(window);
+    } else if let Some(notice) = startup_notice {
         message(window, &notice, "DarkReNamer - 복구 상태");
     }
     let mut message = MSG::default();

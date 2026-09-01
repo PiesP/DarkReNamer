@@ -1,5 +1,177 @@
 use super::*;
 
+#[derive(Debug)]
+pub(super) struct ActiveRecoveryPresentation {
+    pub(super) status: String,
+    pub(super) completed: bool,
+}
+
+pub(super) fn confirm_startup_recovery(owner: HWND) {
+    let Some(mut state_lease) = try_app_state(owner) else {
+        return;
+    };
+    let state = state_lease.state_mut();
+    if !state.can_confirm_active_recovery() {
+        return;
+    }
+    let detail = state.active_journal.as_ref().map_or_else(
+        || "보존된 active 저널 정보가 없습니다.".to_owned(),
+        |journal| {
+            format!(
+                "저널: {}\n크기: {} bytes\n레코드: {}개",
+                journal.path().display(),
+                journal.byte_len(),
+                journal.records().len()
+            )
+        },
+    );
+    let buttons = [TaskDialogButtonSpec {
+        id: RECOVER_CONFIRM_BUTTON_ID,
+        text: "이전 변경 복구",
+    }];
+    state.mutation_locked = true;
+    state.confirmation_pending = true;
+    update_controls(state);
+    drop(state_lease);
+
+    let answer = task_dialog(
+        owner,
+        TaskDialogSpec {
+            title: "DarkReNamer - 이전 변경 복구 확인",
+            main_instruction: "이전 실행에서 중단된 이름 변경을 복구하시겠습니까?",
+            content: "복구를 선택하면 보존된 저널과 현재 파일 신원을 다시 검증한 뒤 필요한 역방향 이름 변경을 수행합니다. 취소하면 어떤 파일도 변경하지 않고 복구 잠금을 유지합니다.",
+            expanded_information: Some(&detail),
+            buttons: &buttons,
+            warning: true,
+        },
+    );
+
+    let Some(mut state_lease) = try_app_state(owner) else {
+        return;
+    };
+    let state = state_lease.state_mut();
+    state.mutation_locked = false;
+    state.confirmation_pending = false;
+    update_controls(state);
+    if state.close_pending {
+        drop(state_lease);
+        // SAFETY: queueing WM_CLOSE carries no borrowed state. The startup
+        // confirmation has released its AppState lease before reclamation.
+        unsafe { PostMessageW(owner, WM_CLOSE, 0, 0) };
+        return;
+    }
+    let answer = match answer {
+        Ok(answer) => answer,
+        Err(error) => {
+            drop(state_lease);
+            message(
+                owner,
+                &format!("안전 확인 대화상자를 열지 못해 복구를 시작하지 않았습니다: {error}"),
+                "DarkReNamer - 복구 보류",
+            );
+            return;
+        }
+    };
+    if destructive_prompt_choice(answer, RECOVER_CONFIRM_BUTTON_ID)
+        != DestructivePromptChoice::Confirm
+    {
+        return;
+    }
+    if !state.can_confirm_active_recovery() {
+        drop(state_lease);
+        message(
+            owner,
+            "확인 중 복구 상태가 변경되어 어떤 파일도 변경하지 않았습니다.",
+            "DarkReNamer - 복구 거부",
+        );
+        return;
+    }
+
+    let presentation = recover_confirmed_active_journal(state);
+    update_controls(state);
+    drop(state_lease);
+    let caption = if presentation.completed {
+        "DarkReNamer - 복구 완료"
+    } else {
+        "DarkReNamer - 복구 확인 필요"
+    };
+    message(owner, &presentation.status, caption);
+}
+
+pub(super) fn recover_confirmed_active_journal(state: &mut AppState) -> ActiveRecoveryPresentation {
+    if !state.can_confirm_active_recovery() {
+        return ActiveRecoveryPresentation {
+            status: "현재 상태에서는 active 저널 복구를 시작할 수 없습니다.".to_owned(),
+            completed: false,
+        };
+    }
+    let Some(mut journal) = state.active_journal.take() else {
+        return ActiveRecoveryPresentation {
+            status: "복구할 active 저널이 없습니다.".to_owned(),
+            completed: false,
+        };
+    };
+    let mut backend = WindowsRenameBackend;
+    match RenameRecovery::new(&mut backend, &mut journal).rollback() {
+        outcome @ RecoveryOutcome::Recovered { .. } | outcome @ RecoveryOutcome::NotRequired => {
+            let cleanup = cleanup_file_journal(journal);
+            let cleanup_failed = cleanup.error.is_some();
+            let recovered = matches!(outcome, RecoveryOutcome::Recovered { .. });
+            let mut status = if recovered && cleanup_failed {
+                "이전 변경을 검증하고 복구했지만 저널 정리가 완료되지 않았습니다.".to_owned()
+            } else if recovered {
+                "이전 변경을 안전하게 복구하고 저널을 정리했습니다.".to_owned()
+            } else if cleanup_failed {
+                "파일 상태를 안전하게 확인했지만 완료된 저널을 정리하지 못했습니다.".to_owned()
+            } else {
+                "파일 상태를 안전하게 확인하고 완료된 저널을 정리했습니다.".to_owned()
+            };
+            if let Some(error) = cleanup.error {
+                status.push_str(&format!(" 저널 삭제 실패: {error}"));
+            }
+            state.active_journal = cleanup.retained;
+            state.recovery_locked = cleanup_failed
+                || state.active_journal.is_some()
+                || state.staged_journal.is_some()
+                || !state.blocked_journals.is_empty();
+            if state.recovery_locked {
+                state.ui_status.set_recovery(status.clone());
+            } else {
+                state.ui_status.clear_recovery();
+                state.ui_status.set_transient(status.clone());
+            }
+            ActiveRecoveryPresentation {
+                status,
+                completed: !state.recovery_locked,
+            }
+        }
+        RecoveryOutcome::Blocked { reason, .. } => {
+            let status = format!(
+                "현재 파일 상태와 저널을 대조한 결과 복구가 차단되었습니다: {reason:?}. active 저널을 보존하고 새 적용을 잠급니다."
+            );
+            state.active_journal = Some(journal);
+            state.recovery_locked = true;
+            state.ui_status.set_recovery(status.clone());
+            ActiveRecoveryPresentation {
+                status,
+                completed: false,
+            }
+        }
+        RecoveryOutcome::RecoveryRequired { reason, .. } => {
+            let status = format!(
+                "복구를 완료하지 못했습니다: {reason:?}. active 저널을 보존하고 새 적용을 잠급니다."
+            );
+            state.active_journal = Some(journal);
+            state.recovery_locked = true;
+            state.ui_status.set_recovery(status.clone());
+            ActiveRecoveryPresentation {
+                status,
+                completed: false,
+            }
+        }
+    }
+}
+
 pub(super) fn export_recovery_journal(owner: HWND, state: &mut AppState) {
     if !state.can_export_recovery_journal() {
         message(
@@ -269,6 +441,9 @@ pub(super) fn show_recovery_status(owner: HWND, state: &AppState) {
     );
     if state.can_export_recovery_journal() {
         lines.push("가능한 작업: 보존된 저널 바이트 내보내기".to_owned());
+    }
+    if state.can_confirm_active_recovery() {
+        lines.push("시작 시 확인 가능: 이전 변경의 명시적 복구".to_owned());
     }
     if state.can_discard_staged_intent() {
         lines.push("가능한 작업: 활성화 전 실행 계획 폐기".to_owned());

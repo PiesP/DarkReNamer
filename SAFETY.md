@@ -100,8 +100,13 @@ Startup first holds an exclusive runtime lock, then opens both fixed journal
 leaves before taking a recovery action. If active and candidate are observed
 together, both handles and their collision provenance are retained; automatic
 rollback, cleanup, and candidate discard remain disabled. With only a valid
-active stream, current entry identities and occupancy are reconciled before
-rollback. Ambiguous observations never cause a guessed rename.
+active stream, startup retains the opened handle and enters recovery lock
+without changing any selected file. After the native window is visible, a
+warning dialog requires an explicit custom-button confirmation before current
+entry identities and occupancy are reconciled and rollback is attempted. The
+dialog defaults to Cancel; cancellation, close, an unknown result, or a dialog
+failure leaves the retained journal and recovery lock unchanged. Ambiguous
+observations never cause a guessed rename.
 
 If bytes cannot be decoded, the UI starts recovery-locked and retains the exact
 opened file handle when possible. It reports the path, failure stage, structured

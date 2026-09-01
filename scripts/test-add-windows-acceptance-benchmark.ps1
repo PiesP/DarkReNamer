@@ -14,6 +14,13 @@ function Write-Utf8([string]$Path, [string]$Content) { [IO.File]::WriteAllText($
 function Write-Json([string]$Path, [object]$Value) { Write-Utf8 $Path (($Value | ConvertTo-Json -Depth 20) + "`n") }
 function Copy-Json([object]$Value) { return $Value | ConvertTo-Json -Depth 20 | ConvertFrom-Json }
 
+function New-FifoFixture([string]$Path) {
+    $mkfifo = Get-Command mkfifo -CommandType Application -ErrorAction Stop |
+        Select-Object -First 1
+    & $mkfifo.Source -- $Path
+    if ($LASTEXITCODE -ne 0) { throw "Could not create FIFO fixture: $Path" }
+}
+
 function Write-Context(
     [string]$Directory,
     [string]$StorageModel = 'Fixture SSD Model',
@@ -87,6 +94,7 @@ $sourceSha = (& git -C $sourceRoot rev-parse HEAD).Trim()
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "darkrenamer-benchmark-import-$([Guid]::NewGuid())"
 $links = [Collections.Generic.List[string]]::new()
 $insideOutput = $null
+$insideOutputCleanupOwned = $false
 try {
     New-Item -ItemType Directory -Path $testRoot | Out-Null
     $exe = Join-Path $testRoot 'DarkReNamer.exe'; [IO.File]::WriteAllBytes($exe, [byte[]](0x4d,0x5a,1,2))
@@ -204,6 +212,26 @@ try {
     $badUtf=New-Case 'bad-utf8';[IO.File]::WriteAllBytes((Join-Path $badUtf.Logs 'iteration-1.log'),[byte[]](0xff,0xfe));Assert-Fails {&$augmenter -SourceRoot $sourceRoot -EvidencePath $badUtf.Evidence -LogDirectory $badUtf.Logs -OutputPath $badUtf.Output} 'strict UTF-8' $badUtf.Output
     $large=New-Case 'large-log';[IO.File]::WriteAllBytes((Join-Path $large.Logs 'iteration-1.log'),[byte[]]::new(4*1024*1024+1));Assert-Fails {&$augmenter -SourceRoot $sourceRoot -EvidencePath $large.Evidence -LogDirectory $large.Logs -OutputPath $large.Output} 'byte limit' $large.Output
 
+    if (-not $IsWindows) {
+        $fifoContext = New-Case 'fifo-context'
+        $fifoContextPath = Join-Path $fifoContext.Logs 'benchmark-context.json'
+        Remove-Item -LiteralPath $fifoContextPath
+        New-FifoFixture $fifoContextPath
+        Assert-Fails `
+            { & $augmenter -SourceRoot $sourceRoot -EvidencePath $fifoContext.Evidence -LogDirectory $fifoContext.Logs -OutputPath $fifoContext.Output } `
+            'must be a regular non-reparse file' `
+            $fifoContext.Output
+
+        $fifoLog = New-Case 'fifo-log'
+        $fifoLogPath = Join-Path $fifoLog.Logs 'iteration-1.log'
+        Remove-Item -LiteralPath $fifoLogPath
+        New-FifoFixture $fifoLogPath
+        Assert-Fails `
+            { & $augmenter -SourceRoot $sourceRoot -EvidencePath $fifoLog.Evidence -LogDirectory $fifoLog.Logs -OutputPath $fifoLog.Output } `
+            'must be a regular non-reparse file' `
+            $fifoLog.Output
+    }
+
     $badContext=New-Case 'bad-context'; Write-Context $badContext.Logs 'Drive 192.0.2.10'
     $watcher = [IO.FileSystemWatcher]::new($badContext.Root)
     $eventId = "benchmark-temp-$([Guid]::NewGuid())"
@@ -254,12 +282,13 @@ try {
     Assert-Fails { & $augmenter -SourceRoot $sourceRoot -EvidencePath $reparseBase.Evidence -LogDirectory (Join-Path $sourceRoot 'scripts') -OutputPath $insideLogsOutput } 'LogDirectory must be outside SourceRoot' $insideLogsOutput
     $insideOutput = Join-Path $sourceRoot '.stage-followup-inside-output.json'
     if (Test-Path -LiteralPath $insideOutput) { throw "Reserved inside output exists: $insideOutput" }
+    $insideOutputCleanupOwned = $true
     Assert-Fails { & $augmenter -SourceRoot $sourceRoot -EvidencePath $reparseBase.Evidence -LogDirectory $reparseBase.Logs -OutputPath $insideOutput } 'OutputPath must be outside SourceRoot' $insideOutput
 
     Write-Host 'Windows acceptance benchmark augmenter tests passed.'
 }
 finally {
     for($index=$links.Count-1;$index -ge 0;$index--){$link=$links[$index];if(Test-Path -LiteralPath $link){Remove-Item -LiteralPath $link -Force}}
-    if($null -ne $insideOutput -and (Test-Path -LiteralPath $insideOutput -PathType Leaf)){Remove-Item -LiteralPath $insideOutput -Force}
+    if($insideOutputCleanupOwned -and $null -ne $insideOutput -and (Test-Path -LiteralPath $insideOutput -PathType Leaf)){Remove-Item -LiteralPath $insideOutput -Force}
     if(Test-Path $testRoot){Remove-Item $testRoot -Recurse -Force}
 }

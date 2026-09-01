@@ -21,7 +21,10 @@ foreach ($validator in $handoffValidator, $evidenceValidator) {
     }
 }
 
-& $handoffValidator -SourceRoot $SourceRoot -HandoffRoot $HandoffRoot
+$provenance = & $handoffValidator `
+    -SourceRoot $SourceRoot `
+    -HandoffRoot $HandoffRoot `
+    -PassThru
 $evidence = & $evidenceValidator `
     -EvidencePath $EvidencePath `
     -VisualEvidenceRoot $VisualEvidenceRoot `
@@ -34,8 +37,6 @@ $sourceHead = @(& git -C $sourcePath rev-parse HEAD)
 if ($LASTEXITCODE -ne 0 -or $sourceHead.Count -ne 1 -or $sourceHead[0] -cnotmatch '^[0-9a-f]{40}$') {
     throw 'Source HEAD could not be resolved as a full Git SHA.'
 }
-
-$provenance = Get-Content -LiteralPath (Join-Path $handoffPath 'release-handoff.json') -Raw | ConvertFrom-Json
 
 if (-not [string]::Equals($evidence.source_sha, $sourceHead[0], [StringComparison]::Ordinal)) {
     throw 'Acceptance evidence source_sha does not match checkout HEAD.'

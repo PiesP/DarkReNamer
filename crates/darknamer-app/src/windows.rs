@@ -656,6 +656,20 @@ impl AppState {
                 .is_some_and(FileJournal::is_complete_intent_candidate)
     }
 
+    fn can_confirm_active_recovery(&self) -> bool {
+        self.recovery_locked
+            && !self.mutation_locked
+            && !self.confirmation_pending
+            && !self.close_pending
+            && !self.collision_observed
+            && self.active_journal.is_some()
+            && self.staged_journal.is_none()
+            && self.blocked_journals.is_empty()
+            && self.apply_worker.is_none()
+            && self.plan_worker.is_none()
+            && self.admission_worker.is_none()
+    }
+
     fn can_export_recovery_journal(&self) -> bool {
         self.active_journal.is_some()
             || self.staged_journal.is_some()
@@ -1067,14 +1081,42 @@ mod tests {
             );
         }
 
+        let mut before_startup = fs::read_dir(&data)?
+            .map(|entry| {
+                let entry = entry?;
+                Ok((entry.file_name(), fs::read(entry.path())?))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        before_startup.sort_by(|left, right| left.0.cmp(&right.0));
         let runtime = initialize_safe_runtime_at(directory.path())?;
         if expect_staged_lock {
             assert!(runtime.recovery_locked);
             assert!(runtime.staged_journal.is_some());
         } else {
-            assert!(runtime.active_journal.is_none());
+            assert!(runtime.recovery_locked);
+            assert!(runtime.active_journal.is_some());
         }
-        drop(runtime);
+        let mut after_startup = fs::read_dir(&data)?
+            .map(|entry| {
+                let entry = entry?;
+                Ok((entry.file_name(), fs::read(entry.path())?))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        after_startup.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            before_startup, after_startup,
+            "startup discovery mutated files before explicit recovery confirmation"
+        );
+
+        let mut state = AppState::new(runtime);
+        if expect_staged_lock {
+            assert!(!state.can_confirm_active_recovery());
+        } else {
+            assert!(state.can_confirm_active_recovery());
+            recover_confirmed_active_journal(&mut state);
+            assert!(state.active_journal.is_none());
+        }
+        drop(state);
 
         let (expected_a, expected_b) = if expect_swapped {
             (b"b".as_slice(), b"a".as_slice())
@@ -1226,9 +1268,20 @@ mod tests {
                 .status
                 .as_deref()
                 .unwrap_or_default()
+                .contains("명시적인 복구 확인이 필요")
+        );
+        let mut state = AppState::new(runtime);
+        assert!(state.can_confirm_active_recovery());
+        let presentation = recover_confirmed_active_journal(&mut state);
+        assert!(!presentation.completed);
+        assert!(
+            presentation
+                .status
                 .contains("저널 삭제 실패: file journal error: UnsafeCleanupState")
         );
-        drop(runtime);
+        assert!(state.recovery_locked);
+        assert!(state.active_journal.is_some());
+        drop(state);
         assert_eq!(fs::read(active)?, bytes);
         Ok(())
     }

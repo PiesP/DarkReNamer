@@ -21,6 +21,163 @@ if ($PSVersionTable.PSVersion -lt [version] '7.4') {
     throw 'Windows acceptance evidence validation requires PowerShell 7.4 or newer (pwsh).'
 }
 
+if (-not $IsWindows -and -not ('DarkReNamer.AcceptanceEvidenceFile' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+namespace DarkReNamer
+{
+    public static class AcceptanceEvidenceFile
+    {
+        [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+        private static extern int open(string path, int flags, int mode);
+
+        public static FileStream OpenReadRegular(string path)
+        {
+            int flags;
+            if (OperatingSystem.IsLinux())
+            {
+                const int O_NONBLOCK = 0x00000800;
+                const int O_NOFOLLOW = 0x00020000;
+                const int O_CLOEXEC = 0x00080000;
+                flags = O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC;
+            }
+            else if (OperatingSystem.IsMacOS())
+            {
+                const int O_NONBLOCK = 0x00000004;
+                const int O_NOFOLLOW = 0x00000100;
+                const int O_CLOEXEC = 0x01000000;
+                flags = O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC;
+            }
+            else
+            {
+                throw new PlatformNotSupportedException(
+                    "Regular-file validation is unsupported on this Unix platform."
+                );
+            }
+
+            int descriptor = open(path, flags, 0);
+            if (descriptor < 0)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            var handle = new SafeFileHandle(new IntPtr(descriptor), ownsHandle: true);
+            FileStream stream = null;
+            try
+            {
+                stream = new FileStream(handle, FileAccess.Read);
+                if (!stream.CanSeek)
+                {
+                    throw new IOException("The opened evidence object is not a regular file.");
+                }
+                return stream;
+            }
+            catch
+            {
+                if (stream != null)
+                {
+                    stream.Dispose();
+                }
+                else
+                {
+                    handle.Dispose();
+                }
+                throw;
+            }
+        }
+    }
+}
+'@
+}
+
+function Open-RegularFileReadOnce {
+    param(
+        [Parameter(Mandatory)]
+        [IO.FileInfo] $Item,
+        [Parameter(Mandatory)]
+        [string] $Label,
+        [IO.FileOptions] $WindowsFileOptions = [IO.FileOptions]::None
+    )
+
+    try {
+        if ($IsWindows) {
+            return [IO.FileStream]::new(
+                $Item.FullName,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::Read,
+                [IO.FileShare]::Read,
+                4096,
+                $WindowsFileOptions
+            )
+        }
+        return [DarkReNamer.AcceptanceEvidenceFile]::OpenReadRegular($Item.FullName)
+    }
+    catch {
+        throw "$Label must be a regular non-reparse file: $($_.Exception.Message)"
+    }
+}
+
+function Read-StrictUtf8RegularFileOnce {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path,
+        [Parameter(Mandatory)]
+        [long] $MaximumBytes,
+        [Parameter(Mandatory)]
+        [string] $Label
+    )
+
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item -isnot [IO.FileInfo] -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq
+            [IO.FileAttributes]::ReparsePoint) {
+        throw "$Label must be a regular non-reparse file."
+    }
+
+    $stream = Open-RegularFileReadOnce -Item $item -Label $Label
+    try {
+        $length = $stream.Length
+        if ($length -gt $MaximumBytes) {
+            throw "$Label exceeds its byte limit."
+        }
+        $bytes = [byte[]]::new([int] $length)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $read = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+            if ($read -eq 0) {
+                throw "$Label changed while it was being read."
+            }
+            $offset += $read
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+
+    $start = 0
+    if ($bytes.Length -ge 3 -and
+        $bytes[0] -eq 0xef -and
+        $bytes[1] -eq 0xbb -and
+        $bytes[2] -eq 0xbf) {
+        $start = 3
+    }
+    try {
+        return [Text.UTF8Encoding]::new($false, $true).GetString(
+            $bytes,
+            $start,
+            $bytes.Length - $start
+        )
+    }
+    catch {
+        throw "$Label must be strict UTF-8 with an optional UTF-8 BOM."
+    }
+}
+
 function Test-Property {
     param(
         [Parameter(Mandatory)]
@@ -281,13 +438,20 @@ namespace DarkReNamerAcceptance
     {
         public uint Width { get; private set; }
         public uint Height { get; private set; }
+        public string EncodedSha256 { get; private set; }
         public string RasterSha256 { get; private set; }
         public int DistinctColors { get; private set; }
 
-        public PngDimensions(uint width, uint height, string rasterSha256, int distinctColors)
+        public PngDimensions(
+            uint width,
+            uint height,
+            string encodedSha256,
+            string rasterSha256,
+            int distinctColors)
         {
             Width = width;
             Height = height;
+            EncodedSha256 = encodedSha256;
             RasterSha256 = rasterSha256;
             DistinctColors = distinctColors;
         }
@@ -302,19 +466,22 @@ namespace DarkReNamerAcceptance
             { 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a };
         private static readonly uint[] CrcTable = BuildCrcTable();
 
-        public static PngDimensions Validate(string path)
+        public static PngDimensions Validate(FileStream input)
         {
-            using (FileStream stream = new FileStream(
-                path,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                4096,
-                FileOptions.SequentialScan))
+            using (input)
             {
-                if (stream.Length < 57 || stream.Length > MaximumEncodedBytes)
+                if (input.Length < 57 || input.Length > MaximumEncodedBytes)
                     throw new InvalidDataException("PNG encoded size is outside the 57-byte through 64-MiB limit.");
 
+                byte[] encodedBytes = ReadExactly(input, checked((int)input.Length));
+                string encodedSha;
+                using (SHA256 encodedHash = SHA256.Create())
+                {
+                    encodedSha = Convert.ToHexString(encodedHash.ComputeHash(encodedBytes)).ToLowerInvariant();
+                }
+
+                using (MemoryStream stream = new MemoryStream(encodedBytes, writable: false))
+                {
                 byte[] signature = ReadExactly(stream, Signature.Length);
                 for (int index = 0; index < Signature.Length; index++)
                     if (signature[index] != Signature[index])
@@ -391,6 +558,12 @@ namespace DarkReNamerAcceptance
                                 throw new InvalidDataException("PNG contains trailing bytes after IEND.");
                             break;
                         }
+                        else if (type == "tRNS")
+                        {
+                            throw new InvalidDataException(
+                                "PNG screenshot pixels must be fully opaque; tRNS is not allowed."
+                            );
+                        }
                         else
                         {
                             if (seenData) endedData = true;
@@ -410,32 +583,67 @@ namespace DarkReNamerAcceptance
                     byte[] filtered = new byte[rowLength + 1];
                     byte[] row = new byte[rowLength];
                     byte[] previousRow = new byte[rowLength];
+                    byte[] canonicalRow = new byte[checked((int)width * 4)];
                     HashSet<uint> colors = new HashSet<uint>();
                     compressed.Position = 0;
                     using (IncrementalHash rasterHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
                     using (ZLibStream decoder = new ZLibStream(compressed, CompressionMode.Decompress, true))
                     {
-                        rasterHash.AppendData(headerData);
+                        rasterHash.AppendData(headerData, 0, 8);
                         for (uint y = 0; y < height; y++)
                         {
                             ReadExactly(decoder, filtered, 0, filtered.Length);
                             if (filtered[0] > 4)
                                 throw new InvalidDataException("PNG scanline uses an invalid filter.");
                             Unfilter(filtered[0], filtered, row, previousRow, bytesPerPixel);
-                            rasterHash.AppendData(row);
                             for (int offset = 0; offset < row.Length; offset += bytesPerPixel)
                             {
-                                if ((colorType == 4 && row[offset + 1] != 255) ||
-                                    (colorType == 6 && row[offset + 3] != 255))
+                                byte red;
+                                byte green;
+                                byte blue;
+                                byte alpha;
+                                switch (colorType)
+                                {
+                                    case 0:
+                                        red = green = blue = row[offset];
+                                        alpha = 255;
+                                        break;
+                                    case 2:
+                                        red = row[offset];
+                                        green = row[offset + 1];
+                                        blue = row[offset + 2];
+                                        alpha = 255;
+                                        break;
+                                    case 4:
+                                        red = green = blue = row[offset];
+                                        alpha = row[offset + 1];
+                                        break;
+                                    case 6:
+                                        red = row[offset];
+                                        green = row[offset + 1];
+                                        blue = row[offset + 2];
+                                        alpha = row[offset + 3];
+                                        break;
+                                    default:
+                                        throw new InvalidDataException("PNG color type is unsupported.");
+                                }
+                                if (alpha != 255)
                                     throw new InvalidDataException("PNG screenshot pixels must be fully opaque.");
+                                int canonicalOffset = (offset / bytesPerPixel) * 4;
+                                canonicalRow[canonicalOffset] = red;
+                                canonicalRow[canonicalOffset + 1] = green;
+                                canonicalRow[canonicalOffset + 2] = blue;
+                                canonicalRow[canonicalOffset + 3] = alpha;
                                 if (colors.Count <= 64)
                                 {
-                                    uint color = 0;
-                                    for (int channel = 0; channel < bytesPerPixel; channel++)
-                                        color = (color << 8) | row[offset + channel];
+                                    uint color = ((uint)red << 24) |
+                                        ((uint)green << 16) |
+                                        ((uint)blue << 8) |
+                                        alpha;
                                     colors.Add(color);
                                 }
                             }
+                            rasterHash.AppendData(canonicalRow);
                             byte[] swap = previousRow;
                             previousRow = row;
                             row = swap;
@@ -443,8 +651,14 @@ namespace DarkReNamerAcceptance
                         if (decoder.ReadByte() != -1)
                             throw new InvalidDataException("PNG decoded data exceeds the IHDR dimensions.");
                         string rasterSha = Convert.ToHexString(rasterHash.GetHashAndReset()).ToLowerInvariant();
-                        return new PngDimensions(width, height, rasterSha, colors.Count);
+                        return new PngDimensions(
+                            width,
+                            height,
+                            encodedSha,
+                            rasterSha,
+                            colors.Count);
                     }
+                }
                 }
             }
         }
@@ -540,8 +754,19 @@ namespace DarkReNamerAcceptance
 
 function Get-PngDimensions {
     param([Parameter(Mandatory)][string] $Path)
+    $stream = $null
     try {
-        $dimensions = [DarkReNamerAcceptance.StrictPngValidator]::Validate($Path)
+        $item = Get-Item -LiteralPath $Path -Force
+        if ($item -isnot [IO.FileInfo] -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq
+                [IO.FileAttributes]::ReparsePoint) {
+            throw 'Visual capture must be a regular non-reparse file.'
+        }
+        $stream = Open-RegularFileReadOnce `
+            -Item $item `
+            -Label 'Visual capture' `
+            -WindowsFileOptions ([IO.FileOptions]::SequentialScan)
+        $dimensions = [DarkReNamerAcceptance.StrictPngValidator]::Validate($stream)
     }
     catch {
         $detail = if ($null -ne $_.Exception.InnerException) {
@@ -552,9 +777,15 @@ function Get-PngDimensions {
         }
         throw "Visual capture is not a bounded decodable PNG: $detail"
     }
+    finally {
+        if ($null -ne $stream) {
+            $stream.Dispose()
+        }
+    }
     return [pscustomobject]@{
         width = [uint64] $dimensions.Width
         height = [uint64] $dimensions.Height
+        encoded_sha256 = $dimensions.EncodedSha256
         raster_sha256 = $dimensions.RasterSha256
         distinct_colors = $dimensions.DistinctColors
     }
@@ -599,7 +830,10 @@ if ($PSCmdlet.ParameterSetName -eq 'Path') {
     if (-not (Test-Path -LiteralPath $EvidencePath -PathType Leaf)) {
         throw "Evidence file does not exist: $EvidencePath"
     }
-    $evidenceJson = Get-Content -LiteralPath $EvidencePath -Raw
+    $evidenceJson = Read-StrictUtf8RegularFileOnce `
+        -Path $EvidencePath `
+        -MaximumBytes (4 * 1024 * 1024) `
+        -Label 'Evidence file'
 }
 try {
     $jsonDocument = [Text.Json.JsonDocument]::Parse($evidenceJson)
@@ -996,7 +1230,7 @@ foreach ($capture in @($evidence.visual_captures)) {
             $dimensions.height -ne [uint64] $capture.image.pixel_height) {
             throw "$location PNG dimensions do not match the recorded pixel dimensions."
         }
-        $actualImageHash = (Get-FileHash -LiteralPath $imagePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $actualImageHash = $dimensions.encoded_sha256
         if (-not [string]::Equals($actualImageHash, $capture.image.sha256, [StringComparison]::Ordinal)) {
             throw "$location image SHA-256 does not match VisualEvidenceRoot bytes."
         }

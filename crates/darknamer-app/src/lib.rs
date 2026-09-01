@@ -1762,6 +1762,8 @@ pub(crate) const DIRECTORY_RECURSE_BUTTON_ID: i32 = 1_002;
 pub(crate) const APPLY_CONFIRM_BUTTON_ID: i32 = 1_101;
 #[cfg(any(windows, test))]
 pub(crate) const DISCARD_CONFIRM_BUTTON_ID: i32 = 1_201;
+#[cfg(any(windows, test))]
+pub(crate) const RECOVER_CONFIRM_BUTTON_ID: i32 = 1_202;
 
 /// Maps native task-dialog response values, failing closed for every unknown result.
 #[cfg(any(windows, test))]
@@ -6004,9 +6006,33 @@ mod tests {
             destructive_prompt_choice(APPLY_CONFIRM_BUTTON_ID, APPLY_CONFIRM_BUTTON_ID),
             DestructivePromptChoice::Confirm
         );
-        for result in [0, 1, 2, 42, DISCARD_CONFIRM_BUTTON_ID] {
+        assert_eq!(
+            destructive_prompt_choice(RECOVER_CONFIRM_BUTTON_ID, RECOVER_CONFIRM_BUTTON_ID),
+            DestructivePromptChoice::Confirm
+        );
+        for result in [
+            0,
+            1,
+            2,
+            42,
+            DISCARD_CONFIRM_BUTTON_ID,
+            RECOVER_CONFIRM_BUTTON_ID,
+        ] {
             assert_eq!(
                 destructive_prompt_choice(result, APPLY_CONFIRM_BUTTON_ID),
+                DestructivePromptChoice::Cancel
+            );
+        }
+        for result in [
+            0,
+            1,
+            2,
+            42,
+            APPLY_CONFIRM_BUTTON_ID,
+            DISCARD_CONFIRM_BUTTON_ID,
+        ] {
+            assert_eq!(
+                destructive_prompt_choice(result, RECOVER_CONFIRM_BUTTON_ID),
                 DestructivePromptChoice::Cancel
             );
         }

@@ -398,6 +398,63 @@ try {
     Write-Provenance -Path (Join-Path $handoffRoot 'release-handoff.json') -SourceSha $sourceSha -ExecutableSha $exeSha -WorkflowRun $workflowRun
     Write-Checksums -HandoffRoot $handoffRoot
     Write-JsonObject -Value $complete -Path $evidencePath
+
+    $replacementRun = '33257061301'
+    $replacementEvidence = Copy-JsonObject $complete
+    $replacementEvidence.artifact.workflow_run = $replacementRun
+    Write-JsonObject -Value $replacementEvidence -Path $evidencePath
+    $validatorBundle = Join-Path $testRoot 'validator-bundle'
+    New-Item -ItemType Directory -Path $validatorBundle | Out-Null
+    foreach ($name in @(
+            'validate-release-acceptance.ps1',
+            'validate-windows-acceptance-evidence.ps1',
+            'windows-acceptance-evidence.schema.json'
+        )) {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $validatorBundle
+    }
+    $realHandoffValidator = (Join-Path $PSScriptRoot 'validate-release-handoff.ps1').Replace("'", "''")
+    $replacementShim = @"
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory)][string] `$SourceRoot,
+    [Parameter(Mandatory)][string] `$HandoffRoot,
+    [switch] `$PassThru
+)
+`$validated = & '$realHandoffValidator' -SourceRoot `$SourceRoot -HandoffRoot `$HandoffRoot -PassThru
+`$path = Join-Path `$HandoffRoot 'release-handoff.json'
+`$replacement = Get-Content -LiteralPath `$path -Raw | ConvertFrom-Json
+`$replacement.workflow_run = '$replacementRun'
+[IO.File]::WriteAllText(
+    `$path,
+    ((`$replacement | ConvertTo-Json -Depth 10) + "``n"),
+    [Text.UTF8Encoding]::new(`$false)
+)
+if (`$PassThru) { return `$validated }
+Write-Host 'Validated unsigned release handoff before test replacement.'
+"@
+    Write-Utf8NoBom `
+        -Path (Join-Path $validatorBundle 'validate-release-handoff.ps1') `
+        -Content $replacementShim
+    $replacementValidator = Join-Path $validatorBundle 'validate-release-acceptance.ps1'
+    $replacementRejected = $false
+    try {
+        & $replacementValidator `
+            -SourceRoot $sourceRoot `
+            -HandoffRoot $handoffRoot `
+            -EvidencePath $evidencePath `
+            -VisualEvidenceRoot $visualEvidenceRoot | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notlike '*artifact.workflow_run does not match*') { throw }
+        $replacementRejected = $true
+    }
+    if (-not $replacementRejected) {
+        throw 'Release acceptance validation trusted provenance replaced after handoff validation.'
+    }
+
+    Write-Provenance -Path (Join-Path $handoffRoot 'release-handoff.json') -SourceSha $sourceSha -ExecutableSha $exeSha -WorkflowRun $workflowRun
+    Write-Checksums -HandoffRoot $handoffRoot
+    Write-JsonObject -Value $complete -Path $evidencePath
     Write-VisualPngFixture `
         -Path (Join-Path $visualEvidenceRoot $complete.visual_captures[0].image.filename) `
         -Marker 'different-valid-image' `

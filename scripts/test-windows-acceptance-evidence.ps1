@@ -13,6 +13,13 @@ if (-not (Test-Path -LiteralPath $validator -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $schema -PathType Leaf)) {
     throw "Windows acceptance evidence schema is missing: $schema"
 }
+$validatorSource = Get-Content -LiteralPath $validator -Raw
+if ($validatorSource -match 'Get-FileHash\s+-LiteralPath\s+\$imagePath') {
+    throw 'Visual PNG hashing must not reopen imagePath after retained-stream decoding.'
+}
+if ($validatorSource -match '(?s)ComputeHash\(stream\).*stream\.Position\s*=\s*0') {
+    throw 'Visual PNG hashing and decoding must use one immutable encoded-byte snapshot.'
+}
 . $visualFixture
 
 function Copy-Evidence {
@@ -34,6 +41,16 @@ function Write-Evidence {
 
     $json = $Evidence | ConvertTo-Json -Depth 20
     [IO.File]::WriteAllText($Path, $json, [Text.UTF8Encoding]::new($false))
+}
+
+function New-FifoFixture {
+    param([Parameter(Mandatory)][string] $Path)
+    $mkfifo = Get-Command mkfifo -CommandType Application -ErrorAction Stop |
+        Select-Object -First 1
+    & $mkfifo.Source -- $Path
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not create FIFO fixture: $Path"
+    }
 }
 
 function Assert-ValidatorPasses {
@@ -117,6 +134,26 @@ function Assert-ValidatorFails {
         return
     }
     throw "Expected '$Name' to fail with '$ExpectedFragment', but validation succeeded."
+}
+
+function Assert-EvidenceFileFails {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path,
+        [Parameter(Mandatory)]
+        [string] $ExpectedFragment
+    )
+
+    try {
+        & $validator -EvidencePath $Path -Draft | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notlike "*$ExpectedFragment*") {
+            throw "Expected evidence file to fail with '$ExpectedFragment', got: $($_.Exception.Message)"
+        }
+        return
+    }
+    throw "Expected evidence file to fail with '$ExpectedFragment', but validation succeeded."
 }
 
 function Assert-SchemaRejects {
@@ -459,6 +496,57 @@ try {
     if ($pathSemanticJson -cne $memorySemanticJson) {
         throw 'EvidencePath and EvidenceJson validation returned different semantic objects.'
     }
+    $oversizedEvidencePath = Join-Path $testRoot 'oversized-evidence.json'
+    $oversizedEvidenceStream = [IO.FileStream]::new(
+        $oversizedEvidencePath,
+        [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::None
+    )
+    try {
+        $oversizedEvidenceStream.SetLength((4 * 1024 * 1024) + 1)
+    }
+    finally {
+        $oversizedEvidenceStream.Dispose()
+    }
+    Assert-EvidenceFileFails `
+        -Path $oversizedEvidencePath `
+        -ExpectedFragment 'exceeds its byte limit'
+
+    $invalidUtf8EvidencePath = Join-Path $testRoot 'invalid-utf8-evidence.json'
+    [IO.File]::WriteAllBytes(
+        $invalidUtf8EvidencePath,
+        [byte[]](0x7b, 0x22, 0x78, 0x22, 0x3a, 0x22, 0xff, 0x22, 0x7d)
+    )
+    Assert-EvidenceFileFails `
+        -Path $invalidUtf8EvidencePath `
+        -ExpectedFragment 'must be strict UTF-8'
+
+    $bomEvidencePath = Join-Path $testRoot 'utf8-bom-evidence.json'
+    $plainEvidenceBytes = [IO.File]::ReadAllBytes($passThruPath)
+    [IO.File]::WriteAllBytes(
+        $bomEvidencePath,
+        [byte[]](@(0xef, 0xbb, 0xbf) + $plainEvidenceBytes)
+    )
+    $bomOutput = @(& $validator -EvidencePath $bomEvidencePath -Draft -PassThru 6>&1)
+    if ($bomOutput.Count -ne 1 -or
+        (($bomOutput[0] | ConvertTo-Json -Depth 20 -Compress) -cne $pathSemanticJson)) {
+        throw 'Optional UTF-8 BOM changed EvidencePath validation semantics.'
+    }
+
+    $linkedEvidencePath = Join-Path $testRoot 'linked-evidence.json'
+    New-Item -ItemType SymbolicLink -Path $linkedEvidencePath -Target $passThruPath | Out-Null
+    Assert-EvidenceFileFails `
+        -Path $linkedEvidencePath `
+        -ExpectedFragment 'must be a regular non-reparse file'
+
+    if (-not $IsWindows) {
+        $fifoEvidencePath = Join-Path $testRoot 'fifo-evidence.json'
+        New-FifoFixture -Path $fifoEvidencePath
+        Assert-EvidenceFileFails `
+            -Path $fifoEvidencePath `
+            -ExpectedFragment 'must be a regular non-reparse file'
+    }
     $missingVisualRootRejected = $false
     try {
         & $validator -EvidencePath $passThruPath | Out-Null
@@ -564,6 +652,23 @@ try {
         -VisualEvidenceRoot $visualRoot
     Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
 
+    $truecolorTransparency = Copy-Evidence $complete
+    Write-VisualPngFixture `
+        -Path $firstVisualPath `
+        -Marker 'truecolor-transparency' `
+        -Width 640 `
+        -Height 360 `
+        -Seed 1 `
+        -TruecolorTransparency
+    $truecolorTransparency.visual_captures[0].image.sha256 =
+        (Get-FileHash -LiteralPath $firstVisualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ValidatorFails `
+        -Evidence $truecolorTransparency `
+        -Name 'visual-root-truecolor-transparency' `
+        -ExpectedFragment 'screenshot pixels must be fully opaque' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
     $transparentAfterColorCap = Copy-Evidence $complete
     Write-VisualPngFixture `
         -Path $firstVisualPath `
@@ -598,6 +703,24 @@ try {
         -VisualEvidenceRoot $visualRoot
     Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
 
+    $duplicateColorModel = Copy-Evidence $complete
+    $secondVisualPath = Join-Path $visualRoot $duplicateColorModel.visual_captures[1].image.filename
+    Write-VisualPngFixture `
+        -Path $secondVisualPath `
+        -Marker 'same-raster-truecolor' `
+        -Width 640 `
+        -Height 360 `
+        -Seed 1 `
+        -TruecolorOpaque
+    $duplicateColorModel.visual_captures[1].image.sha256 =
+        (Get-FileHash -LiteralPath $secondVisualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ValidatorFails `
+        -Evidence $duplicateColorModel `
+        -Name 'visual-root-duplicate-color-model' `
+        -ExpectedFragment 'Duplicate visual capture decoded raster' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
     Write-VisualPngFixture `
         -Path $firstVisualPath `
         -Marker 'different-valid-image' `
@@ -608,6 +731,19 @@ try {
         -Evidence $complete `
         -Name 'visual-root-hash-mismatch' `
         -ExpectedFragment 'image SHA-256 does not match VisualEvidenceRoot bytes' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
+    $invalidSignatureEvidence = Copy-Evidence $complete
+    $invalidSignatureBytes = [IO.File]::ReadAllBytes($firstVisualPath)
+    $invalidSignatureBytes[0] = $invalidSignatureBytes[0] -bxor 1
+    [IO.File]::WriteAllBytes($firstVisualPath, $invalidSignatureBytes)
+    $invalidSignatureEvidence.visual_captures[0].image.sha256 =
+        (Get-FileHash -LiteralPath $firstVisualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ValidatorFails `
+        -Evidence $invalidSignatureEvidence `
+        -Name 'visual-root-invalid-signature' `
+        -ExpectedFragment 'PNG signature is invalid' `
         -VisualEvidenceRoot $visualRoot
     Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
 
@@ -659,6 +795,18 @@ try {
         -ExpectedFragment 'encoded size is outside' `
         -VisualEvidenceRoot $visualRoot
     Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
+    if (-not $IsWindows) {
+        Remove-Item -LiteralPath $firstVisualPath
+        New-FifoFixture -Path $firstVisualPath
+        Assert-ValidatorFails `
+            -Evidence $complete `
+            -Name 'visual-root-fifo-image' `
+            -ExpectedFragment 'must be a regular non-reparse file' `
+            -VisualEvidenceRoot $visualRoot
+        Remove-Item -LiteralPath $firstVisualPath
+        Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+    }
 
     $tooManyChunksEvidence = Copy-Evidence $complete
     $validPng = [IO.File]::ReadAllBytes($firstVisualPath)
