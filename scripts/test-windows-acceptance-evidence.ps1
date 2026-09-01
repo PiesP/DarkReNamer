@@ -13,6 +13,10 @@ if (-not (Test-Path -LiteralPath $validator -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $schema -PathType Leaf)) {
     throw "Windows acceptance evidence schema is missing: $schema"
 }
+$validatorSource = Get-Content -LiteralPath $validator -Raw
+if ($validatorSource -match 'Get-FileHash\s+-LiteralPath\s+\$imagePath') {
+    throw 'Visual PNG hashing must not reopen imagePath after retained-stream decoding.'
+}
 . $visualFixture
 
 function Copy-Evidence {

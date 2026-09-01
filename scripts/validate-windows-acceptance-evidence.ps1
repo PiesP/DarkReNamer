@@ -438,13 +438,20 @@ namespace DarkReNamerAcceptance
     {
         public uint Width { get; private set; }
         public uint Height { get; private set; }
+        public string EncodedSha256 { get; private set; }
         public string RasterSha256 { get; private set; }
         public int DistinctColors { get; private set; }
 
-        public PngDimensions(uint width, uint height, string rasterSha256, int distinctColors)
+        public PngDimensions(
+            uint width,
+            uint height,
+            string encodedSha256,
+            string rasterSha256,
+            int distinctColors)
         {
             Width = width;
             Height = height;
+            EncodedSha256 = encodedSha256;
             RasterSha256 = rasterSha256;
             DistinctColors = distinctColors;
         }
@@ -465,6 +472,13 @@ namespace DarkReNamerAcceptance
             {
                 if (stream.Length < 57 || stream.Length > MaximumEncodedBytes)
                     throw new InvalidDataException("PNG encoded size is outside the 57-byte through 64-MiB limit.");
+
+                string encodedSha;
+                using (SHA256 encodedHash = SHA256.Create())
+                {
+                    encodedSha = Convert.ToHexString(encodedHash.ComputeHash(stream)).ToLowerInvariant();
+                }
+                stream.Position = 0;
 
                 byte[] signature = ReadExactly(stream, Signature.Length);
                 for (int index = 0; index < Signature.Length; index++)
@@ -594,7 +608,12 @@ namespace DarkReNamerAcceptance
                         if (decoder.ReadByte() != -1)
                             throw new InvalidDataException("PNG decoded data exceeds the IHDR dimensions.");
                         string rasterSha = Convert.ToHexString(rasterHash.GetHashAndReset()).ToLowerInvariant();
-                        return new PngDimensions(width, height, rasterSha, colors.Count);
+                        return new PngDimensions(
+                            width,
+                            height,
+                            encodedSha,
+                            rasterSha,
+                            colors.Count);
                     }
                 }
             }
@@ -722,6 +741,7 @@ function Get-PngDimensions {
     return [pscustomobject]@{
         width = [uint64] $dimensions.Width
         height = [uint64] $dimensions.Height
+        encoded_sha256 = $dimensions.EncodedSha256
         raster_sha256 = $dimensions.RasterSha256
         distinct_colors = $dimensions.DistinctColors
     }
@@ -1166,7 +1186,7 @@ foreach ($capture in @($evidence.visual_captures)) {
             $dimensions.height -ne [uint64] $capture.image.pixel_height) {
             throw "$location PNG dimensions do not match the recorded pixel dimensions."
         }
-        $actualImageHash = (Get-FileHash -LiteralPath $imagePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $actualImageHash = $dimensions.encoded_sha256
         if (-not [string]::Equals($actualImageHash, $capture.image.sha256, [StringComparison]::Ordinal)) {
             throw "$location image SHA-256 does not match VisualEvidenceRoot bytes."
         }
