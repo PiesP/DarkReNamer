@@ -87,6 +87,9 @@ try {
         -SourceRoot $testRoot `
         -Revision $revision `
         -Path 'missing.txt'
+    if ($global:LASTEXITCODE -ne 0) {
+        throw 'A handled Git blob probe failure leaked a native process exit code.'
+    }
 }
 finally {
     if (Test-Path -LiteralPath $testRoot) {
