@@ -69,6 +69,10 @@ jobs:
         shell: pwsh
         run: ./scripts/test-measure-windows-binary.ps1
 
+      - name: Test canonical Git blob hashing
+        shell: pwsh
+        run: ./scripts/test-get-git-blob-sha256.ps1
+
       - name: Test release CycloneDX preparation
         shell: pwsh
         run: ./scripts/test-prepare-release-cyclonedx.ps1
@@ -156,6 +160,10 @@ jobs:
       - name: Test Windows binary measurement
         shell: pwsh
         run: ./scripts/test-measure-windows-binary.ps1
+
+      - name: Test canonical Git blob hashing
+        shell: pwsh
+        run: ./scripts/test-get-git-blob-sha256.ps1
 
       - name: Test immutable release candidate metadata validation
         shell: pwsh

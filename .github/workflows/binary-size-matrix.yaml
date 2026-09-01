@@ -171,9 +171,12 @@ jobs:
             workflow_run_attempt = $env:GITHUB_RUN_ATTEMPT
             rustc_version = $env:RUSTC_VERSION
             target_triple = 'x86_64-pc-windows-msvc'
-            cargo_toml_sha256 = (Get-FileHash -LiteralPath Cargo.toml -Algorithm SHA256).Hash.ToLowerInvariant()
-            cargo_lock_sha256 = (Get-FileHash -LiteralPath Cargo.lock -Algorithm SHA256).Hash.ToLowerInvariant()
-            rust_toolchain_toml_sha256 = (Get-FileHash -LiteralPath rust-toolchain.toml -Algorithm SHA256).Hash.ToLowerInvariant()
+            cargo_toml_sha256 = ./scripts/get-git-blob-sha256.ps1 `
+              -SourceRoot $PWD -Revision $env:SOURCE_SHA -Path Cargo.toml
+            cargo_lock_sha256 = ./scripts/get-git-blob-sha256.ps1 `
+              -SourceRoot $PWD -Revision $env:SOURCE_SHA -Path Cargo.lock
+            rust_toolchain_toml_sha256 = ./scripts/get-git-blob-sha256.ps1 `
+              -SourceRoot $PWD -Revision $env:SOURCE_SHA -Path rust-toolchain.toml
             variants = $results.ToArray()
           }
           [IO.File]::WriteAllText(
