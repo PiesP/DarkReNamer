@@ -3,7 +3,9 @@ param(
     [Parameter(Mandatory)]
     [string] $EvidencePath,
 
-    [switch] $Draft
+    [switch] $Draft,
+
+    [switch] $PassThru
 )
 
 Set-StrictMode -Version Latest
@@ -721,5 +723,8 @@ elseif ($completeHddUnavailable) {
 }
 else {
     'complete release-gate'
+}
+if ($PassThru) {
+    return $evidence
 }
 Write-Host "Validated $mode Windows acceptance evidence for source $($evidence.source_sha)."

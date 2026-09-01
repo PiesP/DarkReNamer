@@ -343,6 +343,27 @@ iteration, and never include warmup iteration 0 in the median. The
 `unique-parent` and `deep-parent` samples remain diagnostic and are not
 aggregated into release-acceptance rows.
 
+For one release-row target, retain recorded iterations 1 through 5 as exactly
+five `.log` files in a private external directory. Add
+`benchmark-context.json` beside them with the tested Windows and physical
+storage context; do not include paths, hostnames, device serials, or narrative.
+Import the target into a new draft rather than editing evidence in place:
+
+```powershell
+./scripts/add-windows-acceptance-benchmark.ps1 `
+  -SourceRoot $PWD `
+  -EvidencePath $draftPath `
+  -LogDirectory $recordedLogDirectory `
+  -OutputPath $nextDraftPath
+```
+
+The importer accepts only the source-bound, recorded physical `baseline`
+`same-parent` summaries used by release evidence, verifies all five successful
+logs, and calculates the two medians. Chain the next import from
+`$nextDraftPath`. Inputs and output parents must be external, private, and free
+of symbolic links or junctions. Reparse checks and a no-overwrite atomic move
+limit mistakes but cannot eliminate a malicious local directory-retarget race.
+
 The summary line reports the whole `planning` and `preflight` phases and, for
 physical evidence, the durable `execution` phase. Backend lines report
 `planning`, `preflight`, and `execution` call counts and observer timings;

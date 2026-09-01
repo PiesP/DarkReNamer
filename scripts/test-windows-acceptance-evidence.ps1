@@ -312,6 +312,21 @@ try {
     Assert-EvidencePathspec -TestRoot $testRoot
 
     $complete = New-CompleteEvidence
+    $passThruPath = Join-Path $testRoot 'pass-thru-draft.json'
+    Write-Evidence -Evidence $complete -Path $passThruPath
+    $defaultOutput = @(& $validator -EvidencePath $passThruPath -Draft 6>&1)
+    if ((($defaultOutput | ForEach-Object { "$_" }) -join ' ') -notlike
+        '*Validated draft Windows acceptance evidence*') {
+        throw 'Default evidence validation did not retain its human success output.'
+    }
+    $passThruOutput = @(& $validator -EvidencePath $passThruPath -Draft -PassThru 6>&1)
+    if ($passThruOutput.Count -ne 1 -or $passThruOutput[0] -isnot [pscustomobject]) {
+        throw 'Evidence PassThru must return exactly one validated evidence object.'
+    }
+    if (($passThruOutput[0].PSObject.Properties.Name -join ',') -cne
+        'schema_version,source_sha,artifact,recorded_at_utc,operator_context,ui_matrix,scenarios,benchmarks,durability_trials,unexecuted') {
+        throw 'Evidence PassThru fields do not match the validated evidence contract.'
+    }
     Assert-ValidatorPasses `
         -Evidence $complete `
         -Name 'valid-complete' `
