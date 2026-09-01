@@ -167,7 +167,7 @@ try {
     [IO.File]::WriteAllBytes((Join-Path $handoffRoot 'DarkReNamer.pdb'), [byte[]](0x50, 0x44, 0x42, 0x00))
     Write-Utf8NoBom `
         -Path (Join-Path $handoffRoot 'DarkReNamer.cdx.json') `
-        -Content '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[{"type":"application","name":"darknamer-app","version":"0.1.0"}]}'
+        -Content '{"bomFormat":"CycloneDX","specVersion":"1.5","serialNumber":"urn:uuid:12345678-1234-4234-9234-123456789abc","components":[{"type":"application","name":"darknamer-app","version":"0.1.0"}]}'
     Compress-Archive `
         -LiteralPath (Join-Path $handoffRoot 'DarkReNamer.pdb') `
         -DestinationPath (Join-Path $handoffRoot 'DarkReNamer-debug-symbols.zip')
@@ -456,6 +456,22 @@ try {
         -SourceRoot $sourceRoot `
         -HandoffRoot $handoffRoot
     $global:DarkReNamerTestAuthenticodeStatus = 'NotSigned'
+
+    Write-Utf8NoBom `
+        -Path (Join-Path $handoffRoot 'DarkReNamer.cdx.json') `
+        -Content '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[{"type":"application","name":"darknamer-app","version":"0.1.0"}]}'
+    Write-Metrics -HandoffRoot $handoffRoot -SourceSha $sourceSha
+    Write-Checksums -HandoffRoot $handoffRoot
+    Assert-ValidatorFails `
+        -ExpectedFragment 'serialNumber must be a lowercase RFC 4122 UUID URN' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+
+    Write-Utf8NoBom `
+        -Path (Join-Path $handoffRoot 'DarkReNamer.cdx.json') `
+        -Content '{"bomFormat":"CycloneDX","specVersion":"1.5","serialNumber":"urn:uuid:12345678-1234-4234-9234-123456789abc","components":[{"type":"application","name":"darknamer-app","version":"0.1.0"}]}'
+    Write-Metrics -HandoffRoot $handoffRoot -SourceSha $sourceSha
+    Write-Checksums -HandoffRoot $handoffRoot
 
     Write-Utf8NoBom -Path (Join-Path $handoffRoot 'LICENSE') -Content "tampered`n"
     Assert-ValidatorFails `

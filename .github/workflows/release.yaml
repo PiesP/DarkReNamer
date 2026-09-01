@@ -104,8 +104,12 @@ jobs:
           New-Item -ItemType Directory -Path dist | Out-Null
           Copy-Item target/release/DarkReNamer.exe dist/DarkReNamer.exe
           Copy-Item target/release/DarkReNamer.pdb dist/DarkReNamer.pdb
-          Copy-Item crates/darknamer-app/DarkReNamer_bin_x86_64-pc-windows-msvc.cdx.json `
-            dist/DarkReNamer.cdx.json
+          $cycloneDxSerial = "urn:uuid:$([Guid]::NewGuid().ToString('D').ToLowerInvariant())"
+          ./scripts/prepare-release-cyclonedx.ps1 `
+            -InputPath crates/darknamer-app/DarkReNamer_bin_x86_64-pc-windows-msvc.cdx.json `
+            -OutputPath dist/DarkReNamer.cdx.json `
+            -SerialNumber $cycloneDxSerial
+          if ($LASTEXITCODE -ne 0) { throw 'CycloneDX release preparation failed.' }
           Copy-Item LICENSE dist/LICENSE
           Copy-Item THIRD_PARTY_NOTICES.md dist/THIRD_PARTY_NOTICES.md
           Copy-Item DISTRIBUTION.md dist/DISTRIBUTION.md
