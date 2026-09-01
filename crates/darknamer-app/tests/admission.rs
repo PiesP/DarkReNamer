@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use darknamer_app::admission::{
     AdmissionAdapter, AdmissionAdapterError, AdmissionChildren, AdmissionIssueKind,
-    AdmissionMetadata, AdmissionMode, AdmissionOperation, MAX_ADMISSION_DEPTH,
+    AdmissionMetadata, AdmissionMode, AdmissionOperation, AdmissionReadBudget, MAX_ADMISSION_DEPTH,
     MAX_ADMITTED_PATH_BYTES, MAX_ADMITTED_SOURCES, MAX_IMPORT_BYTES, PathBudget,
     PathBudgetReservation, bounded_import_lines, bounded_selection, collect_admission,
     collect_admission_cancellable, collect_admission_cancellable_with_budget, read_bounded_import,
@@ -27,6 +27,55 @@ struct FakeAdapter {
     legacy_paths: BTreeMap<PathBuf, LegacyText>,
     metadata_calls: Cell<usize>,
     enumeration_calls: Cell<usize>,
+    materialized_child_path_bytes: Cell<usize>,
+    last_read_budget: Cell<Option<AdmissionReadBudget>>,
+}
+
+impl FakeAdapter {
+    fn read_children_bounded(
+        &self,
+        path: &Path,
+        budget: AdmissionReadBudget,
+        cancellation_requested: &dyn Fn() -> bool,
+    ) -> Result<AdmissionChildren, darknamer_app::admission::AdmissionReadError> {
+        self.enumeration_calls.set(self.enumeration_calls.get() + 1);
+        self.last_read_budget.set(Some(budget));
+        let children = self.children.get(path).ok_or_else(|| {
+            darknamer_app::admission::AdmissionReadError::Adapter(AdmissionAdapterError::new(
+                AdmissionOperation::ReadDirectory,
+            ))
+        })?;
+        let mut paths = Vec::new();
+        let mut remaining_path_bytes = budget.remaining_path_bytes();
+        let mut path_budget_exhausted = false;
+        for child in children.iter().take(budget.path_limit()) {
+            if cancellation_requested() {
+                return Err(darknamer_app::admission::AdmissionReadError::Cancelled);
+            }
+            let Some(path_bytes) = self.path_utf16_units(child).checked_mul(size_of::<u16>())
+            else {
+                path_budget_exhausted = true;
+                break;
+            };
+            if path_bytes > remaining_path_bytes {
+                path_budget_exhausted = true;
+                break;
+            }
+            remaining_path_bytes -= path_bytes;
+            paths.push(child.clone());
+        }
+        self.materialized_child_path_bytes.set(
+            budget
+                .remaining_path_bytes()
+                .saturating_sub(remaining_path_bytes),
+        );
+        Ok(AdmissionChildren {
+            paths,
+            had_errors: false,
+            truncated: children.len() > budget.path_limit(),
+            path_budget_exhausted,
+        })
+    }
 }
 
 impl AdmissionAdapter for FakeAdapter {
@@ -45,45 +94,24 @@ impl AdmissionAdapter for FakeAdapter {
     fn read_children(
         &self,
         path: &Path,
-        limit: usize,
+        budget: AdmissionReadBudget,
     ) -> Result<AdmissionChildren, AdmissionAdapterError> {
-        self.enumeration_calls.set(self.enumeration_calls.get() + 1);
-        let children = self.children.get(path).ok_or(AdmissionAdapterError::new(
-            AdmissionOperation::ReadDirectory,
-        ))?;
-        Ok(AdmissionChildren {
-            paths: children.iter().take(limit).cloned().collect(),
-            had_errors: false,
-            truncated: children.len() > limit,
-        })
+        match self.read_children_bounded(path, budget, &|| false) {
+            Ok(children) => Ok(children),
+            Err(darknamer_app::admission::AdmissionReadError::Adapter(error)) => Err(error),
+            Err(darknamer_app::admission::AdmissionReadError::Cancelled) => {
+                unreachable!("the non-cancellable fake adapter cannot be cancelled")
+            }
+        }
     }
 
     fn read_children_cancellable(
         &self,
         path: &Path,
-        limit: usize,
+        budget: AdmissionReadBudget,
         cancellation_requested: &dyn Fn() -> bool,
     ) -> Result<AdmissionChildren, darknamer_app::admission::AdmissionReadError> {
-        self.enumeration_calls.set(self.enumeration_calls.get() + 1);
-        let children = self.children.get(path).ok_or_else(|| {
-            darknamer_app::admission::AdmissionReadError::Adapter(AdmissionAdapterError::new(
-                AdmissionOperation::ReadDirectory,
-            ))
-        })?;
-        let mut paths = Vec::with_capacity(limit.min(children.len()));
-        for child in children.iter().take(limit.saturating_add(1)) {
-            if cancellation_requested() {
-                return Err(darknamer_app::admission::AdmissionReadError::Cancelled);
-            }
-            paths.push(child.clone());
-        }
-        let truncated = paths.len() > limit;
-        paths.truncate(limit);
-        Ok(AdmissionChildren {
-            paths,
-            had_errors: false,
-            truncated,
-        })
+        self.read_children_bounded(path, budget, cancellation_requested)
     }
 
     fn legacy_path(&self, path: &Path) -> LegacyText {
@@ -91,6 +119,13 @@ impl AdmissionAdapter for FakeAdapter {
             .get(path)
             .cloned()
             .unwrap_or_else(|| LegacyText::from(path.to_string_lossy().into_owned()))
+    }
+
+    fn path_utf16_units(&self, path: &Path) -> usize {
+        self.legacy_paths.get(path).map_or_else(
+            || path.to_string_lossy().encode_utf16().count(),
+            |legacy| legacy.units().len(),
+        )
     }
 }
 
@@ -504,6 +539,93 @@ fn recursive_admission_reports_aggregate_path_budget_exhaustion() {
         AdmissionIssueKind::PathBudgetExceeded
     );
     assert!(report.summary_korean(2).contains("경로 용량 1"));
+}
+
+#[test]
+fn recursive_frontier_is_bounded_before_child_paths_are_materialized() {
+    let root = test_root().join("p".repeat(256));
+    let children = (0..MAX_ADMITTED_SOURCES)
+        .map(|index| root.join(format!("child-{index:05}-{}", "x".repeat(32))))
+        .collect::<Vec<_>>();
+    let mut adapter = FakeAdapter::default();
+    adapter.metadata.insert(root.clone(), directory(1));
+    adapter.children.insert(root.clone(), children.clone());
+    for child in &children {
+        adapter.metadata.insert(child.clone(), file());
+    }
+    let frontier_budget_bytes = 1_024;
+
+    let report = collect_admission_cancellable_with_budget(
+        &adapter,
+        vec![root],
+        AdmissionMode::Recurse,
+        MAX_ADMITTED_SOURCES,
+        PathBudget::from_remaining_bytes(frontier_budget_bytes),
+        compare,
+        || false,
+    )
+    .unwrap_or_default();
+
+    assert!(
+        adapter.materialized_child_path_bytes.get() <= frontier_budget_bytes,
+        "the adapter materialized {} bytes before the {}-byte frontier budget was enforced",
+        adapter.materialized_child_path_bytes.get(),
+        frontier_budget_bytes,
+    );
+    assert_eq!(report.items.len(), 1);
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.kind == AdmissionIssueKind::PathBudgetExceeded)
+    );
+}
+
+#[test]
+fn recursive_frontier_budget_accounts_for_already_queued_paths() {
+    let root = test_root();
+    let directory_root = root.join("a-directory");
+    let child = directory_root.join("child.txt");
+    let queued_root = root.join("z-queued.txt");
+    let child_bytes = child.to_string_lossy().encode_utf16().count() * size_of::<u16>();
+    let queued_bytes = queued_root.to_string_lossy().encode_utf16().count() * size_of::<u16>();
+    let mut adapter = FakeAdapter::default();
+    adapter
+        .metadata
+        .insert(directory_root.clone(), directory(1));
+    adapter.metadata.insert(child.clone(), file());
+    adapter.metadata.insert(queued_root.clone(), file());
+    adapter
+        .children
+        .insert(directory_root.clone(), vec![child.clone()]);
+
+    let report = collect_admission_cancellable_with_budget(
+        &adapter,
+        vec![queued_root.clone(), directory_root],
+        AdmissionMode::Recurse,
+        MAX_ADMITTED_SOURCES,
+        PathBudget::from_remaining_bytes(child_bytes + queued_bytes),
+        compare,
+        || false,
+    )
+    .unwrap_or_default();
+
+    assert_eq!(
+        adapter
+            .last_read_budget
+            .get()
+            .map(AdmissionReadBudget::remaining_path_bytes),
+        Some(child_bytes),
+    );
+    assert_eq!(
+        report
+            .items
+            .iter()
+            .map(|item| item.source_path().to_string_lossy())
+            .collect::<Vec<_>>(),
+        vec![child.to_string_lossy(), queued_root.to_string_lossy()],
+    );
+    assert!(report.issues.is_empty());
 }
 
 #[test]
