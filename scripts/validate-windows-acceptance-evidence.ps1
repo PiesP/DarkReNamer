@@ -7,6 +7,8 @@ param(
     [AllowEmptyString()]
     [string] $EvidenceJson,
 
+    [string] $VisualEvidenceRoot,
+
     [switch] $Draft,
 
     [switch] $PassThru
@@ -235,6 +237,56 @@ function Assert-Privacy {
     }
 }
 
+function Resolve-VisualEvidenceRoot {
+    param([string] $Root)
+    if ([string]::IsNullOrWhiteSpace($Root)) {
+        return $null
+    }
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+        throw 'VisualEvidenceRoot must identify an existing directory.'
+    }
+    $resolved = (Resolve-Path -LiteralPath $Root).Path
+    $current = Get-Item -LiteralPath $resolved -Force
+    while ($null -ne $current) {
+        if (($current.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq
+            [IO.FileAttributes]::ReparsePoint) {
+            throw 'VisualEvidenceRoot and its ancestor chain must not contain reparse points.'
+        }
+        $parent = [IO.Directory]::GetParent($current.FullName)
+        $current = if ($null -eq $parent) { $null } else { Get-Item -LiteralPath $parent.FullName -Force }
+    }
+    return $resolved
+}
+
+function Get-PngDimensions {
+    param([Parameter(Mandatory)][string] $Path)
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $signature = [byte[]](0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
+    if ($bytes.Length -lt 24) {
+        throw 'Visual capture image is too short to contain a PNG IHDR.'
+    }
+    for ($index = 0; $index -lt $signature.Length; $index++) {
+        if ($bytes[$index] -ne $signature[$index]) {
+            throw 'Visual capture image does not have a PNG signature.'
+        }
+    }
+    if ([Text.Encoding]::ASCII.GetString($bytes, 12, 4) -cne 'IHDR') {
+        throw 'Visual capture image does not begin with a PNG IHDR chunk.'
+    }
+    [uint32] $width = ([uint32] $bytes[16] -shl 24) -bor
+        ([uint32] $bytes[17] -shl 16) -bor
+        ([uint32] $bytes[18] -shl 8) -bor
+        [uint32] $bytes[19]
+    [uint32] $height = ([uint32] $bytes[20] -shl 24) -bor
+        ([uint32] $bytes[21] -shl 16) -bor
+        ([uint32] $bytes[22] -shl 8) -bor
+        [uint32] $bytes[23]
+    if ($width -eq 0 -or $height -eq 0) {
+        throw 'Visual capture PNG dimensions must be positive.'
+    }
+    return [pscustomobject]@{ width = [uint64] $width; height = [uint64] $height }
+}
+
 function Get-UiTarget {
     param($Row)
     return "ui|$($Row.windows_product)|$($Row.dpi_percent)|$($Row.contrast)"
@@ -265,6 +317,10 @@ if ($schemaDocument.'$schema' -ne 'https://json-schema.org/draft/2020-12/schema'
 }
 $expectedSchemaVersion = $schemaDocument.properties.schema_version.const
 $schemaDefinitions = $schemaDocument.'$defs'
+$resolvedVisualEvidenceRoot = Resolve-VisualEvidenceRoot -Root $VisualEvidenceRoot
+if (-not $Draft -and $null -eq $resolvedVisualEvidenceRoot) {
+    throw 'Complete evidence validation requires VisualEvidenceRoot.'
+}
 
 if ($PSCmdlet.ParameterSetName -eq 'Path') {
     if (-not (Test-Path -LiteralPath $EvidencePath -PathType Leaf)) {
@@ -299,7 +355,7 @@ Assert-ObjectShape `
     -Object $evidence `
     -Required @(
         'schema_version', 'source_sha', 'artifact', 'recorded_at_utc',
-        'operator_context', 'ui_matrix', 'scenarios', 'benchmarks',
+        'operator_context', 'ui_matrix', 'visual_captures', 'scenarios', 'benchmarks',
         'durability_trials', 'unexecuted'
     ) `
     -Location 'evidence'
@@ -540,6 +596,134 @@ foreach ($row in @($evidence.scenarios)) {
     $scenarioIndex++
 }
 
+$captureIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$captureFilenames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$captureHashes = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$capturedMainTargets = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$capturedAppearances = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$capturedSurfaces = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$captureIndex = 0
+foreach ($capture in @($evidence.visual_captures)) {
+    $location = "visual_captures[$captureIndex]"
+    Assert-ObjectShape `
+        -Object $capture `
+        -Required @('id', 'image', 'executable_sha256', 'ui_target', 'appearance', 'surface') `
+        -Optional @('scenario_target') `
+        -Location $location
+    if ($capture.id -isnot [string] -or
+        $capture.id -cnotmatch $schemaDefinitions.visualCapture.properties.id.pattern) {
+        throw "$location.id must be a lowercase stable identifier."
+    }
+    if (-not $captureIds.Add($capture.id)) {
+        throw "Duplicate visual capture id: $($capture.id)."
+    }
+    Assert-ObjectShape `
+        -Object $capture.image `
+        -Required @('filename', 'sha256', 'pixel_width', 'pixel_height') `
+        -Location "$location.image"
+    if ($capture.image.filename -isnot [string] -or
+        $capture.image.filename -cnotmatch $schemaDefinitions.imageArtifact.properties.filename.pattern) {
+        throw "$location.image.filename must be a filename only, without a path."
+    }
+    if ($capture.image.filename -match '^(?i:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)') {
+        throw "$location.image.filename must not use a reserved Windows device name."
+    }
+    if (-not $captureFilenames.Add($capture.image.filename)) {
+        throw "Duplicate visual capture filename: $($capture.image.filename)."
+    }
+    if ($capture.image.sha256 -isnot [string] -or
+        $capture.image.sha256 -cnotmatch $schemaDefinitions.imageArtifact.properties.sha256.pattern) {
+        throw "$location.image.sha256 must be a lowercase 64-character SHA-256 digest."
+    }
+    if (-not $captureHashes.Add($capture.image.sha256)) {
+        throw "Duplicate visual capture image digest: $($capture.image.sha256)."
+    }
+    foreach ($dimension in 'pixel_width', 'pixel_height') {
+        $value = $capture.image.$dimension
+        if ($value -is [string] -or $value -is [bool] -or
+            [decimal] $value -ne [decimal]::Truncate([decimal] $value) -or
+            [decimal] $value -lt 1 -or [decimal] $value -gt 16384) {
+            throw "$location.image.$dimension must be an integer from 1 through 16384."
+        }
+    }
+    if (-not [string]::Equals(
+            $capture.executable_sha256,
+            $artifact.sha256,
+            [StringComparison]::Ordinal
+        )) {
+        throw "$location.executable_sha256 must match artifact.sha256."
+    }
+    $uiTargetObserved = $uiByTarget.ContainsKey($capture.ui_target)
+    $uiTargetStatus = if ($uiTargetObserved) { $uiByTarget[$capture.ui_target].status } else { '<missing>' }
+    if ($expectedUiTargets -cnotcontains $capture.ui_target -or
+        -not $uiTargetObserved -or
+        $uiTargetStatus -ne 'pass') {
+        throw "$location.ui_target must reference a passed UI matrix cell."
+    }
+    Assert-Enum `
+        -Value $capture.appearance `
+        -Allowed @($schemaDefinitions.visualCapture.properties.appearance.enum) `
+        -Location "$location.appearance"
+    Assert-Enum `
+        -Value $capture.surface `
+        -Allowed @($schemaDefinitions.visualCapture.properties.surface.enum) `
+        -Location "$location.surface"
+    $uiParts = $capture.ui_target -split '\|'
+    $contrast = $uiParts[3]
+    if (($contrast -eq 'normal' -and $capture.appearance -eq 'forced-colors') -or
+        ($contrast -eq 'high-contrast' -and $capture.appearance -ne 'forced-colors')) {
+        throw "$location.appearance does not match its UI contrast target."
+    }
+    if (Test-Property -Object $capture -Name 'scenario_target') {
+        if ($expectedScenarioTargets -cnotcontains $capture.scenario_target -or
+            -not $scenarioByTarget.ContainsKey($capture.scenario_target) -or
+            $scenarioByTarget[$capture.scenario_target].status -ne 'pass') {
+            throw "$location.scenario_target must reference a passed scenario."
+        }
+        $scenarioParts = $capture.scenario_target -split '\|'
+        if ($scenarioParts[1] -cne $uiParts[1]) {
+            throw "$location scenario and UI targets must use the same Windows product."
+        }
+    }
+    if ($capture.surface -eq 'common-dialog' -and
+        (-not (Test-Property -Object $capture -Name 'scenario_target') -or
+         $capture.scenario_target -cnotlike 'scenario|Windows *|common-dialog')) {
+        throw "$location common-dialog capture must bind the common-dialog scenario."
+    }
+    if ($capture.surface -eq 'recovery-window' -and
+        (-not (Test-Property -Object $capture -Name 'scenario_target') -or
+         ($capture.scenario_target -cnotlike 'scenario|Windows *|startup-recovery' -and
+          $capture.scenario_target -cnotlike 'scenario|Windows *|recovery-export'))) {
+        throw "$location recovery-window capture must bind a recovery scenario."
+    }
+    if ($null -ne $resolvedVisualEvidenceRoot) {
+        $imagePath = Join-Path $resolvedVisualEvidenceRoot $capture.image.filename
+        if (-not (Test-Path -LiteralPath $imagePath -PathType Leaf)) {
+            throw "$location image file is missing from VisualEvidenceRoot."
+        }
+        $imageItem = Get-Item -LiteralPath $imagePath -Force
+        if (($imageItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq
+            [IO.FileAttributes]::ReparsePoint) {
+            throw "$location image file must not be a reparse point."
+        }
+        $dimensions = Get-PngDimensions -Path $imagePath
+        if ($dimensions.width -ne [uint64] $capture.image.pixel_width -or
+            $dimensions.height -ne [uint64] $capture.image.pixel_height) {
+            throw "$location PNG dimensions do not match the recorded pixel dimensions."
+        }
+        $actualImageHash = (Get-FileHash -LiteralPath $imagePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if (-not [string]::Equals($actualImageHash, $capture.image.sha256, [StringComparison]::Ordinal)) {
+            throw "$location image SHA-256 does not match VisualEvidenceRoot bytes."
+        }
+    }
+    if ($capture.surface -eq 'main-workbench') {
+        [void] $capturedMainTargets.Add($capture.ui_target)
+    }
+    [void] $capturedAppearances.Add($capture.appearance)
+    [void] $capturedSurfaces.Add($capture.surface)
+    $captureIndex++
+}
+
 $benchmarkByTarget = @{}
 $benchmarkIndex = 0
 foreach ($row in @($evidence.benchmarks)) {
@@ -694,6 +878,21 @@ foreach ($id in $unexecutedById.Keys) {
 }
 
 if (-not $Draft) {
+    foreach ($target in $expectedUiTargets) {
+        if (-not $capturedMainTargets.Contains($target)) {
+            throw "Complete evidence is missing a main-workbench visual capture for $target."
+        }
+    }
+    foreach ($appearance in @($schemaDefinitions.visualCapture.properties.appearance.enum)) {
+        if (-not $capturedAppearances.Contains($appearance)) {
+            throw "Complete evidence is missing visual appearance coverage: $appearance."
+        }
+    }
+    foreach ($surface in @($schemaDefinitions.visualCapture.properties.surface.enum)) {
+        if (-not $capturedSurfaces.Contains($surface)) {
+            throw "Complete evidence is missing visual surface coverage: $surface."
+        }
+    }
     foreach ($row in $uiByTarget.Values) {
         if ($row.status -ne 'pass') {
             throw 'Complete evidence requires every UI matrix cell to pass.'

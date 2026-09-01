@@ -12,6 +12,7 @@
     "recorded_at_utc",
     "operator_context",
     "ui_matrix",
+    "visual_captures",
     "scenarios",
     "benchmarks",
     "durability_trials",
@@ -19,7 +20,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": 2
+      "const": 3
     },
     "source_sha": {
       "type": "string",
@@ -42,6 +43,12 @@
       "type": "array",
       "items": {
         "$ref": "#/$defs/uiCell"
+      }
+    },
+    "visual_captures": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/visualCapture"
       }
     },
     "scenarios": {
@@ -113,6 +120,78 @@
           }
         }
       ]
+    },
+    "imageArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filename", "sha256", "pixel_width", "pixel_height"],
+      "properties": {
+        "filename": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\\.png$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "pixel_width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "pixel_height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        }
+      }
+    },
+    "visualCapture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "image",
+        "executable_sha256",
+        "ui_target",
+        "appearance",
+        "surface"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "image": {
+          "$ref": "#/$defs/imageArtifact"
+        },
+        "executable_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "ui_target": {
+          "type": "string",
+          "pattern": "^ui\\|Windows (?:10|11)\\|(?:100|125|150|200|250|300)\\|(?:normal|high-contrast)$"
+        },
+        "scenario_target": {
+          "type": "string",
+          "pattern": "^scenario\\|Windows (?:10|11)\\|[a-z-]+$"
+        },
+        "appearance": {
+          "enum": ["system", "light", "dark", "forced-colors"]
+        },
+        "surface": {
+          "enum": [
+            "main-workbench",
+            "native-menu",
+            "appearance-dialog",
+            "input-prompt",
+            "common-dialog",
+            "confirmation-task-dialog",
+            "recovery-window"
+          ]
+        }
+      }
     },
     "operatorContext": {
       "type": "object",

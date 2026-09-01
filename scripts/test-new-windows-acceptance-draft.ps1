@@ -163,7 +163,7 @@ function Assert-Draft {
     & $validator -EvidencePath $Path -Draft | Out-Null
     $raw = Get-Content -LiteralPath $Path -Raw
     $evidence = $raw | ConvertFrom-Json
-    if ($evidence.schema_version -ne 2 -or $evidence.source_sha -cne $SourceSha) {
+    if ($evidence.schema_version -ne 3 -or $evidence.source_sha -cne $SourceSha) {
         throw 'Generated draft source or schema provenance is incorrect.'
     }
     if ($evidence.artifact.filename -cne 'DarkReNamer.exe' -or
@@ -181,6 +181,7 @@ function Assert-Draft {
     }
     if (@($evidence.operator_context).Count -ne 0 -or
         @($evidence.ui_matrix).Count -ne 24 -or
+        @($evidence.visual_captures).Count -ne 0 -or
         @($evidence.scenarios).Count -ne 20 -or
         @($evidence.benchmarks).Count -ne 0 -or
         @($evidence.durability_trials).Count -ne 4 -or

@@ -5,7 +5,9 @@ param(
     [Parameter(Mandatory)]
     [string] $HandoffRoot,
     [Parameter(Mandatory)]
-    [string] $EvidencePath
+    [string] $EvidencePath,
+    [Parameter(Mandatory)]
+    [string] $VisualEvidenceRoot
 )
 
 Set-StrictMode -Version Latest
@@ -20,7 +22,9 @@ foreach ($validator in $handoffValidator, $evidenceValidator) {
 }
 
 & $handoffValidator -SourceRoot $SourceRoot -HandoffRoot $HandoffRoot
-& $evidenceValidator -EvidencePath $EvidencePath
+& $evidenceValidator `
+    -EvidencePath $EvidencePath `
+    -VisualEvidenceRoot $VisualEvidenceRoot
 
 $sourcePath = (Resolve-Path -LiteralPath $SourceRoot).Path
 $handoffPath = (Resolve-Path -LiteralPath $HandoffRoot).Path

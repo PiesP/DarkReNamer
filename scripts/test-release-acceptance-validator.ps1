@@ -24,6 +24,97 @@ function Write-JsonObject {
     Write-Utf8NoBom -Path $Path -Content (($Value | ConvertTo-Json -Depth 20) + "`n")
 }
 
+function New-ReleaseVisualCaptures {
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string] $ExecutableSha
+    )
+    $captures = [Collections.Generic.List[object]]::new()
+    $sequence = 1
+    foreach ($product in 'Windows 10', 'Windows 11') {
+        $productId = $product.ToLowerInvariant().Replace(' ', '')
+        $dpiIndex = 0
+        foreach ($dpi in 100, 125, 150, 200, 250, 300) {
+            foreach ($contrast in 'normal', 'high-contrast') {
+                $appearance = if ($contrast -eq 'high-contrast') {
+                    'forced-colors'
+                }
+                else {
+                    @('system', 'light', 'dark')[$dpiIndex % 3]
+                }
+                $id = "main-$productId-$dpi-$contrast"
+                $filename = "$id.png"
+                $imagePath = Join-Path $Root $filename
+                $header = [byte[]](
+                    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+                    0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+                    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+                    0x08, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+                )
+                [IO.File]::WriteAllBytes(
+                    $imagePath,
+                    [byte[]] ($header + [Text.Encoding]::UTF8.GetBytes($id))
+                )
+                $captures.Add([pscustomobject][ordered]@{
+                    id = $id
+                    image = [pscustomobject][ordered]@{
+                        filename = $filename
+                        sha256 = (Get-FileHash -LiteralPath $imagePath -Algorithm SHA256).Hash.ToLowerInvariant()
+                        pixel_width = 1
+                        pixel_height = 1
+                    }
+                    executable_sha256 = $ExecutableSha
+                    ui_target = "ui|$product|$dpi|$contrast"
+                    appearance = $appearance
+                    surface = 'main-workbench'
+                })
+                $sequence++
+            }
+            $dpiIndex++
+        }
+    }
+    foreach ($extra in @(
+            @{ Id = 'surface-native-menu'; Product = 'Windows 10'; Dpi = 100; Appearance = 'system'; Surface = 'native-menu' },
+            @{ Id = 'surface-appearance-dialog'; Product = 'Windows 10'; Dpi = 100; Appearance = 'light'; Surface = 'appearance-dialog' },
+            @{ Id = 'surface-input-prompt'; Product = 'Windows 10'; Dpi = 125; Appearance = 'dark'; Surface = 'input-prompt' },
+            @{ Id = 'surface-common-dialog'; Product = 'Windows 10'; Dpi = 150; Appearance = 'system'; Surface = 'common-dialog'; Scenario = 'common-dialog' },
+            @{ Id = 'surface-confirmation-task-dialog'; Product = 'Windows 11'; Dpi = 100; Appearance = 'light'; Surface = 'confirmation-task-dialog' },
+            @{ Id = 'surface-recovery-window'; Product = 'Windows 11'; Dpi = 150; Appearance = 'dark'; Surface = 'recovery-window'; Scenario = 'startup-recovery' }
+        )) {
+        $filename = "$($extra.Id).png"
+        $imagePath = Join-Path $Root $filename
+        $header = [byte[]](
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+            0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+            0x08, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        )
+        [IO.File]::WriteAllBytes(
+            $imagePath,
+            [byte[]] ($header + [Text.Encoding]::UTF8.GetBytes($extra.Id))
+        )
+        $capture = [ordered]@{
+            id = $extra.Id
+            image = [pscustomobject][ordered]@{
+                filename = $filename
+                sha256 = (Get-FileHash -LiteralPath $imagePath -Algorithm SHA256).Hash.ToLowerInvariant()
+                pixel_width = 1
+                pixel_height = 1
+            }
+            executable_sha256 = $ExecutableSha
+            ui_target = "ui|$($extra.Product)|$($extra.Dpi)|normal"
+            appearance = $extra.Appearance
+            surface = $extra.Surface
+        }
+        if ($extra.ContainsKey('Scenario')) {
+            $capture.scenario_target = "scenario|$($extra.Product)|$($extra.Scenario)"
+        }
+        $captures.Add([pscustomobject] $capture)
+        $sequence++
+    }
+    return @($captures)
+}
+
 function New-CompleteEvidence {
     param(
         [Parameter(Mandatory)][string] $SourceSha,
@@ -90,7 +181,7 @@ function New-CompleteEvidence {
     )
 
     return [pscustomobject]@{
-        schema_version = 2
+        schema_version = 3
         source_sha = $SourceSha
         artifact = [pscustomobject]@{
             filename = 'DarkReNamer.exe'
@@ -104,6 +195,11 @@ function New-CompleteEvidence {
             [pscustomobject]@{ windows_product = 'Windows 11'; windows_build = '26100.4946'; architecture = 'x64' }
         )
         ui_matrix = $uiMatrix
+        visual_captures = @(
+            New-ReleaseVisualCaptures `
+                -Root $script:visualEvidenceRoot `
+                -ExecutableSha $ExecutableSha
+        )
         scenarios = $scenarios
         benchmarks = $benchmarks
         durability_trials = @(
@@ -171,7 +267,11 @@ function Assert-ValidatorFails {
         [Parameter(Mandatory)][string] $EvidencePath
     )
     try {
-        & $validator -SourceRoot $SourceRoot -HandoffRoot $HandoffRoot -EvidencePath $EvidencePath | Out-Null
+        & $validator `
+            -SourceRoot $SourceRoot `
+            -HandoffRoot $HandoffRoot `
+            -EvidencePath $EvidencePath `
+            -VisualEvidenceRoot $script:visualEvidenceRoot | Out-Null
     }
     catch {
         if ($_.Exception.Message -notlike "*$ExpectedFragment*") {
@@ -194,6 +294,7 @@ function Get-FlattenedValidatorOutput {
             -SourceRoot $SourceRoot `
             -HandoffRoot $HandoffRoot `
             -EvidencePath $EvidencePath `
+            -VisualEvidenceRoot $script:visualEvidenceRoot `
             6>&1
     )
     $text = (($output | ForEach-Object { "$_" }) -join ' ')
@@ -203,11 +304,12 @@ function Get-FlattenedValidatorOutput {
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "darkrenamer-release-acceptance-$([Guid]::NewGuid())"
 $sourceRoot = Join-Path $testRoot 'source'
 $handoffRoot = Join-Path $testRoot 'dist'
+$visualEvidenceRoot = Join-Path $testRoot 'visual'
 $evidencePath = Join-Path $testRoot 'windows-acceptance-evidence.json'
 $workflowRun = '33257061299'
 
 try {
-    New-Item -ItemType Directory -Path $sourceRoot, $handoffRoot | Out-Null
+    New-Item -ItemType Directory -Path $sourceRoot, $handoffRoot, $visualEvidenceRoot | Out-Null
     foreach ($name in 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'DISTRIBUTION.md') {
         Write-Utf8NoBom -Path (Join-Path $sourceRoot $name) -Content "$name source policy`n"
         Copy-Item -LiteralPath (Join-Path $sourceRoot $name) -Destination $handoffRoot
@@ -288,6 +390,9 @@ try {
 
     $hashMismatch = Copy-JsonObject $complete
     $hashMismatch.artifact.sha256 = 'a' * 64
+    foreach ($capture in $hashMismatch.visual_captures) {
+        $capture.executable_sha256 = $hashMismatch.artifact.sha256
+    }
     Write-JsonObject -Value $hashMismatch -Path $evidencePath
     Assert-ValidatorFails -ExpectedFragment 'artifact.sha256 does not match' -SourceRoot $sourceRoot -HandoffRoot $handoffRoot -EvidencePath $evidencePath
 
@@ -295,6 +400,19 @@ try {
     Write-Checksums -HandoffRoot $handoffRoot
     Write-JsonObject -Value $complete -Path $evidencePath
     Assert-ValidatorFails -ExpectedFragment 'source_sha does not match source HEAD' -SourceRoot $sourceRoot -HandoffRoot $handoffRoot -EvidencePath $evidencePath
+
+    Write-Provenance -Path (Join-Path $handoffRoot 'release-handoff.json') -SourceSha $sourceSha -ExecutableSha $exeSha -WorkflowRun $workflowRun
+    Write-Checksums -HandoffRoot $handoffRoot
+    Write-JsonObject -Value $complete -Path $evidencePath
+    [IO.File]::AppendAllText(
+        (Join-Path $visualEvidenceRoot $complete.visual_captures[0].image.filename),
+        'tampered'
+    )
+    Assert-ValidatorFails `
+        -ExpectedFragment 'image SHA-256 does not match VisualEvidenceRoot bytes' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot `
+        -EvidencePath $evidencePath
 
     Write-Host 'Release acceptance cross-validation tests passed.'
 }

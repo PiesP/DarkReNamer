@@ -282,6 +282,7 @@ $evidence = [ordered]@{
     )
     operator_context = @()
     ui_matrix = @($uiMatrix)
+    visual_captures = @()
     scenarios = @($scenarios)
     benchmarks = @()
     durability_trials = @($durabilityTrials)
