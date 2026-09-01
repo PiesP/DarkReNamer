@@ -176,7 +176,7 @@ use windows_sys::Win32::UI::Controls::{
     DRAWITEMSTRUCT, LVM_GETITEMTEXTW, MEASUREITEMSTRUCT, ODT_BUTTON, ODT_MENU,
 };
 use windows_sys::Win32::UI::HiDpi::{
-    AdjustWindowRectExForDpi, GetDpiForWindow, GetSystemMetricsForDpi, SystemParametersInfoForDpi,
+    AdjustWindowRectExForDpi, GetDpiForWindow, SystemParametersInfoForDpi,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetFocus, IsWindowEnabled, SetFocus, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_F6,
@@ -199,10 +199,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     LoadCursorW, LoadIconW, MENUITEMINFOW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED,
     MF_OWNERDRAW, MF_POPUP, MF_SEPARATOR, MF_UNCHECKED, MIIM_DATA, MIIM_STRING, MIIM_SUBMENU,
     MINMAXINFO, MNC_EXECUTE, MNC_IGNORE, MNC_SELECT, MSG, MessageBoxW, MoveWindow,
-    NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXVSCROLL,
-    SPI_GETHIGHCONTRAST, SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOREDRAW, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu,
-    SetMenuItemInfoW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW,
+    NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassExW, SPI_GETHIGHCONTRAST,
+    SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW,
+    SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetMenuItemInfoW,
+    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW,
     TranslateAcceleratorW, TranslateMessage, USER_TIMER_MINIMUM, WM_APP, WM_CLOSE, WM_COMMAND,
     WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
     WM_DRAWITEM, WM_ERASEBKGND, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_MEASUREITEM,

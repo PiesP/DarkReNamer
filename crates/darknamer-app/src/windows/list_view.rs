@@ -212,36 +212,45 @@ fn handle_status_header_double_click(
     Some(1)
 }
 
+fn list_column_width(list_window: HWND, column: usize) -> i32 {
+    // SAFETY: the live ListView returns one integral column width and retains no
+    // caller storage.
+    unsafe { SendMessageW(list_window, LVM_GETCOLUMNWIDTH, column, 0) as i32 }
+}
+
 pub(super) fn update_primary_column_widths(state: &AppState) {
     let mut rect = RECT::default();
     // SAFETY: list_window is live and rect remains writable through this call.
     if unsafe { GetClientRect(state.list_window, &mut rect) } == 0 {
         return;
     }
-    // SAFETY: this system-metric query has no pointer parameters and uses the
-    // live window's normalized DPI.
-    let scrollbar_allowance = unsafe { GetSystemMetricsForDpi(SM_CXVSCROLL, state.dpi) }
-        .max(scale_dip(LIST_SCROLLBAR_ALLOWANCE_DIP, state.dpi));
-    let status_extra = native_status_column_width_px(state)
-        .saturating_sub(scale_dip(NATIVE_STATUS_COLUMN_WIDTH_DIP, state.dpi));
+    // Fall back only if the native control has no usable status-column width.
+    let current_status_width = list_column_width(state.list_window, NATIVE_STATUS_COLUMN_INDEX);
+    let status_width = if current_status_width > 0 {
+        current_status_width
+    } else {
+        native_status_column_width_px(state)
+    };
     let widths = allocate_primary_column_widths(
-        (rect.right - rect.left).saturating_sub(status_extra),
+        rect.right.saturating_sub(rect.left),
+        status_width,
         state.dpi,
         &state.column_states,
-        scrollbar_allowance,
     );
     let _list_update = ProgrammaticListUpdateGuard::begin();
     for (column, width) in widths.into_iter().enumerate() {
-        // SAFETY: list_window is live and the message carries a checked column
-        // index and an adaptive pixel width without a pointer payload.
-        unsafe {
-            SendMessageW(
-                state.list_window,
-                LVM_SETCOLUMNWIDTH,
-                column,
-                width as isize,
-            )
-        };
+        let current = list_column_width(state.list_window, column);
+        if current != width {
+            // SAFETY: same live ListView and checked primary-column index.
+            unsafe {
+                SendMessageW(
+                    state.list_window,
+                    LVM_SETCOLUMNWIDTH,
+                    column,
+                    width as isize,
+                )
+            };
+        }
     }
 }
 
@@ -730,6 +739,7 @@ pub(super) fn refresh_all_rows(state: &mut AppState) {
     state.rendered_rows = rows;
     state.mark_preview_synchronized();
     select_rows(state.list_window, &selected);
+    update_primary_column_widths(state);
 }
 
 pub(super) fn refresh_changed_rows(state: &mut AppState, changed: &[usize]) {

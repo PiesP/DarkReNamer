@@ -2989,9 +2989,9 @@ const fn unscale_px(value: i32, dpi: u32) -> i32 {
 #[must_use]
 pub(crate) fn allocate_primary_column_widths(
     client_width: i32,
+    status_width: i32,
     dpi: u32,
     columns: &[ColumnState; 7],
-    scrollbar_allowance: i32,
 ) -> [i32; 3] {
     let optional_width = columns[3..]
         .iter()
@@ -3000,8 +3000,7 @@ pub(crate) fn allocate_primary_column_widths(
         .fold(0_i32, i32::saturating_add);
     let budget = client_width
         .max(0)
-        .saturating_sub(scrollbar_allowance.max(0))
-        .saturating_sub(scale_dip(NATIVE_STATUS_COLUMN_WIDTH_DIP, dpi))
+        .saturating_sub(status_width.max(0))
         .saturating_sub(optional_width);
     let minimum = [
         scale_dip(NAME_COLUMN_MINIMUM, dpi),
@@ -6268,14 +6267,39 @@ mod tests {
     }
 
     #[test]
+    fn primary_columns_fill_the_client_budget_at_supported_dpis() {
+        for dpi in [96, 120, 144, 192] {
+            let client_width = scale_dip(600, dpi);
+            let status_width = scale_dip(NATIVE_STATUS_COLUMN_WIDTH_DIP, dpi);
+            let widths = allocate_primary_column_widths(
+                client_width,
+                status_width,
+                dpi,
+                &default_column_states(),
+            );
+
+            assert_eq!(widths.iter().sum::<i32>(), client_width - status_width);
+        }
+    }
+
+    #[test]
     fn optional_columns_reduce_the_primary_width_budget() {
         let mut columns = default_column_states();
         columns[3].set_visible(true);
 
-        let widths = allocate_primary_column_widths(457, 96, &columns, 17);
+        let widths =
+            allocate_primary_column_widths(569, NATIVE_STATUS_COLUMN_WIDTH_DIP, 96, &columns);
 
-        assert_eq!(widths, [120, 120, 80]);
-        assert_eq!(widths.iter().sum::<i32>(), 320);
+        assert_eq!(widths, [129, 128, 80]);
+        assert_eq!(widths.iter().sum::<i32>(), 569 - 112 - 120);
+    }
+
+    #[test]
+    fn expanded_actual_status_width_reduces_the_primary_width_budget() {
+        let widths = allocate_primary_column_widths(517, 180, 96, &default_column_states());
+
+        assert_eq!(widths, [129, 128, 80]);
+        assert_eq!(widths.iter().sum::<i32>(), 517 - 180);
     }
 
     #[test]
@@ -6291,9 +6315,14 @@ mod tests {
         assert_eq!(NATIVE_STATUS_COLUMN.label, "상태");
         assert_eq!(NATIVE_STATUS_COLUMN.default_width, 112);
 
-        let widths = allocate_primary_column_widths(449, 96, &default_column_states(), 17);
-        assert_eq!(widths, [120, 120, 80]);
-        assert_eq!(widths.iter().sum::<i32>(), 449 - 17 - 112);
+        let widths = allocate_primary_column_widths(
+            449,
+            NATIVE_STATUS_COLUMN_WIDTH_DIP,
+            96,
+            &default_column_states(),
+        );
+        assert_eq!(widths, [129, 128, 80]);
+        assert_eq!(widths.iter().sum::<i32>(), 449 - 112);
 
         assert_eq!(status_column_width_after_resize(80, 146, 96), 146);
         assert_eq!(status_column_width_after_resize(240, 146, 96), 240);
@@ -6305,10 +6334,11 @@ mod tests {
         let mut columns = default_column_states();
         columns[0].record_user_resize(220, 96);
 
-        let widths = allocate_primary_column_widths(300, 96, &columns, 17);
+        let widths =
+            allocate_primary_column_widths(300, NATIVE_STATUS_COLUMN_WIDTH_DIP, 96, &columns);
 
         assert_eq!(widths, [220, 120, 80]);
-        assert!(widths.iter().sum::<i32>() > 300 - 17);
+        assert!(widths.iter().sum::<i32>() > 300 - NATIVE_STATUS_COLUMN_WIDTH_DIP);
     }
 
     #[test]
