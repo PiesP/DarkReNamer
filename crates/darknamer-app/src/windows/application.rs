@@ -512,6 +512,7 @@ pub(super) unsafe extern "system" fn window_proc(
                 KillTimer(window, APPLY_POLL_TIMER_ID);
                 KillTimer(window, PREFERENCES_POLL_TIMER_ID);
                 KillTimer(window, STATUS_RENDER_TIMER_ID);
+                KillTimer(window, MENU_EDGE_REPAIR_TIMER_ID);
             }
             // SAFETY: the slot is still live. Its sidecar is disjoint from a
             // possibly leased AppState value and is taken at most once.
@@ -534,6 +535,18 @@ pub(super) unsafe extern "system" fn window_proc(
             // ending the UI loop requires no state reference.
             unsafe { PostQuitMessage(0) };
             return 0;
+        }
+        if repaints_menu_bottom_edge(message) && !state_slot.is_null() {
+            // Preserve native non-client behavior immediately. The app-owned
+            // repair cannot read state while another callback holds the lease,
+            // so coalesce a retry until the nested modal callback unwinds.
+            // SAFETY: arguments are unchanged copied values from this active
+            // non-client callback.
+            let result = unsafe { DefWindowProcW(window, message, wparam, lparam) };
+            // SAFETY: window owns this pointer-free timer identifier. Reusing
+            // the same HWND/ID resets rather than duplicates the pending retry.
+            unsafe { SetTimer(window, MENU_EDGE_REPAIR_TIMER_ID, USER_TIMER_MINIMUM, None) };
+            return result;
         }
         if message == WM_COMMAND
             || message == WM_NOTIFY
@@ -683,6 +696,18 @@ pub(super) unsafe extern "system" fn window_proc(
             };
             let text = empty_state_safety_copy(mode);
             run_after_callback_state_release(state_lease, || set_status(safety, text));
+            0
+        }
+        WM_TIMER if !state_ptr.is_null() && wparam == MENU_EDGE_REPAIR_TIMER_ID => {
+            // Stop the coalescing timer only after acquiring the state lease.
+            // A busy nested WM_TIMER exits above and leaves it installed.
+            // SAFETY: window owns this exact pointer-free timer identifier.
+            unsafe { KillTimer(window, MENU_EDGE_REPAIR_TIMER_ID) };
+            drop(state_lease);
+            // SAFETY: the live top-level window retains no borrowed AppState.
+            // Invalidating its frame schedules a later non-client callback;
+            // failure is best-effort because default painting already ran.
+            unsafe { RedrawWindow(window, null(), null_mut(), RDW_INVALIDATE | RDW_FRAME) };
             0
         }
         WM_TIMER if !state_ptr.is_null() && wparam == STATUS_RENDER_TIMER_ID => {

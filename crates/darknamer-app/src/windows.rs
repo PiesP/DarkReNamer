@@ -119,11 +119,13 @@ use windows_sys::Win32::Graphics::Gdi::{
     DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteObject, DrawTextW,
     FillRect, GetDC, GetMonitorInfoW, GetSysColor, GetSysColorBrush, HBRUSH, HDC, HFONT,
     MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, RDW_ALLCHILDREN, RDW_ERASE,
-    RDW_INVALIDATE, RedrawWindow, ReleaseDC, SelectObject, SetBkColor, SetBkMode, SetTextColor,
-    TRANSPARENT, UpdateWindow,
+    RDW_FRAME, RDW_INVALIDATE, RedrawWindow, ReleaseDC, SelectObject, SetBkColor, SetBkMode,
+    SetTextColor, TRANSPARENT, UpdateWindow,
 };
 #[cfg(test)]
-use windows_sys::Win32::Graphics::Gdi::{GetBkColor, GetPixel, GetTextColor};
+use windows_sys::Win32::Graphics::Gdi::{
+    GetBkColor, GetPixel, GetTextColor, GetUpdateRect, ValidateRect,
+};
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
 use windows_sys::Win32::Storage::FileSystem::{
@@ -257,6 +259,7 @@ const WM_APP_MENU_REDRAW: u32 = WM_APP + 0x50;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 const PREFERENCES_POLL_TIMER_ID: usize = 0xD4A2;
 const STATUS_RENDER_TIMER_ID: usize = 0xD4A3;
+const MENU_EDGE_REPAIR_TIMER_ID: usize = 0xD4A4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CallbackStateStatus {
@@ -1358,6 +1361,112 @@ mod tests {
             );
         }
         assert_eq!(actual_text, expected_text);
+        assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+        Ok(())
+    }
+
+    #[test]
+    fn menu_edge_repair_timer_survives_nested_nonclient_reentry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+        state.appearance_resources = Some(AppearanceResources::create(GRAPHITE_DARK)?);
+        let class = wide("STATIC");
+
+        // SAFETY: the hidden HWND, published state slot, callback lease, and
+        // timer below remain UI-thread confined. Publication is cleared and
+        // the timer is killed before the HWND and slot are reclaimed.
+        let (
+            default_result_preserved,
+            first_timer_installed,
+            duplicate_timer_absent,
+            busy_timer_result,
+            busy_timer_survived,
+            clean_before_retry,
+            retry_result,
+            retry_timer_removed,
+            redraw_scheduled,
+            disposition,
+        ) = unsafe {
+            let owner = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            );
+            if owner.is_null() {
+                return Err(io::Error::last_os_error().into());
+            }
+            let state_slot: *mut AppStateSlot = CallbackState::into_raw(state);
+            SetWindowLongPtrW(owner, GWLP_USERDATA, state_slot as isize);
+            let busy_lease = match CallbackState::try_lease(state_slot) {
+                Some(lease) => lease,
+                None => {
+                    SetWindowLongPtrW(owner, GWLP_USERDATA, 0);
+                    DestroyWindow(owner);
+                    let disposition = CallbackState::request_reclaim(state_slot);
+                    assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+                    return Err(io::Error::other("menu-edge test lease is unavailable").into());
+                }
+            };
+
+            let expected_default = DefWindowProcW(owner, WM_NCACTIVATE, 1, 0);
+            let nested_default = application::window_proc(owner, WM_NCACTIVATE, 1, 0);
+            application::window_proc(owner, WM_NCPAINT, 0, 0);
+            let first_timer_installed = KillTimer(owner, MENU_EDGE_REPAIR_TIMER_ID) != 0;
+            let duplicate_timer_absent = KillTimer(owner, MENU_EDGE_REPAIR_TIMER_ID) == 0;
+
+            application::window_proc(owner, WM_NCPAINT, 0, 0);
+            let busy_timer_result =
+                application::window_proc(owner, WM_TIMER, MENU_EDGE_REPAIR_TIMER_ID, 0);
+            let busy_timer_survived = KillTimer(owner, MENU_EDGE_REPAIR_TIMER_ID) != 0;
+            application::window_proc(owner, WM_NCACTIVATE, 0, 0);
+            drop(busy_lease);
+
+            ValidateRect(owner, null());
+            let mut before_retry = RECT::default();
+            let clean_before_retry = GetUpdateRect(owner, &mut before_retry, 0) == 0;
+            let retry_result =
+                application::window_proc(owner, WM_TIMER, MENU_EDGE_REPAIR_TIMER_ID, 0);
+            let retry_timer_removed = KillTimer(owner, MENU_EDGE_REPAIR_TIMER_ID) == 0;
+            let mut after_retry = RECT::default();
+            let redraw_scheduled = GetUpdateRect(owner, &mut after_retry, 0) != 0;
+
+            SetWindowLongPtrW(owner, GWLP_USERDATA, 0);
+            KillTimer(owner, MENU_EDGE_REPAIR_TIMER_ID);
+            DestroyWindow(owner);
+            let disposition = CallbackState::request_reclaim(state_slot);
+            (
+                nested_default == expected_default,
+                first_timer_installed,
+                duplicate_timer_absent,
+                busy_timer_result,
+                busy_timer_survived,
+                clean_before_retry,
+                retry_result,
+                retry_timer_removed,
+                redraw_scheduled,
+                disposition,
+            )
+        };
+
+        assert!(default_result_preserved);
+        assert!(first_timer_installed);
+        assert!(duplicate_timer_absent);
+        assert_eq!(busy_timer_result, 0);
+        assert!(busy_timer_survived);
+        assert!(clean_before_retry);
+        assert_eq!(retry_result, 0);
+        assert!(retry_timer_removed);
+        assert!(redraw_scheduled);
         assert_eq!(disposition, ReclaimDisposition::Reclaimed);
         Ok(())
     }
