@@ -189,6 +189,11 @@ and actual executable bytes. Supply the external screenshot directory through
 checks each PNG's digest and recorded dimensions. Packaging validation by
 itself does not satisfy the acceptance matrix below.
 
+The visual-root checks reject static aliases but do not prevent another local
+process from replacing a file between metadata, dimension, and digest reads.
+Keep the external root immutable for the validation session and writable only
+by the acceptance operator.
+
 [`scripts/windows-acceptance-evidence.schema.json`](scripts/windows-acceptance-evidence.schema.json)
 is the machine-readable field contract. Validate evidence with
 [`scripts/validate-windows-acceptance-evidence.ps1`](scripts/validate-windows-acceptance-evidence.ps1).

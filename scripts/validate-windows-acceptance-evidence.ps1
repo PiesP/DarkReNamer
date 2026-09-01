@@ -245,15 +245,23 @@ function Resolve-VisualEvidenceRoot {
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
         throw 'VisualEvidenceRoot must identify an existing directory.'
     }
-    $resolved = (Resolve-Path -LiteralPath $Root).Path
-    $current = Get-Item -LiteralPath $resolved -Force
-    while ($null -ne $current) {
-        if (($current.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq
-            [IO.FileAttributes]::ReparsePoint) {
-            throw 'VisualEvidenceRoot and its ancestor chain must not contain reparse points.'
+    foreach ($start in [IO.Path]::GetFullPath($Root), (Resolve-Path -LiteralPath $Root).Path) {
+        $currentPath = $start
+        while ($null -ne $currentPath) {
+            $current = Get-Item -LiteralPath $currentPath -Force
+            if (($current.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq
+                [IO.FileAttributes]::ReparsePoint) {
+                throw 'VisualEvidenceRoot and its ancestor chain must not contain reparse points.'
+            }
+            $parent = [IO.Directory]::GetParent($currentPath)
+            $currentPath = if ($null -eq $parent) { $null } else { $parent.FullName }
         }
-        $parent = [IO.Directory]::GetParent($current.FullName)
-        $current = if ($null -eq $parent) { $null } else { Get-Item -LiteralPath $parent.FullName -Force }
+    }
+    $resolved = (Resolve-Path -LiteralPath $Root).Path
+    $resolvedItem = Get-Item -LiteralPath $resolved -Force
+    if (($resolvedItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq
+            [IO.FileAttributes]::ReparsePoint) {
+        throw 'VisualEvidenceRoot must not resolve to a reparse point.'
     }
     return $resolved
 }

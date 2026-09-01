@@ -488,6 +488,19 @@ try {
         -Name 'valid-complete-with-visual-root' `
         -VisualEvidenceRoot $visualRoot
 
+    $visualRootLink = Join-Path $testRoot 'visual-root-link'
+    if ($IsWindows) {
+        New-Item -ItemType Junction -Path $visualRootLink -Target $visualRoot | Out-Null
+    }
+    else {
+        New-Item -ItemType SymbolicLink -Path $visualRootLink -Target $visualRoot | Out-Null
+    }
+    Assert-ValidatorFails `
+        -Evidence $complete `
+        -Name 'visual-root-reparse' `
+        -ExpectedFragment 'must not contain reparse points' `
+        -VisualEvidenceRoot $visualRootLink
+
     $wrongVisualDimensions = Copy-Evidence $complete
     $wrongVisualDimensions.visual_captures[0].image.pixel_width = 2
     Assert-ValidatorFails `
