@@ -117,7 +117,7 @@ use windows_sys::Win32::Globalization::{DATE_SHORTDATE, GetDateFormatEx, GetTime
 use windows_sys::Win32::Graphics::Gdi::{
     COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW, DT_CALCRECT, DT_END_ELLIPSIS, DT_LEFT,
     DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteObject, DrawTextW,
-    FillRect, FrameRect, GetDC, GetMonitorInfoW, GetSysColor, GetSysColorBrush, HBRUSH, HDC, HFONT,
+    FillRect, GetDC, GetMonitorInfoW, GetSysColor, GetSysColorBrush, HBRUSH, HDC, HFONT,
     MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, RDW_ALLCHILDREN, RDW_ERASE,
     RDW_INVALIDATE, RedrawWindow, ReleaseDC, SelectObject, SetBkColor, SetBkMode, SetTextColor,
     TRANSPARENT, UpdateWindow,
@@ -144,10 +144,10 @@ use windows_sys::Win32::System::Ole::{
 #[cfg(test)]
 use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 use windows_sys::Win32::System::SystemServices::{
-    SS_CENTER, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_NOPREFIX, SS_OWNERDRAW, SS_SUNKEN,
+    SS_CENTER, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_NOPREFIX, SS_OWNERDRAW,
 };
 #[cfg(test)]
-use windows_sys::Win32::System::SystemServices::{SS_NOTIFY, SS_TYPEMASK};
+use windows_sys::Win32::System::SystemServices::{SS_NOTIFY, SS_SUNKEN, SS_TYPEMASK};
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTimeEx};
 use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 #[cfg(test)]
@@ -476,6 +476,8 @@ struct AppState {
     preview_issue_cache: PreviewIssueCache,
     preview_synchronization: PreviewSynchronization,
     status_layout_input: StatusLayoutInput,
+    status_chrome: StatusChromeGeometry,
+    workspace_chrome: WorkspaceChromeGeometry,
     forced_colors: ForcedColorsState,
     system_theme: Option<ResolvedTheme>,
     appearance_resources: Option<AppearanceResources>,
@@ -576,6 +578,8 @@ impl AppState {
             preview_issue_cache: PreviewIssueCache::default(),
             preview_synchronization: PreviewSynchronization::default(),
             status_layout_input: StatusLayoutInput::default(),
+            status_chrome: StatusChromeGeometry::default(),
+            workspace_chrome: WorkspaceChromeGeometry::default(),
             forced_colors: ForcedColorsState::default(),
             system_theme: None,
             appearance_resources: None,
@@ -2411,6 +2415,7 @@ mod tests {
                 let style = unsafe { GetWindowLongPtrW(status, GWL_STYLE) } as u32;
                 assert_eq!(style & SS_NOPREFIX, SS_NOPREFIX);
                 assert_eq!(style & SS_ENDELLIPSIS, SS_ENDELLIPSIS);
+                assert_eq!(style & SS_SUNKEN, 0);
             }
             // SAFETY: cancel is a live standard BUTTON and GWL_STYLE is a
             // pointer-free value query.
@@ -2597,6 +2602,7 @@ mod tests {
         assert_eq!(disposition, ReclaimDisposition::Reclaimed);
         let (style, was_bottom, is_bottom) = result?;
         assert_ne!(style & WS_CLIPSIBLINGS, 0);
+        assert_eq!(style & WS_BORDER, 0);
         assert!(
             !was_bottom,
             "test precondition must put the ListView above a sibling"
@@ -3159,7 +3165,7 @@ mod tests {
         };
         let result = (|| -> io::Result<()> {
             let (instruction, safety, _add) = create_empty_state_controls(parent)?;
-            let (status, _count, _cancel) = create_status_controls(parent)?;
+            let (status, count, _cancel) = create_status_controls(parent)?;
             let drop_overlay = create_drop_overlay(parent)?;
             // SAFETY: parent is live and the returned DC is released below.
             let dc = unsafe { GetDC(parent) };
@@ -3173,7 +3179,15 @@ mod tests {
             }
             for empty in [instruction, safety] {
                 assert_eq!(
-                    application::route_static_control_colors(None, instruction, safety, empty, dc,),
+                    application::route_static_control_colors(
+                        None,
+                        instruction,
+                        safety,
+                        status,
+                        count,
+                        empty,
+                        dc,
+                    ),
                     // SAFETY: this is the cached system-owned workspace brush.
                     Some(unsafe { GetSysColorBrush(COLOR_WINDOW) })
                 );
@@ -3201,6 +3215,8 @@ mod tests {
                     instruction,
                     safety,
                     status,
+                    count,
+                    status,
                     dc,
                 ),
                 Some(custom_brush)
@@ -3210,12 +3226,38 @@ mod tests {
             // SAFETY: same live DC and semantic background.
             assert_eq!(unsafe { GetBkColor(dc) }, custom.background);
 
-            for unrelated in [status, drop_overlay, rail.separator_windows()[0]] {
+            for system_status in [status, count] {
                 assert_eq!(
                     application::route_static_control_colors(
                         None,
                         instruction,
                         safety,
+                        status,
+                        count,
+                        system_status,
+                        dc,
+                    ),
+                    // SAFETY: this is the cached system-owned status brush.
+                    Some(unsafe { GetSysColorBrush(COLOR_WINDOW) })
+                );
+                // SAFETY: route wrote current system colors to the live DC.
+                assert_eq!(unsafe { GetTextColor(dc) }, unsafe {
+                    GetSysColor(COLOR_WINDOWTEXT)
+                });
+                // SAFETY: same live DC and system status background color.
+                assert_eq!(unsafe { GetBkColor(dc) }, unsafe {
+                    GetSysColor(COLOR_WINDOW)
+                });
+            }
+
+            for unrelated in [drop_overlay, rail.separator_windows()[0]] {
+                assert_eq!(
+                    application::route_static_control_colors(
+                        None,
+                        instruction,
+                        safety,
+                        status,
+                        count,
                         unrelated,
                         dc,
                     ),

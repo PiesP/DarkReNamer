@@ -408,25 +408,55 @@ pub(super) fn handle_header_custom_draw(state: &AppState, lparam: LPARAM) -> Opt
         unsafe { GetClientRect(header_window, &mut client) };
         // SAFETY: this value query retains no caller storage.
         let item_count = unsafe { SendMessageW(header_window, HDM_GETITEMCOUNT, 0, 0) };
-        if item_count > 0 {
-            let mut last = RECT::default();
-            // SAFETY: item_count-1 names the final live header item and last is
-            // writable for this synchronous rectangle query.
+        let mut item_right_edges = Vec::with_capacity(usize::try_from(item_count).unwrap_or(0));
+        for item in 0..usize::try_from(item_count).unwrap_or(0) {
+            let mut rect = RECT::default();
+            // SAFETY: every index is below the queried live item count and rect
+            // remains writable for the synchronous rectangle query.
             if unsafe {
                 SendMessageW(
                     header_window,
                     HDM_GETITEMRECT,
-                    usize::try_from(item_count - 1).unwrap_or_default(),
-                    (&raw mut last) as LPARAM,
+                    item,
+                    (&raw mut rect) as LPARAM,
                 )
             } != 0
             {
-                client.left = last.right.clamp(client.left, client.right);
+                item_right_edges.push(rect.right);
             }
         }
-        if client.left < client.right {
-            // SAFETY: callback DC and header brush remain live through postpaint.
-            unsafe { FillRect((*custom).hdc, &client, resources.header_brush()) };
+        let chrome = calculate_header_chrome(
+            LayoutRect {
+                x: client.left,
+                y: client.top,
+                width: client.right.saturating_sub(client.left),
+                height: client.bottom.saturating_sub(client.top),
+            },
+            &item_right_edges,
+        );
+        let to_rect = |rect: LayoutRect| RECT {
+            left: rect.x,
+            top: rect.y,
+            right: rect.right(),
+            bottom: rect.bottom(),
+        };
+        // SAFETY: callback DC and resource brushes remain live through
+        // postpaint; calculated rectangles stay within the header client.
+        unsafe {
+            let gutter = to_rect(chrome.gutter);
+            if gutter.left < gutter.right && gutter.top < gutter.bottom {
+                FillRect((*custom).hdc, &gutter, resources.header_brush());
+            }
+            let bottom = to_rect(chrome.bottom_line);
+            if bottom.left < bottom.right && bottom.top < bottom.bottom {
+                FillRect((*custom).hdc, &bottom, resources.border_brush());
+            }
+            for divider in chrome.item_dividers {
+                let divider = to_rect(divider);
+                if divider.left < divider.right && divider.top < divider.bottom {
+                    FillRect((*custom).hdc, &divider, resources.border_brush());
+                }
+            }
         }
         return Some(CDRF_DODEFAULT as LRESULT);
     }
@@ -473,7 +503,6 @@ pub(super) fn handle_header_custom_draw(state: &AppState, lparam: LPARAM) -> Opt
     // SAFETY: the callback DC and resource-owned brushes remain live for this draw.
     unsafe {
         FillRect((*custom).hdc, &rect, background);
-        FrameRect((*custom).hdc, &rect, resources.border_brush());
         SetBkMode((*custom).hdc, TRANSPARENT as i32);
         SetTextColor((*custom).hdc, palette.text_primary);
     }

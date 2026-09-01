@@ -43,16 +43,19 @@ fn minimum_track_width(window: HWND, state: &AppState) -> i32 {
     let baseline_rail_width = density
         .minimum_density()
         .map_or(0, |minimum| minimum.metrics(state.dpi).rail_width);
+    let workspace_divider_width = i32::from(rail_width > 0).saturating_mul(2);
     let measured_content_width = scale_dip(minimum_content_width_dip(), state.dpi)
         .saturating_add(
             rail_width
                 .saturating_sub(baseline_rail_width)
                 .saturating_mul(2),
         )
+        .saturating_add(workspace_divider_width)
         .max(
             rail_width
                 .saturating_mul(2)
-                .saturating_add(state.font_metrics.empty_state_minimum_width(state.dpi)),
+                .saturating_add(state.font_metrics.empty_state_minimum_width(state.dpi))
+                .saturating_add(workspace_divider_width),
         );
     scale_dip(INITIAL_WIDTH, state.dpi).max(measured_content_width.saturating_add(nonclient_width))
 }
@@ -897,8 +900,21 @@ pub(super) unsafe extern "system" fn window_proc(
         WM_ERASEBKGND if !state_ptr.is_null() => {
             // SAFETY: state_ptr is live UI-thread state and wparam is the
             // callback-owned paint DC for this exact top-level window.
-            let resources = unsafe { (*state_ptr).appearance_resources.as_ref() };
-            erase_themed_background(window, wparam as HDC, resources);
+            let (resources, status_chrome, workspace_chrome) = unsafe {
+                let state = &*state_ptr;
+                (
+                    state.appearance_resources.as_ref(),
+                    state.status_chrome,
+                    state.workspace_chrome,
+                )
+            };
+            erase_themed_background(
+                window,
+                wparam as HDC,
+                resources,
+                status_chrome,
+                workspace_chrome,
+            );
             1
         }
         WM_DRAWITEM if !state_ptr.is_null() => {
@@ -949,18 +965,22 @@ pub(super) unsafe extern "system" fn window_proc(
             // Copy all routing values in a tiny borrow that ends before any GDI
             // call.
             // SAFETY: state_ptr is live UI-thread state for this callback.
-            let (custom_colors, instruction, safety) = unsafe {
+            let (custom_colors, instruction, safety, status_message, status_count) = unsafe {
                 let state = &*state_ptr;
                 (
                     static_control_colors(state, child),
                     state.empty_instruction,
                     state.empty_safety,
+                    state.status_message,
+                    state.status_count,
                 )
             };
             if let Some(brush) = route_static_control_colors(
                 custom_colors,
                 instruction,
                 safety,
+                status_message,
+                status_count,
                 child,
                 wparam as HDC,
             ) {
@@ -1137,6 +1157,8 @@ pub(super) fn route_static_control_colors(
     custom_colors: Option<StaticControlColors>,
     empty_instruction: HWND,
     empty_safety: HWND,
+    status_message: HWND,
+    status_count: HWND,
     child: HWND,
     dc: HDC,
 ) -> Option<HBRUSH> {
@@ -1149,7 +1171,11 @@ pub(super) fn route_static_control_colors(
         }
         return Some(colors.brush);
     }
-    if child != empty_instruction && child != empty_safety {
+    if child != empty_instruction
+        && child != empty_safety
+        && child != status_message
+        && child != status_count
+    {
         return None;
     }
     // SAFETY: WM_CTLCOLORSTATIC supplies a live HDC. System colors and the

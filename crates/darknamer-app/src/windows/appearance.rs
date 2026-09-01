@@ -129,6 +129,10 @@ impl AppearanceResources {
         self.header.as_raw()
     }
 
+    pub(super) const fn status_brush(&self) -> HBRUSH {
+        self.status.as_raw()
+    }
+
     pub(super) const fn dialog_brush(&self) -> HBRUSH {
         self.dialog.as_raw()
     }
@@ -216,6 +220,8 @@ pub(super) fn erase_themed_background(
     window: HWND,
     dc: HDC,
     resources: Option<&AppearanceResources>,
+    status: StatusChromeGeometry,
+    workspace: WorkspaceChromeGeometry,
 ) {
     let mut rect = windows_sys::Win32::Foundation::RECT::default();
     // SAFETY: window/dc are live for WM_ERASEBKGND and rect is writable.
@@ -230,8 +236,80 @@ pub(super) fn erase_themed_background(
         },
         AppearanceResources::window_brush,
     );
-    // SAFETY: dc and brush are live; rect is bounded to the client area.
-    unsafe { FillRect(dc, &rect, brush) };
+    let status_brush = resources.map_or_else(
+        || {
+            // SAFETY: COLOR_WINDOW is a process-global cached system brush.
+            unsafe { GetSysColorBrush(COLOR_WINDOW) }
+        },
+        AppearanceResources::status_brush,
+    );
+    let separator_brush = resources.map_or_else(
+        || {
+            // SAFETY: COLOR_3DSHADOW is a process-global cached system brush.
+            unsafe { GetSysColorBrush(COLOR_3DSHADOW) }
+        },
+        AppearanceResources::border_brush,
+    );
+    let outer = RECT {
+        left: status.outer.x,
+        top: status.outer.y,
+        right: status.outer.right(),
+        bottom: status.outer.bottom(),
+    };
+    let top_line = RECT {
+        left: status.outer.x,
+        top: status.outer.y,
+        right: status
+            .top_line_right
+            .clamp(status.outer.x, status.outer.right()),
+        bottom: status
+            .outer
+            .y
+            .saturating_add(i32::from(status.outer.height > 0)),
+    };
+    let boundary = status
+        .message_count_boundary
+        .clamp(status.outer.x, status.top_line_right);
+    let divider = RECT {
+        left: boundary,
+        top: top_line.bottom,
+        right: boundary.saturating_add(1),
+        bottom: status.outer.bottom(),
+    };
+    let left_list_divider = RECT {
+        left: workspace.left_list_divider.x,
+        top: workspace.left_list_divider.y,
+        right: workspace.left_list_divider.right(),
+        bottom: workspace.left_list_divider.bottom(),
+    };
+    let right_list_divider = RECT {
+        left: workspace.right_list_divider.x,
+        top: workspace.right_list_divider.y,
+        right: workspace.right_list_divider.right(),
+        bottom: workspace.right_list_divider.bottom(),
+    };
+    // SAFETY: dc and all selected brushes are live. Every rectangle is derived
+    // from the current client layout and checked for positive area before use.
+    unsafe {
+        FillRect(dc, &rect, brush);
+        if outer.left < outer.right && outer.top < outer.bottom {
+            FillRect(dc, &outer, status_brush);
+        }
+        if top_line.left < top_line.right && top_line.top < top_line.bottom {
+            FillRect(dc, &top_line, separator_brush);
+        }
+        for divider in [left_list_divider, right_list_divider] {
+            if divider.left < divider.right && divider.top < divider.bottom {
+                FillRect(dc, &divider, separator_brush);
+            }
+        }
+        if boundary > status.outer.x
+            && boundary < status.top_line_right
+            && divider.top < divider.bottom
+        {
+            FillRect(dc, &divider, separator_brush);
+        }
+    }
 }
 
 pub(super) fn draw_owner_button(resources: Option<&AppearanceResources>, lparam: LPARAM) -> bool {

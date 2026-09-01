@@ -271,7 +271,6 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
             null(),
             WS_CHILD
                 | WS_VISIBLE
-                | WS_BORDER
                 | WS_TABSTOP
                 | WS_CLIPSIBLINGS
                 | LVS_REPORT
@@ -409,14 +408,14 @@ pub(super) fn create_status_controls(parent: HWND) -> io::Result<(HWND, HWND, HW
         "STATIC",
         "",
         STATUS_MESSAGE_ID as u16,
-        SS_CENTERIMAGE | SS_SUNKEN | SS_NOPREFIX | SS_ENDELLIPSIS,
+        SS_CENTERIMAGE | SS_NOPREFIX | SS_ENDELLIPSIS,
     )?;
     let count = child(
         parent,
         "STATIC",
         "",
         STATUS_COUNT_ID as u16,
-        SS_CENTERIMAGE | SS_SUNKEN | SS_NOPREFIX | SS_ENDELLIPSIS,
+        SS_CENTERIMAGE | SS_NOPREFIX | SS_ENDELLIPSIS,
     )?;
     let cancel = child(
         parent,
@@ -592,6 +591,8 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
         appearance.show_empty_safety,
         status_layout_input,
     );
+    state.status_chrome = layout.status_chrome;
+    state.workspace_chrome = layout.workspace_chrome;
     let rails_visible = layout.rail_mode != RailMode::MenuOnly;
     let previously_focused = focused_child(state);
     let mut windows = Vec::with_capacity(main_layout_window_count(&layout));

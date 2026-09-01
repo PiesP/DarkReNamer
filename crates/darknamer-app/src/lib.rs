@@ -1380,9 +1380,40 @@ pub(crate) struct LayoutRect {
 #[cfg(any(windows, test))]
 impl LayoutRect {
     #[must_use]
+    pub(crate) const fn right(self) -> i32 {
+        self.x.saturating_add(self.width)
+    }
+
+    #[must_use]
     pub(crate) const fn bottom(self) -> i32 {
         self.y.saturating_add(self.height)
     }
+}
+
+/// App-owned status-strip geometry painted behind the inset native controls.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct StatusChromeGeometry {
+    pub(crate) outer: LayoutRect,
+    pub(crate) message_count_boundary: i32,
+    pub(crate) top_line_right: i32,
+}
+
+/// App-owned one-pixel boundaries between visible rails and the ListView.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct WorkspaceChromeGeometry {
+    pub(crate) left_list_divider: LayoutRect,
+    pub(crate) right_list_divider: LayoutRect,
+}
+
+/// App-owned header geometry painted once after every item has been filled.
+#[cfg(any(windows, test))]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct HeaderChromeGeometry {
+    pub(crate) gutter: LayoutRect,
+    pub(crate) bottom_line: LayoutRect,
+    pub(crate) item_dividers: Vec<LayoutRect>,
 }
 
 /// Complete main-client layout, including the explicit menu-only fallback.
@@ -1393,7 +1424,9 @@ pub(crate) struct MainLayout {
     pub(crate) rail_width: i32,
     pub(crate) left_buttons: Vec<CommandPlacement>,
     pub(crate) right_buttons: Vec<CommandPlacement>,
+    pub(crate) workspace_chrome: WorkspaceChromeGeometry,
     pub(crate) list: LayoutRect,
+    pub(crate) status_chrome: StatusChromeGeometry,
     pub(crate) status_message: LayoutRect,
     pub(crate) status_count: LayoutRect,
     pub(crate) cancel: LayoutRect,
@@ -1401,6 +1434,51 @@ pub(crate) struct MainLayout {
     pub(crate) empty_safety: LayoutRect,
     pub(crate) empty_add: LayoutRect,
     pub(crate) drop_overlay: LayoutRect,
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn calculate_header_chrome(
+    client: LayoutRect,
+    item_right_edges: &[i32],
+) -> HeaderChromeGeometry {
+    let line_height = i32::from(client.height > 0);
+    let content_height = client.height.saturating_sub(line_height);
+    let bottom_line = LayoutRect {
+        x: client.x,
+        y: client.bottom().saturating_sub(line_height),
+        width: client.width,
+        height: line_height,
+    };
+    let mut edges = item_right_edges.to_vec();
+    edges.sort_unstable();
+    edges.dedup();
+    let last_item_right = edges
+        .last()
+        .copied()
+        .unwrap_or(client.x)
+        .clamp(client.x, client.right());
+    let _ = edges.pop();
+    let item_dividers = edges
+        .into_iter()
+        .filter(|edge| *edge > client.x && *edge <= client.right())
+        .map(|edge| LayoutRect {
+            x: edge.saturating_sub(1),
+            y: client.y,
+            width: 1,
+            height: content_height,
+        })
+        .collect();
+    HeaderChromeGeometry {
+        gutter: LayoutRect {
+            x: last_item_right,
+            y: client.y,
+            width: client.right().saturating_sub(last_item_right),
+            height: content_height,
+        },
+        bottom_line,
+        item_dividers,
+    }
 }
 
 /// Major focus regions in the native workbench.
@@ -2319,7 +2397,7 @@ pub(crate) fn calculate_main_layout_with_safety(
     let selected = preference.candidates().iter().copied().find_map(|density| {
         let metrics = measured.rail_metrics(density, dpi);
         let rails_width = metrics.rail_width.saturating_mul(2);
-        if rails_width >= width {
+        if rails_width.saturating_add(2) >= width {
             return None;
         }
         let left = calculate_command_rail_layout(&LEFT_RAIL, rail_height, metrics).ok()?;
@@ -2336,7 +2414,44 @@ pub(crate) fn calculate_main_layout_with_safety(
         }
         None => (RailMode::MenuOnly, 0, Vec::new(), Vec::new()),
     };
-    let list_width = width.saturating_sub(rail_width.saturating_mul(2));
+    let (workspace_chrome, list) = if rail_width > 0 {
+        let left_list_divider = LayoutRect {
+            x: rail_width,
+            y: 0,
+            width: 1,
+            height: rail_height,
+        };
+        let right_list_divider = LayoutRect {
+            x: width.saturating_sub(rail_width).saturating_sub(1),
+            y: 0,
+            width: 1,
+            height: rail_height,
+        };
+        (
+            WorkspaceChromeGeometry {
+                left_list_divider,
+                right_list_divider,
+            },
+            LayoutRect {
+                x: rail_width.saturating_add(1),
+                y: 0,
+                width: width
+                    .saturating_sub(rail_width.saturating_mul(2))
+                    .saturating_sub(2),
+                height: rail_height,
+            },
+        )
+    } else {
+        (
+            WorkspaceChromeGeometry::default(),
+            LayoutRect {
+                x: 0,
+                y: 0,
+                width,
+                height: rail_height,
+            },
+        )
+    };
     let cancel_preferred = if status.cancel_visible {
         measured
             .cancel_text_width
@@ -2350,15 +2465,41 @@ pub(crate) fn calculate_main_layout_with_safety(
     let count_preferred = status
         .measured_count_width
         .max(scale_dip(44, dpi))
-        .saturating_add(scale_dip(12, dpi));
+        .saturating_add(scale_dip(16, dpi));
     let count_width = count_preferred.min(after_cancel);
     let message_width = after_cancel.saturating_sub(count_width);
-    let list = LayoutRect {
-        x: rail_width,
-        y: 0,
-        width: list_width,
-        height: rail_height,
+    let status_outer = LayoutRect {
+        x: 0,
+        y: rail_height,
+        width,
+        height: status_height,
     };
+    let message_count_boundary = message_width;
+    let top_line_right = message_width.saturating_add(count_width);
+    let inset_status_text = |rect: LayoutRect| {
+        let horizontal_inset = scale_dip(8, dpi).min(rect.width.saturating_div(2));
+        let top_line_height = i32::from(rect.height > 0);
+        LayoutRect {
+            x: rect.x.saturating_add(horizontal_inset),
+            y: rect.y.saturating_add(top_line_height),
+            width: rect
+                .width
+                .saturating_sub(horizontal_inset.saturating_mul(2)),
+            height: rect.height.saturating_sub(top_line_height),
+        }
+    };
+    let status_message = inset_status_text(LayoutRect {
+        x: 0,
+        y: rail_height,
+        width: message_width,
+        height: status_height,
+    });
+    let status_count = inset_status_text(LayoutRect {
+        x: message_width,
+        y: rail_height,
+        width: count_width,
+        height: status_height,
+    });
     let empty = calculate_empty_state_layout(list, dpi, measured, show_empty_safety);
     let drop_overlay = calculate_drop_overlay_layout(list, dpi, measured);
     MainLayout {
@@ -2366,19 +2507,15 @@ pub(crate) fn calculate_main_layout_with_safety(
         rail_width,
         left_buttons,
         right_buttons,
+        workspace_chrome,
         list,
-        status_message: LayoutRect {
-            x: 0,
-            y: rail_height,
-            width: message_width,
-            height: status_height,
+        status_chrome: StatusChromeGeometry {
+            outer: status_outer,
+            message_count_boundary,
+            top_line_right,
         },
-        status_count: LayoutRect {
-            x: message_width,
-            y: rail_height,
-            width: count_width,
-            height: status_height,
-        },
+        status_message,
+        status_count,
         cancel: LayoutRect {
             x: message_width.saturating_add(count_width),
             y: rail_height,
@@ -5384,7 +5521,8 @@ mod tests {
         let client_width = compact
             .rail_width
             .saturating_mul(2)
-            .saturating_add(measured.empty_state_minimum_width(96));
+            .saturating_add(measured.empty_state_minimum_width(96))
+            .saturating_add(2);
         let client_height =
             minimum_main_client_height(96, measured, RailDensityPreference::Automatic);
         let layout = calculate_main_layout(
@@ -5445,7 +5583,8 @@ mod tests {
             .rail_width;
         let client_width = rail_width
             .saturating_mul(2)
-            .saturating_add(measured.empty_state_minimum_width(96));
+            .saturating_add(measured.empty_state_minimum_width(96))
+            .saturating_add(2);
         let client_height =
             minimum_main_client_height(96, measured, RailDensityPreference::Automatic);
         let rail_only_height =
@@ -5509,7 +5648,8 @@ mod tests {
             .rail_metrics(RailDensity::Compact, 96)
             .rail_width
             .saturating_mul(2)
-            .saturating_add(measured.empty_state_minimum_width(96));
+            .saturating_add(measured.empty_state_minimum_width(96))
+            .saturating_add(2);
         let hidden = calculate_main_layout_with_safety(
             width,
             without_safety,
@@ -5577,8 +5717,13 @@ mod tests {
             },
         );
         assert_eq!(hidden.cancel.width, 0);
-        assert_eq!(hidden.status_count.width, 132);
-        assert_eq!(hidden.status_message.width, 668);
+        assert_eq!(hidden.status_count.width, 120);
+        assert_eq!(hidden.status_message.width, 648);
+        assert_eq!(hidden.status_chrome.outer.width, 800);
+        assert_eq!(hidden.status_chrome.message_count_boundary, 664);
+        assert_eq!(hidden.status_chrome.top_line_right, 800);
+        assert_eq!(hidden.status_message.x, 8);
+        assert_eq!(hidden.status_count.x, 672);
 
         let visible = calculate_main_layout_with_safety(
             800,
@@ -5593,11 +5738,272 @@ mod tests {
             },
         );
         assert_eq!(visible.cancel.width, 68);
-        assert_eq!(visible.status_count.width, 132);
-        assert_eq!(visible.status_message.width, 600);
+        assert_eq!(visible.status_count.width, 120);
+        assert_eq!(visible.status_message.width, 580);
+        assert_eq!(visible.status_chrome.outer.width, 800);
+        assert_eq!(visible.status_chrome.message_count_boundary, 596);
+        assert_eq!(visible.status_chrome.top_line_right, 732);
+        assert_eq!(visible.status_message.x, 8);
+        assert_eq!(visible.status_count.x, 604);
         assert_eq!(
-            visible.status_message.width + visible.status_count.width + visible.cancel.width,
+            visible.status_chrome.top_line_right + visible.cancel.width,
             800
+        );
+    }
+
+    #[test]
+    fn status_layout_scales_padding_and_preserves_nonnegative_narrow_geometry() {
+        let measured = MeasuredFontMetrics {
+            status_text_height: 16,
+            cancel_text_width: 52,
+            cancel_text_height: 20,
+            ..MeasuredFontMetrics::default()
+        };
+        for dpi in [96, 120, 144, 192] {
+            let padding = scale_dip(8, dpi);
+            let measured_count = scale_dip(60, dpi);
+            let layout = calculate_main_layout_with_safety(
+                scale_dip(480, dpi),
+                scale_dip(320, dpi),
+                dpi,
+                measured,
+                RailDensityPreference::Automatic,
+                true,
+                StatusLayoutInput {
+                    cancel_visible: false,
+                    measured_count_width: measured_count,
+                },
+            );
+            assert_eq!(
+                layout.status_chrome.top_line_right,
+                layout.status_chrome.outer.right()
+            );
+            assert_eq!(
+                layout.status_chrome.outer.width,
+                layout.status_chrome.message_count_boundary
+                    + measured_count
+                    + padding.saturating_mul(2)
+            );
+            assert_eq!(layout.status_message.x, padding);
+            assert_eq!(
+                layout.status_message.y,
+                layout.status_chrome.outer.y.saturating_add(1)
+            );
+            assert_eq!(
+                layout.status_message.bottom(),
+                layout.status_chrome.outer.bottom()
+            );
+            assert_eq!(
+                layout.status_count.x,
+                layout
+                    .status_chrome
+                    .message_count_boundary
+                    .saturating_add(padding)
+            );
+            assert_eq!(layout.status_count.width, measured_count);
+        }
+
+        for cancel_visible in [false, true] {
+            let layout = calculate_main_layout_with_safety(
+                7,
+                5,
+                192,
+                measured,
+                RailDensityPreference::Automatic,
+                true,
+                StatusLayoutInput {
+                    cancel_visible,
+                    measured_count_width: 400,
+                },
+            );
+            for rect in [
+                layout.status_chrome.outer,
+                layout.status_message,
+                layout.status_count,
+                layout.cancel,
+            ] {
+                assert!(rect.x >= 0);
+                assert!(rect.y >= 0);
+                assert!(rect.width >= 0);
+                assert!(rect.height >= 0);
+                assert!(rect.right() <= layout.status_chrome.outer.right());
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_chrome_reserves_one_physical_pixel_per_visible_rail_boundary() {
+        let measured = MeasuredFontMetrics::default();
+        for dpi in [96, 120, 144, 192] {
+            let width = scale_dip(800, dpi);
+            let height = scale_dip(500, dpi);
+            for (preference, expected_mode) in [
+                (RailDensityPreference::Comfortable, RailMode::Comfortable),
+                (RailDensityPreference::Compact, RailMode::Compact),
+            ] {
+                let layout = calculate_main_layout_with_safety(
+                    width,
+                    height,
+                    dpi,
+                    measured,
+                    preference,
+                    true,
+                    StatusLayoutInput::default(),
+                );
+                assert_eq!(layout.rail_mode, expected_mode);
+                assert_eq!(layout.workspace_chrome.left_list_divider.width, 1);
+                assert_eq!(layout.workspace_chrome.right_list_divider.width, 1);
+                assert_eq!(
+                    layout.workspace_chrome.left_list_divider.x,
+                    layout.rail_width
+                );
+                assert_eq!(layout.list.x, layout.rail_width.saturating_add(1));
+                assert_eq!(
+                    layout.workspace_chrome.right_list_divider.x,
+                    width.saturating_sub(layout.rail_width).saturating_sub(1)
+                );
+                assert_eq!(
+                    layout.list.right(),
+                    layout.workspace_chrome.right_list_divider.x
+                );
+                assert_eq!(
+                    layout.workspace_chrome.left_list_divider.height,
+                    layout.list.height
+                );
+                assert_eq!(
+                    layout.workspace_chrome.right_list_divider.height,
+                    layout.list.height
+                );
+                for overlay in [
+                    layout.empty_instruction,
+                    layout.empty_safety,
+                    layout.empty_add,
+                    layout.drop_overlay,
+                ] {
+                    assert!(overlay.x >= layout.list.x);
+                    assert!(overlay.right() <= layout.list.right());
+                }
+            }
+
+            let menu_only = calculate_main_layout_with_safety(
+                width,
+                height,
+                dpi,
+                measured,
+                RailDensityPreference::MenuOnly,
+                true,
+                StatusLayoutInput::default(),
+            );
+            assert_eq!(menu_only.rail_mode, RailMode::MenuOnly);
+            assert_eq!(menu_only.list.x, 0);
+            assert_eq!(menu_only.list.width, width);
+            assert_eq!(
+                menu_only.workspace_chrome,
+                WorkspaceChromeGeometry::default()
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_chrome_falls_back_before_narrow_dividers_can_overlap() {
+        let measured = MeasuredFontMetrics::default();
+        let rail_width = measured.rail_metrics(RailDensity::Compact, 96).rail_width;
+        let too_narrow = calculate_main_layout_with_safety(
+            rail_width.saturating_mul(2).saturating_add(2),
+            1_000,
+            96,
+            measured,
+            RailDensityPreference::Compact,
+            true,
+            StatusLayoutInput::default(),
+        );
+        assert_eq!(too_narrow.rail_mode, RailMode::MenuOnly);
+        assert_eq!(
+            too_narrow.workspace_chrome,
+            WorkspaceChromeGeometry::default()
+        );
+
+        let one_pixel_list = calculate_main_layout_with_safety(
+            rail_width.saturating_mul(2).saturating_add(3),
+            1_000,
+            96,
+            measured,
+            RailDensityPreference::Compact,
+            true,
+            StatusLayoutInput::default(),
+        );
+        assert_eq!(one_pixel_list.rail_mode, RailMode::Compact);
+        assert_eq!(one_pixel_list.list.width, 1);
+        assert!(one_pixel_list.workspace_chrome.left_list_divider.right() <= one_pixel_list.list.x);
+        assert!(
+            one_pixel_list.list.right() <= one_pixel_list.workspace_chrome.right_list_divider.x
+        );
+    }
+
+    #[test]
+    fn header_chrome_owns_one_bottom_line_and_unique_internal_dividers() {
+        let chrome = calculate_header_chrome(
+            LayoutRect {
+                x: 0,
+                y: 0,
+                width: 500,
+                height: 28,
+            },
+            &[100, 250, 250, 400],
+        );
+        assert_eq!(
+            chrome.bottom_line,
+            LayoutRect {
+                x: 0,
+                y: 27,
+                width: 500,
+                height: 1,
+            }
+        );
+        assert_eq!(
+            chrome.gutter,
+            LayoutRect {
+                x: 400,
+                y: 0,
+                width: 100,
+                height: 27,
+            }
+        );
+        assert_eq!(
+            chrome.item_dividers,
+            vec![
+                LayoutRect {
+                    x: 99,
+                    y: 0,
+                    width: 1,
+                    height: 27,
+                },
+                LayoutRect {
+                    x: 249,
+                    y: 0,
+                    width: 1,
+                    height: 27,
+                },
+            ]
+        );
+
+        let clipped = calculate_header_chrome(
+            LayoutRect {
+                x: 0,
+                y: 0,
+                width: 300,
+                height: 28,
+            },
+            &[100, 250, 400],
+        );
+        assert_eq!(clipped.gutter.width, 0);
+        assert_eq!(
+            clipped
+                .item_dividers
+                .iter()
+                .map(|divider| divider.x)
+                .collect::<Vec<_>>(),
+            vec![99, 249]
         );
     }
 
@@ -5637,13 +6043,13 @@ mod tests {
             assert!(rect.height >= 0);
         }
         assert_eq!(menu_only.list.width, 80);
-        assert_eq!(menu_only.status_message.x, 0);
+        assert_eq!(menu_only.status_message.x, scale_dip(8, 96));
         assert_eq!(menu_only.cancel.x + menu_only.cancel.width, 80);
+        assert_eq!(menu_only.status_chrome.outer.width, 80);
         assert_eq!(
-            menu_only.status_message.width + menu_only.status_count.width + menu_only.cancel.width,
-            80
+            menu_only.list.height + menu_only.status_chrome.outer.height,
+            40
         );
-        assert_eq!(menu_only.list.height + menu_only.status_message.height, 40);
         for overlay in [
             comfortable.empty_instruction,
             comfortable.empty_add,
