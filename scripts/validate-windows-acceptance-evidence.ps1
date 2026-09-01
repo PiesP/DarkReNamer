@@ -466,20 +466,22 @@ namespace DarkReNamerAcceptance
             { 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a };
         private static readonly uint[] CrcTable = BuildCrcTable();
 
-        public static PngDimensions Validate(FileStream stream)
+        public static PngDimensions Validate(FileStream input)
         {
-            using (stream)
+            using (input)
             {
-                if (stream.Length < 57 || stream.Length > MaximumEncodedBytes)
+                if (input.Length < 57 || input.Length > MaximumEncodedBytes)
                     throw new InvalidDataException("PNG encoded size is outside the 57-byte through 64-MiB limit.");
 
+                byte[] encodedBytes = ReadExactly(input, checked((int)input.Length));
                 string encodedSha;
                 using (SHA256 encodedHash = SHA256.Create())
                 {
-                    encodedSha = Convert.ToHexString(encodedHash.ComputeHash(stream)).ToLowerInvariant();
+                    encodedSha = Convert.ToHexString(encodedHash.ComputeHash(encodedBytes)).ToLowerInvariant();
                 }
-                stream.Position = 0;
 
+                using (MemoryStream stream = new MemoryStream(encodedBytes, writable: false))
+                {
                 byte[] signature = ReadExactly(stream, Signature.Length);
                 for (int index = 0; index < Signature.Length; index++)
                     if (signature[index] != Signature[index])
@@ -621,6 +623,7 @@ namespace DarkReNamerAcceptance
                             rasterSha,
                             colors.Count);
                     }
+                }
                 }
             }
         }

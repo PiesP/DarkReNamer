@@ -17,6 +17,9 @@ $validatorSource = Get-Content -LiteralPath $validator -Raw
 if ($validatorSource -match 'Get-FileHash\s+-LiteralPath\s+\$imagePath') {
     throw 'Visual PNG hashing must not reopen imagePath after retained-stream decoding.'
 }
+if ($validatorSource -match '(?s)ComputeHash\(stream\).*stream\.Position\s*=\s*0') {
+    throw 'Visual PNG hashing and decoding must use one immutable encoded-byte snapshot.'
+}
 . $visualFixture
 
 function Copy-Evidence {
