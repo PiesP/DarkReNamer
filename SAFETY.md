@@ -347,6 +347,22 @@ For one release-row target, retain recorded iterations 1 through 5 as exactly
 five `.log` files in a private external directory. Add
 `benchmark-context.json` beside them with the tested Windows and physical
 storage context; do not include paths, hostnames, device serials, or narrative.
+Use the exact observed values with this object shape:
+
+```json
+{
+  "schema_version": 1,
+  "windows_product": "Windows 11",
+  "windows_build": "10.0.26100",
+  "architecture": "x64",
+  "filesystem": "ntfs",
+  "storage_model": "Example SSD Family",
+  "connection": "nvme",
+  "free_space_bucket": "50-percent-or-more",
+  "power_mode": "balanced"
+}
+```
+
 Import the target into a new draft rather than editing evidence in place:
 
 ```powershell
