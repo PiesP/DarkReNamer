@@ -504,6 +504,7 @@ pub(super) unsafe extern "system" fn window_proc(
             unsafe {
                 KillTimer(window, APPLY_POLL_TIMER_ID);
                 KillTimer(window, PREFERENCES_POLL_TIMER_ID);
+                KillTimer(window, STATUS_RENDER_TIMER_ID);
             }
             // SAFETY: the slot is still live. Its sidecar is disjoint from a
             // possibly leased AppState value and is taken at most once.
@@ -675,6 +676,33 @@ pub(super) unsafe extern "system" fn window_proc(
             };
             let text = empty_state_safety_copy(mode);
             run_after_callback_state_release(state_lease, || set_status(safety, text));
+            0
+        }
+        WM_TIMER if !state_ptr.is_null() && wparam == STATUS_RENDER_TIMER_ID => {
+            // Stop the coalescing timer only after this callback acquires the
+            // state lease. A busy nested WM_TIMER exits above without killing
+            // it, so the low-priority timer can retry after the nested loop.
+            // SAFETY: window owns this exact timer identifier; killing an
+            // absent timer is harmless and carries no callback payload.
+            unsafe { KillTimer(window, STATUS_RENDER_TIMER_ID) };
+            // Snapshot both channels as owned text plus copied HWNDs, then end
+            // the sole AppState lease before SetWindowTextW can synchronously
+            // enter accessibility or WM_CTLCOLORSTATIC callbacks.
+            // SAFETY: state_ptr is the live AppState under this callback's sole
+            // lease; no AppState reference crosses the release boundary.
+            let (status_message, status_count, message_text, count_text) = unsafe {
+                let state = &*state_ptr;
+                (
+                    state.status_message,
+                    state.status_count,
+                    state.ui_status.message_text().to_owned(),
+                    state.ui_status.count_text(),
+                )
+            };
+            run_after_callback_state_release(state_lease, || {
+                set_status(status_message, &message_text);
+                set_status(status_count, &count_text);
+            });
             0
         }
         WM_GETMINMAXINFO if !state_ptr.is_null() => {

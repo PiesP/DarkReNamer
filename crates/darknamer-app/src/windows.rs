@@ -203,13 +203,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SPI_GETHIGHCONTRAST, SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOREDRAW, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu,
     SetMenuItemInfoW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW,
-    TranslateAcceleratorW, TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE,
-    WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM,
-    WM_ERASEBKGND, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_MEASUREITEM, WM_MENUCHAR,
-    WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE,
-    WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION,
-    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
-    WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    TranslateAcceleratorW, TranslateMessage, USER_TIMER_MINIMUM, WM_APP, WM_CLOSE, WM_COMMAND,
+    WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
+    WM_DRAWITEM, WM_ERASEBKGND, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_MEASUREITEM,
+    WM_MENUCHAR, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW,
+    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW,
+    WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW,
+    WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU,
+    WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -254,6 +255,7 @@ const WM_APP_FINISH_CLOSE: u32 = WM_APP + 0x4F;
 const WM_APP_MENU_REDRAW: u32 = WM_APP + 0x50;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 const PREFERENCES_POLL_TIMER_ID: usize = 0xD4A2;
+const STATUS_RENDER_TIMER_ID: usize = 0xD4A3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CallbackStateStatus {
@@ -681,8 +683,19 @@ impl AppState {
     }
 
     fn render_status(&self) {
-        set_status(self.status_message, self.ui_status.message_text());
-        set_status(self.status_count, &self.ui_status.count_text());
+        // Status mutations often occur while a window callback owns the sole
+        // AppState lease. A same-HWND/ID timer coalesces repeated requests and
+        // generates WM_TIMER only when no higher-priority message is queued,
+        // keeping SetWindowTextW outside the mutation callback's lease.
+        // SAFETY: status_message is either a live UI-thread child or null. A
+        // null/retired child has no parent and deliberately installs no timer.
+        let owner = unsafe { GetParent(self.status_message) };
+        if !owner.is_null() {
+            // SAFETY: owner is the copied parent HWND. Reusing this HWND/ID
+            // replaces the existing UI-thread timer without a payload; failure
+            // leaves no sticky app state, so a later mutation can retry.
+            unsafe { SetTimer(owner, STATUS_RENDER_TIMER_ID, USER_TIMER_MINIMUM, None) };
+        }
     }
 
     fn worker_activity(&self) -> WorkerActivity {
@@ -831,6 +844,11 @@ mod tests {
     static EMPTY_SAFETY_COPY_BRUSH: AtomicUsize = AtomicUsize::new(0);
     static EMPTY_SAFETY_COPY_TEXT: AtomicUsize = AtomicUsize::new(0);
     static EMPTY_SAFETY_COPY_BACKGROUND: AtomicUsize = AtomicUsize::new(0);
+    const STATUS_RENDER_PROBE_SUBCLASS_ID: usize = 0xD4B3;
+    static STATUS_RENDER_CALLBACKS: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
+    static STATUS_RENDER_BRUSH: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
+    static STATUS_RENDER_TEXT: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
+    static STATUS_RENDER_BACKGROUND: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
 
     extern "system" fn empty_safety_copy_probe(
         window: HWND,
@@ -861,6 +879,50 @@ mod tests {
                     EMPTY_SAFETY_COPY_TEXT.store(GetTextColor(dc) as usize, Ordering::SeqCst);
                     EMPTY_SAFETY_COPY_BACKGROUND.store(GetBkColor(dc) as usize, Ordering::SeqCst);
                     ReleaseDC(window, dc);
+                }
+            }
+            DefSubclassProc(window, message, wparam, lparam)
+        }
+    }
+
+    extern "system" fn status_render_probe(
+        window: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        subclass_id: usize,
+        _ref_data: usize,
+    ) -> LRESULT {
+        // SAFETY: the callback forwards its original message through the
+        // system subclass chain exactly once. The status branch uses the live
+        // child/parent pair and releases the exact child DC synchronously.
+        unsafe {
+            if subclass_id == STATUS_RENDER_PROBE_SUBCLASS_ID
+                && message == windows_sys::Win32::UI::WindowsAndMessaging::WM_SETTEXT
+            {
+                let index = match GetDlgCtrlID(window) {
+                    id if id == STATUS_MESSAGE_ID as i32 => Some(0),
+                    id if id == STATUS_COUNT_ID as i32 => Some(1),
+                    _ => None,
+                };
+                if let Some(index) = index {
+                    let owner = GetParent(window);
+                    let dc = GetDC(window);
+                    if !dc.is_null() {
+                        let brush = application::window_proc(
+                            owner,
+                            WM_CTLCOLORSTATIC,
+                            dc as WPARAM,
+                            window as LPARAM,
+                        );
+                        STATUS_RENDER_CALLBACKS[index].fetch_add(1, Ordering::SeqCst);
+                        STATUS_RENDER_BRUSH[index].store(brush as usize, Ordering::SeqCst);
+                        STATUS_RENDER_TEXT[index]
+                            .store(GetTextColor(dc) as usize, Ordering::SeqCst);
+                        STATUS_RENDER_BACKGROUND[index]
+                            .store(GetBkColor(dc) as usize, Ordering::SeqCst);
+                        ReleaseDC(window, dc);
+                    }
                 }
             }
             DefSubclassProc(window, message, wparam, lparam)
@@ -1057,6 +1119,240 @@ mod tests {
             expected.background as usize
         );
         assert_eq!(text, empty_state_safety_copy(RailMode::MenuOnly));
+        assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+        Ok(())
+    }
+
+    #[test]
+    fn status_render_timer_coalesces_and_survives_busy_callback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for index in 0..2 {
+            STATUS_RENDER_CALLBACKS[index].store(0, Ordering::SeqCst);
+            STATUS_RENDER_BRUSH[index].store(0, Ordering::SeqCst);
+            STATUS_RENDER_TEXT[index].store(0, Ordering::SeqCst);
+            STATUS_RENDER_BACKGROUND[index].store(0, Ordering::SeqCst);
+        }
+
+        let directory = tempfile::tempdir()?;
+        let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+        state.appearance_resources = Some(AppearanceResources::create(GRAPHITE_DARK)?);
+        state.ui_status = UiStatus::with_transient("이전 상태 표시");
+        // A missing child parent installs no timer and leaves no sticky state;
+        // the same state can install one after controls become available.
+        state.render_status();
+        state.render_status();
+        let class = wide("STATIC");
+        // SAFETY: every HWND and state slot below is owned by this UI-thread
+        // test. Publication is cleared and both subclasses are removed before
+        // the owner destroys its children; the unpublished slot is reclaimed.
+        let (
+            synchronous_callbacks,
+            first_timer_installed,
+            duplicate_timer_absent,
+            busy_handler_result,
+            callbacks_while_busy,
+            busy_timer_survived,
+            handler_result,
+            handler_timer_removed,
+            expected,
+            expected_text,
+            actual_message_text,
+            actual_count_text,
+            disposition,
+        ) = unsafe {
+            let owner = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                160,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            );
+            if owner.is_null() {
+                return Err(io::Error::last_os_error().into());
+            }
+            let (status_message, status_count, _cancel) = match create_status_controls(owner) {
+                Ok(controls) => controls,
+                Err(error) => {
+                    DestroyWindow(owner);
+                    return Err(error.into());
+                }
+            };
+            for status in [status_message, status_count] {
+                if SetWindowSubclass(
+                    status,
+                    Some(status_render_probe),
+                    STATUS_RENDER_PROBE_SUBCLASS_ID,
+                    0,
+                ) == 0
+                {
+                    DestroyWindow(owner);
+                    return Err(io::Error::last_os_error().into());
+                }
+            }
+
+            state.status_message = status_message;
+            state.status_count = status_count;
+            let expected_message = match static_control_colors(&state, status_message) {
+                Some(colors) => colors,
+                None => {
+                    DestroyWindow(owner);
+                    return Err(
+                        io::Error::other("message status semantic colors are missing").into(),
+                    );
+                }
+            };
+            let expected_count = match static_control_colors(&state, status_count) {
+                Some(colors) => colors,
+                None => {
+                    DestroyWindow(owner);
+                    return Err(io::Error::other("count status semantic colors are missing").into());
+                }
+            };
+            let expected = [expected_message, expected_count];
+            let expected_text = ["최신 상태 표시".to_owned(), state.ui_status.count_text()];
+            let state_slot: *mut AppStateSlot = CallbackState::into_raw(state);
+            SetWindowLongPtrW(owner, GWLP_USERDATA, state_slot as isize);
+
+            let mut state_lease = match CallbackState::try_lease(state_slot) {
+                Some(lease) => lease,
+                None => {
+                    SetWindowLongPtrW(owner, GWLP_USERDATA, 0);
+                    DestroyWindow(owner);
+                    let disposition = CallbackState::request_reclaim(state_slot);
+                    assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+                    return Err(io::Error::other("status render state lease is unavailable").into());
+                }
+            };
+            state_lease.state().render_status();
+            state_lease
+                .state_mut()
+                .ui_status
+                .set_transient("최신 상태 표시");
+            state_lease.state().render_status();
+            state_lease.state().render_status();
+            let synchronous_callbacks = [
+                STATUS_RENDER_CALLBACKS[0].load(Ordering::SeqCst),
+                STATUS_RENDER_CALLBACKS[1].load(Ordering::SeqCst),
+            ];
+            drop(state_lease);
+
+            // Reusing one HWND/ID replaces the timer. One kill succeeds and a
+            // second cannot find a duplicate timer instance.
+            let first_timer_installed = KillTimer(owner, STATUS_RENDER_TIMER_ID) != 0;
+            let duplicate_timer_absent = KillTimer(owner, STATUS_RENDER_TIMER_ID) == 0;
+
+            let busy_lease = match CallbackState::try_lease(state_slot) {
+                Some(lease) => lease,
+                None => {
+                    SetWindowLongPtrW(owner, GWLP_USERDATA, 0);
+                    DestroyWindow(owner);
+                    let disposition = CallbackState::request_reclaim(state_slot);
+                    assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+                    return Err(io::Error::other("busy status lease is unavailable").into());
+                }
+            };
+            busy_lease.state().render_status();
+            let busy_handler_result =
+                application::window_proc(owner, WM_TIMER, STATUS_RENDER_TIMER_ID, 0);
+            let callbacks_while_busy = [
+                STATUS_RENDER_CALLBACKS[0].load(Ordering::SeqCst),
+                STATUS_RENDER_CALLBACKS[1].load(Ordering::SeqCst),
+            ];
+            drop(busy_lease);
+            let busy_timer_survived = KillTimer(owner, STATUS_RENDER_TIMER_ID) != 0;
+
+            let retry_lease = match CallbackState::try_lease(state_slot) {
+                Some(lease) => {
+                    lease.state().render_status();
+                    lease
+                }
+                None => {
+                    SetWindowLongPtrW(owner, GWLP_USERDATA, 0);
+                    DestroyWindow(owner);
+                    let disposition = CallbackState::request_reclaim(state_slot);
+                    assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+                    return Err(io::Error::other("retry status lease is unavailable").into());
+                }
+            };
+            drop(retry_lease);
+            let handler_result =
+                application::window_proc(owner, WM_TIMER, STATUS_RENDER_TIMER_ID, 0);
+            let handler_timer_removed = KillTimer(owner, STATUS_RENDER_TIMER_ID) == 0;
+            let actual_message_text = window_text(status_message);
+            let actual_count_text = window_text(status_count);
+
+            for status in [status_message, status_count] {
+                RemoveWindowSubclass(
+                    status,
+                    Some(status_render_probe),
+                    STATUS_RENDER_PROBE_SUBCLASS_ID,
+                );
+            }
+            SetWindowLongPtrW(owner, GWLP_USERDATA, 0);
+            DestroyWindow(owner);
+            let disposition = CallbackState::request_reclaim(state_slot);
+            (
+                synchronous_callbacks,
+                first_timer_installed,
+                duplicate_timer_absent,
+                busy_handler_result,
+                callbacks_while_busy,
+                busy_timer_survived,
+                handler_result,
+                handler_timer_removed,
+                expected,
+                expected_text,
+                actual_message_text,
+                actual_count_text,
+                disposition,
+            )
+        };
+
+        let actual_text = [actual_message_text?, actual_count_text?];
+        assert_eq!(
+            synchronous_callbacks,
+            [0, 0],
+            "render_status must not synchronously enter a status control"
+        );
+        assert!(first_timer_installed);
+        assert!(
+            duplicate_timer_absent,
+            "repeated renders must share one timer"
+        );
+        assert_eq!(busy_handler_result, 0);
+        assert_eq!(callbacks_while_busy, [0, 0]);
+        assert!(
+            busy_timer_survived,
+            "busy WM_TIMER handling must leave the retry timer installed"
+        );
+        assert_eq!(handler_result, 0);
+        assert!(
+            handler_timer_removed,
+            "successful status rendering must stop the timer"
+        );
+        for index in 0..2 {
+            assert_eq!(STATUS_RENDER_CALLBACKS[index].load(Ordering::SeqCst), 1);
+            assert_eq!(
+                STATUS_RENDER_BRUSH[index].load(Ordering::SeqCst),
+                expected[index].brush as usize
+            );
+            assert_eq!(
+                STATUS_RENDER_TEXT[index].load(Ordering::SeqCst),
+                expected[index].text as usize
+            );
+            assert_eq!(
+                STATUS_RENDER_BACKGROUND[index].load(Ordering::SeqCst),
+                expected[index].background as usize
+            );
+        }
+        assert_eq!(actual_text, expected_text);
         assert_eq!(disposition, ReclaimDisposition::Reclaimed);
         Ok(())
     }

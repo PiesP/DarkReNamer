@@ -95,7 +95,7 @@ const EXPECTED: &[(&str, UnsafeCounts)] = &[
         "src/rename/windows_native.rs",
         UnsafeCounts::new(18, 0, 0, 0),
     ),
-    ("src/windows.rs", UnsafeCounts::new(164, 4, 1, 0)),
+    ("src/windows.rs", UnsafeCounts::new(168, 4, 1, 0)),
     ("src/windows/appearance.rs", UnsafeCounts::new(50, 0, 0, 0)),
     (
         "src/windows/appearance_dialog.rs",
@@ -103,7 +103,7 @@ const EXPECTED: &[(&str, UnsafeCounts)] = &[
     ),
     (
         "src/windows/application.rs",
-        UnsafeCounts::new(113, 0, 1, 0),
+        UnsafeCounts::new(115, 0, 1, 0),
     ),
     ("src/windows/clipboard.rs", UnsafeCounts::new(11, 0, 0, 0)),
     (
