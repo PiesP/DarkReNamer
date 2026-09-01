@@ -346,7 +346,9 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
     state.drop_overlay = create_drop_overlay(window)?;
     refresh_system_fonts(state);
     update_dpi_metrics(state);
-    state.menu = create_menu()?.attach(window)?;
+    let menu = create_menu()?;
+    state.menu = menu.as_raw();
+    state.pending_menu = Some(menu);
     let mut shell_info = SHFILEINFOW::default();
     let empty = wide("");
     // SAFETY: The lookup path is owned terminated UTF-16 and info is writable SHFILEINFOW retained for the shell query.
@@ -1100,8 +1102,16 @@ pub(super) fn apply_command_states(state: &AppState) {
         )
     };
     if !state.menu.is_null() {
-        // SAFETY: AppState's menu and parent HWND are live and command IDs are validated resource values.
-        unsafe { DrawMenuBar(GetParent(state.list_window)) };
+        // Owner-draw measurement and painting synchronously reenter the parent
+        // WndProc. Post the redraw so it runs only after the current AppState
+        // lease ends; nested callbacks can then borrow the rendering state.
+        // SAFETY: list_window is a live direct child and the posted message
+        // carries no pointers or borrowed state.
+        let parent = unsafe { GetParent(state.list_window) };
+        if !parent.is_null() {
+            // SAFETY: parent remains live while AppState is installed.
+            unsafe { PostMessageW(parent, WM_APP_MENU_REDRAW, 0, 0) };
+        }
     }
 }
 

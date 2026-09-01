@@ -248,6 +248,7 @@ const WM_APP_LAYOUT: u32 = WM_APP + 0x4C;
 const WM_APP_EMPTY_SAFETY_COPY: u32 = WM_APP + 0x4D;
 const WM_APP_APPEARANCE_RESTORE_FOCUS: u32 = WM_APP + 0x4E;
 const WM_APP_FINISH_CLOSE: u32 = WM_APP + 0x4F;
+const WM_APP_MENU_REDRAW: u32 = WM_APP + 0x50;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 const PREFERENCES_POLL_TIMER_ID: usize = 0xD4A2;
 
@@ -425,6 +426,7 @@ struct AppState {
     empty_add: HWND,
     drop_overlay: HWND,
     menu: HMENU,
+    pending_menu: Option<OwnedMenu>,
     font: OwnedFont,
     status_font: OwnedFont,
     left_rail: Option<CommandRail>,
@@ -521,6 +523,7 @@ impl AppState {
             empty_add: null_mut(),
             drop_overlay: null_mut(),
             menu: null_mut(),
+            pending_menu: None,
             font: OwnedFont::default(),
             status_font: OwnedFont::default(),
             left_rail: None,
