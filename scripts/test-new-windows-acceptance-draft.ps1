@@ -227,14 +227,17 @@ $sourceRoot = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Pat
 $sourceSha = (& git -C $sourceRoot rev-parse HEAD).Trim()
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "darkrenamer-acceptance-draft-$([Guid]::NewGuid())"
 $insideRepositoryOutput = Join-Path $sourceRoot '.stage4-generator-test-output.json'
+$insideRepositoryOutputCleanupOwned = $false
 $reparseParent = $null
 $reparseTargetOutput = $null
+$reparseTargetOutputCleanupOwned = $false
 
 try {
     New-Item -ItemType Directory -Path $testRoot | Out-Null
     if (Test-Path -LiteralPath $insideRepositoryOutput) {
         throw "Reserved inside-repository test output already exists: $insideRepositoryOutput"
     }
+    $insideRepositoryOutputCleanupOwned = $true
 
     $reasonParameter = (Get-Command $generator).Parameters['DefaultUnexecutedReason']
     $validateSet = @(
@@ -263,6 +266,7 @@ try {
     if (Test-Path -LiteralPath $reparseTargetOutput) {
         throw "Reserved reparse regression target already exists: $reparseTargetOutput"
     }
+    $reparseTargetOutputCleanupOwned = $true
     if ($IsWindows) {
         New-Item `
             -ItemType Junction `
@@ -412,10 +416,11 @@ try {
 finally {
     Remove-Item Function:\global:Get-AuthenticodeSignature -ErrorAction SilentlyContinue
     Remove-Variable DarkReNamerTestAuthenticodeStatus -Scope Global -ErrorAction SilentlyContinue
-    if (Test-Path -LiteralPath $insideRepositoryOutput -PathType Leaf) {
+    if ($insideRepositoryOutputCleanupOwned -and
+        (Test-Path -LiteralPath $insideRepositoryOutput -PathType Leaf)) {
         Remove-Item -LiteralPath $insideRepositoryOutput -Force
     }
-    if ($null -ne $reparseTargetOutput -and
+    if ($reparseTargetOutputCleanupOwned -and $null -ne $reparseTargetOutput -and
         (Test-Path -LiteralPath $reparseTargetOutput -PathType Leaf)) {
         Remove-Item -LiteralPath $reparseTargetOutput -Force
     }

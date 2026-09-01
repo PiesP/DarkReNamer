@@ -94,6 +94,7 @@ $sourceSha = (& git -C $sourceRoot rev-parse HEAD).Trim()
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "darkrenamer-benchmark-import-$([Guid]::NewGuid())"
 $links = [Collections.Generic.List[string]]::new()
 $insideOutput = $null
+$insideOutputCleanupOwned = $false
 try {
     New-Item -ItemType Directory -Path $testRoot | Out-Null
     $exe = Join-Path $testRoot 'DarkReNamer.exe'; [IO.File]::WriteAllBytes($exe, [byte[]](0x4d,0x5a,1,2))
@@ -281,12 +282,13 @@ try {
     Assert-Fails { & $augmenter -SourceRoot $sourceRoot -EvidencePath $reparseBase.Evidence -LogDirectory (Join-Path $sourceRoot 'scripts') -OutputPath $insideLogsOutput } 'LogDirectory must be outside SourceRoot' $insideLogsOutput
     $insideOutput = Join-Path $sourceRoot '.stage-followup-inside-output.json'
     if (Test-Path -LiteralPath $insideOutput) { throw "Reserved inside output exists: $insideOutput" }
+    $insideOutputCleanupOwned = $true
     Assert-Fails { & $augmenter -SourceRoot $sourceRoot -EvidencePath $reparseBase.Evidence -LogDirectory $reparseBase.Logs -OutputPath $insideOutput } 'OutputPath must be outside SourceRoot' $insideOutput
 
     Write-Host 'Windows acceptance benchmark augmenter tests passed.'
 }
 finally {
     for($index=$links.Count-1;$index -ge 0;$index--){$link=$links[$index];if(Test-Path -LiteralPath $link){Remove-Item -LiteralPath $link -Force}}
-    if($null -ne $insideOutput -and (Test-Path -LiteralPath $insideOutput -PathType Leaf)){Remove-Item -LiteralPath $insideOutput -Force}
+    if($insideOutputCleanupOwned -and $null -ne $insideOutput -and (Test-Path -LiteralPath $insideOutput -PathType Leaf)){Remove-Item -LiteralPath $insideOutput -Force}
     if(Test-Path $testRoot){Remove-Item $testRoot -Recurse -Force}
 }
