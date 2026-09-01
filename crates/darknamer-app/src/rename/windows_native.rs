@@ -400,8 +400,16 @@ pub(crate) fn open_directory_entry(parent: &NativeParent, leaf: &[u16]) -> io::R
 pub(crate) fn query_directory_names(
     directory: &File,
     limit: usize,
-) -> io::Result<(Vec<Vec<u16>>, bool)> {
-    match query_directory_names_cancellable(directory, limit, &|| false) {
+    path_prefix_units: usize,
+    remaining_path_bytes: usize,
+) -> io::Result<(Vec<Vec<u16>>, bool, bool)> {
+    match query_directory_names_cancellable(
+        directory,
+        limit,
+        path_prefix_units,
+        remaining_path_bytes,
+        &|| false,
+    ) {
         Ok(result) => Ok(result),
         Err(DirectoryQueryError::Io(error)) => Err(error),
         Err(DirectoryQueryError::Cancelled) => {
@@ -441,6 +449,24 @@ fn validated_directory_name_units(
     Ok(file_name_bytes / size_of::<u16>())
 }
 
+fn reserve_complete_child_path_bytes(
+    path_prefix_units: usize,
+    name_units: usize,
+    remaining_path_bytes: &mut usize,
+) -> bool {
+    let Some(path_bytes) = path_prefix_units
+        .checked_add(name_units)
+        .and_then(|units| units.checked_mul(size_of::<u16>()))
+    else {
+        return false;
+    };
+    if path_bytes > *remaining_path_bytes {
+        return false;
+    }
+    *remaining_path_bytes -= path_bytes;
+    true
+}
+
 impl From<io::Error> for DirectoryQueryError {
     fn from(error: io::Error) -> Self {
         Self::Io(error)
@@ -450,8 +476,10 @@ impl From<io::Error> for DirectoryQueryError {
 pub(crate) fn query_directory_names_cancellable(
     directory: &File,
     limit: usize,
+    path_prefix_units: usize,
+    mut remaining_path_bytes: usize,
     cancellation_requested: &dyn Fn() -> bool,
-) -> Result<(Vec<Vec<u16>>, bool), DirectoryQueryError> {
+) -> Result<(Vec<Vec<u16>>, bool, bool), DirectoryQueryError> {
     let name_capacity = 255_usize;
     let bytes = offset_of!(FILE_ID_BOTH_DIR_INFORMATION, FileName)
         .checked_add(name_capacity * size_of::<u16>())
@@ -459,7 +487,16 @@ pub(crate) fn query_directory_names_cancellable(
     let elements = bytes.div_ceil(size_of::<FILE_ID_BOTH_DIR_INFORMATION>());
     let buffer_size =
         u32::try_from(bytes).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    let mut names = Vec::with_capacity(limit.min(name_capacity));
+    let mut names = Vec::new();
+    let maximum_budgeted_names = path_prefix_units
+        .checked_add(1)
+        .and_then(|units| units.checked_mul(size_of::<u16>()))
+        .map_or(0, |minimum_path_bytes| {
+            remaining_path_bytes / minimum_path_bytes
+        });
+    names
+        .try_reserve(limit.min(maximum_budgeted_names))
+        .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
     let mut restart = true;
     let mut buffer = vec![FILE_ID_BOTH_DIR_INFORMATION::default(); elements];
     loop {
@@ -490,7 +527,7 @@ pub(crate) fn query_directory_names_cancellable(
         }
         restart = false;
         if status == STATUS_NO_MORE_FILES {
-            return Ok((names, false));
+            return Ok((names, false, false));
         }
         if status < 0 {
             // SAFETY: status came directly from NtQueryDirectoryFile.
@@ -508,15 +545,26 @@ pub(crate) fn query_directory_names_cancellable(
         )?;
         // SAFETY: FileNameLength was returned for this initialized flexible
         // array and is bounded by the allocation above.
-        let name =
-            unsafe { std::slice::from_raw_parts(entry.FileName.as_ptr(), name_units).to_vec() };
-        if name != [b'.' as u16] && name != [b'.' as u16, b'.' as u16] {
-            names.push(name);
-            if names.len() > limit {
-                names.truncate(limit);
-                return Ok((names, true));
-            }
+        let name = unsafe { std::slice::from_raw_parts(entry.FileName.as_ptr(), name_units) };
+        if name == [b'.' as u16] || name == [b'.' as u16, b'.' as u16] {
+            continue;
         }
+        if names.len() >= limit {
+            return Ok((names, true, false));
+        }
+        if !reserve_complete_child_path_bytes(
+            path_prefix_units,
+            name_units,
+            &mut remaining_path_bytes,
+        ) {
+            return Ok((names, false, true));
+        }
+        let mut retained_name = Vec::new();
+        retained_name
+            .try_reserve_exact(name_units)
+            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+        retained_name.extend_from_slice(name);
+        names.push(retained_name);
     }
 }
 
@@ -720,6 +768,23 @@ mod tests {
         assert!(validated_directory_name_units(fixed_bytes + 512, 1024, 512, 255).is_err());
         assert!(validated_directory_name_units(1025, 1024, 2, 255).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn complete_child_path_budget_is_checked_before_reservation() {
+        let mut remaining = 20;
+        assert!(reserve_complete_child_path_bytes(4, 6, &mut remaining));
+        assert_eq!(remaining, 0);
+        assert!(!reserve_complete_child_path_bytes(0, 1, &mut remaining));
+        assert_eq!(remaining, 0);
+
+        let mut overflow_budget = usize::MAX;
+        assert!(!reserve_complete_child_path_bytes(
+            usize::MAX,
+            1,
+            &mut overflow_budget,
+        ));
+        assert_eq!(overflow_budget, usize::MAX);
     }
 
     #[test]
