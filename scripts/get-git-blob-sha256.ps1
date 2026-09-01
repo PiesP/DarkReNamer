@@ -54,7 +54,11 @@ if (-not [string]::Equals($canonicalRoot, $canonicalTopLevel, $comparison)) {
 
 $objectSpec = "${Revision}:$Path"
 $objectType = @(& git -C $canonicalRoot cat-file -t $objectSpec 2>$null)
-if ($LASTEXITCODE -ne 0 -or $objectType.Count -ne 1 -or $objectType[0] -cne 'blob') {
+$objectTypeExitCode = $LASTEXITCODE
+if ($objectTypeExitCode -ne 0 -or $objectType.Count -ne 1 -or $objectType[0] -cne 'blob') {
+    # The structured exception owns this handled probe failure. Do not leak the
+    # native Git status into a caller that intentionally catches the exception.
+    $global:LASTEXITCODE = 0
     throw 'Revision and Path must identify one Git blob.'
 }
 
