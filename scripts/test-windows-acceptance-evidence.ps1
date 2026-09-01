@@ -651,6 +651,15 @@ try {
         -Name 'zero-context-complete' `
         -ExpectedFragment 'Complete evidence requires operator context for Windows 10'
 
+    $arm64Context = Copy-Evidence $complete
+    foreach ($context in $arm64Context.operator_context) {
+        $context.architecture = 'arm64'
+    }
+    Assert-ValidatorFails `
+        -Evidence $arm64Context `
+        -Name 'arm64-context-complete' `
+        -ExpectedFragment 'architecture must be one of: x64'
+
     $missingUiProductContext = Copy-Evidence $zeroContextDraft
     $missingUiProductContext.operator_context = @($complete.operator_context[0])
     $missingUiProductContext.ui_matrix[12].status = 'pass'
