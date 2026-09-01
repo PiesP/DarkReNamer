@@ -115,6 +115,24 @@ jobs:
           Copy-Item DISTRIBUTION.md dist/DISTRIBUTION.md
           Compress-Archive -Path dist/DarkReNamer.pdb `
             -DestinationPath dist/DarkReNamer-debug-symbols.zip
+          $binaryMeasurementPath = Join-Path `
+            $env:RUNNER_TEMP `
+            "darkrenamer-release-binary-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"
+          try {
+            ./scripts/measure-windows-binary.ps1 `
+              -ExecutablePath dist/DarkReNamer.exe `
+              -PdbPath dist/DarkReNamer.pdb `
+              -DebugSymbolsZipPath dist/DarkReNamer-debug-symbols.zip `
+              -OutputPath $binaryMeasurementPath
+            $binaryMeasurement = Get-Content `
+              -LiteralPath $binaryMeasurementPath `
+              -Raw | ConvertFrom-Json
+          }
+          finally {
+            if (Test-Path -LiteralPath $binaryMeasurementPath) {
+              Remove-Item -LiteralPath $binaryMeasurementPath
+            }
+          }
           $rustcVersion = (& rustc --version).Trim()
           if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($rustcVersion)) {
             throw 'The release rustc version could not be resolved.'
@@ -127,11 +145,13 @@ jobs:
             throw 'Cargo.lock did not contain any package tables.'
           }
           $metrics = [ordered]@{
-            schema_version = 1
+            schema_version = 2
             source_sha = '${{ steps.source.outputs.source_commit }}'
             rustc_version = $rustcVersion
             target_triple = 'x86_64-pc-windows-msvc'
             darkrenamer_exe_bytes = (Get-Item -LiteralPath dist/DarkReNamer.exe).Length
+            darkrenamer_text_raw_bytes = $binaryMeasurement.pe.text_raw_bytes
+            debug_symbols_pdb_bytes = $binaryMeasurement.debug_symbols.pdb_bytes
             debug_symbols_zip_bytes = (Get-Item -LiteralPath dist/DarkReNamer-debug-symbols.zip).Length
             sbom_bytes = (Get-Item -LiteralPath dist/DarkReNamer.cdx.json).Length
             cargo_lock_package_count = $cargoLockPackageCount
@@ -188,6 +208,8 @@ jobs:
             rustc_version = $metrics.rustc_version
             target_triple = $metrics.target_triple
             darkrenamer_exe_bytes = $metrics.darkrenamer_exe_bytes
+            darkrenamer_text_raw_bytes = $metrics.darkrenamer_text_raw_bytes
+            debug_symbols_pdb_bytes = $metrics.debug_symbols_pdb_bytes
             debug_symbols_zip_bytes = $metrics.debug_symbols_zip_bytes
             sbom_bytes = $metrics.sbom_bytes
             cargo_lock_package_count = $metrics.cargo_lock_package_count

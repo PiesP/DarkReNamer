@@ -190,6 +190,42 @@ try {
         -ExpectedFragment 'PDB GUID and age do not match' `
         -ExecutablePath $executable -PdbPath $differentPdb -SymbolsPath $differentSymbols `
         -OutputPath (Join-Path $testRoot 'different-pdb.json')
+
+    $oversizedPdb = Join-Path $testRoot 'oversized.pdb'
+    $oversizedPdbStream = [IO.File]::Open(
+        $oversizedPdb,
+        [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::None
+    )
+    try {
+        $oversizedPdbStream.SetLength(134217729)
+    }
+    finally {
+        $oversizedPdbStream.Dispose()
+    }
+    Assert-MeasurerFails `
+        -ExpectedFragment 'PdbPath must not exceed 134217728 bytes' `
+        -ExecutablePath $executable -PdbPath $oversizedPdb -SymbolsPath $symbols `
+        -OutputPath (Join-Path $testRoot 'oversized-pdb.json')
+
+    $oversizedSymbols = Join-Path $testRoot 'oversized-symbols.zip'
+    $oversizedSymbolsStream = [IO.File]::Open(
+        $oversizedSymbols,
+        [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::None
+    )
+    try {
+        $oversizedSymbolsStream.SetLength(134217729)
+    }
+    finally {
+        $oversizedSymbolsStream.Dispose()
+    }
+    Assert-MeasurerFails `
+        -ExpectedFragment 'DebugSymbolsZipPath must not exceed 134217728 bytes' `
+        -ExecutablePath $executable -PdbPath $pdb -SymbolsPath $oversizedSymbols `
+        -OutputPath (Join-Path $testRoot 'oversized-symbols.json')
 }
 finally {
     if (Test-Path -LiteralPath $testRoot) {

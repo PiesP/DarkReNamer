@@ -3,6 +3,7 @@ param()
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'test-support/windows-binary-fixture.ps1')
 
 $generator = Join-Path $PSScriptRoot 'new-windows-acceptance-draft.ps1'
 $validator = Join-Path $PSScriptRoot 'validate-windows-acceptance-evidence.ps1'
@@ -35,14 +36,7 @@ function Write-HandoffFixture {
     foreach ($name in 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'DISTRIBUTION.md') {
         Copy-Item -LiteralPath (Join-Path $SourceRoot $name) -Destination $HandoffRoot
     }
-    [IO.File]::WriteAllBytes(
-        (Join-Path $HandoffRoot 'DarkReNamer.exe'),
-        [byte[]](0x4d, 0x5a, 0x01, 0x02, 0x03)
-    )
-    [IO.File]::WriteAllBytes(
-        (Join-Path $HandoffRoot 'DarkReNamer.pdb'),
-        [byte[]](0x50, 0x44, 0x42, 0x00)
-    )
+    $null = Write-WindowsBinaryFixture -Root $HandoffRoot
     Write-Utf8NoBom `
         -Path (Join-Path $HandoffRoot 'DarkReNamer.cdx.json') `
         -Content '{"bomFormat":"CycloneDX","specVersion":"1.5","serialNumber":"urn:uuid:12345678-1234-4234-9234-123456789abc","components":[{"type":"application","name":"darknamer-app","version":"0.1.0"}]}'
@@ -77,11 +71,13 @@ function Write-HandoffFixture {
     Write-JsonObject `
         -Path (Join-Path $HandoffRoot 'release-metrics.json') `
         -Value ([ordered]@{
-            schema_version = 1
+            schema_version = 2
             source_sha = $SourceSha
             rustc_version = "rustc $($channelMatch.Groups[1].Value) (fixture 2026-09-01)"
             target_triple = 'x86_64-pc-windows-msvc'
             darkrenamer_exe_bytes = (Get-Item -LiteralPath (Join-Path $HandoffRoot 'DarkReNamer.exe')).Length
+            darkrenamer_text_raw_bytes = 0x200
+            debug_symbols_pdb_bytes = (Get-Item -LiteralPath (Join-Path $HandoffRoot 'DarkReNamer.pdb')).Length
             debug_symbols_zip_bytes = (Get-Item -LiteralPath (Join-Path $HandoffRoot 'DarkReNamer-debug-symbols.zip')).Length
             sbom_bytes = (Get-Item -LiteralPath (Join-Path $HandoffRoot 'DarkReNamer.cdx.json')).Length
             cargo_lock_package_count = $cargoLockPackageCount

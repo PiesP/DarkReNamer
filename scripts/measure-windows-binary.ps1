@@ -18,6 +18,8 @@ if ($PSVersionTable.PSVersion -lt [Version]'7.4') {
 }
 
 $maximumPeBytes = 268435456
+$maximumPdbBytes = 134217728
+$maximumSymbolsZipBytes = 134217728
 
 function Resolve-RequiredFile {
     param(
@@ -400,8 +402,14 @@ $symbolsInfo = Get-Item -LiteralPath $resolvedSymbols
 if ($pdbInfo.Length -le 0) {
     throw 'PdbPath must not be empty.'
 }
+if ($pdbInfo.Length -gt $maximumPdbBytes) {
+    throw "PdbPath must not exceed $maximumPdbBytes bytes."
+}
 if ($symbolsInfo.Length -le 0) {
     throw 'DebugSymbolsZipPath must not be empty.'
+}
+if ($symbolsInfo.Length -gt $maximumSymbolsZipBytes) {
+    throw "DebugSymbolsZipPath must not exceed $maximumSymbolsZipBytes bytes."
 }
 $pdbHash = (Get-FileHash -LiteralPath $resolvedPdb -Algorithm SHA256).Hash.ToLowerInvariant()
 $pdbIdentity = Get-PdbIdentity -Path $resolvedPdb
