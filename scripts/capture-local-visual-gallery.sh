@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-for tool in cargo wine wineboot winepath wineserver xvfb-run ffmpeg sha256sum timeout; do
+for tool in cargo wine wineboot winepath wineserver xvfb-run ffmpeg jq sha256sum timeout; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     printf 'Required visual-gallery tool is unavailable: %s\n' "$tool" >&2
     exit 1
@@ -50,17 +50,32 @@ if [[ ! -x "$resource_compiler" ]]; then
   exit 1
 fi
 
+build_messages="$(mktemp /tmp/darkrenamer-visual-build.XXXXXX)"
+wine_root=''
+cleanup() {
+  if [[ -n "$wine_root" ]]; then
+    WINEPREFIX="$wine_root" wineserver -k >/dev/null 2>&1 || true
+    if [[ "$wine_root" == /tmp/darkrenamer-wine-prefix.* ]]; then
+      rm -rf -- "$wine_root"
+    fi
+  fi
+  rm -f -- "$build_messages"
+}
+trap cleanup EXIT INT TERM
+
 RC="$resource_compiler" cargo xwin test \
   --package darknamer-app \
   --lib \
   --locked \
   --target x86_64-pc-windows-msvc \
-  --no-run
+  --no-run \
+  --message-format=json > "$build_messages"
 
-test_exe="$({
-  find target/x86_64-pc-windows-msvc/debug/deps \
-    -maxdepth 1 -type f -name 'darknamer_app-*.exe' -printf '%T@ %p\n'
-} | sort -nr | head -1 | cut -d' ' -f2-)"
+test_exe="$(
+  jq -r \
+    'select(.reason == "compiler-artifact" and .target.name == "darknamer_app" and .profile.test and (.executable != null)) | .executable' \
+    "$build_messages" | tail -1
+)"
 if [[ -z "$test_exe" || ! -f "$test_exe" ]]; then
   printf 'The current Windows native-test executable was not produced.\n' >&2
   exit 1
@@ -71,10 +86,6 @@ wine_root="$(mktemp -d /tmp/darkrenamer-wine-prefix.XXXXXX)"
 export WINEPREFIX="$wine_root"
 export WINEDEBUG=-all
 export WINEDLLOVERRIDES='mscoree,mshtml='
-cleanup() {
-  WINEPREFIX="$wine_root" wineserver -k >/dev/null 2>&1 || true
-}
-trap cleanup EXIT INT TERM
 
 timeout 60s xvfb-run -a -s '-screen 0 1600x1200x24' bash -c \
   'wineboot -i >/dev/null 2>&1; wineserver -w'
