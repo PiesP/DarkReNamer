@@ -119,6 +119,26 @@ function Assert-ValidatorFails {
     throw "Expected '$Name' to fail with '$ExpectedFragment', but validation succeeded."
 }
 
+function Assert-EvidenceFileFails {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path,
+        [Parameter(Mandatory)]
+        [string] $ExpectedFragment
+    )
+
+    try {
+        & $validator -EvidencePath $Path -Draft | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notlike "*$ExpectedFragment*") {
+            throw "Expected evidence file to fail with '$ExpectedFragment', got: $($_.Exception.Message)"
+        }
+        return
+    }
+    throw "Expected evidence file to fail with '$ExpectedFragment', but validation succeeded."
+}
+
 function Assert-SchemaRejects {
     param(
         [Parameter(Mandatory)]
@@ -459,6 +479,49 @@ try {
     if ($pathSemanticJson -cne $memorySemanticJson) {
         throw 'EvidencePath and EvidenceJson validation returned different semantic objects.'
     }
+    $oversizedEvidencePath = Join-Path $testRoot 'oversized-evidence.json'
+    $oversizedEvidenceStream = [IO.FileStream]::new(
+        $oversizedEvidencePath,
+        [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::None
+    )
+    try {
+        $oversizedEvidenceStream.SetLength((4 * 1024 * 1024) + 1)
+    }
+    finally {
+        $oversizedEvidenceStream.Dispose()
+    }
+    Assert-EvidenceFileFails `
+        -Path $oversizedEvidencePath `
+        -ExpectedFragment 'exceeds its byte limit'
+
+    $invalidUtf8EvidencePath = Join-Path $testRoot 'invalid-utf8-evidence.json'
+    [IO.File]::WriteAllBytes(
+        $invalidUtf8EvidencePath,
+        [byte[]](0x7b, 0x22, 0x78, 0x22, 0x3a, 0x22, 0xff, 0x22, 0x7d)
+    )
+    Assert-EvidenceFileFails `
+        -Path $invalidUtf8EvidencePath `
+        -ExpectedFragment 'must be strict UTF-8'
+
+    $bomEvidencePath = Join-Path $testRoot 'utf8-bom-evidence.json'
+    $plainEvidenceBytes = [IO.File]::ReadAllBytes($passThruPath)
+    [IO.File]::WriteAllBytes(
+        $bomEvidencePath,
+        [byte[]](@(0xef, 0xbb, 0xbf) + $plainEvidenceBytes)
+    )
+    $bomOutput = @(& $validator -EvidencePath $bomEvidencePath -Draft -PassThru 6>&1)
+    if ($bomOutput.Count -ne 1 -or
+        (($bomOutput[0] | ConvertTo-Json -Depth 20 -Compress) -cne $pathSemanticJson)) {
+        throw 'Optional UTF-8 BOM changed EvidencePath validation semantics.'
+    }
+
+    $linkedEvidencePath = Join-Path $testRoot 'linked-evidence.json'
+    New-Item -ItemType SymbolicLink -Path $linkedEvidencePath -Target $passThruPath | Out-Null
+    Assert-EvidenceFileFails `
+        -Path $linkedEvidencePath `
+        -ExpectedFragment 'must be a regular non-reparse file'
     $missingVisualRootRejected = $false
     try {
         & $validator -EvidencePath $passThruPath | Out-Null

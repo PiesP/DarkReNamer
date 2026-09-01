@@ -21,6 +21,67 @@ if ($PSVersionTable.PSVersion -lt [version] '7.4') {
     throw 'Windows acceptance evidence validation requires PowerShell 7.4 or newer (pwsh).'
 }
 
+function Read-StrictUtf8RegularFileOnce {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path,
+        [Parameter(Mandatory)]
+        [long] $MaximumBytes,
+        [Parameter(Mandatory)]
+        [string] $Label
+    )
+
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item -isnot [IO.FileInfo] -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq
+            [IO.FileAttributes]::ReparsePoint) {
+        throw "$Label must be a regular non-reparse file."
+    }
+
+    $stream = [IO.FileStream]::new(
+        $item.FullName,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::Read
+    )
+    try {
+        $length = $stream.Length
+        if ($length -gt $MaximumBytes) {
+            throw "$Label exceeds its byte limit."
+        }
+        $bytes = [byte[]]::new([int] $length)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $read = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+            if ($read -eq 0) {
+                throw "$Label changed while it was being read."
+            }
+            $offset += $read
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+
+    $start = 0
+    if ($bytes.Length -ge 3 -and
+        $bytes[0] -eq 0xef -and
+        $bytes[1] -eq 0xbb -and
+        $bytes[2] -eq 0xbf) {
+        $start = 3
+    }
+    try {
+        return [Text.UTF8Encoding]::new($false, $true).GetString(
+            $bytes,
+            $start,
+            $bytes.Length - $start
+        )
+    }
+    catch {
+        throw "$Label must be strict UTF-8 with an optional UTF-8 BOM."
+    }
+}
+
 function Test-Property {
     param(
         [Parameter(Mandatory)]
@@ -599,7 +660,10 @@ if ($PSCmdlet.ParameterSetName -eq 'Path') {
     if (-not (Test-Path -LiteralPath $EvidencePath -PathType Leaf)) {
         throw "Evidence file does not exist: $EvidencePath"
     }
-    $evidenceJson = Get-Content -LiteralPath $EvidencePath -Raw
+    $evidenceJson = Read-StrictUtf8RegularFileOnce `
+        -Path $EvidencePath `
+        -MaximumBytes (4 * 1024 * 1024) `
+        -Label 'Evidence file'
 }
 try {
     $jsonDocument = [Text.Json.JsonDocument]::Parse($evidenceJson)
