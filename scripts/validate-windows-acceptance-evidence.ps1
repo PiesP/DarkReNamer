@@ -594,7 +594,46 @@ function Assert-TargetCoverage {
 
 Assert-TargetCoverage -Expected $expectedUiTargets -Observed $uiByTarget -Label 'UI matrix'
 Assert-TargetCoverage -Expected $expectedScenarioTargets -Observed $scenarioByTarget -Label 'scenario'
-Assert-TargetCoverage -Expected $expectedBenchmarkTargets -Observed $benchmarkByTarget -Label 'benchmark'
+$completeHddUnavailable = $false
+if ($Draft) {
+    Assert-TargetCoverage -Expected $expectedBenchmarkTargets -Observed $benchmarkByTarget -Label 'benchmark'
+}
+else {
+    $expectedSsdBenchmarkTargets = @(
+        $expectedBenchmarkTargets | Where-Object { $_ -clike 'benchmark|ssd|*' }
+    )
+    $expectedHddBenchmarkTargets = @(
+        $expectedBenchmarkTargets | Where-Object { $_ -clike 'benchmark|hdd|*' }
+    )
+    Assert-TargetCoverage `
+        -Expected $expectedSsdBenchmarkTargets `
+        -Observed $benchmarkByTarget `
+        -Label 'SSD benchmark'
+
+    $observedHddBenchmarkTargets = @(
+        $expectedHddBenchmarkTargets | Where-Object { $benchmarkByTarget.ContainsKey($_) }
+    )
+    if ($observedHddBenchmarkTargets.Count -eq 0) {
+        $completeHddUnavailable = $true
+        foreach ($target in $expectedHddBenchmarkTargets) {
+            if (-not $unexecutedByTarget.ContainsKey($target)) {
+                throw "Complete evidence must explain unavailable HDD benchmark target in unexecuted: $target."
+            }
+            $reason = $unexecutedByTarget[$target]
+            if (-not [string]::Equals(
+                    $reason.reason_code,
+                    'hardware-unavailable',
+                    [StringComparison]::Ordinal
+                )) {
+                throw "Complete evidence must use reason_code hardware-unavailable for omitted HDD benchmark target: $target."
+            }
+            [void] $usedUnexecutedIds.Add($reason.id)
+        }
+    }
+    elseif ($observedHddBenchmarkTargets.Count -ne $expectedHddBenchmarkTargets.Count) {
+        throw 'Complete evidence requires all three HDD benchmark rows or no HDD benchmark rows with hardware-unavailable reasons.'
+    }
+}
 Assert-TargetCoverage `
     -Expected $expectedDurabilityTargets `
     -Observed $durabilityByTarget `
@@ -653,5 +692,13 @@ if (-not $conformsToSchema) {
     throw 'Evidence does not conform to windows-acceptance-evidence.schema.json.'
 }
 
-$mode = if ($Draft) { 'draft' } else { 'complete release-gate' }
+$mode = if ($Draft) {
+    'draft'
+}
+elseif ($completeHddUnavailable) {
+    'complete release-gate with HDD-unavailable limitation'
+}
+else {
+    'complete release-gate'
+}
 Write-Host "Validated $mode Windows acceptance evidence for source $($evidence.source_sha)."

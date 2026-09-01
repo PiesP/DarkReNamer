@@ -60,4 +60,11 @@ if (-not [string]::Equals($evidence.artifact.sha256, $actualExeHash, [StringComp
     throw 'Acceptance evidence artifact.sha256 does not match the release handoff executable bytes.'
 }
 
-Write-Host "Validated complete Windows acceptance against release handoff run $($provenance.workflow_run) at source $($sourceHead[0])."
+$hddBenchmarkRows = @($evidence.benchmarks | Where-Object { $_.media -ceq 'hdd' })
+$limitation = if ($hddBenchmarkRows.Count -eq 0) {
+    ' with HDD-unavailable limitation'
+}
+else {
+    ''
+}
+Write-Host "Validated complete Windows acceptance$limitation against release handoff run $($provenance.workflow_run) at source $($sourceHead[0])."
