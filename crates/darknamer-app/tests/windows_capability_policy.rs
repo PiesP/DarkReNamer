@@ -104,12 +104,17 @@ fn release_workflows_promote_the_immutable_candidate_without_rebuilding()
     let promotion =
         normalize_workflow_source(&repository_file(".github/workflows/promote-release.yaml")?);
     let ci = normalize_workflow_source(&repository_file(".github/workflows/ci.yaml")?);
+    let (non_windows_ci, windows_ci) = ci
+        .split_once("\n  windows:\n")
+        .ok_or("CI workflow must retain a dedicated Windows job")?;
 
     assert!(candidate.contains("on:\n  workflow_dispatch:"));
     assert!(!candidate.contains("\n  push:"));
     assert!(candidate.contains("if: github.ref == 'refs/heads/master'"));
     assert!(candidate.contains("ref: master"));
     assert!(candidate.contains("git ls-remote origin refs/heads/master"));
+    assert!(candidate.contains("./scripts/prepare-release-cyclonedx.ps1"));
+    assert!(candidate.contains("[Guid]::NewGuid().ToString('D').ToLowerInvariant()"));
     assert!(candidate.contains("name: Attest candidate build provenance"));
     assert!(candidate.contains("name: Attest candidate executable SBOM"));
     assert!(candidate.contains("id: candidate_artifact"));
@@ -170,12 +175,21 @@ fn release_workflows_promote_the_immutable_candidate_without_rebuilding()
         );
     }
     assert!(!promotion.contains("-ExpectedRunId '${{"));
-    assert_eq!(
-        ci.matches("./scripts/test-release-candidate-metadata-validator.ps1")
-            .count(),
-        2,
-        "candidate metadata policy must run in both quality and Windows CI"
-    );
+    for script in [
+        "./scripts/test-release-candidate-metadata-validator.ps1",
+        "./scripts/test-prepare-release-cyclonedx.ps1",
+    ] {
+        assert_eq!(
+            non_windows_ci.matches(script).count(),
+            1,
+            "{script} must run exactly once before the Windows CI job"
+        );
+        assert_eq!(
+            windows_ci.matches(script).count(),
+            1,
+            "{script} must run exactly once in the Windows CI job"
+        );
+    }
     Ok(())
 }
 

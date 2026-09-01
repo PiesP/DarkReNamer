@@ -367,6 +367,12 @@ $sbom = Get-Content -LiteralPath $sbomPath -Raw | ConvertFrom-Json
 if ($sbom.bomFormat -ne 'CycloneDX' -or $sbom.specVersion -ne '1.5') {
     throw 'SBOM must be a CycloneDX 1.5 JSON document.'
 }
+if ($null -eq $sbom.PSObject.Properties['serialNumber'] -or
+    $sbom.serialNumber -isnot [string] -or
+    $sbom.serialNumber -cnotmatch
+    '^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') {
+    throw 'SBOM serialNumber must be a lowercase RFC 4122 UUID URN.'
+}
 if (@($sbom.components).Count -eq 0) {
     throw 'SBOM must describe at least one component.'
 }

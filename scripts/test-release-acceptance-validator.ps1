@@ -320,7 +320,7 @@ try {
 
     [IO.File]::WriteAllBytes((Join-Path $handoffRoot 'DarkReNamer.exe'), [byte[]](0x4d, 0x5a, 0x01, 0x02))
     [IO.File]::WriteAllBytes((Join-Path $handoffRoot 'DarkReNamer.pdb'), [byte[]](0x50, 0x44, 0x42, 0x00))
-    Write-Utf8NoBom -Path (Join-Path $handoffRoot 'DarkReNamer.cdx.json') -Content '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[{"type":"application","name":"darknamer-app","version":"0.1.0"}]}'
+    Write-Utf8NoBom -Path (Join-Path $handoffRoot 'DarkReNamer.cdx.json') -Content '{"bomFormat":"CycloneDX","specVersion":"1.5","serialNumber":"urn:uuid:12345678-1234-4234-9234-123456789abc","components":[{"type":"application","name":"darknamer-app","version":"0.1.0"}]}'
     Compress-Archive -LiteralPath (Join-Path $handoffRoot 'DarkReNamer.pdb') -DestinationPath (Join-Path $handoffRoot 'DarkReNamer-debug-symbols.zip')
     $exeSha = (Get-FileHash -LiteralPath (Join-Path $handoffRoot 'DarkReNamer.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
     Write-Provenance -Path (Join-Path $handoffRoot 'release-handoff.json') -SourceSha $sourceSha -ExecutableSha $exeSha -WorkflowRun $workflowRun

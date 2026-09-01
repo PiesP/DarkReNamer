@@ -45,7 +45,7 @@ function Write-HandoffFixture {
     )
     Write-Utf8NoBom `
         -Path (Join-Path $HandoffRoot 'DarkReNamer.cdx.json') `
-        -Content '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[{"type":"application","name":"darknamer-app","version":"0.1.0"}]}'
+        -Content '{"bomFormat":"CycloneDX","specVersion":"1.5","serialNumber":"urn:uuid:12345678-1234-4234-9234-123456789abc","components":[{"type":"application","name":"darknamer-app","version":"0.1.0"}]}'
     Compress-Archive `
         -LiteralPath (Join-Path $HandoffRoot 'DarkReNamer.pdb') `
         -DestinationPath (Join-Path $HandoffRoot 'DarkReNamer-debug-symbols.zip')
