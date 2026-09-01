@@ -106,6 +106,9 @@ fn planning_benchmark_workflow_is_manual_least_privilege_and_directional() {
         "topology:\n        description: Parent topology\n        required: true\n        type: choice\n        default: all\n        options:\n          - all\n          - same-parent\n          - unique-parent\n          - deep-parent"
     ));
     assert!(workflow.contains(
+        "variant:\n        description: Planning measurement variant\n        required: true\n        type: choice\n        default: baseline\n        options:\n          - baseline\n          - validation-skip-estimate"
+    ));
+    assert!(workflow.contains(
         "repetitions:\n        description: Recorded repetitions after each warmup\n        required: true\n        type: choice\n        default: \"3\"\n        options:\n          - \"1\"\n          - \"3\""
     ));
     assert!(workflow.contains("permissions:\n  contents: read"));
@@ -123,6 +126,9 @@ fn planning_benchmark_workflow_is_manual_least_privilege_and_directional() {
     assert!(workflow.contains("$env:DARKRENAMER_BENCH_ROOT_PRIVATE = '1'"));
     assert!(workflow.contains("$env:DARKRENAMER_BENCH_EVIDENCE_CLASS = 'directional-hosted'"));
     assert!(workflow.contains("$env:DARKRENAMER_BENCH_MEDIA = 'virtual'"));
+    assert!(workflow.contains("SELECTED_VARIANT: ${{ inputs.variant }}"));
+    assert!(workflow.contains("$env:DARKRENAMER_BENCH_VARIANT = $env:SELECTED_VARIANT"));
+    assert!(workflow.contains("$env:DARKRENAMER_BENCH_SOURCE_SHA = $env:GITHUB_SHA"));
     assert!(workflow.contains("$env:DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'"));
     assert!(workflow.contains("foreach ($iteration in 0..$repetitions)"));
     assert!(workflow.contains(

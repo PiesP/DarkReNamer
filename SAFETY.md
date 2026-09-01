@@ -233,13 +233,14 @@ document.
 
 ### Durable workload benchmark
 
-The ignored Windows integration benchmark exercises the production planner,
-`FileJournal`, and handle-relative rename backend on a caller-selected physical
-volume. The root must already exist; the test creates and removes only its own
-uniquely named child directory. Use a dedicated root whose access is private to
-the benchmark operator and run it from a non-elevated PowerShell session. The
-private-root environment setting below is an explicit operator acknowledgment,
-not an ACL check.
+The ignored Windows integration benchmark's `baseline` variant exercises the
+production planner, `FileJournal`, and handle-relative rename backend on a
+caller-selected physical volume. The estimate variant is the narrowly bounded
+planning-only exception described below. The root must already exist; the test
+creates and removes only its own uniquely named child directory. Use a dedicated
+root whose access is private to the benchmark operator and run it from a
+non-elevated PowerShell session. The private-root environment setting below is
+an explicit operator acknowledgment, not an ACL check.
 
 The authoritative physical matrix is SSD and HDD media crossed with counts 100,
 1,000, and 10,000 and the `same-parent`, `unique-parent`, and `deep-parent`
@@ -252,6 +253,12 @@ $env:DARKRENAMER_BENCH_ROOT = 'D:\darkrenamer-benchmark-root'
 $env:DARKRENAMER_BENCH_MEDIA = 'hdd'
 $env:DARKRENAMER_BENCH_ROOT_PRIVATE = '1'
 $env:DARKRENAMER_BENCH_EVIDENCE_CLASS = 'physical'
+$env:DARKRENAMER_BENCH_VARIANT = 'baseline'
+$sourceSha = (git rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $sourceSha -cnotmatch '^[0-9a-f]{40}$') {
+  throw 'Could not resolve an exact lowercase source SHA.'
+}
+$env:DARKRENAMER_BENCH_SOURCE_SHA = $sourceSha
 $env:DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'
 foreach ($count in 100, 1000, 10000) {
   foreach ($topology in 'same-parent', 'unique-parent', 'deep-parent') {
@@ -270,10 +277,11 @@ foreach ($count in 100, 1000, 10000) {
 
 Use `ssd` and the SSD's dedicated root for the SSD pass. Only the six
 `same-parent` cells (two media classes by three counts) map to the existing
-release-acceptance benchmark rows. Keep `unique-parent` and `deep-parent`
-results as separate, source-SHA-bound, path-free diagnostic evidence; they do
-not add or replace release rows. Record only iterations 1 through 5. Iteration 0
-is warmup output and must not be promoted to evidence.
+release-acceptance benchmark rows, and those rows must use `variant=baseline`.
+Keep `unique-parent` and `deep-parent` results as separate, source-SHA-bound,
+path-free diagnostic evidence; they do not add or replace release rows. Record
+only iterations 1 through 5. Iteration 0 is warmup output and must not be
+promoted to evidence.
 
 For each of the six `same-parent` release rows, record the median
 `planning_ms` and median `execution_ms` from the five recorded iterations.
@@ -291,20 +299,51 @@ journal lines report the execution journal phases. The per-call observers add
 measurement overhead, so their microseconds are diagnostic attribution and do
 not sum exactly to wall-clock duration. The benchmark removes its fixture
 before emitting any result lines: missing output after work begins can indicate
-cleanup failure and is not a usable measurement.
+cleanup failure and is not a usable measurement. Every emitted summary,
+backend, and journal line carries the exact source SHA and instrumentation
+revision.
 
-Establish a fresh five-iteration baseline from the unchanged comparison SHA on
-the same machine, volume, power mode, toolchain, count, and topology before
-evaluating a planning optimization. Compare the candidate SHA under the same
-conditions. A prior baseline is not reusable after any of those conditions or
-the benchmark instrumentation changes.
+Establish a fresh five-iteration baseline on the exact source SHA before an A/B
+run. The paired run must use that same source SHA,
+`instrumentation_revision=parent-validation-v1`, machine, volume, power mode,
+toolchain, count, topology, warmup, and five recorded iterations. A prior
+baseline is not reusable after any of those conditions or the instrumentation
+revision changes.
+
+`DARKRENAMER_BENCH_VARIANT` defaults to `baseline` and also accepts the
+benchmark-only `validation-skip-estimate`. The estimate skips repeated parent
+validation to provide a conservative directional comparison in a controlled,
+private, static fixture. Concurrent parent mutation invalidates that assumption, so matching
+plan rows and fingerprints in the fixture do not establish behavioral parity.
+The wrapper is consumed immediately after planning; preflight, execution,
+freeze validation, and mutation use the unwrapped production backend. The
+estimate retains no handle or snapshot and is not an implementation prototype
+or production candidate.
+
+Run `baseline` and `validation-skip-estimate` separately under the paired
+conditions above. Both variants use the same timing instrumentation, and the
+median rules remain unchanged. Estimate results are diagnostic even on physical
+SSD or HDD media and can never populate, substitute for, or approve a
+release-acceptance row. Baseline remains the only release evidence.
+
+Production validation/observation fusion remains no-go unless a typed atomic
+inspection seam can return a validated observation without carrying cached
+authority across the planning boundary. A production decision additionally
+requires separate paired physical evidence showing stable median improvement
+across SSD and HDD media at 100, 1,000, and 10,000 entries for all three
+topologies, plus safety and execution regression coverage. The skip estimate
+cannot satisfy or waive either requirement.
 
 The media label is operator-supplied context, not an automatic hardware claim.
 The manual `Planning benchmark` Actions workflow uses ephemeral runner storage,
 `directional-hosted` evidence, `virtual` media, iteration 0 warmups, and one or
 three recorded repetitions. Its planning-only output is useful for directional
 regression checks, but is neither physical-media evidence nor release-acceptance
-evidence and does not replace the physical matrix above.
+evidence and does not replace the physical matrix above. Dispatch it separately
+for `baseline` and `validation-skip-estimate` when collecting a paired
+directional comparison. Both dispatches must use the exact same source SHA and
+`parent-validation-v1` instrumentation revision; do not combine variants in one
+run.
 
 ### Preview path-key benchmark
 

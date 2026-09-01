@@ -7,7 +7,8 @@
 #[path = "support/windows_capabilities.rs"]
 mod windows_capabilities;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::os::windows::ffi::OsStrExt;
@@ -15,14 +16,14 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use darknamer_app::rename::{
-    BackendError, EntryId, EntryKind, ExecuteErrorKind, ExecutionOutcome, FileJournal,
-    FileJournalErrorKind, JournalDirection, JournalError, JournalRoot, JournalStep, JournalStore,
-    JournalTerminal, MemoryJournal, ModelRevision, MutationCertainty, PathKey, PathSnapshot,
-    PlanId, PlanIssueKind, PlanRequest, RenameBackend, RenameExecutor, RenameIntent,
-    RenameOperation, RenamePlanner, WindowsRenameBackend, apply_execution_report,
+    BackendError, BackendOperation, EntryId, EntryKind, ExecuteErrorKind, ExecutionOutcome,
+    FileJournal, FileJournalErrorKind, JournalDirection, JournalError, JournalRoot, JournalStep,
+    JournalStore, JournalTerminal, MemoryBackend, MemoryJournal, ModelRevision, MutationCertainty,
+    PathKey, PathSnapshot, PlanId, PlanIssueKind, PlanRequest, RenameBackend, RenameExecutor,
+    RenameIntent, RenameOperation, RenamePlanner, WindowsRenameBackend, apply_execution_report,
     build_plan_request, preflight_plan, process_is_elevated,
 };
-use darknamer_core::{LegacyList, LegacyListItem, LegacyText};
+use darknamer_core::{LegacyList, LegacyListItem, LegacyText, validate_windows_leaf_name};
 
 fn legacy_path(path: &std::path::Path) -> LegacyText {
     LegacyText::from_units(path.as_os_str().encode_wide().collect::<Vec<_>>())
@@ -151,6 +152,90 @@ impl<B: RenameBackend> RenameBackend for TimedBackend<B> {
     }
 }
 
+// Benchmark-only directional estimate for a controlled, private, static fixture.
+// Concurrent parent mutation invalidates its assumption; this is neither a
+// parity-preserving implementation nor a production candidate.
+struct ValidationMemoBackend<B> {
+    inner: B,
+    validated_parents: RefCell<BTreeSet<LegacyText>>,
+}
+
+impl<B> ValidationMemoBackend<B> {
+    fn new(inner: B) -> Self {
+        Self {
+            inner,
+            validated_parents: RefCell::new(BTreeSet::new()),
+        }
+    }
+
+    fn into_inner(self) -> B {
+        self.inner
+    }
+}
+
+impl<B: RenameBackend> RenameBackend for ValidationMemoBackend<B> {
+    fn validate_path_environment(&self, path: &LegacyText) -> Result<(), BackendError> {
+        let Some(parent) = benchmark_validated_parent(path) else {
+            return self.inner.validate_path_environment(path);
+        };
+        if self.validated_parents.borrow().contains(&parent) {
+            return Ok(());
+        }
+        let result = self.inner.validate_path_environment(path);
+        if result.is_ok() {
+            self.validated_parents.borrow_mut().insert(parent);
+        }
+        result
+    }
+
+    fn path_key(&self, path: &LegacyText) -> PathKey {
+        self.inner.path_key(path)
+    }
+
+    fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
+        self.inner.observe(path)
+    }
+
+    fn is_same_or_descendant(
+        &self,
+        ancestor: &LegacyText,
+        candidate: &LegacyText,
+    ) -> Result<bool, BackendError> {
+        self.inner.is_same_or_descendant(ancestor, candidate)
+    }
+
+    fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
+        self.inner.next_transaction_nonce()
+    }
+
+    fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+        self.inner.rename_no_replace(operation)
+    }
+}
+
+fn benchmark_validated_parent(path: &LegacyText) -> Option<LegacyText> {
+    let units = path.units();
+    let is_separator = |unit| unit == b'\\' as u16 || unit == b'/' as u16;
+    let is_drive_absolute = units.len() >= 3
+        && ((b'A' as u16..=b'Z' as u16).contains(&units[0])
+            || (b'a' as u16..=b'z' as u16).contains(&units[0]))
+        && units[1] == b':' as u16
+        && is_separator(units[2]);
+    let is_unc_absolute = units.len() >= 5 && is_separator(units[0]) && is_separator(units[1]);
+    let separator = units.iter().rposition(|unit| is_separator(*unit))?;
+    if !(is_drive_absolute || is_unc_absolute) || separator + 1 >= units.len() {
+        return None;
+    }
+    let leaf = LegacyText::from_units(units[separator + 1..].to_vec());
+    validate_windows_leaf_name(&leaf).ok()?;
+    let parent_end = if separator == 2 && units[1] == b':' as u16 {
+        separator + 1
+    } else {
+        separator
+    };
+    Some(LegacyText::from_units(units[..parent_end].to_vec()))
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct JournalMetrics {
     begin: TimedCallMetric,
@@ -231,6 +316,15 @@ fn assert_timed_calls(metric: TimedCallMetric, expected: usize) {
     assert_eq!(metric.calls, expected);
 }
 
+fn assert_no_backend_calls(metrics: BackendMetrics) {
+    assert_timed_calls(metrics.validate, 0);
+    assert_timed_calls(metrics.path_key, 0);
+    assert_timed_calls(metrics.observe, 0);
+    assert_timed_calls(metrics.descendant, 0);
+    assert_timed_calls(metrics.nonce, 0);
+    assert_timed_calls(metrics.rename, 0);
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BenchmarkTopology {
     Same,
@@ -274,6 +368,173 @@ enum EnvironmentInput<'a> {
     Missing,
     Unicode(&'a str),
     NonUnicode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BenchmarkVariant {
+    Baseline,
+    ValidationSkipEstimate,
+}
+
+impl BenchmarkVariant {
+    fn parse(value: EnvironmentInput<'_>) -> Result<Self, std::io::Error> {
+        match value {
+            EnvironmentInput::Missing | EnvironmentInput::Unicode("baseline") => Ok(Self::Baseline),
+            EnvironmentInput::Unicode("validation-skip-estimate") => {
+                Ok(Self::ValidationSkipEstimate)
+            }
+            EnvironmentInput::Unicode(_) => Err(std::io::Error::other(
+                "DARKRENAMER_BENCH_VARIANT must be baseline or validation-skip-estimate",
+            )),
+            EnvironmentInput::NonUnicode => Err(std::io::Error::other(
+                "DARKRENAMER_BENCH_VARIANT must be valid Unicode",
+            )),
+        }
+    }
+
+    fn from_environment() -> Result<Self, std::io::Error> {
+        match std::env::var("DARKRENAMER_BENCH_VARIANT") {
+            Ok(value) => Self::parse(EnvironmentInput::Unicode(&value)),
+            Err(std::env::VarError::NotPresent) => Self::parse(EnvironmentInput::Missing),
+            Err(std::env::VarError::NotUnicode(_)) => Self::parse(EnvironmentInput::NonUnicode),
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Baseline => "baseline",
+            Self::ValidationSkipEstimate => "validation-skip-estimate",
+        }
+    }
+}
+
+enum BenchmarkBackend {
+    Baseline(TimedBackend<WindowsRenameBackend>),
+    ValidationSkipEstimate(ValidationMemoBackend<TimedBackend<WindowsRenameBackend>>),
+}
+
+impl BenchmarkBackend {
+    fn new(variant: BenchmarkVariant) -> Self {
+        let timed = TimedBackend::new(WindowsRenameBackend);
+        match variant {
+            BenchmarkVariant::Baseline => Self::Baseline(timed),
+            BenchmarkVariant::ValidationSkipEstimate => {
+                Self::ValidationSkipEstimate(ValidationMemoBackend::new(timed))
+            }
+        }
+    }
+
+    fn into_timed_inner(self) -> TimedBackend<WindowsRenameBackend> {
+        match self {
+            Self::Baseline(backend) => backend,
+            Self::ValidationSkipEstimate(backend) => backend.into_inner(),
+        }
+    }
+}
+
+impl RenameBackend for BenchmarkBackend {
+    fn validate_path_environment(&self, path: &LegacyText) -> Result<(), BackendError> {
+        match self {
+            Self::Baseline(backend) => backend.validate_path_environment(path),
+            Self::ValidationSkipEstimate(backend) => backend.validate_path_environment(path),
+        }
+    }
+
+    fn path_key(&self, path: &LegacyText) -> PathKey {
+        match self {
+            Self::Baseline(backend) => backend.path_key(path),
+            Self::ValidationSkipEstimate(backend) => backend.path_key(path),
+        }
+    }
+
+    fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
+        match self {
+            Self::Baseline(backend) => backend.observe(path),
+            Self::ValidationSkipEstimate(backend) => backend.observe(path),
+        }
+    }
+
+    fn is_same_or_descendant(
+        &self,
+        ancestor: &LegacyText,
+        candidate: &LegacyText,
+    ) -> Result<bool, BackendError> {
+        match self {
+            Self::Baseline(backend) => backend.is_same_or_descendant(ancestor, candidate),
+            Self::ValidationSkipEstimate(backend) => {
+                backend.is_same_or_descendant(ancestor, candidate)
+            }
+        }
+    }
+
+    fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
+        match self {
+            Self::Baseline(backend) => backend.next_transaction_nonce(),
+            Self::ValidationSkipEstimate(backend) => backend.next_transaction_nonce(),
+        }
+    }
+
+    fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+        match self {
+            Self::Baseline(backend) => backend.rename_no_replace(operation),
+            Self::ValidationSkipEstimate(backend) => backend.rename_no_replace(operation),
+        }
+    }
+}
+
+struct ScriptedValidationBackend {
+    inner: MemoryBackend,
+    validation_calls: Cell<usize>,
+    fail_validation: bool,
+}
+
+impl ScriptedValidationBackend {
+    fn new(fail_validation: bool) -> Self {
+        Self {
+            inner: MemoryBackend::new(),
+            validation_calls: Cell::new(0),
+            fail_validation,
+        }
+    }
+}
+
+impl RenameBackend for ScriptedValidationBackend {
+    fn validate_path_environment(&self, path: &LegacyText) -> Result<(), BackendError> {
+        self.validation_calls.set(self.validation_calls.get() + 1);
+        if self.fail_validation {
+            Err(BackendError {
+                operation: BackendOperation::Observe,
+                code: 5,
+                certainty: MutationCertainty::NotApplied,
+            })
+        } else {
+            self.inner.validate_path_environment(path)
+        }
+    }
+
+    fn path_key(&self, path: &LegacyText) -> PathKey {
+        self.inner.path_key(path)
+    }
+
+    fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
+        self.inner.observe(path)
+    }
+
+    fn is_same_or_descendant(
+        &self,
+        ancestor: &LegacyText,
+        candidate: &LegacyText,
+    ) -> Result<bool, BackendError> {
+        self.inner.is_same_or_descendant(ancestor, candidate)
+    }
+
+    fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
+        self.inner.next_transaction_nonce()
+    }
+
+    fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+        self.inner.rename_no_replace(operation)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -373,6 +634,44 @@ impl BenchmarkIteration {
     }
 }
 
+const BENCHMARK_INSTRUMENTATION_REVISION: &str = "parent-validation-v1";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BenchmarkSourceSha(String);
+
+impl BenchmarkSourceSha {
+    fn parse(value: EnvironmentInput<'_>) -> Result<Self, std::io::Error> {
+        match value {
+            EnvironmentInput::Unicode(value)
+                if value.len() == 40
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) =>
+            {
+                Ok(Self(value.to_owned()))
+            }
+            EnvironmentInput::Unicode(_) | EnvironmentInput::Missing => Err(std::io::Error::other(
+                "DARKRENAMER_BENCH_SOURCE_SHA must be exactly 40 lowercase hexadecimal characters",
+            )),
+            EnvironmentInput::NonUnicode => Err(std::io::Error::other(
+                "DARKRENAMER_BENCH_SOURCE_SHA must be valid Unicode",
+            )),
+        }
+    }
+
+    fn from_environment() -> Result<Self, std::io::Error> {
+        match std::env::var("DARKRENAMER_BENCH_SOURCE_SHA") {
+            Ok(value) => Self::parse(EnvironmentInput::Unicode(&value)),
+            Err(std::env::VarError::NotPresent) => Self::parse(EnvironmentInput::Missing),
+            Err(std::env::VarError::NotUnicode(_)) => Self::parse(EnvironmentInput::NonUnicode),
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 const DEEP_PARENT_EXTRA_DEPTH: usize = 8;
 
 fn parse_private_root_acknowledgment(value: Option<&str>) -> Result<(), std::io::Error> {
@@ -440,8 +739,11 @@ struct BenchmarkMetadata<'a> {
     media: &'a str,
     count: usize,
     topology: BenchmarkTopology,
+    variant: BenchmarkVariant,
     evidence_class: BenchmarkEvidenceClass,
     iteration: BenchmarkIteration,
+    source_sha: &'a str,
+    instrumentation_revision: &'static str,
 }
 
 fn print_backend_metrics(metadata: BenchmarkMetadata<'_>, phase: &str, metrics: BackendMetrics) {
@@ -449,15 +751,20 @@ fn print_backend_metrics(metadata: BenchmarkMetadata<'_>, phase: &str, metrics: 
         media,
         count,
         topology,
+        variant,
         evidence_class,
         iteration,
+        source_sha,
+        instrumentation_revision,
     } = metadata;
     println!(
-        "darkrenamer_benchmark_backend,media={media},count={count},topology={},evidence_class={},\
-         iteration={},recorded={},scope={},phase={phase},validate_calls={},validate_us={},\
+        "darkrenamer_benchmark_backend,media={media},count={count},topology={},variant={},evidence_class={},\
+         iteration={},recorded={},scope={},source_sha={source_sha},instrumentation_revision={instrumentation_revision},\
+         phase={phase},validate_calls={},validate_us={},\
          path_key_calls={},path_key_us={},observe_calls={},observe_us={},descendant_calls={},\
          descendant_us={},nonce_calls={},nonce_us={},rename_calls={},rename_us={}",
         topology.as_str(),
+        variant.as_str(),
         evidence_class.as_str(),
         iteration.value(),
         iteration.recorded(),
@@ -482,15 +789,20 @@ fn print_journal_metrics(metadata: BenchmarkMetadata<'_>, metrics: JournalMetric
         media,
         count,
         topology,
+        variant,
         evidence_class,
         iteration,
+        source_sha,
+        instrumentation_revision,
     } = metadata;
     println!(
-        "darkrenamer_benchmark_journal,media={media},count={count},topology={},evidence_class={},\
-         iteration={},recorded={},scope={},phase=execution,begin_calls={},begin_us={},\
+        "darkrenamer_benchmark_journal,media={media},count={count},topology={},variant={},evidence_class={},\
+         iteration={},recorded={},scope={},source_sha={source_sha},instrumentation_revision={instrumentation_revision},\
+         phase=execution,begin_calls={},begin_us={},\
          prepared_calls={},prepared_us={},completed_calls={},completed_us={},not_applied_calls={},\
          not_applied_us={},terminal_calls={},terminal_us={}",
         topology.as_str(),
+        variant.as_str(),
         evidence_class.as_str(),
         iteration.value(),
         iteration.recorded(),
@@ -524,15 +836,20 @@ fn print_benchmark_summary(
         media,
         count,
         topology,
+        variant,
         evidence_class,
         iteration,
+        source_sha,
+        instrumentation_revision,
     } = metadata;
     match durable {
         Some(durable) => println!(
-            "darkrenamer_benchmark,media={media},count={count},topology={},evidence_class={},\
-             iteration={},recorded={},scope={},planning_ms={},execution_ms={},planning_us={},\
+            "darkrenamer_benchmark,media={media},count={count},topology={},variant={},evidence_class={},\
+             iteration={},recorded={},scope={},source_sha={source_sha},instrumentation_revision={instrumentation_revision},\
+             planning_ms={},execution_ms={},planning_us={},\
              preflight_us={},execution_us={}",
             topology.as_str(),
+            variant.as_str(),
             evidence_class.as_str(),
             iteration.value(),
             iteration.recorded(),
@@ -544,9 +861,11 @@ fn print_benchmark_summary(
             durable.execution.as_micros(),
         ),
         None => println!(
-            "darkrenamer_benchmark,media={media},count={count},topology={},evidence_class={},\
-             iteration={},recorded={},scope={},planning_ms={},planning_us={},preflight_us={}",
+            "darkrenamer_benchmark,media={media},count={count},topology={},variant={},evidence_class={},\
+             iteration={},recorded={},scope={},source_sha={source_sha},instrumentation_revision={instrumentation_revision},\
+             planning_ms={},planning_us={},preflight_us={}",
             topology.as_str(),
+            variant.as_str(),
             evidence_class.as_str(),
             iteration.value(),
             iteration.recorded(),
@@ -1114,6 +1433,200 @@ fn benchmark_topology_parser_accepts_documented_values_and_rejects_unknown_value
 }
 
 #[test]
+fn benchmark_variant_parser_defaults_to_baseline_and_rejects_unknown_values() {
+    assert_eq!(
+        BenchmarkVariant::parse(EnvironmentInput::Missing).ok(),
+        Some(BenchmarkVariant::Baseline)
+    );
+    assert_eq!(
+        BenchmarkVariant::parse(EnvironmentInput::Unicode("baseline")).ok(),
+        Some(BenchmarkVariant::Baseline)
+    );
+    assert_eq!(
+        BenchmarkVariant::parse(EnvironmentInput::Unicode("validation-skip-estimate")).ok(),
+        Some(BenchmarkVariant::ValidationSkipEstimate)
+    );
+    assert!(BenchmarkVariant::parse(EnvironmentInput::Unicode("memo")).is_err());
+    assert!(BenchmarkVariant::parse(EnvironmentInput::Unicode("validation-memo")).is_err());
+    assert!(BenchmarkVariant::parse(EnvironmentInput::Unicode("unknown")).is_err());
+    assert!(BenchmarkVariant::parse(EnvironmentInput::NonUnicode).is_err());
+}
+
+#[test]
+fn benchmark_source_sha_parser_and_output_metadata_are_strict()
+-> Result<(), Box<dyn std::error::Error>> {
+    const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+    let source_sha = BenchmarkSourceSha::parse(EnvironmentInput::Unicode(SHA))?;
+    assert_eq!(source_sha.as_str(), SHA);
+    assert!(BenchmarkSourceSha::parse(EnvironmentInput::Missing).is_err());
+    assert!(BenchmarkSourceSha::parse(EnvironmentInput::NonUnicode).is_err());
+    assert!(
+        BenchmarkSourceSha::parse(EnvironmentInput::Unicode(
+            "0123456789abcdef0123456789abcdef0123456"
+        ))
+        .is_err()
+    );
+    assert!(
+        BenchmarkSourceSha::parse(EnvironmentInput::Unicode(
+            "0123456789abcdef0123456789abcdef0123456G"
+        ))
+        .is_err()
+    );
+    assert!(
+        BenchmarkSourceSha::parse(EnvironmentInput::Unicode(
+            "0123456789abcdef0123456789abcdef0123456A"
+        ))
+        .is_err()
+    );
+
+    let metadata = BenchmarkMetadata {
+        media: "virtual",
+        count: 100,
+        topology: BenchmarkTopology::Same,
+        variant: BenchmarkVariant::ValidationSkipEstimate,
+        evidence_class: BenchmarkEvidenceClass::DirectionalHosted,
+        iteration: BenchmarkIteration(1),
+        source_sha: source_sha.as_str(),
+        instrumentation_revision: BENCHMARK_INSTRUMENTATION_REVISION,
+    };
+    assert_eq!(metadata.source_sha, SHA);
+    assert_eq!(metadata.instrumentation_revision, "parent-validation-v1");
+    assert_eq!(metadata.variant.as_str(), "validation-skip-estimate");
+    Ok(())
+}
+
+#[test]
+fn validation_skip_estimate_never_caches_failed_or_structurally_invalid_paths() {
+    let failed = ValidationMemoBackend::new(ScriptedValidationBackend::new(true));
+    let valid_path = LegacyText::from("C:\\work\\file.txt");
+    assert!(failed.validate_path_environment(&valid_path).is_err());
+    assert!(failed.validate_path_environment(&valid_path).is_err());
+    assert_eq!(failed.inner.validation_calls.get(), 2);
+    assert!(failed.validated_parents.borrow().is_empty());
+
+    let invalid = ValidationMemoBackend::new(ScriptedValidationBackend::new(false));
+    for path in [
+        LegacyText::from("relative.txt"),
+        LegacyText::from("C:\\work\\bad?.txt"),
+    ] {
+        assert!(invalid.validate_path_environment(&path).is_ok());
+        assert!(invalid.validate_path_environment(&path).is_ok());
+    }
+    assert_eq!(invalid.inner.validation_calls.get(), 4);
+    assert!(invalid.validated_parents.borrow().is_empty());
+}
+
+#[test]
+fn validation_skip_estimate_matches_static_topology_fixtures_and_reduces_validation_calls()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+    for (topology, expected_estimate_validations) in [
+        (BenchmarkTopology::Same, 1),
+        (BenchmarkTopology::Unique, 2),
+        (BenchmarkTopology::Deep, 1),
+    ] {
+        let topology_root = directory.path().join(topology.as_str());
+        fs::create_dir(&topology_root)?;
+        let parents = prepare_benchmark_parents(&topology_root, topology, 2)?;
+        let fixtures = parents
+            .into_iter()
+            .enumerate()
+            .map(|(index, parent)| {
+                let source = parent.join(format!("source-{index}.txt"));
+                let destination = parent.join(format!("renamed-{index}.txt"));
+                fs::write(&source, format!("source-{index}"))?;
+                Ok((parent, source, destination))
+            })
+            .collect::<Result<Vec<_>, std::io::Error>>()?;
+        let make_intents = || {
+            fixtures
+                .iter()
+                .enumerate()
+                .map(|(index, (parent, source, _destination))| {
+                    Ok(intent(
+                        u32::try_from(index)?,
+                        source,
+                        parent,
+                        &format!("renamed-{index}.txt"),
+                    ))
+                })
+                .collect::<Result<Vec<_>, std::num::TryFromIntError>>()
+        };
+
+        let baseline_backend = BenchmarkBackend::new(BenchmarkVariant::Baseline);
+        let baseline_plan = RenamePlanner::new(&baseline_backend)
+            .plan(PlanRequest::new(ModelRevision::new(1), make_intents()?))?;
+        let mut baseline_backend = baseline_backend.into_timed_inner();
+        let baseline_metrics = baseline_backend.take_metrics();
+        assert_timed_calls(baseline_metrics.validate, 4);
+        assert_timed_calls(baseline_metrics.observe, 4);
+
+        let estimate_backend = BenchmarkBackend::new(BenchmarkVariant::ValidationSkipEstimate);
+        let estimate_plan = RenamePlanner::new(&estimate_backend)
+            .plan(PlanRequest::new(ModelRevision::new(1), make_intents()?))?;
+        let mut estimate_backend = estimate_backend.into_timed_inner();
+        let estimate_metrics = estimate_backend.take_metrics();
+        assert_timed_calls(estimate_metrics.validate, expected_estimate_validations);
+        assert_timed_calls(estimate_metrics.observe, 4);
+        assert_eq!(baseline_plan.rows(), estimate_plan.rows());
+        assert_eq!(baseline_plan.fingerprint(), estimate_plan.fingerprint());
+
+        for (_parent, source, destination) in &fixtures {
+            estimate_backend.validate_path_environment(&legacy_path(source))?;
+            estimate_backend.validate_path_environment(&legacy_path(destination))?;
+        }
+        let fresh_validation_metrics = estimate_backend.take_metrics();
+        assert_timed_calls(fresh_validation_metrics.validate, 4);
+        assert_timed_calls(fresh_validation_metrics.observe, 0);
+        assert_no_backend_calls(estimate_backend.take_metrics());
+
+        for (_parent, source, destination) in &fixtures {
+            assert!(source.is_file());
+            assert!(!destination.exists());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn validation_skip_estimate_is_removed_before_preflight_and_execution()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+    let source = directory.path().join("source.txt");
+    let destination = directory.path().join("renamed.txt");
+    fs::write(&source, b"content")?;
+    let estimate_backend = BenchmarkBackend::new(BenchmarkVariant::ValidationSkipEstimate);
+    let plan = RenamePlanner::new(&estimate_backend).plan(PlanRequest::new(
+        ModelRevision::new(1),
+        vec![intent(0, &source, directory.path(), "renamed.txt")],
+    ))?;
+    let mut execution_backend: TimedBackend<WindowsRenameBackend> =
+        estimate_backend.into_timed_inner();
+    let planning_metrics = execution_backend.take_metrics();
+    assert_timed_calls(planning_metrics.validate, 1);
+
+    execution_backend.validate_path_environment(&legacy_path(&source))?;
+    execution_backend.validate_path_environment(&legacy_path(&destination))?;
+    assert_timed_calls(execution_backend.take_metrics().validate, 2);
+    let _requirements = preflight_plan(&plan, &mut execution_backend)?;
+    let id = plan.id();
+    let revision = plan.revision();
+    let mut journal = MemoryJournal::new();
+    let report = RenameExecutor::new(&mut execution_backend, &mut journal)
+        .execute(plan.confirm_presented(id, revision)?)?;
+    assert_eq!(report.outcome(), &ExecutionOutcome::Completed);
+    assert!(!source.exists());
+    assert_eq!(fs::read(destination)?, b"content");
+    Ok(())
+}
+
+#[test]
 fn benchmark_evidence_class_parser_and_media_pairings_are_strict() {
     assert_eq!(
         BenchmarkEvidenceClass::parse(EnvironmentInput::Missing).ok(),
@@ -1324,6 +1837,8 @@ fn benchmark_durable_production_path() -> Result<(), Box<dyn std::error::Error>>
     evidence_class.validate_media(&media)?;
     let iteration = BenchmarkIteration::from_environment()?;
     let topology = BenchmarkTopology::from_environment()?;
+    let variant = BenchmarkVariant::from_environment()?;
+    let source_sha = BenchmarkSourceSha::from_environment()?;
     // This explicit operator acknowledgment is a defensive fixture precondition,
     // not proof that the selected root's ACL excludes other users or processes.
     private_root_acknowledged_from_environment()?;
@@ -1373,11 +1888,12 @@ fn benchmark_durable_production_path() -> Result<(), Box<dyn std::error::Error>>
         fixture_paths.push((source, destination));
     }
 
-    let mut backend = TimedBackend::new(WindowsRenameBackend);
+    let backend = BenchmarkBackend::new(variant);
     let planning_started = Instant::now();
     let plan =
         RenamePlanner::new(&backend).plan(PlanRequest::new(ModelRevision::new(1), intents))?;
     let planning = planning_started.elapsed();
+    let mut backend = backend.into_timed_inner();
     let planning_backend = backend.take_metrics();
 
     let preflight_started = Instant::now();
@@ -1429,8 +1945,11 @@ fn benchmark_durable_production_path() -> Result<(), Box<dyn std::error::Error>>
         media: media.as_str(),
         count,
         topology,
+        variant,
         evidence_class,
         iteration,
+        source_sha: source_sha.as_str(),
+        instrumentation_revision: BENCHMARK_INSTRUMENTATION_REVISION,
     };
     print_benchmark_summary(metadata, planning, preflight, durable.as_ref());
     print_backend_metrics(metadata, "planning", planning_backend);
