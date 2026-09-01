@@ -198,6 +198,8 @@ try {
             'rustc_version'
             'target_triple'
             'darkrenamer_exe_bytes'
+            'darkrenamer_text_raw_bytes'
+            'debug_symbols_pdb_bytes'
             'debug_symbols_zip_bytes'
             'sbom_bytes'
             'cargo_lock_package_count'
@@ -207,6 +209,8 @@ try {
     $numericElements = @{}
     foreach ($name in @(
         'darkrenamer_exe_bytes'
+        'darkrenamer_text_raw_bytes'
+        'debug_symbols_pdb_bytes'
         'debug_symbols_zip_bytes'
         'sbom_bytes'
         'cargo_lock_package_count'
@@ -221,8 +225,8 @@ finally {
 $schemaVersion = [long] 0
 if ($schemaVersionElement.ValueKind -ne [Text.Json.JsonValueKind]::Number -or
     -not $schemaVersionElement.TryGetInt64([ref] $schemaVersion) -or
-    $schemaVersion -ne 1) {
-    throw 'release-metrics.schema_version must be the JSON integer 1.'
+    $schemaVersion -ne 2) {
+    throw 'release-metrics.schema_version must be the JSON integer 2.'
 }
 if ($metrics.source_sha -isnot [string] -or $metrics.source_sha -cnotmatch '^[0-9a-f]{40}$') {
     throw 'release-metrics.source_sha must be a full lowercase 40-character Git SHA.'
@@ -278,6 +282,7 @@ foreach ($name in $numericElements.Keys) {
 
 $expectedByteCounts = @{
     darkrenamer_exe_bytes = (Get-Item -LiteralPath (Join-Path $handoffPath 'DarkReNamer.exe')).Length
+    debug_symbols_pdb_bytes = (Get-Item -LiteralPath (Join-Path $handoffPath 'DarkReNamer.pdb')).Length
     debug_symbols_zip_bytes = (Get-Item -LiteralPath (Join-Path $handoffPath 'DarkReNamer-debug-symbols.zip')).Length
     sbom_bytes = (Get-Item -LiteralPath (Join-Path $handoffPath 'DarkReNamer.cdx.json')).Length
 }
@@ -354,6 +359,34 @@ $entryHash = [Convert]::ToHexString($entryHashBytes).ToLowerInvariant()
 $pdbHash = (Get-FileHash -LiteralPath $pdbPath -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($entryHash -ne $pdbHash) {
     throw 'Debug-symbol archive does not contain the handoff PDB bytes.'
+}
+
+$measurerPath = Join-Path $PSScriptRoot 'measure-windows-binary.ps1'
+if (-not (Test-Path -LiteralPath $measurerPath -PathType Leaf)) {
+    throw 'Required Windows binary measurement script is missing.'
+}
+$measurementPath = Join-Path `
+    ([IO.Path]::GetTempPath()) `
+    "darkrenamer-handoff-measurement-$([Guid]::NewGuid().ToString('N')).json"
+try {
+    & $measurerPath `
+        -ExecutablePath (Join-Path $handoffPath 'DarkReNamer.exe') `
+        -PdbPath $pdbPath `
+        -DebugSymbolsZipPath $symbolsPath `
+        -OutputPath $measurementPath `
+        6>$null
+    $binaryMeasurement = Get-Content -LiteralPath $measurementPath -Raw | ConvertFrom-Json
+}
+finally {
+    if (Test-Path -LiteralPath $measurementPath) {
+        Remove-Item -LiteralPath $measurementPath
+    }
+}
+if ($metricValues['darkrenamer_text_raw_bytes'] -ne $binaryMeasurement.pe.text_raw_bytes) {
+    throw 'release-metrics.darkrenamer_text_raw_bytes does not match the executable .text raw bytes.'
+}
+if ($metricValues['debug_symbols_pdb_bytes'] -ne $binaryMeasurement.debug_symbols.pdb_bytes) {
+    throw 'release-metrics.debug_symbols_pdb_bytes does not match the measured PDB bytes.'
 }
 
 $exePath = Join-Path $handoffPath 'DarkReNamer.exe'

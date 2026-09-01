@@ -18,8 +18,9 @@ published prerelease contains:
 - `SHA256SUMS.txt`;
 - `release-handoff.json`, binding the source SHA and Actions workflow run to the
   executable filename and SHA-256;
-- `release-metrics.json`, recording the source, toolchain, target, artifact byte
-  sizes, and Cargo lockfile package count for that build;
+- `release-metrics.json`, recording the source, toolchain, target, executable and
+  `.text` raw byte sizes, raw and compressed debug-symbol sizes, SBOM size, and
+  Cargo lockfile package count for that build;
 - a CycloneDX JSON SBOM;
 - a zipped PDB;
 - license, attribution, and this distribution policy;
