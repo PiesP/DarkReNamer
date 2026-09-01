@@ -3,16 +3,16 @@ use std::ffi::c_void;
 use std::io;
 use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::HWND;
 #[cfg(test)]
 use windows_sys::Win32::Foundation::RECT;
+use windows_sys::Win32::Foundation::{HWND, LPARAM};
 #[cfg(test)]
 use windows_sys::Win32::Graphics::Gdi::MapWindowPoints;
 use windows_sys::Win32::Graphics::Gdi::{
     CreateSolidBrush, DeleteObject, HBRUSH, HFONT, InvalidateRect,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::SystemServices::SS_ETCHEDHORZ;
+use windows_sys::Win32::System::SystemServices::SS_OWNERDRAW;
 use windows_sys::Win32::UI::Controls::{
     TOOLTIPS_CLASSW, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTS_ALWAYSTIP, TTTOOLINFOW,
 };
@@ -31,8 +31,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::{
-    APPLY, APPLY_KEYLINE_COLOR, CommandId, CommandPlacement, CommandRailSpec, LayoutRect,
-    calculate_apply_keyline_layout, calculate_command_rail_separator_layout, command_ui_spec, wide,
+    APPLY, APPLY_KEYLINE_COLOR, AppearanceResources, CommandId, CommandPlacement, CommandRailSpec,
+    LayoutRect, calculate_apply_keyline_layout, calculate_command_rail_separator_layout,
+    command_ui_spec, draw_owner_separator, wide,
 };
 
 #[derive(Debug)]
@@ -192,8 +193,10 @@ impl CommandRail {
             self.add_tooltip(button, command_spec.tooltip_label)?;
         }
         for _ in 1..self.spec.group_count() {
-            // A themed STATIC separator is decorative and deliberately omits
-            // WS_TABSTOP, an identifier, and custom drawing.
+            // An owner-drawn STATIC separator is decorative and deliberately
+            // omits WS_TABSTOP and an identifier. Owning the complete two-DIP
+            // paint avoids the system etched renderer's light background in a
+            // custom dark palette while retaining system-color fallback.
             // SAFETY: parent is a live top-level window and the system STATIC
             // class retains no caller-owned storage from this creation call.
             let separator = unsafe {
@@ -201,7 +204,7 @@ impl CommandRail {
                     0,
                     wide("STATIC").as_ptr(),
                     null(),
-                    WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
+                    WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
                     0,
                     0,
                     0,
@@ -408,8 +411,14 @@ impl CommandRail {
             .map(|keyline| keyline.brush)
     }
 
-    pub(super) fn is_separator(&self, window: HWND) -> bool {
-        self.separators.contains(&window)
+    pub(super) fn draw_separator(
+        &self,
+        resources: Option<&AppearanceResources>,
+        lparam: LPARAM,
+    ) -> bool {
+        self.separators
+            .iter()
+            .any(|separator| draw_owner_separator(resources, *separator, lparam))
     }
 
     pub(super) fn set_apply_keyline_color(&mut self, color: u32) -> io::Result<()> {

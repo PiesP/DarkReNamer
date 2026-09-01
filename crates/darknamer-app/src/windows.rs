@@ -145,7 +145,7 @@ use windows_sys::Win32::System::SystemServices::{
     SS_CENTER, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_NOPREFIX, SS_OWNERDRAW, SS_SUNKEN,
 };
 #[cfg(test)]
-use windows_sys::Win32::System::SystemServices::{SS_ETCHEDHORZ, SS_NOTIFY, SS_TYPEMASK};
+use windows_sys::Win32::System::SystemServices::{SS_NOTIFY, SS_TYPEMASK};
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTimeEx};
 use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 #[cfg(test)]
@@ -171,7 +171,7 @@ use windows_sys::Win32::UI::Controls::{
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::{
-    DRAWITEMSTRUCT, LVM_GETITEMTEXTW, MEASUREITEMSTRUCT, ODT_BUTTON, ODT_MENU,
+    DRAWITEMSTRUCT, LVM_GETITEMTEXTW, MEASUREITEMSTRUCT, ODT_BUTTON, ODT_MENU, ODT_STATIC,
 };
 use windows_sys::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForWindow, GetSystemMetricsForDpi, SystemParametersInfoForDpi,
@@ -2639,12 +2639,29 @@ mod tests {
                     // SAFETY: separator is live and GWL_STYLE is a value query.
                     let style = unsafe { GetWindowLongPtrW(*separator, GWL_STYLE) } as u32;
                     assert_eq!(style & WS_TABSTOP, 0);
-                    assert_eq!(style & SS_TYPEMASK, SS_ETCHEDHORZ);
+                    assert_eq!(style & SS_TYPEMASK, SS_OWNERDRAW);
                     let rect = rail.separator_rect(index)?;
                     assert_eq!(rect.left, origin_x + expected_rect.x);
                     assert_eq!(rect.top, expected_rect.y);
                     assert_eq!(rect.right - rect.left, expected_rect.width);
                     assert_eq!(rect.bottom - rect.top, expected_rect.height);
+                    // SAFETY: separator is live and the returned DC is released
+                    // after the synchronous owner-draw probe below.
+                    let dc = unsafe { GetDC(*separator) };
+                    if dc.is_null() {
+                        return Err(io::Error::last_os_error());
+                    }
+                    let mut draw = DRAWITEMSTRUCT {
+                        CtlType: ODT_STATIC,
+                        hwndItem: *separator,
+                        hDC: dc,
+                        ..DRAWITEMSTRUCT::default()
+                    };
+                    // SAFETY: separator is live and rcItem is writable storage.
+                    unsafe { GetClientRect(*separator, &mut draw.rcItem) };
+                    assert!(rail.draw_separator(None, (&raw mut draw) as LPARAM));
+                    // SAFETY: dc came from this exact live separator.
+                    unsafe { ReleaseDC(*separator, dc) };
                 }
                 rail.set_visible(false);
                 for separator in rail.separator_windows() {

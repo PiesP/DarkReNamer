@@ -84,7 +84,6 @@ impl Drop for OwnedSolidBrush {
 /// GDI resources for the app-owned native surfaces only.
 pub(super) struct AppearanceResources {
     window: OwnedSolidBrush,
-    panel: OwnedSolidBrush,
     workspace: OwnedSolidBrush,
     status: OwnedSolidBrush,
     drop_overlay: OwnedSolidBrush,
@@ -102,7 +101,6 @@ impl AppearanceResources {
     pub(super) fn create(palette: SemanticPalette) -> io::Result<Self> {
         Ok(Self {
             window: OwnedSolidBrush::create(palette.surface_window)?,
-            panel: OwnedSolidBrush::create(palette.surface_panel)?,
             workspace: OwnedSolidBrush::create(palette.surface_workspace)?,
             status: OwnedSolidBrush::create(palette.surface_status)?,
             drop_overlay: OwnedSolidBrush::create(palette.surface_drop)?,
@@ -206,20 +204,6 @@ pub(super) fn static_control_colors(state: &AppState, child: HWND) -> Option<Sta
             brush: resources.drop_overlay.as_raw(),
             text: resources.palette.text_primary,
             background: resources.palette.surface_drop,
-        })
-    } else if state
-        .left_rail
-        .as_ref()
-        .is_some_and(|rail| rail.is_separator(child))
-        || state
-            .right_rail
-            .as_ref()
-            .is_some_and(|rail| rail.is_separator(child))
-    {
-        Some(StaticControlColors {
-            brush: resources.panel.as_raw(),
-            text: resources.palette.text_secondary,
-            background: resources.palette.surface_panel,
         })
     } else {
         None
