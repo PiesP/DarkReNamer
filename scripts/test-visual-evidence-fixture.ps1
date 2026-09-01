@@ -51,7 +51,8 @@ function Write-VisualPngFixture {
         [Parameter(Mandatory)][int] $Width,
         [Parameter(Mandatory)][int] $Height,
         [Parameter(Mandatory)][ValidateRange(1, 255)][int] $Seed,
-        [switch] $Solid
+        [switch] $Solid,
+        [switch] $Transparent
     )
     if ($Width -lt 1 -or $Height -lt 1) {
         throw 'PNG fixture dimensions must be positive.'
@@ -69,6 +70,11 @@ function Write-VisualPngFixture {
     )
     if ($Solid) {
         $colors = @($colors[0], $colors[0], $colors[0], $colors[0])
+    }
+    if ($Transparent) {
+        foreach ($color in $colors) {
+            $color[3] = 0
+        }
     }
     $rows = @([byte[]]::new(1 + ($Width * 4)), [byte[]]::new(1 + ($Width * 4)))
     foreach ($rowIndex in 0, 1) {

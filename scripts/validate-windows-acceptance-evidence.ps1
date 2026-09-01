@@ -328,6 +328,7 @@ namespace DarkReNamerAcceptance
                 uint width = 0;
                 uint height = 0;
                 int bytesPerPixel = 0;
+                int colorType = -1;
                 byte[] headerData = null;
                 using (MemoryStream compressed = new MemoryStream())
                 {
@@ -360,7 +361,8 @@ namespace DarkReNamerAcceptance
                                 throw new InvalidDataException("PNG dimensions are outside the supported range.");
                             if (data[8] != 8 || data[10] != 0 || data[11] != 0 || data[12] != 0)
                                 throw new InvalidDataException("PNG must be non-interlaced 8-bit lossless data.");
-                            switch (data[9])
+                            colorType = data[9];
+                            switch (colorType)
                             {
                                 case 0: bytesPerPixel = 1; break;
                                 case 2: bytesPerPixel = 3; break;
@@ -425,6 +427,9 @@ namespace DarkReNamerAcceptance
                             {
                                 for (int offset = 0; offset < row.Length; offset += bytesPerPixel)
                                 {
+                                    if ((colorType == 4 && row[offset + 1] != 255) ||
+                                        (colorType == 6 && row[offset + 3] != 255))
+                                        throw new InvalidDataException("PNG screenshot pixels must be fully opaque.");
                                     uint color = 0;
                                     for (int channel = 0; channel < bytesPerPixel; channel++)
                                         color = (color << 8) | row[offset + channel];
