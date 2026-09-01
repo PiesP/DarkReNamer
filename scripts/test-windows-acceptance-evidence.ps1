@@ -479,6 +479,168 @@ try {
     )
     Assert-ValidatorPasses -Evidence $draft -Name 'valid-draft' -Draft
 
+    $zeroContextDraft = Copy-Evidence $complete
+    $zeroContextDraft.operator_context = @()
+    $zeroContextDraft.unexecuted = @()
+    $rowIndex = 0
+    foreach ($row in $zeroContextDraft.ui_matrix) {
+        $id = "ui-not-run-$rowIndex"
+        $row.status = 'not-run'
+        $row.observation_code = 'not-executed'
+        $row | Add-Member -NotePropertyName unexecuted_id -NotePropertyValue $id
+        $zeroContextDraft.unexecuted += [pscustomobject]@{
+            id = $id
+            target = "ui|$($row.windows_product)|$($row.dpi_percent)|$($row.contrast)"
+            reason_code = 'scheduled-later'
+        }
+        $rowIndex++
+    }
+    $rowIndex = 0
+    foreach ($row in $zeroContextDraft.scenarios) {
+        $id = "scenario-not-run-$rowIndex"
+        $row.status = 'not-run'
+        $row.observation_code = 'not-executed'
+        $row.PSObject.Properties.Remove('accessibility_tool')
+        $row | Add-Member -NotePropertyName unexecuted_id -NotePropertyValue $id
+        $zeroContextDraft.unexecuted += [pscustomobject]@{
+            id = $id
+            target = "scenario|$($row.windows_product)|$($row.kind)"
+            reason_code = 'scheduled-later'
+        }
+        $rowIndex++
+    }
+    $zeroContextDraft.benchmarks = @()
+    foreach ($media in 'ssd', 'hdd') {
+        foreach ($count in 100, 1000, 10000) {
+            $zeroContextDraft.unexecuted += [pscustomobject]@{
+                id = "benchmark-$media-$count-not-run"
+                target = "benchmark|$media|$count"
+                reason_code = 'scheduled-later'
+            }
+        }
+    }
+    $rowIndex = 0
+    foreach ($row in $zeroContextDraft.durability_trials) {
+        $id = "durability-not-run-$rowIndex"
+        $row.status = 'not-run'
+        $row.observation_code = 'not-executed'
+        $row.PSObject.Properties.Remove('authorization')
+        $row | Add-Member -NotePropertyName unexecuted_id -NotePropertyValue $id
+        $zeroContextDraft.unexecuted += [pscustomobject]@{
+            id = $id
+            target = "durability|$($row.kind)"
+            reason_code = 'scheduled-later'
+        }
+        $rowIndex++
+    }
+    $zeroContextDraft.unexecuted += @(
+        [pscustomobject]@{
+            id = 'durability-physical-power-loss-not-run'
+            target = 'durability|physical-power-loss'
+            reason_code = 'scheduled-later'
+        },
+        [pscustomobject]@{
+            id = 'durability-storage-fault-not-run'
+            target = 'durability|storage-fault'
+            reason_code = 'scheduled-later'
+        }
+    )
+    Assert-ValidatorPasses `
+        -Evidence $zeroContextDraft `
+        -Name 'zero-context-not-run-draft' `
+        -Draft
+
+    $zeroContextUiExecuted = Copy-Evidence $zeroContextDraft
+    $zeroContextUiExecuted.ui_matrix[0].status = 'pass'
+    $zeroContextUiExecuted.ui_matrix[0].observation_code = 'layout-verified'
+    $zeroContextUiExecuted.ui_matrix[0].PSObject.Properties.Remove('unexecuted_id')
+    $zeroContextUiExecuted.unexecuted = @(
+        $zeroContextUiExecuted.unexecuted |
+            Where-Object { $_.target -ne 'ui|Windows 10|100|normal' }
+    )
+    Assert-ValidatorFails `
+        -Evidence $zeroContextUiExecuted `
+        -Name 'zero-context-executed-ui-draft' `
+        -ExpectedFragment 'may omit operator_context only when no acceptance rows are executed' `
+        -Draft
+
+    $zeroContextScenarioExecuted = Copy-Evidence $zeroContextDraft
+    $zeroContextScenarioExecuted.scenarios[0].status = 'pass'
+    $zeroContextScenarioExecuted.scenarios[0].observation_code = 'interaction-verified'
+    $zeroContextScenarioExecuted.scenarios[0].PSObject.Properties.Remove('unexecuted_id')
+    $zeroContextScenarioExecuted.unexecuted = @(
+        $zeroContextScenarioExecuted.unexecuted |
+            Where-Object { $_.target -ne 'scenario|Windows 10|keyboard-only' }
+    )
+    Assert-ValidatorFails `
+        -Evidence $zeroContextScenarioExecuted `
+        -Name 'zero-context-executed-scenario-draft' `
+        -ExpectedFragment 'may omit operator_context only when no acceptance rows are executed' `
+        -Draft
+
+    $zeroContextBenchmarkExecuted = Copy-Evidence $zeroContextDraft
+    $zeroContextBenchmarkExecuted.benchmarks = @(Copy-Evidence $complete.benchmarks[0])
+    $zeroContextBenchmarkExecuted.unexecuted = @(
+        $zeroContextBenchmarkExecuted.unexecuted |
+            Where-Object { $_.target -ne 'benchmark|ssd|100' }
+    )
+    Assert-ValidatorFails `
+        -Evidence $zeroContextBenchmarkExecuted `
+        -Name 'zero-context-executed-benchmark-draft' `
+        -ExpectedFragment 'may omit operator_context only when no acceptance rows are executed' `
+        -Draft
+
+    $zeroContextDurabilityExecuted = Copy-Evidence $zeroContextDraft
+    $zeroContextDurabilityExecuted.durability_trials[0].status = 'pass'
+    $zeroContextDurabilityExecuted.durability_trials[0].observation_code = 'recovery-verified'
+    $zeroContextDurabilityExecuted.durability_trials[0].PSObject.Properties.Remove('unexecuted_id')
+    $zeroContextDurabilityExecuted.unexecuted = @(
+        $zeroContextDurabilityExecuted.unexecuted |
+            Where-Object { $_.target -ne 'durability|process-crash' }
+    )
+    Assert-ValidatorFails `
+        -Evidence $zeroContextDurabilityExecuted `
+        -Name 'zero-context-executed-durability-draft' `
+        -ExpectedFragment 'may omit operator_context only when no acceptance rows are executed' `
+        -Draft
+
+    $zeroContextComplete = Copy-Evidence $complete
+    $zeroContextComplete.operator_context = @()
+    Assert-ValidatorFails `
+        -Evidence $zeroContextComplete `
+        -Name 'zero-context-complete' `
+        -ExpectedFragment 'Complete evidence requires operator context for Windows 10'
+
+    $missingUiProductContext = Copy-Evidence $zeroContextDraft
+    $missingUiProductContext.operator_context = @($complete.operator_context[0])
+    $missingUiProductContext.ui_matrix[12].status = 'pass'
+    $missingUiProductContext.ui_matrix[12].observation_code = 'layout-verified'
+    $missingUiProductContext.ui_matrix[12].PSObject.Properties.Remove('unexecuted_id')
+    $missingUiProductContext.unexecuted = @(
+        $missingUiProductContext.unexecuted |
+            Where-Object { $_.target -ne 'ui|Windows 11|100|normal' }
+    )
+    Assert-ValidatorFails `
+        -Evidence $missingUiProductContext `
+        -Name 'executed-ui-missing-product-context' `
+        -ExpectedFragment 'has no matching operator_context for Windows 11' `
+        -Draft
+
+    $missingScenarioProductContext = Copy-Evidence $zeroContextDraft
+    $missingScenarioProductContext.operator_context = @($complete.operator_context[0])
+    $missingScenarioProductContext.scenarios[10].status = 'pass'
+    $missingScenarioProductContext.scenarios[10].observation_code = 'interaction-verified'
+    $missingScenarioProductContext.scenarios[10].PSObject.Properties.Remove('unexecuted_id')
+    $missingScenarioProductContext.unexecuted = @(
+        $missingScenarioProductContext.unexecuted |
+            Where-Object { $_.target -ne 'scenario|Windows 11|keyboard-only' }
+    )
+    Assert-ValidatorFails `
+        -Evidence $missingScenarioProductContext `
+        -Name 'executed-scenario-missing-product-context' `
+        -ExpectedFragment 'has no matching operator_context for Windows 11' `
+        -Draft
+
     $missingCell = Copy-Evidence $complete
     $missingCell.ui_matrix = @($missingCell.ui_matrix | Select-Object -SkipLast 1)
     Assert-ValidatorFails `

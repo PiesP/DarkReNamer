@@ -34,7 +34,6 @@
     },
     "operator_context": {
       "type": "array",
-      "minItems": 1,
       "items": {
         "$ref": "#/$defs/operatorContext"
       }

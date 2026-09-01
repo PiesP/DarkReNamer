@@ -197,6 +197,22 @@ privacy, uniqueness, and references. Every omitted draft target and every
 `not-run` row must point to a reason in `unexecuted`. Draft validation never
 promotes missing work to release evidence.
 
+Create a path-free starting document with
+[`scripts/new-windows-acceptance-draft.ps1`](scripts/new-windows-acceptance-draft.ps1).
+Use `-ExecutablePath` for a local `DarkReNamer.exe`, or `-HandoffRoot` for a
+downloaded Actions handoff. The latter validates the complete handoff before it
+reads provenance. `-OutputPath` must be an absolute new file outside the source
+worktree whose parent directory already exists; the generator validates a
+same-directory temporary file in `-Draft` mode and never overwrites an existing
+destination.
+
+The schema remains the truth for target enumerations and allowed reason codes,
+and the validator remains the truth for draft and release-gate semantics. A new
+draft contains no operator context or observed results: every required UI,
+scenario, benchmark, and durability target starts as explicitly unexecuted.
+The generator does not inspect a Windows host, ingest benchmark output or
+medians, invent storage or tool details, or establish any acceptance coverage.
+
 Complete release-gate evidence requires all of the following:
 
 - one unique UI result for Windows 10 and Windows 11 at 100%, 125%, 150%, 200%,

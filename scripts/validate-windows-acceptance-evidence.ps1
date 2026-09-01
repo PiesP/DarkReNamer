@@ -421,9 +421,6 @@ foreach ($context in @($evidence.operator_context)) {
     $contextsByProduct[$context.windows_product] = $context
     $contextIndex++
 }
-if ($contextsByProduct.Count -eq 0) {
-    throw 'operator_context must identify at least one Windows test host.'
-}
 if (-not $Draft) {
     foreach ($product in $windowsProducts) {
         if (-not $contextsByProduct.ContainsKey($product)) {
@@ -432,6 +429,7 @@ if (-not $Draft) {
     }
 }
 
+$hasExecutedRows = $false
 $uiByTarget = @{}
 $uiIndex = 0
 foreach ($row in @($evidence.ui_matrix)) {
@@ -447,7 +445,12 @@ foreach ($row in @($evidence.ui_matrix)) {
         -Code $row.observation_code `
         -Codes @{ pass = 'layout-verified'; fail = 'layout-defect'; 'not-run' = 'not-executed' } `
         -Location "$location.observation_code"
-    if (-not $contextsByProduct.ContainsKey($row.windows_product)) {
+    if ($row.status -ne 'not-run') {
+        $hasExecutedRows = $true
+    }
+    if ($row.status -ne 'not-run' -and
+        $contextsByProduct.Count -gt 0 -and
+        -not $contextsByProduct.ContainsKey($row.windows_product)) {
         throw "$location has no matching operator_context for $($row.windows_product)."
     }
     $target = Get-UiTarget $row
@@ -473,7 +476,12 @@ foreach ($row in @($evidence.scenarios)) {
         -Code $row.observation_code `
         -Codes @{ pass = 'interaction-verified'; fail = 'interaction-defect'; 'not-run' = 'not-executed' } `
         -Location "$location.observation_code"
-    if (-not $contextsByProduct.ContainsKey($row.windows_product)) {
+    if ($row.status -ne 'not-run') {
+        $hasExecutedRows = $true
+    }
+    if ($row.status -ne 'not-run' -and
+        $contextsByProduct.Count -gt 0 -and
+        -not $contextsByProduct.ContainsKey($row.windows_product)) {
         throw "$location has no matching operator_context for $($row.windows_product)."
     }
     $hasTool = Test-Property -Object $row -Name 'accessibility_tool'
@@ -514,6 +522,7 @@ foreach ($row in @($evidence.benchmarks)) {
             'connection', 'free_space_bucket', 'power_mode', 'cleanup_observation'
         ) `
         -Location $location
+    $hasExecutedRows = $true
     Assert-Enum -Value $row.media -Allowed $mediaKinds -Location "$location.media"
     Assert-Enum -Value $row.filesystem -Allowed $filesystemKinds -Location "$location.filesystem"
     Assert-Enum -Value $row.count -Allowed $benchmarkCounts -Location "$location.count"
@@ -548,6 +557,9 @@ foreach ($row in @($evidence.durability_trials)) {
         -Code $row.observation_code `
         -Codes @{ pass = 'recovery-verified'; fail = 'recovery-defect'; 'not-run' = 'not-executed' } `
         -Location "$location.observation_code"
+    if ($row.status -ne 'not-run') {
+        $hasExecutedRows = $true
+    }
     $hasAuthorization = Test-Property -Object $row -Name 'authorization'
     $requiresAuthorization = $row.kind -ne 'process-crash' -and $row.status -ne 'not-run'
     if ($requiresAuthorization) {
@@ -567,6 +579,10 @@ foreach ($row in @($evidence.durability_trials)) {
     $durabilityByTarget[$target] = $row
     Assert-NotRunReference -Row $row -Target $target -Location $location
     $durabilityIndex++
+}
+
+if ($Draft -and $contextsByProduct.Count -eq 0 -and $hasExecutedRows) {
+    throw 'Draft evidence may omit operator_context only when no acceptance rows are executed.'
 }
 
 function Assert-TargetCoverage {
