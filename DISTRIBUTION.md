@@ -16,6 +16,8 @@ published prerelease contains:
 - `SHA256SUMS.txt`;
 - `release-handoff.json`, binding the source SHA and Actions workflow run to the
   executable filename and SHA-256;
+- `release-metrics.json`, recording the source, toolchain, target, artifact byte
+  sizes, and Cargo lockfile package count for that build;
 - a CycloneDX JSON SBOM;
 - a zipped PDB;
 - license, attribution, and this distribution policy;
@@ -31,8 +33,10 @@ moved independently.
 Every successful packaging run also retains the complete Actions handoff,
 including the raw PDB. The handoff validator checks the exact file layout,
 symbol archive contents, SBOM format, checksums, unsigned Authenticode status,
-provenance shape and executable bytes, and byte-identical copies of the
-repository license and policy files.
+provenance and metrics shape, source and toolchain bindings, recorded artifact
+sizes, Cargo lockfile package count, executable bytes, and byte-identical copies
+of the repository license and policy files. The metrics are information only;
+the workflow does not apply release size or dependency-count thresholds.
 
 Verify the checksum before running the executable. GitHub attestations can be
 verified with `gh attestation verify` against this repository. A valid checksum
@@ -45,6 +49,11 @@ Run the Portable prerelease workflow manually on the source ref to exercise the
 same Windows test, build, SBOM, packaging, and handoff-validation path without
 running the publication or attestation job. Inspect the retained dry-run
 artifact before creating a release tag.
+
+After handoff validation, the workflow copies the effective values from
+`release-metrics.json` into the Actions job summary. Use the retained JSON as
+the machine-readable record for the build; the summary is an informational
+view of the same values.
 
 The workflow exports the source commit timestamp as `SOURCE_DATE_EPOCH` before
 the release build. This supplies stable source-time metadata to tools that honor

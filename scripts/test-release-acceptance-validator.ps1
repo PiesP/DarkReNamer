@@ -75,6 +75,7 @@ function New-CompleteEvidence {
             foreach ($count in 100, 1000, 10000) {
                 [pscustomobject]@{
                     media = $media
+                    filesystem = 'ntfs'
                     count = $count
                     planning_ms = 12.5
                     execution_ms = 42.25
@@ -89,7 +90,7 @@ function New-CompleteEvidence {
     )
 
     return [pscustomobject]@{
-        schema_version = 1
+        schema_version = 2
         source_sha = $SourceSha
         artifact = [pscustomobject]@{
             filename = 'DarkReNamer.exe'
@@ -131,11 +132,29 @@ function Write-Provenance {
     })
 }
 
+function Write-Metrics {
+    param(
+        [Parameter(Mandatory)][string] $HandoffRoot,
+        [Parameter(Mandatory)][string] $SourceSha
+    )
+    Write-JsonObject -Path (Join-Path $HandoffRoot 'release-metrics.json') -Value ([ordered]@{
+        schema_version = 1
+        source_sha = $SourceSha
+        rustc_version = 'rustc 1.97.1 (fixture 2026-08-01)'
+        target_triple = 'x86_64-pc-windows-msvc'
+        darkrenamer_exe_bytes = (Get-Item -LiteralPath (Join-Path $HandoffRoot 'DarkReNamer.exe')).Length
+        debug_symbols_zip_bytes = (Get-Item -LiteralPath (Join-Path $HandoffRoot 'DarkReNamer-debug-symbols.zip')).Length
+        sbom_bytes = (Get-Item -LiteralPath (Join-Path $HandoffRoot 'DarkReNamer.cdx.json')).Length
+        cargo_lock_package_count = 2
+    })
+}
+
 function Write-Checksums {
     param([Parameter(Mandatory)][string] $HandoffRoot)
     $subjects = @(
         'DarkReNamer-debug-symbols.zip', 'DarkReNamer.cdx.json', 'DarkReNamer.exe',
-        'DISTRIBUTION.md', 'LICENSE', 'release-handoff.json', 'THIRD_PARTY_NOTICES.md'
+        'DISTRIBUTION.md', 'LICENSE', 'release-handoff.json', 'release-metrics.json',
+        'THIRD_PARTY_NOTICES.md'
     )
     $lines = foreach ($name in $subjects) {
         $hash = (Get-FileHash -LiteralPath (Join-Path $HandoffRoot $name) -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -193,10 +212,12 @@ try {
         Write-Utf8NoBom -Path (Join-Path $sourceRoot $name) -Content "$name source policy`n"
         Copy-Item -LiteralPath (Join-Path $sourceRoot $name) -Destination $handoffRoot
     }
+    Write-Utf8NoBom -Path (Join-Path $sourceRoot 'rust-toolchain.toml') -Content "[toolchain]`nchannel = `"1.97.1`"`n"
+    Write-Utf8NoBom -Path (Join-Path $sourceRoot 'Cargo.lock') -Content "version = 4`n`n[[package]]`nname = `"fixture-a`"`nversion = `"0.1.0`"`n`n[[package]]`nname = `"fixture-b`"`nversion = `"0.2.0`"`n"
     & git -C $sourceRoot init --quiet
     & git -C $sourceRoot config user.name 'DarkReNamer test'
     & git -C $sourceRoot config user.email 'darkrenamer-test@example.invalid'
-    & git -C $sourceRoot add -- LICENSE THIRD_PARTY_NOTICES.md DISTRIBUTION.md
+    & git -C $sourceRoot add -- LICENSE THIRD_PARTY_NOTICES.md DISTRIBUTION.md rust-toolchain.toml Cargo.lock
     & git -C $sourceRoot commit --quiet -m 'test: initialize release source fixture'
     if ($LASTEXITCODE -ne 0) { throw 'Failed to commit source fixture repository.' }
     $sourceSha = (& git -C $sourceRoot rev-parse HEAD).Trim()
@@ -207,6 +228,7 @@ try {
     Compress-Archive -LiteralPath (Join-Path $handoffRoot 'DarkReNamer.pdb') -DestinationPath (Join-Path $handoffRoot 'DarkReNamer-debug-symbols.zip')
     $exeSha = (Get-FileHash -LiteralPath (Join-Path $handoffRoot 'DarkReNamer.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
     Write-Provenance -Path (Join-Path $handoffRoot 'release-handoff.json') -SourceSha $sourceSha -ExecutableSha $exeSha -WorkflowRun $workflowRun
+    Write-Metrics -HandoffRoot $handoffRoot -SourceSha $sourceSha
     Write-Checksums -HandoffRoot $handoffRoot
 
     $global:DarkReNamerTestAuthenticodeStatus = 'NotSigned'

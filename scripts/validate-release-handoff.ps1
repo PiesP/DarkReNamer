@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory)]
     [string] $SourceRoot,
     [Parameter(Mandatory)]
-    [string] $HandoffRoot
+    [string] $HandoffRoot,
+    [switch] $PassThru
 )
 
 Set-StrictMode -Version Latest
@@ -20,6 +21,7 @@ $expectedNames = @(
     'DISTRIBUTION.md'
     'LICENSE'
     'release-handoff.json'
+    'release-metrics.json'
     'SHA256SUMS.txt'
     'THIRD_PARTY_NOTICES.md'
 )
@@ -91,6 +93,23 @@ function Assert-UniqueJsonProperties {
     }
 }
 
+function Assert-PositiveJsonInteger {
+    param(
+        [Parameter(Mandatory)]
+        [Text.Json.JsonElement] $Element,
+        [Parameter(Mandatory)]
+        [string] $Location
+    )
+
+    $value = [long] 0
+    if ($Element.ValueKind -ne [Text.Json.JsonValueKind]::Number -or
+        -not $Element.TryGetInt64([ref] $value) -or
+        $value -le 0) {
+        throw "$Location must be a positive JSON integer."
+    }
+    return $value
+}
+
 $provenancePath = Join-Path $handoffPath 'release-handoff.json'
 try {
     $provenanceJson = Get-Content -LiteralPath $provenancePath -Raw
@@ -155,6 +174,132 @@ if ($LASTEXITCODE -ne 0 -or $sourceHead.Count -ne 1 -or $sourceHead[0] -cnotmatc
 }
 if (-not [string]::Equals($provenance.source_sha, $sourceHead[0], [StringComparison]::Ordinal)) {
     throw 'release-handoff.source_sha does not match source HEAD.'
+}
+
+$metricsPath = Join-Path $handoffPath 'release-metrics.json'
+try {
+    $metricsJson = Get-Content -LiteralPath $metricsPath -Raw
+    $metricsDocument = [Text.Json.JsonDocument]::Parse($metricsJson)
+}
+catch {
+    throw "release-metrics.json is not valid JSON: $($_.Exception.Message)"
+}
+try {
+    if ($metricsDocument.RootElement.ValueKind -ne [Text.Json.JsonValueKind]::Object) {
+        throw 'release-metrics must be a JSON object.'
+    }
+    Assert-UniqueJsonProperties -Element $metricsDocument.RootElement -Location 'release-metrics'
+    $metrics = $metricsJson | ConvertFrom-Json
+    Assert-ObjectShape `
+        -Object $metrics `
+        -Required @(
+            'schema_version'
+            'source_sha'
+            'rustc_version'
+            'target_triple'
+            'darkrenamer_exe_bytes'
+            'debug_symbols_zip_bytes'
+            'sbom_bytes'
+            'cargo_lock_package_count'
+        ) `
+        -Location 'release-metrics'
+    $schemaVersionElement = $metricsDocument.RootElement.GetProperty('schema_version').Clone()
+    $numericElements = @{}
+    foreach ($name in @(
+        'darkrenamer_exe_bytes'
+        'debug_symbols_zip_bytes'
+        'sbom_bytes'
+        'cargo_lock_package_count'
+    )) {
+        $numericElements[$name] = $metricsDocument.RootElement.GetProperty($name).Clone()
+    }
+}
+finally {
+    $metricsDocument.Dispose()
+}
+
+$schemaVersion = [long] 0
+if ($schemaVersionElement.ValueKind -ne [Text.Json.JsonValueKind]::Number -or
+    -not $schemaVersionElement.TryGetInt64([ref] $schemaVersion) -or
+    $schemaVersion -ne 1) {
+    throw 'release-metrics.schema_version must be the JSON integer 1.'
+}
+if ($metrics.source_sha -isnot [string] -or $metrics.source_sha -cnotmatch '^[0-9a-f]{40}$') {
+    throw 'release-metrics.source_sha must be a full lowercase 40-character Git SHA.'
+}
+if (-not [string]::Equals($metrics.source_sha, $provenance.source_sha, [StringComparison]::Ordinal) -or
+    -not [string]::Equals($metrics.source_sha, $sourceHead[0], [StringComparison]::Ordinal)) {
+    throw 'release-metrics.source_sha does not match release-handoff.source_sha and source HEAD.'
+}
+if ($metrics.rustc_version -isnot [string] -or
+    $metrics.rustc_version.Length -eq 0 -or
+    $metrics.rustc_version.Length -gt 256 -or
+    $metrics.rustc_version -match '[\r\n]') {
+    throw 'release-metrics.rustc_version must be a nonempty single-line string of at most 256 characters.'
+}
+$rustcVersionMatch = [regex]::Match(
+    $metrics.rustc_version,
+    '^rustc (?<version>[0-9]+\.[0-9]+\.[0-9]+)(?:$|[ +(-])'
+)
+if (-not $rustcVersionMatch.Success) {
+    throw 'release-metrics.rustc_version must begin with rustc and a semantic version.'
+}
+$toolchainPath = Join-Path $sourcePath 'rust-toolchain.toml'
+if (-not (Test-Path -LiteralPath $toolchainPath -PathType Leaf)) {
+    throw 'Required source rust-toolchain.toml is missing.'
+}
+$toolchainText = Get-Content -LiteralPath $toolchainPath -Raw
+$toolchainMatches = [regex]::Matches(
+    $toolchainText,
+    '(?m)^\s*channel\s*=\s*"([^"]+)"\s*(?:#.*)?$'
+)
+if ($toolchainMatches.Count -ne 1 -or $toolchainMatches[0].Groups[1].Value -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+    throw 'rust-toolchain.toml must define one exact semantic-version channel.'
+}
+$toolchainChannel = $toolchainMatches[0].Groups[1].Value
+if (-not [string]::Equals(
+    $rustcVersionMatch.Groups['version'].Value,
+    $toolchainChannel,
+    [StringComparison]::Ordinal
+)) {
+    throw 'release-metrics.rustc_version does not match rust-toolchain.toml channel.'
+}
+if ($metrics.target_triple -isnot [string] -or
+    -not [string]::Equals($metrics.target_triple, 'x86_64-pc-windows-msvc', [StringComparison]::Ordinal)) {
+    throw 'release-metrics.target_triple must be x86_64-pc-windows-msvc.'
+}
+
+$metricValues = @{}
+foreach ($name in $numericElements.Keys) {
+    $metricValues[$name] = Assert-PositiveJsonInteger `
+        -Element $numericElements[$name] `
+        -Location "release-metrics.$name"
+}
+
+$expectedByteCounts = @{
+    darkrenamer_exe_bytes = (Get-Item -LiteralPath (Join-Path $handoffPath 'DarkReNamer.exe')).Length
+    debug_symbols_zip_bytes = (Get-Item -LiteralPath (Join-Path $handoffPath 'DarkReNamer-debug-symbols.zip')).Length
+    sbom_bytes = (Get-Item -LiteralPath (Join-Path $handoffPath 'DarkReNamer.cdx.json')).Length
+}
+foreach ($name in $expectedByteCounts.Keys) {
+    if ($metricValues[$name] -ne $expectedByteCounts[$name]) {
+        throw "release-metrics.$name does not match the handoff file bytes."
+    }
+}
+
+$cargoLockPath = Join-Path $sourcePath 'Cargo.lock'
+if (-not (Test-Path -LiteralPath $cargoLockPath -PathType Leaf)) {
+    throw 'Required source Cargo.lock is missing.'
+}
+$cargoLockPackageCount = [regex]::Matches(
+    (Get-Content -LiteralPath $cargoLockPath -Raw),
+    '(?m)^\[\[package\]\]\s*$'
+).Count
+if ($cargoLockPackageCount -le 0) {
+    throw 'Source Cargo.lock must contain at least one [[package]] table.'
+}
+if ($metricValues['cargo_lock_package_count'] -ne $cargoLockPackageCount) {
+    throw 'release-metrics.cargo_lock_package_count does not match source Cargo.lock.'
 }
 
 $provenanceExePath = Join-Path $handoffPath $provenance.executable.filename
@@ -233,6 +378,7 @@ $expectedChecksumSubjects = @(
     'DISTRIBUTION.md'
     'LICENSE'
     'release-handoff.json'
+    'release-metrics.json'
     'THIRD_PARTY_NOTICES.md'
 )
 $checksumPath = Join-Path $handoffPath 'SHA256SUMS.txt'
@@ -261,4 +407,7 @@ for ($index = 0; $index -lt $checksumLines.Count; $index++) {
     }
 }
 
+if ($PassThru) {
+    return $provenance
+}
 Write-Host "Validated unsigned release handoff at $handoffPath."

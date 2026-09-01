@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use darknamer_app::rename::{
@@ -1234,4 +1236,324 @@ fn strict_replay_requires_manifest_order_and_reconciles_prepared_or_corrupt_reco
 
 fn temp_path(fingerprint: u64, nonce: u128, entry: u32, ordinal: usize) -> String {
     format!("C:\\work\\.__darknamer_{fingerprint:016x}_{nonce:032x}_{entry:08x}_{ordinal:02x}.tmp")
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MatrixJournalCall {
+    Begin,
+    Prepared(usize, JournalDirection),
+    Completed(usize, JournalDirection),
+    NotApplied(usize, JournalDirection),
+    Terminal(JournalTerminal),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MatrixEvent {
+    Journal(MatrixJournalCall),
+    Rename(usize),
+}
+
+type MatrixTimeline = Rc<RefCell<Vec<MatrixEvent>>>;
+
+struct MatrixJournal {
+    inner: MemoryJournal,
+    fault: Option<(usize, AppendCertainty)>,
+    calls: Vec<MatrixJournalCall>,
+    timeline: MatrixTimeline,
+}
+
+impl MatrixJournal {
+    fn new(fault: Option<(usize, AppendCertainty)>, timeline: MatrixTimeline) -> Self {
+        Self {
+            inner: MemoryJournal::new(),
+            fault,
+            calls: Vec::new(),
+            timeline,
+        }
+    }
+
+    fn append(
+        &mut self,
+        call: MatrixJournalCall,
+        operation: impl FnOnce(&mut MemoryJournal) -> Result<(), JournalError>,
+    ) -> Result<(), JournalError> {
+        self.calls.push(call);
+        self.timeline.borrow_mut().push(MatrixEvent::Journal(call));
+        let ordinal = self.calls.len();
+        if let Some((fault_ordinal, certainty)) = self.fault
+            && fault_ordinal == ordinal
+        {
+            self.fault = None;
+            if certainty == AppendCertainty::MayHaveAppended {
+                operation(&mut self.inner)?;
+            }
+            return Err(JournalError {
+                code: 1_120,
+                certainty,
+            });
+        }
+        operation(&mut self.inner)
+    }
+}
+
+impl JournalStore for MatrixJournal {
+    fn begin(&mut self, plan: PlanId, steps: &[JournalStep]) -> Result<(), JournalError> {
+        self.append(MatrixJournalCall::Begin, |inner| inner.begin(plan, steps))
+    }
+
+    fn prepared(&mut self, step: usize, direction: JournalDirection) -> Result<(), JournalError> {
+        self.append(MatrixJournalCall::Prepared(step, direction), |inner| {
+            inner.prepared(step, direction)
+        })
+    }
+
+    fn completed(&mut self, step: usize, direction: JournalDirection) -> Result<(), JournalError> {
+        self.append(MatrixJournalCall::Completed(step, direction), |inner| {
+            inner.completed(step, direction)
+        })
+    }
+
+    fn not_applied(
+        &mut self,
+        step: usize,
+        direction: JournalDirection,
+    ) -> Result<(), JournalError> {
+        self.append(MatrixJournalCall::NotApplied(step, direction), |inner| {
+            inner.not_applied(step, direction)
+        })
+    }
+
+    fn terminal(&mut self, terminal: JournalTerminal) -> Result<(), JournalError> {
+        self.append(MatrixJournalCall::Terminal(terminal), |inner| {
+            inner.terminal(terminal)
+        })
+    }
+}
+
+struct MatrixBackend {
+    inner: MemoryBackend,
+    forced_rollback: bool,
+    fault: Option<(usize, MutationCertainty)>,
+    rename_attempts: usize,
+    timeline: MatrixTimeline,
+}
+
+impl RenameBackend for MatrixBackend {
+    fn validate_path_environment(
+        &self,
+        path: &darknamer_core::LegacyText,
+    ) -> Result<(), BackendError> {
+        self.inner.validate_path_environment(path)
+    }
+
+    fn path_key(&self, path: &darknamer_core::LegacyText) -> PathKey {
+        self.inner.path_key(path)
+    }
+
+    fn observe(&self, path: &darknamer_core::LegacyText) -> Result<PathSnapshot, BackendError> {
+        self.inner.observe(path)
+    }
+
+    fn is_same_or_descendant(
+        &self,
+        ancestor: &darknamer_core::LegacyText,
+        candidate: &darknamer_core::LegacyText,
+    ) -> Result<bool, BackendError> {
+        self.inner.is_same_or_descendant(ancestor, candidate)
+    }
+
+    fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
+        self.inner.next_transaction_nonce()
+    }
+
+    fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+        self.rename_attempts = self.rename_attempts.saturating_add(1);
+        let ordinal = self.rename_attempts;
+        self.timeline
+            .borrow_mut()
+            .push(MatrixEvent::Rename(ordinal));
+        let matrix_fault = self
+            .fault
+            .filter(|(fault_ordinal, _)| *fault_ordinal == ordinal)
+            .map(|(_, certainty)| certainty);
+        if matrix_fault.is_some() {
+            self.fault = None;
+        }
+        let certainty = matrix_fault.or_else(|| {
+            (self.forced_rollback && ordinal == 2).then_some(MutationCertainty::NotApplied)
+        });
+        match certainty {
+            Some(MutationCertainty::NotApplied) => Err(BackendError {
+                operation: BackendOperation::Rename,
+                code: 995,
+                certainty: MutationCertainty::NotApplied,
+            }),
+            Some(MutationCertainty::MayHaveApplied) => {
+                self.inner.rename_no_replace(operation)?;
+                Err(BackendError {
+                    operation: BackendOperation::Rename,
+                    code: 995,
+                    certainty: MutationCertainty::MayHaveApplied,
+                })
+            }
+            None => self.inner.rename_no_replace(operation),
+        }
+    }
+}
+
+struct ExecutorMatrixEvidence {
+    journal_calls: Vec<MatrixJournalCall>,
+    rename_attempts: usize,
+    timeline: Vec<MatrixEvent>,
+}
+
+fn run_executor_matrix_case(
+    forced_rollback: bool,
+    journal_fault: Option<(usize, AppendCertainty)>,
+    rename_fault: Option<(usize, MutationCertainty)>,
+) -> Result<ExecutorMatrixEvidence, Box<dyn std::error::Error>> {
+    let planned_backend = MemoryBackend::new()
+        .with_file("C:\\work\\a.txt", 1)
+        .with_file("C:\\work\\b.txt", 2)
+        .with_file("C:\\work\\sentinel.txt", 99);
+    let confirmed = confirmed_plan(
+        &planned_backend,
+        vec![intent(0, "a.txt", "b.txt"), intent(1, "b.txt", "c.txt")],
+    )?;
+    let timeline = Rc::new(RefCell::new(Vec::new()));
+    let mut backend = MatrixBackend {
+        inner: planned_backend,
+        forced_rollback,
+        fault: rename_fault,
+        rename_attempts: 0,
+        timeline: Rc::clone(&timeline),
+    };
+    let mut journal = MatrixJournal::new(journal_fault, Rc::clone(&timeline));
+
+    let result = RenameExecutor::new(&mut backend, &mut journal).execute(confirmed);
+
+    let state = [
+        backend.inner.file_id("C:\\work\\a.txt"),
+        backend.inner.file_id("C:\\work\\b.txt"),
+        backend.inner.file_id("C:\\work\\c.txt"),
+    ];
+    let original = [Some(1), Some(2), None];
+    let committed = [None, Some(1), Some(2)];
+    assert_eq!(backend.inner.file_id("C:\\work\\sentinel.txt"), Some(99));
+    assert_eq!(
+        state.iter().filter(|file_id| **file_id == Some(1)).count(),
+        1
+    );
+    assert_eq!(
+        state.iter().filter(|file_id| **file_id == Some(2)).count(),
+        1
+    );
+    let allowed_endpoints = ["C:\\work\\a.txt", "C:\\work\\b.txt", "C:\\work\\c.txt"];
+    assert!(
+        backend
+            .inner
+            .completed_moves()
+            .iter()
+            .all(|(source, destination)| {
+                allowed_endpoints.contains(&source.as_str())
+                    && allowed_endpoints.contains(&destination.as_str())
+            })
+    );
+    match &result {
+        Err(_) => assert_eq!(state, original),
+        Ok(report) => match report.outcome() {
+            ExecutionOutcome::Completed => assert_eq!(state, committed),
+            ExecutionOutcome::RolledBack { .. } => assert_eq!(state, original),
+            ExecutionOutcome::RecoveryRequired { .. } => {}
+        },
+    }
+    if journal_fault.is_some() {
+        assert!(journal.fault.is_none(), "journal fault was not reached");
+    }
+    if rename_fault.is_some() {
+        assert!(backend.fault.is_none(), "rename fault was not reached");
+    }
+    let evidence = ExecutorMatrixEvidence {
+        journal_calls: journal.calls,
+        rename_attempts: backend.rename_attempts,
+        timeline: timeline.borrow().clone(),
+    };
+    Ok(evidence)
+}
+
+fn journal_methods_are_covered(calls: &[MatrixJournalCall]) -> bool {
+    calls
+        .iter()
+        .any(|call| matches!(call, MatrixJournalCall::Begin))
+        && calls
+            .iter()
+            .any(|call| matches!(call, MatrixJournalCall::Prepared(..)))
+        && calls
+            .iter()
+            .any(|call| matches!(call, MatrixJournalCall::Completed(..)))
+        && calls
+            .iter()
+            .any(|call| matches!(call, MatrixJournalCall::NotApplied(..)))
+        && calls
+            .iter()
+            .any(|call| matches!(call, MatrixJournalCall::Terminal(..)))
+}
+
+fn run_executor_fault_matrix() -> Result<(), Box<dyn std::error::Error>> {
+    let normal = run_executor_matrix_case(false, None, None)?;
+    let rollback = run_executor_matrix_case(true, None, None)?;
+    assert!(journal_methods_are_covered(
+        &normal
+            .journal_calls
+            .iter()
+            .chain(&rollback.journal_calls)
+            .copied()
+            .collect::<Vec<_>>()
+    ));
+
+    for (forced_rollback, baseline) in [(false, &normal), (true, &rollback)] {
+        for ordinal in 1..=baseline.journal_calls.len() {
+            for certainty in [
+                AppendCertainty::NotAppended,
+                AppendCertainty::MayHaveAppended,
+            ] {
+                let evidence =
+                    run_executor_matrix_case(forced_rollback, Some((ordinal, certainty)), None)?;
+                assert_eq!(
+                    evidence.journal_calls[ordinal - 1],
+                    baseline.journal_calls[ordinal - 1]
+                );
+                if certainty == AppendCertainty::MayHaveAppended {
+                    assert_eq!(
+                        evidence.timeline.last(),
+                        Some(&MatrixEvent::Journal(baseline.journal_calls[ordinal - 1]))
+                    );
+                }
+            }
+        }
+        for ordinal in 1..=baseline.rename_attempts {
+            for certainty in [
+                MutationCertainty::NotApplied,
+                MutationCertainty::MayHaveApplied,
+            ] {
+                let evidence =
+                    run_executor_matrix_case(forced_rollback, None, Some((ordinal, certainty)))?;
+                assert!(evidence.rename_attempts >= ordinal);
+                if certainty == MutationCertainty::MayHaveApplied {
+                    assert_eq!(
+                        evidence.timeline.last(),
+                        Some(&MatrixEvent::Rename(ordinal))
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn exhaustive_executor_fault_matrix_preserves_transaction_invariants()
+-> Result<(), Box<dyn std::error::Error>> {
+    run_executor_fault_matrix()?;
+    Ok(())
 }

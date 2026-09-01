@@ -114,6 +114,7 @@ impl<'a> RenamePlanner<'a> {
                         kind: match error.code {
                             50 => PlanIssueKind::UnsupportedCaseSensitiveParent,
                             53 => PlanIssueKind::UnsupportedWindowsPath,
+                            1005 => PlanIssueKind::UnsupportedFilesystem,
                             _ => PlanIssueKind::BackendFailure(error),
                         },
                     });
