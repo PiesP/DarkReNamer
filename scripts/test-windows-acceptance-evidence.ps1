@@ -649,6 +649,23 @@ try {
         -VisualEvidenceRoot $visualRoot
     Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
 
+    $truecolorTransparency = Copy-Evidence $complete
+    Write-VisualPngFixture `
+        -Path $firstVisualPath `
+        -Marker 'truecolor-transparency' `
+        -Width 640 `
+        -Height 360 `
+        -Seed 1 `
+        -TruecolorTransparency
+    $truecolorTransparency.visual_captures[0].image.sha256 =
+        (Get-FileHash -LiteralPath $firstVisualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ValidatorFails `
+        -Evidence $truecolorTransparency `
+        -Name 'visual-root-truecolor-transparency' `
+        -ExpectedFragment 'screenshot pixels must be fully opaque' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
     $transparentAfterColorCap = Copy-Evidence $complete
     Write-VisualPngFixture `
         -Path $firstVisualPath `

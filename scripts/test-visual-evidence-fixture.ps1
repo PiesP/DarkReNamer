@@ -53,22 +53,38 @@ function Write-VisualPngFixture {
         [Parameter(Mandatory)][ValidateRange(1, 255)][int] $Seed,
         [switch] $Solid,
         [switch] $Transparent,
+        [switch] $TruecolorTransparency,
         [ValidateRange(0, 255)][int] $OpaquePrefixPixels = 0
     )
     if ($Width -lt 1 -or $Height -lt 1) {
         throw 'PNG fixture dimensions must be positive.'
     }
+    if ($TruecolorTransparency -and ($Transparent -or $OpaquePrefixPixels -gt 0)) {
+        throw 'Truecolor transparency cannot be combined with alpha-channel fixture modes.'
+    }
+    $colorType = if ($TruecolorTransparency) { 2 } else { 6 }
+    $bytesPerPixel = if ($TruecolorTransparency) { 3 } else { 4 }
     $header = [byte[]] (
         (ConvertTo-VisualFixtureBigEndian -Value ([uint32] $Width)) +
         (ConvertTo-VisualFixtureBigEndian -Value ([uint32] $Height)) +
-        [byte[]](8, 6, 0, 0, 0)
+        [byte[]](8, $colorType, 0, 0, 0)
     )
-    $colors = @(
-        [byte[]]($Seed, 17, 33, 255),
-        [byte[]]($Seed, 97, 53, 255),
-        [byte[]]($Seed, 43, 173, 255),
-        [byte[]]($Seed, 211, 199, 255)
-    )
+    $colors = if ($TruecolorTransparency) {
+        @(
+            [byte[]]($Seed, 17, 33),
+            [byte[]]($Seed, 97, 53),
+            [byte[]]($Seed, 43, 173),
+            [byte[]]($Seed, 211, 199)
+        )
+    }
+    else {
+        @(
+            [byte[]]($Seed, 17, 33, 255),
+            [byte[]]($Seed, 97, 53, 255),
+            [byte[]]($Seed, 43, 173, 255),
+            [byte[]]($Seed, 211, 199, 255)
+        )
+    }
     if ($Solid) {
         $colors = @($colors[0], $colors[0], $colors[0], $colors[0])
     }
@@ -77,11 +93,20 @@ function Write-VisualPngFixture {
             $color[3] = 0
         }
     }
-    $rows = @([byte[]]::new(1 + ($Width * 4)), [byte[]]::new(1 + ($Width * 4)))
+    $rows = @(
+        [byte[]]::new(1 + ($Width * $bytesPerPixel)),
+        [byte[]]::new(1 + ($Width * $bytesPerPixel))
+    )
     foreach ($rowIndex in 0, 1) {
         for ($x = 0; $x -lt $Width; $x++) {
             $color = $colors[($rowIndex * 2) + [int]($x -ge [math]::Ceiling($Width / 2))]
-            [Array]::Copy($color, 0, $rows[$rowIndex], 1 + ($x * 4), 4)
+            [Array]::Copy(
+                $color,
+                0,
+                $rows[$rowIndex],
+                1 + ($x * $bytesPerPixel),
+                $bytesPerPixel
+            )
         }
     }
     if ($OpaquePrefixPixels -gt 0) {
@@ -129,12 +154,21 @@ function Write-VisualPngFixture {
         [Text.Encoding]::UTF8.GetBytes($Marker)
     )
     $signature = [byte[]](0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
+    $transparencyChunk = if ($TruecolorTransparency) {
+        New-VisualFixturePngChunk `
+            -Type 'tRNS' `
+            -Data ([byte[]](0, $Seed, 0, 17, 0, 33))
+    }
+    else {
+        [byte[]]::new(0)
+    }
     [IO.File]::WriteAllBytes(
         $Path,
         [byte[]] (
             $signature +
             (New-VisualFixturePngChunk -Type 'IHDR' -Data $header) +
             (New-VisualFixturePngChunk -Type 'tEXt' -Data $text) +
+            $transparencyChunk +
             (New-VisualFixturePngChunk -Type 'IDAT' -Data $compressed.ToArray()) +
             (New-VisualFixturePngChunk -Type 'IEND' -Data ([byte[]]::new(0)))
         )

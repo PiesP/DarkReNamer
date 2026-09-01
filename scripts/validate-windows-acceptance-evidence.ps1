@@ -556,6 +556,12 @@ namespace DarkReNamerAcceptance
                                 throw new InvalidDataException("PNG contains trailing bytes after IEND.");
                             break;
                         }
+                        else if (type == "tRNS")
+                        {
+                            throw new InvalidDataException(
+                                "PNG screenshot pixels must be fully opaque; tRNS is not allowed."
+                            );
+                        }
                         else
                         {
                             if (seenData) endedData = true;
