@@ -47,6 +47,7 @@
     },
     "visual_captures": {
       "type": "array",
+      "maxItems": 64,
       "items": {
         "$ref": "#/$defs/visualCapture"
       }

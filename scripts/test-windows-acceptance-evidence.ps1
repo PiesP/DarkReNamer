@@ -254,12 +254,19 @@ function Write-VisualEvidenceFiles {
         [Parameter(Mandatory)][object] $Evidence,
         [Parameter(Mandatory)][string] $Root
     )
+    $sequence = 1
     foreach ($capture in $Evidence.visual_captures) {
         $path = Join-Path $Root $capture.image.filename
-        Write-VisualPngFixture -Path $path -Marker $capture.id
-        $capture.image.pixel_width = 1
-        $capture.image.pixel_height = 1
+        Write-VisualPngFixture `
+            -Path $path `
+            -Marker $capture.id `
+            -Width 640 `
+            -Height 360 `
+            -Seed $sequence
+        $capture.image.pixel_width = 640
+        $capture.image.pixel_height = 360
         $capture.image.sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        $sequence++
     }
 }
 
@@ -496,6 +503,7 @@ try {
         -ExpectedFragment 'must not contain reparse points' `
         -VisualEvidenceRoot $visualRootLink
 
+    $firstVisualPath = Join-Path $visualRoot $complete.visual_captures[0].image.filename
     $wrongVisualDimensions = Copy-Evidence $complete
     $wrongVisualDimensions.visual_captures[0].image.pixel_width = 2
     Assert-ValidatorFails `
@@ -504,8 +512,64 @@ try {
         -ExpectedFragment 'PNG dimensions do not match' `
         -VisualEvidenceRoot $visualRoot
 
-    $firstVisualPath = Join-Path $visualRoot $complete.visual_captures[0].image.filename
-    Write-VisualPngFixture -Path $firstVisualPath -Marker 'different-valid-image'
+    $tooSmallVisual = Copy-Evidence $complete
+    Write-VisualPngFixture `
+        -Path $firstVisualPath `
+        -Marker 'too-small-main-workbench' `
+        -Width 320 `
+        -Height 180 `
+        -Seed 1
+    $tooSmallVisual.visual_captures[0].image.pixel_width = 320
+    $tooSmallVisual.visual_captures[0].image.pixel_height = 180
+    $tooSmallVisual.visual_captures[0].image.sha256 =
+        (Get-FileHash -LiteralPath $firstVisualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ValidatorFails `
+        -Evidence $tooSmallVisual `
+        -Name 'visual-root-too-small' `
+        -ExpectedFragment 'dimensions are too small for surface main-workbench' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
+    $solidVisual = Copy-Evidence $complete
+    Write-VisualPngFixture `
+        -Path $firstVisualPath `
+        -Marker 'solid-main-workbench' `
+        -Width 640 `
+        -Height 360 `
+        -Seed 1 `
+        -Solid
+    $solidVisual.visual_captures[0].image.sha256 =
+        (Get-FileHash -LiteralPath $firstVisualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ValidatorFails `
+        -Evidence $solidVisual `
+        -Name 'visual-root-solid-raster' `
+        -ExpectedFragment 'at least four distinct decoded colors' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
+    $duplicateRaster = Copy-Evidence $complete
+    $secondVisualPath = Join-Path $visualRoot $duplicateRaster.visual_captures[1].image.filename
+    Write-VisualPngFixture `
+        -Path $secondVisualPath `
+        -Marker 'same-raster-different-metadata' `
+        -Width 640 `
+        -Height 360 `
+        -Seed 1
+    $duplicateRaster.visual_captures[1].image.sha256 =
+        (Get-FileHash -LiteralPath $secondVisualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ValidatorFails `
+        -Evidence $duplicateRaster `
+        -Name 'visual-root-duplicate-raster' `
+        -ExpectedFragment 'Duplicate visual capture decoded raster' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
+    Write-VisualPngFixture `
+        -Path $firstVisualPath `
+        -Marker 'different-valid-image' `
+        -Width 640 `
+        -Height 360 `
+        -Seed 1
     Assert-ValidatorFails `
         -Evidence $complete `
         -Name 'visual-root-hash-mismatch' `
@@ -559,6 +623,31 @@ try {
         -Evidence $complete `
         -Name 'visual-root-oversized-image' `
         -ExpectedFragment 'encoded size is outside' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
+    $tooManyChunksEvidence = Copy-Evidence $complete
+    $validPng = [IO.File]::ReadAllBytes($firstVisualPath)
+    $iendOffset = $validPng.Length - 12
+    $chunk = New-VisualFixturePngChunk -Type 'tEXt' -Data ([byte[]]::new(0))
+    $manyChunks = [IO.MemoryStream]::new()
+    try {
+        $manyChunks.Write($validPng, 0, $iendOffset)
+        foreach ($index in 1..4097) {
+            $manyChunks.Write($chunk, 0, $chunk.Length)
+        }
+        $manyChunks.Write($validPng, $iendOffset, 12)
+        [IO.File]::WriteAllBytes($firstVisualPath, $manyChunks.ToArray())
+    }
+    finally {
+        $manyChunks.Dispose()
+    }
+    $tooManyChunksEvidence.visual_captures[0].image.sha256 =
+        (Get-FileHash -LiteralPath $firstVisualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ValidatorFails `
+        -Evidence $tooManyChunksEvidence `
+        -Name 'visual-root-too-many-chunks' `
+        -ExpectedFragment 'more than 4096 chunks' `
         -VisualEvidenceRoot $visualRoot
     Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
 
@@ -622,6 +711,19 @@ try {
         -Evidence $reservedVisualFilename `
         -Name 'reserved-visual-filename' `
         -ExpectedFragment 'must not use a reserved Windows device name'
+
+    $tooManyCaptures = Copy-Evidence $complete
+    while (@($tooManyCaptures.visual_captures).Count -le 64) {
+        $index = @($tooManyCaptures.visual_captures).Count
+        $extra = Copy-Evidence $tooManyCaptures.visual_captures[0]
+        $extra.id = "extra-capture-$index"
+        $extra.image.filename = "extra-capture-$index.png"
+        $extra.image.sha256 = ([Convert]::ToString(1000 + $index, 16).PadLeft(64, '0'))
+        $tooManyCaptures.visual_captures += $extra
+    }
+    Assert-SchemaRejects `
+        -Evidence $tooManyCaptures `
+        -Name 'too-many-visual-captures'
 
     foreach ($filesystem in 'refs', 'exfat', 'other') {
         $draftFilesystem = Copy-Evidence $complete

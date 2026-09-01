@@ -47,14 +47,19 @@ function New-ReleaseVisualCaptures {
                 $id = "main-$productId-$dpi-$contrast"
                 $filename = "$id.png"
                 $imagePath = Join-Path $Root $filename
-                Write-VisualPngFixture -Path $imagePath -Marker $id
+                Write-VisualPngFixture `
+                    -Path $imagePath `
+                    -Marker $id `
+                    -Width 640 `
+                    -Height 360 `
+                    -Seed $sequence
                 $captures.Add([pscustomobject][ordered]@{
                     id = $id
                     image = [pscustomobject][ordered]@{
                         filename = $filename
                         sha256 = (Get-FileHash -LiteralPath $imagePath -Algorithm SHA256).Hash.ToLowerInvariant()
-                        pixel_width = 1
-                        pixel_height = 1
+                        pixel_width = 640
+                        pixel_height = 360
                     }
                     executable_sha256 = $ExecutableSha
                     ui_target = "ui|$product|$dpi|$contrast"
@@ -76,14 +81,19 @@ function New-ReleaseVisualCaptures {
         )) {
         $filename = "$($extra.Id).png"
         $imagePath = Join-Path $Root $filename
-        Write-VisualPngFixture -Path $imagePath -Marker $extra.Id
+        Write-VisualPngFixture `
+            -Path $imagePath `
+            -Marker $extra.Id `
+            -Width 640 `
+            -Height 360 `
+            -Seed $sequence
         $capture = [ordered]@{
             id = $extra.Id
             image = [pscustomobject][ordered]@{
                 filename = $filename
                 sha256 = (Get-FileHash -LiteralPath $imagePath -Algorithm SHA256).Hash.ToLowerInvariant()
-                pixel_width = 1
-                pixel_height = 1
+                pixel_width = 640
+                pixel_height = 360
             }
             executable_sha256 = $ExecutableSha
             ui_target = "ui|$($extra.Product)|$($extra.Dpi)|normal"
@@ -390,7 +400,10 @@ try {
     Write-JsonObject -Value $complete -Path $evidencePath
     Write-VisualPngFixture `
         -Path (Join-Path $visualEvidenceRoot $complete.visual_captures[0].image.filename) `
-        -Marker 'different-valid-image'
+        -Marker 'different-valid-image' `
+        -Width 640 `
+        -Height 360 `
+        -Seed 1
     Assert-ValidatorFails `
         -ExpectedFragment 'image SHA-256 does not match VisualEvidenceRoot bytes' `
         -SourceRoot $sourceRoot `

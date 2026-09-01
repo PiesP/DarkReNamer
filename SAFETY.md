@@ -252,6 +252,11 @@ Complete release-gate evidence requires all of the following:
 - a passed application-process crash trial plus at least one separately
   authorized and passed VM hard-reset or storage-fault trial.
 
+The validator accepts at most 64 visual rows. Main-workbench images must be at
+least 640 by 360 pixels, other surfaces at least 240 by 120, and every image
+must contain at least four decoded colors. Canonical decoded-raster digests must
+be unique, so metadata-only changes cannot reuse one visual across targets.
+
 The HDD-unavailable form records a personal development hardware limitation; it
 does not claim or simulate HDD coverage. Partial HDD rows, mixed HDD rows and
 unexecuted reasons, or a non-hardware reason do not pass the release gate. SSD

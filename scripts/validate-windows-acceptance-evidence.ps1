@@ -269,8 +269,10 @@ function Resolve-VisualEvidenceRoot {
 if ($null -eq ('DarkReNamerAcceptance.StrictPngValidator' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace DarkReNamerAcceptance
@@ -279,11 +281,15 @@ namespace DarkReNamerAcceptance
     {
         public uint Width { get; private set; }
         public uint Height { get; private set; }
+        public string RasterSha256 { get; private set; }
+        public int DistinctColors { get; private set; }
 
-        public PngDimensions(uint width, uint height)
+        public PngDimensions(uint width, uint height, string rasterSha256, int distinctColors)
         {
             Width = width;
             Height = height;
+            RasterSha256 = rasterSha256;
+            DistinctColors = distinctColors;
         }
     }
 
@@ -318,13 +324,18 @@ namespace DarkReNamerAcceptance
                 bool seenData = false;
                 bool endedData = false;
                 bool seenEnd = false;
+                int chunkCount = 0;
                 uint width = 0;
                 uint height = 0;
                 int bytesPerPixel = 0;
+                byte[] headerData = null;
                 using (MemoryStream compressed = new MemoryStream())
                 {
                     while (stream.Position < stream.Length)
                     {
+                        chunkCount++;
+                        if (chunkCount > 4096)
+                            throw new InvalidDataException("PNG contains more than 4096 chunks.");
                         uint declaredLength = ReadBigEndianUInt32(ReadExactly(stream, 4), 0);
                         if (declaredLength > MaximumChunkBytes ||
                             declaredLength > stream.Length - stream.Position - 8)
@@ -358,6 +369,7 @@ namespace DarkReNamerAcceptance
                                 default: throw new InvalidDataException("PNG color type is unsupported.");
                             }
                             seenHeader = true;
+                            headerData = data;
                         }
                         else if (type == "IDAT")
                         {
@@ -392,22 +404,81 @@ namespace DarkReNamerAcceptance
                     long decodedBytes = checked((rowBytes + 1L) * height);
                     if (decodedBytes > MaximumDecodedBytes)
                         throw new InvalidDataException("PNG decoded data exceeds 256 MiB.");
-                    byte[] row = new byte[checked((int)rowBytes + 1)];
+                    int rowLength = checked((int)rowBytes);
+                    byte[] filtered = new byte[rowLength + 1];
+                    byte[] row = new byte[rowLength];
+                    byte[] previousRow = new byte[rowLength];
+                    HashSet<uint> colors = new HashSet<uint>();
                     compressed.Position = 0;
+                    using (IncrementalHash rasterHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
                     using (ZLibStream decoder = new ZLibStream(compressed, CompressionMode.Decompress, true))
                     {
+                        rasterHash.AppendData(headerData);
                         for (uint y = 0; y < height; y++)
                         {
-                            ReadExactly(decoder, row, 0, row.Length);
-                            if (row[0] > 4)
+                            ReadExactly(decoder, filtered, 0, filtered.Length);
+                            if (filtered[0] > 4)
                                 throw new InvalidDataException("PNG scanline uses an invalid filter.");
+                            Unfilter(filtered[0], filtered, row, previousRow, bytesPerPixel);
+                            rasterHash.AppendData(row);
+                            if (colors.Count <= 64)
+                            {
+                                for (int offset = 0; offset < row.Length; offset += bytesPerPixel)
+                                {
+                                    uint color = 0;
+                                    for (int channel = 0; channel < bytesPerPixel; channel++)
+                                        color = (color << 8) | row[offset + channel];
+                                    colors.Add(color);
+                                    if (colors.Count > 64) break;
+                                }
+                            }
+                            byte[] swap = previousRow;
+                            previousRow = row;
+                            row = swap;
                         }
                         if (decoder.ReadByte() != -1)
                             throw new InvalidDataException("PNG decoded data exceeds the IHDR dimensions.");
+                        string rasterSha = Convert.ToHexString(rasterHash.GetHashAndReset()).ToLowerInvariant();
+                        return new PngDimensions(width, height, rasterSha, colors.Count);
                     }
                 }
-                return new PngDimensions(width, height);
             }
+        }
+
+        private static void Unfilter(
+            byte filter,
+            byte[] filtered,
+            byte[] row,
+            byte[] previous,
+            int bytesPerPixel)
+        {
+            for (int index = 0; index < row.Length; index++)
+            {
+                int left = index >= bytesPerPixel ? row[index - bytesPerPixel] : 0;
+                int up = previous[index];
+                int upperLeft = index >= bytesPerPixel ? previous[index - bytesPerPixel] : 0;
+                int predictor;
+                switch (filter)
+                {
+                    case 0: predictor = 0; break;
+                    case 1: predictor = left; break;
+                    case 2: predictor = up; break;
+                    case 3: predictor = (left + up) / 2; break;
+                    case 4: predictor = Paeth(left, up, upperLeft); break;
+                    default: throw new InvalidDataException("PNG scanline uses an invalid filter.");
+                }
+                row[index] = unchecked((byte)(filtered[index + 1] + predictor));
+            }
+        }
+
+        private static int Paeth(int left, int up, int upperLeft)
+        {
+            int estimate = left + up - upperLeft;
+            int leftDistance = Math.Abs(estimate - left);
+            int upDistance = Math.Abs(estimate - up);
+            int upperLeftDistance = Math.Abs(estimate - upperLeft);
+            if (leftDistance <= upDistance && leftDistance <= upperLeftDistance) return left;
+            return upDistance <= upperLeftDistance ? up : upperLeft;
         }
 
         private static byte[] ReadExactly(Stream stream, int count)
@@ -480,6 +551,8 @@ function Get-PngDimensions {
     return [pscustomobject]@{
         width = [uint64] $dimensions.Width
         height = [uint64] $dimensions.Height
+        raster_sha256 = $dimensions.RasterSha256
+        distinct_colors = $dimensions.DistinctColors
     }
 }
 
@@ -795,6 +868,7 @@ foreach ($row in @($evidence.scenarios)) {
 $captureIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $captureFilenames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $captureHashes = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$captureRasterHashes = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $capturedMainTargets = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $capturedNormalMainAppearances = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $capturedSurfaces = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -903,6 +977,17 @@ foreach ($capture in @($evidence.visual_captures)) {
             throw "$location image file must not be a reparse point."
         }
         $dimensions = Get-PngDimensions -Path $imagePath
+        $minimumWidth = if ($capture.surface -eq 'main-workbench') { 640 } else { 240 }
+        $minimumHeight = if ($capture.surface -eq 'main-workbench') { 360 } else { 120 }
+        if ($dimensions.width -lt $minimumWidth -or $dimensions.height -lt $minimumHeight) {
+            throw "$location PNG dimensions are too small for surface $($capture.surface)."
+        }
+        if ($dimensions.distinct_colors -lt 4) {
+            throw "$location PNG must contain at least four distinct decoded colors."
+        }
+        if (-not $captureRasterHashes.Add($dimensions.raster_sha256)) {
+            throw "Duplicate visual capture decoded raster: $($dimensions.raster_sha256)."
+        }
         if ($dimensions.width -ne [uint64] $capture.image.pixel_width -or
             $dimensions.height -ne [uint64] $capture.image.pixel_height) {
             throw "$location PNG dimensions do not match the recorded pixel dimensions."
