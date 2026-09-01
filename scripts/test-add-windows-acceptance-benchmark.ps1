@@ -186,7 +186,24 @@ try {
     $large=New-Case 'large-log';[IO.File]::WriteAllBytes((Join-Path $large.Logs 'iteration-1.log'),[byte[]]::new(4*1024*1024+1));Assert-Fails {&$augmenter -SourceRoot $sourceRoot -EvidencePath $large.Evidence -LogDirectory $large.Logs -OutputPath $large.Output} 'byte limit' $large.Output
 
     $badContext=New-Case 'bad-context'; Write-Context $badContext.Logs 'Drive 192.0.2.10'
-    Assert-Fails { & $augmenter -SourceRoot $sourceRoot -EvidencePath $badContext.Evidence -LogDirectory $badContext.Logs -OutputPath $badContext.Output } 'prohibited IP address' $badContext.Output
+    $watcher = [IO.FileSystemWatcher]::new($badContext.Root)
+    $eventId = "benchmark-temp-$([Guid]::NewGuid())"
+    Register-ObjectEvent -InputObject $watcher -EventName Created -SourceIdentifier $eventId | Out-Null
+    try {
+        $watcher.EnableRaisingEvents = $true
+        Assert-Fails { & $augmenter -SourceRoot $sourceRoot -EvidencePath $badContext.Evidence -LogDirectory $badContext.Logs -OutputPath $badContext.Output } 'prohibited IP address' $badContext.Output
+        Start-Sleep -Milliseconds 100
+        $createdEvents = @(Get-Event -SourceIdentifier $eventId -ErrorAction SilentlyContinue)
+        if (@($createdEvents | Where-Object { $_.SourceEventArgs.Name -like '.output.json.*.tmp' }).Count -ne 0) {
+            throw 'Privacy-invalid context created an owned temporary file before rejection.'
+        }
+    }
+    finally {
+        $watcher.EnableRaisingEvents = $false
+        Unregister-Event -SourceIdentifier $eventId -ErrorAction SilentlyContinue
+        Remove-Event -SourceIdentifier $eventId -ErrorAction SilentlyContinue
+        $watcher.Dispose()
+    }
     $extraContext=New-Case 'extra-context'; $ctx=Get-Content (Join-Path $extraContext.Logs 'benchmark-context.json') -Raw|ConvertFrom-Json; $ctx|Add-Member hostname 'private'; Write-Json (Join-Path $extraContext.Logs 'benchmark-context.json') $ctx
     Assert-Fails { & $augmenter -SourceRoot $sourceRoot -EvidencePath $extraContext.Evidence -LogDirectory $extraContext.Logs -OutputPath $extraContext.Output } 'must contain exactly' $extraContext.Output
     $duplicateContext=New-Case 'duplicate-context';$p=Join-Path $duplicateContext.Logs 'benchmark-context.json';$t=Get-Content $p -Raw;Write-Utf8 $p ($t.Replace('"schema_version": 1','"schema_version": 1, "schema_version": 1'))

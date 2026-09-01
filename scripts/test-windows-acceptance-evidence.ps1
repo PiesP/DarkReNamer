@@ -327,6 +327,31 @@ try {
         'schema_version,source_sha,artifact,recorded_at_utc,operator_context,ui_matrix,scenarios,benchmarks,durability_trials,unexecuted') {
         throw 'Evidence PassThru fields do not match the validated evidence contract.'
     }
+    $evidenceJson = ($complete | ConvertTo-Json -Depth 20) + "`n"
+    $jsonDefaultOutput = @(& $validator -EvidenceJson $evidenceJson -Draft 6>&1)
+    if ((($jsonDefaultOutput | ForEach-Object { "$_" }) -join ' ') -notlike
+        '*Validated draft Windows acceptance evidence*') {
+        throw 'EvidenceJson validation did not retain default human success output.'
+    }
+    $jsonPassThruOutput = @(& $validator -EvidenceJson $evidenceJson -Draft -PassThru 6>&1)
+    if ($jsonPassThruOutput.Count -ne 1 -or $jsonPassThruOutput[0] -isnot [pscustomobject]) {
+        throw 'EvidenceJson PassThru must return exactly one validated evidence object.'
+    }
+    $pathSemanticJson = $passThruOutput[0] | ConvertTo-Json -Depth 20 -Compress
+    $memorySemanticJson = $jsonPassThruOutput[0] | ConvertTo-Json -Depth 20 -Compress
+    if ($pathSemanticJson -cne $memorySemanticJson) {
+        throw 'EvidencePath and EvidenceJson validation returned different semantic objects.'
+    }
+    foreach ($invalidJson in '{', '{"schema_version":2,"schema_version":2}') {
+        try {
+            & $validator -EvidenceJson $invalidJson -Draft | Out-Null
+        }
+        catch {
+            if ($_.Exception.Message -notlike '*Evidence is not valid JSON*') { throw }
+            continue
+        }
+        throw 'EvidenceJson accepted invalid or duplicate JSON.'
+    }
     Assert-ValidatorPasses `
         -Evidence $complete `
         -Name 'valid-complete' `

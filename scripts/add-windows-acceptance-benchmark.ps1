@@ -206,6 +206,7 @@ $evidence.benchmarks = @($evidence.benchmarks) + [pscustomobject][ordered]@{ med
 $evidence.unexecuted = @($evidence.unexecuted | Where-Object { $_.target -cne $target })
 $evidence.recorded_at_utc = [DateTimeOffset]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
 $json = ($evidence | ConvertTo-Json -Depth 20) + "`n"
+& $validator -EvidenceJson $json -Draft -PassThru | Out-Null
 
 $leaf = [IO.Path]::GetFileName($outputFull)
 $temp = Join-Path $outputParent ".$leaf.$([Guid]::NewGuid().ToString('N')).tmp"
