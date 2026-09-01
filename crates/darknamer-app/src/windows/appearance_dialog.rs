@@ -340,7 +340,7 @@ pub(super) fn cancel_appearance_dialog(owner: HWND, state: &mut AppState) {
     arrange(owner, state);
 }
 
-fn create_appearance_dialog_window(
+pub(super) fn create_appearance_dialog_window(
     owner: HWND,
     session_id: u32,
     appearance: UiAppearance,
@@ -441,6 +441,16 @@ fn create_appearance_dialog_window(
         UpdateWindow(window);
     }
     Ok(window)
+}
+
+#[cfg(test)]
+pub(super) fn visual_custom_colors_active(window: HWND) -> Option<bool> {
+    Some(
+        try_appearance_dialog_state(window)?
+            .state()
+            .appearance_resources
+            .is_some(),
+    )
 }
 
 fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io::Result<()> {

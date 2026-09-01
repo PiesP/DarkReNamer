@@ -120,6 +120,10 @@ const EXPECTED: &[(&str, UnsafeCounts)] = &[
     ("src/windows/menu.rs", UnsafeCounts::new(62, 0, 0, 0)),
     ("src/windows/recovery_ui.rs", UnsafeCounts::new(1, 0, 0, 0)),
     ("src/windows/text_io.rs", UnsafeCounts::new(3, 0, 0, 0)),
+    (
+        "src/windows/visual_capture.rs",
+        UnsafeCounts::new(21, 0, 0, 0),
+    ),
     ("src/windows/worker.rs", UnsafeCounts::new(20, 0, 0, 0)),
     (
         "tests/rename_windows_backend.rs",

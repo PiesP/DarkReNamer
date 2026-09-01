@@ -106,6 +106,20 @@ RC=/usr/bin/llvm-rc-19 cargo xwin build --release --locked \
   -p darknamer-app --bin DarkReNamer
 ```
 
+Generate a local diagnostic gallery for the production advanced-appearance
+window from Linux with Wine and Xvfb:
+
+```text
+./scripts/capture-local-visual-gallery.sh
+```
+
+The script writes BMP and PNG captures, hashes, and `visual-gallery.json` to a
+new temporary directory unless an empty absolute output directory is supplied.
+The manifest reports whether custom colors were active and whether Wine needed
+the window-DC fallback because `PrintWindow` returned a blank image. This
+fixture does not initialize the journal runtime, exercise the main workbench,
+or count as Windows acceptance evidence.
+
 ## Attribution and license
 
 DarkNamer was originally developed by
