@@ -145,6 +145,8 @@ fn release_workflows_promote_the_immutable_candidate_without_rebuilding()
     assert!(promotion.contains("run-id: ${{ inputs.candidate_run_id }}"));
     assert!(promotion.contains("./scripts/validate-release-candidate-metadata.ps1"));
     assert!(promotion.contains("./scripts/validate-release-handoff.ps1"));
+    assert!(promotion.contains("[regex]::Matches($cargo, '(?m)^version = \"([^\"]+)\"\\r?$')"));
+    assert!(promotion.contains("if ($versionMatches.Count -ne 1)"));
     assert!(promotion.contains("gh attestation verify"));
     assert!(promotion.contains("--signer-workflow"));
     assert!(promotion.contains("--source-digest $env:CANDIDATE_SOURCE_SHA"));

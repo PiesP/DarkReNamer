@@ -93,9 +93,11 @@ jobs:
           }
 
           $cargo = Get-Content -LiteralPath Cargo.toml -Raw
-          $versionMatch = [regex]::Match($cargo, '(?m)^version = "([^"]+)"$')
-          if (-not $versionMatch.Success) { throw 'Workspace version was not found.' }
-          $expectedTag = "v$($versionMatch.Groups[1].Value)"
+          $versionMatches = [regex]::Matches($cargo, '(?m)^version = "([^"]+)"\r?$')
+          if ($versionMatches.Count -ne 1) {
+            throw 'Workspace version line must appear exactly once.'
+          }
+          $expectedTag = "v$($versionMatches[0].Groups[1].Value)"
           if ($env:RELEASE_TAG -cne $expectedTag) {
             throw "Release tag $env:RELEASE_TAG does not match $expectedTag."
           }

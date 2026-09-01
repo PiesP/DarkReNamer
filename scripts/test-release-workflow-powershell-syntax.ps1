@@ -91,4 +91,13 @@ if ($blockCount -le 0) {
     throw 'No PowerShell workflow run blocks were found.'
 }
 
+$versionPattern = '(?m)^version = "([^"]+)"\r?$'
+foreach ($newline in "`n", "`r`n") {
+    $cargoFixture = "[workspace]${newline}${newline}[workspace.package]${newline}version = `"0.1.0`"${newline}"
+    $matches = [regex]::Matches($cargoFixture, $versionPattern)
+    if ($matches.Count -ne 1 -or $matches[0].Groups[1].Value -cne '0.1.0') {
+        throw 'Release version parsing must accept exactly one LF or CRLF workspace version line.'
+    }
+}
+
 Write-Host "Release workflow PowerShell syntax tests passed for $blockCount run blocks."
