@@ -1,10 +1,10 @@
 use darknamer_app::rename::{
-    AppendCertainty, AuthorizedJournal, BackendError, EntryId, EntryIdentity, EntryKind,
-    ExecutionOutcome, JournalAuthorization, JournalDirection, JournalError, JournalRecord,
-    JournalSnapshot, JournalStep, JournalStore, JournalTerminal, MemoryBackend, MemoryJournal,
-    ModelRevision, PathKey, PathSnapshot, PlanId, PlanRequest, RecoveryBlockKind, RecoveryFailure,
-    RecoveryOutcome, RenameBackend, RenameExecutor, RenameIntent, RenameOperation, RenamePlanner,
-    RenameRecovery, TemporaryPhase,
+    AppendCertainty, AuthorizedJournal, BackendError, BackendOperation, EntryId, EntryIdentity,
+    EntryKind, ExecutionOutcome, JournalAuthorization, JournalDirection, JournalError,
+    JournalRecord, JournalSnapshot, JournalStep, JournalStore, JournalTerminal, MemoryBackend,
+    MemoryJournal, ModelRevision, MutationCertainty, PathKey, PathSnapshot, PlanId, PlanRequest,
+    RecoveryBlockKind, RecoveryFailure, RecoveryOutcome, RenameBackend, RenameExecutor,
+    RenameIntent, RenameOperation, RenamePlanner, RenameRecovery, TemporaryPhase,
 };
 use darknamer_core::LegacyText;
 use std::cell::RefCell;
@@ -471,6 +471,7 @@ impl AuthorizedJournal for AuthorizedMatrixJournal {
 
 struct RecoveryMatrixBackend {
     inner: MemoryBackend,
+    fault: Option<(usize, MutationCertainty)>,
     rename_attempts: usize,
     timeline: RecoveryMatrixTimeline,
 }
@@ -502,10 +503,33 @@ impl RenameBackend for RecoveryMatrixBackend {
 
     fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
         self.rename_attempts = self.rename_attempts.saturating_add(1);
+        let ordinal = self.rename_attempts;
         self.timeline
             .borrow_mut()
-            .push(RecoveryMatrixEvent::Rename(self.rename_attempts));
-        self.inner.rename_no_replace(operation)
+            .push(RecoveryMatrixEvent::Rename(ordinal));
+        let certainty = self
+            .fault
+            .filter(|(fault_ordinal, _)| *fault_ordinal == ordinal)
+            .map(|(_, certainty)| certainty);
+        if certainty.is_some() {
+            self.fault = None;
+        }
+        match certainty {
+            Some(MutationCertainty::NotApplied) => Err(BackendError {
+                operation: BackendOperation::Rename,
+                code: 995,
+                certainty: MutationCertainty::NotApplied,
+            }),
+            Some(MutationCertainty::MayHaveApplied) => {
+                self.inner.rename_no_replace(operation)?;
+                Err(BackendError {
+                    operation: BackendOperation::Rename,
+                    code: 995,
+                    certainty: MutationCertainty::MayHaveApplied,
+                })
+            }
+            None => self.inner.rename_no_replace(operation),
+        }
     }
 }
 
@@ -565,21 +589,24 @@ fn recovery_fixture(
 
 struct RecoveryMatrixEvidence {
     calls: Vec<AuthorizedMatrixCall>,
+    rename_attempts: usize,
     timeline: Vec<RecoveryMatrixEvent>,
 }
 
 fn run_recovery_matrix_case(
     location: PreparedLocation,
-    fault: Option<(usize, AppendCertainty)>,
+    journal_fault: Option<(usize, AppendCertainty)>,
+    rename_fault: Option<(usize, MutationCertainty)>,
 ) -> Result<RecoveryMatrixEvidence, Box<dyn std::error::Error>> {
     let (inner, records, plan) = recovery_fixture(location)?;
     let timeline = Rc::new(RefCell::new(Vec::new()));
     let mut backend = RecoveryMatrixBackend {
         inner,
+        fault: rename_fault,
         rename_attempts: 0,
         timeline: Rc::clone(&timeline),
     };
-    let mut journal = AuthorizedMatrixJournal::new(records, fault, Rc::clone(&timeline));
+    let mut journal = AuthorizedMatrixJournal::new(records, journal_fault, Rc::clone(&timeline));
 
     let outcome = RenameRecovery::new(&mut backend, &mut journal).rollback();
 
@@ -608,30 +635,55 @@ fn run_recovery_matrix_case(
                     && allowed_endpoints.contains(&destination.as_str())
             })
     );
-    match outcome {
+    let recovery_required = match outcome {
         RecoveryOutcome::Recovered {
             plan: recovered_plan,
             ..
         } => {
             assert_eq!(recovered_plan, plan);
             assert_eq!(state, [Some(1), Some(2), None]);
+            false
         }
         RecoveryOutcome::RecoveryRequired {
             plan: required_plan,
             ..
-        } => assert_eq!(required_plan, plan),
+        } => {
+            assert_eq!(required_plan, plan);
+            true
+        }
         RecoveryOutcome::NotRequired | RecoveryOutcome::Blocked { .. } => {
             return Err(std::io::Error::other(
                 "prepared fixture did not reach the recovery transaction",
             )
             .into());
         }
-    }
-    if fault.is_some() {
+    };
+    if journal_fault.is_some() {
         assert!(journal.fault.is_none(), "authorized fault was not reached");
+    }
+    if let Some((ordinal, certainty)) = rename_fault {
+        assert!(recovery_required);
+        assert!(
+            backend.fault.is_none(),
+            "recovery rename fault was not reached"
+        );
+        assert_eq!(backend.rename_attempts, ordinal);
+        match certainty {
+            MutationCertainty::NotApplied => {
+                assert_eq!(state, [Some(1), None, Some(2)]);
+            }
+            MutationCertainty::MayHaveApplied => {
+                assert_eq!(state, [Some(1), Some(2), None]);
+                assert_eq!(
+                    timeline.borrow().last(),
+                    Some(&RecoveryMatrixEvent::Rename(ordinal))
+                );
+            }
+        }
     }
     Ok(RecoveryMatrixEvidence {
         calls: journal.calls,
+        rename_attempts: backend.rename_attempts,
         timeline: timeline.borrow().clone(),
     })
 }
@@ -639,8 +691,8 @@ fn run_recovery_matrix_case(
 #[test]
 fn exhaustive_recovery_append_fault_matrix_preserves_transaction_invariants()
 -> Result<(), Box<dyn std::error::Error>> {
-    let source = run_recovery_matrix_case(PreparedLocation::Source, None)?;
-    let destination = run_recovery_matrix_case(PreparedLocation::Destination, None)?;
+    let source = run_recovery_matrix_case(PreparedLocation::Source, None, None)?;
+    let destination = run_recovery_matrix_case(PreparedLocation::Destination, None, None)?;
     let combined = source
         .calls
         .iter()
@@ -677,7 +729,8 @@ fn exhaustive_recovery_append_fault_matrix_preserves_transaction_invariants()
                 AppendCertainty::NotAppended,
                 AppendCertainty::MayHaveAppended,
             ] {
-                let evidence = run_recovery_matrix_case(location, Some((ordinal, certainty)))?;
+                let evidence =
+                    run_recovery_matrix_case(location, Some((ordinal, certainty)), None)?;
                 assert_eq!(evidence.calls[ordinal - 1], baseline.calls[ordinal - 1]);
                 if certainty == AppendCertainty::MayHaveAppended {
                     assert_eq!(
@@ -688,5 +741,39 @@ fn exhaustive_recovery_append_fault_matrix_preserves_transaction_invariants()
             }
         }
     }
+    Ok(())
+}
+
+fn run_recovery_rename_fault_matrix() -> Result<(), Box<dyn std::error::Error>> {
+    let source = run_recovery_matrix_case(PreparedLocation::Source, None, None)?;
+    assert_eq!(source.rename_attempts, 0);
+    let destination = run_recovery_matrix_case(PreparedLocation::Destination, None, None)?;
+    let rollback_renames = destination.rename_attempts;
+    if rollback_renames == 0 {
+        return Err(std::io::Error::other(
+            "prepared-at-destination baseline did not attempt rollback",
+        )
+        .into());
+    }
+    for ordinal in 1..=rollback_renames {
+        for certainty in [
+            MutationCertainty::NotApplied,
+            MutationCertainty::MayHaveApplied,
+        ] {
+            let evidence = run_recovery_matrix_case(
+                PreparedLocation::Destination,
+                None,
+                Some((ordinal, certainty)),
+            )?;
+            assert_eq!(evidence.rename_attempts, ordinal);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn exhaustive_recovery_rename_fault_matrix_preserves_transaction_invariants()
+-> Result<(), Box<dyn std::error::Error>> {
+    run_recovery_rename_fault_matrix()?;
     Ok(())
 }
