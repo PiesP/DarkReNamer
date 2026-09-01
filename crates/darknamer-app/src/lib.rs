@@ -1112,8 +1112,8 @@ const fn horizontal_footer_minimum_width(dpi: u32, button_width: i32) -> i32 {
 /// Pixel metrics used to place one command rail.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UiMetrics {
-    pub rail_padding: i32,
-    pub apply_keyline_inset: i32,
+    pub rail_top_padding: i32,
+    pub rail_bottom_padding: i32,
     pub button_height: i32,
     pub group_gap: i32,
     pub rail_width: i32,
@@ -1310,13 +1310,13 @@ impl RailDensity {
     /// Returns DPI-scaled pixel metrics for this density.
     #[must_use]
     pub const fn metrics(self, dpi: u32) -> UiMetrics {
-        let (rail_padding, button_height, group_gap, rail_width) = match self {
+        let (rail_bottom_padding, button_height, group_gap, rail_width) = match self {
             Self::Comfortable => (4, 32, 8, 52),
             Self::Compact => (2, 28, 4, 52),
         };
         UiMetrics {
-            rail_padding: scale_dip(rail_padding, dpi),
-            apply_keyline_inset: scale_dip(4, dpi),
+            rail_top_padding: 0,
+            rail_bottom_padding: scale_dip(rail_bottom_padding, dpi),
             button_height: scale_dip(button_height, dpi),
             group_gap: scale_dip(group_gap, dpi),
             rail_width: scale_dip(rail_width, dpi),
@@ -1683,27 +1683,27 @@ pub(crate) fn calculate_command_rail_separator_layout(
     separators
 }
 
-/// Derives the decorative pending-Apply keyline inside the Apply button's
-/// reserved left rail padding. The returned rectangle never overlaps Apply.
+/// Derives the decorative readiness indicator inside an Apply button.
 #[cfg(any(windows, test))]
 #[must_use]
-pub(crate) fn calculate_apply_keyline_layout(
-    placements: &[CommandPlacement],
+pub(crate) fn calculate_apply_readiness_indicator_rect(
+    button: LayoutRect,
     dpi: u32,
 ) -> Option<LayoutRect> {
-    let apply = placements
-        .iter()
-        .find(|placement| placement.command == APPLY)?;
-    let gap = scale_dip(2, dpi).max(0).min(apply.x);
-    let right = apply.x.saturating_sub(gap);
-    let width = scale_dip(2, dpi).max(0).min(right);
-    let vertical_inset = scale_dip(6, dpi).max(0).min(apply.height.saturating_div(2));
-    let height = apply
+    let horizontal_inset = scale_dip(4, dpi).max(0).min(button.width.saturating_div(2));
+    let available_width = button
+        .width
+        .saturating_sub(horizontal_inset.saturating_mul(2));
+    let width = scale_dip(2, dpi).max(0).min(available_width);
+    let vertical_inset = scale_dip(6, dpi)
+        .max(0)
+        .min(button.height.saturating_div(2));
+    let height = button
         .height
         .saturating_sub(vertical_inset.saturating_mul(2));
     (width > 0 && height > 0).then_some(LayoutRect {
-        x: right.saturating_sub(width),
-        y: apply.y.saturating_add(vertical_inset),
+        x: button.x.saturating_add(horizontal_inset),
+        y: button.y.saturating_add(vertical_inset),
         width,
         height,
     })
@@ -2125,8 +2125,8 @@ fn required_command_rail_height(
     let group_gaps =
         i32::try_from(spec.group_count().saturating_sub(1)).map_err(|_| LayoutError::Overflow)?;
     metrics
-        .rail_padding
-        .checked_mul(2)
+        .rail_top_padding
+        .checked_add(metrics.rail_bottom_padding)
         .and_then(|padding| {
             metrics
                 .button_height
@@ -2157,7 +2157,7 @@ pub fn calculate_command_rail_layout(
     }
 
     let mut placements = Vec::with_capacity(spec.command_count());
-    let mut y = metrics.rail_padding;
+    let mut y = metrics.rail_top_padding;
     let mut previous_group = None;
     for command_spec in spec.command_specs() {
         let group = command_spec
@@ -2170,16 +2170,11 @@ pub fn calculate_command_rail_layout(
                 .ok_or(LayoutError::Overflow)?;
         }
         previous_group = Some(group);
-        let apply_inset = if command_spec.id == APPLY {
-            metrics.apply_keyline_inset.min(metrics.rail_width).max(0)
-        } else {
-            0
-        };
         placements.push(CommandPlacement {
             command: command_spec.id,
-            x: apply_inset,
+            x: 0,
             y,
-            width: metrics.rail_width.saturating_sub(apply_inset),
+            width: metrics.rail_width,
             height: metrics.button_height,
         });
         y = y
@@ -2689,7 +2684,7 @@ impl ForcedColorsState {
 
 #[cfg(any(windows, test))]
 #[must_use]
-pub(crate) const fn apply_keyline_visible(
+pub(crate) const fn apply_readiness_indicator_visible(
     apply: ApplyPresentation,
     forced_colors: ForcedColorsState,
     rails_visible: bool,
@@ -2738,10 +2733,6 @@ pub(crate) const fn proposed_name_visual_decision(
         ProposedNameVisual::Default
     }
 }
-
-/// Initial Apply keyline color before appearance resources are installed.
-#[cfg(any(windows, test))]
-pub(crate) const APPLY_KEYLINE_COLOR: u32 = 0x0032_29D9;
 
 /// Structured status content whose independent channels survive row refreshes.
 #[cfg(any(windows, test))]
@@ -4542,15 +4533,14 @@ mod tests {
     #[test]
     fn command_rail_layout_has_exact_group_gaps_without_overlap() -> Result<(), LayoutError> {
         let metrics = RailDensity::Comfortable.metrics(96);
-        let placements = calculate_command_rail_layout(&LEFT_RAIL, 352, metrics)?;
+        let placements = calculate_command_rail_layout(&LEFT_RAIL, 348, metrics)?;
 
         assert_eq!(placements.len(), 10);
         assert!(placements.iter().all(|placement| {
-            let expected_inset = if placement.command == APPLY { 4 } else { 0 };
-            placement.x == expected_inset
-                && placement.width == 52 - expected_inset
+            placement.x == 0
+                && placement.width == 52
                 && placement.height == 32
-                && placement.bottom() <= 348
+                && placement.bottom() <= 344
         }));
         assert!(
             placements
@@ -4559,9 +4549,9 @@ mod tests {
         );
         assert_eq!(
             placements.last().map(|placement| placement.bottom()),
-            Some(348)
+            Some(344)
         );
-        assert_eq!(placements[9].bottom() + 4, 352);
+        assert_eq!(placements[9].bottom() + 4, 348);
 
         for start in [1, 4, 7] {
             assert_eq!(
@@ -4577,16 +4567,25 @@ mod tests {
             assert!(separator.width > 0);
             assert!(separator.height > 0);
         }
-        let keyline = calculate_apply_keyline_layout(&placements, 96).unwrap_or_default();
         let apply = placements[0];
-        assert!(keyline.x >= 0);
-        assert!(keyline.x + keyline.width <= apply.x);
-        assert!(keyline.y >= apply.y);
-        assert!(keyline.bottom() <= apply.bottom());
-        assert!(keyline.width > 0);
-        assert!(keyline.height > 0);
+        let indicator = calculate_apply_readiness_indicator_rect(
+            LayoutRect {
+                x: apply.x,
+                y: apply.y,
+                width: apply.width,
+                height: apply.height,
+            },
+            96,
+        )
+        .unwrap_or_default();
+        assert!(indicator.x > apply.x);
+        assert!(indicator.x + indicator.width < apply.x + apply.width);
+        assert!(indicator.y > apply.y);
+        assert!(indicator.bottom() < apply.bottom());
+        assert!(indicator.width > 0);
+        assert!(indicator.height > 0);
 
-        let right = calculate_command_rail_layout(&RIGHT_RAIL, 352, metrics)?;
+        let right = calculate_command_rail_layout(&RIGHT_RAIL, 348, metrics)?;
         for start in [1, 4, 6] {
             assert_eq!(
                 right[start].y - right[start - 1].bottom(),
@@ -4602,35 +4601,71 @@ mod tests {
             [96, 120, 144, 192].map(|dpi| RailDensity::Comfortable.metrics(dpi)),
             [
                 UiMetrics {
-                    rail_padding: 4,
-                    apply_keyline_inset: 4,
+                    rail_top_padding: 0,
+                    rail_bottom_padding: 4,
                     button_height: 32,
                     group_gap: 8,
                     rail_width: 52
                 },
                 UiMetrics {
-                    rail_padding: 5,
-                    apply_keyline_inset: 5,
+                    rail_top_padding: 0,
+                    rail_bottom_padding: 5,
                     button_height: 40,
                     group_gap: 10,
                     rail_width: 65
                 },
                 UiMetrics {
-                    rail_padding: 6,
-                    apply_keyline_inset: 6,
+                    rail_top_padding: 0,
+                    rail_bottom_padding: 6,
                     button_height: 48,
                     group_gap: 12,
                     rail_width: 78
                 },
                 UiMetrics {
-                    rail_padding: 8,
-                    apply_keyline_inset: 8,
+                    rail_top_padding: 0,
+                    rail_bottom_padding: 8,
                     button_height: 64,
                     group_gap: 16,
                     rail_width: 104
                 },
             ]
         );
+    }
+
+    #[test]
+    fn apply_readiness_indicator_stays_inside_full_width_apply_at_supported_dpis()
+    -> Result<(), LayoutError> {
+        for dpi in [96, 120, 144, 192] {
+            let metrics = RailDensity::Comfortable.metrics(dpi);
+            let available = required_command_rail_height(&LEFT_RAIL, metrics)?;
+            let placements = calculate_command_rail_layout(&LEFT_RAIL, available, metrics)?;
+            let apply = placements[0];
+            assert_eq!(apply.command, APPLY);
+            assert_eq!(apply.x, 0);
+            assert_eq!(apply.y, 0);
+            assert_eq!(apply.width, metrics.rail_width);
+            assert_eq!(
+                placements.last().map(|placement| placement.bottom()),
+                Some(available - metrics.rail_bottom_padding)
+            );
+
+            let indicator = calculate_apply_readiness_indicator_rect(
+                LayoutRect {
+                    x: apply.x,
+                    y: apply.y,
+                    width: apply.width,
+                    height: apply.height,
+                },
+                dpi,
+            );
+            assert!(indicator.is_some());
+            let indicator = indicator.unwrap_or_default();
+            assert!(indicator.x > apply.x);
+            assert!(indicator.y > apply.y);
+            assert!(indicator.x + indicator.width < apply.x + apply.width);
+            assert!(indicator.bottom() < apply.bottom());
+        }
+        Ok(())
     }
 
     #[test]
@@ -4646,22 +4681,22 @@ mod tests {
     #[test]
     fn command_rail_density_falls_back_and_reports_insufficient_height() {
         assert_eq!(
-            select_command_rail_density(352, 96),
+            select_command_rail_density(348, 96),
             Ok(RailDensity::Comfortable)
         );
         assert_eq!(
-            select_command_rail_density(351, 96),
+            select_command_rail_density(347, 96),
             Ok(RailDensity::Compact)
         );
         assert_eq!(
-            select_command_rail_density(296, 96),
+            select_command_rail_density(294, 96),
             Ok(RailDensity::Compact)
         );
         assert_eq!(
-            select_command_rail_density(295, 96),
+            select_command_rail_density(293, 96),
             Err(LayoutError::InsufficientHeight {
-                required: 296,
-                available: 295,
+                required: 294,
+                available: 293,
             })
         );
     }
@@ -5243,7 +5278,7 @@ mod tests {
     fn explicit_density_preferences_never_silently_substitute_the_other_density() {
         assert_eq!(
             select_command_rail_density_with_preference(
-                352,
+                348,
                 96,
                 RailDensityPreference::Comfortable,
             ),
@@ -5251,29 +5286,29 @@ mod tests {
         );
         assert!(matches!(
             select_command_rail_density_with_preference(
-                351,
+                347,
                 96,
                 RailDensityPreference::Comfortable,
             ),
             Err(LayoutError::InsufficientHeight { .. })
         ));
         assert_eq!(
-            select_command_rail_density_with_preference(296, 96, RailDensityPreference::Compact),
+            select_command_rail_density_with_preference(294, 96, RailDensityPreference::Compact),
             Ok(RailDensity::Compact)
         );
         assert!(matches!(
-            select_command_rail_density_with_preference(295, 96, RailDensityPreference::Compact),
+            select_command_rail_density_with_preference(293, 96, RailDensityPreference::Compact),
             Err(LayoutError::InsufficientHeight { .. })
         ));
 
         let measured = MeasuredFontMetrics::default();
         let automatic =
-            calculate_main_layout(464, 369, 96, measured, RailDensityPreference::Automatic);
+            calculate_main_layout(464, 365, 96, measured, RailDensityPreference::Automatic);
         let comfortable =
-            calculate_main_layout(464, 369, 96, measured, RailDensityPreference::Comfortable);
-        let compact = calculate_main_layout(464, 369, 96, measured, RailDensityPreference::Compact);
+            calculate_main_layout(464, 365, 96, measured, RailDensityPreference::Comfortable);
+        let compact = calculate_main_layout(464, 365, 96, measured, RailDensityPreference::Compact);
         let menu_only =
-            calculate_main_layout(464, 369, 96, measured, RailDensityPreference::MenuOnly);
+            calculate_main_layout(464, 365, 96, measured, RailDensityPreference::MenuOnly);
         assert_eq!(automatic.rail_mode, RailMode::Compact);
         assert_eq!(comfortable.rail_mode, RailMode::MenuOnly);
         assert_eq!(compact.rail_mode, RailMode::Compact);
@@ -5570,16 +5605,16 @@ mod tests {
     fn main_layout_falls_back_from_compact_to_menu_only_without_invalid_rectangles() {
         let measured = MeasuredFontMetrics::default();
         let comfortable =
-            calculate_main_layout(464, 370, 96, measured, RailDensityPreference::Automatic);
+            calculate_main_layout(464, 366, 96, measured, RailDensityPreference::Automatic);
         assert_eq!(comfortable.rail_mode, RailMode::Comfortable);
         assert_eq!(main_layout_window_count(&comfortable), 34);
 
         let compact =
-            calculate_main_layout(464, 369, 96, measured, RailDensityPreference::Automatic);
+            calculate_main_layout(464, 365, 96, measured, RailDensityPreference::Automatic);
         assert_eq!(compact.rail_mode, RailMode::Compact);
 
         let vertical_menu_only =
-            calculate_main_layout(464, 313, 96, measured, RailDensityPreference::Automatic);
+            calculate_main_layout(464, 311, 96, measured, RailDensityPreference::Automatic);
         assert_eq!(vertical_menu_only.rail_mode, RailMode::MenuOnly);
         assert_eq!(main_layout_window_count(&vertical_menu_only), 8);
 
@@ -5804,7 +5839,7 @@ mod tests {
             ApplyPresentation::NoChanges
         );
 
-        assert!(apply_keyline_visible(
+        assert!(apply_readiness_indicator_visible(
             ApplyPresentation::Ready,
             ForcedColorsState::Inactive,
             true
@@ -5832,7 +5867,11 @@ mod tests {
             ),
             (ApplyPresentation::Ready, ForcedColorsState::Inactive, false),
         ] {
-            assert!(!apply_keyline_visible(apply, forced_colors, rails_visible));
+            assert!(!apply_readiness_indicator_visible(
+                apply,
+                forced_colors,
+                rails_visible
+            ));
         }
     }
 
@@ -5863,7 +5902,6 @@ mod tests {
             assert_eq!(state, ForcedColorsState::ActiveOrUnknown);
             assert!(!state.custom_colors_enabled());
         }
-        assert_eq!(APPLY_KEYLINE_COLOR, 0x0032_29D9);
         assert_eq!(
             proposed_name_visual_decision(ProposedNameVisualContext {
                 row: Some(1),

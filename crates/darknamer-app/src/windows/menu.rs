@@ -637,7 +637,7 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
         };
     }
     state.rails_visible = rails_visible;
-    refresh_apply_keyline(
+    refresh_apply_readiness(
         state,
         if state.command_states[0] {
             ApplyPresentation::Ready
@@ -757,7 +757,7 @@ pub(super) fn update_controls(state: &mut AppState) {
         };
     }
     apply_command_states(state);
-    refresh_apply_keyline(state, presentation.apply);
+    refresh_apply_readiness(state, presentation.apply);
     apply_cancel_control_state(state);
     apply_empty_state_presentation(state, presentation.empty);
     repair_focus_state(state);
@@ -786,13 +786,14 @@ pub(super) fn update_controls(state: &mut AppState) {
     }
 }
 
-pub(super) fn refresh_apply_keyline(state: &AppState, apply: ApplyPresentation) {
-    let requested = apply_keyline_visible(apply, state.forced_colors, state.rails_visible);
+pub(super) fn refresh_apply_readiness(state: &AppState, apply: ApplyPresentation) {
+    let requested =
+        apply_readiness_indicator_visible(apply, state.forced_colors, state.rails_visible);
     if let Some(rail) = &state.left_rail {
-        rail.set_apply_keyline_visible(requested);
+        rail.set_apply_readiness_visible(requested);
     }
     if let Some(rail) = &state.right_rail {
-        rail.set_apply_keyline_visible(requested);
+        rail.set_apply_readiness_visible(requested);
     }
 }
 

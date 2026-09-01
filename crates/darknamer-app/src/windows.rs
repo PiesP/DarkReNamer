@@ -123,7 +123,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     TRANSPARENT, UpdateWindow,
 };
 #[cfg(test)]
-use windows_sys::Win32::Graphics::Gdi::{GetBkColor, GetObjectType, GetTextColor, OBJ_BRUSH};
+use windows_sys::Win32::Graphics::Gdi::{GetBkColor, GetPixel, GetTextColor};
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
 use windows_sys::Win32::Storage::FileSystem::{
@@ -173,7 +173,8 @@ use windows_sys::Win32::UI::Controls::{
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::{
-    DRAWITEMSTRUCT, LVM_GETITEMTEXTW, MEASUREITEMSTRUCT, ODT_BUTTON, ODT_MENU,
+    DRAWITEMSTRUCT, LVM_GETITEMTEXTW, MEASUREITEMSTRUCT, ODS_DEFAULT, ODS_FOCUS, ODT_BUTTON,
+    ODT_MENU,
 };
 use windows_sys::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForWindow, SystemParametersInfoForDpi,
@@ -214,8 +215,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BM_CLICK, BS_FLAT, BS_MULTILINE, BS_TYPEMASK, GW_HWNDLAST, GWL_STYLE, GetClassNameW,
-    GetDlgCtrlID, GetWindow, HWND_TOP,
+    BM_CLICK, BS_FLAT, BS_MULTILINE, BS_TYPEMASK, GW_CHILD, GW_HWNDLAST, GW_HWNDNEXT, GWL_STYLE,
+    GetClassNameW, GetDlgCtrlID, GetWindow, HWND_TOP,
 };
 use worker::*;
 
@@ -2182,7 +2183,7 @@ mod tests {
     }
 
     #[test]
-    fn native_apply_keyline_replaces_brush_and_releases_owned_window()
+    fn native_apply_readiness_targets_the_existing_button_and_menu_only_hides_it()
     -> Result<(), Box<dyn std::error::Error>> {
         let controls = INITCOMMONCONTROLSEX {
             dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
@@ -2214,7 +2215,7 @@ mod tests {
         if parent.is_null() {
             return Err(io::Error::last_os_error().into());
         }
-        let mut rail = match CommandRail::create(parent, &LEFT_RAIL) {
+        let rail = match CommandRail::create(parent, &LEFT_RAIL) {
             Ok(rail) => rail,
             Err(error) => {
                 // SAFETY: parent is the hidden test window created above.
@@ -2222,33 +2223,155 @@ mod tests {
                 return Err(error.into());
             }
         };
-        let (Some(keyline), Some(original_brush)) =
-            (rail.apply_keyline_window(), rail.apply_keyline_brush())
-        else {
-            rail.destroy();
-            // SAFETY: parent is the hidden test window created above.
-            unsafe { DestroyWindow(parent) };
-            return Err(io::Error::other("Apply keyline resources are missing").into());
-        };
-        // SAFETY: original_brush is the live object solely owned by rail.
-        assert_eq!(unsafe { GetObjectType(original_brush) }, OBJ_BRUSH as u32);
-        rail.set_apply_keyline_color(GRAPHITE_DARK.apply_keyline)?;
-        let brush = rail
-            .apply_keyline_brush()
-            .ok_or_else(|| io::Error::other("replacement Apply keyline brush is missing"))?;
-        assert_ne!(brush, original_brush);
-        // SAFETY: brush is the new live object solely owned by rail.
-        assert_eq!(unsafe { GetObjectType(brush) }, OBJ_BRUSH as u32);
+        let apply = rail
+            .command_hwnd(APPLY)
+            .ok_or_else(|| io::Error::other("Apply button is missing"))?;
+        assert_eq!(rail.active_apply_readiness_button(), None);
+        rail.set_apply_readiness_visible(true);
+        assert_eq!(rail.active_apply_readiness_button(), Some(apply));
+        rail.set_visible(false);
+        assert_eq!(rail.active_apply_readiness_button(), None);
+        rail.set_visible(true);
+        assert_eq!(rail.active_apply_readiness_button(), Some(apply));
+        rail.set_apply_readiness_visible(false);
+        assert_eq!(rail.active_apply_readiness_button(), None);
+
+        let mut child_count = 0;
+        // SAFETY: parent is live; GetWindow walks its direct-child Z-order
+        // without retaining any handle beyond this synchronous count.
+        let mut child = unsafe { GetWindow(parent, GW_CHILD) };
+        while !child.is_null() {
+            child_count += 1;
+            // SAFETY: child remains live and GW_HWNDNEXT advances the same
+            // direct-child chain.
+            child = unsafe { GetWindow(child, GW_HWNDNEXT) };
+        }
+        assert_eq!(
+            child_count,
+            rail.button_count() + rail.separator_windows().len()
+        );
         rail.destroy();
-        let result: io::Result<()> = {
-            // SAFETY: the consumed owner must have destroyed its child window.
-            // GDI handle values are intentionally not queried after deletion:
-            // parallel tests may immediately reuse the numeric value for an
-            // unrelated brush in this process.
-            assert_eq!(unsafe { IsWindow(keyline) }, 0);
-            Ok(())
-        };
         // SAFETY: parent remains the test-owned hidden HWND.
+        unsafe { DestroyWindow(parent) };
+        Ok(())
+    }
+
+    #[test]
+    fn owner_draw_apply_readiness_uses_custom_palette_without_replacing_focus_or_default()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // SAFETY: the system STATIC class and current module are process-global.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let rail = match CommandRail::create(parent, &LEFT_RAIL) {
+            Ok(rail) => rail,
+            Err(error) => {
+                // SAFETY: parent is the test-owned hidden HWND.
+                unsafe { DestroyWindow(parent) };
+                return Err(error.into());
+            }
+        };
+        let result = (|| -> io::Result<()> {
+            let dpi = BASE_DPI;
+            let placements = calculate_command_rail_layout(
+                &LEFT_RAIL,
+                800,
+                RailDensity::Comfortable.metrics(dpi),
+            )
+            .map_err(|error| io::Error::other(format!("rail layout failed: {error:?}")))?;
+            rail.arrange(0, &placements, dpi);
+            let apply = rail
+                .command_hwnd(APPLY)
+                .ok_or_else(|| io::Error::other("Apply button is missing"))?;
+            // SAFETY: apply is live; its DC and writable client rectangle are
+            // used only for synchronous owner drawing below.
+            let (dc, rect) = unsafe {
+                let dc = GetDC(apply);
+                let mut rect = RECT::default();
+                GetClientRect(apply, &mut rect);
+                (dc, rect)
+            };
+            if dc.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let paint_result = (|| -> io::Result<()> {
+                let indicator = calculate_apply_readiness_indicator_rect(
+                    LayoutRect {
+                        x: rect.left,
+                        y: rect.top,
+                        width: rect.right.saturating_sub(rect.left),
+                        height: rect.bottom.saturating_sub(rect.top),
+                    },
+                    dpi,
+                )
+                .ok_or_else(|| io::Error::other("Apply readiness indicator is missing"))?;
+                let sample_x = indicator.x.saturating_add(indicator.width / 2);
+                let sample_y = indicator.y.saturating_add(indicator.height / 2);
+                let resources = AppearanceResources::create(GRAPHITE_DARK)?;
+                let mut draw = DRAWITEMSTRUCT {
+                    CtlType: ODT_BUTTON,
+                    itemState: ODS_DEFAULT | ODS_FOCUS,
+                    hwndItem: apply,
+                    hDC: dc,
+                    rcItem: rect,
+                    ..DRAWITEMSTRUCT::default()
+                };
+                assert!(draw_owner_rail_button(
+                    Some(&resources),
+                    Some(apply),
+                    dpi,
+                    (&raw mut draw) as LPARAM,
+                ));
+                // SAFETY: dc is live and the sampled point is strictly inside
+                // the pure indicator after focus/default rendering.
+                let indicator_pixel = unsafe { GetPixel(dc, sample_x, sample_y) };
+                assert_eq!(indicator_pixel, GRAPHITE_DARK.apply_keyline);
+
+                assert!(draw_owner_rail_button(
+                    Some(&resources),
+                    None,
+                    dpi,
+                    (&raw mut draw) as LPARAM,
+                ));
+                // SAFETY: the same bounded point now contains the normal custom
+                // button surface because no readiness target was supplied.
+                let untargeted_pixel = unsafe { GetPixel(dc, sample_x, sample_y) };
+                assert_ne!(untargeted_pixel, GRAPHITE_DARK.apply_keyline);
+
+                assert!(draw_owner_rail_button(
+                    None,
+                    Some(apply),
+                    dpi,
+                    (&raw mut draw) as LPARAM,
+                ));
+                // SAFETY: resources=None follows system/Forced Colors painting
+                // and deliberately draws no custom palette indicator.
+                let system_pixel = unsafe { GetPixel(dc, sample_x, sample_y) };
+                assert_ne!(system_pixel, GRAPHITE_DARK.apply_keyline);
+                Ok(())
+            })();
+            // SAFETY: dc came from this exact live Apply button.
+            unsafe { ReleaseDC(apply, dc) };
+            paint_result
+        })();
+        rail.destroy();
+        // SAFETY: parent is the test-owned hidden HWND after rail teardown.
         unsafe { DestroyWindow(parent) };
         result.map_err(Into::into)
     }
@@ -3038,12 +3161,6 @@ mod tests {
             let (instruction, safety, _add) = create_empty_state_controls(parent)?;
             let (status, _count, _cancel) = create_status_controls(parent)?;
             let drop_overlay = create_drop_overlay(parent)?;
-            let keyline = rail
-                .apply_keyline_window()
-                .ok_or_else(|| io::Error::other("Apply keyline is missing"))?;
-            let keyline_brush = rail
-                .apply_keyline_brush_for(keyline)
-                .ok_or_else(|| io::Error::other("Apply keyline brush is missing"))?;
             // SAFETY: parent is live and the returned DC is released below.
             let dc = unsafe { GetDC(parent) };
             if dc.is_null() {
@@ -3054,32 +3171,9 @@ mod tests {
                 SetTextColor(dc, 0x0012_3456);
                 SetBkColor(dc, 0x0065_4321);
             }
-            assert_eq!(
-                application::route_static_control_colors(
-                    Some(keyline_brush),
-                    None,
-                    instruction,
-                    safety,
-                    keyline,
-                    dc,
-                ),
-                Some(keyline_brush)
-            );
-            // SAFETY: keyline routing must not alter the live DC colors.
-            assert_eq!(unsafe { GetTextColor(dc) }, 0x0012_3456);
-            // SAFETY: same live DC.
-            assert_eq!(unsafe { GetBkColor(dc) }, 0x0065_4321);
-
             for empty in [instruction, safety] {
                 assert_eq!(
-                    application::route_static_control_colors(
-                        None,
-                        None,
-                        instruction,
-                        safety,
-                        empty,
-                        dc,
-                    ),
+                    application::route_static_control_colors(None, instruction, safety, empty, dc,),
                     // SAFETY: this is the cached system-owned workspace brush.
                     Some(unsafe { GetSysColorBrush(COLOR_WINDOW) })
                 );
@@ -3093,21 +3187,23 @@ mod tests {
                 });
             }
 
+            // SAFETY: this cached system brush is process-global and stays
+            // live for the complete synchronous routing test.
+            let custom_brush = unsafe { GetSysColorBrush(COLOR_WINDOW) };
             let custom = StaticControlColors {
-                brush: keyline_brush,
+                brush: custom_brush,
                 text: GRAPHITE_DARK.text_primary,
                 background: GRAPHITE_DARK.surface_status,
             };
             assert_eq!(
                 application::route_static_control_colors(
-                    None,
                     Some(custom),
                     instruction,
                     safety,
                     status,
                     dc,
                 ),
-                Some(keyline_brush)
+                Some(custom_brush)
             );
             // SAFETY: custom route wrote semantic values to the live DC.
             assert_eq!(unsafe { GetTextColor(dc) }, custom.text);
@@ -3117,7 +3213,6 @@ mod tests {
             for unrelated in [status, drop_overlay, rail.separator_windows()[0]] {
                 assert_eq!(
                     application::route_static_control_colors(
-                        rail.apply_keyline_brush_for(unrelated),
                         None,
                         instruction,
                         safety,
@@ -3226,60 +3321,24 @@ mod tests {
         right.arrange(right_origin, &right_placements, dpi);
 
         let result = (|| -> io::Result<()> {
-            let keyline = left
-                .apply_keyline_window()
-                .ok_or_else(|| io::Error::other("Apply keyline is missing"))?;
-            assert!(right.apply_keyline_window().is_none());
-            // SAFETY: keyline is a live standard STATIC and these are
-            // pointer-free style/identifier queries.
-            let keyline_style = unsafe { GetWindowLongPtrW(keyline, GWL_STYLE) } as u32;
-            assert_eq!(keyline_style & WS_TABSTOP, 0);
-            assert_eq!(keyline_style & SS_NOTIFY, 0);
-            // SAFETY: same live direct child with no assigned control ID.
-            assert_eq!(unsafe { GetDlgCtrlID(keyline) }, 0);
-            assert_eq!(keyline_style & WS_VISIBLE, 0);
-            let expected_keyline = calculate_apply_keyline_layout(&left_placements, dpi)
-                .ok_or_else(|| io::Error::other("Apply keyline layout is missing"))?;
-            let keyline_rect = left.apply_keyline_rect()?;
-            assert_eq!(keyline_rect.left, expected_keyline.x);
-            assert_eq!(keyline_rect.top, expected_keyline.y);
-            assert_eq!(
-                keyline_rect.right - keyline_rect.left,
-                expected_keyline.width
-            );
-            assert_eq!(
-                keyline_rect.bottom - keyline_rect.top,
-                expected_keyline.height
-            );
             let apply_rect = left.command_rect(APPLY)?;
-            assert!(keyline_rect.right <= apply_rect.left);
-            let brush = left
-                .apply_keyline_brush()
-                .ok_or_else(|| io::Error::other("Apply keyline brush is missing"))?;
-            assert_eq!(left.apply_keyline_brush_for(keyline), Some(brush));
             let apply_button = left
                 .command_hwnd(APPLY)
                 .ok_or_else(|| io::Error::other("Apply button is missing"))?;
-            assert_eq!(left.apply_keyline_brush_for(apply_button), None);
-
-            left.set_apply_keyline_visible(true);
-            // SAFETY: keyline remains live and style reflects ShowWindow.
-            let ready_style = unsafe { GetWindowLongPtrW(keyline, GWL_STYLE) } as u32;
-            assert_ne!(ready_style & WS_VISIBLE, 0);
-            left.set_apply_keyline_visible(false);
-            // SAFETY: same live keyline after the visibility update.
-            let idle_style = unsafe { GetWindowLongPtrW(keyline, GWL_STYLE) } as u32;
-            assert_eq!(idle_style & WS_VISIBLE, 0);
-            left.set_apply_keyline_visible(true);
+            assert_eq!(apply_rect.left, 0);
+            assert_eq!(apply_rect.right - apply_rect.left, metrics.rail_width);
+            assert_eq!(left.active_apply_readiness_button(), None);
+            assert_eq!(right.active_apply_readiness_button(), None);
+            left.set_apply_readiness_visible(true);
+            right.set_apply_readiness_visible(true);
+            assert_eq!(left.active_apply_readiness_button(), Some(apply_button));
+            assert_eq!(right.active_apply_readiness_button(), None);
             left.set_visible(false);
-            // SAFETY: MenuOnly-style rail hiding keeps the keyline hidden.
-            let menu_only_style = unsafe { GetWindowLongPtrW(keyline, GWL_STYLE) } as u32;
-            assert_eq!(menu_only_style & WS_VISIBLE, 0);
+            assert_eq!(left.active_apply_readiness_button(), None);
             left.set_visible(true);
-            // SAFETY: the retained Ready request is visible when rails return.
-            let restored_style = unsafe { GetWindowLongPtrW(keyline, GWL_STYLE) } as u32;
-            assert_ne!(restored_style & WS_VISIBLE, 0);
-            left.set_apply_keyline_visible(false);
+            assert_eq!(left.active_apply_readiness_button(), Some(apply_button));
+            left.set_apply_readiness_visible(false);
+            right.set_apply_readiness_visible(false);
 
             let mut actual_ids = Vec::with_capacity(19);
             for (rail, expected, origin_x) in [

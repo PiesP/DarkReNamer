@@ -906,7 +906,17 @@ pub(super) unsafe extern "system" fn window_proc(
             // only the synchronous WM_DRAWITEM payload.
             let state = unsafe { &*state_ptr };
             let resources = state.appearance_resources.as_ref();
-            if draw_owner_button(resources, lparam)
+            let apply_readiness_button = state
+                .left_rail
+                .as_ref()
+                .and_then(CommandRail::active_apply_readiness_button)
+                .or_else(|| {
+                    state
+                        .right_rail
+                        .as_ref()
+                        .and_then(CommandRail::active_apply_readiness_button)
+                });
+            if draw_owner_rail_button(resources, apply_readiness_button, state.dpi, lparam)
                 || state
                     .left_rail
                     .as_ref()
@@ -937,29 +947,17 @@ pub(super) unsafe extern "system" fn window_proc(
         WM_CTLCOLORSTATIC if !state_ptr.is_null() => {
             let child = lparam as HWND;
             // Copy all routing values in a tiny borrow that ends before any GDI
-            // call. Keyline matching remains the first and exact route.
+            // call.
             // SAFETY: state_ptr is live UI-thread state for this callback.
-            let (keyline_brush, custom_colors, instruction, safety) = unsafe {
+            let (custom_colors, instruction, safety) = unsafe {
                 let state = &*state_ptr;
-                let keyline_brush = state
-                    .left_rail
-                    .as_ref()
-                    .and_then(|rail| rail.apply_keyline_brush_for(child))
-                    .or_else(|| {
-                        state
-                            .right_rail
-                            .as_ref()
-                            .and_then(|rail| rail.apply_keyline_brush_for(child))
-                    });
                 (
-                    keyline_brush,
                     static_control_colors(state, child),
                     state.empty_instruction,
                     state.empty_safety,
                 )
             };
             if let Some(brush) = route_static_control_colors(
-                keyline_brush,
                 custom_colors,
                 instruction,
                 safety,
@@ -1136,16 +1134,12 @@ pub(super) unsafe extern "system" fn window_proc(
 }
 
 pub(super) fn route_static_control_colors(
-    keyline_brush: Option<HBRUSH>,
     custom_colors: Option<StaticControlColors>,
     empty_instruction: HWND,
     empty_safety: HWND,
     child: HWND,
     dc: HDC,
 ) -> Option<HBRUSH> {
-    if let Some(brush) = keyline_brush {
-        return Some(brush);
-    }
     if let Some(colors) = custom_colors {
         // SAFETY: WM_CTLCOLORSTATIC supplies a live HDC. AppState owns the
         // selected brush through this synchronous paint callback.

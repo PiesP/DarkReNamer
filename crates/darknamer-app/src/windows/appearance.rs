@@ -93,6 +93,7 @@ pub(super) struct AppearanceResources {
     control_hover: OwnedSolidBrush,
     control_pressed: OwnedSolidBrush,
     control_disabled: OwnedSolidBrush,
+    apply_readiness: OwnedSolidBrush,
     border: OwnedSolidBrush,
     palette: SemanticPalette,
 }
@@ -110,6 +111,7 @@ impl AppearanceResources {
             control_hover: OwnedSolidBrush::create(palette.control_hover)?,
             control_pressed: OwnedSolidBrush::create(palette.control_pressed)?,
             control_disabled: OwnedSolidBrush::create(palette.control_disabled)?,
+            apply_readiness: OwnedSolidBrush::create(palette.apply_keyline)?,
             border: OwnedSolidBrush::create(palette.border)?,
             palette,
         })
@@ -233,6 +235,24 @@ pub(super) fn erase_themed_background(
 }
 
 pub(super) fn draw_owner_button(resources: Option<&AppearanceResources>, lparam: LPARAM) -> bool {
+    draw_owner_button_with_readiness(resources, None, BASE_DPI, lparam)
+}
+
+pub(super) fn draw_owner_rail_button(
+    resources: Option<&AppearanceResources>,
+    apply_readiness_button: Option<HWND>,
+    dpi: u32,
+    lparam: LPARAM,
+) -> bool {
+    draw_owner_button_with_readiness(resources, apply_readiness_button, dpi, lparam)
+}
+
+fn draw_owner_button_with_readiness(
+    resources: Option<&AppearanceResources>,
+    apply_readiness_button: Option<HWND>,
+    dpi: u32,
+    lparam: LPARAM,
+) -> bool {
     let draw = lparam as *const DRAWITEMSTRUCT;
     if draw.is_null() {
         return false;
@@ -247,6 +267,7 @@ pub(super) fn draw_owner_button(resources: Option<&AppearanceResources>, lparam:
         draw.hwndItem,
         draw.hDC,
         draw.rcItem,
+        (apply_readiness_button == Some(draw.hwndItem)).then_some(dpi),
         ButtonDrawState {
             disabled: draw.itemState & (ODS_DISABLED | ODS_GRAYED) != 0,
             pressed: draw.itemState & ODS_SELECTED != 0,
@@ -316,6 +337,7 @@ pub(super) fn draw_custom_button(
         unsafe { (*custom).hdc },
         // SAFETY: the rectangle is copied integral callback data.
         unsafe { (*custom).rc },
+        None,
         ButtonDrawState {
             disabled: state & CDIS_DISABLED != 0,
             pressed: state & CDIS_SELECTED != 0,
@@ -341,6 +363,7 @@ fn paint_button(
     button: HWND,
     dc: HDC,
     rect: windows_sys::Win32::Foundation::RECT,
+    apply_readiness_dpi: Option<u32>,
     state: ButtonDrawState,
 ) {
     let ButtonDrawState {
@@ -395,6 +418,27 @@ fn paint_button(
         inner.bottom = inner.bottom.saturating_sub(1);
         // SAFETY: inner remains inside rect and the border brush is live.
         unsafe { FrameRect(dc, &inner, border) };
+    }
+    if let (Some(resources), Some(dpi)) = (resources, apply_readiness_dpi)
+        && let Some(indicator) = calculate_apply_readiness_indicator_rect(
+            LayoutRect {
+                x: rect.left,
+                y: rect.top,
+                width: rect.right.saturating_sub(rect.left),
+                height: rect.bottom.saturating_sub(rect.top),
+            },
+            dpi,
+        )
+    {
+        let indicator = windows_sys::Win32::Foundation::RECT {
+            left: indicator.x,
+            top: indicator.y,
+            right: indicator.x.saturating_add(indicator.width),
+            bottom: indicator.y.saturating_add(indicator.height),
+        };
+        // SAFETY: the callback DC and readiness brush are live, and the pure
+        // rectangle is strictly bounded inside the owner-draw button.
+        unsafe { FillRect(dc, &indicator, resources.apply_readiness.as_raw()) };
     }
     // SAFETY: button is the live native BUTTON being drawn.
     let length = unsafe { GetWindowTextLengthW(button) };
@@ -728,15 +772,6 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
     let resolved = state.resolved_appearance();
     let palette = semantic_palette(resolved.theme);
     let replacement = palette.map(AppearanceResources::create).transpose()?;
-
-    if let Some(palette) = palette {
-        if let Some(rail) = state.left_rail.as_mut() {
-            rail.set_apply_keyline_color(palette.apply_keyline)?;
-        }
-        if let Some(rail) = state.right_rail.as_mut() {
-            rail.set_apply_keyline_color(palette.apply_keyline)?;
-        }
-    }
 
     // Install the replacement brush while both old and new resources remain
     // alive. Only a successful menu update permits dropping the old brush set.
