@@ -734,6 +734,19 @@ try {
         -VisualEvidenceRoot $visualRoot
     Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
 
+    $invalidSignatureEvidence = Copy-Evidence $complete
+    $invalidSignatureBytes = [IO.File]::ReadAllBytes($firstVisualPath)
+    $invalidSignatureBytes[0] = $invalidSignatureBytes[0] -bxor 1
+    [IO.File]::WriteAllBytes($firstVisualPath, $invalidSignatureBytes)
+    $invalidSignatureEvidence.visual_captures[0].image.sha256 =
+        (Get-FileHash -LiteralPath $firstVisualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ValidatorFails `
+        -Evidence $invalidSignatureEvidence `
+        -Name 'visual-root-invalid-signature' `
+        -ExpectedFragment 'PNG signature is invalid' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
     $invalidCrcEvidence = Copy-Evidence $complete
     $invalidCrcBytes = [IO.File]::ReadAllBytes($firstVisualPath)
     $invalidCrcBytes[60] = $invalidCrcBytes[60] -bxor 1
