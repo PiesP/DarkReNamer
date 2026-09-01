@@ -394,6 +394,75 @@ fn profile_benchmark_matrix_is_directional_serial_and_non_publishing() {
 }
 
 #[test]
+fn profile_planning_matrix_is_directional_nonexecuting_and_non_publishing() {
+    let workflow = normalize_workflow_source(include_str!(
+        "../../../.github/workflows/profile-planning-matrix.yaml"
+    ));
+
+    assert!(workflow.contains("on:\n  workflow_dispatch:"));
+    assert!(!workflow.contains("\n  push:"));
+    assert!(!workflow.contains("\n  pull_request:"));
+    assert!(workflow.contains("permissions:\n  contents: read"));
+    assert!(!workflow.contains(": write"));
+    assert!(workflow.contains("runs-on: windows-2025"));
+    assert!(workflow.contains("timeout-minutes: 120"));
+    assert!(workflow.contains("persist-credentials: false"));
+    assert!(!workflow.contains("strategy:"));
+    for declaration in [
+        "id = 'current-3-3'; app_opt_level = '3'; core_opt_level = '3'",
+        "id = 'app-s-core-3'; app_opt_level = 's'; core_opt_level = '3'",
+    ] {
+        assert!(
+            workflow.contains(declaration),
+            "missing variant {declaration}"
+        );
+    }
+    assert!(!workflow.contains("app-s-core-s"));
+    assert!(!workflow.contains("app-2-core-3"));
+    assert!(workflow.contains("$topologies = @('same-parent', 'unique-parent', 'deep-parent')"));
+    assert!(workflow.contains("foreach ($iteration in 0..5)"));
+    assert!(workflow.contains("DARKRENAMER_BENCH_EVIDENCE_CLASS = 'directional-hosted'"));
+    assert!(workflow.contains("DARKRENAMER_BENCH_MEDIA = 'virtual'"));
+    assert!(workflow.contains("DARKRENAMER_BENCH_VARIANT = 'baseline'"));
+    assert!(workflow.contains("DARKRENAMER_BENCH_COUNT = '10000'"));
+    assert!(workflow.contains("execution_performed = $false"));
+    assert!(workflow.contains("physical_storage_or_desktop_acceptance = $false"));
+    assert!(workflow.contains("selection_evidence = $false"));
+    assert!(workflow.contains("filesystem_mutation = 'owned-temporary-fixtures-only'"));
+    assert!(workflow.contains("recorded_iterations = 5"));
+    assert!(workflow.contains("$env:CARGO_INCREMENTAL = '0'"));
+    assert!(workflow.contains(
+        "--package darknamer-app --test rename_windows_backend `\n                    benchmark_durable_production_path"
+    ));
+    assert_eq!(
+        workflow
+            .matches("./scripts/get-git-blob-sha256.ps1")
+            .count(),
+        4
+    );
+    assert!(workflow.contains("profile-planning-matrix.json"));
+    assert!(workflow.contains(
+        "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1"
+    ));
+    for prohibited in [
+        "DARKRENAMER_BENCH_EVIDENCE_CLASS = 'physical'",
+        "DARKRENAMER_BENCH_MEDIA = 'ssd'",
+        "DARKRENAMER_BENCH_MEDIA = 'hdd'",
+        "actions/attest@",
+        "actions/cache@",
+        "cargo publish",
+        "gh release",
+        "git ls-remote",
+        "id-token: write",
+    ] {
+        assert!(
+            !workflow.contains(prohibited),
+            "profile planning benchmark must not contain {prohibited}"
+        );
+    }
+}
+
+#[test]
 fn workflow_contract_normalizes_windows_line_endings() {
     assert_eq!(
         normalize_workflow_source("on:\r\n  workflow_dispatch:\r\n"),

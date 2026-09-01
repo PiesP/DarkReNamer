@@ -69,6 +69,7 @@ $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $workflows = @(
     Join-Path $repositoryRoot '.github/workflows/binary-size-matrix.yaml'
     Join-Path $repositoryRoot '.github/workflows/profile-benchmark-matrix.yaml'
+    Join-Path $repositoryRoot '.github/workflows/profile-planning-matrix.yaml'
     Join-Path $repositoryRoot '.github/workflows/release.yaml'
     Join-Path $repositoryRoot '.github/workflows/promote-release.yaml'
 )
