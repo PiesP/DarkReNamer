@@ -1390,6 +1390,40 @@ impl LayoutRect {
     }
 }
 
+/// Calculates the one-pixel menu-bottom repair in window-DC coordinates.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn calculate_menu_bottom_edge(
+    window_screen: LayoutRect,
+    menu_screen: LayoutRect,
+) -> Option<LayoutRect> {
+    if window_screen.width <= 0
+        || window_screen.height <= 0
+        || menu_screen.width <= 0
+        || menu_screen.height <= 0
+    {
+        return None;
+    }
+
+    let window_right = window_screen.x.checked_add(window_screen.width)?;
+    let window_bottom = window_screen.y.checked_add(window_screen.height)?;
+    let menu_right = menu_screen.x.checked_add(menu_screen.width)?;
+    let menu_bottom = menu_screen.y.checked_add(menu_screen.height)?;
+
+    let left = menu_screen.x.max(window_screen.x);
+    let right = menu_right.min(window_right);
+    if right <= left || menu_bottom <= window_screen.y || menu_bottom >= window_bottom {
+        return None;
+    }
+
+    Some(LayoutRect {
+        x: left.checked_sub(window_screen.x)?,
+        y: menu_bottom.checked_sub(window_screen.y)?,
+        width: right.checked_sub(left)?,
+        height: 1,
+    })
+}
+
 /// App-owned status-strip geometry painted behind the inset native controls.
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -6005,6 +6039,127 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![99, 249]
         );
+    }
+
+    #[test]
+    fn menu_bottom_edge_matches_observed_window_coordinates() {
+        let edge = calculate_menu_bottom_edge(
+            LayoutRect {
+                x: 300,
+                y: 200,
+                width: 1_158,
+                height: 1_088,
+            },
+            LayoutRect {
+                x: 313,
+                y: 250,
+                width: 1_132,
+                height: 46,
+            },
+        );
+
+        assert_eq!(
+            edge,
+            Some(LayoutRect {
+                x: 13,
+                y: 96,
+                width: 1_132,
+                height: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn menu_bottom_edge_clamps_horizontally_and_rejects_invalid_geometry() {
+        let window = LayoutRect {
+            x: 100,
+            y: 200,
+            width: 300,
+            height: 200,
+        };
+        assert_eq!(
+            calculate_menu_bottom_edge(
+                window,
+                LayoutRect {
+                    x: 50,
+                    y: 220,
+                    width: 400,
+                    height: 30,
+                },
+            ),
+            Some(LayoutRect {
+                x: 0,
+                y: 50,
+                width: 300,
+                height: 1,
+            })
+        );
+
+        for (invalid_window, invalid_menu) in [
+            (
+                LayoutRect { width: 0, ..window },
+                LayoutRect {
+                    x: 120,
+                    y: 220,
+                    width: 100,
+                    height: 30,
+                },
+            ),
+            (
+                window,
+                LayoutRect {
+                    x: 500,
+                    y: 220,
+                    width: 100,
+                    height: 30,
+                },
+            ),
+            (
+                window,
+                LayoutRect {
+                    x: 120,
+                    y: 170,
+                    width: 100,
+                    height: 30,
+                },
+            ),
+            (
+                window,
+                LayoutRect {
+                    x: 120,
+                    y: 390,
+                    width: 100,
+                    height: 10,
+                },
+            ),
+            (
+                LayoutRect {
+                    x: i32::MAX - 10,
+                    width: 20,
+                    ..window
+                },
+                LayoutRect {
+                    x: i32::MAX - 5,
+                    y: 220,
+                    width: 10,
+                    height: 30,
+                },
+            ),
+            (
+                window,
+                LayoutRect {
+                    x: 120,
+                    y: i32::MAX - 5,
+                    width: 100,
+                    height: 10,
+                },
+            ),
+        ] {
+            assert_eq!(
+                calculate_menu_bottom_edge(invalid_window, invalid_menu),
+                None
+            );
+        }
     }
 
     #[test]

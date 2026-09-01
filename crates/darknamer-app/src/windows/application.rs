@@ -476,6 +476,10 @@ pub(super) fn handle_list_marquee_begin(list_window: HWND, lparam: LPARAM) -> Op
     Some(if item_count == 0 { 1 } else { 0 })
 }
 
+const fn repaints_menu_bottom_edge(message: u32) -> bool {
+    matches!(message, WM_NCPAINT | WM_NCACTIVATE)
+}
+
 pub(super) unsafe extern "system" fn window_proc(
     window: HWND,
     message: u32,
@@ -897,6 +901,24 @@ pub(super) unsafe extern "system" fn window_proc(
             request_window_close(window, state);
             0
         }
+        _ if repaints_menu_bottom_edge(message) && !state_ptr.is_null() => {
+            // Only custom Light/Dark resources repair the app-owned menu edge.
+            // Copy the COLORREF and end the lease before default non-client
+            // painting can synchronously reenter this callback graph.
+            let color = state_lease
+                .state()
+                .appearance_resources
+                .as_ref()
+                .map(|resources| resources.palette().surface_window);
+            drop(state_lease);
+            // SAFETY: arguments are unchanged copied values from this active
+            // non-client callback. Its return value remains authoritative.
+            let result = unsafe { DefWindowProcW(window, message, wparam, lparam) };
+            if let Some(color) = color {
+                paint_menu_bottom_edge(window, color);
+            }
+            result
+        }
         WM_ERASEBKGND if !state_ptr.is_null() => {
             // SAFETY: state_ptr is live UI-thread state and wparam is the
             // callback-owned paint DC for this exact top-level window.
@@ -1184,5 +1206,17 @@ pub(super) fn route_static_control_colors(
         SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
         SetBkColor(dc, GetSysColor(COLOR_WINDOW));
         Some(GetSysColorBrush(COLOR_WINDOW))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn menu_bottom_edge_repaints_for_paint_and_activation_messages() {
+        assert!(repaints_menu_bottom_edge(WM_NCPAINT));
+        assert!(repaints_menu_bottom_edge(WM_NCACTIVATE));
+        assert!(!repaints_menu_bottom_edge(WM_ERASEBKGND));
     }
 }

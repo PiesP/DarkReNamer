@@ -12,9 +12,9 @@ use windows_sys::Win32::Graphics::Gdi::{
     COLOR_HIGHLIGHTTEXT, COLOR_MENU, COLOR_MENUTEXT, COLOR_WINDOW, COLOR_WINDOWFRAME,
     COLOR_WINDOWTEXT, CreateSolidBrush, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_HIDEPREFIX,
     DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteObject,
-    DrawFocusRect, DrawTextW, FillRect, FrameRect, GetDC, GetSysColor, GetSysColorBrush, HBRUSH,
-    RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RedrawWindow, ReleaseDC, SelectObject, SetBkMode,
-    SetTextColor, TRANSPARENT,
+    DrawFocusRect, DrawTextW, FillRect, FrameRect, GetDC, GetSysColor, GetSysColorBrush,
+    GetWindowDC, HBRUSH, HDC, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RedrawWindow,
+    ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows_sys::Win32::UI::Controls::{
     CDDS_PREPAINT, CDIS_DEFAULT, CDIS_DISABLED, CDIS_FOCUS, CDIS_HOT, CDIS_SELECTED,
@@ -24,8 +24,8 @@ use windows_sys::Win32::UI::Controls::{
 };
 use windows_sys::Win32::UI::Controls::{LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetWindowTextLengthW, GetWindowTextW, MENUINFO, MIM_APPLYTOSUBMENUS, MIM_BACKGROUND,
-    SendMessageW, SetMenuInfo, WM_GETFONT,
+    GetMenuBarInfo, GetWindowTextLengthW, GetWindowTextW, MENUBARINFO, MENUINFO,
+    MIM_APPLYTOSUBMENUS, MIM_BACKGROUND, OBJID_MENU, SendMessageW, SetMenuInfo, WM_GETFONT,
 };
 
 use super::*;
@@ -77,6 +77,34 @@ impl Drop for OwnedSolidBrush {
             // SAFETY: this wrapper solely owns the unselected solid brush.
             unsafe { DeleteObject(self.0) };
             self.0 = null_mut();
+        }
+    }
+}
+
+struct OwnedWindowDc {
+    window: HWND,
+    dc: HDC,
+}
+
+impl OwnedWindowDc {
+    fn acquire(window: HWND) -> Option<Self> {
+        // SAFETY: window is the live top-level HWND. A successful window DC is
+        // paired with ReleaseDC by this wrapper on every subsequent path.
+        let dc = unsafe { GetWindowDC(window) };
+        (!dc.is_null()).then_some(Self { window, dc })
+    }
+
+    const fn as_raw(&self) -> HDC {
+        self.dc
+    }
+}
+
+impl Drop for OwnedWindowDc {
+    fn drop(&mut self) {
+        if !self.dc.is_null() {
+            // SAFETY: this is the exact DC returned for this HWND by GetWindowDC.
+            unsafe { ReleaseDC(self.window, self.dc) };
+            self.dc = null_mut();
         }
     }
 }
@@ -846,6 +874,56 @@ fn apply_menu_background(menu: HMENU, resources: Option<&AppearanceResources>) -
     }
 }
 
+fn screen_layout_rect(rect: RECT) -> Option<LayoutRect> {
+    Some(LayoutRect {
+        x: rect.left,
+        y: rect.top,
+        width: rect.right.checked_sub(rect.left)?,
+        height: rect.bottom.checked_sub(rect.top)?,
+    })
+}
+
+pub(super) fn paint_menu_bottom_edge(window: HWND, color: u32) {
+    let mut menu = MENUBARINFO {
+        cbSize: u32::try_from(size_of::<MENUBARINFO>()).unwrap_or(u32::MAX),
+        ..MENUBARINFO::default()
+    };
+    // SAFETY: window is live and menu is exact initialized writable storage for
+    // this synchronous top-level menu query.
+    if unsafe { GetMenuBarInfo(window, OBJID_MENU, 0, &mut menu) } == 0 {
+        return;
+    }
+    let mut window_rect = RECT::default();
+    // SAFETY: window is live and window_rect remains writable for this query.
+    if unsafe { GetWindowRect(window, &mut window_rect) } == 0 {
+        return;
+    }
+    let Some(window_screen) = screen_layout_rect(window_rect) else {
+        return;
+    };
+    let Some(menu_screen) = screen_layout_rect(menu.rcBar) else {
+        return;
+    };
+    let Some(edge) = calculate_menu_bottom_edge(window_screen, menu_screen) else {
+        return;
+    };
+    let Some(dc) = OwnedWindowDc::acquire(window) else {
+        return;
+    };
+    let Ok(brush) = OwnedSolidBrush::create(color) else {
+        return;
+    };
+    let rect = RECT {
+        left: edge.x,
+        top: edge.y,
+        right: edge.right(),
+        bottom: edge.bottom(),
+    };
+    // SAFETY: dc and brush are live RAII-owned GDI handles and rect is readable
+    // for this synchronous one-pixel fill.
+    unsafe { FillRect(dc.as_raw(), &rect, brush.as_raw()) };
+}
+
 pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io::Result<()> {
     let resolved = state.resolved_appearance();
     let palette = semantic_palette(resolved.theme);
@@ -900,7 +978,7 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
             window,
             null(),
             null_mut(),
-            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
+            RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN,
         )
     };
     Ok(())
