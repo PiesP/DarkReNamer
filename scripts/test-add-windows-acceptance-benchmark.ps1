@@ -38,6 +38,9 @@ function Write-Logs([string]$Directory, [string]$Sha, [string]$Media='ssd', [int
 }
 
 function New-Case([string]$Name, [string]$Media='ssd', [int]$Count=100) {
+    if ($Name -match '^(?i:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)') {
+        throw "Test case name is a reserved Windows device name: $Name"
+    }
     $root = Join-Path $script:testRoot $Name
     New-Item -ItemType Directory -Path $root | Out-Null
     $evidence = Join-Path $root 'input.json'
@@ -85,6 +88,14 @@ try {
     $exe = Join-Path $testRoot 'DarkReNamer.exe'; [IO.File]::WriteAllBytes($exe, [byte[]](0x4d,0x5a,1,2))
     $baseEvidence = Join-Path $testRoot 'base.json'
     & $draftGenerator -SourceRoot $sourceRoot -OutputPath $baseEvidence -ExecutablePath $exe | Out-Null
+
+    try {
+        $null = New-Case 'nul'
+        throw 'Expected the portable fixture-name guard to reject nul.'
+    }
+    catch {
+        if ($_.Exception.Message -notlike '*reserved Windows device name*') { throw }
+    }
 
     $happy = New-Case 'happy'
     & $augmenter -SourceRoot $sourceRoot -EvidencePath $happy.Evidence -LogDirectory $happy.Logs -OutputPath $happy.Output | Out-Null
@@ -180,7 +191,7 @@ try {
 
     $bom=New-Case 'utf8-bom';$p=Join-Path $bom.Logs 'iteration-1.log';$b=[Text.UTF8Encoding]::new($false).GetBytes((Get-Content $p -Raw));[IO.File]::WriteAllBytes($p,[byte[]](@(0xef,0xbb,0xbf)+$b))
     & $augmenter -SourceRoot $sourceRoot -EvidencePath $bom.Evidence -LogDirectory $bom.Logs -OutputPath $bom.Output | Out-Null
-    $nul=New-Case 'nul';Mutate-FirstLog $nul {param($t)$t+[char]0};Assert-Fails {&$augmenter -SourceRoot $sourceRoot -EvidencePath $nul.Evidence -LogDirectory $nul.Logs -OutputPath $nul.Output} 'contains NUL' $nul.Output
+    $nul=New-Case 'contains-nul';Mutate-FirstLog $nul {param($t)$t+[char]0};Assert-Fails {&$augmenter -SourceRoot $sourceRoot -EvidencePath $nul.Evidence -LogDirectory $nul.Logs -OutputPath $nul.Output} 'contains NUL' $nul.Output
     $long=New-Case 'long-line';Mutate-FirstLog $long {param($t)('x'*8193)+"`n"+$t};Assert-Fails {&$augmenter -SourceRoot $sourceRoot -EvidencePath $long.Evidence -LogDirectory $long.Logs -OutputPath $long.Output} 'overlong line' $long.Output
     $badUtf=New-Case 'bad-utf8';[IO.File]::WriteAllBytes((Join-Path $badUtf.Logs 'iteration-1.log'),[byte[]](0xff,0xfe));Assert-Fails {&$augmenter -SourceRoot $sourceRoot -EvidencePath $badUtf.Evidence -LogDirectory $badUtf.Logs -OutputPath $badUtf.Output} 'strict UTF-8' $badUtf.Output
     $large=New-Case 'large-log';[IO.File]::WriteAllBytes((Join-Path $large.Logs 'iteration-1.log'),[byte[]]::new(4*1024*1024+1));Assert-Fails {&$augmenter -SourceRoot $sourceRoot -EvidencePath $large.Evidence -LogDirectory $large.Logs -OutputPath $large.Output} 'byte limit' $large.Output
