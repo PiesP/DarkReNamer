@@ -870,11 +870,13 @@ mod tests {
     static EMPTY_SAFETY_COPY_BRUSH: AtomicUsize = AtomicUsize::new(0);
     static EMPTY_SAFETY_COPY_TEXT: AtomicUsize = AtomicUsize::new(0);
     static EMPTY_SAFETY_COPY_BACKGROUND: AtomicUsize = AtomicUsize::new(0);
+    static EMPTY_SAFETY_COPY_FAILURES: AtomicUsize = AtomicUsize::new(0);
     const STATUS_RENDER_PROBE_SUBCLASS_ID: usize = 0xD4B3;
     static STATUS_RENDER_CALLBACKS: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
     static STATUS_RENDER_BRUSH: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
     static STATUS_RENDER_TEXT: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
     static STATUS_RENDER_BACKGROUND: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
+    static STATUS_RENDER_FAILURES: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
 
     extern "system" fn empty_safety_copy_probe(
         window: HWND,
@@ -882,7 +884,7 @@ mod tests {
         wparam: WPARAM,
         lparam: LPARAM,
         subclass_id: usize,
-        _ref_data: usize,
+        ref_data: usize,
     ) -> LRESULT {
         // SAFETY: the callback forwards its original message through the
         // system subclass chain exactly once. The empty-safety branch uses the
@@ -891,17 +893,39 @@ mod tests {
             if subclass_id == EMPTY_SAFETY_COPY_PROBE_SUBCLASS_ID
                 && message == windows_sys::Win32::UI::WindowsAndMessaging::WM_SETTEXT
             {
-                let owner = GetParent(window);
                 let dc = GetDC(window);
                 if !dc.is_null() {
-                    let brush = application::window_proc(
-                        owner,
-                        WM_CTLCOLORSTATIC,
-                        dc as WPARAM,
-                        window as LPARAM,
-                    );
+                    let slot = ref_data as *mut AppStateSlot;
+                    let brush = CallbackState::try_lease(slot).and_then(|lease| {
+                        let state = lease.state();
+                        let custom_colors = static_control_colors(state, window);
+                        let instruction = state.empty_instruction;
+                        let safety = state.empty_safety;
+                        let status_message = state.status_message;
+                        let status_count = state.status_count;
+                        let brush = application::route_static_control_colors(
+                            custom_colors,
+                            instruction,
+                            safety,
+                            status_message,
+                            status_count,
+                            window,
+                            dc,
+                        );
+                        drop(lease);
+                        brush
+                    });
                     EMPTY_SAFETY_COPY_CALLBACKS.fetch_add(1, Ordering::SeqCst);
-                    EMPTY_SAFETY_COPY_BRUSH.store(brush as usize, Ordering::SeqCst);
+                    EMPTY_SAFETY_COPY_BRUSH.store(
+                        brush.map_or_else(
+                            || {
+                                EMPTY_SAFETY_COPY_FAILURES.fetch_add(1, Ordering::SeqCst);
+                                usize::MAX
+                            },
+                            |brush| brush as usize,
+                        ),
+                        Ordering::SeqCst,
+                    );
                     EMPTY_SAFETY_COPY_TEXT.store(GetTextColor(dc) as usize, Ordering::SeqCst);
                     EMPTY_SAFETY_COPY_BACKGROUND.store(GetBkColor(dc) as usize, Ordering::SeqCst);
                     ReleaseDC(window, dc);
@@ -917,7 +941,7 @@ mod tests {
         wparam: WPARAM,
         lparam: LPARAM,
         subclass_id: usize,
-        _ref_data: usize,
+        ref_data: usize,
     ) -> LRESULT {
         // SAFETY: the callback forwards its original message through the
         // system subclass chain exactly once. The status branch uses the live
@@ -932,17 +956,39 @@ mod tests {
                     _ => None,
                 };
                 if let Some(index) = index {
-                    let owner = GetParent(window);
                     let dc = GetDC(window);
                     if !dc.is_null() {
-                        let brush = application::window_proc(
-                            owner,
-                            WM_CTLCOLORSTATIC,
-                            dc as WPARAM,
-                            window as LPARAM,
-                        );
+                        let slot = ref_data as *mut AppStateSlot;
+                        let brush = CallbackState::try_lease(slot).and_then(|lease| {
+                            let state = lease.state();
+                            let custom_colors = static_control_colors(state, window);
+                            let instruction = state.empty_instruction;
+                            let safety = state.empty_safety;
+                            let status_message = state.status_message;
+                            let status_count = state.status_count;
+                            let brush = application::route_static_control_colors(
+                                custom_colors,
+                                instruction,
+                                safety,
+                                status_message,
+                                status_count,
+                                window,
+                                dc,
+                            );
+                            drop(lease);
+                            brush
+                        });
                         STATUS_RENDER_CALLBACKS[index].fetch_add(1, Ordering::SeqCst);
-                        STATUS_RENDER_BRUSH[index].store(brush as usize, Ordering::SeqCst);
+                        STATUS_RENDER_BRUSH[index].store(
+                            brush.map_or_else(
+                                || {
+                                    STATUS_RENDER_FAILURES[index].fetch_add(1, Ordering::SeqCst);
+                                    usize::MAX
+                                },
+                                |brush| brush as usize,
+                            ),
+                            Ordering::SeqCst,
+                        );
                         STATUS_RENDER_TEXT[index]
                             .store(GetTextColor(dc) as usize, Ordering::SeqCst);
                         STATUS_RENDER_BACKGROUND[index]
@@ -1101,6 +1147,7 @@ mod tests {
         EMPTY_SAFETY_COPY_BRUSH.store(0, Ordering::SeqCst);
         EMPTY_SAFETY_COPY_TEXT.store(0, Ordering::SeqCst);
         EMPTY_SAFETY_COPY_BACKGROUND.store(0, Ordering::SeqCst);
+        EMPTY_SAFETY_COPY_FAILURES.store(0, Ordering::SeqCst);
 
         let directory = tempfile::tempdir()?;
         let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
@@ -1145,24 +1192,42 @@ mod tests {
                 DestroyWindow(owner);
                 return Err(io::Error::last_os_error().into());
             }
-            if SetWindowSubclass(
-                safety,
-                Some(empty_safety_copy_probe),
-                EMPTY_SAFETY_COPY_PROBE_SUBCLASS_ID,
-                0,
-            ) == 0
-            {
-                DestroyWindow(owner);
-                return Err(io::Error::last_os_error().into());
-            }
-
             state.empty_safety = safety;
             let expected = static_control_colors(&state, safety)
                 .ok_or_else(|| io::Error::other("empty safety semantic colors are missing"))?;
             let state_slot: *mut AppStateSlot = CallbackState::into_raw(state);
             SetWindowLongPtrW(owner, GWLP_USERDATA, state_slot as isize);
+            if SetWindowSubclass(
+                safety,
+                Some(empty_safety_copy_probe),
+                EMPTY_SAFETY_COPY_PROBE_SUBCLASS_ID,
+                state_slot as usize,
+            ) == 0
+            {
+                let error = io::Error::last_os_error();
+                SetWindowLongPtrW(owner, GWLP_USERDATA, 0);
+                DestroyWindow(owner);
+                let disposition = CallbackState::request_reclaim(state_slot);
+                assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+                return Err(error.into());
+            }
 
-            let message_result = application::window_proc(owner, WM_APP_EMPTY_SAFETY_COPY, 0, 0);
+            let state_lease = match CallbackState::try_lease(state_slot) {
+                Some(lease) => lease,
+                None => {
+                    RemoveWindowSubclass(
+                        safety,
+                        Some(empty_safety_copy_probe),
+                        EMPTY_SAFETY_COPY_PROBE_SUBCLASS_ID,
+                    );
+                    SetWindowLongPtrW(owner, GWLP_USERDATA, 0);
+                    DestroyWindow(owner);
+                    let disposition = CallbackState::request_reclaim(state_slot);
+                    assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+                    return Err(io::Error::other("empty safety state lease is unavailable").into());
+                }
+            };
+            let message_result = application::handle_empty_safety_copy(state_lease, 0);
             let text = window_text(safety);
 
             RemoveWindowSubclass(
@@ -1179,6 +1244,7 @@ mod tests {
 
         assert_eq!(message_result, 0);
         assert_eq!(EMPTY_SAFETY_COPY_CALLBACKS.load(Ordering::SeqCst), 1);
+        assert_eq!(EMPTY_SAFETY_COPY_FAILURES.load(Ordering::SeqCst), 0);
         assert_eq!(
             EMPTY_SAFETY_COPY_BRUSH.load(Ordering::SeqCst),
             expected.brush as usize
@@ -1204,6 +1270,7 @@ mod tests {
             STATUS_RENDER_BRUSH[index].store(0, Ordering::SeqCst);
             STATUS_RENDER_TEXT[index].store(0, Ordering::SeqCst);
             STATUS_RENDER_BACKGROUND[index].store(0, Ordering::SeqCst);
+            STATUS_RENDER_FAILURES[index].store(0, Ordering::SeqCst);
         }
 
         let directory = tempfile::tempdir()?;
@@ -1222,7 +1289,8 @@ mod tests {
             synchronous_callbacks,
             first_timer_installed,
             duplicate_timer_absent,
-            busy_handler_result,
+            nested_lease_rejected,
+            busy_timer_message_suppressed,
             callbacks_while_busy,
             busy_timer_survived,
             handler_result,
@@ -1257,19 +1325,6 @@ mod tests {
                     return Err(error.into());
                 }
             };
-            for status in [status_message, status_count] {
-                if SetWindowSubclass(
-                    status,
-                    Some(status_render_probe),
-                    STATUS_RENDER_PROBE_SUBCLASS_ID,
-                    0,
-                ) == 0
-                {
-                    DestroyWindow(owner);
-                    return Err(io::Error::last_os_error().into());
-                }
-            }
-
             state.status_message = status_message;
             state.status_count = status_count;
             let expected_message = match static_control_colors(&state, status_message) {
@@ -1292,6 +1347,22 @@ mod tests {
             let expected_text = ["최신 상태 표시".to_owned(), state.ui_status.count_text()];
             let state_slot: *mut AppStateSlot = CallbackState::into_raw(state);
             SetWindowLongPtrW(owner, GWLP_USERDATA, state_slot as isize);
+            for status in [status_message, status_count] {
+                if SetWindowSubclass(
+                    status,
+                    Some(status_render_probe),
+                    STATUS_RENDER_PROBE_SUBCLASS_ID,
+                    state_slot as usize,
+                ) == 0
+                {
+                    let error = io::Error::last_os_error();
+                    SetWindowLongPtrW(owner, GWLP_USERDATA, 0);
+                    DestroyWindow(owner);
+                    let disposition = CallbackState::request_reclaim(state_slot);
+                    assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+                    return Err(error.into());
+                }
+            }
 
             let mut state_lease = match CallbackState::try_lease(state_slot) {
                 Some(lease) => lease,
@@ -1332,8 +1403,9 @@ mod tests {
                 }
             };
             busy_lease.state().render_status();
-            let busy_handler_result =
-                application::window_proc(owner, WM_TIMER, STATUS_RENDER_TIMER_ID, 0);
+            let nested_lease_rejected = CallbackState::try_lease(state_slot).is_none();
+            let busy_timer_message_suppressed =
+                application::suppresses_busy_callback_message(WM_TIMER);
             let callbacks_while_busy = [
                 STATUS_RENDER_CALLBACKS[0].load(Ordering::SeqCst),
                 STATUS_RENDER_CALLBACKS[1].load(Ordering::SeqCst),
@@ -1354,9 +1426,7 @@ mod tests {
                     return Err(io::Error::other("retry status lease is unavailable").into());
                 }
             };
-            drop(retry_lease);
-            let handler_result =
-                application::window_proc(owner, WM_TIMER, STATUS_RENDER_TIMER_ID, 0);
+            let handler_result = application::handle_status_render_timer(owner, retry_lease);
             let handler_timer_removed = KillTimer(owner, STATUS_RENDER_TIMER_ID) == 0;
             let actual_message_text = window_text(status_message);
             let actual_count_text = window_text(status_count);
@@ -1375,7 +1445,8 @@ mod tests {
                 synchronous_callbacks,
                 first_timer_installed,
                 duplicate_timer_absent,
-                busy_handler_result,
+                nested_lease_rejected,
+                busy_timer_message_suppressed,
                 callbacks_while_busy,
                 busy_timer_survived,
                 handler_result,
@@ -1399,7 +1470,8 @@ mod tests {
             duplicate_timer_absent,
             "repeated renders must share one timer"
         );
-        assert_eq!(busy_handler_result, 0);
+        assert!(nested_lease_rejected);
+        assert!(busy_timer_message_suppressed);
         assert_eq!(callbacks_while_busy, [0, 0]);
         assert!(
             busy_timer_survived,
@@ -1412,6 +1484,7 @@ mod tests {
         );
         for index in 0..2 {
             assert_eq!(STATUS_RENDER_CALLBACKS[index].load(Ordering::SeqCst), 1);
+            assert_eq!(STATUS_RENDER_FAILURES[index].load(Ordering::SeqCst), 0);
             assert_eq!(
                 STATUS_RENDER_BRUSH[index].load(Ordering::SeqCst),
                 expected[index].brush as usize

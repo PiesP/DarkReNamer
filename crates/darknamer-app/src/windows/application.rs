@@ -480,7 +480,47 @@ const fn repaints_menu_bottom_edge(message: u32) -> bool {
     matches!(message, WM_NCPAINT | WM_NCACTIVATE)
 }
 
-pub(super) unsafe extern "system" fn window_proc(
+pub(super) const fn suppresses_busy_callback_message(message: u32) -> bool {
+    matches!(message, WM_COMMAND | WM_NOTIFY | WM_CLOSE | WM_TIMER) || message >= WM_APP
+}
+
+pub(super) fn handle_empty_safety_copy(
+    state_lease: CallbackStateLease<AppState, DropTargetRegistrations>,
+    wparam: WPARAM,
+) -> LRESULT {
+    let safety = state_lease.state().empty_safety;
+    let mode = if wparam == 0 {
+        RailMode::MenuOnly
+    } else {
+        RailMode::Compact
+    };
+    let text = empty_state_safety_copy(mode);
+    run_after_callback_state_release(state_lease, || set_status(safety, text));
+    0
+}
+
+pub(super) fn handle_status_render_timer(
+    window: HWND,
+    state_lease: CallbackStateLease<AppState, DropTargetRegistrations>,
+) -> LRESULT {
+    // Stop the coalescing timer only after the caller acquired the state lease.
+    // A busy nested WM_TIMER cannot call this helper and leaves it installed.
+    // SAFETY: window owns this exact timer identifier; killing an absent timer
+    // is harmless and carries no callback payload.
+    unsafe { KillTimer(window, STATUS_RENDER_TIMER_ID) };
+    let state = state_lease.state();
+    let status_message = state.status_message;
+    let status_count = state.status_count;
+    let message_text = state.ui_status.message_text().to_owned();
+    let count_text = state.ui_status.count_text();
+    run_after_callback_state_release(state_lease, || {
+        set_status(status_message, &message_text);
+        set_status(status_count, &count_text);
+    });
+    0
+}
+
+unsafe extern "system" fn window_proc(
     window: HWND,
     message: u32,
     wparam: WPARAM,
@@ -552,12 +592,7 @@ pub(super) unsafe extern "system" fn window_proc(
             unsafe { PostQuitMessage(0) };
             return 0;
         }
-        if message == WM_COMMAND
-            || message == WM_NOTIFY
-            || message == WM_CLOSE
-            || message == WM_TIMER
-            || message >= WM_APP
-        {
+        if suppresses_busy_callback_message(message) {
             return 0;
         }
         // SAFETY: a same-state nested entry must not construct another Rust
@@ -688,46 +723,10 @@ pub(super) unsafe extern "system" fn window_proc(
             0
         }
         WM_APP_EMPTY_SAFETY_COPY if !state_ptr.is_null() => {
-            // Copy only owned/scalar routing values, then release the callback
-            // lease before SetWindowTextW can synchronously request colors.
-            // SAFETY: state_ptr is the live AppState under this callback's sole
-            // lease; only the copyable HWND crosses the release boundary.
-            let safety = unsafe { (*state_ptr).empty_safety };
-            let mode = if wparam == 0 {
-                RailMode::MenuOnly
-            } else {
-                RailMode::Compact
-            };
-            let text = empty_state_safety_copy(mode);
-            run_after_callback_state_release(state_lease, || set_status(safety, text));
-            0
+            handle_empty_safety_copy(state_lease, wparam)
         }
         WM_TIMER if !state_ptr.is_null() && wparam == STATUS_RENDER_TIMER_ID => {
-            // Stop the coalescing timer only after this callback acquires the
-            // state lease. A busy nested WM_TIMER exits above without killing
-            // it, so the low-priority timer can retry after the nested loop.
-            // SAFETY: window owns this exact timer identifier; killing an
-            // absent timer is harmless and carries no callback payload.
-            unsafe { KillTimer(window, STATUS_RENDER_TIMER_ID) };
-            // Snapshot both channels as owned text plus copied HWNDs, then end
-            // the sole AppState lease before SetWindowTextW can synchronously
-            // enter accessibility or WM_CTLCOLORSTATIC callbacks.
-            // SAFETY: state_ptr is the live AppState under this callback's sole
-            // lease; no AppState reference crosses the release boundary.
-            let (status_message, status_count, message_text, count_text) = unsafe {
-                let state = &*state_ptr;
-                (
-                    state.status_message,
-                    state.status_count,
-                    state.ui_status.message_text().to_owned(),
-                    state.ui_status.count_text(),
-                )
-            };
-            run_after_callback_state_release(state_lease, || {
-                set_status(status_message, &message_text);
-                set_status(status_count, &count_text);
-            });
-            0
+            handle_status_render_timer(window, state_lease)
         }
         WM_GETMINMAXINFO if !state_ptr.is_null() => {
             let info = lparam as *mut MINMAXINFO;
