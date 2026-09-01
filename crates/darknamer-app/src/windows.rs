@@ -145,7 +145,7 @@ use windows_sys::Win32::System::SystemServices::{
     SS_CENTER, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_NOPREFIX, SS_OWNERDRAW, SS_SUNKEN,
 };
 #[cfg(test)]
-use windows_sys::Win32::System::SystemServices::{SS_ETCHEDHORZ, SS_NOTIFY, SS_TYPEMASK};
+use windows_sys::Win32::System::SystemServices::{SS_NOTIFY, SS_TYPEMASK};
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTimeEx};
 use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 #[cfg(test)]
@@ -248,6 +248,7 @@ const WM_APP_LAYOUT: u32 = WM_APP + 0x4C;
 const WM_APP_EMPTY_SAFETY_COPY: u32 = WM_APP + 0x4D;
 const WM_APP_APPEARANCE_RESTORE_FOCUS: u32 = WM_APP + 0x4E;
 const WM_APP_FINISH_CLOSE: u32 = WM_APP + 0x4F;
+const WM_APP_MENU_REDRAW: u32 = WM_APP + 0x50;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 const PREFERENCES_POLL_TIMER_ID: usize = 0xD4A2;
 
@@ -425,6 +426,7 @@ struct AppState {
     empty_add: HWND,
     drop_overlay: HWND,
     menu: HMENU,
+    pending_menu: Option<OwnedMenu>,
     font: OwnedFont,
     status_font: OwnedFont,
     left_rail: Option<CommandRail>,
@@ -521,6 +523,7 @@ impl AppState {
             empty_add: null_mut(),
             drop_overlay: null_mut(),
             menu: null_mut(),
+            pending_menu: None,
             font: OwnedFont::default(),
             status_font: OwnedFont::default(),
             left_rail: None,
@@ -2636,7 +2639,7 @@ mod tests {
                     // SAFETY: separator is live and GWL_STYLE is a value query.
                     let style = unsafe { GetWindowLongPtrW(*separator, GWL_STYLE) } as u32;
                     assert_eq!(style & WS_TABSTOP, 0);
-                    assert_eq!(style & SS_TYPEMASK, SS_ETCHEDHORZ);
+                    assert_eq!(style & SS_TYPEMASK, SS_OWNERDRAW);
                     let rect = rail.separator_rect(index)?;
                     assert_eq!(rect.left, origin_x + expected_rect.x);
                     assert_eq!(rect.top, expected_rect.y);

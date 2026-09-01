@@ -349,6 +349,12 @@ fn run_unsafe() -> io::Result<()> {
         }
         return Err(io::Error::last_os_error());
     }
+    // The menu was intentionally created but not attached during WM_CREATE.
+    // Attach it now, outside that callback's AppState lease, so synchronous
+    // owner-draw measurement can safely borrow the rendering state.
+    // SAFETY: window is the live top-level HWND and the private message carries
+    // no pointers or borrowed data.
+    unsafe { SendMessageW(window, WM_APP_MENU_REDRAW, 0, 0) };
     let Some(state_lease) = try_app_state(window) else {
         // SAFETY: the created window did not retain its required AppState and
         // is destroyed before returning the initialization failure.
@@ -572,6 +578,51 @@ unsafe extern "system" fn window_proc(
             arrange(window, unsafe { &mut *state_ptr });
             0
         }
+        WM_APP_MENU_REDRAW if !state_ptr.is_null() => {
+            // DrawMenuBar synchronously sends owner-draw measurement and paint
+            // callbacks. End the current state lease first so those nested
+            // callbacks can acquire their own non-aliasing lease.
+            // SAFETY: this callback owns the sole AppState lease. The unattached
+            // menu, when present, transfers out exactly once; otherwise only the
+            // window-owned raw handle is copied.
+            let (pending, attached) = unsafe {
+                let state = &mut *state_ptr;
+                let pending = state.pending_menu.take();
+                if pending.is_some() {
+                    state.menu = null_mut();
+                }
+                (pending, state.menu)
+            };
+            drop(state_lease);
+            let menu = if let Some(pending) = pending {
+                match pending.attach(window) {
+                    Ok(menu) => {
+                        if let Some(mut lease) = try_app_state(window) {
+                            lease.state_mut().menu = menu;
+                        }
+                        menu
+                    }
+                    Err(error) => {
+                        super::message(
+                            window,
+                            &format!("메뉴를 화면에 표시하지 못했습니다: {error}"),
+                            "DarkReNamer - 시작 실패",
+                        );
+                        // SAFETY: no state lease remains. Normal destruction owns
+                        // child, menu, and AppState cleanup exactly once.
+                        unsafe { DestroyWindow(window) };
+                        return 0;
+                    }
+                }
+            } else {
+                attached
+            };
+            if !menu.is_null() {
+                // SAFETY: window is the live top-level owner and menu is attached.
+                unsafe { DrawMenuBar(window) };
+            }
+            0
+        }
         WM_APP_EMPTY_SAFETY_COPY if !state_ptr.is_null() => {
             // Copy the target HWND in a tiny UI-thread borrow that ends before
             // SetWindowTextW can synchronously enter control/accessibility code.
@@ -787,6 +838,14 @@ unsafe extern "system" fn window_proc(
             let state = unsafe { &*state_ptr };
             let resources = state.appearance_resources.as_ref();
             if draw_owner_button(resources, lparam)
+                || state
+                    .left_rail
+                    .as_ref()
+                    .is_some_and(|rail| rail.draw_separator(resources, lparam))
+                || state
+                    .right_rail
+                    .as_ref()
+                    .is_some_and(|rail| rail.draw_separator(resources, lparam))
                 || draw_owner_menu(resources, state.font.as_raw(), state.dpi, lparam)
             {
                 return 1;
@@ -990,7 +1049,12 @@ unsafe extern "system" fn window_proc(
             0
         }
         _ => {
-            // SAFETY: window, message, wparam, and lparam are unchanged values from the active Windows callback.
+            // Default handling can synchronously enter native menu, focus, and
+            // non-client callbacks. Release AppState before that reentry so the
+            // nested callback can acquire its own lease without aliasing.
+            drop(state_lease);
+            // SAFETY: window, message, wparam, and lparam are unchanged copied
+            // values from the active Windows callback.
             unsafe { DefWindowProcW(window, message, wparam, lparam) }
         }
     }
