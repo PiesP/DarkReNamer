@@ -825,6 +825,47 @@ pub(crate) fn atomic_replace_preferences(source: &Path, destination: &Path) -> i
 mod tests {
     use super::*;
 
+    const EMPTY_SAFETY_COPY_PROBE_SUBCLASS_ID: usize = 0xD4B2;
+    static EMPTY_SAFETY_COPY_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
+    static EMPTY_SAFETY_COPY_BRUSH: AtomicUsize = AtomicUsize::new(0);
+    static EMPTY_SAFETY_COPY_TEXT: AtomicUsize = AtomicUsize::new(0);
+    static EMPTY_SAFETY_COPY_BACKGROUND: AtomicUsize = AtomicUsize::new(0);
+
+    extern "system" fn empty_safety_copy_probe(
+        window: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        subclass_id: usize,
+        _ref_data: usize,
+    ) -> LRESULT {
+        // SAFETY: the callback forwards its original message through the
+        // system subclass chain exactly once. The empty-safety branch uses the
+        // live child/parent pair and releases the exact child DC synchronously.
+        unsafe {
+            if subclass_id == EMPTY_SAFETY_COPY_PROBE_SUBCLASS_ID
+                && message == windows_sys::Win32::UI::WindowsAndMessaging::WM_SETTEXT
+            {
+                let owner = GetParent(window);
+                let dc = GetDC(window);
+                if !dc.is_null() {
+                    let brush = application::window_proc(
+                        owner,
+                        WM_CTLCOLORSTATIC,
+                        dc as WPARAM,
+                        window as LPARAM,
+                    );
+                    EMPTY_SAFETY_COPY_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+                    EMPTY_SAFETY_COPY_BRUSH.store(brush as usize, Ordering::SeqCst);
+                    EMPTY_SAFETY_COPY_TEXT.store(GetTextColor(dc) as usize, Ordering::SeqCst);
+                    EMPTY_SAFETY_COPY_BACKGROUND.store(GetBkColor(dc) as usize, Ordering::SeqCst);
+                    ReleaseDC(window, dc);
+                }
+            }
+            DefSubclassProc(window, message, wparam, lparam)
+        }
+    }
+
     #[test]
     fn proposal_mutation_errors_keep_failure_copy_actionable_and_path_free() {
         assert_eq!(
@@ -913,6 +954,108 @@ mod tests {
         drop(action_probe);
         // SAFETY: no lease remains and the test is retiring its unique slot.
         let disposition = unsafe { CallbackState::request_reclaim(slot) };
+        assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+        Ok(())
+    }
+
+    #[test]
+    fn empty_safety_copy_releases_state_before_nested_static_color_callback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        EMPTY_SAFETY_COPY_CALLBACKS.store(0, Ordering::SeqCst);
+        EMPTY_SAFETY_COPY_BRUSH.store(0, Ordering::SeqCst);
+        EMPTY_SAFETY_COPY_TEXT.store(0, Ordering::SeqCst);
+        EMPTY_SAFETY_COPY_BACKGROUND.store(0, Ordering::SeqCst);
+
+        let directory = tempfile::tempdir()?;
+        let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+        state.appearance_resources = Some(AppearanceResources::create(GRAPHITE_DARK)?);
+        let class = wide("STATIC");
+        // SAFETY: every HWND and state slot below is owned by this UI-thread
+        // test. Publication is cleared and the subclass removed before the
+        // owner destroys its child; the unpublished slot is then reclaimed.
+        let (message_result, expected, text, disposition) = unsafe {
+            let owner = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                320,
+                240,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            );
+            if owner.is_null() {
+                return Err(io::Error::last_os_error().into());
+            }
+            let safety = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_CHILD | WS_VISIBLE,
+                0,
+                0,
+                240,
+                32,
+                owner,
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            );
+            if safety.is_null() {
+                DestroyWindow(owner);
+                return Err(io::Error::last_os_error().into());
+            }
+            if SetWindowSubclass(
+                safety,
+                Some(empty_safety_copy_probe),
+                EMPTY_SAFETY_COPY_PROBE_SUBCLASS_ID,
+                0,
+            ) == 0
+            {
+                DestroyWindow(owner);
+                return Err(io::Error::last_os_error().into());
+            }
+
+            state.empty_safety = safety;
+            let expected = static_control_colors(&state, safety)
+                .ok_or_else(|| io::Error::other("empty safety semantic colors are missing"))?;
+            let state_slot: *mut AppStateSlot = CallbackState::into_raw(state);
+            SetWindowLongPtrW(owner, GWLP_USERDATA, state_slot as isize);
+
+            let message_result = application::window_proc(owner, WM_APP_EMPTY_SAFETY_COPY, 0, 0);
+            let text = window_text(safety);
+
+            RemoveWindowSubclass(
+                safety,
+                Some(empty_safety_copy_probe),
+                EMPTY_SAFETY_COPY_PROBE_SUBCLASS_ID,
+            );
+            SetWindowLongPtrW(owner, GWLP_USERDATA, 0);
+            DestroyWindow(owner);
+            let disposition = CallbackState::request_reclaim(state_slot);
+            (message_result, expected, text, disposition)
+        };
+        let text = text?;
+
+        assert_eq!(message_result, 0);
+        assert_eq!(EMPTY_SAFETY_COPY_CALLBACKS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            EMPTY_SAFETY_COPY_BRUSH.load(Ordering::SeqCst),
+            expected.brush as usize
+        );
+        assert_eq!(
+            EMPTY_SAFETY_COPY_TEXT.load(Ordering::SeqCst),
+            expected.text as usize
+        );
+        assert_eq!(
+            EMPTY_SAFETY_COPY_BACKGROUND.load(Ordering::SeqCst),
+            expected.background as usize
+        );
+        assert_eq!(text, empty_state_safety_copy(RailMode::MenuOnly));
         assert_eq!(disposition, ReclaimDisposition::Reclaimed);
         Ok(())
     }

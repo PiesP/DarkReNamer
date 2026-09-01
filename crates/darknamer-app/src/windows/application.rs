@@ -451,7 +451,7 @@ fn run_unsafe() -> io::Result<()> {
     Ok(())
 }
 
-unsafe extern "system" fn window_proc(
+pub(super) unsafe extern "system" fn window_proc(
     window: HWND,
     message: u32,
     wparam: WPARAM,
@@ -633,16 +633,18 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_APP_EMPTY_SAFETY_COPY if !state_ptr.is_null() => {
-            // Copy the target HWND in a tiny UI-thread borrow that ends before
-            // SetWindowTextW can synchronously enter control/accessibility code.
-            // SAFETY: state_ptr is the live AppState published by this window.
+            // Copy only owned/scalar routing values, then release the callback
+            // lease before SetWindowTextW can synchronously request colors.
+            // SAFETY: state_ptr is the live AppState under this callback's sole
+            // lease; only the copyable HWND crosses the release boundary.
             let safety = unsafe { (*state_ptr).empty_safety };
             let mode = if wparam == 0 {
                 RailMode::MenuOnly
             } else {
                 RailMode::Compact
             };
-            set_status(safety, empty_state_safety_copy(mode));
+            let text = empty_state_safety_copy(mode);
+            run_after_callback_state_release(state_lease, || set_status(safety, text));
             0
         }
         WM_GETMINMAXINFO if !state_ptr.is_null() => {

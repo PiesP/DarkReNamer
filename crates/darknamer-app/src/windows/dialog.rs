@@ -1256,8 +1256,8 @@ pub(super) fn import_paths_dialog(owner: HWND, state: &mut AppState) {
 pub(super) fn set_status(status: HWND, text: &str) {
     let text = wide(text);
     // SAFETY: status is a live UI-thread control and SetWindowTextW copies the
-    // terminated buffer synchronously. Its ordinary invalidation paints only
-    // after the caller's AppState borrow/callback boundary has ended.
+    // terminated buffer synchronously. Callers must release AppState before
+    // entry because control/accessibility callbacks may also run synchronously.
     unsafe { windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(status, text.as_ptr()) };
 }
 
