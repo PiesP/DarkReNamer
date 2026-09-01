@@ -114,6 +114,11 @@ use windows_sys::Win32::Foundation::{
     SYSTEMTIME, WPARAM,
 };
 use windows_sys::Win32::Globalization::{DATE_SHORTDATE, GetDateFormatEx, GetTimeFormatEx};
+#[cfg(test)]
+use windows_sys::Win32::Graphics::Gdi::{
+    COLOR_BTNFACE, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, GetBkColor, GetPixel,
+    GetTextColor, HBITMAP, HGDIOBJ,
+};
 use windows_sys::Win32::Graphics::Gdi::{
     COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW, DT_CALCRECT, DT_END_ELLIPSIS, DT_LEFT,
     DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteObject, DrawTextW,
@@ -122,8 +127,6 @@ use windows_sys::Win32::Graphics::Gdi::{
     RDW_INVALIDATE, RedrawWindow, ReleaseDC, SelectObject, SetBkColor, SetBkMode, SetTextColor,
     TRANSPARENT, UpdateWindow,
 };
-#[cfg(test)]
-use windows_sys::Win32::Graphics::Gdi::{GetBkColor, GetPixel, GetTextColor};
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
 use windows_sys::Win32::Storage::FileSystem::{
@@ -2434,6 +2437,96 @@ mod tests {
             }
         };
         let result = (|| -> io::Result<()> {
+            struct MemoryPaintSurface {
+                dc: HDC,
+                bitmap: HBITMAP,
+                previous: HGDIOBJ,
+            }
+
+            impl MemoryPaintSurface {
+                fn create(window: HWND, width: i32, height: i32) -> io::Result<Self> {
+                    // SAFETY: window is live. The display DC is released before
+                    // returning, while successful compatible objects transfer
+                    // to this RAII owner.
+                    unsafe {
+                        let reference = GetDC(window);
+                        if reference.is_null() {
+                            return Err(io::Error::last_os_error());
+                        }
+                        let dc = CreateCompatibleDC(reference);
+                        let bitmap = if dc.is_null() {
+                            null_mut()
+                        } else {
+                            CreateCompatibleBitmap(reference, width, height)
+                        };
+                        ReleaseDC(window, reference);
+                        if dc.is_null() || bitmap.is_null() {
+                            if !bitmap.is_null() {
+                                DeleteObject(bitmap);
+                            }
+                            if !dc.is_null() {
+                                DeleteDC(dc);
+                            }
+                            return Err(io::Error::last_os_error());
+                        }
+                        let previous = SelectObject(dc, bitmap);
+                        if previous.is_null() {
+                            DeleteObject(bitmap);
+                            DeleteDC(dc);
+                            return Err(io::Error::last_os_error());
+                        }
+                        Ok(Self {
+                            dc,
+                            bitmap,
+                            previous,
+                        })
+                    }
+                }
+
+                const fn dc(&self) -> HDC {
+                    self.dc
+                }
+            }
+
+            impl Drop for MemoryPaintSurface {
+                fn drop(&mut self) {
+                    // SAFETY: restore the exact original object before deleting
+                    // the compatible bitmap and DC on every unwind/return path.
+                    unsafe {
+                        SelectObject(self.dc, self.previous);
+                        DeleteObject(self.bitmap);
+                        DeleteDC(self.dc);
+                    }
+                    self.dc = null_mut();
+                    self.bitmap = null_mut();
+                    self.previous = null_mut();
+                }
+            }
+
+            fn checked_pixel(dc: HDC, x: i32, y: i32) -> u32 {
+                // SAFETY: callers pass the live memory DC and a bounded point.
+                let pixel = unsafe { GetPixel(dc, x, y) };
+                assert_ne!(pixel, u32::MAX, "memory-surface GetPixel failed");
+                pixel
+            }
+
+            fn focus_perimeter(dc: HDC, rect: RECT) -> Vec<u32> {
+                let left = rect.left.saturating_add(3);
+                let top = rect.top.saturating_add(3);
+                let right = rect.right.saturating_sub(4);
+                let bottom = rect.bottom.saturating_sub(4);
+                let mut pixels = Vec::new();
+                for x in left..=right {
+                    pixels.push(checked_pixel(dc, x, top));
+                    pixels.push(checked_pixel(dc, x, bottom));
+                }
+                for y in top.saturating_add(1)..bottom {
+                    pixels.push(checked_pixel(dc, left, y));
+                    pixels.push(checked_pixel(dc, right, y));
+                }
+                pixels
+            }
+
             let dpi = BASE_DPI;
             let placements = calculate_command_rail_layout(
                 &LEFT_RAIL,
@@ -2445,17 +2538,16 @@ mod tests {
             let apply = rail
                 .command_hwnd(APPLY)
                 .ok_or_else(|| io::Error::other("Apply button is missing"))?;
-            // SAFETY: apply is live; its DC and writable client rectangle are
-            // used only for synchronous owner drawing below.
-            let (dc, rect) = unsafe {
-                let dc = GetDC(apply);
+            // SAFETY: apply is live and rect is writable for this query.
+            let rect = unsafe {
                 let mut rect = RECT::default();
                 GetClientRect(apply, &mut rect);
-                (dc, rect)
+                rect
             };
-            if dc.is_null() {
-                return Err(io::Error::last_os_error());
-            }
+            let width = rect.right.saturating_sub(rect.left);
+            let height = rect.bottom.saturating_sub(rect.top);
+            let surface = MemoryPaintSurface::create(apply, width, height)?;
+            let dc = surface.dc();
             let paint_result = (|| -> io::Result<()> {
                 let indicator = calculate_apply_readiness_indicator_rect(
                     LayoutRect {
@@ -2472,7 +2564,7 @@ mod tests {
                 let resources = AppearanceResources::create(GRAPHITE_DARK)?;
                 let mut draw = DRAWITEMSTRUCT {
                     CtlType: ODT_BUTTON,
-                    itemState: ODS_DEFAULT | ODS_FOCUS,
+                    itemState: ODS_DEFAULT,
                     hwndItem: apply,
                     hDC: dc,
                     rcItem: rect,
@@ -2480,13 +2572,30 @@ mod tests {
                 };
                 assert!(draw_owner_rail_button(
                     Some(&resources),
+                    None,
+                    dpi,
+                    (&raw mut draw) as LPARAM,
+                ));
+                assert_eq!(checked_pixel(dc, 1, 1), GRAPHITE_DARK.border);
+                let focus_before = focus_perimeter(dc, rect);
+
+                draw.itemState = ODS_DEFAULT | ODS_FOCUS;
+                assert!(draw_owner_rail_button(
+                    Some(&resources),
+                    None,
+                    dpi,
+                    (&raw mut draw) as LPARAM,
+                ));
+                let focus_after = focus_perimeter(dc, rect);
+                assert_ne!(focus_after, focus_before, "focus perimeter was not drawn");
+
+                assert!(draw_owner_rail_button(
+                    Some(&resources),
                     Some(apply),
                     dpi,
                     (&raw mut draw) as LPARAM,
                 ));
-                // SAFETY: dc is live and the sampled point is strictly inside
-                // the pure indicator after focus/default rendering.
-                let indicator_pixel = unsafe { GetPixel(dc, sample_x, sample_y) };
+                let indicator_pixel = checked_pixel(dc, sample_x, sample_y);
                 assert_eq!(indicator_pixel, GRAPHITE_DARK.apply_keyline);
 
                 assert!(draw_owner_rail_button(
@@ -2495,10 +2604,8 @@ mod tests {
                     dpi,
                     (&raw mut draw) as LPARAM,
                 ));
-                // SAFETY: the same bounded point now contains the normal custom
-                // button surface because no readiness target was supplied.
-                let untargeted_pixel = unsafe { GetPixel(dc, sample_x, sample_y) };
-                assert_ne!(untargeted_pixel, GRAPHITE_DARK.apply_keyline);
+                let untargeted_pixel = checked_pixel(dc, sample_x, sample_y);
+                assert_eq!(untargeted_pixel, GRAPHITE_DARK.control_normal);
 
                 assert!(draw_owner_rail_button(
                     None,
@@ -2506,14 +2613,13 @@ mod tests {
                     dpi,
                     (&raw mut draw) as LPARAM,
                 ));
-                // SAFETY: resources=None follows system/Forced Colors painting
-                // and deliberately draws no custom palette indicator.
-                let system_pixel = unsafe { GetPixel(dc, sample_x, sample_y) };
-                assert_ne!(system_pixel, GRAPHITE_DARK.apply_keyline);
+                let system_pixel = checked_pixel(dc, sample_x, sample_y);
+                // SAFETY: COLOR_BTNFACE is the process-global system color used
+                // by the system/Forced Colors button surface path.
+                assert_eq!(system_pixel, unsafe { GetSysColor(COLOR_BTNFACE) });
                 Ok(())
             })();
-            // SAFETY: dc came from this exact live Apply button.
-            unsafe { ReleaseDC(apply, dc) };
+            drop(surface);
             paint_result
         })();
         rail.destroy();
