@@ -522,6 +522,19 @@ try {
     Assert-EvidenceFileFails `
         -Path $linkedEvidencePath `
         -ExpectedFragment 'must be a regular non-reparse file'
+
+    if (-not $IsWindows) {
+        $fifoEvidencePath = Join-Path $testRoot 'fifo-evidence.json'
+        $mkfifo = Get-Command mkfifo -CommandType Application -ErrorAction Stop |
+            Select-Object -First 1
+        & $mkfifo.Source -- $fifoEvidencePath
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Could not create the FIFO evidence regression fixture.'
+        }
+        Assert-EvidenceFileFails `
+            -Path $fifoEvidencePath `
+            -ExpectedFragment 'must be a regular non-reparse file'
+    }
     $missingVisualRootRejected = $false
     try {
         & $validator -EvidencePath $passThruPath | Out-Null

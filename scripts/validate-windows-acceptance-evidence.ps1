@@ -21,6 +21,80 @@ if ($PSVersionTable.PSVersion -lt [version] '7.4') {
     throw 'Windows acceptance evidence validation requires PowerShell 7.4 or newer (pwsh).'
 }
 
+if (-not $IsWindows -and -not ('DarkReNamer.AcceptanceEvidenceFile' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+namespace DarkReNamer
+{
+    public static class AcceptanceEvidenceFile
+    {
+        [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+        private static extern int open(string path, int flags, int mode);
+
+        public static FileStream OpenReadRegular(string path)
+        {
+            int flags;
+            if (OperatingSystem.IsLinux())
+            {
+                const int O_NONBLOCK = 0x00000800;
+                const int O_NOFOLLOW = 0x00020000;
+                const int O_CLOEXEC = 0x00080000;
+                flags = O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC;
+            }
+            else if (OperatingSystem.IsMacOS())
+            {
+                const int O_NONBLOCK = 0x00000004;
+                const int O_NOFOLLOW = 0x00000100;
+                const int O_CLOEXEC = 0x01000000;
+                flags = O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC;
+            }
+            else
+            {
+                throw new PlatformNotSupportedException(
+                    "Regular-file validation is unsupported on this Unix platform."
+                );
+            }
+
+            int descriptor = open(path, flags, 0);
+            if (descriptor < 0)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            var handle = new SafeFileHandle(new IntPtr(descriptor), ownsHandle: true);
+            FileStream stream = null;
+            try
+            {
+                stream = new FileStream(handle, FileAccess.Read);
+                if (!stream.CanSeek)
+                {
+                    throw new IOException("The opened evidence object is not a regular file.");
+                }
+                return stream;
+            }
+            catch
+            {
+                if (stream != null)
+                {
+                    stream.Dispose();
+                }
+                else
+                {
+                    handle.Dispose();
+                }
+                throw;
+            }
+        }
+    }
+}
+'@
+}
+
 function Read-StrictUtf8RegularFileOnce {
     param(
         [Parameter(Mandatory)]
@@ -38,12 +112,22 @@ function Read-StrictUtf8RegularFileOnce {
         throw "$Label must be a regular non-reparse file."
     }
 
-    $stream = [IO.FileStream]::new(
-        $item.FullName,
-        [IO.FileMode]::Open,
-        [IO.FileAccess]::Read,
-        [IO.FileShare]::Read
-    )
+    try {
+        if ($IsWindows) {
+            $stream = [IO.FileStream]::new(
+                $item.FullName,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::Read,
+                [IO.FileShare]::Read
+            )
+        }
+        else {
+            $stream = [DarkReNamer.AcceptanceEvidenceFile]::OpenReadRegular($item.FullName)
+        }
+    }
+    catch {
+        throw "$Label must be a regular non-reparse file: $($_.Exception.Message)"
+    }
     try {
         $length = $stream.Length
         if ($length -gt $MaximumBytes) {
