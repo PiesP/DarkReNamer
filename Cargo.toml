@@ -36,4 +36,4 @@ strip = "symbols"
 opt-level = 3
 
 [profile.release.package.darknamer-app]
-opt-level = 3
+opt-level = "s"

@@ -271,7 +271,7 @@ fn binary_size_matrix_is_manual_serial_and_non_publishing() {
         1
     );
     for declaration in [
-        "id = 'current-3-3'; app_opt_level = '3'; core_opt_level = '3'",
+        "id = 'app-3-core-3'; app_opt_level = '3'; core_opt_level = '3'",
         "id = 'app-s-core-3'; app_opt_level = 's'; core_opt_level = '3'",
         "id = 'app-s-core-s'; app_opt_level = 's'; core_opt_level = 's'",
         "id = 'app-2-core-3'; app_opt_level = '2'; core_opt_level = '3'",
@@ -341,7 +341,7 @@ fn profile_benchmark_matrix_is_directional_serial_and_non_publishing() {
     assert!(!workflow.contains("strategy:"));
     assert!(!workflow.contains("${{ matrix."));
     for declaration in [
-        "id = 'current-3-3'; app_opt_level = '3'; core_opt_level = '3'",
+        "id = 'app-3-core-3'; app_opt_level = '3'; core_opt_level = '3'",
         "id = 'app-s-core-3'; app_opt_level = 's'; core_opt_level = '3'",
         "id = 'app-s-core-s'; app_opt_level = 's'; core_opt_level = 's'",
         "id = 'app-2-core-3'; app_opt_level = '2'; core_opt_level = '3'",
@@ -409,7 +409,7 @@ fn profile_planning_matrix_is_directional_nonexecuting_and_non_publishing() {
     assert!(workflow.contains("persist-credentials: false"));
     assert!(!workflow.contains("strategy:"));
     for declaration in [
-        "id = 'current-3-3'; app_opt_level = '3'; core_opt_level = '3'",
+        "id = 'app-3-core-3'; app_opt_level = '3'; core_opt_level = '3'",
         "id = 'app-s-core-3'; app_opt_level = 's'; core_opt_level = '3'",
     ] {
         assert!(
@@ -468,4 +468,12 @@ fn workflow_contract_normalizes_windows_line_endings() {
         normalize_workflow_source("on:\r\n  workflow_dispatch:\r\n"),
         "on:\n  workflow_dispatch:\n"
     );
+}
+
+#[test]
+fn release_profile_keeps_core_speed_and_selects_app_size() {
+    let cargo = normalize_workflow_source(include_str!("../../../Cargo.toml"));
+    assert!(cargo.contains(
+        "[profile.release.package.darknamer-core]\nopt-level = 3\n\n[profile.release.package.darknamer-app]\nopt-level = \"s\""
+    ));
 }
