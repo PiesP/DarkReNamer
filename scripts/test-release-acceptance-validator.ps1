@@ -75,6 +75,7 @@ function New-CompleteEvidence {
             foreach ($count in 100, 1000, 10000) {
                 [pscustomobject]@{
                     media = $media
+                    filesystem = 'ntfs'
                     count = $count
                     planning_ms = 12.5
                     execution_ms = 42.25
@@ -89,7 +90,7 @@ function New-CompleteEvidence {
     )
 
     return [pscustomobject]@{
-        schema_version = 1
+        schema_version = 2
         source_sha = $SourceSha
         artifact = [pscustomobject]@{
             filename = 'DarkReNamer.exe'

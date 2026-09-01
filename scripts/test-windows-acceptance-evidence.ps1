@@ -211,6 +211,7 @@ function New-CompleteEvidence {
             foreach ($count in 100, 1000, 10000) {
                 [pscustomobject]@{
                     media = $media
+                    filesystem = 'ntfs'
                     count = $count
                     planning_ms = 12.5
                     execution_ms = 42.25
@@ -225,7 +226,7 @@ function New-CompleteEvidence {
     )
 
     return [pscustomobject]@{
-        schema_version = 1
+        schema_version = 2
         source_sha = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
         artifact = [pscustomobject]@{
             filename = 'DarkReNamer.exe'
@@ -315,6 +316,43 @@ try {
         -Evidence $complete `
         -Name 'valid-complete' `
         -ForbiddenOutput 'HDD-unavailable limitation'
+
+    foreach ($filesystem in 'refs', 'exfat', 'other') {
+        $draftFilesystem = Copy-Evidence $complete
+        $draftFilesystem.benchmarks[0].filesystem = $filesystem
+        Assert-ValidatorPasses `
+            -Evidence $draftFilesystem `
+            -Name "valid-draft-$filesystem-filesystem" `
+            -Draft
+
+        Assert-ValidatorFails `
+            -Evidence $draftFilesystem `
+            -Name "complete-$filesystem-filesystem" `
+            -ExpectedFragment 'requires NTFS for every benchmark row'
+    }
+
+    $invalidFilesystem = Copy-Evidence $complete
+    $invalidFilesystem.benchmarks[0].filesystem = 'ext4'
+    Assert-ValidatorFails `
+        -Evidence $invalidFilesystem `
+        -Name 'invalid-filesystem' `
+        -ExpectedFragment 'filesystem must be one of' `
+        -Draft
+
+    $missingFilesystem = Copy-Evidence $complete
+    $missingFilesystem.benchmarks[0].PSObject.Properties.Remove('filesystem')
+    Assert-ValidatorFails `
+        -Evidence $missingFilesystem `
+        -Name 'missing-filesystem' `
+        -ExpectedFragment 'missing required field: filesystem' `
+        -Draft
+
+    $schemaV1 = Copy-Evidence $complete
+    $schemaV1.schema_version = 1
+    Assert-ValidatorFails `
+        -Evidence $schemaV1 `
+        -Name 'schema-v1' `
+        -ExpectedFragment 'schema_version must be 2'
 
     $hddUnavailable = New-HddUnavailableEvidence -CompleteEvidence $complete
     Assert-ValidatorPasses `
@@ -580,7 +618,7 @@ try {
         -ExpectedFragment 'requires operator-authorized scope'
 
     $stringSchemaVersion = Copy-Evidence $complete
-    $stringSchemaVersion.schema_version = '1'
+    $stringSchemaVersion.schema_version = '2'
     Assert-ValidatorFails `
         -Evidence $stringSchemaVersion `
         -Name 'string-schema-version' `

@@ -319,6 +319,7 @@ $dpiValues = @($schemaDefinitions.uiCell.properties.dpi_percent.enum)
 $contrastValues = @($schemaDefinitions.uiCell.properties.contrast.enum)
 $scenarioKinds = @($schemaDefinitions.scenario.properties.kind.enum)
 $mediaKinds = @($schemaDefinitions.benchmark.properties.media.enum)
+$filesystemKinds = @($schemaDefinitions.benchmark.properties.filesystem.enum)
 $benchmarkCounts = @($schemaDefinitions.benchmark.properties.count.enum)
 $durabilityKinds = @($schemaDefinitions.durabilityTrial.properties.kind.enum)
 $statuses = @($schemaDefinitions.status.enum)
@@ -509,11 +510,12 @@ foreach ($row in @($evidence.benchmarks)) {
     Assert-ObjectShape `
         -Object $row `
         -Required @(
-            'media', 'count', 'planning_ms', 'execution_ms', 'storage_model',
+            'media', 'filesystem', 'count', 'planning_ms', 'execution_ms', 'storage_model',
             'connection', 'free_space_bucket', 'power_mode', 'cleanup_observation'
         ) `
         -Location $location
     Assert-Enum -Value $row.media -Allowed $mediaKinds -Location "$location.media"
+    Assert-Enum -Value $row.filesystem -Allowed $filesystemKinds -Location "$location.filesystem"
     Assert-Enum -Value $row.count -Allowed $benchmarkCounts -Location "$location.count"
     Assert-NonNegativeNumber -Value $row.planning_ms -Location "$location.planning_ms"
     Assert-NonNegativeNumber -Value $row.execution_ms -Location "$location.execution_ms"
@@ -658,6 +660,9 @@ if (-not $Draft) {
         }
     }
     foreach ($row in $benchmarkByTarget.Values) {
+        if ($row.filesystem -ne 'ntfs') {
+            throw 'Complete evidence requires NTFS for every benchmark row.'
+        }
         if ($row.cleanup_observation -ne 'clean') {
             throw 'Complete evidence requires clean benchmark cleanup observations.'
         }

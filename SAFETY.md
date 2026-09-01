@@ -18,6 +18,13 @@ reopens and verifies those identities and performs handle-relative,
 no-replacement renames. Unsupported network, device, case-sensitive, elevated,
 cross-parent, reparse, and overlapping-source environments fail closed.
 
+The v0.1 release-validated scope is Windows 10 and Windows 11 on x64, with a
+local, non-elevated process operating on same-parent, non-reparse entries in a
+case-insensitive NTFS directory. Filesystems other than NTFS are unsupported
+and unvalidated for v0.1. That limitation belongs to the release evidence
+contract; the runtime does not currently identify and reject a volume solely
+because its filesystem is not NTFS.
+
 Appearance preferences are non-authorizing input. Theme, command-rail density,
 preview emphasis, separators, tint, and empty-state copy may change presentation
 only. They are stored separately from rename journals and cannot alter model
@@ -200,9 +207,9 @@ Complete release-gate evidence requires all of the following:
   common dialogs, clipboard, worker cancellation, worker close, startup
   recovery, recovery export, and Intent-only candidate discard;
 - one same-parent benchmark each for 100, 1,000, and 10,000 entries on physical
-  SSD media, with planning and execution durations, storage model and
+  SSD media using NTFS, with planning and execution durations, storage model and
   connection, free-space bucket, power mode, and a clean cleanup observation;
-- either the same three clean benchmark rows on physical HDD media or no HDD
+- either the same three clean NTFS benchmark rows on physical HDD media or no HDD
   rows plus one target-bound `hardware-unavailable` reason for each count; and
 - a passed application-process crash trial plus at least one separately
   authorized and passed VM hard-reset or storage-fault trial.
@@ -211,6 +218,12 @@ The HDD-unavailable form records a personal development hardware limitation; it
 does not claim or simulate HDD coverage. Partial HDD rows, mixed HDD rows and
 unexecuted reasons, or a non-hardware reason do not pass the release gate. SSD
 rows remain mandatory and cannot be replaced by an unexecuted reason.
+
+Draft evidence may record `ntfs`, `refs`, `exfat`, or `other` for each benchmark
+row. Complete release-gate evidence accepts only `ntfs`; the other values retain
+honest draft observations without promoting unsupported filesystems into the
+v0.1 release-validated scope.
+
 This form applies only when no physical HDD is present before any HDD run starts.
 A failed or residue-producing HDD attempt cannot be reclassified as unavailable;
 retain its source-bound external raw record as failed acceptance evidence.
@@ -286,7 +299,8 @@ foreach ($count in 100, 1000, 10000) {
 
 Use `ssd` and the SSD's dedicated root for the SSD pass. Up to six
 `same-parent` cells (two media classes by three counts) map to
-release-acceptance benchmark rows, and those rows must use `variant=baseline`.
+release-acceptance benchmark rows, and those rows must use `variant=baseline`
+on NTFS.
 The three SSD cells are mandatory. If no physical HDD is available, omit all
 three HDD rows and record the three exact `hardware-unavailable` reasons instead;
 the limitation stays visible in the evidence artifact. Do not relabel SSD,

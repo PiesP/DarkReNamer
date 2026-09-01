@@ -19,7 +19,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": 1
+      "const": 2
     },
     "source_sha": {
       "type": "string",
@@ -290,6 +290,7 @@
       "additionalProperties": false,
       "required": [
         "media",
+        "filesystem",
         "count",
         "planning_ms",
         "execution_ms",
@@ -302,6 +303,9 @@
       "properties": {
         "media": {
           "enum": ["ssd", "hdd"]
+        },
+        "filesystem": {
+          "enum": ["ntfs", "refs", "exfat", "other"]
         },
         "count": {
           "enum": [100, 1000, 10000]
