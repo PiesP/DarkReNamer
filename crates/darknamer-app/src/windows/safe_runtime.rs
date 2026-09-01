@@ -230,74 +230,26 @@ pub(super) fn initialize_safe_runtime_at(local_app_data: &Path) -> io::Result<Sa
         });
     }
 
-    let Some(mut journal) = active_journal else {
+    let Some(journal) = active_journal else {
         return Err(io::Error::other("active journal state was lost"));
     };
-    let mut backend = WindowsRenameBackend;
-    let outcome = RenameRecovery::new(&mut backend, &mut journal).rollback();
-    match outcome {
-        RecoveryOutcome::Recovered { .. } | RecoveryOutcome::NotRequired => {
-            let cleanup = cleanup_file_journal(journal);
-            let cleanup_failed = cleanup.error.is_some();
-            let mut status = if matches!(outcome, RecoveryOutcome::Recovered { .. }) {
-                "이전 변경을 안전하게 복구했습니다.".to_owned()
-            } else {
-                "저널 상태를 확인했습니다.".to_owned()
-            };
-            if let Some(error) = cleanup.error {
-                status.push_str(&format!(" 저널 삭제 실패: {error}"));
-            }
-            append_staged_status(&mut status, staged_journal.as_ref());
-            append_blocked_status(&mut status, &blocked_journals);
-            Ok(SafeRuntime {
-                root,
-                runtime_lock,
-                recovery_locked: cleanup_failed
-                    || cleanup.retained.is_some()
-                    || staged_journal.is_some()
-                    || !blocked_journals.is_empty(),
-                active_journal: cleanup.retained,
-                staged_journal,
-                blocked_journals,
-                collision_observed: false,
-                status: Some(status),
-            })
-        }
-        RecoveryOutcome::Blocked { reason, .. } => {
-            let status = status_with_staged_journal(
-                format!("복구가 차단되었습니다: {reason:?}"),
-                staged_journal.as_ref(),
-            );
-            let status = status_with_blocked_journals(status, &blocked_journals);
-            Ok(SafeRuntime {
-                root,
-                runtime_lock,
-                active_journal: Some(journal),
-                staged_journal,
-                blocked_journals,
-                collision_observed: false,
-                recovery_locked: true,
-                status: Some(status),
-            })
-        }
-        RecoveryOutcome::RecoveryRequired { reason, .. } => {
-            let status = status_with_staged_journal(
-                format!("복구가 필요합니다: {reason:?}"),
-                staged_journal.as_ref(),
-            );
-            let status = status_with_blocked_journals(status, &blocked_journals);
-            Ok(SafeRuntime {
-                root,
-                runtime_lock,
-                active_journal: Some(journal),
-                staged_journal,
-                blocked_journals,
-                collision_observed: false,
-                recovery_locked: true,
-                status: Some(status),
-            })
-        }
-    }
+    let mut status = format!(
+        "이전 실행의 active 저널을 발견했습니다: {} ({} bytes). 파일 변경 전 명시적인 복구 확인이 필요하며 새 적용은 잠겼습니다.",
+        journal.path().display(),
+        journal.byte_len()
+    );
+    append_staged_status(&mut status, staged_journal.as_ref());
+    append_blocked_status(&mut status, &blocked_journals);
+    Ok(SafeRuntime {
+        root,
+        runtime_lock,
+        active_journal: Some(journal),
+        staged_journal,
+        blocked_journals,
+        collision_observed: false,
+        recovery_locked: true,
+        status: Some(status),
+    })
 }
 
 fn startup_locked_status(
@@ -317,11 +269,6 @@ fn startup_locked_status(
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
-fn status_with_staged_journal(mut status: String, staged_journal: Option<&FileJournal>) -> String {
-    append_staged_status(&mut status, staged_journal);
-    status
-}
-
 fn append_staged_status(status: &mut String, staged_journal: Option<&FileJournal>) {
     if let Some(journal) = staged_journal {
         status.push_str(&format!(
@@ -329,14 +276,6 @@ fn append_staged_status(status: &mut String, staged_journal: Option<&FileJournal
             journal.path().display()
         ));
     }
-}
-
-fn status_with_blocked_journals(
-    mut status: String,
-    blocked_journals: &[StartupJournalBlock],
-) -> String {
-    append_blocked_status(&mut status, blocked_journals);
-    status
 }
 
 fn append_blocked_status(status: &mut String, blocked_journals: &[StartupJournalBlock]) {
