@@ -7,6 +7,8 @@ param(
     [AllowEmptyString()]
     [string] $EvidenceJson,
 
+    [string] $VisualEvidenceRoot,
+
     [switch] $Draft,
 
     [switch] $PassThru
@@ -235,6 +237,329 @@ function Assert-Privacy {
     }
 }
 
+function Resolve-VisualEvidenceRoot {
+    param([string] $Root)
+    if ([string]::IsNullOrWhiteSpace($Root)) {
+        return $null
+    }
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+        throw 'VisualEvidenceRoot must identify an existing directory.'
+    }
+    foreach ($start in [IO.Path]::GetFullPath($Root), (Resolve-Path -LiteralPath $Root).Path) {
+        $currentPath = $start
+        while ($null -ne $currentPath) {
+            $current = Get-Item -LiteralPath $currentPath -Force
+            if (($current.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq
+                [IO.FileAttributes]::ReparsePoint) {
+                throw 'VisualEvidenceRoot and its ancestor chain must not contain reparse points.'
+            }
+            $parent = [IO.Directory]::GetParent($currentPath)
+            $currentPath = if ($null -eq $parent) { $null } else { $parent.FullName }
+        }
+    }
+    $resolved = (Resolve-Path -LiteralPath $Root).Path
+    $resolvedItem = Get-Item -LiteralPath $resolved -Force
+    if (($resolvedItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq
+            [IO.FileAttributes]::ReparsePoint) {
+        throw 'VisualEvidenceRoot must not resolve to a reparse point.'
+    }
+    return $resolved
+}
+
+if ($null -eq ('DarkReNamerAcceptance.StrictPngValidator' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.IO.Compression;
+using System.Security.Cryptography;
+using System.Text;
+
+namespace DarkReNamerAcceptance
+{
+    public sealed class PngDimensions
+    {
+        public uint Width { get; private set; }
+        public uint Height { get; private set; }
+        public string RasterSha256 { get; private set; }
+        public int DistinctColors { get; private set; }
+
+        public PngDimensions(uint width, uint height, string rasterSha256, int distinctColors)
+        {
+            Width = width;
+            Height = height;
+            RasterSha256 = rasterSha256;
+            DistinctColors = distinctColors;
+        }
+    }
+
+    public static class StrictPngValidator
+    {
+        private const long MaximumEncodedBytes = 64L * 1024L * 1024L;
+        private const long MaximumDecodedBytes = 256L * 1024L * 1024L;
+        private const int MaximumChunkBytes = 16 * 1024 * 1024;
+        private static readonly byte[] Signature =
+            { 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a };
+        private static readonly uint[] CrcTable = BuildCrcTable();
+
+        public static PngDimensions Validate(string path)
+        {
+            using (FileStream stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                4096,
+                FileOptions.SequentialScan))
+            {
+                if (stream.Length < 57 || stream.Length > MaximumEncodedBytes)
+                    throw new InvalidDataException("PNG encoded size is outside the 57-byte through 64-MiB limit.");
+
+                byte[] signature = ReadExactly(stream, Signature.Length);
+                for (int index = 0; index < Signature.Length; index++)
+                    if (signature[index] != Signature[index])
+                        throw new InvalidDataException("PNG signature is invalid.");
+
+                bool seenHeader = false;
+                bool seenData = false;
+                bool endedData = false;
+                bool seenEnd = false;
+                int chunkCount = 0;
+                uint width = 0;
+                uint height = 0;
+                int bytesPerPixel = 0;
+                int colorType = -1;
+                byte[] headerData = null;
+                using (MemoryStream compressed = new MemoryStream())
+                {
+                    while (stream.Position < stream.Length)
+                    {
+                        chunkCount++;
+                        if (chunkCount > 4096)
+                            throw new InvalidDataException("PNG contains more than 4096 chunks.");
+                        uint declaredLength = ReadBigEndianUInt32(ReadExactly(stream, 4), 0);
+                        if (declaredLength > MaximumChunkBytes ||
+                            declaredLength > stream.Length - stream.Position - 8)
+                            throw new InvalidDataException("PNG chunk length is invalid or exceeds 16 MiB.");
+                        int length = checked((int)declaredLength);
+                        byte[] typeBytes = ReadExactly(stream, 4);
+                        string type = Encoding.ASCII.GetString(typeBytes);
+                        byte[] data = ReadExactly(stream, length);
+                        uint storedCrc = ReadBigEndianUInt32(ReadExactly(stream, 4), 0);
+                        if (ComputeCrc(typeBytes, data) != storedCrc)
+                            throw new InvalidDataException("PNG chunk CRC is invalid.");
+
+                        if (!seenHeader && type != "IHDR")
+                            throw new InvalidDataException("PNG IHDR must be the first chunk.");
+                        if (type == "IHDR")
+                        {
+                            if (seenHeader || length != 13)
+                                throw new InvalidDataException("PNG must contain one 13-byte IHDR chunk.");
+                            width = ReadBigEndianUInt32(data, 0);
+                            height = ReadBigEndianUInt32(data, 4);
+                            if (width == 0 || height == 0 || width > 16384 || height > 16384)
+                                throw new InvalidDataException("PNG dimensions are outside the supported range.");
+                            if (data[8] != 8 || data[10] != 0 || data[11] != 0 || data[12] != 0)
+                                throw new InvalidDataException("PNG must be non-interlaced 8-bit lossless data.");
+                            colorType = data[9];
+                            switch (colorType)
+                            {
+                                case 0: bytesPerPixel = 1; break;
+                                case 2: bytesPerPixel = 3; break;
+                                case 4: bytesPerPixel = 2; break;
+                                case 6: bytesPerPixel = 4; break;
+                                default: throw new InvalidDataException("PNG color type is unsupported.");
+                            }
+                            seenHeader = true;
+                            headerData = data;
+                        }
+                        else if (type == "IDAT")
+                        {
+                            if (!seenHeader || endedData)
+                                throw new InvalidDataException("PNG IDAT chunks must be consecutive after IHDR.");
+                            if (compressed.Length + length > MaximumEncodedBytes)
+                                throw new InvalidDataException("PNG compressed image data exceeds 64 MiB.");
+                            compressed.Write(data, 0, data.Length);
+                            seenData = true;
+                        }
+                        else if (type == "IEND")
+                        {
+                            if (!seenData || length != 0 || seenEnd)
+                                throw new InvalidDataException("PNG IEND is missing, duplicated, or malformed.");
+                            seenEnd = true;
+                            if (stream.Position != stream.Length)
+                                throw new InvalidDataException("PNG contains trailing bytes after IEND.");
+                            break;
+                        }
+                        else
+                        {
+                            if (seenData) endedData = true;
+                            if ((typeBytes[0] & 0x20) == 0)
+                                throw new InvalidDataException("PNG contains an unsupported critical chunk.");
+                        }
+                    }
+
+                    if (!seenHeader || !seenData || !seenEnd)
+                        throw new InvalidDataException("PNG is missing IHDR, IDAT, or IEND.");
+
+                    long rowBytes = checked((long)width * bytesPerPixel);
+                    long decodedBytes = checked((rowBytes + 1L) * height);
+                    if (decodedBytes > MaximumDecodedBytes)
+                        throw new InvalidDataException("PNG decoded data exceeds 256 MiB.");
+                    int rowLength = checked((int)rowBytes);
+                    byte[] filtered = new byte[rowLength + 1];
+                    byte[] row = new byte[rowLength];
+                    byte[] previousRow = new byte[rowLength];
+                    HashSet<uint> colors = new HashSet<uint>();
+                    compressed.Position = 0;
+                    using (IncrementalHash rasterHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
+                    using (ZLibStream decoder = new ZLibStream(compressed, CompressionMode.Decompress, true))
+                    {
+                        rasterHash.AppendData(headerData);
+                        for (uint y = 0; y < height; y++)
+                        {
+                            ReadExactly(decoder, filtered, 0, filtered.Length);
+                            if (filtered[0] > 4)
+                                throw new InvalidDataException("PNG scanline uses an invalid filter.");
+                            Unfilter(filtered[0], filtered, row, previousRow, bytesPerPixel);
+                            rasterHash.AppendData(row);
+                            for (int offset = 0; offset < row.Length; offset += bytesPerPixel)
+                            {
+                                if ((colorType == 4 && row[offset + 1] != 255) ||
+                                    (colorType == 6 && row[offset + 3] != 255))
+                                    throw new InvalidDataException("PNG screenshot pixels must be fully opaque.");
+                                if (colors.Count <= 64)
+                                {
+                                    uint color = 0;
+                                    for (int channel = 0; channel < bytesPerPixel; channel++)
+                                        color = (color << 8) | row[offset + channel];
+                                    colors.Add(color);
+                                }
+                            }
+                            byte[] swap = previousRow;
+                            previousRow = row;
+                            row = swap;
+                        }
+                        if (decoder.ReadByte() != -1)
+                            throw new InvalidDataException("PNG decoded data exceeds the IHDR dimensions.");
+                        string rasterSha = Convert.ToHexString(rasterHash.GetHashAndReset()).ToLowerInvariant();
+                        return new PngDimensions(width, height, rasterSha, colors.Count);
+                    }
+                }
+            }
+        }
+
+        private static void Unfilter(
+            byte filter,
+            byte[] filtered,
+            byte[] row,
+            byte[] previous,
+            int bytesPerPixel)
+        {
+            for (int index = 0; index < row.Length; index++)
+            {
+                int left = index >= bytesPerPixel ? row[index - bytesPerPixel] : 0;
+                int up = previous[index];
+                int upperLeft = index >= bytesPerPixel ? previous[index - bytesPerPixel] : 0;
+                int predictor;
+                switch (filter)
+                {
+                    case 0: predictor = 0; break;
+                    case 1: predictor = left; break;
+                    case 2: predictor = up; break;
+                    case 3: predictor = (left + up) / 2; break;
+                    case 4: predictor = Paeth(left, up, upperLeft); break;
+                    default: throw new InvalidDataException("PNG scanline uses an invalid filter.");
+                }
+                row[index] = unchecked((byte)(filtered[index + 1] + predictor));
+            }
+        }
+
+        private static int Paeth(int left, int up, int upperLeft)
+        {
+            int estimate = left + up - upperLeft;
+            int leftDistance = Math.Abs(estimate - left);
+            int upDistance = Math.Abs(estimate - up);
+            int upperLeftDistance = Math.Abs(estimate - upperLeft);
+            if (leftDistance <= upDistance && leftDistance <= upperLeftDistance) return left;
+            return upDistance <= upperLeftDistance ? up : upperLeft;
+        }
+
+        private static byte[] ReadExactly(Stream stream, int count)
+        {
+            byte[] buffer = new byte[count];
+            ReadExactly(stream, buffer, 0, count);
+            return buffer;
+        }
+
+        private static void ReadExactly(Stream stream, byte[] buffer, int offset, int count)
+        {
+            int total = 0;
+            while (total < count)
+            {
+                int read = stream.Read(buffer, offset + total, count - total);
+                if (read == 0) throw new EndOfStreamException("PNG ended before the declared data was available.");
+                total += read;
+            }
+        }
+
+        private static uint ReadBigEndianUInt32(byte[] bytes, int offset)
+        {
+            return ((uint)bytes[offset] << 24) |
+                   ((uint)bytes[offset + 1] << 16) |
+                   ((uint)bytes[offset + 2] << 8) |
+                   bytes[offset + 3];
+        }
+
+        private static uint ComputeCrc(byte[] type, byte[] data)
+        {
+            uint crc = 0xffffffffu;
+            for (int index = 0; index < type.Length; index++)
+                crc = CrcTable[(crc ^ type[index]) & 0xff] ^ (crc >> 8);
+            for (int index = 0; index < data.Length; index++)
+                crc = CrcTable[(crc ^ data[index]) & 0xff] ^ (crc >> 8);
+            return crc ^ 0xffffffffu;
+        }
+
+        private static uint[] BuildCrcTable()
+        {
+            uint[] table = new uint[256];
+            for (uint value = 0; value < table.Length; value++)
+            {
+                uint crc = value;
+                for (int bit = 0; bit < 8; bit++)
+                    crc = (crc & 1) != 0 ? 0xedb88320u ^ (crc >> 1) : crc >> 1;
+                table[value] = crc;
+            }
+            return table;
+        }
+    }
+}
+'@
+}
+
+function Get-PngDimensions {
+    param([Parameter(Mandatory)][string] $Path)
+    try {
+        $dimensions = [DarkReNamerAcceptance.StrictPngValidator]::Validate($Path)
+    }
+    catch {
+        $detail = if ($null -ne $_.Exception.InnerException) {
+            $_.Exception.InnerException.Message
+        }
+        else {
+            $_.Exception.Message
+        }
+        throw "Visual capture is not a bounded decodable PNG: $detail"
+    }
+    return [pscustomobject]@{
+        width = [uint64] $dimensions.Width
+        height = [uint64] $dimensions.Height
+        raster_sha256 = $dimensions.RasterSha256
+        distinct_colors = $dimensions.DistinctColors
+    }
+}
+
 function Get-UiTarget {
     param($Row)
     return "ui|$($Row.windows_product)|$($Row.dpi_percent)|$($Row.contrast)"
@@ -265,6 +590,10 @@ if ($schemaDocument.'$schema' -ne 'https://json-schema.org/draft/2020-12/schema'
 }
 $expectedSchemaVersion = $schemaDocument.properties.schema_version.const
 $schemaDefinitions = $schemaDocument.'$defs'
+$resolvedVisualEvidenceRoot = Resolve-VisualEvidenceRoot -Root $VisualEvidenceRoot
+if (-not $Draft -and $null -eq $resolvedVisualEvidenceRoot) {
+    throw 'Complete evidence validation requires VisualEvidenceRoot.'
+}
 
 if ($PSCmdlet.ParameterSetName -eq 'Path') {
     if (-not (Test-Path -LiteralPath $EvidencePath -PathType Leaf)) {
@@ -299,7 +628,7 @@ Assert-ObjectShape `
     -Object $evidence `
     -Required @(
         'schema_version', 'source_sha', 'artifact', 'recorded_at_utc',
-        'operator_context', 'ui_matrix', 'scenarios', 'benchmarks',
+        'operator_context', 'ui_matrix', 'visual_captures', 'scenarios', 'benchmarks',
         'durability_trials', 'unexecuted'
     ) `
     -Location 'evidence'
@@ -540,6 +869,148 @@ foreach ($row in @($evidence.scenarios)) {
     $scenarioIndex++
 }
 
+$captureIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$captureFilenames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$captureHashes = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$captureRasterHashes = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$capturedMainTargets = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$capturedNormalMainAppearances = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$capturedSurfaces = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$captureIndex = 0
+foreach ($capture in @($evidence.visual_captures)) {
+    $location = "visual_captures[$captureIndex]"
+    Assert-ObjectShape `
+        -Object $capture `
+        -Required @('id', 'image', 'executable_sha256', 'ui_target', 'appearance', 'surface') `
+        -Optional @('scenario_target') `
+        -Location $location
+    if ($capture.id -isnot [string] -or
+        $capture.id -cnotmatch $schemaDefinitions.visualCapture.properties.id.pattern) {
+        throw "$location.id must be a lowercase stable identifier."
+    }
+    if (-not $captureIds.Add($capture.id)) {
+        throw "Duplicate visual capture id: $($capture.id)."
+    }
+    Assert-ObjectShape `
+        -Object $capture.image `
+        -Required @('filename', 'sha256', 'pixel_width', 'pixel_height') `
+        -Location "$location.image"
+    if ($capture.image.filename -isnot [string] -or
+        $capture.image.filename -cnotmatch $schemaDefinitions.imageArtifact.properties.filename.pattern) {
+        throw "$location.image.filename must be a filename only, without a path."
+    }
+    if ($capture.image.filename -match '^(?i:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)') {
+        throw "$location.image.filename must not use a reserved Windows device name."
+    }
+    if (-not $captureFilenames.Add($capture.image.filename)) {
+        throw "Duplicate visual capture filename: $($capture.image.filename)."
+    }
+    if ($capture.image.sha256 -isnot [string] -or
+        $capture.image.sha256 -cnotmatch $schemaDefinitions.imageArtifact.properties.sha256.pattern) {
+        throw "$location.image.sha256 must be a lowercase 64-character SHA-256 digest."
+    }
+    if (-not $captureHashes.Add($capture.image.sha256)) {
+        throw "Duplicate visual capture image digest: $($capture.image.sha256)."
+    }
+    foreach ($dimension in 'pixel_width', 'pixel_height') {
+        $value = $capture.image.$dimension
+        if ($value -is [string] -or $value -is [bool] -or
+            [decimal] $value -ne [decimal]::Truncate([decimal] $value) -or
+            [decimal] $value -lt 1 -or [decimal] $value -gt 16384) {
+            throw "$location.image.$dimension must be an integer from 1 through 16384."
+        }
+    }
+    if (-not [string]::Equals(
+            $capture.executable_sha256,
+            $artifact.sha256,
+            [StringComparison]::Ordinal
+        )) {
+        throw "$location.executable_sha256 must match artifact.sha256."
+    }
+    $uiTargetObserved = $uiByTarget.ContainsKey($capture.ui_target)
+    $uiTargetStatus = if ($uiTargetObserved) { $uiByTarget[$capture.ui_target].status } else { '<missing>' }
+    if ($expectedUiTargets -cnotcontains $capture.ui_target -or
+        -not $uiTargetObserved -or
+        $uiTargetStatus -ne 'pass') {
+        throw "$location.ui_target must reference a passed UI matrix cell."
+    }
+    Assert-Enum `
+        -Value $capture.appearance `
+        -Allowed @($schemaDefinitions.visualCapture.properties.appearance.enum) `
+        -Location "$location.appearance"
+    Assert-Enum `
+        -Value $capture.surface `
+        -Allowed @($schemaDefinitions.visualCapture.properties.surface.enum) `
+        -Location "$location.surface"
+    $uiParts = $capture.ui_target -split '\|'
+    $contrast = $uiParts[3]
+    if (($contrast -eq 'normal' -and $capture.appearance -eq 'forced-colors') -or
+        ($contrast -eq 'high-contrast' -and $capture.appearance -ne 'forced-colors')) {
+        throw "$location.appearance does not match its UI contrast target."
+    }
+    if (Test-Property -Object $capture -Name 'scenario_target') {
+        if ($expectedScenarioTargets -cnotcontains $capture.scenario_target -or
+            -not $scenarioByTarget.ContainsKey($capture.scenario_target) -or
+            $scenarioByTarget[$capture.scenario_target].status -ne 'pass') {
+            throw "$location.scenario_target must reference a passed scenario."
+        }
+        $scenarioParts = $capture.scenario_target -split '\|'
+        if ($scenarioParts[1] -cne $uiParts[1]) {
+            throw "$location scenario and UI targets must use the same Windows product."
+        }
+    }
+    if ($capture.surface -eq 'common-dialog' -and
+        (-not (Test-Property -Object $capture -Name 'scenario_target') -or
+         $capture.scenario_target -cnotlike 'scenario|Windows *|common-dialog')) {
+        throw "$location common-dialog capture must bind the common-dialog scenario."
+    }
+    if ($capture.surface -eq 'recovery-window' -and
+        (-not (Test-Property -Object $capture -Name 'scenario_target') -or
+         ($capture.scenario_target -cnotlike 'scenario|Windows *|startup-recovery' -and
+          $capture.scenario_target -cnotlike 'scenario|Windows *|recovery-export'))) {
+        throw "$location recovery-window capture must bind a recovery scenario."
+    }
+    if ($null -ne $resolvedVisualEvidenceRoot) {
+        $imagePath = Join-Path $resolvedVisualEvidenceRoot $capture.image.filename
+        if (-not (Test-Path -LiteralPath $imagePath -PathType Leaf)) {
+            throw "$location image file is missing from VisualEvidenceRoot."
+        }
+        $imageItem = Get-Item -LiteralPath $imagePath -Force
+        if (($imageItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq
+            [IO.FileAttributes]::ReparsePoint) {
+            throw "$location image file must not be a reparse point."
+        }
+        $dimensions = Get-PngDimensions -Path $imagePath
+        $minimumWidth = if ($capture.surface -eq 'main-workbench') { 640 } else { 240 }
+        $minimumHeight = if ($capture.surface -eq 'main-workbench') { 360 } else { 120 }
+        if ($dimensions.width -lt $minimumWidth -or $dimensions.height -lt $minimumHeight) {
+            throw "$location PNG dimensions are too small for surface $($capture.surface)."
+        }
+        if ($dimensions.distinct_colors -lt 4) {
+            throw "$location PNG must contain at least four distinct decoded colors."
+        }
+        if (-not $captureRasterHashes.Add($dimensions.raster_sha256)) {
+            throw "Duplicate visual capture decoded raster: $($dimensions.raster_sha256)."
+        }
+        if ($dimensions.width -ne [uint64] $capture.image.pixel_width -or
+            $dimensions.height -ne [uint64] $capture.image.pixel_height) {
+            throw "$location PNG dimensions do not match the recorded pixel dimensions."
+        }
+        $actualImageHash = (Get-FileHash -LiteralPath $imagePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if (-not [string]::Equals($actualImageHash, $capture.image.sha256, [StringComparison]::Ordinal)) {
+            throw "$location image SHA-256 does not match VisualEvidenceRoot bytes."
+        }
+    }
+    if ($capture.surface -eq 'main-workbench') {
+        [void] $capturedMainTargets.Add($capture.ui_target)
+        if ($contrast -eq 'normal') {
+            [void] $capturedNormalMainAppearances.Add($capture.appearance)
+        }
+    }
+    [void] $capturedSurfaces.Add($capture.surface)
+    $captureIndex++
+}
+
 $benchmarkByTarget = @{}
 $benchmarkIndex = 0
 foreach ($row in @($evidence.benchmarks)) {
@@ -694,6 +1165,21 @@ foreach ($id in $unexecutedById.Keys) {
 }
 
 if (-not $Draft) {
+    foreach ($target in $expectedUiTargets) {
+        if (-not $capturedMainTargets.Contains($target)) {
+            throw "Complete evidence is missing a main-workbench visual capture for $target."
+        }
+    }
+    foreach ($appearance in 'system', 'light', 'dark') {
+        if (-not $capturedNormalMainAppearances.Contains($appearance)) {
+            throw "Complete evidence is missing normal main-workbench appearance coverage: $appearance."
+        }
+    }
+    foreach ($surface in @($schemaDefinitions.visualCapture.properties.surface.enum)) {
+        if (-not $capturedSurfaces.Contains($surface)) {
+            throw "Complete evidence is missing visual surface coverage: $surface."
+        }
+    }
     foreach ($row in $uiByTarget.Values) {
         if ($row.status -ne 'pass') {
             throw 'Complete evidence requires every UI matrix cell to pass.'

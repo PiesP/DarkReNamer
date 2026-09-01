@@ -6,12 +6,14 @@ $ErrorActionPreference = 'Stop'
 
 $validator = Join-Path $PSScriptRoot 'validate-windows-acceptance-evidence.ps1'
 $schema = Join-Path $PSScriptRoot 'windows-acceptance-evidence.schema.json'
+$visualFixture = Join-Path $PSScriptRoot 'test-visual-evidence-fixture.ps1'
 if (-not (Test-Path -LiteralPath $validator -PathType Leaf)) {
     throw "Windows acceptance evidence validator is missing: $validator"
 }
 if (-not (Test-Path -LiteralPath $schema -PathType Leaf)) {
     throw "Windows acceptance evidence schema is missing: $schema"
 }
+. $visualFixture
 
 function Copy-Evidence {
     param(
@@ -42,16 +44,28 @@ function Assert-ValidatorPasses {
         [string] $Name,
         [switch] $Draft,
         [string] $ExpectedOutput,
-        [string] $ForbiddenOutput
+        [string] $ForbiddenOutput,
+        [string] $VisualEvidenceRoot
     )
 
     $path = Join-Path $script:testRoot "$Name.json"
     Write-Evidence -Evidence $Evidence -Path $path
+    $arguments = @{ EvidencePath = $path }
+    $effectiveVisualRoot = if ($VisualEvidenceRoot) {
+        $VisualEvidenceRoot
+    }
+    elseif (-not $Draft) {
+        $script:visualRoot
+    }
+    if ($effectiveVisualRoot) {
+        $arguments.VisualEvidenceRoot = $effectiveVisualRoot
+    }
     if ($Draft) {
-        $output = @(& $validator -EvidencePath $path -Draft 6>&1)
+        $arguments.Draft = $true
+        $output = @(& $validator @arguments 6>&1)
     }
     else {
-        $output = @(& $validator -EvidencePath $path 6>&1)
+        $output = @(& $validator @arguments 6>&1)
     }
     $flattenedOutput = (($output | ForEach-Object { "$_" }) -join ' ')
     $flattenedOutput = (($flattenedOutput -split '\s+') -join ' ').Trim()
@@ -71,17 +85,29 @@ function Assert-ValidatorFails {
         [string] $Name,
         [Parameter(Mandatory)]
         [string] $ExpectedFragment,
-        [switch] $Draft
+        [switch] $Draft,
+        [string] $VisualEvidenceRoot
     )
 
     $path = Join-Path $script:testRoot "$Name.json"
     Write-Evidence -Evidence $Evidence -Path $path
     try {
+        $arguments = @{ EvidencePath = $path }
+        $effectiveVisualRoot = if ($VisualEvidenceRoot) {
+            $VisualEvidenceRoot
+        }
+        elseif (-not $Draft) {
+            $script:visualRoot
+        }
+        if ($effectiveVisualRoot) {
+            $arguments.VisualEvidenceRoot = $effectiveVisualRoot
+        }
         if ($Draft) {
-            & $validator -EvidencePath $path -Draft | Out-Null
+            $arguments.Draft = $true
+            & $validator @arguments | Out-Null
         }
         else {
-            & $validator -EvidencePath $path | Out-Null
+            & $validator @arguments | Out-Null
         }
     }
     catch {
@@ -157,6 +183,93 @@ function Assert-EvidencePathspec {
     }
 }
 
+function New-VisualCaptures {
+    param([Parameter(Mandatory)][string] $ExecutableSha)
+
+    $captures = [Collections.Generic.List[object]]::new()
+    $sequence = 1
+    foreach ($product in 'Windows 10', 'Windows 11') {
+        $productId = $product.ToLowerInvariant().Replace(' ', '')
+        $dpiIndex = 0
+        foreach ($dpi in 100, 125, 150, 200, 250, 300) {
+            foreach ($contrast in 'normal', 'high-contrast') {
+                $appearance = if ($contrast -eq 'high-contrast') {
+                    'forced-colors'
+                }
+                else {
+                    @('system', 'light', 'dark')[$dpiIndex % 3]
+                }
+                $id = "main-$productId-$dpi-$contrast"
+                $captures.Add([pscustomobject][ordered]@{
+                    id = $id
+                    image = [pscustomobject][ordered]@{
+                        filename = "$id.png"
+                        sha256 = ([Convert]::ToString($sequence, 16).PadLeft(64, '0'))
+                        pixel_width = 1280
+                        pixel_height = 900
+                    }
+                    executable_sha256 = $ExecutableSha
+                    ui_target = "ui|$product|$dpi|$contrast"
+                    appearance = $appearance
+                    surface = 'main-workbench'
+                })
+                $sequence++
+            }
+            $dpiIndex++
+        }
+    }
+
+    foreach ($extra in @(
+            @{ Id = 'surface-native-menu'; Product = 'Windows 10'; Dpi = 100; Appearance = 'system'; Surface = 'native-menu' },
+            @{ Id = 'surface-appearance-dialog'; Product = 'Windows 10'; Dpi = 100; Appearance = 'light'; Surface = 'appearance-dialog' },
+            @{ Id = 'surface-input-prompt'; Product = 'Windows 10'; Dpi = 125; Appearance = 'dark'; Surface = 'input-prompt' },
+            @{ Id = 'surface-common-dialog'; Product = 'Windows 10'; Dpi = 150; Appearance = 'system'; Surface = 'common-dialog'; Scenario = 'common-dialog' },
+            @{ Id = 'surface-confirmation-task-dialog'; Product = 'Windows 11'; Dpi = 100; Appearance = 'light'; Surface = 'confirmation-task-dialog' },
+            @{ Id = 'surface-recovery-window'; Product = 'Windows 11'; Dpi = 150; Appearance = 'dark'; Surface = 'recovery-window'; Scenario = 'startup-recovery' }
+        )) {
+        $capture = [ordered]@{
+            id = $extra.Id
+            image = [pscustomobject][ordered]@{
+                filename = "$($extra.Id).png"
+                sha256 = ([Convert]::ToString($sequence, 16).PadLeft(64, '0'))
+                pixel_width = 1280
+                pixel_height = 900
+            }
+            executable_sha256 = $ExecutableSha
+            ui_target = "ui|$($extra.Product)|$($extra.Dpi)|normal"
+            appearance = $extra.Appearance
+            surface = $extra.Surface
+        }
+        if ($extra.ContainsKey('Scenario')) {
+            $capture.scenario_target = "scenario|$($extra.Product)|$($extra.Scenario)"
+        }
+        $captures.Add([pscustomobject] $capture)
+        $sequence++
+    }
+    return @($captures)
+}
+
+function Write-VisualEvidenceFiles {
+    param(
+        [Parameter(Mandatory)][object] $Evidence,
+        [Parameter(Mandatory)][string] $Root
+    )
+    $sequence = 1
+    foreach ($capture in $Evidence.visual_captures) {
+        $path = Join-Path $Root $capture.image.filename
+        Write-VisualPngFixture `
+            -Path $path `
+            -Marker $capture.id `
+            -Width 640 `
+            -Height 360 `
+            -Seed $sequence
+        $capture.image.pixel_width = 640
+        $capture.image.pixel_height = 360
+        $capture.image.sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        $sequence++
+    }
+}
+
 function New-CompleteEvidence {
     $uiMatrix = @(
         foreach ($product in 'Windows 10', 'Windows 11') {
@@ -226,7 +339,7 @@ function New-CompleteEvidence {
     )
 
     return [pscustomobject]@{
-        schema_version = 2
+        schema_version = 3
         source_sha = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
         artifact = [pscustomobject]@{
             filename = 'DarkReNamer.exe'
@@ -248,6 +361,7 @@ function New-CompleteEvidence {
             }
         )
         ui_matrix = $uiMatrix
+        visual_captures = @(New-VisualCaptures -ExecutableSha ('a' * 64))
         scenarios = $scenarios
         benchmarks = $benchmarks
         durability_trials = @(
@@ -312,6 +426,9 @@ try {
     Assert-EvidencePathspec -TestRoot $testRoot
 
     $complete = New-CompleteEvidence
+    $visualRoot = Join-Path $testRoot 'visual-root'
+    New-Item -ItemType Directory -Path $visualRoot | Out-Null
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
     $passThruPath = Join-Path $testRoot 'pass-thru-draft.json'
     Write-Evidence -Evidence $complete -Path $passThruPath
     $defaultOutput = @(& $validator -EvidencePath $passThruPath -Draft 6>&1)
@@ -324,7 +441,7 @@ try {
         throw 'Evidence PassThru must return exactly one validated evidence object.'
     }
     if (($passThruOutput[0].PSObject.Properties.Name -join ',') -cne
-        'schema_version,source_sha,artifact,recorded_at_utc,operator_context,ui_matrix,scenarios,benchmarks,durability_trials,unexecuted') {
+        'schema_version,source_sha,artifact,recorded_at_utc,operator_context,ui_matrix,visual_captures,scenarios,benchmarks,durability_trials,unexecuted') {
         throw 'Evidence PassThru fields do not match the validated evidence contract.'
     }
     $evidenceJson = ($complete | ConvertTo-Json -Depth 20) + "`n"
@@ -342,7 +459,18 @@ try {
     if ($pathSemanticJson -cne $memorySemanticJson) {
         throw 'EvidencePath and EvidenceJson validation returned different semantic objects.'
     }
-    foreach ($invalidJson in '{', '{"schema_version":2,"schema_version":2}') {
+    $missingVisualRootRejected = $false
+    try {
+        & $validator -EvidencePath $passThruPath | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notlike '*requires VisualEvidenceRoot*') { throw }
+        $missingVisualRootRejected = $true
+    }
+    if (-not $missingVisualRootRejected) {
+        throw 'Complete evidence validation accepted a missing VisualEvidenceRoot.'
+    }
+    foreach ($invalidJson in '{', '{"schema_version":3,"schema_version":3}') {
         try {
             & $validator -EvidenceJson $invalidJson -Draft | Out-Null
         }
@@ -356,6 +484,280 @@ try {
         -Evidence $complete `
         -Name 'valid-complete' `
         -ForbiddenOutput 'HDD-unavailable limitation'
+
+    Assert-ValidatorPasses `
+        -Evidence $complete `
+        -Name 'valid-complete-with-visual-root' `
+        -VisualEvidenceRoot $visualRoot
+
+    $visualRootLink = Join-Path $testRoot 'visual-root-link'
+    if ($IsWindows) {
+        New-Item -ItemType Junction -Path $visualRootLink -Target $visualRoot | Out-Null
+    }
+    else {
+        New-Item -ItemType SymbolicLink -Path $visualRootLink -Target $visualRoot | Out-Null
+    }
+    Assert-ValidatorFails `
+        -Evidence $complete `
+        -Name 'visual-root-reparse' `
+        -ExpectedFragment 'must not contain reparse points' `
+        -VisualEvidenceRoot $visualRootLink
+
+    $firstVisualPath = Join-Path $visualRoot $complete.visual_captures[0].image.filename
+    $wrongVisualDimensions = Copy-Evidence $complete
+    $wrongVisualDimensions.visual_captures[0].image.pixel_width = 2
+    Assert-ValidatorFails `
+        -Evidence $wrongVisualDimensions `
+        -Name 'visual-root-dimension-mismatch' `
+        -ExpectedFragment 'PNG dimensions do not match' `
+        -VisualEvidenceRoot $visualRoot
+
+    $tooSmallVisual = Copy-Evidence $complete
+    Write-VisualPngFixture `
+        -Path $firstVisualPath `
+        -Marker 'too-small-main-workbench' `
+        -Width 320 `
+        -Height 180 `
+        -Seed 1
+    $tooSmallVisual.visual_captures[0].image.pixel_width = 320
+    $tooSmallVisual.visual_captures[0].image.pixel_height = 180
+    $tooSmallVisual.visual_captures[0].image.sha256 =
+        (Get-FileHash -LiteralPath $firstVisualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ValidatorFails `
+        -Evidence $tooSmallVisual `
+        -Name 'visual-root-too-small' `
+        -ExpectedFragment 'dimensions are too small for surface main-workbench' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
+    $solidVisual = Copy-Evidence $complete
+    Write-VisualPngFixture `
+        -Path $firstVisualPath `
+        -Marker 'solid-main-workbench' `
+        -Width 640 `
+        -Height 360 `
+        -Seed 1 `
+        -Solid
+    $solidVisual.visual_captures[0].image.sha256 =
+        (Get-FileHash -LiteralPath $firstVisualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ValidatorFails `
+        -Evidence $solidVisual `
+        -Name 'visual-root-solid-raster' `
+        -ExpectedFragment 'at least four distinct decoded colors' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
+    $transparentVisual = Copy-Evidence $complete
+    Write-VisualPngFixture `
+        -Path $firstVisualPath `
+        -Marker 'transparent-main-workbench' `
+        -Width 640 `
+        -Height 360 `
+        -Seed 1 `
+        -Transparent
+    $transparentVisual.visual_captures[0].image.sha256 =
+        (Get-FileHash -LiteralPath $firstVisualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ValidatorFails `
+        -Evidence $transparentVisual `
+        -Name 'visual-root-transparent-raster' `
+        -ExpectedFragment 'screenshot pixels must be fully opaque' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
+    $transparentAfterColorCap = Copy-Evidence $complete
+    Write-VisualPngFixture `
+        -Path $firstVisualPath `
+        -Marker 'transparent-after-color-cap' `
+        -Width 640 `
+        -Height 360 `
+        -Seed 1 `
+        -OpaquePrefixPixels 65
+    $transparentAfterColorCap.visual_captures[0].image.sha256 =
+        (Get-FileHash -LiteralPath $firstVisualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ValidatorFails `
+        -Evidence $transparentAfterColorCap `
+        -Name 'visual-root-transparent-after-color-cap' `
+        -ExpectedFragment 'screenshot pixels must be fully opaque' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
+    $duplicateRaster = Copy-Evidence $complete
+    $secondVisualPath = Join-Path $visualRoot $duplicateRaster.visual_captures[1].image.filename
+    Write-VisualPngFixture `
+        -Path $secondVisualPath `
+        -Marker 'same-raster-different-metadata' `
+        -Width 640 `
+        -Height 360 `
+        -Seed 1
+    $duplicateRaster.visual_captures[1].image.sha256 =
+        (Get-FileHash -LiteralPath $secondVisualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ValidatorFails `
+        -Evidence $duplicateRaster `
+        -Name 'visual-root-duplicate-raster' `
+        -ExpectedFragment 'Duplicate visual capture decoded raster' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
+    Write-VisualPngFixture `
+        -Path $firstVisualPath `
+        -Marker 'different-valid-image' `
+        -Width 640 `
+        -Height 360 `
+        -Seed 1
+    Assert-ValidatorFails `
+        -Evidence $complete `
+        -Name 'visual-root-hash-mismatch' `
+        -ExpectedFragment 'image SHA-256 does not match VisualEvidenceRoot bytes' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
+    $invalidCrcEvidence = Copy-Evidence $complete
+    $invalidCrcBytes = [IO.File]::ReadAllBytes($firstVisualPath)
+    $invalidCrcBytes[60] = $invalidCrcBytes[60] -bxor 1
+    [IO.File]::WriteAllBytes($firstVisualPath, $invalidCrcBytes)
+    $invalidCrcEvidence.visual_captures[0].image.sha256 =
+        (Get-FileHash -LiteralPath $firstVisualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ValidatorFails `
+        -Evidence $invalidCrcEvidence `
+        -Name 'visual-root-invalid-crc' `
+        -ExpectedFragment 'not a bounded decodable PNG' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
+    $missingImageDataEvidence = Copy-Evidence $complete
+    $headerOnly = [byte[]](
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+        0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    )
+    [IO.File]::WriteAllBytes($firstVisualPath, $headerOnly)
+    $missingImageDataEvidence.visual_captures[0].image.sha256 =
+        (Get-FileHash -LiteralPath $firstVisualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ValidatorFails `
+        -Evidence $missingImageDataEvidence `
+        -Name 'visual-root-missing-image-data' `
+        -ExpectedFragment 'not a bounded decodable PNG' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
+    $oversizedVisual = [IO.FileStream]::new(
+        $firstVisualPath,
+        [IO.FileMode]::Create,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::None
+    )
+    try {
+        $oversizedVisual.SetLength((64 * 1024 * 1024) + 1)
+    }
+    finally {
+        $oversizedVisual.Dispose()
+    }
+    Assert-ValidatorFails `
+        -Evidence $complete `
+        -Name 'visual-root-oversized-image' `
+        -ExpectedFragment 'encoded size is outside' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
+    $tooManyChunksEvidence = Copy-Evidence $complete
+    $validPng = [IO.File]::ReadAllBytes($firstVisualPath)
+    $iendOffset = $validPng.Length - 12
+    $chunk = New-VisualFixturePngChunk -Type 'tEXt' -Data ([byte[]]::new(0))
+    $manyChunks = [IO.MemoryStream]::new()
+    try {
+        $manyChunks.Write($validPng, 0, $iendOffset)
+        foreach ($index in 1..4097) {
+            $manyChunks.Write($chunk, 0, $chunk.Length)
+        }
+        $manyChunks.Write($validPng, $iendOffset, 12)
+        [IO.File]::WriteAllBytes($firstVisualPath, $manyChunks.ToArray())
+    }
+    finally {
+        $manyChunks.Dispose()
+    }
+    $tooManyChunksEvidence.visual_captures[0].image.sha256 =
+        (Get-FileHash -LiteralPath $firstVisualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ValidatorFails `
+        -Evidence $tooManyChunksEvidence `
+        -Name 'visual-root-too-many-chunks' `
+        -ExpectedFragment 'more than 4096 chunks' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
+    $missingVisualCell = Copy-Evidence $complete
+    $missingVisualCell.visual_captures = @(
+        $missingVisualCell.visual_captures |
+            Where-Object { $_.ui_target -ne 'ui|Windows 11|300|high-contrast' }
+    )
+    Assert-ValidatorFails `
+        -Evidence $missingVisualCell `
+        -Name 'missing-main-workbench-capture' `
+        -ExpectedFragment 'missing a main-workbench visual capture'
+
+    $wrongVisualExecutable = Copy-Evidence $complete
+    $wrongVisualExecutable.visual_captures[0].executable_sha256 = 'b' * 64
+    Assert-ValidatorFails `
+        -Evidence $wrongVisualExecutable `
+        -Name 'wrong-visual-executable' `
+        -ExpectedFragment 'must match artifact.sha256'
+
+    $wrongVisualAppearance = Copy-Evidence $complete
+    $wrongVisualAppearance.visual_captures[1].appearance = 'dark'
+    Assert-ValidatorFails `
+        -Evidence $wrongVisualAppearance `
+        -Name 'wrong-high-contrast-appearance' `
+        -ExpectedFragment 'appearance does not match its UI contrast target'
+
+    $mainAppearanceBypass = Copy-Evidence $complete
+    foreach ($capture in $mainAppearanceBypass.visual_captures) {
+        if ($capture.surface -eq 'main-workbench' -and
+            $capture.ui_target -like 'ui|*|normal') {
+            $capture.appearance = 'system'
+        }
+    }
+    Assert-ValidatorFails `
+        -Evidence $mainAppearanceBypass `
+        -Name 'main-workbench-appearance-bypass' `
+        -ExpectedFragment 'missing normal main-workbench appearance coverage: light'
+
+    $missingVisualSurface = Copy-Evidence $complete
+    $missingVisualSurface.visual_captures = @(
+        $missingVisualSurface.visual_captures |
+            Where-Object { $_.surface -ne 'recovery-window' }
+    )
+    Assert-ValidatorFails `
+        -Evidence $missingVisualSurface `
+        -Name 'missing-visual-surface' `
+        -ExpectedFragment 'missing visual surface coverage: recovery-window'
+
+    $duplicateVisualFilename = Copy-Evidence $complete
+    $duplicateVisualFilename.visual_captures[1].image.filename =
+        $duplicateVisualFilename.visual_captures[0].image.filename
+    Assert-ValidatorFails `
+        -Evidence $duplicateVisualFilename `
+        -Name 'duplicate-visual-filename' `
+        -ExpectedFragment 'Duplicate visual capture filename'
+
+    $reservedVisualFilename = Copy-Evidence $complete
+    $reservedVisualFilename.visual_captures[0].image.filename = 'CON.png'
+    Assert-ValidatorFails `
+        -Evidence $reservedVisualFilename `
+        -Name 'reserved-visual-filename' `
+        -ExpectedFragment 'must not use a reserved Windows device name'
+
+    $tooManyCaptures = Copy-Evidence $complete
+    while (@($tooManyCaptures.visual_captures).Count -le 64) {
+        $index = @($tooManyCaptures.visual_captures).Count
+        $extra = Copy-Evidence $tooManyCaptures.visual_captures[0]
+        $extra.id = "extra-capture-$index"
+        $extra.image.filename = "extra-capture-$index.png"
+        $extra.image.sha256 = ([Convert]::ToString(1000 + $index, 16).PadLeft(64, '0'))
+        $tooManyCaptures.visual_captures += $extra
+    }
+    Assert-SchemaRejects `
+        -Evidence $tooManyCaptures `
+        -Name 'too-many-visual-captures'
 
     foreach ($filesystem in 'refs', 'exfat', 'other') {
         $draftFilesystem = Copy-Evidence $complete
@@ -392,7 +794,7 @@ try {
     Assert-ValidatorFails `
         -Evidence $schemaV1 `
         -Name 'schema-v1' `
-        -ExpectedFragment 'schema_version must be 2'
+        -ExpectedFragment 'schema_version must be 3'
 
     $hddUnavailable = New-HddUnavailableEvidence -CompleteEvidence $complete
     Assert-ValidatorPasses `
@@ -500,6 +902,7 @@ try {
 
     $draft = Copy-Evidence $complete
     $draft.ui_matrix = @($draft.ui_matrix | Select-Object -SkipLast 1)
+    $draft.visual_captures = @()
     $draft.scenarios[0].status = 'not-run'
     $draft.scenarios[0].observation_code = 'not-executed'
     $draft.scenarios[0] | Add-Member -NotePropertyName unexecuted_id -NotePropertyValue 'keyboard-deferred'
@@ -521,6 +924,7 @@ try {
 
     $zeroContextDraft = Copy-Evidence $complete
     $zeroContextDraft.operator_context = @()
+    $zeroContextDraft.visual_captures = @()
     $zeroContextDraft.unexecuted = @()
     $rowIndex = 0
     foreach ($row in $zeroContextDraft.ui_matrix) {
@@ -651,6 +1055,15 @@ try {
         -Name 'zero-context-complete' `
         -ExpectedFragment 'Complete evidence requires operator context for Windows 10'
 
+    $arm64Context = Copy-Evidence $complete
+    foreach ($context in $arm64Context.operator_context) {
+        $context.architecture = 'arm64'
+    }
+    Assert-ValidatorFails `
+        -Evidence $arm64Context `
+        -Name 'arm64-context-complete' `
+        -ExpectedFragment 'architecture must be one of: x64'
+
     $missingUiProductContext = Copy-Evidence $zeroContextDraft
     $missingUiProductContext.operator_context = @($complete.operator_context[0])
     $missingUiProductContext.ui_matrix[12].status = 'pass'
@@ -683,6 +1096,10 @@ try {
 
     $missingCell = Copy-Evidence $complete
     $missingCell.ui_matrix = @($missingCell.ui_matrix | Select-Object -SkipLast 1)
+    $missingCell.visual_captures = @(
+        $missingCell.visual_captures |
+            Where-Object { $_.ui_target -ne 'ui|Windows 11|300|high-contrast' }
+    )
     Assert-ValidatorFails `
         -Evidence $missingCell `
         -Name 'missing-ui-cell' `
@@ -768,6 +1185,10 @@ try {
     $notRunWithoutReason = Copy-Evidence $complete
     $notRunWithoutReason.ui_matrix[0].status = 'not-run'
     $notRunWithoutReason.ui_matrix[0].observation_code = 'not-executed'
+    $notRunWithoutReason.visual_captures = @(
+        $notRunWithoutReason.visual_captures |
+            Where-Object { $_.ui_target -ne 'ui|Windows 10|100|normal' }
+    )
     Assert-ValidatorFails `
         -Evidence $notRunWithoutReason `
         -Name 'not-run-without-reason' `
@@ -820,7 +1241,7 @@ try {
         -ExpectedFragment 'requires operator-authorized scope'
 
     $stringSchemaVersion = Copy-Evidence $complete
-    $stringSchemaVersion.schema_version = '2'
+    $stringSchemaVersion.schema_version = '3'
     Assert-ValidatorFails `
         -Evidence $stringSchemaVersion `
         -Name 'string-schema-version' `

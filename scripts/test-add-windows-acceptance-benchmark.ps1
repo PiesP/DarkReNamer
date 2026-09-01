@@ -14,9 +14,13 @@ function Write-Utf8([string]$Path, [string]$Content) { [IO.File]::WriteAllText($
 function Write-Json([string]$Path, [object]$Value) { Write-Utf8 $Path (($Value | ConvertTo-Json -Depth 20) + "`n") }
 function Copy-Json([object]$Value) { return $Value | ConvertTo-Json -Depth 20 | ConvertFrom-Json }
 
-function Write-Context([string]$Directory, [string]$StorageModel = 'Fixture SSD Model') {
+function Write-Context(
+    [string]$Directory,
+    [string]$StorageModel = 'Fixture SSD Model',
+    [string]$Architecture = 'x64'
+) {
     Write-Json (Join-Path $Directory 'benchmark-context.json') ([ordered]@{
-        schema_version=1; windows_product='Windows 11'; windows_build='26100.4946'; architecture='x64';
+        schema_version=1; windows_product='Windows 11'; windows_build='26100.4946'; architecture=$Architecture;
         filesystem='ntfs'; storage_model=$StorageModel; connection='nvme';
         free_space_bucket='50-percent-or-more'; power_mode='balanced'
     })
@@ -145,6 +149,10 @@ try {
     $conflictEvidence.operator_context = @([pscustomobject]@{ windows_product='Windows 11'; windows_build='22621'; architecture='x64' })
     Write-Json $conflict.Evidence $conflictEvidence
     Assert-Fails { & $augmenter -SourceRoot $sourceRoot -EvidencePath $conflict.Evidence -LogDirectory $conflict.Logs -OutputPath $conflict.Output } 'conflicts with existing operator context' $conflict.Output
+
+    $arm64Context = New-Case 'arm64-context'
+    Write-Context -Directory $arm64Context.Logs -Architecture 'arm64'
+    Assert-Fails { & $augmenter -SourceRoot $sourceRoot -EvidencePath $arm64Context.Evidence -LogDirectory $arm64Context.Logs -OutputPath $arm64Context.Output } 'invalid operator context' $arm64Context.Output
 
     foreach ($caseSpec in @(
         @{ N='hosted'; O='evidence_class=physical'; R='evidence_class=directional-hosted'; E='recorded physical' },

@@ -175,17 +175,25 @@ files are not source files, must not be committed, and must not contain local
 paths, operator or machine identities, or volume serials. The JSON records a
 full source SHA and the tested executable's filename and SHA-256. An artifact
 from the Actions handoff also records its workflow run ID; a local build is
-identified only as a local build. The validator does not retrieve either
-artifact, so the operator remains responsible for hashing the executable that
-was actually exercised.
+identified only as a local build. Visual capture rows bind PNG filenames,
+dimensions, image digests, UI and optional scenario targets, appearance, and
+surface to that same executable digest. Image bytes remain external.
 
 For a release decision, validate the complete external evidence against the
 downloaded Actions handoff and matching checkout with
 [`scripts/validate-release-acceptance.ps1`](scripts/validate-release-acceptance.ps1).
 This cross-check requires the evidence to identify `actions-handoff` and match
 the handoff's source SHA, workflow run, executable filename, executable digest,
-and actual executable bytes. Packaging validation by itself does not satisfy
-the acceptance matrix below.
+and actual executable bytes. Supply the external screenshot directory through
+`-VisualEvidenceRoot`; the validator rejects reparse-point roots or images and
+checks each PNG's encoded-size bound, chunk order and CRCs, decoded scanlines,
+digest, and recorded dimensions. Packaging validation by itself does not
+satisfy the acceptance matrix below.
+
+The visual-root checks reject static aliases but do not prevent another local
+process from replacing a file between metadata, dimension, and digest reads.
+Keep the external root immutable for the validation session and writable only
+by the acceptance operator.
 
 [`scripts/windows-acceptance-evidence.schema.json`](scripts/windows-acceptance-evidence.schema.json)
 is the machine-readable field contract. Validate evidence with
@@ -216,8 +224,8 @@ modify.
 
 The schema remains the truth for target enumerations and allowed reason codes,
 and the validator remains the truth for draft and release-gate semantics. A new
-draft contains no operator context or observed results: every required UI,
-scenario, benchmark, and durability target starts as explicitly unexecuted.
+draft contains no operator context, visual captures, or observed results: every
+required UI, scenario, benchmark, and durability target starts as explicitly unexecuted.
 The generator does not inspect a Windows host, ingest benchmark output or
 medians, invent storage or tool details, or establish any acceptance coverage.
 
@@ -226,6 +234,12 @@ Complete release-gate evidence requires all of the following:
 - one unique UI result for Windows 10 and Windows 11 at 100%, 125%, 150%, 200%,
   250%, and 300% DPI in both normal and high-contrast modes (24 cells total),
   all passed;
+- one main-workbench PNG bound to every passed UI cell; normal-mode captures
+  collectively cover System, Light, and Dark while high-contrast captures use
+  the Forced Colors appearance;
+- visual coverage of the native menu, advanced appearance window, input prompt,
+  common dialog, confirmation TaskDialog, and recovery window, with common and
+  recovery surfaces bound to their passed scenarios;
 - one passed result per operating system for keyboard-only operation,
   accessibility inspection with tool and version, Explorer drag-and-drop,
   common dialogs, clipboard, worker cancellation, worker close, startup
@@ -237,6 +251,11 @@ Complete release-gate evidence requires all of the following:
   rows plus one target-bound `hardware-unavailable` reason for each count; and
 - a passed application-process crash trial plus at least one separately
   authorized and passed VM hard-reset or storage-fault trial.
+
+The validator accepts at most 64 visual rows. Main-workbench images must be at
+least 640 by 360 pixels, other surfaces at least 240 by 120, and every image
+must contain at least four decoded colors. Canonical decoded-raster digests must
+be unique, so metadata-only changes cannot reuse one visual across targets.
 
 The HDD-unavailable form records a personal development hardware limitation; it
 does not claim or simulate HDD coverage. Partial HDD rows, mixed HDD rows and
@@ -262,20 +281,31 @@ An executed VM, storage-fault, or physical-power trial records only the
 `operator-authorized` scope marker, never the approver's identity.
 
 The JSON is deliberately path-free and has no generic note or narrative field.
-UI, scenario, durability, and unexecuted results use enumerated observation and
-reason codes. It stores an artifact filename, not its location, and uses
-bounded free-space categories instead of volume details. Accessibility tool
-and storage model-family values accept only a restricted character set. The
-operator must record the public model family, not a device serial, asset tag,
-operator name, or hostname.
+UI, visual, scenario, durability, and unexecuted results use enumerated targets,
+appearances, surfaces, observation codes, or reason codes. It stores artifact
+and image filenames, not their locations, and uses bounded free-space categories
+instead of volume details. Accessibility tool and storage model-family values
+accept only a restricted character set. The operator must record the public
+model family, not a device serial, asset tag, operator name, or hostname.
 
-Screenshots, traces, detailed narratives, benchmark roots, user profiles,
-hostnames, and operator names remain outside the JSON. Name an external
-evidence artifact `windows-acceptance-evidence-<source-sha>.json`; CI rejects a
-tracked file matching that evidence pattern. A release decision must cite the
-external artifact through the release's controlled handoff rather than add a
-current run's SHA, timestamp, measurements, or machine details to this
-document.
+Screenshot bytes, traces, detailed narratives, benchmark roots, user profiles,
+hostnames, and operator names remain outside the JSON. Screenshot filenames,
+digests, dimensions, targets, appearances, and surfaces are the bounded link to
+those external bytes. Name the JSON artifact
+`windows-acceptance-evidence-<source-sha>.json`; CI rejects a tracked file
+matching that evidence pattern. A release decision must cite the external JSON
+and screenshot root through the controlled handoff rather than add a current
+run's SHA, timestamp, measurements, or machine details to this document.
+
+### Local visual diagnostics
+
+`scripts/capture-local-visual-gallery.sh` can cross-build and run the production
+advanced-appearance window under Wine. Its external manifest records the source
+state, native-test executable digest, capture backend, geometry, color-diversity
+check, and whether custom colors were active. Wine cannot provide the audited
+journal handles required by the main application, and its theme APIs may fall
+back to system rendering. The gallery is diagnostic only: it does not establish
+Windows version, DPI, Forced Colors, main-workbench, or accessibility acceptance.
 
 ### Durable workload benchmark
 

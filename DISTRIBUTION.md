@@ -64,9 +64,10 @@ separate from packaging validation.
 Formal desktop acceptance is complete only when the external evidence passes
 the full release gate documented in repository file `SAFETY.md` and repository
 script `scripts/validate-release-acceptance.ps1` cross-checks it against the
-checkout HEAD and the actual Actions handoff. Use the exact source commit named
-by `release-handoff.json`; this standalone policy file does not embed or link to
-a potentially newer repository revision. A valid handoff alone is packaging
+checkout HEAD, the actual Actions handoff, and the PNG bytes under the supplied
+`-VisualEvidenceRoot`. Use the exact source commit named by
+`release-handoff.json`; this standalone policy file does not embed or link to a
+potentially newer repository revision. A valid handoff alone is packaging
 evidence, not desktop acceptance.
 
 ## Future Authenticode boundary

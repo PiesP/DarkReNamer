@@ -65,6 +65,8 @@ mod recovery_ui;
 mod resource_ids;
 mod safe_runtime;
 mod text_io;
+#[cfg(test)]
+mod visual_capture;
 mod worker;
 
 fn proposal_mutation_error_korean(error: ProposalMutationError) -> &'static str {

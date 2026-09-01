@@ -128,7 +128,7 @@ if ($contextSchemaVersionElement.ValueKind -ne [Text.Json.JsonValueKind]::Number
     $contextSchemaVersion -ne 1) {
     throw 'benchmark-context.json schema_version must be the JSON integer 1.'
 }
-if ($context.windows_product -cnotin @('Windows 10','Windows 11') -or $context.windows_build -isnot [string] -or $context.windows_build -notmatch '^[0-9]+(?:\.[0-9]+){0,3}$' -or $context.architecture -cnotin @('x64','arm64')) { throw 'benchmark-context.json contains invalid operator context.' }
+if ($context.windows_product -cnotin @('Windows 10','Windows 11') -or $context.windows_build -isnot [string] -or $context.windows_build -notmatch '^[0-9]+(?:\.[0-9]+){0,3}$' -or $context.architecture -cne 'x64') { throw 'benchmark-context.json contains invalid operator context.' }
 if ($context.filesystem -cne 'ntfs') { throw 'benchmark-context.json filesystem must be ntfs.' }
 if ($context.storage_model -isnot [string] -or $context.storage_model -notmatch '^(?=[A-Za-z0-9 ._()+-]{1,200}$)(?=.*[A-Za-z])[A-Za-z0-9][A-Za-z0-9 ._()+-]*$') { throw 'benchmark-context.json storage_model is invalid.' }
 if ($context.connection -cnotin @('nvme','sata','usb','thunderbolt','other-physical') -or $context.free_space_bucket -cnotin @('under-10-percent','10-to-24-percent','25-to-49-percent','50-percent-or-more') -or $context.power_mode -cnotin @('power-saver','balanced','high-performance','other')) { throw 'benchmark-context.json contains invalid storage context.' }
