@@ -1,0 +1,379 @@
+name: Release profile Windows planning matrix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: profile-planning-matrix-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: benchmark/release-profile-windows-planning
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - name: Checkout selected source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: rustup toolchain install 1.97.1 --profile minimal
+
+      - name: Resolve source and output metadata
+        shell: pwsh
+        run: |
+          $sourceSha = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $sourceSha -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'The selected source commit could not be resolved.'
+          }
+          $sourceEpoch = (git show -s --format=%ct HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $sourceEpoch -notmatch '^[1-9][0-9]*$') {
+            throw 'The selected source commit timestamp could not be resolved.'
+          }
+          $rustcVersion = (& rustc --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($rustcVersion)) {
+            throw 'The pinned rustc version could not be resolved.'
+          }
+          $artifactRoot = Join-Path `
+            $env:RUNNER_TEMP `
+            "darkrenamer-profile-planning-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $targetRoot = Join-Path `
+            $env:RUNNER_TEMP `
+            "darkrenamer-profile-planning-target-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          if ((Test-Path -LiteralPath $artifactRoot) -or (Test-Path -LiteralPath $targetRoot)) {
+            throw 'Profile planning output roots must not already exist.'
+          }
+          New-Item -ItemType Directory -Path $artifactRoot, $targetRoot | Out-Null
+          "SOURCE_SHA=$sourceSha" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SOURCE_DATE_EPOCH=$sourceEpoch" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RUSTC_VERSION=$rustcVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "ARTIFACT_ROOT=$artifactRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TARGET_ROOT=$targetRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build and run production Windows planning profiles serially
+        shell: pwsh
+        run: |
+          function Convert-PlanningMetricLine {
+            param(
+              [Parameter(Mandatory)]
+              [string] $Line,
+              [Parameter(Mandatory)]
+              [string] $ExpectedSourceSha,
+              [Parameter(Mandatory)]
+              [string] $ExpectedTopology,
+              [Parameter(Mandatory)]
+              [int] $ExpectedIteration
+            )
+
+            $prefix = 'darkrenamer_benchmark,'
+            $libtestPrefix = 'test benchmark_durable_production_path ... '
+            $metric = if ($Line.StartsWith($prefix, [StringComparison]::Ordinal)) {
+              $Line
+            } elseif ($Line.StartsWith("$libtestPrefix$prefix", [StringComparison]::Ordinal)) {
+              $Line.Substring($libtestPrefix.Length)
+            } else {
+              throw 'Windows planning output must use the standalone or exact libtest metric prefix.'
+            }
+            $parts = @($metric -split ',')
+            if ($parts.Count -ne 14 -or $parts[0] -cne 'darkrenamer_benchmark') {
+              throw "Windows planning metric field count is invalid: $metric"
+            }
+            $fields = [Collections.Generic.Dictionary[string,string]]::new(
+              [StringComparer]::Ordinal
+            )
+            foreach ($part in $parts[1..($parts.Count - 1)]) {
+              $pair = $part -split '=', 2
+              if ($pair.Count -ne 2 -or
+                  [string]::IsNullOrWhiteSpace($pair[0]) -or
+                  -not $fields.TryAdd($pair[0], $pair[1])) {
+                throw "Windows planning metric contains an invalid field: $part"
+              }
+            }
+            $expectedNames = @(
+              'media', 'count', 'topology', 'variant', 'evidence_class',
+              'iteration', 'recorded', 'scope', 'source_sha',
+              'instrumentation_revision', 'planning_ms', 'planning_us', 'preflight_us'
+            )
+            $actualNames = ($fields.Keys | Sort-Object) -join ','
+            $canonicalNames = ($expectedNames | Sort-Object) -join ','
+            if ($actualNames -cne $canonicalNames) {
+              throw 'Windows planning metric fields do not match the canonical schema.'
+            }
+            $expectedRecorded = if ($ExpectedIteration -eq 0) { 'false' } else { 'true' }
+            if ($fields['media'] -cne 'virtual' -or
+                $fields['count'] -cne '10000' -or
+                $fields['topology'] -cne $ExpectedTopology -or
+                $fields['variant'] -cne 'baseline' -or
+                $fields['evidence_class'] -cne 'directional-hosted' -or
+                $fields['iteration'] -cne "$ExpectedIteration" -or
+                $fields['recorded'] -cne $expectedRecorded -or
+                $fields['scope'] -cne 'planning-only' -or
+                $fields['source_sha'] -cne $ExpectedSourceSha -or
+                $fields['instrumentation_revision'] -cne 'parent-validation-v1' -or
+                $fields['planning_ms'] -notmatch '^[0-9]+$' -or
+                $fields['planning_us'] -notmatch '^[1-9][0-9]*$' -or
+                $fields['preflight_us'] -notmatch '^[1-9][0-9]*$') {
+              throw "Windows planning metric values are invalid: $metric"
+            }
+            if ([long] $fields['planning_ms'] -ne
+                [Math]::Floor(([long] $fields['planning_us']) / 1000)) {
+              throw 'Windows planning millisecond and microsecond values disagree.'
+            }
+            [pscustomobject][ordered]@{
+              planning_us = [long] $fields['planning_us']
+              preflight_us = [long] $fields['preflight_us']
+            }
+          }
+
+          foreach ($value in @(
+              $env:SOURCE_SHA,
+              $env:SOURCE_DATE_EPOCH,
+              $env:RUSTC_VERSION,
+              $env:ARTIFACT_ROOT,
+              $env:TARGET_ROOT
+          )) {
+            if ([string]::IsNullOrWhiteSpace($value)) {
+              throw 'Required planning source or output metadata is missing.'
+            }
+          }
+          if ($env:SOURCE_SHA -cnotmatch '^[0-9a-f]{40}$' -or
+              $env:SOURCE_DATE_EPOCH -notmatch '^[1-9][0-9]*$') {
+            throw 'Planning source metadata is malformed.'
+          }
+
+          $variants = @(
+            [pscustomobject][ordered]@{
+              id = 'current-3-3'; app_opt_level = '3'; core_opt_level = '3'
+              app_toml = '3'; core_toml = '3'
+            }
+            [pscustomobject][ordered]@{
+              id = 'app-s-core-3'; app_opt_level = 's'; core_opt_level = '3'
+              app_toml = '"s"'; core_toml = '3'
+            }
+          )
+          $topologies = @('same-parent', 'unique-parent', 'deep-parent')
+          $variantState = @{}
+          foreach ($variant in $variants) {
+            $variantRoot = Join-Path $env:ARTIFACT_ROOT $variant.id
+            $variantTarget = Join-Path $env:TARGET_ROOT $variant.id
+            $logRoot = Join-Path $variantRoot 'logs'
+            New-Item -ItemType Directory -Path $variantRoot, $variantTarget, $logRoot | Out-Null
+            $configPath = Join-Path $variantRoot 'cargo-profile.toml'
+            $configText = @(
+              '[profile.release.package.darknamer-app]'
+              "opt-level = $($variant.app_toml)"
+              ''
+              '[profile.release.package.darknamer-core]'
+              "opt-level = $($variant.core_toml)"
+              ''
+            ) -join "`n"
+            [IO.File]::WriteAllText(
+              $configPath,
+              $configText,
+              [Text.UTF8Encoding]::new($false)
+            )
+            $configHash = (Get-FileHash `
+                -LiteralPath $configPath `
+                -Algorithm SHA256).Hash.ToLowerInvariant()
+            $variantState[$variant.id] = [pscustomobject]@{
+              config_path = $configPath
+              config_hash = $configHash
+              target_path = $variantTarget
+              log_root = $logRoot
+            }
+            $env:CARGO_TARGET_DIR = $variantTarget
+            cargo --config $configPath test --release --locked `
+              --package darknamer-app --test rename_windows_backend --no-run
+            if ($LASTEXITCODE -ne 0) {
+              throw "Windows planning benchmark build failed for $($variant.id)."
+            }
+          }
+
+          $env:DARKRENAMER_BENCH_ROOT = $env:RUNNER_TEMP
+          $env:DARKRENAMER_BENCH_ROOT_PRIVATE = '1'
+          $env:DARKRENAMER_BENCH_EVIDENCE_CLASS = 'directional-hosted'
+          $env:DARKRENAMER_BENCH_MEDIA = 'virtual'
+          $env:DARKRENAMER_BENCH_VARIANT = 'baseline'
+          $env:DARKRENAMER_BENCH_COUNT = '10000'
+          $env:DARKRENAMER_BENCH_SOURCE_SHA = $env:SOURCE_SHA
+          $env:DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'
+          $env:CARGO_INCREMENTAL = '0'
+          $samples = [Collections.Generic.List[object]]::new(60)
+
+          foreach ($topology in $topologies) {
+            $env:DARKRENAMER_BENCH_TOPOLOGY = $topology
+            foreach ($iteration in 0..5) {
+              $startIndex = if ($iteration % 2 -eq 0) { 0 } else { 1 }
+              foreach ($offset in 0..($variants.Count - 1)) {
+                $variant = $variants[($startIndex + $offset) % $variants.Count]
+                $state = $variantState[$variant.id]
+                $env:CARGO_TARGET_DIR = $state.target_path
+                $env:DARKRENAMER_BENCH_ITERATION = "$iteration"
+                $commandOutput = @(
+                  & cargo --config $state.config_path test --release --locked `
+                    --package darknamer-app --test rename_windows_backend `
+                    benchmark_durable_production_path -- `
+                    --ignored --exact --nocapture --test-threads=1 2>&1
+                )
+                $commandExit = $LASTEXITCODE
+                $logPath = Join-Path `
+                  $state.log_root `
+                  "$topology-iteration-$iteration.log"
+                [IO.File]::WriteAllText(
+                  $logPath,
+                  (($commandOutput | ForEach-Object { "$_" }) -join "`n") + "`n",
+                  [Text.UTF8Encoding]::new($false)
+                )
+                if ($commandExit -ne 0) {
+                  throw "Windows planning benchmark failed for $($variant.id)/$topology/$iteration."
+                }
+                $metricLines = @(
+                  $commandOutput |
+                    ForEach-Object { "$_" } |
+                    Where-Object { $_.Contains('darkrenamer_benchmark,') }
+                )
+                if ($metricLines.Count -ne 1) {
+                  throw "Windows planning benchmark must emit one summary for $($variant.id)/$topology/$iteration."
+                }
+                $metric = Convert-PlanningMetricLine `
+                  -Line $metricLines[0] `
+                  -ExpectedSourceSha $env:SOURCE_SHA `
+                  -ExpectedTopology $topology `
+                  -ExpectedIteration $iteration
+                if ($iteration -ne 0) {
+                  $samples.Add([pscustomobject][ordered]@{
+                    variant = $variant.id
+                    topology = $topology
+                    iteration = $iteration
+                    planning_us = $metric.planning_us
+                    preflight_us = $metric.preflight_us
+                  })
+                }
+              }
+            }
+          }
+          Remove-Item Env:CARGO_TARGET_DIR
+          Remove-Item Env:CARGO_INCREMENTAL
+          foreach ($name in @(
+              'DARKRENAMER_BENCH_ROOT',
+              'DARKRENAMER_BENCH_ROOT_PRIVATE',
+              'DARKRENAMER_BENCH_EVIDENCE_CLASS',
+              'DARKRENAMER_BENCH_MEDIA',
+              'DARKRENAMER_BENCH_VARIANT',
+              'DARKRENAMER_BENCH_COUNT',
+              'DARKRENAMER_BENCH_SOURCE_SHA',
+              'DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES',
+              'DARKRENAMER_BENCH_TOPOLOGY',
+              'DARKRENAMER_BENCH_ITERATION'
+          )) {
+            Remove-Item "Env:$name"
+          }
+
+          $variantResults = [Collections.Generic.List[object]]::new($variants.Count)
+          foreach ($variant in $variants) {
+            $topologyResults = [Collections.Generic.List[object]]::new($topologies.Count)
+            foreach ($topology in $topologies) {
+              $topologySamples = @(
+                $samples |
+                  Where-Object { $_.variant -ceq $variant.id -and $_.topology -ceq $topology } |
+                  Sort-Object iteration
+              )
+              if ($topologySamples.Count -ne 5 -or
+                  ($topologySamples.iteration -join ',') -cne '1,2,3,4,5') {
+                throw "Windows planning sample set is incomplete for $($variant.id)/$topology."
+              }
+              $sortedPlanning = @($topologySamples.planning_us | Sort-Object)
+              $sortedPreflight = @($topologySamples.preflight_us | Sort-Object)
+              $topologyResults.Add([pscustomobject][ordered]@{
+                topology = $topology
+                planning_samples_us = @($topologySamples.planning_us)
+                planning_median_us = [long] $sortedPlanning[2]
+                preflight_samples_us = @($topologySamples.preflight_us)
+                preflight_median_us = [long] $sortedPreflight[2]
+              })
+            }
+            $variantResults.Add([pscustomobject][ordered]@{
+              id = $variant.id
+              app_opt_level = $variant.app_opt_level
+              core_opt_level = $variant.core_opt_level
+              cargo_config_filename = "$($variant.id)/cargo-profile.toml"
+              cargo_config_sha256 = $variantState[$variant.id].config_hash
+              topologies = $topologyResults.ToArray()
+            })
+          }
+
+          $matrix = [pscustomobject][ordered]@{
+            schema_version = 1
+            measurement_kind = 'release-profile-windows-planning'
+            evidence_class = 'directional-hosted'
+            scope = 'planning-only'
+            selection_evidence = $false
+            filesystem_mutation = 'owned-temporary-fixtures-only'
+            execution_performed = $false
+            physical_storage_or_desktop_acceptance = $false
+            source_sha = $env:SOURCE_SHA
+            source_date_epoch = [long] $env:SOURCE_DATE_EPOCH
+            workflow_run = $env:GITHUB_RUN_ID
+            workflow_run_attempt = $env:GITHUB_RUN_ATTEMPT
+            rustc_version = $env:RUSTC_VERSION
+            target_triple = 'x86_64-pc-windows-msvc'
+            workload_count = 10000
+            warmup_iterations = 1
+            recorded_iterations = 5
+            instrumentation_revision = 'parent-validation-v1'
+            cargo_toml_sha256 = ./scripts/get-git-blob-sha256.ps1 `
+              -SourceRoot $PWD -Revision $env:SOURCE_SHA -Path Cargo.toml
+            cargo_lock_sha256 = ./scripts/get-git-blob-sha256.ps1 `
+              -SourceRoot $PWD -Revision $env:SOURCE_SHA -Path Cargo.lock
+            rust_toolchain_toml_sha256 = ./scripts/get-git-blob-sha256.ps1 `
+              -SourceRoot $PWD -Revision $env:SOURCE_SHA -Path rust-toolchain.toml
+            harness_sha256 = ./scripts/get-git-blob-sha256.ps1 `
+              -SourceRoot $PWD `
+              -Revision $env:SOURCE_SHA `
+              -Path crates/darknamer-app/tests/rename_windows_backend.rs
+            variants = $variantResults.ToArray()
+          }
+          [IO.File]::WriteAllText(
+            (Join-Path $env:ARTIFACT_ROOT 'profile-planning-matrix.json'),
+            (($matrix | ConvertTo-Json -Depth 10) + "`n"),
+            [Text.UTF8Encoding]::new($false)
+          )
+
+      - name: Summarize Windows planning profiles
+        shell: pwsh
+        run: |
+          $matrix = Get-Content `
+            -LiteralPath (Join-Path $env:ARTIFACT_ROOT 'profile-planning-matrix.json') `
+            -Raw | ConvertFrom-Json
+          @(
+            '## Release profile Windows planning comparison'
+            ''
+            'Directional hosted planning only. No rename execution was performed.'
+            ''
+            'These values are not profile-selection or release-acceptance evidence.'
+            ''
+            "Source SHA: ``$($matrix.source_sha)``"
+            ''
+            '| Variant | Topology | Planning median us | Preflight median us |'
+            '| --- | --- | ---: | ---: |'
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          foreach ($variant in $matrix.variants) {
+            foreach ($topology in $variant.topologies) {
+              "| ``$($variant.id)`` | ``$($topology.topology)`` | $($topology.planning_median_us) | $($topology.preflight_median_us) |" |
+                Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+            }
+          }
+
+      - name: Retain Windows planning profiles
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: DarkReNamer-profile-planning-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/darkrenamer-profile-planning-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: error
+          retention-days: 30
