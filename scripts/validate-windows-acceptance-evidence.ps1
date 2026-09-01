@@ -423,18 +423,17 @@ namespace DarkReNamerAcceptance
                                 throw new InvalidDataException("PNG scanline uses an invalid filter.");
                             Unfilter(filtered[0], filtered, row, previousRow, bytesPerPixel);
                             rasterHash.AppendData(row);
-                            if (colors.Count <= 64)
+                            for (int offset = 0; offset < row.Length; offset += bytesPerPixel)
                             {
-                                for (int offset = 0; offset < row.Length; offset += bytesPerPixel)
+                                if ((colorType == 4 && row[offset + 1] != 255) ||
+                                    (colorType == 6 && row[offset + 3] != 255))
+                                    throw new InvalidDataException("PNG screenshot pixels must be fully opaque.");
+                                if (colors.Count <= 64)
                                 {
-                                    if ((colorType == 4 && row[offset + 1] != 255) ||
-                                        (colorType == 6 && row[offset + 3] != 255))
-                                        throw new InvalidDataException("PNG screenshot pixels must be fully opaque.");
                                     uint color = 0;
                                     for (int channel = 0; channel < bytesPerPixel; channel++)
                                         color = (color << 8) | row[offset + channel];
                                     colors.Add(color);
-                                    if (colors.Count > 64) break;
                                 }
                             }
                             byte[] swap = previousRow;

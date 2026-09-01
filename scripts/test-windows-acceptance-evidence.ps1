@@ -564,6 +564,23 @@ try {
         -VisualEvidenceRoot $visualRoot
     Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
 
+    $transparentAfterColorCap = Copy-Evidence $complete
+    Write-VisualPngFixture `
+        -Path $firstVisualPath `
+        -Marker 'transparent-after-color-cap' `
+        -Width 640 `
+        -Height 360 `
+        -Seed 1 `
+        -OpaquePrefixPixels 65
+    $transparentAfterColorCap.visual_captures[0].image.sha256 =
+        (Get-FileHash -LiteralPath $firstVisualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-ValidatorFails `
+        -Evidence $transparentAfterColorCap `
+        -Name 'visual-root-transparent-after-color-cap' `
+        -ExpectedFragment 'screenshot pixels must be fully opaque' `
+        -VisualEvidenceRoot $visualRoot
+    Write-VisualEvidenceFiles -Evidence $complete -Root $visualRoot
+
     $duplicateRaster = Copy-Evidence $complete
     $secondVisualPath = Join-Path $visualRoot $duplicateRaster.visual_captures[1].image.filename
     Write-VisualPngFixture `

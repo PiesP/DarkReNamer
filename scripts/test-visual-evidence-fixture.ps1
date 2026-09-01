@@ -52,7 +52,8 @@ function Write-VisualPngFixture {
         [Parameter(Mandatory)][int] $Height,
         [Parameter(Mandatory)][ValidateRange(1, 255)][int] $Seed,
         [switch] $Solid,
-        [switch] $Transparent
+        [switch] $Transparent,
+        [ValidateRange(0, 255)][int] $OpaquePrefixPixels = 0
     )
     if ($Width -lt 1 -or $Height -lt 1) {
         throw 'PNG fixture dimensions must be positive.'
@@ -83,6 +84,24 @@ function Write-VisualPngFixture {
             [Array]::Copy($color, 0, $rows[$rowIndex], 1 + ($x * 4), 4)
         }
     }
+    if ($OpaquePrefixPixels -gt 0) {
+        $prefixRow = [byte[]]::new(1 + ($Width * 4))
+        $transparentRow = [byte[]]::new(1 + ($Width * 4))
+        for ($x = 0; $x -lt $Width; $x++) {
+            $offset = 1 + ($x * 4)
+            if ($x -lt $OpaquePrefixPixels) {
+                $prefixRow[$offset] = [byte] $x
+                $prefixRow[$offset + 1] = [byte] (($x * 3) -band 0xff)
+                $prefixRow[$offset + 2] = [byte] (($x * 7) -band 0xff)
+                $prefixRow[$offset + 3] = 255
+            }
+            else {
+                $prefixRow[$offset] = [byte] $Seed
+            }
+            $transparentRow[$offset] = [byte] $Seed
+        }
+        $rows = @($prefixRow, $transparentRow)
+    }
     $compressed = [IO.MemoryStream]::new()
     $encoder = [IO.Compression.ZLibStream]::new(
         $compressed,
@@ -91,7 +110,13 @@ function Write-VisualPngFixture {
     )
     try {
         for ($y = 0; $y -lt $Height; $y++) {
-            $row = $rows[[int]($y -ge [math]::Ceiling($Height / 2))]
+            $rowIndex = if ($OpaquePrefixPixels -gt 0) {
+                [int] ($y -ne 0)
+            }
+            else {
+                [int] ($y -ge [math]::Ceiling($Height / 2))
+            }
+            $row = $rows[$rowIndex]
             $encoder.Write($row, 0, $row.Length)
         }
     }
