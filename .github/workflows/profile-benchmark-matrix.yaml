@@ -1,0 +1,343 @@
+name: Release profile micro-benchmark matrix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: profile-benchmark-matrix-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: benchmark/release-profile-micro-workloads
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - name: Checkout selected source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: rustup toolchain install 1.97.1 --profile minimal
+
+      - name: Resolve source and output metadata
+        shell: pwsh
+        run: |
+          $sourceSha = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $sourceSha -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'The selected source commit could not be resolved.'
+          }
+          $sourceEpoch = (git show -s --format=%ct HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $sourceEpoch -notmatch '^[1-9][0-9]*$') {
+            throw 'The selected source commit timestamp could not be resolved.'
+          }
+          $rustcVersion = (& rustc --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($rustcVersion)) {
+            throw 'The pinned rustc version could not be resolved.'
+          }
+          $artifactRoot = Join-Path `
+            $env:RUNNER_TEMP `
+            "darkrenamer-profile-benchmark-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $targetRoot = Join-Path `
+            $env:RUNNER_TEMP `
+            "darkrenamer-profile-target-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          if ((Test-Path -LiteralPath $artifactRoot) -or (Test-Path -LiteralPath $targetRoot)) {
+            throw 'Profile benchmark output roots must not already exist.'
+          }
+          New-Item -ItemType Directory -Path $artifactRoot, $targetRoot | Out-Null
+          "SOURCE_SHA=$sourceSha" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SOURCE_DATE_EPOCH=$sourceEpoch" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RUSTC_VERSION=$rustcVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "ARTIFACT_ROOT=$artifactRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TARGET_ROOT=$targetRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build and run profile micro-workloads serially
+        shell: pwsh
+        run: |
+          function Convert-MetricLine {
+            param(
+              [Parameter(Mandatory)]
+              [string] $Line,
+              [Parameter(Mandatory)]
+              [string] $ExpectedSourceSha,
+              [Parameter(Mandatory)]
+              [int] $ExpectedIteration
+            )
+
+            $prefix = 'darkrenamer_profile_benchmark,'
+            $prefixIndex = $Line.IndexOf($prefix, [StringComparison]::Ordinal)
+            if ($prefixIndex -lt 0) {
+              throw 'Profile benchmark output does not contain its metric prefix.'
+            }
+            $metric = $Line.Substring($prefixIndex)
+            $parts = @($metric -split ',')
+            if ($parts.Count -ne 12 -or $parts[0] -cne 'darkrenamer_profile_benchmark') {
+              throw "Profile benchmark metric field count is invalid: $metric"
+            }
+            $fields = [Collections.Generic.Dictionary[string,string]]::new(
+              [StringComparer]::Ordinal
+            )
+            foreach ($part in $parts[1..($parts.Count - 1)]) {
+              $pair = $part -split '=', 2
+              if ($pair.Count -ne 2 -or
+                  [string]::IsNullOrWhiteSpace($pair[0]) -or
+                  -not $fields.TryAdd($pair[0], $pair[1])) {
+                throw "Profile benchmark metric contains an invalid field: $part"
+              }
+            }
+            $expectedNames = @(
+              'source_sha', 'iteration', 'recorded', 'count', 'scope',
+              'selection_evidence', 'backend', 'filesystem_mutation',
+              'instrumentation_revision', 'phase', 'elapsed_ns'
+            )
+            $actualNames = ($fields.Keys | Sort-Object) -join ','
+            $canonicalNames = ($expectedNames | Sort-Object) -join ','
+            if ($actualNames -cne $canonicalNames) {
+              throw 'Profile benchmark metric fields do not match the canonical schema.'
+            }
+            $expectedRecorded = if ($ExpectedIteration -eq 0) { 'false' } else { 'true' }
+            if ($fields['source_sha'] -cne $ExpectedSourceSha -or
+                $fields['iteration'] -cne "$ExpectedIteration" -or
+                $fields['recorded'] -cne $expectedRecorded -or
+                $fields['count'] -cne '10000' -or
+                $fields['scope'] -cne 'cpu-micro-workloads' -or
+                $fields['selection_evidence'] -cne 'false' -or
+                $fields['backend'] -cne 'memory' -or
+                $fields['filesystem_mutation'] -cne 'none' -or
+                $fields['instrumentation_revision'] -cne 'profile-workloads-v1' -or
+                $fields['phase'] -cnotmatch '^(core-append|core-transform|planning|preflight)$' -or
+                $fields['elapsed_ns'] -notmatch '^[1-9][0-9]*$') {
+              throw "Profile benchmark metric values are invalid: $metric"
+            }
+            [pscustomobject][ordered]@{
+              phase = $fields['phase']
+              elapsed_ns = [long] $fields['elapsed_ns']
+            }
+          }
+
+          foreach ($value in @(
+              $env:SOURCE_SHA,
+              $env:SOURCE_DATE_EPOCH,
+              $env:RUSTC_VERSION,
+              $env:ARTIFACT_ROOT,
+              $env:TARGET_ROOT
+          )) {
+            if ([string]::IsNullOrWhiteSpace($value)) {
+              throw 'Required benchmark source or output metadata is missing.'
+            }
+          }
+          if ($env:SOURCE_SHA -cnotmatch '^[0-9a-f]{40}$' -or
+              $env:SOURCE_DATE_EPOCH -notmatch '^[1-9][0-9]*$') {
+            throw 'Benchmark source metadata is malformed.'
+          }
+
+          $variants = @(
+            [pscustomobject][ordered]@{
+              id = 'current-3-3'; app_opt_level = '3'; core_opt_level = '3'
+              app_toml = '3'; core_toml = '3'
+            }
+            [pscustomobject][ordered]@{
+              id = 'app-s-core-3'; app_opt_level = 's'; core_opt_level = '3'
+              app_toml = '"s"'; core_toml = '3'
+            }
+            [pscustomobject][ordered]@{
+              id = 'app-s-core-s'; app_opt_level = 's'; core_opt_level = 's'
+              app_toml = '"s"'; core_toml = '"s"'
+            }
+            [pscustomobject][ordered]@{
+              id = 'app-2-core-3'; app_opt_level = '2'; core_opt_level = '3'
+              app_toml = '2'; core_toml = '3'
+            }
+          )
+          $variantState = @{}
+          foreach ($variant in $variants) {
+            $variantRoot = Join-Path $env:ARTIFACT_ROOT $variant.id
+            $variantTarget = Join-Path $env:TARGET_ROOT $variant.id
+            $logRoot = Join-Path $variantRoot 'logs'
+            New-Item -ItemType Directory -Path $variantRoot, $variantTarget, $logRoot | Out-Null
+            $configPath = Join-Path $variantRoot 'cargo-profile.toml'
+            $configText = @(
+              '[profile.release.package.darknamer-app]'
+              "opt-level = $($variant.app_toml)"
+              ''
+              '[profile.release.package.darknamer-core]'
+              "opt-level = $($variant.core_toml)"
+              ''
+            ) -join "`n"
+            [IO.File]::WriteAllText(
+              $configPath,
+              $configText,
+              [Text.UTF8Encoding]::new($false)
+            )
+            $configHash = (Get-FileHash `
+                -LiteralPath $configPath `
+                -Algorithm SHA256).Hash.ToLowerInvariant()
+            $variantState[$variant.id] = [pscustomobject]@{
+              config_path = $configPath
+              config_hash = $configHash
+              target_path = $variantTarget
+              log_root = $logRoot
+            }
+            $env:CARGO_TARGET_DIR = $variantTarget
+            cargo --config $configPath test --release --locked `
+              --package darknamer-app --test profile_benchmarks --no-run
+            if ($LASTEXITCODE -ne 0) {
+              throw "Profile benchmark build failed for $($variant.id)."
+            }
+          }
+
+          $samples = [Collections.Generic.List[object]]::new(80)
+          foreach ($iteration in 0..5) {
+            $startIndex = if ($iteration -eq 0) { 0 } else { ($iteration - 1) % $variants.Count }
+            foreach ($offset in 0..($variants.Count - 1)) {
+              $variant = $variants[($startIndex + $offset) % $variants.Count]
+              $state = $variantState[$variant.id]
+              $env:CARGO_TARGET_DIR = $state.target_path
+              $env:DARKRENAMER_PROFILE_BENCH_SOURCE_SHA = $env:SOURCE_SHA
+              $env:DARKRENAMER_PROFILE_BENCH_ITERATION = "$iteration"
+              $commandOutput = @(
+                & cargo --config $state.config_path test --release --locked `
+                  --package darknamer-app --test profile_benchmarks `
+                  benchmark_release_profile -- `
+                  --ignored --exact --nocapture --test-threads=1 2>&1
+              )
+              $commandExit = $LASTEXITCODE
+              $logPath = Join-Path $state.log_root "iteration-$iteration.log"
+              [IO.File]::WriteAllText(
+                $logPath,
+                (($commandOutput | ForEach-Object { "$_" }) -join "`n") + "`n",
+                [Text.UTF8Encoding]::new($false)
+              )
+              if ($commandExit -ne 0) {
+                throw "Profile benchmark failed for $($variant.id), iteration $iteration."
+              }
+              $metricLines = @(
+                $commandOutput |
+                  ForEach-Object { "$_" } |
+                  Where-Object { $_.Contains('darkrenamer_profile_benchmark,') }
+              )
+              if ($metricLines.Count -ne 4) {
+                throw "Profile benchmark must emit four metrics for $($variant.id), iteration $iteration."
+              }
+              $phases = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+              foreach ($line in $metricLines) {
+                $metric = Convert-MetricLine `
+                  -Line $line `
+                  -ExpectedSourceSha $env:SOURCE_SHA `
+                  -ExpectedIteration $iteration
+                if (-not $phases.Add($metric.phase)) {
+                  throw "Profile benchmark emitted duplicate phase $($metric.phase)."
+                }
+                if ($iteration -ne 0) {
+                  $samples.Add([pscustomobject][ordered]@{
+                    variant = $variant.id
+                    iteration = $iteration
+                    phase = $metric.phase
+                    elapsed_ns = $metric.elapsed_ns
+                  })
+                }
+              }
+              if ($phases.Count -ne 4) {
+                throw 'Profile benchmark did not emit every required phase.'
+              }
+            }
+          }
+          Remove-Item Env:CARGO_TARGET_DIR
+          Remove-Item Env:DARKRENAMER_PROFILE_BENCH_SOURCE_SHA
+          Remove-Item Env:DARKRENAMER_PROFILE_BENCH_ITERATION
+
+          $variantResults = [Collections.Generic.List[object]]::new($variants.Count)
+          foreach ($variant in $variants) {
+            $phaseResults = [Collections.Generic.List[object]]::new(4)
+            foreach ($phase in 'core-append', 'core-transform', 'planning', 'preflight') {
+              $phaseSamples = @(
+                $samples |
+                  Where-Object { $_.variant -ceq $variant.id -and $_.phase -ceq $phase } |
+                  Sort-Object iteration
+              )
+              if ($phaseSamples.Count -ne 5 -or
+                  ($phaseSamples.iteration -join ',') -cne '1,2,3,4,5') {
+                throw "Profile benchmark sample set is incomplete for $($variant.id)/$phase."
+              }
+              $sortedValues = @($phaseSamples.elapsed_ns | Sort-Object)
+              $phaseResults.Add([pscustomobject][ordered]@{
+                phase = $phase
+                samples_ns = @($phaseSamples.elapsed_ns)
+                median_ns = [long] $sortedValues[2]
+              })
+            }
+            $variantResults.Add([pscustomobject][ordered]@{
+              id = $variant.id
+              app_opt_level = $variant.app_opt_level
+              core_opt_level = $variant.core_opt_level
+              cargo_config_filename = "$($variant.id)/cargo-profile.toml"
+              cargo_config_sha256 = $variantState[$variant.id].config_hash
+              phases = $phaseResults.ToArray()
+            })
+          }
+
+          $matrix = [pscustomobject][ordered]@{
+            schema_version = 1
+            measurement_kind = 'release-profile-cpu-micro-workloads'
+            scope = 'directional-only'
+            selection_evidence = $false
+            source_sha = $env:SOURCE_SHA
+            source_date_epoch = [long] $env:SOURCE_DATE_EPOCH
+            workflow_run = $env:GITHUB_RUN_ID
+            workflow_run_attempt = $env:GITHUB_RUN_ATTEMPT
+            rustc_version = $env:RUSTC_VERSION
+            target_triple = 'x86_64-pc-windows-msvc'
+            workload_count = 10000
+            warmup_iterations = 1
+            recorded_iterations = 5
+            cargo_toml_sha256 = (Get-FileHash -LiteralPath Cargo.toml -Algorithm SHA256).Hash.ToLowerInvariant()
+            cargo_lock_sha256 = (Get-FileHash -LiteralPath Cargo.lock -Algorithm SHA256).Hash.ToLowerInvariant()
+            rust_toolchain_toml_sha256 = (Get-FileHash -LiteralPath rust-toolchain.toml -Algorithm SHA256).Hash.ToLowerInvariant()
+            harness_sha256 = (Get-FileHash `
+                -LiteralPath crates/darknamer-app/tests/profile_benchmarks.rs `
+                -Algorithm SHA256).Hash.ToLowerInvariant()
+            variants = $variantResults.ToArray()
+          }
+          [IO.File]::WriteAllText(
+            (Join-Path $env:ARTIFACT_ROOT 'profile-benchmark-matrix.json'),
+            (($matrix | ConvertTo-Json -Depth 10) + "`n"),
+            [Text.UTF8Encoding]::new($false)
+          )
+
+      - name: Summarize profile micro-workloads
+        shell: pwsh
+        run: |
+          $matrix = Get-Content `
+            -LiteralPath (Join-Path $env:ARTIFACT_ROOT 'profile-benchmark-matrix.json') `
+            -Raw | ConvertFrom-Json
+          @(
+            '## Release profile CPU micro-workloads'
+            ''
+            'Directional only. These values are not profile-selection or release-acceptance evidence.'
+            ''
+            "Source SHA: ``$($matrix.source_sha)``"
+            ''
+            '| Variant | App opt | Core opt | Append median ns | Transform median ns | Planning median ns | Preflight median ns |'
+            '| --- | ---: | ---: | ---: | ---: | ---: | ---: |'
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          foreach ($variant in $matrix.variants) {
+            $medians = @{}
+            foreach ($phase in $variant.phases) {
+              $medians[$phase.phase] = $phase.median_ns
+            }
+            "| ``$($variant.id)`` | ``$($variant.app_opt_level)`` | ``$($variant.core_opt_level)`` | $($medians['core-append']) | $($medians['core-transform']) | $($medians['planning']) | $($medians['preflight']) |" |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          }
+
+      - name: Retain profile micro-workloads
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: DarkReNamer-profile-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/darkrenamer-profile-benchmark-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: error
+          retention-days: 30

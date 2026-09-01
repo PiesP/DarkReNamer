@@ -316,6 +316,76 @@ fn binary_size_matrix_is_manual_serial_and_non_publishing() {
 }
 
 #[test]
+fn profile_benchmark_matrix_is_directional_serial_and_non_publishing() {
+    let workflow = normalize_workflow_source(include_str!(
+        "../../../.github/workflows/profile-benchmark-matrix.yaml"
+    ));
+
+    assert!(workflow.contains("on:\n  workflow_dispatch:"));
+    assert!(!workflow.contains("\n  push:"));
+    assert!(!workflow.contains("\n  pull_request:"));
+    assert!(workflow.contains("permissions:\n  contents: read"));
+    assert!(!workflow.contains(": write"));
+    assert!(workflow.contains("cancel-in-progress: false"));
+    assert!(workflow.contains("runs-on: windows-2025"));
+    assert!(workflow.contains("timeout-minutes: 45"));
+    assert!(
+        workflow
+            .contains("uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1")
+    );
+    assert!(workflow.contains("persist-credentials: false"));
+    assert!(workflow.contains("rustup toolchain install 1.97.1 --profile minimal"));
+    assert!(!workflow.contains("strategy:"));
+    assert!(!workflow.contains("${{ matrix."));
+    for declaration in [
+        "id = 'current-3-3'; app_opt_level = '3'; core_opt_level = '3'",
+        "id = 'app-s-core-3'; app_opt_level = 's'; core_opt_level = '3'",
+        "id = 'app-s-core-s'; app_opt_level = 's'; core_opt_level = 's'",
+        "id = 'app-2-core-3'; app_opt_level = '2'; core_opt_level = '3'",
+    ] {
+        assert!(
+            workflow.contains(declaration),
+            "missing variant {declaration}"
+        );
+    }
+    assert!(workflow.contains("foreach ($iteration in 0..5)"));
+    assert!(workflow.contains("$startIndex = if ($iteration -eq 0)"));
+    assert!(workflow.contains("recorded_iterations = 5"));
+    assert!(workflow.contains("workload_count = 10000"));
+    assert!(workflow.contains("selection_evidence = $false"));
+    assert!(workflow.contains("scope = 'directional-only'"));
+    assert!(workflow.contains("$fields['filesystem_mutation'] -cne 'none'"));
+    assert!(workflow.contains("$fields['scope'] -cne 'cpu-micro-workloads'"));
+    assert!(workflow.contains("$fields['instrumentation_revision'] -cne 'profile-workloads-v1'"));
+    assert!(workflow.contains("$env:CARGO_TARGET_DIR = $variantTarget"));
+    assert!(workflow.contains(
+        "cargo --config $configPath test --release --locked `\n              --package darknamer-app --test profile_benchmarks --no-run"
+    ));
+    assert!(workflow.contains("profile-benchmark-matrix.json"));
+    assert!(workflow.contains("harness_sha256 = (Get-FileHash"));
+    assert!(workflow.contains(
+        "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1"
+    ));
+    for prohibited in [
+        "WindowsRenameBackend",
+        "FileJournal",
+        "actions/attest@",
+        "actions/cache@",
+        "artifact-metadata: write",
+        "attestations: write",
+        "cargo publish",
+        "gh release",
+        "git ls-remote",
+        "id-token: write",
+    ] {
+        assert!(
+            !workflow.contains(prohibited),
+            "profile benchmark must not contain {prohibited}"
+        );
+    }
+}
+
+#[test]
 fn workflow_contract_normalizes_windows_line_endings() {
     assert_eq!(
         normalize_workflow_source("on:\r\n  workflow_dispatch:\r\n"),
