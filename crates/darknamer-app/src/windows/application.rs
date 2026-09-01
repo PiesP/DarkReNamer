@@ -506,13 +506,12 @@ pub(super) unsafe extern "system" fn window_proc(
             // SAFETY: this final callback owns the publication slot. Clearing it
             // prevents any nested or queued callback from reaching the state.
             unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, 0) };
-            // SAFETY: both identifiers belong to this exact top-level window;
+            // SAFETY: all timer identifiers belong to this exact top-level window;
             // killing absent timers is harmless during defensive teardown.
             unsafe {
                 KillTimer(window, APPLY_POLL_TIMER_ID);
                 KillTimer(window, PREFERENCES_POLL_TIMER_ID);
                 KillTimer(window, STATUS_RENDER_TIMER_ID);
-                KillTimer(window, MENU_EDGE_REPAIR_TIMER_ID);
             }
             // SAFETY: the slot is still live. Its sidecar is disjoint from a
             // possibly leased AppState value and is taken at most once.
@@ -523,6 +522,23 @@ pub(super) unsafe extern "system" fn window_proc(
         }
         // SAFETY: arguments are unchanged values from the final callback.
         return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+    }
+    if repaints_menu_bottom_edge(message) {
+        // The scalar color sidecar is disjoint from AppState and remains
+        // readable during a nested modal callback's value lease. Copy it
+        // before default processing, which may synchronously destroy the HWND.
+        // SAFETY: state_slot is either null or the live UI-thread publication;
+        // this method touches only its scalar sidecar and never AppState.
+        let color = unsafe { CallbackState::menu_edge_color(state_slot) };
+        // SAFETY: arguments are unchanged copied values from this active
+        // non-client callback. Its return value remains authoritative.
+        let result = unsafe { DefWindowProcW(window, message, wparam, lparam) };
+        if let Some(color) = color {
+            // No state-slot access occurs after default processing; an HWND
+            // destroyed during that call makes the best-effort GDI queries fail.
+            paint_menu_bottom_edge(window, color);
+        }
+        return result;
     }
     // SAFETY: the slot is the current UI-thread publication and remains live
     // until this callback either releases or defers reclamation of its lease.
@@ -535,18 +551,6 @@ pub(super) unsafe extern "system" fn window_proc(
             // ending the UI loop requires no state reference.
             unsafe { PostQuitMessage(0) };
             return 0;
-        }
-        if repaints_menu_bottom_edge(message) && !state_slot.is_null() {
-            // Preserve native non-client behavior immediately. The app-owned
-            // repair cannot read state while another callback holds the lease,
-            // so coalesce a retry until the nested modal callback unwinds.
-            // SAFETY: arguments are unchanged copied values from this active
-            // non-client callback.
-            let result = unsafe { DefWindowProcW(window, message, wparam, lparam) };
-            // SAFETY: window owns this pointer-free timer identifier. Reusing
-            // the same HWND/ID resets rather than duplicates the pending retry.
-            unsafe { SetTimer(window, MENU_EDGE_REPAIR_TIMER_ID, USER_TIMER_MINIMUM, None) };
-            return result;
         }
         if message == WM_COMMAND
             || message == WM_NOTIFY
@@ -696,18 +700,6 @@ pub(super) unsafe extern "system" fn window_proc(
             };
             let text = empty_state_safety_copy(mode);
             run_after_callback_state_release(state_lease, || set_status(safety, text));
-            0
-        }
-        WM_TIMER if !state_ptr.is_null() && wparam == MENU_EDGE_REPAIR_TIMER_ID => {
-            // Stop the coalescing timer only after acquiring the state lease.
-            // A busy nested WM_TIMER exits above and leaves it installed.
-            // SAFETY: window owns this exact pointer-free timer identifier.
-            unsafe { KillTimer(window, MENU_EDGE_REPAIR_TIMER_ID) };
-            drop(state_lease);
-            // SAFETY: the live top-level window retains no borrowed AppState.
-            // Invalidating its frame schedules a later non-client callback;
-            // failure is best-effort because default painting already ran.
-            unsafe { RedrawWindow(window, null(), null_mut(), RDW_INVALIDATE | RDW_FRAME) };
             0
         }
         WM_TIMER if !state_ptr.is_null() && wparam == STATUS_RENDER_TIMER_ID => {
@@ -925,24 +917,6 @@ pub(super) unsafe extern "system" fn window_proc(
             cancel_appearance_dialog(window, state);
             request_window_close(window, state);
             0
-        }
-        _ if repaints_menu_bottom_edge(message) && !state_ptr.is_null() => {
-            // Only custom Light/Dark resources repair the app-owned menu edge.
-            // Copy the COLORREF and end the lease before default non-client
-            // painting can synchronously reenter this callback graph.
-            let color = state_lease
-                .state()
-                .appearance_resources
-                .as_ref()
-                .map(|resources| resources.palette().surface_window);
-            drop(state_lease);
-            // SAFETY: arguments are unchanged copied values from this active
-            // non-client callback. Its return value remains authoritative.
-            let result = unsafe { DefWindowProcW(window, message, wparam, lparam) };
-            if let Some(color) = color {
-                paint_menu_bottom_edge(window, color);
-            }
-            result
         }
         WM_ERASEBKGND if !state_ptr.is_null() => {
             // SAFETY: state_ptr is live UI-thread state and wparam is the

@@ -969,6 +969,17 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
         rail.set_separators_visible(resolved.appearance.show_separators);
     }
     state.appearance_resources = replacement;
+    // Mirror only the scalar COLORREF into the callback allocation's disjoint
+    // sidecar. Nested non-client callbacks can read it without borrowing the
+    // AppState value whose resources established this successful appearance.
+    // SAFETY: this main-window AppState is currently published from the live
+    // UI-thread slot; the method touches only its separate scalar Cell.
+    unsafe {
+        CallbackState::set_menu_edge_color(
+            app_state_slot(window),
+            palette.map(|palette| palette.surface_window),
+        )
+    };
     state.menu_fallback_resources.clear();
     apply_dwm_title_frame(window, state, resolved.theme);
     // SAFETY: window is the live top-level HWND. One invalidation repaints all

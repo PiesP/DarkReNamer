@@ -119,13 +119,11 @@ use windows_sys::Win32::Graphics::Gdi::{
     DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteObject, DrawTextW,
     FillRect, GetDC, GetMonitorInfoW, GetSysColor, GetSysColorBrush, HBRUSH, HDC, HFONT,
     MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, RDW_ALLCHILDREN, RDW_ERASE,
-    RDW_FRAME, RDW_INVALIDATE, RedrawWindow, ReleaseDC, SelectObject, SetBkColor, SetBkMode,
-    SetTextColor, TRANSPARENT, UpdateWindow,
+    RDW_INVALIDATE, RedrawWindow, ReleaseDC, SelectObject, SetBkColor, SetBkMode, SetTextColor,
+    TRANSPARENT, UpdateWindow,
 };
 #[cfg(test)]
-use windows_sys::Win32::Graphics::Gdi::{
-    GetBkColor, GetPixel, GetTextColor, GetUpdateRect, ValidateRect,
-};
+use windows_sys::Win32::Graphics::Gdi::{GetBkColor, GetPixel, GetTextColor};
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
 use windows_sys::Win32::Storage::FileSystem::{
@@ -259,7 +257,6 @@ const WM_APP_MENU_REDRAW: u32 = WM_APP + 0x50;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 const PREFERENCES_POLL_TIMER_ID: usize = 0xD4A2;
 const STATUS_RENDER_TIMER_ID: usize = 0xD4A3;
-const MENU_EDGE_REPAIR_TIMER_ID: usize = 0xD4A4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CallbackStateStatus {
@@ -276,12 +273,13 @@ enum ReclaimDisposition {
 
 /// Owns callback state separately from the lease cell used to guard it.
 ///
-/// Windows publishes a raw pointer to this allocation. Callback entry first
-/// touches only `status`; it does not create a reference to `value` unless the
-/// lease changes from `Available` to `Leased`. All access is confined to the UI
-/// thread.
+/// Windows publishes a raw pointer to this allocation. Callback entry touches
+/// only `status` or a disjoint scalar sidecar; it does not create a reference to
+/// `value` unless the lease changes from `Available` to `Leased`. All access is
+/// confined to the UI thread.
 struct CallbackState<T, R = ()> {
     status: Cell<CallbackStateStatus>,
+    menu_edge_color: Cell<Option<u32>>,
     retirement: UnsafeCell<Option<R>>,
     value: UnsafeCell<T>,
 }
@@ -295,6 +293,7 @@ impl<T, R> CallbackState<T, R> {
     fn into_raw(value: T) -> *mut Self {
         Box::into_raw(Box::new(Self {
             status: Cell::new(CallbackStateStatus::Available),
+            menu_edge_color: Cell::new(None),
             retirement: UnsafeCell::new(None),
             value: UnsafeCell::new(value),
         }))
@@ -314,6 +313,25 @@ impl<T, R> CallbackState<T, R> {
             slot,
             _ui_thread_only: PhantomData,
         })
+    }
+
+    unsafe fn menu_edge_color(slot: *mut Self) -> Option<u32> {
+        let slot = NonNull::new(slot)?;
+        // SAFETY: the caller guarantees that this is the live UI-thread slot.
+        // This scalar Cell is disjoint from both the leased value and the
+        // retirement sidecar and creates no reference to either one.
+        let color = unsafe { &*std::ptr::addr_of!((*slot.as_ptr()).menu_edge_color) };
+        color.get()
+    }
+
+    unsafe fn set_menu_edge_color(slot: *mut Self, color: Option<u32>) {
+        let Some(slot) = NonNull::new(slot) else {
+            return;
+        };
+        // SAFETY: all access is serialized on the owning UI thread and touches
+        // only this scalar Cell, never the possibly leased value or retirement.
+        let sidecar = unsafe { &*std::ptr::addr_of!((*slot.as_ptr()).menu_edge_color) };
+        sidecar.set(color);
     }
 
     unsafe fn request_reclaim(slot: *mut Self) -> ReclaimDisposition {
@@ -1007,6 +1025,53 @@ mod tests {
     }
 
     #[test]
+    fn callback_state_menu_edge_color_is_disjoint_from_a_value_lease()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let slot = CallbackState::<u32>::into_raw(41);
+        // SAFETY: the test solely owns this live UI-thread slot. Sidecar calls
+        // touch only their scalar Cell while the sole value lease stays live;
+        // publication ends before the final unique reclamation.
+        let (before, initial, updated, cleared, nested_rejected, after, disposition) = unsafe {
+            let lease = match CallbackState::try_lease(slot) {
+                Some(lease) => lease,
+                None => {
+                    let disposition = CallbackState::request_reclaim(slot);
+                    assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+                    return Err(io::Error::other("menu-edge sidecar lease was rejected").into());
+                }
+            };
+            let before = *lease.state();
+            let initial = CallbackState::menu_edge_color(slot);
+            CallbackState::set_menu_edge_color(slot, Some(GRAPHITE_DARK.surface_window));
+            let updated = CallbackState::menu_edge_color(slot);
+            CallbackState::set_menu_edge_color(slot, None);
+            let cleared = CallbackState::menu_edge_color(slot);
+            let nested_rejected = CallbackState::try_lease(slot).is_none();
+            let after = *lease.state();
+            drop(lease);
+            let disposition = CallbackState::request_reclaim(slot);
+            (
+                before,
+                initial,
+                updated,
+                cleared,
+                nested_rejected,
+                after,
+                disposition,
+            )
+        };
+
+        assert_eq!(before, 41);
+        assert_eq!(initial, None);
+        assert_eq!(updated, Some(GRAPHITE_DARK.surface_window));
+        assert_eq!(cleared, None);
+        assert!(nested_rejected);
+        assert_eq!(after, 41);
+        assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+        Ok(())
+    }
+
+    #[test]
     fn close_decision_is_applied_only_after_callback_lease_ends()
     -> Result<(), Box<dyn std::error::Error>> {
         let slot: *mut CallbackState<bool> = CallbackState::into_raw(true);
@@ -1365,111 +1430,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn menu_edge_repair_timer_survives_nested_nonclient_reentry()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let directory = tempfile::tempdir()?;
-        let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
-        state.appearance_resources = Some(AppearanceResources::create(GRAPHITE_DARK)?);
-        let class = wide("STATIC");
-
-        // SAFETY: the hidden HWND, published state slot, callback lease, and
-        // timer below remain UI-thread confined. Publication is cleared and
-        // the timer is killed before the HWND and slot are reclaimed.
-        let (
-            default_result_preserved,
-            first_timer_installed,
-            duplicate_timer_absent,
-            busy_timer_result,
-            busy_timer_survived,
-            clean_before_retry,
-            retry_result,
-            retry_timer_removed,
-            redraw_scheduled,
-            disposition,
-        ) = unsafe {
-            let owner = CreateWindowExW(
-                0,
-                class.as_ptr(),
-                null(),
-                WS_OVERLAPPEDWINDOW,
-                0,
-                0,
-                640,
-                480,
-                null_mut(),
-                null_mut(),
-                GetModuleHandleW(null()),
-                null_mut(),
-            );
-            if owner.is_null() {
-                return Err(io::Error::last_os_error().into());
-            }
-            let state_slot: *mut AppStateSlot = CallbackState::into_raw(state);
-            SetWindowLongPtrW(owner, GWLP_USERDATA, state_slot as isize);
-            let busy_lease = match CallbackState::try_lease(state_slot) {
-                Some(lease) => lease,
-                None => {
-                    SetWindowLongPtrW(owner, GWLP_USERDATA, 0);
-                    DestroyWindow(owner);
-                    let disposition = CallbackState::request_reclaim(state_slot);
-                    assert_eq!(disposition, ReclaimDisposition::Reclaimed);
-                    return Err(io::Error::other("menu-edge test lease is unavailable").into());
-                }
-            };
-
-            let expected_default = DefWindowProcW(owner, WM_NCACTIVATE, 1, 0);
-            let nested_default = application::window_proc(owner, WM_NCACTIVATE, 1, 0);
-            application::window_proc(owner, WM_NCPAINT, 0, 0);
-            let first_timer_installed = KillTimer(owner, MENU_EDGE_REPAIR_TIMER_ID) != 0;
-            let duplicate_timer_absent = KillTimer(owner, MENU_EDGE_REPAIR_TIMER_ID) == 0;
-
-            application::window_proc(owner, WM_NCPAINT, 0, 0);
-            let busy_timer_result =
-                application::window_proc(owner, WM_TIMER, MENU_EDGE_REPAIR_TIMER_ID, 0);
-            let busy_timer_survived = KillTimer(owner, MENU_EDGE_REPAIR_TIMER_ID) != 0;
-            application::window_proc(owner, WM_NCACTIVATE, 0, 0);
-            drop(busy_lease);
-
-            ValidateRect(owner, null());
-            let mut before_retry = RECT::default();
-            let clean_before_retry = GetUpdateRect(owner, &mut before_retry, 0) == 0;
-            let retry_result =
-                application::window_proc(owner, WM_TIMER, MENU_EDGE_REPAIR_TIMER_ID, 0);
-            let retry_timer_removed = KillTimer(owner, MENU_EDGE_REPAIR_TIMER_ID) == 0;
-            let mut after_retry = RECT::default();
-            let redraw_scheduled = GetUpdateRect(owner, &mut after_retry, 0) != 0;
-
-            SetWindowLongPtrW(owner, GWLP_USERDATA, 0);
-            KillTimer(owner, MENU_EDGE_REPAIR_TIMER_ID);
-            DestroyWindow(owner);
-            let disposition = CallbackState::request_reclaim(state_slot);
-            (
-                nested_default == expected_default,
-                first_timer_installed,
-                duplicate_timer_absent,
-                busy_timer_result,
-                busy_timer_survived,
-                clean_before_retry,
-                retry_result,
-                retry_timer_removed,
-                redraw_scheduled,
-                disposition,
-            )
-        };
-
-        assert!(default_result_preserved);
-        assert!(first_timer_installed);
-        assert!(duplicate_timer_absent);
-        assert_eq!(busy_timer_result, 0);
-        assert!(busy_timer_survived);
-        assert!(clean_before_retry);
-        assert_eq!(retry_result, 0);
-        assert!(retry_timer_removed);
-        assert!(redraw_scheduled);
-        assert_eq!(disposition, ReclaimDisposition::Reclaimed);
-        Ok(())
-    }
     use std::process::Command;
 
     use crate::rename::{
