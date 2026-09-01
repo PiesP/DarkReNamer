@@ -178,6 +178,7 @@ fn release_workflows_promote_the_immutable_candidate_without_rebuilding()
     for script in [
         "./scripts/test-release-candidate-metadata-validator.ps1",
         "./scripts/test-prepare-release-cyclonedx.ps1",
+        "./scripts/test-release-workflow-powershell-syntax.ps1",
     ] {
         assert_eq!(
             non_windows_ci.matches(script).count(),
