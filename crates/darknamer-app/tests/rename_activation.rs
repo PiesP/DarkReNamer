@@ -1,3 +1,5 @@
+use std::cell::Cell;
+
 use darknamer_app::rename::{
     BackendError, BackendOperation, ExecutionOutcome, JournalCapacityError, JournalCapacityKind,
     JournalCleanupDecision, JournalRecord, JournalTerminal, MemoryBackend, MemoryJournal,
@@ -134,13 +136,15 @@ fn capacity_messages_name_the_resource_and_required_and_maximum_values() {
 
 struct FailingBackend {
     inner: MemoryBackend,
+    code: u32,
+    observe_calls: Cell<usize>,
 }
 
 impl RenameBackend for FailingBackend {
     fn validate_path_environment(&self, _path: &LegacyText) -> Result<(), BackendError> {
         Err(BackendError {
             operation: BackendOperation::Observe,
-            code: 1234,
+            code: self.code,
             certainty: MutationCertainty::NotApplied,
         })
     }
@@ -150,6 +154,7 @@ impl RenameBackend for FailingBackend {
     }
 
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
+        self.observe_calls.set(self.observe_calls.get() + 1);
         self.inner.observe(path)
     }
 
@@ -175,6 +180,8 @@ fn backend_blocker_message_retains_operation_and_native_code() {
     let model = model();
     let backend = FailingBackend {
         inner: MemoryBackend::new().with_file("C:\\work\\a.txt", 1),
+        code: 1234,
+        observe_calls: Cell::new(0),
     };
     let error = RenamePlanner::new(&backend)
         .plan(build_plan_request(&model, ModelRevision::new(1)))
@@ -186,4 +193,31 @@ fn backend_blocker_message_retains_operation_and_native_code() {
     assert!(message.contains("Observe"));
     assert!(message.contains("1234"));
     assert_eq!(rows, vec![0]);
+    assert_eq!(backend.observe_calls.get(), 0);
+    assert_eq!(backend.inner.mutation_count(), 0);
+}
+
+#[test]
+fn unsupported_filesystem_blocker_has_clear_korean_message_without_observation_or_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let model = model();
+    let backend = FailingBackend {
+        inner: MemoryBackend::new().with_file("C:\\work\\a.txt", 1),
+        code: 1005,
+        observe_calls: Cell::new(0),
+    };
+
+    let Err(error) =
+        RenamePlanner::new(&backend).plan(build_plan_request(&model, ModelRevision::new(1)))
+    else {
+        return Err(std::io::Error::other("a non-NTFS parent was accepted").into());
+    };
+    let (message, rows) = plan_error_korean(&error);
+
+    assert!(message.contains("NTFS"));
+    assert!(message.contains("지원"));
+    assert_eq!(rows, vec![0]);
+    assert_eq!(backend.observe_calls.get(), 0);
+    assert_eq!(backend.inner.mutation_count(), 0);
+    Ok(())
 }

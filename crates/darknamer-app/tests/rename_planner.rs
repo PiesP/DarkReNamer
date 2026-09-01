@@ -1,9 +1,9 @@
 use std::cell::Cell;
 
 use darknamer_app::rename::{
-    BackendError, EntryId, EntryKind, MAX_PLAN_PATH_DEPTH, MemoryBackend, ModelRevision, PathKey,
-    PathSnapshot, PlanAttemptError, PlanIssueKind, PlanRequest, RenameBackend, RenameIntent,
-    RenameOperation, RenamePlanner,
+    BackendError, BackendOperation, EntryId, EntryKind, MAX_PLAN_PATH_DEPTH, MemoryBackend,
+    ModelRevision, MutationCertainty, PathKey, PathSnapshot, PlanAttemptError, PlanIssueKind,
+    PlanRequest, RenameBackend, RenameIntent, RenameOperation, RenamePlanner,
 };
 use darknamer_core::{LegacyText, WindowsLeafNameError};
 
@@ -344,6 +344,80 @@ struct CountingBackend {
     key_calls: Cell<usize>,
     observe_calls: Cell<usize>,
     relationship_calls: Cell<usize>,
+}
+
+struct EnvironmentFailureBackend {
+    inner: MemoryBackend,
+    validation_calls: Cell<usize>,
+    key_calls: Cell<usize>,
+    observe_calls: Cell<usize>,
+}
+
+impl RenameBackend for EnvironmentFailureBackend {
+    fn validate_path_environment(&self, _path: &LegacyText) -> Result<(), BackendError> {
+        self.validation_calls.set(self.validation_calls.get() + 1);
+        Err(BackendError {
+            operation: BackendOperation::Observe,
+            code: 1005,
+            certainty: MutationCertainty::NotApplied,
+        })
+    }
+
+    fn path_key(&self, path: &LegacyText) -> PathKey {
+        self.key_calls.set(self.key_calls.get() + 1);
+        self.inner.path_key(path)
+    }
+
+    fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
+        self.observe_calls.set(self.observe_calls.get() + 1);
+        self.inner.observe(path)
+    }
+
+    fn is_same_or_descendant(
+        &self,
+        ancestor: &LegacyText,
+        candidate: &LegacyText,
+    ) -> Result<bool, BackendError> {
+        self.inner.is_same_or_descendant(ancestor, candidate)
+    }
+
+    fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
+        self.inner.next_transaction_nonce()
+    }
+
+    fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+        self.inner.rename_no_replace(operation)
+    }
+}
+
+#[test]
+fn unsupported_filesystem_is_typed_before_observation_or_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = EnvironmentFailureBackend {
+        inner: MemoryBackend::new().with_file("C:\\work\\a.txt", 1),
+        validation_calls: Cell::new(0),
+        key_calls: Cell::new(0),
+        observe_calls: Cell::new(0),
+    };
+
+    let Err(error) = RenamePlanner::new(&backend).plan(PlanRequest::new(
+        ModelRevision::new(1),
+        vec![intent(0, "C:\\work\\a.txt", "b.txt")],
+    )) else {
+        return Err(std::io::Error::other("a non-NTFS parent was accepted").into());
+    };
+
+    assert!(
+        error
+            .issues()
+            .iter()
+            .all(|issue| issue.kind == PlanIssueKind::UnsupportedFilesystem)
+    );
+    assert_eq!(backend.validation_calls.get(), 2);
+    assert_eq!(backend.key_calls.get(), 0);
+    assert_eq!(backend.observe_calls.get(), 0);
+    assert_eq!(backend.inner.mutation_count(), 0);
+    Ok(())
 }
 
 impl RenameBackend for CountingBackend {

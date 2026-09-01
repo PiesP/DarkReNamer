@@ -140,6 +140,7 @@ fn plan_issue_korean(kind: &PlanIssueKind) -> String {
         PlanIssueKind::UnsupportedWindowsPath => {
             "네트워크 또는 지원하지 않는 경로입니다.".to_owned()
         }
+        PlanIssueKind::UnsupportedFilesystem => "NTFS 파일 시스템만 지원합니다.".to_owned(),
         PlanIssueKind::Backend => "파일 시스템을 안전하게 확인하지 못했습니다.".to_owned(),
         PlanIssueKind::BackendFailure(error) => backend_error_korean("계획 검사", *error),
     }

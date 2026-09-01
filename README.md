@@ -22,8 +22,9 @@ execution path.
 The v0.1 release-validated scope is Windows 10 and Windows 11 on x64, using
 local NTFS storage from a non-elevated process for same-parent entries that do
 not traverse reparse points in case-insensitive directories. Other filesystems
-are unsupported and unvalidated for v0.1. This is an evidence boundary, not a
-claim that the runtime detects and blocks every non-NTFS volume.
+are unsupported and unvalidated for v0.1. The runtime enforces the same boundary
+by querying the filesystem from the retained final directory handle and failing
+closed unless it reports NTFS.
 
 Apply validates Windows leaf names and current file identities before showing
 confirmation. It executes local same-folder renames with handle-relative,

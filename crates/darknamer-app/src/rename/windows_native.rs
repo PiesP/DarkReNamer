@@ -28,8 +28,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES,
     FILE_READ_DATA, FILE_REMOTE_PROTOCOL_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_DATA, FileCaseSensitiveInfo, FileDispositionInfo,
-    FileIdInfo, FileRemoteProtocolInfo, GetDriveTypeW, GetFileInformationByHandleEx, SYNCHRONIZE,
-    SetFileInformationByHandle,
+    FileIdInfo, FileRemoteProtocolInfo, GetDriveTypeW, GetFileInformationByHandleEx,
+    GetVolumeInformationByHandleW, SYNCHRONIZE, SetFileInformationByHandle,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::SystemServices::FILE_CS_FLAG_CASE_SENSITIVE_DIR;
@@ -38,6 +38,8 @@ use windows_sys::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOVABL
 
 const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 const SHARE_READ_WRITE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
+const ERROR_UNRECOGNIZED_VOLUME: i32 = 1005;
+const FILESYSTEM_NAME_CAPACITY: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct NativeIdentity {
@@ -102,6 +104,7 @@ impl NativeParent {
             reject_case_sensitive_directory(&file)?;
             reject_remote_protocol_if_reported(&file)?;
         }
+        reject_unsupported_filesystem(&file)?;
         let identity = file_identity(&file)?;
         Ok(Self { file, identity })
     }
@@ -141,6 +144,56 @@ fn reject_case_sensitive_directory(file: &File) -> io::Result<()> {
 
 pub(crate) const fn case_sensitive_flags_unsupported(flags: u32) -> bool {
     flags & FILE_CS_FLAG_CASE_SENSITIVE_DIR != 0
+}
+
+fn reject_unsupported_filesystem(file: &File) -> io::Result<()> {
+    let mut filesystem_name = [u16::MAX; FILESYSTEM_NAME_CAPACITY];
+    let filesystem_name_capacity = u32::try_from(filesystem_name.len())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: file is the retained final directory handle; unused output
+    // pointers are null, filesystem_name is writable for its checked length,
+    // and the synchronous API retains no pointers.
+    let success = unsafe {
+        GetVolumeInformationByHandleW(
+            file.as_raw_handle(),
+            ptr::null_mut(),
+            0,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            filesystem_name.as_mut_ptr(),
+            filesystem_name_capacity,
+        )
+    };
+    let query_result = if success == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    };
+    validate_ntfs_query_result(query_result, &filesystem_name)
+}
+
+fn validate_ntfs_query_result(query_result: io::Result<()>, buffer: &[u16]) -> io::Result<()> {
+    query_result?;
+    let nul = buffer
+        .iter()
+        .position(|unit| *unit == 0)
+        .ok_or_else(unsupported_filesystem_error)?;
+    let name = &buffer[..nul];
+    let expected = b"NTFS";
+    if name.len() == expected.len()
+        && name.iter().zip(expected).all(|(unit, expected)| {
+            u8::try_from(*unit).is_ok_and(|unit| unit.eq_ignore_ascii_case(expected))
+        })
+    {
+        Ok(())
+    } else {
+        Err(unsupported_filesystem_error())
+    }
+}
+
+fn unsupported_filesystem_error() -> io::Error {
+    io::Error::from_raw_os_error(ERROR_UNRECOGNIZED_VOLUME)
 }
 
 fn reject_unsupported_drive_type(path: &Path) -> io::Result<()> {
@@ -678,6 +731,50 @@ mod tests {
         assert!(case_sensitive_flags_unsupported(
             FILE_CS_FLAG_CASE_SENSITIVE_DIR | 0x8000_0000
         ));
+    }
+
+    #[test]
+    fn filesystem_name_classifier_accepts_only_case_insensitive_ntfs() -> io::Result<()> {
+        for name in ["NTFS", "ntfs", "NtFs"] {
+            let mut buffer = [u16::MAX; FILESYSTEM_NAME_CAPACITY];
+            for (target, source) in buffer.iter_mut().zip(name.encode_utf16()) {
+                *target = source;
+            }
+            buffer[name.len()] = 0;
+            validate_ntfs_query_result(Ok(()), &buffer)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn filesystem_name_classifier_rejects_non_ntfs_empty_and_malformed_buffers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for buffer in [
+            "ReFS\0".encode_utf16().collect::<Vec<_>>(),
+            "exFAT\0".encode_utf16().collect::<Vec<_>>(),
+            "FAT32\0".encode_utf16().collect::<Vec<_>>(),
+            vec![0],
+            "NTFS".encode_utf16().collect::<Vec<_>>(),
+            vec![b'N' as u16, b'T' as u16, 0xd800, b'S' as u16, 0],
+        ] {
+            let Err(error) = validate_ntfs_query_result(Ok(()), &buffer) else {
+                return Err(io::Error::other("unsupported filesystem data was accepted").into());
+            };
+            assert_eq!(error.raw_os_error(), Some(ERROR_UNRECOGNIZED_VOLUME));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn filesystem_query_preserves_native_api_failure() -> Result<(), Box<dyn std::error::Error>> {
+        let Err(error) = validate_ntfs_query_result(
+            Err(io::Error::from_raw_os_error(5)),
+            &[b'N' as u16, b'T' as u16, b'F' as u16, b'S' as u16, 0],
+        ) else {
+            return Err(io::Error::other("the filesystem query failure was ignored").into());
+        };
+        assert_eq!(error.raw_os_error(), Some(5));
+        Ok(())
     }
 
     #[test]

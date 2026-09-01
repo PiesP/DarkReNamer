@@ -233,6 +233,8 @@ pub enum PlanIssueKind {
     UnsupportedCaseSensitiveParent,
     /// A Windows path class such as UNC/SMB is unsupported by safe v1.
     UnsupportedWindowsPath,
+    /// The parent volume is not the NTFS filesystem required by safe v1.
+    UnsupportedFilesystem,
     /// A destination is occupied by an entry outside this plan.
     DestinationOccupied,
     /// A required backend observation failed.

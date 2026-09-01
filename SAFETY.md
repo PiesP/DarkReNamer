@@ -22,8 +22,8 @@ The v0.1 release-validated scope is Windows 10 and Windows 11 on x64, with a
 local, non-elevated process operating on same-parent, non-reparse entries in a
 case-insensitive NTFS directory. Filesystems other than NTFS are unsupported
 and unvalidated for v0.1. That limitation belongs to the release evidence
-contract; the runtime does not currently identify and reject a volume solely
-because its filesystem is not NTFS.
+contract and the runtime boundary: DarkReNamer queries the filesystem from the
+retained final directory handle and fails closed unless it reports NTFS.
 
 Appearance preferences are non-authorizing input. Theme, command-rail density,
 preview emphasis, separators, tint, and empty-state copy may change presentation
