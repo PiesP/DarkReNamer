@@ -1105,12 +1105,14 @@ pub(super) fn apply_command_states(state: &AppState) {
         // Owner-draw measurement and painting synchronously reenter the parent
         // WndProc. Post the redraw so it runs only after the current AppState
         // lease ends; nested callbacks can then borrow the rendering state.
-        // SAFETY: list_window is a live direct child and the posted message
-        // carries no pointers or borrowed state.
-        let parent = unsafe { GetParent(state.list_window) };
-        if !parent.is_null() {
-            // SAFETY: parent remains live while AppState is installed.
-            unsafe { PostMessageW(parent, WM_APP_MENU_REDRAW, 0, 0) };
+        // SAFETY: list_window is a live direct child. Its parent remains live
+        // while AppState is installed, and the posted message carries no
+        // pointers or borrowed state.
+        unsafe {
+            let parent = GetParent(state.list_window);
+            if !parent.is_null() {
+                PostMessageW(parent, WM_APP_MENU_REDRAW, 0, 0);
+            }
         }
     }
 }
