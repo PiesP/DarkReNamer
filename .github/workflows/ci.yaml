@@ -65,6 +65,10 @@ jobs:
         shell: pwsh
         run: ./scripts/test-release-handoff-validator.ps1
 
+      - name: Test immutable release candidate metadata validation
+        shell: pwsh
+        run: ./scripts/test-release-candidate-metadata-validator.ps1
+
       - name: Test Windows acceptance evidence validation
         shell: pwsh
         run: ./scripts/test-windows-acceptance-evidence.ps1
@@ -136,6 +140,10 @@ jobs:
       - name: Test Windows acceptance evidence validation
         shell: pwsh
         run: ./scripts/test-windows-acceptance-evidence.ps1
+
+      - name: Test immutable release candidate metadata validation
+        shell: pwsh
+        run: ./scripts/test-release-candidate-metadata-validator.ps1
 
       - name: Test Windows acceptance draft generation
         shell: pwsh
