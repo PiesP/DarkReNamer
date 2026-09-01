@@ -451,6 +451,28 @@ fn run_unsafe() -> io::Result<()> {
     Ok(())
 }
 
+pub(super) fn handle_list_marquee_begin(list_window: HWND, lparam: LPARAM) -> Option<LRESULT> {
+    let header = lparam as *const NMHDR;
+    if header.is_null()
+        // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix for this
+        // synchronous callback; the null pointer was rejected above.
+        || unsafe { (*header).hwndFrom } != list_window
+    {
+        return None;
+    }
+    // Read the notification code only after validating the exact source HWND.
+    // SAFETY: same live NMHDR prefix and verified ListView sender as above.
+    if unsafe { (*header).code } != LVN_MARQUEEBEGIN {
+        return None;
+    }
+    // Query native state rather than the model: refresh can temporarily make
+    // the two counts differ, while marquee selection acts on rendered rows.
+    // SAFETY: list_window is the live sender verified from this synchronous
+    // notification, and LVM_GETITEMCOUNT has no pointer payload.
+    let item_count = unsafe { SendMessageW(list_window, LVM_GETITEMCOUNT, 0, 0) };
+    Some(if item_count == 0 { 1 } else { 0 })
+}
+
 pub(super) unsafe extern "system" fn window_proc(
     window: HWND,
     message: u32,
@@ -538,7 +560,15 @@ pub(super) unsafe extern "system" fn window_proc(
             // SAFETY: child creation succeeded and this callback retains the
             // allocation's sole AppState lease.
             start_preferences_writers(window, unsafe { &mut *state_ptr });
-            0
+            // SetWindowPos can synchronously reenter the callback graph. The
+            // copied ListView HWND is sufficient for the z-order repair, so end
+            // the AppState lease before placing it behind every direct sibling.
+            drop(state_lease);
+            if place_list_view_below_siblings(list).is_err() {
+                -1
+            } else {
+                0
+            }
         }
         WM_SIZE if !state_ptr.is_null() => {
             // SAFETY: state_ptr is non-null window-owned AppState storage and no
@@ -961,6 +991,12 @@ pub(super) unsafe extern "system" fn window_proc(
                 if matches!(code, LVN_ITEMCHANGED | HDN_ITEMCHANGINGW | HDN_ITEMCHANGEDW) {
                     return 0;
                 }
+            }
+            // SAFETY: this callback owns the sole state lease; only the copied
+            // ListView HWND is passed to the source-validating native query.
+            let list_window = unsafe { (*state_ptr).list_window };
+            if let Some(result) = handle_list_marquee_begin(list_window, lparam) {
+                return result;
             }
             // SAFETY: state_ptr is the live UI-thread AppState and the custom
             // draw helper validates the synchronous WM_NOTIFY payload/source.

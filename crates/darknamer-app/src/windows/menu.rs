@@ -273,6 +273,7 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
                 | WS_VISIBLE
                 | WS_BORDER
                 | WS_TABSTOP
+                | WS_CLIPSIBLINGS
                 | LVS_REPORT
                 | LVS_SHOWSELALWAYS
                 | LVS_SHAREIMAGELISTS
@@ -378,6 +379,28 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
     arrange(window, state);
     refresh(state);
     Ok(())
+}
+
+pub(super) fn place_list_view_below_siblings(list_window: HWND) -> io::Result<()> {
+    // SAFETY: callers pass the copied HWND of a live direct child without
+    // retaining AppState. The flags alter only its sibling z-order, preserving
+    // geometry, activation, and the SWP_NOZORDER layout contract.
+    if unsafe {
+        SetWindowPos(
+            list_window,
+            HWND_BOTTOM,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+    } == 0
+    {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) fn create_status_controls(parent: HWND) -> io::Result<(HWND, HWND, HWND)> {

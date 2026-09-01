@@ -160,10 +160,10 @@ use windows_sys::Win32::UI::Controls::{
     HDN_ITEMCHANGINGW, ICC_LISTVIEW_CLASSES, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX,
     InitCommonControlsEx, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW,
     LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS,
-    LVM_DELETEITEM, LVM_ENSUREVISIBLE, LVM_GETCOLUMNWIDTH, LVM_GETHEADER, LVM_GETITEMSTATE,
-    LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH,
+    LVM_DELETEITEM, LVM_ENSUREVISIBLE, LVM_GETCOLUMNWIDTH, LVM_GETHEADER, LVM_GETITEMCOUNT,
+    LVM_GETITEMSTATE, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH,
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW,
-    LVM_SETITEMW, LVN_GETINFOTIPW, LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED,
+    LVM_SETITEMW, LVN_GETINFOTIPW, LVN_ITEMCHANGED, LVN_MARQUEEBEGIN, LVNI_FOCUSED, LVNI_SELECTED,
     LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_NOSORTHEADER,
     LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_CUSTOMDRAW, NM_DBLCLK,
     NM_SETFOCUS, NMCUSTOMDRAW, NMHDR, NMHEADERW, NMLISTVIEW, NMLVCUSTOMDRAW, NMLVGETINFOTIPW,
@@ -195,25 +195,26 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, EndDeferWindowPos, FCONTROL, FSHIFT, FVIRTKEY,
     GWLP_USERDATA, GetClientRect, GetMenuItemCount, GetMenuItemInfoW, GetMessageW, GetParent,
     GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HACCEL, HMENU,
-    IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, IsWindow, IsWindowVisible, KillTimer, LoadCursorW,
-    LoadIconW, MENUITEMINFOW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_OWNERDRAW,
-    MF_POPUP, MF_SEPARATOR, MF_UNCHECKED, MIIM_DATA, MIIM_STRING, MIIM_SUBMENU, MINMAXINFO,
-    MNC_EXECUTE, MNC_IGNORE, MNC_SELECT, MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW,
-    PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXVSCROLL, SPI_GETHIGHCONTRAST,
-    SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW,
-    SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetMenuItemInfoW, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateAcceleratorW,
-    TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
-    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_FONTCHANGE,
-    WM_GETMINMAXINFO, WM_KEYDOWN, WM_MEASUREITEM, WM_MENUCHAR, WM_NCCREATE, WM_NCDESTROY,
-    WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
-    WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
-    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
-    WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    HWND_BOTTOM, IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, IsWindow, IsWindowVisible, KillTimer,
+    LoadCursorW, LoadIconW, MENUITEMINFOW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED,
+    MF_OWNERDRAW, MF_POPUP, MF_SEPARATOR, MF_UNCHECKED, MIIM_DATA, MIIM_STRING, MIIM_SUBMENU,
+    MINMAXINFO, MNC_EXECUTE, MNC_IGNORE, MNC_SELECT, MSG, MessageBoxW, MoveWindow,
+    NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXVSCROLL,
+    SPI_GETHIGHCONTRAST, SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOREDRAW, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu,
+    SetMenuItemInfoW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW,
+    TranslateAcceleratorW, TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE,
+    WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM,
+    WM_ERASEBKGND, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_MEASUREITEM, WM_MENUCHAR,
+    WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE,
+    WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION,
+    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
+    WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BM_CLICK, BS_FLAT, BS_MULTILINE, BS_TYPEMASK, GWL_STYLE, GetClassNameW, GetDlgCtrlID,
+    BM_CLICK, BS_FLAT, BS_MULTILINE, BS_TYPEMASK, GW_HWNDLAST, GWL_STYLE, GetClassNameW,
+    GetDlgCtrlID, GetWindow, HWND_TOP,
 };
 use worker::*;
 
@@ -2087,6 +2088,196 @@ mod tests {
         assert!(
             total_width <= u32::try_from(menu_budget).unwrap_or(u32::MAX),
             "top-level menu measured {total_width}px for a {menu_budget}px content budget",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn native_list_view_clips_siblings_and_is_placed_at_the_sibling_bottom()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let controls = INITCOMMONCONTROLSEX {
+            dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+            dwICC: ICC_LISTVIEW_CLASSES | ICC_WIN95_CLASSES,
+        };
+        // SAFETY: controls has its exact structure size and remains readable for
+        // the synchronous common-controls initialization call.
+        unsafe { InitCommonControlsEx(&controls) };
+        let directory = tempfile::tempdir()?;
+        let state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+        let class = wide("STATIC");
+        // SAFETY: the system STATIC class and current module remain valid for
+        // this hidden test owner.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let state_slot: *mut AppStateSlot = CallbackState::into_raw(state);
+        // SAFETY: the hidden owner and UI-thread slot remain live until cleanup
+        // clears publication and reclaims the slot below.
+        unsafe { SetWindowLongPtrW(parent, GWLP_USERDATA, state_slot as isize) };
+        let result = (|| -> io::Result<(u32, bool, bool)> {
+            // SAFETY: the test owns the published slot and no callback lease is active.
+            let mut state_lease = unsafe { CallbackState::try_lease(state_slot) }
+                .ok_or_else(|| io::Error::other("test AppState lease is unavailable"))?;
+            create_children(parent, state_lease.state_mut())?;
+            let list_window = state_lease.state().list_window;
+            // SAFETY: list_window is a live native control and the style query
+            // retains no caller storage.
+            let style = unsafe { GetWindowLongPtrW(list_window, GWL_STYLE) } as u32;
+            drop(state_lease);
+
+            // Put the ListView at the top first so creation order cannot make
+            // the production z-order repair pass accidentally.
+            // SAFETY: list_window is a live direct child and the flags alter
+            // only sibling z-order without moving, resizing, or activating it.
+            if unsafe {
+                SetWindowPos(
+                    list_window,
+                    HWND_TOP,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: list_window is live and this non-owning query returns the
+            // current bottom sibling without retaining state.
+            let was_bottom = unsafe { GetWindow(list_window, GW_HWNDLAST) } == list_window;
+            place_list_view_below_siblings(list_window)?;
+            // SAFETY: same live-child z-order query after the repair.
+            let is_bottom = unsafe { GetWindow(list_window, GW_HWNDLAST) } == list_window;
+            Ok((style, was_bottom, is_bottom))
+        })();
+        // SAFETY: publication is cleared before parent teardown so child
+        // callbacks cannot reach AppState during destruction.
+        unsafe {
+            SetWindowLongPtrW(parent, GWLP_USERDATA, 0);
+            DestroyWindow(parent);
+        }
+        // SAFETY: no lease remains and publication has been cleared.
+        let disposition = unsafe { CallbackState::request_reclaim(state_slot) };
+        assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+        let (style, was_bottom, is_bottom) = result?;
+        assert_ne!(style & WS_CLIPSIBLINGS, 0);
+        assert!(
+            !was_bottom,
+            "test precondition must put the ListView above a sibling"
+        );
+        assert!(
+            is_bottom,
+            "ListView must remain behind every direct sibling"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn empty_native_list_cancels_marquee_but_one_native_item_allows_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let controls = INITCOMMONCONTROLSEX {
+            dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+            dwICC: ICC_LISTVIEW_CLASSES | ICC_WIN95_CLASSES,
+        };
+        // SAFETY: controls has its exact structure size and remains readable for
+        // the synchronous common-controls initialization call.
+        unsafe { InitCommonControlsEx(&controls) };
+        let class = wide("STATIC");
+        // SAFETY: the system STATIC class and current module remain valid for
+        // this hidden test owner.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let list_window = match child(parent, "SysListView32", "", LIST_ID as u16, LVS_REPORT) {
+            Ok(list_window) => list_window,
+            Err(error) => {
+                // SAFETY: parent is the test-owned hidden HWND.
+                unsafe { DestroyWindow(parent) };
+                return Err(error.into());
+            }
+        };
+        let mut notification = NMHDR {
+            hwndFrom: list_window,
+            idFrom: LIST_ID,
+            code: LVN_MARQUEEBEGIN,
+        };
+        let mut row_text = wide("row");
+        let mut row = LVITEMW {
+            mask: LVIF_TEXT,
+            iItem: 0,
+            pszText: row_text.as_mut_ptr(),
+            ..LVITEMW::default()
+        };
+        // SAFETY: list_window and both callback payloads stay live throughout
+        // these synchronous messages; the inserted text buffer is writable and
+        // terminated for the complete insertion call.
+        let (empty_result, inserted, one_item_result, other_source_result) = unsafe {
+            let empty_result = application::handle_list_marquee_begin(
+                list_window,
+                (&raw mut notification) as LPARAM,
+            );
+            let inserted = SendMessageW(list_window, LVM_INSERTITEMW, 0, (&raw mut row) as LPARAM);
+            let one_item_result = application::handle_list_marquee_begin(
+                list_window,
+                (&raw mut notification) as LPARAM,
+            );
+            notification.hwndFrom = parent;
+            let other_source_result = application::handle_list_marquee_begin(
+                list_window,
+                (&raw mut notification) as LPARAM,
+            );
+            (empty_result, inserted, one_item_result, other_source_result)
+        };
+
+        // SAFETY: parent is the test-owned hidden HWND and destroys its ListView.
+        unsafe { DestroyWindow(parent) };
+        assert_eq!(inserted, 0, "native fixture must contain exactly one item");
+        assert_eq!(
+            empty_result,
+            Some(1),
+            "empty ListView must reject marquee selection"
+        );
+        assert_eq!(
+            one_item_result,
+            Some(0),
+            "nonempty ListView must retain marquee selection"
+        );
+        assert_eq!(
+            other_source_result, None,
+            "unrelated senders must not be intercepted"
         );
         Ok(())
     }
