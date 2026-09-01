@@ -95,15 +95,15 @@ const EXPECTED: &[(&str, UnsafeCounts)] = &[
         "src/rename/windows_native.rs",
         UnsafeCounts::new(18, 0, 0, 0),
     ),
-    ("src/windows.rs", UnsafeCounts::new(147, 4, 1, 0)),
-    ("src/windows/appearance.rs", UnsafeCounts::new(50, 0, 0, 0)),
+    ("src/windows.rs", UnsafeCounts::new(175, 6, 1, 0)),
+    ("src/windows/appearance.rs", UnsafeCounts::new(59, 0, 0, 0)),
     (
         "src/windows/appearance_dialog.rs",
         UnsafeCounts::new(153, 0, 3, 0),
     ),
     (
         "src/windows/application.rs",
-        UnsafeCounts::new(109, 0, 1, 0),
+        UnsafeCounts::new(117, 0, 1, 0),
     ),
     ("src/windows/clipboard.rs", UnsafeCounts::new(11, 0, 0, 0)),
     (
@@ -112,12 +112,12 @@ const EXPECTED: &[(&str, UnsafeCounts)] = &[
     ),
     (
         "src/windows/command_rail.rs",
-        UnsafeCounts::new(30, 0, 0, 0),
+        UnsafeCounts::new(20, 0, 0, 0),
     ),
     ("src/windows/dialog.rs", UnsafeCounts::new(75, 0, 1, 0)),
     ("src/windows/drag_drop.rs", UnsafeCounts::new(103, 5, 38, 0)),
     ("src/windows/list_view.rs", UnsafeCounts::new(79, 1, 1, 0)),
-    ("src/windows/menu.rs", UnsafeCounts::new(62, 0, 0, 0)),
+    ("src/windows/menu.rs", UnsafeCounts::new(63, 0, 0, 0)),
     ("src/windows/recovery_ui.rs", UnsafeCounts::new(2, 0, 0, 0)),
     ("src/windows/text_io.rs", UnsafeCounts::new(3, 0, 0, 0)),
     (

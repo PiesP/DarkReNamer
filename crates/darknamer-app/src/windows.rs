@@ -117,13 +117,13 @@ use windows_sys::Win32::Globalization::{DATE_SHORTDATE, GetDateFormatEx, GetTime
 use windows_sys::Win32::Graphics::Gdi::{
     COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW, DT_CALCRECT, DT_END_ELLIPSIS, DT_LEFT,
     DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteObject, DrawTextW,
-    FillRect, FrameRect, GetDC, GetMonitorInfoW, GetSysColor, GetSysColorBrush, HBRUSH, HDC, HFONT,
+    FillRect, GetDC, GetMonitorInfoW, GetSysColor, GetSysColorBrush, HBRUSH, HDC, HFONT,
     MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, RDW_ALLCHILDREN, RDW_ERASE,
     RDW_INVALIDATE, RedrawWindow, ReleaseDC, SelectObject, SetBkColor, SetBkMode, SetTextColor,
     TRANSPARENT, UpdateWindow,
 };
 #[cfg(test)]
-use windows_sys::Win32::Graphics::Gdi::{GetBkColor, GetObjectType, GetTextColor, OBJ_BRUSH};
+use windows_sys::Win32::Graphics::Gdi::{GetBkColor, GetPixel, GetTextColor};
 #[cfg(test)]
 use windows_sys::Win32::Storage::FileSystem::MoveFileW;
 use windows_sys::Win32::Storage::FileSystem::{
@@ -144,10 +144,10 @@ use windows_sys::Win32::System::Ole::{
 #[cfg(test)]
 use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 use windows_sys::Win32::System::SystemServices::{
-    SS_CENTER, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_NOPREFIX, SS_OWNERDRAW, SS_SUNKEN,
+    SS_CENTER, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_NOPREFIX, SS_OWNERDRAW,
 };
 #[cfg(test)]
-use windows_sys::Win32::System::SystemServices::{SS_NOTIFY, SS_TYPEMASK};
+use windows_sys::Win32::System::SystemServices::{SS_NOTIFY, SS_SUNKEN, SS_TYPEMASK};
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTimeEx};
 use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 #[cfg(test)]
@@ -160,10 +160,10 @@ use windows_sys::Win32::UI::Controls::{
     HDN_ITEMCHANGINGW, ICC_LISTVIEW_CLASSES, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX,
     InitCommonControlsEx, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW,
     LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS,
-    LVM_DELETEITEM, LVM_ENSUREVISIBLE, LVM_GETCOLUMNWIDTH, LVM_GETHEADER, LVM_GETITEMSTATE,
-    LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH,
+    LVM_DELETEITEM, LVM_ENSUREVISIBLE, LVM_GETCOLUMNWIDTH, LVM_GETHEADER, LVM_GETITEMCOUNT,
+    LVM_GETITEMSTATE, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH,
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW,
-    LVM_SETITEMW, LVN_GETINFOTIPW, LVN_ITEMCHANGED, LVNI_FOCUSED, LVNI_SELECTED,
+    LVM_SETITEMW, LVN_GETINFOTIPW, LVN_ITEMCHANGED, LVN_MARQUEEBEGIN, LVNI_FOCUSED, LVNI_SELECTED,
     LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_NOSORTHEADER,
     LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_CUSTOMDRAW, NM_DBLCLK,
     NM_SETFOCUS, NMCUSTOMDRAW, NMHDR, NMHEADERW, NMLISTVIEW, NMLVCUSTOMDRAW, NMLVGETINFOTIPW,
@@ -173,10 +173,11 @@ use windows_sys::Win32::UI::Controls::{
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::{
-    DRAWITEMSTRUCT, LVM_GETITEMTEXTW, MEASUREITEMSTRUCT, ODT_BUTTON, ODT_MENU,
+    DRAWITEMSTRUCT, LVM_GETITEMTEXTW, MEASUREITEMSTRUCT, ODS_DEFAULT, ODS_FOCUS, ODT_BUTTON,
+    ODT_MENU,
 };
 use windows_sys::Win32::UI::HiDpi::{
-    AdjustWindowRectExForDpi, GetDpiForWindow, GetSystemMetricsForDpi, SystemParametersInfoForDpi,
+    AdjustWindowRectExForDpi, GetDpiForWindow, SystemParametersInfoForDpi,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetFocus, IsWindowEnabled, SetFocus, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_F6,
@@ -195,25 +196,27 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, EndDeferWindowPos, FCONTROL, FSHIFT, FVIRTKEY,
     GWLP_USERDATA, GetClientRect, GetMenuItemCount, GetMenuItemInfoW, GetMessageW, GetParent,
     GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HACCEL, HMENU,
-    IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, IsWindow, IsWindowVisible, KillTimer, LoadCursorW,
-    LoadIconW, MENUITEMINFOW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_OWNERDRAW,
-    MF_POPUP, MF_SEPARATOR, MF_UNCHECKED, MIIM_DATA, MIIM_STRING, MIIM_SUBMENU, MINMAXINFO,
-    MNC_EXECUTE, MNC_IGNORE, MNC_SELECT, MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW,
-    PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXVSCROLL, SPI_GETHIGHCONTRAST,
+    HWND_BOTTOM, IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, IsWindow, IsWindowVisible, KillTimer,
+    LoadCursorW, LoadIconW, MENUITEMINFOW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED,
+    MF_OWNERDRAW, MF_POPUP, MF_SEPARATOR, MF_UNCHECKED, MIIM_DATA, MIIM_STRING, MIIM_SUBMENU,
+    MINMAXINFO, MNC_EXECUTE, MNC_IGNORE, MNC_SELECT, MSG, MessageBoxW, MoveWindow,
+    NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassExW, SPI_GETHIGHCONTRAST,
     SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW,
-    SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetMenuItemInfoW, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateAcceleratorW,
-    TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
-    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_FONTCHANGE,
-    WM_GETMINMAXINFO, WM_KEYDOWN, WM_MEASUREITEM, WM_MENUCHAR, WM_NCCREATE, WM_NCDESTROY,
-    WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE,
-    WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
+    SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetMenuItemInfoW,
+    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW,
+    TranslateAcceleratorW, TranslateMessage, USER_TIMER_MINIMUM, WM_APP, WM_CLOSE, WM_COMMAND,
+    WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
+    WM_DRAWITEM, WM_ERASEBKGND, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_MEASUREITEM,
+    WM_MENUCHAR, WM_NCACTIVATE, WM_NCCREATE, WM_NCDESTROY, WM_NCPAINT, WM_NOTIFY, WM_SETFOCUS,
+    WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
+    WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
     WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
     WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BM_CLICK, BS_FLAT, BS_MULTILINE, BS_TYPEMASK, GWL_STYLE, GetClassNameW, GetDlgCtrlID,
+    BM_CLICK, BS_FLAT, BS_MULTILINE, BS_TYPEMASK, GW_CHILD, GW_HWNDLAST, GW_HWNDNEXT, GWL_STYLE,
+    GetClassNameW, GetDlgCtrlID, GetWindow, HWND_TOP,
 };
 use worker::*;
 
@@ -253,6 +256,7 @@ const WM_APP_FINISH_CLOSE: u32 = WM_APP + 0x4F;
 const WM_APP_MENU_REDRAW: u32 = WM_APP + 0x50;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 const PREFERENCES_POLL_TIMER_ID: usize = 0xD4A2;
+const STATUS_RENDER_TIMER_ID: usize = 0xD4A3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CallbackStateStatus {
@@ -269,12 +273,13 @@ enum ReclaimDisposition {
 
 /// Owns callback state separately from the lease cell used to guard it.
 ///
-/// Windows publishes a raw pointer to this allocation. Callback entry first
-/// touches only `status`; it does not create a reference to `value` unless the
-/// lease changes from `Available` to `Leased`. All access is confined to the UI
-/// thread.
+/// Windows publishes a raw pointer to this allocation. Callback entry touches
+/// only `status` or a disjoint scalar sidecar; it does not create a reference to
+/// `value` unless the lease changes from `Available` to `Leased`. All access is
+/// confined to the UI thread.
 struct CallbackState<T, R = ()> {
     status: Cell<CallbackStateStatus>,
+    menu_edge_color: Cell<Option<u32>>,
     retirement: UnsafeCell<Option<R>>,
     value: UnsafeCell<T>,
 }
@@ -288,6 +293,7 @@ impl<T, R> CallbackState<T, R> {
     fn into_raw(value: T) -> *mut Self {
         Box::into_raw(Box::new(Self {
             status: Cell::new(CallbackStateStatus::Available),
+            menu_edge_color: Cell::new(None),
             retirement: UnsafeCell::new(None),
             value: UnsafeCell::new(value),
         }))
@@ -307,6 +313,25 @@ impl<T, R> CallbackState<T, R> {
             slot,
             _ui_thread_only: PhantomData,
         })
+    }
+
+    unsafe fn menu_edge_color(slot: *mut Self) -> Option<u32> {
+        let slot = NonNull::new(slot)?;
+        // SAFETY: the caller guarantees that this is the live UI-thread slot.
+        // This scalar Cell is disjoint from both the leased value and the
+        // retirement sidecar and creates no reference to either one.
+        let color = unsafe { &*std::ptr::addr_of!((*slot.as_ptr()).menu_edge_color) };
+        color.get()
+    }
+
+    unsafe fn set_menu_edge_color(slot: *mut Self, color: Option<u32>) {
+        let Some(slot) = NonNull::new(slot) else {
+            return;
+        };
+        // SAFETY: all access is serialized on the owning UI thread and touches
+        // only this scalar Cell, never the possibly leased value or retirement.
+        let sidecar = unsafe { &*std::ptr::addr_of!((*slot.as_ptr()).menu_edge_color) };
+        sidecar.set(color);
     }
 
     unsafe fn request_reclaim(slot: *mut Self) -> ReclaimDisposition {
@@ -472,6 +497,8 @@ struct AppState {
     preview_issue_cache: PreviewIssueCache,
     preview_synchronization: PreviewSynchronization,
     status_layout_input: StatusLayoutInput,
+    status_chrome: StatusChromeGeometry,
+    workspace_chrome: WorkspaceChromeGeometry,
     forced_colors: ForcedColorsState,
     system_theme: Option<ResolvedTheme>,
     appearance_resources: Option<AppearanceResources>,
@@ -572,6 +599,8 @@ impl AppState {
             preview_issue_cache: PreviewIssueCache::default(),
             preview_synchronization: PreviewSynchronization::default(),
             status_layout_input: StatusLayoutInput::default(),
+            status_chrome: StatusChromeGeometry::default(),
+            workspace_chrome: WorkspaceChromeGeometry::default(),
             forced_colors: ForcedColorsState::default(),
             system_theme: None,
             appearance_resources: None,
@@ -680,8 +709,19 @@ impl AppState {
     }
 
     fn render_status(&self) {
-        set_status(self.status_message, self.ui_status.message_text());
-        set_status(self.status_count, &self.ui_status.count_text());
+        // Status mutations often occur while a window callback owns the sole
+        // AppState lease. A same-HWND/ID timer coalesces repeated requests and
+        // generates WM_TIMER only when no higher-priority message is queued,
+        // keeping SetWindowTextW outside the mutation callback's lease.
+        // SAFETY: status_message is either a live UI-thread child or null. A
+        // null/retired child has no parent and deliberately installs no timer.
+        let owner = unsafe { GetParent(self.status_message) };
+        if !owner.is_null() {
+            // SAFETY: owner is the copied parent HWND. Reusing this HWND/ID
+            // replaces the existing UI-thread timer without a payload; failure
+            // leaves no sticky app state, so a later mutation can retry.
+            unsafe { SetTimer(owner, STATUS_RENDER_TIMER_ID, USER_TIMER_MINIMUM, None) };
+        }
     }
 
     fn worker_activity(&self) -> WorkerActivity {
@@ -825,6 +865,96 @@ pub(crate) fn atomic_replace_preferences(source: &Path, destination: &Path) -> i
 mod tests {
     use super::*;
 
+    const EMPTY_SAFETY_COPY_PROBE_SUBCLASS_ID: usize = 0xD4B2;
+    static EMPTY_SAFETY_COPY_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
+    static EMPTY_SAFETY_COPY_BRUSH: AtomicUsize = AtomicUsize::new(0);
+    static EMPTY_SAFETY_COPY_TEXT: AtomicUsize = AtomicUsize::new(0);
+    static EMPTY_SAFETY_COPY_BACKGROUND: AtomicUsize = AtomicUsize::new(0);
+    const STATUS_RENDER_PROBE_SUBCLASS_ID: usize = 0xD4B3;
+    static STATUS_RENDER_CALLBACKS: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
+    static STATUS_RENDER_BRUSH: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
+    static STATUS_RENDER_TEXT: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
+    static STATUS_RENDER_BACKGROUND: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
+
+    extern "system" fn empty_safety_copy_probe(
+        window: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        subclass_id: usize,
+        _ref_data: usize,
+    ) -> LRESULT {
+        // SAFETY: the callback forwards its original message through the
+        // system subclass chain exactly once. The empty-safety branch uses the
+        // live child/parent pair and releases the exact child DC synchronously.
+        unsafe {
+            if subclass_id == EMPTY_SAFETY_COPY_PROBE_SUBCLASS_ID
+                && message == windows_sys::Win32::UI::WindowsAndMessaging::WM_SETTEXT
+            {
+                let owner = GetParent(window);
+                let dc = GetDC(window);
+                if !dc.is_null() {
+                    let brush = application::window_proc(
+                        owner,
+                        WM_CTLCOLORSTATIC,
+                        dc as WPARAM,
+                        window as LPARAM,
+                    );
+                    EMPTY_SAFETY_COPY_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+                    EMPTY_SAFETY_COPY_BRUSH.store(brush as usize, Ordering::SeqCst);
+                    EMPTY_SAFETY_COPY_TEXT.store(GetTextColor(dc) as usize, Ordering::SeqCst);
+                    EMPTY_SAFETY_COPY_BACKGROUND.store(GetBkColor(dc) as usize, Ordering::SeqCst);
+                    ReleaseDC(window, dc);
+                }
+            }
+            DefSubclassProc(window, message, wparam, lparam)
+        }
+    }
+
+    extern "system" fn status_render_probe(
+        window: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        subclass_id: usize,
+        _ref_data: usize,
+    ) -> LRESULT {
+        // SAFETY: the callback forwards its original message through the
+        // system subclass chain exactly once. The status branch uses the live
+        // child/parent pair and releases the exact child DC synchronously.
+        unsafe {
+            if subclass_id == STATUS_RENDER_PROBE_SUBCLASS_ID
+                && message == windows_sys::Win32::UI::WindowsAndMessaging::WM_SETTEXT
+            {
+                let index = match GetDlgCtrlID(window) {
+                    id if id == STATUS_MESSAGE_ID as i32 => Some(0),
+                    id if id == STATUS_COUNT_ID as i32 => Some(1),
+                    _ => None,
+                };
+                if let Some(index) = index {
+                    let owner = GetParent(window);
+                    let dc = GetDC(window);
+                    if !dc.is_null() {
+                        let brush = application::window_proc(
+                            owner,
+                            WM_CTLCOLORSTATIC,
+                            dc as WPARAM,
+                            window as LPARAM,
+                        );
+                        STATUS_RENDER_CALLBACKS[index].fetch_add(1, Ordering::SeqCst);
+                        STATUS_RENDER_BRUSH[index].store(brush as usize, Ordering::SeqCst);
+                        STATUS_RENDER_TEXT[index]
+                            .store(GetTextColor(dc) as usize, Ordering::SeqCst);
+                        STATUS_RENDER_BACKGROUND[index]
+                            .store(GetBkColor(dc) as usize, Ordering::SeqCst);
+                        ReleaseDC(window, dc);
+                    }
+                }
+            }
+            DefSubclassProc(window, message, wparam, lparam)
+        }
+    }
+
     #[test]
     fn proposal_mutation_errors_keep_failure_copy_actionable_and_path_free() {
         assert_eq!(
@@ -895,6 +1025,53 @@ mod tests {
     }
 
     #[test]
+    fn callback_state_menu_edge_color_is_disjoint_from_a_value_lease()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let slot = CallbackState::<u32>::into_raw(41);
+        // SAFETY: the test solely owns this live UI-thread slot. Sidecar calls
+        // touch only their scalar Cell while the sole value lease stays live;
+        // publication ends before the final unique reclamation.
+        let (before, initial, updated, cleared, nested_rejected, after, disposition) = unsafe {
+            let lease = match CallbackState::try_lease(slot) {
+                Some(lease) => lease,
+                None => {
+                    let disposition = CallbackState::request_reclaim(slot);
+                    assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+                    return Err(io::Error::other("menu-edge sidecar lease was rejected").into());
+                }
+            };
+            let before = *lease.state();
+            let initial = CallbackState::menu_edge_color(slot);
+            CallbackState::set_menu_edge_color(slot, Some(GRAPHITE_DARK.surface_window));
+            let updated = CallbackState::menu_edge_color(slot);
+            CallbackState::set_menu_edge_color(slot, None);
+            let cleared = CallbackState::menu_edge_color(slot);
+            let nested_rejected = CallbackState::try_lease(slot).is_none();
+            let after = *lease.state();
+            drop(lease);
+            let disposition = CallbackState::request_reclaim(slot);
+            (
+                before,
+                initial,
+                updated,
+                cleared,
+                nested_rejected,
+                after,
+                disposition,
+            )
+        };
+
+        assert_eq!(before, 41);
+        assert_eq!(initial, None);
+        assert_eq!(updated, Some(GRAPHITE_DARK.surface_window));
+        assert_eq!(cleared, None);
+        assert!(nested_rejected);
+        assert_eq!(after, 41);
+        assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+        Ok(())
+    }
+
+    #[test]
     fn close_decision_is_applied_only_after_callback_lease_ends()
     -> Result<(), Box<dyn std::error::Error>> {
         let slot: *mut CallbackState<bool> = CallbackState::into_raw(true);
@@ -916,6 +1093,343 @@ mod tests {
         assert_eq!(disposition, ReclaimDisposition::Reclaimed);
         Ok(())
     }
+
+    #[test]
+    fn empty_safety_copy_releases_state_before_nested_static_color_callback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        EMPTY_SAFETY_COPY_CALLBACKS.store(0, Ordering::SeqCst);
+        EMPTY_SAFETY_COPY_BRUSH.store(0, Ordering::SeqCst);
+        EMPTY_SAFETY_COPY_TEXT.store(0, Ordering::SeqCst);
+        EMPTY_SAFETY_COPY_BACKGROUND.store(0, Ordering::SeqCst);
+
+        let directory = tempfile::tempdir()?;
+        let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+        state.appearance_resources = Some(AppearanceResources::create(GRAPHITE_DARK)?);
+        let class = wide("STATIC");
+        // SAFETY: every HWND and state slot below is owned by this UI-thread
+        // test. Publication is cleared and the subclass removed before the
+        // owner destroys its child; the unpublished slot is then reclaimed.
+        let (message_result, expected, text, disposition) = unsafe {
+            let owner = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                320,
+                240,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            );
+            if owner.is_null() {
+                return Err(io::Error::last_os_error().into());
+            }
+            let safety = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_CHILD | WS_VISIBLE,
+                0,
+                0,
+                240,
+                32,
+                owner,
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            );
+            if safety.is_null() {
+                DestroyWindow(owner);
+                return Err(io::Error::last_os_error().into());
+            }
+            if SetWindowSubclass(
+                safety,
+                Some(empty_safety_copy_probe),
+                EMPTY_SAFETY_COPY_PROBE_SUBCLASS_ID,
+                0,
+            ) == 0
+            {
+                DestroyWindow(owner);
+                return Err(io::Error::last_os_error().into());
+            }
+
+            state.empty_safety = safety;
+            let expected = static_control_colors(&state, safety)
+                .ok_or_else(|| io::Error::other("empty safety semantic colors are missing"))?;
+            let state_slot: *mut AppStateSlot = CallbackState::into_raw(state);
+            SetWindowLongPtrW(owner, GWLP_USERDATA, state_slot as isize);
+
+            let message_result = application::window_proc(owner, WM_APP_EMPTY_SAFETY_COPY, 0, 0);
+            let text = window_text(safety);
+
+            RemoveWindowSubclass(
+                safety,
+                Some(empty_safety_copy_probe),
+                EMPTY_SAFETY_COPY_PROBE_SUBCLASS_ID,
+            );
+            SetWindowLongPtrW(owner, GWLP_USERDATA, 0);
+            DestroyWindow(owner);
+            let disposition = CallbackState::request_reclaim(state_slot);
+            (message_result, expected, text, disposition)
+        };
+        let text = text?;
+
+        assert_eq!(message_result, 0);
+        assert_eq!(EMPTY_SAFETY_COPY_CALLBACKS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            EMPTY_SAFETY_COPY_BRUSH.load(Ordering::SeqCst),
+            expected.brush as usize
+        );
+        assert_eq!(
+            EMPTY_SAFETY_COPY_TEXT.load(Ordering::SeqCst),
+            expected.text as usize
+        );
+        assert_eq!(
+            EMPTY_SAFETY_COPY_BACKGROUND.load(Ordering::SeqCst),
+            expected.background as usize
+        );
+        assert_eq!(text, empty_state_safety_copy(RailMode::MenuOnly));
+        assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+        Ok(())
+    }
+
+    #[test]
+    fn status_render_timer_coalesces_and_survives_busy_callback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for index in 0..2 {
+            STATUS_RENDER_CALLBACKS[index].store(0, Ordering::SeqCst);
+            STATUS_RENDER_BRUSH[index].store(0, Ordering::SeqCst);
+            STATUS_RENDER_TEXT[index].store(0, Ordering::SeqCst);
+            STATUS_RENDER_BACKGROUND[index].store(0, Ordering::SeqCst);
+        }
+
+        let directory = tempfile::tempdir()?;
+        let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+        state.appearance_resources = Some(AppearanceResources::create(GRAPHITE_DARK)?);
+        state.ui_status = UiStatus::with_transient("이전 상태 표시");
+        // A missing child parent installs no timer and leaves no sticky state;
+        // the same state can install one after controls become available.
+        state.render_status();
+        state.render_status();
+        let class = wide("STATIC");
+        // SAFETY: every HWND and state slot below is owned by this UI-thread
+        // test. Publication is cleared and both subclasses are removed before
+        // the owner destroys its children; the unpublished slot is reclaimed.
+        let (
+            synchronous_callbacks,
+            first_timer_installed,
+            duplicate_timer_absent,
+            busy_handler_result,
+            callbacks_while_busy,
+            busy_timer_survived,
+            handler_result,
+            handler_timer_removed,
+            expected,
+            expected_text,
+            actual_message_text,
+            actual_count_text,
+            disposition,
+        ) = unsafe {
+            let owner = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                160,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            );
+            if owner.is_null() {
+                return Err(io::Error::last_os_error().into());
+            }
+            let (status_message, status_count, _cancel) = match create_status_controls(owner) {
+                Ok(controls) => controls,
+                Err(error) => {
+                    DestroyWindow(owner);
+                    return Err(error.into());
+                }
+            };
+            for status in [status_message, status_count] {
+                if SetWindowSubclass(
+                    status,
+                    Some(status_render_probe),
+                    STATUS_RENDER_PROBE_SUBCLASS_ID,
+                    0,
+                ) == 0
+                {
+                    DestroyWindow(owner);
+                    return Err(io::Error::last_os_error().into());
+                }
+            }
+
+            state.status_message = status_message;
+            state.status_count = status_count;
+            let expected_message = match static_control_colors(&state, status_message) {
+                Some(colors) => colors,
+                None => {
+                    DestroyWindow(owner);
+                    return Err(
+                        io::Error::other("message status semantic colors are missing").into(),
+                    );
+                }
+            };
+            let expected_count = match static_control_colors(&state, status_count) {
+                Some(colors) => colors,
+                None => {
+                    DestroyWindow(owner);
+                    return Err(io::Error::other("count status semantic colors are missing").into());
+                }
+            };
+            let expected = [expected_message, expected_count];
+            let expected_text = ["최신 상태 표시".to_owned(), state.ui_status.count_text()];
+            let state_slot: *mut AppStateSlot = CallbackState::into_raw(state);
+            SetWindowLongPtrW(owner, GWLP_USERDATA, state_slot as isize);
+
+            let mut state_lease = match CallbackState::try_lease(state_slot) {
+                Some(lease) => lease,
+                None => {
+                    SetWindowLongPtrW(owner, GWLP_USERDATA, 0);
+                    DestroyWindow(owner);
+                    let disposition = CallbackState::request_reclaim(state_slot);
+                    assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+                    return Err(io::Error::other("status render state lease is unavailable").into());
+                }
+            };
+            state_lease.state().render_status();
+            state_lease
+                .state_mut()
+                .ui_status
+                .set_transient("최신 상태 표시");
+            state_lease.state().render_status();
+            state_lease.state().render_status();
+            let synchronous_callbacks = [
+                STATUS_RENDER_CALLBACKS[0].load(Ordering::SeqCst),
+                STATUS_RENDER_CALLBACKS[1].load(Ordering::SeqCst),
+            ];
+            drop(state_lease);
+
+            // Reusing one HWND/ID replaces the timer. One kill succeeds and a
+            // second cannot find a duplicate timer instance.
+            let first_timer_installed = KillTimer(owner, STATUS_RENDER_TIMER_ID) != 0;
+            let duplicate_timer_absent = KillTimer(owner, STATUS_RENDER_TIMER_ID) == 0;
+
+            let busy_lease = match CallbackState::try_lease(state_slot) {
+                Some(lease) => lease,
+                None => {
+                    SetWindowLongPtrW(owner, GWLP_USERDATA, 0);
+                    DestroyWindow(owner);
+                    let disposition = CallbackState::request_reclaim(state_slot);
+                    assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+                    return Err(io::Error::other("busy status lease is unavailable").into());
+                }
+            };
+            busy_lease.state().render_status();
+            let busy_handler_result =
+                application::window_proc(owner, WM_TIMER, STATUS_RENDER_TIMER_ID, 0);
+            let callbacks_while_busy = [
+                STATUS_RENDER_CALLBACKS[0].load(Ordering::SeqCst),
+                STATUS_RENDER_CALLBACKS[1].load(Ordering::SeqCst),
+            ];
+            drop(busy_lease);
+            let busy_timer_survived = KillTimer(owner, STATUS_RENDER_TIMER_ID) != 0;
+
+            let retry_lease = match CallbackState::try_lease(state_slot) {
+                Some(lease) => {
+                    lease.state().render_status();
+                    lease
+                }
+                None => {
+                    SetWindowLongPtrW(owner, GWLP_USERDATA, 0);
+                    DestroyWindow(owner);
+                    let disposition = CallbackState::request_reclaim(state_slot);
+                    assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+                    return Err(io::Error::other("retry status lease is unavailable").into());
+                }
+            };
+            drop(retry_lease);
+            let handler_result =
+                application::window_proc(owner, WM_TIMER, STATUS_RENDER_TIMER_ID, 0);
+            let handler_timer_removed = KillTimer(owner, STATUS_RENDER_TIMER_ID) == 0;
+            let actual_message_text = window_text(status_message);
+            let actual_count_text = window_text(status_count);
+
+            for status in [status_message, status_count] {
+                RemoveWindowSubclass(
+                    status,
+                    Some(status_render_probe),
+                    STATUS_RENDER_PROBE_SUBCLASS_ID,
+                );
+            }
+            SetWindowLongPtrW(owner, GWLP_USERDATA, 0);
+            DestroyWindow(owner);
+            let disposition = CallbackState::request_reclaim(state_slot);
+            (
+                synchronous_callbacks,
+                first_timer_installed,
+                duplicate_timer_absent,
+                busy_handler_result,
+                callbacks_while_busy,
+                busy_timer_survived,
+                handler_result,
+                handler_timer_removed,
+                expected,
+                expected_text,
+                actual_message_text,
+                actual_count_text,
+                disposition,
+            )
+        };
+
+        let actual_text = [actual_message_text?, actual_count_text?];
+        assert_eq!(
+            synchronous_callbacks,
+            [0, 0],
+            "render_status must not synchronously enter a status control"
+        );
+        assert!(first_timer_installed);
+        assert!(
+            duplicate_timer_absent,
+            "repeated renders must share one timer"
+        );
+        assert_eq!(busy_handler_result, 0);
+        assert_eq!(callbacks_while_busy, [0, 0]);
+        assert!(
+            busy_timer_survived,
+            "busy WM_TIMER handling must leave the retry timer installed"
+        );
+        assert_eq!(handler_result, 0);
+        assert!(
+            handler_timer_removed,
+            "successful status rendering must stop the timer"
+        );
+        for index in 0..2 {
+            assert_eq!(STATUS_RENDER_CALLBACKS[index].load(Ordering::SeqCst), 1);
+            assert_eq!(
+                STATUS_RENDER_BRUSH[index].load(Ordering::SeqCst),
+                expected[index].brush as usize
+            );
+            assert_eq!(
+                STATUS_RENDER_TEXT[index].load(Ordering::SeqCst),
+                expected[index].text as usize
+            );
+            assert_eq!(
+                STATUS_RENDER_BACKGROUND[index].load(Ordering::SeqCst),
+                expected[index].background as usize
+            );
+        }
+        assert_eq!(actual_text, expected_text);
+        assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+        Ok(())
+    }
+
     use std::process::Command;
 
     use crate::rename::{
@@ -1742,7 +2256,7 @@ mod tests {
     }
 
     #[test]
-    fn native_apply_keyline_replaces_brush_and_releases_owned_window()
+    fn native_apply_readiness_targets_the_existing_button_and_menu_only_hides_it()
     -> Result<(), Box<dyn std::error::Error>> {
         let controls = INITCOMMONCONTROLSEX {
             dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
@@ -1774,7 +2288,7 @@ mod tests {
         if parent.is_null() {
             return Err(io::Error::last_os_error().into());
         }
-        let mut rail = match CommandRail::create(parent, &LEFT_RAIL) {
+        let rail = match CommandRail::create(parent, &LEFT_RAIL) {
             Ok(rail) => rail,
             Err(error) => {
                 // SAFETY: parent is the hidden test window created above.
@@ -1782,33 +2296,155 @@ mod tests {
                 return Err(error.into());
             }
         };
-        let (Some(keyline), Some(original_brush)) =
-            (rail.apply_keyline_window(), rail.apply_keyline_brush())
-        else {
-            rail.destroy();
-            // SAFETY: parent is the hidden test window created above.
-            unsafe { DestroyWindow(parent) };
-            return Err(io::Error::other("Apply keyline resources are missing").into());
-        };
-        // SAFETY: original_brush is the live object solely owned by rail.
-        assert_eq!(unsafe { GetObjectType(original_brush) }, OBJ_BRUSH as u32);
-        rail.set_apply_keyline_color(GRAPHITE_DARK.apply_keyline)?;
-        let brush = rail
-            .apply_keyline_brush()
-            .ok_or_else(|| io::Error::other("replacement Apply keyline brush is missing"))?;
-        assert_ne!(brush, original_brush);
-        // SAFETY: brush is the new live object solely owned by rail.
-        assert_eq!(unsafe { GetObjectType(brush) }, OBJ_BRUSH as u32);
+        let apply = rail
+            .command_hwnd(APPLY)
+            .ok_or_else(|| io::Error::other("Apply button is missing"))?;
+        assert_eq!(rail.active_apply_readiness_button(), None);
+        rail.set_apply_readiness_visible(true);
+        assert_eq!(rail.active_apply_readiness_button(), Some(apply));
+        rail.set_visible(false);
+        assert_eq!(rail.active_apply_readiness_button(), None);
+        rail.set_visible(true);
+        assert_eq!(rail.active_apply_readiness_button(), Some(apply));
+        rail.set_apply_readiness_visible(false);
+        assert_eq!(rail.active_apply_readiness_button(), None);
+
+        let mut child_count = 0;
+        // SAFETY: parent is live; GetWindow walks its direct-child Z-order
+        // without retaining any handle beyond this synchronous count.
+        let mut child = unsafe { GetWindow(parent, GW_CHILD) };
+        while !child.is_null() {
+            child_count += 1;
+            // SAFETY: child remains live and GW_HWNDNEXT advances the same
+            // direct-child chain.
+            child = unsafe { GetWindow(child, GW_HWNDNEXT) };
+        }
+        assert_eq!(
+            child_count,
+            rail.button_count() + rail.separator_windows().len()
+        );
         rail.destroy();
-        let result: io::Result<()> = {
-            // SAFETY: the consumed owner must have destroyed its child window.
-            // GDI handle values are intentionally not queried after deletion:
-            // parallel tests may immediately reuse the numeric value for an
-            // unrelated brush in this process.
-            assert_eq!(unsafe { IsWindow(keyline) }, 0);
-            Ok(())
-        };
         // SAFETY: parent remains the test-owned hidden HWND.
+        unsafe { DestroyWindow(parent) };
+        Ok(())
+    }
+
+    #[test]
+    fn owner_draw_apply_readiness_uses_custom_palette_without_replacing_focus_or_default()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // SAFETY: the system STATIC class and current module are process-global.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let rail = match CommandRail::create(parent, &LEFT_RAIL) {
+            Ok(rail) => rail,
+            Err(error) => {
+                // SAFETY: parent is the test-owned hidden HWND.
+                unsafe { DestroyWindow(parent) };
+                return Err(error.into());
+            }
+        };
+        let result = (|| -> io::Result<()> {
+            let dpi = BASE_DPI;
+            let placements = calculate_command_rail_layout(
+                &LEFT_RAIL,
+                800,
+                RailDensity::Comfortable.metrics(dpi),
+            )
+            .map_err(|error| io::Error::other(format!("rail layout failed: {error:?}")))?;
+            rail.arrange(0, &placements, dpi);
+            let apply = rail
+                .command_hwnd(APPLY)
+                .ok_or_else(|| io::Error::other("Apply button is missing"))?;
+            // SAFETY: apply is live; its DC and writable client rectangle are
+            // used only for synchronous owner drawing below.
+            let (dc, rect) = unsafe {
+                let dc = GetDC(apply);
+                let mut rect = RECT::default();
+                GetClientRect(apply, &mut rect);
+                (dc, rect)
+            };
+            if dc.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let paint_result = (|| -> io::Result<()> {
+                let indicator = calculate_apply_readiness_indicator_rect(
+                    LayoutRect {
+                        x: rect.left,
+                        y: rect.top,
+                        width: rect.right.saturating_sub(rect.left),
+                        height: rect.bottom.saturating_sub(rect.top),
+                    },
+                    dpi,
+                )
+                .ok_or_else(|| io::Error::other("Apply readiness indicator is missing"))?;
+                let sample_x = indicator.x.saturating_add(indicator.width / 2);
+                let sample_y = indicator.y.saturating_add(indicator.height / 2);
+                let resources = AppearanceResources::create(GRAPHITE_DARK)?;
+                let mut draw = DRAWITEMSTRUCT {
+                    CtlType: ODT_BUTTON,
+                    itemState: ODS_DEFAULT | ODS_FOCUS,
+                    hwndItem: apply,
+                    hDC: dc,
+                    rcItem: rect,
+                    ..DRAWITEMSTRUCT::default()
+                };
+                assert!(draw_owner_rail_button(
+                    Some(&resources),
+                    Some(apply),
+                    dpi,
+                    (&raw mut draw) as LPARAM,
+                ));
+                // SAFETY: dc is live and the sampled point is strictly inside
+                // the pure indicator after focus/default rendering.
+                let indicator_pixel = unsafe { GetPixel(dc, sample_x, sample_y) };
+                assert_eq!(indicator_pixel, GRAPHITE_DARK.apply_keyline);
+
+                assert!(draw_owner_rail_button(
+                    Some(&resources),
+                    None,
+                    dpi,
+                    (&raw mut draw) as LPARAM,
+                ));
+                // SAFETY: the same bounded point now contains the normal custom
+                // button surface because no readiness target was supplied.
+                let untargeted_pixel = unsafe { GetPixel(dc, sample_x, sample_y) };
+                assert_ne!(untargeted_pixel, GRAPHITE_DARK.apply_keyline);
+
+                assert!(draw_owner_rail_button(
+                    None,
+                    Some(apply),
+                    dpi,
+                    (&raw mut draw) as LPARAM,
+                ));
+                // SAFETY: resources=None follows system/Forced Colors painting
+                // and deliberately draws no custom palette indicator.
+                let system_pixel = unsafe { GetPixel(dc, sample_x, sample_y) };
+                assert_ne!(system_pixel, GRAPHITE_DARK.apply_keyline);
+                Ok(())
+            })();
+            // SAFETY: dc came from this exact live Apply button.
+            unsafe { ReleaseDC(apply, dc) };
+            paint_result
+        })();
+        rail.destroy();
+        // SAFETY: parent is the test-owned hidden HWND after rail teardown.
         unsafe { DestroyWindow(parent) };
         result.map_err(Into::into)
     }
@@ -1848,6 +2484,7 @@ mod tests {
                 let style = unsafe { GetWindowLongPtrW(status, GWL_STYLE) } as u32;
                 assert_eq!(style & SS_NOPREFIX, SS_NOPREFIX);
                 assert_eq!(style & SS_ENDELLIPSIS, SS_ENDELLIPSIS);
+                assert_eq!(style & SS_SUNKEN, 0);
             }
             // SAFETY: cancel is a live standard BUTTON and GWL_STYLE is a
             // pointer-free value query.
@@ -1944,6 +2581,197 @@ mod tests {
         assert!(
             total_width <= u32::try_from(menu_budget).unwrap_or(u32::MAX),
             "top-level menu measured {total_width}px for a {menu_budget}px content budget",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn native_list_view_clips_siblings_and_is_placed_at_the_sibling_bottom()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let controls = INITCOMMONCONTROLSEX {
+            dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+            dwICC: ICC_LISTVIEW_CLASSES | ICC_WIN95_CLASSES,
+        };
+        // SAFETY: controls has its exact structure size and remains readable for
+        // the synchronous common-controls initialization call.
+        unsafe { InitCommonControlsEx(&controls) };
+        let directory = tempfile::tempdir()?;
+        let state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+        let class = wide("STATIC");
+        // SAFETY: the system STATIC class and current module remain valid for
+        // this hidden test owner.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let state_slot: *mut AppStateSlot = CallbackState::into_raw(state);
+        // SAFETY: the hidden owner and UI-thread slot remain live until cleanup
+        // clears publication and reclaims the slot below.
+        unsafe { SetWindowLongPtrW(parent, GWLP_USERDATA, state_slot as isize) };
+        let result = (|| -> io::Result<(u32, bool, bool)> {
+            // SAFETY: the test owns the published slot and no callback lease is active.
+            let mut state_lease = unsafe { CallbackState::try_lease(state_slot) }
+                .ok_or_else(|| io::Error::other("test AppState lease is unavailable"))?;
+            create_children(parent, state_lease.state_mut())?;
+            let list_window = state_lease.state().list_window;
+            // SAFETY: list_window is a live native control and the style query
+            // retains no caller storage.
+            let style = unsafe { GetWindowLongPtrW(list_window, GWL_STYLE) } as u32;
+            drop(state_lease);
+
+            // Put the ListView at the top first so creation order cannot make
+            // the production z-order repair pass accidentally.
+            // SAFETY: list_window is a live direct child and the flags alter
+            // only sibling z-order without moving, resizing, or activating it.
+            if unsafe {
+                SetWindowPos(
+                    list_window,
+                    HWND_TOP,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: list_window is live and this non-owning query returns the
+            // current bottom sibling without retaining state.
+            let was_bottom = unsafe { GetWindow(list_window, GW_HWNDLAST) } == list_window;
+            place_list_view_below_siblings(list_window)?;
+            // SAFETY: same live-child z-order query after the repair.
+            let is_bottom = unsafe { GetWindow(list_window, GW_HWNDLAST) } == list_window;
+            Ok((style, was_bottom, is_bottom))
+        })();
+        // SAFETY: publication is cleared before parent teardown so child
+        // callbacks cannot reach AppState during destruction.
+        unsafe {
+            SetWindowLongPtrW(parent, GWLP_USERDATA, 0);
+            DestroyWindow(parent);
+        }
+        // SAFETY: no lease remains and publication has been cleared.
+        let disposition = unsafe { CallbackState::request_reclaim(state_slot) };
+        assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+        let (style, was_bottom, is_bottom) = result?;
+        assert_ne!(style & WS_CLIPSIBLINGS, 0);
+        assert_eq!(style & WS_BORDER, 0);
+        assert!(
+            !was_bottom,
+            "test precondition must put the ListView above a sibling"
+        );
+        assert!(
+            is_bottom,
+            "ListView must remain behind every direct sibling"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn empty_native_list_cancels_marquee_but_one_native_item_allows_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let controls = INITCOMMONCONTROLSEX {
+            dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+            dwICC: ICC_LISTVIEW_CLASSES | ICC_WIN95_CLASSES,
+        };
+        // SAFETY: controls has its exact structure size and remains readable for
+        // the synchronous common-controls initialization call.
+        unsafe { InitCommonControlsEx(&controls) };
+        let class = wide("STATIC");
+        // SAFETY: the system STATIC class and current module remain valid for
+        // this hidden test owner.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let list_window = match child(parent, "SysListView32", "", LIST_ID as u16, LVS_REPORT) {
+            Ok(list_window) => list_window,
+            Err(error) => {
+                // SAFETY: parent is the test-owned hidden HWND.
+                unsafe { DestroyWindow(parent) };
+                return Err(error.into());
+            }
+        };
+        let mut notification = NMHDR {
+            hwndFrom: list_window,
+            idFrom: LIST_ID,
+            code: LVN_MARQUEEBEGIN,
+        };
+        let mut row_text = wide("row");
+        let mut row = LVITEMW {
+            mask: LVIF_TEXT,
+            iItem: 0,
+            pszText: row_text.as_mut_ptr(),
+            ..LVITEMW::default()
+        };
+        // SAFETY: list_window and both callback payloads stay live throughout
+        // these synchronous messages; the inserted text buffer is writable and
+        // terminated for the complete insertion call.
+        let (empty_result, inserted, one_item_result, other_source_result) = unsafe {
+            let empty_result = application::handle_list_marquee_begin(
+                list_window,
+                (&raw mut notification) as LPARAM,
+            );
+            let inserted = SendMessageW(list_window, LVM_INSERTITEMW, 0, (&raw mut row) as LPARAM);
+            let one_item_result = application::handle_list_marquee_begin(
+                list_window,
+                (&raw mut notification) as LPARAM,
+            );
+            notification.hwndFrom = parent;
+            let other_source_result = application::handle_list_marquee_begin(
+                list_window,
+                (&raw mut notification) as LPARAM,
+            );
+            (empty_result, inserted, one_item_result, other_source_result)
+        };
+
+        // SAFETY: parent is the test-owned hidden HWND and destroys its ListView.
+        unsafe { DestroyWindow(parent) };
+        assert_eq!(inserted, 0, "native fixture must contain exactly one item");
+        assert_eq!(
+            empty_result,
+            Some(1),
+            "empty ListView must reject marquee selection"
+        );
+        assert_eq!(
+            one_item_result,
+            Some(0),
+            "nonempty ListView must retain marquee selection"
+        );
+        assert_eq!(
+            other_source_result, None,
+            "unrelated senders must not be intercepted"
         );
         Ok(())
     }
@@ -2406,14 +3234,8 @@ mod tests {
         };
         let result = (|| -> io::Result<()> {
             let (instruction, safety, _add) = create_empty_state_controls(parent)?;
-            let (status, _count, _cancel) = create_status_controls(parent)?;
+            let (status, count, _cancel) = create_status_controls(parent)?;
             let drop_overlay = create_drop_overlay(parent)?;
-            let keyline = rail
-                .apply_keyline_window()
-                .ok_or_else(|| io::Error::other("Apply keyline is missing"))?;
-            let keyline_brush = rail
-                .apply_keyline_brush_for(keyline)
-                .ok_or_else(|| io::Error::other("Apply keyline brush is missing"))?;
             // SAFETY: parent is live and the returned DC is released below.
             let dc = unsafe { GetDC(parent) };
             if dc.is_null() {
@@ -2424,29 +3246,14 @@ mod tests {
                 SetTextColor(dc, 0x0012_3456);
                 SetBkColor(dc, 0x0065_4321);
             }
-            assert_eq!(
-                application::route_static_control_colors(
-                    Some(keyline_brush),
-                    None,
-                    instruction,
-                    safety,
-                    keyline,
-                    dc,
-                ),
-                Some(keyline_brush)
-            );
-            // SAFETY: keyline routing must not alter the live DC colors.
-            assert_eq!(unsafe { GetTextColor(dc) }, 0x0012_3456);
-            // SAFETY: same live DC.
-            assert_eq!(unsafe { GetBkColor(dc) }, 0x0065_4321);
-
             for empty in [instruction, safety] {
                 assert_eq!(
                     application::route_static_control_colors(
                         None,
-                        None,
                         instruction,
                         safety,
+                        status,
+                        count,
                         empty,
                         dc,
                     ),
@@ -2463,34 +3270,63 @@ mod tests {
                 });
             }
 
+            // SAFETY: this cached system brush is process-global and stays
+            // live for the complete synchronous routing test.
+            let custom_brush = unsafe { GetSysColorBrush(COLOR_WINDOW) };
             let custom = StaticControlColors {
-                brush: keyline_brush,
+                brush: custom_brush,
                 text: GRAPHITE_DARK.text_primary,
                 background: GRAPHITE_DARK.surface_status,
             };
             assert_eq!(
                 application::route_static_control_colors(
-                    None,
                     Some(custom),
                     instruction,
                     safety,
                     status,
+                    count,
+                    status,
                     dc,
                 ),
-                Some(keyline_brush)
+                Some(custom_brush)
             );
             // SAFETY: custom route wrote semantic values to the live DC.
             assert_eq!(unsafe { GetTextColor(dc) }, custom.text);
             // SAFETY: same live DC and semantic background.
             assert_eq!(unsafe { GetBkColor(dc) }, custom.background);
 
-            for unrelated in [status, drop_overlay, rail.separator_windows()[0]] {
+            for system_status in [status, count] {
                 assert_eq!(
                     application::route_static_control_colors(
-                        rail.apply_keyline_brush_for(unrelated),
                         None,
                         instruction,
                         safety,
+                        status,
+                        count,
+                        system_status,
+                        dc,
+                    ),
+                    // SAFETY: this is the cached system-owned status brush.
+                    Some(unsafe { GetSysColorBrush(COLOR_WINDOW) })
+                );
+                // SAFETY: route wrote current system colors to the live DC.
+                assert_eq!(unsafe { GetTextColor(dc) }, unsafe {
+                    GetSysColor(COLOR_WINDOWTEXT)
+                });
+                // SAFETY: same live DC and system status background color.
+                assert_eq!(unsafe { GetBkColor(dc) }, unsafe {
+                    GetSysColor(COLOR_WINDOW)
+                });
+            }
+
+            for unrelated in [drop_overlay, rail.separator_windows()[0]] {
+                assert_eq!(
+                    application::route_static_control_colors(
+                        None,
+                        instruction,
+                        safety,
+                        status,
+                        count,
                         unrelated,
                         dc,
                     ),
@@ -2596,60 +3432,24 @@ mod tests {
         right.arrange(right_origin, &right_placements, dpi);
 
         let result = (|| -> io::Result<()> {
-            let keyline = left
-                .apply_keyline_window()
-                .ok_or_else(|| io::Error::other("Apply keyline is missing"))?;
-            assert!(right.apply_keyline_window().is_none());
-            // SAFETY: keyline is a live standard STATIC and these are
-            // pointer-free style/identifier queries.
-            let keyline_style = unsafe { GetWindowLongPtrW(keyline, GWL_STYLE) } as u32;
-            assert_eq!(keyline_style & WS_TABSTOP, 0);
-            assert_eq!(keyline_style & SS_NOTIFY, 0);
-            // SAFETY: same live direct child with no assigned control ID.
-            assert_eq!(unsafe { GetDlgCtrlID(keyline) }, 0);
-            assert_eq!(keyline_style & WS_VISIBLE, 0);
-            let expected_keyline = calculate_apply_keyline_layout(&left_placements, dpi)
-                .ok_or_else(|| io::Error::other("Apply keyline layout is missing"))?;
-            let keyline_rect = left.apply_keyline_rect()?;
-            assert_eq!(keyline_rect.left, expected_keyline.x);
-            assert_eq!(keyline_rect.top, expected_keyline.y);
-            assert_eq!(
-                keyline_rect.right - keyline_rect.left,
-                expected_keyline.width
-            );
-            assert_eq!(
-                keyline_rect.bottom - keyline_rect.top,
-                expected_keyline.height
-            );
             let apply_rect = left.command_rect(APPLY)?;
-            assert!(keyline_rect.right <= apply_rect.left);
-            let brush = left
-                .apply_keyline_brush()
-                .ok_or_else(|| io::Error::other("Apply keyline brush is missing"))?;
-            assert_eq!(left.apply_keyline_brush_for(keyline), Some(brush));
             let apply_button = left
                 .command_hwnd(APPLY)
                 .ok_or_else(|| io::Error::other("Apply button is missing"))?;
-            assert_eq!(left.apply_keyline_brush_for(apply_button), None);
-
-            left.set_apply_keyline_visible(true);
-            // SAFETY: keyline remains live and style reflects ShowWindow.
-            let ready_style = unsafe { GetWindowLongPtrW(keyline, GWL_STYLE) } as u32;
-            assert_ne!(ready_style & WS_VISIBLE, 0);
-            left.set_apply_keyline_visible(false);
-            // SAFETY: same live keyline after the visibility update.
-            let idle_style = unsafe { GetWindowLongPtrW(keyline, GWL_STYLE) } as u32;
-            assert_eq!(idle_style & WS_VISIBLE, 0);
-            left.set_apply_keyline_visible(true);
+            assert_eq!(apply_rect.left, 0);
+            assert_eq!(apply_rect.right - apply_rect.left, metrics.rail_width);
+            assert_eq!(left.active_apply_readiness_button(), None);
+            assert_eq!(right.active_apply_readiness_button(), None);
+            left.set_apply_readiness_visible(true);
+            right.set_apply_readiness_visible(true);
+            assert_eq!(left.active_apply_readiness_button(), Some(apply_button));
+            assert_eq!(right.active_apply_readiness_button(), None);
             left.set_visible(false);
-            // SAFETY: MenuOnly-style rail hiding keeps the keyline hidden.
-            let menu_only_style = unsafe { GetWindowLongPtrW(keyline, GWL_STYLE) } as u32;
-            assert_eq!(menu_only_style & WS_VISIBLE, 0);
+            assert_eq!(left.active_apply_readiness_button(), None);
             left.set_visible(true);
-            // SAFETY: the retained Ready request is visible when rails return.
-            let restored_style = unsafe { GetWindowLongPtrW(keyline, GWL_STYLE) } as u32;
-            assert_ne!(restored_style & WS_VISIBLE, 0);
-            left.set_apply_keyline_visible(false);
+            assert_eq!(left.active_apply_readiness_button(), Some(apply_button));
+            left.set_apply_readiness_visible(false);
+            right.set_apply_readiness_visible(false);
 
             let mut actual_ids = Vec::with_capacity(19);
             for (rail, expected, origin_x) in [

@@ -12,9 +12,9 @@ use windows_sys::Win32::Graphics::Gdi::{
     COLOR_HIGHLIGHTTEXT, COLOR_MENU, COLOR_MENUTEXT, COLOR_WINDOW, COLOR_WINDOWFRAME,
     COLOR_WINDOWTEXT, CreateSolidBrush, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_HIDEPREFIX,
     DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteObject,
-    DrawFocusRect, DrawTextW, FillRect, FrameRect, GetDC, GetSysColor, GetSysColorBrush, HBRUSH,
-    RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RedrawWindow, ReleaseDC, SelectObject, SetBkMode,
-    SetTextColor, TRANSPARENT,
+    DrawFocusRect, DrawTextW, FillRect, FrameRect, GetDC, GetSysColor, GetSysColorBrush,
+    GetWindowDC, HBRUSH, HDC, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RedrawWindow,
+    ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows_sys::Win32::UI::Controls::{
     CDDS_PREPAINT, CDIS_DEFAULT, CDIS_DISABLED, CDIS_FOCUS, CDIS_HOT, CDIS_SELECTED,
@@ -24,8 +24,8 @@ use windows_sys::Win32::UI::Controls::{
 };
 use windows_sys::Win32::UI::Controls::{LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetWindowTextLengthW, GetWindowTextW, MENUINFO, MIM_APPLYTOSUBMENUS, MIM_BACKGROUND,
-    SendMessageW, SetMenuInfo, WM_GETFONT,
+    GetMenuBarInfo, GetWindowTextLengthW, GetWindowTextW, MENUBARINFO, MENUINFO,
+    MIM_APPLYTOSUBMENUS, MIM_BACKGROUND, OBJID_MENU, SendMessageW, SetMenuInfo, WM_GETFONT,
 };
 
 use super::*;
@@ -81,6 +81,34 @@ impl Drop for OwnedSolidBrush {
     }
 }
 
+struct OwnedWindowDc {
+    window: HWND,
+    dc: HDC,
+}
+
+impl OwnedWindowDc {
+    fn acquire(window: HWND) -> Option<Self> {
+        // SAFETY: window is the live top-level HWND. A successful window DC is
+        // paired with ReleaseDC by this wrapper on every subsequent path.
+        let dc = unsafe { GetWindowDC(window) };
+        (!dc.is_null()).then_some(Self { window, dc })
+    }
+
+    const fn as_raw(&self) -> HDC {
+        self.dc
+    }
+}
+
+impl Drop for OwnedWindowDc {
+    fn drop(&mut self) {
+        if !self.dc.is_null() {
+            // SAFETY: this is the exact DC returned for this HWND by GetWindowDC.
+            unsafe { ReleaseDC(self.window, self.dc) };
+            self.dc = null_mut();
+        }
+    }
+}
+
 /// GDI resources for the app-owned native surfaces only.
 pub(super) struct AppearanceResources {
     window: OwnedSolidBrush,
@@ -93,6 +121,7 @@ pub(super) struct AppearanceResources {
     control_hover: OwnedSolidBrush,
     control_pressed: OwnedSolidBrush,
     control_disabled: OwnedSolidBrush,
+    apply_readiness: OwnedSolidBrush,
     border: OwnedSolidBrush,
     palette: SemanticPalette,
 }
@@ -110,6 +139,7 @@ impl AppearanceResources {
             control_hover: OwnedSolidBrush::create(palette.control_hover)?,
             control_pressed: OwnedSolidBrush::create(palette.control_pressed)?,
             control_disabled: OwnedSolidBrush::create(palette.control_disabled)?,
+            apply_readiness: OwnedSolidBrush::create(palette.apply_keyline)?,
             border: OwnedSolidBrush::create(palette.border)?,
             palette,
         })
@@ -125,6 +155,10 @@ impl AppearanceResources {
 
     pub(super) const fn header_brush(&self) -> HBRUSH {
         self.header.as_raw()
+    }
+
+    pub(super) const fn status_brush(&self) -> HBRUSH {
+        self.status.as_raw()
     }
 
     pub(super) const fn dialog_brush(&self) -> HBRUSH {
@@ -214,6 +248,8 @@ pub(super) fn erase_themed_background(
     window: HWND,
     dc: HDC,
     resources: Option<&AppearanceResources>,
+    status: StatusChromeGeometry,
+    workspace: WorkspaceChromeGeometry,
 ) {
     let mut rect = windows_sys::Win32::Foundation::RECT::default();
     // SAFETY: window/dc are live for WM_ERASEBKGND and rect is writable.
@@ -228,11 +264,101 @@ pub(super) fn erase_themed_background(
         },
         AppearanceResources::window_brush,
     );
-    // SAFETY: dc and brush are live; rect is bounded to the client area.
-    unsafe { FillRect(dc, &rect, brush) };
+    let status_brush = resources.map_or_else(
+        || {
+            // SAFETY: COLOR_WINDOW is a process-global cached system brush.
+            unsafe { GetSysColorBrush(COLOR_WINDOW) }
+        },
+        AppearanceResources::status_brush,
+    );
+    let separator_brush = resources.map_or_else(
+        || {
+            // SAFETY: COLOR_3DSHADOW is a process-global cached system brush.
+            unsafe { GetSysColorBrush(COLOR_3DSHADOW) }
+        },
+        AppearanceResources::border_brush,
+    );
+    let outer = RECT {
+        left: status.outer.x,
+        top: status.outer.y,
+        right: status.outer.right(),
+        bottom: status.outer.bottom(),
+    };
+    let top_line = RECT {
+        left: status.outer.x,
+        top: status.outer.y,
+        right: status
+            .top_line_right
+            .clamp(status.outer.x, status.outer.right()),
+        bottom: status
+            .outer
+            .y
+            .saturating_add(i32::from(status.outer.height > 0)),
+    };
+    let boundary = status
+        .message_count_boundary
+        .clamp(status.outer.x, status.top_line_right);
+    let divider = RECT {
+        left: boundary,
+        top: top_line.bottom,
+        right: boundary.saturating_add(1),
+        bottom: status.outer.bottom(),
+    };
+    let left_list_divider = RECT {
+        left: workspace.left_list_divider.x,
+        top: workspace.left_list_divider.y,
+        right: workspace.left_list_divider.right(),
+        bottom: workspace.left_list_divider.bottom(),
+    };
+    let right_list_divider = RECT {
+        left: workspace.right_list_divider.x,
+        top: workspace.right_list_divider.y,
+        right: workspace.right_list_divider.right(),
+        bottom: workspace.right_list_divider.bottom(),
+    };
+    // SAFETY: dc and all selected brushes are live. Every rectangle is derived
+    // from the current client layout and checked for positive area before use.
+    unsafe {
+        FillRect(dc, &rect, brush);
+        if outer.left < outer.right && outer.top < outer.bottom {
+            FillRect(dc, &outer, status_brush);
+        }
+        if top_line.left < top_line.right && top_line.top < top_line.bottom {
+            FillRect(dc, &top_line, separator_brush);
+        }
+        for divider in [left_list_divider, right_list_divider] {
+            if divider.left < divider.right && divider.top < divider.bottom {
+                FillRect(dc, &divider, separator_brush);
+            }
+        }
+        if boundary > status.outer.x
+            && boundary < status.top_line_right
+            && divider.top < divider.bottom
+        {
+            FillRect(dc, &divider, separator_brush);
+        }
+    }
 }
 
 pub(super) fn draw_owner_button(resources: Option<&AppearanceResources>, lparam: LPARAM) -> bool {
+    draw_owner_button_with_readiness(resources, None, BASE_DPI, lparam)
+}
+
+pub(super) fn draw_owner_rail_button(
+    resources: Option<&AppearanceResources>,
+    apply_readiness_button: Option<HWND>,
+    dpi: u32,
+    lparam: LPARAM,
+) -> bool {
+    draw_owner_button_with_readiness(resources, apply_readiness_button, dpi, lparam)
+}
+
+fn draw_owner_button_with_readiness(
+    resources: Option<&AppearanceResources>,
+    apply_readiness_button: Option<HWND>,
+    dpi: u32,
+    lparam: LPARAM,
+) -> bool {
     let draw = lparam as *const DRAWITEMSTRUCT;
     if draw.is_null() {
         return false;
@@ -247,6 +373,7 @@ pub(super) fn draw_owner_button(resources: Option<&AppearanceResources>, lparam:
         draw.hwndItem,
         draw.hDC,
         draw.rcItem,
+        (apply_readiness_button == Some(draw.hwndItem)).then_some(dpi),
         ButtonDrawState {
             disabled: draw.itemState & (ODS_DISABLED | ODS_GRAYED) != 0,
             pressed: draw.itemState & ODS_SELECTED != 0,
@@ -316,6 +443,7 @@ pub(super) fn draw_custom_button(
         unsafe { (*custom).hdc },
         // SAFETY: the rectangle is copied integral callback data.
         unsafe { (*custom).rc },
+        None,
         ButtonDrawState {
             disabled: state & CDIS_DISABLED != 0,
             pressed: state & CDIS_SELECTED != 0,
@@ -341,6 +469,7 @@ fn paint_button(
     button: HWND,
     dc: HDC,
     rect: windows_sys::Win32::Foundation::RECT,
+    apply_readiness_dpi: Option<u32>,
     state: ButtonDrawState,
 ) {
     let ButtonDrawState {
@@ -395,6 +524,27 @@ fn paint_button(
         inner.bottom = inner.bottom.saturating_sub(1);
         // SAFETY: inner remains inside rect and the border brush is live.
         unsafe { FrameRect(dc, &inner, border) };
+    }
+    if let (Some(resources), Some(dpi)) = (resources, apply_readiness_dpi)
+        && let Some(indicator) = calculate_apply_readiness_indicator_rect(
+            LayoutRect {
+                x: rect.left,
+                y: rect.top,
+                width: rect.right.saturating_sub(rect.left),
+                height: rect.bottom.saturating_sub(rect.top),
+            },
+            dpi,
+        )
+    {
+        let indicator = windows_sys::Win32::Foundation::RECT {
+            left: indicator.x,
+            top: indicator.y,
+            right: indicator.x.saturating_add(indicator.width),
+            bottom: indicator.y.saturating_add(indicator.height),
+        };
+        // SAFETY: the callback DC and readiness brush are live, and the pure
+        // rectangle is strictly bounded inside the owner-draw button.
+        unsafe { FillRect(dc, &indicator, resources.apply_readiness.as_raw()) };
     }
     // SAFETY: button is the live native BUTTON being drawn.
     let length = unsafe { GetWindowTextLengthW(button) };
@@ -724,19 +874,60 @@ fn apply_menu_background(menu: HMENU, resources: Option<&AppearanceResources>) -
     }
 }
 
+fn screen_layout_rect(rect: RECT) -> Option<LayoutRect> {
+    Some(LayoutRect {
+        x: rect.left,
+        y: rect.top,
+        width: rect.right.checked_sub(rect.left)?,
+        height: rect.bottom.checked_sub(rect.top)?,
+    })
+}
+
+pub(super) fn paint_menu_bottom_edge(window: HWND, color: u32) {
+    let mut menu = MENUBARINFO {
+        cbSize: u32::try_from(size_of::<MENUBARINFO>()).unwrap_or(u32::MAX),
+        ..MENUBARINFO::default()
+    };
+    // SAFETY: window is live and menu is exact initialized writable storage for
+    // this synchronous top-level menu query.
+    if unsafe { GetMenuBarInfo(window, OBJID_MENU, 0, &mut menu) } == 0 {
+        return;
+    }
+    let mut window_rect = RECT::default();
+    // SAFETY: window is live and window_rect remains writable for this query.
+    if unsafe { GetWindowRect(window, &mut window_rect) } == 0 {
+        return;
+    }
+    let Some(window_screen) = screen_layout_rect(window_rect) else {
+        return;
+    };
+    let Some(menu_screen) = screen_layout_rect(menu.rcBar) else {
+        return;
+    };
+    let Some(edge) = calculate_menu_bottom_edge(window_screen, menu_screen) else {
+        return;
+    };
+    let Some(dc) = OwnedWindowDc::acquire(window) else {
+        return;
+    };
+    let Ok(brush) = OwnedSolidBrush::create(color) else {
+        return;
+    };
+    let rect = RECT {
+        left: edge.x,
+        top: edge.y,
+        right: edge.right(),
+        bottom: edge.bottom(),
+    };
+    // SAFETY: dc and brush are live RAII-owned GDI handles and rect is readable
+    // for this synchronous one-pixel fill.
+    unsafe { FillRect(dc.as_raw(), &rect, brush.as_raw()) };
+}
+
 pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io::Result<()> {
     let resolved = state.resolved_appearance();
     let palette = semantic_palette(resolved.theme);
     let replacement = palette.map(AppearanceResources::create).transpose()?;
-
-    if let Some(palette) = palette {
-        if let Some(rail) = state.left_rail.as_mut() {
-            rail.set_apply_keyline_color(palette.apply_keyline)?;
-        }
-        if let Some(rail) = state.right_rail.as_mut() {
-            rail.set_apply_keyline_color(palette.apply_keyline)?;
-        }
-    }
 
     // Install the replacement brush while both old and new resources remain
     // alive. Only a successful menu update permits dropping the old brush set.
@@ -778,6 +969,17 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
         rail.set_separators_visible(resolved.appearance.show_separators);
     }
     state.appearance_resources = replacement;
+    // Mirror only the scalar COLORREF into the callback allocation's disjoint
+    // sidecar. Nested non-client callbacks can read it without borrowing the
+    // AppState value whose resources established this successful appearance.
+    // SAFETY: this main-window AppState is currently published from the live
+    // UI-thread slot; the method touches only its separate scalar Cell.
+    unsafe {
+        CallbackState::set_menu_edge_color(
+            app_state_slot(window),
+            palette.map(|palette| palette.surface_window),
+        )
+    };
     state.menu_fallback_resources.clear();
     apply_dwm_title_frame(window, state, resolved.theme);
     // SAFETY: window is the live top-level HWND. One invalidation repaints all
@@ -787,7 +989,7 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
             window,
             null(),
             null_mut(),
-            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
+            RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN,
         )
     };
     Ok(())

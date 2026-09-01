@@ -43,16 +43,19 @@ fn minimum_track_width(window: HWND, state: &AppState) -> i32 {
     let baseline_rail_width = density
         .minimum_density()
         .map_or(0, |minimum| minimum.metrics(state.dpi).rail_width);
+    let workspace_divider_width = i32::from(rail_width > 0).saturating_mul(2);
     let measured_content_width = scale_dip(minimum_content_width_dip(), state.dpi)
         .saturating_add(
             rail_width
                 .saturating_sub(baseline_rail_width)
                 .saturating_mul(2),
         )
+        .saturating_add(workspace_divider_width)
         .max(
             rail_width
                 .saturating_mul(2)
-                .saturating_add(state.font_metrics.empty_state_minimum_width(state.dpi)),
+                .saturating_add(state.font_metrics.empty_state_minimum_width(state.dpi))
+                .saturating_add(workspace_divider_width),
         );
     scale_dip(INITIAL_WIDTH, state.dpi).max(measured_content_width.saturating_add(nonclient_width))
 }
@@ -451,7 +454,33 @@ fn run_unsafe() -> io::Result<()> {
     Ok(())
 }
 
-unsafe extern "system" fn window_proc(
+pub(super) fn handle_list_marquee_begin(list_window: HWND, lparam: LPARAM) -> Option<LRESULT> {
+    let header = lparam as *const NMHDR;
+    if header.is_null()
+        // SAFETY: WM_NOTIFY supplies a readable NMHDR prefix for this
+        // synchronous callback; the null pointer was rejected above.
+        || unsafe { (*header).hwndFrom } != list_window
+    {
+        return None;
+    }
+    // Read the notification code only after validating the exact source HWND.
+    // SAFETY: same live NMHDR prefix and verified ListView sender as above.
+    if unsafe { (*header).code } != LVN_MARQUEEBEGIN {
+        return None;
+    }
+    // Query native state rather than the model: refresh can temporarily make
+    // the two counts differ, while marquee selection acts on rendered rows.
+    // SAFETY: list_window is the live sender verified from this synchronous
+    // notification, and LVM_GETITEMCOUNT has no pointer payload.
+    let item_count = unsafe { SendMessageW(list_window, LVM_GETITEMCOUNT, 0, 0) };
+    Some(if item_count == 0 { 1 } else { 0 })
+}
+
+const fn repaints_menu_bottom_edge(message: u32) -> bool {
+    matches!(message, WM_NCPAINT | WM_NCACTIVATE)
+}
+
+pub(super) unsafe extern "system" fn window_proc(
     window: HWND,
     message: u32,
     wparam: WPARAM,
@@ -477,11 +506,12 @@ unsafe extern "system" fn window_proc(
             // SAFETY: this final callback owns the publication slot. Clearing it
             // prevents any nested or queued callback from reaching the state.
             unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, 0) };
-            // SAFETY: both identifiers belong to this exact top-level window;
+            // SAFETY: all timer identifiers belong to this exact top-level window;
             // killing absent timers is harmless during defensive teardown.
             unsafe {
                 KillTimer(window, APPLY_POLL_TIMER_ID);
                 KillTimer(window, PREFERENCES_POLL_TIMER_ID);
+                KillTimer(window, STATUS_RENDER_TIMER_ID);
             }
             // SAFETY: the slot is still live. Its sidecar is disjoint from a
             // possibly leased AppState value and is taken at most once.
@@ -492,6 +522,23 @@ unsafe extern "system" fn window_proc(
         }
         // SAFETY: arguments are unchanged values from the final callback.
         return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+    }
+    if repaints_menu_bottom_edge(message) {
+        // The scalar color sidecar is disjoint from AppState and remains
+        // readable during a nested modal callback's value lease. Copy it
+        // before default processing, which may synchronously destroy the HWND.
+        // SAFETY: state_slot is either null or the live UI-thread publication;
+        // this method touches only its scalar sidecar and never AppState.
+        let color = unsafe { CallbackState::menu_edge_color(state_slot) };
+        // SAFETY: arguments are unchanged copied values from this active
+        // non-client callback. Its return value remains authoritative.
+        let result = unsafe { DefWindowProcW(window, message, wparam, lparam) };
+        if let Some(color) = color {
+            // No state-slot access occurs after default processing; an HWND
+            // destroyed during that call makes the best-effort GDI queries fail.
+            paint_menu_bottom_edge(window, color);
+        }
+        return result;
     }
     // SAFETY: the slot is the current UI-thread publication and remains live
     // until this callback either releases or defers reclamation of its lease.
@@ -538,7 +585,15 @@ unsafe extern "system" fn window_proc(
             // SAFETY: child creation succeeded and this callback retains the
             // allocation's sole AppState lease.
             start_preferences_writers(window, unsafe { &mut *state_ptr });
-            0
+            // SetWindowPos can synchronously reenter the callback graph. The
+            // copied ListView HWND is sufficient for the z-order repair, so end
+            // the AppState lease before placing it behind every direct sibling.
+            drop(state_lease);
+            if place_list_view_below_siblings(list).is_err() {
+                -1
+            } else {
+                0
+            }
         }
         WM_SIZE if !state_ptr.is_null() => {
             // SAFETY: state_ptr is non-null window-owned AppState storage and no
@@ -633,16 +688,45 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_APP_EMPTY_SAFETY_COPY if !state_ptr.is_null() => {
-            // Copy the target HWND in a tiny UI-thread borrow that ends before
-            // SetWindowTextW can synchronously enter control/accessibility code.
-            // SAFETY: state_ptr is the live AppState published by this window.
+            // Copy only owned/scalar routing values, then release the callback
+            // lease before SetWindowTextW can synchronously request colors.
+            // SAFETY: state_ptr is the live AppState under this callback's sole
+            // lease; only the copyable HWND crosses the release boundary.
             let safety = unsafe { (*state_ptr).empty_safety };
             let mode = if wparam == 0 {
                 RailMode::MenuOnly
             } else {
                 RailMode::Compact
             };
-            set_status(safety, empty_state_safety_copy(mode));
+            let text = empty_state_safety_copy(mode);
+            run_after_callback_state_release(state_lease, || set_status(safety, text));
+            0
+        }
+        WM_TIMER if !state_ptr.is_null() && wparam == STATUS_RENDER_TIMER_ID => {
+            // Stop the coalescing timer only after this callback acquires the
+            // state lease. A busy nested WM_TIMER exits above without killing
+            // it, so the low-priority timer can retry after the nested loop.
+            // SAFETY: window owns this exact timer identifier; killing an
+            // absent timer is harmless and carries no callback payload.
+            unsafe { KillTimer(window, STATUS_RENDER_TIMER_ID) };
+            // Snapshot both channels as owned text plus copied HWNDs, then end
+            // the sole AppState lease before SetWindowTextW can synchronously
+            // enter accessibility or WM_CTLCOLORSTATIC callbacks.
+            // SAFETY: state_ptr is the live AppState under this callback's sole
+            // lease; no AppState reference crosses the release boundary.
+            let (status_message, status_count, message_text, count_text) = unsafe {
+                let state = &*state_ptr;
+                (
+                    state.status_message,
+                    state.status_count,
+                    state.ui_status.message_text().to_owned(),
+                    state.ui_status.count_text(),
+                )
+            };
+            run_after_callback_state_release(state_lease, || {
+                set_status(status_message, &message_text);
+                set_status(status_count, &count_text);
+            });
             0
         }
         WM_GETMINMAXINFO if !state_ptr.is_null() => {
@@ -837,8 +921,21 @@ unsafe extern "system" fn window_proc(
         WM_ERASEBKGND if !state_ptr.is_null() => {
             // SAFETY: state_ptr is live UI-thread state and wparam is the
             // callback-owned paint DC for this exact top-level window.
-            let resources = unsafe { (*state_ptr).appearance_resources.as_ref() };
-            erase_themed_background(window, wparam as HDC, resources);
+            let (resources, status_chrome, workspace_chrome) = unsafe {
+                let state = &*state_ptr;
+                (
+                    state.appearance_resources.as_ref(),
+                    state.status_chrome,
+                    state.workspace_chrome,
+                )
+            };
+            erase_themed_background(
+                window,
+                wparam as HDC,
+                resources,
+                status_chrome,
+                workspace_chrome,
+            );
             1
         }
         WM_DRAWITEM if !state_ptr.is_null() => {
@@ -846,7 +943,17 @@ unsafe extern "system" fn window_proc(
             // only the synchronous WM_DRAWITEM payload.
             let state = unsafe { &*state_ptr };
             let resources = state.appearance_resources.as_ref();
-            if draw_owner_button(resources, lparam)
+            let apply_readiness_button = state
+                .left_rail
+                .as_ref()
+                .and_then(CommandRail::active_apply_readiness_button)
+                .or_else(|| {
+                    state
+                        .right_rail
+                        .as_ref()
+                        .and_then(CommandRail::active_apply_readiness_button)
+                });
+            if draw_owner_rail_button(resources, apply_readiness_button, state.dpi, lparam)
                 || state
                     .left_rail
                     .as_ref()
@@ -877,32 +984,24 @@ unsafe extern "system" fn window_proc(
         WM_CTLCOLORSTATIC if !state_ptr.is_null() => {
             let child = lparam as HWND;
             // Copy all routing values in a tiny borrow that ends before any GDI
-            // call. Keyline matching remains the first and exact route.
+            // call.
             // SAFETY: state_ptr is live UI-thread state for this callback.
-            let (keyline_brush, custom_colors, instruction, safety) = unsafe {
+            let (custom_colors, instruction, safety, status_message, status_count) = unsafe {
                 let state = &*state_ptr;
-                let keyline_brush = state
-                    .left_rail
-                    .as_ref()
-                    .and_then(|rail| rail.apply_keyline_brush_for(child))
-                    .or_else(|| {
-                        state
-                            .right_rail
-                            .as_ref()
-                            .and_then(|rail| rail.apply_keyline_brush_for(child))
-                    });
                 (
-                    keyline_brush,
                     static_control_colors(state, child),
                     state.empty_instruction,
                     state.empty_safety,
+                    state.status_message,
+                    state.status_count,
                 )
             };
             if let Some(brush) = route_static_control_colors(
-                keyline_brush,
                 custom_colors,
                 instruction,
                 safety,
+                status_message,
+                status_count,
                 child,
                 wparam as HDC,
             ) {
@@ -959,6 +1058,12 @@ unsafe extern "system" fn window_proc(
                 if matches!(code, LVN_ITEMCHANGED | HDN_ITEMCHANGINGW | HDN_ITEMCHANGEDW) {
                     return 0;
                 }
+            }
+            // SAFETY: this callback owns the sole state lease; only the copied
+            // ListView HWND is passed to the source-validating native query.
+            let list_window = unsafe { (*state_ptr).list_window };
+            if let Some(result) = handle_list_marquee_begin(list_window, lparam) {
+                return result;
             }
             // SAFETY: state_ptr is the live UI-thread AppState and the custom
             // draw helper validates the synchronous WM_NOTIFY payload/source.
@@ -1070,16 +1175,14 @@ unsafe extern "system" fn window_proc(
 }
 
 pub(super) fn route_static_control_colors(
-    keyline_brush: Option<HBRUSH>,
     custom_colors: Option<StaticControlColors>,
     empty_instruction: HWND,
     empty_safety: HWND,
+    status_message: HWND,
+    status_count: HWND,
     child: HWND,
     dc: HDC,
 ) -> Option<HBRUSH> {
-    if let Some(brush) = keyline_brush {
-        return Some(brush);
-    }
     if let Some(colors) = custom_colors {
         // SAFETY: WM_CTLCOLORSTATIC supplies a live HDC. AppState owns the
         // selected brush through this synchronous paint callback.
@@ -1089,7 +1192,11 @@ pub(super) fn route_static_control_colors(
         }
         return Some(colors.brush);
     }
-    if child != empty_instruction && child != empty_safety {
+    if child != empty_instruction
+        && child != empty_safety
+        && child != status_message
+        && child != status_count
+    {
         return None;
     }
     // SAFETY: WM_CTLCOLORSTATIC supplies a live HDC. System colors and the
@@ -1098,5 +1205,17 @@ pub(super) fn route_static_control_colors(
         SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
         SetBkColor(dc, GetSysColor(COLOR_WINDOW));
         Some(GetSysColorBrush(COLOR_WINDOW))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn menu_bottom_edge_repaints_for_paint_and_activation_messages() {
+        assert!(repaints_menu_bottom_edge(WM_NCPAINT));
+        assert!(repaints_menu_bottom_edge(WM_NCACTIVATE));
+        assert!(!repaints_menu_bottom_edge(WM_ERASEBKGND));
     }
 }

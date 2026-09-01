@@ -271,8 +271,8 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
             null(),
             WS_CHILD
                 | WS_VISIBLE
-                | WS_BORDER
                 | WS_TABSTOP
+                | WS_CLIPSIBLINGS
                 | LVS_REPORT
                 | LVS_SHOWSELALWAYS
                 | LVS_SHAREIMAGELISTS
@@ -380,20 +380,42 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
     Ok(())
 }
 
+pub(super) fn place_list_view_below_siblings(list_window: HWND) -> io::Result<()> {
+    // SAFETY: callers pass the copied HWND of a live direct child without
+    // retaining AppState. The flags alter only its sibling z-order, preserving
+    // geometry, activation, and the SWP_NOZORDER layout contract.
+    if unsafe {
+        SetWindowPos(
+            list_window,
+            HWND_BOTTOM,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+    } == 0
+    {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 pub(super) fn create_status_controls(parent: HWND) -> io::Result<(HWND, HWND, HWND)> {
     let message = child(
         parent,
         "STATIC",
         "",
         STATUS_MESSAGE_ID as u16,
-        SS_CENTERIMAGE | SS_SUNKEN | SS_NOPREFIX | SS_ENDELLIPSIS,
+        SS_CENTERIMAGE | SS_NOPREFIX | SS_ENDELLIPSIS,
     )?;
     let count = child(
         parent,
         "STATIC",
         "",
         STATUS_COUNT_ID as u16,
-        SS_CENTERIMAGE | SS_SUNKEN | SS_NOPREFIX | SS_ENDELLIPSIS,
+        SS_CENTERIMAGE | SS_NOPREFIX | SS_ENDELLIPSIS,
     )?;
     let cancel = child(
         parent,
@@ -569,6 +591,8 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
         appearance.show_empty_safety,
         status_layout_input,
     );
+    state.status_chrome = layout.status_chrome;
+    state.workspace_chrome = layout.workspace_chrome;
     let rails_visible = layout.rail_mode != RailMode::MenuOnly;
     let previously_focused = focused_child(state);
     let mut windows = Vec::with_capacity(main_layout_window_count(&layout));
@@ -614,7 +638,7 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
         };
     }
     state.rails_visible = rails_visible;
-    refresh_apply_keyline(
+    refresh_apply_readiness(
         state,
         if state.command_states[0] {
             ApplyPresentation::Ready
@@ -734,7 +758,7 @@ pub(super) fn update_controls(state: &mut AppState) {
         };
     }
     apply_command_states(state);
-    refresh_apply_keyline(state, presentation.apply);
+    refresh_apply_readiness(state, presentation.apply);
     apply_cancel_control_state(state);
     apply_empty_state_presentation(state, presentation.empty);
     repair_focus_state(state);
@@ -763,13 +787,14 @@ pub(super) fn update_controls(state: &mut AppState) {
     }
 }
 
-pub(super) fn refresh_apply_keyline(state: &AppState, apply: ApplyPresentation) {
-    let requested = apply_keyline_visible(apply, state.forced_colors, state.rails_visible);
+pub(super) fn refresh_apply_readiness(state: &AppState, apply: ApplyPresentation) {
+    let requested =
+        apply_readiness_indicator_visible(apply, state.forced_colors, state.rails_visible);
     if let Some(rail) = &state.left_rail {
-        rail.set_apply_keyline_visible(requested);
+        rail.set_apply_readiness_visible(requested);
     }
     if let Some(rail) = &state.right_rail {
-        rail.set_apply_keyline_visible(requested);
+        rail.set_apply_readiness_visible(requested);
     }
 }
 
