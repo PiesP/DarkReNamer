@@ -289,9 +289,12 @@ fn binary_size_matrix_is_manual_serial_and_non_publishing() {
     ));
     assert!(workflow.contains("SOURCE_DATE_EPOCH=$sourceEpoch"));
     assert!(workflow.contains("cargo_config_sha256 = $configHash"));
-    assert!(workflow.contains("cargo_toml_sha256 = (Get-FileHash"));
-    assert!(workflow.contains("cargo_lock_sha256 = (Get-FileHash"));
-    assert!(workflow.contains("rust_toolchain_toml_sha256 = (Get-FileHash"));
+    assert_eq!(
+        workflow
+            .matches("./scripts/get-git-blob-sha256.ps1")
+            .count(),
+        3
+    );
     assert!(workflow.contains("./scripts/measure-windows-binary.ps1"));
     assert!(workflow.contains("binary-size-matrix.json"));
     assert!(workflow.contains(
@@ -362,7 +365,12 @@ fn profile_benchmark_matrix_is_directional_serial_and_non_publishing() {
         "cargo --config $configPath test --release --locked `\n              --package darknamer-app --test profile_benchmarks --no-run"
     ));
     assert!(workflow.contains("profile-benchmark-matrix.json"));
-    assert!(workflow.contains("harness_sha256 = (Get-FileHash"));
+    assert_eq!(
+        workflow
+            .matches("./scripts/get-git-blob-sha256.ps1")
+            .count(),
+        4
+    );
     assert!(workflow.contains(
         "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1"
     ));

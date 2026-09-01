@@ -295,12 +295,16 @@ jobs:
             workload_count = 10000
             warmup_iterations = 1
             recorded_iterations = 5
-            cargo_toml_sha256 = (Get-FileHash -LiteralPath Cargo.toml -Algorithm SHA256).Hash.ToLowerInvariant()
-            cargo_lock_sha256 = (Get-FileHash -LiteralPath Cargo.lock -Algorithm SHA256).Hash.ToLowerInvariant()
-            rust_toolchain_toml_sha256 = (Get-FileHash -LiteralPath rust-toolchain.toml -Algorithm SHA256).Hash.ToLowerInvariant()
-            harness_sha256 = (Get-FileHash `
-                -LiteralPath crates/darknamer-app/tests/profile_benchmarks.rs `
-                -Algorithm SHA256).Hash.ToLowerInvariant()
+            cargo_toml_sha256 = ./scripts/get-git-blob-sha256.ps1 `
+              -SourceRoot $PWD -Revision $env:SOURCE_SHA -Path Cargo.toml
+            cargo_lock_sha256 = ./scripts/get-git-blob-sha256.ps1 `
+              -SourceRoot $PWD -Revision $env:SOURCE_SHA -Path Cargo.lock
+            rust_toolchain_toml_sha256 = ./scripts/get-git-blob-sha256.ps1 `
+              -SourceRoot $PWD -Revision $env:SOURCE_SHA -Path rust-toolchain.toml
+            harness_sha256 = ./scripts/get-git-blob-sha256.ps1 `
+              -SourceRoot $PWD `
+              -Revision $env:SOURCE_SHA `
+              -Path crates/darknamer-app/tests/profile_benchmarks.rs
             variants = $variantResults.ToArray()
           }
           [IO.File]::WriteAllText(
