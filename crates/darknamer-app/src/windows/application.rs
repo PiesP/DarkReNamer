@@ -556,11 +556,9 @@ unsafe extern "system" fn window_proc(
         drain_deferred_messages(window);
         return 0;
     }
-    if message != WM_NCDESTROY && !app_callback_is_busy(window) && has_deferred_messages(window) {
-        // A previous PostMessageW failure retains the owned notice. The next
-        // lease-free callback drains it before borrowing AppState again.
-        drain_deferred_messages(window);
-    }
+    // A previous PostMessageW failure retains the owned notice. The next
+    // lease-free callback drains it before borrowing AppState again.
+    let _ = drain_retained_messages_before_callback(window, message, show_message_now);
     if message == WM_NCDESTROY {
         discard_deferred_messages(window);
         if !state_slot.is_null() {
@@ -1624,11 +1622,19 @@ mod tests {
             "discarded caption",
             |_| false,
         ));
-        let retained = take_deferred_message(app.owner)
-            .ok_or_else(|| io::Error::other("failed wake discarded deferred text"))?;
-        assert_eq!(retained.text, "discarded text");
-        assert_eq!(retained.caption, "discarded caption");
         drop(lease);
+        let recovered = RefCell::new(Vec::new());
+        assert!(drain_retained_messages_before_callback(
+            app.owner,
+            0,
+            |_, text, caption| recovered
+                .borrow_mut()
+                .push((text.to_owned(), caption.to_owned())),
+        ));
+        assert_eq!(
+            recovered.into_inner(),
+            vec![("discarded text".to_owned(), "discarded caption".to_owned())]
+        );
         assert!(!defer_message_if_callback_busy(
             app.owner,
             "immediate text",
@@ -1671,6 +1677,16 @@ mod tests {
                 ("second".to_owned(), "two".to_owned()),
             ]
         );
+        assert!(take_deferred_message(owner).is_none());
+
+        DEFERRED_MESSAGES.with(|messages| {
+            messages.borrow_mut().push_back(DeferredMessage {
+                owner: owner as usize,
+                text: "destroyed".to_owned(),
+                caption: "owner".to_owned(),
+            });
+        });
+        discard_deferred_messages(owner);
         assert!(take_deferred_message(owner).is_none());
     }
 

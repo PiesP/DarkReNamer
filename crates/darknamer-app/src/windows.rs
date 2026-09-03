@@ -916,6 +916,17 @@ fn drain_deferred_messages(owner: HWND) {
     let _ = drain_deferred_messages_with(owner, show_message_now);
 }
 
+fn drain_retained_messages_before_callback(
+    owner: HWND,
+    callback_message: u32,
+    show: impl FnMut(HWND, &str, &str),
+) -> bool {
+    callback_message != WM_NCDESTROY
+        && !app_callback_is_busy(owner)
+        && has_deferred_messages(owner)
+        && drain_deferred_messages_with(owner, show)
+}
+
 fn defer_message_if_callback_busy(
     owner: HWND,
     text: &str,
