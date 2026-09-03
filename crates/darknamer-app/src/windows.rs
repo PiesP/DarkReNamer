@@ -935,10 +935,18 @@ fn defer_message_if_callback_busy(
             caption: caption.to_owned(),
         });
     });
-    // A failed wake must not discard safety-relevant text. A later enqueue or
-    // callback can retry/drain the still-owned queue without reentering state.
+    // A failed wake must not discard safety-relevant text. A later callback
+    // retries scheduling without entering a modal UI or borrowing AppState.
     let _posted = post(owner);
     true
+}
+
+fn schedule_deferred_message_wake(
+    owner: HWND,
+    post: impl FnOnce(HWND) -> bool,
+    set_timer: impl FnOnce(HWND) -> bool,
+) -> bool {
+    post(owner) || set_timer(owner)
 }
 
 fn app_callback_is_busy(owner: HWND) -> bool {
@@ -950,15 +958,19 @@ fn app_callback_is_busy(owner: HWND) -> bool {
 
 pub(super) fn message(owner: HWND, text: &str, caption: &str) {
     let deferred = defer_message_if_callback_busy(owner, text, caption, |window| {
-        // SAFETY: the message carries no pointer. The UI-thread queue owns all
-        // text until the top-level callback consumes or discards it.
-        if unsafe { PostMessageW(window, WM_APP_SHOW_DEFERRED_MESSAGE, 0, 0) } != 0 {
-            true
-        } else {
-            // SAFETY: this pointer-free timer belongs to the same live owner.
-            // If the queue is currently busy, it remains armed for a later tick.
-            unsafe { SetTimer(window, DEFERRED_MESSAGE_TIMER_ID, 1, None) != 0 }
-        }
+        schedule_deferred_message_wake(
+            window,
+            |target| {
+                // SAFETY: the message carries no pointer. The UI-thread queue
+                // owns all text until a dedicated callback consumes it.
+                unsafe { PostMessageW(target, WM_APP_SHOW_DEFERRED_MESSAGE, 0, 0) != 0 }
+            },
+            |target| {
+                // SAFETY: this pointer-free timer belongs to the same live owner.
+                // If the queue is currently busy, it remains armed for a later tick.
+                unsafe { SetTimer(target, DEFERRED_MESSAGE_TIMER_ID, 1, None) != 0 }
+            },
+        )
     });
     if !deferred {
         show_message_now(owner, text, caption);

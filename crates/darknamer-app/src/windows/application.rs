@@ -578,6 +578,22 @@ unsafe extern "system" fn window_proc(
         let _ = drain_deferred_messages_if_available(window, show_message_now);
         return 0;
     }
+    if message != WM_NCDESTROY && !app_callback_is_busy(window) && has_deferred_messages(window) {
+        // Scheduling is non-modal and pointer-free, so this callback may safely
+        // continue with its already-copied state slot. Repeated ordinary
+        // callbacks retry if both queue wake mechanisms previously failed.
+        let _ = schedule_deferred_message_wake(
+            window,
+            |target| {
+                // SAFETY: the private message carries no pointer payload.
+                unsafe { PostMessageW(target, WM_APP_SHOW_DEFERRED_MESSAGE, 0, 0) != 0 }
+            },
+            |target| {
+                // SAFETY: this pointer-free timer belongs to the live owner.
+                unsafe { SetTimer(target, DEFERRED_MESSAGE_TIMER_ID, 1, None) != 0 }
+            },
+        );
+    }
     if message == WM_NCDESTROY {
         discard_deferred_messages(window);
         if !state_slot.is_null() {
@@ -1712,6 +1728,33 @@ mod tests {
         });
         discard_deferred_messages(owner);
         assert!(take_deferred_message(owner).is_none());
+    }
+
+    #[test]
+    fn deferred_message_wake_retries_after_both_schedulers_fail() {
+        let owner = null_mut();
+        let attempts = Cell::new(0_u8);
+        assert!(!schedule_deferred_message_wake(
+            owner,
+            |_| {
+                attempts.set(attempts.get().saturating_add(1));
+                false
+            },
+            |_| {
+                attempts.set(attempts.get().saturating_add(1));
+                false
+            },
+        ));
+        assert_eq!(attempts.get(), 2);
+        assert!(schedule_deferred_message_wake(
+            owner,
+            |_| {
+                attempts.set(attempts.get().saturating_add(1));
+                true
+            },
+            |_| false,
+        ));
+        assert_eq!(attempts.get(), 3);
     }
 
     #[test]
