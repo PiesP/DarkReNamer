@@ -1335,6 +1335,7 @@ mod tests {
 
     const FILE_DIALOG_DRAWITEM_SUBCLASS_ID: usize = 0xD4B4;
     static FILE_DIALOG_DRAWITEM_LEASED: AtomicBool = AtomicBool::new(false);
+    static FILE_DIALOG_TEST_SERIAL: Mutex<()> = Mutex::new(());
     static APPEARANCE_CREATE_REENTERED: AtomicBool = AtomicBool::new(false);
     static APPEARANCE_FOCUSED: AtomicBool = AtomicBool::new(false);
     static APPEARANCE_GUARD_CREATED: AtomicBool = AtomicBool::new(false);
@@ -1785,6 +1786,9 @@ mod tests {
     #[test]
     fn real_file_dialog_pipeline_routes_all_commands_and_cleans_sessions()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _serial = FILE_DIALOG_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let app = PublishedFileDialogTestApp::new()?;
         FILE_DIALOG_DRAWITEM_LEASED.store(false, Ordering::SeqCst);
         app.dispatch_with_selector(ADD_FILES, |owner, kind| {
@@ -1981,6 +1985,9 @@ mod tests {
     #[test]
     fn real_discard_task_dialog_runs_after_release_and_revalidates_the_journal()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _serial = FILE_DIALOG_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let app = PublishedFileDialogTestApp::new()?;
         let (candidate, _) = app.install_staged_intent()?;
         FILE_DIALOG_DRAWITEM_LEASED.store(false, Ordering::SeqCst);
@@ -2067,6 +2074,9 @@ mod tests {
     #[test]
     fn real_recovery_export_pipeline_copies_retained_bytes_and_rejects_stale_state()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _serial = FILE_DIALOG_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let app = PublishedFileDialogTestApp::new()?;
         let (_candidate, expected_bytes) = app.install_staged_intent()?;
         let cancelled = app._directory.path().join("cancelled-export");
@@ -2225,6 +2235,9 @@ mod tests {
     #[test]
     fn real_directory_task_dialog_releases_state_and_restarts_current_admission()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _serial = FILE_DIALOG_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let app = PublishedFileDialogTestApp::new()?;
         let directory = app._directory.path().join("selected-directory");
         fs::create_dir(&directory)?;
@@ -2266,6 +2279,9 @@ mod tests {
     #[test]
     fn real_apply_task_dialog_releases_state_and_confirms_the_same_plan()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _serial = FILE_DIALOG_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let app = PublishedFileDialogTestApp::new()?;
         let source = app._directory.path().join("before.txt");
         let destination = app._directory.path().join("after.txt");

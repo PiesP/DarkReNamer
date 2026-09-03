@@ -855,9 +855,13 @@ impl DeferredMessageDrainGuard {
     fn begin(owner: HWND) -> Option<Self> {
         DRAINING_DEFERRED_MESSAGES.with(|owners| {
             let mut owners = owners.borrow_mut();
-            owners.insert(owner as usize).then_some(Self {
-                owner: owner as usize,
-            })
+            if owners.insert(owner as usize) {
+                Some(Self {
+                    owner: owner as usize,
+                })
+            } else {
+                None
+            }
         })
     }
 }
