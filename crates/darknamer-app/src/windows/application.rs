@@ -1260,6 +1260,13 @@ mod tests {
         fn new() -> Result<Self, Box<dyn std::error::Error>> {
             let directory = tempfile::tempdir()?;
             let state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+            let controls = INITCOMMONCONTROLSEX {
+                dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+                dwICC: ICC_LISTVIEW_CLASSES | ICC_WIN95_CLASSES,
+            };
+            // SAFETY: controls has the exact ABI size and remains live for the
+            // synchronous process-wide common-controls initialization call.
+            unsafe { InitCommonControlsEx(&controls) };
             let class = wide("STATIC");
             // SAFETY: the system STATIC class and current module remain live
             // for this hidden, test-owned top-level window.
@@ -1462,6 +1469,7 @@ mod tests {
     #[test]
     fn real_file_dialog_pipeline_rejects_stale_locked_and_mismatched_sessions()
     -> Result<(), Box<dyn std::error::Error>> {
+        #[derive(Clone, Copy)]
         enum Blocker {
             StaleRevision,
             Close,
@@ -1497,6 +1505,57 @@ mod tests {
             });
             assert!(!selector_called.get());
             app.assert_session_cleared()?;
+            if matches!(blocker, Blocker::Worker) {
+                app.drain_admission()?;
+            }
+        }
+
+        // Revalidate after the modal boundary as well as before it. Each
+        // selector changes state only after the production runner has accepted
+        // the prepared session, then returns an otherwise valid save result.
+        for blocker in [
+            Blocker::StaleRevision,
+            Blocker::Close,
+            Blocker::ReadOnly,
+            Blocker::Mutation,
+            Blocker::Worker,
+        ] {
+            let app = PublishedFileDialogTestApp::new()?;
+            let output = app._directory.path().join("stale-modal-result.txt");
+            let expected_kind = Cell::new(false);
+            app.dispatch_with_selector(SAVE_PATHS, |_, kind| {
+                let text = match kind {
+                    PreparedFileDialogKind::SaveText { text, names: false } => {
+                        expected_kind.set(true);
+                        text
+                    }
+                    _ => LegacyText::default(),
+                };
+                assert!(
+                    app.with_state(|state| match blocker {
+                        Blocker::StaleRevision => state.model_revision += 1,
+                        Blocker::Close => state.close_pending = true,
+                        Blocker::ReadOnly => state.recovery_locked = true,
+                        Blocker::Mutation => state.mutation_locked = true,
+                        Blocker::Worker => {
+                            let started = admit_paths(app.owner, state, Vec::new());
+                            assert!(started.is_ok());
+                            finalize_admission_start(state);
+                        }
+                    })
+                    .is_ok()
+                );
+                PreparedFileDialogSelection::SaveText {
+                    path: output.clone(),
+                    text,
+                }
+            })?;
+            assert!(expected_kind.get());
+            assert!(!output.exists());
+            app.assert_session_cleared()?;
+            if matches!(blocker, Blocker::Close) {
+                assert!(app.with_state(|state| state.close_pending)?);
+            }
             if matches!(blocker, Blocker::Worker) {
                 app.drain_admission()?;
             }
