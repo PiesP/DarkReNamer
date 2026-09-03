@@ -2,8 +2,8 @@ use std::cell::Cell;
 
 use darknamer_app::rename::{
     BackendError, BackendOperation, EntryId, EntryKind, MAX_PLAN_PATH_DEPTH, MemoryBackend,
-    ModelRevision, MutationCertainty, PathKey, PathSnapshot, PlanAttemptError, PlanIssueKind,
-    PlanRequest, RenameBackend, RenameIntent, RenameOperation, RenamePlanner,
+    ModelRevision, MoveScope, MutationCertainty, PathKey, PathSnapshot, PlanAttemptError,
+    PlanIssueKind, PlanRequest, RenameBackend, RenameIntent, RenameOperation, RenamePlanner,
 };
 use darknamer_core::{LegacyText, WindowsLeafNameError};
 
@@ -218,6 +218,177 @@ fn planner_blocks_duplicate_identity_inputs_cross_parent_and_source_overlap()
             .iter()
             .all(|issue| issue.kind == PlanIssueKind::SourceOverlap)
     );
+    Ok(())
+}
+
+#[test]
+fn same_volume_files_only_allows_cross_parent_files_and_changes_the_fingerprint()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = MemoryBackend::new().with_file("C:\\source\\a.txt", 1);
+    let intent = RenameIntent::new(
+        EntryId::new(0),
+        "C:\\source\\a.txt",
+        "C:\\target",
+        "a.txt",
+        EntryKind::File,
+    );
+    let same_parent = PlanRequest::new(ModelRevision::new(1), vec![intent.clone()]);
+    let authorized = PlanRequest::with_scope(
+        ModelRevision::new(1),
+        vec![intent],
+        MoveScope::SameVolumeFilesOnly,
+    );
+
+    let Err(error) = RenamePlanner::new(&backend).plan(same_parent) else {
+        return Err(std::io::Error::other("default request authorized a cross-parent move").into());
+    };
+    assert_eq!(error.issues()[0].kind, PlanIssueKind::CrossParent);
+
+    let plan = RenamePlanner::new(&backend).plan(authorized)?;
+    assert_eq!(plan.scope(), MoveScope::SameVolumeFilesOnly);
+
+    let same_parent_backend = MemoryBackend::new().with_file("C:\\source\\a.txt", 1);
+    let default_plan = RenamePlanner::new(&same_parent_backend).plan(PlanRequest::new(
+        ModelRevision::new(1),
+        vec![RenameIntent::new(
+            EntryId::new(0),
+            "C:\\source\\a.txt",
+            "C:\\source",
+            "b.txt",
+            EntryKind::File,
+        )],
+    ))?;
+    let scoped_plan = RenamePlanner::new(&same_parent_backend).plan(PlanRequest::with_scope(
+        ModelRevision::new(1),
+        vec![RenameIntent::new(
+            EntryId::new(0),
+            "C:\\source\\a.txt",
+            "C:\\source",
+            "b.txt",
+            EntryKind::File,
+        )],
+        MoveScope::SameVolumeFilesOnly,
+    ))?;
+    assert_ne!(default_plan.fingerprint(), scoped_plan.fingerprint());
+    Ok(())
+}
+
+#[test]
+fn same_volume_scope_rejects_cross_parent_directories_and_cross_volume_files()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory_backend = MemoryBackend::new().with_directory("C:\\source\\folder", 1);
+    let directory = PlanRequest::with_scope(
+        ModelRevision::new(1),
+        vec![RenameIntent::new(
+            EntryId::new(0),
+            "C:\\source\\folder",
+            "C:\\target",
+            "folder",
+            EntryKind::Directory,
+        )],
+        MoveScope::SameVolumeFilesOnly,
+    );
+    let Err(error) = RenamePlanner::new(&directory_backend).plan(directory) else {
+        return Err(std::io::Error::other("cross-parent directory move was accepted").into());
+    };
+    assert_eq!(
+        error.issues()[0].kind,
+        PlanIssueKind::DirectoryMoveUnsupported
+    );
+
+    let cross_volume_backend = MemoryBackend::new()
+        .with_file("C:\\source\\a.txt", 1)
+        .with_parent_identity(
+            "C:\\source",
+            darknamer_app::rename::EntryIdentity::new(1, 10),
+        )
+        .with_parent_identity(
+            "D:\\target",
+            darknamer_app::rename::EntryIdentity::new(2, 20),
+        );
+    let cross_volume = PlanRequest::with_scope(
+        ModelRevision::new(2),
+        vec![RenameIntent::new(
+            EntryId::new(0),
+            "C:\\source\\a.txt",
+            "D:\\target",
+            "a.txt",
+            EntryKind::File,
+        )],
+        MoveScope::SameVolumeFilesOnly,
+    );
+    let Err(error) = RenamePlanner::new(&cross_volume_backend).plan(cross_volume) else {
+        return Err(std::io::Error::other("cross-volume move was accepted").into());
+    };
+    assert_eq!(error.issues()[0].kind, PlanIssueKind::CrossVolume);
+    Ok(())
+}
+
+struct AliasedParentIdentityBackend {
+    inner: MemoryBackend,
+}
+
+impl RenameBackend for AliasedParentIdentityBackend {
+    fn validate_path_environment(&self, path: &LegacyText) -> Result<(), BackendError> {
+        self.inner.validate_path_environment(path)
+    }
+
+    fn path_key(&self, path: &LegacyText) -> PathKey {
+        self.inner.path_key(path)
+    }
+
+    fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
+        let mut snapshot = self.inner.observe(path)?;
+        if path
+            .to_string_lossy()
+            .eq_ignore_ascii_case("C:\\work\\b.txt")
+        {
+            snapshot.parent = darknamer_app::rename::EntryIdentity::new(1, 99);
+        }
+        Ok(snapshot)
+    }
+
+    fn is_same_or_descendant(
+        &self,
+        ancestor: &LegacyText,
+        candidate: &LegacyText,
+    ) -> Result<bool, BackendError> {
+        self.inner.is_same_or_descendant(ancestor, candidate)
+    }
+
+    fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
+        self.inner.next_transaction_nonce()
+    }
+
+    fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+        self.inner.rename_no_replace(operation)
+    }
+}
+
+#[test]
+fn same_parent_scope_uses_observed_parent_identity_not_an_aliased_path_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = AliasedParentIdentityBackend {
+        inner: MemoryBackend::new().with_file("C:\\work\\a.txt", 1),
+    };
+    let request = PlanRequest::new(
+        ModelRevision::new(1),
+        vec![RenameIntent::new(
+            EntryId::new(0),
+            "C:\\work\\a.txt",
+            "C:\\WORK",
+            "b.txt",
+            EntryKind::File,
+        )],
+    );
+
+    let Err(error) = RenamePlanner::new(&backend).plan(request) else {
+        return Err(
+            std::io::Error::other("aliased path key bypassed parent identity policy").into(),
+        );
+    };
+
+    assert_eq!(error.issues()[0].kind, PlanIssueKind::CrossParent);
     Ok(())
 }
 

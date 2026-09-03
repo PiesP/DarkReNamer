@@ -3,7 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use darknamer_core::LegacyText;
 
 use super::model::PlanRow;
-use super::{BackendError, EntryId, EntryIdentity, PathKey, RenameBackend, RenamePlan};
+use super::{
+    BackendError, EntryId, EntryIdentity, EntryKind, MoveScope, PathKey, RenameBackend, RenamePlan,
+};
 
 /// Maximum temporary-name probes for one cycle pivot.
 pub const MAX_TEMP_CANDIDATES: usize = 32;
@@ -27,6 +29,8 @@ pub(super) struct ScheduleStep {
     pub identity: EntryIdentity,
     pub source_parent: EntryIdentity,
     pub destination_parent: EntryIdentity,
+    pub kind: EntryKind,
+    pub scope: MoveScope,
     pub temporary_phase: TemporaryPhase,
 }
 
@@ -102,7 +106,7 @@ pub(super) fn build_schedule_cancellable(
             if !pending[index] {
                 return Err(ScheduleError::Invalid);
             }
-            schedule.push(direct_step(&plan.entries[index])?);
+            schedule.push(direct_step(&plan.entries[index], plan.scope)?);
             pending[index] = false;
             if !remaining_indices.remove(&index) {
                 return Err(ScheduleError::Invalid);
@@ -136,6 +140,8 @@ pub(super) fn build_schedule_cancellable(
             identity,
             source_parent: pivot_entry.source_snapshot.parent,
             destination_parent: pivot_entry.source_snapshot.parent,
+            kind: pivot_entry.kind,
+            scope: plan.scope,
             temporary_phase: TemporaryPhase::IntoTemporary,
         });
 
@@ -148,7 +154,7 @@ pub(super) fn build_schedule_cancellable(
             if !pending[index] {
                 return Err(ScheduleError::Invalid);
             }
-            schedule.push(direct_step(&plan.entries[index])?);
+            schedule.push(direct_step(&plan.entries[index], plan.scope)?);
             freed = index;
             pending[index] = false;
             if !remaining_indices.remove(&index) {
@@ -164,6 +170,8 @@ pub(super) fn build_schedule_cancellable(
             identity,
             source_parent: pivot_entry.source_snapshot.parent,
             destination_parent: pivot_entry.destination_snapshot.parent,
+            kind: pivot_entry.kind,
+            scope: plan.scope,
             temporary_phase: TemporaryPhase::FromTemporary,
         });
         pending[pivot] = false;
@@ -176,7 +184,7 @@ pub(super) fn build_schedule_cancellable(
     Ok(schedule)
 }
 
-fn direct_step(entry: &PlanRow) -> Result<ScheduleStep, ScheduleError> {
+fn direct_step(entry: &PlanRow, scope: MoveScope) -> Result<ScheduleStep, ScheduleError> {
     Ok(ScheduleStep {
         entry: entry.id,
         source: entry.source.clone(),
@@ -184,6 +192,8 @@ fn direct_step(entry: &PlanRow) -> Result<ScheduleStep, ScheduleError> {
         identity: source_identity(entry)?,
         source_parent: entry.source_snapshot.parent,
         destination_parent: entry.destination_snapshot.parent,
+        kind: entry.kind,
+        scope,
         temporary_phase: TemporaryPhase::None,
     })
 }
@@ -253,7 +263,7 @@ fn parent_units(path: &[u16]) -> &[u16] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rename::{EntryKind, MemoryBackend, ModelRevision, PlanId};
+    use crate::rename::{EntryKind, MemoryBackend, ModelRevision, MoveScope, PlanId};
 
     fn build_plan(
         backend: &MemoryBackend,
@@ -278,6 +288,7 @@ mod tests {
             id: PlanId::from_fingerprint(1),
             revision: ModelRevision::new(1),
             entries: entries.into_boxed_slice(),
+            scope: MoveScope::SameParent,
         })
     }
 

@@ -7,7 +7,7 @@ use darknamer_app::rename::{
     ExecuteErrorKind, ExecutionControl, ExecutionFailure, ExecutionOutcome, ExecutionPhase,
     ExecutionProgress, JournalCapacityKind, JournalCorruption, JournalDirection, JournalError,
     JournalRecord, JournalStep, JournalStore, JournalTerminal, MAX_JOURNAL_FRAME_BYTES,
-    MAX_JOURNAL_STEPS, MAX_TEMP_CANDIDATES, MemoryBackend, MemoryJournal, ModelRevision,
+    MAX_JOURNAL_STEPS, MAX_TEMP_CANDIDATES, MemoryBackend, MemoryJournal, ModelRevision, MoveScope,
     MutationCertainty, PathKey, PathSnapshot, PlanId, PlanRequest, RecoveryReason, RecoveryState,
     RenameBackend, RenameExecutor, RenameIntent, RenameOperation, RenamePlanner, RenameState,
     TemporaryPhase, preflight_plan, preflight_plan_cancellable, replay_journal,
@@ -32,6 +32,87 @@ fn confirmed_plan(
     let id = plan.id();
     let revision = plan.revision();
     Ok(plan.confirm_presented(id, revision)?)
+}
+
+fn cross_parent_intent(
+    id: u32,
+    source: &str,
+    destination_parent: &str,
+    destination_name: &str,
+) -> RenameIntent {
+    RenameIntent::new(
+        EntryId::new(id),
+        source,
+        destination_parent,
+        destination_name,
+        EntryKind::File,
+    )
+}
+
+fn confirmed_cross_parent_plan(
+    backend: &dyn RenameBackend,
+    intents: Vec<RenameIntent>,
+) -> Result<darknamer_app::rename::ConfirmedPlan, Box<dyn std::error::Error>> {
+    let plan = RenamePlanner::new(backend).plan(PlanRequest::with_scope(
+        ModelRevision::new(1),
+        intents,
+        MoveScope::SameVolumeFilesOnly,
+    ))?;
+    let id = plan.id();
+    let revision = plan.revision();
+    Ok(plan.confirm_presented(id, revision)?)
+}
+
+#[test]
+fn same_volume_cross_parent_direct_move_and_move_rename_complete()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut backend = MemoryBackend::new()
+        .with_file("C:\\source\\a.txt", 1)
+        .with_file("C:\\source\\b.txt", 2);
+    let confirmed = confirmed_cross_parent_plan(
+        &backend,
+        vec![
+            cross_parent_intent(0, "C:\\source\\a.txt", "C:\\target", "a.txt"),
+            cross_parent_intent(1, "C:\\source\\b.txt", "C:\\target", "renamed.txt"),
+        ],
+    )?;
+    let mut journal = MemoryJournal::new();
+
+    let report = RenameExecutor::new(&mut backend, &mut journal).execute(confirmed)?;
+
+    assert_eq!(report.outcome(), &ExecutionOutcome::Completed);
+    assert_eq!(backend.file_id("C:\\source\\a.txt"), None);
+    assert_eq!(backend.file_id("C:\\source\\b.txt"), None);
+    assert_eq!(backend.file_id("C:\\target\\a.txt"), Some(1));
+    assert_eq!(backend.file_id("C:\\target\\renamed.txt"), Some(2));
+    assert_eq!(backend.mutation_count(), 2);
+    assert_eq!(journal.recovery_state(), RecoveryState::Clean);
+    Ok(())
+}
+
+#[test]
+fn same_volume_cross_parent_cycle_uses_temporary_hop_and_completes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut backend = MemoryBackend::new()
+        .with_file("C:\\left\\a.txt", 1)
+        .with_file("C:\\right\\b.txt", 2);
+    let confirmed = confirmed_cross_parent_plan(
+        &backend,
+        vec![
+            cross_parent_intent(0, "C:\\left\\a.txt", "C:\\right", "b.txt"),
+            cross_parent_intent(1, "C:\\right\\b.txt", "C:\\left", "a.txt"),
+        ],
+    )?;
+    let mut journal = MemoryJournal::new();
+
+    let report = RenameExecutor::new(&mut backend, &mut journal).execute(confirmed)?;
+
+    assert_eq!(report.outcome(), &ExecutionOutcome::Completed);
+    assert_eq!(backend.file_id("C:\\left\\a.txt"), Some(2));
+    assert_eq!(backend.file_id("C:\\right\\b.txt"), Some(1));
+    assert_eq!(backend.mutation_count(), 3);
+    assert!(backend.completed_moves()[0].1.contains(".__darknamer_"));
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -622,6 +703,33 @@ fn stale_source_parent_or_destination_refuses_before_journal_and_mutation()
 }
 
 #[test]
+fn stale_cross_parent_destination_refuses_before_journal_and_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut backend = MemoryBackend::new().with_file("C:\\source\\a.txt", 1);
+    let confirmed = confirmed_cross_parent_plan(
+        &backend,
+        vec![cross_parent_intent(
+            0,
+            "C:\\source\\a.txt",
+            "C:\\target",
+            "a.txt",
+        )],
+    )?;
+    backend.replace_parent_id("C:\\target\\a.txt", 99);
+    let mut journal = MemoryJournal::new();
+
+    let error = RenameExecutor::new(&mut backend, &mut journal)
+        .execute(confirmed)
+        .err()
+        .ok_or_else(|| std::io::Error::other("stale destination parent was executed"))?;
+
+    assert_eq!(error.kind, ExecuteErrorKind::StaleParent);
+    assert_eq!(backend.mutation_count(), 0);
+    assert!(journal.records().is_empty());
+    Ok(())
+}
+
+#[test]
 fn forward_failure_rolls_completed_moves_back_in_reverse_order()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut backend = MemoryBackend::new()
@@ -654,6 +762,34 @@ fn forward_failure_rolls_completed_moves_back_in_reverse_order()
         journal.records().last(),
         Some(&JournalRecord::Terminal(JournalTerminal::RolledBack))
     );
+    Ok(())
+}
+
+#[test]
+fn same_volume_cross_parent_forward_failure_rolls_back_to_original_parents()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut backend = MemoryBackend::new()
+        .with_file("C:\\left\\a.txt", 1)
+        .with_file("C:\\right\\b.txt", 2);
+    let confirmed = confirmed_cross_parent_plan(
+        &backend,
+        vec![
+            cross_parent_intent(0, "C:\\left\\a.txt", "C:\\right", "b.txt"),
+            cross_parent_intent(1, "C:\\right\\b.txt", "C:\\left", "a.txt"),
+        ],
+    )?;
+    backend.fail_move_on(2, 5);
+    let mut journal = MemoryJournal::new();
+
+    let report = RenameExecutor::new(&mut backend, &mut journal).execute(confirmed)?;
+
+    assert!(matches!(
+        report.outcome(),
+        ExecutionOutcome::RolledBack { .. }
+    ));
+    assert_eq!(backend.file_id("C:\\left\\a.txt"), Some(1));
+    assert_eq!(backend.file_id("C:\\right\\b.txt"), Some(2));
+    assert_eq!(journal.recovery_state(), RecoveryState::Clean);
     Ok(())
 }
 
@@ -724,6 +860,168 @@ fn backend_enforces_expected_parent_identities_at_the_mutation_seam()
 
     assert_eq!(error.certainty, MutationCertainty::NotApplied);
     assert_eq!(backend.mutation_count(), 0);
+    Ok(())
+}
+
+#[test]
+fn backend_rejects_cross_volume_at_the_primitive_seam_without_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut backend = MemoryBackend::new()
+        .with_file_identity(
+            "C:\\source\\a.txt",
+            darknamer_app::rename::EntryIdentity::new(1, 1),
+        )
+        .with_parent_identity(
+            "C:\\source",
+            darknamer_app::rename::EntryIdentity::new(1, 10),
+        )
+        .with_parent_identity(
+            "D:\\target",
+            darknamer_app::rename::EntryIdentity::new(2, 20),
+        );
+    let source = darknamer_core::LegacyText::from("C:\\source\\a.txt");
+    let destination = darknamer_core::LegacyText::from("D:\\target\\a.txt");
+    let source_snapshot = backend.observe(&source)?;
+    let destination_snapshot = backend.observe(&destination)?;
+    let operation = RenameOperation::new(
+        source,
+        destination,
+        source_snapshot
+            .entry
+            .ok_or_else(|| std::io::Error::other("test source missing"))?
+            .identity,
+        source_snapshot.parent,
+        destination_snapshot.parent,
+    );
+
+    let error = backend
+        .rename_no_replace(&operation)
+        .err()
+        .ok_or_else(|| std::io::Error::other("cross-volume primitive succeeded"))?;
+
+    assert_eq!(error.code, 17);
+    assert_eq!(error.certainty, MutationCertainty::NotApplied);
+    assert_eq!(backend.file_id("C:\\source\\a.txt"), Some(1));
+    assert_eq!(backend.file_id("D:\\target\\a.txt"), None);
+    assert_eq!(backend.mutation_count(), 0);
+    Ok(())
+}
+
+#[test]
+fn backend_rejects_cross_parent_operations_without_matching_authorization()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut file_backend = MemoryBackend::new()
+        .with_file("C:\\source\\a.txt", 1)
+        .with_parent_identity(
+            "C:\\source",
+            darknamer_app::rename::EntryIdentity::new(1, 10),
+        )
+        .with_parent_identity(
+            "C:\\target",
+            darknamer_app::rename::EntryIdentity::new(1, 20),
+        );
+    let source = darknamer_core::LegacyText::from("C:\\source\\a.txt");
+    let destination = darknamer_core::LegacyText::from("C:\\target\\a.txt");
+    let source_snapshot = file_backend.observe(&source)?;
+    let destination_snapshot = file_backend.observe(&destination)?;
+    let default_operation = RenameOperation::new(
+        source,
+        destination,
+        source_snapshot
+            .entry
+            .ok_or_else(|| std::io::Error::other("test source missing"))?
+            .identity,
+        source_snapshot.parent,
+        destination_snapshot.parent,
+    );
+    let error = file_backend
+        .rename_no_replace(&default_operation)
+        .err()
+        .ok_or_else(|| std::io::Error::other("default operation authorized cross-parent move"))?;
+    assert_eq!(error.certainty, MutationCertainty::NotApplied);
+    assert_eq!(file_backend.mutation_count(), 0);
+
+    let mut directory_backend = MemoryBackend::new()
+        .with_directory("C:\\source\\folder", 2)
+        .with_parent_identity(
+            "C:\\source",
+            darknamer_app::rename::EntryIdentity::new(1, 10),
+        )
+        .with_parent_identity(
+            "C:\\target",
+            darknamer_app::rename::EntryIdentity::new(1, 20),
+        );
+    let source = darknamer_core::LegacyText::from("C:\\source\\folder");
+    let destination = darknamer_core::LegacyText::from("C:\\target\\folder");
+    let source_snapshot = directory_backend.observe(&source)?;
+    let destination_snapshot = directory_backend.observe(&destination)?;
+    let directory_operation = RenameOperation::with_authorization(
+        source,
+        destination,
+        source_snapshot
+            .entry
+            .ok_or_else(|| std::io::Error::other("test directory missing"))?
+            .identity,
+        source_snapshot.parent,
+        destination_snapshot.parent,
+        EntryKind::Directory,
+        MoveScope::SameVolumeFilesOnly,
+    );
+    let error = directory_backend
+        .rename_no_replace(&directory_operation)
+        .err()
+        .ok_or_else(|| std::io::Error::other("file-only scope authorized a directory move"))?;
+    assert_eq!(error.certainty, MutationCertainty::NotApplied);
+    assert_eq!(directory_backend.mutation_count(), 0);
+
+    let source = darknamer_core::LegacyText::from("C:\\source\\folder");
+    let destination = darknamer_core::LegacyText::from("C:\\target\\folder");
+    let source_snapshot = directory_backend.observe(&source)?;
+    let destination_snapshot = directory_backend.observe(&destination)?;
+    let mislabeled_operation = RenameOperation::with_authorization(
+        source,
+        destination,
+        source_snapshot
+            .entry
+            .ok_or_else(|| std::io::Error::other("test directory missing"))?
+            .identity,
+        source_snapshot.parent,
+        destination_snapshot.parent,
+        EntryKind::File,
+        MoveScope::SameVolumeFilesOnly,
+    );
+    let error = directory_backend
+        .rename_no_replace(&mislabeled_operation)
+        .err()
+        .ok_or_else(|| std::io::Error::other("mislabeled directory move succeeded"))?;
+    assert_eq!(error.certainty, MutationCertainty::NotApplied);
+    assert_eq!(directory_backend.mutation_count(), 0);
+    Ok(())
+}
+
+#[test]
+fn default_primitive_preserves_same_parent_directory_compatibility()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut backend = MemoryBackend::new().with_directory("C:\\work\\folder", 1);
+    let source = darknamer_core::LegacyText::from("C:\\work\\folder");
+    let destination = darknamer_core::LegacyText::from("C:\\work\\renamed");
+    let source_snapshot = backend.observe(&source)?;
+    let destination_snapshot = backend.observe(&destination)?;
+    let operation = RenameOperation::new(
+        source,
+        destination,
+        source_snapshot
+            .entry
+            .ok_or_else(|| std::io::Error::other("test directory missing"))?
+            .identity,
+        source_snapshot.parent,
+        destination_snapshot.parent,
+    );
+
+    backend.rename_no_replace(&operation)?;
+
+    assert_eq!(backend.file_id("C:\\work\\folder"), None);
+    assert_eq!(backend.file_id("C:\\work\\renamed"), Some(1));
     Ok(())
 }
 
@@ -929,6 +1227,39 @@ fn cancellation_after_middle_step_rolls_back_every_completed_step_and_ignores_re
             .count(),
         1
     );
+    Ok(())
+}
+
+#[test]
+fn cancellation_after_cross_parent_forward_step_restores_original_parent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut backend = MemoryBackend::new()
+        .with_file("C:\\source\\a.txt", 1)
+        .with_file("C:\\source\\b.txt", 2);
+    let confirmed = confirmed_cross_parent_plan(
+        &backend,
+        vec![
+            cross_parent_intent(0, "C:\\source\\a.txt", "C:\\target", "a.txt"),
+            cross_parent_intent(1, "C:\\source\\b.txt", "C:\\target", "b.txt"),
+        ],
+    )?;
+    let mut journal = MemoryJournal::new();
+    let control = RecordingControl::new(Some(1), false);
+
+    let report = RenameExecutor::new(&mut backend, &mut journal)
+        .execute_with_control(confirmed, &control)?;
+
+    assert!(matches!(
+        report.outcome(),
+        ExecutionOutcome::RolledBack {
+            failure: ExecutionFailure::Cancelled { step: 1 }
+        }
+    ));
+    assert_eq!(backend.file_id("C:\\source\\a.txt"), Some(1));
+    assert_eq!(backend.file_id("C:\\source\\b.txt"), Some(2));
+    assert_eq!(backend.file_id("C:\\target\\a.txt"), None);
+    assert_eq!(backend.file_id("C:\\target\\b.txt"), None);
+    assert_eq!(journal.recovery_state(), RecoveryState::Clean);
     Ok(())
 }
 

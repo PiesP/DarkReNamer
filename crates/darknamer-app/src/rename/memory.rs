@@ -56,6 +56,55 @@ impl MemoryBackend {
         self
     }
 
+    /// Adds one regular file with an explicit stable identity.
+    #[must_use]
+    pub fn with_file_identity(
+        mut self,
+        path: impl Into<LegacyText>,
+        identity: EntryIdentity,
+    ) -> Self {
+        let path = path.into();
+        let key = self.path_key(&path);
+        self.entries.insert(
+            key,
+            MemoryEntry {
+                identity,
+                kind: EntryKind::File,
+                is_reparse_point: false,
+            },
+        );
+        self
+    }
+
+    /// Adds one directory on the default test volume.
+    #[must_use]
+    pub fn with_directory(mut self, path: impl Into<LegacyText>, file_id: u128) -> Self {
+        let path = path.into();
+        let key = self.path_key(&path);
+        self.entries.insert(
+            key,
+            MemoryEntry {
+                identity: EntryIdentity::new(1, file_id),
+                kind: EntryKind::Directory,
+                is_reparse_point: false,
+            },
+        );
+        self
+    }
+
+    /// Overrides one parent path's stable identity for deterministic tests.
+    #[must_use]
+    pub fn with_parent_identity(
+        mut self,
+        parent_path: impl Into<LegacyText>,
+        identity: EntryIdentity,
+    ) -> Self {
+        let parent_path = parent_path.into();
+        self.parent_identities
+            .insert(self.path_key(&parent_path), identity);
+        self
+    }
+
     /// Inserts or replaces a regular file after planning.
     pub fn insert_file(&mut self, path: impl Into<LegacyText>, file_id: u128) {
         let path = path.into();
@@ -85,6 +134,18 @@ impl MemoryBackend {
         let parent = LegacyText::from_units(parent_units(child_path.units()).to_vec());
         self.parent_identities
             .insert(self.path_key(&parent), EntryIdentity::new(1, file_id));
+    }
+
+    /// Overrides the resolved direct-parent identity, including its volume.
+    pub fn replace_parent_identity(
+        &mut self,
+        child_path: impl Into<LegacyText>,
+        identity: EntryIdentity,
+    ) {
+        let child_path = child_path.into();
+        let parent = LegacyText::from_units(parent_units(child_path.units()).to_vec());
+        self.parent_identities
+            .insert(self.path_key(&parent), identity);
     }
 
     /// Injects one backend failure by one-based move-attempt number.
@@ -197,6 +258,9 @@ impl RenameBackend for MemoryBackend {
     }
 
     fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+        if let Some(error) = operation.authorization_error() {
+            return Err(error);
+        }
         self.move_attempts += 1;
         let injected = self.failures.get(&self.move_attempts).copied();
         if let Some((code, MutationCertainty::NotApplied)) = injected {
@@ -225,7 +289,7 @@ impl RenameBackend for MemoryBackend {
                 MutationCertainty::NotApplied,
             ));
         }
-        let Some(entry) = self.entries.remove(&source_key) else {
+        let Some(entry) = self.entries.get(&source_key).copied() else {
             return Err(backend_error(
                 BackendOperation::Rename,
                 2,
@@ -233,13 +297,29 @@ impl RenameBackend for MemoryBackend {
             ));
         };
         if entry.identity != operation.expected_source() {
-            self.entries.insert(source_key, entry);
             return Err(backend_error(
                 BackendOperation::Rename,
                 1168,
                 MutationCertainty::NotApplied,
             ));
         }
+        if operation.kind().is_some_and(|kind| entry.kind != kind) {
+            return Err(backend_error(
+                BackendOperation::Rename,
+                1168,
+                MutationCertainty::NotApplied,
+            ));
+        }
+        if operation.expected_source_parent().volume()
+            != operation.expected_destination_parent().volume()
+        {
+            return Err(backend_error(
+                BackendOperation::Rename,
+                17,
+                MutationCertainty::NotApplied,
+            ));
+        }
+        self.entries.remove(&source_key);
         self.entries.insert(destination_key, entry);
         self.completed_moves.push((
             operation.source().to_string_lossy(),

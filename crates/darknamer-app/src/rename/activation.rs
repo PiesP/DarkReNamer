@@ -132,6 +132,8 @@ fn plan_issue_korean(kind: &PlanIssueKind) -> String {
         }
         PlanIssueKind::DestinationOccupied => "대상 이름이 이미 사용 중입니다.".to_owned(),
         PlanIssueKind::CrossParent => "다른 폴더로 이동할 수 없습니다.".to_owned(),
+        PlanIssueKind::CrossVolume => "다른 볼륨으로 이동할 수 없습니다.".to_owned(),
+        PlanIssueKind::DirectoryMoveUnsupported => "폴더 이동은 아직 지원하지 않습니다.".to_owned(),
         PlanIssueKind::SourceOverlap => "상위/하위 항목을 함께 변경할 수 없습니다.".to_owned(),
         PlanIssueKind::PathTooDeep => "경로의 폴더 깊이가 안전 한도를 초과했습니다.".to_owned(),
         PlanIssueKind::UnsupportedCaseSensitiveParent => {
@@ -165,6 +167,9 @@ pub fn execute_error_korean(error: &ExecuteError) -> String {
             "안전한 임시 이름을 확보하지 못했습니다.".to_owned()
         }
         ExecuteErrorKind::InvalidSchedule => "안전한 실행 순서를 만들지 못했습니다.".to_owned(),
+        ExecuteErrorKind::UnauthorizedMove => {
+            "계획된 이동이 허용된 안전 범위를 벗어났습니다.".to_owned()
+        }
     }
 }
 

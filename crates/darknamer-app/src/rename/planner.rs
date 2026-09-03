@@ -5,8 +5,8 @@ use darknamer_core::validate_windows_leaf_name;
 
 use super::model::PlanRow;
 use super::{
-    EntryId, PathKey, PlanError, PlanId, PlanIssue, PlanIssueKind, PlanRequest, RenameBackend,
-    RenameIntent, RenamePlan,
+    EntryId, MoveScope, PathKey, PlanError, PlanId, PlanIssue, PlanIssueKind, PlanRequest,
+    RenameBackend, RenameIntent, RenamePlan,
 };
 
 /// Maximum number of path components accepted by one direct plan request.
@@ -135,14 +135,6 @@ impl<'a> RenamePlanner<'a> {
                 .entry(self.backend.path_key(&intent.destination))
                 .or_default()
                 .push(intent.id);
-            if self.backend.path_key(&parent_path(&intent.source))
-                != self.backend.path_key(&parent_path(&intent.destination))
-            {
-                issues.push(PlanIssue {
-                    entry: intent.id,
-                    kind: PlanIssueKind::CrossParent,
-                });
-            }
         }
         append_duplicate_issues(
             source_owners.values(),
@@ -241,6 +233,38 @@ impl<'a> RenamePlanner<'a> {
                 }
             };
             check_cancelled(&cancellation_requested)?;
+            let parents_differ = source_snapshot.parent != destination_snapshot.parent;
+            let volume_differs = source_entry.identity.volume() != source_snapshot.parent.volume()
+                || source_snapshot.parent.volume() != destination_snapshot.parent.volume();
+            if parents_differ && request.scope == MoveScope::SameParent {
+                issues.push(PlanIssue {
+                    entry: intent.id,
+                    kind: PlanIssueKind::CrossParent,
+                });
+            }
+            if parents_differ
+                && request.scope == MoveScope::SameVolumeFilesOnly
+                && source_entry.kind == super::EntryKind::Directory
+            {
+                issues.push(PlanIssue {
+                    entry: intent.id,
+                    kind: PlanIssueKind::DirectoryMoveUnsupported,
+                });
+            }
+            if volume_differs {
+                issues.push(PlanIssue {
+                    entry: intent.id,
+                    kind: PlanIssueKind::CrossVolume,
+                });
+            }
+            if (parents_differ && request.scope == MoveScope::SameParent)
+                || (parents_differ
+                    && request.scope == MoveScope::SameVolumeFilesOnly
+                    && source_entry.kind == super::EntryKind::Directory)
+                || volume_differs
+            {
+                continue;
+            }
             entries.push(PlanRow {
                 id: intent.id,
                 source: intent.source.clone(),
@@ -274,6 +298,7 @@ impl<'a> RenamePlanner<'a> {
             id: PlanId::new(plan_id_cancellable(&request, &cancellation_requested)?),
             revision: request.revision,
             entries: entries.into_boxed_slice(),
+            scope: request.scope,
         })
     }
 }
@@ -322,15 +347,6 @@ fn visit_direct_ancestors(
         visit(&ancestor);
     }
     Ok(())
-}
-
-fn parent_path(path: &darknamer_core::LegacyText) -> darknamer_core::LegacyText {
-    let units = path.units();
-    let end = units
-        .iter()
-        .rposition(|unit| is_separator(*unit))
-        .unwrap_or(0);
-    darknamer_core::LegacyText::from_units(units[..end].to_vec())
 }
 
 fn validate_intent(intent: &RenameIntent, issues: &mut Vec<PlanIssue>) {
@@ -411,6 +427,7 @@ fn plan_id_cancellable(
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     hash_value(&mut hash, 0x4452_504c_414e_0001);
     hash_value(&mut hash, request.revision.value());
+    hash_value(&mut hash, request.scope as u64);
     hash_value(&mut hash, request.entries.len() as u64);
     for intent in &request.entries {
         check_cancelled(cancellation_requested)?;

@@ -79,6 +79,16 @@ pub enum EntryKind {
     Directory,
 }
 
+/// Filesystem movement boundary explicitly authorized for one immutable plan.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MoveScope {
+    /// Only rename entries within their already observed direct parent.
+    #[default]
+    SameParent,
+    /// Allow regular files to move between parents on the same volume.
+    SameVolumeFilesOnly,
+}
+
 /// Stable filesystem identity used to detect replacement and movement.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct EntryIdentity {
@@ -188,6 +198,7 @@ impl RenameIntent {
 pub struct PlanRequest {
     pub(super) revision: ModelRevision,
     pub(super) entries: Box<[RenameIntent]>,
+    pub(super) scope: MoveScope,
 }
 
 impl PlanRequest {
@@ -197,7 +208,28 @@ impl PlanRequest {
         Self {
             revision,
             entries: entries.into_boxed_slice(),
+            scope: MoveScope::SameParent,
         }
+    }
+
+    /// Creates a plan request with an explicit filesystem movement boundary.
+    #[must_use]
+    pub fn with_scope(
+        revision: ModelRevision,
+        entries: Vec<RenameIntent>,
+        scope: MoveScope,
+    ) -> Self {
+        Self {
+            revision,
+            entries: entries.into_boxed_slice(),
+            scope,
+        }
+    }
+
+    /// Returns the explicitly authorized filesystem movement boundary.
+    #[must_use]
+    pub const fn scope(&self) -> MoveScope {
+        self.scope
     }
 }
 
@@ -225,6 +257,10 @@ pub enum PlanIssueKind {
     DuplicateSource,
     /// Source and destination resolve under different direct parents.
     CrossParent,
+    /// Source and destination parents are on different volumes.
+    CrossVolume,
+    /// Cross-parent directory moves are outside the authorized file-only scope.
+    DirectoryMoveUnsupported,
     /// Selected sources have an ancestor/descendant relationship.
     SourceOverlap,
     /// A source or destination parent exceeds the planner's bounded path depth.
@@ -326,6 +362,7 @@ pub struct RenamePlan {
     pub(super) id: PlanId,
     pub(super) revision: ModelRevision,
     pub(super) entries: Box<[PlanRow]>,
+    pub(super) scope: MoveScope,
 }
 
 impl RenamePlan {
@@ -345,6 +382,12 @@ impl RenamePlan {
     #[must_use]
     pub const fn revision(&self) -> ModelRevision {
         self.revision
+    }
+
+    /// Returns the filesystem movement boundary frozen into this plan.
+    #[must_use]
+    pub const fn scope(&self) -> MoveScope {
+        self.scope
     }
 
     /// Returns the number of logical renames.

@@ -138,6 +138,36 @@ fn every_record_round_trips_exact_utf16_and_manifest_identities()
 }
 
 #[test]
+fn cross_parent_manifest_round_trips_distinct_same_volume_parent_identities()
+-> Result<(), Box<dyn std::error::Error>> {
+    let records = vec![JournalRecord::Intent {
+        plan: PlanId::from_fingerprint(43),
+        steps: vec![
+            JournalStep::new(
+                EntryId::new(0),
+                LegacyText::from("C:\\source\\a.txt"),
+                LegacyText::from("C:\\target\\a.txt"),
+                EntryIdentity::new(7, 10),
+                EntryIdentity::new(7, 1),
+                EntryIdentity::new(7, 2),
+                TemporaryPhase::None,
+            )
+            .with_move_authorization(
+                EntryKind::File,
+                darknamer_app::rename::MoveScope::SameVolumeFilesOnly,
+            ),
+        ]
+        .into_boxed_slice(),
+    }];
+
+    let encoded = encode_journal_records(&records)?;
+    let decoded = decode_journal_records(&encoded)?;
+
+    assert_eq!(decoded, records);
+    Ok(())
+}
+
+#[test]
 fn decoder_rejects_torn_checksum_version_sequence_and_unknown_kind()
 -> Result<(), Box<dyn std::error::Error>> {
     let encoded = encode_journal_records(&complete_records())?;

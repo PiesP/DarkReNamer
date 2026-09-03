@@ -13,6 +13,8 @@ use super::{
 pub enum RecoveryBlockKind {
     /// The journal record stream is corrupt or has no usable manifest.
     JournalCorrupt,
+    /// A manifest step exceeds its persisted movement authorization.
+    UnauthorizedOperation,
     /// Observed endpoint identities match neither safe transition state.
     StateMismatch,
     /// A resolved direct-parent identity changed.
@@ -103,6 +105,15 @@ impl<'a> RenameRecovery<'a> {
             };
         };
         let plan = *plan;
+        if steps
+            .iter()
+            .any(|step| forward_operation(step).authorization_error().is_some())
+        {
+            return RecoveryOutcome::Blocked {
+                plan: Some(plan),
+                reason: RecoveryBlockKind::UnauthorizedOperation,
+            };
+        }
         let mut transitions = match transition_state(&records, steps, self.backend) {
             Ok(state) => state,
             Err(reason) => {
@@ -360,12 +371,16 @@ fn observe_all(
             backend,
             step.source(),
             step.expected_source_parent(),
+            step.expected_source(),
+            step.kind(),
             &mut observed,
         )?;
         observe_endpoint(
             backend,
             step.destination(),
             step.expected_destination_parent(),
+            step.expected_source(),
+            step.kind(),
             &mut observed,
         )?;
     }
@@ -376,6 +391,8 @@ fn observe_endpoint(
     backend: &dyn RenameBackend,
     path: &darknamer_core::LegacyText,
     expected_parent: EntryIdentity,
+    expected_source: EntryIdentity,
+    expected_kind: Option<super::EntryKind>,
     observed: &mut BTreeMap<PathKey, Option<EntryIdentity>>,
 ) -> Result<(), RecoveryBlockKind> {
     let snapshot = backend.observe(path).map_err(RecoveryBlockKind::Backend)?;
@@ -383,6 +400,11 @@ fn observe_endpoint(
         return Err(RecoveryBlockKind::ParentChanged);
     }
     if snapshot.entry.is_some_and(|entry| entry.is_reparse_point) {
+        return Err(RecoveryBlockKind::StateMismatch);
+    }
+    if snapshot.entry.is_some_and(|entry| {
+        entry.identity == expected_source && expected_kind.is_some_and(|kind| entry.kind != kind)
+    }) {
         return Err(RecoveryBlockKind::StateMismatch);
     }
     observed.insert(
@@ -400,13 +422,48 @@ fn occupancy_matches(
 }
 
 fn reverse_operation(step: &JournalStep) -> RenameOperation {
-    RenameOperation::new(
-        step.destination().clone(),
-        step.source().clone(),
-        step.expected_source(),
-        step.expected_destination_parent(),
-        step.expected_source_parent(),
-    )
+    operation(step, true)
+}
+
+fn forward_operation(step: &JournalStep) -> RenameOperation {
+    operation(step, false)
+}
+
+fn operation(step: &JournalStep, reverse: bool) -> RenameOperation {
+    let (source, destination, source_parent, destination_parent) = if reverse {
+        (
+            step.destination().clone(),
+            step.source().clone(),
+            step.expected_destination_parent(),
+            step.expected_source_parent(),
+        )
+    } else {
+        (
+            step.source().clone(),
+            step.destination().clone(),
+            step.expected_source_parent(),
+            step.expected_destination_parent(),
+        )
+    };
+    if let Some(kind) = step.kind() {
+        RenameOperation::with_authorization(
+            source,
+            destination,
+            step.expected_source(),
+            source_parent,
+            destination_parent,
+            kind,
+            step.scope(),
+        )
+    } else {
+        RenameOperation::with_legacy_same_parent_authorization(
+            source,
+            destination,
+            step.expected_source(),
+            source_parent,
+            destination_parent,
+        )
+    }
 }
 
 const fn replay_plan(state: &RecoveryState) -> Option<PlanId> {

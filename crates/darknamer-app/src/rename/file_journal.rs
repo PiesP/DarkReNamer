@@ -16,13 +16,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use darknamer_core::{LegacyText, validate_windows_leaf_name};
 
 use super::{
-    AuthorizedJournal, EntryId, EntryIdentity, JournalAuthorization, JournalDirection,
+    AuthorizedJournal, EntryId, EntryIdentity, EntryKind, JournalAuthorization, JournalDirection,
     JournalError, JournalRecord, JournalSnapshot, JournalStep, JournalStore, JournalTerminal,
-    PlanId, RecoveryReason, RecoveryState, TemporaryPhase, replay_journal,
+    MoveScope, PlanId, RecoveryReason, RecoveryState, TemporaryPhase, replay_journal,
 };
 
 const MAGIC: [u8; 4] = *b"DRJ1";
-const VERSION: u16 = 1;
+const LEGACY_VERSION: u16 = 1;
+const VERSION: u16 = 2;
 const HEADER_BYTES: usize = 24;
 const FLAGS_NONE: u8 = 0;
 
@@ -537,7 +538,8 @@ pub fn inspect_journal_records(bytes: &[u8]) -> Result<JournalInspection, Journa
                 JournalCodecErrorKind::InvalidMagic,
             ));
         }
-        if u16::from_le_bytes([header[4], header[5]]) != VERSION {
+        let version = u16::from_le_bytes([header[4], header[5]]);
+        if !matches!(version, LEGACY_VERSION | VERSION) {
             return Err(JournalCodecError::new(
                 frame,
                 JournalCodecErrorKind::UnsupportedVersion,
@@ -585,7 +587,7 @@ pub fn inspect_journal_records(bytes: &[u8]) -> Result<JournalInspection, Journa
                 JournalCodecErrorKind::ChecksumMismatch,
             ));
         }
-        records.push(decode_record(kind, payload, frame)?);
+        records.push(decode_record(kind, payload, frame, version)?);
         offset = frame_end;
     }
     finish_inspection(records, None, offset)
@@ -677,6 +679,11 @@ fn encode_record(
                 put_identity(payload, step.expected_source());
                 put_identity(payload, step.expected_source_parent());
                 put_identity(payload, step.expected_destination_parent());
+                let kind = step.kind().ok_or_else(|| {
+                    JournalCodecError::new(frame, JournalCodecErrorKind::InvalidPayload)
+                })?;
+                payload.push(encode_kind(kind));
+                payload.push(encode_scope(step.scope()));
                 payload.push(encode_phase(step.temporary_phase()));
                 if payload.len() > MAX_JOURNAL_FRAME_BYTES {
                     return Err(JournalCodecError::new(
@@ -713,7 +720,7 @@ fn encode_record(
 }
 
 const INTENT_FIXED_BYTES: usize = 8 + 4;
-const INTENT_STEP_FIXED_BYTES: usize = 4 + 4 + 4 + (8 + 16) * 3 + 1;
+const INTENT_STEP_FIXED_BYTES: usize = 4 + 4 + 4 + (8 + 16) * 3 + 3;
 
 pub(super) fn journal_requirements(
     steps: &[JournalStep],
@@ -750,6 +757,7 @@ fn decode_record(
     kind: u8,
     payload: &[u8],
     frame: usize,
+    version: u16,
 ) -> Result<JournalRecord, JournalCodecError> {
     let mut decoder = Decoder::new(payload, frame);
     let record = match kind {
@@ -770,16 +778,34 @@ fn decode_record(
                 let expected_source = decoder.identity()?;
                 let expected_source_parent = decoder.identity()?;
                 let expected_destination_parent = decoder.identity()?;
-                let temporary_phase = decode_phase(decoder.u8()?, frame)?;
-                steps.push(JournalStep::new(
-                    entry,
-                    source,
-                    destination,
-                    expected_source,
-                    expected_source_parent,
-                    expected_destination_parent,
-                    temporary_phase,
-                ));
+                if version == LEGACY_VERSION {
+                    let temporary_phase = decode_phase(decoder.u8()?, frame)?;
+                    steps.push(JournalStep::legacy_same_parent(
+                        entry,
+                        source,
+                        destination,
+                        expected_source,
+                        expected_source_parent,
+                        expected_destination_parent,
+                        temporary_phase,
+                    ));
+                } else {
+                    let entry_kind = decode_kind(decoder.u8()?, frame)?;
+                    let scope = decode_scope(decoder.u8()?, frame)?;
+                    let temporary_phase = decode_phase(decoder.u8()?, frame)?;
+                    steps.push(
+                        JournalStep::new(
+                            entry,
+                            source,
+                            destination,
+                            expected_source,
+                            expected_source_parent,
+                            expected_destination_parent,
+                            temporary_phase,
+                        )
+                        .with_move_authorization(entry_kind, scope),
+                    );
+                }
             }
             JournalRecord::Intent {
                 plan,
@@ -967,6 +993,42 @@ fn decode_direction(value: u8, frame: usize) -> Result<JournalDirection, Journal
     match value {
         0 => Ok(JournalDirection::Forward),
         1 => Ok(JournalDirection::Rollback),
+        _ => Err(JournalCodecError::new(
+            frame,
+            JournalCodecErrorKind::UnknownFieldValue,
+        )),
+    }
+}
+
+const fn encode_kind(kind: EntryKind) -> u8 {
+    match kind {
+        EntryKind::File => 0,
+        EntryKind::Directory => 1,
+    }
+}
+
+fn decode_kind(value: u8, frame: usize) -> Result<EntryKind, JournalCodecError> {
+    match value {
+        0 => Ok(EntryKind::File),
+        1 => Ok(EntryKind::Directory),
+        _ => Err(JournalCodecError::new(
+            frame,
+            JournalCodecErrorKind::UnknownFieldValue,
+        )),
+    }
+}
+
+const fn encode_scope(scope: MoveScope) -> u8 {
+    match scope {
+        MoveScope::SameParent => 0,
+        MoveScope::SameVolumeFilesOnly => 1,
+    }
+}
+
+fn decode_scope(value: u8, frame: usize) -> Result<MoveScope, JournalCodecError> {
+    match value {
+        0 => Ok(MoveScope::SameParent),
+        1 => Ok(MoveScope::SameVolumeFilesOnly),
         _ => Err(JournalCodecError::new(
             frame,
             JournalCodecErrorKind::UnknownFieldValue,
@@ -1965,6 +2027,23 @@ const fn metadata_is_reparse(_metadata: &std::fs::Metadata) -> bool {
 mod tests {
     use super::*;
 
+    fn refresh_test_frame_checksum(frame: &mut [u8]) {
+        let checksum = crc32_parts(&[&frame[4..20], &frame[HEADER_BYTES..]]);
+        frame[20..24].copy_from_slice(&checksum.to_le_bytes());
+    }
+
+    fn legacy_intent_frame(intent: &JournalRecord) -> Result<Vec<u8>, JournalCodecError> {
+        let mut legacy = encode_frame(0, intent, 0)?;
+        let authorization_start = legacy.len() - 3;
+        legacy.drain(authorization_start..authorization_start + 2);
+        legacy[4..6].copy_from_slice(&LEGACY_VERSION.to_le_bytes());
+        let payload_len = u32::try_from(legacy.len() - HEADER_BYTES)
+            .map_err(|_| JournalCodecError::new(0, JournalCodecErrorKind::IntegerOutOfRange))?;
+        legacy[16..20].copy_from_slice(&payload_len.to_le_bytes());
+        refresh_test_frame_checksum(&mut legacy);
+        Ok(legacy)
+    }
+
     fn test_step() -> JournalStep {
         JournalStep::new(
             EntryId::new(0),
@@ -1991,6 +2070,87 @@ mod tests {
                 .authorized_completed(&mut authorization, 0, JournalDirection::Forward,)
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn codec_rejects_unknown_authorization_and_decodes_v1_as_legacy_same_parent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let intent = JournalRecord::Intent {
+            plan: PlanId::from_fingerprint(1),
+            steps: vec![test_step()].into_boxed_slice(),
+        };
+        let mut unknown_scope = encode_frame(0, &intent, 0)?;
+        let scope_offset = unknown_scope.len() - 2;
+        unknown_scope[scope_offset] = 0xff;
+        refresh_test_frame_checksum(&mut unknown_scope);
+        assert_eq!(
+            decode_journal_records(&unknown_scope)
+                .err()
+                .map(|error| error.kind),
+            Some(JournalCodecErrorKind::UnknownFieldValue)
+        );
+
+        let legacy = legacy_intent_frame(&intent)?;
+        let decoded = decode_journal_records(&legacy)?;
+        let JournalRecord::Intent { steps, .. } = &decoded[0] else {
+            return Err(std::io::Error::other("legacy intent decoded as another record").into());
+        };
+        assert_eq!(steps[0].kind(), None);
+        assert_eq!(steps[0].scope(), MoveScope::SameParent);
+        Ok(())
+    }
+
+    #[test]
+    fn v1_same_parent_directory_manifest_remains_recoverable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let step = JournalStep::new(
+            EntryId::new(0),
+            LegacyText::from("C:\\a"),
+            LegacyText::from("C:\\b"),
+            EntryIdentity::new(1, 2),
+            EntryIdentity::new(1, 1),
+            EntryIdentity::new(1, 1),
+            TemporaryPhase::None,
+        );
+        let intent = JournalRecord::Intent {
+            plan: PlanId::from_fingerprint(2),
+            steps: vec![step].into_boxed_slice(),
+        };
+        let mut bytes = legacy_intent_frame(&intent)?;
+        bytes.extend(encode_frame(
+            1,
+            &JournalRecord::Prepared {
+                step: 0,
+                direction: JournalDirection::Forward,
+            },
+            1,
+        )?);
+        bytes.extend(encode_frame(
+            2,
+            &JournalRecord::Completed {
+                step: 0,
+                direction: JournalDirection::Forward,
+            },
+            2,
+        )?);
+        let records = decode_journal_records(&bytes)?;
+        let mut backend = crate::rename::MemoryBackend::new()
+            .with_directory("C:\\b", 2)
+            .with_parent_identity("C:", EntryIdentity::new(1, 1));
+        let mut journal = crate::rename::MemoryJournal::from_records(records);
+
+        let outcome = crate::rename::RenameRecovery::new(&mut backend, &mut journal).rollback();
+
+        assert_eq!(
+            outcome,
+            crate::rename::RecoveryOutcome::Recovered {
+                plan: PlanId::from_fingerprint(2),
+                restored_steps: 1,
+            }
+        );
+        assert_eq!(backend.file_id("C:\\a"), Some(2));
+        assert_eq!(backend.file_id("C:\\b"), None);
         Ok(())
     }
 

@@ -2,7 +2,7 @@ use std::fmt;
 
 use darknamer_core::LegacyText;
 
-use super::{EntryIdentity, PathKey, PathSnapshot};
+use super::{EntryIdentity, EntryKind, MoveScope, PathKey, PathSnapshot};
 use super::{JournalDirection, JournalStep, JournalTerminal, PlanId};
 
 /// Backend operation associated with a structured error.
@@ -56,6 +56,8 @@ pub struct RenameOperation {
     expected_source: EntryIdentity,
     expected_source_parent: EntryIdentity,
     expected_destination_parent: EntryIdentity,
+    kind: Option<EntryKind>,
+    scope: MoveScope,
 }
 
 impl RenameOperation {
@@ -68,12 +70,52 @@ impl RenameOperation {
         expected_source_parent: EntryIdentity,
         expected_destination_parent: EntryIdentity,
     ) -> Self {
+        Self::with_legacy_same_parent_authorization(
+            source,
+            destination,
+            expected_source,
+            expected_source_parent,
+            expected_destination_parent,
+        )
+    }
+
+    /// Creates a primitive operation with an explicit immutable move authorization.
+    #[must_use]
+    pub fn with_authorization(
+        source: LegacyText,
+        destination: LegacyText,
+        expected_source: EntryIdentity,
+        expected_source_parent: EntryIdentity,
+        expected_destination_parent: EntryIdentity,
+        kind: EntryKind,
+        scope: MoveScope,
+    ) -> Self {
         Self {
             source,
             destination,
             expected_source,
             expected_source_parent,
             expected_destination_parent,
+            kind: Some(kind),
+            scope,
+        }
+    }
+
+    pub(super) fn with_legacy_same_parent_authorization(
+        source: LegacyText,
+        destination: LegacyText,
+        expected_source: EntryIdentity,
+        expected_source_parent: EntryIdentity,
+        expected_destination_parent: EntryIdentity,
+    ) -> Self {
+        Self {
+            source,
+            destination,
+            expected_source,
+            expected_source_parent,
+            expected_destination_parent,
+            kind: None,
+            scope: MoveScope::SameParent,
         }
     }
 
@@ -105,6 +147,40 @@ impl RenameOperation {
     #[must_use]
     pub const fn expected_destination_parent(&self) -> EntryIdentity {
         self.expected_destination_parent
+    }
+
+    /// Returns the filesystem kind authorized for this primitive.
+    #[must_use]
+    pub const fn kind(&self) -> Option<EntryKind> {
+        self.kind
+    }
+
+    /// Returns the parent-movement scope authorized for this primitive.
+    #[must_use]
+    pub const fn scope(&self) -> MoveScope {
+        self.scope
+    }
+
+    pub(super) fn authorization_error(&self) -> Option<BackendError> {
+        if self.expected_source.volume() != self.expected_source_parent.volume()
+            || self.expected_source_parent.volume() != self.expected_destination_parent.volume()
+        {
+            return Some(BackendError {
+                operation: BackendOperation::Rename,
+                code: 17,
+                certainty: MutationCertainty::NotApplied,
+            });
+        }
+        if self.expected_source_parent != self.expected_destination_parent
+            && (self.scope == MoveScope::SameParent || self.kind != Some(EntryKind::File))
+        {
+            return Some(BackendError {
+                operation: BackendOperation::Rename,
+                code: 5,
+                certainty: MutationCertainty::NotApplied,
+            });
+        }
+        None
     }
 }
 
