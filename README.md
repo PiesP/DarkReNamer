@@ -88,6 +88,10 @@ in [`DISTRIBUTION.md`](DISTRIBUTION.md).
 
 ## Development
 
+See [`DEVELOPMENT.md`](DEVELOPMENT.md) for native Windows prerequisites,
+Linux/WSL checks, cross-build tooling, visual diagnostics, and dependency
+policy.
+
 Run the automated gate:
 
 ```text

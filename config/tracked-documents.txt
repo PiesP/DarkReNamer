@@ -1,0 +1,9 @@
+DEVELOPMENT.md
+DISTRIBUTION.md
+LICENSES/DarkNamer-MIT.txt
+README.md
+SAFETY.md
+SECURITY.md
+THIRD_PARTY_NOTICES.md
+config/tracked-documents.txt
+crates/darknamer-app/THIRD_PARTY_NOTICES.md

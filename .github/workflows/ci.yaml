@@ -48,14 +48,7 @@ jobs:
             exit 1
           fi
           tracked_docs="$(git ls-files '*.md' '*.txt' | LC_ALL=C sort)"
-          expected_docs="$(printf '%s\n' \
-            DISTRIBUTION.md \
-            LICENSES/DarkNamer-MIT.txt \
-            README.md \
-            SAFETY.md \
-            SECURITY.md \
-            THIRD_PARTY_NOTICES.md \
-            crates/darknamer-app/THIRD_PARTY_NOTICES.md)"
+          expected_docs="$(LC_ALL=C sort config/tracked-documents.txt)"
           if [[ "$tracked_docs" != "$expected_docs" ]]; then
             printf 'Tracked documentation differs from the repository policy:\n%s\n' "$tracked_docs" >&2
             exit 1

@@ -1,3 +1,8 @@
-/LICENSE text eol=lf
-/THIRD_PARTY_NOTICES.md text eol=lf
-/DISTRIBUTION.md text eol=lf
+* text=auto eol=lf
+
+*.bmp binary
+*.exe binary
+*.ico binary
+*.pdb binary
+*.png binary
+*.zip binary
