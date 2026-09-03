@@ -114,7 +114,7 @@ const EXPECTED: &[(&str, UnsafeCounts)] = &[
         "src/windows/command_rail.rs",
         UnsafeCounts::new(20, 0, 0, 0),
     ),
-    ("src/windows/dialog.rs", UnsafeCounts::new(75, 0, 1, 0)),
+    ("src/windows/dialog.rs", UnsafeCounts::new(79, 0, 2, 0)),
     ("src/windows/drag_drop.rs", UnsafeCounts::new(103, 5, 38, 0)),
     ("src/windows/list_view.rs", UnsafeCounts::new(79, 1, 1, 0)),
     ("src/windows/menu.rs", UnsafeCounts::new(63, 0, 0, 0)),
@@ -167,6 +167,22 @@ fn build_source_manifest_is_sorted_unique_and_contains_the_policy() {
             .iter()
             .any(|(path, source)| *path == POLICY_FILE && source.contains("const EXPECTED"))
     );
+}
+
+#[test]
+fn task_dialog_stays_out_of_the_static_windows_import_table()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dialog = BUILD_SOURCE_FILES
+        .iter()
+        .find(|(path, _)| *path == "src/windows/dialog.rs")
+        .map(|(_, source)| *source)
+        .ok_or("dialog source is absent from the reviewed manifest")?;
+    assert!(BUILD_SOURCE_FILES.iter().all(|(_, source)| rust_tokens(source)
+        .iter()
+        .all(|token| !matches!(token, RustToken::Identifier(value) if value == "TaskDialogIndirect"))));
+    assert!(dialog.contains("GetProcAddress"));
+    assert!(dialog.contains("b\"TaskDialogIndirect\\0\""));
+    Ok(())
 }
 
 #[test]

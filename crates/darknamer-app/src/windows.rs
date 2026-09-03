@@ -174,7 +174,7 @@ use windows_sys::Win32::UI::Controls::{
     NM_SETFOCUS, NMCUSTOMDRAW, NMHDR, NMHEADERW, NMLISTVIEW, NMLVCUSTOMDRAW, NMLVGETINFOTIPW,
     TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TASKDIALOGCONFIG_1, TD_WARNING_ICON,
     TDCBF_CANCEL_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION, TDF_POSITION_RELATIVE_TO_WINDOW,
-    TDF_SIZE_TO_CONTENT, TDF_USE_COMMAND_LINKS, TaskDialogIndirect,
+    TDF_SIZE_TO_CONTENT, TDF_USE_COMMAND_LINKS,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::{
@@ -855,9 +855,13 @@ impl DeferredMessageDrainGuard {
     fn begin(owner: HWND) -> Option<Self> {
         DRAINING_DEFERRED_MESSAGES.with(|owners| {
             let mut owners = owners.borrow_mut();
-            owners.insert(owner as usize).then_some(Self {
-                owner: owner as usize,
-            })
+            if owners.insert(owner as usize) {
+                Some(Self {
+                    owner: owner as usize,
+                })
+            } else {
+                None
+            }
         })
     }
 }
