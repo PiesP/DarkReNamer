@@ -552,7 +552,14 @@ unsafe extern "system" fn window_proc(
         }
     }
     let state_slot = app_state_slot(window);
+    if message == WM_APP_SHOW_DEFERRED_MESSAGE {
+        if let Some(message) = take_deferred_message(window) {
+            show_message_now(window, &message.text, &message.caption);
+        }
+        return 0;
+    }
     if message == WM_NCDESTROY {
+        discard_deferred_messages(window);
         if !state_slot.is_null() {
             // SAFETY: this final callback owns the publication slot. Clearing it
             // prevents any nested or queued callback from reaching the state.
@@ -1581,6 +1588,47 @@ mod tests {
         });
         assert!(!selector_called.get());
         assert_eq!(app.with_state(|state| state.active_prompt)?, Some(1));
+        Ok(())
+    }
+
+    #[test]
+    fn callback_busy_messages_are_owned_until_a_lease_free_callback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let app = PublishedFileDialogTestApp::new()?;
+        // SAFETY: this test owns the published slot and releases its sole lease
+        // before fixture teardown.
+        let lease = unsafe { CallbackState::try_lease(app.slot) }
+            .ok_or_else(|| io::Error::other("message test lease is unavailable"))?;
+        let posted = Cell::new(false);
+        assert!(defer_message_if_callback_busy(
+            app.owner,
+            "deferred text",
+            "deferred caption",
+            |_| {
+                posted.set(true);
+                true
+            },
+        ));
+        assert!(posted.get());
+        let deferred = take_deferred_message(app.owner)
+            .ok_or_else(|| io::Error::other("deferred message was not retained"))?;
+        assert_eq!(deferred.text, "deferred text");
+        assert_eq!(deferred.caption, "deferred caption");
+
+        assert!(defer_message_if_callback_busy(
+            app.owner,
+            "discarded text",
+            "discarded caption",
+            |_| false,
+        ));
+        assert!(take_deferred_message(app.owner).is_none());
+        drop(lease);
+        assert!(!defer_message_if_callback_busy(
+            app.owner,
+            "immediate text",
+            "immediate caption",
+            |_| true,
+        ));
         Ok(())
     }
 

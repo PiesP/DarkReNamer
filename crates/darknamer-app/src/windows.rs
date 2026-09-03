@@ -1,5 +1,5 @@
-use std::cell::{Cell, UnsafeCell};
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell, UnsafeCell};
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::ffi::c_void;
 use std::fs;
@@ -257,6 +257,7 @@ const WM_APP_EMPTY_SAFETY_COPY: u32 = WM_APP + 0x4D;
 const WM_APP_APPEARANCE_RESTORE_FOCUS: u32 = WM_APP + 0x4E;
 const WM_APP_FINISH_CLOSE: u32 = WM_APP + 0x4F;
 const WM_APP_MENU_REDRAW: u32 = WM_APP + 0x50;
+const WM_APP_SHOW_DEFERRED_MESSAGE: u32 = WM_APP + 0x51;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 const PREFERENCES_POLL_TIMER_ID: usize = 0xD4A2;
 const STATUS_RENDER_TIMER_ID: usize = 0xD4A3;
@@ -325,6 +326,16 @@ impl<T, R> CallbackState<T, R> {
         // retirement sidecar and creates no reference to either one.
         let color = unsafe { &*std::ptr::addr_of!((*slot.as_ptr()).menu_edge_color) };
         color.get()
+    }
+
+    unsafe fn is_busy(slot: *mut Self) -> bool {
+        let Some(slot) = NonNull::new(slot) else {
+            return false;
+        };
+        // SAFETY: the caller guarantees that this is the live UI-thread slot.
+        // Reading the disjoint status Cell creates no reference to `value`.
+        let status = unsafe { &*std::ptr::addr_of!((*slot.as_ptr()).status) };
+        status.get() != CallbackStateStatus::Available
     }
 
     unsafe fn set_menu_edge_color(slot: *mut Self, color: Option<u32>) {
@@ -820,12 +831,90 @@ pub(crate) fn run() -> io::Result<()> {
     application::run()
 }
 
-pub(super) fn message(owner: HWND, text: &str, caption: &str) {
+struct DeferredMessage {
+    owner: usize,
+    text: String,
+    caption: String,
+}
+
+thread_local! {
+    static DEFERRED_MESSAGES: RefCell<VecDeque<DeferredMessage>> = const {
+        RefCell::new(VecDeque::new())
+    };
+}
+
+fn take_deferred_message(owner: HWND) -> Option<DeferredMessage> {
+    DEFERRED_MESSAGES.with(|messages| {
+        let mut messages = messages.borrow_mut();
+        let index = messages
+            .iter()
+            .position(|message| message.owner == owner as usize)?;
+        messages.remove(index)
+    })
+}
+
+fn discard_deferred_messages(owner: HWND) {
+    DEFERRED_MESSAGES.with(|messages| {
+        messages
+            .borrow_mut()
+            .retain(|message| message.owner != owner as usize);
+    });
+}
+
+fn discard_last_deferred_message(owner: HWND) {
+    DEFERRED_MESSAGES.with(|messages| {
+        let mut messages = messages.borrow_mut();
+        if let Some(index) = messages
+            .iter()
+            .rposition(|message| message.owner == owner as usize)
+        {
+            messages.remove(index);
+        }
+    });
+}
+
+fn show_message_now(owner: HWND, text: &str, caption: &str) {
     let text = wide(text);
     let caption = wide(caption);
     // SAFETY: owner is a live HWND and text/caption are owned NUL-terminated
     // UTF-16 buffers retained until the synchronous MessageBoxW call returns.
     unsafe { MessageBoxW(owner, text.as_ptr(), caption.as_ptr(), 0) };
+}
+
+fn defer_message_if_callback_busy(
+    owner: HWND,
+    text: &str,
+    caption: &str,
+    post: impl FnOnce(HWND) -> bool,
+) -> bool {
+    let slot = app_state_slot(owner);
+    // SAFETY: the slot is the current UI-thread publication. This reads only
+    // its status sidecar and never accesses a possibly leased AppState value.
+    if !unsafe { CallbackState::is_busy(slot) } {
+        return false;
+    }
+    DEFERRED_MESSAGES.with(|messages| {
+        messages.borrow_mut().push_back(DeferredMessage {
+            owner: owner as usize,
+            text: text.to_owned(),
+            caption: caption.to_owned(),
+        });
+    });
+    if !post(owner) {
+        discard_last_deferred_message(owner);
+    }
+    true
+}
+
+pub(super) fn message(owner: HWND, text: &str, caption: &str) {
+    let deferred = defer_message_if_callback_busy(owner, text, caption, |window| {
+        // SAFETY: the message carries no pointer. The UI-thread queue owns all
+        // text until the top-level callback consumes or discards it.
+        unsafe { PostMessageW(window, WM_APP_SHOW_DEFERRED_MESSAGE, 0, 0) != 0 }
+    });
+    if !deferred {
+        show_message_now(owner, text, caption);
+    }
 }
 
 #[allow(
