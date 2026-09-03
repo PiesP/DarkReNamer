@@ -405,7 +405,11 @@ fn run_unsafe() -> io::Result<()> {
         if result == -1 {
             let error = io::Error::last_os_error();
             if let Some(mut state_lease) = try_app_state(window) {
-                cancel_appearance_dialog(window, state_lease.state_mut());
+                let cancelled = cancel_appearance_dialog(window, state_lease.state_mut());
+                drop(state_lease);
+                if let Some(cancelled) = cancelled {
+                    destroy_cancelled_appearance_dialog(cancelled);
+                }
             }
             finish_apply_after_message_loop_failure(window);
             // SAFETY: window is the live top-level HWND created above and this
@@ -520,6 +524,40 @@ pub(super) fn handle_status_render_timer(
     0
 }
 
+fn run_prepared_command_action_after_state_release<T, R>(
+    state_lease: CallbackStateLease<T, R>,
+    window: HWND,
+    action: Option<PreparedCommandAction>,
+    select_file_dialog: impl FnOnce(HWND, PreparedFileDialogKind) -> PreparedFileDialogSelection,
+    select_task_dialog: impl FnOnce(HWND, &PreparedTaskDialogSpec) -> io::Result<i32>,
+    appearance_platform: impl AppearanceDialogPlatform,
+) -> Option<()> {
+    run_after_callback_state_release(state_lease, || {
+        action.map(|action| {
+            run_prepared_command_action(
+                window,
+                action,
+                select_file_dialog,
+                select_task_dialog,
+                appearance_platform,
+            );
+        })
+    })
+}
+
+fn run_prepared_worker_task_dialog_after_state_release<T, R>(
+    state_lease: CallbackStateLease<T, R>,
+    window: HWND,
+    prepared: Option<PreparedWorkerTaskDialog>,
+    select: impl FnOnce(HWND, &PreparedTaskDialogSpec) -> io::Result<i32>,
+) {
+    run_after_callback_state_release(state_lease, || {
+        if let Some(prepared) = prepared {
+            run_prepared_worker_task_dialog(window, prepared, select);
+        }
+    });
+}
+
 unsafe extern "system" fn window_proc(
     window: HWND,
     message: u32,
@@ -541,7 +579,50 @@ unsafe extern "system" fn window_proc(
         }
     }
     let state_slot = app_state_slot(window);
+    if message == WM_APP_SHOW_DEFERRED_MESSAGE {
+        if app_callback_is_busy(window) {
+            // The successful post may be consumed by a nested modal loop while
+            // the originating callback still owns AppState. Keep retrying with
+            // a pointer-free timer until that lease ends.
+            // SAFETY: this exact timer belongs to the still-live owner.
+            unsafe { SetTimer(window, DEFERRED_MESSAGE_TIMER_ID, 1, None) };
+            return 0;
+        }
+        // Kill before MessageBoxW starts another modal loop; the HWND may be
+        // destroyed or reused before that loop returns.
+        // SAFETY: an absent fallback timer on this live callback owner is harmless.
+        unsafe { KillTimer(window, DEFERRED_MESSAGE_TIMER_ID) };
+        let _ = drain_deferred_messages_if_available(window, show_message_now);
+        return 0;
+    }
+    if message == WM_TIMER && wparam == DEFERRED_MESSAGE_TIMER_ID {
+        if app_callback_is_busy(window) {
+            return 0;
+        }
+        // SAFETY: kill the live owner's timer before modal display can destroy
+        // or recycle the numeric HWND.
+        unsafe { KillTimer(window, DEFERRED_MESSAGE_TIMER_ID) };
+        let _ = drain_deferred_messages_if_available(window, show_message_now);
+        return 0;
+    }
+    if message != WM_NCDESTROY && !app_callback_is_busy(window) && has_deferred_messages(window) {
+        // Scheduling is non-modal and pointer-free, so this callback may safely
+        // continue with its already-copied state slot. Repeated ordinary
+        // callbacks retry if both queue wake mechanisms previously failed.
+        let _ = schedule_deferred_message_wake(
+            window,
+            |target| {
+                // SAFETY: the private message carries no pointer payload.
+                unsafe { PostMessageW(target, WM_APP_SHOW_DEFERRED_MESSAGE, 0, 0) != 0 }
+            },
+            |target| {
+                // SAFETY: this pointer-free timer belongs to the live owner.
+                unsafe { SetTimer(target, DEFERRED_MESSAGE_TIMER_ID, 1, None) != 0 }
+            },
+        );
+    }
     if message == WM_NCDESTROY {
+        discard_deferred_messages(window);
         if !state_slot.is_null() {
             // SAFETY: this final callback owns the publication slot. Clearing it
             // prevents any nested or queued callback from reaching the state.
@@ -552,6 +633,7 @@ unsafe extern "system" fn window_proc(
                 KillTimer(window, APPLY_POLL_TIMER_ID);
                 KillTimer(window, PREFERENCES_POLL_TIMER_ID);
                 KillTimer(window, STATUS_RENDER_TIMER_ID);
+                KillTimer(window, DEFERRED_MESSAGE_TIMER_ID);
             }
             // SAFETY: the slot is still live. Its sidecar is disjoint from a
             // possibly leased AppState value and is taken at most once.
@@ -825,8 +907,9 @@ unsafe extern "system" fn window_proc(
                 }
                 released
             };
-            // Dropping may synchronously restore owner focus, so it occurs only
-            // after the AppState borrow above has ended.
+            // Dropping may synchronously restore owner focus, so release the
+            // complete callback-state lease, not only its temporary borrow.
+            drop(state_lease);
             drop(released_session);
             0
         }
@@ -857,12 +940,24 @@ unsafe extern "system" fn window_proc(
         }
         WM_APP_PLAN_COMPLETE if !state_ptr.is_null() => {
             // SAFETY: state_ptr is the live UI-thread AppState for this window.
-            handle_plan_completion(window, unsafe { &mut *state_ptr });
+            let prepared = handle_plan_completion(window, unsafe { &mut *state_ptr });
+            run_prepared_worker_task_dialog_after_state_release(
+                state_lease,
+                window,
+                prepared,
+                select_prepared_task_dialog,
+            );
             0
         }
         WM_APP_ADMISSION_COMPLETE if !state_ptr.is_null() => {
             // SAFETY: state_ptr is the live UI-thread AppState for this window.
-            handle_admission_completion(window, unsafe { &mut *state_ptr });
+            let prepared = handle_admission_completion(window, unsafe { &mut *state_ptr });
+            run_prepared_worker_task_dialog_after_state_release(
+                state_lease,
+                window,
+                prepared,
+                select_prepared_task_dialog,
+            );
             0
         }
         WM_APP_ADMISSION_STARTED if !state_ptr.is_null() => {
@@ -889,7 +984,13 @@ unsafe extern "system" fn window_proc(
                 .as_ref()
                 .is_some_and(|worker| worker.handle.is_finished())
             {
-                handle_admission_completion(window, state);
+                let prepared = handle_admission_completion(window, state);
+                run_prepared_worker_task_dialog_after_state_release(
+                    state_lease,
+                    window,
+                    prepared,
+                    select_prepared_task_dialog,
+                );
                 return 0;
             }
             if state
@@ -897,7 +998,13 @@ unsafe extern "system" fn window_proc(
                 .as_ref()
                 .is_some_and(|worker| worker.handle.is_finished())
             {
-                handle_plan_completion(window, state);
+                let prepared = handle_plan_completion(window, state);
+                run_prepared_worker_task_dialog_after_state_release(
+                    state_lease,
+                    window,
+                    prepared,
+                    select_prepared_task_dialog,
+                );
                 return 0;
             }
             handle_apply_progress(state);
@@ -913,8 +1020,12 @@ unsafe extern "system" fn window_proc(
         WM_CLOSE if !state_ptr.is_null() => {
             // SAFETY: state_ptr is the live UI-thread AppState for this window.
             let state = unsafe { &mut *state_ptr };
-            cancel_appearance_dialog(window, state);
+            let cancelled = cancel_appearance_dialog(window, state);
             request_window_close(window, state);
+            drop(state_lease);
+            if let Some(cancelled) = cancelled {
+                destroy_cancelled_appearance_dialog(cancelled);
+            }
             0
         }
         WM_ERASEBKGND if !state_ptr.is_null() => {
@@ -1038,12 +1149,15 @@ unsafe extern "system" fn window_proc(
             }
             // SAFETY: state_ptr is the non-null, window-thread-confined AppState
             // installed in GWLP_USERDATA and is uniquely borrowed for dispatch.
-            let prompt = dispatch_command(window, unsafe { &mut *state_ptr }, command);
-            run_after_callback_state_release(state_lease, || {
-                if let Some(prompt) = prompt {
-                    run_prepared_prompt(window, prompt);
-                }
-            });
+            let action = dispatch_command(window, unsafe { &mut *state_ptr }, command);
+            run_prepared_command_action_after_state_release(
+                state_lease,
+                window,
+                action,
+                select_prepared_file_dialog,
+                select_prepared_task_dialog,
+                NativeAppearanceDialogPlatform,
+            );
             0
         }
         WM_NOTIFY if !state_ptr.is_null() => {
@@ -1115,27 +1229,31 @@ unsafe extern "system" fn window_proc(
                 } else if unsafe { (*header).code } == NM_DBLCLK {
                     // SAFETY: state_ptr is the non-null AppState installed for
                     // this HWND and remains exclusively callback-thread owned.
-                    let prompt =
+                    let action =
                         dispatch_command(window, unsafe { &mut *state_ptr }, MANUAL_CHANGE);
-                    run_after_callback_state_release(state_lease, || {
-                        if let Some(prompt) = prompt {
-                            run_prepared_prompt(window, prompt);
-                        }
-                    });
+                    run_prepared_command_action_after_state_release(
+                        state_lease,
+                        window,
+                        action,
+                        select_prepared_file_dialog,
+                        select_prepared_task_dialog,
+                        NativeAppearanceDialogPlatform,
+                    );
                     return 0;
                 }
             }
             0
         }
         WM_DESTROY => {
+            let mut cancelled_appearance = None;
             if !state_ptr.is_null() {
                 // Stop the ListView from retaining AppState refdata before any
                 // child teardown can reenter through common-controls messages.
                 // SAFETY: state_ptr is live and UI-thread confined here.
                 remove_list_view_notification_subclass(unsafe { (*state_ptr).list_window });
-                // SAFETY: defensive owner teardown rolls back and destroys any
-                // still-live appearance session before preference shutdown/drop.
-                cancel_appearance_dialog(window, unsafe { &mut *state_ptr });
+                // SAFETY: defensive owner teardown removes any appearance
+                // session now; native dialog destruction follows lease release.
+                cancelled_appearance = cancel_appearance_dialog(window, unsafe { &mut *state_ptr });
                 // Copy overlay identity, then revoke the disjoint OLE sidecar
                 // without extending the AppState reference into COM teardown.
                 // SAFETY: this callback owns the sole AppState lease.
@@ -1156,6 +1274,10 @@ unsafe extern "system" fn window_proc(
                 if let Some(rail) = unsafe { (&mut *state_ptr).right_rail.take() } {
                     rail.destroy();
                 }
+            }
+            drop(state_lease);
+            if let Some(cancelled) = cancelled_appearance {
+                destroy_cancelled_appearance_dialog(cancelled);
             }
             // SAFETY: PostQuitMessage targets the current thread queue and accepts no borrowed pointers.
             unsafe { PostQuitMessage(0) };
@@ -1210,6 +1332,1191 @@ pub(super) fn route_static_control_colors(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const FILE_DIALOG_DRAWITEM_SUBCLASS_ID: usize = 0xD4B4;
+    static FILE_DIALOG_DRAWITEM_LEASED: AtomicBool = AtomicBool::new(false);
+    static APPEARANCE_CREATE_REENTERED: AtomicBool = AtomicBool::new(false);
+    static APPEARANCE_FOCUSED: AtomicBool = AtomicBool::new(false);
+    static APPEARANCE_GUARD_CREATED: AtomicBool = AtomicBool::new(false);
+    static APPEARANCE_WINDOW_DESTROYED: AtomicBool = AtomicBool::new(false);
+    static APPEARANCE_TEST_SERIAL: Mutex<()> = Mutex::new(());
+
+    #[derive(Clone, Copy, Default)]
+    enum AppearanceTestMutation {
+        #[default]
+        None,
+        Revision,
+        Close,
+        Confirmation,
+        Session,
+        Worker,
+        DestroyOwner,
+    }
+
+    struct TestAppearancePlatform {
+        slot: *mut AppStateSlot,
+        create_failure: bool,
+        arm_failure: bool,
+        mutation: AppearanceTestMutation,
+    }
+
+    impl AppearanceDialogPlatform for TestAppearancePlatform {
+        fn create(
+            &mut self,
+            owner: HWND,
+            session_id: u32,
+            appearance: UiAppearance,
+            forced_colors: ForcedColorsState,
+            system_theme: Option<ResolvedTheme>,
+        ) -> io::Result<HWND> {
+            // SAFETY: the test owns the live publication and create must run
+            // only after the command callback released its lease.
+            if let Some(lease) = unsafe { CallbackState::try_lease(self.slot) } {
+                APPEARANCE_CREATE_REENTERED.store(true, Ordering::SeqCst);
+                drop(lease);
+            }
+            if self.create_failure {
+                return Err(io::Error::other("injected appearance create failure"));
+            }
+            let mut native = NativeAppearanceDialogPlatform;
+            let window =
+                native.create(owner, session_id, appearance, forced_colors, system_theme)?;
+            // SAFETY: mutation uses the same live test publication between
+            // external creation and the runner's installation validation.
+            if let Some(mut lease) = unsafe { CallbackState::try_lease(self.slot) } {
+                let state = lease.state_mut();
+                match self.mutation {
+                    AppearanceTestMutation::None => {}
+                    AppearanceTestMutation::Revision => state.model_revision += 1,
+                    AppearanceTestMutation::Close => state.close_pending = true,
+                    AppearanceTestMutation::Confirmation => state.confirmation_pending = true,
+                    AppearanceTestMutation::Session => state.active_prompt = Some(999),
+                    AppearanceTestMutation::Worker => {
+                        let started = admit_paths(owner, state, Vec::new());
+                        assert!(started.is_ok());
+                        finalize_admission_start(state);
+                    }
+                    AppearanceTestMutation::DestroyOwner => {}
+                }
+                drop(lease);
+            }
+            if matches!(self.mutation, AppearanceTestMutation::DestroyOwner) {
+                // SAFETY: owner is the live test-owned window and this case
+                // deliberately exercises destruction during external create.
+                unsafe { DestroyWindow(owner) };
+            }
+            Ok(window)
+        }
+
+        fn arm(&mut self, window: HWND, session_id: u32) -> bool {
+            if self.arm_failure {
+                false
+            } else {
+                NativeAppearanceDialogPlatform.arm(window, session_id)
+            }
+        }
+
+        fn focus(&mut self, window: HWND) {
+            APPEARANCE_FOCUSED.store(true, Ordering::SeqCst);
+            NativeAppearanceDialogPlatform.focus(window);
+        }
+
+        fn owner_guard(&mut self, owner: HWND) -> OwnerEnableGuard {
+            APPEARANCE_GUARD_CREATED.store(true, Ordering::SeqCst);
+            NativeAppearanceDialogPlatform.owner_guard(owner)
+        }
+
+        fn destroy(&mut self, window: HWND) {
+            APPEARANCE_WINDOW_DESTROYED.store(true, Ordering::SeqCst);
+            NativeAppearanceDialogPlatform.destroy(window);
+        }
+    }
+
+    fn send_synthetic_drawitem(owner: HWND) {
+        // SAFETY: tests pass their live, test-owned top-level window and the
+        // synchronous message contains no pointer payload.
+        unsafe { SendMessageW(owner, WM_DRAWITEM, 0, 0) };
+    }
+
+    extern "system" fn file_dialog_drawitem_probe(
+        window: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        subclass_id: usize,
+        ref_data: usize,
+    ) -> LRESULT {
+        if subclass_id == FILE_DIALOG_DRAWITEM_SUBCLASS_ID && message == WM_DRAWITEM {
+            let slot = ref_data as *mut AppStateSlot;
+            // SAFETY: the subclass refdata is the live test-owned publication
+            // slot and this synchronous callback does not outlive the owner.
+            if let Some(lease) = unsafe { CallbackState::try_lease(slot) } {
+                FILE_DIALOG_DRAWITEM_LEASED.store(true, Ordering::SeqCst);
+                drop(lease);
+                return 1;
+            }
+        }
+        // SAFETY: unchanged callback arguments are forwarded exactly once to
+        // the system-owned subclass chain.
+        unsafe { DefSubclassProc(window, message, wparam, lparam) }
+    }
+
+    struct PublishedFileDialogTestApp {
+        owner: HWND,
+        slot: *mut AppStateSlot,
+        _directory: tempfile::TempDir,
+    }
+
+    impl PublishedFileDialogTestApp {
+        fn new() -> Result<Self, Box<dyn std::error::Error>> {
+            let directory = tempfile::tempdir()?;
+            let state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+            let controls = INITCOMMONCONTROLSEX {
+                dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+                dwICC: ICC_LISTVIEW_CLASSES | ICC_WIN95_CLASSES,
+            };
+            // SAFETY: controls has the exact ABI size and remains live for the
+            // synchronous process-wide common-controls initialization call.
+            unsafe { InitCommonControlsEx(&controls) };
+            let class = wide("STATIC");
+            // SAFETY: the system STATIC class and current module remain live
+            // for this hidden, test-owned top-level window.
+            let owner = unsafe {
+                CreateWindowExW(
+                    0,
+                    class.as_ptr(),
+                    null(),
+                    WS_OVERLAPPEDWINDOW,
+                    0,
+                    0,
+                    640,
+                    480,
+                    null_mut(),
+                    null_mut(),
+                    GetModuleHandleW(null()),
+                    null_mut(),
+                )
+            };
+            if owner.is_null() {
+                return Err(io::Error::last_os_error().into());
+            }
+            let slot: *mut AppStateSlot = CallbackState::into_raw(state);
+            // SAFETY: owner and slot are test-owned and remain live until Drop.
+            unsafe { SetWindowLongPtrW(owner, GWLP_USERDATA, slot as isize) };
+            let app = Self {
+                owner,
+                slot,
+                _directory: directory,
+            };
+            // SAFETY: owner and slot remain live through app Drop, which
+            // removes this exact subclass before destroying the window.
+            if unsafe {
+                SetWindowSubclass(
+                    owner,
+                    Some(file_dialog_drawitem_probe),
+                    FILE_DIALOG_DRAWITEM_SUBCLASS_ID,
+                    slot as usize,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error().into());
+            }
+            app.with_state(|state| create_children(owner, state))??;
+            Ok(app)
+        }
+
+        fn lease(&self) -> io::Result<CallbackStateLease<AppState, DropTargetRegistrations>> {
+            // SAFETY: this test owns the published UI-thread slot and callers
+            // never request another lease while the returned value is live.
+            unsafe { CallbackState::try_lease(self.slot) }
+                .ok_or_else(|| io::Error::other("test AppState lease is unavailable"))
+        }
+
+        fn with_state<R>(&self, action: impl FnOnce(&mut AppState) -> R) -> io::Result<R> {
+            let mut lease = self.lease()?;
+            let result = action(lease.state_mut());
+            drop(lease);
+            Ok(result)
+        }
+
+        fn prepare(&self, command: u16) -> io::Result<PreparedCommandAction> {
+            self.with_state(|state| dispatch_command(self.owner, state, command))?
+                .ok_or_else(|| io::Error::other("file command prepared no action"))
+        }
+
+        fn dispatch_with_selector(
+            &self,
+            command: u16,
+            selector: impl FnOnce(HWND, PreparedFileDialogKind) -> PreparedFileDialogSelection,
+        ) -> io::Result<()> {
+            // SAFETY: this test owns the published UI-thread slot and ends this
+            // dispatch lease through the production application seam.
+            let mut lease = self.lease()?;
+            let action = dispatch_command(self.owner, lease.state_mut(), command);
+            run_prepared_command_action_after_state_release(
+                lease,
+                self.owner,
+                action,
+                selector,
+                select_prepared_task_dialog,
+                NativeAppearanceDialogPlatform,
+            )
+            .ok_or_else(|| io::Error::other("file command prepared no action"))?;
+            Ok(())
+        }
+
+        fn dispatch_task_with_selector(
+            &self,
+            command: u16,
+            selector: impl FnOnce(HWND, &PreparedTaskDialogSpec) -> io::Result<i32>,
+        ) -> io::Result<()> {
+            // SAFETY: this test owns the published UI-thread slot and ends this
+            // dispatch lease through the production application seam.
+            let mut lease = self.lease()?;
+            let action = dispatch_command(self.owner, lease.state_mut(), command);
+            run_prepared_command_action_after_state_release(
+                lease,
+                self.owner,
+                action,
+                select_prepared_file_dialog,
+                selector,
+                NativeAppearanceDialogPlatform,
+            )
+            .ok_or_else(|| io::Error::other("task-dialog command prepared no action"))?;
+            Ok(())
+        }
+
+        fn dispatch_appearance_with_platform(
+            &self,
+            platform: impl AppearanceDialogPlatform,
+        ) -> io::Result<()> {
+            let mut lease = self.lease()?;
+            let action = dispatch_command(self.owner, lease.state_mut(), APPEARANCE_ADVANCED);
+            run_prepared_command_action_after_state_release(
+                lease,
+                self.owner,
+                action,
+                select_prepared_file_dialog,
+                select_prepared_task_dialog,
+                platform,
+            )
+            .ok_or_else(|| io::Error::other("appearance command prepared no action"))?;
+            Ok(())
+        }
+
+        fn install_staged_intent(&self) -> Result<(PathBuf, Vec<u8>), Box<dyn std::error::Error>> {
+            self.with_state(
+                |state| -> Result<(PathBuf, Vec<u8>), Box<dyn std::error::Error>> {
+                    let journal = FileJournal::create_candidate(
+                        &state.journal_root,
+                        CANDIDATE_JOURNAL_LEAF,
+                        ACTIVE_JOURNAL_LEAF,
+                    )?;
+                    let step = crate::rename::JournalStep::new(
+                        crate::rename::EntryId::new(1),
+                        LegacyText::from(r"C:\fixture\before.txt"),
+                        LegacyText::from(r"C:\fixture\after.txt"),
+                        crate::rename::EntryIdentity::new(7, 11),
+                        crate::rename::EntryIdentity::new(7, 1),
+                        crate::rename::EntryIdentity::new(7, 1),
+                        crate::rename::TemporaryPhase::None,
+                    );
+                    let path = journal.path().to_path_buf();
+                    drop(journal);
+                    let bytes = crate::rename::encode_journal_records(&[
+                        crate::rename::JournalRecord::Intent {
+                            plan: crate::rename::PlanId::from_fingerprint(7),
+                            steps: vec![step].into_boxed_slice(),
+                        },
+                    ])?;
+                    fs::write(&path, &bytes)?;
+                    let journal = FileJournal::open_candidate_existing_retained(
+                        &state.journal_root,
+                        CANDIDATE_JOURNAL_LEAF,
+                        ACTIVE_JOURNAL_LEAF,
+                    )?;
+                    state.staged_journal = Some(journal);
+                    state.recovery_locked = true;
+                    update_controls(state);
+                    Ok((path, bytes))
+                },
+            )?
+        }
+
+        fn drain_admission(&self) -> io::Result<()> {
+            for _ in 0..200 {
+                let finished = self.with_state(|state| {
+                    state
+                        .admission_worker
+                        .as_ref()
+                        .is_some_and(|worker| worker.handle.is_finished())
+                })?;
+                if finished {
+                    self.with_state(|state| handle_admission_completion(self.owner, state))?;
+                    return Ok(());
+                }
+                if self.with_state(|state| state.admission_worker.is_none())? {
+                    return Ok(());
+                }
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(io::Error::other("admission worker did not finish"))
+        }
+
+        fn finish_directory_admission_with_selector(
+            &self,
+            selector: impl FnOnce(HWND, &PreparedTaskDialogSpec) -> io::Result<i32>,
+        ) -> io::Result<()> {
+            for _ in 0..200 {
+                // SAFETY: the test owns the published UI-thread slot. The
+                // production wrapper releases this lease before selection.
+                let mut lease = self.lease()?;
+                let finished = lease
+                    .state()
+                    .admission_worker
+                    .as_ref()
+                    .is_some_and(|worker| worker.handle.is_finished());
+                if finished {
+                    let prepared = handle_admission_completion(self.owner, lease.state_mut());
+                    run_prepared_worker_task_dialog_after_state_release(
+                        lease, self.owner, prepared, selector,
+                    );
+                    return Ok(());
+                }
+                drop(lease);
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(io::Error::other(
+                "directory admission worker did not finish",
+            ))
+        }
+
+        fn finish_plan_with_selector(
+            &self,
+            selector: impl FnOnce(HWND, &PreparedTaskDialogSpec) -> io::Result<i32>,
+        ) -> io::Result<()> {
+            for _ in 0..400 {
+                // SAFETY: the test owns the published UI-thread slot. The
+                // production wrapper releases this lease before selection.
+                let mut lease = self.lease()?;
+                let finished = lease
+                    .state()
+                    .plan_worker
+                    .as_ref()
+                    .is_some_and(|worker| worker.handle.is_finished());
+                if finished {
+                    let prepared = handle_plan_completion(self.owner, lease.state_mut());
+                    run_prepared_worker_task_dialog_after_state_release(
+                        lease, self.owner, prepared, selector,
+                    );
+                    return Ok(());
+                }
+                drop(lease);
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(io::Error::other("plan worker did not finish"))
+        }
+
+        fn drain_apply(&self) -> io::Result<()> {
+            for _ in 0..400 {
+                let finished = self.with_state(|state| {
+                    state
+                        .apply_worker
+                        .as_ref()
+                        .is_some_and(|worker| worker.handle.is_finished())
+                })?;
+                if finished {
+                    self.with_state(|state| handle_apply_completion(self.owner, state))?;
+                    return Ok(());
+                }
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(io::Error::other("apply worker did not finish"))
+        }
+
+        fn assert_session_cleared(&self) -> io::Result<()> {
+            let active = self.with_state(|state| state.active_prompt)?;
+            if active.is_some() {
+                Err(io::Error::other("file-dialog session was not cleared"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl Drop for PublishedFileDialogTestApp {
+        fn drop(&mut self) {
+            // A failed assertion or timeout can leave a test admission worker
+            // live. Join it while the owner HWND is still published so its
+            // completion wake cannot target a later recycled test window.
+            finish_apply_after_message_loop_failure(self.owner);
+            let mut cancelled_appearance = None;
+            // SAFETY: Drop owns the published slot and window. It mirrors the
+            // production child cleanup order before unpublishing and reclaiming.
+            unsafe {
+                if let Some(mut lease) = CallbackState::try_lease(self.slot) {
+                    let state = lease.state_mut();
+                    cancelled_appearance = cancel_appearance_dialog(self.owner, state);
+                    remove_list_view_notification_subclass(state.list_window);
+                    if let Some(rail) = state.left_rail.take() {
+                        rail.destroy();
+                    }
+                    if let Some(rail) = state.right_rail.take() {
+                        rail.destroy();
+                    }
+                    drop(lease);
+                }
+                if let Some(cancelled) = cancelled_appearance {
+                    destroy_cancelled_appearance_dialog(cancelled);
+                }
+                RemoveWindowSubclass(
+                    self.owner,
+                    Some(file_dialog_drawitem_probe),
+                    FILE_DIALOG_DRAWITEM_SUBCLASS_ID,
+                );
+                SetWindowLongPtrW(self.owner, GWLP_USERDATA, 0);
+                DestroyWindow(self.owner);
+                discard_deferred_messages(self.owner);
+                let _disposition = CallbackState::request_reclaim(self.slot);
+            }
+        }
+    }
+
+    #[test]
+    fn real_file_dialog_pipeline_routes_all_commands_and_cleans_sessions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let app = PublishedFileDialogTestApp::new()?;
+        FILE_DIALOG_DRAWITEM_LEASED.store(false, Ordering::SeqCst);
+        app.dispatch_with_selector(ADD_FILES, |owner, kind| {
+            assert!(matches!(kind, PreparedFileDialogKind::AddFiles));
+            // SAFETY: owner is the live test window. The synchronous subclass
+            // callback attempts the same AppState lease as production drawing.
+            send_synthetic_drawitem(owner);
+            PreparedFileDialogSelection::Cancelled
+        })?;
+        assert!(FILE_DIALOG_DRAWITEM_LEASED.load(Ordering::SeqCst));
+        app.assert_session_cleared()?;
+
+        app.dispatch_with_selector(ADD_FILES, |_, kind| {
+            assert!(matches!(kind, PreparedFileDialogKind::AddFiles));
+            PreparedFileDialogSelection::AddFiles(Vec::new())
+        })?;
+        app.assert_session_cleared()?;
+        app.drain_admission()?;
+
+        for (command, names, leaf) in [
+            (SAVE_NAMES, true, "saved-names.txt"),
+            (SAVE_PATHS, false, "saved-paths.txt"),
+        ] {
+            let output = app._directory.path().join(leaf);
+            app.dispatch_with_selector(command, |_, kind| match kind {
+                PreparedFileDialogKind::SaveText {
+                    text,
+                    names: actual,
+                } if actual == names => PreparedFileDialogSelection::SaveText {
+                    path: output.clone(),
+                    text,
+                },
+                _ => PreparedFileDialogSelection::Cancelled,
+            })?;
+            assert!(output.is_file());
+            app.assert_session_cleared()?;
+        }
+
+        let imported_names = app._directory.path().join("import-names.txt");
+        write_legacy_text(&imported_names, &LegacyText::from("name.txt"))?;
+        app.dispatch_with_selector(IMPORT_NAMES, |_, kind| {
+            assert!(matches!(kind, PreparedFileDialogKind::ImportNames));
+            PreparedFileDialogSelection::ImportNames(imported_names)
+        })?;
+        app.assert_session_cleared()?;
+
+        let imported_paths = app._directory.path().join("import-paths.txt");
+        write_legacy_text(&imported_paths, &LegacyText::default())?;
+        app.dispatch_with_selector(IMPORT_PATHS, |_, kind| {
+            assert!(matches!(kind, PreparedFileDialogKind::ImportPaths));
+            PreparedFileDialogSelection::ImportPaths(imported_paths)
+        })?;
+        app.assert_session_cleared()?;
+        app.drain_admission()?;
+        Ok(())
+    }
+
+    #[test]
+    fn real_file_dialog_pipeline_rejects_stale_locked_and_mismatched_sessions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        #[derive(Clone, Copy)]
+        enum Blocker {
+            StaleRevision,
+            Close,
+            ReadOnly,
+            Mutation,
+            Worker,
+        }
+
+        for blocker in [
+            Blocker::StaleRevision,
+            Blocker::Close,
+            Blocker::ReadOnly,
+            Blocker::Mutation,
+            Blocker::Worker,
+        ] {
+            let app = PublishedFileDialogTestApp::new()?;
+            let action = app.prepare(SAVE_PATHS)?;
+            app.with_state(|state| match blocker {
+                Blocker::StaleRevision => state.model_revision += 1,
+                Blocker::Close => state.close_pending = true,
+                Blocker::ReadOnly => state.recovery_locked = true,
+                Blocker::Mutation => state.mutation_locked = true,
+                Blocker::Worker => {
+                    let started = admit_paths(app.owner, state, Vec::new());
+                    assert!(started.is_ok());
+                    finalize_admission_start(state);
+                }
+            })?;
+            let selector_called = Cell::new(false);
+            run_prepared_command_action(
+                app.owner,
+                action,
+                |_, _| {
+                    selector_called.set(true);
+                    PreparedFileDialogSelection::Cancelled
+                },
+                select_prepared_task_dialog,
+                NativeAppearanceDialogPlatform,
+            );
+            assert!(!selector_called.get());
+            app.assert_session_cleared()?;
+            if matches!(blocker, Blocker::Worker) {
+                app.drain_admission()?;
+            }
+        }
+
+        // Revalidate after the modal boundary as well as before it. Each
+        // selector changes state only after the production runner has accepted
+        // the prepared session, then returns an otherwise valid save result.
+        for blocker in [
+            Blocker::StaleRevision,
+            Blocker::Close,
+            Blocker::ReadOnly,
+            Blocker::Mutation,
+            Blocker::Worker,
+        ] {
+            let app = PublishedFileDialogTestApp::new()?;
+            let output = app._directory.path().join("stale-modal-result.txt");
+            let expected_kind = Cell::new(false);
+            app.dispatch_with_selector(SAVE_PATHS, |_, kind| {
+                let text = match kind {
+                    PreparedFileDialogKind::SaveText { text, names: false } => {
+                        expected_kind.set(true);
+                        text
+                    }
+                    _ => LegacyText::default(),
+                };
+                assert!(
+                    app.with_state(|state| match blocker {
+                        Blocker::StaleRevision => state.model_revision += 1,
+                        Blocker::Close => state.close_pending = true,
+                        Blocker::ReadOnly => state.recovery_locked = true,
+                        Blocker::Mutation => state.mutation_locked = true,
+                        Blocker::Worker => {
+                            let started = admit_paths(app.owner, state, Vec::new());
+                            assert!(started.is_ok());
+                            finalize_admission_start(state);
+                        }
+                    })
+                    .is_ok()
+                );
+                PreparedFileDialogSelection::SaveText {
+                    path: output.clone(),
+                    text,
+                }
+            })?;
+            assert!(expected_kind.get());
+            assert!(!output.exists());
+            app.assert_session_cleared()?;
+            if matches!(blocker, Blocker::Close) {
+                assert!(app.with_state(|state| state.close_pending)?);
+            }
+            if matches!(blocker, Blocker::Worker) {
+                app.drain_admission()?;
+            }
+        }
+
+        let app = PublishedFileDialogTestApp::new()?;
+        let action = app.prepare(SAVE_PATHS)?;
+        app.with_state(|state| state.active_prompt = Some(999))?;
+        let selector_called = Cell::new(false);
+        run_prepared_command_action(
+            app.owner,
+            action,
+            |_, _| {
+                selector_called.set(true);
+                PreparedFileDialogSelection::Cancelled
+            },
+            select_prepared_task_dialog,
+            NativeAppearanceDialogPlatform,
+        );
+        assert!(!selector_called.get());
+        assert_eq!(app.with_state(|state| state.active_prompt)?, Some(999));
+
+        let app = PublishedFileDialogTestApp::new()?;
+        let action = app.prepare(SAVE_PATHS)?;
+        let selector_called = Cell::new(false);
+        run_prepared_command_action(
+            null_mut(),
+            action,
+            |_, _| {
+                selector_called.set(true);
+                PreparedFileDialogSelection::Cancelled
+            },
+            select_prepared_task_dialog,
+            NativeAppearanceDialogPlatform,
+        );
+        assert!(!selector_called.get());
+        assert_eq!(app.with_state(|state| state.active_prompt)?, Some(1));
+        Ok(())
+    }
+
+    #[test]
+    fn real_discard_task_dialog_runs_after_release_and_revalidates_the_journal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let app = PublishedFileDialogTestApp::new()?;
+        let (candidate, _) = app.install_staged_intent()?;
+        FILE_DIALOG_DRAWITEM_LEASED.store(false, Ordering::SeqCst);
+        app.dispatch_task_with_selector(DISCARD_STAGED_JOURNAL, |owner, spec| {
+            assert_eq!(spec.buttons.len(), 1);
+            // SAFETY: owner is the live test window. The synchronous callback
+            // attempts the production AppState lease during the fake modal.
+            send_synthetic_drawitem(owner);
+            Ok(IDCANCEL)
+        })?;
+        assert!(FILE_DIALOG_DRAWITEM_LEASED.load(Ordering::SeqCst));
+        app.assert_session_cleared()?;
+        assert!(candidate.exists());
+
+        app.dispatch_task_with_selector(DISCARD_STAGED_JOURNAL, |_, _| {
+            Err(io::Error::other("injected TaskDialog failure"))
+        })?;
+        app.assert_session_cleared()?;
+        assert!(candidate.exists());
+
+        app.dispatch_task_with_selector(DISCARD_STAGED_JOURNAL, |_, _| {
+            app.with_state(|state| state.model_revision += 1)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            Ok(DISCARD_CONFIRM_BUTTON_ID)
+        })?;
+        app.assert_session_cleared()?;
+        assert!(candidate.exists());
+
+        app.with_state(|state| state.model_revision -= 1)?;
+        #[derive(Clone, Copy)]
+        enum PostModalChange {
+            Close,
+            DialogLockLost,
+            SessionChanged,
+            WorkerStarted,
+        }
+        for change in [
+            PostModalChange::Close,
+            PostModalChange::DialogLockLost,
+            PostModalChange::SessionChanged,
+            PostModalChange::WorkerStarted,
+        ] {
+            app.dispatch_task_with_selector(DISCARD_STAGED_JOURNAL, |_, _| {
+                app.with_state(|state| match change {
+                    PostModalChange::Close => state.close_pending = true,
+                    PostModalChange::DialogLockLost => state.mutation_locked = false,
+                    PostModalChange::SessionChanged => state.active_prompt = Some(999),
+                    PostModalChange::WorkerStarted => {
+                        let started = admit_paths(app.owner, state, Vec::new());
+                        assert!(started.is_ok());
+                        finalize_admission_start(state);
+                    }
+                })
+                .map_err(|error| io::Error::other(error.to_string()))?;
+                Ok(DISCARD_CONFIRM_BUTTON_ID)
+            })?;
+            assert!(candidate.exists());
+            if matches!(change, PostModalChange::SessionChanged) {
+                assert_eq!(app.with_state(|state| state.active_prompt)?, Some(999));
+            } else {
+                app.assert_session_cleared()?;
+            }
+            app.with_state(|state| {
+                state.close_pending = false;
+                state.active_prompt = None;
+                state.confirmation_pending = false;
+                if state.admission_worker.is_none() {
+                    state.mutation_locked = false;
+                }
+            })?;
+            if matches!(change, PostModalChange::WorkerStarted) {
+                app.drain_admission()?;
+            }
+        }
+
+        app.dispatch_task_with_selector(DISCARD_STAGED_JOURNAL, |_, _| {
+            Ok(DISCARD_CONFIRM_BUTTON_ID)
+        })?;
+        app.assert_session_cleared()?;
+        assert!(!candidate.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn real_recovery_export_pipeline_copies_retained_bytes_and_rejects_stale_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let app = PublishedFileDialogTestApp::new()?;
+        let (_candidate, expected_bytes) = app.install_staged_intent()?;
+        let cancelled = app._directory.path().join("cancelled-export");
+        fs::create_dir(&cancelled)?;
+        app.dispatch_with_selector(EXPORT_RECOVERY_JOURNAL, |owner, kind| {
+            assert!(matches!(
+                kind,
+                PreparedFileDialogKind::ExportRecoveryJournal
+            ));
+            send_synthetic_drawitem(owner);
+            PreparedFileDialogSelection::Cancelled
+        })?;
+        app.assert_session_cleared()?;
+        assert!(fs::read_dir(&cancelled)?.next().is_none());
+
+        let exported = app._directory.path().join("successful-export");
+        fs::create_dir(&exported)?;
+        FILE_DIALOG_DRAWITEM_LEASED.store(false, Ordering::SeqCst);
+        app.dispatch_with_selector(EXPORT_RECOVERY_JOURNAL, |owner, kind| {
+            assert!(matches!(
+                kind,
+                PreparedFileDialogKind::ExportRecoveryJournal
+            ));
+            send_synthetic_drawitem(owner);
+            PreparedFileDialogSelection::RecoveryExportDirectory(exported.clone())
+        })?;
+        assert!(FILE_DIALOG_DRAWITEM_LEASED.load(Ordering::SeqCst));
+        app.assert_session_cleared()?;
+        assert_eq!(
+            fs::read(exported.join("candidate.drj.retained"))?,
+            expected_bytes
+        );
+        let presentation = take_deferred_message(app.owner)
+            .ok_or_else(|| io::Error::other("recovery export queued no presentation"))?;
+        assert_eq!(presentation.caption, "DarkReNamer - 진단 내보내기 완료");
+
+        app.with_state(|state| {
+            state
+                .blocked_journals
+                .push(StartupJournalBlock::Unavailable {
+                    role: JournalRole::Active,
+                    path: app._directory.path().join("unavailable-active.drj"),
+                    failure: JournalOpenFailure {
+                        stage: crate::rename::JournalOpenStage::Open,
+                        kind: crate::rename::FileJournalErrorKind::Io,
+                        os_code: Some(5),
+                        codec_frame: None,
+                    },
+                });
+        })?;
+        let mixed = app._directory.path().join("mixed-export");
+        fs::create_dir(&mixed)?;
+        app.dispatch_with_selector(EXPORT_RECOVERY_JOURNAL, |_, _| {
+            PreparedFileDialogSelection::RecoveryExportDirectory(mixed.clone())
+        })?;
+        assert_eq!(
+            fs::read(mixed.join("candidate.drj.retained"))?,
+            expected_bytes
+        );
+        let presentation = take_deferred_message(app.owner)
+            .ok_or_else(|| io::Error::other("mixed export queued no presentation"))?;
+        assert_eq!(
+            presentation.caption,
+            "DarkReNamer - 진단 내보내기 일부 실패"
+        );
+        assert!(presentation.text.contains("건너뜀: Active"));
+
+        let partial = app._directory.path().join("partial-export");
+        fs::create_dir(&partial)?;
+        fs::write(partial.join("candidate.drj.retained"), b"sentinel")?;
+        app.dispatch_with_selector(EXPORT_RECOVERY_JOURNAL, |_, _| {
+            PreparedFileDialogSelection::RecoveryExportDirectory(partial.clone())
+        })?;
+        assert_eq!(
+            fs::read(partial.join("candidate.drj.retained"))?,
+            b"sentinel"
+        );
+        let presentation = take_deferred_message(app.owner)
+            .ok_or_else(|| io::Error::other("partial export queued no presentation"))?;
+        assert_eq!(
+            presentation.caption,
+            "DarkReNamer - 진단 내보내기 일부 실패"
+        );
+
+        #[derive(Clone, Copy)]
+        enum PostModalChange {
+            Revision,
+            Close,
+            DialogLockLost,
+            SessionChanged,
+            WorkerStarted,
+        }
+        for (index, change) in [
+            PostModalChange::Revision,
+            PostModalChange::Close,
+            PostModalChange::DialogLockLost,
+            PostModalChange::SessionChanged,
+            PostModalChange::WorkerStarted,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let destination = app._directory.path().join(format!("stale-export-{index}"));
+            fs::create_dir(&destination)?;
+            app.dispatch_with_selector(EXPORT_RECOVERY_JOURNAL, |_, _| {
+                assert!(
+                    app.with_state(|state| match change {
+                        PostModalChange::Revision => state.model_revision += 1,
+                        PostModalChange::Close => state.close_pending = true,
+                        PostModalChange::DialogLockLost => state.mutation_locked = false,
+                        PostModalChange::SessionChanged => state.active_prompt = Some(999),
+                        PostModalChange::WorkerStarted => {
+                            let started = admit_paths(app.owner, state, Vec::new());
+                            assert!(started.is_ok());
+                            finalize_admission_start(state);
+                        }
+                    })
+                    .is_ok()
+                );
+                PreparedFileDialogSelection::RecoveryExportDirectory(destination.clone())
+            })?;
+            assert!(!destination.join("candidate.drj.retained").exists());
+            app.with_state(|state| {
+                if matches!(change, PostModalChange::Revision) {
+                    state.model_revision -= 1;
+                }
+                state.close_pending = false;
+                state.active_prompt = None;
+                state.confirmation_pending = false;
+                if state.admission_worker.is_none() {
+                    state.mutation_locked = false;
+                }
+            })?;
+            if matches!(change, PostModalChange::WorkerStarted) {
+                app.drain_admission()?;
+            }
+        }
+
+        let identity_app = PublishedFileDialogTestApp::new()?;
+        let (_candidate, _) = identity_app.install_staged_intent()?;
+        let destination = identity_app._directory.path().join("identity-changed");
+        fs::create_dir(&destination)?;
+        identity_app.dispatch_with_selector(EXPORT_RECOVERY_JOURNAL, |_, _| {
+            assert!(
+                identity_app
+                    .with_state(|state| state.staged_journal = None)
+                    .is_ok()
+            );
+            PreparedFileDialogSelection::RecoveryExportDirectory(destination.clone())
+        })?;
+        identity_app.assert_session_cleared()?;
+        assert!(!destination.join("candidate.drj.retained").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn real_directory_task_dialog_releases_state_and_restarts_current_admission()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let app = PublishedFileDialogTestApp::new()?;
+        let directory = app._directory.path().join("selected-directory");
+        fs::create_dir(&directory)?;
+        app.with_state(|state| {
+            let started = admit_paths(app.owner, state, vec![directory]);
+            assert!(started.is_ok());
+            finalize_admission_start(state);
+        })?;
+        FILE_DIALOG_DRAWITEM_LEASED.store(false, Ordering::SeqCst);
+        app.finish_directory_admission_with_selector(|owner, spec| {
+            assert_eq!(spec.buttons.len(), 2);
+            // SAFETY: owner is live and the synchronous test subclass probes
+            // whether the modal runner released AppState.
+            send_synthetic_drawitem(owner);
+            Ok(DIRECTORY_DIRECT_BUTTON_ID)
+        })?;
+        assert!(FILE_DIALOG_DRAWITEM_LEASED.load(Ordering::SeqCst));
+        app.assert_session_cleared()?;
+        assert!(app.with_state(|state| state.admission_worker.is_some())?);
+        app.drain_admission()?;
+
+        let directory = app._directory.path().join("stale-directory");
+        fs::create_dir(&directory)?;
+        app.with_state(|state| {
+            let started = admit_paths(app.owner, state, vec![directory]);
+            assert!(started.is_ok());
+            finalize_admission_start(state);
+        })?;
+        app.finish_directory_admission_with_selector(|_, _| {
+            app.with_state(|state| state.recovery_locked = true)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            Ok(DIRECTORY_DIRECT_BUTTON_ID)
+        })?;
+        app.assert_session_cleared()?;
+        assert!(app.with_state(|state| state.admission_worker.is_none())?);
+        Ok(())
+    }
+
+    #[test]
+    fn real_apply_task_dialog_releases_state_and_confirms_the_same_plan()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let app = PublishedFileDialogTestApp::new()?;
+        let source = app._directory.path().join("before.txt");
+        let destination = app._directory.path().join("after.txt");
+        fs::write(&source, b"fixture")?;
+        app.with_state(|state| -> Result<(), ProposalMutationError> {
+            let appended =
+                state
+                    .model
+                    .append(LegacyListItem::new(legacy_path(&source), false, 7, 0, 0))?;
+            state.commit_known_model_change(appended);
+            let changed = state
+                .model
+                .manual_change_changed(0, LegacyText::from("after.txt"))?;
+            state.commit_known_model_change(changed);
+            refresh(state);
+            update_controls(state);
+            Ok(())
+        })??;
+        app.with_state(|state| apply_changes(app.owner, state))?;
+        FILE_DIALOG_DRAWITEM_LEASED.store(false, Ordering::SeqCst);
+        app.finish_plan_with_selector(|owner, spec| {
+            assert_eq!(spec.buttons.len(), 1);
+            // SAFETY: owner is live and the synchronous test subclass probes
+            // whether the modal runner released AppState.
+            send_synthetic_drawitem(owner);
+            Ok(APPLY_CONFIRM_BUTTON_ID)
+        })?;
+        assert!(FILE_DIALOG_DRAWITEM_LEASED.load(Ordering::SeqCst));
+        app.assert_session_cleared()?;
+        assert!(app.with_state(|state| state.apply_worker.is_some())?);
+        app.drain_apply()?;
+        assert!(!source.exists());
+        assert!(destination.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn real_appearance_pipeline_installs_exact_guard_and_focuses_existing_dialog()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _serial = APPEARANCE_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let app = PublishedFileDialogTestApp::new()?;
+        for flag in [
+            &APPEARANCE_CREATE_REENTERED,
+            &APPEARANCE_FOCUSED,
+            &APPEARANCE_GUARD_CREATED,
+            &APPEARANCE_WINDOW_DESTROYED,
+        ] {
+            flag.store(false, Ordering::SeqCst);
+        }
+        app.dispatch_appearance_with_platform(TestAppearancePlatform {
+            slot: app.slot,
+            create_failure: false,
+            arm_failure: false,
+            mutation: AppearanceTestMutation::None,
+        })?;
+        assert!(APPEARANCE_CREATE_REENTERED.load(Ordering::SeqCst));
+        assert!(APPEARANCE_FOCUSED.load(Ordering::SeqCst));
+        assert!(APPEARANCE_GUARD_CREATED.load(Ordering::SeqCst));
+        assert!(!APPEARANCE_WINDOW_DESTROYED.load(Ordering::SeqCst));
+        app.assert_session_cleared()?;
+        let installed = app.with_state(|state| {
+            state
+                .appearance_dialog
+                .as_ref()
+                .is_some_and(AppearanceDialogSession::owns_owner_guard)
+        })?;
+        assert!(installed);
+
+        APPEARANCE_CREATE_REENTERED.store(false, Ordering::SeqCst);
+        APPEARANCE_FOCUSED.store(false, Ordering::SeqCst);
+        app.dispatch_appearance_with_platform(TestAppearancePlatform {
+            slot: app.slot,
+            create_failure: true,
+            arm_failure: true,
+            mutation: AppearanceTestMutation::None,
+        })?;
+        assert!(!APPEARANCE_CREATE_REENTERED.load(Ordering::SeqCst));
+        assert!(APPEARANCE_FOCUSED.load(Ordering::SeqCst));
+        Ok(())
+    }
+
+    #[test]
+    fn real_appearance_pipeline_cleans_create_arm_and_stale_failures()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _serial = APPEARANCE_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (create_failure, arm_failure, mutation) in [
+            (true, false, AppearanceTestMutation::None),
+            (false, true, AppearanceTestMutation::None),
+            (false, false, AppearanceTestMutation::Revision),
+            (false, false, AppearanceTestMutation::Close),
+            (false, false, AppearanceTestMutation::Confirmation),
+            (false, false, AppearanceTestMutation::Session),
+            (false, false, AppearanceTestMutation::Worker),
+            (false, false, AppearanceTestMutation::DestroyOwner),
+        ] {
+            let app = PublishedFileDialogTestApp::new()?;
+            APPEARANCE_WINDOW_DESTROYED.store(false, Ordering::SeqCst);
+            app.dispatch_appearance_with_platform(TestAppearancePlatform {
+                slot: app.slot,
+                create_failure,
+                arm_failure,
+                mutation,
+            })?;
+            let active = app.with_state(|state| state.active_prompt).unwrap_or(None);
+            if matches!(mutation, AppearanceTestMutation::Session) {
+                assert_eq!(active, Some(999));
+            } else if !matches!(mutation, AppearanceTestMutation::DestroyOwner) {
+                assert_eq!(active, None);
+            }
+            if !create_failure {
+                assert!(APPEARANCE_WINDOW_DESTROYED.load(Ordering::SeqCst));
+            }
+            if matches!(mutation, AppearanceTestMutation::Worker) {
+                app.drain_admission()?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn callback_busy_messages_are_owned_until_a_lease_free_callback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let app = PublishedFileDialogTestApp::new()?;
+        // SAFETY: this test owns the published slot and releases its sole lease
+        // before fixture teardown.
+        let lease = unsafe { CallbackState::try_lease(app.slot) }
+            .ok_or_else(|| io::Error::other("message test lease is unavailable"))?;
+        let posted = Cell::new(false);
+        assert!(defer_message_if_callback_busy(
+            app.owner,
+            "deferred text",
+            "deferred caption",
+            |_| {
+                posted.set(true);
+                true
+            },
+        ));
+        assert!(posted.get());
+        let deferred = take_deferred_message(app.owner)
+            .ok_or_else(|| io::Error::other("deferred message was not retained"))?;
+        assert_eq!(deferred.text, "deferred text");
+        assert_eq!(deferred.caption, "deferred caption");
+
+        assert!(defer_message_if_callback_busy(
+            app.owner,
+            "discarded text",
+            "discarded caption",
+            |_| false,
+        ));
+        assert!(!drain_deferred_messages_if_available(
+            app.owner,
+            |_, _, _| {}
+        ));
+        assert!(has_deferred_messages(app.owner));
+        drop(lease);
+        let recovered = RefCell::new(Vec::new());
+        assert!(drain_deferred_messages_if_available(
+            app.owner,
+            |_, text, caption| recovered
+                .borrow_mut()
+                .push((text.to_owned(), caption.to_owned()))
+        ));
+        assert_eq!(
+            recovered.into_inner(),
+            vec![("discarded text".to_owned(), "discarded caption".to_owned())]
+        );
+        assert!(!defer_message_if_callback_busy(
+            app.owner,
+            "immediate text",
+            "immediate caption",
+            |_| true,
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn deferred_messages_drain_fifo_without_nested_consumption() {
+        let owner = null_mut();
+        DEFERRED_MESSAGES.with(|messages| {
+            let mut messages = messages.borrow_mut();
+            messages.push_back(DeferredMessage {
+                owner: owner as usize,
+                text: "first".to_owned(),
+                caption: "one".to_owned(),
+            });
+            messages.push_back(DeferredMessage {
+                owner: owner as usize,
+                text: "second".to_owned(),
+                caption: "two".to_owned(),
+            });
+        });
+        let shown = RefCell::new(Vec::new());
+        assert!(drain_deferred_messages_with(
+            owner,
+            |nested_owner, text, caption| {
+                shown
+                    .borrow_mut()
+                    .push((text.to_owned(), caption.to_owned()));
+                assert!(!drain_deferred_messages_with(nested_owner, |_, _, _| {}));
+            }
+        ));
+        assert_eq!(
+            shown.into_inner(),
+            vec![
+                ("first".to_owned(), "one".to_owned()),
+                ("second".to_owned(), "two".to_owned()),
+            ]
+        );
+        assert!(take_deferred_message(owner).is_none());
+
+        DEFERRED_MESSAGES.with(|messages| {
+            messages.borrow_mut().push_back(DeferredMessage {
+                owner: owner as usize,
+                text: "destroyed".to_owned(),
+                caption: "owner".to_owned(),
+            });
+        });
+        discard_deferred_messages(owner);
+        assert!(take_deferred_message(owner).is_none());
+    }
+
+    #[test]
+    fn deferred_message_wake_retries_after_both_schedulers_fail() {
+        let owner = null_mut();
+        let attempts = Cell::new(0_u8);
+        assert!(!schedule_deferred_message_wake(
+            owner,
+            |_| {
+                attempts.set(attempts.get().saturating_add(1));
+                false
+            },
+            |_| {
+                attempts.set(attempts.get().saturating_add(1));
+                false
+            },
+        ));
+        assert_eq!(attempts.get(), 2);
+        assert!(schedule_deferred_message_wake(
+            owner,
+            |_| {
+                attempts.set(attempts.get().saturating_add(1));
+                true
+            },
+            |_| false,
+        ));
+        assert_eq!(attempts.get(), 3);
+    }
 
     #[test]
     fn menu_bottom_edge_repaints_for_paint_and_activation_messages() {

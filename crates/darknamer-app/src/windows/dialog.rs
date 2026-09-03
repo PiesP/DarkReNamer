@@ -17,6 +17,45 @@ pub(super) struct TaskDialogSpec<'a> {
     pub(super) warning: bool,
 }
 
+pub(super) struct PreparedTaskDialogButton {
+    pub(super) id: i32,
+    pub(super) text: String,
+}
+
+pub(super) struct PreparedTaskDialogSpec {
+    pub(super) title: String,
+    pub(super) main_instruction: String,
+    pub(super) content: String,
+    pub(super) expanded_information: Option<String>,
+    pub(super) buttons: Vec<PreparedTaskDialogButton>,
+    pub(super) warning: bool,
+}
+
+pub(super) fn select_prepared_task_dialog(
+    owner: HWND,
+    prepared: &PreparedTaskDialogSpec,
+) -> io::Result<i32> {
+    let buttons = prepared
+        .buttons
+        .iter()
+        .map(|button| TaskDialogButtonSpec {
+            id: button.id,
+            text: &button.text,
+        })
+        .collect::<Vec<_>>();
+    task_dialog(
+        owner,
+        TaskDialogSpec {
+            title: &prepared.title,
+            main_instruction: &prepared.main_instruction,
+            content: &prepared.content,
+            expanded_information: prepared.expanded_information.as_deref(),
+            buttons: &buttons,
+            warning: prepared.warning,
+        },
+    )
+}
+
 struct OwnedTaskDialog {
     _title: Vec<u16>,
     _main_instruction: Vec<u16>,
@@ -1123,24 +1162,6 @@ pub(super) fn window_text(window: HWND) -> LegacyText {
     prompt_window_text(window).unwrap_or_default()
 }
 
-pub(super) fn add_files_dialog(owner: HWND, state: &mut AppState) {
-    let Some(paths) = modal_native_dialog(owner, || {
-        native_file_dialog(owner)
-            .set_title("이름 붙일 파일 불러오기")
-            .add_filter("All Files", &["*"])
-            .pick_files()
-    }) else {
-        return;
-    };
-    match admit_paths(owner, state, paths) {
-        Ok(()) => finalize_admission_start(state),
-        Err(error) => {
-            finalize_admission_start_failure(state);
-            report_admission_start_error(owner, &error);
-        }
-    }
-}
-
 pub(super) fn copy_clipboard_or_report(owner: HWND, text: &LegacyText) {
     if let Err(error) = copy_clipboard(owner, text) {
         message(
@@ -1151,105 +1172,84 @@ pub(super) fn copy_clipboard_or_report(owner: HWND, text: &LegacyText) {
     }
 }
 
-pub(super) fn save_text_dialog(owner: HWND, text: LegacyText, names: bool) {
-    let title = if names {
-        "파일명 저장"
-    } else {
-        "경로명 저장"
-    };
-    let default_name = if names { "names.txt" } else { "paths.txt" };
-    let Some(path) = modal_native_dialog(owner, || {
-        native_file_dialog(owner)
-            .set_title(title)
-            .add_filter("Text Files", &["txt"])
-            .add_filter("All Files", &["*"])
-            .set_file_name(default_name)
-            .save_file()
-    }) else {
-        return;
-    };
-    if let Err(error) = write_legacy_text(&path, &text) {
-        message(
-            owner,
-            &format!("파일을 저장하지 못했습니다: {error}"),
-            "DarkReNamer - 저장 실패",
-        );
-    }
+pub(super) enum PreparedFileDialogKind {
+    AddFiles,
+    SaveText { text: LegacyText, names: bool },
+    ImportNames,
+    ImportPaths,
+    ExportRecoveryJournal,
 }
 
-pub(super) fn import_names_dialog(owner: HWND, state: &mut AppState) -> Box<[usize]> {
-    let Some(path) = modal_native_dialog(owner, || {
-        native_file_dialog(owner)
-            .set_title("바꿀 파일 이름 불러오기")
-            .add_filter("Text Files", &["txt"])
-            .add_filter("All Files", &["*"])
-            .pick_file()
-    }) else {
-        return Box::default();
-    };
-    match read_legacy_text(&path) {
-        Ok(text) => match state.model.import_names_changed(&text) {
-            Ok(changed) => changed,
-            Err(error) => {
-                message(
-                    owner,
-                    proposal_mutation_error_korean(error),
-                    "DarkReNamer - 이름 가져오기",
-                );
-                Box::default()
-            }
-        },
-        Err(error) => {
-            message(
-                owner,
-                &format!("가져오기 파일을 읽지 못했습니다: {error}"),
-                "DarkReNamer",
-            );
-            Box::default()
-        }
-    }
+pub(super) enum PreparedFileDialogSelection {
+    Cancelled,
+    AddFiles(Vec<PathBuf>),
+    SaveText { path: PathBuf, text: LegacyText },
+    ImportNames(PathBuf),
+    ImportPaths(PathBuf),
+    RecoveryExportDirectory(PathBuf),
 }
 
-pub(super) fn import_paths_dialog(owner: HWND, state: &mut AppState) {
-    let Some(path) = modal_native_dialog(owner, || {
-        native_file_dialog(owner)
-            .set_title("파일에서 경로목록 읽어 추가하기")
-            .add_filter("Text Files", &["txt"])
-            .add_filter("All Files", &["*"])
-            .pick_file()
-    }) else {
-        return;
-    };
-    let text = match read_legacy_text(&path) {
-        Ok(text) => text,
-        Err(error) => {
-            message(
-                owner,
-                &format!("경로 목록을 읽지 못했습니다: {error}"),
-                "DarkReNamer",
-            );
-            return;
+pub(super) fn select_prepared_file_dialog(
+    owner: HWND,
+    kind: PreparedFileDialogKind,
+) -> PreparedFileDialogSelection {
+    match kind {
+        PreparedFileDialogKind::AddFiles => modal_native_dialog(owner, || {
+            native_file_dialog(owner)
+                .set_title("이름 붙일 파일 불러오기")
+                .add_filter("All Files", &["*"])
+                .pick_files()
+        })
+        .map_or(PreparedFileDialogSelection::Cancelled, |paths| {
+            PreparedFileDialogSelection::AddFiles(paths)
+        }),
+        PreparedFileDialogKind::SaveText { text, names } => {
+            let title = if names {
+                "파일명 저장"
+            } else {
+                "경로명 저장"
+            };
+            let default_name = if names { "names.txt" } else { "paths.txt" };
+            modal_native_dialog(owner, || {
+                native_file_dialog(owner)
+                    .set_title(title)
+                    .add_filter("Text Files", &["txt"])
+                    .add_filter("All Files", &["*"])
+                    .set_file_name(default_name)
+                    .save_file()
+            })
+            .map_or(PreparedFileDialogSelection::Cancelled, |path| {
+                PreparedFileDialogSelection::SaveText { path, text }
+            })
         }
-    };
-    let remaining = MAX_ADMITTED_SOURCES.saturating_sub(state.model.len());
-    let (lines, truncated) = bounded_import_lines(&text, remaining.saturating_add(1));
-    if truncated || lines.len() > remaining {
-        message(
-            owner,
-            "경로 목록이 남은 10,000개 한도를 초과해 제한된 수만 처리합니다.",
-            "DarkReNamer - 가져오기 한도",
-        );
-    }
-    let paths = lines
-        .into_iter()
-        .map(|line| PathBuf::from(std::ffi::OsString::from_wide(line.units())))
-        .collect();
-    match admit_paths(owner, state, paths) {
-        Ok(()) => finalize_admission_start(state),
-        Err(error) => {
-            finalize_admission_start_failure(state);
-            report_admission_start_error(owner, &error);
-        }
+        PreparedFileDialogKind::ImportNames => modal_native_dialog(owner, || {
+            native_file_dialog(owner)
+                .set_title("바꿀 파일 이름 불러오기")
+                .add_filter("Text Files", &["txt"])
+                .add_filter("All Files", &["*"])
+                .pick_file()
+        })
+        .map_or(PreparedFileDialogSelection::Cancelled, |path| {
+            PreparedFileDialogSelection::ImportNames(path)
+        }),
+        PreparedFileDialogKind::ImportPaths => modal_native_dialog(owner, || {
+            native_file_dialog(owner)
+                .set_title("파일에서 경로목록 읽어 추가하기")
+                .add_filter("Text Files", &["txt"])
+                .add_filter("All Files", &["*"])
+                .pick_file()
+        })
+        .map_or(PreparedFileDialogSelection::Cancelled, |path| {
+            PreparedFileDialogSelection::ImportPaths(path)
+        }),
+        PreparedFileDialogKind::ExportRecoveryJournal => modal_native_dialog(owner, || {
+            native_file_dialog(owner)
+                .set_title("복구 저널 원본을 저장할 폴더 선택")
+                .pick_folder()
+        })
+        .map_or(PreparedFileDialogSelection::Cancelled, |path| {
+            PreparedFileDialogSelection::RecoveryExportDirectory(path)
+        }),
     }
 }
 

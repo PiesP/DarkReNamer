@@ -95,15 +95,15 @@ const EXPECTED: &[(&str, UnsafeCounts)] = &[
         "src/rename/windows_native.rs",
         UnsafeCounts::new(18, 0, 0, 0),
     ),
-    ("src/windows.rs", UnsafeCounts::new(175, 6, 1, 0)),
+    ("src/windows.rs", UnsafeCounts::new(179, 7, 1, 0)),
     ("src/windows/appearance.rs", UnsafeCounts::new(59, 0, 0, 0)),
     (
         "src/windows/appearance_dialog.rs",
-        UnsafeCounts::new(153, 0, 3, 0),
+        UnsafeCounts::new(155, 0, 3, 0),
     ),
     (
         "src/windows/application.rs",
-        UnsafeCounts::new(115, 0, 1, 0),
+        UnsafeCounts::new(133, 0, 1, 0),
     ),
     ("src/windows/clipboard.rs", UnsafeCounts::new(11, 0, 0, 0)),
     (

@@ -203,6 +203,27 @@ pub(super) enum ReadyPlanError {
     Summary,
 }
 
+pub(super) enum PreparedWorkerTaskDialog {
+    Apply(PreparedApplyTaskDialog),
+    Directory(PreparedDirectoryTaskDialog),
+}
+
+pub(super) struct PreparedApplyTaskDialog {
+    session: PreparedTaskDialogSession,
+    spec: PreparedTaskDialogSpec,
+    revision: ModelRevision,
+    fingerprint: u64,
+    plan: RenamePlan,
+}
+
+pub(super) struct PreparedDirectoryTaskDialog {
+    session: PreparedTaskDialogSession,
+    spec: PreparedTaskDialogSpec,
+    revision: ModelRevision,
+    paths: Vec<PathBuf>,
+    capacity: usize,
+}
+
 pub(super) enum ApplyWorkerResult {
     JournalCreateFailed(FileJournalError),
     Executed {
@@ -345,7 +366,7 @@ pub(super) fn handle_ready_plan(
     state: &mut AppState,
     revision: ModelRevision,
     plan: Result<ReadyPlan, ReadyPlanError>,
-) {
+) -> Option<PreparedWorkerTaskDialog> {
     let ready = match plan {
         Ok(ready) => ready,
         Err(ReadyPlanError::Plan(error)) => {
@@ -356,7 +377,7 @@ pub(super) fn handle_ready_plan(
                 update_controls(state);
                 message(window, &message_text, "DarkReNamer - 적용 차단");
             }
-            return;
+            return None;
         }
         Err(ReadyPlanError::Preflight(error)) => {
             message(
@@ -364,7 +385,7 @@ pub(super) fn handle_ready_plan(
                 &execute_error_korean(&error),
                 "DarkReNamer - 적용 차단",
             );
-            return;
+            return None;
         }
         Err(ReadyPlanError::Summary) => {
             message(
@@ -372,42 +393,64 @@ pub(super) fn handle_ready_plan(
                 "실행 계획 요약이 내부 실행 단계와 일치하지 않습니다. 파일 변경은 시작되지 않았습니다.",
                 "DarkReNamer - 적용 차단",
             );
-            return;
+            return None;
         }
     };
     if !preview_is_ready_for_apply(window, state) {
-        return;
+        return None;
     }
     let plan = ready.plan;
     if plan.is_empty() {
         message(window, "변경할 항목이 없습니다.", "DarkReNamer");
-        return;
+        return None;
     }
     let primary = apply_confirmation_primary(ready.summary);
     let detail = apply_confirmation_detail(plan.fingerprint(), state.model_revision);
-    let buttons = [TaskDialogButtonSpec {
-        id: APPLY_CONFIRM_BUTTON_ID,
-        text: "변경 적용",
-    }];
-    state.mutation_locked = true;
-    state.confirmation_pending = true;
+    let fingerprint = plan.fingerprint();
+    let session = begin_prepared_task_dialog(state)?;
     update_controls(state);
-    let answer = task_dialog(
-        window,
-        TaskDialogSpec {
-            title: "DarkReNamer - 안전한 적용 확인",
-            main_instruction: "실제 파일 이름 변경을 적용하시겠습니까?",
-            content: &primary,
-            expanded_information: Some(&detail),
-            buttons: &buttons,
+    Some(PreparedWorkerTaskDialog::Apply(PreparedApplyTaskDialog {
+        session,
+        spec: PreparedTaskDialogSpec {
+            title: "DarkReNamer - 안전한 적용 확인".to_owned(),
+            main_instruction: "실제 파일 이름 변경을 적용하시겠습니까?".to_owned(),
+            content: primary,
+            expanded_information: Some(detail),
+            buttons: vec![PreparedTaskDialogButton {
+                id: APPLY_CONFIRM_BUTTON_ID,
+                text: "변경 적용".to_owned(),
+            }],
             warning: true,
         },
-    );
-    state.mutation_locked = false;
-    state.confirmation_pending = false;
+        revision,
+        fingerprint,
+        plan,
+    }))
+}
+
+fn run_prepared_apply_task_dialog(
+    window: HWND,
+    prepared: PreparedApplyTaskDialog,
+    select: impl FnOnce(HWND, &PreparedTaskDialogSpec) -> io::Result<i32>,
+) {
+    let answer = select(window, &prepared.spec);
+    let Some(mut state_lease) = try_app_state(window) else {
+        return;
+    };
+    let state = state_lease.state_mut();
+    let disposition =
+        take_prepared_task_dialog(state, prepared.session, PreparedTaskDialogPolicy::Mutable);
     update_controls(state);
-    if state.close_pending {
+    if disposition == PreparedTaskDialogDisposition::Closed {
         try_finish_window_close(window, state);
+        return;
+    }
+    if disposition != PreparedTaskDialogDisposition::Accepted {
+        if disposition == PreparedTaskDialogDisposition::Rejected {
+            state.set_transient_status(
+                "확인 중 목록 또는 작업 상태가 바뀌어 실행 계획을 적용하지 않았습니다.",
+            );
+        }
         return;
     }
     let answer = match answer {
@@ -429,7 +472,16 @@ pub(super) fn handle_ready_plan(
     if !preview_is_ready_for_apply(window, state) {
         return;
     }
-    if state.revision() != revision {
+    if state.apply_locked() {
+        state.set_transient_status(
+            "확인 중 복구 또는 다른 작업 상태가 바뀌어 실행 계획을 적용하지 않았습니다.",
+        );
+        return;
+    }
+    if state.revision() != prepared.revision
+        || prepared.plan.revision() != prepared.revision
+        || prepared.plan.fingerprint() != prepared.fingerprint
+    {
         {
             message(
                 window,
@@ -439,9 +491,9 @@ pub(super) fn handle_ready_plan(
         }
         return;
     }
-    let id = plan.id();
-    let plan_revision = plan.revision();
-    let confirmed = match plan.confirm_presented(id, plan_revision) {
+    let id = prepared.plan.id();
+    let plan_revision = prepared.plan.revision();
+    let confirmed = match prepared.plan.confirm_presented(id, plan_revision) {
         Ok(confirmed) => confirmed,
         Err(error) => {
             message(window, &error.to_string(), "DarkReNamer");
@@ -449,6 +501,21 @@ pub(super) fn handle_ready_plan(
         }
     };
     start_apply_worker(window, state, confirmed);
+}
+
+pub(super) fn run_prepared_worker_task_dialog(
+    window: HWND,
+    prepared: PreparedWorkerTaskDialog,
+    select: impl FnOnce(HWND, &PreparedTaskDialogSpec) -> io::Result<i32>,
+) {
+    match prepared {
+        PreparedWorkerTaskDialog::Apply(prepared) => {
+            run_prepared_apply_task_dialog(window, prepared, select);
+        }
+        PreparedWorkerTaskDialog::Directory(prepared) => {
+            run_prepared_directory_task_dialog(window, prepared, select);
+        }
+    }
 }
 
 pub(super) fn handle_completed_execution(
@@ -626,26 +693,25 @@ pub(super) fn start_plan_worker(
     update_controls(state);
 }
 
-pub(super) fn handle_plan_completion(window: HWND, state: &mut AppState) {
-    let Some(worker) = state.plan_worker.as_ref() else {
-        return;
-    };
+pub(super) fn handle_plan_completion(
+    window: HWND,
+    state: &mut AppState,
+) -> Option<PreparedWorkerTaskDialog> {
+    let worker = state.plan_worker.as_ref()?;
     if !worker.handle.is_finished() {
-        return;
+        return None;
     }
     // SAFETY: this exact timer belongs to the live top-level window and the
     // planning thread has reached its terminal state.
     unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
-    let Some(worker) = state.plan_worker.take() else {
-        return;
-    };
+    let worker = state.plan_worker.take()?;
     apply_cancel_control_state(state);
     let joined = worker.handle.join();
     state.mutation_locked = false;
     state.clear_progress_status();
     if state.close_pending {
         try_finish_window_close(window, state);
-        return;
+        return None;
     }
     if joined.is_err() {
         message(
@@ -654,18 +720,20 @@ pub(super) fn handle_plan_completion(window: HWND, state: &mut AppState) {
             "DarkReNamer - 계획 오류",
         );
         update_controls(state);
-        return;
+        return None;
     }
-    match worker.receiver.try_recv() {
+    let prepared = match worker.receiver.try_recv() {
         Ok(PlanWorkerResult::Finished { revision, plan }) => {
-            handle_ready_plan(window, state, revision, plan);
+            let prepared = handle_ready_plan(window, state, revision, plan);
             if state.close_pending {
                 try_finish_window_close(window, state);
-                return;
+                return None;
             }
+            prepared
         }
         Ok(PlanWorkerResult::Cancelled) => {
             state.set_transient_status("파일 변경 계획을 취소했습니다.");
+            None
         }
         Ok(PlanWorkerResult::Panicked) => {
             message(
@@ -673,6 +741,7 @@ pub(super) fn handle_plan_completion(window: HWND, state: &mut AppState) {
                 "planning worker 내부 오류가 발생했습니다. 파일 변경은 시작되지 않았습니다.",
                 "DarkReNamer - 계획 오류",
             );
+            None
         }
         Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
             message(
@@ -680,9 +749,11 @@ pub(super) fn handle_plan_completion(window: HWND, state: &mut AppState) {
                 "planning worker가 결과를 전달하지 못했습니다. 파일 변경은 시작되지 않았습니다.",
                 "DarkReNamer - 계획 결과 없음",
             );
+            None
         }
-    }
+    };
     update_controls(state);
+    prepared
 }
 
 pub(super) fn start_apply_worker(
@@ -1182,26 +1253,82 @@ pub(super) fn report_admission_start_error(owner: HWND, error: &io::Error) {
     message(owner, &error.to_string(), "DarkReNamer - 추가 실패");
 }
 
-pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
-    let Some(worker) = state.admission_worker.as_ref() else {
+fn run_prepared_directory_task_dialog(
+    window: HWND,
+    prepared: PreparedDirectoryTaskDialog,
+    select: impl FnOnce(HWND, &PreparedTaskDialogSpec) -> io::Result<i32>,
+) {
+    let answer = select(window, &prepared.spec);
+    let Some(mut state_lease) = try_app_state(window) else {
         return;
     };
-    if !worker.handle.is_finished() {
+    let state = state_lease.state_mut();
+    let disposition =
+        take_prepared_task_dialog(state, prepared.session, PreparedTaskDialogPolicy::Mutable);
+    update_controls(state);
+    if disposition == PreparedTaskDialogDisposition::Closed {
+        try_finish_window_close(window, state);
         return;
+    }
+    if disposition != PreparedTaskDialogDisposition::Accepted
+        || state.revision() != prepared.revision
+    {
+        if disposition == PreparedTaskDialogDisposition::Rejected {
+            state.set_transient_status(
+                "확인 중 목록 또는 작업 상태가 바뀌어 폴더 추가를 시작하지 않았습니다.",
+            );
+        }
+        return;
+    }
+    let answer = match answer {
+        Ok(answer) => answer,
+        Err(error) => {
+            message(
+                window,
+                &format!("폴더 추가 방식 대화상자를 열지 못해 추가를 취소했습니다: {error}"),
+                "DarkReNamer - 폴더 추가 취소",
+            );
+            return;
+        }
+    };
+    let mode = match directory_prompt_choice(answer) {
+        DirectoryPromptChoice::Direct => AdmissionMode::Direct,
+        DirectoryPromptChoice::Recurse => AdmissionMode::Recurse,
+        DirectoryPromptChoice::Cancel => {
+            state
+                .set_transient_status("폴더 추가 방식을 취소했습니다. 목록은 변경되지 않았습니다.");
+            update_controls(state);
+            return;
+        }
+    };
+    match start_admission_worker(window, state, prepared.paths, Some(mode), prepared.capacity) {
+        Ok(()) => finalize_admission_start(state),
+        Err(error) => {
+            finalize_admission_start_failure(state);
+            report_admission_start_error(window, &error);
+        }
+    }
+}
+
+pub(super) fn handle_admission_completion(
+    window: HWND,
+    state: &mut AppState,
+) -> Option<PreparedWorkerTaskDialog> {
+    let worker = state.admission_worker.as_ref()?;
+    if !worker.handle.is_finished() {
+        return None;
     }
     // SAFETY: this timer belongs to the live window and the admission thread
     // has reached its terminal state.
     unsafe { KillTimer(window, APPLY_POLL_TIMER_ID) };
-    let Some(worker) = state.admission_worker.take() else {
-        return;
-    };
+    let worker = state.admission_worker.take()?;
     apply_cancel_control_state(state);
     let joined = worker.handle.join();
     state.mutation_locked = false;
     state.clear_progress_status();
     if state.close_pending {
         try_finish_window_close(window, state);
-        return;
+        return None;
     }
     if joined.is_err() {
         message(
@@ -1210,7 +1337,7 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
             "DarkReNamer - 추가 오류",
         );
         update_controls(state);
-        return;
+        return None;
     }
     match worker.receiver.try_recv() {
         Ok(AdmissionWorkerResult::NeedsDirectoryMode {
@@ -1226,7 +1353,7 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
                     "DarkReNamer - 오래된 결과",
                 );
                 update_controls(state);
-                return;
+                return None;
             }
             let directory_units = path_wide(&directory);
             let directory_text = String::from_utf16_lossy(
@@ -1235,69 +1362,33 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
                     .unwrap_or(&directory_units),
             );
             let directory_detail = format!("선택한 폴더: {directory_text}");
-            let buttons = [
-                TaskDialogButtonSpec {
-                    id: DIRECTORY_DIRECT_BUTTON_ID,
-                    text: "선택한 폴더만 추가",
-                },
-                TaskDialogButtonSpec {
-                    id: DIRECTORY_RECURSE_BUTTON_ID,
-                    text: "하위 파일을 모두 추가",
-                },
-            ];
-            state.mutation_locked = true;
-            state.confirmation_pending = true;
+            let session = begin_prepared_task_dialog(state)?;
             update_controls(state);
-            let answer = task_dialog(
-                window,
-                TaskDialogSpec {
-                    title: "DarkReNamer - 폴더 추가 방식",
-                    main_instruction: "선택한 폴더를 어떻게 추가할까요?",
-                    content: "목록에 추가할 범위를 선택하세요.",
-                    expanded_information: Some(&directory_detail),
-                    buttons: &buttons,
-                    warning: false,
+            return Some(PreparedWorkerTaskDialog::Directory(
+                PreparedDirectoryTaskDialog {
+                    session,
+                    spec: PreparedTaskDialogSpec {
+                        title: "DarkReNamer - 폴더 추가 방식".to_owned(),
+                        main_instruction: "선택한 폴더를 어떻게 추가할까요?".to_owned(),
+                        content: "목록에 추가할 범위를 선택하세요.".to_owned(),
+                        expanded_information: Some(directory_detail),
+                        buttons: vec![
+                            PreparedTaskDialogButton {
+                                id: DIRECTORY_DIRECT_BUTTON_ID,
+                                text: "선택한 폴더만 추가".to_owned(),
+                            },
+                            PreparedTaskDialogButton {
+                                id: DIRECTORY_RECURSE_BUTTON_ID,
+                                text: "하위 파일을 모두 추가".to_owned(),
+                            },
+                        ],
+                        warning: false,
+                    },
+                    revision,
+                    paths,
+                    capacity,
                 },
-            );
-            state.mutation_locked = false;
-            state.confirmation_pending = false;
-            if state.close_pending {
-                try_finish_window_close(window, state);
-                return;
-            }
-            let answer = match answer {
-                Ok(answer) => answer,
-                Err(error) => {
-                    message(
-                        window,
-                        &format!(
-                            "폴더 추가 방식 대화상자를 열지 못해 추가를 취소했습니다: {error}"
-                        ),
-                        "DarkReNamer - 폴더 추가 취소",
-                    );
-                    update_controls(state);
-                    return;
-                }
-            };
-            let mode = match directory_prompt_choice(answer) {
-                DirectoryPromptChoice::Direct => AdmissionMode::Direct,
-                DirectoryPromptChoice::Recurse => AdmissionMode::Recurse,
-                DirectoryPromptChoice::Cancel => {
-                    state.set_transient_status(
-                        "폴더 추가 방식을 취소했습니다. 목록은 변경되지 않았습니다.",
-                    );
-                    update_controls(state);
-                    return;
-                }
-            };
-            match start_admission_worker(window, state, paths, Some(mode), capacity) {
-                Ok(()) => finalize_admission_start(state),
-                Err(error) => {
-                    finalize_admission_start_failure(state);
-                    report_admission_start_error(window, &error);
-                }
-            }
-            return;
+            ));
         }
         Ok(AdmissionWorkerResult::Finished {
             revision,
@@ -1366,4 +1457,5 @@ pub(super) fn handle_admission_completion(window: HWND, state: &mut AppState) {
         }
     }
     update_controls(state);
+    None
 }

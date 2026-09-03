@@ -1,5 +1,5 @@
-use std::cell::{Cell, UnsafeCell};
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell, UnsafeCell};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::ffi::c_void;
 use std::fs;
@@ -14,6 +14,8 @@ use std::ptr::NonNull;
 use std::ptr::{null, null_mut};
 use std::rc::Rc;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
 use std::thread::{self, JoinHandle};
@@ -257,9 +259,11 @@ const WM_APP_EMPTY_SAFETY_COPY: u32 = WM_APP + 0x4D;
 const WM_APP_APPEARANCE_RESTORE_FOCUS: u32 = WM_APP + 0x4E;
 const WM_APP_FINISH_CLOSE: u32 = WM_APP + 0x4F;
 const WM_APP_MENU_REDRAW: u32 = WM_APP + 0x50;
+const WM_APP_SHOW_DEFERRED_MESSAGE: u32 = WM_APP + 0x51;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 const PREFERENCES_POLL_TIMER_ID: usize = 0xD4A2;
 const STATUS_RENDER_TIMER_ID: usize = 0xD4A3;
+const DEFERRED_MESSAGE_TIMER_ID: usize = 0xD4A4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CallbackStateStatus {
@@ -325,6 +329,16 @@ impl<T, R> CallbackState<T, R> {
         // retirement sidecar and creates no reference to either one.
         let color = unsafe { &*std::ptr::addr_of!((*slot.as_ptr()).menu_edge_color) };
         color.get()
+    }
+
+    unsafe fn is_busy(slot: *mut Self) -> bool {
+        let Some(slot) = NonNull::new(slot) else {
+            return false;
+        };
+        // SAFETY: the caller guarantees that this is the live UI-thread slot.
+        // Reading the disjoint status Cell creates no reference to `value`.
+        let status = unsafe { &*std::ptr::addr_of!((*slot.as_ptr()).status) };
+        status.get() != CallbackStateStatus::Available
     }
 
     unsafe fn set_menu_edge_color(slot: *mut Self, color: Option<u32>) {
@@ -820,12 +834,168 @@ pub(crate) fn run() -> io::Result<()> {
     application::run()
 }
 
-pub(super) fn message(owner: HWND, text: &str, caption: &str) {
+struct DeferredMessage {
+    owner: usize,
+    text: String,
+    caption: String,
+}
+
+thread_local! {
+    static DEFERRED_MESSAGES: RefCell<VecDeque<DeferredMessage>> = const {
+        RefCell::new(VecDeque::new())
+    };
+    static DRAINING_DEFERRED_MESSAGES: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+}
+
+struct DeferredMessageDrainGuard {
+    owner: usize,
+}
+
+impl DeferredMessageDrainGuard {
+    fn begin(owner: HWND) -> Option<Self> {
+        DRAINING_DEFERRED_MESSAGES.with(|owners| {
+            let mut owners = owners.borrow_mut();
+            owners.insert(owner as usize).then_some(Self {
+                owner: owner as usize,
+            })
+        })
+    }
+}
+
+impl Drop for DeferredMessageDrainGuard {
+    fn drop(&mut self) {
+        DRAINING_DEFERRED_MESSAGES.with(|owners| {
+            owners.borrow_mut().remove(&self.owner);
+        });
+    }
+}
+
+fn take_deferred_message(owner: HWND) -> Option<DeferredMessage> {
+    DEFERRED_MESSAGES.with(|messages| {
+        let mut messages = messages.borrow_mut();
+        let index = messages
+            .iter()
+            .position(|message| message.owner == owner as usize)?;
+        messages.remove(index)
+    })
+}
+
+fn has_deferred_messages(owner: HWND) -> bool {
+    DEFERRED_MESSAGES.with(|messages| {
+        messages
+            .borrow()
+            .iter()
+            .any(|message| message.owner == owner as usize)
+    })
+}
+
+fn post_deferred_message_wake(owner: HWND) -> bool {
+    // SAFETY: the message carries no pointer payload; the UI-thread queue owns
+    // every presentation until the dedicated callback consumes it.
+    unsafe { PostMessageW(owner, WM_APP_SHOW_DEFERRED_MESSAGE, 0, 0) != 0 }
+}
+
+fn set_deferred_message_timer(owner: HWND) -> bool {
+    // SAFETY: this pointer-free fallback timer belongs to the live UI-thread
+    // owner and remains armed only until delivery succeeds.
+    unsafe { SetTimer(owner, DEFERRED_MESSAGE_TIMER_ID, 1, None) != 0 }
+}
+
+fn queue_deferred_message(owner: HWND, text: String, caption: String) {
+    DEFERRED_MESSAGES.with(|messages| {
+        messages.borrow_mut().push_back(DeferredMessage {
+            owner: owner as usize,
+            text,
+            caption,
+        });
+    });
+    let _scheduled = schedule_deferred_message_wake(
+        owner,
+        post_deferred_message_wake,
+        set_deferred_message_timer,
+    );
+}
+
+fn discard_deferred_messages(owner: HWND) {
+    DEFERRED_MESSAGES.with(|messages| {
+        messages
+            .borrow_mut()
+            .retain(|message| message.owner != owner as usize);
+    });
+}
+
+fn show_message_now(owner: HWND, text: &str, caption: &str) {
     let text = wide(text);
     let caption = wide(caption);
     // SAFETY: owner is a live HWND and text/caption are owned NUL-terminated
     // UTF-16 buffers retained until the synchronous MessageBoxW call returns.
     unsafe { MessageBoxW(owner, text.as_ptr(), caption.as_ptr(), 0) };
+}
+
+fn drain_deferred_messages_with(owner: HWND, mut show: impl FnMut(HWND, &str, &str)) -> bool {
+    let Some(_guard) = DeferredMessageDrainGuard::begin(owner) else {
+        return false;
+    };
+    while let Some(message) = take_deferred_message(owner) {
+        show(owner, &message.text, &message.caption);
+    }
+    true
+}
+
+fn drain_deferred_messages_if_available(owner: HWND, show: impl FnMut(HWND, &str, &str)) -> bool {
+    !app_callback_is_busy(owner)
+        && has_deferred_messages(owner)
+        && drain_deferred_messages_with(owner, show)
+}
+
+fn defer_message_if_callback_busy(
+    owner: HWND,
+    text: &str,
+    caption: &str,
+    post: impl FnOnce(HWND) -> bool,
+) -> bool {
+    if !app_callback_is_busy(owner) {
+        return false;
+    }
+    DEFERRED_MESSAGES.with(|messages| {
+        messages.borrow_mut().push_back(DeferredMessage {
+            owner: owner as usize,
+            text: text.to_owned(),
+            caption: caption.to_owned(),
+        });
+    });
+    // A failed wake must not discard safety-relevant text. A later callback
+    // retries scheduling without entering a modal UI or borrowing AppState.
+    let _posted = post(owner);
+    true
+}
+
+fn schedule_deferred_message_wake(
+    owner: HWND,
+    post: impl FnOnce(HWND) -> bool,
+    set_timer: impl FnOnce(HWND) -> bool,
+) -> bool {
+    post(owner) || set_timer(owner)
+}
+
+fn app_callback_is_busy(owner: HWND) -> bool {
+    let slot = app_state_slot(owner);
+    // SAFETY: the slot is the current UI-thread publication. This reads only
+    // its status sidecar and never accesses a possibly leased AppState value.
+    unsafe { CallbackState::is_busy(slot) }
+}
+
+pub(super) fn message(owner: HWND, text: &str, caption: &str) {
+    let deferred = defer_message_if_callback_busy(owner, text, caption, |window| {
+        schedule_deferred_message_wake(
+            window,
+            post_deferred_message_wake,
+            set_deferred_message_timer,
+        )
+    });
+    if !deferred {
+        show_message_now(owner, text, caption);
+    }
 }
 
 #[allow(
