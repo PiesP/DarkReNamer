@@ -520,14 +520,14 @@ pub(super) fn handle_status_render_timer(
     0
 }
 
-fn run_prepared_command_action_after_state_release<T, R, O>(
+fn run_prepared_command_action_after_state_release<T, R>(
     state_lease: CallbackStateLease<T, R>,
     window: HWND,
     action: Option<PreparedCommandAction>,
-    run_action: impl FnOnce(HWND, PreparedCommandAction) -> O,
-) -> Option<O> {
+    select_file_dialog: impl FnOnce(HWND, PreparedFileDialogKind) -> PreparedFileDialogSelection,
+) -> Option<()> {
     run_after_callback_state_release(state_lease, || {
-        action.map(|action| run_action(window, action))
+        action.map(|action| run_prepared_command_action(window, action, select_file_dialog))
     })
 }
 
@@ -1054,7 +1054,7 @@ unsafe extern "system" fn window_proc(
                 state_lease,
                 window,
                 action,
-                run_prepared_command_action,
+                select_prepared_file_dialog,
             );
             0
         }
@@ -1133,7 +1133,7 @@ unsafe extern "system" fn window_proc(
                         state_lease,
                         window,
                         action,
-                        run_prepared_command_action,
+                        select_prepared_file_dialog,
                     );
                     return 0;
                 }
@@ -1224,124 +1224,300 @@ pub(super) fn route_static_control_colors(
 mod tests {
     use super::*;
 
-    #[test]
-    fn all_file_dialog_commands_route_through_a_released_fake_selector()
-    -> Result<(), Box<dyn std::error::Error>> {
-        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-        enum RoutedDialog {
-            AddFiles,
-            SaveNames,
-            SavePaths,
-            ImportNames,
-            ImportPaths,
+    const FILE_DIALOG_DRAWITEM_SUBCLASS_ID: usize = 0xD4B4;
+    static FILE_DIALOG_DRAWITEM_LEASED: AtomicBool = AtomicBool::new(false);
+
+    extern "system" fn file_dialog_drawitem_probe(
+        window: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        subclass_id: usize,
+        ref_data: usize,
+    ) -> LRESULT {
+        if subclass_id == FILE_DIALOG_DRAWITEM_SUBCLASS_ID && message == WM_DRAWITEM {
+            let slot = ref_data as *mut AppStateSlot;
+            // SAFETY: the subclass refdata is the live test-owned publication
+            // slot and this synchronous callback does not outlive the owner.
+            if let Some(lease) = unsafe { CallbackState::try_lease(slot) } {
+                FILE_DIALOG_DRAWITEM_LEASED.store(true, Ordering::SeqCst);
+                drop(lease);
+                return 1;
+            }
+        }
+        // SAFETY: unchanged callback arguments are forwarded exactly once to
+        // the system-owned subclass chain.
+        unsafe { DefSubclassProc(window, message, wparam, lparam) }
+    }
+
+    struct PublishedFileDialogTestApp {
+        owner: HWND,
+        slot: *mut AppStateSlot,
+        _directory: tempfile::TempDir,
+    }
+
+    impl PublishedFileDialogTestApp {
+        fn new() -> Result<Self, Box<dyn std::error::Error>> {
+            let directory = tempfile::tempdir()?;
+            let state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+            let class = wide("STATIC");
+            // SAFETY: the system STATIC class and current module remain live
+            // for this hidden, test-owned top-level window.
+            let owner = unsafe {
+                CreateWindowExW(
+                    0,
+                    class.as_ptr(),
+                    null(),
+                    WS_OVERLAPPEDWINDOW,
+                    0,
+                    0,
+                    640,
+                    480,
+                    null_mut(),
+                    null_mut(),
+                    GetModuleHandleW(null()),
+                    null_mut(),
+                )
+            };
+            if owner.is_null() {
+                return Err(io::Error::last_os_error().into());
+            }
+            let slot: *mut AppStateSlot = CallbackState::into_raw(state);
+            // SAFETY: owner and slot are test-owned and remain live until Drop.
+            unsafe { SetWindowLongPtrW(owner, GWLP_USERDATA, slot as isize) };
+            let app = Self {
+                owner,
+                slot,
+                _directory: directory,
+            };
+            // SAFETY: owner and slot remain live through app Drop, which
+            // removes this exact subclass before destroying the window.
+            if unsafe {
+                SetWindowSubclass(
+                    owner,
+                    Some(file_dialog_drawitem_probe),
+                    FILE_DIALOG_DRAWITEM_SUBCLASS_ID,
+                    slot as usize,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error().into());
+            }
+            app.with_state(|state| create_children(owner, state))??;
+            Ok(app)
         }
 
-        for (command, expected) in [
-            (ADD_FILES, RoutedDialog::AddFiles),
-            (SAVE_NAMES, RoutedDialog::SaveNames),
-            (SAVE_PATHS, RoutedDialog::SavePaths),
-            (IMPORT_NAMES, RoutedDialog::ImportNames),
-            (IMPORT_PATHS, RoutedDialog::ImportPaths),
-        ] {
-            let model = LegacyList::new();
-            let mut next_session_id = 0;
-            let mut active_session = None;
-            let action = dispatch_file_dialog_action(
-                null_mut(),
-                &model,
-                ModelRevision::new(0),
-                &mut next_session_id,
-                &mut active_session,
-                command,
-            )
-            .map(PreparedCommandAction::FileDialog);
-            assert_eq!(active_session, Some(1));
+        fn with_state<R>(&self, action: impl FnOnce(&mut AppState) -> R) -> io::Result<R> {
+            // SAFETY: this test owns the published UI-thread slot and never
+            // calls this helper while another lease is live.
+            let mut lease = unsafe { CallbackState::try_lease(self.slot) }
+                .ok_or_else(|| io::Error::other("test AppState lease is unavailable"))?;
+            let result = action(lease.state_mut());
+            drop(lease);
+            Ok(result)
+        }
 
-            let slot: *mut CallbackState<bool> = CallbackState::into_raw(true);
-            // SAFETY: this test owns the live UI-thread-confined slot until the
-            // final request_reclaim call, and never keeps two leases alive.
-            let lease = unsafe { CallbackState::try_lease(slot) }
-                .ok_or_else(|| io::Error::other("file-dialog command lease was rejected"))?;
-            let routed = run_prepared_command_action_after_state_release(
-                lease,
-                null_mut(),
-                action,
-                |window, action| match action {
-                    PreparedCommandAction::Prompt(_) => {
-                        Err(io::Error::other("file command prepared a prompt"))
+        fn prepare(&self, command: u16) -> io::Result<PreparedCommandAction> {
+            self.with_state(|state| dispatch_command(self.owner, state, command))?
+                .ok_or_else(|| io::Error::other("file command prepared no action"))
+        }
+
+        fn dispatch_with_selector(
+            &self,
+            command: u16,
+            selector: impl FnOnce(HWND, PreparedFileDialogKind) -> PreparedFileDialogSelection,
+        ) -> io::Result<()> {
+            // SAFETY: this test owns the published UI-thread slot and ends this
+            // dispatch lease through the production application seam.
+            let mut lease = unsafe { CallbackState::try_lease(self.slot) }
+                .ok_or_else(|| io::Error::other("dispatch AppState lease is unavailable"))?;
+            let action = dispatch_command(self.owner, lease.state_mut(), command);
+            run_prepared_command_action_after_state_release(lease, self.owner, action, selector)
+                .ok_or_else(|| io::Error::other("file command prepared no action"))?;
+            Ok(())
+        }
+
+        fn drain_admission(&self) -> io::Result<()> {
+            for _ in 0..200 {
+                let finished = self.with_state(|state| {
+                    state
+                        .admission_worker
+                        .as_ref()
+                        .is_some_and(|worker| worker.handle.is_finished())
+                })?;
+                if finished {
+                    self.with_state(|state| handle_admission_completion(self.owner, state))?;
+                    return Ok(());
+                }
+                if self.with_state(|state| state.admission_worker.is_none())? {
+                    return Ok(());
+                }
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(io::Error::other("admission worker did not finish"))
+        }
+
+        fn assert_session_cleared(&self) -> io::Result<()> {
+            let active = self.with_state(|state| state.active_prompt)?;
+            if active.is_some() {
+                Err(io::Error::other("file-dialog session was not cleared"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl Drop for PublishedFileDialogTestApp {
+        fn drop(&mut self) {
+            // SAFETY: Drop owns the published slot and window. It mirrors the
+            // production child cleanup order before unpublishing and reclaiming.
+            unsafe {
+                if let Some(mut lease) = CallbackState::try_lease(self.slot) {
+                    let state = lease.state_mut();
+                    remove_list_view_notification_subclass(state.list_window);
+                    if let Some(rail) = state.left_rail.take() {
+                        rail.destroy();
                     }
-                    PreparedCommandAction::FileDialog(dialog) => route_prepared_file_dialog(
-                        window,
-                        dialog,
-                        |_, _| true,
-                        |_, kind| {
-                            // A nested WM_DRAWITEM callback reaches the same
-                            // lease path while the fake native modal is active.
-                            // SAFETY: application orchestration must end the
-                            // dispatch lease before invoking this selector.
-                            let nested =
-                                unsafe { CallbackState::try_lease(slot) }.ok_or_else(|| {
-                                    io::Error::other("selector ran before lease release")
-                                })?;
-                            drop(nested);
-                            Ok::<PreparedFileDialogSelection, io::Error>(match kind {
-                                PreparedFileDialogKind::AddFiles => {
-                                    PreparedFileDialogSelection::AddFiles(vec![PathBuf::from(
-                                        r"C:\fixture.txt",
-                                    )])
-                                }
-                                PreparedFileDialogKind::SaveText { text, names } => {
-                                    let leaf = if names { "names.txt" } else { "paths.txt" };
-                                    PreparedFileDialogSelection::SaveText {
-                                        path: PathBuf::from(leaf),
-                                        text,
-                                    }
-                                }
-                                PreparedFileDialogKind::ImportNames => {
-                                    PreparedFileDialogSelection::ImportNames(PathBuf::from(
-                                        "names.txt",
-                                    ))
-                                }
-                                PreparedFileDialogKind::ImportPaths => {
-                                    PreparedFileDialogSelection::ImportPaths(PathBuf::from(
-                                        "paths.txt",
-                                    ))
-                                }
-                            })
-                        },
-                        |_, _, selection| {
-                            Ok(match selection? {
-                                PreparedFileDialogSelection::AddFiles(_) => RoutedDialog::AddFiles,
-                                PreparedFileDialogSelection::SaveText { path, .. }
-                                    if path == Path::new("names.txt") =>
-                                {
-                                    RoutedDialog::SaveNames
-                                }
-                                PreparedFileDialogSelection::SaveText { .. } => {
-                                    RoutedDialog::SavePaths
-                                }
-                                PreparedFileDialogSelection::ImportNames(_) => {
-                                    RoutedDialog::ImportNames
-                                }
-                                PreparedFileDialogSelection::ImportPaths(_) => {
-                                    RoutedDialog::ImportPaths
-                                }
-                                PreparedFileDialogSelection::Cancelled => {
-                                    return Err(io::Error::other("fake selector cancelled"));
-                                }
-                            })
-                        },
-                    )
-                    .ok_or_else(|| io::Error::other("file dialog was not routed"))?,
-                },
-            )
-            .ok_or_else(|| io::Error::other("file command prepared no action"))??;
-            assert_eq!(routed, expected);
-
-            // SAFETY: publication is test-owned and no lease remains.
-            let disposition = unsafe { CallbackState::request_reclaim(slot) };
-            assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+                    if let Some(rail) = state.right_rail.take() {
+                        rail.destroy();
+                    }
+                    drop(lease);
+                }
+                RemoveWindowSubclass(
+                    self.owner,
+                    Some(file_dialog_drawitem_probe),
+                    FILE_DIALOG_DRAWITEM_SUBCLASS_ID,
+                );
+                SetWindowLongPtrW(self.owner, GWLP_USERDATA, 0);
+                DestroyWindow(self.owner);
+                let _disposition = CallbackState::request_reclaim(self.slot);
+            }
         }
+    }
+
+    #[test]
+    fn real_file_dialog_pipeline_routes_all_commands_and_cleans_sessions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let app = PublishedFileDialogTestApp::new()?;
+        FILE_DIALOG_DRAWITEM_LEASED.store(false, Ordering::SeqCst);
+        app.dispatch_with_selector(ADD_FILES, |owner, kind| {
+            assert!(matches!(kind, PreparedFileDialogKind::AddFiles));
+            // SAFETY: owner is the live test window. The synchronous subclass
+            // callback attempts the same AppState lease as production drawing.
+            unsafe { SendMessageW(owner, WM_DRAWITEM, 0, 0) };
+            PreparedFileDialogSelection::Cancelled
+        })?;
+        assert!(FILE_DIALOG_DRAWITEM_LEASED.load(Ordering::SeqCst));
+        app.assert_session_cleared()?;
+
+        app.dispatch_with_selector(ADD_FILES, |_, kind| {
+            assert!(matches!(kind, PreparedFileDialogKind::AddFiles));
+            PreparedFileDialogSelection::AddFiles(Vec::new())
+        })?;
+        app.assert_session_cleared()?;
+        app.drain_admission()?;
+
+        for (command, names, leaf) in [
+            (SAVE_NAMES, true, "saved-names.txt"),
+            (SAVE_PATHS, false, "saved-paths.txt"),
+        ] {
+            let output = app._directory.path().join(leaf);
+            app.dispatch_with_selector(command, |_, kind| match kind {
+                PreparedFileDialogKind::SaveText {
+                    text,
+                    names: actual,
+                } if actual == names => PreparedFileDialogSelection::SaveText {
+                    path: output.clone(),
+                    text,
+                },
+                _ => PreparedFileDialogSelection::Cancelled,
+            })?;
+            assert!(output.is_file());
+            app.assert_session_cleared()?;
+        }
+
+        let imported_names = app._directory.path().join("import-names.txt");
+        write_legacy_text(&imported_names, &LegacyText::from("name.txt"))?;
+        app.dispatch_with_selector(IMPORT_NAMES, |_, kind| {
+            assert!(matches!(kind, PreparedFileDialogKind::ImportNames));
+            PreparedFileDialogSelection::ImportNames(imported_names)
+        })?;
+        app.assert_session_cleared()?;
+
+        let imported_paths = app._directory.path().join("import-paths.txt");
+        write_legacy_text(&imported_paths, &LegacyText::default())?;
+        app.dispatch_with_selector(IMPORT_PATHS, |_, kind| {
+            assert!(matches!(kind, PreparedFileDialogKind::ImportPaths));
+            PreparedFileDialogSelection::ImportPaths(imported_paths)
+        })?;
+        app.assert_session_cleared()?;
+        app.drain_admission()?;
+        Ok(())
+    }
+
+    #[test]
+    fn real_file_dialog_pipeline_rejects_stale_locked_and_mismatched_sessions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        enum Blocker {
+            StaleRevision,
+            Close,
+            ReadOnly,
+            Mutation,
+            Worker,
+        }
+
+        for blocker in [
+            Blocker::StaleRevision,
+            Blocker::Close,
+            Blocker::ReadOnly,
+            Blocker::Mutation,
+            Blocker::Worker,
+        ] {
+            let app = PublishedFileDialogTestApp::new()?;
+            let action = app.prepare(SAVE_PATHS)?;
+            app.with_state(|state| match blocker {
+                Blocker::StaleRevision => state.model_revision += 1,
+                Blocker::Close => state.close_pending = true,
+                Blocker::ReadOnly => state.recovery_locked = true,
+                Blocker::Mutation => state.mutation_locked = true,
+                Blocker::Worker => {
+                    let started = admit_paths(app.owner, state, Vec::new());
+                    assert!(started.is_ok());
+                    finalize_admission_start(state);
+                }
+            })?;
+            let selector_called = Cell::new(false);
+            run_prepared_command_action(app.owner, action, |_, _| {
+                selector_called.set(true);
+                PreparedFileDialogSelection::Cancelled
+            });
+            assert!(!selector_called.get());
+            app.assert_session_cleared()?;
+            if matches!(blocker, Blocker::Worker) {
+                app.drain_admission()?;
+            }
+        }
+
+        let app = PublishedFileDialogTestApp::new()?;
+        let action = app.prepare(SAVE_PATHS)?;
+        app.with_state(|state| state.active_prompt = Some(999))?;
+        let selector_called = Cell::new(false);
+        run_prepared_command_action(app.owner, action, |_, _| {
+            selector_called.set(true);
+            PreparedFileDialogSelection::Cancelled
+        });
+        assert!(!selector_called.get());
+        assert_eq!(app.with_state(|state| state.active_prompt)?, Some(999));
+
+        let app = PublishedFileDialogTestApp::new()?;
+        let action = app.prepare(SAVE_PATHS)?;
+        let selector_called = Cell::new(false);
+        run_prepared_command_action(null_mut(), action, |_, _| {
+            selector_called.set(true);
+            PreparedFileDialogSelection::Cancelled
+        });
+        assert!(!selector_called.get());
+        assert_eq!(app.with_state(|state| state.active_prompt)?, Some(1));
         Ok(())
     }
 

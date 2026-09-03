@@ -457,7 +457,7 @@ pub(super) enum PreparedCommandAction {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct PreparedFileDialogSession {
+struct PreparedFileDialogSession {
     owner: HWND,
     session_id: u64,
     expected_revision: ModelRevision,
@@ -991,84 +991,55 @@ fn prepare_file_dialog_command(
     state: &mut AppState,
     command: u16,
 ) -> Option<PreparedFileDialog> {
-    let revision = state.revision();
-    dispatch_file_dialog_action(
-        owner,
-        &state.model,
-        revision,
-        &mut state.next_prompt_id,
-        &mut state.active_prompt,
-        command,
-    )
-}
-
-pub(super) fn dispatch_file_dialog_action(
-    owner: HWND,
-    model: &LegacyList,
-    revision: ModelRevision,
-    next_session_id: &mut u64,
-    active_session: &mut Option<u64>,
-    command: u16,
-) -> Option<PreparedFileDialog> {
     let kind = match command {
         ADD_FILES => PreparedFileDialogKind::AddFiles,
         SAVE_NAMES => PreparedFileDialogKind::SaveText {
-            text: model.export_names(),
+            text: state.model.export_names(),
             names: true,
         },
         SAVE_PATHS => PreparedFileDialogKind::SaveText {
-            text: model.export_paths(),
+            text: state.model.export_paths(),
             names: false,
         },
         IMPORT_NAMES => PreparedFileDialogKind::ImportNames,
         IMPORT_PATHS => PreparedFileDialogKind::ImportPaths,
         _ => return None,
     };
-    *next_session_id = next_session_id.wrapping_add(1).max(1);
-    let session_id = *next_session_id;
-    *active_session = Some(session_id);
-    Some(PreparedFileDialog::new(owner, session_id, revision, kind))
+    state.next_prompt_id = state.next_prompt_id.wrapping_add(1).max(1);
+    let session_id = state.next_prompt_id;
+    state.active_prompt = Some(session_id);
+    Some(PreparedFileDialog::new(
+        owner,
+        session_id,
+        state.revision(),
+        kind,
+    ))
 }
 
-pub(super) fn run_prepared_command_action(window: HWND, action: PreparedCommandAction) {
+pub(super) fn run_prepared_command_action(
+    window: HWND,
+    action: PreparedCommandAction,
+    select_file_dialog: impl FnOnce(HWND, PreparedFileDialogKind) -> PreparedFileDialogSelection,
+) {
     match action {
         PreparedCommandAction::Prompt(prompt) => run_prepared_prompt(window, prompt),
-        PreparedCommandAction::FileDialog(dialog) => run_prepared_file_dialog(window, dialog),
+        PreparedCommandAction::FileDialog(dialog) => {
+            run_prepared_file_dialog(window, dialog, select_file_dialog);
+        }
     }
 }
 
-fn run_prepared_file_dialog(window: HWND, dialog: PreparedFileDialog) {
-    let session = dialog.session;
-    if route_prepared_file_dialog(
-        window,
-        dialog,
-        file_dialog_session_is_current,
-        select_prepared_file_dialog,
-        finish_prepared_file_dialog_selection,
-    )
-    .is_none()
-    {
-        let _ = finish_file_dialog_session(window, session, FileDialogCompletion::Accept, |_| ());
-    }
-}
-
-pub(super) fn route_prepared_file_dialog<S, O>(
+fn run_prepared_file_dialog(
     window: HWND,
     dialog: PreparedFileDialog,
-    session_is_current: impl FnOnce(HWND, PreparedFileDialogSession) -> bool,
-    select: impl FnOnce(HWND, PreparedFileDialogKind) -> S,
-    finish: impl FnOnce(HWND, PreparedFileDialogSession, S) -> O,
-) -> Option<O> {
-    let session = dialog.session;
-    session_is_current(window, session)
-        .then(|| finish(window, session, select(window, dialog.kind)))
-}
-
-fn finish_prepared_file_dialog_selection(
-    window: HWND,
-    session: PreparedFileDialogSession,
-    selection: PreparedFileDialogSelection,
+    select_file_dialog: impl FnOnce(HWND, PreparedFileDialogKind) -> PreparedFileDialogSelection,
 ) {
+    let session = dialog.session;
+    if !file_dialog_session_is_current(window, session) {
+        let _ = finish_file_dialog_session(window, session, FileDialogCompletion::Accept, |_| ());
+        return;
+    }
+    let selection = select_file_dialog(window, dialog.kind);
     match selection {
         PreparedFileDialogSelection::Cancelled => {
             let _ =
