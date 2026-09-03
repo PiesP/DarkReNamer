@@ -553,10 +553,13 @@ unsafe extern "system" fn window_proc(
     }
     let state_slot = app_state_slot(window);
     if message == WM_APP_SHOW_DEFERRED_MESSAGE {
-        if let Some(message) = take_deferred_message(window) {
-            show_message_now(window, &message.text, &message.caption);
-        }
+        drain_deferred_messages(window);
         return 0;
+    }
+    if message != WM_NCDESTROY && !app_callback_is_busy(window) && has_deferred_messages(window) {
+        // A previous PostMessageW failure retains the owned notice. The next
+        // lease-free callback drains it before borrowing AppState again.
+        drain_deferred_messages(window);
     }
     if message == WM_NCDESTROY {
         discard_deferred_messages(window);
@@ -1621,7 +1624,10 @@ mod tests {
             "discarded caption",
             |_| false,
         ));
-        assert!(take_deferred_message(app.owner).is_none());
+        let retained = take_deferred_message(app.owner)
+            .ok_or_else(|| io::Error::other("failed wake discarded deferred text"))?;
+        assert_eq!(retained.text, "discarded text");
+        assert_eq!(retained.caption, "discarded caption");
         drop(lease);
         assert!(!defer_message_if_callback_busy(
             app.owner,
@@ -1630,6 +1636,42 @@ mod tests {
             |_| true,
         ));
         Ok(())
+    }
+
+    #[test]
+    fn deferred_messages_drain_fifo_without_nested_consumption() {
+        let owner = null_mut();
+        DEFERRED_MESSAGES.with(|messages| {
+            let mut messages = messages.borrow_mut();
+            messages.push_back(DeferredMessage {
+                owner: owner as usize,
+                text: "first".to_owned(),
+                caption: "one".to_owned(),
+            });
+            messages.push_back(DeferredMessage {
+                owner: owner as usize,
+                text: "second".to_owned(),
+                caption: "two".to_owned(),
+            });
+        });
+        let shown = RefCell::new(Vec::new());
+        assert!(drain_deferred_messages_with(
+            owner,
+            |nested_owner, text, caption| {
+                shown
+                    .borrow_mut()
+                    .push((text.to_owned(), caption.to_owned()));
+                assert!(!drain_deferred_messages_with(nested_owner, |_, _, _| {}));
+            }
+        ));
+        assert_eq!(
+            shown.into_inner(),
+            vec![
+                ("first".to_owned(), "one".to_owned()),
+                ("second".to_owned(), "two".to_owned()),
+            ]
+        );
+        assert!(take_deferred_message(owner).is_none());
     }
 
     #[test]

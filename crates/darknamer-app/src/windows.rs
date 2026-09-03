@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell, UnsafeCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::ffi::c_void;
 use std::fs;
@@ -841,6 +841,30 @@ thread_local! {
     static DEFERRED_MESSAGES: RefCell<VecDeque<DeferredMessage>> = const {
         RefCell::new(VecDeque::new())
     };
+    static DRAINING_DEFERRED_MESSAGES: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+}
+
+struct DeferredMessageDrainGuard {
+    owner: usize,
+}
+
+impl DeferredMessageDrainGuard {
+    fn begin(owner: HWND) -> Option<Self> {
+        DRAINING_DEFERRED_MESSAGES.with(|owners| {
+            let mut owners = owners.borrow_mut();
+            owners.insert(owner as usize).then_some(Self {
+                owner: owner as usize,
+            })
+        })
+    }
+}
+
+impl Drop for DeferredMessageDrainGuard {
+    fn drop(&mut self) {
+        DRAINING_DEFERRED_MESSAGES.with(|owners| {
+            owners.borrow_mut().remove(&self.owner);
+        });
+    }
 }
 
 fn take_deferred_message(owner: HWND) -> Option<DeferredMessage> {
@@ -853,23 +877,20 @@ fn take_deferred_message(owner: HWND) -> Option<DeferredMessage> {
     })
 }
 
+fn has_deferred_messages(owner: HWND) -> bool {
+    DEFERRED_MESSAGES.with(|messages| {
+        messages
+            .borrow()
+            .iter()
+            .any(|message| message.owner == owner as usize)
+    })
+}
+
 fn discard_deferred_messages(owner: HWND) {
     DEFERRED_MESSAGES.with(|messages| {
         messages
             .borrow_mut()
             .retain(|message| message.owner != owner as usize);
-    });
-}
-
-fn discard_last_deferred_message(owner: HWND) {
-    DEFERRED_MESSAGES.with(|messages| {
-        let mut messages = messages.borrow_mut();
-        if let Some(index) = messages
-            .iter()
-            .rposition(|message| message.owner == owner as usize)
-        {
-            messages.remove(index);
-        }
     });
 }
 
@@ -881,16 +902,27 @@ fn show_message_now(owner: HWND, text: &str, caption: &str) {
     unsafe { MessageBoxW(owner, text.as_ptr(), caption.as_ptr(), 0) };
 }
 
+fn drain_deferred_messages_with(owner: HWND, mut show: impl FnMut(HWND, &str, &str)) -> bool {
+    let Some(_guard) = DeferredMessageDrainGuard::begin(owner) else {
+        return false;
+    };
+    while let Some(message) = take_deferred_message(owner) {
+        show(owner, &message.text, &message.caption);
+    }
+    true
+}
+
+fn drain_deferred_messages(owner: HWND) {
+    let _ = drain_deferred_messages_with(owner, show_message_now);
+}
+
 fn defer_message_if_callback_busy(
     owner: HWND,
     text: &str,
     caption: &str,
     post: impl FnOnce(HWND) -> bool,
 ) -> bool {
-    let slot = app_state_slot(owner);
-    // SAFETY: the slot is the current UI-thread publication. This reads only
-    // its status sidecar and never accesses a possibly leased AppState value.
-    if !unsafe { CallbackState::is_busy(slot) } {
+    if !app_callback_is_busy(owner) {
         return false;
     }
     DEFERRED_MESSAGES.with(|messages| {
@@ -900,10 +932,17 @@ fn defer_message_if_callback_busy(
             caption: caption.to_owned(),
         });
     });
-    if !post(owner) {
-        discard_last_deferred_message(owner);
-    }
+    // A failed wake must not discard safety-relevant text. A later enqueue or
+    // callback can retry/drain the still-owned queue without reentering state.
+    let _posted = post(owner);
     true
+}
+
+fn app_callback_is_busy(owner: HWND) -> bool {
+    let slot = app_state_slot(owner);
+    // SAFETY: the slot is the current UI-thread publication. This reads only
+    // its status sidecar and never accesses a possibly leased AppState value.
+    unsafe { CallbackState::is_busy(slot) }
 }
 
 pub(super) fn message(owner: HWND, text: &str, caption: &str) {
