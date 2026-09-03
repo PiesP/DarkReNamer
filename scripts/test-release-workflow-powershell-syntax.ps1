@@ -73,6 +73,57 @@ $workflows = @(
     Join-Path $repositoryRoot '.github/workflows/release.yaml'
     Join-Path $repositoryRoot '.github/workflows/promote-release.yaml'
 )
+
+$promotionWorkflow = Get-Content -LiteralPath (Join-Path $repositoryRoot '.github/workflows/promote-release.yaml') -Raw
+$candidateWorkflow = Get-Content -LiteralPath (Join-Path $repositoryRoot '.github/workflows/release.yaml') -Raw
+if ($promotionWorkflow -notmatch "(?m)^\s+if: github\.ref == 'refs/heads/master'\s*$") {
+    throw 'The release promotion job must reject workflow dispatches from refs other than master.'
+}
+if ($promotionWorkflow -notmatch '(?m)^\s+environment:\s*\r?\n\s+name: release\s*$') {
+    throw 'The release promotion job must use the repository release environment.'
+}
+if ($candidateWorkflow -notmatch '(?m)^\s+cargo install --locked cargo-about --version 0\.9\.2 --features cli\s*$') {
+    throw 'The candidate workflow must install the pinned cargo-about 0.9.2 CLI from crates.io.'
+}
+if ($candidateWorkflow -notmatch '(?ms)^\s+cargo about generate --locked --workspace --fail about\.hbs `\r?\n\s+--output-file dist/THIRD_PARTY_LICENSES\.html\s*$') {
+    throw 'The candidate workflow must generate the tracked third-party license template into the handoff.'
+}
+if ($promotionWorkflow -notmatch '(?m)^\s+dist/THIRD_PARTY_LICENSES\.html `\s*$') {
+    throw 'The promotion workflow must publish the generated third-party license bundle.'
+}
+
+$aboutConfigPath = Join-Path $repositoryRoot 'about.toml'
+if (-not (Test-Path -LiteralPath $aboutConfigPath -PathType Leaf)) {
+    throw 'The tracked cargo-about configuration is missing.'
+}
+$aboutConfig = Get-Content -LiteralPath $aboutConfigPath -Raw
+foreach ($requiredConfig in @(
+    'targets = ["x86_64-pc-windows-msvc"]'
+    'ignore-build-dependencies = false'
+    'ignore-dev-dependencies = true'
+    'ignore-transitive-dependencies = false'
+    'private = { ignore = true }'
+)) {
+    if (-not $aboutConfig.Contains($requiredConfig, [StringComparison]::Ordinal)) {
+        throw "about.toml is missing the required release graph setting: $requiredConfig"
+    }
+}
+
+$aboutTemplatePath = Join-Path $repositoryRoot 'about.hbs'
+if (-not (Test-Path -LiteralPath $aboutTemplatePath -PathType Leaf)) {
+    throw 'The tracked cargo-about HTML template is missing.'
+}
+$aboutTemplate = Get-Content -LiteralPath $aboutTemplatePath -Raw
+foreach ($requiredTemplateText in @(
+    '<title>Third-party licenses for DarkReNamer</title>'
+    '{{#each licenses}}'
+    '{{#each used_by}}'
+    '{{text}}'
+)) {
+    if (-not $aboutTemplate.Contains($requiredTemplateText, [StringComparison]::Ordinal)) {
+        throw "about.hbs is missing required deterministic template content: $requiredTemplateText"
+    }
+}
 $blockCount = 0
 foreach ($workflow in $workflows) {
     foreach ($block in Get-PowerShellRunBlocks -Path $workflow) {

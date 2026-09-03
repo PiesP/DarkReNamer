@@ -23,6 +23,7 @@ $expectedNames = @(
     'release-handoff.json'
     'release-metrics.json'
     'SHA256SUMS.txt'
+    'THIRD_PARTY_LICENSES.html'
     'THIRD_PARTY_NOTICES.md'
 )
 $actualFiles = @(Get-ChildItem -LiteralPath $handoffPath -File | Sort-Object Name)
@@ -418,6 +419,7 @@ $expectedChecksumSubjects = @(
     'LICENSE'
     'release-handoff.json'
     'release-metrics.json'
+    'THIRD_PARTY_LICENSES.html'
     'THIRD_PARTY_NOTICES.md'
 )
 $checksumPath = Join-Path $handoffPath 'SHA256SUMS.txt'

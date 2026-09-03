@@ -104,6 +104,7 @@ fn release_workflows_promote_the_immutable_candidate_without_rebuilding()
     let promotion =
         normalize_workflow_source(&repository_file(".github/workflows/promote-release.yaml")?);
     let ci = normalize_workflow_source(&repository_file(".github/workflows/ci.yaml")?);
+    let tooling_tests = normalize_workflow_source(&repository_file("scripts/test-tooling.ps1")?);
     let (non_windows_ci, windows_ci) = ci
         .split_once("\n  windows:\n")
         .ok_or("CI workflow must retain a dedicated Windows job")?;
@@ -137,6 +138,8 @@ fn release_workflows_promote_the_immutable_candidate_without_rebuilding()
     }
     assert!(promotion.contains("actions: read"));
     assert!(promotion.contains("contents: write"));
+    assert!(promotion.contains("if: github.ref == 'refs/heads/master'"));
+    assert!(promotion.contains("environment:\n      name: release"));
     assert!(promotion.contains("runs-on: windows-2025"));
     assert!(!promotion.contains("runs-on: ubuntu-24.04"));
     assert!(promotion.contains("artifact-ids: ${{ inputs.candidate_artifact_id }}"));
@@ -177,20 +180,29 @@ fn release_workflows_promote_the_immutable_candidate_without_rebuilding()
         );
     }
     assert!(!promotion.contains("-ExpectedRunId '${{"));
+    assert_eq!(
+        non_windows_ci
+            .matches("./scripts/test-tooling.ps1 -Platform Ubuntu")
+            .count(),
+        1,
+        "the non-Windows CI job must run the Ubuntu tooling suite exactly once"
+    );
+    assert_eq!(
+        windows_ci
+            .matches("./scripts/test-tooling.ps1 -Platform Windows")
+            .count(),
+        1,
+        "the Windows CI job must run the Windows tooling suite exactly once"
+    );
     for script in [
-        "./scripts/test-release-candidate-metadata-validator.ps1",
-        "./scripts/test-prepare-release-cyclonedx.ps1",
-        "./scripts/test-release-workflow-powershell-syntax.ps1",
+        "test-release-candidate-metadata-validator.ps1",
+        "test-prepare-release-cyclonedx.ps1",
+        "test-release-workflow-powershell-syntax.ps1",
     ] {
         assert_eq!(
-            non_windows_ci.matches(script).count(),
+            tooling_tests.matches(script).count(),
             1,
-            "{script} must run exactly once before the Windows CI job"
-        );
-        assert_eq!(
-            windows_ci.matches(script).count(),
-            1,
-            "{script} must run exactly once in the Windows CI job"
+            "{script} must occur exactly once in the shared tooling suite"
         );
     }
     Ok(())

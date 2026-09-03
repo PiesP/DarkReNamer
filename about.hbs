@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Third-party licenses for DarkReNamer</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: system-ui, sans-serif;
+    }
+    body {
+      max-width: 72rem;
+      margin: 0 auto;
+      padding: 2rem;
+      line-height: 1.5;
+    }
+    a {
+      color: inherit;
+    }
+    .license-list {
+      padding: 0;
+      list-style: none;
+    }
+    .license-text {
+      overflow-x: auto;
+      padding: 1rem;
+      border: 1px solid currentColor;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Third-party licenses for DarkReNamer</h1>
+    <p>
+      This file contains license texts for the Rust dependencies included in
+      the x86-64 Windows distribution, including build dependencies and
+      excluding development-only dependencies.
+    </p>
+    <h2>License overview</h2>
+    <ul>
+      {{#each overview}}
+      <li><a href="#{{id}}">{{name}}</a> ({{count}})</li>
+      {{/each}}
+    </ul>
+    <h2>License texts</h2>
+    <ul class="license-list">
+      {{#each licenses}}
+      <li>
+        {{#if first_of_kind}}
+        <h3 id="{{id}}">{{name}}</h3>
+        {{/if}}
+        <p>Used by:</p>
+        <ul>
+          {{#each used_by}}
+          <li>
+            <a href="{{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}}">{{crate.name}} {{crate.version}}</a>
+          </li>
+          {{/each}}
+        </ul>
+        <pre class="license-text">{{text}}</pre>
+      </li>
+      {{/each}}
+    </ul>
+  </main>
+</body>
+</html>
