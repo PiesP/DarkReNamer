@@ -7,23 +7,16 @@ use windows_sys::Win32::UI::Controls::SetWindowTheme;
 
 struct DynamicLibrary {
     handle: HMODULE,
-    owned: bool,
 }
 
 impl DynamicLibrary {
     fn load_system(name: &str) -> io::Result<Self> {
         let wide_name = wide(name);
-        // SAFETY: wide_name is an owned NUL-terminated UTF-16 buffer retained
-        // for both synchronous loader calls.
-        let existing = unsafe { GetModuleHandleW(wide_name.as_ptr()) };
-        if !existing.is_null() {
-            return Ok(Self {
-                handle: existing,
-                owned: false,
-            });
-        }
         // SAFETY: the fixed system-DLL leaf is NUL-terminated and the search
-        // flag prevents current-directory or PATH preloading.
+        // flag prevents current-directory or PATH preloading. LoadLibraryExW
+        // also applies the process activation context, selecting the manifest's
+        // Common Controls assembly when one is active, and acquires one owned
+        // reference even if another same-basename module is already mapped.
         let loaded =
             unsafe { LoadLibraryExW(wide_name.as_ptr(), null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32) };
         if loaded.is_null() {
@@ -32,10 +25,7 @@ impl DynamicLibrary {
                 io::Error::last_os_error()
             )))
         } else {
-            Ok(Self {
-                handle: loaded,
-                owned: true,
-            })
+            Ok(Self { handle: loaded })
         }
     }
 
@@ -63,11 +53,9 @@ impl DynamicLibrary {
 
 impl Drop for DynamicLibrary {
     fn drop(&mut self) {
-        if self.owned {
-            // SAFETY: this handle came from one successful LoadLibraryExW call
-            // and this owner releases that reference exactly once.
-            unsafe { FreeLibrary(self.handle) };
-        }
+        // SAFETY: this handle came from one successful LoadLibraryExW call and
+        // this owner releases that reference exactly once.
+        unsafe { FreeLibrary(self.handle) };
     }
 }
 
