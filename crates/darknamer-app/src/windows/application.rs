@@ -1369,6 +1369,10 @@ mod tests {
 
     impl Drop for PublishedFileDialogTestApp {
         fn drop(&mut self) {
+            // A failed assertion or timeout can leave a test admission worker
+            // live. Join it while the owner HWND is still published so its
+            // completion wake cannot target a later recycled test window.
+            finish_apply_after_message_loop_failure(self.owner);
             // SAFETY: Drop owns the published slot and window. It mirrors the
             // production child cleanup order before unpublishing and reclaiming.
             unsafe {
