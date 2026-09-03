@@ -17,6 +17,45 @@ pub(super) struct TaskDialogSpec<'a> {
     pub(super) warning: bool,
 }
 
+pub(super) struct PreparedTaskDialogButton {
+    pub(super) id: i32,
+    pub(super) text: String,
+}
+
+pub(super) struct PreparedTaskDialogSpec {
+    pub(super) title: String,
+    pub(super) main_instruction: String,
+    pub(super) content: String,
+    pub(super) expanded_information: Option<String>,
+    pub(super) buttons: Vec<PreparedTaskDialogButton>,
+    pub(super) warning: bool,
+}
+
+pub(super) fn select_prepared_task_dialog(
+    owner: HWND,
+    prepared: &PreparedTaskDialogSpec,
+) -> io::Result<i32> {
+    let buttons = prepared
+        .buttons
+        .iter()
+        .map(|button| TaskDialogButtonSpec {
+            id: button.id,
+            text: &button.text,
+        })
+        .collect::<Vec<_>>();
+    task_dialog(
+        owner,
+        TaskDialogSpec {
+            title: &prepared.title,
+            main_instruction: &prepared.main_instruction,
+            content: &prepared.content,
+            expanded_information: prepared.expanded_information.as_deref(),
+            buttons: &buttons,
+            warning: prepared.warning,
+        },
+    )
+}
+
 struct OwnedTaskDialog {
     _title: Vec<u16>,
     _main_instruction: Vec<u16>,

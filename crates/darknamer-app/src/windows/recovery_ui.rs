@@ -250,51 +250,89 @@ pub(super) fn export_valid_journal(
     }
 }
 
-pub(super) fn discard_staged_journal(owner: HWND, state: &mut AppState) {
+pub(super) struct PreparedDiscardTaskDialog {
+    session: PreparedTaskDialogSession,
+    spec: PreparedTaskDialogSpec,
+    journal_path: PathBuf,
+    journal_bytes: u64,
+    journal_records: Vec<crate::rename::JournalRecord>,
+}
+
+pub(super) fn prepare_discard_staged_journal(
+    owner: HWND,
+    state: &mut AppState,
+) -> Option<PreparedDiscardTaskDialog> {
     if !state.can_discard_staged_intent() {
         message(
             owner,
             "현재 상태에서는 활성화 전 저널을 폐기할 수 없습니다. 복구 상태를 다시 확인해 주세요.",
             "DarkReNamer - 폐기 거부",
         );
-        return;
+        return None;
     }
-    let detail = state.staged_journal.as_ref().map_or_else(
-        || "보존된 활성화 전 저널 정보가 없습니다.".to_owned(),
-        |journal| {
-            format!(
-                "저널: {}\n크기: {} bytes\n레코드: {}개",
-                journal.path().display(),
-                journal.byte_len(),
-                journal.records().len()
-            )
-        },
+    let staged = state.staged_journal.as_ref()?;
+    let journal_path = staged.path().to_path_buf();
+    let journal_bytes = staged.byte_len();
+    let journal_records = staged.records().to_vec();
+    let detail = format!(
+        "저널: {}\n크기: {} bytes\n레코드: {}개",
+        journal_path.display(),
+        journal_bytes,
+        journal_records.len()
     );
-    let buttons = [TaskDialogButtonSpec {
-        id: DISCARD_CONFIRM_BUTTON_ID,
-        text: "계획 폐기",
-    }];
-    state.mutation_locked = true;
-    state.confirmation_pending = true;
+    let session = begin_prepared_task_dialog(state)?;
     update_controls(state);
-    let answer = task_dialog(
-        owner,
-        TaskDialogSpec {
-            title: "DarkReNamer - 활성화 전 계획 폐기",
-            main_instruction: "활성화 전 실행 계획을 폐기하시겠습니까?",
-            content: "파일 변경은 시작되지 않았습니다. 폐기하면 새 적용을 다시 사용할 수 있습니다.",
-            expanded_information: Some(&detail),
-            buttons: &buttons,
+    Some(PreparedDiscardTaskDialog {
+        session,
+        spec: PreparedTaskDialogSpec {
+            title: "DarkReNamer - 활성화 전 계획 폐기".to_owned(),
+            main_instruction: "활성화 전 실행 계획을 폐기하시겠습니까?".to_owned(),
+            content: "파일 변경은 시작되지 않았습니다. 폐기하면 새 적용을 다시 사용할 수 있습니다."
+                .to_owned(),
+            expanded_information: Some(detail),
+            buttons: vec![PreparedTaskDialogButton {
+                id: DISCARD_CONFIRM_BUTTON_ID,
+                text: "계획 폐기".to_owned(),
+            }],
             warning: true,
         },
+        journal_path,
+        journal_bytes,
+        journal_records,
+    })
+}
+
+pub(super) fn run_prepared_discard_task_dialog(
+    owner: HWND,
+    prepared: PreparedDiscardTaskDialog,
+    select: impl FnOnce(HWND, &PreparedTaskDialogSpec) -> io::Result<i32>,
+) {
+    let answer = select(owner, &prepared.spec);
+    let Some(mut state_lease) = try_app_state(owner) else {
+        return;
+    };
+    let state = state_lease.state_mut();
+    let disposition = take_prepared_task_dialog(
+        state,
+        prepared.session,
+        PreparedTaskDialogPolicy::RecoveryLocked,
     );
-    state.mutation_locked = false;
-    state.confirmation_pending = false;
     update_controls(state);
-    if state.close_pending {
+    if disposition == PreparedTaskDialogDisposition::Closed {
+        drop(state_lease);
         // SAFETY: queueing WM_CLOSE carries no borrowed state. The current
-        // command dispatch must return before WM_CLOSE can reclaim AppState.
+        // prepared-dialog runner has released AppState before reclamation.
         unsafe { PostMessageW(owner, WM_CLOSE, 0, 0) };
+        return;
+    }
+    if disposition != PreparedTaskDialogDisposition::Accepted {
+        if disposition == PreparedTaskDialogDisposition::Rejected {
+            message(
+                owner,
+                "확인 중 복구 상태가 변경되어 폐기를 중단했습니다.",
+                "DarkReNamer - 폐기 거부",
+            );
+        }
         return;
     }
     let answer = match answer {
@@ -313,7 +351,12 @@ pub(super) fn discard_staged_journal(owner: HWND, state: &mut AppState) {
     {
         return;
     }
-    if !state.can_discard_staged_intent() {
+    let journal_matches = state.staged_journal.as_ref().is_some_and(|journal| {
+        journal.path() == prepared.journal_path
+            && journal.byte_len() == prepared.journal_bytes
+            && journal.records() == prepared.journal_records
+    });
+    if !state.can_discard_staged_intent() || !journal_matches {
         message(
             owner,
             "확인 중 복구 상태가 변경되어 폐기를 중단했습니다.",

@@ -454,6 +454,78 @@ pub(super) struct PreparedPrompt {
 pub(super) enum PreparedCommandAction {
     Prompt(PreparedPrompt),
     FileDialog(PreparedFileDialog),
+    TaskDialog(PreparedDiscardTaskDialog),
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct PreparedTaskDialogSession {
+    pub(super) session_id: u64,
+    pub(super) expected_revision: ModelRevision,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PreparedTaskDialogPolicy {
+    Mutable,
+    RecoveryLocked,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PreparedTaskDialogDisposition {
+    Accepted,
+    Closed,
+    Rejected,
+    Missing,
+}
+
+pub(super) fn begin_prepared_task_dialog(
+    state: &mut AppState,
+) -> Option<PreparedTaskDialogSession> {
+    if state.active_prompt.is_some() || state.confirmation_pending {
+        return None;
+    }
+    state.next_prompt_id = state.next_prompt_id.wrapping_add(1).max(1);
+    let session = PreparedTaskDialogSession {
+        session_id: state.next_prompt_id,
+        expected_revision: state.revision(),
+    };
+    state.active_prompt = Some(session.session_id);
+    state.mutation_locked = true;
+    state.confirmation_pending = true;
+    Some(session)
+}
+
+pub(super) fn take_prepared_task_dialog(
+    state: &mut AppState,
+    session: PreparedTaskDialogSession,
+    policy: PreparedTaskDialogPolicy,
+) -> PreparedTaskDialogDisposition {
+    if state.active_prompt != Some(session.session_id) {
+        return PreparedTaskDialogDisposition::Missing;
+    }
+    let activity = state.worker_activity();
+    let policy_matches = match policy {
+        PreparedTaskDialogPolicy::Mutable => !state.read_only_locked(),
+        PreparedTaskDialogPolicy::RecoveryLocked => state.read_only_locked(),
+    };
+    let current = state.confirmation_pending
+        && state.mutation_locked
+        && !activity.admission
+        && !activity.plan
+        && !activity.apply
+        && state.revision() == session.expected_revision
+        && policy_matches;
+    let closing = state.close_pending;
+    let worker_active = activity.admission || activity.plan || activity.apply;
+    state.active_prompt = None;
+    state.confirmation_pending = false;
+    state.mutation_locked = closing || worker_active;
+    if closing {
+        PreparedTaskDialogDisposition::Closed
+    } else if current {
+        PreparedTaskDialogDisposition::Accepted
+    } else {
+        PreparedTaskDialogDisposition::Rejected
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -563,6 +635,10 @@ pub(super) fn dispatch_command(
     if let Some(dialog) = prepare_file_dialog_command(window, state, command) {
         return Some(PreparedCommandAction::FileDialog(dialog));
     }
+    if command == DISCARD_STAGED_JOURNAL {
+        return prepare_discard_staged_journal(window, state)
+            .map(PreparedCommandAction::TaskDialog);
+    }
     let mut selection_restore = None;
     let outcome = match command {
         APPLY => {
@@ -650,10 +726,6 @@ pub(super) fn dispatch_command(
         }
         EXPORT_RECOVERY_JOURNAL => {
             export_recovery_journal(window, state);
-            CommandOutcome::ui(UiEffect::None)
-        }
-        DISCARD_STAGED_JOURNAL => {
-            discard_staged_journal(window, state);
             CommandOutcome::ui(UiEffect::None)
         }
         SHOW_RECOVERY_STATUS => {
@@ -1020,11 +1092,15 @@ pub(super) fn run_prepared_command_action(
     window: HWND,
     action: PreparedCommandAction,
     select_file_dialog: impl FnOnce(HWND, PreparedFileDialogKind) -> PreparedFileDialogSelection,
+    select_task_dialog: impl FnOnce(HWND, &PreparedTaskDialogSpec) -> io::Result<i32>,
 ) {
     match action {
         PreparedCommandAction::Prompt(prompt) => run_prepared_prompt(window, prompt),
         PreparedCommandAction::FileDialog(dialog) => {
             run_prepared_file_dialog(window, dialog, select_file_dialog);
+        }
+        PreparedCommandAction::TaskDialog(dialog) => {
+            run_prepared_discard_task_dialog(window, dialog, select_task_dialog);
         }
     }
 }

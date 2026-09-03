@@ -525,10 +525,26 @@ fn run_prepared_command_action_after_state_release<T, R>(
     window: HWND,
     action: Option<PreparedCommandAction>,
     select_file_dialog: impl FnOnce(HWND, PreparedFileDialogKind) -> PreparedFileDialogSelection,
+    select_task_dialog: impl FnOnce(HWND, &PreparedTaskDialogSpec) -> io::Result<i32>,
 ) -> Option<()> {
     run_after_callback_state_release(state_lease, || {
-        action.map(|action| run_prepared_command_action(window, action, select_file_dialog))
+        action.map(|action| {
+            run_prepared_command_action(window, action, select_file_dialog, select_task_dialog);
+        })
     })
+}
+
+fn run_prepared_worker_task_dialog_after_state_release<T, R>(
+    state_lease: CallbackStateLease<T, R>,
+    window: HWND,
+    prepared: Option<PreparedWorkerTaskDialog>,
+    select: impl FnOnce(HWND, &PreparedTaskDialogSpec) -> io::Result<i32>,
+) {
+    run_after_callback_state_release(state_lease, || {
+        if let Some(prepared) = prepared {
+            run_prepared_worker_task_dialog(window, prepared, select);
+        }
+    });
 }
 
 unsafe extern "system" fn window_proc(
@@ -912,12 +928,24 @@ unsafe extern "system" fn window_proc(
         }
         WM_APP_PLAN_COMPLETE if !state_ptr.is_null() => {
             // SAFETY: state_ptr is the live UI-thread AppState for this window.
-            handle_plan_completion(window, unsafe { &mut *state_ptr });
+            let prepared = handle_plan_completion(window, unsafe { &mut *state_ptr });
+            run_prepared_worker_task_dialog_after_state_release(
+                state_lease,
+                window,
+                prepared,
+                select_prepared_task_dialog,
+            );
             0
         }
         WM_APP_ADMISSION_COMPLETE if !state_ptr.is_null() => {
             // SAFETY: state_ptr is the live UI-thread AppState for this window.
-            handle_admission_completion(window, unsafe { &mut *state_ptr });
+            let prepared = handle_admission_completion(window, unsafe { &mut *state_ptr });
+            run_prepared_worker_task_dialog_after_state_release(
+                state_lease,
+                window,
+                prepared,
+                select_prepared_task_dialog,
+            );
             0
         }
         WM_APP_ADMISSION_STARTED if !state_ptr.is_null() => {
@@ -944,7 +972,13 @@ unsafe extern "system" fn window_proc(
                 .as_ref()
                 .is_some_and(|worker| worker.handle.is_finished())
             {
-                handle_admission_completion(window, state);
+                let prepared = handle_admission_completion(window, state);
+                run_prepared_worker_task_dialog_after_state_release(
+                    state_lease,
+                    window,
+                    prepared,
+                    select_prepared_task_dialog,
+                );
                 return 0;
             }
             if state
@@ -952,7 +986,13 @@ unsafe extern "system" fn window_proc(
                 .as_ref()
                 .is_some_and(|worker| worker.handle.is_finished())
             {
-                handle_plan_completion(window, state);
+                let prepared = handle_plan_completion(window, state);
+                run_prepared_worker_task_dialog_after_state_release(
+                    state_lease,
+                    window,
+                    prepared,
+                    select_prepared_task_dialog,
+                );
                 return 0;
             }
             handle_apply_progress(state);
@@ -1099,6 +1139,7 @@ unsafe extern "system" fn window_proc(
                 window,
                 action,
                 select_prepared_file_dialog,
+                select_prepared_task_dialog,
             );
             0
         }
@@ -1178,6 +1219,7 @@ unsafe extern "system" fn window_proc(
                         window,
                         action,
                         select_prepared_file_dialog,
+                        select_prepared_task_dialog,
                     );
                     return 0;
                 }
@@ -1271,6 +1313,12 @@ mod tests {
     const FILE_DIALOG_DRAWITEM_SUBCLASS_ID: usize = 0xD4B4;
     static FILE_DIALOG_DRAWITEM_LEASED: AtomicBool = AtomicBool::new(false);
 
+    fn send_synthetic_drawitem(owner: HWND) {
+        // SAFETY: tests pass their live, test-owned top-level window and the
+        // synchronous message contains no pointer payload.
+        unsafe { SendMessageW(owner, WM_DRAWITEM, 0, 0) };
+    }
+
     extern "system" fn file_dialog_drawitem_probe(
         window: HWND,
         message: u32,
@@ -1358,11 +1406,15 @@ mod tests {
             Ok(app)
         }
 
+        fn lease(&self) -> io::Result<CallbackStateLease<AppState, DropTargetRegistrations>> {
+            // SAFETY: this test owns the published UI-thread slot and callers
+            // never request another lease while the returned value is live.
+            unsafe { CallbackState::try_lease(self.slot) }
+                .ok_or_else(|| io::Error::other("test AppState lease is unavailable"))
+        }
+
         fn with_state<R>(&self, action: impl FnOnce(&mut AppState) -> R) -> io::Result<R> {
-            // SAFETY: this test owns the published UI-thread slot and never
-            // calls this helper while another lease is live.
-            let mut lease = unsafe { CallbackState::try_lease(self.slot) }
-                .ok_or_else(|| io::Error::other("test AppState lease is unavailable"))?;
+            let mut lease = self.lease()?;
             let result = action(lease.state_mut());
             drop(lease);
             Ok(result)
@@ -1380,12 +1432,74 @@ mod tests {
         ) -> io::Result<()> {
             // SAFETY: this test owns the published UI-thread slot and ends this
             // dispatch lease through the production application seam.
-            let mut lease = unsafe { CallbackState::try_lease(self.slot) }
-                .ok_or_else(|| io::Error::other("dispatch AppState lease is unavailable"))?;
+            let mut lease = self.lease()?;
             let action = dispatch_command(self.owner, lease.state_mut(), command);
-            run_prepared_command_action_after_state_release(lease, self.owner, action, selector)
-                .ok_or_else(|| io::Error::other("file command prepared no action"))?;
+            run_prepared_command_action_after_state_release(
+                lease,
+                self.owner,
+                action,
+                selector,
+                select_prepared_task_dialog,
+            )
+            .ok_or_else(|| io::Error::other("file command prepared no action"))?;
             Ok(())
+        }
+
+        fn dispatch_task_with_selector(
+            &self,
+            command: u16,
+            selector: impl FnOnce(HWND, &PreparedTaskDialogSpec) -> io::Result<i32>,
+        ) -> io::Result<()> {
+            // SAFETY: this test owns the published UI-thread slot and ends this
+            // dispatch lease through the production application seam.
+            let mut lease = self.lease()?;
+            let action = dispatch_command(self.owner, lease.state_mut(), command);
+            run_prepared_command_action_after_state_release(
+                lease,
+                self.owner,
+                action,
+                select_prepared_file_dialog,
+                selector,
+            )
+            .ok_or_else(|| io::Error::other("task-dialog command prepared no action"))?;
+            Ok(())
+        }
+
+        fn install_staged_intent(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+            self.with_state(|state| -> Result<PathBuf, Box<dyn std::error::Error>> {
+                let journal = FileJournal::create_candidate(
+                    &state.journal_root,
+                    CANDIDATE_JOURNAL_LEAF,
+                    ACTIVE_JOURNAL_LEAF,
+                )?;
+                let step = crate::rename::JournalStep::new(
+                    crate::rename::EntryId::new(1),
+                    LegacyText::from(r"C:\fixture\before.txt"),
+                    LegacyText::from(r"C:\fixture\after.txt"),
+                    crate::rename::EntryIdentity::new(7, 11),
+                    crate::rename::EntryIdentity::new(7, 1),
+                    crate::rename::EntryIdentity::new(7, 1),
+                    crate::rename::TemporaryPhase::None,
+                );
+                let path = journal.path().to_path_buf();
+                drop(journal);
+                let bytes = crate::rename::encode_journal_records(&[
+                    crate::rename::JournalRecord::Intent {
+                        plan: crate::rename::PlanId::from_fingerprint(7),
+                        steps: vec![step].into_boxed_slice(),
+                    },
+                ])?;
+                fs::write(&path, bytes)?;
+                let journal = FileJournal::open_candidate_existing_retained(
+                    &state.journal_root,
+                    CANDIDATE_JOURNAL_LEAF,
+                    ACTIVE_JOURNAL_LEAF,
+                )?;
+                state.staged_journal = Some(journal);
+                state.recovery_locked = true;
+                update_controls(state);
+                Ok(path)
+            })?
         }
 
         fn drain_admission(&self) -> io::Result<()> {
@@ -1406,6 +1520,77 @@ mod tests {
                 thread::sleep(std::time::Duration::from_millis(10));
             }
             Err(io::Error::other("admission worker did not finish"))
+        }
+
+        fn finish_directory_admission_with_selector(
+            &self,
+            selector: impl FnOnce(HWND, &PreparedTaskDialogSpec) -> io::Result<i32>,
+        ) -> io::Result<()> {
+            for _ in 0..200 {
+                // SAFETY: the test owns the published UI-thread slot. The
+                // production wrapper releases this lease before selection.
+                let mut lease = self.lease()?;
+                let finished = lease
+                    .state()
+                    .admission_worker
+                    .as_ref()
+                    .is_some_and(|worker| worker.handle.is_finished());
+                if finished {
+                    let prepared = handle_admission_completion(self.owner, lease.state_mut());
+                    run_prepared_worker_task_dialog_after_state_release(
+                        lease, self.owner, prepared, selector,
+                    );
+                    return Ok(());
+                }
+                drop(lease);
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(io::Error::other(
+                "directory admission worker did not finish",
+            ))
+        }
+
+        fn finish_plan_with_selector(
+            &self,
+            selector: impl FnOnce(HWND, &PreparedTaskDialogSpec) -> io::Result<i32>,
+        ) -> io::Result<()> {
+            for _ in 0..400 {
+                // SAFETY: the test owns the published UI-thread slot. The
+                // production wrapper releases this lease before selection.
+                let mut lease = self.lease()?;
+                let finished = lease
+                    .state()
+                    .plan_worker
+                    .as_ref()
+                    .is_some_and(|worker| worker.handle.is_finished());
+                if finished {
+                    let prepared = handle_plan_completion(self.owner, lease.state_mut());
+                    run_prepared_worker_task_dialog_after_state_release(
+                        lease, self.owner, prepared, selector,
+                    );
+                    return Ok(());
+                }
+                drop(lease);
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(io::Error::other("plan worker did not finish"))
+        }
+
+        fn drain_apply(&self) -> io::Result<()> {
+            for _ in 0..400 {
+                let finished = self.with_state(|state| {
+                    state
+                        .apply_worker
+                        .as_ref()
+                        .is_some_and(|worker| worker.handle.is_finished())
+                })?;
+                if finished {
+                    self.with_state(|state| handle_apply_completion(self.owner, state))?;
+                    return Ok(());
+                }
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(io::Error::other("apply worker did not finish"))
         }
 
         fn assert_session_cleared(&self) -> io::Result<()> {
@@ -1445,6 +1630,7 @@ mod tests {
                 );
                 SetWindowLongPtrW(self.owner, GWLP_USERDATA, 0);
                 DestroyWindow(self.owner);
+                discard_deferred_messages(self.owner);
                 let _disposition = CallbackState::request_reclaim(self.slot);
             }
         }
@@ -1459,7 +1645,7 @@ mod tests {
             assert!(matches!(kind, PreparedFileDialogKind::AddFiles));
             // SAFETY: owner is the live test window. The synchronous subclass
             // callback attempts the same AppState lease as production drawing.
-            unsafe { SendMessageW(owner, WM_DRAWITEM, 0, 0) };
+            send_synthetic_drawitem(owner);
             PreparedFileDialogSelection::Cancelled
         })?;
         assert!(FILE_DIALOG_DRAWITEM_LEASED.load(Ordering::SeqCst));
@@ -1543,10 +1729,15 @@ mod tests {
                 }
             })?;
             let selector_called = Cell::new(false);
-            run_prepared_command_action(app.owner, action, |_, _| {
-                selector_called.set(true);
-                PreparedFileDialogSelection::Cancelled
-            });
+            run_prepared_command_action(
+                app.owner,
+                action,
+                |_, _| {
+                    selector_called.set(true);
+                    PreparedFileDialogSelection::Cancelled
+                },
+                select_prepared_task_dialog,
+            );
             assert!(!selector_called.get());
             app.assert_session_cleared()?;
             if matches!(blocker, Blocker::Worker) {
@@ -1609,22 +1800,198 @@ mod tests {
         let action = app.prepare(SAVE_PATHS)?;
         app.with_state(|state| state.active_prompt = Some(999))?;
         let selector_called = Cell::new(false);
-        run_prepared_command_action(app.owner, action, |_, _| {
-            selector_called.set(true);
-            PreparedFileDialogSelection::Cancelled
-        });
+        run_prepared_command_action(
+            app.owner,
+            action,
+            |_, _| {
+                selector_called.set(true);
+                PreparedFileDialogSelection::Cancelled
+            },
+            select_prepared_task_dialog,
+        );
         assert!(!selector_called.get());
         assert_eq!(app.with_state(|state| state.active_prompt)?, Some(999));
 
         let app = PublishedFileDialogTestApp::new()?;
         let action = app.prepare(SAVE_PATHS)?;
         let selector_called = Cell::new(false);
-        run_prepared_command_action(null_mut(), action, |_, _| {
-            selector_called.set(true);
-            PreparedFileDialogSelection::Cancelled
-        });
+        run_prepared_command_action(
+            null_mut(),
+            action,
+            |_, _| {
+                selector_called.set(true);
+                PreparedFileDialogSelection::Cancelled
+            },
+            select_prepared_task_dialog,
+        );
         assert!(!selector_called.get());
         assert_eq!(app.with_state(|state| state.active_prompt)?, Some(1));
+        Ok(())
+    }
+
+    #[test]
+    fn real_discard_task_dialog_runs_after_release_and_revalidates_the_journal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let app = PublishedFileDialogTestApp::new()?;
+        let candidate = app.install_staged_intent()?;
+        FILE_DIALOG_DRAWITEM_LEASED.store(false, Ordering::SeqCst);
+        app.dispatch_task_with_selector(DISCARD_STAGED_JOURNAL, |owner, spec| {
+            assert_eq!(spec.buttons.len(), 1);
+            // SAFETY: owner is the live test window. The synchronous callback
+            // attempts the production AppState lease during the fake modal.
+            send_synthetic_drawitem(owner);
+            Ok(IDCANCEL)
+        })?;
+        assert!(FILE_DIALOG_DRAWITEM_LEASED.load(Ordering::SeqCst));
+        app.assert_session_cleared()?;
+        assert!(candidate.exists());
+
+        app.dispatch_task_with_selector(DISCARD_STAGED_JOURNAL, |_, _| {
+            Err(io::Error::other("injected TaskDialog failure"))
+        })?;
+        app.assert_session_cleared()?;
+        assert!(candidate.exists());
+
+        app.dispatch_task_with_selector(DISCARD_STAGED_JOURNAL, |_, _| {
+            app.with_state(|state| state.model_revision += 1)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            Ok(DISCARD_CONFIRM_BUTTON_ID)
+        })?;
+        app.assert_session_cleared()?;
+        assert!(candidate.exists());
+
+        app.with_state(|state| state.model_revision -= 1)?;
+        #[derive(Clone, Copy)]
+        enum PostModalChange {
+            Close,
+            DialogLockLost,
+            SessionChanged,
+            WorkerStarted,
+        }
+        for change in [
+            PostModalChange::Close,
+            PostModalChange::DialogLockLost,
+            PostModalChange::SessionChanged,
+            PostModalChange::WorkerStarted,
+        ] {
+            app.dispatch_task_with_selector(DISCARD_STAGED_JOURNAL, |_, _| {
+                app.with_state(|state| match change {
+                    PostModalChange::Close => state.close_pending = true,
+                    PostModalChange::DialogLockLost => state.mutation_locked = false,
+                    PostModalChange::SessionChanged => state.active_prompt = Some(999),
+                    PostModalChange::WorkerStarted => {
+                        let started = admit_paths(app.owner, state, Vec::new());
+                        assert!(started.is_ok());
+                        finalize_admission_start(state);
+                    }
+                })
+                .map_err(|error| io::Error::other(error.to_string()))?;
+                Ok(DISCARD_CONFIRM_BUTTON_ID)
+            })?;
+            assert!(candidate.exists());
+            if matches!(change, PostModalChange::SessionChanged) {
+                assert_eq!(app.with_state(|state| state.active_prompt)?, Some(999));
+            } else {
+                app.assert_session_cleared()?;
+            }
+            app.with_state(|state| {
+                state.close_pending = false;
+                state.active_prompt = None;
+                state.confirmation_pending = false;
+                if state.admission_worker.is_none() {
+                    state.mutation_locked = false;
+                }
+            })?;
+            if matches!(change, PostModalChange::WorkerStarted) {
+                app.drain_admission()?;
+            }
+        }
+
+        app.dispatch_task_with_selector(DISCARD_STAGED_JOURNAL, |_, _| {
+            Ok(DISCARD_CONFIRM_BUTTON_ID)
+        })?;
+        app.assert_session_cleared()?;
+        assert!(!candidate.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn real_directory_task_dialog_releases_state_and_restarts_current_admission()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let app = PublishedFileDialogTestApp::new()?;
+        let directory = app._directory.path().join("selected-directory");
+        fs::create_dir(&directory)?;
+        app.with_state(|state| {
+            let started = admit_paths(app.owner, state, vec![directory]);
+            assert!(started.is_ok());
+            finalize_admission_start(state);
+        })?;
+        FILE_DIALOG_DRAWITEM_LEASED.store(false, Ordering::SeqCst);
+        app.finish_directory_admission_with_selector(|owner, spec| {
+            assert_eq!(spec.buttons.len(), 2);
+            // SAFETY: owner is live and the synchronous test subclass probes
+            // whether the modal runner released AppState.
+            send_synthetic_drawitem(owner);
+            Ok(DIRECTORY_DIRECT_BUTTON_ID)
+        })?;
+        assert!(FILE_DIALOG_DRAWITEM_LEASED.load(Ordering::SeqCst));
+        app.assert_session_cleared()?;
+        assert!(app.with_state(|state| state.admission_worker.is_some())?);
+        app.drain_admission()?;
+
+        let directory = app._directory.path().join("stale-directory");
+        fs::create_dir(&directory)?;
+        app.with_state(|state| {
+            let started = admit_paths(app.owner, state, vec![directory]);
+            assert!(started.is_ok());
+            finalize_admission_start(state);
+        })?;
+        app.finish_directory_admission_with_selector(|_, _| {
+            app.with_state(|state| state.recovery_locked = true)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            Ok(DIRECTORY_DIRECT_BUTTON_ID)
+        })?;
+        app.assert_session_cleared()?;
+        assert!(app.with_state(|state| state.admission_worker.is_none())?);
+        Ok(())
+    }
+
+    #[test]
+    fn real_apply_task_dialog_releases_state_and_confirms_the_same_plan()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let app = PublishedFileDialogTestApp::new()?;
+        let source = app._directory.path().join("before.txt");
+        let destination = app._directory.path().join("after.txt");
+        fs::write(&source, b"fixture")?;
+        app.with_state(|state| -> Result<(), ProposalMutationError> {
+            let appended =
+                state
+                    .model
+                    .append(LegacyListItem::new(legacy_path(&source), false, 7, 0, 0))?;
+            state.commit_known_model_change(appended);
+            let changed = state
+                .model
+                .manual_change_changed(0, LegacyText::from("after.txt"))?;
+            state.commit_known_model_change(changed);
+            refresh(state);
+            update_controls(state);
+            Ok(())
+        })??;
+        app.with_state(|state| apply_changes(app.owner, state))?;
+        FILE_DIALOG_DRAWITEM_LEASED.store(false, Ordering::SeqCst);
+        app.finish_plan_with_selector(|owner, spec| {
+            assert_eq!(spec.buttons.len(), 1);
+            // SAFETY: owner is live and the synchronous test subclass probes
+            // whether the modal runner released AppState.
+            send_synthetic_drawitem(owner);
+            Ok(APPLY_CONFIRM_BUTTON_ID)
+        })?;
+        assert!(FILE_DIALOG_DRAWITEM_LEASED.load(Ordering::SeqCst));
+        app.assert_session_cleared()?;
+        assert!(app.with_state(|state| state.apply_worker.is_some())?);
+        app.drain_apply()?;
+        assert!(!source.exists());
+        assert!(destination.exists());
         Ok(())
     }
 
