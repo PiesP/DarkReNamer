@@ -40,6 +40,9 @@ function Write-HandoffFixture {
     Write-Utf8NoBom `
         -Path (Join-Path $HandoffRoot 'DarkReNamer.cdx.json') `
         -Content '{"bomFormat":"CycloneDX","specVersion":"1.5","serialNumber":"urn:uuid:12345678-1234-4234-9234-123456789abc","components":[{"type":"application","name":"darknamer-app","version":"0.1.0"}]}'
+    Write-Utf8NoBom `
+        -Path (Join-Path $HandoffRoot 'THIRD_PARTY_LICENSES.html') `
+        -Content '<!doctype html><html><body><pre>fixture license text</pre></body></html>'
     Compress-Archive `
         -LiteralPath (Join-Path $HandoffRoot 'DarkReNamer.pdb') `
         -DestinationPath (Join-Path $HandoffRoot 'DarkReNamer-debug-symbols.zip')
@@ -91,6 +94,7 @@ function Write-HandoffFixture {
         'LICENSE'
         'release-handoff.json'
         'release-metrics.json'
+        'THIRD_PARTY_LICENSES.html'
         'THIRD_PARTY_NOTICES.md'
     )
     $checksumLines = foreach ($name in $checksumSubjects) {

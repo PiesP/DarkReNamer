@@ -247,6 +247,7 @@ function Write-Checksums {
     $subjects = @(
         'DarkReNamer-debug-symbols.zip', 'DarkReNamer.cdx.json', 'DarkReNamer.exe',
         'DISTRIBUTION.md', 'LICENSE', 'release-handoff.json', 'release-metrics.json',
+        'THIRD_PARTY_LICENSES.html',
         'THIRD_PARTY_NOTICES.md'
     )
     $lines = foreach ($name in $subjects) {
@@ -323,6 +324,7 @@ try {
 
     $null = Write-WindowsBinaryFixture -Root $handoffRoot
     Write-Utf8NoBom -Path (Join-Path $handoffRoot 'DarkReNamer.cdx.json') -Content '{"bomFormat":"CycloneDX","specVersion":"1.5","serialNumber":"urn:uuid:12345678-1234-4234-9234-123456789abc","components":[{"type":"application","name":"darknamer-app","version":"0.1.0"}]}'
+    Write-Utf8NoBom -Path (Join-Path $handoffRoot 'THIRD_PARTY_LICENSES.html') -Content '<!doctype html><html><body><pre>fixture license text</pre></body></html>'
     Compress-Archive -LiteralPath (Join-Path $handoffRoot 'DarkReNamer.pdb') -DestinationPath (Join-Path $handoffRoot 'DarkReNamer-debug-symbols.zip')
     $exeSha = (Get-FileHash -LiteralPath (Join-Path $handoffRoot 'DarkReNamer.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
     Write-Provenance -Path (Join-Path $handoffRoot 'release-handoff.json') -SourceSha $sourceSha -ExecutableSha $exeSha -WorkflowRun $workflowRun
