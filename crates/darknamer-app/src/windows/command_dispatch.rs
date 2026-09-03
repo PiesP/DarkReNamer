@@ -181,6 +181,106 @@ mod accelerator_tests {
             assert!(!blocked);
         }
     }
+
+    #[test]
+    fn file_dialog_completion_cleans_matching_sessions_and_rejects_stale_state() {
+        let revision = ModelRevision::new(7);
+        let mut active = Some(3);
+        assert_eq!(
+            take_file_dialog_session(
+                &mut active,
+                3,
+                FileDialogCompletion::Accept,
+                PromptCompletionLocks::default(),
+                revision,
+                revision,
+            ),
+            FileDialogSessionDisposition::Accepted,
+        );
+        assert_eq!(active, None);
+
+        for locks in [
+            PromptCompletionLocks {
+                close_pending: true,
+                ..PromptCompletionLocks::default()
+            },
+            PromptCompletionLocks {
+                read_only_locked: true,
+                ..PromptCompletionLocks::default()
+            },
+            PromptCompletionLocks {
+                mutation_locked: true,
+                ..PromptCompletionLocks::default()
+            },
+            PromptCompletionLocks {
+                worker_active: true,
+                ..PromptCompletionLocks::default()
+            },
+        ] {
+            let mut active = Some(3);
+            assert_eq!(
+                take_file_dialog_session(
+                    &mut active,
+                    3,
+                    FileDialogCompletion::Accept,
+                    locks,
+                    revision,
+                    revision,
+                ),
+                FileDialogSessionDisposition::Rejected,
+            );
+            assert_eq!(active, None);
+        }
+
+        let mut stale_revision = Some(3);
+        assert_eq!(
+            take_file_dialog_session(
+                &mut stale_revision,
+                3,
+                FileDialogCompletion::Accept,
+                PromptCompletionLocks::default(),
+                ModelRevision::new(8),
+                revision,
+            ),
+            FileDialogSessionDisposition::Rejected,
+        );
+        assert_eq!(stale_revision, None);
+
+        let mut cancelled = Some(3);
+        assert_eq!(
+            take_file_dialog_session(
+                &mut cancelled,
+                3,
+                FileDialogCompletion::Cancel,
+                PromptCompletionLocks {
+                    close_pending: true,
+                    read_only_locked: true,
+                    mutation_locked: true,
+                    worker_active: true,
+                },
+                ModelRevision::new(8),
+                revision,
+            ),
+            FileDialogSessionDisposition::Cancelled,
+        );
+        assert_eq!(cancelled, None);
+
+        for mut active in [None, Some(4)] {
+            let before = active;
+            assert_eq!(
+                take_file_dialog_session(
+                    &mut active,
+                    3,
+                    FileDialogCompletion::Accept,
+                    PromptCompletionLocks::default(),
+                    revision,
+                    revision,
+                ),
+                FileDialogSessionDisposition::Missing,
+            );
+            assert_eq!(active, before);
+        }
+    }
 }
 
 pub(super) fn selected_indices(list: HWND) -> Vec<usize> {
@@ -357,7 +457,7 @@ pub(super) enum PreparedCommandAction {
 }
 
 #[derive(Clone, Copy)]
-struct PreparedFileDialogSession {
+pub(super) struct PreparedFileDialogSession {
     owner: HWND,
     session_id: u64,
     expected_revision: ModelRevision,
@@ -406,6 +506,20 @@ struct PromptCompletionLocks {
     read_only_locked: bool,
     mutation_locked: bool,
     worker_active: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FileDialogCompletion {
+    Accept,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FileDialogSessionDisposition {
+    Accepted,
+    Cancelled,
+    Rejected,
+    Missing,
 }
 
 pub(super) fn dispatch_command(
@@ -877,29 +991,43 @@ fn prepare_file_dialog_command(
     state: &mut AppState,
     command: u16,
 ) -> Option<PreparedFileDialog> {
+    let revision = state.revision();
+    dispatch_file_dialog_action(
+        owner,
+        &state.model,
+        revision,
+        &mut state.next_prompt_id,
+        &mut state.active_prompt,
+        command,
+    )
+}
+
+pub(super) fn dispatch_file_dialog_action(
+    owner: HWND,
+    model: &LegacyList,
+    revision: ModelRevision,
+    next_session_id: &mut u64,
+    active_session: &mut Option<u64>,
+    command: u16,
+) -> Option<PreparedFileDialog> {
     let kind = match command {
         ADD_FILES => PreparedFileDialogKind::AddFiles,
         SAVE_NAMES => PreparedFileDialogKind::SaveText {
-            text: state.model.export_names(),
+            text: model.export_names(),
             names: true,
         },
         SAVE_PATHS => PreparedFileDialogKind::SaveText {
-            text: state.model.export_paths(),
+            text: model.export_paths(),
             names: false,
         },
         IMPORT_NAMES => PreparedFileDialogKind::ImportNames,
         IMPORT_PATHS => PreparedFileDialogKind::ImportPaths,
         _ => return None,
     };
-    state.next_prompt_id = state.next_prompt_id.wrapping_add(1).max(1);
-    let session_id = state.next_prompt_id;
-    state.active_prompt = Some(session_id);
-    Some(PreparedFileDialog::new(
-        owner,
-        session_id,
-        state.revision(),
-        kind,
-    ))
+    *next_session_id = next_session_id.wrapping_add(1).max(1);
+    let session_id = *next_session_id;
+    *active_session = Some(session_id);
+    Some(PreparedFileDialog::new(owner, session_id, revision, kind))
 }
 
 pub(super) fn run_prepared_command_action(window: HWND, action: PreparedCommandAction) {
@@ -911,31 +1039,63 @@ pub(super) fn run_prepared_command_action(window: HWND, action: PreparedCommandA
 
 fn run_prepared_file_dialog(window: HWND, dialog: PreparedFileDialog) {
     let session = dialog.session;
-    if !file_dialog_session_is_current(window, session) {
-        let _ = finish_file_dialog_session(window, session, true, |_| ());
-        return;
+    if route_prepared_file_dialog(
+        window,
+        dialog,
+        file_dialog_session_is_current,
+        select_prepared_file_dialog,
+        finish_prepared_file_dialog_selection,
+    )
+    .is_none()
+    {
+        let _ = finish_file_dialog_session(window, session, FileDialogCompletion::Accept, |_| ());
     }
-    let selection = select_prepared_file_dialog(window, dialog.kind);
+}
+
+pub(super) fn route_prepared_file_dialog<S, O>(
+    window: HWND,
+    dialog: PreparedFileDialog,
+    session_is_current: impl FnOnce(HWND, PreparedFileDialogSession) -> bool,
+    select: impl FnOnce(HWND, PreparedFileDialogKind) -> S,
+    finish: impl FnOnce(HWND, PreparedFileDialogSession, S) -> O,
+) -> Option<O> {
+    let session = dialog.session;
+    session_is_current(window, session)
+        .then(|| finish(window, session, select(window, dialog.kind)))
+}
+
+fn finish_prepared_file_dialog_selection(
+    window: HWND,
+    session: PreparedFileDialogSession,
+    selection: PreparedFileDialogSelection,
+) {
     match selection {
         PreparedFileDialogSelection::Cancelled => {
-            let _ = finish_file_dialog_session(window, session, false, |_| ());
+            let _ =
+                finish_file_dialog_session(window, session, FileDialogCompletion::Cancel, |_| ());
         }
         PreparedFileDialogSelection::AddFiles(paths) => {
-            let result = finish_file_dialog_session(window, session, true, |state| {
-                let result = admit_paths(window, state, paths);
-                if result.is_ok() {
-                    finalize_admission_start(state);
-                } else {
-                    finalize_admission_start_failure(state);
-                }
-                result
-            });
+            let result = finish_file_dialog_session(
+                window,
+                session,
+                FileDialogCompletion::Accept,
+                |state| {
+                    let result = admit_paths(window, state, paths);
+                    if result.is_ok() {
+                        finalize_admission_start(state);
+                    } else {
+                        finalize_admission_start_failure(state);
+                    }
+                    result
+                },
+            );
             if let Some(Err(error)) = result {
                 report_admission_start_error(window, &error);
             }
         }
         PreparedFileDialogSelection::SaveText { path, text } => {
-            if finish_file_dialog_session(window, session, true, |_| ()).is_some()
+            if finish_file_dialog_session(window, session, FileDialogCompletion::Accept, |_| ())
+                .is_some()
                 && let Err(error) = write_legacy_text(&path, &text)
             {
                 message(
@@ -947,13 +1107,25 @@ fn run_prepared_file_dialog(window: HWND, dialog: PreparedFileDialog) {
         }
         PreparedFileDialogSelection::ImportNames(path) => {
             if !file_dialog_session_is_current(window, session) {
-                let _ = finish_file_dialog_session(window, session, true, |_| ());
+                let _ = finish_file_dialog_session(
+                    window,
+                    session,
+                    FileDialogCompletion::Accept,
+                    |_| (),
+                );
                 return;
             }
             let text = match read_legacy_text(&path) {
                 Ok(text) => text,
                 Err(error) => {
-                    if finish_file_dialog_session(window, session, true, |_| ()).is_some() {
+                    if finish_file_dialog_session(
+                        window,
+                        session,
+                        FileDialogCompletion::Accept,
+                        |_| (),
+                    )
+                    .is_some()
+                    {
                         message(
                             window,
                             &format!("가져오기 파일을 읽지 못했습니다: {error}"),
@@ -963,12 +1135,17 @@ fn run_prepared_file_dialog(window: HWND, dialog: PreparedFileDialog) {
                     return;
                 }
             };
-            let result = finish_file_dialog_session(window, session, true, |state| {
-                state.model.import_names_changed(&text).map(|changed| {
-                    let outcome = proposal_outcome(state, changed);
-                    apply_command_outcome(window, state, outcome, None);
-                })
-            });
+            let result = finish_file_dialog_session(
+                window,
+                session,
+                FileDialogCompletion::Accept,
+                |state| {
+                    state.model.import_names_changed(&text).map(|changed| {
+                        let outcome = proposal_outcome(state, changed);
+                        apply_command_outcome(window, state, outcome, None);
+                    })
+                },
+            );
             if let Some(Err(error)) = result {
                 message(
                     window,
@@ -979,13 +1156,25 @@ fn run_prepared_file_dialog(window: HWND, dialog: PreparedFileDialog) {
         }
         PreparedFileDialogSelection::ImportPaths(path) => {
             if !file_dialog_session_is_current(window, session) {
-                let _ = finish_file_dialog_session(window, session, true, |_| ());
+                let _ = finish_file_dialog_session(
+                    window,
+                    session,
+                    FileDialogCompletion::Accept,
+                    |_| (),
+                );
                 return;
             }
             let text = match read_legacy_text(&path) {
                 Ok(text) => text,
                 Err(error) => {
-                    if finish_file_dialog_session(window, session, true, |_| ()).is_some() {
+                    if finish_file_dialog_session(
+                        window,
+                        session,
+                        FileDialogCompletion::Accept,
+                        |_| (),
+                    )
+                    .is_some()
+                    {
                         message(
                             window,
                             &format!("경로 목록을 읽지 못했습니다: {error}"),
@@ -1006,7 +1195,12 @@ fn run_prepared_file_dialog(window: HWND, dialog: PreparedFileDialog) {
                 (over_limit, paths)
             });
             let Some((over_limit, paths)) = prepared else {
-                let _ = finish_file_dialog_session(window, session, true, |_| ());
+                let _ = finish_file_dialog_session(
+                    window,
+                    session,
+                    FileDialogCompletion::Accept,
+                    |_| (),
+                );
                 return;
             };
             if over_limit {
@@ -1016,15 +1210,20 @@ fn run_prepared_file_dialog(window: HWND, dialog: PreparedFileDialog) {
                     "DarkReNamer - 가져오기 한도",
                 );
             }
-            let result = finish_file_dialog_session(window, session, true, |state| {
-                let result = admit_paths(window, state, paths);
-                if result.is_ok() {
-                    finalize_admission_start(state);
-                } else {
-                    finalize_admission_start_failure(state);
-                }
-                result
-            });
+            let result = finish_file_dialog_session(
+                window,
+                session,
+                FileDialogCompletion::Accept,
+                |state| {
+                    let result = admit_paths(window, state, paths);
+                    if result.is_ok() {
+                        finalize_admission_start(state);
+                    } else {
+                        finalize_admission_start_failure(state);
+                    }
+                    result
+                },
+            );
             if let Some(Err(error)) = result {
                 report_admission_start_error(window, &error);
             }
@@ -1061,7 +1260,7 @@ fn inspect_file_dialog_session<R>(
 fn finish_file_dialog_session<R>(
     window: HWND,
     session: PreparedFileDialogSession,
-    report_stale: bool,
+    completion: FileDialogCompletion,
     finish: impl FnOnce(&mut AppState) -> R,
 ) -> Option<R> {
     if !file_dialog_window_is_current(window, session.owner) {
@@ -1069,27 +1268,28 @@ fn finish_file_dialog_session<R>(
     }
     let mut state_lease = try_app_state(window)?;
     let state = state_lease.state_mut();
-    if state.active_prompt != Some(session.session_id) {
-        return None;
-    }
-    let current = deferred_result_can_apply(
-        state.active_prompt,
+    let locks = completion_locks(state);
+    let revision = state.revision();
+    let disposition = take_file_dialog_session(
+        &mut state.active_prompt,
         session.session_id,
-        completion_locks(state),
-        state.revision(),
+        completion,
+        locks,
+        revision,
         session.expected_revision,
     );
-    state.active_prompt = None;
-    let result = if current {
-        Some(finish(state))
-    } else {
-        if report_stale && !state.close_pending {
-            state.set_transient_status(
+    let result = match disposition {
+        FileDialogSessionDisposition::Accepted => Some(finish(state)),
+        FileDialogSessionDisposition::Cancelled | FileDialogSessionDisposition::Missing => None,
+        FileDialogSessionDisposition::Rejected => {
+            if !state.close_pending {
+                state.set_transient_status(
                 "파일 대화상자가 열린 동안 목록 또는 작업 상태가 바뀌어 결과를 적용하지 않았습니다.",
             );
-            update_controls(state);
+                update_controls(state);
+            }
+            None
         }
-        None
     };
     if state.close_pending {
         try_finish_window_close(window, state);
@@ -1165,6 +1365,32 @@ fn deferred_result_can_apply(
         && !locks.mutation_locked
         && !locks.worker_active
         && current_revision == expected_revision
+}
+
+fn take_file_dialog_session(
+    active_session: &mut Option<u64>,
+    session_id: u64,
+    completion: FileDialogCompletion,
+    locks: PromptCompletionLocks,
+    current_revision: ModelRevision,
+    expected_revision: ModelRevision,
+) -> FileDialogSessionDisposition {
+    if *active_session != Some(session_id) {
+        return FileDialogSessionDisposition::Missing;
+    }
+    let current = deferred_result_can_apply(
+        *active_session,
+        session_id,
+        locks,
+        current_revision,
+        expected_revision,
+    );
+    *active_session = None;
+    match completion {
+        FileDialogCompletion::Cancel => FileDialogSessionDisposition::Cancelled,
+        FileDialogCompletion::Accept if current => FileDialogSessionDisposition::Accepted,
+        FileDialogCompletion::Accept => FileDialogSessionDisposition::Rejected,
+    }
 }
 
 fn finish_prompt_command(

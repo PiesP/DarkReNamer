@@ -1225,43 +1225,123 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prepared_file_dialog_action_runs_after_callback_state_release()
+    fn all_file_dialog_commands_route_through_a_released_fake_selector()
     -> Result<(), Box<dyn std::error::Error>> {
-        let slot: *mut CallbackState<bool> = CallbackState::into_raw(true);
-        // SAFETY: this test owns the live UI-thread-confined slot until the
-        // final request_reclaim call, and never keeps two leases alive.
-        let lease = unsafe { CallbackState::try_lease(slot) }
-            .ok_or_else(|| io::Error::other("file-dialog command lease was rejected"))?;
-        let action = Some(PreparedCommandAction::FileDialog(PreparedFileDialog::new(
-            null_mut(),
-            1,
-            ModelRevision::new(0),
-            PreparedFileDialogKind::AddFiles,
-        )));
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        enum RoutedDialog {
+            AddFiles,
+            SaveNames,
+            SavePaths,
+            ImportNames,
+            ImportPaths,
+        }
 
-        let nested = run_prepared_command_action_after_state_release(
-            lease,
-            null_mut(),
-            action,
-            |_, action| {
-                if !matches!(action, PreparedCommandAction::FileDialog(_)) {
-                    return Err(io::Error::other(
-                        "ADD_FILES did not prepare a file-dialog action",
-                    ));
-                }
-                // A nested owner-draw callback reaches this same lease path.
-                // SAFETY: the orchestration seam must end the dispatch lease
-                // before invoking this injected native-action boundary.
-                unsafe { CallbackState::try_lease(slot) }
-                    .ok_or_else(|| io::Error::other("file dialog ran before lease release"))
-            },
-        )
-        .ok_or_else(|| io::Error::other("ADD_FILES prepared no deferred action"))??;
-        drop(nested);
+        for (command, expected) in [
+            (ADD_FILES, RoutedDialog::AddFiles),
+            (SAVE_NAMES, RoutedDialog::SaveNames),
+            (SAVE_PATHS, RoutedDialog::SavePaths),
+            (IMPORT_NAMES, RoutedDialog::ImportNames),
+            (IMPORT_PATHS, RoutedDialog::ImportPaths),
+        ] {
+            let model = LegacyList::new();
+            let mut next_session_id = 0;
+            let mut active_session = None;
+            let action = dispatch_file_dialog_action(
+                null_mut(),
+                &model,
+                ModelRevision::new(0),
+                &mut next_session_id,
+                &mut active_session,
+                command,
+            )
+            .map(PreparedCommandAction::FileDialog);
+            assert_eq!(active_session, Some(1));
 
-        // SAFETY: publication is test-owned and no lease remains.
-        let disposition = unsafe { CallbackState::request_reclaim(slot) };
-        assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+            let slot: *mut CallbackState<bool> = CallbackState::into_raw(true);
+            // SAFETY: this test owns the live UI-thread-confined slot until the
+            // final request_reclaim call, and never keeps two leases alive.
+            let lease = unsafe { CallbackState::try_lease(slot) }
+                .ok_or_else(|| io::Error::other("file-dialog command lease was rejected"))?;
+            let routed = run_prepared_command_action_after_state_release(
+                lease,
+                null_mut(),
+                action,
+                |window, action| match action {
+                    PreparedCommandAction::Prompt(_) => {
+                        Err(io::Error::other("file command prepared a prompt"))
+                    }
+                    PreparedCommandAction::FileDialog(dialog) => route_prepared_file_dialog(
+                        window,
+                        dialog,
+                        |_, _| true,
+                        |_, kind| {
+                            // A nested WM_DRAWITEM callback reaches the same
+                            // lease path while the fake native modal is active.
+                            // SAFETY: application orchestration must end the
+                            // dispatch lease before invoking this selector.
+                            let nested =
+                                unsafe { CallbackState::try_lease(slot) }.ok_or_else(|| {
+                                    io::Error::other("selector ran before lease release")
+                                })?;
+                            drop(nested);
+                            Ok::<PreparedFileDialogSelection, io::Error>(match kind {
+                                PreparedFileDialogKind::AddFiles => {
+                                    PreparedFileDialogSelection::AddFiles(vec![PathBuf::from(
+                                        r"C:\fixture.txt",
+                                    )])
+                                }
+                                PreparedFileDialogKind::SaveText { text, names } => {
+                                    let leaf = if names { "names.txt" } else { "paths.txt" };
+                                    PreparedFileDialogSelection::SaveText {
+                                        path: PathBuf::from(leaf),
+                                        text,
+                                    }
+                                }
+                                PreparedFileDialogKind::ImportNames => {
+                                    PreparedFileDialogSelection::ImportNames(PathBuf::from(
+                                        "names.txt",
+                                    ))
+                                }
+                                PreparedFileDialogKind::ImportPaths => {
+                                    PreparedFileDialogSelection::ImportPaths(PathBuf::from(
+                                        "paths.txt",
+                                    ))
+                                }
+                            })
+                        },
+                        |_, _, selection| {
+                            Ok(match selection? {
+                                PreparedFileDialogSelection::AddFiles(_) => RoutedDialog::AddFiles,
+                                PreparedFileDialogSelection::SaveText { path, .. }
+                                    if path == Path::new("names.txt") =>
+                                {
+                                    RoutedDialog::SaveNames
+                                }
+                                PreparedFileDialogSelection::SaveText { .. } => {
+                                    RoutedDialog::SavePaths
+                                }
+                                PreparedFileDialogSelection::ImportNames(_) => {
+                                    RoutedDialog::ImportNames
+                                }
+                                PreparedFileDialogSelection::ImportPaths(_) => {
+                                    RoutedDialog::ImportPaths
+                                }
+                                PreparedFileDialogSelection::Cancelled => {
+                                    return Err(io::Error::other("fake selector cancelled"));
+                                }
+                            })
+                        },
+                    )
+                    .ok_or_else(|| io::Error::other("file dialog was not routed"))?,
+                },
+            )
+            .ok_or_else(|| io::Error::other("file command prepared no action"))??;
+            assert_eq!(routed, expected);
+
+            // SAFETY: publication is test-owned and no lease remains.
+            let disposition = unsafe { CallbackState::request_reclaim(slot) };
+            assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+        }
         Ok(())
     }
 
