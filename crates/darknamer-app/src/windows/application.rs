@@ -1956,6 +1956,37 @@ mod tests {
             .ok_or_else(|| io::Error::other("recovery export queued no presentation"))?;
         assert_eq!(presentation.caption, "DarkReNamer - 진단 내보내기 완료");
 
+        app.with_state(|state| {
+            state
+                .blocked_journals
+                .push(StartupJournalBlock::Unavailable {
+                    role: JournalRole::Active,
+                    path: app._directory.path().join("unavailable-active.drj"),
+                    failure: JournalOpenFailure {
+                        stage: crate::rename::JournalOpenStage::Open,
+                        kind: crate::rename::FileJournalErrorKind::Io,
+                        os_code: Some(5),
+                        codec_frame: None,
+                    },
+                });
+        })?;
+        let mixed = app._directory.path().join("mixed-export");
+        fs::create_dir(&mixed)?;
+        app.dispatch_with_selector(EXPORT_RECOVERY_JOURNAL, |_, _| {
+            PreparedFileDialogSelection::RecoveryExportDirectory(mixed.clone())
+        })?;
+        assert_eq!(
+            fs::read(mixed.join("candidate.drj.retained"))?,
+            expected_bytes
+        );
+        let presentation = take_deferred_message(app.owner)
+            .ok_or_else(|| io::Error::other("mixed export queued no presentation"))?;
+        assert_eq!(
+            presentation.caption,
+            "DarkReNamer - 진단 내보내기 일부 실패"
+        );
+        assert!(presentation.text.contains("건너뜀: Active"));
+
         let partial = app._directory.path().join("partial-export");
         fs::create_dir(&partial)?;
         fs::write(partial.join("candidate.drj.retained"), b"sentinel")?;

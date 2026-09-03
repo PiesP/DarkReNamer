@@ -322,6 +322,7 @@ fn perform_recovery_export(state: &mut AppState, directory: &Path) -> RecoveryEx
     for blocked in &mut state.blocked_journals {
         let role = blocked.role();
         let Some(evidence) = blocked.evidence_mut() else {
+            failures = failures.saturating_add(1);
             results.push(format!(
                 "건너뜀: {role:?} 저널은 retained handle을 확보하지 못했습니다."
             ));
