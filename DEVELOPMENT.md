@@ -18,6 +18,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-targets --all-features --locked
 cargo build --release --locked --package darknamer-app --bin DarkReNamer
+pwsh -NoLogo -NoProfile -File ./scripts/test-tooling.ps1 -Platform Windows
 ```
 
 Native tests exercise Windows-only handle and filesystem behavior. They do not
@@ -59,9 +60,9 @@ gate.
 ## Dependency policy
 
 `Cargo.lock` and `--locked` define reproducible application resolution. Exact
-manifest pins are reserved for UI/native-boundary dependencies whose compatible
-updates have previously carried higher regression risk (`rfd`, `windows`, and
-`raw-window-handle`). Other dependencies use compatible requirements and remain
+manifest pins are reserved for UI/native-boundary dependencies (`rfd`,
+`windows`, and `raw-window-handle`), whose updates require focused Windows
+validation. Other external dependencies use compatible requirements and remain
 fixed by the lockfile. Review changes with the Windows target graph before
 altering this policy:
 
