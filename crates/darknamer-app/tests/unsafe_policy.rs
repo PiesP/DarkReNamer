@@ -99,16 +99,16 @@ const EXPECTED: &[(&str, UnsafeCounts)] = &[
     ("src/windows/appearance.rs", UnsafeCounts::new(59, 0, 0, 0)),
     (
         "src/windows/appearance_dialog.rs",
-        UnsafeCounts::new(153, 0, 3, 0),
+        UnsafeCounts::new(155, 0, 3, 0),
     ),
     (
         "src/windows/application.rs",
-        UnsafeCounts::new(130, 0, 1, 0),
+        UnsafeCounts::new(133, 0, 1, 0),
     ),
     ("src/windows/clipboard.rs", UnsafeCounts::new(11, 0, 0, 0)),
     (
         "src/windows/command_dispatch.rs",
-        UnsafeCounts::new(10, 0, 0, 0),
+        UnsafeCounts::new(9, 0, 0, 0),
     ),
     (
         "src/windows/command_rail.rs",

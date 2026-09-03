@@ -405,7 +405,11 @@ fn run_unsafe() -> io::Result<()> {
         if result == -1 {
             let error = io::Error::last_os_error();
             if let Some(mut state_lease) = try_app_state(window) {
-                cancel_appearance_dialog(window, state_lease.state_mut());
+                let cancelled = cancel_appearance_dialog(window, state_lease.state_mut());
+                drop(state_lease);
+                if let Some(cancelled) = cancelled {
+                    destroy_cancelled_appearance_dialog(cancelled);
+                }
             }
             finish_apply_after_message_loop_failure(window);
             // SAFETY: window is the live top-level HWND created above and this
@@ -526,10 +530,17 @@ fn run_prepared_command_action_after_state_release<T, R>(
     action: Option<PreparedCommandAction>,
     select_file_dialog: impl FnOnce(HWND, PreparedFileDialogKind) -> PreparedFileDialogSelection,
     select_task_dialog: impl FnOnce(HWND, &PreparedTaskDialogSpec) -> io::Result<i32>,
+    appearance_platform: impl AppearanceDialogPlatform,
 ) -> Option<()> {
     run_after_callback_state_release(state_lease, || {
         action.map(|action| {
-            run_prepared_command_action(window, action, select_file_dialog, select_task_dialog);
+            run_prepared_command_action(
+                window,
+                action,
+                select_file_dialog,
+                select_task_dialog,
+                appearance_platform,
+            );
         })
     })
 }
@@ -896,8 +907,9 @@ unsafe extern "system" fn window_proc(
                 }
                 released
             };
-            // Dropping may synchronously restore owner focus, so it occurs only
-            // after the AppState borrow above has ended.
+            // Dropping may synchronously restore owner focus, so release the
+            // complete callback-state lease, not only its temporary borrow.
+            drop(state_lease);
             drop(released_session);
             0
         }
@@ -1008,8 +1020,12 @@ unsafe extern "system" fn window_proc(
         WM_CLOSE if !state_ptr.is_null() => {
             // SAFETY: state_ptr is the live UI-thread AppState for this window.
             let state = unsafe { &mut *state_ptr };
-            cancel_appearance_dialog(window, state);
+            let cancelled = cancel_appearance_dialog(window, state);
             request_window_close(window, state);
+            drop(state_lease);
+            if let Some(cancelled) = cancelled {
+                destroy_cancelled_appearance_dialog(cancelled);
+            }
             0
         }
         WM_ERASEBKGND if !state_ptr.is_null() => {
@@ -1140,6 +1156,7 @@ unsafe extern "system" fn window_proc(
                 action,
                 select_prepared_file_dialog,
                 select_prepared_task_dialog,
+                NativeAppearanceDialogPlatform,
             );
             0
         }
@@ -1220,6 +1237,7 @@ unsafe extern "system" fn window_proc(
                         action,
                         select_prepared_file_dialog,
                         select_prepared_task_dialog,
+                        NativeAppearanceDialogPlatform,
                     );
                     return 0;
                 }
@@ -1227,14 +1245,15 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_DESTROY => {
+            let mut cancelled_appearance = None;
             if !state_ptr.is_null() {
                 // Stop the ListView from retaining AppState refdata before any
                 // child teardown can reenter through common-controls messages.
                 // SAFETY: state_ptr is live and UI-thread confined here.
                 remove_list_view_notification_subclass(unsafe { (*state_ptr).list_window });
-                // SAFETY: defensive owner teardown rolls back and destroys any
-                // still-live appearance session before preference shutdown/drop.
-                cancel_appearance_dialog(window, unsafe { &mut *state_ptr });
+                // SAFETY: defensive owner teardown removes any appearance
+                // session now; native dialog destruction follows lease release.
+                cancelled_appearance = cancel_appearance_dialog(window, unsafe { &mut *state_ptr });
                 // Copy overlay identity, then revoke the disjoint OLE sidecar
                 // without extending the AppState reference into COM teardown.
                 // SAFETY: this callback owns the sole AppState lease.
@@ -1255,6 +1274,10 @@ unsafe extern "system" fn window_proc(
                 if let Some(rail) = unsafe { (&mut *state_ptr).right_rail.take() } {
                     rail.destroy();
                 }
+            }
+            drop(state_lease);
+            if let Some(cancelled) = cancelled_appearance {
+                destroy_cancelled_appearance_dialog(cancelled);
             }
             // SAFETY: PostQuitMessage targets the current thread queue and accepts no borrowed pointers.
             unsafe { PostQuitMessage(0) };
@@ -1312,6 +1335,101 @@ mod tests {
 
     const FILE_DIALOG_DRAWITEM_SUBCLASS_ID: usize = 0xD4B4;
     static FILE_DIALOG_DRAWITEM_LEASED: AtomicBool = AtomicBool::new(false);
+    static APPEARANCE_CREATE_REENTERED: AtomicBool = AtomicBool::new(false);
+    static APPEARANCE_FOCUSED: AtomicBool = AtomicBool::new(false);
+    static APPEARANCE_GUARD_CREATED: AtomicBool = AtomicBool::new(false);
+    static APPEARANCE_WINDOW_DESTROYED: AtomicBool = AtomicBool::new(false);
+
+    #[derive(Clone, Copy, Default)]
+    enum AppearanceTestMutation {
+        #[default]
+        None,
+        Revision,
+        Close,
+        Confirmation,
+        Session,
+        Worker,
+        DestroyOwner,
+    }
+
+    struct TestAppearancePlatform {
+        slot: *mut AppStateSlot,
+        create_failure: bool,
+        arm_failure: bool,
+        mutation: AppearanceTestMutation,
+    }
+
+    impl AppearanceDialogPlatform for TestAppearancePlatform {
+        fn create(
+            &mut self,
+            owner: HWND,
+            session_id: u32,
+            appearance: UiAppearance,
+            forced_colors: ForcedColorsState,
+            system_theme: Option<ResolvedTheme>,
+        ) -> io::Result<HWND> {
+            // SAFETY: the test owns the live publication and create must run
+            // only after the command callback released its lease.
+            if let Some(lease) = unsafe { CallbackState::try_lease(self.slot) } {
+                APPEARANCE_CREATE_REENTERED.store(true, Ordering::SeqCst);
+                drop(lease);
+            }
+            if self.create_failure {
+                return Err(io::Error::other("injected appearance create failure"));
+            }
+            let mut native = NativeAppearanceDialogPlatform;
+            let window =
+                native.create(owner, session_id, appearance, forced_colors, system_theme)?;
+            // SAFETY: mutation uses the same live test publication between
+            // external creation and the runner's installation validation.
+            if let Some(mut lease) = unsafe { CallbackState::try_lease(self.slot) } {
+                let state = lease.state_mut();
+                match self.mutation {
+                    AppearanceTestMutation::None => {}
+                    AppearanceTestMutation::Revision => state.model_revision += 1,
+                    AppearanceTestMutation::Close => state.close_pending = true,
+                    AppearanceTestMutation::Confirmation => state.confirmation_pending = true,
+                    AppearanceTestMutation::Session => state.active_prompt = Some(999),
+                    AppearanceTestMutation::Worker => {
+                        let started = admit_paths(owner, state, Vec::new());
+                        assert!(started.is_ok());
+                        finalize_admission_start(state);
+                    }
+                    AppearanceTestMutation::DestroyOwner => {}
+                }
+                drop(lease);
+            }
+            if matches!(self.mutation, AppearanceTestMutation::DestroyOwner) {
+                // SAFETY: owner is the live test-owned window and this case
+                // deliberately exercises destruction during external create.
+                unsafe { DestroyWindow(owner) };
+            }
+            Ok(window)
+        }
+
+        fn arm(&mut self, window: HWND, session_id: u32) -> bool {
+            if self.arm_failure {
+                false
+            } else {
+                NativeAppearanceDialogPlatform.arm(window, session_id)
+            }
+        }
+
+        fn focus(&mut self, window: HWND) {
+            APPEARANCE_FOCUSED.store(true, Ordering::SeqCst);
+            NativeAppearanceDialogPlatform.focus(window);
+        }
+
+        fn owner_guard(&mut self, owner: HWND) -> OwnerEnableGuard {
+            APPEARANCE_GUARD_CREATED.store(true, Ordering::SeqCst);
+            NativeAppearanceDialogPlatform.owner_guard(owner)
+        }
+
+        fn destroy(&mut self, window: HWND) {
+            APPEARANCE_WINDOW_DESTROYED.store(true, Ordering::SeqCst);
+            NativeAppearanceDialogPlatform.destroy(window);
+        }
+    }
 
     fn send_synthetic_drawitem(owner: HWND) {
         // SAFETY: tests pass their live, test-owned top-level window and the
@@ -1440,6 +1558,7 @@ mod tests {
                 action,
                 selector,
                 select_prepared_task_dialog,
+                NativeAppearanceDialogPlatform,
             )
             .ok_or_else(|| io::Error::other("file command prepared no action"))?;
             Ok(())
@@ -1460,8 +1579,27 @@ mod tests {
                 action,
                 select_prepared_file_dialog,
                 selector,
+                NativeAppearanceDialogPlatform,
             )
             .ok_or_else(|| io::Error::other("task-dialog command prepared no action"))?;
+            Ok(())
+        }
+
+        fn dispatch_appearance_with_platform(
+            &self,
+            platform: impl AppearanceDialogPlatform,
+        ) -> io::Result<()> {
+            let mut lease = self.lease()?;
+            let action = dispatch_command(self.owner, lease.state_mut(), APPEARANCE_ADVANCED);
+            run_prepared_command_action_after_state_release(
+                lease,
+                self.owner,
+                action,
+                select_prepared_file_dialog,
+                select_prepared_task_dialog,
+                platform,
+            )
+            .ok_or_else(|| io::Error::other("appearance command prepared no action"))?;
             Ok(())
         }
 
@@ -1611,11 +1749,13 @@ mod tests {
             // live. Join it while the owner HWND is still published so its
             // completion wake cannot target a later recycled test window.
             finish_apply_after_message_loop_failure(self.owner);
+            let mut cancelled_appearance = None;
             // SAFETY: Drop owns the published slot and window. It mirrors the
             // production child cleanup order before unpublishing and reclaiming.
             unsafe {
                 if let Some(mut lease) = CallbackState::try_lease(self.slot) {
                     let state = lease.state_mut();
+                    cancelled_appearance = cancel_appearance_dialog(self.owner, state);
                     remove_list_view_notification_subclass(state.list_window);
                     if let Some(rail) = state.left_rail.take() {
                         rail.destroy();
@@ -1624,6 +1764,9 @@ mod tests {
                         rail.destroy();
                     }
                     drop(lease);
+                }
+                if let Some(cancelled) = cancelled_appearance {
+                    destroy_cancelled_appearance_dialog(cancelled);
                 }
                 RemoveWindowSubclass(
                     self.owner,
@@ -1739,6 +1882,7 @@ mod tests {
                     PreparedFileDialogSelection::Cancelled
                 },
                 select_prepared_task_dialog,
+                NativeAppearanceDialogPlatform,
             );
             assert!(!selector_called.get());
             app.assert_session_cleared()?;
@@ -1810,6 +1954,7 @@ mod tests {
                 PreparedFileDialogSelection::Cancelled
             },
             select_prepared_task_dialog,
+            NativeAppearanceDialogPlatform,
         );
         assert!(!selector_called.get());
         assert_eq!(app.with_state(|state| state.active_prompt)?, Some(999));
@@ -1825,6 +1970,7 @@ mod tests {
                 PreparedFileDialogSelection::Cancelled
             },
             select_prepared_task_dialog,
+            NativeAppearanceDialogPlatform,
         );
         assert!(!selector_called.get());
         assert_eq!(app.with_state(|state| state.active_prompt)?, Some(1));
@@ -2152,6 +2298,87 @@ mod tests {
         app.drain_apply()?;
         assert!(!source.exists());
         assert!(destination.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn real_appearance_pipeline_installs_exact_guard_and_focuses_existing_dialog()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let app = PublishedFileDialogTestApp::new()?;
+        for flag in [
+            &APPEARANCE_CREATE_REENTERED,
+            &APPEARANCE_FOCUSED,
+            &APPEARANCE_GUARD_CREATED,
+            &APPEARANCE_WINDOW_DESTROYED,
+        ] {
+            flag.store(false, Ordering::SeqCst);
+        }
+        app.dispatch_appearance_with_platform(TestAppearancePlatform {
+            slot: app.slot,
+            create_failure: false,
+            arm_failure: false,
+            mutation: AppearanceTestMutation::None,
+        })?;
+        assert!(APPEARANCE_CREATE_REENTERED.load(Ordering::SeqCst));
+        assert!(APPEARANCE_FOCUSED.load(Ordering::SeqCst));
+        assert!(APPEARANCE_GUARD_CREATED.load(Ordering::SeqCst));
+        assert!(!APPEARANCE_WINDOW_DESTROYED.load(Ordering::SeqCst));
+        app.assert_session_cleared()?;
+        let installed = app.with_state(|state| {
+            state
+                .appearance_dialog
+                .as_ref()
+                .is_some_and(AppearanceDialogSession::owns_owner_guard)
+        })?;
+        assert!(installed);
+
+        APPEARANCE_CREATE_REENTERED.store(false, Ordering::SeqCst);
+        APPEARANCE_FOCUSED.store(false, Ordering::SeqCst);
+        app.dispatch_appearance_with_platform(TestAppearancePlatform {
+            slot: app.slot,
+            create_failure: true,
+            arm_failure: true,
+            mutation: AppearanceTestMutation::None,
+        })?;
+        assert!(!APPEARANCE_CREATE_REENTERED.load(Ordering::SeqCst));
+        assert!(APPEARANCE_FOCUSED.load(Ordering::SeqCst));
+        Ok(())
+    }
+
+    #[test]
+    fn real_appearance_pipeline_cleans_create_arm_and_stale_failures()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (create_failure, arm_failure, mutation) in [
+            (true, false, AppearanceTestMutation::None),
+            (false, true, AppearanceTestMutation::None),
+            (false, false, AppearanceTestMutation::Revision),
+            (false, false, AppearanceTestMutation::Close),
+            (false, false, AppearanceTestMutation::Confirmation),
+            (false, false, AppearanceTestMutation::Session),
+            (false, false, AppearanceTestMutation::Worker),
+            (false, false, AppearanceTestMutation::DestroyOwner),
+        ] {
+            let app = PublishedFileDialogTestApp::new()?;
+            APPEARANCE_WINDOW_DESTROYED.store(false, Ordering::SeqCst);
+            app.dispatch_appearance_with_platform(TestAppearancePlatform {
+                slot: app.slot,
+                create_failure,
+                arm_failure,
+                mutation,
+            })?;
+            let active = app.with_state(|state| state.active_prompt).unwrap_or(None);
+            if matches!(mutation, AppearanceTestMutation::Session) {
+                assert_eq!(active, Some(999));
+            } else if !matches!(mutation, AppearanceTestMutation::DestroyOwner) {
+                assert_eq!(active, None);
+            }
+            if !create_failure {
+                assert!(APPEARANCE_WINDOW_DESTROYED.load(Ordering::SeqCst));
+            }
+            if matches!(mutation, AppearanceTestMutation::Worker) {
+                app.drain_admission()?;
+            }
+        }
         Ok(())
     }
 

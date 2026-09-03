@@ -456,6 +456,7 @@ pub(super) enum PreparedCommandAction {
     FileDialog(PreparedFileDialog),
     TaskDialog(PreparedDiscardTaskDialog),
     RecoveryExport(PreparedRecoveryExport),
+    Appearance(PreparedAppearanceAction),
 }
 
 #[derive(Clone, Copy)]
@@ -605,11 +606,8 @@ pub(super) fn dispatch_command(
     if state.active_prompt.is_some() {
         return None;
     }
-    if let Some(dialog) = active_appearance_dialog(state) {
-        // SAFETY: dialog is the live owned modal surface; owner commands remain
-        // inert until the dialog reaches OK or Cancel.
-        unsafe { SetForegroundWindow(dialog) };
-        return None;
+    if state.appearance_dialog.is_some() {
+        return prepare_appearance_dialog(window, state).map(PreparedCommandAction::Appearance);
     }
     if state.read_only_locked() && !recovery_command_allowed(command) {
         message(
@@ -644,6 +642,9 @@ pub(super) fn dispatch_command(
     }
     if command == EXPORT_RECOVERY_JOURNAL {
         return prepare_recovery_export(window, state).map(PreparedCommandAction::RecoveryExport);
+    }
+    if command == APPEARANCE_ADVANCED {
+        return prepare_appearance_dialog(window, state).map(PreparedCommandAction::Appearance);
     }
     let mut selection_restore = None;
     let outcome = match command {
@@ -742,10 +743,6 @@ pub(super) fn dispatch_command(
                 state.appearance = appearance;
                 CommandOutcome::ui(UiEffect::AppearanceChanged)
             }
-        }
-        APPEARANCE_ADVANCED => {
-            open_appearance_dialog(window, state);
-            CommandOutcome::ui(UiEffect::None)
         }
         EXIT_COMMAND => CommandOutcome::ui(UiEffect::CloseRequested),
         _ => CommandOutcome::ui(UiEffect::None),
@@ -1095,6 +1092,7 @@ pub(super) fn run_prepared_command_action(
     action: PreparedCommandAction,
     select_file_dialog: impl FnOnce(HWND, PreparedFileDialogKind) -> PreparedFileDialogSelection,
     select_task_dialog: impl FnOnce(HWND, &PreparedTaskDialogSpec) -> io::Result<i32>,
+    appearance_platform: impl AppearanceDialogPlatform,
 ) {
     match action {
         PreparedCommandAction::Prompt(prompt) => run_prepared_prompt(window, prompt),
@@ -1106,6 +1104,9 @@ pub(super) fn run_prepared_command_action(
         }
         PreparedCommandAction::RecoveryExport(prepared) => {
             run_prepared_recovery_export(window, prepared, select_file_dialog);
+        }
+        PreparedCommandAction::Appearance(prepared) => {
+            run_prepared_appearance_action(window, prepared, appearance_platform);
         }
     }
 }

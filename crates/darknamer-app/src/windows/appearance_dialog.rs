@@ -67,11 +67,87 @@ pub(super) struct AppearanceDialogSession {
     owner_guard: Option<OwnerEnableGuard>,
 }
 
+pub(super) enum PreparedAppearanceAction {
+    FocusExisting {
+        owner: HWND,
+        session_id: u32,
+        window: HWND,
+    },
+    Create {
+        owner: HWND,
+        command_session_id: u64,
+        expected_revision: ModelRevision,
+        appearance_session_id: u32,
+        appearance: UiAppearance,
+        forced_colors: ForcedColorsState,
+        system_theme: Option<ResolvedTheme>,
+    },
+}
+
+pub(super) trait AppearanceDialogPlatform {
+    fn create(
+        &mut self,
+        owner: HWND,
+        session_id: u32,
+        appearance: UiAppearance,
+        forced_colors: ForcedColorsState,
+        system_theme: Option<ResolvedTheme>,
+    ) -> io::Result<HWND>;
+    fn arm(&mut self, window: HWND, session_id: u32) -> bool;
+    fn focus(&mut self, window: HWND);
+    fn owner_guard(&mut self, owner: HWND) -> OwnerEnableGuard;
+    fn destroy(&mut self, window: HWND);
+}
+
+pub(super) struct NativeAppearanceDialogPlatform;
+
+impl AppearanceDialogPlatform for NativeAppearanceDialogPlatform {
+    fn create(
+        &mut self,
+        owner: HWND,
+        session_id: u32,
+        appearance: UiAppearance,
+        forced_colors: ForcedColorsState,
+        system_theme: Option<ResolvedTheme>,
+    ) -> io::Result<HWND> {
+        create_appearance_dialog_window(owner, session_id, appearance, forced_colors, system_theme)
+    }
+
+    fn arm(&mut self, window: HWND, session_id: u32) -> bool {
+        // SAFETY: the runner installed this live unarmed HWND as the exact
+        // AppState session and the scalar payload contains no borrowed data.
+        unsafe { SendMessageW(window, WM_APP_APPEARANCE_ARM, 0, session_id as isize) != 0 }
+    }
+
+    fn focus(&mut self, window: HWND) {
+        // SAFETY: the runner validated this copied live session HWND and holds
+        // no AppState lease across synchronous activation/focus callbacks.
+        unsafe {
+            SetForegroundWindow(window);
+            SetFocus(window);
+        }
+    }
+
+    fn owner_guard(&mut self, owner: HWND) -> OwnerEnableGuard {
+        OwnerEnableGuard::new(owner)
+    }
+
+    fn destroy(&mut self, window: HWND) {
+        // SAFETY: the runner removed this exact session before destruction.
+        unsafe { DestroyWindow(window) };
+    }
+}
+
 impl AppearanceDialogSession {
     pub(super) fn disarm_owner_restore(&mut self) {
         if let Some(guard) = self.owner_guard.as_mut() {
             guard.disarm();
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn owns_owner_guard(&self) -> bool {
+        self.owner_guard.is_some()
     }
 }
 
@@ -132,14 +208,16 @@ struct AppearanceGroupSubclassState {
     style: Option<AppearanceGroupStyle>,
 }
 
-pub(super) fn open_appearance_dialog(owner: HWND, state: &mut AppState) {
+pub(super) fn prepare_appearance_dialog(
+    owner: HWND,
+    state: &mut AppState,
+) -> Option<PreparedAppearanceAction> {
     if let Some(session) = state.appearance_dialog.as_ref() {
-        // SAFETY: the session owns a live top-level dialog while it remains in AppState.
-        unsafe {
-            SetForegroundWindow(session.window);
-            SetFocus(session.window);
-        }
-        return;
+        return Some(PreparedAppearanceAction::FocusExisting {
+            owner,
+            session_id: session.id,
+            window: session.window,
+        });
     }
     let activity = state.worker_activity();
     let worker_active = activity.admission || activity.plan || activity.apply;
@@ -149,50 +227,215 @@ pub(super) fn open_appearance_dialog(owner: HWND, state: &mut AppState) {
             "진행 중인 작업이나 확인 대화상자를 마친 뒤 모양 설정을 열어 주세요.",
             "DarkReNamer - 모양 설정",
         );
-        return;
+        return None;
     }
-    let next = state.next_appearance_dialog_id.wrapping_add(1).max(1);
-    match create_appearance_dialog_window(
+    state.next_prompt_id = state.next_prompt_id.wrapping_add(1).max(1);
+    let command_session_id = state.next_prompt_id;
+    state.active_prompt = Some(command_session_id);
+    Some(PreparedAppearanceAction::Create {
         owner,
-        next,
-        state.appearance,
-        state.forced_colors,
-        state.system_theme,
-    ) {
-        Ok(window) => {
-            state.next_appearance_dialog_id = next;
-            state.appearance_dialog = Some(AppearanceDialogSession {
-                id: next,
-                window,
-                baseline: state.appearance,
-                owner_guard: None,
-            });
-            // SAFETY: the dialog is live, the AppState session is installed,
-            // and this scalar ID cannot cause an owner callback.
-            let armed =
-                unsafe { SendMessageW(window, WM_APP_APPEARANCE_ARM, 0, next as isize) != 0 };
-            if armed {
-                let guard = OwnerEnableGuard::new(owner);
-                if let Some(session) = state.appearance_dialog.as_mut() {
-                    session.owner_guard = Some(guard);
-                }
-            } else {
-                let session = state.appearance_dialog.take();
-                if let Some(session) = session {
-                    // SAFETY: the unarmed HWND cannot notify the owner and is
-                    // destroyed before its pointer-free session is dropped.
-                    unsafe { DestroyWindow(session.window) };
-                    drop(session);
-                }
-                state.set_transient_status(
-                    "모양 설정 창을 활성화하지 못했습니다. 현재 작업에는 영향이 없습니다.",
-                );
+        command_session_id,
+        expected_revision: state.revision(),
+        appearance_session_id: state.next_appearance_dialog_id.wrapping_add(1).max(1),
+        appearance: state.appearance,
+        forced_colors: state.forced_colors,
+        system_theme: state.system_theme,
+    })
+}
+
+pub(super) fn run_prepared_appearance_action(
+    owner: HWND,
+    prepared: PreparedAppearanceAction,
+    mut platform: impl AppearanceDialogPlatform,
+) {
+    match prepared {
+        PreparedAppearanceAction::FocusExisting {
+            owner: prepared_owner,
+            session_id,
+            window,
+        } => {
+            if prepared_owner != owner {
+                return;
+            }
+            let Some(state_lease) = try_app_state(owner) else {
+                return;
+            };
+            let current = state_lease
+                .state()
+                .appearance_dialog
+                .as_ref()
+                .is_some_and(|session| session.id == session_id && session.window == window)
+                // SAFETY: both copied HWND values are non-owning identity queries.
+                && unsafe { IsWindow(owner) != 0 && IsWindow(window) != 0 };
+            drop(state_lease);
+            if current {
+                platform.focus(window);
             }
         }
-        Err(error) => {
-            state.set_transient_status(format!(
-                "모양 설정 창을 열지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
-            ));
+        PreparedAppearanceAction::Create {
+            owner: prepared_owner,
+            command_session_id,
+            expected_revision,
+            appearance_session_id,
+            appearance,
+            forced_colors,
+            system_theme,
+        } => {
+            if prepared_owner != owner {
+                return;
+            }
+            let window = match platform.create(
+                owner,
+                appearance_session_id,
+                appearance,
+                forced_colors,
+                system_theme,
+            ) {
+                Ok(window) => window,
+                Err(error) => {
+                    finish_failed_appearance_creation(
+                        owner,
+                        command_session_id,
+                        format!(
+                            "모양 설정 창을 열지 못했습니다. 현재 작업에는 영향이 없습니다: {error}"
+                        ),
+                    );
+                    return;
+                }
+            };
+            let Some(mut state_lease) = try_app_state(owner) else {
+                platform.destroy(window);
+                return;
+            };
+            let state = state_lease.state_mut();
+            if state.active_prompt != Some(command_session_id) {
+                drop(state_lease);
+                platform.destroy(window);
+                return;
+            }
+            let activity = state.worker_activity();
+            let current = !state.close_pending
+                && !activity.admission
+                && !activity.plan
+                && !activity.apply
+                && !state.confirmation_pending
+                && state.revision() == expected_revision
+                && state.appearance_dialog.is_none()
+                // SAFETY: both HWND values are copied identity queries.
+                && unsafe { IsWindow(owner) != 0 && IsWindow(window) != 0 };
+            state.active_prompt = None;
+            if !current {
+                if !state.close_pending {
+                    state.set_transient_status(
+                        "모양 설정 창을 준비하는 동안 작업 상태가 바뀌어 창을 열지 않았습니다.",
+                    );
+                } else {
+                    try_finish_window_close(owner, state);
+                }
+                drop(state_lease);
+                platform.destroy(window);
+                return;
+            }
+            state.next_appearance_dialog_id = appearance_session_id;
+            state.appearance_dialog = Some(AppearanceDialogSession {
+                id: appearance_session_id,
+                window,
+                baseline: appearance,
+                owner_guard: None,
+            });
+            drop(state_lease);
+
+            if !platform.arm(window, appearance_session_id) {
+                remove_failed_appearance_session(
+                    owner,
+                    appearance_session_id,
+                    window,
+                    "모양 설정 창을 활성화하지 못했습니다. 현재 작업에는 영향이 없습니다.",
+                );
+                platform.destroy(window);
+                return;
+            }
+            let mut owner_guard = platform.owner_guard(owner);
+            platform.focus(window);
+            let Some(mut state_lease) = try_app_state(owner) else {
+                owner_guard.disarm();
+                platform.destroy(window);
+                drop(owner_guard);
+                return;
+            };
+            let state = state_lease.state_mut();
+            let activity = state.worker_activity();
+            let exact_session = state.appearance_dialog.as_ref().is_some_and(|session| {
+                session.id == appearance_session_id
+                    && session.window == window
+                    && session.owner_guard.is_none()
+            });
+            let current = exact_session
+                && !state.close_pending
+                && !activity.admission
+                && !activity.plan
+                && !activity.apply
+                && !state.confirmation_pending
+                && state.revision() == expected_revision;
+            if current {
+                if let Some(session) = state.appearance_dialog.as_mut() {
+                    session.owner_guard = Some(owner_guard);
+                }
+                return;
+            }
+            let removed = if exact_session {
+                state.appearance_dialog.take()
+            } else {
+                None
+            };
+            if state.close_pending {
+                owner_guard.disarm();
+                try_finish_window_close(owner, state);
+            } else {
+                state.set_transient_status(
+                    "모양 설정 창을 활성화하는 동안 작업 상태가 바뀌어 창을 닫았습니다.",
+                );
+            }
+            drop(state_lease);
+            platform.destroy(window);
+            drop(removed);
+            drop(owner_guard);
+        }
+    }
+}
+
+fn finish_failed_appearance_creation(owner: HWND, command_session_id: u64, error: String) {
+    let Some(mut state_lease) = try_app_state(owner) else {
+        return;
+    };
+    let state = state_lease.state_mut();
+    if state.active_prompt != Some(command_session_id) {
+        return;
+    }
+    state.active_prompt = None;
+    if state.close_pending {
+        try_finish_window_close(owner, state);
+    } else {
+        state.set_transient_status(error);
+    }
+}
+
+fn remove_failed_appearance_session(owner: HWND, session_id: u32, window: HWND, error: &str) {
+    let Some(mut state_lease) = try_app_state(owner) else {
+        return;
+    };
+    let state = state_lease.state_mut();
+    if state
+        .appearance_dialog
+        .as_ref()
+        .is_some_and(|session| session.id == session_id && session.window == window)
+    {
+        let removed = state.appearance_dialog.take();
+        drop(removed);
+        if state.close_pending {
+            try_finish_window_close(owner, state);
+        } else {
+            state.set_transient_status(error);
         }
     }
 }
@@ -316,14 +559,23 @@ pub(super) fn finish_appearance_dialog(
     Some(session)
 }
 
-pub(super) fn cancel_appearance_dialog(owner: HWND, state: &mut AppState) {
-    let Some(mut session) = state.appearance_dialog.take() else {
-        return;
-    };
+pub(super) fn cancel_appearance_dialog(
+    owner: HWND,
+    state: &mut AppState,
+) -> Option<AppearanceDialogSession> {
+    let mut session = state.appearance_dialog.take()?;
     state.appearance = session.baseline;
-    // SAFETY: both messages target the live dialog HWND. The scalar dismiss ID
-    // suppresses its fail-closed finish callback before synchronous teardown,
-    // avoiding owner re-entry while this AppState borrow is active.
+    session.disarm_owner_restore();
+    apply_native_appearance_nonblocking(owner, state);
+    update_controls(state);
+    arrange(owner, state);
+    Some(session)
+}
+
+pub(super) fn destroy_cancelled_appearance_dialog(session: AppearanceDialogSession) {
+    // SAFETY: the caller removed this exact session from AppState and released
+    // its lease. The scalar dismiss ID suppresses the fail-closed callback
+    // before synchronous teardown.
     unsafe {
         SendMessageW(
             session.window,
@@ -333,11 +585,7 @@ pub(super) fn cancel_appearance_dialog(owner: HWND, state: &mut AppState) {
         );
         DestroyWindow(session.window);
     }
-    session.disarm_owner_restore();
     drop(session);
-    apply_native_appearance_nonblocking(owner, state);
-    update_controls(state);
-    arrange(owner, state);
 }
 
 pub(super) fn create_appearance_dialog_window(
