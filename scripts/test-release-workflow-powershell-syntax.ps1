@@ -73,6 +73,14 @@ $workflows = @(
     Join-Path $repositoryRoot '.github/workflows/release.yaml'
     Join-Path $repositoryRoot '.github/workflows/promote-release.yaml'
 )
+
+$promotionWorkflow = Get-Content -LiteralPath (Join-Path $repositoryRoot '.github/workflows/promote-release.yaml') -Raw
+if ($promotionWorkflow -notmatch "(?m)^\s+if: github\.ref == 'refs/heads/master'\s*$") {
+    throw 'The release promotion job must reject workflow dispatches from refs other than master.'
+}
+if ($promotionWorkflow -notmatch '(?m)^\s+environment:\s*\r?\n\s+name: release\s*$') {
+    throw 'The release promotion job must use the protected release environment.'
+}
 $blockCount = 0
 foreach ($workflow in $workflows) {
     foreach ($block in Get-PowerShellRunBlocks -Path $workflow) {

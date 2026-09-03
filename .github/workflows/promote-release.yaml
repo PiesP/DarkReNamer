@@ -38,7 +38,10 @@ concurrency:
 
 jobs:
   publish:
+    if: github.ref == 'refs/heads/master'
     name: prerelease/promote-candidate
+    environment:
+      name: release
     runs-on: windows-2025
     timeout-minutes: 15
     permissions:
