@@ -261,6 +261,7 @@ const WM_APP_SHOW_DEFERRED_MESSAGE: u32 = WM_APP + 0x51;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 const PREFERENCES_POLL_TIMER_ID: usize = 0xD4A2;
 const STATUS_RENDER_TIMER_ID: usize = 0xD4A3;
+const DEFERRED_MESSAGE_TIMER_ID: usize = 0xD4A4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CallbackStateStatus {
@@ -912,17 +913,8 @@ fn drain_deferred_messages_with(owner: HWND, mut show: impl FnMut(HWND, &str, &s
     true
 }
 
-fn drain_deferred_messages(owner: HWND) {
-    let _ = drain_deferred_messages_with(owner, show_message_now);
-}
-
-fn drain_retained_messages_before_callback(
-    owner: HWND,
-    callback_message: u32,
-    show: impl FnMut(HWND, &str, &str),
-) -> bool {
-    callback_message != WM_NCDESTROY
-        && !app_callback_is_busy(owner)
+fn drain_deferred_messages_if_available(owner: HWND, show: impl FnMut(HWND, &str, &str)) -> bool {
+    !app_callback_is_busy(owner)
         && has_deferred_messages(owner)
         && drain_deferred_messages_with(owner, show)
 }
@@ -960,7 +952,13 @@ pub(super) fn message(owner: HWND, text: &str, caption: &str) {
     let deferred = defer_message_if_callback_busy(owner, text, caption, |window| {
         // SAFETY: the message carries no pointer. The UI-thread queue owns all
         // text until the top-level callback consumes or discards it.
-        unsafe { PostMessageW(window, WM_APP_SHOW_DEFERRED_MESSAGE, 0, 0) != 0 }
+        if unsafe { PostMessageW(window, WM_APP_SHOW_DEFERRED_MESSAGE, 0, 0) } != 0 {
+            true
+        } else {
+            // SAFETY: this pointer-free timer belongs to the same live owner.
+            // If the queue is currently busy, it remains armed for a later tick.
+            unsafe { SetTimer(window, DEFERRED_MESSAGE_TIMER_ID, 1, None) != 0 }
+        }
     });
     if !deferred {
         show_message_now(owner, text, caption);

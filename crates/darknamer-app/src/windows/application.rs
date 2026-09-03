@@ -553,12 +553,20 @@ unsafe extern "system" fn window_proc(
     }
     let state_slot = app_state_slot(window);
     if message == WM_APP_SHOW_DEFERRED_MESSAGE {
-        drain_deferred_messages(window);
+        if drain_deferred_messages_if_available(window, show_message_now) {
+            // SAFETY: the queue drained after the state became lease-free; an
+            // absent fallback timer is harmless.
+            unsafe { KillTimer(window, DEFERRED_MESSAGE_TIMER_ID) };
+        }
         return 0;
     }
-    // A previous PostMessageW failure retains the owned notice. The next
-    // lease-free callback drains it before borrowing AppState again.
-    let _ = drain_retained_messages_before_callback(window, message, show_message_now);
+    if message == WM_TIMER && wparam == DEFERRED_MESSAGE_TIMER_ID {
+        if drain_deferred_messages_if_available(window, show_message_now) {
+            // SAFETY: this exact fallback timer belongs to the live owner.
+            unsafe { KillTimer(window, DEFERRED_MESSAGE_TIMER_ID) };
+        }
+        return 0;
+    }
     if message == WM_NCDESTROY {
         discard_deferred_messages(window);
         if !state_slot.is_null() {
@@ -571,6 +579,7 @@ unsafe extern "system" fn window_proc(
                 KillTimer(window, APPLY_POLL_TIMER_ID);
                 KillTimer(window, PREFERENCES_POLL_TIMER_ID);
                 KillTimer(window, STATUS_RENDER_TIMER_ID);
+                KillTimer(window, DEFERRED_MESSAGE_TIMER_ID);
             }
             // SAFETY: the slot is still live. Its sidecar is disjoint from a
             // possibly leased AppState value and is taken at most once.
@@ -1624,12 +1633,11 @@ mod tests {
         ));
         drop(lease);
         let recovered = RefCell::new(Vec::new());
-        assert!(drain_retained_messages_before_callback(
+        assert!(drain_deferred_messages_if_available(
             app.owner,
-            0,
             |_, text, caption| recovered
                 .borrow_mut()
-                .push((text.to_owned(), caption.to_owned())),
+                .push((text.to_owned(), caption.to_owned()))
         ));
         assert_eq!(
             recovered.into_inner(),
