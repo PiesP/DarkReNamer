@@ -23,7 +23,8 @@ published prerelease contains:
   Cargo lockfile package count for that build;
 - a CycloneDX JSON SBOM;
 - a zipped PDB;
-- license, attribution, and this distribution policy;
+- the project license, source attribution, generated Rust dependency license
+  texts, and this distribution policy;
 - the original candidate workflow's GitHub build-provenance and SBOM
   attestations.
 
@@ -38,8 +39,11 @@ including the raw PDB. The handoff validator checks the exact file layout,
 symbol archive contents, SBOM format, checksums, unsigned Authenticode status,
 provenance and metrics shape, source and toolchain bindings, recorded artifact
 sizes, Cargo lockfile package count, executable bytes, and byte-identical copies
-of the repository license and policy files. The metrics are information only;
-the workflow does not apply release size or dependency-count thresholds.
+of the repository license and policy files. `THIRD_PARTY_LICENSES.html` is
+generated from the locked x86-64 Windows dependency graph with build
+dependencies included and development-only dependencies excluded. The metrics
+are information only; the workflow does not apply release size or
+dependency-count thresholds.
 
 Verify the checksum before running the executable. Verify candidate provenance
 against the repository, signer workflow, protected source ref, and exact source

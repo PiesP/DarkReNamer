@@ -35,6 +35,7 @@ function Write-Checksums {
         'LICENSE'
         'release-handoff.json'
         'release-metrics.json'
+        'THIRD_PARTY_LICENSES.html'
         'THIRD_PARTY_NOTICES.md'
     )
     $lines = foreach ($name in $subjects) {
@@ -175,11 +176,24 @@ try {
     Write-Utf8NoBom `
         -Path (Join-Path $handoffRoot 'DarkReNamer.cdx.json') `
         -Content '{"bomFormat":"CycloneDX","specVersion":"1.5","serialNumber":"urn:uuid:12345678-1234-4234-9234-123456789abc","components":[{"type":"application","name":"darknamer-app","version":"0.1.0"}]}'
+    Write-Utf8NoBom `
+        -Path (Join-Path $handoffRoot 'THIRD_PARTY_LICENSES.html') `
+        -Content '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Third-party licenses for DarkReNamer</title></head><body><h1>Third-party licenses for DarkReNamer</h1><pre class="license-text">fixture license text</pre></body></html>'
     Compress-Archive `
         -LiteralPath (Join-Path $handoffRoot 'DarkReNamer.pdb') `
         -DestinationPath (Join-Path $handoffRoot 'DarkReNamer-debug-symbols.zip')
     Write-Provenance -HandoffRoot $handoffRoot -SourceSha $sourceSha
     Write-Metrics -HandoffRoot $handoffRoot -SourceSha $sourceSha
+    Write-Checksums -HandoffRoot $handoffRoot
+
+    Remove-Item -LiteralPath (Join-Path $handoffRoot 'THIRD_PARTY_LICENSES.html')
+    Assert-ValidatorFails `
+        -ExpectedFragment 'Release handoff layout mismatch' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+    Write-Utf8NoBom `
+        -Path (Join-Path $handoffRoot 'THIRD_PARTY_LICENSES.html') `
+        -Content '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Third-party licenses for DarkReNamer</title></head><body><h1>Third-party licenses for DarkReNamer</h1><pre class="license-text">fixture license text</pre></body></html>'
     Write-Checksums -HandoffRoot $handoffRoot
 
     $global:DarkReNamerTestAuthenticodeStatus = 'NotSigned'
@@ -554,6 +568,18 @@ try {
         -SourceRoot $sourceRoot `
         -HandoffRoot $handoffRoot
     Copy-Item -LiteralPath (Join-Path $sourceRoot 'LICENSE') -Destination $handoffRoot -Force
+
+    Write-Checksums -HandoffRoot $handoffRoot
+    $thirdPartyLicensesPath = Join-Path $handoffRoot 'THIRD_PARTY_LICENSES.html'
+    $thirdPartyLicenses = Get-Content -LiteralPath $thirdPartyLicensesPath -Raw
+    Write-Utf8NoBom `
+        -Path $thirdPartyLicensesPath `
+        -Content ($thirdPartyLicenses + "tampered`n")
+    Assert-ValidatorFails `
+        -ExpectedFragment 'Checksum mismatch for THIRD_PARTY_LICENSES.html' `
+        -SourceRoot $sourceRoot `
+        -HandoffRoot $handoffRoot
+    Write-Utf8NoBom -Path $thirdPartyLicensesPath -Content $thirdPartyLicenses
 
     Write-Checksums -HandoffRoot $handoffRoot
     $checksumPath = Join-Path $handoffRoot 'SHA256SUMS.txt'

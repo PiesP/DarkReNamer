@@ -254,6 +254,7 @@ jobs:
             dist/DarkReNamer-debug-symbols.zip `
             dist/SHA256SUMS.txt `
             dist/LICENSE `
+            dist/THIRD_PARTY_LICENSES.html `
             dist/THIRD_PARTY_NOTICES.md `
             dist/DISTRIBUTION.md `
             dist/release-handoff.json `
