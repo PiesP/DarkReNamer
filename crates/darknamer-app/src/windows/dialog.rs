@@ -1,5 +1,122 @@
 use super::*;
+use windows_sys::Win32::Foundation::{FreeLibrary, HMODULE};
+use windows_sys::Win32::System::LibraryLoader::{
+    GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+};
 use windows_sys::Win32::UI::Controls::SetWindowTheme;
+
+struct DynamicLibrary {
+    handle: HMODULE,
+    owned: bool,
+}
+
+impl DynamicLibrary {
+    fn load_system(name: &str) -> io::Result<Self> {
+        let wide_name = wide(name);
+        // SAFETY: wide_name is an owned NUL-terminated UTF-16 buffer retained
+        // for both synchronous loader calls.
+        let existing = unsafe { GetModuleHandleW(wide_name.as_ptr()) };
+        if !existing.is_null() {
+            return Ok(Self {
+                handle: existing,
+                owned: false,
+            });
+        }
+        // SAFETY: the fixed system-DLL leaf is NUL-terminated and the search
+        // flag prevents current-directory or PATH preloading.
+        let loaded =
+            unsafe { LoadLibraryExW(wide_name.as_ptr(), null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32) };
+        if loaded.is_null() {
+            Err(io::Error::other(format!(
+                "Windows system library {name} could not be loaded: {}",
+                io::Error::last_os_error()
+            )))
+        } else {
+            Ok(Self {
+                handle: loaded,
+                owned: true,
+            })
+        }
+    }
+
+    fn resolve(&self, symbol: &[u8]) -> io::Result<NonNull<std::ffi::c_void>> {
+        if symbol.last() != Some(&0) || symbol[..symbol.len().saturating_sub(1)].contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Windows symbol name must contain one trailing NUL",
+            ));
+        }
+        // SAFETY: self retains the loaded module and symbol is a validated
+        // NUL-terminated byte string for this synchronous lookup.
+        let address = unsafe { GetProcAddress(self.handle, symbol.as_ptr()) }
+            .map(|function| function as *const () as *mut std::ffi::c_void)
+            .and_then(NonNull::new);
+        address.ok_or_else(|| {
+            let name = String::from_utf8_lossy(&symbol[..symbol.len().saturating_sub(1)]);
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Windows symbol {name} is unavailable"),
+            )
+        })
+    }
+}
+
+impl Drop for DynamicLibrary {
+    fn drop(&mut self) {
+        if self.owned {
+            // SAFETY: this handle came from one successful LoadLibraryExW call
+            // and this owner releases that reference exactly once.
+            unsafe { FreeLibrary(self.handle) };
+        }
+    }
+}
+
+type TaskDialogIndirectFn = unsafe extern "system" fn(
+    *const TASKDIALOGCONFIG,
+    *mut i32,
+    *mut i32,
+    *mut windows_sys::core::BOOL,
+) -> HRESULT;
+
+union TaskDialogAddress {
+    raw: *mut std::ffi::c_void,
+    typed: TaskDialogIndirectFn,
+}
+
+struct TaskDialogApi {
+    call: TaskDialogIndirectFn,
+    _module: DynamicLibrary,
+}
+
+impl TaskDialogApi {
+    fn load() -> io::Result<Self> {
+        const {
+            assert!(size_of::<*mut std::ffi::c_void>() == size_of::<TaskDialogIndirectFn>());
+        }
+        let module = DynamicLibrary::load_system("comctl32.dll")?;
+        let address = module.resolve(b"TaskDialogIndirect\0").map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "TaskDialogIndirect is unavailable; Common Controls v6 activation is required: {error}"
+                ),
+            )
+        })?;
+        // SAFETY: GetProcAddress returned a non-null address for the exact
+        // TaskDialogIndirect export and TaskDialogIndirectFn matches the Win32
+        // SDK ABI exactly. `_module` retains the code through every call.
+        let call = unsafe {
+            TaskDialogAddress {
+                raw: address.as_ptr(),
+            }
+            .typed
+        };
+        Ok(Self {
+            call,
+            _module: module,
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct TaskDialogButtonSpec<'a> {
@@ -178,12 +295,13 @@ impl OwnedTaskDialog {
 
 pub(super) fn task_dialog(owner: HWND, spec: TaskDialogSpec<'_>) -> io::Result<i32> {
     let dialog = OwnedTaskDialog::new(owner, spec)?;
+    let api = TaskDialogApi::load()?;
     let mut selected_button = 0_i32;
     // SAFETY: config owns pointers into heap allocations retained by `dialog`
     // for this entire synchronous call. The owner is non-null, the custom-button
     // array is immutable, and the selected-button output points to live storage.
     let hresult =
-        unsafe { TaskDialogIndirect(&dialog.config, &mut selected_button, null_mut(), null_mut()) };
+        unsafe { (api.call)(&dialog.config, &mut selected_button, null_mut(), null_mut()) };
     if hresult != 0 {
         return Err(io::Error::other(format!(
             "TaskDialogIndirect failed with HRESULT 0x{:08X}",
@@ -1269,6 +1387,19 @@ pub(super) fn modal_native_dialog<T>(owner: HWND, dialog: impl FnOnce() -> T) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dynamic_system_symbol_resolution_succeeds_and_missing_symbols_fail_closed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let kernel = DynamicLibrary::load_system("kernel32.dll")?;
+        assert!(kernel.resolve(b"GetCurrentProcessId\0").is_ok());
+        let Err(error) = kernel.resolve(b"DarkReNamerMissingSymbol\0") else {
+            return Err(io::Error::other("missing symbol unexpectedly resolved").into());
+        };
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(error.to_string().contains("DarkReNamerMissingSymbol"));
+        Ok(())
+    }
 
     #[test]
     fn native_prompt_bounds_both_edits_and_rejects_programmatic_limit_bypass()
