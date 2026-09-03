@@ -54,45 +54,9 @@ jobs:
             exit 1
           fi
 
-      - name: Test release handoff validation
+      - name: Test release and acceptance tooling
         shell: pwsh
-        run: ./scripts/test-release-handoff-validator.ps1
-
-      - name: Test Windows binary measurement
-        shell: pwsh
-        run: ./scripts/test-measure-windows-binary.ps1
-
-      - name: Test canonical Git blob hashing
-        shell: pwsh
-        run: ./scripts/test-get-git-blob-sha256.ps1
-
-      - name: Test release CycloneDX preparation
-        shell: pwsh
-        run: ./scripts/test-prepare-release-cyclonedx.ps1
-
-      - name: Test release workflow PowerShell syntax
-        shell: pwsh
-        run: ./scripts/test-release-workflow-powershell-syntax.ps1
-
-      - name: Test immutable release candidate metadata validation
-        shell: pwsh
-        run: ./scripts/test-release-candidate-metadata-validator.ps1
-
-      - name: Test Windows acceptance evidence validation
-        shell: pwsh
-        run: ./scripts/test-windows-acceptance-evidence.ps1
-
-      - name: Test Windows acceptance draft generation
-        shell: pwsh
-        run: ./scripts/test-new-windows-acceptance-draft.ps1
-
-      - name: Test Windows acceptance benchmark augmentation
-        shell: pwsh
-        run: ./scripts/test-add-windows-acceptance-benchmark.ps1
-
-      - name: Test release acceptance cross-validation
-        shell: pwsh
-        run: ./scripts/test-release-acceptance-validator.ps1
+        run: ./scripts/test-tooling.ps1 -Platform Ubuntu
 
       - name: Check formatting and lints
         run: |
@@ -146,41 +110,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Test Windows acceptance evidence validation
+      - name: Test release and acceptance tooling
         shell: pwsh
-        run: ./scripts/test-windows-acceptance-evidence.ps1
-
-      - name: Test Windows binary measurement
-        shell: pwsh
-        run: ./scripts/test-measure-windows-binary.ps1
-
-      - name: Test canonical Git blob hashing
-        shell: pwsh
-        run: ./scripts/test-get-git-blob-sha256.ps1
-
-      - name: Test immutable release candidate metadata validation
-        shell: pwsh
-        run: ./scripts/test-release-candidate-metadata-validator.ps1
-
-      - name: Test release CycloneDX preparation
-        shell: pwsh
-        run: ./scripts/test-prepare-release-cyclonedx.ps1
-
-      - name: Test release workflow PowerShell syntax
-        shell: pwsh
-        run: ./scripts/test-release-workflow-powershell-syntax.ps1
-
-      - name: Test Windows acceptance draft generation
-        shell: pwsh
-        run: ./scripts/test-new-windows-acceptance-draft.ps1
-
-      - name: Test Windows acceptance benchmark augmentation
-        shell: pwsh
-        run: ./scripts/test-add-windows-acceptance-benchmark.ps1
-
-      - name: Test release acceptance cross-validation
-        shell: pwsh
-        run: ./scripts/test-release-acceptance-validator.ps1
+        run: ./scripts/test-tooling.ps1 -Platform Windows
 
       - name: Install pinned Rust toolchain
         shell: pwsh
