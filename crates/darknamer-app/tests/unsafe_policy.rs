@@ -172,17 +172,14 @@ fn build_source_manifest_is_sorted_unique_and_contains_the_policy() {
 #[test]
 fn task_dialog_stays_out_of_the_static_windows_import_table()
 -> Result<(), Box<dyn std::error::Error>> {
-    let windows = BUILD_SOURCE_FILES
-        .iter()
-        .find(|(path, _)| *path == "src/windows.rs")
-        .map(|(_, source)| *source)
-        .ok_or("windows source is absent from the reviewed manifest")?;
     let dialog = BUILD_SOURCE_FILES
         .iter()
         .find(|(path, _)| *path == "src/windows/dialog.rs")
         .map(|(_, source)| *source)
         .ok_or("dialog source is absent from the reviewed manifest")?;
-    assert!(!windows.contains("TaskDialogIndirect,"));
+    assert!(BUILD_SOURCE_FILES.iter().all(|(_, source)| rust_tokens(source)
+        .iter()
+        .all(|token| !matches!(token, RustToken::Identifier(value) if value == "TaskDialogIndirect"))));
     assert!(dialog.contains("GetProcAddress"));
     assert!(dialog.contains("b\"TaskDialogIndirect\\0\""));
     Ok(())
