@@ -79,7 +79,7 @@ if ($promotionWorkflow -notmatch "(?m)^\s+if: github\.ref == 'refs/heads/master'
     throw 'The release promotion job must reject workflow dispatches from refs other than master.'
 }
 if ($promotionWorkflow -notmatch '(?m)^\s+environment:\s*\r?\n\s+name: release\s*$') {
-    throw 'The release promotion job must use the protected release environment.'
+    throw 'The release promotion job must use the repository release environment.'
 }
 $blockCount = 0
 foreach ($workflow in $workflows) {
