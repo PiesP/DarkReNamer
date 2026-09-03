@@ -1339,6 +1339,7 @@ mod tests {
     static APPEARANCE_FOCUSED: AtomicBool = AtomicBool::new(false);
     static APPEARANCE_GUARD_CREATED: AtomicBool = AtomicBool::new(false);
     static APPEARANCE_WINDOW_DESTROYED: AtomicBool = AtomicBool::new(false);
+    static APPEARANCE_TEST_SERIAL: Mutex<()> = Mutex::new(());
 
     #[derive(Clone, Copy, Default)]
     enum AppearanceTestMutation {
@@ -2304,6 +2305,9 @@ mod tests {
     #[test]
     fn real_appearance_pipeline_installs_exact_guard_and_focuses_existing_dialog()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _serial = APPEARANCE_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let app = PublishedFileDialogTestApp::new()?;
         for flag in [
             &APPEARANCE_CREATE_REENTERED,
@@ -2348,6 +2352,9 @@ mod tests {
     #[test]
     fn real_appearance_pipeline_cleans_create_arm_and_stale_failures()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _serial = APPEARANCE_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (create_failure, arm_failure, mutation) in [
             (true, false, AppearanceTestMutation::None),
             (false, true, AppearanceTestMutation::None),

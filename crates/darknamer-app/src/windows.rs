@@ -14,6 +14,8 @@ use std::ptr::NonNull;
 use std::ptr::{null, null_mut};
 use std::rc::Rc;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
 use std::thread::{self, JoinHandle};
