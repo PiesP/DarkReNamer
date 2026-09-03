@@ -1177,6 +1177,7 @@ pub(super) enum PreparedFileDialogKind {
     SaveText { text: LegacyText, names: bool },
     ImportNames,
     ImportPaths,
+    ExportRecoveryJournal,
 }
 
 pub(super) enum PreparedFileDialogSelection {
@@ -1185,6 +1186,7 @@ pub(super) enum PreparedFileDialogSelection {
     SaveText { path: PathBuf, text: LegacyText },
     ImportNames(PathBuf),
     ImportPaths(PathBuf),
+    RecoveryExportDirectory(PathBuf),
 }
 
 pub(super) fn select_prepared_file_dialog(
@@ -1239,6 +1241,14 @@ pub(super) fn select_prepared_file_dialog(
         })
         .map_or(PreparedFileDialogSelection::Cancelled, |path| {
             PreparedFileDialogSelection::ImportPaths(path)
+        }),
+        PreparedFileDialogKind::ExportRecoveryJournal => modal_native_dialog(owner, || {
+            native_file_dialog(owner)
+                .set_title("복구 저널 원본을 저장할 폴더 선택")
+                .pick_folder()
+        })
+        .map_or(PreparedFileDialogSelection::Cancelled, |path| {
+            PreparedFileDialogSelection::RecoveryExportDirectory(path)
         }),
     }
 }

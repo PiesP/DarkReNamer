@@ -887,6 +887,33 @@ fn has_deferred_messages(owner: HWND) -> bool {
     })
 }
 
+fn post_deferred_message_wake(owner: HWND) -> bool {
+    // SAFETY: the message carries no pointer payload; the UI-thread queue owns
+    // every presentation until the dedicated callback consumes it.
+    unsafe { PostMessageW(owner, WM_APP_SHOW_DEFERRED_MESSAGE, 0, 0) != 0 }
+}
+
+fn set_deferred_message_timer(owner: HWND) -> bool {
+    // SAFETY: this pointer-free fallback timer belongs to the live UI-thread
+    // owner and remains armed only until delivery succeeds.
+    unsafe { SetTimer(owner, DEFERRED_MESSAGE_TIMER_ID, 1, None) != 0 }
+}
+
+fn queue_deferred_message(owner: HWND, text: String, caption: String) {
+    DEFERRED_MESSAGES.with(|messages| {
+        messages.borrow_mut().push_back(DeferredMessage {
+            owner: owner as usize,
+            text,
+            caption,
+        });
+    });
+    let _scheduled = schedule_deferred_message_wake(
+        owner,
+        post_deferred_message_wake,
+        set_deferred_message_timer,
+    );
+}
+
 fn discard_deferred_messages(owner: HWND) {
     DEFERRED_MESSAGES.with(|messages| {
         messages
@@ -960,16 +987,8 @@ pub(super) fn message(owner: HWND, text: &str, caption: &str) {
     let deferred = defer_message_if_callback_busy(owner, text, caption, |window| {
         schedule_deferred_message_wake(
             window,
-            |target| {
-                // SAFETY: the message carries no pointer. The UI-thread queue
-                // owns all text until a dedicated callback consumes it.
-                unsafe { PostMessageW(target, WM_APP_SHOW_DEFERRED_MESSAGE, 0, 0) != 0 }
-            },
-            |target| {
-                // SAFETY: this pointer-free timer belongs to the same live owner.
-                // If the queue is currently busy, it remains armed for a later tick.
-                unsafe { SetTimer(target, DEFERRED_MESSAGE_TIMER_ID, 1, None) != 0 }
-            },
+            post_deferred_message_wake,
+            set_deferred_message_timer,
         )
     });
     if !deferred {

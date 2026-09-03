@@ -1465,41 +1465,43 @@ mod tests {
             Ok(())
         }
 
-        fn install_staged_intent(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
-            self.with_state(|state| -> Result<PathBuf, Box<dyn std::error::Error>> {
-                let journal = FileJournal::create_candidate(
-                    &state.journal_root,
-                    CANDIDATE_JOURNAL_LEAF,
-                    ACTIVE_JOURNAL_LEAF,
-                )?;
-                let step = crate::rename::JournalStep::new(
-                    crate::rename::EntryId::new(1),
-                    LegacyText::from(r"C:\fixture\before.txt"),
-                    LegacyText::from(r"C:\fixture\after.txt"),
-                    crate::rename::EntryIdentity::new(7, 11),
-                    crate::rename::EntryIdentity::new(7, 1),
-                    crate::rename::EntryIdentity::new(7, 1),
-                    crate::rename::TemporaryPhase::None,
-                );
-                let path = journal.path().to_path_buf();
-                drop(journal);
-                let bytes = crate::rename::encode_journal_records(&[
-                    crate::rename::JournalRecord::Intent {
-                        plan: crate::rename::PlanId::from_fingerprint(7),
-                        steps: vec![step].into_boxed_slice(),
-                    },
-                ])?;
-                fs::write(&path, bytes)?;
-                let journal = FileJournal::open_candidate_existing_retained(
-                    &state.journal_root,
-                    CANDIDATE_JOURNAL_LEAF,
-                    ACTIVE_JOURNAL_LEAF,
-                )?;
-                state.staged_journal = Some(journal);
-                state.recovery_locked = true;
-                update_controls(state);
-                Ok(path)
-            })?
+        fn install_staged_intent(&self) -> Result<(PathBuf, Vec<u8>), Box<dyn std::error::Error>> {
+            self.with_state(
+                |state| -> Result<(PathBuf, Vec<u8>), Box<dyn std::error::Error>> {
+                    let journal = FileJournal::create_candidate(
+                        &state.journal_root,
+                        CANDIDATE_JOURNAL_LEAF,
+                        ACTIVE_JOURNAL_LEAF,
+                    )?;
+                    let step = crate::rename::JournalStep::new(
+                        crate::rename::EntryId::new(1),
+                        LegacyText::from(r"C:\fixture\before.txt"),
+                        LegacyText::from(r"C:\fixture\after.txt"),
+                        crate::rename::EntryIdentity::new(7, 11),
+                        crate::rename::EntryIdentity::new(7, 1),
+                        crate::rename::EntryIdentity::new(7, 1),
+                        crate::rename::TemporaryPhase::None,
+                    );
+                    let path = journal.path().to_path_buf();
+                    drop(journal);
+                    let bytes = crate::rename::encode_journal_records(&[
+                        crate::rename::JournalRecord::Intent {
+                            plan: crate::rename::PlanId::from_fingerprint(7),
+                            steps: vec![step].into_boxed_slice(),
+                        },
+                    ])?;
+                    fs::write(&path, &bytes)?;
+                    let journal = FileJournal::open_candidate_existing_retained(
+                        &state.journal_root,
+                        CANDIDATE_JOURNAL_LEAF,
+                        ACTIVE_JOURNAL_LEAF,
+                    )?;
+                    state.staged_journal = Some(journal);
+                    state.recovery_locked = true;
+                    update_controls(state);
+                    Ok((path, bytes))
+                },
+            )?
         }
 
         fn drain_admission(&self) -> io::Result<()> {
@@ -1833,7 +1835,7 @@ mod tests {
     fn real_discard_task_dialog_runs_after_release_and_revalidates_the_journal()
     -> Result<(), Box<dyn std::error::Error>> {
         let app = PublishedFileDialogTestApp::new()?;
-        let candidate = app.install_staged_intent()?;
+        let (candidate, _) = app.install_staged_intent()?;
         FILE_DIALOG_DRAWITEM_LEASED.store(false, Ordering::SeqCst);
         app.dispatch_task_with_selector(DISCARD_STAGED_JOURNAL, |owner, spec| {
             assert_eq!(spec.buttons.len(), 1);
@@ -1912,6 +1914,133 @@ mod tests {
         })?;
         app.assert_session_cleared()?;
         assert!(!candidate.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn real_recovery_export_pipeline_copies_retained_bytes_and_rejects_stale_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let app = PublishedFileDialogTestApp::new()?;
+        let (_candidate, expected_bytes) = app.install_staged_intent()?;
+        let cancelled = app._directory.path().join("cancelled-export");
+        fs::create_dir(&cancelled)?;
+        app.dispatch_with_selector(EXPORT_RECOVERY_JOURNAL, |owner, kind| {
+            assert!(matches!(
+                kind,
+                PreparedFileDialogKind::ExportRecoveryJournal
+            ));
+            send_synthetic_drawitem(owner);
+            PreparedFileDialogSelection::Cancelled
+        })?;
+        app.assert_session_cleared()?;
+        assert!(fs::read_dir(&cancelled)?.next().is_none());
+
+        let exported = app._directory.path().join("successful-export");
+        fs::create_dir(&exported)?;
+        FILE_DIALOG_DRAWITEM_LEASED.store(false, Ordering::SeqCst);
+        app.dispatch_with_selector(EXPORT_RECOVERY_JOURNAL, |owner, kind| {
+            assert!(matches!(
+                kind,
+                PreparedFileDialogKind::ExportRecoveryJournal
+            ));
+            send_synthetic_drawitem(owner);
+            PreparedFileDialogSelection::RecoveryExportDirectory(exported.clone())
+        })?;
+        assert!(FILE_DIALOG_DRAWITEM_LEASED.load(Ordering::SeqCst));
+        app.assert_session_cleared()?;
+        assert_eq!(
+            fs::read(exported.join("candidate.drj.retained"))?,
+            expected_bytes
+        );
+        let presentation = take_deferred_message(app.owner)
+            .ok_or_else(|| io::Error::other("recovery export queued no presentation"))?;
+        assert_eq!(presentation.caption, "DarkReNamer - 진단 내보내기 완료");
+
+        let partial = app._directory.path().join("partial-export");
+        fs::create_dir(&partial)?;
+        fs::write(partial.join("candidate.drj.retained"), b"sentinel")?;
+        app.dispatch_with_selector(EXPORT_RECOVERY_JOURNAL, |_, _| {
+            PreparedFileDialogSelection::RecoveryExportDirectory(partial.clone())
+        })?;
+        assert_eq!(
+            fs::read(partial.join("candidate.drj.retained"))?,
+            b"sentinel"
+        );
+        let presentation = take_deferred_message(app.owner)
+            .ok_or_else(|| io::Error::other("partial export queued no presentation"))?;
+        assert_eq!(
+            presentation.caption,
+            "DarkReNamer - 진단 내보내기 일부 실패"
+        );
+
+        #[derive(Clone, Copy)]
+        enum PostModalChange {
+            Revision,
+            Close,
+            DialogLockLost,
+            SessionChanged,
+            WorkerStarted,
+        }
+        for (index, change) in [
+            PostModalChange::Revision,
+            PostModalChange::Close,
+            PostModalChange::DialogLockLost,
+            PostModalChange::SessionChanged,
+            PostModalChange::WorkerStarted,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let destination = app._directory.path().join(format!("stale-export-{index}"));
+            fs::create_dir(&destination)?;
+            app.dispatch_with_selector(EXPORT_RECOVERY_JOURNAL, |_, _| {
+                assert!(
+                    app.with_state(|state| match change {
+                        PostModalChange::Revision => state.model_revision += 1,
+                        PostModalChange::Close => state.close_pending = true,
+                        PostModalChange::DialogLockLost => state.mutation_locked = false,
+                        PostModalChange::SessionChanged => state.active_prompt = Some(999),
+                        PostModalChange::WorkerStarted => {
+                            let started = admit_paths(app.owner, state, Vec::new());
+                            assert!(started.is_ok());
+                            finalize_admission_start(state);
+                        }
+                    })
+                    .is_ok()
+                );
+                PreparedFileDialogSelection::RecoveryExportDirectory(destination.clone())
+            })?;
+            assert!(!destination.join("candidate.drj.retained").exists());
+            app.with_state(|state| {
+                if matches!(change, PostModalChange::Revision) {
+                    state.model_revision -= 1;
+                }
+                state.close_pending = false;
+                state.active_prompt = None;
+                state.confirmation_pending = false;
+                if state.admission_worker.is_none() {
+                    state.mutation_locked = false;
+                }
+            })?;
+            if matches!(change, PostModalChange::WorkerStarted) {
+                app.drain_admission()?;
+            }
+        }
+
+        let identity_app = PublishedFileDialogTestApp::new()?;
+        let (_candidate, _) = identity_app.install_staged_intent()?;
+        let destination = identity_app._directory.path().join("identity-changed");
+        fs::create_dir(&destination)?;
+        identity_app.dispatch_with_selector(EXPORT_RECOVERY_JOURNAL, |_, _| {
+            assert!(
+                identity_app
+                    .with_state(|state| state.staged_journal = None)
+                    .is_ok()
+            );
+            PreparedFileDialogSelection::RecoveryExportDirectory(destination.clone())
+        })?;
+        identity_app.assert_session_cleared()?;
+        assert!(!destination.join("candidate.drj.retained").exists());
         Ok(())
     }
 

@@ -455,6 +455,7 @@ pub(super) enum PreparedCommandAction {
     Prompt(PreparedPrompt),
     FileDialog(PreparedFileDialog),
     TaskDialog(PreparedDiscardTaskDialog),
+    RecoveryExport(PreparedRecoveryExport),
 }
 
 #[derive(Clone, Copy)]
@@ -467,6 +468,7 @@ pub(super) struct PreparedTaskDialogSession {
 pub(super) enum PreparedTaskDialogPolicy {
     Mutable,
     RecoveryLocked,
+    RecoveryAllowed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -506,6 +508,7 @@ pub(super) fn take_prepared_task_dialog(
     let policy_matches = match policy {
         PreparedTaskDialogPolicy::Mutable => !state.read_only_locked(),
         PreparedTaskDialogPolicy::RecoveryLocked => state.read_only_locked(),
+        PreparedTaskDialogPolicy::RecoveryAllowed => true,
     };
     let current = state.confirmation_pending
         && state.mutation_locked
@@ -639,6 +642,9 @@ pub(super) fn dispatch_command(
         return prepare_discard_staged_journal(window, state)
             .map(PreparedCommandAction::TaskDialog);
     }
+    if command == EXPORT_RECOVERY_JOURNAL {
+        return prepare_recovery_export(window, state).map(PreparedCommandAction::RecoveryExport);
+    }
     let mut selection_restore = None;
     let outcome = match command {
         APPLY => {
@@ -722,10 +728,6 @@ pub(super) fn dispatch_command(
         }
         VERSION => {
             message(window, &super::about_text(), "DarkReNamer 정보");
-            CommandOutcome::ui(UiEffect::None)
-        }
-        EXPORT_RECOVERY_JOURNAL => {
-            export_recovery_journal(window, state);
             CommandOutcome::ui(UiEffect::None)
         }
         SHOW_RECOVERY_STATUS => {
@@ -1102,6 +1104,9 @@ pub(super) fn run_prepared_command_action(
         PreparedCommandAction::TaskDialog(dialog) => {
             run_prepared_discard_task_dialog(window, dialog, select_task_dialog);
         }
+        PreparedCommandAction::RecoveryExport(prepared) => {
+            run_prepared_recovery_export(window, prepared, select_file_dialog);
+        }
     }
 }
 
@@ -1274,6 +1279,10 @@ fn run_prepared_file_dialog(
             if let Some(Err(error)) = result {
                 report_admission_start_error(window, &error);
             }
+        }
+        PreparedFileDialogSelection::RecoveryExportDirectory(_) => {
+            let _ =
+                finish_file_dialog_session(window, session, FileDialogCompletion::Cancel, |_| ());
         }
     }
 }

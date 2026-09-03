@@ -172,22 +172,135 @@ pub(super) fn recover_confirmed_active_journal(state: &mut AppState) -> ActiveRe
     }
 }
 
-pub(super) fn export_recovery_journal(owner: HWND, state: &mut AppState) {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ValidJournalSnapshot {
+    path: PathBuf,
+    byte_len: u64,
+    records: Vec<crate::rename::JournalRecord>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum BlockedJournalSnapshot {
+    Evidence {
+        role: JournalRole,
+        path: PathBuf,
+        byte_len: u64,
+        failure: JournalOpenFailure,
+    },
+    Unavailable {
+        role: JournalRole,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecoveryExportSnapshot {
+    active: Option<ValidJournalSnapshot>,
+    staged: Option<ValidJournalSnapshot>,
+    blocked: Vec<BlockedJournalSnapshot>,
+}
+
+pub(super) struct PreparedRecoveryExport {
+    session: PreparedTaskDialogSession,
+    snapshot: RecoveryExportSnapshot,
+}
+
+struct RecoveryExportPresentation {
+    text: String,
+    caption: &'static str,
+}
+
+fn valid_journal_snapshot(journal: &FileJournal) -> ValidJournalSnapshot {
+    ValidJournalSnapshot {
+        path: journal.path().to_path_buf(),
+        byte_len: journal.byte_len(),
+        records: journal.records().to_vec(),
+    }
+}
+
+fn recovery_export_snapshot(state: &AppState) -> RecoveryExportSnapshot {
+    RecoveryExportSnapshot {
+        active: state.active_journal.as_ref().map(valid_journal_snapshot),
+        staged: state.staged_journal.as_ref().map(valid_journal_snapshot),
+        blocked: state
+            .blocked_journals
+            .iter()
+            .map(|blocked| {
+                let role = blocked.role();
+                blocked.evidence().map_or(
+                    BlockedJournalSnapshot::Unavailable { role },
+                    |evidence| BlockedJournalSnapshot::Evidence {
+                        role,
+                        path: evidence.path().to_path_buf(),
+                        byte_len: evidence.byte_len(),
+                        failure: evidence.failure(),
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
+pub(super) fn prepare_recovery_export(
+    owner: HWND,
+    state: &mut AppState,
+) -> Option<PreparedRecoveryExport> {
     if !state.can_export_recovery_journal() {
         message(
             owner,
             "보존된 저널 핸들이 없어 원본을 안전하게 복사할 수 없습니다.",
             "DarkReNamer - 진단 내보내기 불가",
         );
-        return;
+        return None;
     }
-    let Some(directory) = modal_native_dialog(owner, || {
-        native_file_dialog(owner)
-            .set_title("복구 저널 원본을 저장할 폴더 선택")
-            .pick_folder()
-    }) else {
+    let snapshot = recovery_export_snapshot(state);
+    let session = begin_prepared_task_dialog(state)?;
+    update_controls(state);
+    Some(PreparedRecoveryExport { session, snapshot })
+}
+
+pub(super) fn run_prepared_recovery_export(
+    owner: HWND,
+    prepared: PreparedRecoveryExport,
+    select: impl FnOnce(HWND, PreparedFileDialogKind) -> PreparedFileDialogSelection,
+) {
+    let selection = select(owner, PreparedFileDialogKind::ExportRecoveryJournal);
+    let Some(mut state_lease) = try_app_state(owner) else {
         return;
     };
+    let state = state_lease.state_mut();
+    let disposition = take_prepared_task_dialog(
+        state,
+        prepared.session,
+        PreparedTaskDialogPolicy::RecoveryAllowed,
+    );
+    update_controls(state);
+    if disposition == PreparedTaskDialogDisposition::Closed {
+        try_finish_window_close(owner, state);
+        return;
+    }
+    let PreparedFileDialogSelection::RecoveryExportDirectory(directory) = selection else {
+        return;
+    };
+    if disposition != PreparedTaskDialogDisposition::Accepted
+        || !state.can_export_recovery_journal()
+        || recovery_export_snapshot(state) != prepared.snapshot
+    {
+        if matches!(
+            disposition,
+            PreparedTaskDialogDisposition::Accepted | PreparedTaskDialogDisposition::Rejected
+        ) {
+            state.set_transient_status(
+                "진단 내보내기 창이 열린 동안 복구 상태가 바뀌어 원본을 복사하지 않았습니다.",
+            );
+        }
+        return;
+    }
+    let presentation = perform_recovery_export(state, &directory);
+    drop(state_lease);
+    queue_deferred_message(owner, presentation.text, presentation.caption.to_owned());
+}
+
+fn perform_recovery_export(state: &mut AppState, directory: &Path) -> RecoveryExportPresentation {
     let mut results = Vec::new();
     let mut failures = 0_usize;
     if let Some(journal) = state.active_journal.as_mut() {
@@ -232,7 +345,10 @@ pub(super) fn export_recovery_journal(owner: HWND, state: &mut AppState) {
     } else {
         "DarkReNamer - 진단 내보내기 일부 실패"
     };
-    message(owner, &results.join("\n"), caption);
+    RecoveryExportPresentation {
+        text: results.join("\n"),
+        caption,
+    }
 }
 
 pub(super) fn export_valid_journal(
