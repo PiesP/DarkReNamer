@@ -520,6 +520,17 @@ pub(super) fn handle_status_render_timer(
     0
 }
 
+fn run_prepared_command_action_after_state_release<T, R, O>(
+    state_lease: CallbackStateLease<T, R>,
+    window: HWND,
+    action: Option<PreparedCommandAction>,
+    run_action: impl FnOnce(HWND, PreparedCommandAction) -> O,
+) -> Option<O> {
+    run_after_callback_state_release(state_lease, || {
+        action.map(|action| run_action(window, action))
+    })
+}
+
 unsafe extern "system" fn window_proc(
     window: HWND,
     message: u32,
@@ -1038,12 +1049,13 @@ unsafe extern "system" fn window_proc(
             }
             // SAFETY: state_ptr is the non-null, window-thread-confined AppState
             // installed in GWLP_USERDATA and is uniquely borrowed for dispatch.
-            let prompt = dispatch_command(window, unsafe { &mut *state_ptr }, command);
-            run_after_callback_state_release(state_lease, || {
-                if let Some(prompt) = prompt {
-                    run_prepared_prompt(window, prompt);
-                }
-            });
+            let action = dispatch_command(window, unsafe { &mut *state_ptr }, command);
+            run_prepared_command_action_after_state_release(
+                state_lease,
+                window,
+                action,
+                run_prepared_command_action,
+            );
             0
         }
         WM_NOTIFY if !state_ptr.is_null() => {
@@ -1115,13 +1127,14 @@ unsafe extern "system" fn window_proc(
                 } else if unsafe { (*header).code } == NM_DBLCLK {
                     // SAFETY: state_ptr is the non-null AppState installed for
                     // this HWND and remains exclusively callback-thread owned.
-                    let prompt =
+                    let action =
                         dispatch_command(window, unsafe { &mut *state_ptr }, MANUAL_CHANGE);
-                    run_after_callback_state_release(state_lease, || {
-                        if let Some(prompt) = prompt {
-                            run_prepared_prompt(window, prompt);
-                        }
-                    });
+                    run_prepared_command_action_after_state_release(
+                        state_lease,
+                        window,
+                        action,
+                        run_prepared_command_action,
+                    );
                     return 0;
                 }
             }
@@ -1210,6 +1223,47 @@ pub(super) fn route_static_control_colors(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_file_dialog_action_runs_after_callback_state_release()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let slot: *mut CallbackState<bool> = CallbackState::into_raw(true);
+        // SAFETY: this test owns the live UI-thread-confined slot until the
+        // final request_reclaim call, and never keeps two leases alive.
+        let lease = unsafe { CallbackState::try_lease(slot) }
+            .ok_or_else(|| io::Error::other("file-dialog command lease was rejected"))?;
+        let action = Some(PreparedCommandAction::FileDialog(PreparedFileDialog::new(
+            null_mut(),
+            1,
+            ModelRevision::new(0),
+            PreparedFileDialogKind::AddFiles,
+        )));
+
+        let nested = run_prepared_command_action_after_state_release(
+            lease,
+            null_mut(),
+            action,
+            |_, action| {
+                if !matches!(action, PreparedCommandAction::FileDialog(_)) {
+                    return Err(io::Error::other(
+                        "ADD_FILES did not prepare a file-dialog action",
+                    ));
+                }
+                // A nested owner-draw callback reaches this same lease path.
+                // SAFETY: the orchestration seam must end the dispatch lease
+                // before invoking this injected native-action boundary.
+                unsafe { CallbackState::try_lease(slot) }
+                    .ok_or_else(|| io::Error::other("file dialog ran before lease release"))
+            },
+        )
+        .ok_or_else(|| io::Error::other("ADD_FILES prepared no deferred action"))??;
+        drop(nested);
+
+        // SAFETY: publication is test-owned and no lease remains.
+        let disposition = unsafe { CallbackState::request_reclaim(slot) };
+        assert_eq!(disposition, ReclaimDisposition::Reclaimed);
+        Ok(())
+    }
 
     #[test]
     fn menu_bottom_edge_repaints_for_paint_and_activation_messages() {

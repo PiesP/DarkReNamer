@@ -106,9 +106,9 @@ mod accelerator_tests {
     }
 
     #[test]
-    fn prompt_completion_requires_the_same_session_revision_and_unlocked_state() {
+    fn deferred_completion_requires_the_same_session_revision_and_unlocked_state() {
         let revision = ModelRevision::new(7);
-        assert!(prompt_result_can_apply(
+        assert!(deferred_result_can_apply(
             Some(3),
             3,
             PromptCompletionLocks::default(),
@@ -116,21 +116,21 @@ mod accelerator_tests {
             revision,
         ));
         for blocked in [
-            prompt_result_can_apply(
+            deferred_result_can_apply(
                 Some(4),
                 3,
                 PromptCompletionLocks::default(),
                 revision,
                 revision,
             ),
-            prompt_result_can_apply(
+            deferred_result_can_apply(
                 None,
                 3,
                 PromptCompletionLocks::default(),
                 revision,
                 revision,
             ),
-            prompt_result_can_apply(
+            deferred_result_can_apply(
                 Some(3),
                 3,
                 PromptCompletionLocks {
@@ -140,7 +140,7 @@ mod accelerator_tests {
                 revision,
                 revision,
             ),
-            prompt_result_can_apply(
+            deferred_result_can_apply(
                 Some(3),
                 3,
                 PromptCompletionLocks {
@@ -150,7 +150,7 @@ mod accelerator_tests {
                 revision,
                 revision,
             ),
-            prompt_result_can_apply(
+            deferred_result_can_apply(
                 Some(3),
                 3,
                 PromptCompletionLocks {
@@ -160,7 +160,7 @@ mod accelerator_tests {
                 revision,
                 revision,
             ),
-            prompt_result_can_apply(
+            deferred_result_can_apply(
                 Some(3),
                 3,
                 PromptCompletionLocks {
@@ -170,7 +170,7 @@ mod accelerator_tests {
                 revision,
                 revision,
             ),
-            prompt_result_can_apply(
+            deferred_result_can_apply(
                 Some(3),
                 3,
                 PromptCompletionLocks::default(),
@@ -351,6 +351,41 @@ pub(super) struct PreparedPrompt {
     continuation: PromptContinuation,
 }
 
+pub(super) enum PreparedCommandAction {
+    Prompt(PreparedPrompt),
+    FileDialog(PreparedFileDialog),
+}
+
+#[derive(Clone, Copy)]
+struct PreparedFileDialogSession {
+    owner: HWND,
+    session_id: u64,
+    expected_revision: ModelRevision,
+}
+
+pub(super) struct PreparedFileDialog {
+    session: PreparedFileDialogSession,
+    kind: PreparedFileDialogKind,
+}
+
+impl PreparedFileDialog {
+    pub(super) fn new(
+        owner: HWND,
+        session_id: u64,
+        expected_revision: ModelRevision,
+        kind: PreparedFileDialogKind,
+    ) -> Self {
+        Self {
+            session: PreparedFileDialogSession {
+                owner,
+                session_id,
+                expected_revision,
+            },
+            kind,
+        }
+    }
+}
+
 enum PromptContinuation {
     ManualChange { row: usize },
     Replace,
@@ -377,7 +412,7 @@ pub(super) fn dispatch_command(
     window: HWND,
     state: &mut AppState,
     command: u16,
-) -> Option<PreparedPrompt> {
+) -> Option<PreparedCommandAction> {
     if state.active_prompt.is_some() {
         return None;
     }
@@ -409,7 +444,10 @@ pub(super) fn dispatch_command(
         return None;
     }
     if let Some(prompt) = prepare_prompt_command(state, command) {
-        return Some(prompt);
+        return Some(PreparedCommandAction::Prompt(prompt));
+    }
+    if let Some(dialog) = prepare_file_dialog_command(window, state, command) {
+        return Some(PreparedCommandAction::FileDialog(dialog));
     }
     let mut selection_restore = None;
     let outcome = match command {
@@ -479,32 +517,12 @@ pub(super) fn dispatch_command(
             );
             CommandOutcome::ui(UiEffect::None)
         }
-        ADD_FILES => {
-            add_files_dialog(window, state);
-            CommandOutcome::ui(UiEffect::None)
-        }
         COPY_NAMES => {
             copy_clipboard_or_report(window, &state.model.export_names());
             CommandOutcome::ui(UiEffect::None)
         }
         COPY_PATHS => {
             copy_clipboard_or_report(window, &state.model.export_paths());
-            CommandOutcome::ui(UiEffect::None)
-        }
-        SAVE_NAMES => {
-            save_text_dialog(window, state.model.export_names(), true);
-            CommandOutcome::ui(UiEffect::None)
-        }
-        SAVE_PATHS => {
-            save_text_dialog(window, state.model.export_paths(), false);
-            CommandOutcome::ui(UiEffect::None)
-        }
-        IMPORT_NAMES => {
-            let changed = import_names_dialog(window, state);
-            proposal_outcome(state, changed)
-        }
-        IMPORT_PATHS => {
-            import_paths_dialog(window, state);
             CommandOutcome::ui(UiEffect::None)
         }
         SHOW_FULL_PATH | SHOW_SIZE | SHOW_MODIFIED | SHOW_CREATED => {
@@ -854,23 +872,258 @@ fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<Prepared
     })
 }
 
+fn prepare_file_dialog_command(
+    owner: HWND,
+    state: &mut AppState,
+    command: u16,
+) -> Option<PreparedFileDialog> {
+    let kind = match command {
+        ADD_FILES => PreparedFileDialogKind::AddFiles,
+        SAVE_NAMES => PreparedFileDialogKind::SaveText {
+            text: state.model.export_names(),
+            names: true,
+        },
+        SAVE_PATHS => PreparedFileDialogKind::SaveText {
+            text: state.model.export_paths(),
+            names: false,
+        },
+        IMPORT_NAMES => PreparedFileDialogKind::ImportNames,
+        IMPORT_PATHS => PreparedFileDialogKind::ImportPaths,
+        _ => return None,
+    };
+    state.next_prompt_id = state.next_prompt_id.wrapping_add(1).max(1);
+    let session_id = state.next_prompt_id;
+    state.active_prompt = Some(session_id);
+    Some(PreparedFileDialog::new(
+        owner,
+        session_id,
+        state.revision(),
+        kind,
+    ))
+}
+
+pub(super) fn run_prepared_command_action(window: HWND, action: PreparedCommandAction) {
+    match action {
+        PreparedCommandAction::Prompt(prompt) => run_prepared_prompt(window, prompt),
+        PreparedCommandAction::FileDialog(dialog) => run_prepared_file_dialog(window, dialog),
+    }
+}
+
+fn run_prepared_file_dialog(window: HWND, dialog: PreparedFileDialog) {
+    let session = dialog.session;
+    if !file_dialog_session_is_current(window, session) {
+        let _ = finish_file_dialog_session(window, session, true, |_| ());
+        return;
+    }
+    let selection = select_prepared_file_dialog(window, dialog.kind);
+    match selection {
+        PreparedFileDialogSelection::Cancelled => {
+            let _ = finish_file_dialog_session(window, session, false, |_| ());
+        }
+        PreparedFileDialogSelection::AddFiles(paths) => {
+            let result = finish_file_dialog_session(window, session, true, |state| {
+                let result = admit_paths(window, state, paths);
+                if result.is_ok() {
+                    finalize_admission_start(state);
+                } else {
+                    finalize_admission_start_failure(state);
+                }
+                result
+            });
+            if let Some(Err(error)) = result {
+                report_admission_start_error(window, &error);
+            }
+        }
+        PreparedFileDialogSelection::SaveText { path, text } => {
+            if finish_file_dialog_session(window, session, true, |_| ()).is_some()
+                && let Err(error) = write_legacy_text(&path, &text)
+            {
+                message(
+                    window,
+                    &format!("파일을 저장하지 못했습니다: {error}"),
+                    "DarkReNamer - 저장 실패",
+                );
+            }
+        }
+        PreparedFileDialogSelection::ImportNames(path) => {
+            if !file_dialog_session_is_current(window, session) {
+                let _ = finish_file_dialog_session(window, session, true, |_| ());
+                return;
+            }
+            let text = match read_legacy_text(&path) {
+                Ok(text) => text,
+                Err(error) => {
+                    if finish_file_dialog_session(window, session, true, |_| ()).is_some() {
+                        message(
+                            window,
+                            &format!("가져오기 파일을 읽지 못했습니다: {error}"),
+                            "DarkReNamer",
+                        );
+                    }
+                    return;
+                }
+            };
+            let result = finish_file_dialog_session(window, session, true, |state| {
+                state.model.import_names_changed(&text).map(|changed| {
+                    let outcome = proposal_outcome(state, changed);
+                    apply_command_outcome(window, state, outcome, None);
+                })
+            });
+            if let Some(Err(error)) = result {
+                message(
+                    window,
+                    proposal_mutation_error_korean(error),
+                    "DarkReNamer - 이름 가져오기",
+                );
+            }
+        }
+        PreparedFileDialogSelection::ImportPaths(path) => {
+            if !file_dialog_session_is_current(window, session) {
+                let _ = finish_file_dialog_session(window, session, true, |_| ());
+                return;
+            }
+            let text = match read_legacy_text(&path) {
+                Ok(text) => text,
+                Err(error) => {
+                    if finish_file_dialog_session(window, session, true, |_| ()).is_some() {
+                        message(
+                            window,
+                            &format!("경로 목록을 읽지 못했습니다: {error}"),
+                            "DarkReNamer",
+                        );
+                    }
+                    return;
+                }
+            };
+            let prepared = inspect_file_dialog_session(window, session, |state| {
+                let remaining = MAX_ADMITTED_SOURCES.saturating_sub(state.model.len());
+                let (lines, truncated) = bounded_import_lines(&text, remaining.saturating_add(1));
+                let over_limit = truncated || lines.len() > remaining;
+                let paths = lines
+                    .into_iter()
+                    .map(|line| PathBuf::from(std::ffi::OsString::from_wide(line.units())))
+                    .collect();
+                (over_limit, paths)
+            });
+            let Some((over_limit, paths)) = prepared else {
+                let _ = finish_file_dialog_session(window, session, true, |_| ());
+                return;
+            };
+            if over_limit {
+                message(
+                    window,
+                    "경로 목록이 남은 10,000개 한도를 초과해 제한된 수만 처리합니다.",
+                    "DarkReNamer - 가져오기 한도",
+                );
+            }
+            let result = finish_file_dialog_session(window, session, true, |state| {
+                let result = admit_paths(window, state, paths);
+                if result.is_ok() {
+                    finalize_admission_start(state);
+                } else {
+                    finalize_admission_start_failure(state);
+                }
+                result
+            });
+            if let Some(Err(error)) = result {
+                report_admission_start_error(window, &error);
+            }
+        }
+    }
+}
+
+fn file_dialog_session_is_current(window: HWND, session: PreparedFileDialogSession) -> bool {
+    inspect_file_dialog_session(window, session, |_| ()).is_some()
+}
+
+fn inspect_file_dialog_session<R>(
+    window: HWND,
+    session: PreparedFileDialogSession,
+    inspect: impl FnOnce(&AppState) -> R,
+) -> Option<R> {
+    if !file_dialog_window_is_current(window, session.owner) {
+        return None;
+    }
+    let state_lease = try_app_state(window)?;
+    let state = state_lease.state();
+    let current = deferred_result_can_apply(
+        state.active_prompt,
+        session.session_id,
+        completion_locks(state),
+        state.revision(),
+        session.expected_revision,
+    );
+    let result = current.then(|| inspect(state));
+    drop(state_lease);
+    result
+}
+
+fn finish_file_dialog_session<R>(
+    window: HWND,
+    session: PreparedFileDialogSession,
+    report_stale: bool,
+    finish: impl FnOnce(&mut AppState) -> R,
+) -> Option<R> {
+    if !file_dialog_window_is_current(window, session.owner) {
+        return None;
+    }
+    let mut state_lease = try_app_state(window)?;
+    let state = state_lease.state_mut();
+    if state.active_prompt != Some(session.session_id) {
+        return None;
+    }
+    let current = deferred_result_can_apply(
+        state.active_prompt,
+        session.session_id,
+        completion_locks(state),
+        state.revision(),
+        session.expected_revision,
+    );
+    state.active_prompt = None;
+    let result = if current {
+        Some(finish(state))
+    } else {
+        if report_stale && !state.close_pending {
+            state.set_transient_status(
+                "파일 대화상자가 열린 동안 목록 또는 작업 상태가 바뀌어 결과를 적용하지 않았습니다.",
+            );
+            update_controls(state);
+        }
+        None
+    };
+    if state.close_pending {
+        try_finish_window_close(window, state);
+    }
+    drop(state_lease);
+    result
+}
+
+fn file_dialog_window_is_current(window: HWND, owner: HWND) -> bool {
+    // SAFETY: the pointer is only queried for live-window identity; IsWindow
+    // dereferences no caller-owned storage and null is rejected first.
+    window == owner && !window.is_null() && unsafe { IsWindow(window) } != 0
+}
+
+fn completion_locks(state: &AppState) -> PromptCompletionLocks {
+    let worker_activity = state.worker_activity();
+    PromptCompletionLocks {
+        close_pending: state.close_pending,
+        read_only_locked: state.read_only_locked(),
+        mutation_locked: state.mutation_locked,
+        worker_active: worker_activity.admission || worker_activity.plan || worker_activity.apply,
+    }
+}
+
 pub(super) fn run_prepared_prompt(window: HWND, prompt: PreparedPrompt) {
     let result = prompt_input_or_report(window, prompt.appearance, prompt.spec);
     let Some(mut state_lease) = try_app_state(window) else {
         return;
     };
     let state = state_lease.state_mut();
-    let worker_activity = state.worker_activity();
-    let worker_active = worker_activity.admission || worker_activity.plan || worker_activity.apply;
-    let completion_current = prompt_result_can_apply(
+    let completion_current = deferred_result_can_apply(
         state.active_prompt,
         prompt.session_id,
-        PromptCompletionLocks {
-            close_pending: state.close_pending,
-            read_only_locked: state.read_only_locked(),
-            mutation_locked: state.mutation_locked,
-            worker_active,
-        },
+        completion_locks(state),
         state.revision(),
         prompt.expected_revision,
     );
@@ -899,7 +1152,7 @@ pub(super) fn run_prepared_prompt(window: HWND, prompt: PreparedPrompt) {
     apply_command_outcome(window, state, outcome, selection_restore);
 }
 
-fn prompt_result_can_apply(
+fn deferred_result_can_apply(
     active_session: Option<u64>,
     session_id: u64,
     locks: PromptCompletionLocks,
