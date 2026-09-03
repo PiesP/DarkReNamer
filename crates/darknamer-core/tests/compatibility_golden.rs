@@ -6,9 +6,11 @@
 use std::cell::Cell;
 
 use darknamer_core::{
-    LegacyAppendIndex, LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode,
-    LegacySortMode, LegacyText, MAX_PROPOSED_NAME_UTF16_UNITS, MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS,
-    ProposalMutationError, parse_import_lines,
+    DestinationParentMutationError, LegacyAppendIndex, LegacyInputError, LegacyList,
+    LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,
+    MAX_DESTINATION_PARENT_UTF16_UNITS, MAX_PROPOSED_NAME_UTF16_UNITS,
+    MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS, PlannedChangeKind, ProposalMutationError,
+    parse_import_lines,
 };
 
 fn item(path: &str, is_directory: bool) -> LegacyListItem {
@@ -430,13 +432,125 @@ fn parent_folder_commands_and_root_unification_match_root_column_behavior() {
         ["file_parent.ext", "drive-root.txt", "folder.name_parent"]
     );
 
-    prefixed.unify_root_path(&LegacyText::from(r"D:\target\"));
+    assert_eq!(
+        prefixed.unify_destination_parent_changed(&LegacyText::from(r"D:\target\")),
+        Ok(Box::from([0, 1, 2]))
+    );
     assert!(
         prefixed
             .items()
             .iter()
             .all(|item| item.root_path() == &LegacyText::from(r"D:\target"))
     );
+}
+
+#[test]
+fn destination_parent_proposals_are_all_row_changed_aware_and_reset_independently() {
+    let mut list = list(&[
+        (r"C:\one\a.txt", false),
+        (r"C:\two\b.txt", false),
+        (r"D:\target\c.txt", false),
+    ]);
+    assert_eq!(list.manual_change(1, "renamed.txt"), Ok(true));
+
+    assert_eq!(
+        list.unify_destination_parent_changed(&LegacyText::from(r"D:\target\")),
+        Ok(Box::from([0, 1]))
+    );
+    assert_eq!(
+        list.items()
+            .iter()
+            .map(LegacyListItem::planned_change_kind)
+            .collect::<Vec<_>>(),
+        [
+            PlannedChangeKind::Move,
+            PlannedChangeKind::MoveAndRename,
+            PlannedChangeKind::None,
+        ]
+    );
+
+    assert_eq!(list.reset_destination_parents(), Ok(Box::from([0, 1])));
+    assert_eq!(
+        list.items()
+            .iter()
+            .map(LegacyListItem::planned_change_kind)
+            .collect::<Vec<_>>(),
+        [
+            PlannedChangeKind::None,
+            PlannedChangeKind::Rename,
+            PlannedChangeKind::None,
+        ]
+    );
+    assert_eq!(
+        list.items()[1].proposed_name(),
+        &LegacyText::from("renamed.txt")
+    );
+}
+
+#[test]
+fn destination_parent_budget_error_leaves_every_row_unchanged() {
+    let mut list = list(&[(r"C:\one\a.txt", false), (r"C:\two\b.txt", false)]);
+    let before = list.clone();
+    let oversized =
+        LegacyText::from_units(vec![b'x' as u16; MAX_DESTINATION_PARENT_UTF16_UNITS + 1]);
+
+    assert_eq!(
+        list.unify_destination_parent_changed(&oversized),
+        Err(DestinationParentMutationError::ParentBudgetExceeded {
+            requested_units: MAX_DESTINATION_PARENT_UTF16_UNITS + 1,
+            maximum_units: MAX_DESTINATION_PARENT_UTF16_UNITS,
+        })
+    );
+    assert_eq!(list, before);
+}
+
+#[test]
+fn destination_parent_separator_variants_reconcile_exactly_after_success() {
+    for (destination_parent, expected_parent, expected_path) in [
+        (r"D:\target\", r"D:\target", r"D:\target\file.txt"),
+        (r"D:\target/", r"D:\target", r"D:\target\file.txt"),
+        (r"D:\target\\", r"D:\target", r"D:\target\file.txt"),
+        (r"C:\", r"C:\", r"C:\file.txt"),
+        (r"C:/", r"C:\", r"C:\file.txt"),
+        (
+            r"\\server\share\\",
+            r"\\server\share",
+            r"\\server\share\file.txt",
+        ),
+    ] {
+        let mut list = list(&[(r"E:\source\file.txt", false)]);
+        assert!(
+            list.unify_destination_parent_changed(&LegacyText::from(destination_parent))
+                .is_ok()
+        );
+        assert_eq!(
+            list.items()[0].destination_parent(),
+            &LegacyText::from(expected_parent),
+            "normalized parent for {destination_parent}"
+        );
+        assert_eq!(
+            list.items()[0].planned_path(),
+            LegacyText::from(expected_path),
+            "planned path for {destination_parent}"
+        );
+
+        assert!(list.record_move_success(0));
+        assert_eq!(
+            list.items()[0].source_path(),
+            &LegacyText::from(expected_path),
+            "recorded source for {destination_parent}"
+        );
+        assert_eq!(
+            list.items()[0].destination_parent(),
+            &LegacyText::from(expected_parent),
+            "recorded parent for {destination_parent}"
+        );
+        assert_eq!(
+            list.items()[0].planned_change_kind(),
+            PlannedChangeKind::None,
+            "reconciled change for {destination_parent}"
+        );
+    }
 }
 
 #[test]

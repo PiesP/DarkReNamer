@@ -6,8 +6,9 @@
 
 #![forbid(unsafe_code)]
 
+use std::borrow::Borrow;
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 use std::mem;
 use std::sync::{Arc, Weak};
@@ -26,6 +27,10 @@ pub const MAX_PROPOSED_NAME_UTF16_UNITS: usize = MAX_WINDOWS_LEAF_NAME_UTF16_UNI
 /// admitted-path byte budget while remaining independent from the per-name
 /// Windows component limit.
 pub const MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS: usize = 2 * 1024 * 1024;
+/// Maximum UTF-16 length retained for one proposed destination parent.
+pub const MAX_DESTINATION_PARENT_UTF16_UNITS: usize = 32_767;
+/// Aggregate UTF-16 units retained by distinct destination-parent proposals.
+pub const MAX_TOTAL_DESTINATION_PARENT_UTF16_UNITS: usize = 2 * 1024 * 1024;
 
 const BACKSLASH: u16 = b'\\' as u16;
 const DOT: u16 = b'.' as u16;
@@ -130,7 +135,7 @@ pub struct LegacyListItem {
     source_path: LegacyText,
     current_name: LegacyText,
     proposed_name: LegacyText,
-    root_path: LegacyText,
+    destination_parent: Arc<LegacyText>,
     is_directory: bool,
     size: u32,
     actual_size: u64,
@@ -170,12 +175,12 @@ impl LegacyListItem {
     ) -> Self {
         let source_path = source_path.into();
         let current_name = path_name(&source_path);
-        let root_path = path_root(&source_path);
+        let destination_parent = Arc::new(path_root(&source_path));
         Self {
             source_path,
             proposed_name: current_name.clone(),
             current_name,
-            root_path,
+            destination_parent,
             is_directory,
             size,
             actual_size,
@@ -204,8 +209,14 @@ impl LegacyListItem {
 
     /// Returns the destination root shown in the original list.
     #[must_use]
-    pub const fn root_path(&self) -> &LegacyText {
-        &self.root_path
+    pub fn root_path(&self) -> &LegacyText {
+        self.destination_parent.as_ref()
+    }
+
+    /// Returns the proposed destination parent.
+    #[must_use]
+    pub fn destination_parent(&self) -> &LegacyText {
+        self.destination_parent.as_ref()
     }
 
     /// Returns whether the row represents a directory.
@@ -241,10 +252,61 @@ impl LegacyListItem {
     /// Returns the exact destination passed to legacy `MoveFile`.
     #[must_use]
     pub fn planned_path(&self) -> LegacyText {
-        let mut path = self.root_path.clone();
-        path.push_unit(BACKSLASH);
+        let mut path = self.destination_parent.as_ref().clone();
+        if destination_separator_units(self.destination_parent.units()) != 0 {
+            path.push_unit(BACKSLASH);
+        }
         path.push(&self.proposed_name);
         path
+    }
+
+    /// Classifies the exact source-to-destination path change.
+    #[must_use]
+    pub fn planned_change_kind(&self) -> PlannedChangeKind {
+        if planned_path_matches_source(self) {
+            return PlannedChangeKind::None;
+        }
+        let renamed = self.current_name != self.proposed_name;
+        let moved = source_parent_units(&self.source_path) != self.destination_parent.units();
+        match (moved, renamed) {
+            (false, false) | (true, false) => PlannedChangeKind::Move,
+            (false, true) => PlannedChangeKind::Rename,
+            (true, true) => PlannedChangeKind::MoveAndRename,
+        }
+    }
+}
+
+/// User-visible kind of an exact planned path change.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PlannedChangeKind {
+    /// Source and planned destination paths are exactly equal.
+    #[default]
+    None,
+    /// Only the final name changes.
+    Rename,
+    /// Only the destination parent changes.
+    Move,
+    /// Both the destination parent and final name change.
+    MoveAndRename,
+}
+
+impl PlannedChangeKind {
+    /// Returns whether the exact planned destination differs from the source.
+    #[must_use]
+    pub const fn is_changed(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    /// Returns whether the final name changes.
+    #[must_use]
+    pub const fn renames(self) -> bool {
+        matches!(self, Self::Rename | Self::MoveAndRename)
+    }
+
+    /// Returns whether the destination parent changes.
+    #[must_use]
+    pub const fn moves(self) -> bool {
+        matches!(self, Self::Move | Self::MoveAndRename)
     }
 }
 
@@ -377,6 +439,58 @@ impl From<LegacyInputError> for ProposalMutationError {
         Self::InvalidInput(error)
     }
 }
+
+/// A destination-parent proposal rejected before any model row was changed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DestinationParentMutationError {
+    /// One destination parent exceeds the bounded Windows path representation.
+    ParentBudgetExceeded {
+        /// Exact requested UTF-16 code-unit count.
+        requested_units: usize,
+        /// Maximum accepted UTF-16 code-unit count.
+        maximum_units: usize,
+    },
+    /// Distinct destination parents together exceed the model budget.
+    AggregateBudgetExceeded {
+        /// Exact requested UTF-16 code-unit count at rejection.
+        requested_units: usize,
+        /// Maximum accepted UTF-16 code-unit count.
+        maximum_units: usize,
+    },
+    /// A checked destination-parent size calculation overflowed `usize`.
+    ArithmeticOverflow,
+    /// A bounded staging allocation could not be reserved.
+    AllocationFailed,
+}
+
+impl fmt::Display for DestinationParentMutationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ParentBudgetExceeded {
+                requested_units,
+                maximum_units,
+            } => write!(
+                formatter,
+                "destination parent requires {requested_units} UTF-16 units; maximum is {maximum_units}"
+            ),
+            Self::AggregateBudgetExceeded {
+                requested_units,
+                maximum_units,
+            } => write!(
+                formatter,
+                "destination parents require {requested_units} UTF-16 units; maximum is {maximum_units}"
+            ),
+            Self::ArithmeticOverflow => {
+                formatter.write_str("destination-parent size calculation overflowed")
+            }
+            Self::AllocationFailed => {
+                formatter.write_str("destination-parent staging allocation failed")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DestinationParentMutationError {}
 
 /// A reusable, comparator-bound index for duplicate checks during list append.
 ///
@@ -612,6 +726,15 @@ pub struct LegacyList {
     proposed_name_utf16_units: usize,
     identity: Arc<()>,
     source_revision: u64,
+}
+
+#[derive(Eq, Hash, PartialEq)]
+struct SharedDestinationParent(Arc<LegacyText>);
+
+impl Borrow<[u16]> for SharedDestinationParent {
+    fn borrow(&self) -> &[u16] {
+        self.0.units()
+    }
 }
 
 impl Clone for LegacyList {
@@ -1082,7 +1205,9 @@ impl LegacyList {
             let new_path = item.planned_path();
             let current_name = path_name(&new_path);
             let new_proposal_units = current_name.len();
-            item.root_path = path_root(&new_path);
+            if source_parent_units(&new_path) != item.destination_parent.units() {
+                item.destination_parent = Arc::new(path_root(&new_path));
+            }
             item.source_path = new_path;
             item.proposed_name.clone_from(&current_name);
             item.current_name = current_name;
@@ -1431,8 +1556,10 @@ impl LegacyList {
                         LegacySequenceMode::AppendRestartPerFolder
                             | LegacySequenceMode::PrependRestartPerFolder
                     )
-                    && compare_text(&items[row - 1].root_path, &items[row].root_path)
-                        != Ordering::Equal
+                    && compare_text(
+                        items[row - 1].destination_parent.as_ref(),
+                        items[row].destination_parent.as_ref(),
+                    ) != Ordering::Equal
                 {
                     current = start;
                 }
@@ -1547,7 +1674,7 @@ impl LegacyList {
             &mut self.proposed_name_utf16_units,
             |items, row| {
                 let item = &items[row];
-                if let Some(folder) = parent_folder_units(&item.root_path) {
+                if let Some(folder) = parent_folder_units(item.destination_parent.as_ref()) {
                     let requested_units =
                         checked_sum(&[folder.len(), 1, item.proposed_name.len()])?;
                     try_build_proposal(row, requested_units, |output| {
@@ -1576,7 +1703,7 @@ impl LegacyList {
             &mut self.proposed_name_utf16_units,
             |items, row| {
                 let item = &items[row];
-                if let Some(folder) = parent_folder_units(&item.root_path) {
+                if let Some(folder) = parent_folder_units(item.destination_parent.as_ref()) {
                     let (stem, extension) = stem_extension_units(item);
                     let requested_units =
                         checked_sum(&[stem.len(), 1, folder.len(), extension.len()])?;
@@ -1595,15 +1722,99 @@ impl LegacyList {
         )
     }
 
-    /// Replaces every destination root, removing one trailing backslash.
-    pub fn unify_root_path(&mut self, root_path: &LegacyText) {
-        let mut root_path = root_path.clone();
-        if root_path.units.last() == Some(&BACKSLASH) {
-            root_path.units.pop();
+    /// Proposes one destination parent for every row.
+    ///
+    /// One trailing backslash is removed to preserve the original command's
+    /// list-column behavior. The returned rows are exactly those whose
+    /// destination parent changed. All fallible work completes before mutation.
+    pub fn unify_destination_parent_changed(
+        &mut self,
+        destination_parent: &LegacyText,
+    ) -> Result<Box<[usize]>, DestinationParentMutationError> {
+        let (normalized_len, preserves_root_separator) =
+            normalized_destination_parent_len(destination_parent.units());
+        validate_destination_parent_units(normalized_len)?;
+        let mut normalized = try_clone_destination_parent(destination_parent)?;
+        normalized.units.truncate(normalized_len);
+        if preserves_root_separator && let Some(separator) = normalized.units.last_mut() {
+            *separator = BACKSLASH;
         }
+
+        let mut changed = Vec::new();
+        changed
+            .try_reserve_exact(self.items.len())
+            .map_err(|_| DestinationParentMutationError::AllocationFailed)?;
+        for (row, item) in self.items.iter().enumerate() {
+            if item.destination_parent.as_ref() != &normalized {
+                changed.push(row);
+            }
+        }
+        let changed = changed.into_boxed_slice();
+        let destination_parent = Arc::new(normalized);
         for item in &mut self.items {
-            item.root_path.clone_from(&root_path);
+            item.destination_parent = Arc::clone(&destination_parent);
         }
+        Ok(changed)
+    }
+
+    /// Restores each row's actual source parent while retaining proposed names.
+    ///
+    /// The returned rows are exactly those whose destination parent changed.
+    /// The reset is atomic on every reported allocation or budget error.
+    pub fn reset_destination_parents(
+        &mut self,
+    ) -> Result<Box<[usize]>, DestinationParentMutationError> {
+        self.reset_destination_parents_by(try_clone_destination_parent_units)
+    }
+
+    fn reset_destination_parents_by(
+        &mut self,
+        mut allocate_parent: impl FnMut(&[u16]) -> Result<LegacyText, DestinationParentMutationError>,
+    ) -> Result<Box<[usize]>, DestinationParentMutationError> {
+        let mut shared = HashSet::<SharedDestinationParent>::new();
+        shared
+            .try_reserve(self.items.len())
+            .map_err(|_| DestinationParentMutationError::AllocationFailed)?;
+        let mut staged = Vec::<(usize, Arc<LegacyText>)>::new();
+        staged
+            .try_reserve_exact(self.items.len())
+            .map_err(|_| DestinationParentMutationError::AllocationFailed)?;
+        let mut changed = Vec::new();
+        changed
+            .try_reserve_exact(self.items.len())
+            .map_err(|_| DestinationParentMutationError::AllocationFailed)?;
+        let mut aggregate_units = 0_usize;
+
+        for (row, item) in self.items.iter().enumerate() {
+            let source_parent = source_parent_units(&item.source_path);
+            validate_destination_parent_units(source_parent.len())?;
+            let destination_parent = if let Some(existing) = shared.get(source_parent) {
+                Arc::clone(&existing.0)
+            } else {
+                aggregate_units = aggregate_units
+                    .checked_add(source_parent.len())
+                    .ok_or(DestinationParentMutationError::ArithmeticOverflow)?;
+                if aggregate_units > MAX_TOTAL_DESTINATION_PARENT_UTF16_UNITS {
+                    return Err(DestinationParentMutationError::AggregateBudgetExceeded {
+                        requested_units: aggregate_units,
+                        maximum_units: MAX_TOTAL_DESTINATION_PARENT_UTF16_UNITS,
+                    });
+                }
+                let destination_parent = Arc::new(allocate_parent(source_parent)?);
+                shared.insert(SharedDestinationParent(Arc::clone(&destination_parent)));
+                destination_parent
+            };
+            if item.destination_parent.as_ref() != destination_parent.as_ref() {
+                changed.push(row);
+            }
+            staged.push((row, destination_parent));
+        }
+
+        let changed = changed.into_boxed_slice();
+        for (row, destination_parent) in staged {
+            self.items[row].destination_parent = destination_parent;
+        }
+        Ok(changed)
     }
 
     /// Sorts using the deterministic fallback case-insensitive text order.
@@ -1857,6 +2068,36 @@ fn try_clone_text(text: &LegacyText) -> Result<LegacyText, ProposalMutationError
     Ok(LegacyText::from_units(units))
 }
 
+fn validate_destination_parent_units(
+    requested_units: usize,
+) -> Result<(), DestinationParentMutationError> {
+    if requested_units > MAX_DESTINATION_PARENT_UTF16_UNITS {
+        Err(DestinationParentMutationError::ParentBudgetExceeded {
+            requested_units,
+            maximum_units: MAX_DESTINATION_PARENT_UTF16_UNITS,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn try_clone_destination_parent(
+    text: &LegacyText,
+) -> Result<LegacyText, DestinationParentMutationError> {
+    try_clone_destination_parent_units(text.units())
+}
+
+fn try_clone_destination_parent_units(
+    source_units: &[u16],
+) -> Result<LegacyText, DestinationParentMutationError> {
+    let mut destination_units = Vec::new();
+    destination_units
+        .try_reserve_exact(source_units.len())
+        .map_err(|_| DestinationParentMutationError::AllocationFailed)?;
+    destination_units.extend_from_slice(source_units);
+    Ok(LegacyText::from_units(destination_units))
+}
+
 /// Splits LF-delimited import text, trims each line, and skips blank lines.
 #[must_use]
 pub fn parse_import_lines(text: &LegacyText) -> Vec<LegacyText> {
@@ -1900,12 +2141,65 @@ fn is_trim_unit(unit: u16) -> bool {
 }
 
 fn path_root(path: &LegacyText) -> LegacyText {
+    LegacyText::from_units(source_parent_units(path).to_vec())
+}
+
+fn source_parent_units(path: &LegacyText) -> &[u16] {
     path.units
         .iter()
         .rposition(|unit| *unit == BACKSLASH)
-        .map_or_else(LegacyText::default, |index| {
-            LegacyText::from_units(path.units[..index].to_vec())
+        .map_or(&[] as &[u16], |index| {
+            let preserves_root_separator = index == 0
+                || path.units[..index]
+                    .last()
+                    .is_some_and(|unit| *unit == b':' as u16);
+            &path.units[..index + usize::from(preserves_root_separator)]
         })
+}
+
+const fn is_path_separator(unit: u16) -> bool {
+    unit == BACKSLASH || unit == b'/' as u16
+}
+
+fn destination_separator_units(parent: &[u16]) -> usize {
+    usize::from(parent.last().is_none_or(|unit| !is_path_separator(*unit)))
+}
+
+fn normalized_destination_parent_len(parent: &[u16]) -> (usize, bool) {
+    let trimmed_len = parent
+        .iter()
+        .rposition(|unit| !is_path_separator(*unit))
+        .map_or(0, |index| index + 1);
+    if trimmed_len == parent.len() {
+        return (trimmed_len, false);
+    }
+    let preserves_root_separator = trimmed_len == 0
+        || parent[..trimmed_len]
+            .last()
+            .is_some_and(|unit| *unit == b':' as u16);
+    (
+        trimmed_len + usize::from(preserves_root_separator),
+        preserves_root_separator,
+    )
+}
+
+fn planned_path_matches_source(item: &LegacyListItem) -> bool {
+    let parent = item.destination_parent.units();
+    let proposed_name = item.proposed_name.units();
+    let Some(expected_len) = parent
+        .len()
+        .checked_add(destination_separator_units(parent))
+        .and_then(|length| length.checked_add(proposed_name.len()))
+    else {
+        return false;
+    };
+    let source = item.source_path.units();
+    if source.len() != expected_len || !source.starts_with(parent) {
+        return false;
+    }
+    let separator_units = destination_separator_units(parent);
+    (separator_units == 0 || source.get(parent.len()) == Some(&BACKSLASH))
+        && source[parent.len() + separator_units..] == *proposed_name
 }
 
 fn path_name(path: &LegacyText) -> LegacyText {
@@ -2022,7 +2316,7 @@ fn parent_folder_units(root_path: &LegacyText) -> Option<&[u16]> {
         .iter()
         .rposition(|unit| *unit == BACKSLASH)
         .map_or(0, |index| index + 1);
-    (start > 0).then_some(&root_path.units[start..])
+    (start > 0 && start < root_path.len()).then_some(&root_path.units[start..])
 }
 
 fn normalized_indices(indices: &[usize], length: usize) -> Vec<usize> {
@@ -2228,5 +2522,117 @@ mod tests {
         index.fail_cache_update_after = None;
         assert_eq!(list.append_batch_indexed(&mut index, incoming), Ok(10));
         assert_bounded_chunks(&index, 110);
+    }
+
+    #[test]
+    fn ten_thousand_rows_share_one_unified_destination_parent_allocation() {
+        let mut list = LegacyList::new();
+        let rows = (0..10_000).map(|row| item(format!(r"C:\source-{row}\item.txt")));
+        assert_eq!(list.append_batch(rows), Ok(10_000));
+
+        assert_eq!(
+            list.unify_destination_parent_changed(&LegacyText::from(r"D:\target"))
+                .map(|rows| rows.len()),
+            Ok(10_000)
+        );
+        assert!(list.items.windows(2).all(|items| {
+            Arc::ptr_eq(&items[0].destination_parent, &items[1].destination_parent)
+        }));
+        assert_eq!(Arc::strong_count(&list.items[0].destination_parent), 10_000);
+
+        for row in 0..list.len() {
+            assert!(list.record_move_success(row));
+        }
+        assert!(list.items.windows(2).all(|items| {
+            Arc::ptr_eq(&items[0].destination_parent, &items[1].destination_parent)
+        }));
+        assert_eq!(Arc::strong_count(&list.items[0].destination_parent), 10_000);
+    }
+
+    #[test]
+    fn reset_destination_parents_is_atomic_when_staging_reports_allocation_failure() {
+        let mut list = LegacyList::new();
+        assert_eq!(
+            list.append_batch([
+                item(r"C:\one\a.txt".to_owned()),
+                item(r"C:\two\b.txt".to_owned()),
+                item(r"C:\three\c.txt".to_owned()),
+            ]),
+            Ok(3)
+        );
+        assert!(
+            list.unify_destination_parent_changed(&LegacyText::from(r"D:\target"))
+                .is_ok()
+        );
+        let before = list.clone();
+
+        let mut allocations = 0_usize;
+        let result = list.reset_destination_parents_by(|units| {
+            if allocations == 1 {
+                return Err(DestinationParentMutationError::AllocationFailed);
+            }
+            allocations += 1;
+            try_clone_destination_parent_units(units)
+        });
+
+        assert_eq!(
+            result,
+            Err(DestinationParentMutationError::AllocationFailed)
+        );
+        assert_eq!(allocations, 1);
+        assert_eq!(list, before);
+    }
+
+    #[test]
+    fn ten_thousand_same_parent_rows_allocate_once_when_resetting_destination_parents() {
+        let mut list = LegacyList::new();
+        let rows = (0..10_000).map(|row| item(format!(r"C:\source\item-{row}.txt")));
+        assert_eq!(list.append_batch(rows), Ok(10_000));
+        assert!(
+            list.unify_destination_parent_changed(&LegacyText::from(r"D:\target"))
+                .is_ok()
+        );
+        let mut allocations = 0_usize;
+
+        let changed = list.reset_destination_parents_by(|units| {
+            allocations += 1;
+            try_clone_destination_parent_units(units)
+        });
+
+        assert_eq!(changed.as_deref().map(<[usize]>::len), Ok(10_000));
+        assert_eq!(allocations, 1);
+        assert!(list.items.windows(2).all(|items| {
+            Arc::ptr_eq(&items[0].destination_parent, &items[1].destination_parent)
+        }));
+        assert_eq!(Arc::strong_count(&list.items[0].destination_parent), 10_000);
+    }
+
+    #[test]
+    fn reset_destination_parents_reports_exact_aggregate_budget_without_partial_mutation() {
+        let parent_count =
+            MAX_TOTAL_DESTINATION_PARENT_UTF16_UNITS / MAX_DESTINATION_PARENT_UTF16_UNITS + 1;
+        let rows = (0..parent_count).map(|row| {
+            let mut path = vec![b'x' as u16; MAX_DESTINATION_PARENT_UTF16_UNITS];
+            path[0] = u16::try_from(row).unwrap_or(u16::MAX);
+            path.extend([BACKSLASH, b'a' as u16]);
+            LegacyListItem::new(LegacyText::from_units(path), false, 0, 0, 0)
+        });
+        let mut list = LegacyList::new();
+        assert_eq!(list.append_batch(rows), Ok(parent_count));
+        assert!(
+            list.unify_destination_parent_changed(&LegacyText::from(r"D:\target"))
+                .is_ok()
+        );
+        let before = list.clone();
+        let requested_units = parent_count * MAX_DESTINATION_PARENT_UTF16_UNITS;
+
+        assert_eq!(
+            list.reset_destination_parents(),
+            Err(DestinationParentMutationError::AggregateBudgetExceeded {
+                requested_units,
+                maximum_units: MAX_TOTAL_DESTINATION_PARENT_UTF16_UNITS,
+            })
+        );
+        assert_eq!(list, before);
     }
 }
