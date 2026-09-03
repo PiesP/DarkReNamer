@@ -553,18 +553,29 @@ unsafe extern "system" fn window_proc(
     }
     let state_slot = app_state_slot(window);
     if message == WM_APP_SHOW_DEFERRED_MESSAGE {
-        if drain_deferred_messages_if_available(window, show_message_now) {
-            // SAFETY: the queue drained after the state became lease-free; an
-            // absent fallback timer is harmless.
-            unsafe { KillTimer(window, DEFERRED_MESSAGE_TIMER_ID) };
+        if app_callback_is_busy(window) {
+            // The successful post may be consumed by a nested modal loop while
+            // the originating callback still owns AppState. Keep retrying with
+            // a pointer-free timer until that lease ends.
+            // SAFETY: this exact timer belongs to the still-live owner.
+            unsafe { SetTimer(window, DEFERRED_MESSAGE_TIMER_ID, 1, None) };
+            return 0;
         }
+        // Kill before MessageBoxW starts another modal loop; the HWND may be
+        // destroyed or reused before that loop returns.
+        // SAFETY: an absent fallback timer on this live callback owner is harmless.
+        unsafe { KillTimer(window, DEFERRED_MESSAGE_TIMER_ID) };
+        let _ = drain_deferred_messages_if_available(window, show_message_now);
         return 0;
     }
     if message == WM_TIMER && wparam == DEFERRED_MESSAGE_TIMER_ID {
-        if drain_deferred_messages_if_available(window, show_message_now) {
-            // SAFETY: this exact fallback timer belongs to the live owner.
-            unsafe { KillTimer(window, DEFERRED_MESSAGE_TIMER_ID) };
+        if app_callback_is_busy(window) {
+            return 0;
         }
+        // SAFETY: kill the live owner's timer before modal display can destroy
+        // or recycle the numeric HWND.
+        unsafe { KillTimer(window, DEFERRED_MESSAGE_TIMER_ID) };
+        let _ = drain_deferred_messages_if_available(window, show_message_now);
         return 0;
     }
     if message == WM_NCDESTROY {
@@ -1631,6 +1642,11 @@ mod tests {
             "discarded caption",
             |_| false,
         ));
+        assert!(!drain_deferred_messages_if_available(
+            app.owner,
+            |_, _, _| {}
+        ));
+        assert!(has_deferred_messages(app.owner));
         drop(lease);
         let recovered = RefCell::new(Vec::new());
         assert!(drain_deferred_messages_if_available(
