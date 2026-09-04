@@ -107,9 +107,19 @@ fn destination_parent_mutation_error_korean(error: DestinationParentMutationErro
 }
 
 #[cfg(test)]
+use ::windows::Win32::System::Com::{
+    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
+};
+#[cfg(test)]
 use ::windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_I4};
 #[cfg(test)]
-use ::windows::Win32::UI::Accessibility::{AccessibleObjectFromWindow, IAccessible};
+use ::windows::Win32::UI::Accessibility::{
+    AccessibleObjectFromWindow, CUIAutomation, IAccessible, IUIAutomation, IUIAutomationElement,
+    IUIAutomationInvokePattern, IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern,
+    ToggleState_On, TreeScope_Descendants, UIA_ControlTypePropertyId, UIA_E_NOTSUPPORTED,
+    UIA_InvokePatternId, UIA_MenuControlTypeId, UIA_MenuItemControlTypeId, UIA_NamePropertyId,
+    UIA_SelectionItemPatternId, UIA_TogglePatternId,
+};
 #[cfg(test)]
 use ::windows::core::Interface;
 #[cfg(test)]
@@ -3141,11 +3151,29 @@ mod tests {
         Ok(())
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Eq, PartialEq)]
     struct AccessiblePopupLeafSnapshot {
         name: String,
         role: i32,
         state: i32,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct UiAutomationElementSnapshot {
+        name: String,
+        control_type: i32,
+        is_enabled: bool,
+        is_control_element: bool,
+        is_content_element: bool,
+        is_offscreen: bool,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct UiAutomationPopupLeafSnapshot {
+        element: UiAutomationElementSnapshot,
+        has_invoke_pattern: bool,
+        toggle_state: Option<i32>,
+        selection_item_selected: Option<bool>,
     }
 
     #[derive(Debug)]
@@ -3153,6 +3181,8 @@ mod tests {
         popup_role: i32,
         child_count: i32,
         leaf: AccessiblePopupLeafSnapshot,
+        uia_root: UiAutomationElementSnapshot,
+        uia_leaf: UiAutomationPopupLeafSnapshot,
     }
 
     fn accessible_child_variant(id: i32) -> VARIANT {
@@ -3176,13 +3206,13 @@ mod tests {
     ) -> io::Result<AccessiblePopupSnapshot> {
         use std::time::{Duration, Instant};
 
-        struct ClientOle;
+        struct ClientCom;
 
-        impl Drop for ClientOle {
+        impl Drop for ClientCom {
             fn drop(&mut self) {
-                // SAFETY: this guard exists only after successful OleInitialize
-                // and drops on the same dedicated accessibility-client thread.
-                unsafe { OleUninitialize() };
+                // SAFETY: this guard exists only after successful CoInitializeEx
+                // and drops on the same dedicated MTA client thread.
+                unsafe { CoUninitialize() };
             }
         }
 
@@ -3216,20 +3246,20 @@ mod tests {
 
         let owner = owner_value as HWND;
         let mut cancel = CancelPopupOnDrop { owner, armed: true };
-        // SAFETY: null is the required reserved value and ClientOle balances
-        // every successful result on this same client thread.
-        let ole_status = unsafe { OleInitialize(null()) };
-        if ole_status < 0 {
+        // SAFETY: None is the required reserved value and ClientCom balances
+        // every successful result on this same dedicated client thread.
+        let com_status = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if com_status.is_err() {
             return Err(io::Error::other(format!(
-                "accessibility-client OLE initialization failed: 0x{:08X}",
-                ole_status as u32
+                "accessibility-client MTA initialization failed: 0x{:08X}",
+                com_status.0 as u32
             )));
         }
-        let _ole = ClientOle;
+        let com = ClientCom;
         let popup_class = wide("#32768");
-        // Three sequential popup probes must remain strictly inside the outer
-        // 15-second child-process watchdog, including startup and teardown.
-        let deadline = Instant::now() + Duration::from_secs(3);
+        // Each of the six owner/native popup probes has independent bounded
+        // discovery and UIA-materialization phases inside the outer watchdog.
+        let popup_deadline = Instant::now() + Duration::from_secs(3);
         let popup = loop {
             let mut previous = null_mut();
             let mut matched = None;
@@ -3261,7 +3291,7 @@ mod tests {
             if let Some(popup) = matched {
                 break popup;
             }
-            if Instant::now() >= deadline {
+            if Instant::now() >= popup_deadline {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
@@ -3272,73 +3302,225 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         };
 
-        let mut raw = null_mut();
-        // SAFETY: popup is the exact live #32768 HWND owned by the source-bound
-        // UI thread. IID/output storage follow AccessibleObjectFromWindow.
-        let accessible = unsafe {
-            AccessibleObjectFromWindow(
-                ::windows::Win32::Foundation::HWND(popup),
-                OBJID_CLIENT as u32,
-                &IAccessible::IID,
-                &mut raw,
-            )
-            .map_err(io::Error::other)?;
-            IAccessible::from_raw(raw)
-        };
-        // SAFETY: the in-process menu proxy remains live until WM_CANCELMODE is
-        // posted by the guard. Each scalar CHILDID is bounded by child_count.
-        let snapshot = unsafe {
-            let self_child = accessible_child_variant(CHILDID_SELF as i32);
-            let popup_role = accessible
-                .get_accRole(&self_child)
-                .map_err(io::Error::other)?
-                .Anonymous
-                .Anonymous
-                .Anonymous
-                .lVal;
-            let child_count = accessible.accChildCount().map_err(io::Error::other)?;
-            let mut exposed_names = Vec::new();
-            let mut matched = None;
-            for id in 1..=child_count {
-                let child = accessible_child_variant(id);
-                let Ok(name) = accessible.get_accName(&child) else {
-                    continue;
-                };
-                let name = name.to_string();
-                exposed_names.push(name.clone());
-                if name != expected_leaf_name {
-                    continue;
+        let snapshot = (|| -> io::Result<AccessiblePopupSnapshot> {
+            let mut raw = null_mut();
+            // SAFETY: popup is the exact live #32768 HWND owned by the
+            // source-bound UI thread. IID/output storage follow
+            // AccessibleObjectFromWindow.
+            let accessible = unsafe {
+                AccessibleObjectFromWindow(
+                    ::windows::Win32::Foundation::HWND(popup),
+                    OBJID_CLIENT as u32,
+                    &IAccessible::IID,
+                    &mut raw,
+                )
+                .map_err(io::Error::other)?;
+                IAccessible::from_raw(raw)
+            };
+            // SAFETY: the popup remains live until the checked cancellation
+            // after this closure. MSAA scalar CHILDIDs are bounded by its
+            // reported count. UIA is created in this MTA, reads the exact popup
+            // HWND, and only inspects current properties and pattern presence.
+            unsafe {
+                let self_child = accessible_child_variant(CHILDID_SELF as i32);
+                let popup_role = accessible
+                    .get_accRole(&self_child)
+                    .map_err(io::Error::other)?
+                    .Anonymous
+                    .Anonymous
+                    .Anonymous
+                    .lVal;
+                let child_count = accessible.accChildCount().map_err(io::Error::other)?;
+                let mut exposed_names = Vec::new();
+                let mut matched_msaa = None;
+                for id in 1..=child_count {
+                    let child = accessible_child_variant(id);
+                    let Ok(name) = accessible.get_accName(&child) else {
+                        continue;
+                    };
+                    let name = name.to_string();
+                    exposed_names.push(name.clone());
+                    if name != expected_leaf_name {
+                        continue;
+                    }
+                    let role = accessible
+                        .get_accRole(&child)
+                        .map_err(io::Error::other)?
+                        .Anonymous
+                        .Anonymous
+                        .Anonymous
+                        .lVal;
+                    let state = accessible
+                        .get_accState(&child)
+                        .map_err(io::Error::other)?
+                        .Anonymous
+                        .Anonymous
+                        .Anonymous
+                        .lVal;
+                    matched_msaa = Some(AccessiblePopupLeafSnapshot { name, role, state });
+                    break;
                 }
-                let role = accessible
-                    .get_accRole(&child)
-                    .map_err(io::Error::other)?
-                    .Anonymous
-                    .Anonymous
-                    .Anonymous
-                    .lVal;
-                let state = accessible
-                    .get_accState(&child)
-                    .map_err(io::Error::other)?
-                    .Anonymous
-                    .Anonymous
-                    .Anonymous
-                    .lVal;
-                matched = Some(AccessiblePopupSnapshot {
+                let leaf = matched_msaa.ok_or_else(|| {
+                    io::Error::other(format!(
+                        "the live {popup_context} popup exposed no {expected_leaf_name:?} MSAA leaf; role={popup_role}, child_count={child_count}, names={exposed_names:?}"
+                    ))
+                })?;
+
+                let uia: IUIAutomation =
+                    CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+                        .map_err(io::Error::other)?;
+                let snapshot_element = |element: &IUIAutomationElement| -> io::Result<_> {
+                    Ok(UiAutomationElementSnapshot {
+                        name: element.CurrentName().map_err(io::Error::other)?.to_string(),
+                        control_type: element.CurrentControlType().map_err(io::Error::other)?.0,
+                        is_enabled: element
+                            .CurrentIsEnabled()
+                            .map_err(io::Error::other)?
+                            .as_bool(),
+                        is_control_element: element
+                            .CurrentIsControlElement()
+                            .map_err(io::Error::other)?
+                            .as_bool(),
+                        is_content_element: element
+                            .CurrentIsContentElement()
+                            .map_err(io::Error::other)?
+                            .as_bool(),
+                        is_offscreen: element
+                            .CurrentIsOffscreen()
+                            .map_err(io::Error::other)?
+                            .as_bool(),
+                    })
+                };
+                let control_view = uia.ControlViewCondition().map_err(io::Error::other)?;
+                let name_value = VARIANT::from(expected_leaf_name.as_str());
+                let name_condition = uia
+                    .CreatePropertyCondition(UIA_NamePropertyId, &name_value)
+                    .map_err(io::Error::other)?;
+                let type_value = VARIANT::from(UIA_MenuItemControlTypeId.0);
+                let type_condition = uia
+                    .CreatePropertyCondition(UIA_ControlTypePropertyId, &type_value)
+                    .map_err(io::Error::other)?;
+                let named_menu_item = uia
+                    .CreateAndCondition(&name_condition, &type_condition)
+                    .map_err(io::Error::other)?;
+                let control_view_menu_item = uia
+                    .CreateAndCondition(&control_view, &named_menu_item)
+                    .map_err(io::Error::other)?;
+                let uia_deadline = Instant::now() + Duration::from_secs(3);
+                let (uia_root_snapshot, uia_leaf) = loop {
+                    let observation = (|| -> io::Result<_> {
+                        let root = uia
+                            .ElementFromHandle(::windows::Win32::Foundation::HWND(popup))
+                            .map_err(io::Error::other)?;
+                        let root_snapshot = snapshot_element(&root)?;
+                        if root_snapshot.control_type != UIA_MenuControlTypeId.0 {
+                            return Ok((root_snapshot, 0, None));
+                        }
+                        let matches = root
+                            .FindAll(TreeScope_Descendants, &control_view_menu_item)
+                            .map_err(io::Error::other)?;
+                        let match_count = matches.Length().map_err(io::Error::other)?;
+                        let leaf = if match_count == 1 {
+                            Some(matches.GetElement(0).map_err(io::Error::other)?)
+                        } else {
+                            None
+                        };
+                        Ok((root_snapshot, match_count, leaf))
+                    })();
+                    let last_uia_observation = match observation {
+                        Ok((root_snapshot, 1, Some(leaf))) => break (root_snapshot, leaf),
+                        Ok((root_snapshot, match_count, None)) => {
+                            format!("root={root_snapshot:?}, matching_menu_items={match_count}")
+                        }
+                        Ok((root_snapshot, match_count, Some(_))) => format!(
+                            "root={root_snapshot:?}, unexpected_matching_menu_items={match_count}"
+                        ),
+                        Err(error) => format!("query_error={error}"),
+                    };
+                    if Instant::now() >= uia_deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!(
+                                "the live {popup_context} popup control view did not expose exactly one UIA MenuItem named {expected_leaf_name:?} before the deadline; last_observation={last_uia_observation}"
+                            ),
+                        ));
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                };
+                let uia_leaf_element = snapshot_element(&uia_leaf)?;
+                // GetCurrentPatternAs may succeed with a null interface for an
+                // unsupported conditional pattern. windows-rs represents that
+                // null conversion as Error(S_OK); only that case and the
+                // documented UIA_E_NOTSUPPORTED mean pattern absence.
+                let invoke_pattern = match uia_leaf
+                    .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+                {
+                    Ok(pattern) => Some(pattern),
+                    Err(error)
+                        if error.code().is_ok() || error.code().0 == UIA_E_NOTSUPPORTED as i32 =>
+                    {
+                        None
+                    }
+                    Err(error) => return Err(io::Error::other(error)),
+                };
+                let toggle_pattern = match uia_leaf
+                    .GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+                {
+                    Ok(pattern) => Some(pattern),
+                    Err(error)
+                        if error.code().is_ok() || error.code().0 == UIA_E_NOTSUPPORTED as i32 =>
+                    {
+                        None
+                    }
+                    Err(error) => return Err(io::Error::other(error)),
+                };
+                let selection_item_pattern = match uia_leaf
+                    .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                        UIA_SelectionItemPatternId,
+                    ) {
+                    Ok(pattern) => Some(pattern),
+                    Err(error)
+                        if error.code().is_ok() || error.code().0 == UIA_E_NOTSUPPORTED as i32 =>
+                    {
+                        None
+                    }
+                    Err(error) => return Err(io::Error::other(error)),
+                };
+                let toggle_state = toggle_pattern
+                    .as_ref()
+                    .map(|pattern| pattern.CurrentToggleState().map(|state| state.0))
+                    .transpose()
+                    .map_err(io::Error::other)?;
+                let selection_item_selected = selection_item_pattern
+                    .as_ref()
+                    .map(|pattern| {
+                        pattern
+                            .CurrentIsSelected()
+                            .map(|selected| selected.as_bool())
+                    })
+                    .transpose()
+                    .map_err(io::Error::other)?;
+
+                Ok(AccessiblePopupSnapshot {
                     popup_role,
                     child_count,
-                    leaf: AccessiblePopupLeafSnapshot { name, role, state },
-                });
-                break;
+                    leaf,
+                    uia_root: uia_root_snapshot,
+                    uia_leaf: UiAutomationPopupLeafSnapshot {
+                        element: uia_leaf_element,
+                        has_invoke_pattern: invoke_pattern.is_some(),
+                        toggle_state,
+                        selection_item_selected,
+                    },
+                })
             }
-            matched.ok_or_else(|| {
-                io::Error::other(format!(
-                    "the live {popup_context} popup exposed no {expected_leaf_name:?} MSAA leaf; role={popup_role}, child_count={child_count}, names={exposed_names:?}"
-                ))
-            })
-        }?;
-        drop(accessible);
+        })();
+        // Every MSAA/UIA interface, condition, element, and pattern was scoped
+        // to the closure above and drops on this same MTA thread before COM is
+        // uninitialized and the checked cancellation reaches the UI thread.
+        drop(com);
         cancel.cancel()?;
-        Ok(snapshot)
+        snapshot
     }
 
     fn track_accessible_popup(
@@ -3385,6 +3567,94 @@ mod tests {
         Ok(snapshot)
     }
 
+    #[derive(Debug)]
+    struct ProductionPopupSnapshots {
+        owner_value: usize,
+        file: AccessiblePopupSnapshot,
+        view: AccessiblePopupSnapshot,
+        theme: AccessiblePopupSnapshot,
+    }
+
+    fn capture_production_popup_snapshots(
+        journal_root: &Path,
+        owner_draw: bool,
+        expected_apply_name: &str,
+        expected_full_path_name: &str,
+    ) -> io::Result<ProductionPopupSnapshots> {
+        application::with_production_popup_window_for_test(journal_root, owner_draw, |owner| {
+            // SAFETY: owner is the live production test window. Its menu tree
+            // remains UI-thread-owned through sequential tracking.
+            let root_menu = unsafe { GetMenu(owner) };
+            // SAFETY: root_menu is the live production menu and positions zero
+            // and two are its File and View popup items.
+            let (file_popup, view_popup) =
+                unsafe { (GetSubMenu(root_menu, 0), GetSubMenu(root_menu, 2)) };
+            let render_context = if owner_draw {
+                "owner-draw"
+            } else {
+                "native-system"
+            };
+            if file_popup.is_null() || view_popup.is_null() {
+                return Err(io::Error::other(format!(
+                    "production {render_context} File or View popup is unavailable"
+                )));
+            }
+            // SAFETY: view_popup is the actual production View menu. Its sixth
+            // item is the Theme parent installed by append_view_popup.
+            let theme_popup = unsafe { GetSubMenu(view_popup, 5) };
+            if theme_popup.is_null() {
+                return Err(io::Error::other(format!(
+                    "production {render_context} Theme submenu is unavailable"
+                )));
+            }
+            let mut process_id = 0_u32;
+            // SAFETY: owner is live and process_id is writable scalar storage.
+            let ui_thread_id = unsafe { GetWindowThreadProcessId(owner, &mut process_id) };
+            if ui_thread_id == 0 || process_id == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut owner_rect = RECT::default();
+            // SAFETY: owner is live and owner_rect is writable. No AppState
+            // lease exists across foregrounding or popup tracking.
+            if unsafe { GetWindowRect(owner, &mut owner_rect) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let file = track_accessible_popup(
+                owner,
+                file_popup,
+                owner_rect,
+                ui_thread_id,
+                process_id,
+                "File",
+                expected_apply_name.to_owned(),
+            )?;
+            let view = track_accessible_popup(
+                owner,
+                view_popup,
+                owner_rect,
+                ui_thread_id,
+                process_id,
+                "View",
+                expected_full_path_name.to_owned(),
+            )?;
+            let theme = track_accessible_popup(
+                owner,
+                theme_popup,
+                owner_rect,
+                ui_thread_id,
+                process_id,
+                "Theme",
+                "어둡게(D)".to_owned(),
+            )?;
+            Ok(ProductionPopupSnapshots {
+                owner_value: owner as usize,
+                file,
+                view,
+                theme,
+            })
+        })
+    }
+
     fn verify_production_owner_draw_popups(
         journal_root: PathBuf,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3397,91 +3667,99 @@ mod tests {
                 io::Error::other("SHOW_FULL_PATH is absent from the command catalog")
             })?);
         let ui = thread::spawn(move || {
-            application::with_owner_draw_production_window_for_test(&journal_root, |owner| {
-                // SAFETY: owner is the live production test window. Its menu
-                // tree remains UI-thread-owned through sequential tracking.
-                let root_menu = unsafe { GetMenu(owner) };
-                // SAFETY: root_menu is the live production menu and positions
-                // zero and two are its File and View popup items.
-                let (file_popup, view_popup) =
-                    unsafe { (GetSubMenu(root_menu, 0), GetSubMenu(root_menu, 2)) };
-                if file_popup.is_null() || view_popup.is_null() {
-                    return Err(io::Error::other(
-                        "production owner-draw File or View popup is unavailable",
-                    ));
-                }
-                // SAFETY: view_popup is the actual production View menu. Its
-                // sixth item is the Theme parent installed by append_view_popup.
-                let theme_popup = unsafe { GetSubMenu(view_popup, 5) };
-                if theme_popup.is_null() {
-                    return Err(io::Error::other(
-                        "production owner-draw Theme submenu is unavailable",
-                    ));
-                }
-                let mut process_id = 0_u32;
-                // SAFETY: owner is live and process_id is writable scalar storage.
-                let ui_thread_id = unsafe { GetWindowThreadProcessId(owner, &mut process_id) };
-                if ui_thread_id == 0 || process_id == 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                let mut owner_rect = RECT::default();
-                // SAFETY: owner is live and owner_rect is writable. No AppState
-                // lease exists across foregrounding or popup tracking.
-                if unsafe { GetWindowRect(owner, &mut owner_rect) } == 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                let file = track_accessible_popup(
-                    owner,
-                    file_popup,
-                    owner_rect,
-                    ui_thread_id,
-                    process_id,
-                    "File",
-                    expected_apply_name,
-                )?;
-                let view = track_accessible_popup(
-                    owner,
-                    view_popup,
-                    owner_rect,
-                    ui_thread_id,
-                    process_id,
-                    "View",
-                    expected_full_path_name,
-                )?;
-                let theme = track_accessible_popup(
-                    owner,
-                    theme_popup,
-                    owner_rect,
-                    ui_thread_id,
-                    process_id,
-                    "Theme",
-                    "어둡게(D)".to_owned(),
-                )?;
-                Ok((owner as usize, file, view, theme))
-            })
+            let owner_draw = capture_production_popup_snapshots(
+                &journal_root,
+                true,
+                &expected_apply_name,
+                &expected_full_path_name,
+            )?;
+            let native_system = capture_production_popup_snapshots(
+                &journal_root,
+                false,
+                &expected_apply_name,
+                &expected_full_path_name,
+            )?;
+            Ok::<_, io::Error>((owner_draw, native_system))
         });
-        let (owner_value, file, view, theme) = ui
+        let (owner_draw, native_system) = ui
             .join()
             .map_err(|_| io::Error::other("popup UI thread panicked"))??;
-        // SAFETY: the dedicated UI thread completed production teardown. The
-        // exact returned HWND must no longer name a live window.
-        assert_eq!(unsafe { IsWindow(owner_value as HWND) }, 0);
-        for snapshot in [&file, &view, &theme] {
+        // SAFETY: the dedicated UI thread completed both production teardowns.
+        // Neither exact returned HWND may still name a live window.
+        let (owner_draw_live, native_system_live) = unsafe {
+            (
+                IsWindow(owner_draw.owner_value as HWND),
+                IsWindow(native_system.owner_value as HWND),
+            )
+        };
+        assert_eq!(owner_draw_live, 0);
+        assert_eq!(native_system_live, 0);
+
+        for (context, snapshot, native) in [
+            ("File", &owner_draw.file, &native_system.file),
+            ("View", &owner_draw.view, &native_system.view),
+            ("Theme", &owner_draw.theme, &native_system.theme),
+        ] {
             assert_eq!(snapshot.popup_role, ROLE_SYSTEM_MENUPOPUP as i32);
             assert!(snapshot.child_count > 0);
             assert_eq!(snapshot.leaf.role, ROLE_SYSTEM_MENUITEM as i32);
+            assert_eq!(snapshot.uia_root.control_type, UIA_MenuControlTypeId.0);
+            assert!(snapshot.uia_root.is_enabled, "{snapshot:#?}");
+            assert!(snapshot.uia_root.is_control_element, "{snapshot:#?}");
+            assert!(snapshot.uia_root.is_content_element, "{snapshot:#?}");
+            assert!(!snapshot.uia_root.is_offscreen, "{snapshot:#?}");
+            assert_eq!(
+                snapshot.uia_leaf.element.control_type,
+                UIA_MenuItemControlTypeId.0
+            );
+            assert!(
+                snapshot.uia_leaf.element.is_control_element,
+                "{snapshot:#?}"
+            );
+            assert!(
+                snapshot.uia_leaf.element.is_content_element,
+                "{snapshot:#?}"
+            );
+            assert!(!snapshot.uia_leaf.element.is_offscreen, "{snapshot:#?}");
+            assert!(snapshot.uia_leaf.has_invoke_pattern, "{snapshot:#?}");
+            assert_eq!(snapshot.leaf.name, snapshot.uia_leaf.element.name);
+            assert_eq!(
+                snapshot.leaf, native.leaf,
+                "{context} owner-draw MSAA leaf diverged from the native-system baseline"
+            );
+            assert_eq!(
+                snapshot.uia_root, native.uia_root,
+                "{context} owner-draw UIA root diverged from the native-system baseline"
+            );
+            assert_eq!(
+                snapshot.uia_leaf, native.uia_leaf,
+                "{context} owner-draw UIA leaf or pattern availability diverged from the native-system baseline"
+            );
         }
+        let file = &owner_draw.file;
         assert_eq!(file.leaf.name, "변경 사항 적용\tCtrl+S");
         assert_ne!(file.leaf.state & STATE_SYSTEM_UNAVAILABLE as i32, 0);
-        assert_eq!(view.leaf.name, "현재 전체 경로");
-        assert_ne!(view.leaf.state & STATE_SYSTEM_CHECKED as i32, 0);
-        assert_eq!(theme.leaf.name, "어둡게(D)");
-        assert_ne!(theme.leaf.state & STATE_SYSTEM_CHECKED as i32, 0);
+        assert!(!file.uia_leaf.element.is_enabled, "{file:#?}");
+
+        for (name, snapshot) in [
+            ("현재 전체 경로", &owner_draw.view),
+            ("어둡게(D)", &owner_draw.theme),
+        ] {
+            assert_eq!(snapshot.leaf.name, name);
+            assert_ne!(snapshot.leaf.state & STATE_SYSTEM_CHECKED as i32, 0);
+            assert!(snapshot.uia_leaf.element.is_enabled, "{snapshot:#?}");
+            if let Some(toggle_state) = snapshot.uia_leaf.toggle_state {
+                assert_eq!(toggle_state, ToggleState_On.0, "{snapshot:#?}");
+            }
+            if let Some(selected) = snapshot.uia_leaf.selection_item_selected {
+                assert!(selected, "{snapshot:#?}");
+            }
+        }
         Ok(())
     }
 
     #[test]
-    fn production_owner_draw_popups_expose_command_states_through_msaa()
+    fn production_owner_draw_popups_expose_command_states_through_msaa_and_uia()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::time::{Duration, Instant};
 
@@ -3515,14 +3793,14 @@ mod tests {
         let mut child = PopupTestChild(
             Command::new(std::env::current_exe()?)
                 .arg("--exact")
-                .arg("windows::tests::production_owner_draw_popups_expose_command_states_through_msaa")
+                .arg("windows::tests::production_owner_draw_popups_expose_command_states_through_msaa_and_uia")
                 .arg("--nocapture")
                 .arg("--test-threads=1")
                 .env(CHILD_MODE, "1")
                 .env(CHILD_ROOT, directory.path())
                 .spawn()?,
         );
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + Duration::from_secs(45);
         loop {
             if let Some(status) = child.0.try_wait()? {
                 if status.success() {
@@ -3538,7 +3816,7 @@ mod tests {
                 let _status = child.0.wait()?;
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "popup accessibility child exceeded the 15-second deadline",
+                    "popup accessibility child exceeded the 45-second deadline",
                 )
                 .into());
             }

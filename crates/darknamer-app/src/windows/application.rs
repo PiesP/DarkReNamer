@@ -116,8 +116,9 @@ fn install_owner_draw_menu_for_test(window: HWND) -> io::Result<()> {
 }
 
 #[cfg(test)]
-pub(super) fn with_owner_draw_production_window_for_test<R>(
+pub(super) fn with_production_popup_window_for_test<R>(
     journal_root: &Path,
+    owner_draw: bool,
     action: impl FnOnce(HWND) -> io::Result<R>,
 ) -> io::Result<R> {
     // SAFETY: null is the required reserved value and OleGuard balances every
@@ -214,7 +215,9 @@ pub(super) fn with_owner_draw_production_window_for_test<R>(
     // seam, matching production ownership transitions exactly.
     // SAFETY: the live owner handles this pointer-free private message.
     unsafe { SendMessageW(window, WM_APP_MENU_REDRAW, 0, 0) };
-    install_owner_draw_menu_for_test(window)?;
+    if owner_draw {
+        install_owner_draw_menu_for_test(window)?;
+    }
     // SAFETY: the window is live, owned by this UI thread, and made visible so
     // TrackPopupMenuEx creates a genuine system #32768 popup window.
     unsafe {
