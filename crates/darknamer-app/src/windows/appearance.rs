@@ -371,6 +371,11 @@ fn draw_owner_button_with_readiness(
     paint_button(
         resources,
         draw.hwndItem,
+        u16::try_from(draw.CtlID)
+            .ok()
+            .and_then(command_ui_spec)
+            .filter(|spec| spec.rail.is_some())
+            .map(|spec| spec.rail_label),
         draw.hDC,
         draw.rcItem,
         (apply_readiness_button == Some(draw.hwndItem)).then_some(dpi),
@@ -439,6 +444,7 @@ pub(super) fn draw_custom_button(
     paint_button(
         resources,
         button,
+        None,
         // SAFETY: the DC is live for this custom-draw stage.
         unsafe { (*custom).hdc },
         // SAFETY: the rectangle is copied integral callback data.
@@ -467,6 +473,7 @@ struct ButtonDrawState {
 fn paint_button(
     resources: Option<&AppearanceResources>,
     button: HWND,
+    visible_label: Option<&str>,
     dc: HDC,
     rect: windows_sys::Win32::Foundation::RECT,
     apply_readiness_dpi: Option<u32>,
@@ -547,14 +554,20 @@ fn paint_button(
         unsafe { FillRect(dc, &indicator, resources.apply_readiness.as_raw()) };
     }
     // SAFETY: button is the live native BUTTON being drawn.
-    let length = unsafe { GetWindowTextLengthW(button) };
+    let length = visible_label.map_or_else(
+        || unsafe { GetWindowTextLengthW(button) },
+        |label| i32::try_from(label.encode_utf16().count()).unwrap_or(i32::MAX),
+    );
     if length > 0 {
         let capacity = usize::try_from(length)
             .unwrap_or_default()
             .saturating_add(1);
-        let mut label = vec![0_u16; capacity];
+        let mut label = visible_label.map_or_else(|| vec![0_u16; capacity], wide);
         // SAFETY: label has length+1 writable units and button remains live.
-        let copied = unsafe { GetWindowTextW(button, label.as_mut_ptr(), length + 1) };
+        let copied = visible_label.map_or_else(
+            || unsafe { GetWindowTextW(button, label.as_mut_ptr(), length + 1) },
+            |_| length,
+        );
         if copied > 0 {
             // SAFETY: WM_GETFONT returns the borrowed font installed on button.
             let font = unsafe { SendMessageW(button, WM_GETFONT, 0, 0) } as HFONT;
@@ -702,7 +715,7 @@ pub(super) fn draw_owner_menu(
     };
     let item_height = (draw.rcItem.bottom - draw.rcItem.top).max(1);
     let kind = owner_menu_kind(draw.itemData);
-    let insets = owner_menu_horizontal_insets(kind, item_height, dpi);
+    let insets = owner_menu_horizontal_insets(draw.itemData, item_height, dpi);
     let mut content = draw.rcItem;
     content.left = content.left.saturating_add(insets.leading);
     content.right = content.right.saturating_sub(insets.trailing);
@@ -746,7 +759,11 @@ pub(super) fn draw_owner_menu(
         };
     }
     if kind == OwnerMenuKind::Popup && draw.itemState & ODS_CHECKED != 0 {
-        let check = wide("✓");
+        let check = wide(if owner_menu_uses_radio(draw.itemData) {
+            "●"
+        } else {
+            "✓"
+        });
         let mut check_rect = draw.rcItem;
         check_rect.right = check_rect.left.saturating_add(item_height);
         // SAFETY: same live DC/rect and one-glyph terminated buffer.
@@ -756,6 +773,21 @@ pub(super) fn draw_owner_menu(
                 check.as_ptr(),
                 1,
                 &mut check_rect,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            )
+        };
+    }
+    if kind == OwnerMenuKind::Popup && owner_menu_has_submenu(draw.itemData) {
+        let arrow = wide("›");
+        let mut arrow_rect = draw.rcItem;
+        arrow_rect.left = arrow_rect.right.saturating_sub(item_height);
+        // SAFETY: same live DC/rect and one-glyph terminated buffer.
+        unsafe {
+            DrawTextW(
+                draw.hDC,
+                arrow.as_ptr(),
+                1,
+                &mut arrow_rect,
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
             )
         };
@@ -774,12 +806,12 @@ struct OwnerMenuHorizontalInsets {
 }
 
 fn owner_menu_horizontal_insets(
-    kind: OwnerMenuKind,
+    data: usize,
     item_height: i32,
     dpi: u32,
 ) -> OwnerMenuHorizontalInsets {
     let item_height = item_height.max(1);
-    match kind {
+    match owner_menu_kind(data) {
         OwnerMenuKind::Bar => {
             let padding = scale_dip(8, dpi.max(BASE_DPI));
             OwnerMenuHorizontalInsets {
@@ -791,7 +823,11 @@ fn owner_menu_horizontal_insets(
             let padding = item_height / 3;
             OwnerMenuHorizontalInsets {
                 leading: item_height.saturating_add(padding),
-                trailing: padding,
+                trailing: if owner_menu_has_submenu(data) {
+                    item_height.saturating_add(padding)
+                } else {
+                    padding
+                },
             }
         }
     }
@@ -810,43 +846,59 @@ pub(super) fn measure_owner_menu(window: HWND, font: HFONT, dpi: u32, lparam: LP
     let Some(label) = owner_menu_label(measure.itemData) else {
         return false;
     };
-    let label = wide(&label);
-    // SAFETY: window/font are live UI resources; the DC is released below.
-    let dc = unsafe { GetDC(window) };
-    let mut rect = windows_sys::Win32::Foundation::RECT::default();
-    if !dc.is_null() {
-        // SAFETY: font remains AppState-owned beyond this synchronous measurement.
-        let previous = unsafe { SelectObject(dc, font) };
-        // SAFETY: label/rect/DC are live for this calculation-only draw.
-        unsafe {
-            DrawTextW(
-                dc,
-                label.as_ptr(),
-                i32::try_from(label.len().saturating_sub(1)).unwrap_or(i32::MAX),
-                &mut rect,
-                DT_CALCRECT | DT_SINGLELINE,
-            )
-        };
-        if !previous.is_null() {
-            // SAFETY: restore the exact object returned by SelectObject.
-            unsafe { SelectObject(dc, previous) };
-        }
-        // SAFETY: release the DC acquired from this exact window.
-        unsafe { ReleaseDC(window, dc) };
-    }
-    let item_height = (rect.bottom - rect.top)
+    let (primary, shortcut) = label
+        .split_once('\t')
+        .map_or((label.as_str(), None), |parts| (parts.0, Some(parts.1)));
+    let (primary_width, primary_height) = measure_owner_menu_text(window, font, primary, false);
+    let shortcut_width = shortcut.map_or(0, |shortcut| {
+        measure_owner_menu_text(window, font, shortcut, true).0
+    });
+    let item_height = primary_height
         .max(scale_dip(16, dpi))
         .saturating_add(scale_dip(8, dpi));
-    let insets = owner_menu_horizontal_insets(owner_menu_kind(measure.itemData), item_height, dpi);
+    let insets = owner_menu_horizontal_insets(measure.itemData, item_height, dpi);
     measure.itemWidth = u32::try_from(
-        (rect.right - rect.left)
-            .max(0)
+        primary_width
+            .saturating_add(if shortcut_width > 0 {
+                shortcut_width.saturating_add(scale_dip(24, dpi))
+            } else {
+                0
+            })
             .saturating_add(insets.leading)
             .saturating_add(insets.trailing),
     )
     .unwrap_or(u32::MAX);
     measure.itemHeight = u32::try_from(item_height).unwrap_or(u32::MAX);
     true
+}
+
+fn measure_owner_menu_text(window: HWND, font: HFONT, text: &str, hide_prefix: bool) -> (i32, i32) {
+    let text = wide(text);
+    let mut rect = windows_sys::Win32::Foundation::RECT::default();
+    // SAFETY: window/font are live UI resources; the DC and selected font are
+    // restored before return, and DrawTextW retains no borrowed pointers.
+    unsafe {
+        let dc = GetDC(window);
+        if dc.is_null() {
+            return (0, 0);
+        }
+        let previous = SelectObject(dc, font);
+        DrawTextW(
+            dc,
+            text.as_ptr(),
+            i32::try_from(text.len().saturating_sub(1)).unwrap_or(i32::MAX),
+            &mut rect,
+            DT_CALCRECT | DT_SINGLELINE | if hide_prefix { DT_NOPREFIX } else { 0 },
+        );
+        if !previous.is_null() {
+            SelectObject(dc, previous);
+        }
+        ReleaseDC(window, dc);
+    }
+    (
+        (rect.right - rect.left).max(0),
+        (rect.bottom - rect.top).max(0),
+    )
 }
 
 fn apply_menu_background(menu: HMENU, resources: Option<&AppearanceResources>) -> io::Result<()> {
@@ -931,7 +983,12 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
 
     // Install the replacement brush while both old and new resources remain
     // alive. Only a successful menu update permits dropping the old brush set.
-    if let Err(error) = apply_menu_background(state.menu, replacement.as_ref()) {
+    let menu_resources = if state.owner_draw_menu {
+        replacement.as_ref()
+    } else {
+        None
+    };
+    if let Err(error) = apply_menu_background(state.menu, menu_resources) {
         // MIM_APPLYTOSUBMENUS does not document transactional failure. Retain
         // every custom brush set from a failed attempt so any partially
         // updated submenu can never reference a deleted GDI object.

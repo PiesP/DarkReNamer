@@ -1313,7 +1313,7 @@ pub(super) fn select_prepared_file_dialog(
         }),
         PreparedFileDialogKind::UnifyDestinationParent => modal_native_dialog(owner, || {
             native_file_dialog(owner)
-                .set_title("대상 폴더 선택")
+                .set_title("모든 파일을 이동할 대상 폴더 선택")
                 .pick_folder()
         })
         .map_or(PreparedFileDialogSelection::Cancelled, |path| {

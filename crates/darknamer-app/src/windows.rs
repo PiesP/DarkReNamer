@@ -201,7 +201,7 @@ use windows_sys::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForWindow, SystemParametersInfoForDpi,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, GetFocus, IsWindowEnabled, SetFocus, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_F6,
+    EnableWindow, GetFocus, IsWindowEnabled, SetFocus, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_F2, VK_F6,
     VK_OEM_COMMA, VK_OEM_PERIOD, VK_UP,
 };
 use windows_sys::Win32::UI::Shell::{
@@ -214,13 +214,13 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CheckMenuItem, CheckMenuRadioItem,
     CreateAcceleratorTableW, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
     DeferWindowPos, DestroyAcceleratorTable, DestroyMenu, DestroyWindow, DispatchMessageW,
-    DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, EndDeferWindowPos, FCONTROL, FSHIFT, FVIRTKEY,
-    GWLP_USERDATA, GetClientRect, GetMenuItemCount, GetMenuItemInfoW, GetMessageW, GetParent,
-    GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HACCEL, HMENU,
-    HWND_BOTTOM, IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, IsWindow, IsWindowVisible, KillTimer,
-    LoadCursorW, LoadIconW, MENUITEMINFOW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED,
-    MF_OWNERDRAW, MF_POPUP, MF_SEPARATOR, MF_UNCHECKED, MIIM_DATA, MIIM_STRING, MIIM_SUBMENU,
-    MINMAXINFO, MNC_EXECUTE, MNC_IGNORE, MNC_SELECT, MSG, MessageBoxW, MoveWindow,
+    DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, EndDeferWindowPos, FALT, FCONTROL, FSHIFT,
+    FVIRTKEY, GWLP_USERDATA, GetClientRect, GetMenuItemCount, GetMenuItemInfoW, GetMessageW,
+    GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HACCEL,
+    HMENU, HWND_BOTTOM, IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, IsWindow, IsWindowVisible,
+    KillTimer, LoadCursorW, LoadIconW, MENUITEMINFOW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED,
+    MF_GRAYED, MF_OWNERDRAW, MF_POPUP, MF_SEPARATOR, MF_UNCHECKED, MIIM_DATA, MIIM_STRING,
+    MIIM_SUBMENU, MINMAXINFO, MNC_EXECUTE, MNC_IGNORE, MNC_SELECT, MSG, MessageBoxW, MoveWindow,
     NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassExW, SPI_GETHIGHCONTRAST,
     SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW,
     SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetMenuItemInfoW,
@@ -486,6 +486,7 @@ struct AppState {
     empty_add: HWND,
     drop_overlay: HWND,
     menu: HMENU,
+    owner_draw_menu: bool,
     pending_menu: Option<OwnedMenu>,
     font: OwnedFont,
     status_font: OwnedFont,
@@ -585,6 +586,7 @@ impl AppState {
             empty_add: null_mut(),
             drop_overlay: null_mut(),
             menu: null_mut(),
+            owner_draw_menu: false,
             pending_menu: None,
             font: OwnedFont::default(),
             status_font: OwnedFont::default(),
@@ -2908,7 +2910,7 @@ mod tests {
 
     #[test]
     fn owner_draw_menu_preserves_alt_mnemonics() -> Result<(), Box<dyn std::error::Error>> {
-        let menu = create_menu()?;
+        let menu = create_owner_draw_menu_for_test()?;
 
         for (position, mnemonic) in ['f', 'e', 'v', 't', 'r', 'h'].into_iter().enumerate() {
             let result = handle_owner_menu_char(mnemonic as WPARAM, menu.as_raw() as LPARAM);
@@ -2944,7 +2946,7 @@ mod tests {
         if owner.is_null() {
             return Err(io::Error::last_os_error().into());
         }
-        let menu = create_menu()?;
+        let menu = create_owner_draw_menu_for_test()?;
         let mut font = OwnedFont::default();
         let message_font = create_message_font(DPI);
         if message_font.is_null() {
@@ -3868,7 +3870,12 @@ mod tests {
                     actual_ids.push(placement.command);
                     let tool = rail_tool_spec(placement.command)
                         .ok_or_else(|| io::Error::other("native command label is missing"))?;
-                    assert_eq!(window_text(button)?, tool.label);
+                    assert_eq!(
+                        window_text(button)?,
+                        command_ui_spec(tool.id)
+                            .map(|spec| spec.menu_label)
+                            .unwrap_or_default()
+                    );
                     let rect = rail.command_rect(placement.command)?;
                     assert_eq!(rect.left, origin_x + placement.x);
                     assert_eq!(rect.top, placement.y);

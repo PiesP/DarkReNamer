@@ -40,6 +40,7 @@ fn native_accelerator_entries() -> Vec<ACCEL> {
             fVirt: FVIRTKEY
                 | match spec.shortcut.modifiers {
                     LegacyShortcutModifiers::None => 0,
+                    LegacyShortcutModifiers::Alt => FALT,
                     LegacyShortcutModifiers::Control => FCONTROL,
                     LegacyShortcutModifiers::ControlShift => FCONTROL | FSHIFT,
                 },
@@ -47,6 +48,9 @@ fn native_accelerator_entries() -> Vec<ACCEL> {
                 LegacyVirtualKey::Character(key) => key,
                 LegacyVirtualKey::Delete => VK_DELETE,
                 LegacyVirtualKey::Escape => VK_ESCAPE,
+                LegacyVirtualKey::F2 => VK_F2,
+                LegacyVirtualKey::Up => VK_UP,
+                LegacyVirtualKey::Down => VK_DOWN,
                 LegacyVirtualKey::OemComma => VK_OEM_COMMA,
                 LegacyVirtualKey::OemPeriod => VK_OEM_PERIOD,
             },
@@ -60,28 +64,32 @@ mod accelerator_tests {
     use super::*;
 
     #[test]
-    fn native_accelerators_use_standard_key_down_with_exact_legacy_bindings() {
+    fn native_accelerators_keep_only_the_explicit_remaining_bindings() {
         let entries = native_accelerator_entries();
         assert_eq!(entries.len(), legacy_command_shortcuts().count());
         let exact = |command| entries.iter().find(|entry| entry.cmd == command).copied();
+        assert!(exact(SORT).is_none());
+        assert!(exact(COPY_NAMES).is_none());
+        assert!(exact(SAVE_NAMES).is_none());
+        assert!(exact(IMPORT_NAMES).is_none());
+        assert!(exact(RESET).is_none());
+        assert!(exact(EXIT_COMMAND).is_none());
         assert_eq!(
-            exact(SORT).map(|entry| (entry.fVirt, entry.key)),
-            Some((FVIRTKEY | FCONTROL, u16::from(b'A')))
+            exact(DELETE_SELECTED_COMMAND).map(|entry| (entry.fVirt, entry.key)),
+            Some((FVIRTKEY, VK_DELETE))
         );
         assert_eq!(
-            exact(SAVE_NAMES).map(|entry| (entry.fVirt, entry.key)),
-            Some((FVIRTKEY | FCONTROL, u16::from(b'X')))
+            exact(MANUAL_CHANGE).map(|entry| (entry.fVirt, entry.key)),
+            Some((FVIRTKEY, VK_F2))
         );
         assert_eq!(
-            exact(IMPORT_NAMES).map(|entry| (entry.fVirt, entry.key)),
-            Some((FVIRTKEY | FCONTROL, u16::from(b'V')))
+            exact(MOVE_UP).map(|entry| (entry.fVirt, entry.key)),
+            Some((FVIRTKEY | FALT, VK_UP))
         );
         assert_eq!(
-            exact(EXIT_COMMAND).map(|entry| (entry.fVirt, entry.key)),
-            Some((FVIRTKEY, VK_ESCAPE))
+            exact(MOVE_DOWN).map(|entry| (entry.fVirt, entry.key)),
+            Some((FVIRTKEY | FALT, VK_DOWN))
         );
-        assert_eq!(exact(MOVE_UP).map(|entry| entry.key), Some(VK_OEM_COMMA));
-        assert_eq!(exact(MOVE_DOWN).map(|entry| entry.key), Some(VK_OEM_PERIOD));
         let mut bindings = entries
             .iter()
             .map(|entry| (entry.fVirt, entry.key))
@@ -716,8 +724,8 @@ pub(super) fn dispatch_command(
         UNIFY_PATH => {
             message(
                 window,
-                "경로 통일은 일반 파일만 있는 목록에서 사용할 수 있습니다. 폴더 행을 제거한 뒤 다시 시도하세요.",
-                "DarkReNamer - 경로 통일",
+                "대상 폴더 지정은 일반 파일만 있는 목록에서 사용할 수 있습니다. 폴더 항목을 목록에서 제거한 뒤 다시 시도하세요.",
+                "DarkReNamer - 대상 폴더 지정",
             );
             CommandOutcome::ui(UiEffect::None)
         }
@@ -1038,8 +1046,8 @@ fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<Prepared
                 &[
                     "파일 이름에 따라 오름차순",
                     "파일 이름에 따라 내림차순",
-                    "전체경로에 따라 오름차순",
-                    "전체경로에 따라 내림차순",
+                    "현재 전체 경로에 따라 오름차순",
+                    "현재 전체 경로에 따라 내림차순",
                     "실제 파일 크기에 따라 오름차순",
                     "실제 파일 크기에 따라 내림차순",
                     "수정한 시각에 따라 오름차순",
@@ -1201,7 +1209,7 @@ pub(super) fn run_prepared_file_dialog_with_destination_validation(
                 if finish_file_dialog_session(window, session, FileDialogCompletion::Accept, |_| ())
                     .is_some()
                 {
-                    report_error(window, &error, "DarkReNamer - 경로 통일");
+                    report_error(window, &error, "DarkReNamer - 대상 폴더 지정");
                 }
                 return;
             }
@@ -1224,7 +1232,7 @@ pub(super) fn run_prepared_file_dialog_with_destination_validation(
                 report_error(
                     window,
                     destination_parent_mutation_error_korean(error),
-                    "DarkReNamer - 경로 통일",
+                    "DarkReNamer - 대상 폴더 지정",
                 );
             }
         }

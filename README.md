@@ -8,16 +8,18 @@ The port targets DarkNamer 08.02.10. The external 81,920-byte
 reference executable is byte-identical to upstream `DarkNamer v08.02.10.exe`
 at commit `3e5d6242e8c8eea60d94e73f8af8ddf9ab677203`, with SHA-256
 `ae93ca169d2b69a5cafe7bf835cabb9e45e42ecffa94f41e7cc88f4eec917e34`.
-That matched source and resource set defines the compatibility target.
+That matched source defines the transformation and command-semantics compatibility
+target. DarkReNamer uses its own menu wording and information architecture so the
+safe rename and move model is explicit.
 
 ## Current status
 
-The Rust workspace provides a native Win32 implementation of the Korean menu,
-command IDs, native command rails, a ListView with seven persisted data columns
-and a fixed status column, input dialogs, keyboard commands, bounded file and
-directory admission, sorting, and import/export. The UTF-16 name transformations
-retain DarkNamer 08.02.10 compatibility, while Apply uses the maintained safe
-execution path.
+The Rust workspace provides a native Win32 Korean UI, stable command IDs, native
+command rails, a ListView with seven persisted data columns and a fixed status
+column, input dialogs, keyboard commands, bounded file and directory admission,
+sorting, and import/export. The UTF-16 name transformations retain DarkNamer
+08.02.10 compatibility, while the menu wording and Apply path describe and enforce
+the maintained safe execution model.
 
 The v0.1 release-validated scope is Windows 10 and Windows 11 on x64, using
 local NTFS storage from a non-elevated process for same-parent entries that do
@@ -30,9 +32,10 @@ Apply validates Windows leaf names, current file identities, and source and
 destination parents before showing confirmation. Safe v2 executes
 handle-relative, no-replace operations for same-parent renames and for regular
 files moved to an existing folder on the same local NTFS volume. The latter is
-prepared with **기능 > 경로 통일하기...** and can combine a move with a
-proposed name change. **기능 > 경로 변경 취소** restores original destination
-parents without changing proposed names; Ctrl+Z remains name-only.
+prepared with **편집 > 대상 폴더 > 모든 파일의 대상 폴더 지정...** and can combine a move with a
+proposed name change. **편집 > 대상 폴더 > 대상 폴더 변경 취소** restores
+original destination parents without changing proposed names. **편집 > 모든 이름
+변경 취소** resets proposed names only; it is deliberately not presented as Undo.
 
 A bounded write-ahead journal records intent before mutation, supports reverse
 rollback, and blocks further Apply operations when an interrupted state cannot
@@ -58,14 +61,15 @@ otherwise DarkReNamer leaves native rendering under Windows control. Forced
 Colors and an unavailable high-contrast query always take precedence over the
 stored appearance and disable custom colors.
 
-DarkReNamer applies its Light and Dark palettes to the main workbench, native
-menus, command buttons, list headers, status surfaces, and the advanced
-appearance window. App-owned input prompts use the same palette while retaining
+DarkReNamer applies its Light and Dark palettes to the main workbench, command
+buttons, list headers, status surfaces, and the advanced appearance window.
+Menus use standard Windows rendering and accessibility. App-owned input prompts
+use the same palette while retaining
 standard Windows edit, combo-box, and button controls. File dialogs and
 confirmation TaskDialogs continue to use Windows rendering. Forced Colors keeps
 system colors and native focus and selection precedence across every surface.
 
-Advanced appearance controls are intentionally under **View > Appearance**.
+Advanced appearance controls are intentionally under **보기 > 모양 설정...**.
 They offer semantic density and emphasis presets plus separator, changed-name
 background highlight, and empty-state safety-copy visibility. The native dialog
 keeps Reset, OK, and Cancel in a fixed footer while its settings body scrolls at
