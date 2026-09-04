@@ -62,6 +62,13 @@ Menu replacements are prepared while state is leased, then attached and the old
 tree destroyed only from the pointer-free deferred redraw message after that
 lease ends. Accessibility metadata and referenced GDI brushes outlive the native
 menu tree that uses them.
+The file list and appearance viewport use `SetWindowTheme` for native scrollbar
+appearance only. The association is selected from the resolved theme, copied by
+Windows during the call, and removed with null arguments for Light, Native
+System, or a failed dark association. Existing callback guards reject state
+reentry during the synchronous theme notification. List colors are restored
+after the call; theme changes do not replace controls or change rows, selection,
+scroll ranges, model revisions, or mutation authority.
 
 ## Preview resource boundary
 

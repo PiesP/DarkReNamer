@@ -70,6 +70,11 @@ and button controls. Native System, Forced Colors, file dialogs, and confirmatio
 TaskDialogs continue to use Windows rendering. Forced Colors keeps system colors
 and native focus and selection precedence across every surface.
 
+The file list and the advanced appearance window's scrolling body request native
+dark scrollbars in Dark mode. Light and Native System remove that association;
+if Windows cannot apply it, the scrollbars retain system rendering. Their native
+scrolling and accessibility behavior remains unchanged.
+
 Advanced appearance controls are intentionally under **보기 > 모양 설정...**.
 They offer semantic density and emphasis presets plus separator, changed-name
 background highlight, and empty-state safety-copy visibility. The native dialog

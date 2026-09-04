@@ -1009,6 +1009,14 @@ fn apply_dialog_appearance(window: HWND, state: &mut AppearanceDialogWindowState
         replacement = None;
     }
     state.appearance_resources = replacement;
+    super::appearance::apply_scrollbar_theme(
+        state.viewport,
+        if state.appearance_resources.is_some() {
+            resolved.theme
+        } else {
+            ResolvedTheme::NativeSystem
+        },
+    );
     apply_auxiliary_dwm_title_frame(
         window,
         if state.appearance_resources.is_some() {

@@ -1005,6 +1005,40 @@ pub(super) fn paint_menu_bottom_edge(window: HWND, color: u32) {
     unsafe { FillRect(dc.as_raw(), &rect, brush.as_raw()) };
 }
 
+fn configure_scrollbar_theme(
+    theme: ResolvedTheme,
+    mut set_theme: impl FnMut(Option<&str>) -> bool,
+) -> bool {
+    let association = (theme == ResolvedTheme::Dark).then_some("DarkMode_Explorer");
+    if set_theme(association) {
+        return true;
+    }
+    if association.is_some() {
+        set_theme(None);
+    }
+    false
+}
+
+pub(super) fn apply_scrollbar_theme(window: HWND, theme: ResolvedTheme) -> bool {
+    if window.is_null() {
+        return false;
+    }
+    configure_scrollbar_theme(theme, |association| {
+        let name = association.map(wide);
+        // SAFETY: window is a live app-owned control. SetWindowTheme copies the
+        // optional NUL-terminated association. True null pointers restore the
+        // system association; empty strings would disable visual styles.
+        // The caller's callback guard rejects any synchronous state reentry.
+        unsafe {
+            SetWindowTheme(
+                window,
+                name.as_ref().map_or(null(), |name| name.as_ptr()),
+                null(),
+            ) >= 0
+        }
+    })
+}
+
 pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io::Result<()> {
     let resolved = state.resolved_appearance();
     let palette = semantic_palette(resolved.theme);
@@ -1045,6 +1079,9 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
         },
         |palette| (palette.surface_workspace, palette.text_primary),
     );
+    // Native theme changes can reset control colors; restore the app palette
+    // afterwards. Unsupported associations retain the native scrollbar path.
+    apply_scrollbar_theme(state.list_window, resolved.theme);
     // SAFETY: list_window is the live ListView owned by AppState. These messages
     // copy integral COLORREF values and retain no caller pointer.
     unsafe {
@@ -1162,4 +1199,31 @@ pub(super) fn apply_auxiliary_dwm_title_frame(window: HWND, theme: ResolvedTheme
             size_of::<i32>() as u32,
         )
     };
+}
+
+#[cfg(test)]
+mod scrollbar_tests {
+    use super::*;
+
+    #[test]
+    fn theme_transition_and_failure_restore_the_native_association() {
+        let mut calls = Vec::new();
+        for theme in [
+            ResolvedTheme::Dark,
+            ResolvedTheme::Light,
+            ResolvedTheme::NativeSystem,
+        ] {
+            assert!(configure_scrollbar_theme(theme, |name| {
+                calls.push(name.map(str::to_owned));
+                true
+            }));
+        }
+        assert_eq!(calls, [Some("DarkMode_Explorer".to_owned()), None, None]);
+        calls.clear();
+        assert!(!configure_scrollbar_theme(ResolvedTheme::Dark, |name| {
+            calls.push(name.map(str::to_owned));
+            name.is_none()
+        }));
+        assert_eq!(calls, [Some("DarkMode_Explorer".to_owned()), None]);
+    }
 }
