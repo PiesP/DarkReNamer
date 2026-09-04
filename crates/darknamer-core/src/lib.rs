@@ -31,6 +31,12 @@ pub const MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS: usize = 2 * 1024 * 1024;
 pub const MAX_DESTINATION_PARENT_UTF16_UNITS: usize = 32_767;
 /// Aggregate UTF-16 units retained by distinct destination-parent proposals.
 pub const MAX_TOTAL_DESTINATION_PARENT_UTF16_UNITS: usize = 2 * 1024 * 1024;
+/// Aggregate UTF-16 units represented by every planned destination path.
+///
+/// This matches the application's four MiB admitted-path byte budget. Unlike
+/// destination-parent storage, the accounting includes a shared parent once
+/// per row because preview and plan construction materialize complete paths.
+pub const MAX_TOTAL_PLANNED_PATH_UTF16_UNITS: usize = 2 * 1024 * 1024;
 
 const BACKSLASH: u16 = b'\\' as u16;
 const DOT: u16 = b'.' as u16;
@@ -401,6 +407,13 @@ pub enum ProposalMutationError {
         /// Maximum accepted UTF-16 code-unit count.
         maximum_units: usize,
     },
+    /// Complete planned paths together would exceed the model budget.
+    PlannedPathAggregateBudgetExceeded {
+        /// Exact requested UTF-16 code-unit count.
+        requested_units: usize,
+        /// Maximum accepted UTF-16 code-unit count.
+        maximum_units: usize,
+    },
     /// A checked proposal-size calculation overflowed `usize`.
     ArithmeticOverflow,
     /// A bounded staging allocation could not be reserved.
@@ -425,6 +438,13 @@ impl fmt::Display for ProposalMutationError {
             } => write!(
                 formatter,
                 "proposals require {requested_units} UTF-16 units; maximum is {maximum_units}"
+            ),
+            Self::PlannedPathAggregateBudgetExceeded {
+                requested_units,
+                maximum_units,
+            } => write!(
+                formatter,
+                "planned paths require {requested_units} UTF-16 units; maximum is {maximum_units}"
             ),
             Self::ArithmeticOverflow => formatter.write_str("proposal size calculation overflowed"),
             Self::AllocationFailed => formatter.write_str("proposal staging allocation failed"),
@@ -457,6 +477,13 @@ pub enum DestinationParentMutationError {
         /// Maximum accepted UTF-16 code-unit count.
         maximum_units: usize,
     },
+    /// Complete planned paths together would exceed the model budget.
+    PlannedPathAggregateBudgetExceeded {
+        /// Exact requested UTF-16 code-unit count.
+        requested_units: usize,
+        /// Maximum accepted UTF-16 code-unit count.
+        maximum_units: usize,
+    },
     /// A checked destination-parent size calculation overflowed `usize`.
     ArithmeticOverflow,
     /// A bounded staging allocation could not be reserved.
@@ -479,6 +506,13 @@ impl fmt::Display for DestinationParentMutationError {
             } => write!(
                 formatter,
                 "destination parents require {requested_units} UTF-16 units; maximum is {maximum_units}"
+            ),
+            Self::PlannedPathAggregateBudgetExceeded {
+                requested_units,
+                maximum_units,
+            } => write!(
+                formatter,
+                "planned paths require {requested_units} UTF-16 units; maximum is {maximum_units}"
             ),
             Self::ArithmeticOverflow => {
                 formatter.write_str("destination-parent size calculation overflowed")
@@ -724,6 +758,7 @@ fn try_chunk_sorted_sources(
 pub struct LegacyList {
     items: Vec<LegacyListItem>,
     proposed_name_utf16_units: usize,
+    planned_path_utf16_units: usize,
     identity: Arc<()>,
     source_revision: u64,
 }
@@ -742,6 +777,7 @@ impl Clone for LegacyList {
         Self {
             items: self.items.clone(),
             proposed_name_utf16_units: self.proposed_name_utf16_units,
+            planned_path_utf16_units: self.planned_path_utf16_units,
             identity: Arc::new(()),
             source_revision: 0,
         }
@@ -805,6 +841,7 @@ impl LegacyList {
         Self {
             items: Vec::new(),
             proposed_name_utf16_units: 0,
+            planned_path_utf16_units: 0,
             identity: Arc::new(()),
             source_revision: 0,
         }
@@ -834,11 +871,18 @@ impl LegacyList {
         self.proposed_name_utf16_units
     }
 
+    /// Returns the exact aggregate UTF-16 length of all planned paths.
+    #[must_use]
+    pub const fn planned_path_utf16_units(&self) -> usize {
+        self.planned_path_utf16_units
+    }
+
     /// Clears all rows and reports whether the list changed.
     pub fn clear(&mut self) -> bool {
         let changed = !self.items.is_empty();
         self.items.clear();
         self.proposed_name_utf16_units = 0;
+        self.planned_path_utf16_units = 0;
         if changed {
             self.invalidate_source_index();
         }
@@ -1011,6 +1055,7 @@ impl LegacyList {
         });
 
         let mut requested_units = self.proposed_name_utf16_units;
+        let mut requested_planned_path_units = self.planned_path_utf16_units;
         for (batch_row, (_, item)) in accepted.iter().enumerate() {
             let row = self
                 .items
@@ -1021,11 +1066,26 @@ impl LegacyList {
             requested_units = requested_units
                 .checked_add(item.proposed_name().len())
                 .ok_or(ProposalMutationError::ArithmeticOverflow)?;
+            requested_planned_path_units = requested_planned_path_units
+                .checked_add(
+                    checked_planned_path_units(
+                        item.destination_parent.units(),
+                        item.proposed_name.len(),
+                    )
+                    .ok_or(ProposalMutationError::ArithmeticOverflow)?,
+                )
+                .ok_or(ProposalMutationError::ArithmeticOverflow)?;
         }
         if requested_units > MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS {
             return Err(ProposalMutationError::AggregateBudgetExceeded {
                 requested_units,
                 maximum_units: MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS,
+            });
+        }
+        if requested_planned_path_units > MAX_TOTAL_PLANNED_PATH_UTF16_UNITS {
+            return Err(ProposalMutationError::PlannedPathAggregateBudgetExceeded {
+                requested_units: requested_planned_path_units,
+                maximum_units: MAX_TOTAL_PLANNED_PATH_UTF16_UNITS,
             });
         }
 
@@ -1054,6 +1114,7 @@ impl LegacyList {
         self.items
             .extend(accepted.into_iter().map(|(_, item)| item));
         self.proposed_name_utf16_units = requested_units;
+        self.planned_path_utf16_units = requested_planned_path_units;
         index.bind_to(self);
         Ok(count)
     }
@@ -1065,10 +1126,21 @@ impl LegacyList {
             .iter()
             .map(|index| self.items[*index].proposed_name.len())
             .sum::<usize>();
+        let removed_planned_path_units = selected
+            .iter()
+            .map(|index| {
+                let item = &self.items[*index];
+                item.destination_parent
+                    .len()
+                    .saturating_add(destination_separator_units(item.destination_parent.units()))
+                    .saturating_add(item.proposed_name.len())
+            })
+            .fold(0_usize, usize::saturating_add);
         for index in selected.iter().rev() {
             self.items.remove(*index);
         }
         self.proposed_name_utf16_units -= removed_units;
+        self.planned_path_utf16_units -= removed_planned_path_units;
         if !selected.is_empty() {
             self.invalidate_source_index();
         }
@@ -1133,16 +1205,17 @@ impl LegacyList {
     }
 
     /// Resets every proposed name to its current/original name (`Ctrl+Z`).
-    pub fn reset_proposals(&mut self) {
-        let _ = self.reset_proposals_changed();
+    pub fn reset_proposals(&mut self) -> Result<(), ProposalMutationError> {
+        self.reset_proposals_changed().map(drop)
     }
 
     /// Resets proposals and returns exactly which proposal rows changed.
-    pub fn reset_proposals_changed(&mut self) -> Box<[usize]> {
-        changed_proposals(
+    pub fn reset_proposals_changed(&mut self) -> Result<Box<[usize]>, ProposalMutationError> {
+        try_changed_proposals(
             &mut self.items,
             &mut self.proposed_name_utf16_units,
-            |item| item.current_name.clone(),
+            &mut self.planned_path_utf16_units,
+            |items, row| try_clone_text(&items[row].current_name),
         )
     }
 
@@ -1186,9 +1259,29 @@ impl LegacyList {
                 maximum_units: MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS,
             });
         }
+        let current_planned_path_units = checked_planned_path_units(
+            current.destination_parent.units(),
+            current.proposed_name.len(),
+        )
+        .ok_or(ProposalMutationError::ArithmeticOverflow)?;
+        let next_planned_path_units =
+            checked_planned_path_units(current.destination_parent.units(), proposed_name.len())
+                .ok_or(ProposalMutationError::ArithmeticOverflow)?;
+        let planned_path_units = self
+            .planned_path_utf16_units
+            .checked_sub(current_planned_path_units)
+            .and_then(|total| total.checked_add(next_planned_path_units))
+            .ok_or(ProposalMutationError::ArithmeticOverflow)?;
+        if planned_path_units > MAX_TOTAL_PLANNED_PATH_UTF16_UNITS {
+            return Err(ProposalMutationError::PlannedPathAggregateBudgetExceeded {
+                requested_units: planned_path_units,
+                maximum_units: MAX_TOTAL_PLANNED_PATH_UTF16_UNITS,
+            });
+        }
         let changed = current.proposed_name != proposed_name;
         self.items[index].proposed_name = proposed_name;
         self.proposed_name_utf16_units = total_units;
+        self.planned_path_utf16_units = planned_path_units;
         Ok(Some(changed))
     }
 
@@ -1215,6 +1308,8 @@ impl LegacyList {
         };
         self.proposed_name_utf16_units =
             self.proposed_name_utf16_units - old_proposal_units + new_proposal_units;
+        // A successful move makes the existing planned path the new source and
+        // leaves the complete planned-path length unchanged.
         self.invalidate_source_index();
         true
     }
@@ -1237,6 +1332,7 @@ impl LegacyList {
         try_changed_proposals(
             &mut self.items,
             &mut self.proposed_name_utf16_units,
+            &mut self.planned_path_utf16_units,
             |items, row| {
                 replaced_units(
                     row,
@@ -1264,6 +1360,7 @@ impl LegacyList {
         try_changed_proposals(
             &mut self.items,
             &mut self.proposed_name_utf16_units,
+            &mut self.planned_path_utf16_units,
             |items, row| {
                 let proposed = items[row].proposed_name.units();
                 let requested_units = checked_sum(&[prefix.len(), proposed.len()])?;
@@ -1294,6 +1391,7 @@ impl LegacyList {
         try_changed_proposals(
             &mut self.items,
             &mut self.proposed_name_utf16_units,
+            &mut self.planned_path_utf16_units,
             |items, row| {
                 let (stem, extension) = stem_extension_units(&items[row]);
                 let requested_units = checked_sum(&[stem.len(), suffix.len(), extension.len()])?;
@@ -1316,6 +1414,7 @@ impl LegacyList {
         changed_proposals(
             &mut self.items,
             &mut self.proposed_name_utf16_units,
+            &mut self.planned_path_utf16_units,
             |item| {
                 let (_stem, extension) = split_stem_extension(item);
                 extension
@@ -1346,6 +1445,7 @@ impl LegacyList {
         Ok(changed_proposals(
             &mut self.items,
             &mut self.proposed_name_utf16_units,
+            &mut self.planned_path_utf16_units,
             |item| {
                 let (mut stem, extension) = split_stem_extension(item);
                 if start <= stem.len() {
@@ -1375,6 +1475,7 @@ impl LegacyList {
         changed_proposals(
             &mut self.items,
             &mut self.proposed_name_utf16_units,
+            &mut self.planned_path_utf16_units,
             |item| {
                 let (mut stem, extension) = split_stem_extension(item);
                 let count = count.min(stem.len());
@@ -1411,6 +1512,7 @@ impl LegacyList {
         Ok(changed_proposals(
             &mut self.items,
             &mut self.proposed_name_utf16_units,
+            &mut self.planned_path_utf16_units,
             |item| {
                 let (mut stem, extension) = split_stem_extension(item);
                 if let Some(start_index) = stem.units.iter().position(|unit| *unit == start) {
@@ -1439,6 +1541,7 @@ impl LegacyList {
         changed_proposals(
             &mut self.items,
             &mut self.proposed_name_utf16_units,
+            &mut self.planned_path_utf16_units,
             |item| {
                 let (mut stem, extension) = split_stem_extension(item);
                 stem.units
@@ -1466,6 +1569,7 @@ impl LegacyList {
         try_changed_proposals(
             &mut self.items,
             &mut self.proposed_name_utf16_units,
+            &mut self.planned_path_utf16_units,
             |items, row| padded_digit_run_proposal(&items[row], row, width, last_digit_run),
         )
     }
@@ -1490,6 +1594,7 @@ impl LegacyList {
         try_changed_proposals(
             &mut self.items,
             &mut self.proposed_name_utf16_units,
+            &mut self.planned_path_utf16_units,
             |items, row| padded_digit_run_proposal(&items[row], row, width, first_digit_run),
         )
     }
@@ -1549,6 +1654,7 @@ impl LegacyList {
         try_changed_proposals(
             &mut self.items,
             &mut self.proposed_name_utf16_units,
+            &mut self.planned_path_utf16_units,
             |items, row| {
                 if row > 0
                     && matches!(
@@ -1598,6 +1704,7 @@ impl LegacyList {
         changed_proposals(
             &mut self.items,
             &mut self.proposed_name_utf16_units,
+            &mut self.planned_path_utf16_units,
             |item| {
                 let (stem, _extension) = split_stem_extension(item);
                 stem
@@ -1621,6 +1728,7 @@ impl LegacyList {
         try_changed_proposals(
             &mut self.items,
             &mut self.proposed_name_utf16_units,
+            &mut self.planned_path_utf16_units,
             |items, row| {
                 let proposed = items[row].proposed_name.units();
                 let requested_units = checked_sum(&[proposed.len(), extension.len()])?;
@@ -1651,6 +1759,7 @@ impl LegacyList {
         try_changed_proposals(
             &mut self.items,
             &mut self.proposed_name_utf16_units,
+            &mut self.planned_path_utf16_units,
             |items, row| {
                 let (stem, _old_extension) = stem_extension_units(&items[row]);
                 let requested_units = checked_sum(&[stem.len(), extension.len()])?;
@@ -1672,6 +1781,7 @@ impl LegacyList {
         try_changed_proposals(
             &mut self.items,
             &mut self.proposed_name_utf16_units,
+            &mut self.planned_path_utf16_units,
             |items, row| {
                 let item = &items[row];
                 if let Some(folder) = parent_folder_units(item.destination_parent.as_ref()) {
@@ -1701,6 +1811,7 @@ impl LegacyList {
         try_changed_proposals(
             &mut self.items,
             &mut self.proposed_name_utf16_units,
+            &mut self.planned_path_utf16_units,
             |items, row| {
                 let item = &items[row];
                 if let Some(folder) = parent_folder_units(item.destination_parent.as_ref()) {
@@ -1734,6 +1845,22 @@ impl LegacyList {
         let (normalized_len, preserves_root_separator) =
             normalized_destination_parent_len(destination_parent.units());
         validate_destination_parent_units(normalized_len)?;
+        let normalized_units = &destination_parent.units()[..normalized_len];
+        let per_row_parent_units = normalized_len
+            .checked_add(destination_separator_units(normalized_units))
+            .ok_or(DestinationParentMutationError::ArithmeticOverflow)?;
+        let requested_planned_path_units = per_row_parent_units
+            .checked_mul(self.items.len())
+            .and_then(|units| units.checked_add(self.proposed_name_utf16_units))
+            .ok_or(DestinationParentMutationError::ArithmeticOverflow)?;
+        if requested_planned_path_units > MAX_TOTAL_PLANNED_PATH_UTF16_UNITS {
+            return Err(
+                DestinationParentMutationError::PlannedPathAggregateBudgetExceeded {
+                    requested_units: requested_planned_path_units,
+                    maximum_units: MAX_TOTAL_PLANNED_PATH_UTF16_UNITS,
+                },
+            );
+        }
         let mut normalized = try_clone_destination_parent(destination_parent)?;
         normalized.units.truncate(normalized_len);
         if preserves_root_separator && let Some(separator) = normalized.units.last_mut() {
@@ -1754,6 +1881,7 @@ impl LegacyList {
         for item in &mut self.items {
             item.destination_parent = Arc::clone(&destination_parent);
         }
+        self.planned_path_utf16_units = requested_planned_path_units;
         Ok(changed)
     }
 
@@ -1771,6 +1899,26 @@ impl LegacyList {
         &mut self,
         mut allocate_parent: impl FnMut(&[u16]) -> Result<LegacyText, DestinationParentMutationError>,
     ) -> Result<Box<[usize]>, DestinationParentMutationError> {
+        let mut requested_planned_path_units = 0_usize;
+        for item in &self.items {
+            requested_planned_path_units = requested_planned_path_units
+                .checked_add(
+                    checked_planned_path_units(
+                        source_parent_units(item.source_path()),
+                        item.proposed_name.len(),
+                    )
+                    .ok_or(DestinationParentMutationError::ArithmeticOverflow)?,
+                )
+                .ok_or(DestinationParentMutationError::ArithmeticOverflow)?;
+        }
+        if requested_planned_path_units > MAX_TOTAL_PLANNED_PATH_UTF16_UNITS {
+            return Err(
+                DestinationParentMutationError::PlannedPathAggregateBudgetExceeded {
+                    requested_units: requested_planned_path_units,
+                    maximum_units: MAX_TOTAL_PLANNED_PATH_UTF16_UNITS,
+                },
+            );
+        }
         let mut shared = HashSet::<SharedDestinationParent>::new();
         shared
             .try_reserve(self.items.len())
@@ -1814,6 +1962,7 @@ impl LegacyList {
         for (row, destination_parent) in staged {
             self.items[row].destination_parent = destination_parent;
         }
+        self.planned_path_utf16_units = requested_planned_path_units;
         Ok(changed)
     }
 
@@ -1944,6 +2093,7 @@ impl LegacyList {
         try_changed_proposals(
             &mut self.items,
             &mut self.proposed_name_utf16_units,
+            &mut self.planned_path_utf16_units,
             |items, row| {
                 let Some(units) = lines.next() else {
                     return try_build_proposal(row, items[row].proposed_name.len(), |output| {
@@ -1961,6 +2111,7 @@ impl LegacyList {
 fn changed_proposals(
     items: &mut [LegacyListItem],
     proposed_name_utf16_units: &mut usize,
+    planned_path_utf16_units: &mut usize,
     mut proposal: impl FnMut(&LegacyListItem) -> LegacyText,
 ) -> Box<[usize]> {
     let mut changed = Vec::with_capacity(items.len());
@@ -1973,7 +2124,13 @@ fn changed_proposals(
             changed.push(index);
         }
     }
+    debug_assert!(
+        total_units <= *proposed_name_utf16_units,
+        "infallible proposal transforms must not increase retained text"
+    );
+    let removed_units = proposed_name_utf16_units.saturating_sub(total_units);
     *proposed_name_utf16_units = total_units;
+    *planned_path_utf16_units -= removed_units;
     changed.into_boxed_slice()
 }
 
@@ -1985,10 +2142,12 @@ struct StagedProposal {
 fn try_changed_proposals(
     items: &mut [LegacyListItem],
     proposed_name_utf16_units: &mut usize,
+    planned_path_utf16_units: &mut usize,
     mut proposal: impl FnMut(&[LegacyListItem], usize) -> Result<LegacyText, ProposalMutationError>,
 ) -> Result<Box<[usize]>, ProposalMutationError> {
     let mut staged = Vec::<StagedProposal>::new();
     let mut total_units = 0_usize;
+    let mut total_planned_path_units = 0_usize;
     for row in 0..items.len() {
         let next = proposal(items, row)?;
         validate_proposal_units(row, next.len())?;
@@ -2001,12 +2160,24 @@ fn try_changed_proposals(
                 maximum_units: MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS,
             });
         }
+        total_planned_path_units = total_planned_path_units
+            .checked_add(
+                checked_planned_path_units(items[row].destination_parent.units(), next.len())
+                    .ok_or(ProposalMutationError::ArithmeticOverflow)?,
+            )
+            .ok_or(ProposalMutationError::ArithmeticOverflow)?;
         if items[row].proposed_name != next {
             staged
                 .try_reserve(1)
                 .map_err(|_| ProposalMutationError::AllocationFailed)?;
             staged.push(StagedProposal { row, value: next });
         }
+    }
+    if total_planned_path_units > MAX_TOTAL_PLANNED_PATH_UTF16_UNITS {
+        return Err(ProposalMutationError::PlannedPathAggregateBudgetExceeded {
+            requested_units: total_planned_path_units,
+            maximum_units: MAX_TOTAL_PLANNED_PATH_UTF16_UNITS,
+        });
     }
 
     let mut changed = Vec::new();
@@ -2018,6 +2189,7 @@ fn try_changed_proposals(
         changed.push(update.row);
     }
     *proposed_name_utf16_units = total_units;
+    *planned_path_utf16_units = total_planned_path_units;
     Ok(changed.into_boxed_slice())
 }
 
@@ -2163,6 +2335,13 @@ const fn is_path_separator(unit: u16) -> bool {
 
 fn destination_separator_units(parent: &[u16]) -> usize {
     usize::from(parent.last().is_none_or(|unit| !is_path_separator(*unit)))
+}
+
+fn checked_planned_path_units(parent: &[u16], proposed_name_units: usize) -> Option<usize> {
+    parent
+        .len()
+        .checked_add(destination_separator_units(parent))?
+        .checked_add(proposed_name_units)
 }
 
 fn normalized_destination_parent_len(parent: &[u16]) -> (usize, bool) {
@@ -2550,6 +2729,115 @@ mod tests {
     }
 
     #[test]
+    fn unified_destination_parent_rejects_aggregate_planned_paths_atomically() {
+        let mut list = LegacyList::new();
+        let rows = (0..10_000).map(|_| item(r"C:\a".to_owned()));
+        assert_eq!(list.append_batch(rows), Ok(10_000));
+        let before = list.clone();
+        let parent = LegacyText::from_units(vec![b'x' as u16; MAX_DESTINATION_PARENT_UTF16_UNITS]);
+        let requested_units = 10_000 * (MAX_DESTINATION_PARENT_UTF16_UNITS + 1 + 1);
+
+        assert_eq!(
+            list.unify_destination_parent_changed(&parent),
+            Err(
+                DestinationParentMutationError::PlannedPathAggregateBudgetExceeded {
+                    requested_units,
+                    maximum_units: MAX_TOTAL_PLANNED_PATH_UTF16_UNITS,
+                }
+            )
+        );
+        assert_eq!(list, before);
+    }
+
+    #[test]
+    fn unified_destination_parent_accepts_exact_aggregate_planned_path_boundary() {
+        let mut list = LegacyList::new();
+        let rows = (0..64).map(|_| item(r"C:\a".to_owned()));
+        assert_eq!(list.append_batch(rows), Ok(64));
+        let parent = LegacyText::from_units(vec![b'x' as u16; 32_766]);
+
+        assert_eq!(
+            list.unify_destination_parent_changed(&parent)
+                .map(|rows| rows.len()),
+            Ok(64)
+        );
+        assert_eq!(
+            list.planned_path_utf16_units(),
+            MAX_TOTAL_PLANNED_PATH_UTF16_UNITS
+        );
+    }
+
+    #[test]
+    fn proposal_growth_cannot_cross_the_aggregate_planned_path_boundary() {
+        let mut list = LegacyList::new();
+        let rows = (0..64).map(|_| item(r"C:\a".to_owned()));
+        assert_eq!(list.append_batch(rows), Ok(64));
+        let parent = LegacyText::from_units(vec![b'x' as u16; 32_766]);
+        assert!(list.unify_destination_parent_changed(&parent).is_ok());
+        let before = list.clone();
+
+        assert_eq!(
+            list.manual_change(0, "aa"),
+            Err(ProposalMutationError::PlannedPathAggregateBudgetExceeded {
+                requested_units: MAX_TOTAL_PLANNED_PATH_UTF16_UNITS + 1,
+                maximum_units: MAX_TOTAL_PLANNED_PATH_UTF16_UNITS,
+            })
+        );
+        assert_eq!(list, before);
+    }
+
+    #[test]
+    fn proposal_reset_cannot_cross_the_aggregate_planned_path_boundary() {
+        let mut list = LegacyList::new();
+        let rows = (0..64).map(|_| item(r"C:\aa".to_owned()));
+        assert_eq!(list.append_batch(rows), Ok(64));
+        for row in 0..64 {
+            assert_eq!(list.manual_change(row, "a"), Ok(true));
+        }
+        let parent = LegacyText::from_units(vec![b'x' as u16; 32_766]);
+        assert!(list.unify_destination_parent_changed(&parent).is_ok());
+        let before = list.clone();
+
+        assert_eq!(
+            list.reset_proposals(),
+            Err(ProposalMutationError::PlannedPathAggregateBudgetExceeded {
+                requested_units: MAX_TOTAL_PLANNED_PATH_UTF16_UNITS + 64,
+                maximum_units: MAX_TOTAL_PLANNED_PATH_UTF16_UNITS,
+            })
+        );
+        assert_eq!(list, before);
+    }
+
+    #[test]
+    fn destination_parent_reset_cannot_cross_the_aggregate_planned_path_boundary() {
+        let mut source = vec![b'x' as u16; 32_766];
+        source.extend([BACKSLASH, b'a' as u16]);
+        let mut list = LegacyList::new();
+        let rows = (0..64)
+            .map(|_| LegacyListItem::new(LegacyText::from_units(source.clone()), false, 0, 0, 0));
+        assert_eq!(list.append_batch(rows), Ok(64));
+        assert!(
+            list.unify_destination_parent_changed(&LegacyText::from(r"D:\target"))
+                .is_ok()
+        );
+        for row in 0..64 {
+            assert_eq!(list.manual_change(row, "aa"), Ok(true));
+        }
+        let before = list.clone();
+
+        assert_eq!(
+            list.reset_destination_parents(),
+            Err(
+                DestinationParentMutationError::PlannedPathAggregateBudgetExceeded {
+                    requested_units: MAX_TOTAL_PLANNED_PATH_UTF16_UNITS + 64,
+                    maximum_units: MAX_TOTAL_PLANNED_PATH_UTF16_UNITS,
+                }
+            )
+        );
+        assert_eq!(list, before);
+    }
+
+    #[test]
     fn reset_destination_parents_is_atomic_when_staging_reports_allocation_failure() {
         let mut list = LegacyList::new();
         assert_eq!(
@@ -2605,34 +2893,5 @@ mod tests {
             Arc::ptr_eq(&items[0].destination_parent, &items[1].destination_parent)
         }));
         assert_eq!(Arc::strong_count(&list.items[0].destination_parent), 10_000);
-    }
-
-    #[test]
-    fn reset_destination_parents_reports_exact_aggregate_budget_without_partial_mutation() {
-        let parent_count =
-            MAX_TOTAL_DESTINATION_PARENT_UTF16_UNITS / MAX_DESTINATION_PARENT_UTF16_UNITS + 1;
-        let rows = (0..parent_count).map(|row| {
-            let mut path = vec![b'x' as u16; MAX_DESTINATION_PARENT_UTF16_UNITS];
-            path[0] = u16::try_from(row).unwrap_or(u16::MAX);
-            path.extend([BACKSLASH, b'a' as u16]);
-            LegacyListItem::new(LegacyText::from_units(path), false, 0, 0, 0)
-        });
-        let mut list = LegacyList::new();
-        assert_eq!(list.append_batch(rows), Ok(parent_count));
-        assert!(
-            list.unify_destination_parent_changed(&LegacyText::from(r"D:\target"))
-                .is_ok()
-        );
-        let before = list.clone();
-        let requested_units = parent_count * MAX_DESTINATION_PARENT_UTF16_UNITS;
-
-        assert_eq!(
-            list.reset_destination_parents(),
-            Err(DestinationParentMutationError::AggregateBudgetExceeded {
-                requested_units,
-                maximum_units: MAX_TOTAL_DESTINATION_PARENT_UTF16_UNITS,
-            })
-        );
-        assert_eq!(list, before);
     }
 }

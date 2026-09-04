@@ -652,7 +652,7 @@ pub(super) fn dispatch_command(
             apply_changes(window, state);
             CommandOutcome::ui(UiEffect::None)
         }
-        RESET => proposal_mutation(state, |model| Ok(model.reset_proposals_changed())),
+        RESET => proposal_mutation(state, LegacyList::reset_proposals_changed),
         RESET_PATH => match state.model.reset_destination_parents() {
             Ok(changed) => model_outcome(state, !changed.is_empty(), UiEffect::AllRowsChanged),
             Err(error) => {

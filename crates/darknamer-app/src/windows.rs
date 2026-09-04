@@ -82,6 +82,7 @@ fn proposal_mutation_error_korean(error: ProposalMutationError) -> &'static str 
         }
         ProposalMutationError::NameBudgetExceeded { .. }
         | ProposalMutationError::AggregateBudgetExceeded { .. }
+        | ProposalMutationError::PlannedPathAggregateBudgetExceeded { .. }
         | ProposalMutationError::ArithmeticOverflow => {
             "변경 결과가 안전 한도를 초과했습니다. 목록은 변경되지 않았습니다. 입력 내용을 줄여 다시 시도하세요."
         }
@@ -95,6 +96,7 @@ fn destination_parent_mutation_error_korean(error: DestinationParentMutationErro
     match error {
         DestinationParentMutationError::ParentBudgetExceeded { .. }
         | DestinationParentMutationError::AggregateBudgetExceeded { .. }
+        | DestinationParentMutationError::PlannedPathAggregateBudgetExceeded { .. }
         | DestinationParentMutationError::ArithmeticOverflow => {
             "대상 폴더 경로가 안전 한도를 초과했습니다. 목록은 변경되지 않았습니다. 더 짧은 경로를 선택해 주세요."
         }
@@ -1067,6 +1069,15 @@ mod tests {
         assert!(budget.contains("목록은 변경되지 않았습니다"));
         assert!(budget.contains("더 짧은 경로"));
 
+        let aggregate = destination_parent_mutation_error_korean(
+            DestinationParentMutationError::PlannedPathAggregateBudgetExceeded {
+                requested_units: 2_097_153,
+                maximum_units: 2_097_152,
+            },
+        );
+        assert!(aggregate.contains("목록은 변경되지 않았습니다"));
+        assert!(aggregate.contains("더 짧은 경로"));
+
         let allocation = destination_parent_mutation_error_korean(
             DestinationParentMutationError::AllocationFailed,
         );
@@ -1223,6 +1234,15 @@ mod tests {
         assert_eq!(
             proposal_mutation_error_korean(ProposalMutationError::AllocationFailed),
             "변경 결과를 준비할 메모리가 부족합니다. 목록은 변경되지 않았습니다. 다른 프로그램을 닫고 다시 시도하세요."
+        );
+        assert_eq!(
+            proposal_mutation_error_korean(
+                ProposalMutationError::PlannedPathAggregateBudgetExceeded {
+                    requested_units: 2_097_153,
+                    maximum_units: 2_097_152,
+                }
+            ),
+            "변경 결과가 안전 한도를 초과했습니다. 목록은 변경되지 않았습니다. 입력 내용을 줄여 다시 시도하세요."
         );
     }
 
