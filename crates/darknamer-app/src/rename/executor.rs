@@ -18,6 +18,8 @@ pub enum ExecuteErrorKind {
     Cancelled,
     /// The planner produced an internally inconsistent dependency graph.
     InvalidSchedule,
+    /// The immutable plan or schedule exceeds its authorized movement scope.
+    UnauthorizedMove,
     /// A source entry no longer matches the planning snapshot.
     StaleSource,
     /// A resolved source or destination parent no longer matches planning.
@@ -649,6 +651,12 @@ impl<'a> RenameExecutor<'a> {
                     kind: ExecuteErrorKind::StaleSource,
                 });
             }
+            if current_source.entry.map(|source| source.kind) != Some(entry.kind) {
+                return Err(ExecuteError {
+                    entry: Some(entry.id),
+                    kind: ExecuteErrorKind::UnauthorizedMove,
+                });
+            }
 
             let current_destination =
                 self.backend
@@ -711,6 +719,14 @@ impl<'a> RenameExecutor<'a> {
                 });
             }
         }
+        for step in schedule {
+            if forward_operation(step).authorization_error().is_some() {
+                return Err(ExecuteError {
+                    entry: Some(step.entry),
+                    kind: ExecuteErrorKind::UnauthorizedMove,
+                });
+            }
+        }
         Ok(())
     }
 
@@ -743,12 +759,14 @@ impl<'a> RenameExecutor<'a> {
             }
             #[cfg(test)]
             super::failpoint::hit(&format!("rollback-prepared-{step_index}"));
-            let operation = RenameOperation::new(
+            let operation = RenameOperation::with_authorization(
                 step.destination.clone(),
                 step.source.clone(),
                 step.identity,
                 step.destination_parent,
                 step.source_parent,
+                step.kind,
+                step.scope,
             );
             if let Err(error) = self.backend.rename_no_replace(&operation) {
                 if error.certainty == MutationCertainty::NotApplied
@@ -828,12 +846,14 @@ impl<'a> RenameExecutor<'a> {
 }
 
 fn forward_operation(step: &ScheduleStep) -> RenameOperation {
-    RenameOperation::new(
+    RenameOperation::with_authorization(
         step.source.clone(),
         step.destination.clone(),
         step.identity,
         step.source_parent,
         step.destination_parent,
+        step.kind,
+        step.scope,
     )
 }
 
@@ -847,6 +867,7 @@ fn journal_step(step: &ScheduleStep) -> JournalStep {
         step.destination_parent,
         step.temporary_phase,
     )
+    .with_move_authorization(step.kind, step.scope)
 }
 
 const fn forward_state(phase: TemporaryPhase) -> RenameState {

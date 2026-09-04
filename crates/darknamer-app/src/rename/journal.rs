@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use darknamer_core::LegacyText;
 
 use super::{
-    AuthorizedJournal, EntryId, EntryIdentity, JournalAuthorization, JournalError, JournalSnapshot,
-    JournalStore, PlanId, TemporaryPhase,
+    AuthorizedJournal, EntryId, EntryIdentity, EntryKind, JournalAuthorization, JournalError,
+    JournalSnapshot, JournalStore, MoveScope, PlanId, TemporaryPhase,
 };
 
 /// Immutable identity-bound primitive step persisted before mutation.
@@ -17,6 +17,8 @@ pub struct JournalStep {
     expected_source: EntryIdentity,
     expected_source_parent: EntryIdentity,
     expected_destination_parent: EntryIdentity,
+    kind: Option<EntryKind>,
+    scope: MoveScope,
     temporary_phase: TemporaryPhase,
 }
 
@@ -39,6 +41,38 @@ impl JournalStep {
             expected_source,
             expected_source_parent,
             expected_destination_parent,
+            kind: Some(EntryKind::File),
+            scope: MoveScope::SameParent,
+            temporary_phase,
+        }
+    }
+
+    /// Replaces the safe default with an explicit immutable move authorization.
+    #[must_use]
+    pub fn with_move_authorization(mut self, kind: EntryKind, scope: MoveScope) -> Self {
+        self.kind = Some(kind);
+        self.scope = scope;
+        self
+    }
+
+    pub(super) fn legacy_same_parent(
+        entry: EntryId,
+        source: LegacyText,
+        destination: LegacyText,
+        expected_source: EntryIdentity,
+        expected_source_parent: EntryIdentity,
+        expected_destination_parent: EntryIdentity,
+        temporary_phase: TemporaryPhase,
+    ) -> Self {
+        Self {
+            entry,
+            source,
+            destination,
+            expected_source,
+            expected_source_parent,
+            expected_destination_parent,
+            kind: None,
+            scope: MoveScope::SameParent,
             temporary_phase,
         }
     }
@@ -77,6 +111,18 @@ impl JournalStep {
     #[must_use]
     pub const fn expected_destination_parent(&self) -> EntryIdentity {
         self.expected_destination_parent
+    }
+
+    /// Returns the filesystem kind authorized for this step.
+    #[must_use]
+    pub const fn kind(&self) -> Option<EntryKind> {
+        self.kind
+    }
+
+    /// Returns the parent-movement scope authorized for this step.
+    #[must_use]
+    pub const fn scope(&self) -> MoveScope {
+        self.scope
     }
 
     /// Returns the temporary-endpoint phase.

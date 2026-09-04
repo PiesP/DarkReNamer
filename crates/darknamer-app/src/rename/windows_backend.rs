@@ -24,11 +24,29 @@ use super::{
 
 const ERROR_FILE_NOT_FOUND: i32 = 2;
 const ERROR_PATH_NOT_FOUND: i32 = 3;
+const ERROR_NOT_SAME_DEVICE: u32 = 17;
 const ERROR_ALREADY_EXISTS: u32 = 183;
 
 /// Windows production backend with handle-relative, identity-bound mutation.
 #[derive(Debug, Default)]
 pub struct WindowsRenameBackend;
+
+impl WindowsRenameBackend {
+    /// Opens and validates one exact destination-parent directory.
+    ///
+    /// All traversal, final-directory, filesystem, case-sensitivity, protocol,
+    /// and identity checks are performed through the retained final directory
+    /// handle before it is released. Volume roots are valid destination
+    /// parents and therefore do not require a synthetic leaf component.
+    pub fn validate_destination_parent(
+        &self,
+        path: &LegacyText,
+    ) -> Result<EntryIdentity, BackendError> {
+        NativeParent::open_legacy(path)
+            .map(|parent| model_identity(parent.identity))
+            .map_err(|error| observe_error(error, BackendOperation::Observe))
+    }
+}
 
 impl RenameBackend for WindowsRenameBackend {
     fn validate_path_environment(&self, path: &LegacyText) -> Result<(), BackendError> {
@@ -119,6 +137,9 @@ impl RenameBackend for WindowsRenameBackend {
     }
 
     fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+        if let Some(error) = operation.authorization_error() {
+            return Err(error);
+        }
         let (source_parent_path, source_leaf) =
             split_absolute_path(operation.source(), BackendOperation::Rename)?;
         let (destination_parent_path, destination_leaf) =
@@ -131,7 +152,6 @@ impl RenameBackend for WindowsRenameBackend {
         let destination_parent_identity = model_identity(destination_parent.identity);
         if source_parent_identity != operation.expected_source_parent()
             || destination_parent_identity != operation.expected_destination_parent()
-            || source_parent_identity != destination_parent_identity
         {
             return Err(BackendError {
                 operation: BackendOperation::Rename,
@@ -148,6 +168,18 @@ impl RenameBackend for WindowsRenameBackend {
             return Err(BackendError {
                 operation: BackendOperation::Rename,
                 code: 4390,
+                certainty: MutationCertainty::NotApplied,
+            });
+        }
+        let source_kind = if metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            EntryKind::Directory
+        } else {
+            EntryKind::File
+        };
+        if operation.kind().is_some_and(|kind| source_kind != kind) {
+            return Err(BackendError {
+                operation: BackendOperation::Rename,
+                code: 1168,
                 certainty: MutationCertainty::NotApplied,
             });
         }
@@ -173,6 +205,14 @@ impl RenameBackend for WindowsRenameBackend {
             Err(error) => {
                 return Err(mutation_error(error, MutationCertainty::NotApplied));
             }
+        }
+
+        if source_parent_identity.volume() != destination_parent_identity.volume() {
+            return Err(BackendError {
+                operation: BackendOperation::Rename,
+                code: ERROR_NOT_SAME_DEVICE,
+                certainty: MutationCertainty::NotApplied,
+            });
         }
 
         rename_noreplace(&source, destination_parent.file(), destination_leaf.units())

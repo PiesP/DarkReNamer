@@ -2,9 +2,9 @@ use darknamer_app::rename::{
     AppendCertainty, AuthorizedJournal, BackendError, BackendOperation, EntryId, EntryIdentity,
     EntryKind, ExecutionOutcome, JournalAuthorization, JournalDirection, JournalError,
     JournalRecord, JournalSnapshot, JournalStep, JournalStore, JournalTerminal, MemoryBackend,
-    MemoryJournal, ModelRevision, MutationCertainty, PathKey, PathSnapshot, PlanId, PlanRequest,
-    RecoveryBlockKind, RecoveryFailure, RecoveryOutcome, RenameBackend, RenameExecutor,
-    RenameIntent, RenameOperation, RenamePlanner, RenameRecovery, TemporaryPhase,
+    MemoryJournal, ModelRevision, MoveScope, MutationCertainty, PathKey, PathSnapshot, PlanId,
+    PlanRequest, RecoveryBlockKind, RecoveryFailure, RecoveryOutcome, RenameBackend,
+    RenameExecutor, RenameIntent, RenameOperation, RenamePlanner, RenameRecovery, TemporaryPhase,
 };
 use darknamer_core::LegacyText;
 use std::cell::RefCell;
@@ -46,6 +46,99 @@ fn prepared_forward_observed_at_destination_rolls_back_to_original()
     );
     assert_eq!(backend.file_id("C:\\work\\a.txt"), Some(1));
     assert_eq!(backend.file_id("C:\\work\\b.txt"), None);
+    Ok(())
+}
+
+#[test]
+fn prepared_cross_parent_forward_recovers_to_the_original_parent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut backend = MemoryBackend::new().with_file("C:\\source\\a.txt", 1);
+    let plan = RenamePlanner::new(&backend).plan(PlanRequest::with_scope(
+        ModelRevision::new(1),
+        vec![RenameIntent::new(
+            EntryId::new(0),
+            "C:\\source\\a.txt",
+            "C:\\target",
+            "a.txt",
+            EntryKind::File,
+        )],
+        MoveScope::SameVolumeFilesOnly,
+    ))?;
+    let id = plan.id();
+    let revision = plan.revision();
+    let confirmed = plan.confirm_presented(id, revision)?;
+    backend.fail_ambiguous_move_on(1, 995);
+    let mut execution_journal = MemoryJournal::new();
+    let report = RenameExecutor::new(&mut backend, &mut execution_journal).execute(confirmed)?;
+    assert!(matches!(
+        report.outcome(),
+        ExecutionOutcome::RecoveryRequired { .. }
+    ));
+    let mut recovery_journal = MemoryJournal::from_records(execution_journal.records().to_vec());
+
+    let outcome = RenameRecovery::new(&mut backend, &mut recovery_journal).rollback();
+
+    assert_eq!(
+        outcome,
+        RecoveryOutcome::Recovered {
+            plan: id,
+            restored_steps: 1,
+        }
+    );
+    assert_eq!(backend.file_id("C:\\source\\a.txt"), Some(1));
+    assert_eq!(backend.file_id("C:\\target\\a.txt"), None);
+    Ok(())
+}
+
+#[test]
+fn recovery_rejects_unauthorized_cross_parent_manifest_without_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut backend = MemoryBackend::new()
+        .with_directory("C:\\target\\folder", 1)
+        .with_parent_identity("C:\\source", EntryIdentity::new(1, 10))
+        .with_parent_identity("C:\\target", EntryIdentity::new(1, 20));
+    let records = vec![
+        JournalRecord::Intent {
+            plan: PlanId::from_fingerprint(91),
+            steps: vec![
+                JournalStep::new(
+                    EntryId::new(0),
+                    LegacyText::from("C:\\source\\folder"),
+                    LegacyText::from("C:\\target\\folder"),
+                    EntryIdentity::new(1, 1),
+                    EntryIdentity::new(1, 10),
+                    EntryIdentity::new(1, 20),
+                    TemporaryPhase::None,
+                )
+                .with_move_authorization(EntryKind::Directory, MoveScope::SameVolumeFilesOnly),
+            ]
+            .into_boxed_slice(),
+        },
+        JournalRecord::Prepared {
+            step: 0,
+            direction: JournalDirection::Forward,
+        },
+        JournalRecord::Completed {
+            step: 0,
+            direction: JournalDirection::Forward,
+        },
+    ];
+    let mut journal = MemoryJournal::from_records(records);
+    let record_count = journal.records().len();
+
+    let outcome = RenameRecovery::new(&mut backend, &mut journal).rollback();
+
+    assert!(matches!(
+        outcome,
+        RecoveryOutcome::Blocked {
+            plan: Some(plan),
+            reason: RecoveryBlockKind::UnauthorizedOperation,
+        } if plan == PlanId::from_fingerprint(91)
+    ));
+    assert_eq!(backend.file_id("C:\\source\\folder"), None);
+    assert_eq!(backend.file_id("C:\\target\\folder"), Some(1));
+    assert_eq!(backend.mutation_count(), 0);
+    assert_eq!(journal.records().len(), record_count);
     Ok(())
 }
 

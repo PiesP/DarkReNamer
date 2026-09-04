@@ -18,10 +18,10 @@ use std::time::{Duration, Instant};
 use darknamer_app::rename::{
     BackendError, BackendOperation, EntryId, EntryKind, ExecuteErrorKind, ExecutionOutcome,
     FileJournal, FileJournalErrorKind, JournalDirection, JournalError, JournalRoot, JournalStep,
-    JournalStore, JournalTerminal, MemoryBackend, MemoryJournal, ModelRevision, MutationCertainty,
-    PathKey, PathSnapshot, PlanId, PlanIssueKind, PlanRequest, RenameBackend, RenameExecutor,
-    RenameIntent, RenameOperation, RenamePlanner, WindowsRenameBackend, apply_execution_report,
-    build_plan_request, preflight_plan, process_is_elevated,
+    JournalStore, JournalTerminal, MemoryBackend, MemoryJournal, ModelRevision, MoveScope,
+    MutationCertainty, PathKey, PathSnapshot, PlanId, PlanIssueKind, PlanRequest, RenameBackend,
+    RenameExecutor, RenameIntent, RenameOperation, RenamePlanner, WindowsRenameBackend,
+    apply_execution_report, build_plan_request, preflight_plan, process_is_elevated,
 };
 use darknamer_core::{LegacyList, LegacyListItem, LegacyText, validate_windows_leaf_name};
 
@@ -902,6 +902,33 @@ fn journal_root_rejects_unc_before_filesystem_access() {
 }
 
 #[test]
+fn exact_destination_parent_validation_accepts_nested_directory_and_volume_root()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let nested = directory.path().join("nested");
+    fs::create_dir(&nested)?;
+    let volume_root = directory
+        .path()
+        .ancestors()
+        .last()
+        .ok_or_else(|| std::io::Error::other("temporary path has no volume root"))?;
+    let backend = WindowsRenameBackend;
+
+    let nested_identity = backend.validate_destination_parent(&legacy_path(&nested))?;
+    let root_identity = backend.validate_destination_parent(&legacy_path(volume_root))?;
+
+    assert_ne!(nested_identity.file_id(), 0);
+    assert_ne!(root_identity.file_id(), 0);
+    let missing = directory.path().join("missing");
+    assert!(
+        backend
+            .validate_destination_parent(&legacy_path(&missing))
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn occupied_destination_and_relative_path_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let source = directory.path().join("a.txt");
@@ -970,6 +997,140 @@ fn case_only_and_swap_execute_through_handle_relative_moves()
     assert_eq!(report.outcome(), &ExecutionOutcome::Completed);
     assert_eq!(fs::read(&left)?, b"right");
     assert_eq!(fs::read(&right)?, b"left");
+    Ok(())
+}
+
+#[test]
+fn same_volume_cross_parent_file_move_executes_through_destination_parent_handle()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let source_parent = directory.path().join("source");
+    let destination_parent = directory.path().join("destination");
+    fs::create_dir(&source_parent)?;
+    fs::create_dir(&destination_parent)?;
+    let source = source_parent.join("a.txt");
+    fs::write(&source, b"move")?;
+    if !case_query_supported(&source_parent)? || !case_query_supported(&destination_parent)? {
+        return Ok(());
+    }
+    let mut backend = WindowsRenameBackend;
+    let plan = RenamePlanner::new(&backend).plan(PlanRequest::with_scope(
+        ModelRevision::new(1),
+        vec![intent(0, &source, &destination_parent, "renamed.txt")],
+        MoveScope::SameVolumeFilesOnly,
+    ))?;
+    let id = plan.id();
+    let revision = plan.revision();
+    let mut journal = MemoryJournal::new();
+
+    let report = RenameExecutor::new(&mut backend, &mut journal)
+        .execute(plan.confirm_presented(id, revision)?)?;
+
+    assert_eq!(report.outcome(), &ExecutionOutcome::Completed);
+    assert!(!source.exists());
+    assert_eq!(fs::read(destination_parent.join("renamed.txt"))?, b"move");
+    Ok(())
+}
+
+#[test]
+fn replaced_cross_parent_destination_is_rejected_before_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let source_parent = directory.path().join("source");
+    let destination_parent = directory.path().join("destination");
+    fs::create_dir(&source_parent)?;
+    fs::create_dir(&destination_parent)?;
+    let source = source_parent.join("a.txt");
+    fs::write(&source, b"keep")?;
+    if !case_query_supported(&source_parent)? || !case_query_supported(&destination_parent)? {
+        return Ok(());
+    }
+    let mut backend = WindowsRenameBackend;
+    let plan = RenamePlanner::new(&backend).plan(PlanRequest::with_scope(
+        ModelRevision::new(1),
+        vec![intent(0, &source, &destination_parent, "a.txt")],
+        MoveScope::SameVolumeFilesOnly,
+    ))?;
+    let displaced = directory.path().join("old-destination");
+    fs::rename(&destination_parent, &displaced)?;
+    fs::create_dir(&destination_parent)?;
+    let id = plan.id();
+    let revision = plan.revision();
+    let mut journal = MemoryJournal::new();
+
+    let error = RenameExecutor::new(&mut backend, &mut journal)
+        .execute(plan.confirm_presented(id, revision)?)
+        .err()
+        .ok_or_else(|| std::io::Error::other("replaced destination parent was executed"))?;
+
+    assert_eq!(error.kind, ExecuteErrorKind::StaleParent);
+    assert_eq!(fs::read(&source)?, b"keep");
+    assert!(!destination_parent.join("a.txt").exists());
+    assert!(journal.records().is_empty());
+    Ok(())
+}
+
+#[test]
+fn windows_primitive_rejects_default_cross_parent_and_mislabeled_directory()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let source_parent = directory.path().join("source");
+    let destination_parent = directory.path().join("destination");
+    fs::create_dir(&source_parent)?;
+    fs::create_dir(&destination_parent)?;
+    if !case_query_supported(&source_parent)? || !case_query_supported(&destination_parent)? {
+        return Ok(());
+    }
+    let source_file = source_parent.join("a.txt");
+    let destination_file = destination_parent.join("a.txt");
+    fs::write(&source_file, b"keep")?;
+    let mut backend = WindowsRenameBackend;
+    let source_snapshot = backend.observe(&legacy_path(&source_file))?;
+    let destination_snapshot = backend.observe(&legacy_path(&destination_file))?;
+    let default_operation = RenameOperation::new(
+        legacy_path(&source_file),
+        legacy_path(&destination_file),
+        source_snapshot
+            .entry
+            .ok_or_else(|| std::io::Error::other("test file missing"))?
+            .identity,
+        source_snapshot.parent,
+        destination_snapshot.parent,
+    );
+
+    let error = backend
+        .rename_no_replace(&default_operation)
+        .err()
+        .ok_or_else(|| std::io::Error::other("default primitive moved across parents"))?;
+    assert_eq!(error.certainty, MutationCertainty::NotApplied);
+    assert_eq!(fs::read(&source_file)?, b"keep");
+    assert!(!destination_file.exists());
+
+    let source_directory = source_parent.join("folder");
+    let destination_directory = destination_parent.join("folder");
+    fs::create_dir(&source_directory)?;
+    let source_snapshot = backend.observe(&legacy_path(&source_directory))?;
+    let destination_snapshot = backend.observe(&legacy_path(&destination_directory))?;
+    let mislabeled_operation = RenameOperation::with_authorization(
+        legacy_path(&source_directory),
+        legacy_path(&destination_directory),
+        source_snapshot
+            .entry
+            .ok_or_else(|| std::io::Error::other("test directory missing"))?
+            .identity,
+        source_snapshot.parent,
+        destination_snapshot.parent,
+        EntryKind::File,
+        MoveScope::SameVolumeFilesOnly,
+    );
+
+    let error = backend
+        .rename_no_replace(&mislabeled_operation)
+        .err()
+        .ok_or_else(|| std::io::Error::other("mislabeled directory primitive succeeded"))?;
+    assert_eq!(error.certainty, MutationCertainty::NotApplied);
+    assert!(source_directory.is_dir());
+    assert!(!destination_directory.exists());
     Ok(())
 }
 
@@ -1244,6 +1405,16 @@ fn case_sensitive_parent_is_explicitly_unsupported_when_platform_allows_fixture(
     fs::write(&source, b"a")?;
 
     let backend = WindowsRenameBackend;
+    let mut model = LegacyList::new();
+    assert_eq!(
+        model.append(LegacyListItem::new(legacy_path(&source), false, 1, 2, 3,)),
+        Ok(true)
+    );
+    let model_before = model.clone();
+    let revision = ModelRevision::new(11);
+    let destination_parent_error = backend
+        .validate_destination_parent(&legacy_path(&parent))
+        .err();
     let environment_error = backend
         .validate_path_environment(&legacy_path(&source))
         .err();
@@ -1260,6 +1431,9 @@ fn case_sensitive_parent_is_explicitly_unsupported_when_platform_allows_fixture(
     assert!(directory.path().is_dir());
 
     assert_eq!(environment_error.map(|error| error.code), Some(50));
+    assert_eq!(destination_parent_error.map(|error| error.code), Some(50));
+    assert_eq!(model, model_before);
+    assert_eq!(revision, ModelRevision::new(11));
     assert!(plan_error.is_some_and(|error| {
         error
             .issues()

@@ -2,9 +2,11 @@ use super::*;
 
 const LIST_VIEW_NOTIFICATION_SUBCLASS_ID: usize = 1;
 const STATUS_COLUMN_TEXT_PADDING_DIP: i32 = 24;
-const STATUS_COLUMN_TEXT_SAMPLES: [&str; 5] = [
+const STATUS_COLUMN_TEXT_SAMPLES: [&str; 7] = [
     NATIVE_STATUS_COLUMN.label,
-    "변경 예정",
+    "이름 변경 예정",
+    "이동 예정",
+    "이동·이름 변경 예정",
     "주의: 이름 본체",
     "차단: 이름",
     "차단: 충돌",
@@ -581,7 +583,7 @@ pub(super) fn handle_list_custom_draw(state: &AppState, lparam: LPARAM) -> Optio
     if selected {
         return Some(CDRF_DODEFAULT as LRESULT);
     }
-    if item.current_name() == item.proposed_name() {
+    if !item.planned_change_kind().renames() {
         return Some(CDRF_DODEFAULT as LRESULT);
     }
     // Resolve cached system state only after every cheaper semantic/native
@@ -647,17 +649,18 @@ pub(super) fn handle_list_infotip(state: &AppState, lparam: LPARAM) -> bool {
     let Some(item) = state.model.items().get(row) else {
         return true;
     };
+    let change = item.planned_change_kind();
     let preview = match state.preview_issue_cache.issue(row) {
         PreviewRowIssue::InvalidName(error) => format!(
             "잘못된 대상 이름: {} · Windows에서 사용할 수 있는 이름으로 수정하세요.",
             windows_leaf_name_error_korean(error)
         ),
         PreviewRowIssue::DuplicateDestination => {
-            "대상 이름 충돌 · 같은 폴더의 대상 이름과 다르게 수정하세요.".to_owned()
+            "대상 경로 충돌 · 이름이나 대상 위치를 수정하세요.".to_owned()
         }
         PreviewRowIssue::EmptyStem => "이름 본체가 비어 있음 · 변경 전 확인 필요".to_owned(),
-        PreviewRowIssue::None if item.current_name() != item.proposed_name() => {
-            "변경 예정".to_owned()
+        PreviewRowIssue::None if change.is_changed() => {
+            preview_status_label(PreviewRowIssue::None, change).to_owned()
         }
         PreviewRowIssue::None => "변경 없음".to_owned(),
     };
@@ -841,6 +844,7 @@ pub(super) fn refresh_proposal_rows(state: &mut AppState, changed: &[usize]) {
                 item.current_name(),
                 item.proposed_name(),
                 item.is_directory(),
+                item.planned_change_kind(),
             ),
             preview_destination_key,
         );
@@ -903,7 +907,7 @@ fn status_delta_rows(state: &AppState) -> Option<Box<[usize]>> {
         state.model.items().iter().enumerate().map(|(row, item)| {
             (
                 state.preview_issue_cache.issue(row),
-                item.current_name() != item.proposed_name(),
+                item.planned_change_kind(),
             )
         }),
     )
@@ -916,7 +920,7 @@ fn update_status_rows(state: &mut AppState, rows: &[usize]) -> bool {
         };
         let value = LegacyText::from(preview_status_label(
             state.preview_issue_cache.issue(row),
-            item.current_name() != item.proposed_name(),
+            item.planned_change_kind(),
         ));
         if state.rendered_rows[row].values[NATIVE_STATUS_COLUMN_INDEX] == value {
             continue;
@@ -935,7 +939,7 @@ fn refresh_preview_count_cache(state: &mut AppState) {
             .model
             .items()
             .iter()
-            .map(|item| (item.current_name(), item.proposed_name())),
+            .map(LegacyListItem::planned_change_kind),
     );
     state.preview_issue_cache.refresh_by(
         state.model.items().iter().map(|item| {
@@ -944,6 +948,7 @@ fn refresh_preview_count_cache(state: &mut AppState) {
                 item.current_name(),
                 item.proposed_name(),
                 item.is_directory(),
+                item.planned_change_kind(),
             )
         }),
         preview_destination_key,
@@ -986,10 +991,7 @@ fn rendered_row(
             LegacyText::from(format_iec_file_size(item.actual_size())),
             format_filetime(item.modified()),
             format_filetime(item.created()),
-            LegacyText::from(preview_status_label(
-                issue,
-                item.current_name() != item.proposed_name(),
-            )),
+            LegacyText::from(preview_status_label(issue, item.planned_change_kind())),
         ],
         icon: file_icon_index(icon_cache, item),
     }

@@ -16,7 +16,8 @@ The UI may display paths but does not authorize mutation by string alone.
 Planning freezes source, entry, and parent identities. The Windows backend
 reopens and verifies those identities and performs handle-relative,
 no-replacement renames. Unsupported network, device, case-sensitive, elevated,
-cross-parent, reparse, and overlapping-source environments fail closed.
+cross-volume, reparse, directory-move, and overlapping-source environments fail
+closed.
 
 The v0.1 release-validated scope is Windows 10 and Windows 11 on x64, with a
 local, non-elevated process operating on same-parent, non-reparse entries in a
@@ -24,6 +25,26 @@ case-insensitive NTFS directory. Filesystems other than NTFS are unsupported
 and unvalidated for v0.1. That limitation belongs to the release evidence
 contract and the runtime boundary: DarkReNamer queries the filesystem from the
 retained final directory handle and fails closed unless it reports NTFS.
+
+Safe v2 retains `SameParent` as the authority for ordinary name changes. A plan
+request selects `SameVolumeFilesOnly` only when the current model contains a
+destination-parent proposal. That scope accepts regular files only, requires
+the separately observed source and destination parents to be on the same local
+NTFS volume, and preserves exact parent and file-identity checks before the
+no-replace operation. The destination folder must already exist. The runtime
+does not create folders, replace an occupied destination, merge directories, or
+fall back to copy-and-delete.
+
+Path unification is a proposal-only UI operation until Apply. It operates on all
+rows and is unavailable when any row is a directory. The folder dialog releases
+the UI state lease and, after it closes, rechecks the owner session, model
+revision, close state, recovery lock, mutation lock, and workers before changing
+the model atomically. Cancellation, stale state, an invalid selected folder, or
+a bounded-allocation failure leaves every row and the revision unchanged. A
+successful change increments the revision once and fully rebuilds path,
+collision, status, and Apply-readiness previews. The separate path-reset command
+restores each source parent while retaining proposed names; Ctrl+Z retains its
+name-only compatibility behavior.
 
 Appearance preferences are non-authorizing input. Theme, command-rail density,
 preview emphasis, separators, tint, and empty-state copy may change presentation
@@ -68,6 +89,12 @@ Any nonterminal active state
   -> Rollback Completed or NotApplied
   -> RolledBack
 ```
+
+Journal format v2 persists the entry kind and move scope needed to recover an
+authorized same-volume file move. Existing format-v1 journals remain readable
+as legacy `SameParent` operations; decoding old recovery evidence never grants
+it cross-parent authority. Rollback continues to reverse the exact source and
+destination paths and their frozen parent identities.
 
 No filesystem mutation may begin before the complete Intent is durable and the
 candidate has atomically become the active journal. An append or rename whose
@@ -135,6 +162,12 @@ tests terminate after each durable/mutation boundary and restart through the
 production recovery path. They assert expected original or committed names,
 unchanged sentinel files, no temporary names, and either terminal cleanup or an
 explicit recovery lock.
+
+The Safe v2 cross-parent path also has portable planner, schedule, journal,
+recovery, model, and deferred-dialog regression coverage and is cross-compiled
+for the Windows target. Those checks are not native Windows execution evidence.
+Real Windows confirmation, common-dialog, filesystem, recovery, and interaction
+results must remain `not-run` until source-bound acceptance evidence is recorded.
 
 Capability-dependent Windows tests may report a structured local skip through
 `tests/support/windows_capabilities.rs`. The hosted Windows and prerelease gates

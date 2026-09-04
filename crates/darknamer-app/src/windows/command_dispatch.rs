@@ -652,7 +652,14 @@ pub(super) fn dispatch_command(
             apply_changes(window, state);
             CommandOutcome::ui(UiEffect::None)
         }
-        RESET => proposal_mutation(state, |model| Ok(model.reset_proposals_changed())),
+        RESET => proposal_mutation(state, LegacyList::reset_proposals_changed),
+        RESET_PATH => match state.model.reset_destination_parents() {
+            Ok(changed) => model_outcome(state, !changed.is_empty(), UiEffect::AllRowsChanged),
+            Err(error) => {
+                state.set_transient_status(destination_parent_mutation_error_korean(error));
+                CommandOutcome::ui(UiEffect::None)
+            }
+        },
         CLEAR_LIST => {
             let changed = state.model.clear();
             model_outcome(state, changed, UiEffect::AllRowsChanged)
@@ -709,8 +716,8 @@ pub(super) fn dispatch_command(
         UNIFY_PATH => {
             message(
                 window,
-                safe_mode_unify_path_message(),
-                "DarkReNamer - Safe 모드",
+                "경로 통일은 일반 파일만 있는 목록에서 사용할 수 있습니다. 폴더 행을 제거한 뒤 다시 시도하세요.",
+                "DarkReNamer - 경로 통일",
             );
             CommandOutcome::ui(UiEffect::None)
         }
@@ -1074,6 +1081,12 @@ fn prepare_file_dialog_command(
         },
         IMPORT_NAMES => PreparedFileDialogKind::ImportNames,
         IMPORT_PATHS => PreparedFileDialogKind::ImportPaths,
+        UNIFY_PATH
+            if !state.model.is_empty()
+                && !state.model.items().iter().any(LegacyListItem::is_directory) =>
+        {
+            PreparedFileDialogKind::UnifyDestinationParent
+        }
         _ => return None,
     };
     state.next_prompt_id = state.next_prompt_id.wrapping_add(1).max(1);
@@ -1116,6 +1129,26 @@ fn run_prepared_file_dialog(
     dialog: PreparedFileDialog,
     select_file_dialog: impl FnOnce(HWND, PreparedFileDialogKind) -> PreparedFileDialogSelection,
 ) {
+    run_prepared_file_dialog_with_destination_validation(
+        window,
+        dialog,
+        select_file_dialog,
+        |destination_parent| {
+            WindowsRenameBackend
+                .validate_destination_parent(destination_parent)
+                .map(|_| ())
+        },
+        message,
+    );
+}
+
+pub(super) fn run_prepared_file_dialog_with_destination_validation(
+    window: HWND,
+    dialog: PreparedFileDialog,
+    select_file_dialog: impl FnOnce(HWND, PreparedFileDialogKind) -> PreparedFileDialogSelection,
+    validate_destination_parent: impl FnOnce(&LegacyText) -> Result<(), crate::rename::BackendError>,
+    mut report_error: impl FnMut(HWND, &str, &str),
+) {
     let session = dialog.session;
     if !file_dialog_session_is_current(window, session) {
         let _ = finish_file_dialog_session(window, session, FileDialogCompletion::Accept, |_| ());
@@ -1144,6 +1177,55 @@ fn run_prepared_file_dialog(
             );
             if let Some(Err(error)) = result {
                 report_admission_start_error(window, &error);
+            }
+        }
+        PreparedFileDialogSelection::UnifyDestinationParent(path) => {
+            if !file_dialog_session_is_current(window, session) {
+                let _ = finish_file_dialog_session(
+                    window,
+                    session,
+                    FileDialogCompletion::Accept,
+                    |_| (),
+                );
+                return;
+            }
+            let destination_parent = legacy_path(&path);
+            let validation_error = validate_destination_parent(&destination_parent)
+                .err()
+                .map(|error| {
+                    format!(
+                    "선택한 대상 폴더를 로컬 NTFS 안전 범위에서 확인하지 못했습니다. 목록은 변경되지 않았습니다. 다른 폴더를 선택해 주세요. ({error})"
+                )
+                });
+            if let Some(error) = validation_error {
+                if finish_file_dialog_session(window, session, FileDialogCompletion::Accept, |_| ())
+                    .is_some()
+                {
+                    report_error(window, &error, "DarkReNamer - 경로 통일");
+                }
+                return;
+            }
+            let result = finish_file_dialog_session(
+                window,
+                session,
+                FileDialogCompletion::Accept,
+                |state| {
+                    state
+                        .model
+                        .unify_destination_parent_changed(&destination_parent)
+                        .map(|changed| {
+                            let outcome =
+                                model_outcome(state, !changed.is_empty(), UiEffect::AllRowsChanged);
+                            apply_command_outcome(window, state, outcome, None);
+                        })
+                },
+            );
+            if let Some(Err(error)) = result {
+                report_error(
+                    window,
+                    destination_parent_mutation_error_korean(error),
+                    "DarkReNamer - 경로 통일",
+                );
             }
         }
         PreparedFileDialogSelection::SaveText { path, text } => {

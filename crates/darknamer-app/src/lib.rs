@@ -1912,9 +1912,13 @@ pub(crate) const fn destructive_prompt_choice(
 
 /// Non-authorizing counts shown before an exact rename plan is confirmed.
 #[cfg(any(windows, test))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ApplyConfirmationSummary {
     logical_changed: usize,
+    rename_only: usize,
+    move_only: usize,
+    move_and_rename: usize,
+    common_destination_parent: Option<darknamer_core::LegacyText>,
     case_only: usize,
     temporary_groups: usize,
     primitive_steps: usize,
@@ -1932,26 +1936,70 @@ impl ApplyConfirmationSummary {
             &darknamer_core::LegacyText,
         ) -> bool,
     ) -> Option<Self> {
-        let case_only = plan
-            .rows()
-            .iter()
-            .filter(|row| paths_equivalent(row.source(), row.destination()))
-            .count();
-        Self::from_counts(plan.changed_count(), case_only, primitive_steps)
+        let mut rename_only = 0;
+        let mut move_only = 0;
+        let mut move_and_rename = 0;
+        let mut case_only = 0;
+        let mut common_destination_parent = None;
+        let mut destination_parents_match = true;
+        for row in plan.rows() {
+            let (source_parent, source_leaf) = split_windows_path(row.source());
+            let (destination_parent, destination_leaf) = split_windows_path(row.destination());
+            let source_parent = darknamer_core::LegacyText::from_units(source_parent.to_vec());
+            let destination_parent =
+                darknamer_core::LegacyText::from_units(destination_parent.to_vec());
+            let moved = !paths_equivalent(&source_parent, &destination_parent);
+            let renamed = source_leaf != destination_leaf;
+            match (moved, renamed) {
+                (false, true) => rename_only += 1,
+                (true, false) => move_only += 1,
+                (true, true) => move_and_rename += 1,
+                (false, false) => return None,
+            }
+            if paths_equivalent(row.source(), row.destination()) {
+                case_only += 1;
+            }
+            match &common_destination_parent {
+                None => common_destination_parent = Some(destination_parent),
+                Some(common) if common == &destination_parent => {}
+                Some(_) => destination_parents_match = false,
+            }
+        }
+        if !destination_parents_match {
+            common_destination_parent = None;
+        }
+        Self::from_counts(
+            rename_only,
+            move_only,
+            move_and_rename,
+            common_destination_parent,
+            case_only,
+            primitive_steps,
+        )
     }
 
     /// Builds a summary only when the scheduler counts are internally consistent.
     #[must_use]
-    pub(crate) const fn from_counts(
-        logical_changed: usize,
+    pub(crate) fn from_counts(
+        rename_only: usize,
+        move_only: usize,
+        move_and_rename: usize,
+        common_destination_parent: Option<darknamer_core::LegacyText>,
         case_only: usize,
         primitive_steps: usize,
     ) -> Option<Self> {
+        let logical_changed = rename_only
+            .checked_add(move_only)?
+            .checked_add(move_and_rename)?;
         if case_only > logical_changed || primitive_steps < logical_changed {
             return None;
         }
         Some(Self {
             logical_changed,
+            rename_only,
+            move_only,
+            move_and_rename,
+            common_destination_parent,
             case_only,
             temporary_groups: primitive_steps - logical_changed,
             primitive_steps,
@@ -1959,22 +2007,22 @@ impl ApplyConfirmationSummary {
     }
 
     #[must_use]
-    pub(crate) const fn logical_changed(self) -> usize {
+    pub(crate) const fn logical_changed(&self) -> usize {
         self.logical_changed
     }
 
     #[must_use]
-    pub(crate) const fn case_only(self) -> usize {
+    pub(crate) const fn case_only(&self) -> usize {
         self.case_only
     }
 
     #[must_use]
-    pub(crate) const fn cycle_groups(self) -> usize {
+    pub(crate) const fn cycle_groups(&self) -> usize {
         self.temporary_groups.saturating_sub(self.case_only)
     }
 
     #[must_use]
-    pub(crate) const fn primitive_steps(self) -> usize {
+    pub(crate) const fn primitive_steps(&self) -> usize {
         self.primitive_steps
     }
 }
@@ -1982,13 +2030,38 @@ impl ApplyConfirmationSummary {
 #[cfg(any(windows, test))]
 #[must_use]
 pub(crate) fn apply_confirmation_primary(summary: ApplyConfirmationSummary) -> String {
-    format!(
-        "논리적 변경: {}개\n대소문자만 변경: {}개\n순환 변경 그룹: {}개\n파일 시스템 변경 단계: {}개",
+    let mut text = format!(
+        "논리적 변경: {}개\n이름만 변경: {}개\n이동만: {}개\n이동 및 이름 변경: {}개\n대소문자만 변경: {}개\n순환 변경 그룹: {}개\n파일 시스템 변경 단계: {}개",
         summary.logical_changed(),
+        summary.rename_only,
+        summary.move_only,
+        summary.move_and_rename,
         summary.case_only(),
         summary.cycle_groups(),
         summary.primitive_steps(),
-    )
+    );
+    if let Some(parent) = summary.common_destination_parent {
+        text.push_str("\n대상 폴더: ");
+        text.push_str(&parent.to_string_lossy());
+    }
+    text.push_str("\n대상 덮어쓰기: 허용하지 않음");
+    text
+}
+
+#[cfg(any(windows, test))]
+fn split_windows_path(path: &darknamer_core::LegacyText) -> (&[u16], &[u16]) {
+    let split = path
+        .units()
+        .iter()
+        .rposition(|unit| *unit == u16::from(b'\\') || *unit == u16::from(b'/'));
+    split.map_or((&[], path.units()), |index| {
+        let parent_end = if index > 0 && path.units()[index - 1] == u16::from(b':') {
+            index + 1
+        } else {
+            index
+        };
+        (&path.units()[..parent_end], &path.units()[index + 1..])
+    })
 }
 
 #[cfg(any(windows, test))]
@@ -3333,6 +3406,9 @@ pub const SHOW_SIZE: CommandId = 0x8021;
 pub const SHOW_MODIFIED: CommandId = 0x8022;
 pub const SHOW_CREATED: CommandId = 0x8023;
 pub const VERSION: CommandId = 0x8024;
+/// Restores proposed destination parents without changing proposed names.
+pub const RESET_PATH: CommandId = 0x8025;
+pub const LAST_COMMAND: CommandId = RESET_PATH;
 pub(crate) const EXIT_COMMAND: CommandId = 2;
 pub(crate) const DELETE_SELECTED_COMMAND: CommandId = 0xFFFF;
 
@@ -3480,7 +3556,7 @@ macro_rules! command_ui_spec {
 }
 
 /// Complete native UI command catalog in stable resource-ID order.
-pub const COMMAND_UI_SPECS: [CommandUiSpec; 34] = [
+pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     command_ui_spec!(
         APPLY,
         rail(RailSide::Left, 0, 0),
@@ -3694,12 +3770,12 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 34] = [
         None,
         "경로\n통일",
         menu(MenuGroup::Tools, 4, 2),
-        "경로 통일하기 (미지원)",
-        "경로 통일하기 (미지원)",
+        "경로 통일하기...",
+        "경로 통일하기",
         None,
-        Never,
-        None,
-        NoRows
+        Rows,
+        Model,
+        AllRows
     ),
     command_ui_spec!(
         EXT_DELETE,
@@ -3941,9 +4017,21 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 34] = [
         None,
         NoRows
     ),
+    command_ui_spec!(
+        RESET_PATH,
+        None,
+        "원래 위치로",
+        menu(MenuGroup::Tools, 4, 3),
+        "경로 변경 취소",
+        "원래 위치로",
+        None,
+        Rows,
+        Model,
+        AllRows
+    ),
 ];
 
-/// Legacy shell accelerators whose commands are outside APPLY..VERSION.
+/// Legacy shell accelerators whose commands are outside APPLY..LAST_COMMAND.
 pub const LEGACY_AUXILIARY_SHORTCUTS: [LegacyCommandShortcut; 2] = [
     LegacyCommandShortcut {
         command: DELETE_SELECTED_COMMAND,
@@ -4295,13 +4383,17 @@ mod tests {
             SHOW_MODIFIED,
             SHOW_CREATED,
             VERSION,
+            RESET_PATH,
         ];
         assert_eq!(ids, core::array::from_fn(|index| 0x8003 + index as u16));
     }
 
     #[test]
     fn command_catalog_is_complete_unique_and_resource_ordered() {
-        assert_eq!(COMMAND_UI_SPECS.len(), usize::from(VERSION - APPLY + 1));
+        assert_eq!(
+            COMMAND_UI_SPECS.len(),
+            usize::from(LAST_COMMAND - APPLY + 1)
+        );
         assert_eq!(
             COMMAND_UI_SPECS.map(|spec| spec.id),
             core::array::from_fn(|index| APPLY + index as u16)
@@ -4310,7 +4402,7 @@ mod tests {
             assert_eq!(command_ui_spec(spec.id), Some(spec));
         }
         assert!(command_ui_spec(APPLY - 1).is_none());
-        assert!(command_ui_spec(VERSION + 1).is_none());
+        assert!(command_ui_spec(LAST_COMMAND + 1).is_none());
     }
 
     #[test]
@@ -4346,6 +4438,7 @@ mod tests {
             assert!(placements.windows(2).all(|pair| pair[0] < pair[1]));
         }
         assert_eq!(command_ui_spec(UNIFY_PATH).and_then(|spec| spec.rail), None);
+        assert_eq!(command_ui_spec(RESET_PATH).and_then(|spec| spec.rail), None);
     }
 
     #[test]
@@ -4398,9 +4491,17 @@ mod tests {
         assert_eq!(
             command_ui_spec(UNIFY_PATH).map(|spec| (spec.enable_rule, spec.mutation, spec.display)),
             Some((
-                CommandEnableRule::Never,
-                CommandMutationClass::None,
-                CommandUiPolicy::NoRows,
+                CommandEnableRule::Rows,
+                CommandMutationClass::Model,
+                CommandUiPolicy::AllRows,
+            ))
+        );
+        assert_eq!(
+            command_ui_spec(RESET_PATH).map(|spec| (spec.enable_rule, spec.mutation, spec.display)),
+            Some((
+                CommandEnableRule::Rows,
+                CommandMutationClass::Model,
+                CommandUiPolicy::AllRows,
             ))
         );
     }
@@ -4460,7 +4561,6 @@ mod tests {
             SAVE_NAMES,
             SAVE_PATHS,
             IMPORT_PATHS,
-            UNIFY_PATH,
             VERSION,
         ] {
             assert_eq!(command_ui_policy(command), CommandUiPolicy::NoRows);
@@ -4491,10 +4591,12 @@ mod tests {
             SORT,
             PARENT_PREFIX,
             PARENT_SUFFIX,
+            UNIFY_PATH,
             EXT_DELETE,
             EXT_ADD,
             EXT_REPLACE,
             IMPORT_NAMES,
+            RESET_PATH,
         ] {
             assert_eq!(command_ui_policy(command), CommandUiPolicy::AllRows);
         }
@@ -4607,6 +4709,7 @@ mod tests {
 
         assert_eq!(commands.len(), 19);
         assert!(!commands.contains(&UNIFY_PATH));
+        assert!(!commands.contains(&RESET_PATH));
     }
 
     #[test]
@@ -6275,7 +6378,7 @@ mod tests {
     fn structured_status_renders_one_priority_message_and_an_independent_count() {
         let mut status = UiStatus::with_recovery("복구 상태를 확인하세요.");
         status.set_transient("2개 경로를 제외했습니다.");
-        status.set_progress("파일 이름 변경 중: 3/10 단계");
+        status.set_progress("파일 변경 중: 3/10 단계");
         status.set_preview_notice(Some("대상 이름 충돌 2개".to_owned()));
         status.set_preview_counts(PreviewCounts {
             total: 120,
@@ -6295,7 +6398,7 @@ mod tests {
         assert_eq!(status.count_text(), "전체 121 · 변경 38 · 선택 3");
 
         status.clear_recovery();
-        assert_eq!(status.message_text(), "파일 이름 변경 중: 3/10 단계");
+        assert_eq!(status.message_text(), "파일 변경 중: 3/10 단계");
         status.clear_progress();
         status.set_preview_sync_failed(true);
         assert_eq!(status.message_text(), PREVIEW_SYNC_FAILURE_STATUS);
@@ -6640,13 +6743,24 @@ mod tests {
     fn apply_confirmation_summary_reports_exact_non_authorizing_counts() {
         let summary = ApplyConfirmationSummary {
             logical_changed: 4,
+            rename_only: 1,
+            move_only: 1,
+            move_and_rename: 2,
+            common_destination_parent: Some(darknamer_core::LegacyText::from(r"C:\archive")),
             case_only: 1,
             temporary_groups: 2,
             primitive_steps: 6,
         };
         assert_eq!(
-            ApplyConfirmationSummary::from_counts(4, 1, 6),
-            Some(summary)
+            ApplyConfirmationSummary::from_counts(
+                1,
+                1,
+                2,
+                Some(darknamer_core::LegacyText::from(r"C:\archive")),
+                1,
+                6,
+            ),
+            Some(summary.clone())
         );
 
         assert_eq!(summary.logical_changed(), 4);
@@ -6659,6 +6773,11 @@ mod tests {
         assert!(primary.contains("대소문자만 변경: 1개"));
         assert!(primary.contains("순환 변경 그룹: 1개"));
         assert!(primary.contains("파일 시스템 변경 단계: 6개"));
+        assert!(primary.contains("이름만 변경: 1개"));
+        assert!(primary.contains("이동만: 1개"));
+        assert!(primary.contains("이동 및 이름 변경: 2개"));
+        assert!(primary.contains(r"대상 폴더: C:\archive"));
+        assert!(primary.contains("대상 덮어쓰기: 허용하지 않음"));
         assert!(!primary.contains("지문"));
         assert!(!primary.contains("버전"));
 
@@ -6669,8 +6788,18 @@ mod tests {
 
     #[test]
     fn apply_confirmation_summary_rejects_inconsistent_counts() {
-        assert_eq!(ApplyConfirmationSummary::from_counts(1, 2, 2), None);
-        assert_eq!(ApplyConfirmationSummary::from_counts(3, 1, 2), None);
+        assert_eq!(
+            ApplyConfirmationSummary::from_counts(1, 1, 0, None, 3, 2),
+            None
+        );
+        assert_eq!(
+            ApplyConfirmationSummary::from_counts(3, 0, 0, None, 1, 2),
+            None
+        );
+        let root_path = darknamer_core::LegacyText::from(r"C:\a.txt");
+        let (parent, leaf) = split_windows_path(&root_path);
+        assert_eq!(parent, r"C:\".encode_utf16().collect::<Vec<_>>());
+        assert_eq!(leaf, "a.txt".encode_utf16().collect::<Vec<_>>());
     }
 
     #[test]
@@ -6715,11 +6844,75 @@ mod tests {
             summary,
             Some(ApplyConfirmationSummary {
                 logical_changed: 4,
+                rename_only: 4,
+                move_only: 0,
+                move_and_rename: 0,
+                common_destination_parent: Some(darknamer_core::LegacyText::from(r"C:\work")),
                 case_only: 1,
                 temporary_groups: 2,
                 primitive_steps: 6,
             })
         );
+        Ok(())
+    }
+
+    #[test]
+    fn apply_confirmation_summary_derives_move_kinds_and_hides_a_mixed_target_parent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::rename::{
+            EntryId, EntryKind, MemoryBackend, ModelRevision, MoveScope, PlanRequest,
+            RenameBackend, RenameIntent, RenamePlanner, preflight_plan,
+        };
+
+        let mut backend = MemoryBackend::new()
+            .with_file(r"C:\source\a.txt", 1)
+            .with_file(r"C:\source\b.txt", 2)
+            .with_file(r"C:\source\c.txt", 3);
+        let plan = RenamePlanner::new(&backend).plan(PlanRequest::with_scope(
+            ModelRevision::new(8),
+            vec![
+                RenameIntent::new(
+                    EntryId::new(0),
+                    r"C:\source\a.txt",
+                    r"C:\archive",
+                    "a.txt",
+                    EntryKind::File,
+                ),
+                RenameIntent::new(
+                    EntryId::new(1),
+                    r"C:\source\b.txt",
+                    r"C:\archive",
+                    "renamed.txt",
+                    EntryKind::File,
+                ),
+                RenameIntent::new(
+                    EntryId::new(2),
+                    r"C:\source\c.txt",
+                    r"C:\source",
+                    "local.txt",
+                    EntryKind::File,
+                ),
+            ],
+            MoveScope::SameVolumeFilesOnly,
+        ))?;
+        let requirements = preflight_plan(&plan, &mut backend)?;
+        let summary = ApplyConfirmationSummary::from_plan(
+            &plan,
+            requirements.primitive_steps(),
+            |source, destination| backend.path_key(source) == backend.path_key(destination),
+        )
+        .ok_or("summary")?;
+
+        assert_eq!(summary.rename_only, 1);
+        assert_eq!(summary.move_only, 1);
+        assert_eq!(summary.move_and_rename, 1);
+        assert_eq!(summary.common_destination_parent, None);
+        let text = apply_confirmation_primary(summary);
+        assert!(text.contains("이름만 변경: 1개"));
+        assert!(text.contains("이동만: 1개"));
+        assert!(text.contains("이동 및 이름 변경: 1개"));
+        assert!(!text.contains("대상 폴더:"));
+        assert!(text.contains("대상 덮어쓰기: 허용하지 않음"));
         Ok(())
     }
 
@@ -7186,7 +7379,8 @@ mod tests {
         assert!(command_enabled(2, 0, 0));
         assert!(!command_enabled(APPLY, 0, 0));
         assert!(command_enabled(APPLY, 1, 0));
-        assert!(!command_enabled(UNIFY_PATH, 1, 0));
+        assert!(command_enabled(UNIFY_PATH, 1, 0));
+        assert!(command_enabled(RESET_PATH, 1, 0));
         assert!(!command_enabled(MANUAL_CHANGE, 1, 0));
         assert!(command_enabled(MANUAL_CHANGE, 1, 1));
     }

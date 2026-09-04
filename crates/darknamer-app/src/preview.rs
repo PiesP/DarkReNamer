@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::rc::Rc;
 
-use darknamer_core::{LegacyText, WindowsLeafNameError};
+use darknamer_core::{LegacyText, PlannedChangeKind, WindowsLeafNameError};
 
 use crate::rename::PathKey;
 
@@ -22,17 +22,39 @@ pub(crate) struct PreviewCountCache {
     changed: usize,
 }
 
+pub(crate) trait PreviewChangeProjection {
+    fn preview_change(self) -> PlannedChangeKind;
+}
+
+impl PreviewChangeProjection for PlannedChangeKind {
+    fn preview_change(self) -> PlannedChangeKind {
+        self
+    }
+}
+
+#[cfg(test)]
+impl<T: PartialEq + ?Sized> PreviewChangeProjection for (&T, &T) {
+    fn preview_change(self) -> PlannedChangeKind {
+        if self.0 == self.1 {
+            PlannedChangeKind::None
+        } else {
+            PlannedChangeKind::Rename
+        }
+    }
+}
+
 impl PreviewCountCache {
     /// Replaces the cache from the authoritative model projection.
-    pub(crate) fn refresh<'a, T: PartialEq + ?Sized + 'a>(
+    pub(crate) fn refresh<T: PreviewChangeProjection>(
         &mut self,
-        names: impl IntoIterator<Item = (&'a T, &'a T)>,
+        changes: impl IntoIterator<Item = T>,
     ) {
         let mut total = 0_usize;
         let mut changed = 0_usize;
-        for (current, proposed) in names {
+        for change in changes {
+            let change = change.preview_change();
             total = total.saturating_add(1);
-            changed = changed.saturating_add(usize::from(current != proposed));
+            changed = changed.saturating_add(usize::from(change.is_changed()));
         }
         *self = Self { total, changed };
     }
@@ -85,9 +107,16 @@ pub(crate) enum PreviewRowIssue {
 
 /// Short, non-authorizing text rendered in the fixed native Status column.
 #[must_use]
-pub(crate) const fn preview_status_label(issue: PreviewRowIssue, changed: bool) -> &'static str {
+pub(crate) const fn preview_status_label(
+    issue: PreviewRowIssue,
+    change: PlannedChangeKind,
+) -> &'static str {
     match issue {
-        PreviewRowIssue::None if changed => "변경 예정",
+        PreviewRowIssue::None if matches!(change, PlannedChangeKind::Rename) => "이름 변경 예정",
+        PreviewRowIssue::None if matches!(change, PlannedChangeKind::Move) => "이동 예정",
+        PreviewRowIssue::None if matches!(change, PlannedChangeKind::MoveAndRename) => {
+            "이동·이름 변경 예정"
+        }
         PreviewRowIssue::None => "",
         PreviewRowIssue::EmptyStem => "주의: 이름 본체",
         PreviewRowIssue::InvalidName(_) => "차단: 이름",
@@ -99,7 +128,7 @@ pub(crate) const fn preview_status_label(issue: PreviewRowIssue, changed: bool) 
 #[must_use]
 pub(crate) fn preview_status_delta_rows<'a>(
     previous: impl IntoIterator<Item = &'a LegacyText>,
-    refreshed: impl IntoIterator<Item = (PreviewRowIssue, bool)>,
+    refreshed: impl IntoIterator<Item = (PreviewRowIssue, PlannedChangeKind)>,
 ) -> Option<Box<[usize]>> {
     let mut previous = previous.into_iter();
     let mut refreshed = refreshed.into_iter();
@@ -107,8 +136,8 @@ pub(crate) fn preview_status_delta_rows<'a>(
     let mut row = 0_usize;
     loop {
         match (previous.next(), refreshed.next()) {
-            (Some(previous), Some((issue, changed))) => {
-                let expected = preview_status_label(issue, changed);
+            (Some(previous), Some((issue, change))) => {
+                let expected = preview_status_label(issue, change);
                 if !previous.units().iter().copied().eq(expected.encode_utf16()) {
                     changed_rows.push(row);
                 }
@@ -125,7 +154,61 @@ struct CachedPreviewRow {
     destination_key: Rc<PathKey>,
     base_issue: PreviewRowIssue,
     issue: PreviewRowIssue,
-    changed: bool,
+    change: PlannedChangeKind,
+}
+
+pub(crate) trait PreviewRowProjection<'a> {
+    fn preview_row(
+        self,
+    ) -> (
+        &'a LegacyText,
+        &'a LegacyText,
+        &'a LegacyText,
+        bool,
+        PlannedChangeKind,
+    );
+}
+
+impl<'a> PreviewRowProjection<'a>
+    for (
+        &'a LegacyText,
+        &'a LegacyText,
+        &'a LegacyText,
+        bool,
+        PlannedChangeKind,
+    )
+{
+    fn preview_row(
+        self,
+    ) -> (
+        &'a LegacyText,
+        &'a LegacyText,
+        &'a LegacyText,
+        bool,
+        PlannedChangeKind,
+    ) {
+        self
+    }
+}
+
+#[cfg(test)]
+impl<'a> PreviewRowProjection<'a> for (&'a LegacyText, &'a LegacyText, &'a LegacyText, bool) {
+    fn preview_row(
+        self,
+    ) -> (
+        &'a LegacyText,
+        &'a LegacyText,
+        &'a LegacyText,
+        bool,
+        PlannedChangeKind,
+    ) {
+        let change = if self.1 == self.2 {
+            PlannedChangeKind::None
+        } else {
+            PlannedChangeKind::Rename
+        };
+        (self.0, self.1, self.2, self.3, change)
+    }
 }
 
 /// Exact preview-cache effects of one proposed-name edit.
@@ -149,23 +232,23 @@ pub(crate) struct PreviewIssueCache {
 }
 
 impl PreviewIssueCache {
-    pub(crate) fn refresh_by<'a, F>(
+    pub(crate) fn refresh_by<'a, F, R>(
         &mut self,
-        rows: impl IntoIterator<Item = (&'a LegacyText, &'a LegacyText, &'a LegacyText, bool)>,
+        rows: impl IntoIterator<Item = R>,
         mut destination_key: F,
     ) where
         F: FnMut(&LegacyText, &LegacyText) -> PathKey,
+        R: PreviewRowProjection<'a>,
     {
         let mut next = Self {
             initialized: true,
             ..Self::default()
         };
-        for (parent, current, proposed, is_directory) in rows {
+        for row_projection in rows {
+            let (parent, current, proposed, is_directory, change) = row_projection.preview_row();
             let row = next.rows.len();
-            let changed = current != proposed;
-            let base_issue = preview_base_issue(current, proposed, is_directory);
-            let effective_name = if changed { proposed } else { current };
-            let computed_key = Rc::new(destination_key(parent, effective_name));
+            let base_issue = preview_base_issue(current, proposed, is_directory, change);
+            let computed_key = Rc::new(destination_key(parent, proposed));
             let destination_key = match next.destination_rows.entry(computed_key) {
                 Entry::Occupied(mut entry) => {
                     let key = Rc::clone(entry.key());
@@ -182,7 +265,7 @@ impl PreviewIssueCache {
                 destination_key,
                 base_issue,
                 issue: base_issue,
-                changed,
+                change,
             });
         }
 
@@ -190,7 +273,7 @@ impl PreviewIssueCache {
             let colliding = group.len() > 1;
             for &row in group {
                 let cached = &mut next.rows[row];
-                cached.issue = resolved_preview_issue(cached.base_issue, cached.changed, colliding);
+                cached.issue = resolved_preview_issue(cached.base_issue, cached.change, colliding);
                 match cached.issue {
                     PreviewRowIssue::None => {}
                     PreviewRowIssue::EmptyStem => next.warning_rows += 1,
@@ -212,31 +295,31 @@ impl PreviewIssueCache {
     /// The destination callback is invoked exactly once after the cache/model
     /// boundary has been validated. `None` requests a full-refresh fallback and
     /// leaves the cache unchanged.
-    pub(crate) fn refresh_one_by<F>(
+    pub(crate) fn refresh_one_by<'a, F, R>(
         &mut self,
         model_len: usize,
         row: usize,
-        values: (&LegacyText, &LegacyText, &LegacyText, bool),
+        values: R,
         mut destination_key: F,
     ) -> Option<PreviewIssueUpdate>
     where
         F: FnMut(&LegacyText, &LegacyText) -> PathKey,
+        R: PreviewRowProjection<'a>,
     {
         if !self.initialized || self.rows.len() != model_len || row >= model_len {
             return None;
         }
-        let (parent, current, proposed, is_directory) = values;
+        let (parent, current, proposed, is_directory, current_change) = values.preview_row();
         let old_key = Rc::clone(&self.rows[row].destination_key);
         let old_group = self
             .destination_rows
             .get(&old_key)
             .filter(|group| group.contains(&row))?;
         let mut affected_rows = old_group.clone();
-        let previous_changed = self.rows[row].changed;
-        let current_changed = current != proposed;
-        let base_issue = preview_base_issue(current, proposed, is_directory);
-        let effective_name = if current_changed { proposed } else { current };
-        let computed_key = destination_key(parent, effective_name);
+        let previous_changed = self.rows[row].change.is_changed();
+        let current_changed = current_change.is_changed();
+        let base_issue = preview_base_issue(current, proposed, is_directory, current_change);
+        let computed_key = destination_key(parent, proposed);
 
         let canonical_key = if old_key.as_ref() == &computed_key {
             Rc::clone(&old_key)
@@ -276,14 +359,14 @@ impl PreviewIssueCache {
 
         self.rows[row].destination_key = canonical_key;
         self.rows[row].base_issue = base_issue;
-        self.rows[row].changed = current_changed;
+        self.rows[row].change = current_change;
         for affected in affected_rows.iter().copied() {
             let cached = &self.rows[affected];
             let colliding = self
                 .destination_rows
                 .get(&cached.destination_key)
                 .is_some_and(|group| group.len() > 1);
-            let issue = resolved_preview_issue(cached.base_issue, cached.changed, colliding);
+            let issue = resolved_preview_issue(cached.base_issue, cached.change, colliding);
             self.replace_issue(affected, issue);
         }
         self.blocker_rows = self
@@ -365,13 +448,13 @@ impl PreviewIssueCache {
             self.duplicate_destination_rows != 0,
         ) {
             (true, true) => Some(
-                "Windows에서 사용할 수 없는 대상 이름과 같은 폴더의 대상 이름 충돌이 있습니다. 표시된 행의 이름을 Windows 이름 규칙에 맞고 서로 다르게 수정해 주세요.",
+                "Windows에서 사용할 수 없는 대상 이름과 대상 경로 충돌이 있습니다. 표시된 행의 이름이나 대상 위치를 수정해 주세요.",
             ),
             (true, false) => Some(
                 "Windows에서 사용할 수 없는 대상 이름이 있습니다. 표시된 행의 이름을 Windows 이름 규칙에 맞게 수정해 주세요.",
             ),
             (false, true) => Some(
-                "같은 폴더에서 둘 이상의 항목이 같은 대상 이름을 사용합니다. 표시된 행의 이름을 다르게 지정해 주세요.",
+                "둘 이상의 항목이 같은 대상 경로를 사용합니다. 표시된 행의 이름이나 대상 위치를 수정해 주세요.",
             ),
             (false, false) => None,
         }
@@ -385,7 +468,7 @@ impl PreviewIssueCache {
         }
         if self.duplicate_destination_rows != 0 {
             counts.push(format!(
-                "대상 이름 충돌 {}개",
+                "대상 경로 충돌 {}개",
                 self.duplicate_destination_rows
             ));
         }
@@ -408,11 +491,12 @@ impl PreviewIssueCache {
 }
 
 fn preview_base_issue(
-    current: &LegacyText,
+    _current: &LegacyText,
     proposed: &LegacyText,
     is_directory: bool,
+    change: PlannedChangeKind,
 ) -> PreviewRowIssue {
-    if current == proposed {
+    if !change.renames() {
         return PreviewRowIssue::None;
     }
     match darknamer_core::validate_windows_leaf_name(proposed) {
@@ -424,12 +508,12 @@ fn preview_base_issue(
 
 fn resolved_preview_issue(
     base_issue: PreviewRowIssue,
-    changed: bool,
+    change: PlannedChangeKind,
     colliding: bool,
 ) -> PreviewRowIssue {
     if matches!(base_issue, PreviewRowIssue::InvalidName(_)) {
         base_issue
-    } else if changed && colliding {
+    } else if change.is_changed() && colliding {
         PreviewRowIssue::DuplicateDestination
     } else {
         base_issue
@@ -461,6 +545,32 @@ fn preview_name_has_empty_stem(name: &LegacyText, is_directory: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_only_moves_count_render_and_block_duplicate_full_destinations() {
+        let target = LegacyText::from(r"C:\target");
+        let current = LegacyText::from("same.txt");
+        let mut counts = PreviewCountCache::default();
+        counts.refresh([PlannedChangeKind::Move, PlannedChangeKind::Move]);
+        assert_eq!(counts.with_selected(0).changed, 2);
+
+        let mut cache = PreviewIssueCache::default();
+        cache.refresh_by(
+            [
+                (&target, &current, &current, false, PlannedChangeKind::Move),
+                (&target, &current, &current, false, PlannedChangeKind::Move),
+            ],
+            preview_test_destination_key,
+        );
+
+        assert_eq!(cache.issue(0), PreviewRowIssue::DuplicateDestination);
+        assert_eq!(cache.issue(1), PreviewRowIssue::DuplicateDestination);
+        assert_eq!(
+            preview_status_label(PreviewRowIssue::None, PlannedChangeKind::Move),
+            "이동 예정"
+        );
+        assert_eq!(cache.blocker_rows().as_ref(), &[0, 1]);
+    }
 
     #[test]
     fn preview_count_cache_updates_only_at_the_authoritative_refresh_boundary() {
@@ -557,7 +667,12 @@ mod tests {
         rows.iter()
             .enumerate()
             .map(|(row, item)| {
-                preview_status_label(cache.issue(row), item.current != item.proposed)
+                let change = if item.current == item.proposed {
+                    PlannedChangeKind::None
+                } else {
+                    PlannedChangeKind::Rename
+                };
+                preview_status_label(cache.issue(row), change)
             })
             .collect()
     }
@@ -763,24 +878,38 @@ mod tests {
     fn native_preview_status_labels_are_short_korean_text_without_filename_prefixes() {
         use darknamer_core::WindowsLeafNameError;
 
-        assert_eq!(preview_status_label(PreviewRowIssue::None, false), "");
         assert_eq!(
-            preview_status_label(PreviewRowIssue::None, true),
-            "변경 예정"
+            preview_status_label(PreviewRowIssue::None, PlannedChangeKind::None),
+            ""
         );
         assert_eq!(
-            preview_status_label(PreviewRowIssue::EmptyStem, true),
+            preview_status_label(PreviewRowIssue::None, PlannedChangeKind::Rename),
+            "이름 변경 예정"
+        );
+        assert_eq!(
+            preview_status_label(PreviewRowIssue::None, PlannedChangeKind::Move),
+            "이동 예정"
+        );
+        assert_eq!(
+            preview_status_label(PreviewRowIssue::None, PlannedChangeKind::MoveAndRename),
+            "이동·이름 변경 예정"
+        );
+        assert_eq!(
+            preview_status_label(PreviewRowIssue::EmptyStem, PlannedChangeKind::Rename),
             "주의: 이름 본체"
         );
         assert_eq!(
             preview_status_label(
                 PreviewRowIssue::InvalidName(WindowsLeafNameError::InvalidCharacter),
-                true,
+                PlannedChangeKind::Rename,
             ),
             "차단: 이름"
         );
         assert_eq!(
-            preview_status_label(PreviewRowIssue::DuplicateDestination, true),
+            preview_status_label(
+                PreviewRowIssue::DuplicateDestination,
+                PlannedChangeKind::Rename,
+            ),
             "차단: 충돌"
         );
     }
@@ -802,8 +931,12 @@ mod tests {
             ],
             preview_test_destination_key,
         );
-        let ordinary =
-            [0, 1].map(|row| LegacyText::from(preview_status_label(cache.issue(row), true)));
+        let ordinary = [0, 1].map(|row| {
+            LegacyText::from(preview_status_label(
+                cache.issue(row),
+                PlannedChangeKind::Rename,
+            ))
+        });
 
         proposed_b = proposed_a.clone();
         cache.refresh_by(
@@ -813,12 +946,18 @@ mod tests {
             ],
             preview_test_destination_key,
         );
-        let introduced =
-            preview_status_delta_rows(ordinary.iter(), [0, 1].map(|row| (cache.issue(row), true)));
+        let introduced = preview_status_delta_rows(
+            ordinary.iter(),
+            [0, 1].map(|row| (cache.issue(row), PlannedChangeKind::Rename)),
+        );
         assert_eq!(introduced.as_deref(), Some([0, 1].as_slice()));
 
-        let collision =
-            [0, 1].map(|row| LegacyText::from(preview_status_label(cache.issue(row), true)));
+        let collision = [0, 1].map(|row| {
+            LegacyText::from(preview_status_label(
+                cache.issue(row),
+                PlannedChangeKind::Rename,
+            ))
+        });
         proposed_b = LegacyText::from("second.txt");
         cache.refresh_by(
             [
@@ -827,8 +966,10 @@ mod tests {
             ],
             preview_test_destination_key,
         );
-        let removed =
-            preview_status_delta_rows(collision.iter(), [0, 1].map(|row| (cache.issue(row), true)));
+        let removed = preview_status_delta_rows(
+            collision.iter(),
+            [0, 1].map(|row| (cache.issue(row), PlannedChangeKind::Rename)),
+        );
         assert_eq!(removed.as_deref(), Some([0, 1].as_slice()));
     }
 
@@ -922,7 +1063,7 @@ mod tests {
         assert_eq!(
             cache.blocker_explanation(),
             Some(
-                "같은 폴더에서 둘 이상의 항목이 같은 대상 이름을 사용합니다. 표시된 행의 이름을 다르게 지정해 주세요."
+                "둘 이상의 항목이 같은 대상 경로를 사용합니다. 표시된 행의 이름이나 대상 위치를 수정해 주세요."
             )
         );
     }
@@ -1101,13 +1242,13 @@ mod tests {
         assert_eq!(
             cache.notice().as_deref(),
             Some(
-                "잘못된 대상 이름 1개 · 대상 이름 충돌 2개 · 이름 본체가 비어 있는 항목 1개 · 변경 적용이 차단되었습니다."
+                "잘못된 대상 이름 1개 · 대상 경로 충돌 2개 · 이름 본체가 비어 있는 항목 1개 · 변경 적용이 차단되었습니다."
             )
         );
         assert_eq!(
             cache.blocker_explanation(),
             Some(
-                "Windows에서 사용할 수 없는 대상 이름과 같은 폴더의 대상 이름 충돌이 있습니다. 표시된 행의 이름을 Windows 이름 규칙에 맞고 서로 다르게 수정해 주세요."
+                "Windows에서 사용할 수 없는 대상 이름과 대상 경로 충돌이 있습니다. 표시된 행의 이름이나 대상 위치를 수정해 주세요."
             )
         );
     }

@@ -6,9 +6,11 @@
 use std::cell::Cell;
 
 use darknamer_core::{
-    LegacyAppendIndex, LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode,
-    LegacySortMode, LegacyText, MAX_PROPOSED_NAME_UTF16_UNITS, MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS,
-    ProposalMutationError, parse_import_lines,
+    DestinationParentMutationError, LegacyAppendIndex, LegacyInputError, LegacyList,
+    LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText,
+    MAX_DESTINATION_PARENT_UTF16_UNITS, MAX_PROPOSED_NAME_UTF16_UNITS,
+    MAX_TOTAL_PLANNED_PATH_UTF16_UNITS, PlannedChangeKind, ProposalMutationError,
+    parse_import_lines,
 };
 
 fn item(path: &str, is_directory: bool) -> LegacyListItem {
@@ -125,7 +127,7 @@ fn complete_replace_prefix_and_pre_extension_suffix_match_name_commands() {
         ]
     );
 
-    list.reset_proposals();
+    assert_eq!(list.reset_proposals(), Ok(()));
     assert!(
         list.suffix_before_extension(&LegacyText::from("-tail"))
             .is_ok()
@@ -153,11 +155,11 @@ fn name_empty_and_position_delete_preserve_last_dot_extension_rules() {
     list.clear_name();
     assert_eq!(proposed(&list), [".gz", ".env", "", ""]);
 
-    list.reset_proposals();
+    assert_eq!(list.reset_proposals(), Ok(()));
     assert_eq!(list.delete_front_range(2, 4), Ok(()));
     assert_eq!(proposed(&list), ["aive.tar.gz", ".env", "RME", "fer.name"]);
 
-    list.reset_proposals();
+    assert_eq!(list.reset_proposals(), Ok(()));
     list.delete_last(3);
     assert_eq!(proposed(&list), ["archive..gz", ".env", "REA", "folder.n"]);
     let before = proposed(&list);
@@ -265,7 +267,7 @@ fn proposal_growth_limits_fail_before_any_row_changes() {
     );
     assert_eq!(per_name, before_per_name);
 
-    let leaf_units = MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS / 10_000;
+    let leaf_units = MAX_TOTAL_PLANNED_PATH_UTF16_UNITS / 10_000 - 1;
     let leaf = "b".repeat(leaf_units);
     let rows = (0..10_000)
         .map(|_| item(leaf.as_str(), false))
@@ -274,10 +276,13 @@ fn proposal_growth_limits_fail_before_any_row_changes() {
     assert_eq!(aggregate.append_batch(rows), Ok(10_000));
     let before_aggregate = aggregate.clone();
     let result = aggregate.prefix_complete(&LegacyText::from("x"));
-    assert!(matches!(
+    assert_eq!(
         result,
-        Err(ProposalMutationError::AggregateBudgetExceeded { .. })
-    ));
+        Err(ProposalMutationError::PlannedPathAggregateBudgetExceeded {
+            requested_units: 2_100_000,
+            maximum_units: MAX_TOTAL_PLANNED_PATH_UTF16_UNITS,
+        })
+    );
     assert_eq!(aggregate, before_aggregate);
 }
 
@@ -423,20 +428,132 @@ fn parent_folder_commands_and_root_unification_match_root_column_behavior() {
         ["parent_file.ext", "drive-root.txt", "parent_folder.name"]
     );
 
-    prefixed.reset_proposals();
+    assert_eq!(prefixed.reset_proposals(), Ok(()));
     assert!(prefixed.suffix_parent_folder().is_ok());
     assert_eq!(
         proposed(&prefixed),
         ["file_parent.ext", "drive-root.txt", "folder.name_parent"]
     );
 
-    prefixed.unify_root_path(&LegacyText::from(r"D:\target\"));
+    assert_eq!(
+        prefixed.unify_destination_parent_changed(&LegacyText::from(r"D:\target\")),
+        Ok(Box::from([0, 1, 2]))
+    );
     assert!(
         prefixed
             .items()
             .iter()
             .all(|item| item.root_path() == &LegacyText::from(r"D:\target"))
     );
+}
+
+#[test]
+fn destination_parent_proposals_are_all_row_changed_aware_and_reset_independently() {
+    let mut list = list(&[
+        (r"C:\one\a.txt", false),
+        (r"C:\two\b.txt", false),
+        (r"D:\target\c.txt", false),
+    ]);
+    assert_eq!(list.manual_change(1, "renamed.txt"), Ok(true));
+
+    assert_eq!(
+        list.unify_destination_parent_changed(&LegacyText::from(r"D:\target\")),
+        Ok(Box::from([0, 1]))
+    );
+    assert_eq!(
+        list.items()
+            .iter()
+            .map(LegacyListItem::planned_change_kind)
+            .collect::<Vec<_>>(),
+        [
+            PlannedChangeKind::Move,
+            PlannedChangeKind::MoveAndRename,
+            PlannedChangeKind::None,
+        ]
+    );
+
+    assert_eq!(list.reset_destination_parents(), Ok(Box::from([0, 1])));
+    assert_eq!(
+        list.items()
+            .iter()
+            .map(LegacyListItem::planned_change_kind)
+            .collect::<Vec<_>>(),
+        [
+            PlannedChangeKind::None,
+            PlannedChangeKind::Rename,
+            PlannedChangeKind::None,
+        ]
+    );
+    assert_eq!(
+        list.items()[1].proposed_name(),
+        &LegacyText::from("renamed.txt")
+    );
+}
+
+#[test]
+fn destination_parent_budget_error_leaves_every_row_unchanged() {
+    let mut list = list(&[(r"C:\one\a.txt", false), (r"C:\two\b.txt", false)]);
+    let before = list.clone();
+    let oversized =
+        LegacyText::from_units(vec![b'x' as u16; MAX_DESTINATION_PARENT_UTF16_UNITS + 1]);
+
+    assert_eq!(
+        list.unify_destination_parent_changed(&oversized),
+        Err(DestinationParentMutationError::ParentBudgetExceeded {
+            requested_units: MAX_DESTINATION_PARENT_UTF16_UNITS + 1,
+            maximum_units: MAX_DESTINATION_PARENT_UTF16_UNITS,
+        })
+    );
+    assert_eq!(list, before);
+}
+
+#[test]
+fn destination_parent_separator_variants_reconcile_exactly_after_success() {
+    for (destination_parent, expected_parent, expected_path) in [
+        (r"D:\target\", r"D:\target", r"D:\target\file.txt"),
+        (r"D:\target/", r"D:\target", r"D:\target\file.txt"),
+        (r"D:\target\\", r"D:\target", r"D:\target\file.txt"),
+        (r"C:\", r"C:\", r"C:\file.txt"),
+        (r"C:/", r"C:\", r"C:\file.txt"),
+        (
+            r"\\server\share\\",
+            r"\\server\share",
+            r"\\server\share\file.txt",
+        ),
+    ] {
+        let mut list = list(&[(r"E:\source\file.txt", false)]);
+        assert!(
+            list.unify_destination_parent_changed(&LegacyText::from(destination_parent))
+                .is_ok()
+        );
+        assert_eq!(
+            list.items()[0].destination_parent(),
+            &LegacyText::from(expected_parent),
+            "normalized parent for {destination_parent}"
+        );
+        assert_eq!(
+            list.items()[0].planned_path(),
+            LegacyText::from(expected_path),
+            "planned path for {destination_parent}"
+        );
+
+        assert!(list.record_move_success(0));
+        assert_eq!(
+            list.items()[0].source_path(),
+            &LegacyText::from(expected_path),
+            "recorded source for {destination_parent}"
+        );
+        assert_eq!(
+            list.items()[0].destination_parent(),
+            &LegacyText::from(expected_parent),
+            "recorded parent for {destination_parent}"
+        );
+        assert_eq!(
+            list.items()[0].planned_change_kind(),
+            PlannedChangeKind::None,
+            "reconciled change for {destination_parent}"
+        );
+    }
 }
 
 #[test]
@@ -462,7 +579,7 @@ fn selected_row_movement_remove_manual_change_and_ctrl_z_are_list_state_only() {
     assert_eq!(list.manual_change(1, "manual.name"), Ok(true));
     assert_eq!(list.manual_change(99, "ignored"), Ok(false));
     assert!(list.prefix_complete(&LegacyText::from("x-")).is_ok());
-    list.reset_proposals();
+    assert_eq!(list.reset_proposals(), Ok(()));
     assert_eq!(proposed(&list), current(&list));
 
     assert_eq!(list.remove_rows(&[1, 3, 3, 99]), 2);
@@ -594,8 +711,11 @@ fn changed_aware_mutations_report_exact_no_ops_without_changing_legacy_results()
 
     assert_eq!(list.manual_change_changed(0, "a.txt"), Ok(false));
     assert_eq!(list.manual_change_changed(1, "renamed.txt"), Ok(true));
-    assert_eq!(&*list.reset_proposals_changed(), &[1]);
-    assert!(list.reset_proposals_changed().is_empty());
+    assert_eq!(list.reset_proposals_changed().as_deref(), Ok(&[1][..]));
+    assert!(
+        list.reset_proposals_changed()
+            .is_ok_and(|changed| changed.is_empty())
+    );
 
     let blocked = list.move_rows_earlier_changed(&[0, 2]);
     assert!(!blocked.changed());
@@ -654,8 +774,11 @@ fn ten_thousand_row_proposal_transforms_return_pure_exact_change_sets() {
     );
 
     let reset = list.reset_proposals_changed();
-    assert_eq!(reset, changed);
-    assert!(list.reset_proposals_changed().is_empty());
+    assert_eq!(reset.as_deref(), Ok(changed.as_ref()));
+    assert!(
+        list.reset_proposals_changed()
+            .is_ok_and(|changed| changed.is_empty())
+    );
 }
 
 #[test]
@@ -692,13 +815,13 @@ fn transformed_names_reject_an_over_budget_append_atomically() {
         .collect::<Vec<_>>();
     assert_eq!(list.append_batch(existing), Ok(8_000));
     assert_eq!(
-        list.prefix_complete(&LegacyText::from("x".repeat(254))),
+        list.prefix_complete(&LegacyText::from("x".repeat(220))),
         Ok(())
     );
     assert!(
         list.items()
             .iter()
-            .all(|row| row.proposed_name().len() == 255)
+            .all(|row| row.proposed_name().len() == 221)
     );
     let before = list.clone();
 
@@ -706,40 +829,25 @@ fn transformed_names_reject_an_over_budget_append_atomically() {
     let incoming = (0..2_000)
         .map(|index| item(&format!(r"C:\incoming\{index:05}\{appended_leaf}"), false))
         .collect::<Vec<_>>();
-    assert_eq!(
+    assert!(matches!(
         list.append_batch(incoming),
-        Err(ProposalMutationError::AggregateBudgetExceeded {
-            requested_units: 2_240_000,
-            maximum_units: MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS,
-        })
-    );
+        Err(ProposalMutationError::PlannedPathAggregateBudgetExceeded { .. })
+    ));
     assert_eq!(list, before);
 }
 
 #[test]
-fn duplicate_only_batch_succeeds_at_the_exact_aggregate_budget() {
+fn duplicate_only_batch_succeeds_at_the_exact_planned_path_budget() {
     let mut list = LegacyList::new();
-    let maximum_leaf = "z".repeat(MAX_PROPOSED_NAME_UTF16_UNITS);
-    let short_leaf = "s".repeat(
-        MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS
-            - (MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS / MAX_PROPOSED_NAME_UTF16_UNITS)
-                * MAX_PROPOSED_NAME_UTF16_UNITS,
-    );
-    let full_rows = MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS / MAX_PROPOSED_NAME_UTF16_UNITS;
-    let rows = (0..full_rows)
-        .map(|index| item(&format!(r"C:\full\{index:05}\{maximum_leaf}"), false))
-        .chain(std::iter::once(item(
-            &format!(r"C:\short\{short_leaf}"),
-            false,
-        )))
+    let mut source = vec![b'x' as u16; 32_766];
+    source.extend([b'\\' as u16, b'a' as u16]);
+    let rows = (0..64)
+        .map(|_| LegacyListItem::new(LegacyText::from_units(source.clone()), false, 0, 0, 0))
         .collect::<Vec<_>>();
-    assert_eq!(list.append_batch(rows), Ok(full_rows + 1));
+    assert_eq!(list.append_batch(rows), Ok(64));
     assert_eq!(
-        list.items()
-            .iter()
-            .map(|row| row.proposed_name().len())
-            .sum::<usize>(),
-        MAX_TOTAL_PROPOSED_NAME_UTF16_UNITS
+        list.planned_path_utf16_units(),
+        MAX_TOTAL_PLANNED_PATH_UTF16_UNITS
     );
     let duplicates = list.items().to_vec();
     let before = list.clone();
@@ -981,7 +1089,7 @@ fn cached_proposal_units_stay_exact_across_composed_mutations() {
             .is_ok()
     );
     assert_eq!(list.proposed_name_utf16_units(), 6);
-    list.reset_proposals();
+    assert_eq!(list.reset_proposals(), Ok(()));
     assert_eq!(list.proposed_name_utf16_units(), 18);
     assert_eq!(list.remove_rows(&[1]), 1);
     assert_eq!(list.proposed_name_utf16_units(), 12);
@@ -1007,7 +1115,7 @@ fn rejected_indexed_append_does_not_poison_the_index_and_retry_succeeds() {
     let existing = (0..8_000).map(|value| item(&format!(r"C:\full\{value:04}\a"), false));
     assert_eq!(list.append_batch_indexed(&mut index, existing), Ok(8_000));
     assert!(
-        list.prefix_complete(&LegacyText::from("y".repeat(254)))
+        list.prefix_complete(&LegacyText::from("y".repeat(220)))
             .is_ok()
     );
     let incoming_leaf = "b".repeat(100);
@@ -1017,10 +1125,10 @@ fn rejected_indexed_append_does_not_poison_the_index_and_retry_succeeds() {
     let before = list.clone();
     assert!(matches!(
         list.append_batch_indexed(&mut index, incoming.clone()),
-        Err(ProposalMutationError::AggregateBudgetExceeded { .. })
+        Err(ProposalMutationError::PlannedPathAggregateBudgetExceeded { .. })
     ));
     assert_eq!(list, before);
 
-    list.reset_proposals();
+    assert_eq!(list.reset_proposals(), Ok(()));
     assert_eq!(list.append_batch_indexed(&mut index, incoming), Ok(2_000));
 }

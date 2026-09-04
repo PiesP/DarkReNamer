@@ -5,8 +5,8 @@ use darknamer_core::LegacyList;
 use super::{
     BackendError, EntryId, EntryKind, ExecuteError, ExecuteErrorKind, ExecutionFailure,
     ExecutionOutcome, ExecutionReport, JournalCapacityError, JournalCapacityKind, JournalRecord,
-    ModelRevision, PlanError, PlanIssueKind, PlanRequest, RecoveryState, RenameIntent, RenameState,
-    replay_journal,
+    ModelRevision, MoveScope, PlanError, PlanIssueKind, PlanRequest, RecoveryState, RenameIntent,
+    RenameState, replay_journal,
 };
 
 /// Advances a monotonic model revision only for an observable model change.
@@ -19,15 +19,18 @@ pub const fn next_model_revision(current: u64, changed: bool) -> u64 {
     }
 }
 
-/// Explains why legacy cross-parent root unification is inert in Safe v1.
-#[must_use]
-pub const fn safe_mode_unify_path_message() -> &'static str {
-    "Safe 모드에서는 다른 폴더로 이동하는 경로 통일을 아직 지원하지 않습니다. 목록은 변경되지 않았습니다."
-}
-
 /// Builds an exact plan request from current legacy rows without changing them.
 #[must_use]
 pub fn build_plan_request(model: &LegacyList, revision: ModelRevision) -> PlanRequest {
+    let scope = if model
+        .items()
+        .iter()
+        .any(|item| item.planned_change_kind().moves())
+    {
+        MoveScope::SameVolumeFilesOnly
+    } else {
+        MoveScope::SameParent
+    };
     let entries = model
         .items()
         .iter()
@@ -46,7 +49,7 @@ pub fn build_plan_request(model: &LegacyList, revision: ModelRevision) -> PlanRe
             )
         })
         .collect();
-    PlanRequest::new(revision, entries)
+    PlanRequest::with_scope(revision, entries, scope)
 }
 
 /// Applies row state only when the complete report is verified `Completed/Applied`.
@@ -132,6 +135,8 @@ fn plan_issue_korean(kind: &PlanIssueKind) -> String {
         }
         PlanIssueKind::DestinationOccupied => "대상 이름이 이미 사용 중입니다.".to_owned(),
         PlanIssueKind::CrossParent => "다른 폴더로 이동할 수 없습니다.".to_owned(),
+        PlanIssueKind::CrossVolume => "다른 볼륨으로 이동할 수 없습니다.".to_owned(),
+        PlanIssueKind::DirectoryMoveUnsupported => "폴더 이동은 아직 지원하지 않습니다.".to_owned(),
         PlanIssueKind::SourceOverlap => "상위/하위 항목을 함께 변경할 수 없습니다.".to_owned(),
         PlanIssueKind::PathTooDeep => "경로의 폴더 깊이가 안전 한도를 초과했습니다.".to_owned(),
         PlanIssueKind::UnsupportedCaseSensitiveParent => {
@@ -165,6 +170,9 @@ pub fn execute_error_korean(error: &ExecuteError) -> String {
             "안전한 임시 이름을 확보하지 못했습니다.".to_owned()
         }
         ExecuteErrorKind::InvalidSchedule => "안전한 실행 순서를 만들지 못했습니다.".to_owned(),
+        ExecuteErrorKind::UnauthorizedMove => {
+            "계획된 이동이 허용된 안전 범위를 벗어났습니다.".to_owned()
+        }
     }
 }
 
@@ -187,7 +195,7 @@ pub fn journal_capacity_error_korean(error: JournalCapacityError) -> String {
 #[must_use]
 pub fn execution_outcome_korean(outcome: &ExecutionOutcome) -> String {
     match outcome {
-        ExecutionOutcome::Completed => "파일 이름을 변경하였습니다.".to_owned(),
+        ExecutionOutcome::Completed => "파일 변경을 완료했습니다.".to_owned(),
         ExecutionOutcome::RolledBack {
             failure: ExecutionFailure::Cancelled { .. },
         } => "요청에 따라 변경을 취소하고 원래 상태로 복원했습니다.".to_owned(),
