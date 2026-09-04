@@ -43,8 +43,8 @@ the model atomically. Cancellation, stale state, an invalid selected folder, or
 a bounded-allocation failure leaves every row and the revision unchanged. A
 successful change increments the revision once and fully rebuilds path,
 collision, status, and Apply-readiness previews. The separate path-reset command
-restores each source parent while retaining proposed names; Ctrl+Z retains its
-name-only compatibility behavior.
+restores each source parent while retaining proposed names; the name-reset
+command independently restores proposed names without changing target folders.
 
 Appearance preferences are non-authorizing input. Theme, command-rail density,
 preview emphasis, separators, tint, and empty-state copy may change presentation

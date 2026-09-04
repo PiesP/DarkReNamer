@@ -103,9 +103,11 @@ impl CommandRail {
             let command_spec = command_ui_spec(command)
                 .filter(|spec| spec.rail.is_some())
                 .ok_or_else(|| io::Error::other("command rail label is missing"))?;
-            let label = wide(command_spec.rail_label);
-            // A standard BUTTON exposes this catalog-owned window text as its
-            // accessible name; no parallel accessibility string can drift.
+            let label = wide(command_spec.menu_label);
+            // A standard BUTTON exposes the full menu command as its accessible
+            // name. Owner-draw painting resolves the shorter rail label from
+            // the same command ID, so narrow visual copy cannot truncate the
+            // spoken name.
             // SAFETY: parent is a live top-level window, label is terminated
             // UTF-16 retained through the synchronous control creation call,
             // and the numeric child identifier is the stable command ID.

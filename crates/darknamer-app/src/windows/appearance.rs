@@ -371,6 +371,11 @@ fn draw_owner_button_with_readiness(
     paint_button(
         resources,
         draw.hwndItem,
+        u16::try_from(draw.CtlID)
+            .ok()
+            .and_then(command_ui_spec)
+            .filter(|spec| spec.rail.is_some())
+            .map(|spec| spec.rail_label),
         draw.hDC,
         draw.rcItem,
         (apply_readiness_button == Some(draw.hwndItem)).then_some(dpi),
@@ -439,6 +444,7 @@ pub(super) fn draw_custom_button(
     paint_button(
         resources,
         button,
+        None,
         // SAFETY: the DC is live for this custom-draw stage.
         unsafe { (*custom).hdc },
         // SAFETY: the rectangle is copied integral callback data.
@@ -467,6 +473,7 @@ struct ButtonDrawState {
 fn paint_button(
     resources: Option<&AppearanceResources>,
     button: HWND,
+    visible_label: Option<&str>,
     dc: HDC,
     rect: windows_sys::Win32::Foundation::RECT,
     apply_readiness_dpi: Option<u32>,
@@ -547,14 +554,20 @@ fn paint_button(
         unsafe { FillRect(dc, &indicator, resources.apply_readiness.as_raw()) };
     }
     // SAFETY: button is the live native BUTTON being drawn.
-    let length = unsafe { GetWindowTextLengthW(button) };
+    let length = visible_label.map_or_else(
+        || unsafe { GetWindowTextLengthW(button) },
+        |label| i32::try_from(label.encode_utf16().count()).unwrap_or(i32::MAX),
+    );
     if length > 0 {
         let capacity = usize::try_from(length)
             .unwrap_or_default()
             .saturating_add(1);
-        let mut label = vec![0_u16; capacity];
+        let mut label = visible_label.map_or_else(|| vec![0_u16; capacity], wide);
         // SAFETY: label has length+1 writable units and button remains live.
-        let copied = unsafe { GetWindowTextW(button, label.as_mut_ptr(), length + 1) };
+        let copied = visible_label.map_or_else(
+            || unsafe { GetWindowTextW(button, label.as_mut_ptr(), length + 1) },
+            |_| length,
+        );
         if copied > 0 {
             // SAFETY: WM_GETFONT returns the borrowed font installed on button.
             let font = unsafe { SendMessageW(button, WM_GETFONT, 0, 0) } as HFONT;

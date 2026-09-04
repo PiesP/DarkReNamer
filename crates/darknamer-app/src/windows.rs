@@ -3870,7 +3870,12 @@ mod tests {
                     actual_ids.push(placement.command);
                     let tool = rail_tool_spec(placement.command)
                         .ok_or_else(|| io::Error::other("native command label is missing"))?;
-                    assert_eq!(window_text(button)?, tool.label);
+                    assert_eq!(
+                        window_text(button)?,
+                        command_ui_spec(tool.id)
+                            .map(|spec| spec.menu_label)
+                            .unwrap_or_default()
+                    );
                     let rect = rail.command_rect(placement.command)?;
                     assert_eq!(rect.left, origin_x + placement.x);
                     assert_eq!(rect.top, placement.y);
