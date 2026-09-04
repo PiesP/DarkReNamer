@@ -163,10 +163,19 @@ impl CommandRailSpec {
 
     /// Iterates over the catalog entries visible on this rail.
     pub fn command_specs(self) -> impl Iterator<Item = &'static CommandUiSpec> {
-        COMMAND_UI_SPECS.iter().filter(move |spec| {
-            spec.rail
-                .is_some_and(|placement| placement.side == self.side)
-        })
+        let mut specs = COMMAND_UI_SPECS
+            .iter()
+            .chain(core::iter::once(&DELETE_SELECTED_UI_SPEC))
+            .filter(move |spec| {
+                spec.rail
+                    .is_some_and(|placement| placement.side == self.side)
+            })
+            .collect::<Vec<_>>();
+        specs.sort_by_key(|spec| {
+            let placement = spec.rail.expect("filtered rail placement");
+            (placement.group, placement.order)
+        });
+        specs.into_iter()
     }
 
     fn group_count(self) -> usize {
@@ -1738,15 +1747,7 @@ pub(crate) fn main_layout_window_count(layout: &MainLayout) -> usize {
 
 #[cfg(any(windows, test))]
 fn command_group(command: CommandId) -> Option<u8> {
-    let mut index = 0_usize;
-    while index < COMMAND_UI_SPECS.len() {
-        let spec = COMMAND_UI_SPECS[index];
-        if spec.id == command {
-            return spec.rail.map(|placement| placement.group);
-        }
-        index += 1;
-    }
-    None
+    command_ui_spec(command).and_then(|spec| spec.rail.map(|placement| placement.group))
 }
 
 #[cfg(any(windows, test))]
@@ -3695,7 +3696,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     ),
     command_ui_spec!(
         CLEAR_LIST,
-        rail(RailSide::Right, 1, 0),
+        None,
         "목록\n지우기",
         menu(MenuGroup::File, 1, 2),
         "목록 비우기",
@@ -3711,7 +3712,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     ),
     command_ui_spec!(
         MANUAL_CHANGE,
-        rail(RailSide::Right, 1, 1),
+        rail(RailSide::Right, 1, 0),
         "직접\n바꾸기",
         menu(MenuGroup::Edit, 1, 0),
         "선택 항목 이름 직접 변경...",
@@ -3735,7 +3736,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     ),
     command_ui_spec!(
         PARENT_PREFIX,
-        rail(RailSide::Right, 2, 0),
+        rail(RailSide::Right, 3, 0),
         "폴더명\n앞에",
         menu(MenuGroup::Tools, 4, 0),
         "대상 폴더명을 이름 앞에 붙이기",
@@ -3747,7 +3748,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     ),
     command_ui_spec!(
         PARENT_SUFFIX,
-        rail(RailSide::Right, 2, 1),
+        rail(RailSide::Right, 3, 1),
         "폴더명\n뒤에",
         menu(MenuGroup::Tools, 4, 1),
         "대상 폴더명을 이름 뒤에 붙이기",
@@ -3771,7 +3772,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     ),
     command_ui_spec!(
         EXT_DELETE,
-        rail(RailSide::Right, 3, 0),
+        rail(RailSide::Right, 2, 0),
         "확장자\n지우기",
         menu(MenuGroup::Tools, 3, 0),
         "확장자 지우기",
@@ -3783,7 +3784,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     ),
     command_ui_spec!(
         EXT_ADD,
-        rail(RailSide::Right, 3, 1),
+        rail(RailSide::Right, 2, 1),
         "확장자\n추가",
         menu(MenuGroup::Tools, 3, 1),
         "확장자 추가...",
@@ -3795,7 +3796,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     ),
     command_ui_spec!(
         EXT_REPLACE,
-        rail(RailSide::Right, 3, 2),
+        rail(RailSide::Right, 2, 2),
         "확장자\n변경",
         menu(MenuGroup::Tools, 3, 2),
         "확장자 변경...",
@@ -4011,15 +4012,25 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
     ),
 ];
 
+pub const DELETE_SELECTED_UI_SPEC: CommandUiSpec = command_ui_spec!(
+    DELETE_SELECTED_COMMAND,
+    rail(RailSide::Right, 1, 1),
+    "선택\n제거",
+    menu(MenuGroup::Edit, 0, 1),
+    "선택 항목을 목록에서 제거",
+    "선택한 항목을 목록에서만 제거합니다. 실제 파일은 삭제하지 않습니다.",
+    legacy(
+        LegacyVirtualKey::Delete,
+        LegacyShortcutModifiers::None,
+        "Delete"
+    ),
+    Selection,
+    Model,
+    AllRows
+);
+
 /// Legacy shell accelerators whose commands are outside APPLY..LAST_COMMAND.
-pub const LEGACY_AUXILIARY_SHORTCUTS: [LegacyCommandShortcut; 1] = [LegacyCommandShortcut {
-    command: DELETE_SELECTED_COMMAND,
-    shortcut: LegacyShortcut {
-        virtual_key: LegacyVirtualKey::Delete,
-        modifiers: LegacyShortcutModifiers::None,
-        display: "Delete",
-    },
-}];
+pub const LEGACY_AUXILIARY_SHORTCUTS: [LegacyCommandShortcut; 0] = [];
 
 /// Iterates every catalog and auxiliary legacy compatibility accelerator.
 pub fn legacy_command_shortcuts() -> impl Iterator<Item = LegacyCommandShortcut> {
@@ -4045,6 +4056,9 @@ pub fn legacy_command_shortcut(command: CommandId) -> Option<LegacyShortcut> {
 /// Looks up one command's immutable UI metadata.
 #[must_use]
 pub fn command_ui_spec(id: CommandId) -> Option<&'static CommandUiSpec> {
+    if id == DELETE_SELECTED_COMMAND {
+        return Some(&DELETE_SELECTED_UI_SPEC);
+    }
     let index = usize::from(id.checked_sub(APPLY)?);
     COMMAND_UI_SPECS.get(index).filter(|spec| spec.id == id)
 }
@@ -4804,7 +4818,7 @@ mod tests {
         assert!(indicator.height > 0);
 
         let right = calculate_command_rail_layout(&RIGHT_RAIL, 348, metrics)?;
-        for start in [1, 4, 6] {
+        for start in [1, 4, 7] {
             assert_eq!(
                 right[start].y - right[start - 1].bottom(),
                 metrics.group_gap
@@ -7301,14 +7315,14 @@ mod tests {
             RIGHT_RAIL.commands().collect::<Vec<_>>(),
             [
                 RESET,
-                CLEAR_LIST,
                 MANUAL_CHANGE,
+                DELETE_SELECTED_COMMAND,
                 SORT,
-                PARENT_PREFIX,
-                PARENT_SUFFIX,
                 EXT_DELETE,
                 EXT_ADD,
-                EXT_REPLACE
+                EXT_REPLACE,
+                PARENT_PREFIX,
+                PARENT_SUFFIX
             ]
             .to_vec()
         );

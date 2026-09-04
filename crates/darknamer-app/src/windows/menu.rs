@@ -916,8 +916,20 @@ pub(super) fn apply_cancel_control_state(state: &AppState) {
 
 fn rail_enabled_states(state: &AppState, spec: CommandRailSpec) -> Vec<bool> {
     spec.commands()
-        .map(|command| state.command_states[usize::from(command - APPLY)])
+        .map(|command| command_state(state, command))
         .collect()
+}
+
+fn command_state(state: &AppState, id: CommandId) -> bool {
+    if id == DELETE_SELECTED_COMMAND {
+        return !state.read_only_locked()
+            && !state.mutation_locked
+            && !selected_indices(state.list_window).is_empty();
+    }
+    id.checked_sub(APPLY)
+        .and_then(|index| state.command_states.get(usize::from(index)))
+        .copied()
+        .unwrap_or(false)
 }
 
 fn focus_index(state: &AppState, child: FocusChild) -> Option<usize> {
@@ -1068,12 +1080,12 @@ pub(super) fn handle_focus_navigation(state: &mut AppState, message: &MSG) -> Op
 pub(super) fn apply_command_states(state: &AppState) {
     for id in LEFT_RAIL.commands() {
         if let Some(rail) = &state.left_rail {
-            rail.set_enabled(id, state.command_states[usize::from(id - APPLY)]);
+            rail.set_enabled(id, command_state(state, id));
         }
     }
     for id in RIGHT_RAIL.commands() {
         if let Some(rail) = &state.right_rail {
-            rail.set_enabled(id, state.command_states[usize::from(id - APPLY)]);
+            rail.set_enabled(id, command_state(state, id));
         }
     }
     for id in APPLY..=LAST_COMMAND {
@@ -1413,18 +1425,12 @@ pub(super) fn handle_owner_menu_char(wparam: WPARAM, lparam: LPARAM) -> LRESULT 
 }
 
 impl MenuBuilder {
-    fn bar() -> io::Result<Self> {
-        OwnedMenu::new_bar().map(|menu| Self {
-            menu,
-            owner_draw: owner_draw_menus_enabled(),
-        })
+    fn bar(owner_draw: bool) -> io::Result<Self> {
+        OwnedMenu::new_bar().map(|menu| Self { menu, owner_draw })
     }
 
-    fn popup() -> io::Result<Self> {
-        OwnedMenu::new_popup().map(|menu| Self {
-            menu,
-            owner_draw: owner_draw_menus_enabled(),
-        })
+    fn popup(owner_draw: bool) -> io::Result<Self> {
+        OwnedMenu::new_popup().map(|menu| Self { menu, owner_draw })
     }
 
     fn item(&mut self, id: u16, label: &str) -> io::Result<()> {
@@ -1519,7 +1525,7 @@ fn set_last_menu_item_text(menu: HMENU, label: &[u16]) -> io::Result<()> {
 }
 
 pub(super) fn create_menu() -> io::Result<OwnedMenu> {
-    let mut menu = MenuBuilder::bar()?;
+    let mut menu = MenuBuilder::bar(owner_draw_menus_enabled())?;
     append_file_popup(&mut menu)?;
     append_edit_popup(&mut menu)?;
     append_view_popup(&mut menu)?;
@@ -1530,7 +1536,7 @@ pub(super) fn create_menu() -> io::Result<OwnedMenu> {
 }
 
 fn append_file_popup(menu: &mut MenuBuilder) -> io::Result<()> {
-    let mut file = MenuBuilder::popup()?;
+    let mut file = MenuBuilder::popup(menu.owner_draw)?;
     append_catalog_section(&mut file, MenuGroup::File, 0)?;
     file.separator()?;
     file.item(
@@ -1539,7 +1545,7 @@ fn append_file_popup(menu: &mut MenuBuilder) -> io::Result<()> {
     )?;
     file.separator()?;
     append_catalog_section(&mut file, MenuGroup::File, 4)?;
-    let mut export = MenuBuilder::popup()?;
+    let mut export = MenuBuilder::popup(menu.owner_draw)?;
     append_catalog_section(&mut export, MenuGroup::File, 2)?;
     export.separator()?;
     append_catalog_section(&mut export, MenuGroup::File, 3)?;
@@ -1550,12 +1556,15 @@ fn append_file_popup(menu: &mut MenuBuilder) -> io::Result<()> {
 }
 
 fn append_edit_popup(menu: &mut MenuBuilder) -> io::Result<()> {
-    let mut edit = MenuBuilder::popup()?;
+    let mut edit = MenuBuilder::popup(menu.owner_draw)?;
     edit.item(
         MANUAL_CHANGE,
         &command_menu_label(command_ui_spec(MANUAL_CHANGE).expect("catalogued command")),
     )?;
-    edit.item(DELETE_SELECTED_COMMAND, "선택 항목을 목록에서 제거\tDelete")?;
+    edit.item(
+        DELETE_SELECTED_COMMAND,
+        &command_menu_label(&DELETE_SELECTED_UI_SPEC),
+    )?;
     edit.separator()?;
     edit.item(
         MOVE_UP,
@@ -1574,7 +1583,7 @@ fn append_edit_popup(menu: &mut MenuBuilder) -> io::Result<()> {
         RESET,
         &command_menu_label(command_ui_spec(RESET).expect("catalogued command")),
     )?;
-    let mut target = MenuBuilder::popup()?;
+    let mut target = MenuBuilder::popup(menu.owner_draw)?;
     target.item(
         UNIFY_PATH,
         &command_menu_label(command_ui_spec(UNIFY_PATH).expect("catalogued command")),
@@ -1593,10 +1602,10 @@ fn append_edit_popup(menu: &mut MenuBuilder) -> io::Result<()> {
 }
 
 fn append_view_popup(menu: &mut MenuBuilder) -> io::Result<()> {
-    let mut view = MenuBuilder::popup()?;
+    let mut view = MenuBuilder::popup(menu.owner_draw)?;
     append_catalog_items(&mut view, MenuGroup::View)?;
     view.separator()?;
-    let mut theme = MenuBuilder::popup()?;
+    let mut theme = MenuBuilder::popup(menu.owner_draw)?;
     theme.item(THEME_SYSTEM, "시스템 설정(&S)")?;
     theme.item(THEME_LIGHT, "밝게(&L)")?;
     theme.item(THEME_DARK, "어둡게(&D)")?;
@@ -1606,7 +1615,7 @@ fn append_view_popup(menu: &mut MenuBuilder) -> io::Result<()> {
 }
 
 fn append_transform_popup(menu: &mut MenuBuilder) -> io::Result<()> {
-    let mut transform = MenuBuilder::popup()?;
+    let mut transform = MenuBuilder::popup(menu.owner_draw)?;
     for (section, data, label) in [
         (0, MENU_POPUP_TEXT, "텍스트(&T)"),
         (1, MENU_POPUP_REMOVAL, "삭제·추출(&R)"),
@@ -1614,7 +1623,7 @@ fn append_transform_popup(menu: &mut MenuBuilder) -> io::Result<()> {
         (3, MENU_POPUP_EXTENSION, "확장자(&E)"),
         (4, MENU_POPUP_FOLDER_NAME, "폴더명 사용(&F)"),
     ] {
-        let mut popup = MenuBuilder::popup()?;
+        let mut popup = MenuBuilder::popup(menu.owner_draw)?;
         if section == 4 {
             for command in [PARENT_PREFIX, PARENT_SUFFIX] {
                 popup.item(
@@ -1631,13 +1640,13 @@ fn append_transform_popup(menu: &mut MenuBuilder) -> io::Result<()> {
 }
 
 fn append_help_popup(menu: &mut MenuBuilder) -> io::Result<()> {
-    let mut help = MenuBuilder::popup()?;
+    let mut help = MenuBuilder::popup(menu.owner_draw)?;
     append_catalog_items(&mut help, MenuGroup::About)?;
     menu.popup_child(help, MENU_POPUP_HELP, "도움말(&H)")
 }
 
 fn append_recovery_popup(menu: &mut MenuBuilder) -> io::Result<()> {
-    let mut recovery = MenuBuilder::popup()?;
+    let mut recovery = MenuBuilder::popup(menu.owner_draw)?;
     recovery.item(SHOW_RECOVERY_STATUS, "복구 상태 및 문제 확인...")?;
     recovery.item(EXPORT_RECOVERY_JOURNAL, "복구 데이터 내보내기...")?;
     recovery.separator()?;
