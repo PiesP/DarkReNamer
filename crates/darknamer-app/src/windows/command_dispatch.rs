@@ -1138,6 +1138,7 @@ fn run_prepared_file_dialog(
                 .validate_destination_parent(destination_parent)
                 .map(|_| ())
         },
+        message,
     );
 }
 
@@ -1146,6 +1147,7 @@ pub(super) fn run_prepared_file_dialog_with_destination_validation(
     dialog: PreparedFileDialog,
     select_file_dialog: impl FnOnce(HWND, PreparedFileDialogKind) -> PreparedFileDialogSelection,
     validate_destination_parent: impl FnOnce(&LegacyText) -> Result<(), crate::rename::BackendError>,
+    mut report_error: impl FnMut(HWND, &str, &str),
 ) {
     let session = dialog.session;
     if !file_dialog_session_is_current(window, session) {
@@ -1199,7 +1201,7 @@ pub(super) fn run_prepared_file_dialog_with_destination_validation(
                 if finish_file_dialog_session(window, session, FileDialogCompletion::Accept, |_| ())
                     .is_some()
                 {
-                    message(window, &error, "DarkReNamer - 경로 통일");
+                    report_error(window, &error, "DarkReNamer - 경로 통일");
                 }
                 return;
             }
@@ -1219,7 +1221,7 @@ pub(super) fn run_prepared_file_dialog_with_destination_validation(
                 },
             );
             if let Some(Err(error)) = result {
-                message(
+                report_error(
                     window,
                     destination_parent_mutation_error_korean(error),
                     "DarkReNamer - 경로 통일",

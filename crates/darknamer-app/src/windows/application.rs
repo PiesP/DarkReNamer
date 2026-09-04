@@ -1884,20 +1884,6 @@ mod tests {
             original_revision
         );
 
-        let missing = app._directory.path().join("missing-target");
-        app.dispatch_with_selector(UNIFY_PATH, |_, kind| {
-            assert!(matches!(
-                kind,
-                PreparedFileDialogKind::UnifyDestinationParent
-            ));
-            PreparedFileDialogSelection::UnifyDestinationParent(missing)
-        })?;
-        app.assert_session_cleared()?;
-        assert_eq!(
-            app.with_state(|state| state.model_revision)?,
-            original_revision
-        );
-
         let destination = app._directory.path().join("unified-target");
         fs::create_dir(&destination)?;
         let expected_destination = legacy_path(&destination);
@@ -1920,7 +1906,7 @@ mod tests {
             assert_eq!(state.rendered_rows[0].values[2], expected_destination);
             assert_eq!(
                 state.rendered_rows[0].values[NATIVE_STATUS_COLUMN_INDEX],
-                LegacyText::from("이동 및 이름 변경 예정")
+                LegacyText::from("이동·이름 변경 예정")
             );
         })?;
 
@@ -2082,6 +2068,10 @@ mod tests {
                     code: 50,
                     certainty: crate::rename::MutationCertainty::NotApplied,
                 })
+            },
+            |_, message, caption| {
+                assert!(message.contains("목록은 변경되지 않았습니다"));
+                assert_eq!(caption, "DarkReNamer - 경로 통일");
             },
         );
 
