@@ -778,11 +778,13 @@ unsafe extern "system" fn window_proc(
             drop(state_lease);
             let menu = if let Some(pending) = pending {
                 match pending.attach(window) {
-                    Ok(menu) => {
+                    Ok(attached) => {
                         if let Some(mut lease) = try_app_state(window) {
-                            lease.state_mut().menu = menu;
+                            let state = lease.state_mut();
+                            state.menu = attached.handle;
+                            state.menu_owner_data = attached.owner_data;
                         }
-                        menu
+                        attached.handle
                     }
                     Err(error) => {
                         super::message(

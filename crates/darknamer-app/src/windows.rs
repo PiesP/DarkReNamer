@@ -106,6 +106,12 @@ fn destination_parent_mutation_error_korean(error: DestinationParentMutationErro
     }
 }
 
+#[cfg(test)]
+use ::windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_I4};
+#[cfg(test)]
+use ::windows::Win32::UI::Accessibility::{AccessibleObjectFromWindow, IAccessible};
+#[cfg(test)]
+use ::windows::core::Interface;
 use clipboard::copy_clipboard;
 use command_dispatch::*;
 use command_rail::CommandRail;
@@ -173,7 +179,11 @@ use windows_sys::Win32::System::SystemServices::{
 #[cfg(test)]
 use windows_sys::Win32::System::SystemServices::{SS_NOTIFY, SS_SUNKEN, SS_TYPEMASK};
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTimeEx};
-use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
+use windows_sys::Win32::UI::Accessibility::{
+    HCF_HIGHCONTRASTON, HIGHCONTRASTW, MSAA_MENU_SIG, MSAAMENUINFO,
+};
+#[cfg(test)]
+use windows_sys::Win32::UI::Accessibility::{ROLE_SYSTEM_MENUITEM, STATE_SYSTEM_HASPOPUP};
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::CDIS_FOCUS;
 use windows_sys::Win32::UI::Controls::{
@@ -240,8 +250,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BM_CLICK, BS_FLAT, BS_MULTILINE, BS_TYPEMASK, GW_CHILD, GW_HWNDLAST, GW_HWNDNEXT, GWL_STYLE,
-    GetClassNameW, GetDlgCtrlID, GetScrollInfo, GetWindow, HWND_TOP, SB_HORZ, SCROLLINFO, SIF_PAGE,
-    SIF_RANGE,
+    GetClassNameW, GetDlgCtrlID, GetScrollInfo, GetWindow, HWND_TOP, OBJID_MENU, SB_HORZ,
+    SCROLLINFO, SIF_PAGE, SIF_RANGE,
 };
 use worker::*;
 
@@ -490,6 +500,7 @@ struct AppState {
     empty_add: HWND,
     drop_overlay: HWND,
     menu: HMENU,
+    menu_owner_data: OwnerMenuDataStore,
     owner_draw_menu: bool,
     pending_menu: Option<OwnedMenu>,
     font: OwnedFont,
@@ -590,6 +601,7 @@ impl AppState {
             empty_add: null_mut(),
             drop_overlay: null_mut(),
             menu: null_mut(),
+            menu_owner_data: Vec::new(),
             owner_draw_menu: false,
             pending_menu: None,
             font: OwnedFont::default(),
@@ -2925,6 +2937,92 @@ mod tests {
     }
 
     #[test]
+    fn owner_draw_menu_exposes_msaa_names() -> Result<(), Box<dyn std::error::Error>> {
+        struct AccessibleMenuSnapshot {
+            child_count: i32,
+            first_name: String,
+            shortcut: String,
+            role: i32,
+            state: i32,
+        }
+
+        // SAFETY: the system STATIC class/current module remain live for this
+        // hidden, process-owned accessibility test window.
+        let owner = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                800,
+                600,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if owner.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let attached = create_owner_draw_menu_for_test()?.attach(owner)?;
+        let result = (|| -> Result<AccessibleMenuSnapshot, Box<dyn std::error::Error>> {
+            let mut raw = null_mut();
+            // SAFETY: owner has a live attached menu; the requested interface
+            // IID and output slot follow AccessibleObjectFromWindow's contract.
+            let accessible = unsafe {
+                AccessibleObjectFromWindow(
+                    ::windows::Win32::Foundation::HWND(owner),
+                    OBJID_MENU as u32,
+                    &IAccessible::IID,
+                    &mut raw,
+                )?;
+                IAccessible::from_raw(raw)
+            };
+            let child = VARIANT {
+                Anonymous: VARIANT_0 {
+                    Anonymous: std::mem::ManuallyDrop::new(VARIANT_0_0 {
+                        vt: VT_I4,
+                        Anonymous: VARIANT_0_0_0 { lVal: 1 },
+                        ..VARIANT_0_0::default()
+                    }),
+                },
+            };
+            // SAFETY: accessible is the live in-process standard menu object
+            // and child 1 is a scalar CHILDID selecting its first menu item.
+            let snapshot = unsafe {
+                let role = accessible.get_accRole(&child)?;
+                let state = accessible.get_accState(&child)?;
+                AccessibleMenuSnapshot {
+                    child_count: accessible.accChildCount()?,
+                    first_name: accessible.get_accName(&child)?.to_string(),
+                    shortcut: accessible.get_accKeyboardShortcut(&child)?.to_string(),
+                    role: role.Anonymous.Anonymous.Anonymous.lVal,
+                    state: state.Anonymous.Anonymous.Anonymous.lVal,
+                }
+            };
+            Ok(snapshot)
+        })();
+        // SAFETY: detach the exact attached menu before destroying both the
+        // native handle and its test window. Metadata remains live until then.
+        unsafe {
+            SetMenu(owner, null_mut());
+            DestroyMenu(attached.handle);
+            DestroyWindow(owner);
+        }
+        drop(attached.owner_data);
+        let snapshot = result?;
+        assert_eq!(snapshot.child_count, 6);
+        assert_eq!(snapshot.first_name, "파일(F)");
+        assert_eq!(snapshot.shortcut, "Alt+f");
+        assert_eq!(snapshot.role, ROLE_SYSTEM_MENUITEM as i32);
+        assert_ne!(snapshot.state & STATE_SYSTEM_HASPOPUP as i32, 0);
+        Ok(())
+    }
+
+    #[test]
     fn owner_draw_top_level_menu_fits_the_parity_width_at_two_hundred_percent()
     -> Result<(), Box<dyn std::error::Error>> {
         const DPI: u32 = 192;
@@ -2960,6 +3058,14 @@ mod tests {
         }
         font.replace(message_font);
         let mut total_width = 0_u32;
+        let root_items = [
+            "파일(&F)",
+            "편집(&E)",
+            "보기(&V)",
+            "변환(&T)",
+            "복구(&R)",
+            "도움말(&H)",
+        ];
         for position in 0..6_u32 {
             let mut info = MENUITEMINFOW {
                 cbSize: size_of::<MENUITEMINFOW>() as u32,
@@ -2973,6 +3079,12 @@ mod tests {
                 unsafe { DestroyWindow(owner) };
                 return Err(io::Error::last_os_error().into());
             }
+            let expected = root_items[usize::try_from(position).unwrap_or_default()];
+            assert_eq!(owner_menu_label(info.dwItemData).as_deref(), Some(expected));
+            assert_eq!(
+                owner_menu_accessibility_label(info.dwItemData).as_deref(),
+                Some(expected),
+            );
             let mut measure = MEASUREITEMSTRUCT {
                 CtlType: ODT_MENU,
                 itemData: info.dwItemData,
