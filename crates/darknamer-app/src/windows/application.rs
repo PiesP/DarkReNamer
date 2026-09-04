@@ -33,6 +33,195 @@ pub(super) fn run() -> io::Result<()> {
     run_unsafe()
 }
 
+#[cfg(test)]
+struct ProductionOwnerDrawTestWindow {
+    window: HWND,
+    instance: *mut c_void,
+    class_name: Vec<u16>,
+}
+
+#[cfg(test)]
+static PRODUCTION_TEST_WINDOW_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+impl Drop for ProductionOwnerDrawTestWindow {
+    fn drop(&mut self) {
+        // SAFETY: this guard is created and dropped on the same UI thread. The
+        // production WndProc owns every child, OLE registration, menu, and
+        // AppState resource until this exact top-level window is destroyed.
+        unsafe {
+            if IsWindow(self.window) != 0 {
+                DestroyWindow(self.window);
+            }
+            UnregisterClassW(self.class_name.as_ptr(), self.instance);
+        }
+    }
+}
+
+#[cfg(test)]
+fn install_owner_draw_menu_for_test(window: HWND) -> io::Result<()> {
+    let replacement = create_owner_draw_menu_for_test()?;
+    // Detach the standard production menu without an AppState lease. SetMenu
+    // can synchronously enter non-client/menu callbacks.
+    // SAFETY: window is the live test-owned production top-level HWND.
+    if unsafe { SetMenu(window, null_mut()) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let Some(mut state_lease) = try_app_state(window) else {
+        return Err(io::Error::other(
+            "production test window state is unavailable",
+        ));
+    };
+    let state = state_lease.state_mut();
+    let previous = std::mem::replace(&mut state.menu, replacement.as_raw());
+    let previous_owner_data = std::mem::take(&mut state.menu_owner_data);
+    state.owner_draw_menu = true;
+    state.pending_menu = Some(replacement);
+    drop(state_lease);
+    if !previous.is_null() {
+        // SAFETY: SetMenu above detached this exact application-owned tree and
+        // no AppState reference remains. Its metadata outlives destruction.
+        unsafe { DestroyMenu(previous) };
+    }
+    drop(previous_owner_data);
+
+    // Attach through the same pointer-free production message used at startup,
+    // after every AppState lease and reference has ended.
+    // SAFETY: window remains live and the private message carries no pointers.
+    unsafe { SendMessageW(window, WM_APP_MENU_REDRAW, 0, 0) };
+    // SAFETY: the handle value belongs to the test-created window and this
+    // scalar query dereferences no caller storage.
+    if unsafe { IsWindow(window) } == 0 {
+        return Err(io::Error::other(
+            "owner-draw test menu attachment destroyed the window",
+        ));
+    }
+    let Some(state_lease) = try_app_state(window) else {
+        return Err(io::Error::other(
+            "owner-draw production test window state was not retained",
+        ));
+    };
+    if state_lease.state().pending_menu.is_some() || !state_lease.state().owner_draw_menu {
+        return Err(io::Error::other(
+            "owner-draw production test menu was not attached",
+        ));
+    }
+    apply_command_states(state_lease.state());
+    drop(state_lease);
+    // apply_command_states posts a redraw because owner-draw measurement may
+    // reenter. Execute it now, again with no AppState lease.
+    // SAFETY: window is live and the private message has no pointer payload.
+    unsafe { SendMessageW(window, WM_APP_MENU_REDRAW, 0, 0) };
+    Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn with_owner_draw_production_window_for_test<R>(
+    journal_root: &Path,
+    action: impl FnOnce(HWND) -> io::Result<R>,
+) -> io::Result<R> {
+    // SAFETY: null is the required reserved value and OleGuard balances every
+    // successful initialization on this same dedicated UI test thread.
+    let ole_status = unsafe { OleInitialize(null()) };
+    if ole_status < 0 {
+        return Err(io::Error::other(format!(
+            "test OLE initialization failed: 0x{:08X}",
+            ole_status as u32
+        )));
+    }
+    let _ole = OleGuard;
+    let controls = INITCOMMONCONTROLSEX {
+        dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+        dwICC: ICC_LISTVIEW_CLASSES | ICC_WIN95_CLASSES,
+    };
+    // SAFETY: controls has its exact ABI size and remains live through this
+    // synchronous process-wide common-controls initialization.
+    unsafe { InitCommonControlsEx(&controls) };
+    // SAFETY: null requests the current process module.
+    let instance = unsafe { GetModuleHandleW(null()) };
+    if instance.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let runtime = initialize_safe_runtime_at(journal_root)?;
+    let sequence = PRODUCTION_TEST_WINDOW_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let class_name = wide(&format!(
+        "DarkReNamerPopupAccessibilityTestWindow{sequence}"
+    ));
+    let window_class = WNDCLASSEXW {
+        cbSize: size_of::<WNDCLASSEXW>() as u32,
+        style: CS_HREDRAW | CS_VREDRAW,
+        lpfnWndProc: Some(window_proc),
+        cbClsExtra: 0,
+        cbWndExtra: 0,
+        hInstance: instance,
+        hIcon: null_mut(),
+        // SAFETY: a null instance plus IDC_ARROW requests the predefined cursor.
+        hCursor: unsafe { LoadCursorW(null_mut(), IDC_ARROW) },
+        hbrBackground: (COLOR_WINDOW + 1) as *mut c_void,
+        lpszMenuName: null(),
+        lpszClassName: class_name.as_ptr(),
+        hIconSm: null_mut(),
+    };
+    // SAFETY: the class storage remains live through window destruction and
+    // unregistration, and window_proc is the production callback.
+    if unsafe { RegisterClassExW(&window_class) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let state: *mut AppStateSlot = CallbackState::into_raw(AppState::new(runtime));
+    let mut adopted = false;
+    let mut init = WindowInit {
+        state,
+        adopted: &mut adopted,
+    };
+    // SAFETY: all pointers remain live through synchronous creation. WM_CREATE
+    // uses the real production AppState/window_proc path.
+    let window = unsafe {
+        CreateWindowExW(
+            WS_EX_APPWINDOW,
+            class_name.as_ptr(),
+            wide("DarkReNamer popup accessibility test").as_ptr(),
+            WS_OVERLAPPEDWINDOW | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            INITIAL_WIDTH,
+            INITIAL_HEIGHT,
+            null_mut(),
+            null_mut(),
+            instance,
+            (&mut init as *mut WindowInit).cast(),
+        )
+    };
+    if window.is_null() {
+        if !adopted {
+            // SAFETY: WM_NCCREATE did not adopt the unique Box allocation.
+            unsafe { drop(Box::from_raw(state)) };
+        }
+        // SAFETY: registration succeeded but no window retained the class.
+        unsafe { UnregisterClassW(class_name.as_ptr(), instance) };
+        return Err(io::Error::last_os_error());
+    }
+    let guard = ProductionOwnerDrawTestWindow {
+        window,
+        instance,
+        class_name,
+    };
+    // Attach the standard startup menu before replacing it through the test
+    // seam, matching production ownership transitions exactly.
+    // SAFETY: the live owner handles this pointer-free private message.
+    unsafe { SendMessageW(window, WM_APP_MENU_REDRAW, 0, 0) };
+    install_owner_draw_menu_for_test(window)?;
+    // SAFETY: the window is live, owned by this UI thread, and made visible so
+    // TrackPopupMenuEx creates a genuine system #32768 popup window.
+    unsafe {
+        ShowWindow(window, SW_SHOW);
+        UpdateWindow(window);
+    }
+    let result = action(window);
+    drop(guard);
+    result
+}
+
 fn minimum_track_width(window: HWND, state: &AppState) -> i32 {
     let mut outer = RECT::default();
     let mut client = RECT::default();

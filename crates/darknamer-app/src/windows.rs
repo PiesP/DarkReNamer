@@ -185,7 +185,9 @@ use windows_sys::Win32::UI::Accessibility::{
     HCF_HIGHCONTRASTON, HIGHCONTRASTW, MSAA_MENU_SIG, MSAAMENUINFO,
 };
 #[cfg(test)]
-use windows_sys::Win32::UI::Accessibility::{ROLE_SYSTEM_MENUITEM, STATE_SYSTEM_HASPOPUP};
+use windows_sys::Win32::UI::Accessibility::{
+    ROLE_SYSTEM_MENUITEM, ROLE_SYSTEM_MENUPOPUP, STATE_SYSTEM_HASPOPUP,
+};
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::CDIS_FOCUS;
 use windows_sys::Win32::UI::Controls::{
@@ -251,9 +253,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BM_CLICK, BS_FLAT, BS_MULTILINE, BS_TYPEMASK, GW_CHILD, GW_HWNDLAST, GW_HWNDNEXT, GWL_STYLE,
-    GetClassNameW, GetDlgCtrlID, GetScrollInfo, GetWindow, HWND_TOP, MF_BYPOSITION, MIIM_FTYPE,
-    OBJID_MENU, SB_HORZ, SCROLLINFO, SIF_PAGE, SIF_RANGE, STATE_SYSTEM_CHECKED,
+    BM_CLICK, BS_FLAT, BS_MULTILINE, BS_TYPEMASK, CHILDID_SELF, FindWindowExW, GW_CHILD,
+    GW_HWNDLAST, GW_HWNDNEXT, GWL_STYLE, GetClassNameW, GetDlgCtrlID, GetMenu, GetScrollInfo,
+    GetSubMenu, GetWindow, GetWindowThreadProcessId, HWND_TOP, MF_BYPOSITION, MIIM_FTYPE,
+    OBJID_CLIENT, OBJID_MENU, SB_HORZ, SCROLLINFO, SIF_PAGE, SIF_RANGE, STATE_SYSTEM_CHECKED,
+    TPM_LEFTALIGN, TPM_LEFTBUTTON, TPM_NONOTIFY, TPM_RETURNCMD, TPM_TOPALIGN, TrackPopupMenuEx,
+    UnregisterClassW, WM_CANCELMODE,
 };
 use worker::*;
 
@@ -3134,6 +3139,342 @@ mod tests {
         assert_ne!(snapshot.items[0].state & STATE_SYSTEM_UNAVAILABLE as i32, 0);
         assert_ne!(snapshot.items[1].state & STATE_SYSTEM_CHECKED as i32, 0);
         Ok(())
+    }
+
+    #[derive(Debug)]
+    struct AccessiblePopupLeafSnapshot {
+        name: String,
+        role: i32,
+        state: i32,
+    }
+
+    #[derive(Debug)]
+    struct AccessiblePopupSnapshot {
+        popup_role: i32,
+        child_count: i32,
+        apply: AccessiblePopupLeafSnapshot,
+    }
+
+    fn accessible_child_variant(id: i32) -> VARIANT {
+        VARIANT {
+            Anonymous: VARIANT_0 {
+                Anonymous: std::mem::ManuallyDrop::new(VARIANT_0_0 {
+                    vt: VT_I4,
+                    Anonymous: VARIANT_0_0_0 { lVal: id },
+                    ..VARIANT_0_0::default()
+                }),
+            },
+        }
+    }
+
+    fn accessible_file_popup_snapshot(
+        owner_value: usize,
+        ui_thread_id: u32,
+        process_id: u32,
+        expected_apply_name: String,
+    ) -> io::Result<AccessiblePopupSnapshot> {
+        use std::time::{Duration, Instant};
+
+        struct ClientOle;
+
+        impl Drop for ClientOle {
+            fn drop(&mut self) {
+                // SAFETY: this guard exists only after successful OleInitialize
+                // and drops on the same dedicated accessibility-client thread.
+                unsafe { OleUninitialize() };
+            }
+        }
+
+        struct CancelPopupOnDrop {
+            owner: HWND,
+            armed: bool,
+        }
+
+        impl CancelPopupOnDrop {
+            fn cancel(&mut self) -> io::Result<()> {
+                // SAFETY: this carries no pointers and targets only the exact
+                // source-bound production owner supplied by the UI thread.
+                if unsafe { PostMessageW(self.owner, WM_CANCELMODE, 0, 0) } == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                self.armed = false;
+                Ok(())
+            }
+        }
+
+        impl Drop for CancelPopupOnDrop {
+            fn drop(&mut self) {
+                if !self.armed {
+                    return;
+                }
+                // SAFETY: this carries no pointers and targets only the exact
+                // source-bound production owner supplied by the UI thread.
+                unsafe { PostMessageW(self.owner, WM_CANCELMODE, 0, 0) };
+            }
+        }
+
+        let owner = owner_value as HWND;
+        let mut cancel = CancelPopupOnDrop { owner, armed: true };
+        // SAFETY: null is the required reserved value and ClientOle balances
+        // every successful result on this same client thread.
+        let ole_status = unsafe { OleInitialize(null()) };
+        if ole_status < 0 {
+            return Err(io::Error::other(format!(
+                "accessibility-client OLE initialization failed: 0x{:08X}",
+                ole_status as u32
+            )));
+        }
+        let _ole = ClientOle;
+        let popup_class = wide("#32768");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let popup = loop {
+            let mut previous = null_mut();
+            let mut matched = None;
+            loop {
+                // SAFETY: null parent searches top-level windows, previous is
+                // either null or the prior result, and class is terminated.
+                let candidate =
+                    unsafe { FindWindowExW(null_mut(), previous, popup_class.as_ptr(), null()) };
+                if candidate.is_null() {
+                    break;
+                }
+                let mut candidate_process = 0_u32;
+                // SAFETY: candidate is the system-enumerated HWND and the
+                // process output remains writable for this scalar query.
+                let candidate_thread =
+                    unsafe { GetWindowThreadProcessId(candidate, &mut candidate_process) };
+                if candidate_thread == ui_thread_id && candidate_process == process_id {
+                    matched = Some(candidate);
+                    break;
+                }
+                previous = candidate;
+            }
+            if let Some(popup) = matched {
+                break popup;
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "the exact UI-thread #32768 popup did not appear before the deadline",
+                ));
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        let mut raw = null_mut();
+        // SAFETY: popup is the exact live #32768 HWND owned by the source-bound
+        // UI thread. IID/output storage follow AccessibleObjectFromWindow.
+        let accessible = unsafe {
+            AccessibleObjectFromWindow(
+                ::windows::Win32::Foundation::HWND(popup),
+                OBJID_CLIENT as u32,
+                &IAccessible::IID,
+                &mut raw,
+            )
+            .map_err(io::Error::other)?;
+            IAccessible::from_raw(raw)
+        };
+        // SAFETY: the in-process menu proxy remains live until WM_CANCELMODE is
+        // posted by the guard. Each scalar CHILDID is bounded by child_count.
+        let snapshot = unsafe {
+            let self_child = accessible_child_variant(CHILDID_SELF as i32);
+            let popup_role = accessible
+                .get_accRole(&self_child)
+                .map_err(io::Error::other)?
+                .Anonymous
+                .Anonymous
+                .Anonymous
+                .lVal;
+            let child_count = accessible.accChildCount().map_err(io::Error::other)?;
+            let mut exposed_names = Vec::new();
+            let mut matched = None;
+            for id in 1..=child_count {
+                let child = accessible_child_variant(id);
+                let Ok(name) = accessible.get_accName(&child) else {
+                    continue;
+                };
+                let name = name.to_string();
+                exposed_names.push(name.clone());
+                if name != expected_apply_name {
+                    continue;
+                }
+                let role = accessible
+                    .get_accRole(&child)
+                    .map_err(io::Error::other)?
+                    .Anonymous
+                    .Anonymous
+                    .Anonymous
+                    .lVal;
+                let state = accessible
+                    .get_accState(&child)
+                    .map_err(io::Error::other)?
+                    .Anonymous
+                    .Anonymous
+                    .Anonymous
+                    .lVal;
+                matched = Some(AccessiblePopupSnapshot {
+                    popup_role,
+                    child_count,
+                    apply: AccessiblePopupLeafSnapshot { name, role, state },
+                });
+                break;
+            }
+            matched.ok_or_else(|| {
+                io::Error::other(format!(
+                    "the live File popup exposed no {expected_apply_name:?} MSAA leaf; role={popup_role}, child_count={child_count}, names={exposed_names:?}"
+                ))
+            })
+        }?;
+        drop(accessible);
+        cancel.cancel()?;
+        Ok(snapshot)
+    }
+
+    fn verify_production_owner_draw_file_popup(
+        journal_root: PathBuf,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let expected_apply_name = command_menu_label(
+            command_ui_spec(APPLY)
+                .ok_or_else(|| io::Error::other("APPLY is absent from the command catalog"))?,
+        );
+        let ui = thread::spawn(move || {
+            application::with_owner_draw_production_window_for_test(&journal_root, |owner| {
+                // SAFETY: owner is the live production test window. Its menu
+                // and first File submenu remain UI-thread-owned through tracking.
+                let file_popup = unsafe { GetSubMenu(GetMenu(owner), 0) };
+                if file_popup.is_null() {
+                    return Err(io::Error::other(
+                        "production owner-draw File popup is unavailable",
+                    ));
+                }
+                let mut process_id = 0_u32;
+                // SAFETY: owner is live and process_id is writable scalar storage.
+                let ui_thread_id = unsafe { GetWindowThreadProcessId(owner, &mut process_id) };
+                if ui_thread_id == 0 || process_id == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let mut owner_rect = RECT::default();
+                // SAFETY: owner is live and owner_rect is writable. No AppState
+                // lease exists across foregrounding or popup tracking.
+                if unsafe { GetWindowRect(owner, &mut owner_rect) } == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let owner_value = owner as usize;
+                let client = thread::spawn(move || {
+                    accessible_file_popup_snapshot(
+                        owner_value,
+                        ui_thread_id,
+                        process_id,
+                        expected_apply_name,
+                    )
+                });
+                // SAFETY: both handles are UI-thread-owned and live. The client
+                // thread closes this modal loop only by posting WM_CANCELMODE to
+                // owner after taking its accessibility snapshot.
+                let selected = unsafe {
+                    SetForegroundWindow(owner);
+                    TrackPopupMenuEx(
+                        file_popup,
+                        TPM_LEFTALIGN
+                            | TPM_TOPALIGN
+                            | TPM_LEFTBUTTON
+                            | TPM_NONOTIFY
+                            | TPM_RETURNCMD,
+                        owner_rect.left.saturating_add(16),
+                        owner_rect.top.saturating_add(48),
+                        owner,
+                        null(),
+                    )
+                };
+                let snapshot = client
+                    .join()
+                    .map_err(|_| io::Error::other("accessibility-client thread panicked"))??;
+                if selected != 0 {
+                    return Err(io::Error::other(format!(
+                        "popup accessibility probe selected command {selected} instead of cancelling"
+                    )));
+                }
+                Ok((owner_value, snapshot))
+            })
+        });
+        let (owner_value, snapshot) = ui
+            .join()
+            .map_err(|_| io::Error::other("popup UI thread panicked"))??;
+        // SAFETY: the dedicated UI thread completed production teardown. The
+        // exact returned HWND must no longer name a live window.
+        assert_eq!(unsafe { IsWindow(owner_value as HWND) }, 0);
+        assert_eq!(snapshot.popup_role, ROLE_SYSTEM_MENUPOPUP as i32);
+        assert!(snapshot.child_count > 0);
+        assert_eq!(snapshot.apply.name, "변경 사항 적용\tCtrl+S");
+        assert_eq!(snapshot.apply.role, ROLE_SYSTEM_MENUITEM as i32);
+        assert_ne!(snapshot.apply.state & STATE_SYSTEM_UNAVAILABLE as i32, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn production_owner_draw_file_popup_exposes_disabled_apply_through_msaa()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::time::{Duration, Instant};
+
+        struct PopupTestChild(std::process::Child);
+
+        impl Drop for PopupTestChild {
+            fn drop(&mut self) {
+                if !matches!(self.0.try_wait(), Ok(Some(_))) {
+                    let _killed = self.0.kill();
+                    let _waited = self.0.wait();
+                }
+            }
+        }
+
+        const CHILD_MODE: &str = "DARKRENAMER_TEST_POPUP_ACCESSIBILITY_CHILD";
+        const CHILD_ROOT: &str = "DARKRENAMER_TEST_POPUP_ACCESSIBILITY_ROOT";
+        if env::var_os(CHILD_MODE).is_some() {
+            let root = PathBuf::from(
+                env::var_os(CHILD_ROOT)
+                    .ok_or_else(|| io::Error::other("popup test child root is missing"))?,
+            );
+            let canonical_root = fs::canonicalize(&root)?;
+            let canonical_temp = fs::canonicalize(env::temp_dir())?;
+            if !canonical_root.starts_with(canonical_temp) {
+                return Err(io::Error::other("popup test child root is outside temp").into());
+            }
+            return verify_production_owner_draw_file_popup(root);
+        }
+
+        let directory = tempfile::tempdir()?;
+        let mut child = PopupTestChild(
+            Command::new(std::env::current_exe()?)
+                .arg("--exact")
+                .arg("windows::tests::production_owner_draw_file_popup_exposes_disabled_apply_through_msaa")
+                .arg("--nocapture")
+                .arg("--test-threads=1")
+                .env(CHILD_MODE, "1")
+                .env(CHILD_ROOT, directory.path())
+                .spawn()?,
+        );
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some(status) = child.0.try_wait()? {
+                if status.success() {
+                    return Ok(());
+                }
+                return Err(io::Error::other(format!(
+                    "popup accessibility child failed: {status}"
+                ))
+                .into());
+            }
+            if Instant::now() >= deadline {
+                child.0.kill()?;
+                let _status = child.0.wait()?;
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "popup accessibility child exceeded the 15-second deadline",
+                )
+                .into());
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
     }
 
     #[test]
