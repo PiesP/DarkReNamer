@@ -3152,7 +3152,7 @@ mod tests {
     struct AccessiblePopupSnapshot {
         popup_role: i32,
         child_count: i32,
-        apply: AccessiblePopupLeafSnapshot,
+        leaf: AccessiblePopupLeafSnapshot,
     }
 
     fn accessible_child_variant(id: i32) -> VARIANT {
@@ -3167,11 +3167,12 @@ mod tests {
         }
     }
 
-    fn accessible_file_popup_snapshot(
+    fn accessible_popup_snapshot(
         owner_value: usize,
         ui_thread_id: u32,
         process_id: u32,
-        expected_apply_name: String,
+        popup_context: &'static str,
+        expected_leaf_name: String,
     ) -> io::Result<AccessiblePopupSnapshot> {
         use std::time::{Duration, Instant};
 
@@ -3226,7 +3227,9 @@ mod tests {
         }
         let _ole = ClientOle;
         let popup_class = wide("#32768");
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // Three sequential popup probes must remain strictly inside the outer
+        // 15-second child-process watchdog, including startup and teardown.
+        let deadline = Instant::now() + Duration::from_secs(3);
         let popup = loop {
             let mut previous = null_mut();
             let mut matched = None;
@@ -3243,7 +3246,13 @@ mod tests {
                 // process output remains writable for this scalar query.
                 let candidate_thread =
                     unsafe { GetWindowThreadProcessId(candidate, &mut candidate_process) };
-                if candidate_thread == ui_thread_id && candidate_process == process_id {
+                // SAFETY: candidate is the live system-enumerated HWND and this
+                // scalar visibility query retains no handle or caller storage.
+                let candidate_visible = unsafe { IsWindowVisible(candidate) } != 0;
+                if candidate_thread == ui_thread_id
+                    && candidate_process == process_id
+                    && candidate_visible
+                {
                     matched = Some(candidate);
                     break;
                 }
@@ -3255,7 +3264,9 @@ mod tests {
             if Instant::now() >= deadline {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "the exact UI-thread #32768 popup did not appear before the deadline",
+                    format!(
+                        "the exact UI-thread #32768 {popup_context} popup did not appear before the deadline"
+                    ),
                 ));
             }
             thread::sleep(Duration::from_millis(10));
@@ -3295,7 +3306,7 @@ mod tests {
                 };
                 let name = name.to_string();
                 exposed_names.push(name.clone());
-                if name != expected_apply_name {
+                if name != expected_leaf_name {
                     continue;
                 }
                 let role = accessible
@@ -3315,13 +3326,13 @@ mod tests {
                 matched = Some(AccessiblePopupSnapshot {
                     popup_role,
                     child_count,
-                    apply: AccessiblePopupLeafSnapshot { name, role, state },
+                    leaf: AccessiblePopupLeafSnapshot { name, role, state },
                 });
                 break;
             }
             matched.ok_or_else(|| {
                 io::Error::other(format!(
-                    "the live File popup exposed no {expected_apply_name:?} MSAA leaf; role={popup_role}, child_count={child_count}, names={exposed_names:?}"
+                    "the live {popup_context} popup exposed no {expected_leaf_name:?} MSAA leaf; role={popup_role}, child_count={child_count}, names={exposed_names:?}"
                 ))
             })
         }?;
@@ -3330,21 +3341,81 @@ mod tests {
         Ok(snapshot)
     }
 
-    fn verify_production_owner_draw_file_popup(
+    fn track_accessible_popup(
+        owner: HWND,
+        popup: HMENU,
+        owner_rect: RECT,
+        ui_thread_id: u32,
+        process_id: u32,
+        popup_context: &'static str,
+        expected_leaf_name: String,
+    ) -> io::Result<AccessiblePopupSnapshot> {
+        let owner_value = owner as usize;
+        let client = thread::spawn(move || {
+            accessible_popup_snapshot(
+                owner_value,
+                ui_thread_id,
+                process_id,
+                popup_context,
+                expected_leaf_name,
+            )
+        });
+        // SAFETY: popup and owner are live UI-thread-owned handles. The client
+        // drops its IAccessible first and then closes this modal loop through a
+        // checked WM_CANCELMODE post to the exact owner.
+        let selected = unsafe {
+            SetForegroundWindow(owner);
+            TrackPopupMenuEx(
+                popup,
+                TPM_LEFTALIGN | TPM_TOPALIGN | TPM_LEFTBUTTON | TPM_NONOTIFY | TPM_RETURNCMD,
+                owner_rect.left.saturating_add(16),
+                owner_rect.top.saturating_add(48),
+                owner,
+                null(),
+            )
+        };
+        let snapshot = client
+            .join()
+            .map_err(|_| io::Error::other("accessibility-client thread panicked"))??;
+        if selected != 0 {
+            return Err(io::Error::other(format!(
+                "{popup_context} popup accessibility probe selected command {selected} instead of cancelling"
+            )));
+        }
+        Ok(snapshot)
+    }
+
+    fn verify_production_owner_draw_popups(
         journal_root: PathBuf,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let expected_apply_name = command_menu_label(
             command_ui_spec(APPLY)
                 .ok_or_else(|| io::Error::other("APPLY is absent from the command catalog"))?,
         );
+        let expected_full_path_name =
+            command_menu_label(command_ui_spec(SHOW_FULL_PATH).ok_or_else(|| {
+                io::Error::other("SHOW_FULL_PATH is absent from the command catalog")
+            })?);
         let ui = thread::spawn(move || {
             application::with_owner_draw_production_window_for_test(&journal_root, |owner| {
                 // SAFETY: owner is the live production test window. Its menu
-                // and first File submenu remain UI-thread-owned through tracking.
-                let file_popup = unsafe { GetSubMenu(GetMenu(owner), 0) };
-                if file_popup.is_null() {
+                // tree remains UI-thread-owned through sequential tracking.
+                let root_menu = unsafe { GetMenu(owner) };
+                // SAFETY: root_menu is the live production menu and positions
+                // zero and two are its File and View popup items.
+                let (file_popup, view_popup) =
+                    unsafe { (GetSubMenu(root_menu, 0), GetSubMenu(root_menu, 2)) };
+                if file_popup.is_null() || view_popup.is_null() {
                     return Err(io::Error::other(
-                        "production owner-draw File popup is unavailable",
+                        "production owner-draw File or View popup is unavailable",
+                    ));
+                }
+                // SAFETY: view_popup is the actual production View menu. Its
+                // sixth item is the Theme parent installed by append_view_popup.
+                let theme_popup = unsafe { GetSubMenu(view_popup, 5) };
+                if theme_popup.is_null() {
+                    return Err(io::Error::other(
+                        "production owner-draw Theme submenu is unavailable",
                     ));
                 }
                 let mut process_id = 0_u32;
@@ -3359,60 +3430,58 @@ mod tests {
                 if unsafe { GetWindowRect(owner, &mut owner_rect) } == 0 {
                     return Err(io::Error::last_os_error());
                 }
-                let owner_value = owner as usize;
-                let client = thread::spawn(move || {
-                    accessible_file_popup_snapshot(
-                        owner_value,
-                        ui_thread_id,
-                        process_id,
-                        expected_apply_name,
-                    )
-                });
-                // SAFETY: both handles are UI-thread-owned and live. The client
-                // thread closes this modal loop only by posting WM_CANCELMODE to
-                // owner after taking its accessibility snapshot.
-                let selected = unsafe {
-                    SetForegroundWindow(owner);
-                    TrackPopupMenuEx(
-                        file_popup,
-                        TPM_LEFTALIGN
-                            | TPM_TOPALIGN
-                            | TPM_LEFTBUTTON
-                            | TPM_NONOTIFY
-                            | TPM_RETURNCMD,
-                        owner_rect.left.saturating_add(16),
-                        owner_rect.top.saturating_add(48),
-                        owner,
-                        null(),
-                    )
-                };
-                let snapshot = client
-                    .join()
-                    .map_err(|_| io::Error::other("accessibility-client thread panicked"))??;
-                if selected != 0 {
-                    return Err(io::Error::other(format!(
-                        "popup accessibility probe selected command {selected} instead of cancelling"
-                    )));
-                }
-                Ok((owner_value, snapshot))
+                let file = track_accessible_popup(
+                    owner,
+                    file_popup,
+                    owner_rect,
+                    ui_thread_id,
+                    process_id,
+                    "File",
+                    expected_apply_name,
+                )?;
+                let view = track_accessible_popup(
+                    owner,
+                    view_popup,
+                    owner_rect,
+                    ui_thread_id,
+                    process_id,
+                    "View",
+                    expected_full_path_name,
+                )?;
+                let theme = track_accessible_popup(
+                    owner,
+                    theme_popup,
+                    owner_rect,
+                    ui_thread_id,
+                    process_id,
+                    "Theme",
+                    "어둡게(D)".to_owned(),
+                )?;
+                Ok((owner as usize, file, view, theme))
             })
         });
-        let (owner_value, snapshot) = ui
+        let (owner_value, file, view, theme) = ui
             .join()
             .map_err(|_| io::Error::other("popup UI thread panicked"))??;
         // SAFETY: the dedicated UI thread completed production teardown. The
         // exact returned HWND must no longer name a live window.
         assert_eq!(unsafe { IsWindow(owner_value as HWND) }, 0);
-        assert_eq!(snapshot.popup_role, ROLE_SYSTEM_MENUPOPUP as i32);
-        assert!(snapshot.child_count > 0);
-        assert_eq!(snapshot.apply.name, "변경 사항 적용\tCtrl+S");
-        assert_eq!(snapshot.apply.role, ROLE_SYSTEM_MENUITEM as i32);
-        assert_ne!(snapshot.apply.state & STATE_SYSTEM_UNAVAILABLE as i32, 0);
+        for snapshot in [&file, &view, &theme] {
+            assert_eq!(snapshot.popup_role, ROLE_SYSTEM_MENUPOPUP as i32);
+            assert!(snapshot.child_count > 0);
+            assert_eq!(snapshot.leaf.role, ROLE_SYSTEM_MENUITEM as i32);
+        }
+        assert_eq!(file.leaf.name, "변경 사항 적용\tCtrl+S");
+        assert_ne!(file.leaf.state & STATE_SYSTEM_UNAVAILABLE as i32, 0);
+        assert_eq!(view.leaf.name, "현재 전체 경로");
+        assert_ne!(view.leaf.state & STATE_SYSTEM_CHECKED as i32, 0);
+        assert_eq!(theme.leaf.name, "어둡게(D)");
+        assert_ne!(theme.leaf.state & STATE_SYSTEM_CHECKED as i32, 0);
         Ok(())
     }
 
     #[test]
-    fn production_owner_draw_file_popup_exposes_disabled_apply_through_msaa()
+    fn production_owner_draw_popups_expose_command_states_through_msaa()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::time::{Duration, Instant};
 
@@ -3439,14 +3508,14 @@ mod tests {
             if !canonical_root.starts_with(canonical_temp) {
                 return Err(io::Error::other("popup test child root is outside temp").into());
             }
-            return verify_production_owner_draw_file_popup(root);
+            return verify_production_owner_draw_popups(root);
         }
 
         let directory = tempfile::tempdir()?;
         let mut child = PopupTestChild(
             Command::new(std::env::current_exe()?)
                 .arg("--exact")
-                .arg("windows::tests::production_owner_draw_file_popup_exposes_disabled_apply_through_msaa")
+                .arg("windows::tests::production_owner_draw_popups_expose_command_states_through_msaa")
                 .arg("--nocapture")
                 .arg("--test-threads=1")
                 .env(CHILD_MODE, "1")

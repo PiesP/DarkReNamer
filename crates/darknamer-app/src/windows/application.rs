@@ -168,7 +168,11 @@ pub(super) fn with_owner_draw_production_window_for_test<R>(
         return Err(io::Error::last_os_error());
     }
 
-    let state: *mut AppStateSlot = CallbackState::into_raw(AppState::new(runtime));
+    let mut state = AppState::new(runtime);
+    state.column_states[3].set_visible(true);
+    state.shown_columns = shown_columns(&state.column_states);
+    state.appearance.theme = AppThemeMode::Dark;
+    let state: *mut AppStateSlot = CallbackState::into_raw(state);
     let mut adopted = false;
     let mut init = WindowInit {
         state,
