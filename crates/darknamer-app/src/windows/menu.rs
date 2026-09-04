@@ -1278,6 +1278,11 @@ impl OwnedMenu {
         self.handle
     }
 
+    #[cfg(test)]
+    pub(super) fn owner_data_len(&self) -> usize {
+        self.owner_data.len()
+    }
+
     fn release_handle(&mut self) -> HMENU {
         std::mem::replace(&mut self.handle, null_mut())
     }
