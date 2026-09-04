@@ -114,8 +114,8 @@ use drag_drop::*;
 #[cfg(test)]
 use list_view::changed_column_mask;
 use list_view::{
-    RenderedRow, handle_header_end_track, handle_list_custom_draw, handle_list_infotip,
-    install_list_view_notification_subclass, native_list_header_height_px,
+    LIST_VIEW_EXTENDED_STYLES, RenderedRow, handle_header_end_track, handle_list_custom_draw,
+    handle_list_infotip, install_list_view_notification_subclass, native_list_header_height_px,
     native_status_column_minimum_px, refresh, refresh_all_rows, refresh_changed_rows,
     refresh_proposal_rows, remove_list_view_notification_subclass, update_column_visibility,
     update_dpi_metrics, update_primary_column_widths,
@@ -138,6 +138,8 @@ use windows_sys::Win32::Graphics::Gdi::{
     COLOR_BTNFACE, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, GetBkColor, GetPixel,
     GetTextColor, HBITMAP, HGDIOBJ,
 };
+#[cfg(test)]
+use windows_sys::Win32::Graphics::Gdi::{COLOR_INFOBK, COLOR_INFOTEXT};
 use windows_sys::Win32::Graphics::Gdi::{
     COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW, DT_CALCRECT, DT_END_ELLIPSIS, DT_LEFT,
     DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteObject, DrawTextW,
@@ -183,20 +185,20 @@ use windows_sys::Win32::UI::Controls::{
     InitCommonControlsEx, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW,
     LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS,
     LVM_DELETEITEM, LVM_ENSUREVISIBLE, LVM_GETCOLUMNWIDTH, LVM_GETHEADER, LVM_GETITEMCOUNT,
-    LVM_GETITEMSTATE, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH,
-    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW,
-    LVM_SETITEMW, LVN_GETINFOTIPW, LVN_ITEMCHANGED, LVN_MARQUEEBEGIN, LVNI_FOCUSED, LVNI_SELECTED,
-    LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_NOSORTHEADER,
-    LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_CUSTOMDRAW, NM_DBLCLK,
-    NM_SETFOCUS, NMCUSTOMDRAW, NMHDR, NMHEADERW, NMLISTVIEW, NMLVCUSTOMDRAW, NMLVGETINFOTIPW,
-    TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TASKDIALOGCONFIG_1, TD_WARNING_ICON,
-    TDCBF_CANCEL_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION, TDF_POSITION_RELATIVE_TO_WINDOW,
-    TDF_SIZE_TO_CONTENT, TDF_USE_COMMAND_LINKS,
+    LVM_GETITEMSTATE, LVM_GETNEXTITEM, LVM_GETTOOLTIPS, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
+    LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE,
+    LVM_SETITEMTEXTW, LVM_SETITEMW, LVN_GETINFOTIPW, LVN_ITEMCHANGED, LVN_MARQUEEBEGIN,
+    LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP,
+    LVS_EX_LABELTIP, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS,
+    LVSIL_SMALL, NM_CUSTOMDRAW, NM_DBLCLK, NM_SETFOCUS, NMCUSTOMDRAW, NMHDR, NMHEADERW, NMLISTVIEW,
+    NMLVCUSTOMDRAW, NMLVGETINFOTIPW, TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0,
+    TASKDIALOGCONFIG_1, TD_WARNING_ICON, TDCBF_CANCEL_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION,
+    TDF_POSITION_RELATIVE_TO_WINDOW, TDF_SIZE_TO_CONTENT, TDF_USE_COMMAND_LINKS,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::{
     DRAWITEMSTRUCT, LVM_GETITEMTEXTW, MEASUREITEMSTRUCT, ODS_DEFAULT, ODS_FOCUS, ODT_BUTTON,
-    ODT_MENU,
+    ODT_MENU, TTM_GETTIPBKCOLOR, TTM_GETTIPTEXTCOLOR,
 };
 use windows_sys::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForWindow, SystemParametersInfoForDpi,
@@ -3841,6 +3843,33 @@ mod tests {
         right.arrange(right_origin, &right_placements, dpi);
 
         let result = (|| -> io::Result<()> {
+            let palette = semantic_palette(ResolvedTheme::Dark)
+                .ok_or_else(|| io::Error::other("dark tooltip palette is missing"))?;
+            apply_tooltip_appearance(left.tooltip_window(), Some(palette));
+            // SAFETY: the rail-owned Tooltip remains live and both messages
+            // return scalar colors without caller-owned pointer payloads.
+            let (tooltip_background, tooltip_text) = unsafe {
+                (
+                    SendMessageW(left.tooltip_window(), TTM_GETTIPBKCOLOR, 0, 0) as u32,
+                    SendMessageW(left.tooltip_window(), TTM_GETTIPTEXTCOLOR, 0, 0) as u32,
+                )
+            };
+            assert_eq!(tooltip_background, palette.surface_panel);
+            assert_eq!(tooltip_text, palette.text_primary);
+            apply_tooltip_appearance(left.tooltip_window(), None);
+            // SAFETY: the rail-owned Tooltip remains live and system color
+            // queries plus TTM getters return only scalar COLORREF values.
+            let (tooltip_background, tooltip_text, system_background, system_text) = unsafe {
+                (
+                    SendMessageW(left.tooltip_window(), TTM_GETTIPBKCOLOR, 0, 0) as u32,
+                    SendMessageW(left.tooltip_window(), TTM_GETTIPTEXTCOLOR, 0, 0) as u32,
+                    GetSysColor(COLOR_INFOBK),
+                    GetSysColor(COLOR_INFOTEXT),
+                )
+            };
+            assert_eq!(tooltip_background, system_background);
+            assert_eq!(tooltip_text, system_text);
+
             let apply_rect = left.command_rect(APPLY)?;
             let apply_button = left
                 .command_hwnd(APPLY)

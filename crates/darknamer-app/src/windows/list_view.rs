@@ -2,6 +2,8 @@ use super::*;
 
 const LIST_VIEW_NOTIFICATION_SUBCLASS_ID: usize = 1;
 const STATUS_COLUMN_TEXT_PADDING_DIP: i32 = 24;
+pub(super) const LIST_VIEW_EXTENDED_STYLES: u32 =
+    LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP | LVS_EX_INFOTIP;
 const STATUS_COLUMN_TEXT_SAMPLES: [&str; 7] = [
     NATIVE_STATUS_COLUMN.label,
     "이름 변경 예정",
@@ -1297,6 +1299,20 @@ mod native_tests {
             return Err(io::Error::last_os_error());
         }
         let result = (|| -> io::Result<()> {
+            // Install the production style set before appearance code queries
+            // the ListView-owned infotip Tooltip.
+            // SAFETY: list is live and both messages carry only scalar values.
+            let tooltip = unsafe {
+                SendMessageW(
+                    list,
+                    LVM_SETEXTENDEDLISTVIEWSTYLE,
+                    0,
+                    LIST_VIEW_EXTENDED_STYLES as isize,
+                );
+                SendMessageW(list, LVM_GETTOOLTIPS, 0, 0) as HWND
+            };
+            assert!(!tooltip.is_null());
+
             // SAFETY: list is live and the query returns one scalar DPI value.
             let dpi = unsafe { GetDpiForWindow(list) }.max(BASE_DPI);
             for (index, label) in COLUMNS

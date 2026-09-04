@@ -351,6 +351,10 @@ impl CommandRail {
         }
     }
 
+    pub(super) fn tooltip_window(&self) -> HWND {
+        self.tooltip.as_raw()
+    }
+
     pub(super) fn command_hwnd(&self, command: CommandId) -> Option<HWND> {
         self.buttons
             .iter()

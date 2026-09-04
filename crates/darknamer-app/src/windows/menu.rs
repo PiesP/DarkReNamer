@@ -303,7 +303,7 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
             state.list_window,
             LVM_SETEXTENDEDLISTVIEWSTYLE,
             0,
-            (LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER) as isize,
+            LIST_VIEW_EXTENDED_STYLES as isize,
         );
         for (index, column) in COLUMNS.iter().enumerate() {
             let mut text = wide(column.label);

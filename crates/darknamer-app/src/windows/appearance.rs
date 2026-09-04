@@ -9,18 +9,19 @@ use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows_sys::Win32::Graphics::Gdi::{
     COLOR_3DSHADOW, COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_GRAYTEXT, COLOR_HIGHLIGHT,
-    COLOR_HIGHLIGHTTEXT, COLOR_MENU, COLOR_MENUTEXT, COLOR_WINDOW, COLOR_WINDOWFRAME,
-    COLOR_WINDOWTEXT, CreateSolidBrush, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_HIDEPREFIX,
-    DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteObject,
-    DrawFocusRect, DrawTextW, FillRect, FrameRect, GetDC, GetSysColor, GetSysColorBrush,
-    GetWindowDC, HBRUSH, HDC, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RedrawWindow,
-    ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    COLOR_HIGHLIGHTTEXT, COLOR_INFOBK, COLOR_INFOTEXT, COLOR_MENU, COLOR_MENUTEXT, COLOR_WINDOW,
+    COLOR_WINDOWFRAME, COLOR_WINDOWTEXT, CreateSolidBrush, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS,
+    DT_HIDEPREFIX, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK,
+    DeleteObject, DrawFocusRect, DrawTextW, FillRect, FrameRect, GetDC, GetSysColor,
+    GetSysColorBrush, GetWindowDC, HBRUSH, HDC, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME,
+    RDW_INVALIDATE, RedrawWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows_sys::Win32::UI::Controls::{
     CDDS_PREPAINT, CDIS_DEFAULT, CDIS_DISABLED, CDIS_FOCUS, CDIS_HOT, CDIS_SELECTED,
     CDRF_DODEFAULT, CDRF_SKIPDEFAULT, DRAWITEMSTRUCT, MEASUREITEMSTRUCT, NM_CUSTOMDRAW,
     NMCUSTOMDRAW, ODS_CHECKED, ODS_DEFAULT, ODS_DISABLED, ODS_FOCUS, ODS_GRAYED, ODS_HOTLIGHT,
-    ODS_NOACCEL, ODS_SELECTED, ODT_BUTTON, ODT_MENU, ODT_STATIC,
+    ODS_NOACCEL, ODS_SELECTED, ODT_BUTTON, ODT_MENU, ODT_STATIC, SetWindowTheme, TTM_SETTIPBKCOLOR,
+    TTM_SETTIPTEXTCOLOR,
 };
 use windows_sys::Win32::UI::Controls::{LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -926,6 +927,33 @@ fn apply_menu_background(menu: HMENU, resources: Option<&AppearanceResources>) -
     }
 }
 
+pub(super) fn apply_tooltip_appearance(tooltip: HWND, palette: Option<SemanticPalette>) {
+    if tooltip.is_null() {
+        return;
+    }
+    let empty = [0_u16];
+    // SAFETY: tooltip is a borrowed live common-control HWND. Empty theme
+    // names disable visual styles so the documented TTM color messages are
+    // authoritative; the messages copy scalar COLORREF values and no call
+    // retains caller-owned storage. Null names restore the native class theme.
+    unsafe {
+        let colors = palette
+            .filter(|_| SetWindowTheme(tooltip, empty.as_ptr(), empty.as_ptr()) >= 0)
+            .map_or_else(
+                || {
+                    // This is also the fail-closed path for Forced Colors and
+                    // a failed custom-theme association. Reset retained TTM
+                    // values as well as the theme association.
+                    SetWindowTheme(tooltip, null(), null());
+                    (GetSysColor(COLOR_INFOBK), GetSysColor(COLOR_INFOTEXT))
+                },
+                |palette| (palette.surface_panel, palette.text_primary),
+            );
+        SendMessageW(tooltip, TTM_SETTIPBKCOLOR, colors.0 as usize, 0);
+        SendMessageW(tooltip, TTM_SETTIPTEXTCOLOR, colors.1 as usize, 0);
+    }
+}
+
 fn screen_layout_rect(rect: RECT) -> Option<LayoutRect> {
     Some(LayoutRect {
         x: rect.left,
@@ -1022,8 +1050,15 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
         );
         SendMessageW(state.list_window, LVM_SETTEXTCOLOR, 0, list_text as isize);
     }
+    // The ListView owns this borrowed Tooltip and may recreate it. Query the
+    // current HWND on every appearance refresh instead of caching ownership.
+    // SAFETY: list_window is live and LVM_GETTOOLTIPS returns a borrowed HWND
+    // without pointer payloads or ownership transfer.
+    let list_tooltip = unsafe { SendMessageW(state.list_window, LVM_GETTOOLTIPS, 0, 0) as HWND };
+    apply_tooltip_appearance(list_tooltip, palette);
     for rail in [&state.left_rail, &state.right_rail].into_iter().flatten() {
         rail.set_separators_visible(resolved.appearance.show_separators);
+        apply_tooltip_appearance(rail.tooltip_window(), palette);
     }
     state.appearance_resources = replacement;
     // Mirror only the scalar COLORREF into the callback allocation's disjoint
