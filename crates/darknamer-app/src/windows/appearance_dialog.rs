@@ -49,13 +49,16 @@ const RESET_DEFAULTS_ID: u16 = 0xA140;
 const APPEARANCE_FINISH_ACCEPTED: u32 = 1 << 31;
 const APPEARANCE_GROUP_SUBCLASS_ID: usize = 1;
 const APPEARANCE_VIEWPORT_SUBCLASS_ID: usize = 2;
-const DENSITY_GROUP_LABEL: &str = "명령 버튼 표시";
+const APPEARANCE_DIALOG_TITLE: &str = "DarkReNamer - 모양 설정";
+const DENSITY_GROUP_LABEL: &str = "명령 버튼 배치";
 const DENSITY_LABELS: [&str; 4] = ["자동 (권장)", "여유 있게", "촘촘하게", "메뉴만"];
-const EMPHASIS_GROUP_LABEL: &str = "변경 강조";
+const EMPHASIS_GROUP_LABEL: &str = "변경 후 이름 강조";
 const EMPHASIS_LABELS: [&str; 3] = ["약하게", "표준", "강하게"];
-const SEPARATOR_LABEL: &str = "기능 그룹 구분선 표시";
-const TINT_LABEL: &str = "변경된 이름의 배경 강조";
-const EMPTY_SAFETY_LABEL: &str = "파일을 추가하기 전 안전 안내 표시";
+const SEPARATOR_LABEL: &str = "명령 버튼 그룹 구분선 표시";
+const TINT_LABEL: &str = "변경 후 이름 셀 배경 강조";
+const EMPTY_SAFETY_LABEL: &str = "빈 목록에서 안전 안내 표시";
+const FORCED_COLORS_EXPLANATION: &str =
+    "고대비가 활성화되어 변경 후 이름의 글자와 셀 배경은 시스템 색상을 사용합니다.";
 const RESET_LABEL: &str = "기본값으로 복원";
 const OK_LABEL: &str = "확인";
 const CANCEL_LABEL: &str = "취소";
@@ -656,7 +659,7 @@ pub(super) fn create_appearance_dialog_window(
         state: state_ptr,
         adopted: &mut adopted,
     };
-    let title = wide("DarkReNamer - 고급 모양 설정");
+    let title = wide(APPEARANCE_DIALOG_TITLE);
     // SAFETY: owner/instance are live; title, class, init, and the boxed state
     // remain allocated through synchronous creation and its callbacks.
     let window = unsafe {
@@ -822,7 +825,7 @@ fn create_controls(window: HWND, state: &mut AppearanceDialogWindowState) -> io:
     state.forced_explanation = child(
         body,
         "STATIC",
-        "고대비가 활성화되어 변경 강조와 배경 강조는 시스템 색상을 사용합니다.",
+        FORCED_COLORS_EXPLANATION,
         FORCED_EXPLANATION_ID,
         SS_NOPREFIX | SS_EDITCONTROL,
     )?;
@@ -1393,7 +1396,7 @@ fn measure_wrapped_appearance_dialog(
         forced_explanation_height: measure_wrapped_text(
             state.viewport,
             font,
-            "고대비가 활성화되어 변경 강조와 배경 강조는 시스템 색상을 사용합니다.",
+            FORCED_COLORS_EXPLANATION,
             layout.forced_explanation.width,
         ),
         ..state.measured
@@ -2150,6 +2153,20 @@ mod native_tests {
         BM_CLICK, BS_TYPEMASK, GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetWindowLongPtrW,
         IsDialogMessageW, MSG, WM_KEYDOWN,
     };
+
+    #[test]
+    fn appearance_copy_names_the_current_settings_exactly() {
+        assert_eq!(APPEARANCE_DIALOG_TITLE, "DarkReNamer - 모양 설정");
+        assert_eq!(DENSITY_GROUP_LABEL, "명령 버튼 배치");
+        assert_eq!(EMPHASIS_GROUP_LABEL, "변경 후 이름 강조");
+        assert_eq!(SEPARATOR_LABEL, "명령 버튼 그룹 구분선 표시");
+        assert_eq!(TINT_LABEL, "변경 후 이름 셀 배경 강조");
+        assert_eq!(EMPTY_SAFETY_LABEL, "빈 목록에서 안전 안내 표시");
+        assert_eq!(
+            FORCED_COLORS_EXPLANATION,
+            "고대비가 활성화되어 변경 후 이름의 글자와 셀 배경은 시스템 색상을 사용합니다."
+        );
+    }
 
     #[test]
     fn appearance_dialog_rejects_nested_state_lease() -> Result<(), Box<dyn std::error::Error>> {

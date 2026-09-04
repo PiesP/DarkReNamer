@@ -32,7 +32,7 @@ pub(crate) const NAME_COLUMN_MINIMUM: i32 = 120;
 #[cfg(any(windows, test))]
 pub(crate) const LOCATION_COLUMN_MINIMUM: i32 = 80;
 #[cfg(any(windows, test))]
-pub(crate) const LIST_SCROLLBAR_ALLOWANCE_DIP: i32 = 17;
+pub(crate) const LIST_COLUMN_FIT_GUTTER_DIP: i32 = 1;
 #[cfg(any(windows, test))]
 pub(crate) const NATIVE_STATUS_COLUMN_WIDTH_DIP: i32 = 112;
 #[cfg(any(windows, test))]
@@ -1129,10 +1129,11 @@ pub struct UiMetrics {
     pub rail_width: i32,
 }
 
-/// Text extents measured from the active native message and status fonts.
+/// Native control and text extents used by the main-window layout.
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct MeasuredFontMetrics {
+    pub(crate) list_header_height: i32,
     pub(crate) button_text_width: i32,
     pub(crate) button_text_height: i32,
     pub(crate) status_text_height: i32,
@@ -1280,6 +1281,7 @@ impl MeasuredFontMetrics {
         self.empty_state_content_metrics(dpi, content_width, show_safety)
             .total_height
             .saturating_add(scale_dip(24, dpi))
+            .saturating_add(self.list_header_height.max(0))
     }
 }
 
@@ -2681,8 +2683,15 @@ fn calculate_empty_state_layout(
     measured: MeasuredFontMetrics,
     show_safety: bool,
 ) -> EmptyStateLayout {
-    let horizontal_padding = scale_dip(12, dpi).min(list.width.saturating_div(2));
-    let content_width = list
+    let header_height = measured.list_header_height.max(0).min(list.height);
+    let data = LayoutRect {
+        x: list.x,
+        y: list.y.saturating_add(header_height),
+        width: list.width,
+        height: list.height.saturating_sub(header_height),
+    };
+    let horizontal_padding = scale_dip(12, dpi).min(data.width.saturating_div(2));
+    let content_width = data
         .width
         .saturating_sub(horizontal_padding.saturating_mul(2));
     let content = measured.empty_state_content_metrics(dpi, content_width, show_safety);
@@ -2691,10 +2700,10 @@ fn calculate_empty_state_layout(
     let desired_safety_height = content.safety_height;
     let desired_gap = scale_dip(8, dpi);
     let desired_total = content.total_height;
-    let top = list
+    let top = data
         .y
-        .saturating_add(list.height.saturating_sub(desired_total).max(0) / 2);
-    let bottom = list.bottom();
+        .saturating_add(data.height.saturating_sub(desired_total).max(0) / 2);
+    let bottom = data.bottom();
     let mut y = top;
     let instruction_y = y;
     let instruction_height = desired_instruction_height
@@ -2713,21 +2722,21 @@ fn calculate_empty_state_layout(
     let button_width = content.add_width;
     EmptyStateLayout {
         instruction: LayoutRect {
-            x: list.x.saturating_add(horizontal_padding),
+            x: data.x.saturating_add(horizontal_padding),
             y: instruction_y,
             width: content_width,
             height: instruction_height,
         },
         safety: LayoutRect {
-            x: list.x.saturating_add(horizontal_padding),
+            x: data.x.saturating_add(horizontal_padding),
             y: safety_y,
             width: content_width,
             height: safety_height,
         },
         add: LayoutRect {
-            x: list
+            x: data
                 .x
-                .saturating_add(list.width.saturating_sub(button_width) / 2),
+                .saturating_add(data.width.saturating_sub(button_width) / 2),
             y: button_y,
             width: button_width,
             height: button_height,
@@ -3230,6 +3239,8 @@ pub(crate) fn allocate_primary_column_widths(
     dpi: u32,
     columns: &[ColumnState; 7],
 ) -> [i32; 3] {
+    let automatic_default_layout = columns[..3].iter().all(|column| !column.user_resized)
+        && columns[3..].iter().all(|column| !column.visible);
     let optional_width = columns[3..]
         .iter()
         .filter(|column| column.visible)
@@ -3238,7 +3249,12 @@ pub(crate) fn allocate_primary_column_widths(
     let budget = client_width
         .max(0)
         .saturating_sub(status_width.max(0))
-        .saturating_sub(optional_width);
+        .saturating_sub(optional_width)
+        .saturating_sub(if automatic_default_layout {
+            scale_dip(LIST_COLUMN_FIT_GUTTER_DIP, dpi).max(1)
+        } else {
+            0
+        });
     let minimum = [
         scale_dip(NAME_COLUMN_MINIMUM, dpi),
         scale_dip(NAME_COLUMN_MINIMUM, dpi),
@@ -3350,12 +3366,15 @@ pub(crate) fn format_timestamp_fallback(date: [u16; 3], time: [u16; 3]) -> Strin
 
 #[cfg(any(windows, test))]
 #[must_use]
-pub(crate) const fn minimum_content_width_dip() -> i32 {
-    RailDensity::Comfortable.metrics(BASE_DPI).rail_width * 2
-        + NAME_COLUMN_MINIMUM * 2
-        + LOCATION_COLUMN_MINIMUM
-        + NATIVE_STATUS_COLUMN_WIDTH_DIP
-        + LIST_SCROLLBAR_ALLOWANCE_DIP
+pub(crate) fn minimum_content_width_px(dpi: u32, status_width_px: i32) -> i32 {
+    RailDensity::Comfortable
+        .metrics(dpi)
+        .rail_width
+        .saturating_mul(2)
+        .saturating_add(scale_dip(NAME_COLUMN_MINIMUM, dpi).saturating_mul(2))
+        .saturating_add(scale_dip(LOCATION_COLUMN_MINIMUM, dpi))
+        .saturating_add(scale_dip(LIST_COLUMN_FIT_GUTTER_DIP, dpi).max(1))
+        .saturating_add(status_width_px.max(0))
 }
 /// Public product name used by the executable and user-facing diagnostics.
 pub const PRODUCT_NAME: &str = "DarkReNamer";
@@ -5475,7 +5494,7 @@ mod tests {
             AppearanceDialogEffect::Preview(_)
         ));
         let draft = model.draft();
-        for dpi in [96, 120, 144, 192, 240, 288] {
+        for dpi in [96, 98, 120, 144, 150, 175, 192, 240, 288] {
             let layout = calculate_appearance_dialog_layout(
                 dpi,
                 scale_dip(360, dpi),
@@ -5578,6 +5597,7 @@ mod tests {
     #[test]
     fn measured_font_metrics_expand_rail_and_status_geometry() {
         let measured = MeasuredFontMetrics {
+            list_header_height: 0,
             button_text_width: 90,
             button_text_height: 44,
             status_text_height: 24,
@@ -5702,6 +5722,56 @@ mod tests {
         assert!(layout.empty_safety.height >= content.safety_height);
         assert!(layout.empty_add.height >= content.add_height);
         assert!(layout.empty_safety.bottom() <= layout.list.bottom());
+    }
+
+    #[test]
+    fn empty_state_minimum_height_reserves_the_native_header() {
+        let without_header = MeasuredFontMetrics {
+            empty_instruction_text_width: 240,
+            empty_instruction_text_height: 20,
+            empty_safety_text_width: 240,
+            empty_safety_text_height: 18,
+            empty_add_text_width: 112,
+            empty_add_text_height: 20,
+            ..MeasuredFontMetrics::default()
+        };
+        let with_header = MeasuredFontMetrics {
+            list_header_height: 24,
+            ..without_header
+        };
+
+        assert_eq!(
+            minimum_main_client_height(96, with_header, RailDensityPreference::MenuOnly),
+            minimum_main_client_height(96, without_header, RailDensityPreference::MenuOnly) + 24
+        );
+    }
+
+    #[test]
+    fn empty_state_is_centered_in_the_list_data_area() {
+        let measured = MeasuredFontMetrics {
+            list_header_height: 32,
+            empty_instruction_text_width: 180,
+            empty_instruction_text_height: 20,
+            empty_add_text_width: 112,
+            empty_add_text_height: 20,
+            ..MeasuredFontMetrics::default()
+        };
+        let list = LayoutRect {
+            x: 10,
+            y: 12,
+            width: 320,
+            height: 240,
+        };
+
+        let empty = calculate_empty_state_layout(list, 96, measured, false);
+        let content = measured.empty_state_content_metrics(96, empty.instruction.width, false);
+        let data_top = list.y + measured.list_header_height;
+        let expected_top =
+            data_top + (list.height - measured.list_header_height - content.total_height) / 2;
+
+        assert_eq!(empty.instruction.y, expected_top);
+        assert!(empty.instruction.y >= data_top);
+        assert!(empty.add.bottom() <= list.bottom());
     }
 
     #[test]
@@ -6986,8 +7056,6 @@ mod tests {
 
     #[test]
     fn adaptive_primary_columns_fit_command_rail_minimum() {
-        assert_eq!(minimum_content_width_dip(), 553);
-
         for (dpi, available, expected) in [
             (96, 320, [120, 120, 80]),
             (96, 360, [140, 140, 80]),
@@ -7019,8 +7087,8 @@ mod tests {
     }
 
     #[test]
-    fn primary_columns_fill_the_client_budget_at_supported_dpis() {
-        for dpi in [96, 120, 144, 192] {
+    fn automatic_default_columns_preserve_the_fit_gutter_at_supported_dpis() {
+        for dpi in [96, 120, 144, 192, 240, 288] {
             let client_width = scale_dip(600, dpi);
             let status_width = scale_dip(NATIVE_STATUS_COLUMN_WIDTH_DIP, dpi);
             let widths = allocate_primary_column_widths(
@@ -7030,7 +7098,32 @@ mod tests {
                 &default_column_states(),
             );
 
-            assert_eq!(widths.iter().sum::<i32>(), client_width - status_width);
+            assert_eq!(
+                widths.iter().sum::<i32>(),
+                client_width - status_width - scale_dip(LIST_COLUMN_FIT_GUTTER_DIP, dpi)
+            );
+        }
+    }
+
+    #[test]
+    fn minimum_content_width_uses_the_measured_status_width() {
+        for (dpi, status_width) in [
+            (96, 146),
+            (98, 149),
+            (120, 183),
+            (150, 228),
+            (175, 266),
+            (192, 292),
+            (288, 438),
+        ] {
+            assert_eq!(
+                minimum_content_width_px(dpi, status_width),
+                RailDensity::Comfortable.metrics(dpi).rail_width * 2
+                    + scale_dip(NAME_COLUMN_MINIMUM, dpi) * 2
+                    + scale_dip(LOCATION_COLUMN_MINIMUM, dpi)
+                    + scale_dip(LIST_COLUMN_FIT_GUTTER_DIP, dpi).max(1)
+                    + status_width
+            );
         }
     }
 
@@ -7050,8 +7143,11 @@ mod tests {
     fn expanded_actual_status_width_reduces_the_primary_width_budget() {
         let widths = allocate_primary_column_widths(517, 180, 96, &default_column_states());
 
-        assert_eq!(widths, [129, 128, 80]);
-        assert_eq!(widths.iter().sum::<i32>(), 517 - 180);
+        assert_eq!(widths, [128, 128, 80]);
+        assert_eq!(
+            widths.iter().sum::<i32>(),
+            517 - 180 - LIST_COLUMN_FIT_GUTTER_DIP
+        );
     }
 
     #[test]
@@ -7073,8 +7169,11 @@ mod tests {
             96,
             &default_column_states(),
         );
-        assert_eq!(widths, [129, 128, 80]);
-        assert_eq!(widths.iter().sum::<i32>(), 449 - 112);
+        assert_eq!(widths, [128, 128, 80]);
+        assert_eq!(
+            widths.iter().sum::<i32>(),
+            449 - 112 - LIST_COLUMN_FIT_GUTTER_DIP
+        );
 
         assert_eq!(status_column_width_after_resize(80, 146, 96), 146);
         assert_eq!(status_column_width_after_resize(240, 146, 96), 240);

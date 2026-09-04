@@ -155,7 +155,7 @@ fn set_native_status_column_width_for(list_window: HWND, width: i32) {
     };
 }
 
-fn native_status_column_minimum_px(state: &AppState) -> i32 {
+pub(super) fn native_status_column_minimum_px(state: &AppState) -> i32 {
     native_status_column_minimum_px_for(state.list_window, state.font.as_raw(), state.dpi)
 }
 
@@ -218,6 +218,20 @@ fn list_column_width(list_window: HWND, column: usize) -> i32 {
     // SAFETY: the live ListView returns one integral column width and retains no
     // caller storage.
     unsafe { SendMessageW(list_window, LVM_GETCOLUMNWIDTH, column, 0) as i32 }
+}
+
+pub(super) fn native_list_header_height_px(list_window: HWND) -> i32 {
+    // SAFETY: list_window is a live ListView and returns its borrowed Header child HWND.
+    let header = unsafe { SendMessageW(list_window, LVM_GETHEADER, 0, 0) } as HWND;
+    if header.is_null() {
+        return 0;
+    }
+    let mut rect = RECT::default();
+    // SAFETY: header is live and rect remains writable for this synchronous query.
+    if unsafe { GetWindowRect(header, &mut rect) } == 0 {
+        return 0;
+    }
+    rect.bottom.saturating_sub(rect.top).max(0)
 }
 
 pub(super) fn update_primary_column_widths(state: &AppState) {
@@ -1230,6 +1244,152 @@ mod native_tests {
     use std::process::Command;
 
     use super::*;
+
+    #[test]
+    fn native_default_columns_leave_no_horizontal_scroll_range() -> io::Result<()> {
+        let controls = INITCOMMONCONTROLSEX {
+            dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+            dwICC: ICC_LISTVIEW_CLASSES,
+        };
+        // SAFETY: controls has its exact structure size for initialization.
+        unsafe { InitCommonControlsEx(&controls) };
+        // SAFETY: the system STATIC class and current module are process-global.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                800,
+                600,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the initialized report ListView class retains no caller-owned
+        // creation data and parent remains live until the test completes.
+        let list = unsafe {
+            CreateWindowExW(
+                0,
+                wide("SysListView32").as_ptr(),
+                null(),
+                WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER,
+                0,
+                0,
+                640,
+                480,
+                parent,
+                LIST_ID as *mut c_void,
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if list.is_null() {
+            // SAFETY: parent is the test-owned hidden HWND.
+            unsafe { DestroyWindow(parent) };
+            return Err(io::Error::last_os_error());
+        }
+        let result = (|| -> io::Result<()> {
+            // SAFETY: list is live and the query returns one scalar DPI value.
+            let dpi = unsafe { GetDpiForWindow(list) }.max(BASE_DPI);
+            for (index, label) in COLUMNS
+                .iter()
+                .map(|column| column.label)
+                .chain(core::iter::once(NATIVE_STATUS_COLUMN.label))
+                .enumerate()
+            {
+                let mut label = wide(label);
+                let mut column = LVCOLUMNW {
+                    mask: LVCF_TEXT | LVCF_WIDTH | LVCF_FMT,
+                    fmt: LVCFMT_LEFT,
+                    cx: 0,
+                    pszText: label.as_mut_ptr(),
+                    ..LVCOLUMNW::default()
+                };
+                // SAFETY: list is live and column/label outlive this synchronous message.
+                if unsafe {
+                    SendMessageW(
+                        list,
+                        LVM_INSERTCOLUMNW,
+                        index,
+                        (&mut column as *mut LVCOLUMNW) as isize,
+                    )
+                } < 0
+                {
+                    return Err(io::Error::other("could not insert native test column"));
+                }
+            }
+            let mut message_font = OwnedFont::default();
+            message_font.replace(create_message_font(dpi));
+            if message_font.as_raw().is_null() {
+                return Err(io::Error::other("could not create native test font"));
+            }
+            let status_width =
+                native_status_column_minimum_px_for(list, message_font.as_raw(), dpi);
+            assert!(status_width > scale_dip(NATIVE_STATUS_COLUMN_WIDTH_DIP, dpi));
+            let baseline_rails = RailDensity::Comfortable
+                .metrics(dpi)
+                .rail_width
+                .saturating_mul(2);
+            let client_width =
+                minimum_content_width_px(dpi, status_width).saturating_sub(baseline_rails);
+            // SAFETY: list is a live child and the test changes only its size.
+            unsafe {
+                SetWindowPos(
+                    list,
+                    null_mut(),
+                    0,
+                    0,
+                    client_width,
+                    scale_dip(240, dpi),
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                )
+            };
+            assert!(native_list_header_height_px(list) > 0);
+            let widths = allocate_primary_column_widths(
+                client_width,
+                status_width,
+                dpi,
+                &default_column_states(),
+            );
+            for (column, width) in widths.into_iter().enumerate() {
+                // SAFETY: list is live and the column indices were inserted above.
+                unsafe { SendMessageW(list, LVM_SETCOLUMNWIDTH, column, width as isize) };
+            }
+            for column in 3..NATIVE_STATUS_COLUMN_INDEX {
+                // SAFETY: list is live and the optional column indices were inserted above.
+                unsafe { SendMessageW(list, LVM_SETCOLUMNWIDTH, column, 0) };
+            }
+            set_native_status_column_width_for(list, status_width);
+
+            let mut scroll = SCROLLINFO {
+                cbSize: u32::try_from(size_of::<SCROLLINFO>())
+                    .map_err(|_| io::Error::other("invalid scroll info size"))?,
+                fMask: SIF_RANGE | SIF_PAGE,
+                ..SCROLLINFO::default()
+            };
+            // SAFETY: list is live and scroll has its exact ABI size and remains writable.
+            if unsafe { GetScrollInfo(list, SB_HORZ, &mut scroll) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let range = scroll.nMax.saturating_sub(scroll.nMin).saturating_add(1);
+            assert!(range <= i32::try_from(scroll.nPage).unwrap_or(i32::MAX));
+            Ok(())
+        })();
+        // SAFETY: the child and parent are test-owned live windows.
+        unsafe {
+            DestroyWindow(list);
+            DestroyWindow(parent);
+        }
+        result
+    }
 
     #[test]
     fn header_notification_type_is_narrowed_before_extended_fields_are_read()

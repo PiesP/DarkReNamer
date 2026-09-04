@@ -114,7 +114,8 @@ pub(super) fn refresh_system_fonts(state: &mut AppState) {
     if let Some(rail) = &state.right_rail {
         rail.apply_font(message_font);
     }
-    state.font_metrics = measure_font_metrics(state.list_window, message_font, status_font);
+    state.font_metrics =
+        measure_font_metrics(state.list_window, message_font, status_font, state.dpi);
     state.font.replace(message_font);
     state.status_font.replace(status_font);
 }
@@ -123,6 +124,7 @@ pub(super) fn measure_font_metrics(
     window: HWND,
     message_font: HFONT,
     status_font: HFONT,
+    dpi: u32,
 ) -> MeasuredFontMetrics {
     let mut button_text_width = 0;
     let mut button_text_height = 0;
@@ -144,6 +146,9 @@ pub(super) fn measure_font_metrics(
         measure_text(window, status_font, EMPTY_STATE_SAFETY, true).unwrap_or_default();
     let (empty_add_text_width, empty_add_text_height) =
         measure_text(window, message_font, EMPTY_STATE_ADD_LABEL, true).unwrap_or_default();
+    let header_fallback_height = empty_instruction_text_height
+        .max(scale_dip(16, dpi.max(BASE_DPI)))
+        .saturating_add(scale_dip(4, dpi.max(BASE_DPI)));
     let (drop_overlay_text_width, drop_overlay_text_height) = [
         DROP_ACCEPTING_TEXT,
         DROP_LOCKED_TEXT,
@@ -156,6 +161,7 @@ pub(super) fn measure_font_metrics(
         (width.max(measured.0), height.max(measured.1))
     });
     MeasuredFontMetrics {
+        list_header_height: native_list_header_height_px(window).max(header_fallback_height),
         button_text_width,
         button_text_height,
         status_text_height,
@@ -551,6 +557,11 @@ pub(super) fn arrange(window: HWND, state: &mut AppState) {
     let width = (rect.right - rect.left).max(0);
     let height = (rect.bottom - rect.top).max(0);
     let appearance = state.resolved_appearance().appearance;
+    let native_header_height = native_list_header_height_px(state.list_window);
+    state.font_metrics.list_header_height = state
+        .font_metrics
+        .list_header_height
+        .max(native_header_height);
     let status_layout_input = current_status_layout_input(state);
     state.status_layout_input = status_layout_input;
     let preliminary = calculate_main_layout_with_safety(
