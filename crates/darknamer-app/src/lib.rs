@@ -172,8 +172,9 @@ impl CommandRailSpec {
             })
             .collect::<Vec<_>>();
         specs.sort_by_key(|spec| {
-            let placement = spec.rail.expect("filtered rail placement");
-            (placement.group, placement.order)
+            spec.rail.map_or((u8::MAX, u8::MAX), |placement| {
+                (placement.group, placement.order)
+            })
         });
         specs.into_iter()
     }
