@@ -244,30 +244,12 @@ fn minimum_track_width(window: HWND, state: &AppState) -> i32 {
         0
     };
     let density = state.resolved_appearance().appearance.density;
-    let rail_width = density.minimum_density().map_or(0, |minimum| {
-        state
-            .font_metrics
-            .rail_metrics(minimum, state.dpi)
-            .rail_width
-    });
-    let baseline_rail_width = density
-        .minimum_density()
-        .map_or(0, |minimum| minimum.metrics(state.dpi).rail_width);
-    let workspace_divider_width = i32::from(rail_width > 0).saturating_mul(2);
-    let measured_content_width =
-        minimum_content_width_px(state.dpi, native_status_column_minimum_px(state))
-            .saturating_add(
-                rail_width
-                    .saturating_sub(baseline_rail_width)
-                    .saturating_mul(2),
-            )
-            .saturating_add(workspace_divider_width)
-            .max(
-                rail_width
-                    .saturating_mul(2)
-                    .saturating_add(state.font_metrics.empty_state_minimum_width(state.dpi))
-                    .saturating_add(workspace_divider_width),
-            );
+    let measured_content_width = minimum_main_client_width(
+        state.dpi,
+        state.font_metrics,
+        density,
+        native_status_column_minimum_px(state),
+    );
     scale_dip(INITIAL_WIDTH, state.dpi).max(measured_content_width.saturating_add(nonclient_width))
 }
 

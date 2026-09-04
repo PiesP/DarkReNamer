@@ -3376,6 +3376,40 @@ pub(crate) fn minimum_content_width_px(dpi: u32, status_width_px: i32) -> i32 {
         .saturating_add(scale_dip(LIST_COLUMN_FIT_GUTTER_DIP, dpi).max(1))
         .saturating_add(status_width_px.max(0))
 }
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn minimum_main_client_width(
+    dpi: u32,
+    measured: MeasuredFontMetrics,
+    preference: RailDensityPreference,
+    status_width_px: i32,
+) -> i32 {
+    let rail_width = preference
+        .candidates()
+        .iter()
+        .copied()
+        .map(|density| measured.rail_metrics(density, dpi).rail_width)
+        .max()
+        .unwrap_or(0);
+    let baseline_rail_width = preference
+        .minimum_density()
+        .map_or(0, |density| density.metrics(dpi).rail_width);
+    let workspace_divider_width = i32::from(rail_width > 0).saturating_mul(2);
+    minimum_content_width_px(dpi, status_width_px)
+        .saturating_add(
+            rail_width
+                .saturating_sub(baseline_rail_width)
+                .saturating_mul(2),
+        )
+        .saturating_add(workspace_divider_width)
+        .max(
+            rail_width
+                .saturating_mul(2)
+                .saturating_add(measured.empty_state_minimum_width(dpi))
+                .saturating_add(workspace_divider_width),
+        )
+}
 /// Public product name used by the executable and user-facing diagnostics.
 pub const PRODUCT_NAME: &str = "DarkReNamer";
 /// Upstream behavior version targeted by compatibility mode.
@@ -7124,6 +7158,85 @@ mod tests {
                     + scale_dip(LIST_COLUMN_FIT_GUTTER_DIP, dpi).max(1)
                     + status_width
             );
+        }
+    }
+
+    #[test]
+    fn minimum_width_budget_fits_selected_density_and_default_columns() {
+        for (dpi, status_width) in [
+            (96, 146),
+            (120, 183),
+            (144, 219),
+            (192, 261),
+            (240, 365),
+            (288, 438),
+        ] {
+            let measured = MeasuredFontMetrics {
+                button_text_width: scale_dip(52, dpi),
+                ..MeasuredFontMetrics::default()
+            };
+            for (preference, expected_mode) in [
+                (RailDensityPreference::Automatic, RailMode::Comfortable),
+                (RailDensityPreference::Comfortable, RailMode::Comfortable),
+                (RailDensityPreference::Compact, RailMode::Compact),
+                (RailDensityPreference::MenuOnly, RailMode::MenuOnly),
+            ] {
+                let client_width =
+                    minimum_main_client_width(dpi, measured, preference, status_width);
+                let client_height = recommended_main_client_height(dpi, measured, preference);
+                let layout =
+                    calculate_main_layout(client_width, client_height, dpi, measured, preference);
+                let columns = allocate_primary_column_widths(
+                    layout.list.width,
+                    status_width,
+                    dpi,
+                    &default_column_states(),
+                );
+                let required_list_width = columns
+                    .iter()
+                    .sum::<i32>()
+                    .saturating_add(status_width)
+                    .saturating_add(scale_dip(LIST_COLUMN_FIT_GUTTER_DIP, dpi).max(1));
+
+                assert_eq!(layout.rail_mode, expected_mode, "DPI {dpi}");
+                assert!(
+                    required_list_width <= layout.list.width,
+                    "DPI {dpi} {preference:?}: default columns require {required_list_width}px but the selected layout provides {}px",
+                    layout.list.width,
+                );
+                if dpi == 192 && preference == RailDensityPreference::Automatic {
+                    assert_eq!(client_width, 1_161);
+                    assert_eq!(layout.list.width, 903);
+                }
+                if dpi == 192 {
+                    let previous_explicit_width = match preference {
+                        RailDensityPreference::Automatic => None,
+                        RailDensityPreference::Comfortable => Some(1_161),
+                        RailDensityPreference::Compact => Some(1_153),
+                        RailDensityPreference::MenuOnly => Some(1_111),
+                    };
+                    if let Some(previous_explicit_width) = previous_explicit_width {
+                        assert_eq!(client_width, previous_explicit_width);
+                    }
+                }
+            }
+
+            let automatic_width = minimum_main_client_width(
+                dpi,
+                measured,
+                RailDensityPreference::Automatic,
+                status_width,
+            );
+            let compact_height =
+                minimum_main_client_height(dpi, measured, RailDensityPreference::Automatic);
+            let compact = calculate_main_layout(
+                automatic_width,
+                compact_height,
+                dpi,
+                measured,
+                RailDensityPreference::Automatic,
+            );
+            assert_eq!(compact.rail_mode, RailMode::Compact, "DPI {dpi}");
         }
     }
 
