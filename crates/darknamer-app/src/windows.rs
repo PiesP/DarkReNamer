@@ -210,7 +210,7 @@ use windows_sys::Win32::UI::Controls::{
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::{
     DRAWITEMSTRUCT, LVM_GETITEMTEXTW, MEASUREITEMSTRUCT, ODS_DEFAULT, ODS_FOCUS, ODT_BUTTON,
-    ODT_MENU, TTM_GETTIPBKCOLOR, TTM_GETTIPTEXTCOLOR,
+    ODT_MENU, STATE_SYSTEM_UNAVAILABLE, TTM_GETTIPBKCOLOR, TTM_GETTIPTEXTCOLOR,
 };
 use windows_sys::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForWindow, SystemParametersInfoForDpi,
@@ -252,8 +252,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BM_CLICK, BS_FLAT, BS_MULTILINE, BS_TYPEMASK, GW_CHILD, GW_HWNDLAST, GW_HWNDNEXT, GWL_STYLE,
-    GetClassNameW, GetDlgCtrlID, GetScrollInfo, GetWindow, HWND_TOP, OBJID_MENU, SB_HORZ,
-    SCROLLINFO, SIF_PAGE, SIF_RANGE,
+    GetClassNameW, GetDlgCtrlID, GetScrollInfo, GetWindow, HWND_TOP, MF_BYPOSITION, MIIM_FTYPE,
+    OBJID_MENU, SB_HORZ, SCROLLINFO, SIF_PAGE, SIF_RANGE, STATE_SYSTEM_CHECKED,
 };
 use worker::*;
 
@@ -2938,6 +2938,59 @@ mod tests {
         Ok(())
     }
 
+    fn verify_owner_menu_metadata_tree(menu: HMENU) -> io::Result<usize> {
+        // SAFETY: menu is a live application-owned menu tree and this query
+        // returns only its current item count.
+        let count = unsafe { GetMenuItemCount(menu) };
+        if count < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut verified = 0_usize;
+        for position in 0..count {
+            let mut info = MENUITEMINFOW {
+                cbSize: size_of::<MENUITEMINFOW>() as u32,
+                fMask: MIIM_DATA | MIIM_FTYPE | MIIM_SUBMENU,
+                ..MENUITEMINFOW::default()
+            };
+            // SAFETY: position is bounded by the queried count and info remains
+            // writable for this synchronous menu metadata query.
+            if unsafe {
+                GetMenuItemInfoW(
+                    menu,
+                    u32::try_from(position).unwrap_or_default(),
+                    1,
+                    &mut info,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if info.fType & MF_SEPARATOR == 0 {
+                assert_ne!(info.fType & MF_OWNERDRAW, 0);
+                let rendered = owner_menu_label(info.dwItemData)
+                    .ok_or_else(|| io::Error::other("owner-draw item tag is invalid"))?;
+                let accessible = owner_menu_accessibility_label(info.dwItemData)
+                    .ok_or_else(|| io::Error::other("owner-draw accessibility text is invalid"))?;
+                assert_eq!(accessible, rendered);
+                verified = verified.saturating_add(1);
+            }
+            if !info.hSubMenu.is_null() {
+                verified = verified.saturating_add(verify_owner_menu_metadata_tree(info.hSubMenu)?);
+            }
+        }
+        Ok(verified)
+    }
+
+    #[test]
+    fn owner_draw_accessibility_metadata_covers_the_complete_menu_tree()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let menu = create_owner_draw_menu_for_test()?;
+        let verified = verify_owner_menu_metadata_tree(menu.as_raw())?;
+        assert_eq!(verified, menu.owner_data_len());
+        assert!(verified > COMMAND_UI_SPECS.len());
+        Ok(())
+    }
+
     #[test]
     fn owner_draw_menu_exposes_msaa_names() -> Result<(), Box<dyn std::error::Error>> {
         struct TestOle;
@@ -2950,12 +3003,28 @@ mod tests {
             }
         }
 
-        struct AccessibleMenuSnapshot {
-            child_count: i32,
-            first_name: String,
+        struct AccessibleMenuItemSnapshot {
+            name: String,
             shortcut: String,
             role: i32,
             state: i32,
+        }
+
+        struct AccessibleMenuSnapshot {
+            child_count: i32,
+            items: Vec<AccessibleMenuItemSnapshot>,
+        }
+
+        fn menu_child(id: i32) -> VARIANT {
+            VARIANT {
+                Anonymous: VARIANT_0 {
+                    Anonymous: std::mem::ManuallyDrop::new(VARIANT_0_0 {
+                        vt: VT_I4,
+                        Anonymous: VARIANT_0_0_0 { lVal: id },
+                        ..VARIANT_0_0::default()
+                    }),
+                },
+            }
         }
 
         // SAFETY: null is required and the same-thread TestOle guard balances
@@ -2991,7 +3060,20 @@ mod tests {
         if owner.is_null() {
             return Err(io::Error::last_os_error().into());
         }
-        let attached = create_owner_draw_menu_for_test()?.attach(owner)?;
+        let menu = create_owner_draw_menu_for_test()?;
+        // Deliberately vary two top-level states so the MSAA proxy must expose
+        // more than owner-draw text. These changes affect only the hidden test.
+        // SAFETY: menu is the live unattached test tree and both positions are
+        // bounded by its six known root items.
+        let state_results = unsafe {
+            (
+                EnableMenuItem(menu.as_raw(), 0, MF_BYPOSITION | MF_GRAYED),
+                CheckMenuItem(menu.as_raw(), 1, MF_BYPOSITION | MF_CHECKED),
+            )
+        };
+        assert_ne!(state_results.0, -1);
+        assert_ne!(state_results.1, u32::MAX);
+        let attached = menu.attach(owner)?;
         let result = (|| -> Result<AccessibleMenuSnapshot, Box<dyn std::error::Error>> {
             let mut raw = null_mut();
             // SAFETY: owner has a live attached menu; the requested interface
@@ -3005,27 +3087,23 @@ mod tests {
                 )?;
                 IAccessible::from_raw(raw)
             };
-            let child = VARIANT {
-                Anonymous: VARIANT_0 {
-                    Anonymous: std::mem::ManuallyDrop::new(VARIANT_0_0 {
-                        vt: VT_I4,
-                        Anonymous: VARIANT_0_0_0 { lVal: 1 },
-                        ..VARIANT_0_0::default()
-                    }),
-                },
-            };
             // SAFETY: accessible is the live in-process standard menu object
-            // and child 1 is a scalar CHILDID selecting its first menu item.
+            // and each scalar CHILDID is bounded by its reported child count.
             let snapshot = unsafe {
-                let role = accessible.get_accRole(&child)?;
-                let state = accessible.get_accState(&child)?;
-                AccessibleMenuSnapshot {
-                    child_count: accessible.accChildCount()?,
-                    first_name: accessible.get_accName(&child)?.to_string(),
-                    shortcut: accessible.get_accKeyboardShortcut(&child)?.to_string(),
-                    role: role.Anonymous.Anonymous.Anonymous.lVal,
-                    state: state.Anonymous.Anonymous.Anonymous.lVal,
+                let child_count = accessible.accChildCount()?;
+                let mut items = Vec::with_capacity(usize::try_from(child_count)?);
+                for id in 1..=child_count {
+                    let child = menu_child(id);
+                    let role = accessible.get_accRole(&child)?;
+                    let state = accessible.get_accState(&child)?;
+                    items.push(AccessibleMenuItemSnapshot {
+                        name: accessible.get_accName(&child)?.to_string(),
+                        shortcut: accessible.get_accKeyboardShortcut(&child)?.to_string(),
+                        role: role.Anonymous.Anonymous.Anonymous.lVal,
+                        state: state.Anonymous.Anonymous.Anonymous.lVal,
+                    });
                 }
+                AccessibleMenuSnapshot { child_count, items }
             };
             Ok(snapshot)
         })();
@@ -3039,10 +3117,22 @@ mod tests {
         drop(attached.owner_data);
         let snapshot = result?;
         assert_eq!(snapshot.child_count, 6);
-        assert_eq!(snapshot.first_name, "파일(F)");
-        assert_eq!(snapshot.shortcut, "Alt+f");
-        assert_eq!(snapshot.role, ROLE_SYSTEM_MENUITEM as i32);
-        assert_ne!(snapshot.state & STATE_SYSTEM_HASPOPUP as i32, 0);
+        let expected = [
+            ("파일(F)", "Alt+f"),
+            ("편집(E)", "Alt+e"),
+            ("보기(V)", "Alt+v"),
+            ("변환(T)", "Alt+t"),
+            ("복구(R)", "Alt+r"),
+            ("도움말(H)", "Alt+h"),
+        ];
+        for (item, (name, shortcut)) in snapshot.items.iter().zip(expected) {
+            assert_eq!(item.name, name);
+            assert_eq!(item.shortcut, shortcut);
+            assert_eq!(item.role, ROLE_SYSTEM_MENUITEM as i32);
+            assert_ne!(item.state & STATE_SYSTEM_HASPOPUP as i32, 0);
+        }
+        assert_ne!(snapshot.items[0].state & STATE_SYSTEM_UNAVAILABLE as i32, 0);
+        assert_ne!(snapshot.items[1].state & STATE_SYSTEM_CHECKED as i32, 0);
         Ok(())
     }
 
