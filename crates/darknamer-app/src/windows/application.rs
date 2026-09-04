@@ -1261,6 +1261,8 @@ unsafe extern "system" fn window_proc(
         }
         WM_DESTROY => {
             let mut cancelled_appearance = None;
+            let mut menu = null_mut();
+            let mut menu_owner_data = OwnerMenuDataStore::new();
             if !state_ptr.is_null() {
                 // Stop the ListView from retaining AppState refdata before any
                 // child teardown can reenter through common-controls messages.
@@ -1289,11 +1291,26 @@ unsafe extern "system" fn window_proc(
                 if let Some(rail) = unsafe { (&mut *state_ptr).right_rail.take() } {
                     rail.destroy();
                 }
+                // Keep accessibility metadata alive until the attached tree is
+                // explicitly detached and destroyed after releasing AppState.
+                // SAFETY: this callback owns the sole AppState lease.
+                menu = std::mem::replace(unsafe { &mut (*state_ptr).menu }, null_mut());
+                // SAFETY: same exclusive AppState access as the menu handle.
+                menu_owner_data = std::mem::take(unsafe { &mut (*state_ptr).menu_owner_data });
             }
             drop(state_lease);
             if let Some(cancelled) = cancelled_appearance {
                 destroy_cancelled_appearance_dialog(cancelled);
             }
+            if !menu.is_null() {
+                // SAFETY: menu is the exact tree attached to this live owner;
+                // metadata remains retained until both native calls complete.
+                unsafe {
+                    SetMenu(window, null_mut());
+                    DestroyMenu(menu);
+                }
+            }
+            drop(menu_owner_data);
             // SAFETY: PostQuitMessage targets the current thread queue and accepts no borrowed pointers.
             unsafe { PostQuitMessage(0) };
             0
