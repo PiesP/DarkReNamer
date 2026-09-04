@@ -1280,6 +1280,7 @@ pub(super) fn copy_clipboard_or_report(owner: HWND, text: &LegacyText) {
 
 pub(super) enum PreparedFileDialogKind {
     AddFiles,
+    UnifyDestinationParent,
     SaveText { text: LegacyText, names: bool },
     ImportNames,
     ImportPaths,
@@ -1289,6 +1290,7 @@ pub(super) enum PreparedFileDialogKind {
 pub(super) enum PreparedFileDialogSelection {
     Cancelled,
     AddFiles(Vec<PathBuf>),
+    UnifyDestinationParent(PathBuf),
     SaveText { path: PathBuf, text: LegacyText },
     ImportNames(PathBuf),
     ImportPaths(PathBuf),
@@ -1308,6 +1310,14 @@ pub(super) fn select_prepared_file_dialog(
         })
         .map_or(PreparedFileDialogSelection::Cancelled, |paths| {
             PreparedFileDialogSelection::AddFiles(paths)
+        }),
+        PreparedFileDialogKind::UnifyDestinationParent => modal_native_dialog(owner, || {
+            native_file_dialog(owner)
+                .set_title("대상 폴더 선택")
+                .pick_folder()
+        })
+        .map_or(PreparedFileDialogSelection::Cancelled, |path| {
+            PreparedFileDialogSelection::UnifyDestinationParent(path)
         }),
         PreparedFileDialogKind::SaveText { text, names } => {
             let title = if names {

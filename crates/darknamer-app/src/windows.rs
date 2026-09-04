@@ -40,11 +40,12 @@ use crate::rename::{
     RenamePlanner, RenameRecovery, WindowsRenameBackend, apply_execution_report,
     build_plan_request, cleanup_decision, execute_error_korean, execution_outcome_korean,
     execution_outcome_presentation, next_model_revision, plan_error_korean,
-    preflight_plan_cancellable, process_is_elevated, safe_mode_unify_path_message,
+    preflight_plan_cancellable, process_is_elevated,
 };
 use darknamer_core::{
-    LegacyAppendIndex, LegacyInputError, LegacyList, LegacyListItem, LegacySequenceMode,
-    LegacySortMode, LegacyText, ProposalMutationError, SortSemantics,
+    DestinationParentMutationError, LegacyAppendIndex, LegacyInputError, LegacyList,
+    LegacyListItem, LegacySequenceMode, LegacySortMode, LegacyText, ProposalMutationError,
+    SortSemantics,
 };
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawWindowHandle,
@@ -86,6 +87,19 @@ fn proposal_mutation_error_korean(error: ProposalMutationError) -> &'static str 
         }
         ProposalMutationError::AllocationFailed => {
             "변경 결과를 준비할 메모리가 부족합니다. 목록은 변경되지 않았습니다. 다른 프로그램을 닫고 다시 시도하세요."
+        }
+    }
+}
+
+fn destination_parent_mutation_error_korean(error: DestinationParentMutationError) -> &'static str {
+    match error {
+        DestinationParentMutationError::ParentBudgetExceeded { .. }
+        | DestinationParentMutationError::AggregateBudgetExceeded { .. }
+        | DestinationParentMutationError::ArithmeticOverflow => {
+            "대상 폴더 경로가 안전 한도를 초과했습니다. 목록은 변경되지 않았습니다. 더 짧은 경로를 선택해 주세요."
+        }
+        DestinationParentMutationError::AllocationFailed => {
+            "대상 폴더 변경을 준비할 메모리가 부족합니다. 목록은 변경되지 않았습니다. 다른 프로그램을 닫고 다시 시도하세요."
         }
     }
 }
@@ -482,7 +496,7 @@ struct AppState {
     status_column_width_dip: i32,
     appearance: UiAppearance,
     dpi: u32,
-    command_states: [bool; 34],
+    command_states: [bool; COMMAND_UI_SPECS.len()],
     model_revision: u64,
     mutation_locked: bool,
     recovery_locked: bool,
@@ -583,7 +597,7 @@ impl AppState {
             status_column_width_dip: NATIVE_STATUS_COLUMN_WIDTH_DIP,
             appearance,
             dpi: BASE_DPI,
-            command_states: [false; 34],
+            command_states: [false; COMMAND_UI_SPECS.len()],
             model_revision: 0,
             mutation_locked: false,
             recovery_locked: runtime.recovery_locked,
@@ -1041,6 +1055,24 @@ pub(crate) fn atomic_replace_preferences(source: &Path, destination: &Path) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn destination_parent_errors_keep_the_model_unchanged_and_give_a_retry_action() {
+        let budget = destination_parent_mutation_error_korean(
+            DestinationParentMutationError::ParentBudgetExceeded {
+                requested_units: 33_000,
+                maximum_units: 32_767,
+            },
+        );
+        assert!(budget.contains("목록은 변경되지 않았습니다"));
+        assert!(budget.contains("더 짧은 경로"));
+
+        let allocation = destination_parent_mutation_error_korean(
+            DestinationParentMutationError::AllocationFailed,
+        );
+        assert!(allocation.contains("목록은 변경되지 않았습니다"));
+        assert!(allocation.contains("다른 프로그램을 닫고"));
+    }
 
     const EMPTY_SAFETY_COPY_PROBE_SUBCLASS_ID: usize = 0xD4B2;
     static EMPTY_SAFETY_COPY_CALLBACKS: AtomicUsize = AtomicUsize::new(0);

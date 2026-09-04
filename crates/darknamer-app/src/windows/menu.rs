@@ -748,11 +748,14 @@ pub(super) fn update_controls(state: &mut AppState) {
     state.ui_status.set_preview_counts(presentation.counts);
     state.render_status();
     let status_layout_changed = current_status_layout_input(state) != state.status_layout_input;
-    for id in APPLY..=VERSION {
+    let contains_directory = state.model.items().iter().any(LegacyListItem::is_directory);
+    for id in APPLY..=LAST_COMMAND {
         state.command_states[usize::from(id - APPLY)] = if id == APPLY {
             matches!(presentation.apply, ApplyPresentation::Ready)
         } else if state.read_only_locked() || state.mutation_locked {
             id == VERSION
+        } else if id == UNIFY_PATH && contains_directory {
+            false
         } else {
             command_enabled(id, state.model.len(), selected_count)
         };
@@ -1032,7 +1035,7 @@ pub(super) fn apply_command_states(state: &AppState) {
             rail.set_enabled(id, state.command_states[usize::from(id - APPLY)]);
         }
     }
-    for id in APPLY..=VERSION {
+    for id in APPLY..=LAST_COMMAND {
         let enabled = state.command_states[usize::from(id - APPLY)];
         // SAFETY: AppState's menu and parent HWND are live and command IDs are validated resource values.
         unsafe {

@@ -26,19 +26,27 @@ are unsupported and unvalidated for v0.1. The runtime enforces the same boundary
 by querying the filesystem from the retained final directory handle and failing
 closed unless it reports NTFS.
 
-Apply validates Windows leaf names and current file identities before showing
-confirmation. It executes local same-folder renames with handle-relative,
-no-replace operations, including case-only changes and rename cycles. A bounded
-write-ahead journal records intent before mutation, supports reverse rollback,
-and blocks further Apply operations when an interrupted state cannot be safely
-reconciled. Network paths, reparse traversal, case-sensitive directories, and
-cross-folder moves are rejected by the current safe policy.
+Apply validates Windows leaf names, current file identities, and source and
+destination parents before showing confirmation. Safe v2 executes
+handle-relative, no-replace operations for same-parent renames and for regular
+files moved to an existing folder on the same local NTFS volume. The latter is
+prepared with **기능 > 경로 통일하기...** and can combine a move with a
+proposed name change. **기능 > 경로 변경 취소** restores original destination
+parents without changing proposed names; Ctrl+Z remains name-only.
+
+A bounded write-ahead journal records intent before mutation, supports reverse
+rollback, and blocks further Apply operations when an interrupted state cannot
+be safely reconciled. Network and device paths, reparse traversal,
+case-sensitive directories, cross-volume moves, directory moves, replacement,
+folder merging, and destination-folder creation remain outside the Safe v2
+boundary. The confirmation separates rename-only, move-only, and combined
+changes and states that existing destinations are not overwritten.
 
 Portable transformation and state behavior are covered by automated tests, and
 the Windows binary cross-builds from Linux. Native focus and menu timing,
 Explorer drag/drop, common dialogs, clipboard operations, native startup
-recovery, and interactive failure handling still require acceptance on a real
-Windows host.
+recovery, same-volume path unification, and interactive failure handling still
+require acceptance on a real Windows host.
 Until that evidence exists, releases should distinguish source-complete porting
 from manually verified runtime parity.
 

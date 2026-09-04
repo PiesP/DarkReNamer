@@ -413,7 +413,7 @@ pub(super) fn handle_ready_plan(
         session,
         spec: PreparedTaskDialogSpec {
             title: "DarkReNamer - 안전한 적용 확인".to_owned(),
-            main_instruction: "실제 파일 이름 변경을 적용하시겠습니까?".to_owned(),
+            main_instruction: "계획된 파일 변경을 적용하시겠습니까?".to_owned(),
             content: primary,
             expanded_information: Some(detail),
             buttons: vec![PreparedTaskDialogButton {
@@ -862,7 +862,7 @@ pub(super) fn handle_apply_progress(state: &mut AppState) {
             format!("취소 요청됨: 현재 원시 변경 경계를 마치는 중 ({completed}/{total} 단계)")
         }
         (0, _) => format!("실행 준비 완료: {total} 단계"),
-        (1, _) => format!("파일 이름 변경 중: {completed}/{total} 단계"),
+        (1, _) => format!("파일 변경 중: {completed}/{total} 단계"),
         (2, _) => format!("취소 또는 오류 후 복원 중: {completed}/{total} 단계"),
         (3, _) => "저널 terminal 상태를 기록했습니다.".to_owned(),
         _ => "파일 변경 상태를 확인하고 있습니다...".to_owned(),

@@ -1847,6 +1847,253 @@ mod tests {
     }
 
     #[test]
+    fn unify_path_dialog_is_atomic_revision_bound_and_reset_keeps_name_proposals()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _serial = FILE_DIALOG_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let app = PublishedFileDialogTestApp::new()?;
+        app.with_state(|state| {
+            assert_eq!(
+                state.model.append(LegacyListItem::new(
+                    r"C:\fixture\before.txt",
+                    false,
+                    1,
+                    2,
+                    3,
+                )),
+                Ok(true)
+            );
+            assert_eq!(state.model.manual_change(0, "renamed.txt"), Ok(true));
+            state.commit_known_model_change(true);
+            refresh_all_rows(state);
+            update_controls(state);
+        })?;
+        let original_revision = app.with_state(|state| state.model_revision)?;
+
+        app.dispatch_with_selector(UNIFY_PATH, |_, kind| {
+            assert!(matches!(
+                kind,
+                PreparedFileDialogKind::UnifyDestinationParent
+            ));
+            PreparedFileDialogSelection::Cancelled
+        })?;
+        app.assert_session_cleared()?;
+        assert_eq!(
+            app.with_state(|state| state.model_revision)?,
+            original_revision
+        );
+
+        let missing = app._directory.path().join("missing-target");
+        app.dispatch_with_selector(UNIFY_PATH, |_, kind| {
+            assert!(matches!(
+                kind,
+                PreparedFileDialogKind::UnifyDestinationParent
+            ));
+            PreparedFileDialogSelection::UnifyDestinationParent(missing)
+        })?;
+        app.assert_session_cleared()?;
+        assert_eq!(
+            app.with_state(|state| state.model_revision)?,
+            original_revision
+        );
+
+        let destination = app._directory.path().join("unified-target");
+        fs::create_dir(&destination)?;
+        let expected_destination = legacy_path(&destination);
+        app.dispatch_with_selector(UNIFY_PATH, |owner, kind| {
+            assert!(matches!(
+                kind,
+                PreparedFileDialogKind::UnifyDestinationParent
+            ));
+            send_synthetic_drawitem(owner);
+            PreparedFileDialogSelection::UnifyDestinationParent(destination.clone())
+        })?;
+        app.assert_session_cleared()?;
+        app.with_state(|state| {
+            assert_eq!(state.model_revision, original_revision + 1);
+            assert_eq!(state.model.items()[0].root_path(), &expected_destination);
+            assert_eq!(
+                state.model.items()[0].proposed_name(),
+                &LegacyText::from("renamed.txt")
+            );
+            assert_eq!(state.rendered_rows[0].values[2], expected_destination);
+            assert_eq!(
+                state.rendered_rows[0].values[NATIVE_STATUS_COLUMN_INDEX],
+                LegacyText::from("이동 및 이름 변경 예정")
+            );
+        })?;
+
+        app.dispatch_with_selector(UNIFY_PATH, |_, _| {
+            PreparedFileDialogSelection::UnifyDestinationParent(destination)
+        })?;
+        assert_eq!(
+            app.with_state(|state| state.model_revision)?,
+            original_revision + 1
+        );
+
+        app.with_state(|state| {
+            assert!(dispatch_command(app.owner, state, RESET_PATH).is_none());
+            assert_eq!(state.model_revision, original_revision + 2);
+            assert_eq!(
+                state.model.items()[0].root_path(),
+                &LegacyText::from(r"C:\fixture")
+            );
+            assert_eq!(
+                state.model.items()[0].proposed_name(),
+                &LegacyText::from("renamed.txt")
+            );
+            assert_eq!(
+                state.rendered_rows[0].values[NATIVE_STATUS_COLUMN_INDEX],
+                LegacyText::from("이름 변경 예정")
+            );
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn unify_path_dialog_rejects_stale_locked_and_directory_list_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _serial = FILE_DIALOG_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let app = PublishedFileDialogTestApp::new()?;
+        app.with_state(|state| {
+            assert_eq!(
+                state.model.append(LegacyListItem::new(
+                    r"C:\fixture\before.txt",
+                    false,
+                    1,
+                    2,
+                    3,
+                )),
+                Ok(true)
+            );
+            refresh_all_rows(state);
+            update_controls(state);
+        })?;
+        let original_parent = LegacyText::from(r"C:\fixture");
+        let destination = app._directory.path().join("stale-target");
+        fs::create_dir(&destination)?;
+
+        let action = app.prepare(UNIFY_PATH)?;
+        app.with_state(|state| state.model_revision += 1)?;
+        let selector_called = Cell::new(false);
+        run_prepared_command_action(
+            app.owner,
+            action,
+            |_, _| {
+                selector_called.set(true);
+                PreparedFileDialogSelection::UnifyDestinationParent(destination.clone())
+            },
+            select_prepared_task_dialog,
+            NativeAppearanceDialogPlatform,
+        );
+        assert!(!selector_called.get());
+        app.assert_session_cleared()?;
+        app.with_state(|state| {
+            state.model_revision -= 1;
+            assert_eq!(state.model.items()[0].root_path(), &original_parent);
+        })?;
+
+        app.dispatch_with_selector(UNIFY_PATH, |_, kind| {
+            assert!(matches!(
+                kind,
+                PreparedFileDialogKind::UnifyDestinationParent
+            ));
+            assert!(app.with_state(|state| state.recovery_locked = true).is_ok());
+            PreparedFileDialogSelection::UnifyDestinationParent(destination)
+        })?;
+        app.assert_session_cleared()?;
+        app.with_state(|state| {
+            assert_eq!(state.model.items()[0].root_path(), &original_parent);
+            state.recovery_locked = false;
+        })?;
+
+        let directory_app = PublishedFileDialogTestApp::new()?;
+        directory_app.with_state(|state| {
+            assert_eq!(
+                state
+                    .model
+                    .append(LegacyListItem::new(r"C:\fixture\folder", true, 0, 2, 3,)),
+                Ok(true)
+            );
+            refresh_all_rows(state);
+            update_controls(state);
+            assert!(!state.command_states[usize::from(UNIFY_PATH - APPLY)]);
+        })?;
+        let picker_called = Cell::new(false);
+        assert!(
+            directory_app
+                .dispatch_with_selector(UNIFY_PATH, |_, _| {
+                    picker_called.set(true);
+                    PreparedFileDialogSelection::Cancelled
+                })
+                .is_err()
+        );
+        assert!(!picker_called.get());
+        assert_eq!(directory_app.with_state(|state| state.model_revision)?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn unify_path_dialog_rejects_injected_case_sensitive_destination_before_model_change()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _serial = FILE_DIALOG_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let app = PublishedFileDialogTestApp::new()?;
+        app.with_state(|state| {
+            assert_eq!(
+                state.model.append(LegacyListItem::new(
+                    r"C:\fixture\before.txt",
+                    false,
+                    1,
+                    2,
+                    3,
+                )),
+                Ok(true)
+            );
+            refresh_all_rows(state);
+            update_controls(state);
+        })?;
+        let original_model = app.with_state(|state| state.model.clone())?;
+        let original_revision = app.with_state(|state| state.model_revision)?;
+        let destination = app._directory.path().join("case-sensitive-target");
+        fs::create_dir(&destination)?;
+        let action = app.prepare(UNIFY_PATH)?;
+        let PreparedCommandAction::FileDialog(dialog) = action else {
+            return Err(io::Error::other("unify command did not prepare a file dialog").into());
+        };
+
+        run_prepared_file_dialog_with_destination_validation(
+            app.owner,
+            dialog,
+            |_, kind| {
+                assert!(matches!(
+                    kind,
+                    PreparedFileDialogKind::UnifyDestinationParent
+                ));
+                PreparedFileDialogSelection::UnifyDestinationParent(destination)
+            },
+            |_| {
+                Err(crate::rename::BackendError {
+                    operation: crate::rename::BackendOperation::Observe,
+                    code: 50,
+                    certainty: crate::rename::MutationCertainty::NotApplied,
+                })
+            },
+        );
+
+        app.assert_session_cleared()?;
+        app.with_state(|state| {
+            assert_eq!(state.model, original_model);
+            assert_eq!(state.model_revision, original_revision);
+        })?;
+        Ok(())
+    }
+
+    #[test]
     fn real_file_dialog_pipeline_rejects_stale_locked_and_mismatched_sessions()
     -> Result<(), Box<dyn std::error::Error>> {
         #[derive(Clone, Copy)]

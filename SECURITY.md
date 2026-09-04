@@ -22,7 +22,13 @@ Security-sensitive areas include unintended file replacement or movement,
 reparse-point traversal and path races, malformed import lists, journal and
 recovery integrity, unsafe Win32 boundaries, dependency provenance, and release
 artifact substitution. The maintained safe path rejects elevated execution,
-network paths, case-sensitive parents, and cross-folder moves.
+network and device paths, case-sensitive parents, reparse traversal,
+cross-volume moves, directory moves, replacement, folder merging, and automatic
+destination creation. Safe v2 authorizes cross-folder movement only for regular
+files whose existing source and destination parents are independently verified
+on the same local NTFS volume; ordinary rename plans retain same-parent
+authority. Journal v1 evidence is decoded only with the legacy same-parent
+scope.
 Compatibility behavior inherited from DarkNamer is not
 automatically a vulnerability; reports should demonstrate the additional
 confidentiality, integrity, or availability impact in the maintained Rust port.

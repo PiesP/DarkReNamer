@@ -902,6 +902,33 @@ fn journal_root_rejects_unc_before_filesystem_access() {
 }
 
 #[test]
+fn exact_destination_parent_validation_accepts_nested_directory_and_volume_root()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let nested = directory.path().join("nested");
+    fs::create_dir(&nested)?;
+    let volume_root = directory
+        .path()
+        .ancestors()
+        .last()
+        .ok_or_else(|| std::io::Error::other("temporary path has no volume root"))?;
+    let backend = WindowsRenameBackend;
+
+    let nested_identity = backend.validate_destination_parent(&legacy_path(&nested))?;
+    let root_identity = backend.validate_destination_parent(&legacy_path(volume_root))?;
+
+    assert_ne!(nested_identity.file_id(), 0);
+    assert_ne!(root_identity.file_id(), 0);
+    let missing = directory.path().join("missing");
+    assert!(
+        backend
+            .validate_destination_parent(&legacy_path(&missing))
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn occupied_destination_and_relative_path_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let source = directory.path().join("a.txt");
@@ -1378,6 +1405,16 @@ fn case_sensitive_parent_is_explicitly_unsupported_when_platform_allows_fixture(
     fs::write(&source, b"a")?;
 
     let backend = WindowsRenameBackend;
+    let mut model = LegacyList::new();
+    assert_eq!(
+        model.append(LegacyListItem::new(legacy_path(&source), false, 1, 2, 3,)),
+        Ok(true)
+    );
+    let model_before = model.clone();
+    let revision = ModelRevision::new(11);
+    let destination_parent_error = backend
+        .validate_destination_parent(&legacy_path(&parent))
+        .err();
     let environment_error = backend
         .validate_path_environment(&legacy_path(&source))
         .err();
@@ -1394,6 +1431,9 @@ fn case_sensitive_parent_is_explicitly_unsupported_when_platform_allows_fixture(
     assert!(directory.path().is_dir());
 
     assert_eq!(environment_error.map(|error| error.code), Some(50));
+    assert_eq!(destination_parent_error.map(|error| error.code), Some(50));
+    assert_eq!(model, model_before);
+    assert_eq!(revision, ModelRevision::new(11));
     assert!(plan_error.is_some_and(|error| {
         error
             .issues()

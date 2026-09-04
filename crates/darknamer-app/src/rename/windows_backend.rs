@@ -31,6 +31,23 @@ const ERROR_ALREADY_EXISTS: u32 = 183;
 #[derive(Debug, Default)]
 pub struct WindowsRenameBackend;
 
+impl WindowsRenameBackend {
+    /// Opens and validates one exact destination-parent directory.
+    ///
+    /// All traversal, final-directory, filesystem, case-sensitivity, protocol,
+    /// and identity checks are performed through the retained final directory
+    /// handle before it is released. Volume roots are valid destination
+    /// parents and therefore do not require a synthetic leaf component.
+    pub fn validate_destination_parent(
+        &self,
+        path: &LegacyText,
+    ) -> Result<EntryIdentity, BackendError> {
+        NativeParent::open_legacy(path)
+            .map(|parent| model_identity(parent.identity))
+            .map_err(|error| observe_error(error, BackendOperation::Observe))
+    }
+}
+
 impl RenameBackend for WindowsRenameBackend {
     fn validate_path_environment(&self, path: &LegacyText) -> Result<(), BackendError> {
         let (parent_path, _leaf) = split_absolute_path(path, BackendOperation::Observe)?;

@@ -3,10 +3,9 @@ use std::cell::Cell;
 use darknamer_app::rename::{
     BackendError, BackendOperation, ExecutionOutcome, JournalCapacityError, JournalCapacityKind,
     JournalCleanupDecision, JournalRecord, JournalTerminal, MemoryBackend, MemoryJournal,
-    ModelRevision, MutationCertainty, PathKey, PathSnapshot, RenameBackend, RenameExecutor,
-    RenameOperation, RenamePlanner, apply_execution_report, build_plan_request, cleanup_decision,
-    journal_capacity_error_korean, next_model_revision, plan_error_korean,
-    safe_mode_unify_path_message,
+    ModelRevision, MoveScope, MutationCertainty, PathKey, PathSnapshot, RenameBackend,
+    RenameExecutor, RenameOperation, RenamePlanner, apply_execution_report, build_plan_request,
+    cleanup_decision, journal_capacity_error_korean, next_model_revision, plan_error_korean,
 };
 use darknamer_core::{LegacyList, LegacyListItem, LegacyText};
 
@@ -108,9 +107,29 @@ fn model_revision_is_monotonic_and_changes_only_with_the_model() {
 }
 
 #[test]
-fn safe_mode_unify_path_is_explicitly_inert() {
-    assert!(safe_mode_unify_path_message().contains("지원하지"));
-    assert!(safe_mode_unify_path_message().contains("변경되지"));
+fn plan_request_authorizes_same_volume_files_only_for_destination_parent_proposals()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut model = model();
+    assert_eq!(
+        build_plan_request(&model, ModelRevision::new(1)).scope(),
+        MoveScope::SameParent
+    );
+
+    let changed = model.unify_destination_parent_changed(&LegacyText::from(r"C:\archive"))?;
+    assert_eq!(&*changed, &[0]);
+    assert_eq!(
+        build_plan_request(&model, ModelRevision::new(2)).scope(),
+        MoveScope::SameVolumeFilesOnly
+    );
+
+    let reset = model.reset_destination_parents()?;
+    assert_eq!(&*reset, &[0]);
+    assert_eq!(model.items()[0].proposed_name(), &LegacyText::from("b.txt"));
+    assert_eq!(
+        build_plan_request(&model, ModelRevision::new(3)).scope(),
+        MoveScope::SameParent
+    );
+    Ok(())
 }
 
 #[test]

@@ -29,7 +29,7 @@ pub use activation::{
     ExecutionOutcomePresentation, JournalCleanupDecision, apply_execution_report,
     build_plan_request, cleanup_decision, execute_error_korean, execution_outcome_korean,
     execution_outcome_presentation, journal_capacity_error_korean, next_model_revision,
-    plan_error_korean, safe_mode_unify_path_message,
+    plan_error_korean,
 };
 pub use executor::{
     CancellationToken, EntryExecution, ExecuteError, ExecuteErrorKind, ExecutionControl,
