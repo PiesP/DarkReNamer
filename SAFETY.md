@@ -50,8 +50,11 @@ Appearance preferences are non-authorizing input. Theme, command-rail density,
 preview emphasis, separators, tint, and empty-state copy may change presentation
 only. They are stored separately from rename journals and cannot alter model
 revision, plan identity, Apply confirmation, mutation locks, recovery locks, or
-active and candidate journal capabilities. Preference load or write failure uses
-safe presentation defaults and does not relax or create filesystem mutation
+active and candidate journal capabilities. When the monitor work area can
+accommodate the requested minimum, the minimum window width reserves the widest
+measured rail eligible for the selected preference, so automatic density changes
+cannot overflow the default ListView columns. Preference load or write failure
+uses safe presentation defaults and does not relax or create filesystem mutation
 authority.
 
 ## Preview resource boundary
