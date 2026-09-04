@@ -1346,6 +1346,7 @@ const MENU_POPUP_NUMBER: usize = 0x1_000A;
 const MENU_POPUP_EXTENSION: usize = 0x1_000B;
 const MENU_POPUP_FOLDER_NAME: usize = 0x1_000C;
 const MENU_POPUP_RECOVERY: usize = 0x1_000D;
+const MENU_SEPARATOR: usize = 0x1_000E;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OwnerMenuKind {
@@ -1420,6 +1421,10 @@ pub(super) fn owner_menu_has_submenu(data: usize) -> bool {
     )
 }
 
+pub(super) fn owner_menu_is_separator(data: usize) -> bool {
+    owner_menu_tag(data) == Some(MENU_SEPARATOR)
+}
+
 pub(super) fn owner_menu_uses_radio(data: usize) -> bool {
     let Some(data) = owner_menu_tag(data) else {
         return false;
@@ -1449,6 +1454,7 @@ fn owner_menu_label_for_tag(data: usize) -> Option<String> {
         MENU_POPUP_EXTENSION => Some("확장자(&E)"),
         MENU_POPUP_FOLDER_NAME => Some("폴더명 사용(&F)"),
         MENU_POPUP_RECOVERY => Some("복구(&R)"),
+        MENU_SEPARATOR => Some(""),
         _ => None,
     };
     if let Some(popup) = popup {
@@ -1578,10 +1584,23 @@ impl MenuBuilder {
     }
 
     fn separator(&mut self) -> io::Result<()> {
-        // SAFETY: the menu is live and separators carry no pointer payload.
-        if unsafe { AppendMenuW(self.menu.as_raw(), MF_SEPARATOR, 0, null()) } == 0 {
+        let data = self
+            .owner_draw
+            .then(|| OwnerMenuData::new(MENU_SEPARATOR, &[0]))
+            .transpose()?;
+        let flags = MF_SEPARATOR | if self.owner_draw { MF_OWNERDRAW } else { 0 };
+        let pointer = data
+            .as_ref()
+            .map_or(null(), |data| (&raw const **data).cast::<u16>());
+        // SAFETY: the menu is live; owner-draw separator metadata is retained
+        // until the same native menu tree is destroyed. MF_SEPARATOR preserves
+        // its non-command role and native keyboard traversal.
+        if unsafe { AppendMenuW(self.menu.as_raw(), flags, 0, pointer) } == 0 {
             Err(io::Error::last_os_error())
         } else {
+            if let Some(data) = data {
+                self.menu.owner_data.push(data);
+            }
             Ok(())
         }
     }

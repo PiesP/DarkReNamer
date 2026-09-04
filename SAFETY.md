@@ -62,6 +62,8 @@ Menu replacements are prepared while state is leased, then attached and the old
 tree destroyed only from the pointer-free deferred redraw message after that
 lease ends. Accessibility metadata and referenced GDI brushes outlive the native
 menu tree that uses them.
+Palette-drawn separators retain the native separator flag and an empty label;
+they remain non-command items during keyboard and accessibility traversal.
 The file list and appearance viewport use `SetWindowTheme` for native scrollbar
 appearance only. The association is selected from the resolved theme, copied by
 Windows during the call, and removed with null arguments for Light, Native

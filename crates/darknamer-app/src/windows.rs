@@ -2980,7 +2980,15 @@ mod tests {
             {
                 return Err(io::Error::last_os_error());
             }
-            if info.fType & MF_SEPARATOR == 0 {
+            if info.fType & MF_SEPARATOR != 0 {
+                assert_ne!(info.fType & MF_OWNERDRAW, 0);
+                assert!(owner_menu_is_separator(info.dwItemData));
+                assert_eq!(
+                    owner_menu_accessibility_label(info.dwItemData).as_deref(),
+                    Some("")
+                );
+                verified = verified.saturating_add(1);
+            } else {
                 assert_ne!(info.fType & MF_OWNERDRAW, 0);
                 let rendered = owner_menu_label(info.dwItemData)
                     .ok_or_else(|| io::Error::other("owner-draw item tag is invalid"))?;

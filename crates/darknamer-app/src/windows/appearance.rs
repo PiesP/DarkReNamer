@@ -665,6 +665,24 @@ pub(super) fn draw_owner_menu(
     if draw.CtlType != ODT_MENU || draw.hDC.is_null() {
         return false;
     }
+    if owner_menu_is_separator(draw.itemData) {
+        let Some(resources) = resources else {
+            return false;
+        };
+        let mut line = draw.rcItem;
+        let inset = scale_dip(8, dpi).max(0);
+        line.left = line.left.saturating_add(inset).min(line.right);
+        line.right = line.right.saturating_sub(inset).max(line.left);
+        line.top = line.top.saturating_add((line.bottom - line.top).max(0) / 2);
+        line.bottom = line.top.saturating_add(1).min(draw.rcItem.bottom);
+        // SAFETY: the menu owns this live drawing DC and rectangle; both
+        // brushes remain AppState-owned throughout this synchronous callback.
+        unsafe {
+            FillRect(draw.hDC, &draw.rcItem, resources.window_brush());
+            FillRect(draw.hDC, &line, resources.border_brush());
+        }
+        return true;
+    }
     let Some(label) = owner_menu_label(draw.itemData) else {
         return false;
     };
@@ -844,6 +862,11 @@ pub(super) fn measure_owner_menu(window: HWND, font: HFONT, dpi: u32, lparam: LP
     let measure = unsafe { &mut *measure };
     if measure.CtlType != ODT_MENU {
         return false;
+    }
+    if owner_menu_is_separator(measure.itemData) {
+        measure.itemWidth = 1;
+        measure.itemHeight = u32::try_from(scale_dip(8, dpi).max(1)).unwrap_or(u32::MAX);
+        return true;
     }
     let Some(label) = owner_menu_label(measure.itemData) else {
         return false;
