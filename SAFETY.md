@@ -55,7 +55,13 @@ accommodate the requested minimum, the minimum window width reserves the widest
 measured rail eligible for the selected preference, so automatic density changes
 cannot overflow the default ListView columns. Preference load or write failure
 uses safe presentation defaults and does not relax or create filesystem mutation
-authority.
+authority. Resolved Light and Dark themes use an app-owned menu palette while
+retaining keyboard mnemonics and native MSAA/UIA metadata. Native System, Forced
+Colors, and an unknown high-contrast query keep the standard Windows menu path.
+Menu replacements are prepared while state is leased, then attached and the old
+tree destroyed only from the pointer-free deferred redraw message after that
+lease ends. Accessibility metadata and referenced GDI brushes outlive the native
+menu tree that uses them.
 
 ## Preview resource boundary
 

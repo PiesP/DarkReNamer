@@ -26,7 +26,8 @@ use windows_sys::Win32::UI::Controls::{
 use windows_sys::Win32::UI::Controls::{LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetMenuBarInfo, GetWindowTextLengthW, GetWindowTextW, MENUBARINFO, MENUINFO,
-    MIM_APPLYTOSUBMENUS, MIM_BACKGROUND, OBJID_MENU, SendMessageW, SetMenuInfo, WM_GETFONT,
+    MIM_APPLYTOSUBMENUS, MIM_BACKGROUND, OBJID_MENU, PostMessageW, SendMessageW, SetMenuInfo,
+    WM_GETFONT,
 };
 
 use super::*;
@@ -1008,19 +1009,30 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
     let resolved = state.resolved_appearance();
     let palette = semantic_palette(resolved.theme);
     let replacement = palette.map(AppearanceResources::create).transpose()?;
+    prepare_menu_appearance(state, resolved.theme)?;
+    let menu_transition = state.pending_menu.is_some();
+    let (menu, owner_draw_menu) = state
+        .pending_menu
+        .as_ref()
+        .map_or((state.menu, state.owner_draw_menu), |menu| {
+            (menu.as_raw(), menu.owner_draw())
+        });
 
     // Install the replacement brush while both old and new resources remain
     // alive. Only a successful menu update permits dropping the old brush set.
-    let menu_resources = if state.owner_draw_menu {
+    let menu_resources = if owner_draw_menu {
         replacement.as_ref()
     } else {
         None
     };
-    if let Err(error) = apply_menu_background(state.menu, menu_resources) {
+    if let Err(error) = apply_menu_background(menu, menu_resources) {
         // MIM_APPLYTOSUBMENUS does not document transactional failure. Retain
-        // every custom brush set from a failed attempt so any partially
-        // updated submenu can never reference a deleted GDI object.
-        if let Some(replacement) = replacement {
+        // every custom brush set for an attached tree so any partially updated
+        // submenu can never reference a deleted GDI object. An unattached
+        // replacement is destroyed while its candidate resources remain live.
+        if menu_transition {
+            state.pending_menu = None;
+        } else if let Some(replacement) = replacement {
             state.menu_fallback_resources.push(replacement);
         }
         return Err(error);
@@ -1060,7 +1072,17 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
         rail.set_separators_visible(resolved.appearance.show_separators);
         apply_tooltip_appearance(rail.tooltip_window(), palette);
     }
-    state.appearance_resources = replacement;
+    let previous_resources = std::mem::replace(&mut state.appearance_resources, replacement);
+    if menu_transition {
+        if let Some(previous_resources) = previous_resources {
+            // The attached owner-draw tree may still retain its old background
+            // brush until the deferred SetMenu succeeds and destroys that tree.
+            state.menu_fallback_resources.push(previous_resources);
+        }
+    } else {
+        drop(previous_resources);
+        state.menu_fallback_resources.clear();
+    }
     // Mirror only the scalar COLORREF into the callback allocation's disjoint
     // sidecar. Nested non-client callbacks can read it without borrowing the
     // AppState value whose resources established this successful appearance.
@@ -1072,7 +1094,6 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
             palette.map(|palette| palette.surface_window),
         )
     };
-    state.menu_fallback_resources.clear();
     apply_dwm_title_frame(window, state, resolved.theme);
     // SAFETY: window is the live top-level HWND. One invalidation repaints all
     // children after every brush and ListView color has been installed.
@@ -1084,6 +1105,16 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
             RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN,
         )
     };
+    if menu_transition {
+        // SetMenu and DrawMenuBar can synchronously reenter the window
+        // procedure. Defer the pointer-free transition until this state lease
+        // and every reference derived from it have ended.
+        // SAFETY: window is the live top-level owner and the private message
+        // carries no caller-owned pointers.
+        if unsafe { PostMessageW(window, WM_APP_MENU_REDRAW, 0, 0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
     Ok(())
 }
 

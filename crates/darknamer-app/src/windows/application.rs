@@ -16,17 +16,13 @@ impl Drop for OleGuard {
 }
 
 pub(super) fn take_attached_menu_for_destroy(state: &mut AppState) -> (HMENU, OwnerMenuDataStore) {
-    if state.pending_menu.is_some() {
-        // pending_menu remains the sole owner of an unattached tree. Clear the
-        // raw alias so teardown never destroys the same handle twice.
-        state.menu = null_mut();
-        (null_mut(), OwnerMenuDataStore::new())
-    } else {
-        (
-            std::mem::replace(&mut state.menu, null_mut()),
-            std::mem::take(&mut state.menu_owner_data),
-        )
-    }
+    // pending_menu owns only the unattached replacement. During a live theme
+    // transition, menu and menu_owner_data still own the currently attached
+    // tree and must follow the normal explicit destruction path.
+    (
+        std::mem::replace(&mut state.menu, null_mut()),
+        std::mem::take(&mut state.menu_owner_data),
+    )
 }
 
 pub(super) fn run() -> io::Result<()> {
@@ -59,34 +55,25 @@ impl Drop for ProductionOwnerDrawTestWindow {
 }
 
 #[cfg(test)]
-fn install_owner_draw_menu_for_test(window: HWND) -> io::Result<()> {
-    let replacement = create_owner_draw_menu_for_test()?;
-    // Detach the standard production menu without an AppState lease. SetMenu
-    // can synchronously enter non-client/menu callbacks.
-    // SAFETY: window is the live test-owned production top-level HWND.
-    if unsafe { SetMenu(window, null_mut()) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
+fn install_menu_mode_for_test(window: HWND, owner_draw: bool) -> io::Result<()> {
     let Some(mut state_lease) = try_app_state(window) else {
         return Err(io::Error::other(
             "production test window state is unavailable",
         ));
     };
     let state = state_lease.state_mut();
-    let previous = std::mem::replace(&mut state.menu, replacement.as_raw());
-    let previous_owner_data = std::mem::take(&mut state.menu_owner_data);
-    state.owner_draw_menu = true;
-    state.pending_menu = Some(replacement);
+    // Keep the selected preference identical across the accessibility
+    // comparison; forced colors chooses the native renderer independently.
+    state.appearance.theme = AppThemeMode::Dark;
+    state.forced_colors = if owner_draw {
+        ForcedColorsState::Inactive
+    } else {
+        ForcedColorsState::ActiveOrUnknown
+    };
+    apply_native_appearance(window, state)?;
     drop(state_lease);
-    if !previous.is_null() {
-        // SAFETY: SetMenu above detached this exact application-owned tree and
-        // no AppState reference remains. Its metadata outlives destruction.
-        unsafe { DestroyMenu(previous) };
-    }
-    drop(previous_owner_data);
 
-    // Attach through the same pointer-free production message used at startup,
-    // after every AppState lease and reference has ended.
+    // Complete the production transition after every AppState reference ends.
     // SAFETY: window remains live and the private message carries no pointers.
     unsafe { SendMessageW(window, WM_APP_MENU_REDRAW, 0, 0) };
     // SAFETY: the handle value belongs to the test-created window and this
@@ -101,15 +88,17 @@ fn install_owner_draw_menu_for_test(window: HWND) -> io::Result<()> {
             "owner-draw production test window state was not retained",
         ));
     };
-    if state_lease.state().pending_menu.is_some() || !state_lease.state().owner_draw_menu {
+    if state_lease.state().pending_menu.is_some()
+        || state_lease.state().owner_draw_menu != owner_draw
+    {
         return Err(io::Error::other(
-            "owner-draw production test menu was not attached",
+            "requested production test menu mode was not attached",
         ));
     }
     apply_command_states(state_lease.state());
     drop(state_lease);
-    // apply_command_states posts a redraw because owner-draw measurement may
-    // reenter. Execute it now, again with no AppState lease.
+    // apply_command_states posts a redraw because menu measurement may reenter.
+    // Execute it now, again with no AppState lease.
     // SAFETY: window is live and the private message has no pointer payload.
     unsafe { SendMessageW(window, WM_APP_MENU_REDRAW, 0, 0) };
     Ok(())
@@ -211,13 +200,10 @@ pub(super) fn with_production_popup_window_for_test<R>(
         instance,
         class_name,
     };
-    // Attach the standard startup menu before replacing it through the test
-    // seam, matching production ownership transitions exactly.
+    // Attach the startup menu before selecting the requested production mode.
     // SAFETY: the live owner handles this pointer-free private message.
     unsafe { SendMessageW(window, WM_APP_MENU_REDRAW, 0, 0) };
-    if owner_draw {
-        install_owner_draw_menu_for_test(window)?;
-    }
+    install_menu_mode_for_test(window, owner_draw)?;
     // SAFETY: the window is live, owned by this UI thread, and made visible so
     // TrackPopupMenuEx creates a genuine system #32768 popup window.
     unsafe {
@@ -956,38 +942,68 @@ unsafe extern "system" fn window_proc(
             // DrawMenuBar synchronously sends owner-draw measurement and paint
             // callbacks. End the current state lease first so those nested
             // callbacks can acquire their own non-aliasing lease.
-            // SAFETY: this callback owns the sole AppState lease. The unattached
-            // menu, when present, transfers out exactly once; otherwise only the
-            // window-owned raw handle is copied.
-            let (pending, attached) = unsafe {
+            // SAFETY: this callback owns the sole AppState lease. The pending
+            // tree and the current tree's accessibility metadata transfer out
+            // exactly once so SetMenu and old-tree destruction run lease-free.
+            let (pending, attached, attached_owner_data) = unsafe {
                 let state = &mut *state_ptr;
                 let pending = state.pending_menu.take();
                 if pending.is_some() {
-                    state.menu = null_mut();
+                    (
+                        pending,
+                        std::mem::replace(&mut state.menu, null_mut()),
+                        std::mem::take(&mut state.menu_owner_data),
+                    )
+                } else {
+                    (pending, state.menu, OwnerMenuDataStore::new())
                 }
-                (pending, state.menu)
             };
             drop(state_lease);
             let menu = if let Some(pending) = pending {
                 match pending.attach(window) {
-                    Ok(attached) => {
+                    Ok(attached_menu) => {
                         if let Some(mut lease) = try_app_state(window) {
                             let state = lease.state_mut();
-                            state.menu = attached.handle;
-                            state.menu_owner_data = attached.owner_data;
+                            state.menu = attached_menu.handle;
+                            state.menu_owner_data = attached_menu.owner_data;
+                            state.owner_draw_menu = attached_menu.owner_draw;
+                            apply_command_states(state);
                         }
-                        attached.handle
+                        if !attached.is_null() {
+                            // SAFETY: successful SetMenu detached this exact
+                            // previous tree; its metadata remains live locally.
+                            unsafe { DestroyMenu(attached) };
+                        }
+                        drop(attached_owner_data);
+                        if let Some(mut lease) = try_app_state(window) {
+                            // Old menu brushes can be released only after its
+                            // detached native tree has been destroyed.
+                            lease.state_mut().menu_fallback_resources.clear();
+                        }
+                        attached_menu.handle
                     }
                     Err(error) => {
-                        super::message(
-                            window,
-                            &format!("메뉴를 화면에 표시하지 못했습니다: {error}"),
-                            "DarkReNamer - 시작 실패",
-                        );
-                        // SAFETY: no state lease remains. Normal destruction owns
-                        // child, menu, and AppState cleanup exactly once.
-                        unsafe { DestroyWindow(window) };
-                        return 0;
+                        if attached.is_null() {
+                            super::message(
+                                window,
+                                &format!("메뉴를 화면에 표시하지 못했습니다: {error}"),
+                                "DarkReNamer - 시작 실패",
+                            );
+                            drop(attached_owner_data);
+                            // SAFETY: no state lease remains. Normal destruction
+                            // owns child and AppState cleanup exactly once.
+                            unsafe { DestroyWindow(window) };
+                            return 0;
+                        }
+                        if let Some(mut lease) = try_app_state(window) {
+                            let state = lease.state_mut();
+                            state.menu = attached;
+                            state.menu_owner_data = attached_owner_data;
+                            state.set_transient_status(format!(
+                                "메뉴 배색을 적용하지 못해 이전 표시를 유지합니다: {error}"
+                            ));
+                        }
+                        attached
                     }
                 }
             } else {
@@ -1063,13 +1079,6 @@ unsafe extern "system" fn window_proc(
             refresh_forced_colors(state);
             refresh_system_theme(state);
             notify_appearance_dialog_accessibility(state);
-            if let Err(error) = refresh_menu_accessibility_mode(window, state) {
-                super::message(
-                    window,
-                    &format!("스크린 리더용 메뉴 표시 방식을 적용하지 못했습니다: {error}"),
-                    "DarkReNamer - 접근성 설정",
-                );
-            }
             apply_native_appearance_nonblocking(window, state);
             refresh_system_fonts(state);
             update_dpi_metrics(state);
@@ -1292,7 +1301,19 @@ unsafe extern "system" fn window_proc(
                 unsafe { DefWindowProcW(window, message, wparam, lparam) }
             }
         }
-        WM_MENUCHAR if !state_ptr.is_null() => handle_owner_menu_char(wparam, lparam),
+        WM_MENUCHAR if !state_ptr.is_null() => {
+            // Native-system menus retain the default Windows mnemonic path.
+            // SAFETY: state_ptr is the live UI-thread AppState and only the
+            // scalar rendering mode is copied before releasing the lease.
+            let owner_draw = unsafe { (*state_ptr).owner_draw_menu };
+            if owner_draw {
+                handle_owner_menu_char(wparam, lparam)
+            } else {
+                drop(state_lease);
+                // SAFETY: arguments are unchanged values from this callback.
+                unsafe { DefWindowProcW(window, message, wparam, lparam) }
+            }
+        }
         WM_CTLCOLORSTATIC if !state_ptr.is_null() => {
             let child = lparam as HWND;
             // Copy all routing values in a tiny borrow that ends before any GDI

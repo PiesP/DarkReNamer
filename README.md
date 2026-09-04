@@ -63,11 +63,12 @@ stored appearance and disable custom colors.
 
 DarkReNamer applies its Light and Dark palettes to the main workbench, command
 buttons and their Tooltips, list headers and information tips, status surfaces,
-and the advanced appearance window. Menus use standard Windows rendering and
-accessibility. App-owned input prompts use the same palette while retaining
-standard Windows edit, combo-box, and button controls. File dialogs and
-confirmation TaskDialogs continue to use Windows rendering. Forced Colors keeps
-system colors and native focus and selection precedence across every surface.
+the menu, and the advanced appearance window. The app-owned Light and Dark menu
+retains keyboard mnemonics and native MSAA/UIA names and states. App-owned input
+prompts use the same palette while retaining standard Windows edit, combo-box,
+and button controls. Native System, Forced Colors, file dialogs, and confirmation
+TaskDialogs continue to use Windows rendering. Forced Colors keeps system colors
+and native focus and selection precedence across every surface.
 
 Advanced appearance controls are intentionally under **보기 > 모양 설정...**.
 They offer semantic density and emphasis presets plus separator, changed-name
