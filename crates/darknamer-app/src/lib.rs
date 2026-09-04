@@ -4012,24 +4012,14 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
 ];
 
 /// Legacy shell accelerators whose commands are outside APPLY..LAST_COMMAND.
-pub const LEGACY_AUXILIARY_SHORTCUTS: [LegacyCommandShortcut; 2] = [
-    LegacyCommandShortcut {
-        command: DELETE_SELECTED_COMMAND,
-        shortcut: LegacyShortcut {
-            virtual_key: LegacyVirtualKey::Delete,
-            modifiers: LegacyShortcutModifiers::None,
-            display: "Delete",
-        },
+pub const LEGACY_AUXILIARY_SHORTCUTS: [LegacyCommandShortcut; 1] = [LegacyCommandShortcut {
+    command: DELETE_SELECTED_COMMAND,
+    shortcut: LegacyShortcut {
+        virtual_key: LegacyVirtualKey::Delete,
+        modifiers: LegacyShortcutModifiers::None,
+        display: "Delete",
     },
-    LegacyCommandShortcut {
-        command: EXIT_COMMAND,
-        shortcut: LegacyShortcut {
-            virtual_key: LegacyVirtualKey::Escape,
-            modifiers: LegacyShortcutModifiers::None,
-            display: "Esc",
-        },
-    },
-];
+}];
 
 /// Iterates every catalog and auxiliary legacy compatibility accelerator.
 pub fn legacy_command_shortcuts() -> impl Iterator<Item = LegacyCommandShortcut> {
@@ -4494,14 +4484,7 @@ mod tests {
         assert_eq!(shortcut(SAVE_NAMES), None);
         assert_eq!(shortcut(IMPORT_NAMES), None);
         assert_eq!(shortcut(RESET), None);
-        assert_eq!(
-            shortcut(EXIT_COMMAND),
-            legacy(
-                LegacyVirtualKey::Escape,
-                LegacyShortcutModifiers::None,
-                "Esc"
-            )
-        );
+        assert_eq!(shortcut(EXIT_COMMAND), None);
         assert_eq!(
             shortcut(MOVE_UP).map(|value| value.virtual_key),
             Some(LegacyVirtualKey::OemComma)

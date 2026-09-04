@@ -743,12 +743,27 @@ pub(super) fn move_window_dip(window: HWND, x: i32, y: i32, width: i32, height: 
 
 pub(super) fn update_controls(state: &mut AppState) {
     let previously_focused = focused_child(state);
-    let selected_count = { selected_indices(state.list_window) }.len();
+    let selected = selected_indices(state.list_window);
+    let selected_count = selected.len();
     let presentation = state.presentation(selected_count);
     state.ui_status.set_preview_counts(presentation.counts);
     state.render_status();
     let status_layout_changed = current_status_layout_input(state) != state.status_layout_input;
     let contains_directory = state.model.items().iter().any(LegacyListItem::is_directory);
+    let has_name_changes = state
+        .model
+        .items()
+        .iter()
+        .any(|item| item.planned_change_kind().renames());
+    let has_path_changes = state
+        .model
+        .items()
+        .iter()
+        .any(|item| item.planned_change_kind().moves());
+    let can_move_up = selected.first().is_some_and(|first| *first > 0);
+    let can_move_down = selected
+        .last()
+        .is_some_and(|last| last.saturating_add(1) < state.model.len());
     for id in APPLY..=LAST_COMMAND {
         state.command_states[usize::from(id - APPLY)] = if id == APPLY {
             matches!(presentation.apply, ApplyPresentation::Ready)
@@ -756,6 +771,16 @@ pub(super) fn update_controls(state: &mut AppState) {
             id == VERSION
         } else if id == UNIFY_PATH && contains_directory {
             false
+        } else if id == MANUAL_CHANGE {
+            selected_count == 1
+        } else if id == MOVE_UP {
+            can_move_up
+        } else if id == MOVE_DOWN {
+            can_move_down
+        } else if id == RESET {
+            has_name_changes
+        } else if id == RESET_PATH {
+            has_path_changes
         } else {
             command_enabled(id, state.model.len(), selected_count)
         };
@@ -787,6 +812,22 @@ pub(super) fn update_controls(state: &mut AppState) {
             // SAFETY: parent is live and the message carries no pointer payload.
             unsafe { PostMessageW(parent, WM_APP_LAYOUT, 0, 0) };
         }
+    }
+    let can_remove_selection = !state.read_only_locked()
+        && !state.mutation_locked
+        && !selected_indices(state.list_window).is_empty();
+    // SAFETY: state.menu is live and the auxiliary command identifier is owned by this process.
+    unsafe {
+        EnableMenuItem(
+            state.menu,
+            u32::from(DELETE_SELECTED_COMMAND),
+            MF_BYCOMMAND
+                | if can_remove_selection {
+                    MF_ENABLED
+                } else {
+                    MF_GRAYED
+                },
+        );
     }
 }
 
@@ -1196,15 +1237,33 @@ impl Drop for OwnedMenu {
 
 struct MenuBuilder {
     menu: OwnedMenu,
+    owner_draw: bool,
+}
+
+fn owner_draw_menus_enabled() -> bool {
+    let mut active = 0_i32;
+    // SAFETY: active is writable BOOL-compatible storage and the synchronous
+    // system query retains no pointer.
+    let succeeded = unsafe {
+        SystemParametersInfoW(SPI_GETSCREENREADER, 0, (&mut active as *mut i32).cast(), 0)
+    };
+    succeeded != 0 && active == 0
 }
 
 const MENU_POPUP_FILE: usize = 0x1_0000;
 const MENU_POPUP_EDIT: usize = 0x1_0001;
 const MENU_POPUP_VIEW: usize = 0x1_0002;
-const MENU_POPUP_APPEARANCE: usize = 0x1_0003;
-const MENU_POPUP_THEME: usize = 0x1_0004;
-const MENU_POPUP_TOOLS: usize = 0x1_0005;
-const MENU_POPUP_RECOVERY: usize = 0x1_0006;
+const MENU_POPUP_TRANSFORM: usize = 0x1_0003;
+const MENU_POPUP_HELP: usize = 0x1_0004;
+const MENU_POPUP_EXPORT: usize = 0x1_0005;
+const MENU_POPUP_TARGET_FOLDER: usize = 0x1_0006;
+const MENU_POPUP_THEME: usize = 0x1_0007;
+const MENU_POPUP_TEXT: usize = 0x1_0008;
+const MENU_POPUP_REMOVAL: usize = 0x1_0009;
+const MENU_POPUP_NUMBER: usize = 0x1_000A;
+const MENU_POPUP_EXTENSION: usize = 0x1_000B;
+const MENU_POPUP_FOLDER_NAME: usize = 0x1_000C;
+const MENU_POPUP_RECOVERY: usize = 0x1_000D;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OwnerMenuKind {
@@ -1218,30 +1277,34 @@ pub(super) fn owner_menu_kind(data: usize) -> OwnerMenuKind {
         MENU_POPUP_FILE
             | MENU_POPUP_EDIT
             | MENU_POPUP_VIEW
-            | MENU_POPUP_TOOLS
+            | MENU_POPUP_TRANSFORM
             | MENU_POPUP_RECOVERY
-    ) || u16::try_from(data)
-        .ok()
-        .and_then(command_ui_spec)
-        .is_some_and(|spec| spec.menu.group == MenuGroup::About)
-    {
+            | MENU_POPUP_HELP
+    ) {
         OwnerMenuKind::Bar
     } else {
         OwnerMenuKind::Popup
     }
 }
 
-fn menu_popup_data(label: &str) -> usize {
-    match label {
-        "파일(&F)" => MENU_POPUP_FILE,
-        "편집(&E)" => MENU_POPUP_EDIT,
-        "보기(&V)" => MENU_POPUP_VIEW,
-        "모양(&A)" => MENU_POPUP_APPEARANCE,
-        "테마(&T)" => MENU_POPUP_THEME,
-        "기능(&T)" => MENU_POPUP_TOOLS,
-        "복구(&R)" => MENU_POPUP_RECOVERY,
-        _ => 0,
-    }
+pub(super) fn owner_menu_has_submenu(data: usize) -> bool {
+    matches!(
+        data,
+        MENU_POPUP_EXPORT
+            | MENU_POPUP_TARGET_FOLDER
+            | MENU_POPUP_THEME
+            | MENU_POPUP_TEXT
+            | MENU_POPUP_REMOVAL
+            | MENU_POPUP_NUMBER
+            | MENU_POPUP_EXTENSION
+            | MENU_POPUP_FOLDER_NAME
+    )
+}
+
+pub(super) fn owner_menu_uses_radio(data: usize) -> bool {
+    u16::try_from(data)
+        .ok()
+        .is_some_and(|id| matches!(id, THEME_SYSTEM | THEME_LIGHT | THEME_DARK))
 }
 
 pub(super) fn owner_menu_label(data: usize) -> Option<String> {
@@ -1249,9 +1312,16 @@ pub(super) fn owner_menu_label(data: usize) -> Option<String> {
         MENU_POPUP_FILE => Some("파일(&F)"),
         MENU_POPUP_EDIT => Some("편집(&E)"),
         MENU_POPUP_VIEW => Some("보기(&V)"),
-        MENU_POPUP_APPEARANCE => Some("모양(&A)"),
+        MENU_POPUP_TRANSFORM => Some("변환(&T)"),
+        MENU_POPUP_HELP => Some("도움말(&H)"),
+        MENU_POPUP_EXPORT => Some("내보내기(&X)"),
+        MENU_POPUP_TARGET_FOLDER => Some("대상 폴더(&D)"),
         MENU_POPUP_THEME => Some("테마(&T)"),
-        MENU_POPUP_TOOLS => Some("기능(&T)"),
+        MENU_POPUP_TEXT => Some("텍스트(&T)"),
+        MENU_POPUP_REMOVAL => Some("삭제·추출(&R)"),
+        MENU_POPUP_NUMBER => Some("번호(&N)"),
+        MENU_POPUP_EXTENSION => Some("확장자(&E)"),
+        MENU_POPUP_FOLDER_NAME => Some("폴더명 사용(&F)"),
         MENU_POPUP_RECOVERY => Some("복구(&R)"),
         _ => None,
     };
@@ -1263,17 +1333,15 @@ pub(super) fn owner_menu_label(data: usize) -> Option<String> {
         return Some(command_menu_label(spec));
     }
     match id {
-        EXIT_COMMAND => Some(legacy_command_shortcut(EXIT_COMMAND).map_or_else(
-            || "종료(&X)".to_owned(),
-            |shortcut| format!("종료(&X)\t{}", shortcut.display),
-        )),
-        THEME_SYSTEM => Some("시스템 설정 사용(&S)".to_owned()),
-        THEME_LIGHT => Some("라이트(&L)".to_owned()),
-        THEME_DARK => Some("다크(&D)".to_owned()),
-        APPEARANCE_ADVANCED => Some("고급 모양 설정(&A)...".to_owned()),
-        EXPORT_RECOVERY_JOURNAL => Some("보존된 저널 바이트 내보내기...".to_owned()),
-        DISCARD_STAGED_JOURNAL => Some("활성화 전 실행 계획 폐기...".to_owned()),
-        SHOW_RECOVERY_STATUS => Some("복구 상태 보기...".to_owned()),
+        EXIT_COMMAND => Some("종료(&X)\tAlt+F4".to_owned()),
+        DELETE_SELECTED_COMMAND => Some("선택 항목을 목록에서 제거\tDelete".to_owned()),
+        THEME_SYSTEM => Some("시스템 설정(&S)".to_owned()),
+        THEME_LIGHT => Some("밝게(&L)".to_owned()),
+        THEME_DARK => Some("어둡게(&D)".to_owned()),
+        APPEARANCE_ADVANCED => Some("모양 설정(&A)...".to_owned()),
+        EXPORT_RECOVERY_JOURNAL => Some("복구 데이터 내보내기...".to_owned()),
+        DISCARD_STAGED_JOURNAL => Some("시작되지 않은 작업 기록 삭제...".to_owned()),
+        SHOW_RECOVERY_STATUS => Some("복구 상태 및 문제 확인...".to_owned()),
         _ => None,
     }
 }
@@ -1346,23 +1414,34 @@ pub(super) fn handle_owner_menu_char(wparam: WPARAM, lparam: LPARAM) -> LRESULT 
 
 impl MenuBuilder {
     fn bar() -> io::Result<Self> {
-        OwnedMenu::new_bar().map(|menu| Self { menu })
+        OwnedMenu::new_bar().map(|menu| Self {
+            menu,
+            owner_draw: owner_draw_menus_enabled(),
+        })
     }
 
     fn popup() -> io::Result<Self> {
-        OwnedMenu::new_popup().map(|menu| Self { menu })
+        OwnedMenu::new_popup().map(|menu| Self {
+            menu,
+            owner_draw: owner_draw_menus_enabled(),
+        })
     }
 
     fn item(&mut self, id: u16, label: &str) -> io::Result<()> {
         let label = wide(label);
-        // SAFETY: MF_OWNERDRAW interprets lpNewItem as copied scalar item data,
-        // never dereferencing the encoded command ID.
+        let item_data = if self.owner_draw {
+            usize::from(id) as *const u16
+        } else {
+            label.as_ptr()
+        };
+        // SAFETY: owner-draw mode copies the scalar command ID. Standard mode
+        // copies the terminated label synchronously.
         if unsafe {
             AppendMenuW(
                 self.menu.as_raw(),
-                MF_OWNERDRAW,
+                if self.owner_draw { MF_OWNERDRAW } else { 0 },
                 usize::from(id),
-                usize::from(id) as *const u16,
+                item_data,
             )
         } == 0
         {
@@ -1381,20 +1460,23 @@ impl MenuBuilder {
         }
     }
 
-    fn popup_child(&mut self, mut popup: Self, label: &str) -> io::Result<()> {
-        let data = menu_popup_data(label);
-        if data == 0 {
-            return Err(io::Error::other("owner-draw popup label is not catalogued"));
-        }
+    fn popup_child(&mut self, mut popup: Self, data: usize, label: &str) -> io::Result<()> {
+        debug_assert!(owner_menu_label(data).is_some());
+        debug_assert_eq!(self.owner_draw, popup.owner_draw);
         let label = wide(label);
-        // SAFETY: both menus are live; MF_OWNERDRAW copies the scalar item data
-        // and success transfers popup ownership into the parent menu tree.
+        let item_data = if self.owner_draw {
+            data as *const u16
+        } else {
+            label.as_ptr()
+        };
+        // SAFETY: both menus are live; owner-draw mode copies scalar item data,
+        // standard mode copies the label, and success transfers popup ownership.
         if unsafe {
             AppendMenuW(
                 self.menu.as_raw(),
-                MF_POPUP | MF_OWNERDRAW,
+                MF_POPUP | if self.owner_draw { MF_OWNERDRAW } else { 0 },
                 popup.menu.as_raw() as usize,
-                data as *const u16,
+                item_data,
             )
         } == 0
         {
@@ -1438,39 +1520,141 @@ fn set_last_menu_item_text(menu: HMENU, label: &[u16]) -> io::Result<()> {
 
 pub(super) fn create_menu() -> io::Result<OwnedMenu> {
     let mut menu = MenuBuilder::bar()?;
-    append_catalog_popup(&mut menu, MenuGroup::File, "파일(&F)")?;
-    append_catalog_popup(&mut menu, MenuGroup::Edit, "편집(&E)")?;
+    append_file_popup(&mut menu)?;
+    append_edit_popup(&mut menu)?;
     append_view_popup(&mut menu)?;
-    append_catalog_popup(&mut menu, MenuGroup::Tools, "기능(&T)")?;
-    let mut recovery = MenuBuilder::popup()?;
-    recovery.item(EXPORT_RECOVERY_JOURNAL, "보존된 저널 바이트 내보내기...")?;
-    recovery.item(DISCARD_STAGED_JOURNAL, "활성화 전 실행 계획 폐기...")?;
-    recovery.item(SHOW_RECOVERY_STATUS, "복구 상태 보기...")?;
-    menu.popup_child(recovery, "복구(&R)")?;
-    append_catalog_items(&mut menu, MenuGroup::About)?;
+    append_transform_popup(&mut menu)?;
+    append_recovery_popup(&mut menu)?;
+    append_help_popup(&mut menu)?;
     Ok(menu.finish())
+}
+
+fn append_file_popup(menu: &mut MenuBuilder) -> io::Result<()> {
+    let mut file = MenuBuilder::popup()?;
+    append_catalog_section(&mut file, MenuGroup::File, 0)?;
+    file.separator()?;
+    file.item(
+        APPLY,
+        &command_menu_label(command_ui_spec(APPLY).expect("catalogued command")),
+    )?;
+    file.separator()?;
+    append_catalog_section(&mut file, MenuGroup::File, 4)?;
+    let mut export = MenuBuilder::popup()?;
+    append_catalog_section(&mut export, MenuGroup::File, 2)?;
+    export.separator()?;
+    append_catalog_section(&mut export, MenuGroup::File, 3)?;
+    file.popup_child(export, MENU_POPUP_EXPORT, "내보내기(&X)")?;
+    file.separator()?;
+    file.item(EXIT_COMMAND, "종료(&X)\tAlt+F4")?;
+    menu.popup_child(file, MENU_POPUP_FILE, "파일(&F)")
+}
+
+fn append_edit_popup(menu: &mut MenuBuilder) -> io::Result<()> {
+    let mut edit = MenuBuilder::popup()?;
+    edit.item(
+        MANUAL_CHANGE,
+        &command_menu_label(command_ui_spec(MANUAL_CHANGE).expect("catalogued command")),
+    )?;
+    edit.item(DELETE_SELECTED_COMMAND, "선택 항목을 목록에서 제거\tDelete")?;
+    edit.separator()?;
+    edit.item(
+        MOVE_UP,
+        &command_menu_label(command_ui_spec(MOVE_UP).expect("catalogued command")),
+    )?;
+    edit.item(
+        MOVE_DOWN,
+        &command_menu_label(command_ui_spec(MOVE_DOWN).expect("catalogued command")),
+    )?;
+    edit.item(
+        SORT,
+        &command_menu_label(command_ui_spec(SORT).expect("catalogued command")),
+    )?;
+    edit.separator()?;
+    edit.item(
+        RESET,
+        &command_menu_label(command_ui_spec(RESET).expect("catalogued command")),
+    )?;
+    let mut target = MenuBuilder::popup()?;
+    target.item(
+        UNIFY_PATH,
+        &command_menu_label(command_ui_spec(UNIFY_PATH).expect("catalogued command")),
+    )?;
+    target.item(
+        RESET_PATH,
+        &command_menu_label(command_ui_spec(RESET_PATH).expect("catalogued command")),
+    )?;
+    edit.popup_child(target, MENU_POPUP_TARGET_FOLDER, "대상 폴더(&D)")?;
+    edit.separator()?;
+    edit.item(
+        CLEAR_LIST,
+        &command_menu_label(command_ui_spec(CLEAR_LIST).expect("catalogued command")),
+    )?;
+    menu.popup_child(edit, MENU_POPUP_EDIT, "편집(&E)")
 }
 
 fn append_view_popup(menu: &mut MenuBuilder) -> io::Result<()> {
     let mut view = MenuBuilder::popup()?;
     append_catalog_items(&mut view, MenuGroup::View)?;
     view.separator()?;
-    let mut appearance = MenuBuilder::popup()?;
     let mut theme = MenuBuilder::popup()?;
-    theme.item(THEME_SYSTEM, "시스템 설정 사용(&S)")?;
-    theme.item(THEME_LIGHT, "라이트(&L)")?;
-    theme.item(THEME_DARK, "다크(&D)")?;
-    appearance.popup_child(theme, "테마(&T)")?;
-    appearance.separator()?;
-    appearance.item(APPEARANCE_ADVANCED, "고급 모양 설정(&A)...")?;
-    view.popup_child(appearance, "모양(&A)")?;
-    menu.popup_child(view, "보기(&V)")
+    theme.item(THEME_SYSTEM, "시스템 설정(&S)")?;
+    theme.item(THEME_LIGHT, "밝게(&L)")?;
+    theme.item(THEME_DARK, "어둡게(&D)")?;
+    view.popup_child(theme, MENU_POPUP_THEME, "테마(&T)")?;
+    view.item(APPEARANCE_ADVANCED, "모양 설정(&A)...")?;
+    menu.popup_child(view, MENU_POPUP_VIEW, "보기(&V)")
 }
 
-fn append_catalog_popup(menu: &mut MenuBuilder, group: MenuGroup, label: &str) -> io::Result<()> {
-    let mut popup = MenuBuilder::popup()?;
-    append_catalog_items(&mut popup, group)?;
-    menu.popup_child(popup, label)
+fn append_transform_popup(menu: &mut MenuBuilder) -> io::Result<()> {
+    let mut transform = MenuBuilder::popup()?;
+    for (section, data, label) in [
+        (0, MENU_POPUP_TEXT, "텍스트(&T)"),
+        (1, MENU_POPUP_REMOVAL, "삭제·추출(&R)"),
+        (2, MENU_POPUP_NUMBER, "번호(&N)"),
+        (3, MENU_POPUP_EXTENSION, "확장자(&E)"),
+        (4, MENU_POPUP_FOLDER_NAME, "폴더명 사용(&F)"),
+    ] {
+        let mut popup = MenuBuilder::popup()?;
+        if section == 4 {
+            for command in [PARENT_PREFIX, PARENT_SUFFIX] {
+                popup.item(
+                    command,
+                    &command_menu_label(command_ui_spec(command).expect("catalogued command")),
+                )?;
+            }
+        } else {
+            append_catalog_section(&mut popup, MenuGroup::Tools, section)?;
+        }
+        transform.popup_child(popup, data, label)?;
+    }
+    menu.popup_child(transform, MENU_POPUP_TRANSFORM, "변환(&T)")
+}
+
+fn append_help_popup(menu: &mut MenuBuilder) -> io::Result<()> {
+    let mut help = MenuBuilder::popup()?;
+    append_catalog_items(&mut help, MenuGroup::About)?;
+    menu.popup_child(help, MENU_POPUP_HELP, "도움말(&H)")
+}
+
+fn append_recovery_popup(menu: &mut MenuBuilder) -> io::Result<()> {
+    let mut recovery = MenuBuilder::popup()?;
+    recovery.item(SHOW_RECOVERY_STATUS, "복구 상태 및 문제 확인...")?;
+    recovery.item(EXPORT_RECOVERY_JOURNAL, "복구 데이터 내보내기...")?;
+    recovery.separator()?;
+    recovery.item(DISCARD_STAGED_JOURNAL, "시작되지 않은 작업 기록 삭제...")?;
+    menu.popup_child(recovery, MENU_POPUP_RECOVERY, "복구(&R)")
+}
+
+fn append_catalog_section(menu: &mut MenuBuilder, group: MenuGroup, section: u8) -> io::Result<()> {
+    let mut specs = COMMAND_UI_SPECS
+        .iter()
+        .filter(|spec| spec.menu.group == group && spec.menu.section == section)
+        .collect::<Vec<_>>();
+    specs.sort_by_key(|spec| spec.menu.order);
+    for spec in specs {
+        menu.item(spec.id, &command_menu_label(spec))?;
+    }
+    Ok(())
 }
 
 fn append_catalog_items(menu: &mut MenuBuilder, group: MenuGroup) -> io::Result<()> {
@@ -1486,15 +1670,6 @@ fn append_catalog_items(menu: &mut MenuBuilder, group: MenuGroup) -> io::Result<
         }
         previous_section = Some(spec.menu.section);
         menu.item(spec.id, &command_menu_label(spec))?;
-    }
-    if group == MenuGroup::File {
-        // Exit is an auxiliary shell command outside the contiguous catalog.
-        menu.separator()?;
-        let label = legacy_command_shortcut(EXIT_COMMAND).map_or_else(
-            || "종료(&X)".to_owned(),
-            |shortcut| format!("종료(&X)\t{}", shortcut.display),
-        );
-        menu.item(EXIT_COMMAND, &label)?;
     }
     Ok(())
 }

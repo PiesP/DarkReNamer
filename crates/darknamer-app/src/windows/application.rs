@@ -2071,7 +2071,7 @@ mod tests {
             },
             |_, message, caption| {
                 assert!(message.contains("목록은 변경되지 않았습니다"));
-                assert_eq!(caption, "DarkReNamer - 경로 통일");
+                assert_eq!(caption, "DarkReNamer - 대상 폴더 지정");
             },
         );
 

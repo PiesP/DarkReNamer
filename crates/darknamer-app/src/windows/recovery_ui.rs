@@ -600,13 +600,13 @@ pub(super) fn show_recovery_status(owner: HWND, state: &AppState) {
             .map(StartupJournalBlock::status_korean),
     );
     if state.can_export_recovery_journal() {
-        lines.push("가능한 작업: 보존된 저널 바이트 내보내기".to_owned());
+        lines.push("가능한 작업: 복구 데이터 내보내기".to_owned());
     }
     if state.can_confirm_active_recovery() {
         lines.push("시작 시 확인 가능: 이전 변경의 명시적 복구".to_owned());
     }
     if state.can_discard_staged_intent() {
-        lines.push("가능한 작업: 활성화 전 실행 계획 폐기".to_owned());
+        lines.push("가능한 작업: 시작되지 않은 작업 기록 삭제".to_owned());
     }
     message(owner, &lines.join("\n"), "DarkReNamer - 복구 상태");
 }
