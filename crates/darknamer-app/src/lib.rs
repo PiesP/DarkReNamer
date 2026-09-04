@@ -1129,10 +1129,11 @@ pub struct UiMetrics {
     pub rail_width: i32,
 }
 
-/// Text extents measured from the active native message and status fonts.
+/// Native control and text extents used by the main-window layout.
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct MeasuredFontMetrics {
+    pub(crate) list_header_height: i32,
     pub(crate) button_text_width: i32,
     pub(crate) button_text_height: i32,
     pub(crate) status_text_height: i32,
@@ -1280,6 +1281,7 @@ impl MeasuredFontMetrics {
         self.empty_state_content_metrics(dpi, content_width, show_safety)
             .total_height
             .saturating_add(scale_dip(24, dpi))
+            .saturating_add(self.list_header_height.max(0))
     }
 }
 
@@ -2681,8 +2683,15 @@ fn calculate_empty_state_layout(
     measured: MeasuredFontMetrics,
     show_safety: bool,
 ) -> EmptyStateLayout {
-    let horizontal_padding = scale_dip(12, dpi).min(list.width.saturating_div(2));
-    let content_width = list
+    let header_height = measured.list_header_height.max(0).min(list.height);
+    let data = LayoutRect {
+        x: list.x,
+        y: list.y.saturating_add(header_height),
+        width: list.width,
+        height: list.height.saturating_sub(header_height),
+    };
+    let horizontal_padding = scale_dip(12, dpi).min(data.width.saturating_div(2));
+    let content_width = data
         .width
         .saturating_sub(horizontal_padding.saturating_mul(2));
     let content = measured.empty_state_content_metrics(dpi, content_width, show_safety);
@@ -2691,10 +2700,10 @@ fn calculate_empty_state_layout(
     let desired_safety_height = content.safety_height;
     let desired_gap = scale_dip(8, dpi);
     let desired_total = content.total_height;
-    let top = list
+    let top = data
         .y
-        .saturating_add(list.height.saturating_sub(desired_total).max(0) / 2);
-    let bottom = list.bottom();
+        .saturating_add(data.height.saturating_sub(desired_total).max(0) / 2);
+    let bottom = data.bottom();
     let mut y = top;
     let instruction_y = y;
     let instruction_height = desired_instruction_height
@@ -2713,21 +2722,21 @@ fn calculate_empty_state_layout(
     let button_width = content.add_width;
     EmptyStateLayout {
         instruction: LayoutRect {
-            x: list.x.saturating_add(horizontal_padding),
+            x: data.x.saturating_add(horizontal_padding),
             y: instruction_y,
             width: content_width,
             height: instruction_height,
         },
         safety: LayoutRect {
-            x: list.x.saturating_add(horizontal_padding),
+            x: data.x.saturating_add(horizontal_padding),
             y: safety_y,
             width: content_width,
             height: safety_height,
         },
         add: LayoutRect {
-            x: list
+            x: data
                 .x
-                .saturating_add(list.width.saturating_sub(button_width) / 2),
+                .saturating_add(data.width.saturating_sub(button_width) / 2),
             y: button_y,
             width: button_width,
             height: button_height,
@@ -5588,6 +5597,7 @@ mod tests {
     #[test]
     fn measured_font_metrics_expand_rail_and_status_geometry() {
         let measured = MeasuredFontMetrics {
+            list_header_height: 0,
             button_text_width: 90,
             button_text_height: 44,
             status_text_height: 24,
@@ -5712,6 +5722,56 @@ mod tests {
         assert!(layout.empty_safety.height >= content.safety_height);
         assert!(layout.empty_add.height >= content.add_height);
         assert!(layout.empty_safety.bottom() <= layout.list.bottom());
+    }
+
+    #[test]
+    fn empty_state_minimum_height_reserves_the_native_header() {
+        let without_header = MeasuredFontMetrics {
+            empty_instruction_text_width: 240,
+            empty_instruction_text_height: 20,
+            empty_safety_text_width: 240,
+            empty_safety_text_height: 18,
+            empty_add_text_width: 112,
+            empty_add_text_height: 20,
+            ..MeasuredFontMetrics::default()
+        };
+        let with_header = MeasuredFontMetrics {
+            list_header_height: 24,
+            ..without_header
+        };
+
+        assert_eq!(
+            minimum_main_client_height(96, with_header, RailDensityPreference::MenuOnly),
+            minimum_main_client_height(96, without_header, RailDensityPreference::MenuOnly) + 24
+        );
+    }
+
+    #[test]
+    fn empty_state_is_centered_in_the_list_data_area() {
+        let measured = MeasuredFontMetrics {
+            list_header_height: 32,
+            empty_instruction_text_width: 180,
+            empty_instruction_text_height: 20,
+            empty_add_text_width: 112,
+            empty_add_text_height: 20,
+            ..MeasuredFontMetrics::default()
+        };
+        let list = LayoutRect {
+            x: 10,
+            y: 12,
+            width: 320,
+            height: 240,
+        };
+
+        let empty = calculate_empty_state_layout(list, 96, measured, false);
+        let content = measured.empty_state_content_metrics(96, empty.instruction.width, false);
+        let data_top = list.y + measured.list_header_height;
+        let expected_top =
+            data_top + (list.height - measured.list_header_height - content.total_height) / 2;
+
+        assert_eq!(empty.instruction.y, expected_top);
+        assert!(empty.instruction.y >= data_top);
+        assert!(empty.add.bottom() <= list.bottom());
     }
 
     #[test]

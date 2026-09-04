@@ -115,10 +115,10 @@ use drag_drop::*;
 use list_view::changed_column_mask;
 use list_view::{
     RenderedRow, handle_header_end_track, handle_list_custom_draw, handle_list_infotip,
-    install_list_view_notification_subclass, native_status_column_minimum_px, refresh,
-    refresh_all_rows, refresh_changed_rows, refresh_proposal_rows,
-    remove_list_view_notification_subclass, update_column_visibility, update_dpi_metrics,
-    update_primary_column_widths,
+    install_list_view_notification_subclass, native_list_header_height_px,
+    native_status_column_minimum_px, refresh, refresh_all_rows, refresh_changed_rows,
+    refresh_proposal_rows, remove_list_view_notification_subclass, update_column_visibility,
+    update_dpi_metrics, update_primary_column_widths,
 };
 use menu::*;
 use recovery_ui::*;
@@ -3806,7 +3806,7 @@ mod tests {
             }
             return Err(io::Error::other("could not create native system fonts").into());
         }
-        let measured = measure_font_metrics(parent, message_font, status_font);
+        let measured = measure_font_metrics(parent, message_font, status_font, dpi);
         assert!(measured.button_text_width > 0);
         assert!(measured.button_text_height > 0);
         assert!(measured.status_text_height > 0);

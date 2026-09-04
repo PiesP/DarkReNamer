@@ -220,6 +220,20 @@ fn list_column_width(list_window: HWND, column: usize) -> i32 {
     unsafe { SendMessageW(list_window, LVM_GETCOLUMNWIDTH, column, 0) as i32 }
 }
 
+pub(super) fn native_list_header_height_px(list_window: HWND) -> i32 {
+    // SAFETY: list_window is a live ListView and returns its borrowed Header child HWND.
+    let header = unsafe { SendMessageW(list_window, LVM_GETHEADER, 0, 0) } as HWND;
+    if header.is_null() {
+        return 0;
+    }
+    let mut rect = RECT::default();
+    // SAFETY: header is live and rect remains writable for this synchronous query.
+    if unsafe { GetWindowRect(header, &mut rect) } == 0 {
+        return 0;
+    }
+    rect.bottom.saturating_sub(rect.top).max(0)
+}
+
 pub(super) fn update_primary_column_widths(state: &AppState) {
     let mut rect = RECT::default();
     // SAFETY: list_window is live and rect remains writable through this call.
@@ -1338,6 +1352,7 @@ mod native_tests {
                     SWP_NOZORDER | SWP_NOACTIVATE,
                 )
             };
+            assert!(native_list_header_height_px(list) > 0);
             let widths = allocate_primary_column_widths(
                 client_width,
                 status_width,
