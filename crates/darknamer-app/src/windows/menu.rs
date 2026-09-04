@@ -1570,10 +1570,7 @@ fn append_file_popup(menu: &mut MenuBuilder) -> io::Result<()> {
     let mut file = MenuBuilder::popup(menu.owner_draw)?;
     append_catalog_section(&mut file, MenuGroup::File, 0)?;
     file.separator()?;
-    file.item(
-        APPLY,
-        &command_menu_label(command_ui_spec(APPLY).expect("catalogued command")),
-    )?;
+    file.item(APPLY, &catalog_menu_label(APPLY)?)?;
     file.separator()?;
     append_catalog_section(&mut file, MenuGroup::File, 4)?;
     let mut export = MenuBuilder::popup(menu.owner_draw)?;
@@ -1588,47 +1585,23 @@ fn append_file_popup(menu: &mut MenuBuilder) -> io::Result<()> {
 
 fn append_edit_popup(menu: &mut MenuBuilder) -> io::Result<()> {
     let mut edit = MenuBuilder::popup(menu.owner_draw)?;
-    edit.item(
-        MANUAL_CHANGE,
-        &command_menu_label(command_ui_spec(MANUAL_CHANGE).expect("catalogued command")),
-    )?;
+    edit.item(MANUAL_CHANGE, &catalog_menu_label(MANUAL_CHANGE)?)?;
     edit.item(
         DELETE_SELECTED_COMMAND,
         &command_menu_label(&DELETE_SELECTED_UI_SPEC),
     )?;
     edit.separator()?;
-    edit.item(
-        MOVE_UP,
-        &command_menu_label(command_ui_spec(MOVE_UP).expect("catalogued command")),
-    )?;
-    edit.item(
-        MOVE_DOWN,
-        &command_menu_label(command_ui_spec(MOVE_DOWN).expect("catalogued command")),
-    )?;
-    edit.item(
-        SORT,
-        &command_menu_label(command_ui_spec(SORT).expect("catalogued command")),
-    )?;
+    edit.item(MOVE_UP, &catalog_menu_label(MOVE_UP)?)?;
+    edit.item(MOVE_DOWN, &catalog_menu_label(MOVE_DOWN)?)?;
+    edit.item(SORT, &catalog_menu_label(SORT)?)?;
     edit.separator()?;
-    edit.item(
-        RESET,
-        &command_menu_label(command_ui_spec(RESET).expect("catalogued command")),
-    )?;
+    edit.item(RESET, &catalog_menu_label(RESET)?)?;
     let mut target = MenuBuilder::popup(menu.owner_draw)?;
-    target.item(
-        UNIFY_PATH,
-        &command_menu_label(command_ui_spec(UNIFY_PATH).expect("catalogued command")),
-    )?;
-    target.item(
-        RESET_PATH,
-        &command_menu_label(command_ui_spec(RESET_PATH).expect("catalogued command")),
-    )?;
+    target.item(UNIFY_PATH, &catalog_menu_label(UNIFY_PATH)?)?;
+    target.item(RESET_PATH, &catalog_menu_label(RESET_PATH)?)?;
     edit.popup_child(target, MENU_POPUP_TARGET_FOLDER, "대상 폴더(&D)")?;
     edit.separator()?;
-    edit.item(
-        CLEAR_LIST,
-        &command_menu_label(command_ui_spec(CLEAR_LIST).expect("catalogued command")),
-    )?;
+    edit.item(CLEAR_LIST, &catalog_menu_label(CLEAR_LIST)?)?;
     menu.popup_child(edit, MENU_POPUP_EDIT, "편집(&E)")
 }
 
@@ -1657,10 +1630,7 @@ fn append_transform_popup(menu: &mut MenuBuilder) -> io::Result<()> {
         let mut popup = MenuBuilder::popup(menu.owner_draw)?;
         if section == 4 {
             for command in [PARENT_PREFIX, PARENT_SUFFIX] {
-                popup.item(
-                    command,
-                    &command_menu_label(command_ui_spec(command).expect("catalogued command")),
-                )?;
+                popup.item(command, &catalog_menu_label(command)?)?;
             }
         } else {
             append_catalog_section(&mut popup, MenuGroup::Transform, section)?;
@@ -1695,6 +1665,12 @@ fn append_catalog_section(menu: &mut MenuBuilder, group: MenuGroup, section: u8)
         menu.item(spec.id, &command_menu_label(spec))?;
     }
     Ok(())
+}
+
+fn catalog_menu_label(command: CommandId) -> io::Result<String> {
+    command_ui_spec(command)
+        .map(command_menu_label)
+        .ok_or_else(|| io::Error::other("menu command is missing from the UI catalog"))
 }
 
 fn append_catalog_items(menu: &mut MenuBuilder, group: MenuGroup) -> io::Result<()> {
