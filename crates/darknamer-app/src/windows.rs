@@ -115,9 +115,10 @@ use drag_drop::*;
 use list_view::changed_column_mask;
 use list_view::{
     RenderedRow, handle_header_end_track, handle_list_custom_draw, handle_list_infotip,
-    install_list_view_notification_subclass, refresh, refresh_all_rows, refresh_changed_rows,
-    refresh_proposal_rows, remove_list_view_notification_subclass, update_column_visibility,
-    update_dpi_metrics, update_primary_column_widths,
+    install_list_view_notification_subclass, native_status_column_minimum_px, refresh,
+    refresh_all_rows, refresh_changed_rows, refresh_proposal_rows,
+    remove_list_view_notification_subclass, update_column_visibility, update_dpi_metrics,
+    update_primary_column_widths,
 };
 use menu::*;
 use recovery_ui::*;
@@ -237,7 +238,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BM_CLICK, BS_FLAT, BS_MULTILINE, BS_TYPEMASK, GW_CHILD, GW_HWNDLAST, GW_HWNDNEXT, GWL_STYLE,
-    GetClassNameW, GetDlgCtrlID, GetWindow, HWND_TOP,
+    GetClassNameW, GetDlgCtrlID, GetScrollInfo, GetWindow, HWND_TOP, SB_HORZ, SCROLLINFO, SIF_PAGE,
+    SIF_RANGE,
 };
 use worker::*;
 

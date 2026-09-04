@@ -32,7 +32,7 @@ pub(crate) const NAME_COLUMN_MINIMUM: i32 = 120;
 #[cfg(any(windows, test))]
 pub(crate) const LOCATION_COLUMN_MINIMUM: i32 = 80;
 #[cfg(any(windows, test))]
-pub(crate) const LIST_SCROLLBAR_ALLOWANCE_DIP: i32 = 17;
+pub(crate) const LIST_COLUMN_FIT_GUTTER_DIP: i32 = 1;
 #[cfg(any(windows, test))]
 pub(crate) const NATIVE_STATUS_COLUMN_WIDTH_DIP: i32 = 112;
 #[cfg(any(windows, test))]
@@ -3230,6 +3230,8 @@ pub(crate) fn allocate_primary_column_widths(
     dpi: u32,
     columns: &[ColumnState; 7],
 ) -> [i32; 3] {
+    let automatic_default_layout = columns[..3].iter().all(|column| !column.user_resized)
+        && columns[3..].iter().all(|column| !column.visible);
     let optional_width = columns[3..]
         .iter()
         .filter(|column| column.visible)
@@ -3238,7 +3240,12 @@ pub(crate) fn allocate_primary_column_widths(
     let budget = client_width
         .max(0)
         .saturating_sub(status_width.max(0))
-        .saturating_sub(optional_width);
+        .saturating_sub(optional_width)
+        .saturating_sub(if automatic_default_layout {
+            scale_dip(LIST_COLUMN_FIT_GUTTER_DIP, dpi).max(1)
+        } else {
+            0
+        });
     let minimum = [
         scale_dip(NAME_COLUMN_MINIMUM, dpi),
         scale_dip(NAME_COLUMN_MINIMUM, dpi),
@@ -3350,12 +3357,15 @@ pub(crate) fn format_timestamp_fallback(date: [u16; 3], time: [u16; 3]) -> Strin
 
 #[cfg(any(windows, test))]
 #[must_use]
-pub(crate) const fn minimum_content_width_dip() -> i32 {
-    RailDensity::Comfortable.metrics(BASE_DPI).rail_width * 2
-        + NAME_COLUMN_MINIMUM * 2
-        + LOCATION_COLUMN_MINIMUM
-        + NATIVE_STATUS_COLUMN_WIDTH_DIP
-        + LIST_SCROLLBAR_ALLOWANCE_DIP
+pub(crate) fn minimum_content_width_px(dpi: u32, status_width_px: i32) -> i32 {
+    RailDensity::Comfortable
+        .metrics(dpi)
+        .rail_width
+        .saturating_mul(2)
+        .saturating_add(scale_dip(NAME_COLUMN_MINIMUM, dpi).saturating_mul(2))
+        .saturating_add(scale_dip(LOCATION_COLUMN_MINIMUM, dpi))
+        .saturating_add(scale_dip(LIST_COLUMN_FIT_GUTTER_DIP, dpi).max(1))
+        .saturating_add(status_width_px.max(0))
 }
 /// Public product name used by the executable and user-facing diagnostics.
 pub const PRODUCT_NAME: &str = "DarkReNamer";
@@ -5475,7 +5485,7 @@ mod tests {
             AppearanceDialogEffect::Preview(_)
         ));
         let draft = model.draft();
-        for dpi in [96, 120, 144, 192, 240, 288] {
+        for dpi in [96, 98, 120, 144, 150, 175, 192, 240, 288] {
             let layout = calculate_appearance_dialog_layout(
                 dpi,
                 scale_dip(360, dpi),
@@ -6986,8 +6996,6 @@ mod tests {
 
     #[test]
     fn adaptive_primary_columns_fit_command_rail_minimum() {
-        assert_eq!(minimum_content_width_dip(), 553);
-
         for (dpi, available, expected) in [
             (96, 320, [120, 120, 80]),
             (96, 360, [140, 140, 80]),
@@ -7019,8 +7027,8 @@ mod tests {
     }
 
     #[test]
-    fn primary_columns_fill_the_client_budget_at_supported_dpis() {
-        for dpi in [96, 120, 144, 192] {
+    fn automatic_default_columns_preserve_the_fit_gutter_at_supported_dpis() {
+        for dpi in [96, 120, 144, 192, 240, 288] {
             let client_width = scale_dip(600, dpi);
             let status_width = scale_dip(NATIVE_STATUS_COLUMN_WIDTH_DIP, dpi);
             let widths = allocate_primary_column_widths(
@@ -7030,7 +7038,32 @@ mod tests {
                 &default_column_states(),
             );
 
-            assert_eq!(widths.iter().sum::<i32>(), client_width - status_width);
+            assert_eq!(
+                widths.iter().sum::<i32>(),
+                client_width - status_width - scale_dip(LIST_COLUMN_FIT_GUTTER_DIP, dpi)
+            );
+        }
+    }
+
+    #[test]
+    fn minimum_content_width_uses_the_measured_status_width() {
+        for (dpi, status_width) in [
+            (96, 146),
+            (98, 149),
+            (120, 183),
+            (150, 228),
+            (175, 266),
+            (192, 292),
+            (288, 438),
+        ] {
+            assert_eq!(
+                minimum_content_width_px(dpi, status_width),
+                RailDensity::Comfortable.metrics(dpi).rail_width * 2
+                    + scale_dip(NAME_COLUMN_MINIMUM, dpi) * 2
+                    + scale_dip(LOCATION_COLUMN_MINIMUM, dpi)
+                    + scale_dip(LIST_COLUMN_FIT_GUTTER_DIP, dpi).max(1)
+                    + status_width
+            );
         }
     }
 
@@ -7050,8 +7083,11 @@ mod tests {
     fn expanded_actual_status_width_reduces_the_primary_width_budget() {
         let widths = allocate_primary_column_widths(517, 180, 96, &default_column_states());
 
-        assert_eq!(widths, [129, 128, 80]);
-        assert_eq!(widths.iter().sum::<i32>(), 517 - 180);
+        assert_eq!(widths, [128, 128, 80]);
+        assert_eq!(
+            widths.iter().sum::<i32>(),
+            517 - 180 - LIST_COLUMN_FIT_GUTTER_DIP
+        );
     }
 
     #[test]
@@ -7073,8 +7109,11 @@ mod tests {
             96,
             &default_column_states(),
         );
-        assert_eq!(widths, [129, 128, 80]);
-        assert_eq!(widths.iter().sum::<i32>(), 449 - 112);
+        assert_eq!(widths, [128, 128, 80]);
+        assert_eq!(
+            widths.iter().sum::<i32>(),
+            449 - 112 - LIST_COLUMN_FIT_GUTTER_DIP
+        );
 
         assert_eq!(status_column_width_after_resize(80, 146, 96), 146);
         assert_eq!(status_column_width_after_resize(240, 146, 96), 240);
