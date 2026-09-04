@@ -2938,6 +2938,16 @@ mod tests {
 
     #[test]
     fn owner_draw_menu_exposes_msaa_names() -> Result<(), Box<dyn std::error::Error>> {
+        struct TestOle;
+
+        impl Drop for TestOle {
+            fn drop(&mut self) {
+                // SAFETY: this guard exists only after successful OleInitialize
+                // and drops on the same native test thread.
+                unsafe { OleUninitialize() };
+            }
+        }
+
         struct AccessibleMenuSnapshot {
             child_count: i32,
             first_name: String,
@@ -2945,6 +2955,18 @@ mod tests {
             role: i32,
             state: i32,
         }
+
+        // SAFETY: null is required and the same-thread TestOle guard balances
+        // every successful OLE initialization result.
+        let ole_status = unsafe { OleInitialize(null()) };
+        if ole_status < 0 {
+            return Err(io::Error::other(format!(
+                "test OLE initialization failed: 0x{:08X}",
+                ole_status as u32
+            ))
+            .into());
+        }
+        let _ole = TestOle;
 
         // SAFETY: the system STATIC class/current module remain live for this
         // hidden, process-owned accessibility test window.
