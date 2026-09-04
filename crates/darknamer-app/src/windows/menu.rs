@@ -303,7 +303,7 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
             state.list_window,
             LVM_SETEXTENDEDLISTVIEWSTYLE,
             0,
-            (LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER) as isize,
+            LIST_VIEW_EXTENDED_STYLES as isize,
         );
         for (index, column) in COLUMNS.iter().enumerate() {
             let mut text = wide(column.label);
@@ -1211,15 +1211,55 @@ pub(super) fn apply_command_states(state: &AppState) {
     }
 }
 
-#[derive(Debug)]
-pub(super) struct OwnedMenu(HMENU);
+#[repr(C)]
+pub(super) struct OwnerMenuData {
+    accessibility: MSAAMENUINFO,
+    tag: usize,
+    _text: Box<[u16]>,
+}
+
+// Each Box gives itemData a stable address while menu trees and their stores
+// move between construction, pending attachment, and live AppState ownership.
+#[allow(clippy::vec_box)]
+pub(super) type OwnerMenuDataStore = Vec<Box<OwnerMenuData>>;
+
+impl OwnerMenuData {
+    fn new(tag: usize, label: &[u16]) -> io::Result<Box<Self>> {
+        let text = label.to_vec().into_boxed_slice();
+        let length = u32::try_from(text.len().saturating_sub(1))
+            .map_err(|_| io::Error::other("owner-draw menu label is too long"))?;
+        let text_pointer = text.as_ptr().cast_mut();
+        Ok(Box::new(Self {
+            accessibility: MSAAMENUINFO {
+                dwMSAASignature: MSAA_MENU_SIG as u32,
+                cchWText: length,
+                pszWText: text_pointer,
+            },
+            tag,
+            _text: text,
+        }))
+    }
+}
+
+pub(super) struct OwnedMenu {
+    handle: HMENU,
+    owner_data: OwnerMenuDataStore,
+}
+
+pub(super) struct AttachedMenu {
+    pub(super) handle: HMENU,
+    pub(super) owner_data: OwnerMenuDataStore,
+}
 
 impl OwnedMenu {
     fn new_bar() -> io::Result<Self> {
         // SAFETY: CreateMenu takes no pointers and returns a newly owned menu.
         let menu = unsafe { CreateMenu() };
         (!menu.is_null())
-            .then_some(Self(menu))
+            .then_some(Self {
+                handle: menu,
+                owner_data: Vec::new(),
+            })
             .ok_or_else(io::Error::last_os_error)
     }
 
@@ -1227,35 +1267,45 @@ impl OwnedMenu {
         // SAFETY: CreatePopupMenu takes no pointers and returns a newly owned menu.
         let menu = unsafe { CreatePopupMenu() };
         (!menu.is_null())
-            .then_some(Self(menu))
+            .then_some(Self {
+                handle: menu,
+                owner_data: Vec::new(),
+            })
             .ok_or_else(io::Error::last_os_error)
     }
 
     pub(super) fn as_raw(&self) -> HMENU {
-        self.0
+        self.handle
     }
 
-    fn release(&mut self) -> HMENU {
-        std::mem::replace(&mut self.0, null_mut())
+    fn release_handle(&mut self) -> HMENU {
+        std::mem::replace(&mut self.handle, null_mut())
     }
 
-    pub(super) fn attach(mut self, window: HWND) -> io::Result<HMENU> {
+    fn release_attached(&mut self) -> AttachedMenu {
+        AttachedMenu {
+            handle: self.release_handle(),
+            owner_data: std::mem::take(&mut self.owner_data),
+        }
+    }
+
+    pub(super) fn attach(mut self, window: HWND) -> io::Result<AttachedMenu> {
         // SAFETY: window and this unattached menu are live; successful SetMenu
         // transfers menu destruction to the top-level window.
-        if unsafe { SetMenu(window, self.0) } == 0 {
+        if unsafe { SetMenu(window, self.handle) } == 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(self.release())
+        Ok(self.release_attached())
     }
 }
 
 impl Drop for OwnedMenu {
     fn drop(&mut self) {
-        if !self.0.is_null() {
+        if !self.handle.is_null() {
             // SAFETY: only unattached menus remain non-null in this owner. Child
             // popups already transferred to this menu are destroyed recursively.
-            unsafe { DestroyMenu(self.0) };
-            self.0 = null_mut();
+            unsafe { DestroyMenu(self.handle) };
+            self.handle = null_mut();
         }
     }
 }
@@ -1293,7 +1343,41 @@ pub(super) enum OwnerMenuKind {
     Popup,
 }
 
+fn owner_menu_tag(data: usize) -> Option<usize> {
+    let data = data as *const OwnerMenuData;
+    if data.is_null() {
+        return None;
+    }
+    // SAFETY: owner-draw callbacks receive the stable item pointer installed
+    // by MenuBuilder and retained by OwnedMenu or AppState for the complete
+    // lifetime of the corresponding native menu tree.
+    let data = unsafe { &*data };
+    (data.accessibility.dwMSAASignature == MSAA_MENU_SIG as u32).then_some(data.tag)
+}
+
+#[cfg(test)]
+pub(super) fn owner_menu_accessibility_label(data: usize) -> Option<String> {
+    let data = data as *const OwnerMenuData;
+    let tag = owner_menu_tag(data as usize)?;
+    // SAFETY: owner_menu_tag validated the stable MenuBuilder allocation and
+    // the embedded pointer/length refer to its retained terminated UTF-16 box.
+    let data = unsafe { &*data };
+    // SAFETY: the validated accessibility prefix retains this exact text
+    // allocation and its checked element count for the complete menu lifetime.
+    let text = unsafe {
+        std::slice::from_raw_parts(
+            data.accessibility.pszWText,
+            usize::try_from(data.accessibility.cchWText).ok()?,
+        )
+    };
+    debug_assert_eq!(data.tag, tag);
+    String::from_utf16(text).ok()
+}
+
 pub(super) fn owner_menu_kind(data: usize) -> OwnerMenuKind {
+    let Some(data) = owner_menu_tag(data) else {
+        return OwnerMenuKind::Popup;
+    };
     if matches!(
         data,
         MENU_POPUP_FILE
@@ -1310,6 +1394,9 @@ pub(super) fn owner_menu_kind(data: usize) -> OwnerMenuKind {
 }
 
 pub(super) fn owner_menu_has_submenu(data: usize) -> bool {
+    let Some(data) = owner_menu_tag(data) else {
+        return false;
+    };
     matches!(
         data,
         MENU_POPUP_EXPORT
@@ -1324,12 +1411,19 @@ pub(super) fn owner_menu_has_submenu(data: usize) -> bool {
 }
 
 pub(super) fn owner_menu_uses_radio(data: usize) -> bool {
+    let Some(data) = owner_menu_tag(data) else {
+        return false;
+    };
     u16::try_from(data)
         .ok()
         .is_some_and(|id| matches!(id, THEME_SYSTEM | THEME_LIGHT | THEME_DARK))
 }
 
 pub(super) fn owner_menu_label(data: usize) -> Option<String> {
+    owner_menu_label_for_tag(owner_menu_tag(data)?)
+}
+
+fn owner_menu_label_for_tag(data: usize) -> Option<String> {
     let popup = match data {
         MENU_POPUP_FILE => Some("파일(&F)"),
         MENU_POPUP_EDIT => Some("편집(&E)"),
@@ -1445,13 +1539,16 @@ impl MenuBuilder {
 
     fn item(&mut self, id: u16, label: &str) -> io::Result<()> {
         let label = wide(label);
-        let item_data = if self.owner_draw {
-            usize::from(id) as *const u16
+        let owner_data = if self.owner_draw {
+            Some(OwnerMenuData::new(usize::from(id), &label)?)
         } else {
-            label.as_ptr()
+            None
         };
-        // SAFETY: owner-draw mode copies the scalar command ID. Standard mode
-        // copies the terminated label synchronously.
+        let item_data = owner_data
+            .as_ref()
+            .map_or_else(|| label.as_ptr(), |data| (&raw const **data).cast::<u16>());
+        // SAFETY: owner-draw mode copies a stable metadata pointer retained on
+        // success. Standard mode copies the terminated label synchronously.
         if unsafe {
             AppendMenuW(
                 self.menu.as_raw(),
@@ -1463,6 +1560,9 @@ impl MenuBuilder {
         {
             Err(io::Error::last_os_error())
         } else {
+            if let Some(owner_data) = owner_data {
+                self.menu.owner_data.push(owner_data);
+            }
             set_last_menu_item_text(self.menu.as_raw(), &label)
         }
     }
@@ -1477,16 +1577,20 @@ impl MenuBuilder {
     }
 
     fn popup_child(&mut self, mut popup: Self, data: usize, label: &str) -> io::Result<()> {
-        debug_assert!(owner_menu_label(data).is_some());
+        debug_assert!(owner_menu_label_for_tag(data).is_some());
         debug_assert_eq!(self.owner_draw, popup.owner_draw);
         let label = wide(label);
-        let item_data = if self.owner_draw {
-            data as *const u16
+        let owner_data = if self.owner_draw {
+            Some(OwnerMenuData::new(data, &label)?)
         } else {
-            label.as_ptr()
+            None
         };
-        // SAFETY: both menus are live; owner-draw mode copies scalar item data,
-        // standard mode copies the label, and success transfers popup ownership.
+        let item_data = owner_data
+            .as_ref()
+            .map_or_else(|| label.as_ptr(), |data| (&raw const **data).cast::<u16>());
+        // SAFETY: both menus are live; owner-draw mode copies a stable metadata
+        // pointer, standard mode copies the label, and success transfers popup
+        // ownership.
         if unsafe {
             AppendMenuW(
                 self.menu.as_raw(),
@@ -1498,9 +1602,13 @@ impl MenuBuilder {
         {
             return Err(io::Error::last_os_error());
         }
+        if let Some(owner_data) = owner_data {
+            self.menu.owner_data.push(owner_data);
+        }
+        self.menu.owner_data.append(&mut popup.menu.owner_data);
         // AppendMenuW transferred recursive destruction to the parent. Disarm
         // the child owner before any later fallible metadata update.
-        popup.menu.release();
+        popup.menu.release_handle();
         set_last_menu_item_text(self.menu.as_raw(), &label)?;
         Ok(())
     }
@@ -1566,13 +1674,15 @@ pub(super) fn refresh_menu_accessibility_mode(
     if unsafe { SetMenu(window, replacement_handle) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    replacement.release();
-    let previous = std::mem::replace(&mut state.menu, replacement_handle);
+    let attached = replacement.release_attached();
+    let previous = std::mem::replace(&mut state.menu, attached.handle);
+    let previous_owner_data = std::mem::replace(&mut state.menu_owner_data, attached.owner_data);
     state.owner_draw_menu = owner_draw;
     if !previous.is_null() {
         // SAFETY: successful SetMenu detached the previous application menu.
         unsafe { DestroyMenu(previous) };
     }
+    drop(previous_owner_data);
     apply_command_states(state);
     Ok(())
 }

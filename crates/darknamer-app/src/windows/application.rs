@@ -15,6 +15,20 @@ impl Drop for OleGuard {
     }
 }
 
+pub(super) fn take_attached_menu_for_destroy(state: &mut AppState) -> (HMENU, OwnerMenuDataStore) {
+    if state.pending_menu.is_some() {
+        // pending_menu remains the sole owner of an unattached tree. Clear the
+        // raw alias so teardown never destroys the same handle twice.
+        state.menu = null_mut();
+        (null_mut(), OwnerMenuDataStore::new())
+    } else {
+        (
+            std::mem::replace(&mut state.menu, null_mut()),
+            std::mem::take(&mut state.menu_owner_data),
+        )
+    }
+}
+
 pub(super) fn run() -> io::Result<()> {
     run_unsafe()
 }
@@ -778,11 +792,13 @@ unsafe extern "system" fn window_proc(
             drop(state_lease);
             let menu = if let Some(pending) = pending {
                 match pending.attach(window) {
-                    Ok(menu) => {
+                    Ok(attached) => {
                         if let Some(mut lease) = try_app_state(window) {
-                            lease.state_mut().menu = menu;
+                            let state = lease.state_mut();
+                            state.menu = attached.handle;
+                            state.menu_owner_data = attached.owner_data;
                         }
-                        menu
+                        attached.handle
                     }
                     Err(error) => {
                         super::message(
@@ -1259,6 +1275,8 @@ unsafe extern "system" fn window_proc(
         }
         WM_DESTROY => {
             let mut cancelled_appearance = None;
+            let mut menu = null_mut();
+            let mut menu_owner_data = OwnerMenuDataStore::new();
             if !state_ptr.is_null() {
                 // Stop the ListView from retaining AppState refdata before any
                 // child teardown can reenter through common-controls messages.
@@ -1287,11 +1305,25 @@ unsafe extern "system" fn window_proc(
                 if let Some(rail) = unsafe { (&mut *state_ptr).right_rail.take() } {
                     rail.destroy();
                 }
+                // Keep accessibility metadata alive until an attached tree is
+                // explicitly destroyed. A pending tree stays OwnedMenu-owned.
+                // SAFETY: this callback owns the sole AppState lease.
+                (menu, menu_owner_data) =
+                    take_attached_menu_for_destroy(unsafe { &mut *state_ptr });
             }
             drop(state_lease);
             if let Some(cancelled) = cancelled_appearance {
                 destroy_cancelled_appearance_dialog(cancelled);
             }
+            if !menu.is_null() {
+                // SAFETY: menu is the exact tree attached to this live owner;
+                // metadata remains retained until both native calls complete.
+                unsafe {
+                    SetMenu(window, null_mut());
+                    DestroyMenu(menu);
+                }
+            }
+            drop(menu_owner_data);
             // SAFETY: PostQuitMessage targets the current thread queue and accepts no borrowed pointers.
             unsafe { PostQuitMessage(0) };
             0

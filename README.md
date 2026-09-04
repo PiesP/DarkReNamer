@@ -62,9 +62,9 @@ Colors and an unavailable high-contrast query always take precedence over the
 stored appearance and disable custom colors.
 
 DarkReNamer applies its Light and Dark palettes to the main workbench, command
-buttons, list headers, status surfaces, and the advanced appearance window.
-Menus use standard Windows rendering and accessibility. App-owned input prompts
-use the same palette while retaining
+buttons and their Tooltips, list headers and information tips, status surfaces,
+and the advanced appearance window. Menus use standard Windows rendering and
+accessibility. App-owned input prompts use the same palette while retaining
 standard Windows edit, combo-box, and button controls. File dialogs and
 confirmation TaskDialogs continue to use Windows rendering. Forced Colors keeps
 system colors and native focus and selection precedence across every surface.

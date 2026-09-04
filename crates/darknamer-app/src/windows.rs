@@ -106,6 +106,14 @@ fn destination_parent_mutation_error_korean(error: DestinationParentMutationErro
     }
 }
 
+#[cfg(test)]
+use ::windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_I4};
+#[cfg(test)]
+use ::windows::Win32::UI::Accessibility::{AccessibleObjectFromWindow, IAccessible};
+#[cfg(test)]
+use ::windows::core::Interface;
+#[cfg(test)]
+use application::take_attached_menu_for_destroy;
 use clipboard::copy_clipboard;
 use command_dispatch::*;
 use command_rail::CommandRail;
@@ -114,8 +122,8 @@ use drag_drop::*;
 #[cfg(test)]
 use list_view::changed_column_mask;
 use list_view::{
-    RenderedRow, handle_header_end_track, handle_list_custom_draw, handle_list_infotip,
-    install_list_view_notification_subclass, native_list_header_height_px,
+    LIST_VIEW_EXTENDED_STYLES, RenderedRow, handle_header_end_track, handle_list_custom_draw,
+    handle_list_infotip, install_list_view_notification_subclass, native_list_header_height_px,
     native_status_column_minimum_px, refresh, refresh_all_rows, refresh_changed_rows,
     refresh_proposal_rows, remove_list_view_notification_subclass, update_column_visibility,
     update_dpi_metrics, update_primary_column_widths,
@@ -138,6 +146,8 @@ use windows_sys::Win32::Graphics::Gdi::{
     COLOR_BTNFACE, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, GetBkColor, GetPixel,
     GetTextColor, HBITMAP, HGDIOBJ,
 };
+#[cfg(test)]
+use windows_sys::Win32::Graphics::Gdi::{COLOR_INFOBK, COLOR_INFOTEXT};
 use windows_sys::Win32::Graphics::Gdi::{
     COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW, DT_CALCRECT, DT_END_ELLIPSIS, DT_LEFT,
     DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteObject, DrawTextW,
@@ -171,7 +181,11 @@ use windows_sys::Win32::System::SystemServices::{
 #[cfg(test)]
 use windows_sys::Win32::System::SystemServices::{SS_NOTIFY, SS_SUNKEN, SS_TYPEMASK};
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTimeEx};
-use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
+use windows_sys::Win32::UI::Accessibility::{
+    HCF_HIGHCONTRASTON, HIGHCONTRASTW, MSAA_MENU_SIG, MSAAMENUINFO,
+};
+#[cfg(test)]
+use windows_sys::Win32::UI::Accessibility::{ROLE_SYSTEM_MENUITEM, STATE_SYSTEM_HASPOPUP};
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::CDIS_FOCUS;
 use windows_sys::Win32::UI::Controls::{
@@ -183,20 +197,20 @@ use windows_sys::Win32::UI::Controls::{
     InitCommonControlsEx, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW,
     LVIF_IMAGE, LVIF_TEXT, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS,
     LVM_DELETEITEM, LVM_ENSUREVISIBLE, LVM_GETCOLUMNWIDTH, LVM_GETHEADER, LVM_GETITEMCOUNT,
-    LVM_GETITEMSTATE, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH,
-    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW,
-    LVM_SETITEMW, LVN_GETINFOTIPW, LVN_ITEMCHANGED, LVN_MARQUEEBEGIN, LVNI_FOCUSED, LVNI_SELECTED,
-    LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_NOSORTHEADER,
-    LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSIL_SMALL, NM_CUSTOMDRAW, NM_DBLCLK,
-    NM_SETFOCUS, NMCUSTOMDRAW, NMHDR, NMHEADERW, NMLISTVIEW, NMLVCUSTOMDRAW, NMLVGETINFOTIPW,
-    TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TASKDIALOGCONFIG_1, TD_WARNING_ICON,
-    TDCBF_CANCEL_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION, TDF_POSITION_RELATIVE_TO_WINDOW,
-    TDF_SIZE_TO_CONTENT, TDF_USE_COMMAND_LINKS,
+    LVM_GETITEMSTATE, LVM_GETNEXTITEM, LVM_GETTOOLTIPS, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
+    LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE,
+    LVM_SETITEMTEXTW, LVM_SETITEMW, LVN_GETINFOTIPW, LVN_ITEMCHANGED, LVN_MARQUEEBEGIN,
+    LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP,
+    LVS_EX_LABELTIP, LVS_NOSORTHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS,
+    LVSIL_SMALL, NM_CUSTOMDRAW, NM_DBLCLK, NM_SETFOCUS, NMCUSTOMDRAW, NMHDR, NMHEADERW, NMLISTVIEW,
+    NMLVCUSTOMDRAW, NMLVGETINFOTIPW, TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0,
+    TASKDIALOGCONFIG_1, TD_WARNING_ICON, TDCBF_CANCEL_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION,
+    TDF_POSITION_RELATIVE_TO_WINDOW, TDF_SIZE_TO_CONTENT, TDF_USE_COMMAND_LINKS,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::Controls::{
     DRAWITEMSTRUCT, LVM_GETITEMTEXTW, MEASUREITEMSTRUCT, ODS_DEFAULT, ODS_FOCUS, ODT_BUTTON,
-    ODT_MENU,
+    ODT_MENU, TTM_GETTIPBKCOLOR, TTM_GETTIPTEXTCOLOR,
 };
 use windows_sys::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForWindow, SystemParametersInfoForDpi,
@@ -238,8 +252,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BM_CLICK, BS_FLAT, BS_MULTILINE, BS_TYPEMASK, GW_CHILD, GW_HWNDLAST, GW_HWNDNEXT, GWL_STYLE,
-    GetClassNameW, GetDlgCtrlID, GetScrollInfo, GetWindow, HWND_TOP, SB_HORZ, SCROLLINFO, SIF_PAGE,
-    SIF_RANGE,
+    GetClassNameW, GetDlgCtrlID, GetScrollInfo, GetWindow, HWND_TOP, OBJID_MENU, SB_HORZ,
+    SCROLLINFO, SIF_PAGE, SIF_RANGE,
 };
 use worker::*;
 
@@ -488,6 +502,7 @@ struct AppState {
     empty_add: HWND,
     drop_overlay: HWND,
     menu: HMENU,
+    menu_owner_data: OwnerMenuDataStore,
     owner_draw_menu: bool,
     pending_menu: Option<OwnedMenu>,
     font: OwnedFont,
@@ -588,6 +603,7 @@ impl AppState {
             empty_add: null_mut(),
             drop_overlay: null_mut(),
             menu: null_mut(),
+            menu_owner_data: Vec::new(),
             owner_draw_menu: false,
             pending_menu: None,
             font: OwnedFont::default(),
@@ -2923,6 +2939,134 @@ mod tests {
     }
 
     #[test]
+    fn owner_draw_menu_exposes_msaa_names() -> Result<(), Box<dyn std::error::Error>> {
+        struct TestOle;
+
+        impl Drop for TestOle {
+            fn drop(&mut self) {
+                // SAFETY: this guard exists only after successful OleInitialize
+                // and drops on the same native test thread.
+                unsafe { OleUninitialize() };
+            }
+        }
+
+        struct AccessibleMenuSnapshot {
+            child_count: i32,
+            first_name: String,
+            shortcut: String,
+            role: i32,
+            state: i32,
+        }
+
+        // SAFETY: null is required and the same-thread TestOle guard balances
+        // every successful OLE initialization result.
+        let ole_status = unsafe { OleInitialize(null()) };
+        if ole_status < 0 {
+            return Err(io::Error::other(format!(
+                "test OLE initialization failed: 0x{:08X}",
+                ole_status as u32
+            ))
+            .into());
+        }
+        let _ole = TestOle;
+
+        // SAFETY: the system STATIC class/current module remain live for this
+        // hidden, process-owned accessibility test window.
+        let owner = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                800,
+                600,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if owner.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let attached = create_owner_draw_menu_for_test()?.attach(owner)?;
+        let result = (|| -> Result<AccessibleMenuSnapshot, Box<dyn std::error::Error>> {
+            let mut raw = null_mut();
+            // SAFETY: owner has a live attached menu; the requested interface
+            // IID and output slot follow AccessibleObjectFromWindow's contract.
+            let accessible = unsafe {
+                AccessibleObjectFromWindow(
+                    ::windows::Win32::Foundation::HWND(owner),
+                    OBJID_MENU as u32,
+                    &IAccessible::IID,
+                    &mut raw,
+                )?;
+                IAccessible::from_raw(raw)
+            };
+            let child = VARIANT {
+                Anonymous: VARIANT_0 {
+                    Anonymous: std::mem::ManuallyDrop::new(VARIANT_0_0 {
+                        vt: VT_I4,
+                        Anonymous: VARIANT_0_0_0 { lVal: 1 },
+                        ..VARIANT_0_0::default()
+                    }),
+                },
+            };
+            // SAFETY: accessible is the live in-process standard menu object
+            // and child 1 is a scalar CHILDID selecting its first menu item.
+            let snapshot = unsafe {
+                let role = accessible.get_accRole(&child)?;
+                let state = accessible.get_accState(&child)?;
+                AccessibleMenuSnapshot {
+                    child_count: accessible.accChildCount()?,
+                    first_name: accessible.get_accName(&child)?.to_string(),
+                    shortcut: accessible.get_accKeyboardShortcut(&child)?.to_string(),
+                    role: role.Anonymous.Anonymous.Anonymous.lVal,
+                    state: state.Anonymous.Anonymous.Anonymous.lVal,
+                }
+            };
+            Ok(snapshot)
+        })();
+        // SAFETY: detach the exact attached menu before destroying both the
+        // native handle and its test window. Metadata remains live until then.
+        unsafe {
+            SetMenu(owner, null_mut());
+            DestroyMenu(attached.handle);
+            DestroyWindow(owner);
+        }
+        drop(attached.owner_data);
+        let snapshot = result?;
+        assert_eq!(snapshot.child_count, 6);
+        assert_eq!(snapshot.first_name, "파일(F)");
+        assert_eq!(snapshot.shortcut, "Alt+f");
+        assert_eq!(snapshot.role, ROLE_SYSTEM_MENUITEM as i32);
+        assert_ne!(snapshot.state & STATE_SYSTEM_HASPOPUP as i32, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn pending_menu_teardown_clears_only_the_raw_alias() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+        let pending = create_owner_draw_menu_for_test()?;
+        let handle = pending.as_raw();
+        state.menu = handle;
+        state.pending_menu = Some(pending);
+
+        let (attached, owner_data) = take_attached_menu_for_destroy(&mut state);
+        assert!(attached.is_null());
+        assert!(owner_data.is_empty());
+        assert!(state.menu.is_null());
+        assert_eq!(
+            state.pending_menu.as_ref().map(OwnedMenu::as_raw),
+            Some(handle)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn owner_draw_top_level_menu_fits_the_parity_width_at_two_hundred_percent()
     -> Result<(), Box<dyn std::error::Error>> {
         const DPI: u32 = 192;
@@ -2958,6 +3102,14 @@ mod tests {
         }
         font.replace(message_font);
         let mut total_width = 0_u32;
+        let root_items = [
+            "파일(&F)",
+            "편집(&E)",
+            "보기(&V)",
+            "변환(&T)",
+            "복구(&R)",
+            "도움말(&H)",
+        ];
         for position in 0..6_u32 {
             let mut info = MENUITEMINFOW {
                 cbSize: size_of::<MENUITEMINFOW>() as u32,
@@ -2971,6 +3123,12 @@ mod tests {
                 unsafe { DestroyWindow(owner) };
                 return Err(io::Error::last_os_error().into());
             }
+            let expected = root_items[usize::try_from(position).unwrap_or_default()];
+            assert_eq!(owner_menu_label(info.dwItemData).as_deref(), Some(expected));
+            assert_eq!(
+                owner_menu_accessibility_label(info.dwItemData).as_deref(),
+                Some(expected),
+            );
             let mut measure = MEASUREITEMSTRUCT {
                 CtlType: ODT_MENU,
                 itemData: info.dwItemData,
@@ -3841,6 +3999,33 @@ mod tests {
         right.arrange(right_origin, &right_placements, dpi);
 
         let result = (|| -> io::Result<()> {
+            let palette = semantic_palette(ResolvedTheme::Dark)
+                .ok_or_else(|| io::Error::other("dark tooltip palette is missing"))?;
+            apply_tooltip_appearance(left.tooltip_window(), Some(palette));
+            // SAFETY: the rail-owned Tooltip remains live and both messages
+            // return scalar colors without caller-owned pointer payloads.
+            let (tooltip_background, tooltip_text) = unsafe {
+                (
+                    SendMessageW(left.tooltip_window(), TTM_GETTIPBKCOLOR, 0, 0) as u32,
+                    SendMessageW(left.tooltip_window(), TTM_GETTIPTEXTCOLOR, 0, 0) as u32,
+                )
+            };
+            assert_eq!(tooltip_background, palette.surface_panel);
+            assert_eq!(tooltip_text, palette.text_primary);
+            apply_tooltip_appearance(left.tooltip_window(), None);
+            // SAFETY: the rail-owned Tooltip remains live and system color
+            // queries plus TTM getters return only scalar COLORREF values.
+            let (tooltip_background, tooltip_text, system_background, system_text) = unsafe {
+                (
+                    SendMessageW(left.tooltip_window(), TTM_GETTIPBKCOLOR, 0, 0) as u32,
+                    SendMessageW(left.tooltip_window(), TTM_GETTIPTEXTCOLOR, 0, 0) as u32,
+                    GetSysColor(COLOR_INFOBK),
+                    GetSysColor(COLOR_INFOTEXT),
+                )
+            };
+            assert_eq!(tooltip_background, system_background);
+            assert_eq!(tooltip_text, system_text);
+
             let apply_rect = left.command_rect(APPLY)?;
             let apply_button = left
                 .command_hwnd(APPLY)
