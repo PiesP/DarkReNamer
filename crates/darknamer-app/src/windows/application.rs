@@ -15,6 +15,20 @@ impl Drop for OleGuard {
     }
 }
 
+pub(super) fn take_attached_menu_for_destroy(state: &mut AppState) -> (HMENU, OwnerMenuDataStore) {
+    if state.pending_menu.is_some() {
+        // pending_menu remains the sole owner of an unattached tree. Clear the
+        // raw alias so teardown never destroys the same handle twice.
+        state.menu = null_mut();
+        (null_mut(), OwnerMenuDataStore::new())
+    } else {
+        (
+            std::mem::replace(&mut state.menu, null_mut()),
+            std::mem::take(&mut state.menu_owner_data),
+        )
+    }
+}
+
 pub(super) fn run() -> io::Result<()> {
     run_unsafe()
 }
@@ -1291,12 +1305,11 @@ unsafe extern "system" fn window_proc(
                 if let Some(rail) = unsafe { (&mut *state_ptr).right_rail.take() } {
                     rail.destroy();
                 }
-                // Keep accessibility metadata alive until the attached tree is
-                // explicitly detached and destroyed after releasing AppState.
+                // Keep accessibility metadata alive until an attached tree is
+                // explicitly destroyed. A pending tree stays OwnedMenu-owned.
                 // SAFETY: this callback owns the sole AppState lease.
-                menu = std::mem::replace(unsafe { &mut (*state_ptr).menu }, null_mut());
-                // SAFETY: same exclusive AppState access as the menu handle.
-                menu_owner_data = std::mem::take(unsafe { &mut (*state_ptr).menu_owner_data });
+                (menu, menu_owner_data) =
+                    take_attached_menu_for_destroy(unsafe { &mut *state_ptr });
             }
             drop(state_lease);
             if let Some(cancelled) = cancelled_appearance {

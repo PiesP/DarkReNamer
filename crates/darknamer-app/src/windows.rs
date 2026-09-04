@@ -112,6 +112,8 @@ use ::windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT
 use ::windows::Win32::UI::Accessibility::{AccessibleObjectFromWindow, IAccessible};
 #[cfg(test)]
 use ::windows::core::Interface;
+#[cfg(test)]
+use application::take_attached_menu_for_destroy;
 use clipboard::copy_clipboard;
 use command_dispatch::*;
 use command_rail::CommandRail;
@@ -3041,6 +3043,26 @@ mod tests {
         assert_eq!(snapshot.shortcut, "Alt+f");
         assert_eq!(snapshot.role, ROLE_SYSTEM_MENUITEM as i32);
         assert_ne!(snapshot.state & STATE_SYSTEM_HASPOPUP as i32, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn pending_menu_teardown_clears_only_the_raw_alias() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
+        let pending = create_owner_draw_menu_for_test()?;
+        let handle = pending.as_raw();
+        state.menu = handle;
+        state.pending_menu = Some(pending);
+
+        let (attached, owner_data) = take_attached_menu_for_destroy(&mut state);
+        assert!(attached.is_null());
+        assert!(owner_data.is_empty());
+        assert!(state.menu.is_null());
+        assert_eq!(
+            state.pending_menu.as_ref().map(OwnedMenu::as_raw),
+            Some(handle)
+        );
         Ok(())
     }
 
