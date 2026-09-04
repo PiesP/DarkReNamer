@@ -346,8 +346,10 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
     state.drop_overlay = create_drop_overlay(window)?;
     refresh_system_fonts(state);
     update_dpi_metrics(state);
-    let menu = create_menu()?;
+    let owner_draw_menu = owner_draw_menus_enabled();
+    let menu = create_menu_for_mode(owner_draw_menu)?;
     state.menu = menu.as_raw();
+    state.owner_draw_menu = owner_draw_menu;
     state.pending_menu = Some(menu);
     let mut shell_info = SHFILEINFOW::default();
     let empty = wide("");
@@ -1252,14 +1254,11 @@ struct MenuBuilder {
     owner_draw: bool,
 }
 
-fn owner_draw_menus_enabled() -> bool {
-    let mut active = 0_i32;
-    // SAFETY: active is writable BOOL-compatible storage and the synchronous
-    // system query retains no pointer.
-    let succeeded = unsafe {
-        SystemParametersInfoW(SPI_GETSCREENREADER, 0, (&mut active as *mut i32).cast(), 0)
-    };
-    succeeded != 0 && active == 0
+pub(super) fn owner_draw_menus_enabled() -> bool {
+    // Standard menus provide Windows-owned MSAA/UIA names and interaction
+    // semantics without relying on SPI_GETSCREENREADER, which is not set by
+    // every assistive technology, including Narrator.
+    false
 }
 
 const MENU_POPUP_FILE: usize = 0x1_0000;
@@ -1345,7 +1344,7 @@ pub(super) fn owner_menu_label(data: usize) -> Option<String> {
         return Some(command_menu_label(spec));
     }
     match id {
-        EXIT_COMMAND => Some("종료(&X)\tAlt+F4".to_owned()),
+        EXIT_COMMAND => Some("종료(&Q)\tAlt+F4".to_owned()),
         DELETE_SELECTED_COMMAND => Some("선택 항목을 목록에서 제거\tDelete".to_owned()),
         THEME_SYSTEM => Some("시스템 설정(&S)".to_owned()),
         THEME_LIGHT => Some("밝게(&L)".to_owned()),
@@ -1524,8 +1523,13 @@ fn set_last_menu_item_text(menu: HMENU, label: &[u16]) -> io::Result<()> {
     }
 }
 
-pub(super) fn create_menu() -> io::Result<OwnedMenu> {
-    let mut menu = MenuBuilder::bar(owner_draw_menus_enabled())?;
+#[cfg(test)]
+pub(super) fn create_owner_draw_menu_for_test() -> io::Result<OwnedMenu> {
+    create_menu_for_mode(true)
+}
+
+fn create_menu_for_mode(owner_draw: bool) -> io::Result<OwnedMenu> {
+    let mut menu = MenuBuilder::bar(owner_draw)?;
     append_file_popup(&mut menu)?;
     append_edit_popup(&mut menu)?;
     append_view_popup(&mut menu)?;
@@ -1533,6 +1537,33 @@ pub(super) fn create_menu() -> io::Result<OwnedMenu> {
     append_recovery_popup(&mut menu)?;
     append_help_popup(&mut menu)?;
     Ok(menu.finish())
+}
+
+pub(super) fn refresh_menu_accessibility_mode(
+    window: HWND,
+    state: &mut AppState,
+) -> io::Result<()> {
+    let owner_draw = owner_draw_menus_enabled();
+    if owner_draw == state.owner_draw_menu || state.pending_menu.is_some() {
+        return Ok(());
+    }
+    let mut replacement = create_menu_for_mode(owner_draw)?;
+    let replacement_handle = replacement.as_raw();
+    // SAFETY: window, replacement, and the currently attached menu are live.
+    // SetMenu transfers the new menu to the window; the old detached tree is
+    // destroyed only after the successful replacement.
+    if unsafe { SetMenu(window, replacement_handle) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    replacement.release();
+    let previous = std::mem::replace(&mut state.menu, replacement_handle);
+    state.owner_draw_menu = owner_draw;
+    if !previous.is_null() {
+        // SAFETY: successful SetMenu detached the previous application menu.
+        unsafe { DestroyMenu(previous) };
+    }
+    apply_command_states(state);
+    Ok(())
 }
 
 fn append_file_popup(menu: &mut MenuBuilder) -> io::Result<()> {
@@ -1551,7 +1582,7 @@ fn append_file_popup(menu: &mut MenuBuilder) -> io::Result<()> {
     append_catalog_section(&mut export, MenuGroup::File, 3)?;
     file.popup_child(export, MENU_POPUP_EXPORT, "내보내기(&X)")?;
     file.separator()?;
-    file.item(EXIT_COMMAND, "종료(&X)\tAlt+F4")?;
+    file.item(EXIT_COMMAND, "종료(&Q)\tAlt+F4")?;
     menu.popup_child(file, MENU_POPUP_FILE, "파일(&F)")
 }
 
@@ -1632,7 +1663,7 @@ fn append_transform_popup(menu: &mut MenuBuilder) -> io::Result<()> {
                 )?;
             }
         } else {
-            append_catalog_section(&mut popup, MenuGroup::Tools, section)?;
+            append_catalog_section(&mut popup, MenuGroup::Transform, section)?;
         }
         transform.popup_child(popup, data, label)?;
     }
@@ -1641,7 +1672,7 @@ fn append_transform_popup(menu: &mut MenuBuilder) -> io::Result<()> {
 
 fn append_help_popup(menu: &mut MenuBuilder) -> io::Result<()> {
     let mut help = MenuBuilder::popup(menu.owner_draw)?;
-    append_catalog_items(&mut help, MenuGroup::About)?;
+    append_catalog_items(&mut help, MenuGroup::Help)?;
     menu.popup_child(help, MENU_POPUP_HELP, "도움말(&H)")
 }
 

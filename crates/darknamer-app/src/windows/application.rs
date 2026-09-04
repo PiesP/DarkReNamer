@@ -868,6 +868,13 @@ unsafe extern "system" fn window_proc(
             refresh_forced_colors(state);
             refresh_system_theme(state);
             notify_appearance_dialog_accessibility(state);
+            if let Err(error) = refresh_menu_accessibility_mode(window, state) {
+                super::message(
+                    window,
+                    &format!("스크린 리더용 메뉴 표시 방식을 적용하지 못했습니다: {error}"),
+                    "DarkReNamer - 접근성 설정",
+                );
+            }
             apply_native_appearance_nonblocking(window, state);
             refresh_system_fonts(state);
             update_dpi_metrics(state);
@@ -1229,8 +1236,13 @@ unsafe extern "system" fn window_proc(
                 } else if unsafe { (*header).code } == NM_DBLCLK {
                     // SAFETY: state_ptr is the non-null AppState installed for
                     // this HWND and remains exclusively callback-thread owned.
-                    let action =
-                        dispatch_command(window, unsafe { &mut *state_ptr }, MANUAL_CHANGE);
+                    let state = unsafe { &mut *state_ptr };
+                    // A double-click is an alternate gesture for the same
+                    // exact-one-selection command exposed by the menu and rail.
+                    if selected_indices(state.list_window).len() != 1 {
+                        return 0;
+                    }
+                    let action = dispatch_command(window, state, MANUAL_CHANGE);
                     run_prepared_command_action_after_state_release(
                         state_lease,
                         window,

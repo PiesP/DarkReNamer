@@ -3427,8 +3427,8 @@ pub enum MenuGroup {
     File,
     Edit,
     View,
-    Tools,
-    About,
+    Transform,
+    Help,
 }
 
 /// Placement of one command in a top-level native menu.
@@ -3446,6 +3446,9 @@ pub enum LegacyVirtualKey {
     Character(u16),
     Delete,
     Escape,
+    F2,
+    Up,
+    Down,
     OemComma,
     OemPeriod,
 }
@@ -3454,6 +3457,7 @@ pub enum LegacyVirtualKey {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LegacyShortcutModifiers {
     None,
+    Alt,
     Control,
     ControlShift,
 }
@@ -3578,7 +3582,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         REPLACE,
         rail(RailSide::Left, 1, 0),
         "찾아\n바꾸기",
-        menu(MenuGroup::Tools, 0, 0),
+        menu(MenuGroup::Transform, 0, 0),
         "문자열 찾아 바꾸기...",
         "파일 이름에서 문자열을 찾아 다른 문자열로 바꿉니다.",
         None,
@@ -3590,7 +3594,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         PREFIX,
         rail(RailSide::Left, 1, 1),
         "앞에\n붙이기",
-        menu(MenuGroup::Tools, 0, 1),
+        menu(MenuGroup::Transform, 0, 1),
         "이름 앞에 문자열 붙이기...",
         "파일 이름 앞에 입력한 문자열을 붙입니다.",
         None,
@@ -3602,7 +3606,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         SUFFIX,
         rail(RailSide::Left, 1, 2),
         "뒤에\n붙이기",
-        menu(MenuGroup::Tools, 0, 2),
+        menu(MenuGroup::Transform, 0, 2),
         "이름 뒤에 문자열 붙이기...",
         "확장자 앞의 파일 이름 뒤에 입력한 문자열을 붙입니다.",
         None,
@@ -3614,7 +3618,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         CLEAR_NAME,
         rail(RailSide::Left, 2, 0),
         "이름 본체\n지우기",
-        menu(MenuGroup::Tools, 1, 0),
+        menu(MenuGroup::Transform, 1, 0),
         "이름 본체 지우기",
         "확장자는 유지하고 파일 이름 본체를 지웁니다.",
         None,
@@ -3626,7 +3630,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         DELETE_POSITION,
         rail(RailSide::Left, 2, 1),
         "범위\n지우기",
-        menu(MenuGroup::Tools, 1, 1),
+        menu(MenuGroup::Transform, 1, 1),
         "지정 위치 범위 지우기...",
         "파일 이름의 지정한 위치 범위를 지웁니다.",
         None,
@@ -3638,7 +3642,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         DELETE_DELIMITED,
         rail(RailSide::Left, 2, 2),
         "사이\n지우기",
-        menu(MenuGroup::Tools, 1, 2),
+        menu(MenuGroup::Transform, 1, 2),
         "구분자 사이 지우기...",
         "파일 이름에서 지정한 두 구분자와 그 사이를 지웁니다.",
         None,
@@ -3650,7 +3654,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         KEEP_DIGITS,
         rail(RailSide::Left, 3, 0),
         "숫자만\n남기기",
-        menu(MenuGroup::Tools, 2, 0),
+        menu(MenuGroup::Transform, 2, 0),
         "이름 본체에 숫자만 남기기",
         "확장자는 유지하고 파일 이름 본체에 ASCII 숫자만 남깁니다.",
         None,
@@ -3662,7 +3666,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         PAD_DIGITS,
         rail(RailSide::Left, 3, 1),
         "자릿수\n맞추기",
-        menu(MenuGroup::Tools, 2, 1),
+        menu(MenuGroup::Transform, 2, 1),
         "숫자 자릿수 맞추기...",
         "파일 이름에 있는 숫자의 자릿수를 0으로 맞춥니다.",
         None,
@@ -3674,7 +3678,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         SEQUENCE,
         rail(RailSide::Left, 3, 2),
         "일련번호\n붙이기",
-        menu(MenuGroup::Tools, 2, 2),
+        menu(MenuGroup::Transform, 2, 2),
         "일련번호 붙이기...",
         "목록 순서에 따라 파일 이름에 일련번호를 붙입니다.",
         None,
@@ -3686,7 +3690,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         RESET,
         rail(RailSide::Right, 0, 0),
         "이름\n초기화",
-        menu(MenuGroup::File, 1, 1),
+        menu(MenuGroup::Edit, 2, 0),
         "모든 이름 변경 취소",
         "모든 제안 이름을 현재 이름으로 되돌립니다. 대상 폴더 변경은 유지됩니다.",
         None,
@@ -3698,7 +3702,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         CLEAR_LIST,
         None,
         "목록\n지우기",
-        menu(MenuGroup::File, 1, 2),
+        menu(MenuGroup::Edit, 3, 0),
         "목록 비우기",
         "목록에서 모든 항목을 제거합니다. 실제 파일은 삭제하지 않습니다.",
         legacy(
@@ -3714,10 +3718,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         MANUAL_CHANGE,
         rail(RailSide::Right, 1, 0),
         "직접\n바꾸기",
-        menu(MenuGroup::Edit, 1, 0),
+        menu(MenuGroup::Edit, 0, 0),
         "선택 항목 이름 직접 변경...",
         "선택한 한 항목의 제안 이름을 직접 변경합니다.",
-        None,
+        legacy(LegacyVirtualKey::F2, LegacyShortcutModifiers::None, "F2"),
         Selection,
         Model,
         SingleRow
@@ -3726,7 +3730,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         SORT,
         rail(RailSide::Right, 1, 2),
         "목록\n정렬",
-        menu(MenuGroup::File, 1, 3),
+        menu(MenuGroup::Edit, 1, 2),
         "목록 정렬...",
         "선택한 기준으로 목록 순서를 정렬합니다.",
         None,
@@ -3738,7 +3742,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         PARENT_PREFIX,
         rail(RailSide::Right, 3, 0),
         "폴더명\n앞에",
-        menu(MenuGroup::Tools, 4, 0),
+        menu(MenuGroup::Transform, 4, 0),
         "대상 폴더명을 이름 앞에 붙이기",
         "제안된 대상 폴더의 마지막 이름을 밑줄과 함께 파일 이름 앞에 붙입니다.",
         None,
@@ -3750,7 +3754,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         PARENT_SUFFIX,
         rail(RailSide::Right, 3, 1),
         "폴더명\n뒤에",
-        menu(MenuGroup::Tools, 4, 1),
+        menu(MenuGroup::Transform, 4, 1),
         "대상 폴더명을 이름 뒤에 붙이기",
         "제안된 대상 폴더의 마지막 이름을 밑줄과 함께 파일 이름 뒤에 붙입니다.",
         None,
@@ -3762,7 +3766,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         UNIFY_PATH,
         None,
         "경로\n통일",
-        menu(MenuGroup::Tools, 4, 2),
+        menu(MenuGroup::Edit, 2, 1),
         "모든 파일의 대상 폴더 지정...",
         "목록의 모든 일반 파일을 선택한 기존 폴더로 이동하도록 예약합니다. 적용 전에는 실제 파일을 이동하지 않습니다.",
         None,
@@ -3774,7 +3778,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         EXT_DELETE,
         rail(RailSide::Right, 2, 0),
         "확장자\n지우기",
-        menu(MenuGroup::Tools, 3, 0),
+        menu(MenuGroup::Transform, 3, 0),
         "확장자 지우기",
         "파일 이름의 확장자를 지웁니다.",
         None,
@@ -3786,7 +3790,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         EXT_ADD,
         rail(RailSide::Right, 2, 1),
         "확장자\n추가",
-        menu(MenuGroup::Tools, 3, 1),
+        menu(MenuGroup::Transform, 3, 1),
         "확장자 추가...",
         "파일 이름에 확장자를 추가합니다.",
         None,
@@ -3798,7 +3802,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         EXT_REPLACE,
         rail(RailSide::Right, 2, 2),
         "확장자\n변경",
-        menu(MenuGroup::Tools, 3, 2),
+        menu(MenuGroup::Transform, 3, 2),
         "확장자 변경...",
         "파일 이름의 확장자를 바꿉니다.",
         None,
@@ -3910,14 +3914,10 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         MOVE_UP,
         None,
         "위로 올림",
-        menu(MenuGroup::Edit, 0, 0),
+        menu(MenuGroup::Edit, 1, 0),
         "목록 순서 위로",
         "선택 항목을 목록 순서에서 한 칸 위로 이동합니다.",
-        legacy(
-            LegacyVirtualKey::OemComma,
-            LegacyShortcutModifiers::None,
-            "<"
-        ),
+        legacy(LegacyVirtualKey::Up, LegacyShortcutModifiers::Alt, "Alt+↑"),
         Selection,
         Model,
         MovedRows
@@ -3926,13 +3926,13 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         MOVE_DOWN,
         None,
         "아래로 내림",
-        menu(MenuGroup::Edit, 0, 1),
+        menu(MenuGroup::Edit, 1, 1),
         "목록 순서 아래로",
         "선택 항목을 목록 순서에서 한 칸 아래로 이동합니다.",
         legacy(
-            LegacyVirtualKey::OemPeriod,
-            LegacyShortcutModifiers::None,
-            ">"
+            LegacyVirtualKey::Down,
+            LegacyShortcutModifiers::Alt,
+            "Alt+↓"
         ),
         Selection,
         Model,
@@ -3990,7 +3990,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         VERSION,
         None,
         "버전",
-        menu(MenuGroup::About, 0, 0),
+        menu(MenuGroup::Help, 0, 0),
         "DarkReNamer 정보...",
         "DarkReNamer 버전 및 저작권 정보를 표시합니다.",
         None,
@@ -4002,7 +4002,7 @@ pub const COMMAND_UI_SPECS: [CommandUiSpec; 35] = [
         RESET_PATH,
         None,
         "원래 위치로",
-        menu(MenuGroup::Tools, 4, 3),
+        menu(MenuGroup::Edit, 2, 2),
         "대상 폴더 변경 취소",
         "각 파일의 대상 폴더를 현재 폴더로 되돌립니다. 제안 이름은 유지됩니다.",
         None,
@@ -4036,6 +4036,7 @@ pub const LEGACY_AUXILIARY_SHORTCUTS: [LegacyCommandShortcut; 0] = [];
 pub fn legacy_command_shortcuts() -> impl Iterator<Item = LegacyCommandShortcut> {
     COMMAND_UI_SPECS
         .iter()
+        .chain(core::iter::once(&DELETE_SELECTED_UI_SPEC))
         .filter_map(|spec| {
             spec.legacy_shortcut.map(|shortcut| LegacyCommandShortcut {
                 command: spec.id,
@@ -4395,8 +4396,8 @@ mod tests {
             MenuGroup::File,
             MenuGroup::Edit,
             MenuGroup::View,
-            MenuGroup::Tools,
-            MenuGroup::About,
+            MenuGroup::Transform,
+            MenuGroup::Help,
         ] {
             let mut placements = COMMAND_UI_SPECS
                 .iter()
@@ -4500,12 +4501,12 @@ mod tests {
         assert_eq!(shortcut(RESET), None);
         assert_eq!(shortcut(EXIT_COMMAND), None);
         assert_eq!(
-            shortcut(MOVE_UP).map(|value| value.virtual_key),
-            Some(LegacyVirtualKey::OemComma)
+            shortcut(MOVE_UP).map(|value| (value.virtual_key, value.modifiers)),
+            Some((LegacyVirtualKey::Up, LegacyShortcutModifiers::Alt))
         );
         assert_eq!(
-            shortcut(MOVE_DOWN).map(|value| value.virtual_key),
-            Some(LegacyVirtualKey::OemPeriod)
+            shortcut(MOVE_DOWN).map(|value| (value.virtual_key, value.modifiers)),
+            Some((LegacyVirtualKey::Down, LegacyShortcutModifiers::Alt))
         );
     }
 

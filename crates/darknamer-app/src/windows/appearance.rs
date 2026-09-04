@@ -970,7 +970,12 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
 
     // Install the replacement brush while both old and new resources remain
     // alive. Only a successful menu update permits dropping the old brush set.
-    if let Err(error) = apply_menu_background(state.menu, replacement.as_ref()) {
+    let menu_resources = if state.owner_draw_menu {
+        replacement.as_ref()
+    } else {
+        None
+    };
+    if let Err(error) = apply_menu_background(state.menu, menu_resources) {
         // MIM_APPLYTOSUBMENUS does not document transactional failure. Retain
         // every custom brush set from a failed attempt so any partially
         // updated submenu can never reference a deleted GDI object.

@@ -40,6 +40,7 @@ fn native_accelerator_entries() -> Vec<ACCEL> {
             fVirt: FVIRTKEY
                 | match spec.shortcut.modifiers {
                     LegacyShortcutModifiers::None => 0,
+                    LegacyShortcutModifiers::Alt => FALT,
                     LegacyShortcutModifiers::Control => FCONTROL,
                     LegacyShortcutModifiers::ControlShift => FCONTROL | FSHIFT,
                 },
@@ -47,6 +48,9 @@ fn native_accelerator_entries() -> Vec<ACCEL> {
                 LegacyVirtualKey::Character(key) => key,
                 LegacyVirtualKey::Delete => VK_DELETE,
                 LegacyVirtualKey::Escape => VK_ESCAPE,
+                LegacyVirtualKey::F2 => VK_F2,
+                LegacyVirtualKey::Up => VK_UP,
+                LegacyVirtualKey::Down => VK_DOWN,
                 LegacyVirtualKey::OemComma => VK_OEM_COMMA,
                 LegacyVirtualKey::OemPeriod => VK_OEM_PERIOD,
             },
@@ -70,8 +74,22 @@ mod accelerator_tests {
         assert!(exact(IMPORT_NAMES).is_none());
         assert!(exact(RESET).is_none());
         assert!(exact(EXIT_COMMAND).is_none());
-        assert_eq!(exact(MOVE_UP).map(|entry| entry.key), Some(VK_OEM_COMMA));
-        assert_eq!(exact(MOVE_DOWN).map(|entry| entry.key), Some(VK_OEM_PERIOD));
+        assert_eq!(
+            exact(DELETE_SELECTED_COMMAND).map(|entry| (entry.fVirt, entry.key)),
+            Some((FVIRTKEY, VK_DELETE))
+        );
+        assert_eq!(
+            exact(MANUAL_CHANGE).map(|entry| (entry.fVirt, entry.key)),
+            Some((FVIRTKEY, VK_F2))
+        );
+        assert_eq!(
+            exact(MOVE_UP).map(|entry| (entry.fVirt, entry.key)),
+            Some((FVIRTKEY | FALT, VK_UP))
+        );
+        assert_eq!(
+            exact(MOVE_DOWN).map(|entry| (entry.fVirt, entry.key)),
+            Some((FVIRTKEY | FALT, VK_DOWN))
+        );
         let mut bindings = entries
             .iter()
             .map(|entry| (entry.fVirt, entry.key))
