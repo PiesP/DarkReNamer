@@ -379,11 +379,16 @@ pub(crate) fn open_entry(
     delete_access: bool,
 ) -> io::Result<File> {
     let access = FILE_READ_ATTRIBUTES | SYNCHRONIZE | if delete_access { DELETE } else { 0 };
+    let share = if delete_access {
+        SHARE_READ_WRITE
+    } else {
+        SHARE_ALL
+    };
     open_relative(
         parent.file(),
         leaf,
         access,
-        SHARE_ALL,
+        share,
         FILE_OPEN,
         FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
     )
@@ -1013,6 +1018,35 @@ mod tests {
         assert!(!path.exists());
         std::fs::write(&path, b"replacement")?;
         assert_eq!(std::fs::read(&path)?, b"replacement");
+        Ok(())
+    }
+
+    #[test]
+    fn rename_source_handle_blocks_competing_delete_share_changes_but_allows_reads()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let source_path = directory.path().join("source.txt");
+        let moved_path = directory.path().join("moved.txt");
+        std::fs::write(&source_path, b"source")?;
+        let parent = NativeParent::open_path(directory.path())?;
+        let leaf = "source.txt".encode_utf16().collect::<Vec<_>>();
+
+        let source = open_entry(&parent, &leaf, true)?;
+        let reader = File::open(&source_path)?;
+        let rename_error = std::fs::rename(&source_path, &moved_path)
+            .err()
+            .ok_or_else(|| io::Error::other("competing rename bypassed source handle"))?;
+        assert_eq!(rename_error.raw_os_error(), Some(32));
+        let delete_error = std::fs::remove_file(&source_path)
+            .err()
+            .ok_or_else(|| io::Error::other("competing delete bypassed source handle"))?;
+        assert_eq!(delete_error.raw_os_error(), Some(32));
+        assert_eq!(std::fs::read(&source_path)?, b"source");
+
+        drop(reader);
+        drop(source);
+        std::fs::rename(&source_path, &moved_path)?;
+        assert_eq!(std::fs::read(&moved_path)?, b"source");
         Ok(())
     }
 }

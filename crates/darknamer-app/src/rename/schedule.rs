@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use darknamer_core::LegacyText;
 
 use super::model::PlanRow;
+#[cfg(test)]
+use super::ports::path_leaf;
 use super::{
     BackendError, EntryId, EntryIdentity, EntryKind, MoveScope, PathKey, RenameBackend, RenamePlan,
 };
@@ -60,8 +62,8 @@ pub(super) fn build_schedule_cancellable(
     let mut destination_keys = Vec::with_capacity(plan.entries.len());
     for entry in &plan.entries {
         check_cancelled(cancellation_requested)?;
-        source_keys.push(backend.path_key(&entry.source));
-        destination_keys.push(backend.path_key(&entry.destination));
+        source_keys.push(entry.source_entry_key.clone());
+        destination_keys.push(entry.destination_entry_key.clone());
     }
     let mut reserved = BTreeSet::new();
     for key in source_keys.iter().chain(&destination_keys) {
@@ -225,12 +227,15 @@ fn unique_temporary_path(
             plan.id.value(),
             pivot.id.value()
         );
+        let leaf = LegacyText::from(leaf);
         let mut units = Vec::with_capacity(parent.len() + 1 + leaf.len());
         units.extend_from_slice(parent);
         units.push(b'\\' as u16);
-        units.extend(leaf.encode_utf16());
+        units.extend_from_slice(leaf.units());
         let path = LegacyText::from_units(units);
-        let key = backend.path_key(&path);
+        let key = backend
+            .planned_entry_key(pivot.source_snapshot.parent, &leaf)
+            .map_err(ScheduleError::Backend)?;
         if reserved.contains(&key) {
             continue;
         }
@@ -274,10 +279,16 @@ mod tests {
             .map(|(id, source, destination)| {
                 let source = LegacyText::from(source);
                 let destination = LegacyText::from(destination);
+                let source_snapshot = backend.observe(&source)?;
+                let destination_snapshot = backend.observe(&destination)?;
                 Ok(PlanRow {
                     id: EntryId::new(id),
-                    source_snapshot: backend.observe(&source)?,
-                    destination_snapshot: backend.observe(&destination)?,
+                    source_entry_key: backend
+                        .planned_entry_key(source_snapshot.parent, &path_leaf(&source))?,
+                    destination_entry_key: backend
+                        .planned_entry_key(destination_snapshot.parent, &path_leaf(&destination))?,
+                    source_snapshot,
+                    destination_snapshot,
                     source,
                     destination,
                     kind: EntryKind::File,
@@ -397,6 +408,85 @@ mod tests {
                 .filter(|step| step.temporary_phase == TemporaryPhase::FromTemporary)
                 .count(),
             2
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parent_alias_chain_uses_the_actual_entry_dependency()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let shared_parent = EntryIdentity::new(1, 90);
+        let mut backend = MemoryBackend::new()
+            .with_file("C:\\work\\a.txt", 1)
+            .with_file(r"\\?\C:\work\b.txt", 2)
+            .with_parent_identity("C:\\work", shared_parent)
+            .with_parent_identity(r"\\?\C:\work", shared_parent);
+        let plan = build_plan(
+            &backend,
+            [
+                (
+                    0,
+                    "C:\\work\\a.txt".to_owned(),
+                    "C:\\work\\b.txt".to_owned(),
+                ),
+                (
+                    1,
+                    r"\\?\C:\work\b.txt".to_owned(),
+                    r"\\?\C:\work\c.txt".to_owned(),
+                ),
+            ],
+        )?;
+
+        let schedule = build_schedule(&plan, &mut backend)
+            .map_err(|error| std::io::Error::other(format!("schedule failed: {error:?}")))?;
+
+        assert_eq!(schedule.len(), 2);
+        assert_eq!(schedule[0].entry, EntryId::new(1));
+        assert_eq!(schedule[1].entry, EntryId::new(0));
+        Ok(())
+    }
+
+    #[test]
+    fn parent_alias_swap_uses_one_temporary_hop() -> Result<(), Box<dyn std::error::Error>> {
+        let shared_parent = EntryIdentity::new(1, 90);
+        let mut backend = MemoryBackend::new()
+            .with_file("C:\\work\\a.txt", 1)
+            .with_file(r"\\?\C:\work\b.txt", 2)
+            .with_parent_identity("C:\\work", shared_parent)
+            .with_parent_identity(r"\\?\C:\work", shared_parent);
+        let plan = build_plan(
+            &backend,
+            [
+                (
+                    0,
+                    "C:\\work\\a.txt".to_owned(),
+                    "C:\\work\\b.txt".to_owned(),
+                ),
+                (
+                    1,
+                    r"\\?\C:\work\b.txt".to_owned(),
+                    r"\\?\C:\work\a.txt".to_owned(),
+                ),
+            ],
+        )?;
+
+        let schedule = build_schedule(&plan, &mut backend)
+            .map_err(|error| std::io::Error::other(format!("schedule failed: {error:?}")))?;
+
+        assert_eq!(schedule.len(), 3);
+        assert_eq!(
+            schedule
+                .iter()
+                .filter(|step| step.temporary_phase == TemporaryPhase::IntoTemporary)
+                .count(),
+            1
+        );
+        assert_eq!(
+            schedule
+                .iter()
+                .filter(|step| step.temporary_phase == TemporaryPhase::FromTemporary)
+                .count(),
+            1
         );
         Ok(())
     }

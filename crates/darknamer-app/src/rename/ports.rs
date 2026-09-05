@@ -2,7 +2,7 @@ use std::fmt;
 
 use darknamer_core::LegacyText;
 
-use super::{EntryIdentity, EntryKind, MoveScope, PathKey, PathSnapshot};
+use super::{EntryIdentity, EntryKind, MoveScope, PathKey, PathSnapshot, ResolvedSource};
 use super::{JournalDirection, JournalStep, JournalTerminal, PlanId};
 
 /// Backend operation associated with a structured error.
@@ -192,11 +192,16 @@ pub trait RenameBackend {
     /// Builds the filesystem's comparison key for a validated complete path.
     fn path_key(&self, path: &LegacyText) -> PathKey;
 
-    /// Builds a fallible key for the actual source directory entry.
-    ///
-    /// Implementations normalize the final entry name only after resolving its
-    /// direct parent and source through the backend's native identity boundary.
-    fn source_entry_key(&self, path: &LegacyText) -> Result<PathKey, BackendError>;
+    /// Resolves one source snapshot, actual spelling, and directory-entry key
+    /// through the same native identity boundary.
+    fn resolve_source(&self, path: &LegacyText) -> Result<ResolvedSource, BackendError>;
+
+    /// Builds an opaque key for one validated leaf under a frozen parent.
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &LegacyText,
+    ) -> Result<PathKey, BackendError>;
 
     /// Observes the exact leaf and resolved direct parent.
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError>;
@@ -222,10 +227,7 @@ pub trait RenameBackend {
     fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError>;
 }
 
-pub(super) fn source_entry_key_from_parts(
-    parent: EntryIdentity,
-    normalized_leaf: &[u16],
-) -> PathKey {
+pub(super) fn entry_key_from_parts(parent: EntryIdentity, normalized_leaf: &[u16]) -> PathKey {
     let mut units = Vec::with_capacity(12 + normalized_leaf.len());
     for bytes in parent.volume().to_le_bytes().chunks_exact(2) {
         units.push(u16::from_le_bytes([bytes[0], bytes[1]]));
@@ -235,6 +237,15 @@ pub(super) fn source_entry_key_from_parts(
     }
     units.extend_from_slice(normalized_leaf);
     PathKey(units.into_boxed_slice())
+}
+
+pub(super) fn path_leaf(path: &LegacyText) -> LegacyText {
+    let start = path
+        .units()
+        .iter()
+        .rposition(|unit| *unit == b'\\' as u16 || *unit == b'/' as u16)
+        .map_or(0, |separator| separator + 1);
+    LegacyText::from_units(path.units()[start..].to_vec())
 }
 
 /// Durable journal adapter failure.

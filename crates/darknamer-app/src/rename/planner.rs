@@ -4,6 +4,7 @@ use std::fmt;
 use darknamer_core::validate_windows_leaf_name;
 
 use super::model::PlanRow;
+use super::ports::path_leaf;
 use super::{
     EntryId, EntryIdentity, EntryKind, MoveScope, PathKey, PathSnapshot, PlanError, PlanId,
     PlanIssue, PlanIssueKind, PlanRequest, RenameBackend, RenameIntent, RenamePlan,
@@ -192,15 +193,10 @@ impl<'a> RenamePlanner<'a> {
         let mut entries = Vec::with_capacity(changed.len());
         let mut source_snapshots = BTreeMap::new();
         let mut destination_snapshots = BTreeMap::new();
-        let mut planned_source_keys = BTreeSet::new();
-        for key in source_owners.keys() {
-            check_cancelled(&cancellation_requested)?;
-            planned_source_keys.insert(key.clone());
-        }
         for intent in &changed {
             check_cancelled(&cancellation_requested)?;
-            let source_snapshot = match self.backend.observe(&intent.source) {
-                Ok(snapshot) => snapshot,
+            let resolved_source = match self.backend.resolve_source(&intent.source) {
+                Ok(source) => source,
                 Err(error) => {
                     issues.push(PlanIssue {
                         entry: intent.id,
@@ -209,6 +205,7 @@ impl<'a> RenamePlanner<'a> {
                     continue;
                 }
             };
+            let source_snapshot = resolved_source.snapshot();
             check_cancelled(&cancellation_requested)?;
             let Some(source_entry) = source_snapshot.entry else {
                 issues.push(PlanIssue {
@@ -223,6 +220,43 @@ impl<'a> RenamePlanner<'a> {
                     kind: PlanIssueKind::SourceKindChanged,
                 });
                 continue;
+            }
+            let Some(source_entry_key) = resolved_source.entry_key().cloned() else {
+                issues.push(PlanIssue {
+                    entry: intent.id,
+                    kind: PlanIssueKind::Backend,
+                });
+                continue;
+            };
+            let actual_source = resolved_source.path();
+            if path_component_depth(actual_source.units()) > MAX_PLAN_PATH_DEPTH
+                || !is_absolute_windows_path(actual_source.units())
+            {
+                issues.push(PlanIssue {
+                    entry: intent.id,
+                    kind: PlanIssueKind::Backend,
+                });
+                continue;
+            }
+            match self
+                .backend
+                .planned_entry_key(source_snapshot.parent, &path_leaf(actual_source))
+            {
+                Ok(key) if key == source_entry_key => {}
+                Ok(_) => {
+                    issues.push(PlanIssue {
+                        entry: intent.id,
+                        kind: PlanIssueKind::Backend,
+                    });
+                    continue;
+                }
+                Err(error) => {
+                    issues.push(PlanIssue {
+                        entry: intent.id,
+                        kind: PlanIssueKind::BackendFailure(error),
+                    });
+                    continue;
+                }
             }
             if source_entry.is_reparse_point {
                 issues.push(PlanIssue {
@@ -274,19 +308,52 @@ impl<'a> RenamePlanner<'a> {
             {
                 continue;
             }
+            let destination_entry_key = match self
+                .backend
+                .planned_entry_key(destination_snapshot.parent, &intent.destination_name)
+            {
+                Ok(key) => key,
+                Err(error) => {
+                    issues.push(PlanIssue {
+                        entry: intent.id,
+                        kind: PlanIssueKind::BackendFailure(error),
+                    });
+                    continue;
+                }
+            };
             entries.push(PlanRow {
                 id: intent.id,
-                source: intent.source.clone(),
+                source: resolved_source.path().clone(),
                 destination: intent.destination.clone(),
                 kind: intent.kind,
                 source_snapshot,
                 destination_snapshot,
+                source_entry_key,
+                destination_entry_key,
             });
             if has_changed_directory {
                 source_snapshots.insert(intent.id, source_snapshot);
                 destination_snapshots.insert(intent.id, destination_snapshot);
             }
         }
+        if !issues.is_empty() {
+            return Err(PlanError::new(issues).into());
+        }
+
+        let mut actual_destination_owners: BTreeMap<PathKey, Vec<EntryId>> = BTreeMap::new();
+        for entry in &entries {
+            check_cancelled(&cancellation_requested)?;
+            actual_destination_owners
+                .entry(entry.destination_entry_key.clone())
+                .or_default()
+                .push(entry.id);
+        }
+        append_duplicate_issues(
+            actual_destination_owners.values(),
+            PlanIssueKind::DuplicateDestination,
+            &mut issues,
+            &cancellation_requested,
+        )?;
         if !issues.is_empty() {
             return Err(PlanError::new(issues).into());
         }
@@ -360,10 +427,15 @@ impl<'a> RenamePlanner<'a> {
             return Err(PlanError::new(issues).into());
         }
 
+        let mut planned_source_keys = BTreeSet::new();
+        for entry in &entries {
+            check_cancelled(&cancellation_requested)?;
+            planned_source_keys.insert(entry.source_entry_key.clone());
+        }
         for entry in &entries {
             check_cancelled(&cancellation_requested)?;
             if entry.destination_snapshot.entry.is_some()
-                && !planned_source_keys.contains(&self.backend.path_key(&entry.destination))
+                && !planned_source_keys.contains(&entry.destination_entry_key)
             {
                 issues.push(PlanIssue {
                     entry: entry.id,
@@ -407,6 +479,7 @@ fn append_duplicate_issues<'a>(
 struct SourceCandidate<'a> {
     id: EntryId,
     path: &'a darknamer_core::LegacyText,
+    entry_key: Option<&'a PathKey>,
     changed: bool,
 }
 
@@ -432,6 +505,7 @@ fn append_actual_duplicate_source_issues<'a>(
                 .push(SourceCandidate {
                     id: entry.id,
                     path: &entry.source,
+                    entry_key: Some(&entry.source_entry_key),
                     changed: true,
                 });
         }
@@ -452,6 +526,7 @@ fn append_actual_duplicate_source_issues<'a>(
                     .push(SourceCandidate {
                         id: intent.id,
                         path: &intent.source,
+                        entry_key: None,
                         changed: false,
                     });
             }
@@ -476,12 +551,23 @@ fn append_actual_duplicate_source_issues<'a>(
         let mut normalized_owners: BTreeMap<PathKey, Vec<&SourceCandidate<'_>>> = BTreeMap::new();
         for candidate in candidate_group {
             check_cancelled(cancellation_requested)?;
-            match backend.source_entry_key(candidate.path) {
-                Ok(key) => normalized_owners.entry(key).or_default().push(candidate),
-                Err(error) => issues.push(PlanIssue {
-                    entry: candidate.id,
-                    kind: PlanIssueKind::BackendFailure(error),
-                }),
+            let key = if let Some(key) = candidate.entry_key {
+                Some(key.clone())
+            } else {
+                match backend.resolve_source(candidate.path) {
+                    Ok(source) => source.entry_key().cloned(),
+                    Err(error) if is_not_found_error(error) => None,
+                    Err(error) => {
+                        issues.push(PlanIssue {
+                            entry: candidate.id,
+                            kind: PlanIssueKind::BackendFailure(error),
+                        });
+                        None
+                    }
+                }
+            };
+            if let Some(key) = key {
+                normalized_owners.entry(key).or_default().push(candidate);
             }
         }
         for owners in normalized_owners
@@ -653,7 +739,8 @@ fn visit_direct_ancestors(
 }
 
 fn validate_intent(intent: &RenameIntent, issues: &mut Vec<PlanIssue>) {
-    if path_component_depth(intent.source.units()) > MAX_PLAN_PATH_DEPTH
+    let (source_too_deep, relative_source) = source_path_validation(intent);
+    if source_too_deep
         || path_component_depth(intent.destination_parent.units()) > MAX_PLAN_PATH_DEPTH
     {
         issues.push(PlanIssue {
@@ -661,7 +748,7 @@ fn validate_intent(intent: &RenameIntent, issues: &mut Vec<PlanIssue>) {
             kind: PlanIssueKind::PathTooDeep,
         });
     }
-    if !is_absolute_windows_path(intent.source.units()) {
+    if relative_source {
         issues.push(PlanIssue {
             entry: intent.id,
             kind: PlanIssueKind::RelativeSource,
@@ -682,18 +769,26 @@ fn validate_intent(intent: &RenameIntent, issues: &mut Vec<PlanIssue>) {
 }
 
 fn validate_source_path(intent: &RenameIntent, issues: &mut Vec<PlanIssue>) {
-    if path_component_depth(intent.source.units()) > MAX_PLAN_PATH_DEPTH {
+    let (too_deep, relative) = source_path_validation(intent);
+    if too_deep {
         issues.push(PlanIssue {
             entry: intent.id,
             kind: PlanIssueKind::PathTooDeep,
         });
     }
-    if !is_absolute_windows_path(intent.source.units()) {
+    if relative {
         issues.push(PlanIssue {
             entry: intent.id,
             kind: PlanIssueKind::RelativeSource,
         });
     }
+}
+
+fn source_path_validation(intent: &RenameIntent) -> (bool, bool) {
+    (
+        path_component_depth(intent.source.units()) > MAX_PLAN_PATH_DEPTH,
+        !is_absolute_windows_path(intent.source.units()),
+    )
 }
 
 fn path_component_depth(units: &[u16]) -> usize {

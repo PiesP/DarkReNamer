@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::ports::path_leaf;
 use super::{
     AuthorizedJournal, BackendError, EntryIdentity, JournalDirection, JournalError, JournalRecord,
     JournalStep, MutationCertainty, PathKey, PlanId, RecoveryReason, RecoveryState, RenameBackend,
@@ -266,7 +267,7 @@ fn transition_state(
         }
     }
 
-    let mut expected = initial_occupancy(steps, backend);
+    let mut expected = initial_occupancy(steps, backend)?;
     for record in records.iter().skip(1) {
         if let JournalRecord::Completed { step, direction } = record {
             apply_step(
@@ -318,24 +319,29 @@ fn transition_state(
 fn initial_occupancy(
     steps: &[JournalStep],
     backend: &dyn RenameBackend,
-) -> BTreeMap<PathKey, Option<EntryIdentity>> {
+) -> Result<BTreeMap<PathKey, Option<EntryIdentity>>, RecoveryBlockKind> {
     let mut occupancy = BTreeMap::new();
     let mut seen_entries = BTreeSet::new();
     for step in steps {
-        occupancy
-            .entry(backend.path_key(step.source()))
-            .or_insert(None);
-        occupancy
-            .entry(backend.path_key(step.destination()))
-            .or_insert(None);
+        let source_key = endpoint_key(backend, step.source(), step.expected_source_parent())?;
+        let destination_key = endpoint_key(
+            backend,
+            step.destination(),
+            step.expected_destination_parent(),
+        )?;
+        occupancy.entry(source_key.clone()).or_insert(None);
+        occupancy.entry(destination_key).or_insert(None);
         if seen_entries.insert(step.entry()) {
-            occupancy.insert(
-                backend.path_key(step.source()),
-                Some(step.expected_source()),
-            );
+            if occupancy
+                .get(&source_key)
+                .is_some_and(|entry| entry.is_some_and(|entry| entry != step.expected_source()))
+            {
+                return Err(RecoveryBlockKind::JournalCorrupt);
+            }
+            occupancy.insert(source_key, Some(step.expected_source()));
         }
     }
-    occupancy
+    Ok(occupancy)
 }
 
 fn apply_step(
@@ -344,13 +350,23 @@ fn apply_step(
     backend: &dyn RenameBackend,
     reverse: bool,
 ) -> Result<(), RecoveryBlockKind> {
-    let (source, destination) = if reverse {
-        (step.destination(), step.source())
+    let (source, source_parent, destination, destination_parent) = if reverse {
+        (
+            step.destination(),
+            step.expected_destination_parent(),
+            step.source(),
+            step.expected_source_parent(),
+        )
     } else {
-        (step.source(), step.destination())
+        (
+            step.source(),
+            step.expected_source_parent(),
+            step.destination(),
+            step.expected_destination_parent(),
+        )
     };
-    let source_key = backend.path_key(source);
-    let destination_key = backend.path_key(destination);
+    let source_key = endpoint_key(backend, source, source_parent)?;
+    let destination_key = endpoint_key(backend, destination, destination_parent)?;
     if occupancy.get(&source_key) != Some(&Some(step.expected_source()))
         || occupancy.get(&destination_key) != Some(&None)
     {
@@ -407,11 +423,27 @@ fn observe_endpoint(
     }) {
         return Err(RecoveryBlockKind::StateMismatch);
     }
-    observed.insert(
-        backend.path_key(path),
-        snapshot.entry.map(|entry| entry.identity),
-    );
+    let key = endpoint_key(backend, path, expected_parent)?;
+    let identity = snapshot.entry.map(|entry| entry.identity);
+    if observed
+        .get(&key)
+        .is_some_and(|previous| *previous != identity)
+    {
+        return Err(RecoveryBlockKind::StateMismatch);
+    }
+    observed.insert(key, identity);
     Ok(())
+}
+
+fn endpoint_key(
+    backend: &dyn RenameBackend,
+    path: &darknamer_core::LegacyText,
+    parent: EntryIdentity,
+) -> Result<PathKey, RecoveryBlockKind> {
+    let leaf = path_leaf(path);
+    backend
+        .planned_entry_key(parent, &leaf)
+        .map_err(RecoveryBlockKind::Backend)
 }
 
 fn occupancy_matches(

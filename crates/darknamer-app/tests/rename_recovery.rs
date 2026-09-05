@@ -4,7 +4,8 @@ use darknamer_app::rename::{
     JournalRecord, JournalSnapshot, JournalStep, JournalStore, JournalTerminal, MemoryBackend,
     MemoryJournal, ModelRevision, MoveScope, MutationCertainty, PathKey, PathSnapshot, PlanId,
     PlanRequest, RecoveryBlockKind, RecoveryFailure, RecoveryOutcome, RenameBackend,
-    RenameExecutor, RenameIntent, RenameOperation, RenamePlanner, RenameRecovery, TemporaryPhase,
+    RenameExecutor, RenameIntent, RenameOperation, RenamePlanner, RenameRecovery, ResolvedSource,
+    TemporaryPhase,
 };
 use darknamer_core::LegacyText;
 use std::cell::RefCell;
@@ -18,6 +19,90 @@ fn intent() -> RenameIntent {
         "b.txt",
         EntryKind::File,
     )
+}
+
+struct AliasPathBackend {
+    inner: MemoryBackend,
+}
+
+impl AliasPathBackend {
+    fn normalized(path: &LegacyText) -> LegacyText {
+        let units = path.units();
+        if units.starts_with(&[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16]) {
+            LegacyText::from_units(units[4..].to_vec())
+        } else {
+            path.clone()
+        }
+    }
+
+    fn file_id(&self, path: &str) -> Option<u128> {
+        self.inner.file_id(path)
+    }
+}
+
+impl RenameBackend for AliasPathBackend {
+    fn validate_path_environment(&self, path: &LegacyText) -> Result<(), BackendError> {
+        self.inner
+            .validate_path_environment(&Self::normalized(path))
+    }
+
+    fn path_key(&self, path: &LegacyText) -> PathKey {
+        self.inner.path_key(&Self::normalized(path))
+    }
+
+    fn resolve_source(&self, path: &LegacyText) -> Result<ResolvedSource, BackendError> {
+        self.inner.resolve_source(&Self::normalized(path))
+    }
+
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        self.inner.planned_entry_key(parent, leaf)
+    }
+
+    fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
+        self.inner.observe(&Self::normalized(path))
+    }
+
+    fn is_same_or_descendant(
+        &self,
+        ancestor: &LegacyText,
+        candidate: &LegacyText,
+    ) -> Result<bool, BackendError> {
+        self.inner
+            .is_same_or_descendant(&Self::normalized(ancestor), &Self::normalized(candidate))
+    }
+
+    fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
+        self.inner.next_transaction_nonce()
+    }
+
+    fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+        let source = Self::normalized(operation.source());
+        let destination = Self::normalized(operation.destination());
+        let normalized = if let Some(kind) = operation.kind() {
+            RenameOperation::with_authorization(
+                source,
+                destination,
+                operation.expected_source(),
+                operation.expected_source_parent(),
+                operation.expected_destination_parent(),
+                kind,
+                operation.scope(),
+            )
+        } else {
+            RenameOperation::new(
+                source,
+                destination,
+                operation.expected_source(),
+                operation.expected_source_parent(),
+                operation.expected_destination_parent(),
+            )
+        };
+        self.inner.rename_no_replace(&normalized)
+    }
 }
 
 #[test]
@@ -268,6 +353,76 @@ fn prepared_chain_step_reconciles_then_rolls_back_in_reverse_schedule_order()
         RecoveryOutcome::Recovered {
             plan: id,
             restored_steps: 2
+        }
+    );
+    assert_eq!(backend.file_id("C:\\work\\a.txt"), Some(1));
+    assert_eq!(backend.file_id("C:\\work\\b.txt"), Some(2));
+    assert_eq!(backend.file_id("C:\\work\\c.txt"), None);
+    Ok(())
+}
+
+#[test]
+fn recovery_reconciles_a_chain_whose_shared_endpoint_uses_parent_alias_spellings()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut backend = AliasPathBackend {
+        inner: MemoryBackend::new()
+            .with_file("C:\\work\\b.txt", 1)
+            .with_file("C:\\work\\c.txt", 2),
+    };
+    let parent = backend
+        .observe(&LegacyText::from("C:\\work\\b.txt"))?
+        .parent;
+    let plan = PlanId::from_fingerprint(77);
+    let steps = vec![
+        JournalStep::new(
+            EntryId::new(1),
+            LegacyText::from(r"\\?\C:\work\b.txt"),
+            LegacyText::from(r"\\?\C:\work\c.txt"),
+            EntryIdentity::new(1, 2),
+            parent,
+            parent,
+            TemporaryPhase::None,
+        )
+        .with_move_authorization(EntryKind::File, MoveScope::SameParent),
+        JournalStep::new(
+            EntryId::new(0),
+            LegacyText::from("C:\\work\\a.txt"),
+            LegacyText::from("C:\\work\\b.txt"),
+            EntryIdentity::new(1, 1),
+            parent,
+            parent,
+            TemporaryPhase::None,
+        )
+        .with_move_authorization(EntryKind::File, MoveScope::SameParent),
+    ]
+    .into_boxed_slice();
+    let mut journal = MemoryJournal::from_records(vec![
+        JournalRecord::Intent { plan, steps },
+        JournalRecord::Prepared {
+            step: 0,
+            direction: JournalDirection::Forward,
+        },
+        JournalRecord::Completed {
+            step: 0,
+            direction: JournalDirection::Forward,
+        },
+        JournalRecord::Prepared {
+            step: 1,
+            direction: JournalDirection::Forward,
+        },
+        JournalRecord::Completed {
+            step: 1,
+            direction: JournalDirection::Forward,
+        },
+    ]);
+
+    let outcome = RenameRecovery::new(&mut backend, &mut journal).rollback();
+
+    assert_eq!(
+        outcome,
+        RecoveryOutcome::Recovered {
+            plan,
+            restored_steps: 2,
         }
     );
     assert_eq!(backend.file_id("C:\\work\\a.txt"), Some(1));
@@ -578,8 +733,16 @@ impl RenameBackend for RecoveryMatrixBackend {
         self.inner.path_key(path)
     }
 
-    fn source_entry_key(&self, path: &LegacyText) -> Result<PathKey, BackendError> {
-        self.inner.source_entry_key(path)
+    fn resolve_source(&self, path: &LegacyText) -> Result<ResolvedSource, BackendError> {
+        self.inner.resolve_source(path)
+    }
+
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        self.inner.planned_entry_key(parent, leaf)
     }
 
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {

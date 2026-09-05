@@ -1,11 +1,12 @@
 use std::cell::Cell;
 
 use darknamer_app::rename::{
-    BackendError, BackendOperation, ExecutionOutcome, JournalCapacityError, JournalCapacityKind,
-    JournalCleanupDecision, JournalRecord, JournalTerminal, MemoryBackend, MemoryJournal,
-    ModelRevision, MoveScope, MutationCertainty, PathKey, PathSnapshot, RenameBackend,
-    RenameExecutor, RenameOperation, RenamePlanner, apply_execution_report, build_plan_request,
-    cleanup_decision, journal_capacity_error_korean, next_model_revision, plan_error_korean,
+    BackendError, BackendOperation, EntryIdentity, ExecutionOutcome, JournalCapacityError,
+    JournalCapacityKind, JournalCleanupDecision, JournalRecord, JournalTerminal, MemoryBackend,
+    MemoryJournal, ModelRevision, MoveScope, MutationCertainty, PathKey, PathSnapshot,
+    RenameBackend, RenameExecutor, RenameOperation, RenamePlanner, ResolvedSource,
+    apply_execution_report, build_plan_request, cleanup_decision, journal_capacity_error_korean,
+    next_model_revision, plan_error_korean,
 };
 use darknamer_core::{LegacyList, LegacyListItem, LegacyText};
 
@@ -245,8 +246,16 @@ impl RenameBackend for FailingBackend {
         self.inner.path_key(path)
     }
 
-    fn source_entry_key(&self, path: &LegacyText) -> Result<PathKey, BackendError> {
-        self.inner.source_entry_key(path)
+    fn resolve_source(&self, path: &LegacyText) -> Result<ResolvedSource, BackendError> {
+        self.inner.resolve_source(path)
+    }
+
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        self.inner.planned_entry_key(parent, leaf)
     }
 
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {

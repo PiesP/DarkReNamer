@@ -25,12 +25,31 @@ it. A changed destination also cannot lie below a directory being renamed.
 Observed directory identity resolves alternate accepted path spellings without
 rewriting the model's source or destination text.
 
-Source duplicate checks first group actual entries by observed parent and file
-identity. Only a group containing a changed row resolves its final directory
-entry names. The Windows backend derives that bounded name from an opened
-source handle, so ordinary, verbatim, and available short-name aliases
-share one source key while distinct hard-link names remain separate. A group
-containing only unchanged rows remains inert.
+Planning resolves every changed source through one opened parent and source
+handle. That result binds the source snapshot, actual directory-entry spelling,
+and entry key. Duplicate candidates use the observed parent and file identities;
+only no-op rows in a candidate group containing a changed row require the same
+name resolution. Ordinary, verbatim, and available short-name aliases share one
+source key while distinct hard-link names remain separate. A group containing
+only unchanged rows remains inert.
+
+Execution freeze resolves each changed source again before journal creation and
+requires its snapshot, actual source spelling, and entry key to match the plan.
+An identity-preserving external case or long-name change is therefore stale
+source evidence and cannot begin a mutation.
+
+Each primitive then opens its source with DELETE access while withholding
+delete sharing. The retained mutation handle blocks competing rename and delete
+opens through the native sink. Before mutation, the backend reads the actual
+leaf from that same handle and requires an exact match with the frozen source
+spelling; a mismatch or sharing conflict is `NotApplied`.
+
+Destination collision, source-vacancy, schedule, temporary-name, and recovery
+occupancy keys combine a frozen parent identity with one validated leaf name.
+New journal Intents therefore store the actual source spelling needed by
+rollback and later recovery. Existing journals retain their stored source text;
+recovery does not guess or rewrite historical names. Correctness does not depend
+on filesystem name tunneling after a rename.
 
 The v0.1 release-validated scope is Windows 10 and Windows 11 on x64, with a
 local, non-elevated process operating on same-parent, non-reparse entries in a

@@ -1,9 +1,10 @@
 use std::cell::Cell;
 
 use darknamer_app::rename::{
-    BackendError, BackendOperation, EntryId, EntryKind, MAX_PLAN_PATH_DEPTH, MemoryBackend,
-    ModelRevision, MoveScope, MutationCertainty, PathKey, PathSnapshot, PlanAttemptError,
-    PlanIssueKind, PlanRequest, RenameBackend, RenameIntent, RenameOperation, RenamePlanner,
+    BackendError, BackendOperation, EntryId, EntryIdentity, EntryKind, MAX_PLAN_PATH_DEPTH,
+    MemoryBackend, ModelRevision, MoveScope, MutationCertainty, PathKey, PathSnapshot,
+    PlanAttemptError, PlanIssueKind, PlanRequest, RenameBackend, RenameIntent, RenameOperation,
+    RenamePlanner, ResolvedSource,
 };
 use darknamer_core::{LegacyText, WindowsLeafNameError};
 
@@ -150,6 +151,50 @@ fn duplicate_and_external_occupied_destinations_are_blocked()
 }
 
 #[test]
+fn destination_parent_aliases_cannot_hide_a_duplicate_destination()
+-> Result<(), Box<dyn std::error::Error>> {
+    let shared_parent = darknamer_app::rename::EntryIdentity::new(1, 90);
+    let backend = MemoryBackend::new()
+        .with_file("C:\\source\\a.txt", 1)
+        .with_file("C:\\source\\b.txt", 2)
+        .with_parent_identity("C:\\target", shared_parent)
+        .with_parent_identity(r"\\?\C:\target", shared_parent);
+    let request = PlanRequest::with_scope(
+        ModelRevision::new(1),
+        vec![
+            RenameIntent::new(
+                EntryId::new(0),
+                "C:\\source\\a.txt",
+                "C:\\target",
+                "same.txt",
+                EntryKind::File,
+            ),
+            RenameIntent::new(
+                EntryId::new(1),
+                "C:\\source\\b.txt",
+                r"\\?\C:\target",
+                "same.txt",
+                EntryKind::File,
+            ),
+        ],
+        MoveScope::SameVolumeFilesOnly,
+    );
+
+    let Err(error) = RenamePlanner::new(&backend).plan(request) else {
+        return Err(std::io::Error::other("aliased duplicate destination was accepted").into());
+    };
+    assert_eq!(error.issues().len(), 2);
+    assert!(
+        error
+            .issues()
+            .iter()
+            .all(|issue| issue.kind == PlanIssueKind::DuplicateDestination)
+    );
+    assert_eq!(backend.mutation_count(), 0);
+    Ok(())
+}
+
+#[test]
 fn changed_row_rejects_an_exact_duplicate_noop_source() -> Result<(), Box<dyn std::error::Error>> {
     let backend = MemoryBackend::new().with_file("C:\\work\\same.txt", 1);
     let request = PlanRequest::new(
@@ -262,14 +307,26 @@ impl RenameBackend for SourceKeyFailureBackend {
         self.inner.path_key(path)
     }
 
-    fn source_entry_key(&self, _path: &LegacyText) -> Result<PathKey, BackendError> {
-        self.source_key_calls
-            .set(self.source_key_calls.get().saturating_add(1));
-        Err(BackendError {
-            operation: BackendOperation::Observe,
-            code: 5,
-            certainty: MutationCertainty::NotApplied,
-        })
+    fn resolve_source(&self, path: &LegacyText) -> Result<ResolvedSource, BackendError> {
+        let call = self.source_key_calls.get().saturating_add(1);
+        self.source_key_calls.set(call);
+        if call == 1 {
+            self.inner.resolve_source(path)
+        } else {
+            Err(BackendError {
+                operation: BackendOperation::Observe,
+                code: 5,
+                certainty: MutationCertainty::NotApplied,
+            })
+        }
+    }
+
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        self.inner.planned_entry_key(parent, leaf)
     }
 
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
@@ -311,7 +368,7 @@ fn source_normalization_skips_noop_only_groups_and_fails_closed_for_a_changed_gr
         ],
     ))?;
     assert_eq!(plan.changed_count(), 1);
-    assert_eq!(unrelated.source_key_calls.get(), 0);
+    assert_eq!(unrelated.source_key_calls.get(), 1);
 
     let changed = SourceKeyFailureBackend {
         inner: MemoryBackend::new().with_file("C:\\work\\same.txt", 1),
@@ -327,7 +384,7 @@ fn source_normalization_skips_noop_only_groups_and_fails_closed_for_a_changed_gr
         return Err(std::io::Error::other("source-key failure was ignored").into());
     };
     assert_eq!(changed.source_key_calls.get(), 2);
-    assert_eq!(error.issues().len(), 2);
+    assert_eq!(error.issues().len(), 1);
     assert!(error.issues().iter().all(|issue| matches!(
         issue.kind,
         PlanIssueKind::BackendFailure(BackendError { code: 5, .. })
@@ -744,8 +801,8 @@ fn noop_plan_stays_zero_cost_and_unique_file_plan_skips_source_normalization()
     assert_eq!(plan.changed_count(), 1);
     assert_eq!(file_backend.validation_calls.get(), 2);
     assert_eq!(file_backend.key_calls.get(), 3);
-    assert_eq!(file_backend.source_key_calls.get(), 0);
-    assert_eq!(file_backend.observe_calls.get(), 3);
+    assert_eq!(file_backend.source_key_calls.get(), 1);
+    assert_eq!(file_backend.observe_calls.get(), 2);
     assert_eq!(file_backend.inner.mutation_count(), 0);
     Ok(())
 }
@@ -866,8 +923,16 @@ impl RenameBackend for AliasedParentIdentityBackend {
         self.inner.path_key(path)
     }
 
-    fn source_entry_key(&self, path: &LegacyText) -> Result<PathKey, BackendError> {
-        self.inner.source_entry_key(path)
+    fn resolve_source(&self, path: &LegacyText) -> Result<ResolvedSource, BackendError> {
+        self.inner.resolve_source(path)
+    }
+
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        self.inner.planned_entry_key(parent, leaf)
     }
 
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
@@ -987,8 +1052,16 @@ impl RenameBackend for CanonicalKeyBackend {
         PathKey::exact(&LegacyText::from(opaque))
     }
 
-    fn source_entry_key(&self, path: &LegacyText) -> Result<PathKey, BackendError> {
-        self.inner.source_entry_key(path)
+    fn resolve_source(&self, path: &LegacyText) -> Result<ResolvedSource, BackendError> {
+        self.inner.resolve_source(path)
+    }
+
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        self.inner.planned_entry_key(parent, leaf)
     }
 
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
@@ -1076,8 +1149,16 @@ impl RenameBackend for AncestorFailureBackend {
         self.inner.path_key(path)
     }
 
-    fn source_entry_key(&self, path: &LegacyText) -> Result<PathKey, BackendError> {
-        self.inner.source_entry_key(path)
+    fn resolve_source(&self, path: &LegacyText) -> Result<ResolvedSource, BackendError> {
+        self.inner.resolve_source(path)
+    }
+
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        self.inner.planned_entry_key(parent, leaf)
     }
 
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
@@ -1157,8 +1238,16 @@ impl RenameBackend for EnvironmentFailureBackend {
         self.inner.path_key(path)
     }
 
-    fn source_entry_key(&self, path: &LegacyText) -> Result<PathKey, BackendError> {
-        self.inner.source_entry_key(path)
+    fn resolve_source(&self, path: &LegacyText) -> Result<ResolvedSource, BackendError> {
+        self.inner.resolve_source(path)
+    }
+
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        self.inner.planned_entry_key(parent, leaf)
     }
 
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
@@ -1224,10 +1313,18 @@ impl RenameBackend for CountingBackend {
         self.inner.path_key(path)
     }
 
-    fn source_entry_key(&self, path: &LegacyText) -> Result<PathKey, BackendError> {
+    fn resolve_source(&self, path: &LegacyText) -> Result<ResolvedSource, BackendError> {
         self.source_key_calls
             .set(self.source_key_calls.get().saturating_add(1));
-        self.inner.source_entry_key(path)
+        self.inner.resolve_source(path)
+    }
+
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        self.inner.planned_entry_key(parent, leaf)
     }
 
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
