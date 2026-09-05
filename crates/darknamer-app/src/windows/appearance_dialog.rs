@@ -51,7 +51,7 @@ const APPEARANCE_FINISH_ACCEPTED: u32 = 1 << 31;
 const APPEARANCE_GROUP_SUBCLASS_ID: usize = 1;
 const APPEARANCE_VIEWPORT_SUBCLASS_ID: usize = 2;
 const WM_APP_APPEARANCE_REDRAW: u32 = WM_APP + 0x53;
-const APPEARANCE_DIALOG_TITLE: &str = "DarkReNamer - 모양 설정";
+const APPEARANCE_DIALOG_TITLE: &str = "DarkReNamer - 모양 설정 (미리보기)";
 const DENSITY_GROUP_LABEL: &str = "명령 버튼 배치";
 const DENSITY_LABELS: [&str; 4] = ["자동 (권장)", "여유 있게", "촘촘하게", "메뉴만"];
 const EMPHASIS_GROUP_LABEL: &str = "변경 후 이름 강조";
@@ -62,7 +62,7 @@ const EMPTY_SAFETY_LABEL: &str = "빈 목록에서 안전 안내 표시";
 const FORCED_COLORS_EXPLANATION: &str =
     "고대비가 활성화되어 변경 후 이름의 글자와 셀 배경은 시스템 색상을 사용합니다.";
 const RESET_LABEL: &str = "기본값으로 복원";
-const OK_LABEL: &str = "확인";
+const OK_LABEL: &str = "저장";
 const CANCEL_LABEL: &str = "취소";
 
 pub(super) struct AppearanceDialogSession {
@@ -2284,12 +2284,16 @@ mod native_tests {
 
     #[test]
     fn appearance_copy_names_the_current_settings_exactly() {
-        assert_eq!(APPEARANCE_DIALOG_TITLE, "DarkReNamer - 모양 설정");
+        assert_eq!(
+            APPEARANCE_DIALOG_TITLE,
+            "DarkReNamer - 모양 설정 (미리보기)"
+        );
         assert_eq!(DENSITY_GROUP_LABEL, "명령 버튼 배치");
         assert_eq!(EMPHASIS_GROUP_LABEL, "변경 후 이름 강조");
         assert_eq!(SEPARATOR_LABEL, "명령 버튼 그룹 구분선 표시");
         assert_eq!(TINT_LABEL, "변경 후 이름 셀 배경 강조");
         assert_eq!(EMPTY_SAFETY_LABEL, "빈 목록에서 안전 안내 표시");
+        assert_eq!(OK_LABEL, "저장");
         assert_eq!(
             FORCED_COLORS_EXPLANATION,
             "고대비가 활성화되어 변경 후 이름의 글자와 셀 배경은 시스템 색상을 사용합니다."
@@ -2697,6 +2701,7 @@ mod native_tests {
         unsafe { ReleaseDC(density_group, group_dc) };
 
         assert_eq!(window_text(menu_only), LegacyText::from(DENSITY_LABELS[3]));
+        assert_eq!(window_text(ok), LegacyText::from(OK_LABEL));
         // SAFETY: menu_only is live and the borrowed theme handle query retains
         // no caller storage. Custom colors require the classic paint path.
         assert_eq!(unsafe { GetWindowTheme(menu_only) }, 0);
