@@ -578,6 +578,10 @@ impl RenameBackend for RecoveryMatrixBackend {
         self.inner.path_key(path)
     }
 
+    fn source_entry_key(&self, path: &LegacyText) -> Result<PathKey, BackendError> {
+        self.inner.source_entry_key(path)
+    }
+
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
         self.inner.observe(path)
     }

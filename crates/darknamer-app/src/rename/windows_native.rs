@@ -9,7 +9,7 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::ptr;
 
-use darknamer_core::LegacyText;
+use darknamer_core::{LegacyText, MAX_WINDOWS_LEAF_NAME_UTF16_UNITS};
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
     FILE_CREATE, FILE_DIRECTORY_FILE, FILE_ID_BOTH_DIR_INFORMATION, FILE_NON_DIRECTORY_FILE,
@@ -25,11 +25,12 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_CASE_SENSITIVE_INFO, FILE_DISPOSITION_INFO,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES,
-    FILE_READ_DATA, FILE_REMOTE_PROTOCOL_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_DATA, FileCaseSensitiveInfo, FileDispositionInfo,
-    FileIdInfo, FileRemoteProtocolInfo, GetDriveTypeW, GetFileInformationByHandleEx,
-    GetVolumeInformationByHandleW, SYNCHRONIZE, SetFileInformationByHandle,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_NAME_NORMALIZED,
+    FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_REMOTE_PROTOCOL_INFO, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_DATA, FileCaseSensitiveInfo,
+    FileDispositionInfo, FileIdInfo, FileRemoteProtocolInfo, GetDriveTypeW,
+    GetFileInformationByHandleEx, GetFinalPathNameByHandleW, GetVolumeInformationByHandleW,
+    SYNCHRONIZE, SetFileInformationByHandle, VOLUME_NAME_NONE,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::SystemServices::FILE_CS_FLAG_CASE_SENSITIVE_DIR;
@@ -39,7 +40,9 @@ use windows_sys::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOVABL
 const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 const SHARE_READ_WRITE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
 const ERROR_UNRECOGNIZED_VOLUME: i32 = 1005;
+const ERROR_FILENAME_EXCED_RANGE: i32 = 206;
 const FILESYSTEM_NAME_CAPACITY: usize = 32;
+const MAX_NORMALIZED_FINAL_PATH_UTF16_UNITS: u32 = 32_768;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct NativeIdentity {
@@ -384,6 +387,77 @@ pub(crate) fn open_entry(
         FILE_OPEN,
         FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
     )
+}
+
+pub(crate) fn normalized_final_leaf(file: &File) -> io::Result<Vec<u16>> {
+    let mut capacity = checked_final_path_capacity(query_normalized_final_path(file, &mut []))?;
+    for _ in 0..2 {
+        let mut path = Vec::new();
+        path.try_reserve_exact(capacity)
+            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+        path.resize(capacity, 0);
+        let written = query_normalized_final_path(file, &mut path);
+        if written == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let written = usize::try_from(written)
+            .map_err(|_| io::Error::from_raw_os_error(ERROR_FILENAME_EXCED_RANGE))?;
+        if written < capacity {
+            path.truncate(written);
+            return normalized_leaf_from_final_path(&path);
+        }
+        capacity = checked_final_path_capacity(
+            u32::try_from(written)
+                .map_err(|_| io::Error::from_raw_os_error(ERROR_FILENAME_EXCED_RANGE))?,
+        )?;
+    }
+    Err(io::Error::from_raw_os_error(ERROR_FILENAME_EXCED_RANGE))
+}
+
+fn query_normalized_final_path(file: &File, buffer: &mut [u16]) -> u32 {
+    let capacity = u32::try_from(buffer.len()).unwrap_or(0);
+    let output = if buffer.is_empty() {
+        ptr::null_mut()
+    } else {
+        buffer.as_mut_ptr()
+    };
+    // SAFETY: file remains live for the synchronous query; output is either
+    // null with zero capacity or writable for the exact checked slice length.
+    unsafe {
+        GetFinalPathNameByHandleW(
+            file.as_raw_handle(),
+            output,
+            capacity,
+            FILE_NAME_NORMALIZED | VOLUME_NAME_NONE,
+        )
+    }
+}
+
+fn checked_final_path_capacity(required: u32) -> io::Result<usize> {
+    if required == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if required > MAX_NORMALIZED_FINAL_PATH_UTF16_UNITS {
+        return Err(io::Error::from_raw_os_error(ERROR_FILENAME_EXCED_RANGE));
+    }
+    usize::try_from(required).map_err(|_| io::Error::from_raw_os_error(ERROR_FILENAME_EXCED_RANGE))
+}
+
+fn normalized_leaf_from_final_path(path: &[u16]) -> io::Result<Vec<u16>> {
+    let separator = path
+        .iter()
+        .rposition(|unit| *unit == b'\\' as u16)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+    let leaf = &path[separator + 1..];
+    if leaf.is_empty() || leaf.len() > MAX_WINDOWS_LEAF_NAME_UTF16_UNITS || leaf.contains(&0) {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    let mut normalized = Vec::new();
+    normalized
+        .try_reserve_exact(leaf.len())
+        .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+    normalized.extend_from_slice(leaf);
+    Ok(normalized)
 }
 
 pub(crate) fn open_directory_entry(parent: &NativeParent, leaf: &[u16]) -> io::Result<File> {
@@ -745,6 +819,45 @@ pub(crate) fn rename_noreplace(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalized_final_path_capacity_is_bounded() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            checked_final_path_capacity(MAX_NORMALIZED_FINAL_PATH_UTF16_UNITS)?,
+            MAX_NORMALIZED_FINAL_PATH_UTF16_UNITS as usize
+        );
+        let Err(error) =
+            checked_final_path_capacity(MAX_NORMALIZED_FINAL_PATH_UTF16_UNITS.saturating_add(1))
+        else {
+            return Err(io::Error::other("oversized normalized path was accepted").into());
+        };
+        assert_eq!(error.raw_os_error(), Some(ERROR_FILENAME_EXCED_RANGE));
+        Ok(())
+    }
+
+    #[test]
+    fn normalized_final_path_extracts_one_bounded_leaf() -> Result<(), Box<dyn std::error::Error>> {
+        let path = r"\parent\normalized-name.txt"
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            normalized_leaf_from_final_path(&path)?,
+            "normalized-name.txt".encode_utf16().collect::<Vec<_>>()
+        );
+        for invalid in [
+            Vec::new(),
+            r"\parent\".encode_utf16().collect::<Vec<_>>(),
+            format!(
+                r"\parent\{}",
+                "x".repeat(MAX_WINDOWS_LEAF_NAME_UTF16_UNITS + 1)
+            )
+            .encode_utf16()
+            .collect::<Vec<_>>(),
+        ] {
+            assert!(normalized_leaf_from_final_path(&invalid).is_err());
+        }
+        Ok(())
+    }
     use windows_sys::Win32::System::WindowsProgramming::{
         DRIVE_NO_ROOT_DIR, DRIVE_REMOTE, DRIVE_UNKNOWN,
     };

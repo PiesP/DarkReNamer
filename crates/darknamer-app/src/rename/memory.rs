@@ -215,6 +215,23 @@ impl RenameBackend for MemoryBackend {
         )
     }
 
+    fn source_entry_key(&self, path: &LegacyText) -> Result<PathKey, BackendError> {
+        let parent = self.parent_identity(path);
+        let leaf_start = path
+            .units()
+            .iter()
+            .rposition(|unit| *unit == b'\\' as u16 || *unit == b'/' as u16)
+            .map_or(0, |separator| separator + 1);
+        let normalized_leaf = path.units()[leaf_start..]
+            .iter()
+            .map(|unit| ascii_lower(*unit))
+            .collect::<Vec<_>>();
+        Ok(super::ports::source_entry_key_from_parts(
+            parent,
+            &normalized_leaf,
+        ))
+    }
+
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
         let entry = self
             .entries

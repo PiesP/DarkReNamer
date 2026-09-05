@@ -150,6 +150,192 @@ fn duplicate_and_external_occupied_destinations_are_blocked()
 }
 
 #[test]
+fn changed_row_rejects_an_exact_duplicate_noop_source() -> Result<(), Box<dyn std::error::Error>> {
+    let backend = MemoryBackend::new().with_file("C:\\work\\same.txt", 1);
+    let request = PlanRequest::new(
+        ModelRevision::new(1),
+        vec![
+            intent(0, "C:\\work\\same.txt", "renamed.txt"),
+            intent(1, "C:\\work\\same.txt", "same.txt"),
+        ],
+    );
+
+    let Err(error) = RenamePlanner::new(&backend).plan(request) else {
+        return Err(std::io::Error::other("changed duplicate source was accepted").into());
+    };
+    assert_eq!(
+        error
+            .issues()
+            .iter()
+            .map(|issue| (issue.entry, issue.kind.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (EntryId::new(0), PlanIssueKind::DuplicateSource),
+            (EntryId::new(1), PlanIssueKind::DuplicateSource),
+        ]
+    );
+    assert_eq!(backend.mutation_count(), 0);
+    Ok(())
+}
+
+#[test]
+fn changed_rows_reject_source_aliases_but_distinct_hardlink_names_remain_valid()
+-> Result<(), Box<dyn std::error::Error>> {
+    let shared_parent = darknamer_app::rename::EntryIdentity::new(1, 90);
+    let shared_entry = darknamer_app::rename::EntryIdentity::new(1, 91);
+    let alias_backend = MemoryBackend::new()
+        .with_file_identity("C:\\work\\same.txt", shared_entry)
+        .with_file_identity(r"\\?\C:\work\same.txt", shared_entry)
+        .with_parent_identity("C:\\work", shared_parent)
+        .with_parent_identity(r"\\?\C:\work", shared_parent);
+
+    for (revision, second_name) in [(1, "same.txt"), (2, "renamed-2.txt")] {
+        let request = PlanRequest::new(
+            ModelRevision::new(revision),
+            vec![
+                intent(0, "C:\\work\\same.txt", "renamed-1.txt"),
+                RenameIntent::new(
+                    EntryId::new(1),
+                    r"\\?\C:\work\same.txt",
+                    r"\\?\C:\work",
+                    second_name,
+                    EntryKind::File,
+                ),
+            ],
+        );
+        let Err(error) = RenamePlanner::new(&alias_backend).plan(request) else {
+            return Err(std::io::Error::other("source aliases were accepted").into());
+        };
+        assert_eq!(error.issues().len(), 2);
+        assert!(
+            error
+                .issues()
+                .iter()
+                .all(|issue| issue.kind == PlanIssueKind::DuplicateSource)
+        );
+    }
+
+    let hardlink_backend = MemoryBackend::new()
+        .with_file_identity("C:\\work\\first.txt", shared_entry)
+        .with_file_identity("C:\\work\\second.txt", shared_entry)
+        .with_parent_identity("C:\\work", shared_parent);
+    for (revision, second_name) in [(3, "second.txt"), (4, "renamed-2.txt")] {
+        let plan = RenamePlanner::new(&hardlink_backend).plan(PlanRequest::new(
+            ModelRevision::new(revision),
+            vec![
+                intent(0, "C:\\work\\first.txt", "renamed-1.txt"),
+                intent(1, "C:\\work\\second.txt", second_name),
+            ],
+        ))?;
+        assert_eq!(plan.changed_count(), 1 + usize::from(revision == 4));
+    }
+    Ok(())
+}
+
+#[test]
+fn all_noop_duplicate_source_group_stays_inert() -> Result<(), Box<dyn std::error::Error>> {
+    let backend = MemoryBackend::new().with_file("C:\\work\\same.txt", 1);
+    let plan = RenamePlanner::new(&backend).plan(PlanRequest::new(
+        ModelRevision::new(1),
+        vec![
+            intent(0, "C:\\work\\same.txt", "same.txt"),
+            intent(1, "C:\\work\\same.txt", "same.txt"),
+        ],
+    ))?;
+
+    assert!(plan.is_empty());
+    assert_eq!(backend.mutation_count(), 0);
+    Ok(())
+}
+
+struct SourceKeyFailureBackend {
+    inner: MemoryBackend,
+    source_key_calls: Cell<usize>,
+}
+
+impl RenameBackend for SourceKeyFailureBackend {
+    fn validate_path_environment(&self, path: &LegacyText) -> Result<(), BackendError> {
+        self.inner.validate_path_environment(path)
+    }
+
+    fn path_key(&self, path: &LegacyText) -> PathKey {
+        self.inner.path_key(path)
+    }
+
+    fn source_entry_key(&self, _path: &LegacyText) -> Result<PathKey, BackendError> {
+        self.source_key_calls
+            .set(self.source_key_calls.get().saturating_add(1));
+        Err(BackendError {
+            operation: BackendOperation::Observe,
+            code: 5,
+            certainty: MutationCertainty::NotApplied,
+        })
+    }
+
+    fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
+        self.inner.observe(path)
+    }
+
+    fn is_same_or_descendant(
+        &self,
+        ancestor: &LegacyText,
+        candidate: &LegacyText,
+    ) -> Result<bool, BackendError> {
+        self.inner.is_same_or_descendant(ancestor, candidate)
+    }
+
+    fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
+        self.inner.next_transaction_nonce()
+    }
+
+    fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+        self.inner.rename_no_replace(operation)
+    }
+}
+
+#[test]
+fn source_normalization_skips_noop_only_groups_and_fails_closed_for_a_changed_group()
+-> Result<(), Box<dyn std::error::Error>> {
+    let unrelated = SourceKeyFailureBackend {
+        inner: MemoryBackend::new()
+            .with_file("C:\\work\\changed.txt", 1)
+            .with_file("C:\\work\\noop.txt", 2),
+        source_key_calls: Cell::new(0),
+    };
+    let plan = RenamePlanner::new(&unrelated).plan(PlanRequest::new(
+        ModelRevision::new(1),
+        vec![
+            intent(0, "C:\\work\\changed.txt", "renamed.txt"),
+            intent(1, "C:\\work\\noop.txt", "noop.txt"),
+            intent(2, "C:\\work\\noop.txt", "noop.txt"),
+        ],
+    ))?;
+    assert_eq!(plan.changed_count(), 1);
+    assert_eq!(unrelated.source_key_calls.get(), 0);
+
+    let changed = SourceKeyFailureBackend {
+        inner: MemoryBackend::new().with_file("C:\\work\\same.txt", 1),
+        source_key_calls: Cell::new(0),
+    };
+    let Err(error) = RenamePlanner::new(&changed).plan(PlanRequest::new(
+        ModelRevision::new(2),
+        vec![
+            intent(0, "C:\\work\\same.txt", "renamed.txt"),
+            intent(1, "C:\\work\\same.txt", "same.txt"),
+        ],
+    )) else {
+        return Err(std::io::Error::other("source-key failure was ignored").into());
+    };
+    assert_eq!(changed.source_key_calls.get(), 2);
+    assert_eq!(error.issues().len(), 2);
+    assert!(error.issues().iter().all(|issue| matches!(
+        issue.kind,
+        PlanIssueKind::BackendFailure(BackendError { code: 5, .. })
+    )));
+    Ok(())
+}
+
+#[test]
 fn planner_blocks_duplicate_identity_inputs_cross_parent_and_source_overlap()
 -> Result<(), Box<dyn std::error::Error>> {
     let backend = MemoryBackend::new()
@@ -447,6 +633,7 @@ fn changed_directory_bounds_unchanged_source_depth_before_backend_access()
         inner: MemoryBackend::new().with_directory("C:\\work\\folder", 1),
         validation_calls: Cell::new(0),
         key_calls: Cell::new(0),
+        source_key_calls: Cell::new(0),
         observe_calls: Cell::new(0),
         relationship_calls: Cell::new(0),
     };
@@ -497,6 +684,7 @@ fn changed_directory_overlap_scan_honors_cancellation_with_bounded_observation_w
         inner,
         validation_calls: Cell::new(0),
         key_calls: Cell::new(0),
+        source_key_calls: Cell::new(0),
         observe_calls: Cell::new(0),
         relationship_calls: Cell::new(0),
     };
@@ -512,12 +700,13 @@ fn changed_directory_overlap_scan_honors_cancellation_with_bounded_observation_w
 }
 
 #[test]
-fn file_only_and_noop_plans_do_not_inspect_unchanged_rows_for_directory_overlap()
+fn noop_plan_stays_zero_cost_and_unique_file_plan_skips_source_normalization()
 -> Result<(), Box<dyn std::error::Error>> {
     let noop_backend = CountingBackend {
         inner: MemoryBackend::new().with_file("C:\\work\\a.txt", 1),
         validation_calls: Cell::new(0),
         key_calls: Cell::new(0),
+        source_key_calls: Cell::new(0),
         observe_calls: Cell::new(0),
         relationship_calls: Cell::new(0),
     };
@@ -528,12 +717,14 @@ fn file_only_and_noop_plans_do_not_inspect_unchanged_rows_for_directory_overlap(
     assert!(noop.is_empty());
     assert_eq!(noop_backend.validation_calls.get(), 0);
     assert_eq!(noop_backend.key_calls.get(), 0);
+    assert_eq!(noop_backend.source_key_calls.get(), 0);
     assert_eq!(noop_backend.observe_calls.get(), 0);
 
     let file_backend = CountingBackend {
         inner: MemoryBackend::new().with_file("C:\\work\\a.txt", 1),
         validation_calls: Cell::new(0),
         key_calls: Cell::new(0),
+        source_key_calls: Cell::new(0),
         observe_calls: Cell::new(0),
         relationship_calls: Cell::new(0),
     };
@@ -553,7 +744,8 @@ fn file_only_and_noop_plans_do_not_inspect_unchanged_rows_for_directory_overlap(
     assert_eq!(plan.changed_count(), 1);
     assert_eq!(file_backend.validation_calls.get(), 2);
     assert_eq!(file_backend.key_calls.get(), 3);
-    assert_eq!(file_backend.observe_calls.get(), 2);
+    assert_eq!(file_backend.source_key_calls.get(), 0);
+    assert_eq!(file_backend.observe_calls.get(), 3);
     assert_eq!(file_backend.inner.mutation_count(), 0);
     Ok(())
 }
@@ -674,6 +866,10 @@ impl RenameBackend for AliasedParentIdentityBackend {
         self.inner.path_key(path)
     }
 
+    fn source_entry_key(&self, path: &LegacyText) -> Result<PathKey, BackendError> {
+        self.inner.source_entry_key(path)
+    }
+
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
         let mut snapshot = self.inner.observe(path)?;
         if path
@@ -791,6 +987,10 @@ impl RenameBackend for CanonicalKeyBackend {
         PathKey::exact(&LegacyText::from(opaque))
     }
 
+    fn source_entry_key(&self, path: &LegacyText) -> Result<PathKey, BackendError> {
+        self.inner.source_entry_key(path)
+    }
+
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
         self.inner.observe(path)
     }
@@ -850,6 +1050,7 @@ struct CountingBackend {
     inner: MemoryBackend,
     validation_calls: Cell<usize>,
     key_calls: Cell<usize>,
+    source_key_calls: Cell<usize>,
     observe_calls: Cell<usize>,
     relationship_calls: Cell<usize>,
 }
@@ -873,6 +1074,10 @@ impl RenameBackend for AncestorFailureBackend {
 
     fn path_key(&self, path: &LegacyText) -> PathKey {
         self.inner.path_key(path)
+    }
+
+    fn source_entry_key(&self, path: &LegacyText) -> Result<PathKey, BackendError> {
+        self.inner.source_entry_key(path)
     }
 
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
@@ -952,6 +1157,10 @@ impl RenameBackend for EnvironmentFailureBackend {
         self.inner.path_key(path)
     }
 
+    fn source_entry_key(&self, path: &LegacyText) -> Result<PathKey, BackendError> {
+        self.inner.source_entry_key(path)
+    }
+
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
         self.observe_calls.set(self.observe_calls.get() + 1);
         self.inner.observe(path)
@@ -1015,6 +1224,12 @@ impl RenameBackend for CountingBackend {
         self.inner.path_key(path)
     }
 
+    fn source_entry_key(&self, path: &LegacyText) -> Result<PathKey, BackendError> {
+        self.source_key_calls
+            .set(self.source_key_calls.get().saturating_add(1));
+        self.inner.source_entry_key(path)
+    }
+
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
         self.observe_calls.set(self.observe_calls.get() + 1);
         self.inner.observe(path)
@@ -1061,6 +1276,7 @@ fn nested_overlap_detection_has_bounded_calls_and_one_issue_per_row() {
         inner,
         validation_calls: Cell::new(0),
         key_calls: Cell::new(0),
+        source_key_calls: Cell::new(0),
         observe_calls: Cell::new(0),
         relationship_calls: Cell::new(0),
     };
@@ -1090,6 +1306,7 @@ fn direct_request_rejects_excessive_path_depth_before_backend_access()
         inner: MemoryBackend::new(),
         validation_calls: Cell::new(0),
         key_calls: Cell::new(0),
+        source_key_calls: Cell::new(0),
         observe_calls: Cell::new(0),
         relationship_calls: Cell::new(0),
     };
@@ -1145,6 +1362,7 @@ fn cancellation_stops_planner_before_all_backend_observations() {
         inner,
         validation_calls: Cell::new(0),
         key_calls: Cell::new(0),
+        source_key_calls: Cell::new(0),
         observe_calls: Cell::new(0),
         relationship_calls: Cell::new(0),
     };

@@ -151,6 +151,10 @@ impl RenameBackend for FailingObserveBackend {
         self.inner.path_key(path)
     }
 
+    fn source_entry_key(&self, path: &darknamer_core::LegacyText) -> Result<PathKey, BackendError> {
+        self.inner.source_entry_key(path)
+    }
+
     fn observe(&self, path: &darknamer_core::LegacyText) -> Result<PathSnapshot, BackendError> {
         let path_text = path.to_string_lossy();
         let matches = match self.target {
@@ -267,6 +271,10 @@ impl RenameBackend for CancelDuringObserveBackend {
         self.inner.path_key(path)
     }
 
+    fn source_entry_key(&self, path: &darknamer_core::LegacyText) -> Result<PathKey, BackendError> {
+        self.inner.source_entry_key(path)
+    }
+
     fn observe(&self, path: &darknamer_core::LegacyText) -> Result<PathSnapshot, BackendError> {
         let observations = self.observations.get().saturating_add(1);
         self.observations.set(observations);
@@ -303,6 +311,10 @@ impl RenameBackend for CancelDuringRenameBackend {
 
     fn path_key(&self, path: &darknamer_core::LegacyText) -> PathKey {
         self.inner.path_key(path)
+    }
+
+    fn source_entry_key(&self, path: &darknamer_core::LegacyText) -> Result<PathKey, BackendError> {
+        self.inner.source_entry_key(path)
     }
 
     fn observe(&self, path: &darknamer_core::LegacyText) -> Result<PathSnapshot, BackendError> {
@@ -1679,6 +1691,10 @@ impl RenameBackend for MatrixBackend {
 
     fn path_key(&self, path: &darknamer_core::LegacyText) -> PathKey {
         self.inner.path_key(path)
+    }
+
+    fn source_entry_key(&self, path: &darknamer_core::LegacyText) -> Result<PathKey, BackendError> {
+        self.inner.source_entry_key(path)
     }
 
     fn observe(&self, path: &darknamer_core::LegacyText) -> Result<PathSnapshot, BackendError> {

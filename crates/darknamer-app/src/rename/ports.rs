@@ -192,6 +192,12 @@ pub trait RenameBackend {
     /// Builds the filesystem's comparison key for a validated complete path.
     fn path_key(&self, path: &LegacyText) -> PathKey;
 
+    /// Builds a fallible key for the actual source directory entry.
+    ///
+    /// Implementations normalize the final entry name only after resolving its
+    /// direct parent and source through the backend's native identity boundary.
+    fn source_entry_key(&self, path: &LegacyText) -> Result<PathKey, BackendError>;
+
     /// Observes the exact leaf and resolved direct parent.
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError>;
 
@@ -214,6 +220,21 @@ pub trait RenameBackend {
     /// `Err(NotApplied)` guarantees no mutation. `Err(MayHaveApplied)` requires
     /// reconciliation and must never be followed by speculative rollback.
     fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError>;
+}
+
+pub(super) fn source_entry_key_from_parts(
+    parent: EntryIdentity,
+    normalized_leaf: &[u16],
+) -> PathKey {
+    let mut units = Vec::with_capacity(12 + normalized_leaf.len());
+    for bytes in parent.volume().to_le_bytes().chunks_exact(2) {
+        units.push(u16::from_le_bytes([bytes[0], bytes[1]]));
+    }
+    for bytes in parent.file_id().to_le_bytes().chunks_exact(2) {
+        units.push(u16::from_le_bytes([bytes[0], bytes[1]]));
+    }
+    units.extend_from_slice(normalized_leaf);
+    PathKey(units.into_boxed_slice())
 }
 
 /// Durable journal adapter failure.

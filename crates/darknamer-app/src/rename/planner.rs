@@ -104,7 +104,7 @@ impl<'a> RenamePlanner<'a> {
             check_cancelled(&cancellation_requested)?;
             validate_intent(intent, &mut issues);
         }
-        if has_changed_directory {
+        if !changed.is_empty() {
             for intent in request
                 .entries
                 .iter()
@@ -291,6 +291,17 @@ impl<'a> RenamePlanner<'a> {
             return Err(PlanError::new(issues).into());
         }
 
+        append_actual_duplicate_source_issues(
+            self.backend,
+            &request.entries,
+            &entries,
+            &mut issues,
+            &cancellation_requested,
+        )?;
+        if !issues.is_empty() {
+            return Err(PlanError::new(issues).into());
+        }
+
         let mut changed_directory_identity_owners: BTreeMap<EntryIdentity, Vec<EntryId>> =
             BTreeMap::new();
         if has_changed_directory {
@@ -389,6 +400,104 @@ fn append_duplicate_issues<'a>(
                 kind: kind.clone(),
             });
         }
+    }
+    Ok(())
+}
+
+struct SourceCandidate<'a> {
+    id: EntryId,
+    path: &'a darknamer_core::LegacyText,
+    changed: bool,
+}
+
+fn append_actual_duplicate_source_issues<'a>(
+    backend: &dyn RenameBackend,
+    request: &'a [RenameIntent],
+    changed_entries: &'a [PlanRow],
+    issues: &mut Vec<PlanIssue>,
+    cancellation_requested: &impl Fn() -> bool,
+) -> Result<(), PlanAttemptError> {
+    if changed_entries.is_empty() {
+        return Ok(());
+    }
+
+    let mut candidates: BTreeMap<(EntryIdentity, EntryIdentity), Vec<SourceCandidate<'a>>> =
+        BTreeMap::new();
+    for entry in changed_entries {
+        check_cancelled(cancellation_requested)?;
+        if let Some(source) = entry.source_snapshot.entry {
+            candidates
+                .entry((entry.source_snapshot.parent, source.identity))
+                .or_default()
+                .push(SourceCandidate {
+                    id: entry.id,
+                    path: &entry.source,
+                    changed: true,
+                });
+        }
+    }
+    for intent in request
+        .iter()
+        .filter(|intent| intent.source == intent.destination)
+    {
+        check_cancelled(cancellation_requested)?;
+        match backend.observe(&intent.source) {
+            Ok(PathSnapshot {
+                parent,
+                entry: Some(source),
+            }) => {
+                candidates
+                    .entry((parent, source.identity))
+                    .or_default()
+                    .push(SourceCandidate {
+                        id: intent.id,
+                        path: &intent.source,
+                        changed: false,
+                    });
+            }
+            Ok(PathSnapshot { entry: None, .. }) => {}
+            Err(error) if is_not_found_error(error) => {}
+            Err(error) => issues.push(PlanIssue {
+                entry: intent.id,
+                kind: PlanIssueKind::BackendFailure(error),
+            }),
+        }
+    }
+    if !issues.is_empty() {
+        return Ok(());
+    }
+
+    let mut duplicates = BTreeSet::new();
+    for candidate_group in candidates
+        .values()
+        .filter(|group| group.len() > 1 && group.iter().any(|candidate| candidate.changed))
+    {
+        check_cancelled(cancellation_requested)?;
+        let mut normalized_owners: BTreeMap<PathKey, Vec<&SourceCandidate<'_>>> = BTreeMap::new();
+        for candidate in candidate_group {
+            check_cancelled(cancellation_requested)?;
+            match backend.source_entry_key(candidate.path) {
+                Ok(key) => normalized_owners.entry(key).or_default().push(candidate),
+                Err(error) => issues.push(PlanIssue {
+                    entry: candidate.id,
+                    kind: PlanIssueKind::BackendFailure(error),
+                }),
+            }
+        }
+        for owners in normalized_owners
+            .values()
+            .filter(|owners| owners.len() > 1 && owners.iter().any(|owner| owner.changed))
+        {
+            check_cancelled(cancellation_requested)?;
+            duplicates.extend(owners.iter().map(|owner| owner.id));
+        }
+    }
+    for entry in duplicates {
+        check_cancelled(cancellation_requested)?;
+        issues.push(PlanIssue {
+            entry,
+            kind: PlanIssueKind::DuplicateSource,
+        });
     }
     Ok(())
 }

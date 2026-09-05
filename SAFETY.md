@@ -25,6 +25,13 @@ it. A changed destination also cannot lie below a directory being renamed.
 Observed directory identity resolves alternate accepted path spellings without
 rewriting the model's source or destination text.
 
+Source duplicate checks first group actual entries by observed parent and file
+identity. Only a group containing a changed row resolves its final directory
+entry names. The Windows backend derives that bounded name from an opened
+source handle, so ordinary, verbatim, and available short-name aliases
+share one source key while distinct hard-link names remain separate. A group
+containing only unchanged rows remains inert.
+
 The v0.1 release-validated scope is Windows 10 and Windows 11 on x64, with a
 local, non-elevated process operating on same-parent, non-reparse entries in a
 case-insensitive NTFS directory. Filesystems other than NTFS are unsupported
@@ -238,6 +245,14 @@ must lower the corresponding budget in the same reviewed change. Every modified
 exception still requires a local `SAFETY` justification and must pass the
 Windows Clippy gate while `undocumented_unsafe_blocks` and
 `unsafe_op_in_unsafe_fn` remain denied.
+
+`normalized_final_leaf` keeps the source handle live for the synchronous
+`GetFinalPathNameByHandleW` call, passes either a null zero-length output or the
+exact checked writable slice, bounds each allocation by
+`MAX_NORMALIZED_FINAL_PATH_UTF16_UNITS`, and retries a changed required size
+once. It retains only a final component bounded by
+`MAX_WINDOWS_LEAF_NAME_UTF16_UNITS`. Native API failures remain typed planning
+blockers.
 
 Rust toolchain or Windows binding upgrades, and every release-candidate review,
 must re-evaluate whether safe `Default`, RAII ownership, typed COM wrappers, or

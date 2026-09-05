@@ -93,7 +93,7 @@ const EXPECTED: &[(&str, UnsafeCounts)] = &[
     ),
     (
         "src/rename/windows_native.rs",
-        UnsafeCounts::new(18, 0, 0, 0),
+        UnsafeCounts::new(19, 0, 0, 0),
     ),
     ("src/windows.rs", UnsafeCounts::new(215, 7, 1, 0)),
     ("src/windows/appearance.rs", UnsafeCounts::new(64, 0, 0, 0)),
@@ -128,7 +128,7 @@ const EXPECTED: &[(&str, UnsafeCounts)] = &[
     ("src/windows/worker.rs", UnsafeCounts::new(20, 0, 0, 0)),
     (
         "tests/rename_windows_backend.rs",
-        UnsafeCounts::new(1, 0, 0, 0),
+        UnsafeCounts::new(2, 0, 0, 0),
     ),
 ];
 

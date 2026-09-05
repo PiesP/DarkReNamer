@@ -16,7 +16,9 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 use super::model::ObservedEntry;
-use super::windows_native::{NativeParent, file_identity, open_entry, rename_noreplace};
+use super::windows_native::{
+    NativeParent, file_identity, normalized_final_leaf, open_entry, rename_noreplace,
+};
 use super::{
     BackendError, BackendOperation, EntryIdentity, EntryKind, MutationCertainty, PathKey,
     PathSnapshot, RenameBackend, RenameOperation,
@@ -69,6 +71,26 @@ impl RenameBackend for WindowsRenameBackend {
             return PathKey(vec![u16::MAX].into_boxed_slice());
         };
         PathKey(mapped.into_boxed_slice())
+    }
+
+    fn source_entry_key(&self, path: &LegacyText) -> Result<PathKey, BackendError> {
+        let (parent_path, leaf) = split_absolute_path(path, BackendOperation::Observe)?;
+        let parent = NativeParent::open_legacy(&parent_path)
+            .map_err(|error| observe_error(error, BackendOperation::Observe))?;
+        let source = open_entry(&parent, leaf.units(), false)
+            .map_err(|error| observe_error(error, BackendOperation::Observe))?;
+        let normalized_leaf = normalized_final_leaf(&source)
+            .map_err(|error| observe_error(error, BackendOperation::Observe))?;
+        let normalized_leaf =
+            invariant_uppercase(&normalized_leaf).ok_or_else(|| BackendError {
+                operation: BackendOperation::Observe,
+                code: io_code(),
+                certainty: MutationCertainty::NotApplied,
+            })?;
+        Ok(super::ports::source_entry_key_from_parts(
+            model_identity(parent.identity),
+            &normalized_leaf,
+        ))
     }
 
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {

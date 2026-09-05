@@ -11,7 +11,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -24,6 +24,7 @@ use darknamer_app::rename::{
     apply_execution_report, build_plan_request, preflight_plan, process_is_elevated,
 };
 use darknamer_core::{LegacyList, LegacyListItem, LegacyText, validate_windows_leaf_name};
+use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
 
 fn legacy_path(path: &std::path::Path) -> LegacyText {
     LegacyText::from_units(path.as_os_str().encode_wide().collect::<Vec<_>>())
@@ -33,6 +34,51 @@ fn verbatim_legacy_path(path: &std::path::Path) -> LegacyText {
     let mut units = r"\\?\".encode_utf16().collect::<Vec<_>>();
     units.extend(path.as_os_str().encode_wide());
     LegacyText::from_units(units)
+}
+
+fn existing_short_path(path: &std::path::Path) -> std::io::Result<Option<PathBuf>> {
+    let mut input = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    input.push(0);
+    let required = query_short_path(&input, &mut []);
+    if required == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let capacity = usize::try_from(required)
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+    let mut output = vec![0_u16; capacity];
+    let written = query_short_path(&input, &mut output);
+    if written == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let written = usize::try_from(written)
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+    if written >= output.len() {
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
+    }
+    output.truncate(written);
+    let short = PathBuf::from(std::ffi::OsString::from_wide(&output));
+    let short_leaf = short.file_name().map(OsStrExt::encode_wide);
+    let long_leaf = path.file_name().map(OsStrExt::encode_wide);
+    if short_leaf
+        .zip(long_leaf)
+        .is_none_or(|(short, long)| short.eq(long))
+    {
+        Ok(None)
+    } else {
+        Ok(Some(short))
+    }
+}
+
+fn query_short_path(input: &[u16], output: &mut [u16]) -> u32 {
+    let output_pointer = if output.is_empty() {
+        std::ptr::null_mut()
+    } else {
+        output.as_mut_ptr()
+    };
+    let capacity = u32::try_from(output.len()).unwrap_or(0);
+    // SAFETY: input is retained NUL-terminated UTF-16; output is either null
+    // with zero capacity or writable for the exact checked slice length.
+    unsafe { GetShortPathNameW(input.as_ptr(), output_pointer, capacity) }
 }
 
 fn intent(id: u32, source: &std::path::Path, parent: &std::path::Path, leaf: &str) -> RenameIntent {
@@ -122,6 +168,10 @@ impl<B: RenameBackend> RenameBackend for TimedBackend<B> {
         result
     }
 
+    fn source_entry_key(&self, path: &LegacyText) -> Result<PathKey, BackendError> {
+        self.inner.source_entry_key(path)
+    }
+
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
         let started = Instant::now();
         let result = self.inner.observe(path);
@@ -196,6 +246,10 @@ impl<B: RenameBackend> RenameBackend for ValidationMemoBackend<B> {
 
     fn path_key(&self, path: &LegacyText) -> PathKey {
         self.inner.path_key(path)
+    }
+
+    fn source_entry_key(&self, path: &LegacyText) -> Result<PathKey, BackendError> {
+        self.inner.source_entry_key(path)
     }
 
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
@@ -453,6 +507,13 @@ impl RenameBackend for BenchmarkBackend {
         }
     }
 
+    fn source_entry_key(&self, path: &LegacyText) -> Result<PathKey, BackendError> {
+        match self {
+            Self::Baseline(backend) => backend.source_entry_key(path),
+            Self::ValidationSkipEstimate(backend) => backend.source_entry_key(path),
+        }
+    }
+
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
         match self {
             Self::Baseline(backend) => backend.observe(path),
@@ -520,6 +581,10 @@ impl RenameBackend for ScriptedValidationBackend {
 
     fn path_key(&self, path: &LegacyText) -> PathKey {
         self.inner.path_key(path)
+    }
+
+    fn source_entry_key(&self, path: &LegacyText) -> Result<PathKey, BackendError> {
+        self.inner.source_entry_key(path)
     }
 
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
@@ -1348,6 +1413,164 @@ fn directory_rename_allows_an_unrelated_verbatim_sibling_source()
     assert!(source.is_dir());
     assert_eq!(fs::read(&child)?, b"child");
     assert!(!directory.path().join("Renamed").exists());
+    Ok(())
+}
+
+#[test]
+fn source_entry_key_unifies_verbatim_aliases_and_distinguishes_hardlink_names()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("original-long-file-name.txt");
+    let hardlink = directory.path().join("separate-hard-link.txt");
+    fs::write(&source, b"source")?;
+    fs::hard_link(&source, &hardlink)?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+    let backend = WindowsRenameBackend;
+
+    let ordinary = backend.source_entry_key(&legacy_path(&source))?;
+    let verbatim = backend.source_entry_key(&verbatim_legacy_path(&source))?;
+    let distinct_hardlink = backend.source_entry_key(&legacy_path(&hardlink))?;
+
+    assert_eq!(ordinary, verbatim);
+    assert_ne!(ordinary, distinct_hardlink);
+    Ok(())
+}
+
+#[test]
+fn planner_rejects_source_aliases_and_executes_distinct_hardlink_names()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("original-long-file-name.txt");
+    let hardlink = directory.path().join("separate-hard-link.txt");
+    fs::write(&source, b"source")?;
+    fs::hard_link(&source, &hardlink)?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+    let mut backend = WindowsRenameBackend;
+
+    for (revision, alias_name) in [(1, "original-long-file-name.txt"), (2, "renamed-alias.txt")] {
+        let request = PlanRequest::new(
+            ModelRevision::new(revision),
+            vec![
+                intent(0, &source, directory.path(), "renamed-source.txt"),
+                RenameIntent::new(
+                    EntryId::new(1),
+                    verbatim_legacy_path(&source),
+                    verbatim_legacy_path(directory.path()),
+                    alias_name,
+                    EntryKind::File,
+                ),
+            ],
+        );
+        let Err(error) = RenamePlanner::new(&backend).plan(request) else {
+            return Err(
+                std::io::Error::other("ordinary/verbatim source aliases were accepted").into(),
+            );
+        };
+        assert_eq!(error.issues().len(), 2);
+        assert!(
+            error
+                .issues()
+                .iter()
+                .all(|issue| issue.kind == PlanIssueKind::DuplicateSource)
+        );
+    }
+
+    let plan = RenamePlanner::new(&backend).plan(PlanRequest::new(
+        ModelRevision::new(3),
+        vec![
+            intent(0, &source, directory.path(), "renamed-source.txt"),
+            intent(1, &hardlink, directory.path(), "separate-hard-link.txt"),
+        ],
+    ))?;
+    let id = plan.id();
+    let revision = plan.revision();
+    let mut journal = MemoryJournal::new();
+    let report = RenameExecutor::new(&mut backend, &mut journal)
+        .execute(plan.confirm_presented(id, revision)?)?;
+    let renamed_source = directory.path().join("renamed-source.txt");
+    assert_eq!(report.outcome(), &ExecutionOutcome::Completed);
+    assert!(!source.exists());
+    assert_eq!(fs::read(&renamed_source)?, b"source");
+    assert_eq!(fs::read(&hardlink)?, b"source");
+
+    let plan = RenamePlanner::new(&backend).plan(PlanRequest::new(
+        ModelRevision::new(4),
+        vec![
+            intent(0, &renamed_source, directory.path(), "renamed-source-2.txt"),
+            intent(1, &hardlink, directory.path(), "hard-link-2.txt"),
+        ],
+    ))?;
+    let id = plan.id();
+    let revision = plan.revision();
+    let mut journal = MemoryJournal::new();
+    let report = RenameExecutor::new(&mut backend, &mut journal)
+        .execute(plan.confirm_presented(id, revision)?)?;
+    assert_eq!(report.outcome(), &ExecutionOutcome::Completed);
+    assert_eq!(
+        fs::read(directory.path().join("renamed-source-2.txt"))?,
+        b"source"
+    );
+    assert_eq!(
+        fs::read(directory.path().join("hard-link-2.txt"))?,
+        b"source"
+    );
+    Ok(())
+}
+
+#[test]
+fn planner_rejects_an_existing_short_name_source_alias_when_available()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let source = directory
+        .path()
+        .join("source-name-long-enough-for-short-alias.txt");
+    fs::write(&source, b"source")?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+    let Some(short_source) = existing_short_path(&source)? else {
+        eprintln!("DARKRENAMER_OPTIONAL_SKIP capability=short-name reason=unavailable");
+        return Ok(());
+    };
+    let short_parent = short_source
+        .parent()
+        .ok_or_else(|| std::io::Error::other("short source parent missing"))?;
+    let short_leaf = short_source
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("short source leaf missing"))?
+        .encode_wide()
+        .collect::<Vec<_>>();
+    let backend = WindowsRenameBackend;
+    let request = PlanRequest::new(
+        ModelRevision::new(1),
+        vec![
+            intent(0, &source, directory.path(), "renamed.txt"),
+            RenameIntent::new(
+                EntryId::new(1),
+                legacy_path(&short_source),
+                legacy_path(short_parent),
+                LegacyText::from_units(short_leaf),
+                EntryKind::File,
+            ),
+        ],
+    );
+
+    let Err(error) = RenamePlanner::new(&backend).plan(request) else {
+        return Err(std::io::Error::other("long/short source aliases were accepted").into());
+    };
+    assert_eq!(error.issues().len(), 2);
+    assert!(
+        error
+            .issues()
+            .iter()
+            .all(|issue| issue.kind == PlanIssueKind::DuplicateSource)
+    );
+    assert!(source.is_file());
+    assert!(!directory.path().join("renamed.txt").exists());
     Ok(())
 }
 
