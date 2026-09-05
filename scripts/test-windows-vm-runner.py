@@ -23,7 +23,7 @@ class VmRunnerTests(unittest.TestCase):
         screenshot = self.artifact('main-workbench.png', b'\x89PNG\r\n\x1a\nfixture')
         self.manifest = {'schema_version': 1, 'source_sha': 'a' * 40, 'source_state': 'clean', 'target': vm.TARGET, 'test_binaries': [self.test], 'application': self.app}
         self.result = dict(self.manifest)
-        self.result.update(status='passed', tests=[dict(self.test, status='passed', exit_code=0, passed=3, failed=0, ignored=1, stdout=stdout, stderr=stderr)], gui={'status': 'passed', 'screenshot': screenshot}, transport={'guest_cleanup': True})
+        self.result.update(status='passed', tests=[dict(self.test, status='passed', exit_code=0, passed=3, failed=0, ignored=1, stdout=stdout, stderr=stderr)], gui=dict(self.app, status='passed', screenshot=screenshot), transport={'guest_cleanup': True})
 
     def artifact(self, name, data):
         (self.root / name).write_bytes(data)
@@ -59,6 +59,19 @@ class VmRunnerTests(unittest.TestCase):
         self.result['tests'][0]['passed'] = 100
         with self.assertRaisesRegex(ValueError, 'counts'):
             self.verify()
+
+    def test_failed_libtest_outcome_is_not_a_pass(self):
+        self.result['tests'][0]['stdout'] = self.artifact('tests.stdout.log', b'test result: FAILED. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s\n')
+        self.assertFalse(self.verify())
+
+    def test_gui_artifact_binding_is_verified(self):
+        self.result['gui']['sha256'] = 'b' * 64
+        with self.assertRaisesRegex(ValueError, 'GUI result'):
+            self.verify()
+
+    def test_cleanup_requires_a_boolean_success(self):
+        self.result['transport']['guest_cleanup'] = {'value': False}
+        self.assertFalse(self.verify())
 
     def test_empty_success_output_is_rejected(self):
         self.result['tests'][0]['stdout'] = self.artifact('tests.stdout.log', b'')

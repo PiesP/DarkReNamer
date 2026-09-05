@@ -134,7 +134,7 @@ try {
                 if ($task) { Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName $name -Confirm:$false }
             }
             if ($guestRoot) {
-                $transport.guest_cleanup = Invoke-Command -Session $session -ArgumentList $guestRoot,$taskName,($null -ne $result) -ScriptBlock {
+                $cleanupResult = Invoke-Command -Session $session -ArgumentList $guestRoot,$taskName,($transport.status -eq 'collected') -ScriptBlock {
                     param($root,$name,$hasResult)
                     if ($name -cnotmatch '^DarkReNamerTests-[0-9a-f]{32}$' -or $root -cne (Join-Path $env:TEMP $name)) { throw 'Unexpected guest cleanup root.' }
                     $prefix = $root + '\'
@@ -160,6 +160,8 @@ try {
                     Remove-Item -LiteralPath $root -Recurse -Force
                     -not (Test-Path -LiteralPath $root)
                 }
+                if ($cleanupResult -isnot [bool]) { throw 'Guest cleanup did not return a boolean.' }
+                $transport.guest_cleanup = [bool]$cleanupResult
             }
         } catch {
             $transport.status='failed'; $transport.cleanup_error='Guest cleanup failed; inspect cleanup-error.txt.'; $transport.guest_cleanup=$false

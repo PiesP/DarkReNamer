@@ -88,6 +88,8 @@ def verify_result(root, manifest, result):
         counts = [row.get(key) for key in ('passed', 'failed', 'ignored')]
         if summaries:
             summary = summaries[-1]
+            if summary[0] != 'ok':
+                passed = False
             if counts != [int(n) for n in summary[1:4]] or int(summary[4]) != 0:
                 raise ValueError('VM test counts differ from the actual libtest output, or tests were filtered.')
         elif row.get('status') == 'passed':
@@ -98,6 +100,8 @@ def verify_result(root, manifest, result):
             total += row['passed']
     checked_artifact(root, manifest['application'])
     gui = result.get('gui', {})
+    if gui.get('file') != manifest['application']['file'] or gui.get('sha256') != manifest['application']['sha256']:
+        raise ValueError('VM GUI result differs from the application artifact.')
     if gui.get('status') != 'passed':
         passed = False
     else:
@@ -105,7 +109,7 @@ def verify_result(root, manifest, result):
         with screenshot.open('rb') as stream:
             if stream.read(8) != b'\x89PNG\r\n\x1a\n':
                 raise ValueError('GUI screenshot is not a PNG.')
-    if not result.get('transport', {}).get('guest_cleanup') or total == 0:
+    if result.get('transport', {}).get('guest_cleanup') is not True or total == 0:
         passed = False
     return passed
 
