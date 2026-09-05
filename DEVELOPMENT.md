@@ -57,6 +57,54 @@ RC=/path/to/llvm-rc-19 cargo xwin build --release --locked \
 `sha256sum`. It is a best-effort diagnostic path, not a CI or Windows acceptance
 gate.
 
+## Native tests in a local Hyper-V VM
+
+From WSL, run the current checkout's Windows test binaries on a configured
+Windows x64 Hyper-V VM:
+
+```bash
+python3 scripts/test-windows-vm.py --vm-name "$DARKRENAMER_VM_NAME"
+```
+
+The WSL host needs Python 3.11 or newer, Git, the pinned Rust toolchain,
+`cargo-xwin`, `wslpath`, and the LLVM resource compiler described above. Windows
+PowerShell must be callable through WSL interop with Hyper-V administration
+rights. The VM needs NTFS, the Microsoft Visual C++ x64 runtime, Developer Mode
+for non-elevated symlink fixtures, and one unlocked desktop for its local test
+account. The test processes run with a limited interactive token; the controller
+uses PowerShell Direct only for transport and scheduled-task management. The
+runner does not change VM security settings, reset checkpoints, or install tools.
+
+Credentials stay outside the checkout and bundle. By default the controller
+loads the host user's local `DarkReNamerVmTools/auth/credential-store.ps1` helper
+with `-Action Load`. Use `--credential-helper` to select another trusted local
+Windows helper implementing the same `PSCredential` interface. Register the
+credential separately under the same Windows host account, using Windows DPAPI
+or an equivalent private store. Missing or invalid credentials fail without an
+interactive password prompt. GUI login remains a separate prerequisite.
+
+The command requires a clean checkout. It builds all workspace test targets
+with locked dependencies, takes executable paths from Cargo's JSON artifacts,
+and records their SHA-256 values together with the exact source commit and
+lockfile hash. It builds the production EXE separately and copies only the
+manifest, runner, and listed binaries into a unique guest test directory.
+Tests run sequentially with required backend capabilities enabled; unavailable
+capabilities fail the run. Ignored benchmarks remain ignored. Every executable
+must produce a libtest summary, and returned counts and log digests are checked
+against the collected output. A separate production-app smoke checks window
+creation, screenshot capture, and normal exit.
+
+Bundles, logs, and screenshots are external. `--output` selects a new
+Windows-backed WSL path; by default the runner uses the Windows host's temporary
+directory. A failed binary, timeout, missing output, or incomplete guest cleanup
+fails the command. Inspect retained evidence before retrying a failure. Do not
+run other GUI automation on the same VM desktop concurrently.
+
+This lane proves actual Windows execution of cross-built test artifacts, not
+native Windows compilation or the complete native development gate. It does not
+establish the Windows 10/11 DPI and Forced Colors matrix, accessibility/IME,
+physical-media benchmarks, or VM power-loss acceptance in `SAFETY.md`.
+
 ## Dependency policy
 
 `Cargo.lock` and `--locked` define reproducible application resolution. Exact

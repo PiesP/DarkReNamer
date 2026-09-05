@@ -2,19 +2,12 @@
 mod windows_capabilities;
 
 use std::ffi::OsStr;
-use std::fs;
 use std::io;
-use std::path::PathBuf;
 
 use windows_capabilities::{GateMode, gate_mode_from, unavailable_in_mode};
 
 fn normalize_workflow_source(source: &str) -> String {
     source.replace("\r\n", "\n")
-}
-
-fn repository_file(path: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    Ok(fs::read_to_string(repository.join(path))?)
 }
 
 #[test]
@@ -100,11 +93,14 @@ fn hosted_windows_and_release_gates_require_capabilities_with_visible_output()
 #[test]
 fn release_workflows_promote_the_immutable_candidate_without_rebuilding()
 -> Result<(), Box<dyn std::error::Error>> {
-    let candidate = normalize_workflow_source(&repository_file(".github/workflows/release.yaml")?);
-    let promotion =
-        normalize_workflow_source(&repository_file(".github/workflows/promote-release.yaml")?);
-    let ci = normalize_workflow_source(&repository_file(".github/workflows/ci.yaml")?);
-    let tooling_tests = normalize_workflow_source(&repository_file("scripts/test-tooling.ps1")?);
+    let candidate =
+        normalize_workflow_source(include_str!("../../../.github/workflows/release.yaml"));
+    let promotion = normalize_workflow_source(include_str!(
+        "../../../.github/workflows/promote-release.yaml"
+    ));
+    let ci = normalize_workflow_source(include_str!("../../../.github/workflows/ci.yaml"));
+    let tooling_tests =
+        normalize_workflow_source(include_str!("../../../scripts/test-tooling.ps1"));
     let (non_windows_ci, windows_ci) = ci
         .split_once("\n  windows:\n")
         .ok_or("CI workflow must retain a dedicated Windows job")?;

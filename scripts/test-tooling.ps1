@@ -12,6 +12,7 @@ if ($Platform -eq 'Current') {
 }
 
 $commonTests = @(
+    'test-windows-vm-guest.ps1'
     'test-toolchain-consistency.ps1'
     'test-measure-windows-binary.ps1'
     'test-get-git-blob-sha256.ps1'
