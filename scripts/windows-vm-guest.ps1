@@ -258,16 +258,19 @@ function Read-RustTestSummary {
         [switch] $AllowZeroTests
     )
 
-    $combined = $Stdout + "`n" + $Stderr
-    $pattern = '(?m)^test result: (ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored;(?:[^\r\n]*)\r?$'
-    $matches = [regex]::Matches($combined, $pattern)
-    if ($matches.Count -ne 1) {
-        throw 'Rust test output must contain exactly one test result summary.'
+    $pattern = '(?m)^test result: (ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; ([0-9]+) measured; ([0-9]+) filtered out;(?:[^\r\n]*)\r?$'
+    $matches = [regex]::Matches($Stdout, $pattern)
+    if ($matches.Count -eq 0) {
+        throw 'Rust test stdout must contain a test result summary.'
     }
-    $summary = $matches[0]
+    $summary = $matches[$matches.Count - 1]
     $passed = [int]::Parse($summary.Groups[2].Value, [Globalization.CultureInfo]::InvariantCulture)
     $failed = [int]::Parse($summary.Groups[3].Value, [Globalization.CultureInfo]::InvariantCulture)
     $ignored = [int]::Parse($summary.Groups[4].Value, [Globalization.CultureInfo]::InvariantCulture)
+    $filtered = [int]::Parse($summary.Groups[6].Value, [Globalization.CultureInfo]::InvariantCulture)
+    if ($filtered -ne 0) {
+        throw 'The final Rust test harness must not filter tests.'
+    }
     if (-not $AllowZeroTests -and ($passed + $failed + $ignored) -eq 0) {
         throw 'A non-main Rust test harness reported zero tests.'
     }
@@ -277,6 +280,7 @@ function Read-RustTestSummary {
         passed = $passed
         failed = $failed
         ignored = $ignored
+        filtered = $filtered
     }
 }
 

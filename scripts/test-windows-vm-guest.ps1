@@ -168,12 +168,24 @@ try {
     }
     Assert-Fails {
         Read-RustTestSummary -Stdout 'no summary' -Stderr ''
-    } 'exactly one test result summary'
+    } 'stdout must contain a test result summary'
+    $nestedSummary = Read-RustTestSummary `
+        -Stdout "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s`ntest result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s`n" `
+        -Stderr 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out'
+    if ($nestedSummary.passed -ne 3 -or $nestedSummary.failed -ne 0 -or
+        $nestedSummary.ignored -ne 1 -or $nestedSummary.filtered -ne 0) {
+        throw 'The final parent libtest summary was not selected from stdout.'
+    }
     Assert-Fails {
-        Read-RustTestSummary -Stdout 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' -Stderr ''
+        Read-RustTestSummary `
+            -Stdout 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out;' `
+            -Stderr ''
+    } 'must not filter tests'
+    Assert-Fails {
+        Read-RustTestSummary -Stdout 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;' -Stderr ''
     } 'reported zero tests'
     $zeroMain = Read-RustTestSummary `
-        -Stdout 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' `
+        -Stdout 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;' `
         -Stderr '' `
         -AllowZeroTests
     if ($zeroMain.passed -ne 0 -or $zeroMain.failed -ne 0 -or $zeroMain.ignored -ne 0) {
