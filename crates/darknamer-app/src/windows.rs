@@ -4524,6 +4524,7 @@ mod tests {
         let result = (|| -> io::Result<()> {
             let mut state = PromptState {
                 spec: prompt_spec(
+                    "테스트 입력",
                     "입력",
                     "첫째",
                     "둘째",
