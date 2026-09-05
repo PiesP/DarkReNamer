@@ -45,6 +45,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &resource,
         resource_script::render(&icon, &manifest, &package_version, version_numbers),
     )?;
-    embed_resource::compile(resource, embed_resource::NONE).manifest_optional()?;
+    // Every executable artifact that can reach the native module requires the
+    // same v6 Common Controls activation. In particular, unit-test harnesses
+    // import the documented subclass APIs before main starts; linking only the
+    // product binary would bind those tests to classic System32 comctl32.
+    embed_resource::compile_for_everything(resource, embed_resource::NONE).manifest_required()?;
     Ok(())
 }

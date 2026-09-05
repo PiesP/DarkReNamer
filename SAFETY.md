@@ -66,6 +66,24 @@ Palette-drawn separators retain the native separator flag and an empty label;
 they remain non-command items during keyboard and accessibility traversal.
 Owner-draw menu callbacks snapshot and restore the caller-provided drawing DC,
 including selected objects, colors, and background mode, on every handled path.
+Windows paints its own submenu marker after the owner-draw item callback. For
+Light and Dark palettes, a deferred pointer-free owner message therefore scopes
+the visible `#32768` popup to the current attached menu tree, process, UI thread,
+and public menu-item screen geometry before installing one Common Controls
+subclass. Product and test executables embed the same Common Controls v6
+activation manifest, so documented subclass imports never bind to the classic
+System32 implementation before process startup. The subclass copies only
+HWND/HMENU, COLORREF, DPI, and generation scalars before default `WM_PAINT`,
+then repaints only each visible submenu item's clipped trailing marker slot
+with one palette-colored triangle. Its DC state and locally owned GDI objects
+are restored and released in order. On
+`WM_NCDESTROY`, a successfully detached subclass releases its boxed context;
+if the documented removal reports failure, the tiny context remains allocated
+rather than leaving live subclass refdata dangling. Ambiguous, stale, foreign,
+invalid, or over-limit requests cannot select a popup or change menu mode;
+scoping or installation failure keeps the owner-draw palette and its visible
+fallback glyph. The native HMENU tree, command state, hit-testing, keyboard
+handling, and MSAA/UIA metadata are not replaced.
 The file list and appearance viewport use `SetWindowTheme` for native scrollbar
 appearance only. The association is selected from the resolved theme, copied by
 Windows during the call, and removed with null arguments for Light, Native

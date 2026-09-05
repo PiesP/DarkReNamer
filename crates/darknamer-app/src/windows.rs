@@ -63,6 +63,7 @@ mod dialog;
 mod drag_drop;
 mod list_view;
 mod menu;
+mod popup_menu;
 mod recovery_ui;
 #[path = "../resource_ids.rs"]
 mod resource_ids;
@@ -139,6 +140,7 @@ use list_view::{
     update_dpi_metrics, update_primary_column_widths,
 };
 use menu::*;
+use popup_menu::*;
 use recovery_ui::*;
 #[cfg(test)]
 use safe_runtime::initialize_safe_runtime_at;
@@ -243,32 +245,31 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     DeferWindowPos, DestroyAcceleratorTable, DestroyMenu, DestroyWindow, DispatchMessageW,
     DrawMenuBar, ES_AUTOHSCROLL, EnableMenuItem, EndDeferWindowPos, FALT, FCONTROL, FSHIFT,
     FVIRTKEY, GWLP_USERDATA, GetClientRect, GetMenuItemCount, GetMenuItemInfoW, GetMessageW,
-    GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HACCEL,
-    HMENU, HWND_BOTTOM, IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, IsWindow, IsWindowVisible,
-    KillTimer, LoadCursorW, LoadIconW, MENUITEMINFOW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED,
-    MF_GRAYED, MF_OWNERDRAW, MF_POPUP, MF_SEPARATOR, MF_UNCHECKED, MIIM_DATA, MIIM_STRING,
-    MIIM_SUBMENU, MINMAXINFO, MNC_EXECUTE, MNC_IGNORE, MNC_SELECT, MSG, MessageBoxW, MoveWindow,
-    NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassExW, SPI_GETHIGHCONTRAST,
-    SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOREDRAW,
-    SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu, SetMenuItemInfoW,
-    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW,
+    GetParent, GetSubMenu, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    HACCEL, HMENU, HWND_BOTTOM, IDC_ARROW, IDCANCEL, IDOK, IsDialogMessageW, IsWindow,
+    IsWindowVisible, KillTimer, LoadCursorW, LoadIconW, MENUITEMINFOW, MF_BYCOMMAND, MF_CHECKED,
+    MF_ENABLED, MF_GRAYED, MF_OWNERDRAW, MF_POPUP, MF_SEPARATOR, MF_UNCHECKED, MIIM_DATA,
+    MIIM_STRING, MIIM_SUBMENU, MINMAXINFO, MNC_EXECUTE, MNC_IGNORE, MNC_SELECT, MSG, MessageBoxW,
+    MoveWindow, NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassExW,
+    SPI_GETHIGHCONTRAST, SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOREDRAW, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetMenu,
+    SetMenuItemInfoW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW,
     TranslateAcceleratorW, TranslateMessage, USER_TIMER_MINIMUM, WM_APP, WM_CLOSE, WM_COMMAND,
     WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
-    WM_DRAWITEM, WM_ERASEBKGND, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_MEASUREITEM,
-    WM_MENUCHAR, WM_NCACTIVATE, WM_NCCREATE, WM_NCDESTROY, WM_NCPAINT, WM_NOTIFY, WM_SETFOCUS,
-    WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
-    WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
-    WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    WM_DRAWITEM, WM_ERASEBKGND, WM_FONTCHANGE, WM_GETMINMAXINFO, WM_INITMENUPOPUP, WM_KEYDOWN,
+    WM_MEASUREITEM, WM_MENUCHAR, WM_MENUSELECT, WM_NCACTIVATE, WM_NCCREATE, WM_NCDESTROY,
+    WM_NCPAINT, WM_NOTIFY, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SETTINGCHANGE, WM_SIZE,
+    WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD,
+    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
+    WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BM_CLICK, BS_FLAT, BS_MULTILINE, BS_TYPEMASK, CHILDID_SELF, FindWindowExW, GW_CHILD,
     GW_HWNDLAST, GW_HWNDNEXT, GWL_STYLE, GetClassNameW, GetDlgCtrlID, GetMenu, GetScrollInfo,
-    GetSubMenu, GetWindow, GetWindowThreadProcessId, HWND_TOP, MF_BYPOSITION, MIIM_FTYPE,
-    OBJID_CLIENT, OBJID_MENU, SB_HORZ, SCROLLINFO, SIF_PAGE, SIF_RANGE, STATE_SYSTEM_CHECKED,
-    TPM_LEFTALIGN, TPM_LEFTBUTTON, TPM_NONOTIFY, TPM_RETURNCMD, TPM_TOPALIGN, TrackPopupMenuEx,
-    UnregisterClassW, WM_CANCELMODE,
+    GetWindow, GetWindowThreadProcessId, HWND_TOP, MF_BYPOSITION, MIIM_FTYPE, OBJID_CLIENT,
+    OBJID_MENU, SB_HORZ, SCROLLINFO, SIF_PAGE, SIF_RANGE, STATE_SYSTEM_CHECKED, TPM_LEFTALIGN,
+    TPM_LEFTBUTTON, TPM_RETURNCMD, TPM_TOPALIGN, TrackPopupMenuEx, UnregisterClassW, WM_CANCELMODE,
 };
 use worker::*;
 
@@ -307,6 +308,7 @@ const WM_APP_APPEARANCE_RESTORE_FOCUS: u32 = WM_APP + 0x4E;
 const WM_APP_FINISH_CLOSE: u32 = WM_APP + 0x4F;
 const WM_APP_MENU_REDRAW: u32 = WM_APP + 0x50;
 const WM_APP_SHOW_DEFERRED_MESSAGE: u32 = WM_APP + 0x51;
+const WM_APP_POPUP_MENU_UPDATE: u32 = WM_APP + 0x52;
 const APPLY_POLL_TIMER_ID: usize = 0xD4A1;
 const PREFERENCES_POLL_TIMER_ID: usize = 0xD4A2;
 const STATUS_RENDER_TIMER_ID: usize = 0xD4A3;
@@ -520,6 +522,7 @@ struct AppState {
     menu_owner_data: OwnerMenuDataStore,
     owner_draw_menu: bool,
     pending_menu: Option<OwnedMenu>,
+    pending_popup_menu_requests: PendingPopupMenuRequests,
     font: OwnedFont,
     status_font: OwnedFont,
     left_rail: Option<CommandRail>,
@@ -621,6 +624,7 @@ impl AppState {
             menu_owner_data: Vec::new(),
             owner_draw_menu: false,
             pending_menu: None,
+            pending_popup_menu_requests: PendingPopupMenuRequests::default(),
             font: OwnedFont::default(),
             status_font: OwnedFont::default(),
             left_rail: None,
@@ -3637,7 +3641,10 @@ mod tests {
             SetForegroundWindow(owner);
             TrackPopupMenuEx(
                 popup,
-                TPM_LEFTALIGN | TPM_TOPALIGN | TPM_LEFTBUTTON | TPM_NONOTIFY | TPM_RETURNCMD,
+                // Keep production menu notifications enabled so this probe
+                // exercises deferred popup subclass installation. RETURNCMD
+                // still prevents the popup from dispatching WM_COMMAND.
+                TPM_LEFTALIGN | TPM_TOPALIGN | TPM_LEFTBUTTON | TPM_RETURNCMD,
                 owner_rect.left.saturating_add(16),
                 owner_rect.top.saturating_add(48),
                 owner,
@@ -3746,6 +3753,7 @@ mod tests {
     fn verify_production_owner_draw_popups(
         journal_root: PathBuf,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        reset_popup_menu_test_counters();
         let expected_apply_name = command_menu_label(
             command_ui_spec(APPLY)
                 .ok_or_else(|| io::Error::other("APPLY is absent from the command catalog"))?,
@@ -3772,6 +3780,24 @@ mod tests {
         let (owner_draw, native_system) = ui
             .join()
             .map_err(|_| io::Error::other("popup UI thread panicked"))??;
+        let (
+            live_contexts,
+            installed_contexts,
+            destroyed_contexts,
+            successful_paints,
+            accepted_notifications,
+        ) = popup_menu_test_counters();
+        assert!(
+            accepted_notifications >= 3,
+            "accepted_notifications={accepted_notifications}"
+        );
+        assert_eq!(live_contexts, 0);
+        assert_eq!(destroyed_contexts, installed_contexts);
+        assert!(installed_contexts >= 2, "installed={installed_contexts}");
+        assert!(
+            successful_paints >= installed_contexts,
+            "painted={successful_paints}, installed={installed_contexts}"
+        );
         // SAFETY: the dedicated UI thread completed both production teardowns.
         // Neither exact returned HWND may still name a live window.
         let (owner_draw_live, native_system_live) = unsafe {
