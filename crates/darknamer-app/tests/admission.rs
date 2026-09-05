@@ -19,6 +19,134 @@ use darknamer_core::LegacyText;
 #[path = "support/windows_capabilities.rs"]
 mod windows_capabilities;
 
+#[cfg(windows)]
+fn windows_path_with_separators(path: &Path, mixed: bool) -> PathBuf {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    let mut separator_index = 0_usize;
+    let units = path
+        .as_os_str()
+        .encode_wide()
+        .map(|unit| {
+            if unit != b'\\' as u16 && unit != b'/' as u16 {
+                return unit;
+            }
+            let replacement = if mixed && separator_index % 2 == 1 {
+                b'\\' as u16
+            } else {
+                b'/' as u16
+            };
+            separator_index += 1;
+            replacement
+        })
+        .collect::<Vec<_>>();
+    PathBuf::from(std::ffi::OsString::from_wide(&units))
+}
+
+#[cfg(windows)]
+fn canonical_windows_legacy_path(path: &Path) -> LegacyText {
+    use std::os::windows::ffi::OsStrExt;
+
+    LegacyText::from_units(
+        path.as_os_str()
+            .encode_wide()
+            .map(|unit| {
+                if unit == b'/' as u16 {
+                    b'\\' as u16
+                } else {
+                    unit
+                }
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[cfg(windows)]
+fn windows_path_with_extra_separator_before_leaf(path: &Path) -> std::io::Result<PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    let mut units = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let separator = units
+        .iter()
+        .rposition(|unit| *unit == b'\\' as u16 || *unit == b'/' as u16)
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    units.insert(separator, units[separator]);
+    Ok(PathBuf::from(std::ffi::OsString::from_wide(&units)))
+}
+
+#[cfg(windows)]
+fn windows_path_with_trailing_separator(path: &Path) -> PathBuf {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    let mut units = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    units.push(b'\\' as u16);
+    PathBuf::from(std::ffi::OsString::from_wide(&units))
+}
+
+#[cfg(windows)]
+fn windows_path_with_current_directory_component(path: &Path) -> std::io::Result<PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    let mut units = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let separator = units
+        .iter()
+        .rposition(|unit| *unit == b'\\' as u16 || *unit == b'/' as u16)
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    units.splice(
+        separator.saturating_add(1)..separator.saturating_add(1),
+        [b'.' as u16, units[separator]],
+    );
+    Ok(PathBuf::from(std::ffi::OsString::from_wide(&units)))
+}
+
+#[cfg(windows)]
+fn windows_verbatim_drive_path(path: &Path, trailing_separator: bool) -> PathBuf {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    let mut units = r"\\?\".encode_utf16().collect::<Vec<_>>();
+    units.extend(path.as_os_str().encode_wide());
+    if trailing_separator {
+        units.push(b'\\' as u16);
+    }
+    PathBuf::from(std::ffi::OsString::from_wide(&units))
+}
+
+#[cfg(windows)]
+fn assert_windows_admission_projection(
+    imported: PathBuf,
+    source: &Path,
+    parent: &Path,
+    leaf: &LegacyText,
+) {
+    use darknamer_app::admission::WindowsAdmissionAdapter;
+    use std::os::windows::ffi::OsStrExt;
+
+    let retained_path_units = imported.as_os_str().encode_wide().count();
+
+    let report = collect_admission(
+        &WindowsAdmissionAdapter::new(),
+        vec![imported],
+        AdmissionMode::Direct,
+        MAX_ADMITTED_SOURCES,
+        compare,
+    );
+
+    assert!(report.issues.is_empty());
+    assert_eq!(report.items.len(), 1);
+    let item = &report.items[0];
+    let expected_source = canonical_windows_legacy_path(source);
+    assert_eq!(item.source_path(), &expected_source);
+    assert!(item.source_path().units().len() <= retained_path_units);
+    assert_eq!(item.current_name(), leaf);
+    assert_eq!(item.proposed_name(), leaf);
+    assert_eq!(
+        item.destination_parent(),
+        &canonical_windows_legacy_path(parent)
+    );
+    assert_eq!(item.planned_path(), expected_source);
+    assert!(!item.planned_change_kind().is_changed());
+}
+
 #[derive(Default)]
 struct FakeAdapter {
     metadata: BTreeMap<PathBuf, AdmissionMetadata>,
@@ -391,6 +519,185 @@ fn windows_reparse_loop_is_not_followed_and_missing_metadata_is_reported()
         );
     }
     assert_eq!(report.items.len(), 1);
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_admission_canonicalizes_all_slash_imported_paths_for_the_legacy_model()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+
+    const LEAF: &str = "\u{5b9f}\u{5341}\u{516d}.txt";
+
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join(LEAF);
+    fs::write(&source, b"file")?;
+    let imported = windows_path_with_separators(&source, false);
+
+    assert_windows_admission_projection(
+        imported,
+        &source,
+        directory.path(),
+        &LegacyText::from(LEAF),
+    );
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_admission_canonicalizes_mixed_separator_imported_paths_for_the_legacy_model()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+
+    const LEAF: &str = "\u{d63c}\u{d569}-\u{1f600}.dat";
+
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join(LEAF);
+    fs::write(&source, b"file")?;
+    let imported = windows_path_with_separators(&source, true);
+
+    assert_windows_admission_projection(
+        imported,
+        &source,
+        directory.path(),
+        &LegacyText::from(LEAF),
+    );
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_admission_removes_a_trailing_directory_separator_from_the_legacy_model()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+
+    const LEAF: &str = "trailing-directory";
+
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join(LEAF);
+    fs::create_dir(&source)?;
+    let imported = windows_path_with_trailing_separator(&source);
+
+    assert_windows_admission_projection(
+        imported,
+        &source,
+        directory.path(),
+        &LegacyText::from(LEAF),
+    );
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_admission_collapses_redundant_separators_before_the_legacy_leaf()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+
+    const LEAF: &str = "doubled-separator.txt";
+
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join(LEAF);
+    fs::write(&source, b"file")?;
+    let imported = windows_path_with_extra_separator_before_leaf(&source)?;
+
+    assert_windows_admission_projection(
+        imported,
+        &source,
+        directory.path(),
+        &LegacyText::from(LEAF),
+    );
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_admission_removes_current_directory_components_from_the_legacy_model()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+
+    const LEAF: &str = "current-directory-component.txt";
+
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join(LEAF);
+    fs::write(&source, b"file")?;
+    let imported = windows_path_with_current_directory_component(&source)?;
+
+    assert_windows_admission_projection(
+        imported,
+        &source,
+        directory.path(),
+        &LegacyText::from(LEAF),
+    );
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_admission_preserves_unpaired_utf16_while_normalizing_separators()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+    use std::os::windows::ffi::OsStringExt;
+
+    let leaf_units = [
+        b'u' as u16,
+        0xd800,
+        b'.' as u16,
+        b't' as u16,
+        b'x' as u16,
+        b't' as u16,
+    ];
+    let leaf = std::ffi::OsString::from_wide(&leaf_units);
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join(&leaf);
+    fs::write(&source, b"file")?;
+    let imported = windows_path_with_separators(&source, false);
+
+    assert_windows_admission_projection(
+        imported,
+        &source,
+        directory.path(),
+        &LegacyText::from_units(leaf_units.to_vec()),
+    );
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_admission_keeps_verbatim_drive_text_exact() {
+    use std::os::windows::ffi::OsStrExt;
+
+    use darknamer_app::admission::WindowsAdmissionAdapter;
+
+    let path = Path::new(r"\\?\C:\literal/segment\.\leaf.txt");
+    let expected = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let adapter = WindowsAdmissionAdapter::new();
+
+    assert_eq!(adapter.legacy_path(path).units(), expected);
+    assert_eq!(adapter.path_utf16_units(path), expected.len());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_admission_removes_only_a_verbatim_directory_terminal_separator()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+
+    const LEAF: &str = "verbatim-trailing-directory";
+
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join(LEAF);
+    fs::create_dir(&source)?;
+    let verbatim_source = windows_verbatim_drive_path(&source, false);
+    let verbatim_parent = windows_verbatim_drive_path(directory.path(), false);
+    let imported = windows_verbatim_drive_path(&source, true);
+
+    assert_windows_admission_projection(
+        imported,
+        &verbatim_source,
+        &verbatim_parent,
+        &LegacyText::from(LEAF),
+    );
     Ok(())
 }
 

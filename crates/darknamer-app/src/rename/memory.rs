@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 
-use darknamer_core::LegacyText;
+use darknamer_core::{LegacyText, validate_windows_leaf_name};
 
 use super::model::ObservedEntry;
+use super::ports::path_leaf;
 use super::{
     BackendError, BackendOperation, EntryIdentity, EntryKind, MutationCertainty, PathKey,
-    PathSnapshot, RenameBackend, RenameOperation,
+    PathSnapshot, RenameBackend, RenameOperation, ResolvedSource,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -213,6 +214,35 @@ impl RenameBackend for MemoryBackend {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
         )
+    }
+
+    fn resolve_source(&self, path: &LegacyText) -> Result<ResolvedSource, BackendError> {
+        let snapshot = self.observe(path)?;
+        let entry_key = snapshot
+            .entry
+            .map(|_| self.planned_entry_key(snapshot.parent, &path_leaf(path)))
+            .transpose()?;
+        Ok(ResolvedSource::new(path.clone(), snapshot, entry_key))
+    }
+
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        if validate_windows_leaf_name(leaf).is_err() {
+            return Err(backend_error(
+                BackendOperation::Observe,
+                123,
+                MutationCertainty::NotApplied,
+            ));
+        }
+        let normalized_leaf = leaf
+            .units()
+            .iter()
+            .map(|unit| ascii_lower(*unit))
+            .collect::<Vec<_>>();
+        Ok(super::ports::entry_key_from_parts(parent, &normalized_leaf))
     }
 
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {

@@ -9,24 +9,152 @@ mod windows_capabilities;
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use darknamer_app::rename::{
-    BackendError, BackendOperation, EntryId, EntryKind, ExecuteErrorKind, ExecutionOutcome,
-    FileJournal, FileJournalErrorKind, JournalDirection, JournalError, JournalRoot, JournalStep,
-    JournalStore, JournalTerminal, MemoryBackend, MemoryJournal, ModelRevision, MoveScope,
-    MutationCertainty, PathKey, PathSnapshot, PlanId, PlanIssueKind, PlanRequest, RenameBackend,
-    RenameExecutor, RenameIntent, RenameOperation, RenamePlanner, WindowsRenameBackend,
-    apply_execution_report, build_plan_request, preflight_plan, process_is_elevated,
+    BackendError, BackendOperation, CancellationToken, EntryId, EntryIdentity, EntryKind,
+    ExecuteErrorKind, ExecutionControl, ExecutionOutcome, ExecutionPhase, ExecutionProgress,
+    FileJournal, FileJournalErrorKind, JournalDirection, JournalError, JournalRecord, JournalRoot,
+    JournalStep, JournalStore, JournalTerminal, MemoryBackend, MemoryJournal, ModelRevision,
+    MoveScope, MutationCertainty, PathKey, PathSnapshot, PlanId, PlanIssueKind, PlanRequest,
+    RenameBackend, RenameExecutor, RenameIntent, RenameOperation, RenamePlanner, ResolvedSource,
+    WindowsRenameBackend, apply_execution_report, build_plan_request, preflight_plan,
+    process_is_elevated,
 };
 use darknamer_core::{LegacyList, LegacyListItem, LegacyText, validate_windows_leaf_name};
+use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
 
 fn legacy_path(path: &std::path::Path) -> LegacyText {
     LegacyText::from_units(path.as_os_str().encode_wide().collect::<Vec<_>>())
+}
+
+fn verbatim_legacy_path(path: &std::path::Path) -> LegacyText {
+    let mut units = r"\\?\".encode_utf16().collect::<Vec<_>>();
+    units.extend(path.as_os_str().encode_wide());
+    LegacyText::from_units(units)
+}
+
+fn existing_short_path(path: &std::path::Path) -> std::io::Result<Option<PathBuf>> {
+    let mut input = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    input.push(0);
+    let required = query_short_path(&input, &mut []);
+    if required == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let capacity = usize::try_from(required)
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+    let mut output = vec![0_u16; capacity];
+    let written = query_short_path(&input, &mut output);
+    if written == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let written = usize::try_from(written)
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+    if written >= output.len() {
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
+    }
+    output.truncate(written);
+    let short = PathBuf::from(std::ffi::OsString::from_wide(&output));
+    let short_leaf = short.file_name().map(OsStrExt::encode_wide);
+    let long_leaf = path.file_name().map(OsStrExt::encode_wide);
+    if short_leaf
+        .zip(long_leaf)
+        .is_none_or(|(short, long)| short.eq(long))
+    {
+        Ok(None)
+    } else {
+        Ok(Some(short))
+    }
+}
+
+fn query_short_path(input: &[u16], output: &mut [u16]) -> u32 {
+    let output_pointer = if output.is_empty() {
+        std::ptr::null_mut()
+    } else {
+        output.as_mut_ptr()
+    };
+    let capacity = u32::try_from(output.len()).unwrap_or(0);
+    // SAFETY: input is retained NUL-terminated UTF-16; output is either null
+    // with zero capacity or writable for the exact checked slice length.
+    unsafe { GetShortPathNameW(input.as_ptr(), output_pointer, capacity) }
+}
+
+#[derive(Default)]
+struct CancelAfterFirstForward {
+    token: CancellationToken,
+}
+
+impl ExecutionControl for CancelAfterFirstForward {
+    fn cancellation_requested(&self) -> bool {
+        self.token.is_requested()
+    }
+
+    fn begin_transaction(&self) -> bool {
+        ExecutionControl::begin_transaction(&self.token)
+    }
+
+    fn progress(&self, progress: ExecutionProgress) {
+        if progress.phase == ExecutionPhase::Forward && progress.completed > 0 {
+            self.token.request();
+        }
+    }
+}
+
+fn assert_cancelled_alias_rollback_preserves_actual_name(
+    directory: &std::path::Path,
+    alias_source: &std::path::Path,
+    actual_leaf: &OsStr,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut backend = WindowsRenameBackend;
+    let plan = RenamePlanner::new(&backend).plan(PlanRequest::new(
+        ModelRevision::new(1),
+        vec![intent(0, alias_source, directory, "renamed.txt")],
+    ))?;
+    let id = plan.id();
+    let revision = plan.revision();
+    let mut journal = MemoryJournal::new();
+    let control = CancelAfterFirstForward::default();
+
+    let report = RenameExecutor::new(&mut backend, &mut journal)
+        .execute_with_control(plan.confirm_presented(id, revision)?, &control)?;
+
+    let Some(JournalRecord::Intent { steps, .. }) = journal.records().first() else {
+        return Err(std::io::Error::other("journal Intent missing").into());
+    };
+    let stored_source = steps
+        .first()
+        .ok_or_else(|| std::io::Error::other("journal source step missing"))?
+        .source();
+    let stored_leaf_start = stored_source
+        .units()
+        .iter()
+        .rposition(|unit| *unit == b'\\' as u16 || *unit == b'/' as u16)
+        .map_or(0, |separator| separator + 1);
+    assert_eq!(
+        &stored_source.units()[stored_leaf_start..],
+        actual_leaf.encode_wide().collect::<Vec<_>>()
+    );
+    assert!(matches!(
+        report.outcome(),
+        ExecutionOutcome::RolledBack { .. }
+    ));
+    let names = fs::read_dir(directory)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(names, vec![actual_leaf.to_os_string()]);
+    assert_eq!(fs::read(directory.join(actual_leaf))?, b"original");
+    assert!(!directory.join("renamed.txt").exists());
+    assert!(
+        names
+            .iter()
+            .all(|name| !name.to_string_lossy().contains(".__darknamer_"))
+    );
+    Ok(())
 }
 
 fn intent(id: u32, source: &std::path::Path, parent: &std::path::Path, leaf: &str) -> RenameIntent {
@@ -116,6 +244,21 @@ impl<B: RenameBackend> RenameBackend for TimedBackend<B> {
         result
     }
 
+    fn resolve_source(&self, path: &LegacyText) -> Result<ResolvedSource, BackendError> {
+        let started = Instant::now();
+        let result = self.inner.resolve_source(path);
+        self.metrics.borrow_mut().observe.record(started.elapsed());
+        result
+    }
+
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        self.inner.planned_entry_key(parent, leaf)
+    }
+
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
         let started = Instant::now();
         let result = self.inner.observe(path);
@@ -190,6 +333,18 @@ impl<B: RenameBackend> RenameBackend for ValidationMemoBackend<B> {
 
     fn path_key(&self, path: &LegacyText) -> PathKey {
         self.inner.path_key(path)
+    }
+
+    fn resolve_source(&self, path: &LegacyText) -> Result<ResolvedSource, BackendError> {
+        self.inner.resolve_source(path)
+    }
+
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        self.inner.planned_entry_key(parent, leaf)
     }
 
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
@@ -447,6 +602,24 @@ impl RenameBackend for BenchmarkBackend {
         }
     }
 
+    fn resolve_source(&self, path: &LegacyText) -> Result<ResolvedSource, BackendError> {
+        match self {
+            Self::Baseline(backend) => backend.resolve_source(path),
+            Self::ValidationSkipEstimate(backend) => backend.resolve_source(path),
+        }
+    }
+
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        match self {
+            Self::Baseline(backend) => backend.planned_entry_key(parent, leaf),
+            Self::ValidationSkipEstimate(backend) => backend.planned_entry_key(parent, leaf),
+        }
+    }
+
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
         match self {
             Self::Baseline(backend) => backend.observe(path),
@@ -514,6 +687,18 @@ impl RenameBackend for ScriptedValidationBackend {
 
     fn path_key(&self, path: &LegacyText) -> PathKey {
         self.inner.path_key(path)
+    }
+
+    fn resolve_source(&self, path: &LegacyText) -> Result<ResolvedSource, BackendError> {
+        self.inner.resolve_source(path)
+    }
+
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        self.inner.planned_entry_key(parent, leaf)
     }
 
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
@@ -1183,6 +1368,51 @@ fn stale_source_and_replaced_parent_fail_before_mutation() -> Result<(), Box<dyn
 }
 
 #[test]
+fn source_case_drift_after_planning_fails_before_journal_or_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    const ACTUAL: &str = "Source-Mixed-Case.txt";
+    const DRIFTED: &str = "SOURCE-MIXED-CASE.TXT";
+
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join(ACTUAL);
+    let drifted = directory.path().join(DRIFTED);
+    let destination = directory.path().join("renamed.txt");
+    fs::write(&source, b"source")?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+    let mut backend = WindowsRenameBackend;
+    let plan = RenamePlanner::new(&backend).plan(PlanRequest::new(
+        ModelRevision::new(1),
+        vec![intent(0, &source, directory.path(), "renamed.txt")],
+    ))?;
+    fs::rename(&source, &drifted)?;
+    let names = fs::read_dir(directory.path())?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(names, vec![OsStr::new(DRIFTED).to_os_string()]);
+    let id = plan.id();
+    let revision = plan.revision();
+    let mut journal = MemoryJournal::new();
+
+    let Err(error) = RenameExecutor::new(&mut backend, &mut journal)
+        .execute(plan.confirm_presented(id, revision)?)
+    else {
+        return Err(std::io::Error::other("source case drift was executed").into());
+    };
+
+    assert_eq!(error.kind, ExecuteErrorKind::StaleSource);
+    assert!(journal.records().is_empty());
+    assert_eq!(fs::read(&drifted)?, b"source");
+    assert!(!destination.exists());
+    let names = fs::read_dir(directory.path())?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(names, vec![OsStr::new(DRIFTED).to_os_string()]);
+    Ok(())
+}
+
+#[test]
 fn directory_normal_and_case_only_renames_use_the_same_safe_executor()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
@@ -1223,6 +1453,388 @@ fn directory_normal_and_case_only_renames_use_the_same_safe_executor()
 }
 
 #[test]
+fn directory_rename_rejects_an_unchanged_verbatim_descendant_before_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("Folder");
+    let child = source.join("child.txt");
+    fs::create_dir(&source)?;
+    fs::write(&child, b"child")?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+    let backend = WindowsRenameBackend;
+    let request = PlanRequest::new(
+        ModelRevision::new(1),
+        vec![
+            directory_intent(0, &source, directory.path(), "Renamed"),
+            RenameIntent::new(
+                EntryId::new(1),
+                verbatim_legacy_path(&child),
+                verbatim_legacy_path(&source),
+                "child.txt",
+                EntryKind::File,
+            ),
+        ],
+    );
+
+    let Err(error) = RenamePlanner::new(&backend).plan(request) else {
+        return Err(std::io::Error::other("verbatim descendant source was accepted").into());
+    };
+    assert!(
+        error
+            .issues()
+            .iter()
+            .all(|issue| issue.kind == PlanIssueKind::SourceOverlap)
+    );
+    assert_eq!(error.issues().len(), 2);
+    assert!(source.is_dir());
+    assert_eq!(fs::read(&child)?, b"child");
+    assert!(!directory.path().join("Renamed").exists());
+    Ok(())
+}
+
+#[test]
+fn directory_rename_rejects_a_verbatim_nested_destination_before_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("Folder");
+    let moving = directory.path().join("moving.txt");
+    fs::create_dir(&source)?;
+    fs::write(&moving, b"moving")?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+    let backend = WindowsRenameBackend;
+    let request = PlanRequest::with_scope(
+        ModelRevision::new(1),
+        vec![
+            directory_intent(0, &source, directory.path(), "Renamed"),
+            RenameIntent::new(
+                EntryId::new(1),
+                legacy_path(&moving),
+                verbatim_legacy_path(&source),
+                "moved.txt",
+                EntryKind::File,
+            ),
+        ],
+        MoveScope::SameVolumeFilesOnly,
+    );
+
+    let Err(error) = RenamePlanner::new(&backend).plan(request) else {
+        return Err(std::io::Error::other("verbatim nested destination was accepted").into());
+    };
+    assert!(
+        error
+            .issues()
+            .iter()
+            .all(|issue| issue.kind == PlanIssueKind::SourceOverlap)
+    );
+    assert_eq!(error.issues().len(), 2);
+    assert!(source.is_dir());
+    assert_eq!(fs::read(&moving)?, b"moving");
+    assert!(!source.join("moved.txt").exists());
+    assert!(!directory.path().join("Renamed").exists());
+    Ok(())
+}
+
+#[test]
+fn directory_rename_allows_an_unrelated_verbatim_sibling_source()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("Folder");
+    let sibling = directory.path().join("Sibling");
+    let child = sibling.join("child.txt");
+    fs::create_dir(&source)?;
+    fs::create_dir(&sibling)?;
+    fs::write(&child, b"child")?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+    let backend = WindowsRenameBackend;
+    let request = PlanRequest::new(
+        ModelRevision::new(1),
+        vec![
+            directory_intent(0, &source, directory.path(), "Renamed"),
+            RenameIntent::new(
+                EntryId::new(1),
+                verbatim_legacy_path(&child),
+                verbatim_legacy_path(&sibling),
+                "child.txt",
+                EntryKind::File,
+            ),
+        ],
+    );
+
+    let plan = RenamePlanner::new(&backend).plan(request)?;
+    assert_eq!(plan.changed_count(), 1);
+    assert_eq!(plan.rows()[0].entry(), EntryId::new(0));
+    assert!(source.is_dir());
+    assert_eq!(fs::read(&child)?, b"child");
+    assert!(!directory.path().join("Renamed").exists());
+    Ok(())
+}
+
+#[test]
+fn resolved_source_unifies_verbatim_aliases_and_distinguishes_hardlink_names()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("original-long-file-name.txt");
+    let hardlink = directory.path().join("separate-hard-link.txt");
+    fs::write(&source, b"source")?;
+    fs::hard_link(&source, &hardlink)?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+    let backend = WindowsRenameBackend;
+
+    let ordinary = backend.resolve_source(&legacy_path(&source))?;
+    let verbatim = backend.resolve_source(&verbatim_legacy_path(&source))?;
+    let distinct_hardlink = backend.resolve_source(&legacy_path(&hardlink))?;
+    let ordinary_key = ordinary
+        .entry_key()
+        .ok_or_else(|| std::io::Error::other("ordinary source key missing"))?;
+    let verbatim_key = verbatim
+        .entry_key()
+        .ok_or_else(|| std::io::Error::other("verbatim source key missing"))?;
+    let hardlink_key = distinct_hardlink
+        .entry_key()
+        .ok_or_else(|| std::io::Error::other("hardlink source key missing"))?;
+
+    assert_eq!(ordinary_key, verbatim_key);
+    assert_ne!(ordinary_key, hardlink_key);
+    assert_eq!(ordinary.path(), &legacy_path(&source));
+    assert_eq!(verbatim.path(), &verbatim_legacy_path(&source));
+    Ok(())
+}
+
+#[test]
+fn planner_rejects_duplicate_destinations_through_parent_spelling_aliases()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let source_parent = directory.path().join("source");
+    let destination_parent = directory.path().join("destination-parent-long-name");
+    fs::create_dir(&source_parent)?;
+    fs::create_dir(&destination_parent)?;
+    let source_a = source_parent.join("a.txt");
+    let source_b = source_parent.join("b.txt");
+    fs::write(&source_a, b"a")?;
+    fs::write(&source_b, b"b")?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+    let backend = WindowsRenameBackend;
+    let request = PlanRequest::with_scope(
+        ModelRevision::new(1),
+        vec![
+            intent(0, &source_a, &destination_parent, "same.txt"),
+            RenameIntent::new(
+                EntryId::new(1),
+                legacy_path(&source_b),
+                verbatim_legacy_path(&destination_parent),
+                "same.txt",
+                EntryKind::File,
+            ),
+        ],
+        MoveScope::SameVolumeFilesOnly,
+    );
+
+    let Err(error) = RenamePlanner::new(&backend).plan(request) else {
+        return Err(std::io::Error::other("aliased duplicate destination was accepted").into());
+    };
+    assert_eq!(error.issues().len(), 2);
+    assert!(
+        error
+            .issues()
+            .iter()
+            .all(|issue| issue.kind == PlanIssueKind::DuplicateDestination)
+    );
+    assert_eq!(fs::read(&source_a)?, b"a");
+    assert_eq!(fs::read(&source_b)?, b"b");
+    assert!(!destination_parent.join("same.txt").exists());
+    Ok(())
+}
+
+#[test]
+fn cancelled_rollback_restores_the_actual_mixed_case_source_name()
+-> Result<(), Box<dyn std::error::Error>> {
+    const ACTUAL_LEAF: &str = "Original-Mixed-Case-Long-Name.txt";
+
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join(ACTUAL_LEAF);
+    fs::write(&source, b"original")?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+    let uppercase_alias = directory.path().join(ACTUAL_LEAF.to_ascii_uppercase());
+
+    assert_cancelled_alias_rollback_preserves_actual_name(
+        directory.path(),
+        &uppercase_alias,
+        OsStr::new(ACTUAL_LEAF),
+    )
+}
+
+#[test]
+fn cancelled_rollback_restores_the_actual_long_name_from_a_short_alias_when_available()
+-> Result<(), Box<dyn std::error::Error>> {
+    const ACTUAL_LEAF: &str = "Original-Long-Source-Name-For-Short-Alias.txt";
+
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join(ACTUAL_LEAF);
+    fs::write(&source, b"original")?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+    let Some(short_alias) = existing_short_path(&source)? else {
+        eprintln!("DARKRENAMER_OPTIONAL_SKIP capability=short-name reason=unavailable");
+        return Ok(());
+    };
+
+    assert_cancelled_alias_rollback_preserves_actual_name(
+        directory.path(),
+        &short_alias,
+        OsStr::new(ACTUAL_LEAF),
+    )
+}
+
+#[test]
+fn planner_rejects_source_aliases_and_executes_distinct_hardlink_names()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("original-long-file-name.txt");
+    let hardlink = directory.path().join("separate-hard-link.txt");
+    fs::write(&source, b"source")?;
+    fs::hard_link(&source, &hardlink)?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+    let mut backend = WindowsRenameBackend;
+
+    for (revision, alias_name) in [(1, "original-long-file-name.txt"), (2, "renamed-alias.txt")] {
+        let request = PlanRequest::new(
+            ModelRevision::new(revision),
+            vec![
+                intent(0, &source, directory.path(), "renamed-source.txt"),
+                RenameIntent::new(
+                    EntryId::new(1),
+                    verbatim_legacy_path(&source),
+                    verbatim_legacy_path(directory.path()),
+                    alias_name,
+                    EntryKind::File,
+                ),
+            ],
+        );
+        let Err(error) = RenamePlanner::new(&backend).plan(request) else {
+            return Err(
+                std::io::Error::other("ordinary/verbatim source aliases were accepted").into(),
+            );
+        };
+        assert_eq!(error.issues().len(), 2);
+        assert!(
+            error
+                .issues()
+                .iter()
+                .all(|issue| issue.kind == PlanIssueKind::DuplicateSource)
+        );
+    }
+
+    let plan = RenamePlanner::new(&backend).plan(PlanRequest::new(
+        ModelRevision::new(3),
+        vec![
+            intent(0, &source, directory.path(), "renamed-source.txt"),
+            intent(1, &hardlink, directory.path(), "separate-hard-link.txt"),
+        ],
+    ))?;
+    let id = plan.id();
+    let revision = plan.revision();
+    let mut journal = MemoryJournal::new();
+    let report = RenameExecutor::new(&mut backend, &mut journal)
+        .execute(plan.confirm_presented(id, revision)?)?;
+    let renamed_source = directory.path().join("renamed-source.txt");
+    assert_eq!(report.outcome(), &ExecutionOutcome::Completed);
+    assert!(!source.exists());
+    assert_eq!(fs::read(&renamed_source)?, b"source");
+    assert_eq!(fs::read(&hardlink)?, b"source");
+
+    let plan = RenamePlanner::new(&backend).plan(PlanRequest::new(
+        ModelRevision::new(4),
+        vec![
+            intent(0, &renamed_source, directory.path(), "renamed-source-2.txt"),
+            intent(1, &hardlink, directory.path(), "hard-link-2.txt"),
+        ],
+    ))?;
+    let id = plan.id();
+    let revision = plan.revision();
+    let mut journal = MemoryJournal::new();
+    let report = RenameExecutor::new(&mut backend, &mut journal)
+        .execute(plan.confirm_presented(id, revision)?)?;
+    assert_eq!(report.outcome(), &ExecutionOutcome::Completed);
+    assert_eq!(
+        fs::read(directory.path().join("renamed-source-2.txt"))?,
+        b"source"
+    );
+    assert_eq!(
+        fs::read(directory.path().join("hard-link-2.txt"))?,
+        b"source"
+    );
+    Ok(())
+}
+
+#[test]
+fn planner_rejects_an_existing_short_name_source_alias_when_available()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let source = directory
+        .path()
+        .join("source-name-long-enough-for-short-alias.txt");
+    fs::write(&source, b"source")?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+    let Some(short_source) = existing_short_path(&source)? else {
+        eprintln!("DARKRENAMER_OPTIONAL_SKIP capability=short-name reason=unavailable");
+        return Ok(());
+    };
+    let short_parent = short_source
+        .parent()
+        .ok_or_else(|| std::io::Error::other("short source parent missing"))?;
+    let short_leaf = short_source
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("short source leaf missing"))?
+        .encode_wide()
+        .collect::<Vec<_>>();
+    let backend = WindowsRenameBackend;
+    let request = PlanRequest::new(
+        ModelRevision::new(1),
+        vec![
+            intent(0, &source, directory.path(), "renamed.txt"),
+            RenameIntent::new(
+                EntryId::new(1),
+                legacy_path(&short_source),
+                legacy_path(short_parent),
+                LegacyText::from_units(short_leaf),
+                EntryKind::File,
+            ),
+        ],
+    );
+
+    let Err(error) = RenamePlanner::new(&backend).plan(request) else {
+        return Err(std::io::Error::other("long/short source aliases were accepted").into());
+    };
+    assert_eq!(error.issues().len(), 2);
+    assert!(
+        error
+            .issues()
+            .iter()
+            .all(|issue| issue.kind == PlanIssueKind::DuplicateSource)
+    );
+    assert!(source.is_file());
+    assert!(!directory.path().join("renamed.txt").exists());
+    Ok(())
+}
+
+#[test]
 fn hard_link_destination_is_never_replaced() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let source = directory.path().join("source.txt");
@@ -1252,6 +1864,106 @@ fn hard_link_destination_is_never_replaced() -> Result<(), Box<dyn std::error::E
     assert_eq!(error.certainty, MutationCertainty::NotApplied);
     assert_eq!(fs::read(&source)?, b"source");
     assert_eq!(fs::read(&hard_link)?, b"source");
+    Ok(())
+}
+
+#[test]
+fn native_rename_refuses_a_source_leaf_spelling_mismatch_without_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("Source-Mixed-Case.txt");
+    let source_alias = directory.path().join("SOURCE-MIXED-CASE.TXT");
+    let destination = directory.path().join("renamed.txt");
+    fs::write(&source, b"source")?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+    let mut backend = WindowsRenameBackend;
+    let source_snapshot = backend.observe(&legacy_path(&source))?;
+    let destination_snapshot = backend.observe(&legacy_path(&destination))?;
+    let operation = RenameOperation::with_authorization(
+        legacy_path(&source_alias),
+        legacy_path(&destination),
+        source_snapshot
+            .entry
+            .ok_or_else(|| std::io::Error::other("source identity missing"))?
+            .identity,
+        source_snapshot.parent,
+        destination_snapshot.parent,
+        EntryKind::File,
+        MoveScope::SameParent,
+    );
+
+    let error = backend
+        .rename_no_replace(&operation)
+        .err()
+        .ok_or_else(|| std::io::Error::other("source spelling mismatch was renamed"))?;
+
+    assert_eq!(error.code, 1168);
+    assert_eq!(error.certainty, MutationCertainty::NotApplied);
+    assert_eq!(fs::read(&source)?, b"source");
+    assert!(!destination.exists());
+    assert_eq!(
+        fs::read_dir(directory.path())?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<Result<Vec<_>, _>>()?,
+        vec![OsStr::new("Source-Mixed-Case.txt").to_os_string()]
+    );
+    Ok(())
+}
+
+#[test]
+fn native_rename_refuses_an_existing_delete_handle_but_allows_an_ordinary_reader()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+    };
+
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("source.txt");
+    let destination = directory.path().join("destination.txt");
+    fs::write(&source, b"source")?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+    let mut backend = WindowsRenameBackend;
+    let source_snapshot = backend.observe(&legacy_path(&source))?;
+    let destination_snapshot = backend.observe(&legacy_path(&destination))?;
+    let operation = RenameOperation::with_authorization(
+        legacy_path(&source),
+        legacy_path(&destination),
+        source_snapshot
+            .entry
+            .ok_or_else(|| std::io::Error::other("source identity missing"))?
+            .identity,
+        source_snapshot.parent,
+        destination_snapshot.parent,
+        EntryKind::File,
+        MoveScope::SameParent,
+    );
+    let competing_delete = fs::OpenOptions::new()
+        .access_mode(DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&source)?;
+
+    let error = backend
+        .rename_no_replace(&operation)
+        .err()
+        .ok_or_else(|| std::io::Error::other("existing delete handle did not block rename"))?;
+    assert_eq!(error.code, 32);
+    assert_eq!(error.certainty, MutationCertainty::NotApplied);
+    assert_eq!(fs::read(&source)?, b"source");
+    assert!(!destination.exists());
+    drop(competing_delete);
+
+    let reader = fs::File::open(&source)?;
+    backend.rename_no_replace(&operation)?;
+    assert_eq!(fs::read(&destination)?, b"source");
+    assert!(!source.exists());
+    drop(reader);
     Ok(())
 }
 
@@ -1944,7 +2656,8 @@ fn direct_plan_reports_phase_separated_backend_and_journal_counts()
     let _requirements = preflight_plan(&plan, &mut backend)?;
     let preflight = backend.take_metrics();
     assert_timed_calls(preflight.validate, 0);
-    assert_timed_calls(preflight.path_key, 4);
+    // Direct schedules reuse the entry keys frozen by planning.
+    assert_timed_calls(preflight.path_key, 0);
     assert_timed_calls(preflight.observe, 0);
     assert_timed_calls(preflight.descendant, 0);
     assert_timed_calls(preflight.nonce, 0);
@@ -1958,7 +2671,7 @@ fn direct_plan_reports_phase_separated_backend_and_journal_counts()
     let execution = backend.take_metrics();
     let journal_metrics = journal.take_metrics();
     assert_timed_calls(execution.validate, 0);
-    assert_timed_calls(execution.path_key, 4);
+    assert_timed_calls(execution.path_key, 0);
     assert_timed_calls(execution.observe, 4);
     assert_timed_calls(execution.descendant, 0);
     assert_timed_calls(execution.nonce, 0);

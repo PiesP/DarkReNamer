@@ -3,14 +3,15 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use darknamer_app::rename::{
-    AppendCertainty, BackendError, BackendOperation, CancellationToken, EntryId, EntryKind,
-    ExecuteErrorKind, ExecutionControl, ExecutionFailure, ExecutionOutcome, ExecutionPhase,
-    ExecutionProgress, JournalCapacityKind, JournalCorruption, JournalDirection, JournalError,
-    JournalRecord, JournalStep, JournalStore, JournalTerminal, MAX_JOURNAL_FRAME_BYTES,
-    MAX_JOURNAL_STEPS, MAX_TEMP_CANDIDATES, MemoryBackend, MemoryJournal, ModelRevision, MoveScope,
-    MutationCertainty, PathKey, PathSnapshot, PlanId, PlanRequest, RecoveryReason, RecoveryState,
-    RenameBackend, RenameExecutor, RenameIntent, RenameOperation, RenamePlanner, RenameState,
-    TemporaryPhase, preflight_plan, preflight_plan_cancellable, replay_journal,
+    AppendCertainty, BackendError, BackendOperation, CancellationToken, EntryId, EntryIdentity,
+    EntryKind, ExecuteErrorKind, ExecutionControl, ExecutionFailure, ExecutionOutcome,
+    ExecutionPhase, ExecutionProgress, JournalCapacityKind, JournalCorruption, JournalDirection,
+    JournalError, JournalRecord, JournalStep, JournalStore, JournalTerminal,
+    MAX_JOURNAL_FRAME_BYTES, MAX_JOURNAL_STEPS, MAX_TEMP_CANDIDATES, MemoryBackend, MemoryJournal,
+    ModelRevision, MoveScope, MutationCertainty, PathKey, PathSnapshot, PlanId, PlanRequest,
+    RecoveryReason, RecoveryState, RenameBackend, RenameExecutor, RenameIntent, RenameOperation,
+    RenamePlanner, RenameState, ResolvedSource, TemporaryPhase, preflight_plan,
+    preflight_plan_cancellable, replay_journal,
 };
 
 fn intent(id: u32, source_name: &str, destination_name: &str) -> RenameIntent {
@@ -151,6 +152,32 @@ impl RenameBackend for FailingObserveBackend {
         self.inner.path_key(path)
     }
 
+    fn resolve_source(
+        &self,
+        path: &darknamer_core::LegacyText,
+    ) -> Result<ResolvedSource, BackendError> {
+        if let ObserveFailureTarget::Exact(expected) = self.target
+            && path.to_string_lossy() == expected
+        {
+            let matching_observations = self.matching_observations.get().saturating_add(1);
+            self.matching_observations.set(matching_observations);
+            if let MatchingObserveOverride::Error { observation, error } = self.result_override
+                && matching_observations == observation
+            {
+                return Err(error);
+            }
+        }
+        self.inner.resolve_source(path)
+    }
+
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &darknamer_core::LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        self.inner.planned_entry_key(parent, leaf)
+    }
+
     fn observe(&self, path: &darknamer_core::LegacyText) -> Result<PathSnapshot, BackendError> {
         let path_text = path.to_string_lossy();
         let matches = match self.target {
@@ -243,6 +270,98 @@ fn assert_freeze_observe_error_is_preserved(
     Ok(())
 }
 
+struct ResolvingSpellingDriftBackend {
+    inner: MemoryBackend,
+    resolutions: std::cell::Cell<usize>,
+}
+
+impl RenameBackend for ResolvingSpellingDriftBackend {
+    fn validate_path_environment(
+        &self,
+        path: &darknamer_core::LegacyText,
+    ) -> Result<(), BackendError> {
+        self.inner.validate_path_environment(path)
+    }
+
+    fn path_key(&self, path: &darknamer_core::LegacyText) -> PathKey {
+        self.inner.path_key(path)
+    }
+
+    fn resolve_source(
+        &self,
+        path: &darknamer_core::LegacyText,
+    ) -> Result<ResolvedSource, BackendError> {
+        let resolution = self.resolutions.get().saturating_add(1);
+        self.resolutions.set(resolution);
+        let resolved = self.inner.resolve_source(path)?;
+        if resolution == 1 {
+            return Ok(resolved);
+        }
+        Ok(ResolvedSource::new(
+            "C:\\work\\A.TXT",
+            resolved.snapshot(),
+            resolved.entry_key().cloned(),
+        ))
+    }
+
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &darknamer_core::LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        self.inner.planned_entry_key(parent, leaf)
+    }
+
+    fn observe(&self, path: &darknamer_core::LegacyText) -> Result<PathSnapshot, BackendError> {
+        self.inner.observe(path)
+    }
+
+    fn is_same_or_descendant(
+        &self,
+        ancestor: &darknamer_core::LegacyText,
+        candidate: &darknamer_core::LegacyText,
+    ) -> Result<bool, BackendError> {
+        self.inner.is_same_or_descendant(ancestor, candidate)
+    }
+
+    fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
+        self.inner.next_transaction_nonce()
+    }
+
+    fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+        self.inner.rename_no_replace(operation)
+    }
+}
+
+#[test]
+fn freeze_rejects_resolved_source_spelling_drift_before_journal_or_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut backend = ResolvingSpellingDriftBackend {
+        inner: MemoryBackend::new().with_file("C:\\work\\a.txt", 1),
+        resolutions: std::cell::Cell::new(0),
+    };
+    let plan = RenamePlanner::new(&backend).plan(PlanRequest::new(
+        ModelRevision::new(1),
+        vec![intent(0, "a.txt", "b.txt")],
+    ))?;
+    let id = plan.id();
+    let revision = plan.revision();
+    let mut journal = MemoryJournal::new();
+
+    let Err(error) = RenameExecutor::new(&mut backend, &mut journal)
+        .execute(plan.confirm_presented(id, revision)?)
+    else {
+        return Err(std::io::Error::other("resolved source spelling drift was executed").into());
+    };
+
+    assert_eq!(error.kind, ExecuteErrorKind::StaleSource);
+    assert!(journal.records().is_empty());
+    assert_eq!(backend.inner.mutation_count(), 0);
+    assert_eq!(backend.inner.file_id("C:\\work\\a.txt"), Some(1));
+    assert_eq!(backend.inner.file_id("C:\\work\\b.txt"), None);
+    Ok(())
+}
+
 struct CancelDuringRenameBackend {
     inner: MemoryBackend,
     token: Arc<CancellationToken>,
@@ -265,6 +384,21 @@ impl RenameBackend for CancelDuringObserveBackend {
 
     fn path_key(&self, path: &darknamer_core::LegacyText) -> PathKey {
         self.inner.path_key(path)
+    }
+
+    fn resolve_source(
+        &self,
+        path: &darknamer_core::LegacyText,
+    ) -> Result<ResolvedSource, BackendError> {
+        self.inner.resolve_source(path)
+    }
+
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &darknamer_core::LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        self.inner.planned_entry_key(parent, leaf)
     }
 
     fn observe(&self, path: &darknamer_core::LegacyText) -> Result<PathSnapshot, BackendError> {
@@ -303,6 +437,21 @@ impl RenameBackend for CancelDuringRenameBackend {
 
     fn path_key(&self, path: &darknamer_core::LegacyText) -> PathKey {
         self.inner.path_key(path)
+    }
+
+    fn resolve_source(
+        &self,
+        path: &darknamer_core::LegacyText,
+    ) -> Result<ResolvedSource, BackendError> {
+        self.inner.resolve_source(path)
+    }
+
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &darknamer_core::LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        self.inner.planned_entry_key(parent, leaf)
     }
 
     fn observe(&self, path: &darknamer_core::LegacyText) -> Result<PathSnapshot, BackendError> {
@@ -1679,6 +1828,21 @@ impl RenameBackend for MatrixBackend {
 
     fn path_key(&self, path: &darknamer_core::LegacyText) -> PathKey {
         self.inner.path_key(path)
+    }
+
+    fn resolve_source(
+        &self,
+        path: &darknamer_core::LegacyText,
+    ) -> Result<ResolvedSource, BackendError> {
+        self.inner.resolve_source(path)
+    }
+
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &darknamer_core::LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        self.inner.planned_entry_key(parent, leaf)
     }
 
     fn observe(&self, path: &darknamer_core::LegacyText) -> Result<PathSnapshot, BackendError> {

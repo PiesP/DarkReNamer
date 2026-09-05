@@ -1774,8 +1774,9 @@ mod tests {
     use std::process::Command;
 
     use crate::rename::{
-        BackendError, BackendOperation, EntryId, EntryKind, MutationCertainty, PathKey,
-        PathSnapshot, PlanRequest, RenameBackend, RenameIntent, RenameOperation,
+        BackendError, BackendOperation, EntryId, EntryIdentity, EntryKind, MutationCertainty,
+        PathKey, PathSnapshot, PlanRequest, RenameBackend, RenameIntent, RenameOperation,
+        ResolvedSource,
     };
 
     fn create_startup_journal_directory(
@@ -1810,6 +1811,18 @@ mod tests {
 
         fn path_key(&self, path: &LegacyText) -> PathKey {
             self.inner.path_key(path)
+        }
+
+        fn resolve_source(&self, path: &LegacyText) -> Result<ResolvedSource, BackendError> {
+            self.inner.resolve_source(path)
+        }
+
+        fn planned_entry_key(
+            &self,
+            parent: EntryIdentity,
+            leaf: &LegacyText,
+        ) -> Result<PathKey, BackendError> {
+            self.inner.planned_entry_key(parent, leaf)
         }
 
         fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {

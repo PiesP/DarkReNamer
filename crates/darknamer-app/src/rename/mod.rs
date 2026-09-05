@@ -52,7 +52,7 @@ pub use memory::MemoryBackend;
 pub use model::{
     ConfirmationError, ConfirmedPlan, EntryId, EntryIdentity, EntryKind, ModelRevision, MoveScope,
     PathKey, PathSnapshot, PlanError, PlanId, PlanIssue, PlanIssueKind, PlanRequest, PlanRow,
-    RenameIntent, RenamePlan,
+    RenameIntent, RenamePlan, ResolvedSource,
 };
 pub use planner::{MAX_PLAN_PATH_DEPTH, PlanAttemptError, RenamePlanner};
 pub use ports::{

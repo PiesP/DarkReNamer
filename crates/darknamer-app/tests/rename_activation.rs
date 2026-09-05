@@ -1,11 +1,12 @@
 use std::cell::Cell;
 
 use darknamer_app::rename::{
-    BackendError, BackendOperation, ExecutionOutcome, JournalCapacityError, JournalCapacityKind,
-    JournalCleanupDecision, JournalRecord, JournalTerminal, MemoryBackend, MemoryJournal,
-    ModelRevision, MoveScope, MutationCertainty, PathKey, PathSnapshot, RenameBackend,
-    RenameExecutor, RenameOperation, RenamePlanner, apply_execution_report, build_plan_request,
-    cleanup_decision, journal_capacity_error_korean, next_model_revision, plan_error_korean,
+    BackendError, BackendOperation, EntryIdentity, ExecutionOutcome, JournalCapacityError,
+    JournalCapacityKind, JournalCleanupDecision, JournalRecord, JournalTerminal, MemoryBackend,
+    MemoryJournal, ModelRevision, MoveScope, MutationCertainty, PathKey, PathSnapshot,
+    RenameBackend, RenameExecutor, RenameOperation, RenamePlanner, ResolvedSource,
+    apply_execution_report, build_plan_request, cleanup_decision, journal_capacity_error_korean,
+    next_model_revision, plan_error_korean,
 };
 use darknamer_core::{LegacyList, LegacyListItem, LegacyText};
 
@@ -133,6 +134,79 @@ fn plan_request_authorizes_same_volume_files_only_for_destination_parent_proposa
 }
 
 #[test]
+fn model_request_rejects_a_directory_rename_that_would_stale_an_unchanged_child()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut model = LegacyList::new();
+    assert_eq!(
+        model.append(LegacyListItem::new("C:\\work\\folder", true, 0, 1, 2)),
+        Ok(true)
+    );
+    assert_eq!(
+        model.append(LegacyListItem::new(
+            "C:\\work\\folder\\child.txt",
+            false,
+            1,
+            2,
+            3
+        )),
+        Ok(true)
+    );
+    assert_eq!(model.manual_change(0, "renamed"), Ok(true));
+    let backend = MemoryBackend::new()
+        .with_directory("C:\\work\\folder", 1)
+        .with_file("C:\\work\\folder\\child.txt", 2);
+
+    let Err(error) =
+        RenamePlanner::new(&backend).plan(build_plan_request(&model, ModelRevision::new(1)))
+    else {
+        return Err(std::io::Error::other("model-staling directory rename was accepted").into());
+    };
+
+    assert!(
+        error
+            .issues()
+            .iter()
+            .all(|issue| issue.kind == darknamer_app::rename::PlanIssueKind::SourceOverlap)
+    );
+    let (_message, rows) = plan_error_korean(&error);
+    assert_eq!(rows, vec![0, 1]);
+    assert_eq!(backend.mutation_count(), 0);
+    Ok(())
+}
+
+#[test]
+fn model_request_rejects_an_incoming_batch_duplicate_when_one_row_changes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut model = LegacyList::new();
+    assert_eq!(
+        model.append_batch([
+            LegacyListItem::new("C:\\work\\same.txt", false, 1, 2, 3),
+            LegacyListItem::new("C:\\work\\same.txt", false, 1, 2, 3),
+        ]),
+        Ok(2)
+    );
+    assert_eq!(model.manual_change(0, "renamed.txt"), Ok(true));
+    let backend = MemoryBackend::new().with_file("C:\\work\\same.txt", 1);
+
+    let Err(error) =
+        RenamePlanner::new(&backend).plan(build_plan_request(&model, ModelRevision::new(1)))
+    else {
+        return Err(std::io::Error::other("model duplicate source was accepted").into());
+    };
+
+    assert!(
+        error
+            .issues()
+            .iter()
+            .all(|issue| issue.kind == darknamer_app::rename::PlanIssueKind::DuplicateSource)
+    );
+    let (_message, rows) = plan_error_korean(&error);
+    assert_eq!(rows, vec![0, 1]);
+    assert_eq!(backend.mutation_count(), 0);
+    Ok(())
+}
+
+#[test]
 fn capacity_messages_name_the_resource_and_required_and_maximum_values() {
     let steps = journal_capacity_error_korean(JournalCapacityError {
         kind: JournalCapacityKind::PrimitiveSteps,
@@ -170,6 +244,18 @@ impl RenameBackend for FailingBackend {
 
     fn path_key(&self, path: &LegacyText) -> PathKey {
         self.inner.path_key(path)
+    }
+
+    fn resolve_source(&self, path: &LegacyText) -> Result<ResolvedSource, BackendError> {
+        self.inner.resolve_source(path)
+    }
+
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        self.inner.planned_entry_key(parent, leaf)
     }
 
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {

@@ -799,11 +799,13 @@ pub fn collect_admission_cancellable_with_budget(
 
 #[cfg(windows)]
 mod windows {
+    use std::borrow::Cow;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::fs::File;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::os::windows::fs::MetadataExt;
+    use std::path::{Component, Prefix};
 
     use darknamer_core::validate_windows_leaf_name;
 
@@ -860,6 +862,37 @@ mod windows {
             parent_units
                 .checked_add(separator_units)
                 .ok_or_else(|| AdmissionAdapterError::new(AdmissionOperation::ReadDirectory))
+        }
+
+        fn legacy_projection(path: &Path) -> Cow<'_, Path> {
+            let prefix = path.components().next();
+            match prefix {
+                Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_)) => {
+                    // The legacy model parses only backslashes. Rebuilding the same
+                    // lexical components accepted by native validation also removes
+                    // redundant separators without resolving filesystem identities.
+                    Cow::Owned(path.components().collect::<PathBuf>())
+                }
+                Some(Component::Prefix(prefix))
+                    if matches!(prefix.kind(), Prefix::VerbatimDisk(_))
+                        && path.file_name().is_some()
+                        && path.as_os_str().encode_wide().last() == Some(b'\\' as u16) =>
+                {
+                    // A terminal verbatim backslash is entry syntax, so removing
+                    // it avoids an empty legacy leaf while preserving every
+                    // literal component code unit, including forward slashes.
+                    let mut units = path.as_os_str().encode_wide().collect::<Vec<_>>();
+                    while units.last() == Some(&(b'\\' as u16)) {
+                        units.pop();
+                    }
+                    Cow::Owned(PathBuf::from(std::ffi::OsString::from_wide(&units)))
+                }
+                _ => {
+                    // Other verbatim spelling stays exact because ordinary
+                    // separator and dot normalization can change semantics.
+                    Cow::Borrowed(path)
+                }
+            }
         }
     }
 
@@ -1012,7 +1045,12 @@ mod windows {
         }
 
         fn legacy_path(&self, path: &Path) -> LegacyText {
-            LegacyText::from_units(path.as_os_str().encode_wide().collect::<Vec<_>>())
+            LegacyText::from_units(
+                Self::legacy_projection(path)
+                    .as_os_str()
+                    .encode_wide()
+                    .collect::<Vec<_>>(),
+            )
         }
 
         fn path_utf16_units(&self, path: &Path) -> usize {

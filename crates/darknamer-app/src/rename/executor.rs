@@ -629,29 +629,33 @@ impl<'a> RenameExecutor<'a> {
             if control.cancellation_requested() {
                 return Err(cancelled_before_begin());
             }
-            let current_source =
-                self.backend
-                    .observe(&entry.source)
-                    .map_err(|error| ExecuteError {
-                        entry: Some(entry.id),
-                        kind: ExecuteErrorKind::Backend(error),
-                    })?;
+            let current_source = self
+                .backend
+                .resolve_source(&entry.source)
+                .map_err(|error| ExecuteError {
+                    entry: Some(entry.id),
+                    kind: ExecuteErrorKind::Backend(error),
+                })?;
             if control.cancellation_requested() {
                 return Err(cancelled_before_begin());
             }
-            if current_source.parent != entry.source_snapshot.parent {
+            let current_source_snapshot = current_source.snapshot();
+            if current_source_snapshot.parent != entry.source_snapshot.parent {
                 return Err(ExecuteError {
                     entry: Some(entry.id),
                     kind: ExecuteErrorKind::StaleParent,
                 });
             }
-            if current_source.entry != entry.source_snapshot.entry {
+            if current_source_snapshot.entry != entry.source_snapshot.entry
+                || current_source.path() != &entry.source
+                || current_source.entry_key() != Some(&entry.source_entry_key)
+            {
                 return Err(ExecuteError {
                     entry: Some(entry.id),
                     kind: ExecuteErrorKind::StaleSource,
                 });
             }
-            if current_source.entry.map(|source| source.kind) != Some(entry.kind) {
+            if current_source_snapshot.entry.map(|source| source.kind) != Some(entry.kind) {
                 return Err(ExecuteError {
                     entry: Some(entry.id),
                     kind: ExecuteErrorKind::UnauthorizedMove,
@@ -918,7 +922,7 @@ mod tests {
     use darknamer_core::LegacyText;
 
     use super::super::model::ObservedEntry;
-    use super::super::{EntryIdentity, EntryKind, PathSnapshot};
+    use super::super::{EntryIdentity, EntryKind, PathKey, PathSnapshot};
     use super::*;
 
     fn plan_row(id: EntryId) -> PlanRow {
@@ -941,6 +945,8 @@ mod tests {
                 parent,
                 entry: None,
             },
+            source_entry_key: PathKey::exact(&LegacyText::from("source")),
+            destination_entry_key: PathKey::exact(&LegacyText::from("destination")),
         }
     }
 

@@ -148,6 +148,48 @@ pub struct PathSnapshot {
     pub entry: Option<ObservedEntry>,
 }
 
+/// One source resolved through a single backend identity boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedSource {
+    pub(super) path: LegacyText,
+    pub(super) snapshot: PathSnapshot,
+    pub(super) entry_key: Option<PathKey>,
+}
+
+impl ResolvedSource {
+    /// Creates one backend-resolved source result.
+    #[must_use]
+    pub fn new(
+        path: impl Into<LegacyText>,
+        snapshot: PathSnapshot,
+        entry_key: Option<PathKey>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            snapshot,
+            entry_key,
+        }
+    }
+
+    /// Returns the source path with its actual directory-entry spelling.
+    #[must_use]
+    pub const fn path(&self) -> &LegacyText {
+        &self.path
+    }
+
+    /// Returns the source and direct-parent identity observation.
+    #[must_use]
+    pub const fn snapshot(&self) -> PathSnapshot {
+        self.snapshot
+    }
+
+    /// Returns the actual directory-entry key when the source exists.
+    #[must_use]
+    pub const fn entry_key(&self) -> Option<&PathKey> {
+        self.entry_key.as_ref()
+    }
+}
+
 /// One source-to-destination intent derived from legacy list state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RenameIntent {
@@ -328,6 +370,8 @@ pub struct PlanRow {
     pub(super) kind: EntryKind,
     pub(super) source_snapshot: PathSnapshot,
     pub(super) destination_snapshot: PathSnapshot,
+    pub(super) source_entry_key: PathKey,
+    pub(super) destination_entry_key: PathKey,
 }
 
 impl PlanRow {
@@ -337,7 +381,7 @@ impl PlanRow {
         self.id
     }
 
-    /// Returns the exact source path submitted for planning.
+    /// Returns the source path with its frozen directory-entry spelling.
     #[must_use]
     pub const fn source(&self) -> &LegacyText {
         &self.source

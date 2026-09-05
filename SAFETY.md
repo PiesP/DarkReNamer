@@ -19,6 +19,38 @@ no-replacement renames. Unsupported network, device, case-sensitive, elevated,
 cross-volume, reparse, directory-move, and overlapping-source environments fail
 closed.
 
+Before freezing a directory rename, planning rejects any other requested source,
+including an unchanged row, that is the same observed directory or lies below
+it. A changed destination also cannot lie below a directory being renamed.
+Observed directory identity resolves alternate accepted path spellings without
+rewriting the model's source or destination text.
+
+Planning resolves every changed source through one opened parent and source
+handle. That result binds the source snapshot, actual directory-entry spelling,
+and entry key. Duplicate candidates use the observed parent and file identities;
+only no-op rows in a candidate group containing a changed row require the same
+name resolution. Ordinary, verbatim, and available short-name aliases share one
+source key while distinct hard-link names remain separate. A group containing
+only unchanged rows remains inert.
+
+Execution freeze resolves each changed source again before journal creation and
+requires its snapshot, actual source spelling, and entry key to match the plan.
+An identity-preserving external case or long-name change is therefore stale
+source evidence and cannot begin a mutation.
+
+Each primitive then opens its source with DELETE access while withholding
+delete sharing. The retained mutation handle blocks competing rename and delete
+opens through the native sink. Before mutation, the backend reads the actual
+leaf from that same handle and requires an exact match with the frozen source
+spelling; a mismatch or sharing conflict is `NotApplied`.
+
+Destination collision, source-vacancy, schedule, temporary-name, and recovery
+occupancy keys combine a frozen parent identity with one validated leaf name.
+New journal Intents therefore store the actual source spelling needed by
+rollback and later recovery. Existing journals retain their stored source text;
+recovery does not guess or rewrite historical names. Correctness does not depend
+on filesystem name tunneling after a rename.
+
 The v0.1 release-validated scope is Windows 10 and Windows 11 on x64, with a
 local, non-elevated process operating on same-parent, non-reparse entries in a
 case-insensitive NTFS directory. Filesystems other than NTFS are unsupported
@@ -232,6 +264,14 @@ must lower the corresponding budget in the same reviewed change. Every modified
 exception still requires a local `SAFETY` justification and must pass the
 Windows Clippy gate while `undocumented_unsafe_blocks` and
 `unsafe_op_in_unsafe_fn` remain denied.
+
+`normalized_final_leaf` keeps the source handle live for the synchronous
+`GetFinalPathNameByHandleW` call, passes either a null zero-length output or the
+exact checked writable slice, bounds each allocation by
+`MAX_NORMALIZED_FINAL_PATH_UTF16_UNITS`, and retries a changed required size
+once. It retains only a final component bounded by
+`MAX_WINDOWS_LEAF_NAME_UTF16_UNITS`. Native API failures remain typed planning
+blockers.
 
 Rust toolchain or Windows binding upgrades, and every release-candidate review,
 must re-evaluate whether safe `Default`, RAII ownership, typed COM wrappers, or

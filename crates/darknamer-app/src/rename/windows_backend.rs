@@ -16,10 +16,12 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 use super::model::ObservedEntry;
-use super::windows_native::{NativeParent, file_identity, open_entry, rename_noreplace};
+use super::windows_native::{
+    NativeParent, file_identity, normalized_final_leaf, open_entry, rename_noreplace,
+};
 use super::{
     BackendError, BackendOperation, EntryIdentity, EntryKind, MutationCertainty, PathKey,
-    PathSnapshot, RenameBackend, RenameOperation,
+    PathSnapshot, RenameBackend, RenameOperation, ResolvedSource,
 };
 
 const ERROR_FILE_NOT_FOUND: i32 = 2;
@@ -69,6 +71,74 @@ impl RenameBackend for WindowsRenameBackend {
             return PathKey(vec![u16::MAX].into_boxed_slice());
         };
         PathKey(mapped.into_boxed_slice())
+    }
+
+    fn resolve_source(&self, path: &LegacyText) -> Result<ResolvedSource, BackendError> {
+        let (parent_path, leaf) = split_absolute_path(path, BackendOperation::Observe)?;
+        let parent = NativeParent::open_legacy(&parent_path)
+            .map_err(|error| observe_error(error, BackendOperation::Observe))?;
+        let source = match open_entry(&parent, leaf.units(), false) {
+            Ok(source) => source,
+            Err(error) if is_not_found(&error) => {
+                return Ok(ResolvedSource::new(
+                    path.clone(),
+                    PathSnapshot {
+                        parent: model_identity(parent.identity),
+                        entry: None,
+                    },
+                    None,
+                ));
+            }
+            Err(error) => return Err(observe_error(error, BackendOperation::Observe)),
+        };
+        let metadata = source
+            .metadata()
+            .map_err(|error| observe_error(error, BackendOperation::Observe))?;
+        let identity = file_identity(&source)
+            .map(model_identity)
+            .map_err(|error| observe_error(error, BackendOperation::Observe))?;
+        let entry = ObservedEntry {
+            identity,
+            kind: if metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0 {
+                EntryKind::Directory
+            } else {
+                EntryKind::File
+            },
+            is_reparse_point: metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0,
+        };
+        let normalized_leaf = normalized_final_leaf(&source)
+            .map_err(|error| observe_error(error, BackendOperation::Observe))?;
+        let normalized_leaf = LegacyText::from_units(normalized_leaf);
+        if validate_windows_leaf_name(&normalized_leaf).is_err() {
+            return Err(invalid_path_error(BackendOperation::Observe));
+        }
+        let parent_identity = model_identity(parent.identity);
+        let entry_key = self.planned_entry_key(parent_identity, &normalized_leaf)?;
+        let actual_path = join_parent_and_leaf(&parent_path, &normalized_leaf);
+        Ok(ResolvedSource::new(
+            actual_path,
+            PathSnapshot {
+                parent: parent_identity,
+                entry: Some(entry),
+            },
+            Some(entry_key),
+        ))
+    }
+
+    fn planned_entry_key(
+        &self,
+        parent: EntryIdentity,
+        leaf: &LegacyText,
+    ) -> Result<PathKey, BackendError> {
+        if validate_windows_leaf_name(leaf).is_err() {
+            return Err(invalid_path_error(BackendOperation::Observe));
+        }
+        let normalized_leaf = invariant_uppercase(leaf.units()).ok_or_else(|| BackendError {
+            operation: BackendOperation::Observe,
+            code: io_code(),
+            certainty: MutationCertainty::NotApplied,
+        })?;
+        Ok(super::ports::entry_key_from_parts(parent, &normalized_leaf))
     }
 
     fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
@@ -193,6 +263,15 @@ impl RenameBackend for WindowsRenameBackend {
                 certainty: MutationCertainty::NotApplied,
             });
         }
+        let actual_source_leaf = normalized_final_leaf(&source)
+            .map_err(|error| mutation_error(error, MutationCertainty::NotApplied))?;
+        if actual_source_leaf != source_leaf.units() {
+            return Err(BackendError {
+                operation: BackendOperation::Rename,
+                code: 1168,
+                certainty: MutationCertainty::NotApplied,
+            });
+        }
         match open_entry(&destination_parent, destination_leaf.units(), false) {
             Ok(_occupied) => {
                 return Err(BackendError {
@@ -251,7 +330,7 @@ fn split_absolute_path(
     if !absolute || separator + 1 >= units.len() {
         return Err(invalid_path_error(operation));
     }
-    let parent_end = if separator == 2 && units[1] == b':' as u16 {
+    let parent_end = if is_drive_root_separator(units, separator) {
         separator + 1
     } else {
         separator
@@ -262,6 +341,27 @@ fn split_absolute_path(
         return Err(invalid_path_error(operation));
     }
     Ok((parent, leaf))
+}
+
+fn join_parent_and_leaf(parent: &LegacyText, leaf: &LegacyText) -> LegacyText {
+    let mut units = Vec::with_capacity(parent.len() + 1 + leaf.len());
+    units.extend_from_slice(parent.units());
+    if !parent
+        .units()
+        .last()
+        .is_some_and(|unit| is_separator(*unit))
+    {
+        units.push(b'\\' as u16);
+    }
+    units.extend_from_slice(leaf.units());
+    LegacyText::from_units(units)
+}
+
+fn is_drive_root_separator(units: &[u16], separator: usize) -> bool {
+    (separator == 2 && units.get(1) == Some(&(b':' as u16)))
+        || (separator == 6
+            && units.starts_with(&[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16])
+            && units.get(5) == Some(&(b':' as u16)))
 }
 
 fn path_components(path: &LegacyText) -> Vec<&[u16]> {
@@ -382,4 +482,22 @@ fn error_code(error: &std::io::Error) -> u32 {
 
 fn io_code() -> u32 {
     error_code(&std::io::Error::last_os_error())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verbatim_drive_leaf_preserves_the_root_separator_in_its_parent() -> Result<(), BackendError>
+    {
+        let (parent, leaf) = split_absolute_path(
+            &LegacyText::from(r"\\?\C:\leaf.txt"),
+            BackendOperation::Observe,
+        )?;
+
+        assert_eq!(parent, LegacyText::from(r"\\?\C:\"));
+        assert_eq!(leaf, LegacyText::from("leaf.txt"));
+        Ok(())
+    }
 }
