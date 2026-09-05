@@ -96,14 +96,14 @@ const EXPECTED: &[(&str, UnsafeCounts)] = &[
         UnsafeCounts::new(18, 0, 0, 0),
     ),
     ("src/windows.rs", UnsafeCounts::new(215, 7, 1, 0)),
-    ("src/windows/appearance.rs", UnsafeCounts::new(63, 0, 0, 0)),
+    ("src/windows/appearance.rs", UnsafeCounts::new(64, 0, 0, 0)),
     (
         "src/windows/appearance_dialog.rs",
         UnsafeCounts::new(155, 0, 3, 0),
     ),
     (
         "src/windows/application.rs",
-        UnsafeCounts::new(152, 0, 1, 0),
+        UnsafeCounts::new(156, 0, 1, 0),
     ),
     ("src/windows/clipboard.rs", UnsafeCounts::new(11, 0, 0, 0)),
     (
@@ -118,6 +118,7 @@ const EXPECTED: &[(&str, UnsafeCounts)] = &[
     ("src/windows/drag_drop.rs", UnsafeCounts::new(103, 5, 38, 0)),
     ("src/windows/list_view.rs", UnsafeCounts::new(93, 1, 1, 0)),
     ("src/windows/menu.rs", UnsafeCounts::new(67, 0, 0, 0)),
+    ("src/windows/popup_menu.rs", UnsafeCounts::new(70, 0, 2, 0)),
     ("src/windows/recovery_ui.rs", UnsafeCounts::new(2, 0, 0, 0)),
     ("src/windows/text_io.rs", UnsafeCounts::new(3, 0, 0, 0)),
     (

@@ -824,6 +824,11 @@ pub(super) fn draw_owner_menu(
             )
         };
     }
+    // Keep a visible palette-colored fallback in the owner-draw callback. The
+    // popup subclass erases this reserved slot after native paint and replaces
+    // both this glyph and Windows' native marker with one triangle. If scoped
+    // subclass installation is unavailable, this glyph keeps the hierarchy
+    // visible without changing the menu tree or its accessibility behavior.
     if kind == OwnerMenuKind::Popup && owner_menu_has_submenu(draw.itemData) {
         let arrow = wide("›");
         let mut arrow_rect = draw.rcItem;
@@ -1202,6 +1207,12 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
             return Err(io::Error::last_os_error());
         }
     }
+    // Refresh any already-open owner-draw popup after the AppState lease ends.
+    // This keeps immutable subclass palette snapshots current across system
+    // appearance changes without retaining AppState or brush references.
+    // SAFETY: the private message is pointer-free and the live owner rechecks
+    // its attached menu generation before touching a popup.
+    let _popup_refresh_posted = unsafe { PostMessageW(window, WM_APP_POPUP_MENU_UPDATE, 0, 0) };
     Ok(())
 }
 

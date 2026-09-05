@@ -6,6 +6,8 @@ mod resource_script;
 #[path = "../build_support/test_source_manifest.rs"]
 mod test_source_manifest;
 
+const BUILD_SCRIPT: &str = include_str!("../build.rs");
+
 use std::path::Path;
 
 #[test]
@@ -53,6 +55,8 @@ fn embedded_manifest_enables_common_controls_and_per_monitor_v2() {
     assert!(manifest.contains("version=\"6.0.0.0\""));
     assert!(manifest.contains(">true/pm</dpiAware>"));
     assert!(manifest.contains(">PerMonitorV2, PerMonitor, system</dpiAwareness>"));
+    assert!(BUILD_SCRIPT.contains("embed_resource::compile_for_everything"));
+    assert!(BUILD_SCRIPT.contains(".manifest_required()?"));
 }
 
 #[cfg(unix)]

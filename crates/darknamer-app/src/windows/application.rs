@@ -667,6 +667,110 @@ pub(super) const fn suppresses_busy_callback_message(message: u32) -> bool {
     matches!(message, WM_COMMAND | WM_NOTIFY | WM_CLOSE | WM_TIMER) || message >= WM_APP
 }
 
+fn queue_popup_menu_notifications(
+    state: &mut AppState,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> bool {
+    if !state.owner_draw_menu || state.menu.is_null() {
+        return false;
+    }
+    let root = state.menu;
+    if message == WM_INITMENUPOPUP {
+        let target = wparam as HMENU;
+        if !menu_belongs_to_root(root, target) {
+            return false;
+        }
+        #[cfg(test)]
+        record_popup_menu_notification();
+        let _queued = state
+            .pending_popup_menu_requests
+            .push(PopupMenuRequest::new(root, target, true));
+        return true;
+    }
+    if message != WM_MENUSELECT {
+        return false;
+    }
+    let parent = lparam as HMENU;
+    let flags = u32::try_from((wparam >> 16) & 0xFFFF).unwrap_or_default();
+    if parent.is_null() || flags == 0xFFFF || !menu_belongs_to_root(root, parent) {
+        return false;
+    }
+    #[cfg(test)]
+    record_popup_menu_notification();
+    let _queued_parent = state
+        .pending_popup_menu_requests
+        .push(PopupMenuRequest::new(root, parent, false));
+    if flags & MF_POPUP != 0 {
+        let position = i32::try_from(wparam & 0xFFFF).unwrap_or(i32::MAX);
+        // SAFETY: parent is reachable from the current attached root and an
+        // out-of-range or forged position returns a null child.
+        let child = unsafe { GetSubMenu(parent, position) };
+        if !menu_belongs_to_root(root, child) {
+            return false;
+        }
+        // Do not prequeue the not-yet-visible child. WM_INITMENUPOPUP owns its
+        // required request, so deduplication cannot discard retry semantics.
+    }
+    true
+}
+
+fn process_popup_menu_updates(
+    window: HWND,
+    mut state_lease: CallbackStateLease<AppState, DropTargetRegistrations>,
+) {
+    let state = state_lease.state_mut();
+    let root = state.menu;
+    let owner_draw = state.owner_draw_menu;
+    let palette = state
+        .appearance_resources
+        .as_ref()
+        .map(|resources| PopupMenuPalette::from_semantic(resources.palette()));
+    let dpi = state.dpi;
+    let requests = state.pending_popup_menu_requests.take();
+    drop(state_lease);
+
+    let Some(palette) = palette.filter(|_| owner_draw) else {
+        return;
+    };
+    let mut retry = Vec::new();
+    let _refreshed_existing = refresh_installed_popup_menus(window, root, palette, dpi);
+    for request in requests {
+        if request.root() != root {
+            continue;
+        }
+        match update_popup_menu(window, root, request.target(), palette, dpi) {
+            PopupMenuUpdate::Installed | PopupMenuUpdate::Refreshed | PopupMenuUpdate::Rejected => {
+            }
+            PopupMenuUpdate::Retry => {
+                if request.required()
+                    && let Some(request) = request.retry()
+                {
+                    retry.push(request);
+                }
+            }
+            PopupMenuUpdate::Failed => {}
+        }
+    }
+    if retry.is_empty() {
+        return;
+    }
+    let Some(mut lease) = try_app_state(window) else {
+        return;
+    };
+    if lease.state().menu != root || !lease.state().owner_draw_menu {
+        return;
+    }
+    for request in retry {
+        lease.state_mut().pending_popup_menu_requests.push(request);
+    }
+    drop(lease);
+    // SAFETY: the private retry carries no pointer payload; retained handles
+    // are revalidated against the current menu tree in the next callback.
+    unsafe { PostMessageW(window, WM_APP_POPUP_MENU_UPDATE, 0, 0) };
+}
+
 pub(super) fn handle_empty_safety_copy(
     state_lease: CallbackStateLease<AppState, DropTargetRegistrations>,
     wparam: WPARAM,
@@ -967,6 +1071,7 @@ unsafe extern "system" fn window_proc(
                             state.menu = attached_menu.handle;
                             state.menu_owner_data = attached_menu.owner_data;
                             state.owner_draw_menu = attached_menu.owner_draw;
+                            state.pending_popup_menu_requests.clear();
                             apply_command_states(state);
                         }
                         if !attached.is_null() {
@@ -1013,6 +1118,12 @@ unsafe extern "system" fn window_proc(
                 // SAFETY: window is the live top-level owner and menu is attached.
                 unsafe { DrawMenuBar(window) };
             }
+            0
+        }
+        WM_APP_POPUP_MENU_UPDATE if !state_ptr.is_null() => {
+            // wparam/lparam are intentionally ignored. Only the bounded
+            // internal request queue is consumed and revalidated.
+            process_popup_menu_updates(window, state_lease);
             0
         }
         WM_APP_EMPTY_SAFETY_COPY if !state_ptr.is_null() => {
@@ -1313,6 +1424,23 @@ unsafe extern "system" fn window_proc(
                 // SAFETY: arguments are unchanged values from this callback.
                 unsafe { DefWindowProcW(window, message, wparam, lparam) }
             }
+        }
+        WM_INITMENUPOPUP | WM_MENUSELECT if !state_ptr.is_null() => {
+            // Store only handles that are currently reachable from the exact
+            // attached root. Default processing and the pointer-free wake run
+            // after the AppState lease has ended.
+            // SAFETY: state_ptr is exclusively leased for this callback and
+            // the helper retains only validated scalar menu handles.
+            let queued =
+                queue_popup_menu_notifications(unsafe { &mut *state_ptr }, message, wparam, lparam);
+            drop(state_lease);
+            if queued {
+                // SAFETY: no caller pointer crosses the posted boundary. The
+                // notification contract returns zero, so no default call can
+                // destroy/recycle HWND before this post.
+                unsafe { PostMessageW(window, WM_APP_POPUP_MENU_UPDATE, 0, 0) };
+            }
+            0
         }
         WM_CTLCOLORSTATIC if !state_ptr.is_null() => {
             let child = lparam as HWND;
