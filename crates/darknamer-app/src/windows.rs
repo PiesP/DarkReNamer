@@ -153,8 +153,8 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Globalization::{DATE_SHORTDATE, GetDateFormatEx, GetTimeFormatEx};
 #[cfg(test)]
 use windows_sys::Win32::Graphics::Gdi::{
-    COLOR_BTNFACE, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, GetBkColor, GetPixel,
-    GetTextColor, HBITMAP, HGDIOBJ,
+    COLOR_BTNFACE, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, GetBkColor, GetBkMode,
+    GetPixel, GetTextColor, HBITMAP, HGDIOBJ, OPAQUE,
 };
 #[cfg(test)]
 use windows_sys::Win32::Graphics::Gdi::{COLOR_INFOBK, COLOR_INFOTEXT};
@@ -2950,6 +2950,86 @@ mod tests {
             assert_eq!(result & 0xFFFF, position as LRESULT);
             assert_eq!((result >> 16) & 0xFFFF, MNC_EXECUTE as LRESULT);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn owner_draw_menu_restores_the_callers_dc_state() -> Result<(), Box<dyn std::error::Error>> {
+        struct TestMemoryDc(HDC);
+
+        impl TestMemoryDc {
+            fn create() -> io::Result<Self> {
+                // SAFETY: a null reference creates a display-compatible memory
+                // DC whose ownership transfers directly into this wrapper.
+                let dc = unsafe { CreateCompatibleDC(null_mut()) };
+                (!dc.is_null())
+                    .then_some(Self(dc))
+                    .ok_or_else(io::Error::last_os_error)
+            }
+
+            const fn as_raw(&self) -> HDC {
+                self.0
+            }
+        }
+
+        impl Drop for TestMemoryDc {
+            fn drop(&mut self) {
+                // SAFETY: this is the exact unselected memory DC owned by the
+                // wrapper, and DeleteDC is called once on every exit path.
+                unsafe { DeleteDC(self.0) };
+                self.0 = null_mut();
+            }
+        }
+
+        let menu = create_owner_draw_menu_for_test()?;
+        let mut item = MENUITEMINFOW {
+            cbSize: size_of::<MENUITEMINFOW>() as u32,
+            fMask: MIIM_DATA,
+            ..MENUITEMINFOW::default()
+        };
+        // SAFETY: menu is the live production owner-draw tree, position zero
+        // exists, and item remains writable for this synchronous metadata query.
+        if unsafe { GetMenuItemInfoW(menu.as_raw(), 0, 1, &mut item) } == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        assert_ne!(item.dwItemData, 0);
+
+        let surface = TestMemoryDc::create()?;
+        let dc = surface.as_raw();
+        const SENTINEL_TEXT_COLOR: u32 = 0x0012_3456;
+        // SAFETY: dc is the live test-owned memory DC. Both setters return the
+        // previous state but the regression asserts the new sentinels.
+        unsafe {
+            SetTextColor(dc, SENTINEL_TEXT_COLOR);
+            SetBkMode(dc, OPAQUE as i32);
+        }
+        // SAFETY: both queries read pointer-free attributes from the same live DC.
+        let (text_color, background_mode) = unsafe { (GetTextColor(dc), GetBkMode(dc)) };
+        assert_eq!(text_color, SENTINEL_TEXT_COLOR);
+        assert_eq!(background_mode, OPAQUE as i32);
+
+        let mut draw = DRAWITEMSTRUCT {
+            CtlType: ODT_MENU,
+            hDC: dc,
+            rcItem: RECT {
+                left: 0,
+                top: 0,
+                right: 240,
+                bottom: 32,
+            },
+            itemData: item.dwItemData,
+            ..DRAWITEMSTRUCT::default()
+        };
+        assert!(draw_owner_menu(
+            None,
+            null_mut(),
+            BASE_DPI,
+            (&raw mut draw) as LPARAM,
+        ));
+        // SAFETY: WM_DRAWITEM returned while the caller-owned DC remains live.
+        let (text_color, background_mode) = unsafe { (GetTextColor(dc), GetBkMode(dc)) };
+        assert_eq!(text_color, SENTINEL_TEXT_COLOR);
+        assert_eq!(background_mode, OPAQUE as i32);
         Ok(())
     }
 

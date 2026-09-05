@@ -14,7 +14,8 @@ use windows_sys::Win32::Graphics::Gdi::{
     DT_HIDEPREFIX, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK,
     DeleteObject, DrawFocusRect, DrawTextW, FillRect, FrameRect, GetDC, GetSysColor,
     GetSysColorBrush, GetWindowDC, HBRUSH, HDC, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME,
-    RDW_INVALIDATE, RedrawWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    RDW_INVALIDATE, RedrawWindow, ReleaseDC, RestoreDC, SaveDC, SelectObject, SetBkMode,
+    SetTextColor, TRANSPARENT,
 };
 use windows_sys::Win32::UI::Controls::{
     CDDS_PREPAINT, CDIS_DEFAULT, CDIS_DISABLED, CDIS_FOCUS, CDIS_HOT, CDIS_SELECTED,
@@ -108,6 +109,29 @@ impl Drop for OwnedWindowDc {
             unsafe { ReleaseDC(self.window, self.dc) };
             self.dc = null_mut();
         }
+    }
+}
+
+/// Restores every caller-owned GDI DC attribute changed while drawing.
+struct SavedDcState {
+    dc: HDC,
+    state: i32,
+}
+
+impl SavedDcState {
+    fn save(dc: HDC) -> Option<Self> {
+        // SAFETY: dc is the live WM_DRAWITEM DC and SaveDC copies its current
+        // state into the DC-owned stack without retaining application pointers.
+        let state = unsafe { SaveDC(dc) };
+        (state != 0).then_some(Self { dc, state })
+    }
+}
+
+impl Drop for SavedDcState {
+    fn drop(&mut self) {
+        // SAFETY: state identifies this guard's successful SaveDC call on the
+        // same live synchronous WM_DRAWITEM DC.
+        unsafe { RestoreDC(self.dc, self.state) };
     }
 }
 
@@ -665,6 +689,9 @@ pub(super) fn draw_owner_menu(
     if draw.CtlType != ODT_MENU || draw.hDC.is_null() {
         return false;
     }
+    let Some(_saved_dc) = SavedDcState::save(draw.hDC) else {
+        return false;
+    };
     if owner_menu_is_separator(draw.itemData) {
         let Some(resources) = resources else {
             return false;
