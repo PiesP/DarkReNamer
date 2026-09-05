@@ -349,7 +349,9 @@ function Start-OwnedProcess {
     $startInfo.FileName = $FilePath
     $startInfo.Arguments = $Arguments
     $startInfo.WorkingDirectory = $WorkingDirectory
-    $startInfo.UseShellExecute = $false
+    # Shell activation gives the GUI the same startup behavior as a user launch.
+    # Test harnesses use direct creation so stdout and stderr stay redirected.
+    $startInfo.UseShellExecute = -not $RedirectOutput
     $startInfo.CreateNoWindow = $RedirectOutput
     $startInfo.RedirectStandardOutput = $RedirectOutput
     $startInfo.RedirectStandardError = $RedirectOutput
