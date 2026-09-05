@@ -80,6 +80,56 @@ pub(crate) struct WindowTrackSize {
     pub(crate) height: i32,
 }
 
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WindowOrigin {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WorkAreaBounds {
+    pub(crate) left: i32,
+    pub(crate) top: i32,
+    pub(crate) right: i32,
+    pub(crate) bottom: i32,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WindowPlacement {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) width: i32,
+    pub(crate) height: i32,
+}
+
+/// Fits a requested top-level window within a positive monitor work area.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn fit_window_to_work_area(
+    origin: WindowOrigin,
+    requested: WindowTrackSize,
+    work: WorkAreaBounds,
+) -> Option<WindowPlacement> {
+    let work_width = work.right.checked_sub(work.left)?;
+    let work_height = work.bottom.checked_sub(work.top)?;
+    if requested.width <= 0 || requested.height <= 0 || work_width <= 0 || work_height <= 0 {
+        return None;
+    }
+    let width = requested.width.min(work_width);
+    let height = requested.height.min(work_height);
+    let latest_x = work.right - width;
+    let latest_y = work.bottom - height;
+    Some(WindowPlacement {
+        x: origin.x.clamp(work.left, latest_x),
+        y: origin.y.clamp(work.top, latest_y),
+        width,
+        height,
+    })
+}
+
 /// Constrains a requested top-level minimum size to a positive monitor work area.
 #[cfg(any(windows, test))]
 #[must_use]
@@ -3148,13 +3198,35 @@ pub(crate) const fn cancel_control_state(activity: WorkerActivity) -> CancelCont
 #[must_use]
 pub(crate) fn adaptive_primary_column_widths(available: i32, dpi: u32) -> [i32; 3] {
     let available = available.max(0);
-    let location_minimum = scale_dip(LOCATION_COLUMN_MINIMUM, dpi).min(available);
-    let names_available = available - location_minimum;
-    let preferred_name = scale_dip(COLUMNS[0].default_width, dpi);
-    let current = preferred_name.min((names_available + 1) / 2);
-    let proposed = preferred_name.min(names_available - current);
-    let location = available - current - proposed;
-    [current, proposed, location]
+    let minimum = [
+        scale_dip(NAME_COLUMN_MINIMUM, dpi),
+        scale_dip(NAME_COLUMN_MINIMUM, dpi),
+        scale_dip(LOCATION_COLUMN_MINIMUM, dpi),
+    ];
+    let minimum_total = minimum.iter().copied().map(i64::from).sum::<i64>();
+    if i64::from(available) < minimum_total {
+        let location = minimum[2].min(available);
+        let names_available = available - location;
+        let current = (names_available + 1) / 2;
+        return [current, names_available - current, location];
+    }
+
+    // Current and proposed names are the primary comparison surface. Give each
+    // two shares of surplus while retaining one share for location context.
+    let remaining = i32::try_from(i64::from(available) - minimum_total).unwrap_or_default();
+    let each_share = remaining / 5;
+    let mut widths = [
+        minimum[0] + each_share * 2,
+        minimum[1] + each_share * 2,
+        minimum[2] + each_share,
+    ];
+    for index in [0, 1, 2, 0, 1]
+        .into_iter()
+        .take(usize::try_from(remaining % 5).unwrap_or(0))
+    {
+        widths[index] += 1;
+    }
+    widths
 }
 
 #[cfg(any(windows, test))]
@@ -7124,15 +7196,59 @@ mod tests {
     fn adaptive_primary_columns_fit_command_rail_minimum() {
         for (dpi, available, expected) in [
             (96, 320, [120, 120, 80]),
-            (96, 360, [140, 140, 80]),
-            (96, 400, [150, 150, 100]),
+            (96, 360, [136, 136, 88]),
+            (96, 400, [152, 152, 96]),
             (120, 400, [150, 150, 100]),
             (144, 480, [180, 180, 120]),
             (192, 640, [240, 240, 160]),
+            (96, 1_000, [392, 392, 216]),
+            (96, 1_003, [393, 393, 217]),
         ] {
             let widths = adaptive_primary_column_widths(available, dpi);
             assert_eq!(widths, expected);
             assert_eq!(widths.iter().sum::<i32>(), available);
+        }
+    }
+
+    #[test]
+    fn adaptive_primary_columns_use_every_pixel_across_dpi_rounding_boundaries() {
+        for dpi in [96, 120, 144, 192, 240, 288] {
+            let minimum =
+                scale_dip(NAME_COLUMN_MINIMUM, dpi) * 2 + scale_dip(LOCATION_COLUMN_MINIMUM, dpi);
+            for available in 0..=minimum + 257 {
+                let widths = adaptive_primary_column_widths(available, dpi);
+                assert!(widths.iter().all(|width| *width >= 0));
+                assert_eq!(widths.iter().sum::<i32>(), available, "DPI {dpi}");
+                assert!(
+                    (widths[0] - widths[1]).abs() <= 1,
+                    "DPI {dpi}, available {available}"
+                );
+                if available >= minimum {
+                    assert!(widths[0] >= scale_dip(NAME_COLUMN_MINIMUM, dpi));
+                    assert!(widths[1] >= scale_dip(NAME_COLUMN_MINIMUM, dpi));
+                    assert!(widths[2] >= scale_dip(LOCATION_COLUMN_MINIMUM, dpi));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn automatic_default_columns_preserve_the_exact_budget_near_boundaries() {
+        for dpi in [96, 120, 144, 192, 240, 288] {
+            let minimum =
+                scale_dip(NAME_COLUMN_MINIMUM, dpi) * 2 + scale_dip(LOCATION_COLUMN_MINIMUM, dpi);
+            let status_width = scale_dip(NATIVE_STATUS_COLUMN_WIDTH_DIP, dpi);
+            let gutter = scale_dip(LIST_COLUMN_FIT_GUTTER_DIP, dpi).max(1);
+            for extra in 0..=31 {
+                let budget = minimum + extra;
+                let widths = allocate_primary_column_widths(
+                    budget + status_width + gutter,
+                    status_width,
+                    dpi,
+                    &default_column_states(),
+                );
+                assert_eq!(widths.iter().sum::<i32>(), budget, "DPI {dpi}");
+            }
         }
     }
 
@@ -7280,7 +7396,7 @@ mod tests {
         let widths =
             allocate_primary_column_widths(569, NATIVE_STATUS_COLUMN_WIDTH_DIP, 96, &columns);
 
-        assert_eq!(widths, [129, 128, 80]);
+        assert_eq!(widths, [127, 127, 83]);
         assert_eq!(widths.iter().sum::<i32>(), 569 - 112 - 120);
     }
 
@@ -7288,7 +7404,7 @@ mod tests {
     fn expanded_actual_status_width_reduces_the_primary_width_budget() {
         let widths = allocate_primary_column_widths(517, 180, 96, &default_column_states());
 
-        assert_eq!(widths, [128, 128, 80]);
+        assert_eq!(widths, [127, 126, 83]);
         assert_eq!(
             widths.iter().sum::<i32>(),
             517 - 180 - LIST_COLUMN_FIT_GUTTER_DIP
@@ -7314,7 +7430,7 @@ mod tests {
             96,
             &default_column_states(),
         );
-        assert_eq!(widths, [128, 128, 80]);
+        assert_eq!(widths, [127, 126, 83]);
         assert_eq!(
             widths.iter().sum::<i32>(),
             449 - 112 - LIST_COLUMN_FIT_GUTTER_DIP
@@ -7382,6 +7498,100 @@ mod tests {
             Some(HorizontalWindowPlacement { x: 0, width: 480 })
         );
         assert_eq!(fit_widened_window_to_work_area(0, 10, 10, 560), None);
+    }
+
+    #[test]
+    fn initial_window_placement_clamps_both_axes_for_offset_work_areas() {
+        let fit = |(x, y), (width, height), (left, top, right, bottom)| {
+            fit_window_to_work_area(
+                WindowOrigin { x, y },
+                WindowTrackSize { width, height },
+                WorkAreaBounds {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                },
+            )
+        };
+        assert_eq!(
+            fit((1_500, 900), (640, 520), (100, 50, 1_700, 950)),
+            Some(WindowPlacement {
+                x: 1_060,
+                y: 430,
+                width: 640,
+                height: 520,
+            })
+        );
+        assert_eq!(
+            fit((-100, 900), (640, 520), (-1_920, -80, 0, 1_000)),
+            Some(WindowPlacement {
+                x: -640,
+                y: 480,
+                width: 640,
+                height: 520,
+            })
+        );
+    }
+
+    #[test]
+    fn initial_window_placement_handles_exact_and_near_work_area_bounds() {
+        let fit = |(x, y), (width, height), (left, top, right, bottom)| {
+            fit_window_to_work_area(
+                WindowOrigin { x, y },
+                WindowTrackSize { width, height },
+                WorkAreaBounds {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                },
+            )
+        };
+        assert_eq!(
+            fit((900, 700), (800, 600), (100, 50, 900, 650)),
+            Some(WindowPlacement {
+                x: 100,
+                y: 50,
+                width: 800,
+                height: 600,
+            })
+        );
+        assert_eq!(
+            fit((900, 650), (799, 599), (100, 50, 900, 650)),
+            Some(WindowPlacement {
+                x: 101,
+                y: 51,
+                width: 799,
+                height: 599,
+            })
+        );
+        assert_eq!(
+            fit((0, 0), (801, 601), (100, 50, 900, 650)),
+            Some(WindowPlacement {
+                x: 100,
+                y: 50,
+                width: 800,
+                height: 600,
+            })
+        );
+        assert_eq!(fit((0, 0), (640, 520), (10, 20, 10, 620)), None);
+    }
+
+    #[test]
+    fn production_initial_resize_applies_the_clamped_position() {
+        let source = include_str!("windows/application.rs");
+        assert!(source.contains("let initial_placement = initial_dpi_placement("));
+        assert!(source.contains("resize_to_initial_dpi(window, placement)"));
+        let resize = source
+            .split_once("fn resize_to_initial_dpi")
+            .map(|(_, tail)| tail)
+            .and_then(|tail| tail.split_once("fn has_window_state"))
+            .map(|(body, _)| body)
+            .expect("production initial-resize function should remain inspectable");
+        assert!(resize.contains("placement.x"));
+        assert!(resize.contains("placement.y"));
+        assert!(!resize.contains("SWP_NOMOVE"));
     }
 
     #[test]

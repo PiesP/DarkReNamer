@@ -317,38 +317,47 @@ fn recommended_track_height(window: HWND, state: &AppState) -> i32 {
     .saturating_add(nonclient_height(window))
 }
 
-fn initial_dpi_size(window: HWND, state: &AppState) -> (i32, i32) {
+fn initial_dpi_placement(window: HWND, state: &AppState) -> io::Result<WindowPlacement> {
     let requested = WindowTrackSize {
         width: minimum_track_width(window, state),
         height: scale_dip(INITIAL_HEIGHT, state.dpi).max(recommended_track_height(window, state)),
     };
-    let effective = nearest_monitor_work_area(window)
-        .ok()
-        .and_then(|work| {
-            constrain_minimum_track_size_to_work_area(
-                requested.width,
-                requested.height,
-                work.right - work.left,
-                work.bottom - work.top,
-            )
-        })
-        .unwrap_or(requested);
-    (effective.width, effective.height)
+    let mut current = RECT::default();
+    // SAFETY: window is the newly created hidden top-level HWND and current is
+    // writable for this synchronous value query.
+    if unsafe { GetWindowRect(window, &mut current) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let work = nearest_monitor_work_area(window)?;
+    fit_window_to_work_area(
+        WindowOrigin {
+            x: current.left,
+            y: current.top,
+        },
+        requested,
+        WorkAreaBounds {
+            left: work.left,
+            top: work.top,
+            right: work.right,
+            bottom: work.bottom,
+        },
+    )
+    .ok_or_else(|| io::Error::other("invalid initial window placement"))
 }
 
-fn resize_to_initial_dpi(window: HWND, width: i32, height: i32) -> io::Result<()> {
-    // SAFETY: window is the newly created hidden top-level HWND. The flags keep
-    // its system-selected position and z-order while applying physical pixels
-    // derived from the window's actual DPI before the first ShowWindow call.
+fn resize_to_initial_dpi(window: HWND, placement: WindowPlacement) -> io::Result<()> {
+    // SAFETY: window is the newly created hidden top-level HWND. The placement
+    // was bounded to its nearest monitor's work area. The flags preserve its
+    // z-order and activation while applying physical pixels before ShowWindow.
     if unsafe {
         SetWindowPos(
             window,
             null_mut(),
-            0,
-            0,
-            width,
-            height,
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            placement.x,
+            placement.y,
+            placement.width,
+            placement.height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
         )
     } == 0
     {
@@ -550,9 +559,11 @@ fn run_unsafe() -> io::Result<()> {
         unsafe { DestroyWindow(window) };
         return Err(io::Error::other("window state was not adopted"));
     };
-    let (initial_width, initial_height) = initial_dpi_size(window, state_lease.state());
+    let initial_placement = initial_dpi_placement(window, state_lease.state());
     drop(state_lease);
-    if let Err(error) = resize_to_initial_dpi(window, initial_width, initial_height) {
+    let initial_result =
+        initial_placement.and_then(|placement| resize_to_initial_dpi(window, placement));
+    if let Err(error) = initial_result {
         // SAFETY: window is still hidden and owns the adopted AppState. Its
         // normal teardown reclaims children, GDI resources, and the state.
         unsafe { DestroyWindow(window) };
