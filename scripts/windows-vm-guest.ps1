@@ -337,6 +337,66 @@ function Invoke-WithIsolatedEnvironment {
     }
 }
 
+function Start-OwnedProcess {
+    param(
+        [Parameter(Mandatory)][string] $FilePath,
+        [Parameter(Mandatory)][AllowEmptyString()][string] $Arguments,
+        [Parameter(Mandatory)][string] $WorkingDirectory,
+        [switch] $RedirectOutput
+    )
+
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = $Arguments
+    $startInfo.WorkingDirectory = $WorkingDirectory
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $RedirectOutput
+    $startInfo.RedirectStandardOutput = $RedirectOutput
+    $startInfo.RedirectStandardError = $RedirectOutput
+    if ($RedirectOutput) {
+        $encoding = [Text.UTF8Encoding]::new($false)
+        $startInfo.StandardOutputEncoding = $encoding
+        $startInfo.StandardErrorEncoding = $encoding
+    }
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) {
+            throw 'Process start returned false.'
+        }
+        [void]$process.Handle
+        [pscustomobject]@{
+            process = $process
+            stdout_task = if ($RedirectOutput) { $process.StandardOutput.ReadToEndAsync() } else { $null }
+            stderr_task = if ($RedirectOutput) { $process.StandardError.ReadToEndAsync() } else { $null }
+            output_saved = $false
+        }
+    }
+    catch {
+        $process.Dispose()
+        throw
+    }
+}
+
+function Save-CapturedProcessOutput {
+    param(
+        [Parameter(Mandatory)][object] $State,
+        [Parameter(Mandatory)][string] $StdoutPath,
+        [Parameter(Mandatory)][string] $StderrPath
+    )
+
+    if ($State.output_saved -or $null -eq $State.stdout_task -or $null -eq $State.stderr_task) {
+        return
+    }
+    $stdoutText = $State.stdout_task.GetAwaiter().GetResult()
+    $stderrText = $State.stderr_task.GetAwaiter().GetResult()
+    $encoding = [Text.UTF8Encoding]::new($false)
+    [IO.File]::WriteAllText($StdoutPath, $stdoutText, $encoding)
+    [IO.File]::WriteAllText($StderrPath, $stderrText, $encoding)
+    $State.output_saved = $true
+}
+
 function Invoke-RustTestBinary {
     param(
         [Parameter(Mandatory)][object] $Test,
@@ -374,23 +434,30 @@ function Invoke-RustTestBinary {
         }
         $caseRoot = New-PrivateDirectory -Parent $RuntimeRoot -Leaf ('test-{0:D3}' -f $Index)
         Invoke-WithIsolatedEnvironment -RuntimeRoot $caseRoot -Action {
-            $processState.process = Start-Process -FilePath $binaryPath `
-                -ArgumentList @('--nocapture', '--test-threads=1') `
+            $ownedProcess = Start-OwnedProcess `
+                -FilePath $binaryPath `
+                -Arguments '--nocapture --test-threads=1' `
                 -WorkingDirectory $Root `
-                -RedirectStandardOutput $stdoutPath `
-                -RedirectStandardError $stderrPath `
-                -NoNewWindow `
-                -PassThru
+                -RedirectOutput
+            $processState.process = $ownedProcess
             $waitMilliseconds = [int]([Math]::Min([int]::MaxValue, $TimeoutSeconds * 1000L))
-            if (-not $processState.process.WaitForExit($waitMilliseconds)) {
+            $timedOut = -not $processState.process.process.WaitForExit($waitMilliseconds)
+            if ($timedOut) {
                 $row.failure_reason = 'timeout'
-                Invoke-TaskkillTree -ProcessId $processState.process.Id
-                [void]$processState.process.WaitForExit(10000)
+                Invoke-TaskkillTree -ProcessId $processState.process.process.Id
+                if (-not $processState.process.process.WaitForExit(10000)) {
+                    throw 'Timed-out test process did not terminate.'
+                }
+            }
+            $processState.process.process.WaitForExit()
+            Save-CapturedProcessOutput `
+                -State $processState.process `
+                -StdoutPath $stdoutPath `
+                -StderrPath $stderrPath
+            if ($timedOut) {
                 return
             }
-            $processState.process.WaitForExit()
-            $processState.process.Refresh()
-            $row.exit_code = $processState.process.ExitCode
+            $row.exit_code = $processState.process.process.ExitCode
             $stdoutText = [IO.File]::ReadAllText($stdoutPath)
             $stderrText = [IO.File]::ReadAllText($stderrPath)
             try {
@@ -401,7 +468,7 @@ function Invoke-RustTestBinary {
                 $row.passed = $summary.passed
                 $row.failed = $summary.failed
                 $row.ignored = $summary.ignored
-                if ($processState.process.ExitCode -eq 0 -and
+                if ($processState.process.process.ExitCode -eq 0 -and
                     $summary.outcome -ceq 'ok' -and
                     $summary.failed -eq 0) {
                     $row.status = 'passed'
@@ -422,19 +489,23 @@ function Invoke-RustTestBinary {
     finally {
         if ($null -ne $processState.process) {
             try {
-                $processState.process.Refresh()
-                if (-not $processState.process.HasExited) {
-                    Invoke-TaskkillTree -ProcessId $processState.process.Id
-                    if (-not $processState.process.WaitForExit(10000)) {
+                $processState.process.process.Refresh()
+                if (-not $processState.process.process.HasExited) {
+                    Invoke-TaskkillTree -ProcessId $processState.process.process.Id
+                    if (-not $processState.process.process.WaitForExit(10000)) {
                         throw 'Owned test process did not terminate.'
                     }
                 }
+                Save-CapturedProcessOutput `
+                    -State $processState.process `
+                    -StdoutPath $stdoutPath `
+                    -StderrPath $stderrPath
             }
             catch {
                 $row.status = 'failed'
                 $row.failure_reason = 'process_cleanup_failed'
             }
-            $processState.process.Dispose()
+            $processState.process.process.Dispose()
         }
         $row.stdout = [ordered]@{
             file = $stdoutLeaf
@@ -476,6 +547,7 @@ public static class DarkReNamerVmNative {
 '@
     }
     Add-Type -AssemblyName System.Drawing
+    Add-Type -AssemblyName UIAutomationClient
 }
 
 function Invoke-GuiSmoke {
@@ -516,19 +588,22 @@ function Invoke-GuiSmoke {
         }
         $caseRoot = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'gui'
         Invoke-WithIsolatedEnvironment -RuntimeRoot $caseRoot -Action {
-            $processState.process = Start-Process -FilePath $applicationPath -WorkingDirectory $Root -PassThru
+            $processState.process = Start-OwnedProcess `
+                -FilePath $applicationPath `
+                -Arguments '' `
+                -WorkingDirectory $Root
             $windowDeadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
             do {
                 Start-Sleep -Milliseconds 200
-                $processState.process.Refresh()
-                if ($processState.process.HasExited) {
-                    $row.exit_code = $processState.process.ExitCode
+                $processState.process.process.Refresh()
+                if ($processState.process.process.HasExited) {
+                    $row.exit_code = $processState.process.process.ExitCode
                     $row.failure_reason = 'app_exited_before_window'
                     return
                 }
-            } while ($processState.process.MainWindowHandle -eq [IntPtr]::Zero -and (Get-Date) -lt $windowDeadline)
+            } while ($processState.process.process.MainWindowHandle -eq [IntPtr]::Zero -and (Get-Date) -lt $windowDeadline)
 
-            $handle = $processState.process.MainWindowHandle
+            $handle = $processState.process.process.MainWindowHandle
             if ($handle -eq [IntPtr]::Zero) {
                 $row.failure_reason = 'window_timeout'
                 return
@@ -538,9 +613,9 @@ function Invoke-GuiSmoke {
             $classText = [Text.StringBuilder]::new(128)
             [void][DarkReNamerVmNative]::GetClassName($handle, $classText, $classText.Capacity)
             $windowClass = $classText.ToString()
-            $windowTitle = $processState.process.MainWindowTitle
-            if ($boundProcessId -ne $processState.process.Id -or
-                $processState.process.SessionId -ne $ExpectedSession -or
+            $windowTitle = $processState.process.process.MainWindowTitle
+            if ($boundProcessId -ne $processState.process.process.Id -or
+                $processState.process.process.SessionId -ne $ExpectedSession -or
                 $windowClass -cne 'DarkReNamerWindow' -or
                 $windowTitle -cne 'DarkReNamer' -or
                 -not [DarkReNamerVmNative]::IsWindowVisible($handle)) {
@@ -551,6 +626,14 @@ function Invoke-GuiSmoke {
             $row.window_title = $windowTitle
 
             if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
+                try {
+                    $automationElement = [Windows.Automation.AutomationElement]::FromHandle($handle)
+                    if ($null -ne $automationElement) {
+                        $automationElement.SetFocus()
+                    }
+                }
+                catch {
+                }
                 [void][DarkReNamerVmNative]::SetForegroundWindow($handle)
                 $foregroundDeadline = (Get-Date).AddSeconds(5)
                 while ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle -and
@@ -615,18 +698,17 @@ function Invoke-GuiSmoke {
                 height = $height
             }
 
-            if (-not $processState.process.CloseMainWindow()) {
+            if (-not $processState.process.process.CloseMainWindow()) {
                 $row.failure_reason = 'normal_close_rejected'
                 return
             }
-            if (-not $processState.process.WaitForExit(10000)) {
+            if (-not $processState.process.process.WaitForExit(10000)) {
                 $row.failure_reason = 'normal_close_timeout'
                 return
             }
-            $processState.process.WaitForExit()
-            $processState.process.Refresh()
-            $row.exit_code = $processState.process.ExitCode
-            if ($processState.process.ExitCode -ne 0) {
+            $processState.process.process.WaitForExit()
+            $row.exit_code = $processState.process.process.ExitCode
+            if ($processState.process.process.ExitCode -ne 0) {
                 $row.failure_reason = 'app_exit_failed'
                 return
             }
@@ -642,10 +724,10 @@ function Invoke-GuiSmoke {
         if ($null -ne $captureState.bitmap) { $captureState.bitmap.Dispose() }
         if ($null -ne $processState.process) {
             try {
-                $processState.process.Refresh()
-                if (-not $processState.process.HasExited) {
-                    Invoke-TaskkillTree -ProcessId $processState.process.Id
-                    if (-not $processState.process.WaitForExit(10000)) {
+                $processState.process.process.Refresh()
+                if (-not $processState.process.process.HasExited) {
+                    Invoke-TaskkillTree -ProcessId $processState.process.process.Id
+                    if (-not $processState.process.process.WaitForExit(10000)) {
                         throw 'Owned application process did not terminate.'
                     }
                 }
@@ -654,7 +736,7 @@ function Invoke-GuiSmoke {
                 $row.status = 'failed'
                 $row.failure_reason = 'process_cleanup_failed'
             }
-            $processState.process.Dispose()
+            $processState.process.process.Dispose()
         }
     }
     [pscustomobject]$row

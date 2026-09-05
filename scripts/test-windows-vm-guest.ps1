@@ -157,6 +157,43 @@ try {
     }
 
     . $valid.runner -BundleRoot $valid.root -ExpectedSessionId 1 -ValidateOnly
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        foreach ($expectedExitCode in @(0, 7)) {
+            $nativeStdout = Join-Path $valid.root "native-exit-$expectedExitCode.stdout.txt"
+            $nativeStderr = Join-Path $valid.root "native-exit-$expectedExitCode.stderr.txt"
+            $ownedProcess = Start-OwnedProcess `
+                -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') `
+                -Arguments "/d /c `"echo synthetic-exit-$expectedExitCode & exit /b $expectedExitCode`"" `
+                -WorkingDirectory $valid.root `
+                -RedirectOutput
+            try {
+                if (-not $ownedProcess.process.WaitForExit(10000)) {
+                    throw "Synthetic exit-$expectedExitCode child timed out."
+                }
+                $ownedProcess.process.WaitForExit()
+                Save-CapturedProcessOutput `
+                    -State $ownedProcess `
+                    -StdoutPath $nativeStdout `
+                    -StderrPath $nativeStderr
+                if ($ownedProcess.process.ExitCode -ne $expectedExitCode) {
+                    throw "Synthetic child exit code was $($ownedProcess.process.ExitCode), expected $expectedExitCode."
+                }
+                if ([IO.File]::ReadAllText($nativeStdout).IndexOf(
+                    "synthetic-exit-$expectedExitCode",
+                    [StringComparison]::Ordinal
+                ) -lt 0) {
+                    throw "Synthetic exit-$expectedExitCode stdout was not captured."
+                }
+            }
+            finally {
+                if (-not $ownedProcess.process.HasExited) {
+                    Invoke-TaskkillTree -ProcessId $ownedProcess.process.Id
+                    [void]$ownedProcess.process.WaitForExit(10000)
+                }
+                $ownedProcess.process.Dispose()
+            }
+        }
+    }
     $summary = Read-RustTestSummary `
         -Stdout "running 2 tests`ntest alpha ... ok`ntest beta ... ignored`ntest result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s`n" `
         -Stderr ''
