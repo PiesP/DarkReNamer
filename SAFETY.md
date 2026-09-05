@@ -64,6 +64,8 @@ lease ends. Accessibility metadata and referenced GDI brushes outlive the native
 menu tree that uses them.
 Palette-drawn separators retain the native separator flag and an empty label;
 they remain non-command items during keyboard and accessibility traversal.
+Owner-draw menu callbacks snapshot and restore the caller-provided drawing DC,
+including selected objects, colors, and background mode, on every handled path.
 The file list and appearance viewport use `SetWindowTheme` for native scrollbar
 appearance only. The association is selected from the resolved theme, copied by
 Windows during the call, and removed with null arguments for Light, Native
