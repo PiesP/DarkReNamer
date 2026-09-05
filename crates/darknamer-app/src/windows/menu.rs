@@ -352,9 +352,8 @@ pub(super) fn create_children(window: HWND, state: &mut AppState) -> io::Result<
     state.drop_overlay = create_drop_overlay(window)?;
     refresh_system_fonts(state);
     update_dpi_metrics(state);
-    let owner_draw_menu = owner_draw_menus_enabled();
+    let owner_draw_menu = owner_draw_menus_enabled(state.resolved_appearance().theme);
     let menu = create_menu_for_mode(owner_draw_menu)?;
-    state.menu = menu.as_raw();
     state.owner_draw_menu = owner_draw_menu;
     state.pending_menu = Some(menu);
     let mut shell_info = SHFILEINFOW::default();
@@ -1244,38 +1243,46 @@ impl OwnerMenuData {
 pub(super) struct OwnedMenu {
     handle: HMENU,
     owner_data: OwnerMenuDataStore,
+    owner_draw: bool,
 }
 
 pub(super) struct AttachedMenu {
     pub(super) handle: HMENU,
     pub(super) owner_data: OwnerMenuDataStore,
+    pub(super) owner_draw: bool,
 }
 
 impl OwnedMenu {
-    fn new_bar() -> io::Result<Self> {
+    fn new_bar(owner_draw: bool) -> io::Result<Self> {
         // SAFETY: CreateMenu takes no pointers and returns a newly owned menu.
         let menu = unsafe { CreateMenu() };
         (!menu.is_null())
             .then_some(Self {
                 handle: menu,
                 owner_data: Vec::new(),
+                owner_draw,
             })
             .ok_or_else(io::Error::last_os_error)
     }
 
-    fn new_popup() -> io::Result<Self> {
+    fn new_popup(owner_draw: bool) -> io::Result<Self> {
         // SAFETY: CreatePopupMenu takes no pointers and returns a newly owned menu.
         let menu = unsafe { CreatePopupMenu() };
         (!menu.is_null())
             .then_some(Self {
                 handle: menu,
                 owner_data: Vec::new(),
+                owner_draw,
             })
             .ok_or_else(io::Error::last_os_error)
     }
 
     pub(super) fn as_raw(&self) -> HMENU {
         self.handle
+    }
+
+    pub(super) const fn owner_draw(&self) -> bool {
+        self.owner_draw
     }
 
     #[cfg(test)]
@@ -1291,6 +1298,7 @@ impl OwnedMenu {
         AttachedMenu {
             handle: self.release_handle(),
             owner_data: std::mem::take(&mut self.owner_data),
+            owner_draw: self.owner_draw,
         }
     }
 
@@ -1320,11 +1328,8 @@ struct MenuBuilder {
     owner_draw: bool,
 }
 
-pub(super) fn owner_draw_menus_enabled() -> bool {
-    // Standard menus provide Windows-owned MSAA/UIA names and interaction
-    // semantics without relying on SPI_GETSCREENREADER, which is not set by
-    // every assistive technology, including Narrator.
-    false
+pub(super) const fn owner_draw_menus_enabled(theme: ResolvedTheme) -> bool {
+    owner_draw_menu_for_theme(theme)
 }
 
 const MENU_POPUP_FILE: usize = 0x1_0000;
@@ -1341,6 +1346,7 @@ const MENU_POPUP_NUMBER: usize = 0x1_000A;
 const MENU_POPUP_EXTENSION: usize = 0x1_000B;
 const MENU_POPUP_FOLDER_NAME: usize = 0x1_000C;
 const MENU_POPUP_RECOVERY: usize = 0x1_000D;
+const MENU_SEPARATOR: usize = 0x1_000E;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OwnerMenuKind {
@@ -1415,6 +1421,10 @@ pub(super) fn owner_menu_has_submenu(data: usize) -> bool {
     )
 }
 
+pub(super) fn owner_menu_is_separator(data: usize) -> bool {
+    owner_menu_tag(data) == Some(MENU_SEPARATOR)
+}
+
 pub(super) fn owner_menu_uses_radio(data: usize) -> bool {
     let Some(data) = owner_menu_tag(data) else {
         return false;
@@ -1444,6 +1454,7 @@ fn owner_menu_label_for_tag(data: usize) -> Option<String> {
         MENU_POPUP_EXTENSION => Some("확장자(&E)"),
         MENU_POPUP_FOLDER_NAME => Some("폴더명 사용(&F)"),
         MENU_POPUP_RECOVERY => Some("복구(&R)"),
+        MENU_SEPARATOR => Some(""),
         _ => None,
     };
     if let Some(popup) = popup {
@@ -1535,11 +1546,11 @@ pub(super) fn handle_owner_menu_char(wparam: WPARAM, lparam: LPARAM) -> LRESULT 
 
 impl MenuBuilder {
     fn bar(owner_draw: bool) -> io::Result<Self> {
-        OwnedMenu::new_bar().map(|menu| Self { menu, owner_draw })
+        OwnedMenu::new_bar(owner_draw).map(|menu| Self { menu, owner_draw })
     }
 
     fn popup(owner_draw: bool) -> io::Result<Self> {
-        OwnedMenu::new_popup().map(|menu| Self { menu, owner_draw })
+        OwnedMenu::new_popup(owner_draw).map(|menu| Self { menu, owner_draw })
     }
 
     fn item(&mut self, id: u16, label: &str) -> io::Result<()> {
@@ -1573,10 +1584,23 @@ impl MenuBuilder {
     }
 
     fn separator(&mut self) -> io::Result<()> {
-        // SAFETY: the menu is live and separators carry no pointer payload.
-        if unsafe { AppendMenuW(self.menu.as_raw(), MF_SEPARATOR, 0, null()) } == 0 {
+        let data = self
+            .owner_draw
+            .then(|| OwnerMenuData::new(MENU_SEPARATOR, &[0]))
+            .transpose()?;
+        let flags = MF_SEPARATOR | if self.owner_draw { MF_OWNERDRAW } else { 0 };
+        let pointer = data
+            .as_ref()
+            .map_or(null(), |data| (&raw const **data).cast::<u16>());
+        // SAFETY: the menu is live; owner-draw separator metadata is retained
+        // until the same native menu tree is destroyed. MF_SEPARATOR preserves
+        // its non-command role and native keyboard traversal.
+        if unsafe { AppendMenuW(self.menu.as_raw(), flags, 0, pointer) } == 0 {
             Err(io::Error::last_os_error())
         } else {
+            if let Some(data) = data {
+                self.menu.owner_data.push(data);
+            }
             Ok(())
         }
     }
@@ -1663,32 +1687,27 @@ fn create_menu_for_mode(owner_draw: bool) -> io::Result<OwnedMenu> {
     Ok(menu.finish())
 }
 
-pub(super) fn refresh_menu_accessibility_mode(
-    window: HWND,
+pub(super) fn prepare_menu_appearance(
     state: &mut AppState,
+    theme: ResolvedTheme,
 ) -> io::Result<()> {
-    let owner_draw = owner_draw_menus_enabled();
-    if owner_draw == state.owner_draw_menu || state.pending_menu.is_some() {
+    let owner_draw = owner_draw_menus_enabled(theme);
+    if state
+        .pending_menu
+        .as_ref()
+        .is_some_and(|menu| menu.owner_draw() == owner_draw)
+    {
         return Ok(());
     }
-    let mut replacement = create_menu_for_mode(owner_draw)?;
-    let replacement_handle = replacement.as_raw();
-    // SAFETY: window, replacement, and the currently attached menu are live.
-    // SetMenu transfers the new menu to the window; the old detached tree is
-    // destroyed only after the successful replacement.
-    if unsafe { SetMenu(window, replacement_handle) } == 0 {
-        return Err(io::Error::last_os_error());
+    if state.pending_menu.is_some() && !state.menu.is_null() && owner_draw == state.owner_draw_menu
+    {
+        state.pending_menu = None;
+        return Ok(());
     }
-    let attached = replacement.release_attached();
-    let previous = std::mem::replace(&mut state.menu, attached.handle);
-    let previous_owner_data = std::mem::replace(&mut state.menu_owner_data, attached.owner_data);
-    state.owner_draw_menu = owner_draw;
-    if !previous.is_null() {
-        // SAFETY: successful SetMenu detached the previous application menu.
-        unsafe { DestroyMenu(previous) };
+    if state.pending_menu.is_none() && owner_draw == state.owner_draw_menu {
+        return Ok(());
     }
-    drop(previous_owner_data);
-    apply_command_states(state);
+    state.pending_menu = Some(create_menu_for_mode(owner_draw)?);
     Ok(())
 }
 

@@ -2980,7 +2980,15 @@ mod tests {
             {
                 return Err(io::Error::last_os_error());
             }
-            if info.fType & MF_SEPARATOR == 0 {
+            if info.fType & MF_SEPARATOR != 0 {
+                assert_ne!(info.fType & MF_OWNERDRAW, 0);
+                assert!(owner_menu_is_separator(info.dwItemData));
+                assert_eq!(
+                    owner_menu_accessibility_label(info.dwItemData).as_deref(),
+                    Some("")
+                );
+                verified = verified.saturating_add(1);
+            } else {
                 assert_ne!(info.fType & MF_OWNERDRAW, 0);
                 let rendered = owner_menu_label(info.dwItemData)
                     .ok_or_else(|| io::Error::other("owner-draw item tag is invalid"))?;
@@ -3825,12 +3833,12 @@ mod tests {
     }
 
     #[test]
-    fn pending_menu_teardown_clears_only_the_raw_alias() -> Result<(), Box<dyn std::error::Error>> {
+    fn pending_menu_teardown_keeps_unattached_and_attached_ownership_distinct()
+    -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let mut state = AppState::new(initialize_safe_runtime_at(directory.path())?);
         let pending = create_owner_draw_menu_for_test()?;
         let handle = pending.as_raw();
-        state.menu = handle;
         state.pending_menu = Some(pending);
 
         let (attached, owner_data) = take_attached_menu_for_destroy(&mut state);
@@ -3841,6 +3849,135 @@ mod tests {
             state.pending_menu.as_ref().map(OwnedMenu::as_raw),
             Some(handle)
         );
+
+        drop(state);
+        application::with_production_popup_window_for_test(directory.path(), true, |window| {
+            let mut lease = try_app_state(window)
+                .ok_or_else(|| io::Error::other("production menu state unavailable"))?;
+            let state = lease.state_mut();
+            let expected_attached = state.menu;
+            let expected_metadata = state.menu_owner_data.len();
+            assert!(!expected_attached.is_null());
+            assert!(expected_metadata > 0);
+            let pending = create_owner_draw_menu_for_test()?;
+            let expected_pending = pending.as_raw();
+            state.pending_menu = Some(pending);
+
+            let (attached, metadata) = take_attached_menu_for_destroy(state);
+            assert_eq!(attached, expected_attached);
+            assert_eq!(metadata.len(), expected_metadata);
+            assert!(state.menu.is_null());
+            assert!(state.menu_owner_data.is_empty());
+            assert_eq!(
+                state.pending_menu.as_ref().map(OwnedMenu::as_raw),
+                Some(expected_pending),
+            );
+            // Restore the extracted ownership for the production window guard's
+            // normal teardown, keeping metadata live until native destruction.
+            state.menu = attached;
+            state.menu_owner_data = metadata;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn production_menu_tracks_custom_and_native_theme_transitions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        fn assert_menu_mode(window: HWND, owner_draw: bool) -> io::Result<HMENU> {
+            // SAFETY: window is the live production test owner and these calls
+            // synchronously query its attached root menu and first item type.
+            let menu = unsafe { GetMenu(window) };
+            if menu.is_null() {
+                return Err(io::Error::other("production menu is not attached"));
+            }
+            let mut info = MENUITEMINFOW {
+                cbSize: size_of::<MENUITEMINFOW>() as u32,
+                fMask: MIIM_FTYPE,
+                ..MENUITEMINFOW::default()
+            };
+            // SAFETY: position zero is bounded by the production root menu and
+            // info remains writable for the complete synchronous query.
+            if unsafe { GetMenuItemInfoW(menu, 0, 1, &mut info) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            assert_eq!(info.fType & MF_OWNERDRAW != 0, owner_draw);
+            let state = try_app_state(window)
+                .ok_or_else(|| io::Error::other("production menu state is unavailable"))?;
+            assert_eq!(state.state().owner_draw_menu, owner_draw);
+            assert!(state.state().pending_menu.is_none());
+            Ok(menu)
+        }
+
+        fn apply_test_appearance(
+            window: HWND,
+            appearance: UiAppearance,
+            forced_colors: ForcedColorsState,
+            system_theme: Option<ResolvedTheme>,
+        ) -> io::Result<bool> {
+            let mut state = try_app_state(window)
+                .ok_or_else(|| io::Error::other("production menu state is unavailable"))?;
+            state.state_mut().appearance = appearance;
+            state.state_mut().forced_colors = forced_colors;
+            state.state_mut().system_theme = system_theme;
+            apply_native_appearance(window, state.state_mut())?;
+            let pending = state.state().pending_menu.is_some();
+            drop(state);
+            if pending {
+                // SAFETY: the production window is live and this pointer-free
+                // private message completes the queued lease-free transition.
+                unsafe { SendMessageW(window, WM_APP_MENU_REDRAW, 0, 0) };
+            }
+            Ok(pending)
+        }
+
+        let directory = tempfile::tempdir()?;
+        application::with_production_popup_window_for_test(directory.path(), true, |window| {
+            let dark_menu = assert_menu_mode(window, true)?;
+
+            let light = UiAppearance {
+                theme: AppThemeMode::Light,
+                ..UiAppearance::default()
+            };
+            assert!(!apply_test_appearance(
+                window,
+                light,
+                ForcedColorsState::Inactive,
+                None,
+            )?);
+            assert_eq!(assert_menu_mode(window, true)?, dark_menu);
+
+            assert!(apply_test_appearance(
+                window,
+                light,
+                ForcedColorsState::ActiveOrUnknown,
+                None,
+            )?);
+            let native_menu = assert_menu_mode(window, false)?;
+            assert_ne!(native_menu, dark_menu);
+
+            let system = UiAppearance::default();
+            assert!(!apply_test_appearance(
+                window,
+                system,
+                ForcedColorsState::Inactive,
+                None,
+            )?);
+            assert_eq!(assert_menu_mode(window, false)?, native_menu);
+
+            let dark = UiAppearance {
+                theme: AppThemeMode::Dark,
+                ..UiAppearance::default()
+            };
+            assert!(apply_test_appearance(
+                window,
+                dark,
+                ForcedColorsState::Inactive,
+                None,
+            )?);
+            assert_ne!(assert_menu_mode(window, true)?, native_menu);
+            Ok(())
+        })?;
         Ok(())
     }
 

@@ -26,7 +26,8 @@ use windows_sys::Win32::UI::Controls::{
 use windows_sys::Win32::UI::Controls::{LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetMenuBarInfo, GetWindowTextLengthW, GetWindowTextW, MENUBARINFO, MENUINFO,
-    MIM_APPLYTOSUBMENUS, MIM_BACKGROUND, OBJID_MENU, SendMessageW, SetMenuInfo, WM_GETFONT,
+    MIM_APPLYTOSUBMENUS, MIM_BACKGROUND, OBJID_MENU, PostMessageW, SendMessageW, SetMenuInfo,
+    WM_GETFONT,
 };
 
 use super::*;
@@ -664,6 +665,24 @@ pub(super) fn draw_owner_menu(
     if draw.CtlType != ODT_MENU || draw.hDC.is_null() {
         return false;
     }
+    if owner_menu_is_separator(draw.itemData) {
+        let Some(resources) = resources else {
+            return false;
+        };
+        let mut line = draw.rcItem;
+        let inset = scale_dip(8, dpi).max(0);
+        line.left = line.left.saturating_add(inset).min(line.right);
+        line.right = line.right.saturating_sub(inset).max(line.left);
+        line.top = line.top.saturating_add((line.bottom - line.top).max(0) / 2);
+        line.bottom = line.top.saturating_add(1).min(draw.rcItem.bottom);
+        // SAFETY: the menu owns this live drawing DC and rectangle; both
+        // brushes remain AppState-owned throughout this synchronous callback.
+        unsafe {
+            FillRect(draw.hDC, &draw.rcItem, resources.window_brush());
+            FillRect(draw.hDC, &line, resources.border_brush());
+        }
+        return true;
+    }
     let Some(label) = owner_menu_label(draw.itemData) else {
         return false;
     };
@@ -844,6 +863,11 @@ pub(super) fn measure_owner_menu(window: HWND, font: HFONT, dpi: u32, lparam: LP
     if measure.CtlType != ODT_MENU {
         return false;
     }
+    if owner_menu_is_separator(measure.itemData) {
+        measure.itemWidth = 1;
+        measure.itemHeight = u32::try_from(scale_dip(8, dpi).max(1)).unwrap_or(u32::MAX);
+        return true;
+    }
     let Some(label) = owner_menu_label(measure.itemData) else {
         return false;
     };
@@ -1004,23 +1028,68 @@ pub(super) fn paint_menu_bottom_edge(window: HWND, color: u32) {
     unsafe { FillRect(dc.as_raw(), &rect, brush.as_raw()) };
 }
 
+fn configure_scrollbar_theme(
+    theme: ResolvedTheme,
+    mut set_theme: impl FnMut(Option<&str>) -> bool,
+) -> bool {
+    let association = (theme == ResolvedTheme::Dark).then_some("DarkMode_Explorer");
+    if set_theme(association) {
+        return true;
+    }
+    if association.is_some() {
+        set_theme(None);
+    }
+    false
+}
+
+pub(super) fn apply_scrollbar_theme(window: HWND, theme: ResolvedTheme) -> bool {
+    if window.is_null() {
+        return false;
+    }
+    configure_scrollbar_theme(theme, |association| {
+        let name = association.map(wide);
+        // SAFETY: window is a live app-owned control. SetWindowTheme copies the
+        // optional NUL-terminated association. True null pointers restore the
+        // system association; empty strings would disable visual styles.
+        // The caller's callback guard rejects any synchronous state reentry.
+        unsafe {
+            SetWindowTheme(
+                window,
+                name.as_ref().map_or(null(), |name| name.as_ptr()),
+                null(),
+            ) >= 0
+        }
+    })
+}
+
 pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io::Result<()> {
     let resolved = state.resolved_appearance();
     let palette = semantic_palette(resolved.theme);
     let replacement = palette.map(AppearanceResources::create).transpose()?;
+    prepare_menu_appearance(state, resolved.theme)?;
+    let menu_transition = state.pending_menu.is_some();
+    let (menu, owner_draw_menu) = state
+        .pending_menu
+        .as_ref()
+        .map_or((state.menu, state.owner_draw_menu), |menu| {
+            (menu.as_raw(), menu.owner_draw())
+        });
 
     // Install the replacement brush while both old and new resources remain
     // alive. Only a successful menu update permits dropping the old brush set.
-    let menu_resources = if state.owner_draw_menu {
+    let menu_resources = if owner_draw_menu {
         replacement.as_ref()
     } else {
         None
     };
-    if let Err(error) = apply_menu_background(state.menu, menu_resources) {
+    if let Err(error) = apply_menu_background(menu, menu_resources) {
         // MIM_APPLYTOSUBMENUS does not document transactional failure. Retain
-        // every custom brush set from a failed attempt so any partially
-        // updated submenu can never reference a deleted GDI object.
-        if let Some(replacement) = replacement {
+        // every custom brush set for an attached tree so any partially updated
+        // submenu can never reference a deleted GDI object. An unattached
+        // replacement is destroyed while its candidate resources remain live.
+        if menu_transition {
+            state.pending_menu = None;
+        } else if let Some(replacement) = replacement {
             state.menu_fallback_resources.push(replacement);
         }
         return Err(error);
@@ -1033,6 +1102,9 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
         },
         |palette| (palette.surface_workspace, palette.text_primary),
     );
+    // Native theme changes can reset control colors; restore the app palette
+    // afterwards. Unsupported associations retain the native scrollbar path.
+    apply_scrollbar_theme(state.list_window, resolved.theme);
     // SAFETY: list_window is the live ListView owned by AppState. These messages
     // copy integral COLORREF values and retain no caller pointer.
     unsafe {
@@ -1060,7 +1132,17 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
         rail.set_separators_visible(resolved.appearance.show_separators);
         apply_tooltip_appearance(rail.tooltip_window(), palette);
     }
-    state.appearance_resources = replacement;
+    let previous_resources = std::mem::replace(&mut state.appearance_resources, replacement);
+    if menu_transition {
+        if let Some(previous_resources) = previous_resources {
+            // The attached owner-draw tree may still retain its old background
+            // brush until the deferred SetMenu succeeds and destroys that tree.
+            state.menu_fallback_resources.push(previous_resources);
+        }
+    } else {
+        drop(previous_resources);
+        state.menu_fallback_resources.clear();
+    }
     // Mirror only the scalar COLORREF into the callback allocation's disjoint
     // sidecar. Nested non-client callbacks can read it without borrowing the
     // AppState value whose resources established this successful appearance.
@@ -1072,7 +1154,6 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
             palette.map(|palette| palette.surface_window),
         )
     };
-    state.menu_fallback_resources.clear();
     apply_dwm_title_frame(window, state, resolved.theme);
     // SAFETY: window is the live top-level HWND. One invalidation repaints all
     // children after every brush and ListView color has been installed.
@@ -1084,6 +1165,16 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
             RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN,
         )
     };
+    if menu_transition {
+        // SetMenu and DrawMenuBar can synchronously reenter the window
+        // procedure. Defer the pointer-free transition until this state lease
+        // and every reference derived from it have ended.
+        // SAFETY: window is the live top-level owner and the private message
+        // carries no caller-owned pointers.
+        if unsafe { PostMessageW(window, WM_APP_MENU_REDRAW, 0, 0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
     Ok(())
 }
 
@@ -1131,4 +1222,31 @@ pub(super) fn apply_auxiliary_dwm_title_frame(window: HWND, theme: ResolvedTheme
             size_of::<i32>() as u32,
         )
     };
+}
+
+#[cfg(test)]
+mod scrollbar_tests {
+    use super::*;
+
+    #[test]
+    fn theme_transition_and_failure_restore_the_native_association() {
+        let mut calls = Vec::new();
+        for theme in [
+            ResolvedTheme::Dark,
+            ResolvedTheme::Light,
+            ResolvedTheme::NativeSystem,
+        ] {
+            assert!(configure_scrollbar_theme(theme, |name| {
+                calls.push(name.map(str::to_owned));
+                true
+            }));
+        }
+        assert_eq!(calls, [Some("DarkMode_Explorer".to_owned()), None, None]);
+        calls.clear();
+        assert!(!configure_scrollbar_theme(ResolvedTheme::Dark, |name| {
+            calls.push(name.map(str::to_owned));
+            name.is_none()
+        }));
+        assert_eq!(calls, [Some("DarkMode_Explorer".to_owned()), None]);
+    }
 }

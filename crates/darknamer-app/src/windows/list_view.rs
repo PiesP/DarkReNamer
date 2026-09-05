@@ -130,6 +130,15 @@ pub(super) fn update_column_visibility(state: &mut AppState, index: usize) {
             column,
             width as isize,
         );
+        // Header painting during the synchronous column change cannot borrow
+        // AppState. Queue a repaint after this lease ends so newly shown cells
+        // use the custom-draw palette instead of retaining the system colors.
+        RedrawWindow(
+            state.list_window,
+            null(),
+            null_mut(),
+            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
+        );
     }
 }
 
@@ -1677,19 +1686,32 @@ mod native_tests {
                 cchTextMax: i32::try_from(buffer.len()).unwrap_or(i32::MAX),
                 ..LVITEMW::default()
             };
-            // SAFETY: list is live and query/buffer are writable for this
-            // synchronous native text retrieval.
-            let copied = unsafe {
-                SendMessageW(
-                    list,
-                    LVM_GETITEMTEXTW,
-                    0,
-                    (&mut query as *mut LVITEMW) as isize,
-                )
-            };
-            let copied = usize::try_from(copied).unwrap_or_default();
-            assert_eq!(String::from_utf16_lossy(&buffer[..copied]), "차단: 충돌");
-            assert_eq!(selected_indices(list), vec![0]);
+            let status_width = list_column_width(list, NATIVE_STATUS_COLUMN_INDEX);
+            for theme in [
+                ResolvedTheme::Dark,
+                ResolvedTheme::Light,
+                ResolvedTheme::NativeSystem,
+                ResolvedTheme::Dark,
+            ] {
+                apply_scrollbar_theme(list, theme);
+                // SAFETY: list is live and query/buffer are writable for this
+                // synchronous native text retrieval after the theme transition.
+                let copied = unsafe {
+                    SendMessageW(
+                        list,
+                        LVM_GETITEMTEXTW,
+                        0,
+                        (&mut query as *mut LVITEMW) as isize,
+                    )
+                };
+                let copied = usize::try_from(copied).unwrap_or_default();
+                assert_eq!(String::from_utf16_lossy(&buffer[..copied]), "차단: 충돌");
+                assert_eq!(selected_indices(list), vec![0]);
+                assert_eq!(
+                    list_column_width(list, NATIVE_STATUS_COLUMN_INDEX),
+                    status_width
+                );
+            }
             Ok(())
         })();
         // SAFETY: parent owns and destroys the native ListView child exactly once.

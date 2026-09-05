@@ -299,6 +299,13 @@ pub(crate) enum ResolvedTheme {
     Dark,
 }
 
+/// Whether the resolved theme uses the app-owned menu palette.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn owner_draw_menu_for_theme(theme: ResolvedTheme) -> bool {
+    matches!(theme, ResolvedTheme::Light | ResolvedTheme::Dark)
+}
+
 /// Resolves background theme from the official UISettings foreground color.
 #[cfg(any(windows, test))]
 #[must_use]
@@ -5050,6 +5057,31 @@ mod tests {
         );
         assert_eq!(theme_from_foreground(245, 245, 245), ResolvedTheme::Dark);
         assert_eq!(theme_from_foreground(24, 24, 24), ResolvedTheme::Light);
+    }
+
+    #[test]
+    fn menu_rendering_policy_tracks_resolved_theme_transitions() {
+        let mut appearance = UiAppearance {
+            theme: AppThemeMode::Dark,
+            ..UiAppearance::default()
+        };
+        let dark = appearance.resolve(ForcedColorsState::Inactive, None);
+        assert!(owner_draw_menu_for_theme(dark.theme));
+
+        appearance.theme = AppThemeMode::Light;
+        let light = appearance.resolve(ForcedColorsState::Inactive, None);
+        assert!(owner_draw_menu_for_theme(light.theme));
+
+        let forced = appearance.resolve(ForcedColorsState::ActiveOrUnknown, None);
+        assert!(!owner_draw_menu_for_theme(forced.theme));
+
+        appearance.theme = AppThemeMode::System;
+        let unavailable = appearance.resolve(ForcedColorsState::Inactive, None);
+        assert!(!owner_draw_menu_for_theme(unavailable.theme));
+
+        appearance.theme = AppThemeMode::Dark;
+        let restored = appearance.resolve(ForcedColorsState::Inactive, None);
+        assert!(owner_draw_menu_for_theme(restored.theme));
     }
 
     #[test]
