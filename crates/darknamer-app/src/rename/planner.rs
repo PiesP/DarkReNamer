@@ -5,8 +5,8 @@ use darknamer_core::validate_windows_leaf_name;
 
 use super::model::PlanRow;
 use super::{
-    EntryId, MoveScope, PathKey, PlanError, PlanId, PlanIssue, PlanIssueKind, PlanRequest,
-    RenameBackend, RenameIntent, RenamePlan,
+    EntryId, EntryIdentity, EntryKind, MoveScope, PathKey, PathSnapshot, PlanError, PlanId,
+    PlanIssue, PlanIssueKind, PlanRequest, RenameBackend, RenameIntent, RenamePlan,
 };
 
 /// Maximum number of path components accepted by one direct plan request.
@@ -92,6 +92,9 @@ impl<'a> RenamePlanner<'a> {
                 changed.push(intent);
             }
         }
+        let has_changed_directory = changed
+            .iter()
+            .any(|intent| intent.kind == EntryKind::Directory);
         let mut issues = Vec::new();
         let mut destination_owners: BTreeMap<PathKey, Vec<_>> = BTreeMap::new();
         let mut source_owners: BTreeMap<PathKey, Vec<_>> = BTreeMap::new();
@@ -100,6 +103,16 @@ impl<'a> RenamePlanner<'a> {
         for intent in &changed {
             check_cancelled(&cancellation_requested)?;
             validate_intent(intent, &mut issues);
+        }
+        if has_changed_directory {
+            for intent in request
+                .entries
+                .iter()
+                .filter(|intent| intent.source == intent.destination)
+            {
+                check_cancelled(&cancellation_requested)?;
+                validate_source_path(intent, &mut issues);
+            }
         }
         if !issues.is_empty() {
             return Err(PlanError::new(issues).into());
@@ -111,12 +124,7 @@ impl<'a> RenamePlanner<'a> {
                 if let Err(error) = self.backend.validate_path_environment(path) {
                     issues.push(PlanIssue {
                         entry: intent.id,
-                        kind: match error.code {
-                            50 => PlanIssueKind::UnsupportedCaseSensitiveParent,
-                            53 => PlanIssueKind::UnsupportedWindowsPath,
-                            1005 => PlanIssueKind::UnsupportedFilesystem,
-                            _ => PlanIssueKind::BackendFailure(error),
-                        },
+                        kind: path_environment_issue(error),
                     });
                 }
             }
@@ -126,10 +134,8 @@ impl<'a> RenamePlanner<'a> {
         }
         for intent in &changed {
             check_cancelled(&cancellation_requested)?;
-            source_owners
-                .entry(self.backend.path_key(&intent.source))
-                .or_default()
-                .push(intent.id);
+            let source_key = self.backend.path_key(&intent.source);
+            source_owners.entry(source_key).or_default().push(intent.id);
             entry_owners.entry(intent.id).or_default().push(intent.id);
             destination_owners
                 .entry(self.backend.path_key(&intent.destination))
@@ -169,6 +175,7 @@ impl<'a> RenamePlanner<'a> {
                     overlap_entries.insert(intent.id);
                     overlap_entries.extend(owners.iter().copied());
                 }
+                Ok(false)
             })?;
         }
         for entry in overlap_entries {
@@ -183,12 +190,14 @@ impl<'a> RenamePlanner<'a> {
         }
 
         let mut entries = Vec::with_capacity(changed.len());
+        let mut source_snapshots = BTreeMap::new();
+        let mut destination_snapshots = BTreeMap::new();
         let mut planned_source_keys = BTreeSet::new();
         for key in source_owners.keys() {
             check_cancelled(&cancellation_requested)?;
             planned_source_keys.insert(key.clone());
         }
-        for intent in changed {
+        for intent in &changed {
             check_cancelled(&cancellation_requested)?;
             let source_snapshot = match self.backend.observe(&intent.source) {
                 Ok(snapshot) => snapshot,
@@ -273,6 +282,68 @@ impl<'a> RenamePlanner<'a> {
                 source_snapshot,
                 destination_snapshot,
             });
+            if has_changed_directory {
+                source_snapshots.insert(intent.id, source_snapshot);
+                destination_snapshots.insert(intent.id, destination_snapshot);
+            }
+        }
+        if !issues.is_empty() {
+            return Err(PlanError::new(issues).into());
+        }
+
+        let mut changed_directory_identity_owners: BTreeMap<EntryIdentity, Vec<EntryId>> =
+            BTreeMap::new();
+        if has_changed_directory {
+            for entry in &entries {
+                check_cancelled(&cancellation_requested)?;
+                if entry.kind == EntryKind::Directory
+                    && let Some(source) = entry.source_snapshot.entry
+                {
+                    changed_directory_identity_owners
+                        .entry(source.identity)
+                        .or_default()
+                        .push(entry.id);
+                }
+            }
+        }
+        if !changed_directory_identity_owners.is_empty() {
+            let mut identity_overlap_entries = BTreeSet::new();
+            {
+                let mut inspection = DirectoryOverlapInspection {
+                    backend: self.backend,
+                    directory_owners: &changed_directory_identity_owners,
+                    overlap_entries: &mut identity_overlap_entries,
+                    issues: &mut issues,
+                    cancellation_requested: &cancellation_requested,
+                };
+                for intent in &request.entries {
+                    check_cancelled(&cancellation_requested)?;
+                    let observation = if intent.source == intent.destination {
+                        self.backend.observe(&intent.source)
+                    } else {
+                        source_snapshots
+                            .get(&intent.id)
+                            .copied()
+                            .map_or_else(|| self.backend.observe(&intent.source), Ok)
+                    };
+                    inspection.inspect(&intent.source, intent.id, observation, true)?;
+                }
+                for intent in &changed {
+                    check_cancelled(&cancellation_requested)?;
+                    let observation = destination_snapshots
+                        .get(&intent.id)
+                        .copied()
+                        .map_or_else(|| self.backend.observe(&intent.destination), Ok);
+                    inspection.inspect(&intent.destination, intent.id, observation, false)?;
+                }
+            }
+            for entry in identity_overlap_entries {
+                check_cancelled(&cancellation_requested)?;
+                issues.push(PlanIssue {
+                    entry,
+                    kind: PlanIssueKind::SourceOverlap,
+                });
+            }
         }
         if !issues.is_empty() {
             return Err(PlanError::new(issues).into());
@@ -322,29 +393,152 @@ fn append_duplicate_issues<'a>(
     Ok(())
 }
 
+struct DirectoryOverlapInspection<'a, C> {
+    backend: &'a dyn RenameBackend,
+    directory_owners: &'a BTreeMap<EntryIdentity, Vec<EntryId>>,
+    overlap_entries: &'a mut BTreeSet<EntryId>,
+    issues: &'a mut Vec<PlanIssue>,
+    cancellation_requested: &'a C,
+}
+
+impl<C: Fn() -> bool> DirectoryOverlapInspection<'_, C> {
+    fn inspect(
+        &mut self,
+        endpoint: &darknamer_core::LegacyText,
+        candidate: EntryId,
+        observation: Result<PathSnapshot, super::BackendError>,
+        compare_endpoint_entry: bool,
+    ) -> Result<(), PlanAttemptError> {
+        let endpoint_matches = match observation {
+            Ok(snapshot) => {
+                let entry_matches = if compare_endpoint_entry
+                    && let Some(entry) = snapshot.entry
+                    && entry.kind == EntryKind::Directory
+                {
+                    record_identity_overlap(
+                        entry.identity,
+                        candidate,
+                        true,
+                        self.directory_owners,
+                        self.overlap_entries,
+                    )
+                } else {
+                    false
+                };
+                let parent_matches = record_identity_overlap(
+                    snapshot.parent,
+                    candidate,
+                    false,
+                    self.directory_owners,
+                    self.overlap_entries,
+                );
+                entry_matches || parent_matches
+            }
+            Err(error) if is_not_found_error(error) => false,
+            Err(error) => {
+                self.issues.push(PlanIssue {
+                    entry: candidate,
+                    kind: PlanIssueKind::BackendFailure(error),
+                });
+                return Ok(());
+            }
+        };
+        if endpoint_matches {
+            return Ok(());
+        }
+
+        visit_direct_ancestors(endpoint, self.cancellation_requested, |ancestor| {
+            let snapshot = match self.backend.observe(ancestor) {
+                Ok(snapshot) => snapshot,
+                Err(error) if is_not_found_error(error) => return Ok(false),
+                Err(error) => {
+                    self.issues.push(PlanIssue {
+                        entry: candidate,
+                        kind: PlanIssueKind::BackendFailure(error),
+                    });
+                    return Ok(true);
+                }
+            };
+            let entry_matches = snapshot.entry.is_some_and(|entry| {
+                entry.kind == EntryKind::Directory
+                    && record_identity_overlap(
+                        entry.identity,
+                        candidate,
+                        false,
+                        self.directory_owners,
+                        self.overlap_entries,
+                    )
+            });
+            let parent_matches = record_identity_overlap(
+                snapshot.parent,
+                candidate,
+                false,
+                self.directory_owners,
+                self.overlap_entries,
+            );
+            Ok(entry_matches || parent_matches)
+        })
+    }
+}
+
+fn record_identity_overlap(
+    identity: EntryIdentity,
+    candidate: EntryId,
+    exclude_candidate: bool,
+    directory_owners: &BTreeMap<EntryIdentity, Vec<EntryId>>,
+    overlap_entries: &mut BTreeSet<EntryId>,
+) -> bool {
+    let Some(owners) = directory_owners.get(&identity) else {
+        return false;
+    };
+    if exclude_candidate && owners.iter().all(|owner| *owner == candidate) {
+        return false;
+    }
+    overlap_entries.insert(candidate);
+    overlap_entries.extend(owners.iter().copied());
+    true
+}
+
+const fn is_not_found_error(error: super::BackendError) -> bool {
+    matches!(error.code, 2 | 3)
+}
+
+fn path_environment_issue(error: super::BackendError) -> PlanIssueKind {
+    match error.code {
+        50 => PlanIssueKind::UnsupportedCaseSensitiveParent,
+        53 => PlanIssueKind::UnsupportedWindowsPath,
+        1005 => PlanIssueKind::UnsupportedFilesystem,
+        _ => PlanIssueKind::BackendFailure(error),
+    }
+}
+
 fn visit_direct_ancestors(
     path: &darknamer_core::LegacyText,
     cancellation_requested: &impl Fn() -> bool,
-    mut visit: impl FnMut(&darknamer_core::LegacyText),
+    mut visit: impl FnMut(&darknamer_core::LegacyText) -> Result<bool, PlanAttemptError>,
 ) -> Result<(), PlanAttemptError> {
     let mut ancestor = path.clone();
+    let verbatim = verbatim_drive_root_separator(path.units()).is_some();
+    let root_separator = verbatim_drive_root_separator(path.units()).unwrap_or(2);
     for _ in 0..MAX_PLAN_PATH_DEPTH {
         check_cancelled(cancellation_requested)?;
         let Some(separator) = ancestor
             .units()
             .iter()
-            .rposition(|unit| is_separator(*unit))
+            .rposition(|unit| is_ancestor_separator(*unit, verbatim))
         else {
             break;
         };
-        if separator <= 2 && ancestor.units().get(1) == Some(&(b':' as u16)) {
+        if separator <= root_separator {
             break;
         }
         ancestor.truncate_units(separator);
         if ancestor.is_empty() {
             break;
         }
-        visit(&ancestor);
+        if visit(&ancestor)? {
+            break;
+        }
     }
     Ok(())
 }
@@ -378,25 +572,33 @@ fn validate_intent(intent: &RenameIntent, issues: &mut Vec<PlanIssue>) {
     }
 }
 
+fn validate_source_path(intent: &RenameIntent, issues: &mut Vec<PlanIssue>) {
+    if path_component_depth(intent.source.units()) > MAX_PLAN_PATH_DEPTH {
+        issues.push(PlanIssue {
+            entry: intent.id,
+            kind: PlanIssueKind::PathTooDeep,
+        });
+    }
+    if !is_absolute_windows_path(intent.source.units()) {
+        issues.push(PlanIssue {
+            entry: intent.id,
+            kind: PlanIssueKind::RelativeSource,
+        });
+    }
+}
+
 fn path_component_depth(units: &[u16]) -> usize {
-    let start = if units.len() >= 7
-        && is_separator(units[0])
-        && is_separator(units[1])
-        && units[2] == b'?' as u16
-        && is_separator(units[3])
-        && units[5] == b':' as u16
-        && is_separator(units[6])
-    {
-        7
+    let (start, verbatim) = if let Some(root) = verbatim_drive_root_separator(units) {
+        (root + 1, true)
     } else if units.len() >= 3 && units[1] == b':' as u16 && is_separator(units[2]) {
-        3
+        (3, false)
     } else {
-        0
+        (0, false)
     };
     let mut depth = 0;
     let mut in_component = false;
     for unit in &units[start..] {
-        if is_separator(*unit) {
+        if is_ancestor_separator(*unit, verbatim) {
             in_component = false;
         } else if !in_component {
             depth += 1;
@@ -404,6 +606,23 @@ fn path_component_depth(units: &[u16]) -> usize {
         }
     }
     depth
+}
+
+fn verbatim_drive_root_separator(units: &[u16]) -> Option<usize> {
+    (units.len() >= 7
+        && units[0] == b'\\' as u16
+        && units[1] == b'\\' as u16
+        && units[2] == b'?' as u16
+        && units[3] == b'\\' as u16
+        && ((b'A' as u16..=b'Z' as u16).contains(&units[4])
+            || (b'a' as u16..=b'z' as u16).contains(&units[4]))
+        && units[5] == b':' as u16
+        && units[6] == b'\\' as u16)
+        .then_some(6)
+}
+
+fn is_ancestor_separator(unit: u16, verbatim: bool) -> bool {
+    unit == b'\\' as u16 || (!verbatim && unit == b'/' as u16)
 }
 
 fn is_absolute_windows_path(units: &[u16]) -> bool {

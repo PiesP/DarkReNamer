@@ -251,7 +251,7 @@ fn split_absolute_path(
     if !absolute || separator + 1 >= units.len() {
         return Err(invalid_path_error(operation));
     }
-    let parent_end = if separator == 2 && units[1] == b':' as u16 {
+    let parent_end = if is_drive_root_separator(units, separator) {
         separator + 1
     } else {
         separator
@@ -262,6 +262,13 @@ fn split_absolute_path(
         return Err(invalid_path_error(operation));
     }
     Ok((parent, leaf))
+}
+
+fn is_drive_root_separator(units: &[u16], separator: usize) -> bool {
+    (separator == 2 && units.get(1) == Some(&(b':' as u16)))
+        || (separator == 6
+            && units.starts_with(&[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16])
+            && units.get(5) == Some(&(b':' as u16)))
 }
 
 fn path_components(path: &LegacyText) -> Vec<&[u16]> {
@@ -382,4 +389,22 @@ fn error_code(error: &std::io::Error) -> u32 {
 
 fn io_code() -> u32 {
     error_code(&std::io::Error::last_os_error())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verbatim_drive_leaf_preserves_the_root_separator_in_its_parent() -> Result<(), BackendError>
+    {
+        let (parent, leaf) = split_absolute_path(
+            &LegacyText::from(r"\\?\C:\leaf.txt"),
+            BackendOperation::Observe,
+        )?;
+
+        assert_eq!(parent, LegacyText::from(r"\\?\C:\"));
+        assert_eq!(leaf, LegacyText::from("leaf.txt"));
+        Ok(())
+    }
 }

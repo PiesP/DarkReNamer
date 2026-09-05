@@ -133,6 +133,47 @@ fn plan_request_authorizes_same_volume_files_only_for_destination_parent_proposa
 }
 
 #[test]
+fn model_request_rejects_a_directory_rename_that_would_stale_an_unchanged_child()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut model = LegacyList::new();
+    assert_eq!(
+        model.append(LegacyListItem::new("C:\\work\\folder", true, 0, 1, 2)),
+        Ok(true)
+    );
+    assert_eq!(
+        model.append(LegacyListItem::new(
+            "C:\\work\\folder\\child.txt",
+            false,
+            1,
+            2,
+            3
+        )),
+        Ok(true)
+    );
+    assert_eq!(model.manual_change(0, "renamed"), Ok(true));
+    let backend = MemoryBackend::new()
+        .with_directory("C:\\work\\folder", 1)
+        .with_file("C:\\work\\folder\\child.txt", 2);
+
+    let Err(error) =
+        RenamePlanner::new(&backend).plan(build_plan_request(&model, ModelRevision::new(1)))
+    else {
+        return Err(std::io::Error::other("model-staling directory rename was accepted").into());
+    };
+
+    assert!(
+        error
+            .issues()
+            .iter()
+            .all(|issue| issue.kind == darknamer_app::rename::PlanIssueKind::SourceOverlap)
+    );
+    let (_message, rows) = plan_error_korean(&error);
+    assert_eq!(rows, vec![0, 1]);
+    assert_eq!(backend.mutation_count(), 0);
+    Ok(())
+}
+
+#[test]
 fn capacity_messages_name_the_resource_and_required_and_maximum_values() {
     let steps = journal_capacity_error_korean(JournalCapacityError {
         kind: JournalCapacityKind::PrimitiveSteps,

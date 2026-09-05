@@ -19,6 +19,12 @@ no-replacement renames. Unsupported network, device, case-sensitive, elevated,
 cross-volume, reparse, directory-move, and overlapping-source environments fail
 closed.
 
+Before freezing a directory rename, planning rejects any other requested source,
+including an unchanged row, that is the same observed directory or lies below
+it. A changed destination also cannot lie below a directory being renamed.
+Observed directory identity resolves alternate accepted path spellings without
+rewriting the model's source or destination text.
+
 The v0.1 release-validated scope is Windows 10 and Windows 11 on x64, with a
 local, non-elevated process operating on same-parent, non-reparse entries in a
 case-insensitive NTFS directory. Filesystems other than NTFS are unsupported

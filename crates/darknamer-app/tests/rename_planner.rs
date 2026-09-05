@@ -17,6 +17,16 @@ fn intent(id: u32, source: &str, destination_name: &str) -> RenameIntent {
     )
 }
 
+fn directory_intent(id: u32, source: &str, destination_name: &str) -> RenameIntent {
+    RenameIntent::new(
+        EntryId::new(id),
+        source,
+        "C:\\work",
+        destination_name,
+        EntryKind::Directory,
+    )
+}
+
 #[test]
 fn unchanged_entry_produces_an_empty_execution_plan() -> Result<(), Box<dyn std::error::Error>> {
     let backend = MemoryBackend::new().with_file("C:\\work\\a.txt", 1);
@@ -218,6 +228,333 @@ fn planner_blocks_duplicate_identity_inputs_cross_parent_and_source_overlap()
             .iter()
             .all(|issue| issue.kind == PlanIssueKind::SourceOverlap)
     );
+    Ok(())
+}
+
+#[test]
+fn changed_directory_rejects_an_unchanged_descendant_source_and_reports_both_rows()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = MemoryBackend::new()
+        .with_directory("C:\\work\\folder", 1)
+        .with_file("C:\\work\\folder\\child.txt", 2);
+    let request = PlanRequest::new(
+        ModelRevision::new(1),
+        vec![
+            RenameIntent::new(
+                EntryId::new(9),
+                "C:\\work\\folder\\child.txt",
+                "C:\\work\\folder",
+                "child.txt",
+                EntryKind::File,
+            ),
+            directory_intent(3, "C:\\work\\folder", "renamed"),
+        ],
+    );
+
+    let Err(error) = RenamePlanner::new(&backend).plan(request) else {
+        return Err(std::io::Error::other("unchanged descendant source was accepted").into());
+    };
+    assert_eq!(
+        error
+            .issues()
+            .iter()
+            .map(|issue| (issue.entry, issue.kind.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (EntryId::new(3), PlanIssueKind::SourceOverlap),
+            (EntryId::new(9), PlanIssueKind::SourceOverlap),
+        ]
+    );
+    assert_eq!(backend.mutation_count(), 0);
+    Ok(())
+}
+
+#[test]
+fn changed_directory_rejects_another_changed_destination_inside_its_source()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = MemoryBackend::new()
+        .with_directory("C:\\work\\folder", 1)
+        .with_file("C:\\outside\\move.txt", 2);
+    let request = PlanRequest::with_scope(
+        ModelRevision::new(1),
+        vec![
+            directory_intent(8, "C:\\work\\folder", "renamed"),
+            RenameIntent::new(
+                EntryId::new(2),
+                "C:\\outside\\move.txt",
+                "C:\\WORK\\FOLDER",
+                "moved.txt",
+                EntryKind::File,
+            ),
+        ],
+        MoveScope::SameVolumeFilesOnly,
+    );
+
+    let Err(error) = RenamePlanner::new(&backend).plan(request) else {
+        return Err(std::io::Error::other("nested changed destination was accepted").into());
+    };
+    assert_eq!(
+        error
+            .issues()
+            .iter()
+            .map(|issue| (issue.entry, issue.kind.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (EntryId::new(2), PlanIssueKind::SourceOverlap),
+            (EntryId::new(8), PlanIssueKind::SourceOverlap),
+        ]
+    );
+    assert_eq!(backend.mutation_count(), 0);
+    Ok(())
+}
+
+#[test]
+fn unchanged_directory_parent_allows_a_changed_child() -> Result<(), Box<dyn std::error::Error>> {
+    let backend = MemoryBackend::new()
+        .with_directory("C:\\work\\folder", 1)
+        .with_file("C:\\work\\folder\\child.txt", 2);
+    let request = PlanRequest::new(
+        ModelRevision::new(1),
+        vec![
+            directory_intent(0, "C:\\work\\folder", "folder"),
+            RenameIntent::new(
+                EntryId::new(1),
+                "C:\\work\\folder\\child.txt",
+                "C:\\work\\folder",
+                "renamed.txt",
+                EntryKind::File,
+            ),
+        ],
+    );
+
+    let plan = RenamePlanner::new(&backend).plan(request)?;
+    assert_eq!(plan.changed_count(), 1);
+    assert_eq!(plan.rows()[0].entry(), EntryId::new(1));
+    Ok(())
+}
+
+#[test]
+fn changed_directory_allows_an_unchanged_source_in_a_sibling_subtree()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = MemoryBackend::new()
+        .with_directory("C:\\work\\folder", 1)
+        .with_file("C:\\work\\sibling\\child.txt", 2);
+    let request = PlanRequest::new(
+        ModelRevision::new(1),
+        vec![
+            directory_intent(0, "C:\\work\\folder", "renamed"),
+            RenameIntent::new(
+                EntryId::new(1),
+                "C:\\work\\sibling\\child.txt",
+                "C:\\work\\sibling",
+                "child.txt",
+                EntryKind::File,
+            ),
+        ],
+    );
+
+    let plan = RenamePlanner::new(&backend).plan(request)?;
+    assert_eq!(plan.changed_count(), 1);
+    assert_eq!(plan.rows()[0].entry(), EntryId::new(0));
+    Ok(())
+}
+
+#[test]
+fn directory_swap_remains_a_valid_plan() -> Result<(), Box<dyn std::error::Error>> {
+    let backend = MemoryBackend::new()
+        .with_directory("C:\\work\\a", 1)
+        .with_directory("C:\\work\\b", 2);
+    let request = PlanRequest::new(
+        ModelRevision::new(1),
+        vec![
+            directory_intent(0, "C:\\work\\a", "b"),
+            directory_intent(1, "C:\\work\\b", "a"),
+        ],
+    );
+
+    let plan = RenamePlanner::new(&backend).plan(request)?;
+    assert_eq!(plan.changed_count(), 2);
+    assert_eq!(backend.mutation_count(), 0);
+    Ok(())
+}
+
+#[test]
+fn directory_rename_allows_an_unrelated_missing_unchanged_source()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = MemoryBackend::new().with_directory("C:\\work\\folder", 1);
+    let request = PlanRequest::new(
+        ModelRevision::new(1),
+        vec![
+            directory_intent(0, "C:\\work\\folder", "renamed"),
+            RenameIntent::new(
+                EntryId::new(1),
+                "C:\\missing\\child.txt",
+                "C:\\missing",
+                "child.txt",
+                EntryKind::File,
+            ),
+        ],
+    );
+
+    let plan = RenamePlanner::new(&backend).plan(request)?;
+    assert_eq!(plan.changed_count(), 1);
+    assert_eq!(plan.rows()[0].entry(), EntryId::new(0));
+    Ok(())
+}
+
+#[test]
+fn changed_directory_rejects_an_unchanged_alias_of_the_same_directory()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = MemoryBackend::new()
+        .with_directory("C:\\work\\folder", 1)
+        .with_directory("X:\\alias", 1);
+    let request = PlanRequest::new(
+        ModelRevision::new(1),
+        vec![
+            directory_intent(0, "C:\\work\\folder", "renamed"),
+            RenameIntent::new(
+                EntryId::new(1),
+                "X:\\alias",
+                "X:\\",
+                "alias",
+                EntryKind::Directory,
+            ),
+        ],
+    );
+
+    let Err(error) = RenamePlanner::new(&backend).plan(request) else {
+        return Err(std::io::Error::other("unchanged directory alias was accepted").into());
+    };
+    assert!(
+        error
+            .issues()
+            .iter()
+            .all(|issue| issue.kind == PlanIssueKind::SourceOverlap)
+    );
+    assert_eq!(error.issues().len(), 2);
+    Ok(())
+}
+
+#[test]
+fn changed_directory_bounds_unchanged_source_depth_before_backend_access()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut deep_parent = String::from("C:\\unrelated");
+    for index in 0..=MAX_PLAN_PATH_DEPTH {
+        deep_parent.push_str(&format!("\\p{index}"));
+    }
+    let deep_source = format!("{deep_parent}\\leaf.txt");
+    let backend = CountingBackend {
+        inner: MemoryBackend::new().with_directory("C:\\work\\folder", 1),
+        validation_calls: Cell::new(0),
+        key_calls: Cell::new(0),
+        observe_calls: Cell::new(0),
+        relationship_calls: Cell::new(0),
+    };
+    let request = PlanRequest::new(
+        ModelRevision::new(1),
+        vec![
+            directory_intent(0, "C:\\work\\folder", "renamed"),
+            RenameIntent::new(
+                EntryId::new(1),
+                deep_source,
+                deep_parent,
+                "leaf.txt",
+                EntryKind::File,
+            ),
+        ],
+    );
+
+    let Err(error) = RenamePlanner::new(&backend).plan(request) else {
+        return Err(std::io::Error::other("over-depth unchanged source was accepted").into());
+    };
+    assert_eq!(error.issues().len(), 1);
+    assert_eq!(error.issues()[0].entry, EntryId::new(1));
+    assert_eq!(error.issues()[0].kind, PlanIssueKind::PathTooDeep);
+    assert_eq!(backend.validation_calls.get(), 0);
+    assert_eq!(backend.key_calls.get(), 0);
+    assert_eq!(backend.observe_calls.get(), 0);
+    assert_eq!(backend.inner.mutation_count(), 0);
+    Ok(())
+}
+
+#[test]
+fn changed_directory_overlap_scan_honors_cancellation_with_bounded_observation_work() {
+    let count = 128_usize;
+    let inner = MemoryBackend::new().with_directory("C:\\work\\folder", 1);
+    let mut intents = Vec::with_capacity(count + 1);
+    intents.push(directory_intent(0, "C:\\work\\folder", "renamed"));
+    for index in 0..count {
+        let source = format!("C:\\work\\folder\\child-{index:03}.txt");
+        intents.push(RenameIntent::new(
+            EntryId::new(index as u32 + 1),
+            source.clone(),
+            "C:\\work\\folder",
+            format!("child-{index:03}.txt"),
+            EntryKind::File,
+        ));
+    }
+    let backend = CountingBackend {
+        inner,
+        validation_calls: Cell::new(0),
+        key_calls: Cell::new(0),
+        observe_calls: Cell::new(0),
+        relationship_calls: Cell::new(0),
+    };
+
+    let result = RenamePlanner::new(&backend)
+        .plan_cancellable(PlanRequest::new(ModelRevision::new(1), intents), || {
+            backend.observe_calls.get() >= 16
+        });
+
+    assert_eq!(result, Err(PlanAttemptError::Cancelled));
+    assert!(backend.observe_calls.get() <= 16);
+    assert_eq!(backend.inner.mutation_count(), 0);
+}
+
+#[test]
+fn file_only_and_noop_plans_do_not_inspect_unchanged_rows_for_directory_overlap()
+-> Result<(), Box<dyn std::error::Error>> {
+    let noop_backend = CountingBackend {
+        inner: MemoryBackend::new().with_file("C:\\work\\a.txt", 1),
+        validation_calls: Cell::new(0),
+        key_calls: Cell::new(0),
+        observe_calls: Cell::new(0),
+        relationship_calls: Cell::new(0),
+    };
+    let noop = RenamePlanner::new(&noop_backend).plan(PlanRequest::new(
+        ModelRevision::new(1),
+        vec![intent(0, "C:\\work\\a.txt", "a.txt")],
+    ))?;
+    assert!(noop.is_empty());
+    assert_eq!(noop_backend.validation_calls.get(), 0);
+    assert_eq!(noop_backend.key_calls.get(), 0);
+    assert_eq!(noop_backend.observe_calls.get(), 0);
+
+    let file_backend = CountingBackend {
+        inner: MemoryBackend::new().with_file("C:\\work\\a.txt", 1),
+        validation_calls: Cell::new(0),
+        key_calls: Cell::new(0),
+        observe_calls: Cell::new(0),
+        relationship_calls: Cell::new(0),
+    };
+    let plan = RenamePlanner::new(&file_backend).plan(PlanRequest::new(
+        ModelRevision::new(2),
+        vec![
+            intent(0, "C:\\work\\a.txt", "b.txt"),
+            RenameIntent::new(
+                EntryId::new(1),
+                "C:\\missing\\noop.txt",
+                "C:\\missing",
+                "noop.txt",
+                EntryKind::File,
+            ),
+        ],
+    ))?;
+    assert_eq!(plan.changed_count(), 1);
+    assert_eq!(file_backend.validation_calls.get(), 2);
+    assert_eq!(file_backend.key_calls.get(), 3);
+    assert_eq!(file_backend.observe_calls.get(), 2);
+    assert_eq!(file_backend.inner.mutation_count(), 0);
     Ok(())
 }
 
@@ -522,6 +859,82 @@ struct EnvironmentFailureBackend {
     validation_calls: Cell<usize>,
     key_calls: Cell<usize>,
     observe_calls: Cell<usize>,
+}
+
+struct AncestorFailureBackend {
+    inner: MemoryBackend,
+    failed_path: LegacyText,
+}
+
+impl RenameBackend for AncestorFailureBackend {
+    fn validate_path_environment(&self, path: &LegacyText) -> Result<(), BackendError> {
+        self.inner.validate_path_environment(path)
+    }
+
+    fn path_key(&self, path: &LegacyText) -> PathKey {
+        self.inner.path_key(path)
+    }
+
+    fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
+        if path == &self.failed_path {
+            return Err(BackendError {
+                operation: BackendOperation::Observe,
+                code: 5,
+                certainty: MutationCertainty::NotApplied,
+            });
+        }
+        self.inner.observe(path)
+    }
+
+    fn is_same_or_descendant(
+        &self,
+        ancestor: &LegacyText,
+        candidate: &LegacyText,
+    ) -> Result<bool, BackendError> {
+        self.inner.is_same_or_descendant(ancestor, candidate)
+    }
+
+    fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
+        self.inner.next_transaction_nonce()
+    }
+
+    fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+        self.inner.rename_no_replace(operation)
+    }
+}
+
+#[test]
+fn directory_rename_fails_closed_when_an_unchanged_ancestor_cannot_be_observed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let backend = AncestorFailureBackend {
+        inner: MemoryBackend::new().with_directory("C:\\work\\folder", 1),
+        failed_path: LegacyText::from("C:\\blocked"),
+    };
+    let request = PlanRequest::new(
+        ModelRevision::new(1),
+        vec![
+            directory_intent(0, "C:\\work\\folder", "renamed"),
+            RenameIntent::new(
+                EntryId::new(1),
+                "C:\\blocked\\child.txt",
+                "C:\\blocked",
+                "child.txt",
+                EntryKind::File,
+            ),
+        ],
+    );
+
+    let Err(error) = RenamePlanner::new(&backend).plan(request) else {
+        return Err(std::io::Error::other("unobservable unchanged ancestor was accepted").into());
+    };
+    assert_eq!(error.issues().len(), 1);
+    assert_eq!(error.issues()[0].entry, EntryId::new(1));
+    assert!(matches!(
+        error.issues()[0].kind,
+        PlanIssueKind::BackendFailure(BackendError { code: 5, .. })
+    ));
+    assert_eq!(backend.inner.mutation_count(), 0);
+    Ok(())
 }
 
 impl RenameBackend for EnvironmentFailureBackend {

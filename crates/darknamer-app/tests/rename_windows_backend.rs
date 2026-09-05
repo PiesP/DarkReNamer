@@ -29,6 +29,12 @@ fn legacy_path(path: &std::path::Path) -> LegacyText {
     LegacyText::from_units(path.as_os_str().encode_wide().collect::<Vec<_>>())
 }
 
+fn verbatim_legacy_path(path: &std::path::Path) -> LegacyText {
+    let mut units = r"\\?\".encode_utf16().collect::<Vec<_>>();
+    units.extend(path.as_os_str().encode_wide());
+    LegacyText::from_units(units)
+}
+
 fn intent(id: u32, source: &std::path::Path, parent: &std::path::Path, leaf: &str) -> RenameIntent {
     RenameIntent::new(
         EntryId::new(id),
@@ -1219,6 +1225,129 @@ fn directory_normal_and_case_only_renames_use_the_same_safe_executor()
             .filter_map(Result::ok)
             .any(|entry| entry.file_name() == "RENAMED")
     );
+    Ok(())
+}
+
+#[test]
+fn directory_rename_rejects_an_unchanged_verbatim_descendant_before_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("Folder");
+    let child = source.join("child.txt");
+    fs::create_dir(&source)?;
+    fs::write(&child, b"child")?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+    let backend = WindowsRenameBackend;
+    let request = PlanRequest::new(
+        ModelRevision::new(1),
+        vec![
+            directory_intent(0, &source, directory.path(), "Renamed"),
+            RenameIntent::new(
+                EntryId::new(1),
+                verbatim_legacy_path(&child),
+                verbatim_legacy_path(&source),
+                "child.txt",
+                EntryKind::File,
+            ),
+        ],
+    );
+
+    let Err(error) = RenamePlanner::new(&backend).plan(request) else {
+        return Err(std::io::Error::other("verbatim descendant source was accepted").into());
+    };
+    assert!(
+        error
+            .issues()
+            .iter()
+            .all(|issue| issue.kind == PlanIssueKind::SourceOverlap)
+    );
+    assert_eq!(error.issues().len(), 2);
+    assert!(source.is_dir());
+    assert_eq!(fs::read(&child)?, b"child");
+    assert!(!directory.path().join("Renamed").exists());
+    Ok(())
+}
+
+#[test]
+fn directory_rename_rejects_a_verbatim_nested_destination_before_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("Folder");
+    let moving = directory.path().join("moving.txt");
+    fs::create_dir(&source)?;
+    fs::write(&moving, b"moving")?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+    let backend = WindowsRenameBackend;
+    let request = PlanRequest::with_scope(
+        ModelRevision::new(1),
+        vec![
+            directory_intent(0, &source, directory.path(), "Renamed"),
+            RenameIntent::new(
+                EntryId::new(1),
+                legacy_path(&moving),
+                verbatim_legacy_path(&source),
+                "moved.txt",
+                EntryKind::File,
+            ),
+        ],
+        MoveScope::SameVolumeFilesOnly,
+    );
+
+    let Err(error) = RenamePlanner::new(&backend).plan(request) else {
+        return Err(std::io::Error::other("verbatim nested destination was accepted").into());
+    };
+    assert!(
+        error
+            .issues()
+            .iter()
+            .all(|issue| issue.kind == PlanIssueKind::SourceOverlap)
+    );
+    assert_eq!(error.issues().len(), 2);
+    assert!(source.is_dir());
+    assert_eq!(fs::read(&moving)?, b"moving");
+    assert!(!source.join("moved.txt").exists());
+    assert!(!directory.path().join("Renamed").exists());
+    Ok(())
+}
+
+#[test]
+fn directory_rename_allows_an_unrelated_verbatim_sibling_source()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("Folder");
+    let sibling = directory.path().join("Sibling");
+    let child = sibling.join("child.txt");
+    fs::create_dir(&source)?;
+    fs::create_dir(&sibling)?;
+    fs::write(&child, b"child")?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+    let backend = WindowsRenameBackend;
+    let request = PlanRequest::new(
+        ModelRevision::new(1),
+        vec![
+            directory_intent(0, &source, directory.path(), "Renamed"),
+            RenameIntent::new(
+                EntryId::new(1),
+                verbatim_legacy_path(&child),
+                verbatim_legacy_path(&sibling),
+                "child.txt",
+                EntryKind::File,
+            ),
+        ],
+    );
+
+    let plan = RenamePlanner::new(&backend).plan(request)?;
+    assert_eq!(plan.changed_count(), 1);
+    assert_eq!(plan.rows()[0].entry(), EntryId::new(0));
+    assert!(source.is_dir());
+    assert_eq!(fs::read(&child)?, b"child");
+    assert!(!directory.path().join("Renamed").exists());
     Ok(())
 }
 
