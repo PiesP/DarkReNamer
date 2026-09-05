@@ -7579,22 +7579,6 @@ mod tests {
     }
 
     #[test]
-    fn production_initial_resize_applies_the_clamped_position() {
-        let source = include_str!("windows/application.rs");
-        assert!(source.contains("let initial_placement = initial_dpi_placement("));
-        assert!(source.contains("resize_to_initial_dpi(window, placement)"));
-        let resize = source
-            .split_once("fn resize_to_initial_dpi")
-            .map(|(_, tail)| tail)
-            .and_then(|tail| tail.split_once("fn has_window_state"))
-            .map(|(body, _)| body)
-            .expect("production initial-resize function should remain inspectable");
-        assert!(resize.contains("placement.x"));
-        assert!(resize.contains("placement.y"));
-        assert!(!resize.contains("SWP_NOMOVE"));
-    }
-
-    #[test]
     fn minimum_track_size_is_clamped_per_axis_to_the_work_area() {
         assert_eq!(
             constrain_minimum_track_size_to_work_area(640, 520, 1_920, 1_040),

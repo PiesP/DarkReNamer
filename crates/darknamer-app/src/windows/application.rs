@@ -317,17 +317,22 @@ fn recommended_track_height(window: HWND, state: &AppState) -> i32 {
     .saturating_add(nonclient_height(window))
 }
 
+fn window_rect(window: HWND) -> io::Result<RECT> {
+    let mut rect = RECT::default();
+    // SAFETY: callers provide a live top-level HWND and rect remains writable
+    // for this synchronous value query.
+    if unsafe { GetWindowRect(window, &mut rect) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(rect)
+}
+
 fn initial_dpi_placement(window: HWND, state: &AppState) -> io::Result<WindowPlacement> {
     let requested = WindowTrackSize {
         width: minimum_track_width(window, state),
         height: scale_dip(INITIAL_HEIGHT, state.dpi).max(recommended_track_height(window, state)),
     };
-    let mut current = RECT::default();
-    // SAFETY: window is the newly created hidden top-level HWND and current is
-    // writable for this synchronous value query.
-    if unsafe { GetWindowRect(window, &mut current) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
+    let current = window_rect(window)?;
     let work = nearest_monitor_work_area(window)?;
     fit_window_to_work_area(
         WindowOrigin {
@@ -2164,6 +2169,38 @@ mod tests {
                 let _disposition = CallbackState::request_reclaim(self.slot);
             }
         }
+    }
+
+    #[test]
+    fn native_initial_resize_fits_an_edge_window_inside_its_work_area()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let app = PublishedFileDialogTestApp::new()?;
+        let work = nearest_monitor_work_area(app.owner)?;
+        resize_to_initial_dpi(
+            app.owner,
+            WindowPlacement {
+                x: work.right - 1,
+                y: work.bottom - 1,
+                width: 100,
+                height: 100,
+            },
+        )?;
+
+        let lease = app.lease()?;
+        let placement = initial_dpi_placement(app.owner, lease.state())?;
+        drop(lease);
+        resize_to_initial_dpi(app.owner, placement)?;
+        let actual = window_rect(app.owner)?;
+
+        assert_eq!(actual.left, placement.x);
+        assert_eq!(actual.top, placement.y);
+        assert_eq!(actual.right - actual.left, placement.width);
+        assert_eq!(actual.bottom - actual.top, placement.height);
+        assert!(actual.left >= work.left);
+        assert!(actual.top >= work.top);
+        assert!(actual.right <= work.right);
+        assert!(actual.bottom <= work.bottom);
+        Ok(())
     }
 
     #[test]
