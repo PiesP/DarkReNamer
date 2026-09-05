@@ -20,3 +20,6 @@
 /.vscode/
 .DS_Store
 Thumbs.db
+
+# Local Python tooling bytecode.
+/scripts/__pycache__/

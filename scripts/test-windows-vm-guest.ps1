@@ -14,7 +14,7 @@ function Assert-Fails {
         & $Action
     }
     catch {
-        if (-not $_.Exception.Message.Contains($Expected, [StringComparison]::Ordinal)) {
+        if ($_.Exception.Message.IndexOf($Expected, [StringComparison]::Ordinal) -lt 0) {
             throw "Expected failure containing '$Expected', got '$($_.Exception.Message)'."
         }
         return
@@ -93,7 +93,7 @@ try {
             $null -ne $failedResult.gui) {
             throw 'The fail-closed result document was parsed incorrectly.'
         }
-        if ($failedResultText.Contains($valid.root, [StringComparison]::Ordinal)) {
+        if ($failedResultText.IndexOf($valid.root, [StringComparison]::Ordinal) -ge 0) {
             throw 'The result document must not contain BundleRoot.'
         }
     }

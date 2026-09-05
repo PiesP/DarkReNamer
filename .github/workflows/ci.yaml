@@ -58,6 +58,9 @@ jobs:
         shell: pwsh
         run: ./scripts/test-tooling.ps1 -Platform Ubuntu
 
+      - name: Test the WSL VM bundle and evidence contract
+        run: python3 scripts/test-windows-vm-runner.py
+
       - name: Check formatting and lints
         run: |
           cargo fmt --all -- --check
