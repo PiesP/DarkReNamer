@@ -1774,7 +1774,9 @@ mod tests {
     use std::process::Command;
 
     use crate::rename::{
-        EntryId, EntryIdentity, EntryKind, PlanRequest, RenameBackend, RenameIntent,
+        BackendError, BackendOperation, EntryId, EntryIdentity, EntryKind, MutationCertainty,
+        PathKey, PathSnapshot, PlanRequest, RenameBackend, RenameIntent, RenameOperation,
+        ResolvedSource,
     };
 
     fn create_startup_journal_directory(
@@ -2004,6 +2006,61 @@ mod tests {
         }
     }
 
+    struct FailSecondPrimitive {
+        inner: WindowsRenameBackend,
+        attempts: usize,
+    }
+
+    impl RenameBackend for FailSecondPrimitive {
+        fn validate_path_environment(&self, path: &LegacyText) -> Result<(), BackendError> {
+            self.inner.validate_path_environment(path)
+        }
+
+        fn path_key(&self, path: &LegacyText) -> PathKey {
+            self.inner.path_key(path)
+        }
+
+        fn resolve_source(&self, path: &LegacyText) -> Result<ResolvedSource, BackendError> {
+            self.inner.resolve_source(path)
+        }
+
+        fn planned_entry_key(
+            &self,
+            parent: EntryIdentity,
+            leaf: &LegacyText,
+        ) -> Result<PathKey, BackendError> {
+            self.inner.planned_entry_key(parent, leaf)
+        }
+
+        fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
+            self.inner.observe(path)
+        }
+
+        fn is_same_or_descendant(
+            &self,
+            ancestor: &LegacyText,
+            candidate: &LegacyText,
+        ) -> Result<bool, BackendError> {
+            self.inner.is_same_or_descendant(ancestor, candidate)
+        }
+
+        fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
+            self.inner.next_transaction_nonce()
+        }
+
+        fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
+            self.attempts = self.attempts.saturating_add(1);
+            if self.attempts == 2 {
+                return Err(BackendError {
+                    operation: BackendOperation::Rename,
+                    code: 123,
+                    certainty: MutationCertainty::NotApplied,
+                });
+            }
+            self.inner.rename_no_replace(operation)
+        }
+    }
+
     fn crash_plan(
         data: &Path,
         graph: CrashGraph,
@@ -2127,19 +2184,33 @@ mod tests {
         let journal_directory = create_startup_journal_directory(&local_app_data)?;
         let data = local_app_data.join("data");
         let graph = CrashGraph::parse(&env::var("DARKRENAMER_TEST_GRAPH")?)?;
-        let mut backend = WindowsRenameBackend;
-        let confirmed = crash_plan(&data, graph, &backend)?;
         let root = JournalRoot::open(&journal_directory)?;
         let mut journal =
             FileJournal::create_candidate(&root, CANDIDATE_JOURNAL_LEAF, ACTIVE_JOURNAL_LEAF)?;
-        let mut executor = RenameExecutor::new(&mut backend, &mut journal);
-        if env::var_os("DARKRENAMER_TEST_FORCE_ROLLBACK").is_some() {
+        if env::var_os("DARKRENAMER_TEST_FAILURE_ROLLBACK").is_some() {
+            if !matches!(graph, CrashGraph::Swap) {
+                return Err(
+                    io::Error::other("failure rollback is limited to the swap graph").into(),
+                );
+            }
+            let mut backend = FailSecondPrimitive {
+                inner: WindowsRenameBackend,
+                attempts: 0,
+            };
+            let confirmed = crash_plan(&data, graph, &backend)?;
+            let _report = RenameExecutor::new(&mut backend, &mut journal).execute(confirmed)?;
+        } else if env::var_os("DARKRENAMER_TEST_FORCE_ROLLBACK").is_some() {
+            let mut backend = WindowsRenameBackend;
+            let confirmed = crash_plan(&data, graph, &backend)?;
             let control = RollbackAfterForward {
                 requested: AtomicBool::new(false),
             };
-            let _report = executor.execute_with_control(confirmed, &control)?;
+            let _report = RenameExecutor::new(&mut backend, &mut journal)
+                .execute_with_control(confirmed, &control)?;
         } else {
-            let _report = executor.execute(confirmed)?;
+            let mut backend = WindowsRenameBackend;
+            let confirmed = crash_plan(&data, graph, &backend)?;
+            let _report = RenameExecutor::new(&mut backend, &mut journal).execute(confirmed)?;
         }
         Err(io::Error::other("configured crash point was not reached").into())
     }
@@ -2270,6 +2341,7 @@ mod tests {
         graph: CrashGraph,
         point: &str,
         force_rollback: bool,
+        failure_rollback: bool,
         recovery_mode: bool,
     ) -> Result<std::process::ExitStatus, Box<dyn std::error::Error>> {
         let mut command = Command::new(std::env::current_exe()?);
@@ -2284,9 +2356,13 @@ mod tests {
             .env("DARKRENAMER_TEST_GRAPH", graph.name())
             .env("DARKRENAMER_TEST_CRASH_POINT", point)
             .env_remove("DARKRENAMER_TEST_FORCE_ROLLBACK")
+            .env_remove("DARKRENAMER_TEST_FAILURE_ROLLBACK")
             .env_remove("DARKRENAMER_TEST_RECOVERY_MODE");
         if force_rollback {
             command.env("DARKRENAMER_TEST_FORCE_ROLLBACK", "1");
+        }
+        if failure_rollback {
+            command.env("DARKRENAMER_TEST_FAILURE_ROLLBACK", "1");
         }
         if recovery_mode {
             command.env("DARKRENAMER_TEST_RECOVERY_MODE", "1");
@@ -2298,6 +2374,7 @@ mod tests {
         graph: CrashGraph,
         point: &str,
         force_rollback: bool,
+        failure_rollback: bool,
         expect_staged_lock: bool,
         recovery_crash_point: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -2313,6 +2390,7 @@ mod tests {
             graph,
             point,
             force_rollback,
+            failure_rollback,
             false,
         )?;
         if status.code() != Some(86) {
@@ -2341,8 +2419,15 @@ mod tests {
         if let Some(recovery_point) = recovery_crash_point {
             assert!(!expect_staged_lock);
             drop(runtime);
-            let recovery_status =
-                crash_child_command(directory.path(), &nonce, graph, recovery_point, false, true)?;
+            let recovery_status = crash_child_command(
+                directory.path(),
+                &nonce,
+                graph,
+                recovery_point,
+                false,
+                false,
+                true,
+            )?;
             if recovery_status.code() != Some(86) {
                 return Err(io::Error::other(format!(
                     "recovery child did not stop at {recovery_point}: {recovery_status}"
@@ -2399,6 +2484,7 @@ mod tests {
                     graph,
                     point,
                     false,
+                    false,
                     point == "staged-intent-synced",
                     None,
                 )?;
@@ -2410,6 +2496,7 @@ mod tests {
                         &format!("forward-{boundary}-{step}"),
                         false,
                         false,
+                        false,
                         None,
                     )?;
                     run_crash_recovery_case(
@@ -2417,12 +2504,21 @@ mod tests {
                         &format!("rollback-{boundary}-{step}"),
                         true,
                         false,
+                        false,
                         None,
                     )?;
                 }
             }
-            run_crash_recovery_case(graph, "terminal-committed", false, false, None)?;
-            run_crash_recovery_case(graph, "terminal-rolled-back", true, false, None)?;
+            run_crash_recovery_case(graph, "terminal-committed", false, false, false, None)?;
+            run_crash_recovery_case(graph, "terminal-rolled-back", true, false, false, None)?;
+        }
+        for point in [
+            "rollback-prepared-0",
+            "rollback-rename-0",
+            "rollback-completed-0",
+            "terminal-rolled-back",
+        ] {
+            run_crash_recovery_case(CrashGraph::Swap, point, false, true, false, None)?;
         }
         Ok(())
     }
@@ -2435,6 +2531,7 @@ mod tests {
             run_crash_recovery_case(
                 graph,
                 &format!("forward-prepared-{last_step}"),
+                false,
                 false,
                 false,
                 Some(&format!("recovery-reconciled-not-applied-{last_step}")),
@@ -2452,6 +2549,7 @@ mod tests {
                 run_crash_recovery_case(
                     graph,
                     &execution_point,
+                    false,
                     false,
                     false,
                     Some(&recovery_point),
