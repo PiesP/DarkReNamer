@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory)][string] $OutputRoot,
     [Parameter(Mandatory)][string] $ExpectedScriptSha256,
     [ValidateRange(10, 600)][int] $TimeoutSeconds = 60,
+    [switch] $HighContrast,
     [switch] $ValidateOnly
 )
 
@@ -163,6 +164,31 @@ function Get-AcceptanceVerdict {
     'not_run'
 }
 
+function Test-HighContrastSnapshotEqual {
+    param(
+        [Parameter(Mandatory)][object] $Expected,
+        [Parameter(Mandatory)][object] $Actual
+    )
+
+    if ($Expected.Flags -ne $Actual.Flags -or
+        -not [string]::Equals(
+            [string]$Expected.Scheme,
+            [string]$Actual.Scheme,
+            [StringComparison]::Ordinal
+        )) {
+        return $false
+    }
+    foreach ($name in @(
+        'Window','WindowText','ButtonFace','ButtonText',
+        'Highlight','HighlightText','GrayText','HotLight'
+    )) {
+        if ($Expected.$name -ne $Actual.$name) {
+            return $false
+        }
+    }
+    $true
+}
+
 function Initialize-AcceptanceNative {
     if ('DarkReNamerVmAcceptanceNative' -as [type]) {
         return
@@ -173,6 +199,19 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 
 public static class DarkReNamerVmAcceptanceNative {
+    public sealed class HighContrastSnapshot {
+        public uint Flags { get; set; }
+        public string Scheme { get; set; }
+        public uint Window { get; set; }
+        public uint WindowText { get; set; }
+        public uint ButtonFace { get; set; }
+        public uint ButtonText { get; set; }
+        public uint Highlight { get; set; }
+        public uint HighlightText { get; set; }
+        public uint GrayText { get; set; }
+        public uint HotLight { get; set; }
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct KEYBDINPUT {
         public ushort virtualKey;
@@ -232,6 +271,8 @@ public static class DarkReNamerVmAcceptanceNative {
     public static extern uint GetDpiForWindow(IntPtr window);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool SystemParametersInfo(uint action, uint parameter, ref HIGHCONTRAST value, uint flags);
+    [DllImport("user32.dll")]
+    private static extern uint GetSysColor(int index);
     [DllImport("ntdll.dll", CharSet = CharSet.Unicode)]
     private static extern int RtlGetVersion(ref RTL_OSVERSIONINFOEX version);
 
@@ -270,13 +311,46 @@ public static class DarkReNamerVmAcceptanceNative {
         KeyUp(0x12);
     }
 
-    public static bool HighContrastEnabled() {
+    public static HighContrastSnapshot GetHighContrastSnapshot() {
         HIGHCONTRAST value = new HIGHCONTRAST();
         value.size = (uint)Marshal.SizeOf(typeof(HIGHCONTRAST));
         if (!SystemParametersInfo(0x42, value.size, ref value, 0)) {
             throw new Win32Exception(Marshal.GetLastWin32Error());
         }
-        return (value.flags & 1) != 0;
+        return new HighContrastSnapshot {
+            Flags = value.flags,
+            Scheme = value.scheme == IntPtr.Zero ? null : Marshal.PtrToStringUni(value.scheme),
+            Window = GetSysColor(5),
+            WindowText = GetSysColor(8),
+            ButtonFace = GetSysColor(15),
+            ButtonText = GetSysColor(18),
+            Highlight = GetSysColor(13),
+            HighlightText = GetSysColor(14),
+            GrayText = GetSysColor(17),
+            HotLight = GetSysColor(26)
+        };
+    }
+
+    public static bool HighContrastEnabled() {
+        return (GetHighContrastSnapshot().Flags & 1) != 0;
+    }
+
+    public static void ApplyHighContrast(uint flags, string scheme) {
+        IntPtr schemeBuffer = IntPtr.Zero;
+        try {
+            if (scheme != null) { schemeBuffer = Marshal.StringToHGlobalUni(scheme); }
+            HIGHCONTRAST value = new HIGHCONTRAST {
+                size = (uint)Marshal.SizeOf(typeof(HIGHCONTRAST)),
+                flags = flags,
+                scheme = schemeBuffer
+            };
+            if (!SystemParametersInfo(0x43, value.size, ref value, 0x2)) {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+        }
+        finally {
+            if (schemeBuffer != IntPtr.Zero) { Marshal.FreeHGlobal(schemeBuffer); }
+        }
     }
 
     public static string OsVersion() {
@@ -490,6 +564,7 @@ $acceptanceInvocation = [pscustomobject]@{
     output_root = $OutputRoot
     expected_script_sha256 = $ExpectedScriptSha256
     timeout_seconds = $TimeoutSeconds
+    high_contrast = [bool]$HighContrast
     validate_only = [bool]$ValidateOnly
 }
 . $bootstrap.runner `
@@ -501,6 +576,7 @@ $ExpectedSessionId = $acceptanceInvocation.expected_session_id
 $OutputRoot = $acceptanceInvocation.output_root
 $ExpectedScriptSha256 = $acceptanceInvocation.expected_script_sha256
 $TimeoutSeconds = $acceptanceInvocation.timeout_seconds
+$HighContrast = $acceptanceInvocation.high_contrast
 $ValidateOnly = $acceptanceInvocation.validate_only
 $verified = Resolve-AcceptanceBundle `
     -Root $BundleRoot `
@@ -536,6 +612,15 @@ $desktopLock = $null
 $previousExecutionState = $null
 $runtimeCleanup = $false
 $lifecycle = [pscustomobject]@{ process_terminated = $true }
+$highContrastState = [pscustomobject]@{
+    requested = [bool]$HighContrast
+    changed = $false
+    original = $null
+    acceptance = $null
+    restored = $null
+    rescue_path = $null
+    restoration_verified = $false
+}
 $captures = [Collections.Generic.List[object]]::new()
 $keyboard = [ordered]@{
     status = 'failed'
@@ -547,6 +632,14 @@ $keyboard = [ordered]@{
 }
 $accessibility = [ordered]@{ status = 'failed'; rail_button_count = 0 }
 $capture = [ordered]@{ status = 'failed'; screenshot_count = 0; visual_review = 'required' }
+$highContrastResult = [ordered]@{
+    requested = [bool]$HighContrast
+    original_enabled = $null
+    acceptance_enabled = $null
+    system_colors_changed = $null
+    restoration = if ($HighContrast) { 'pending' } else { 'not_required' }
+    snapshot = $null
+}
 $clipboard = [ordered]@{
     status = 'not_run'
     reason = 'Lossless restoration of every existing clipboard format is unavailable in this session.'
@@ -577,6 +670,7 @@ $result = [ordered]@{
     accessibility = $accessibility
     capture = $capture
     clipboard = $clipboard
+    high_contrast = $highContrastResult
     observations = $null
     screenshots = @()
     guest_cleanup = $false
@@ -595,6 +689,55 @@ try {
     if (-not [DarkReNamerVmNative]::SetProcessDpiAwarenessContext([IntPtr](-4))) {
         throw 'Windows refused the per-monitor-v2 acceptance DPI context.'
     }
+    $highContrastState.original = [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot()
+    $highContrastResult.original_enabled = ($highContrastState.original.Flags -band 1) -ne 0
+    if ($HighContrast) {
+        $highContrastState.rescue_path = Join-Path $verified.output_root 'high-contrast-restore.json'
+        Write-JsonUtf8Bom -Path $highContrastState.rescue_path -Value ([ordered]@{
+            schema_version = 1
+            source_sha = $verified.source_sha
+            acceptance_script_sha256 = $verified.script_sha256
+            restoration_required = $true
+            original = [ordered]@{
+                flags = $highContrastState.original.Flags
+                scheme = $highContrastState.original.Scheme
+                colors = [ordered]@{
+                    window = $highContrastState.original.Window
+                    window_text = $highContrastState.original.WindowText
+                    button_face = $highContrastState.original.ButtonFace
+                    button_text = $highContrastState.original.ButtonText
+                    highlight = $highContrastState.original.Highlight
+                    highlight_text = $highContrastState.original.HighlightText
+                    gray_text = $highContrastState.original.GrayText
+                    hot_light = $highContrastState.original.HotLight
+                }
+            }
+            restoration_verified = $false
+            restored = $null
+        })
+        if (-not $highContrastResult.original_enabled) {
+            $highContrastState.changed = $true
+            [DarkReNamerVmAcceptanceNative]::ApplyHighContrast(
+                ($highContrastState.original.Flags -bor 1),
+                $highContrastState.original.Scheme
+            )
+        }
+        $highContrastState.acceptance = [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot()
+        $highContrastResult.acceptance_enabled = ($highContrastState.acceptance.Flags -band 1) -ne 0
+        if (-not $highContrastResult.acceptance_enabled) {
+            throw 'Windows did not enable High Contrast for the acceptance session.'
+        }
+        $highContrastResult.system_colors_changed = @(
+            'Window','WindowText','ButtonFace','ButtonText','Highlight','HighlightText','GrayText','HotLight' |
+                Where-Object { $highContrastState.original.$_ -ne $highContrastState.acceptance.$_ }
+        ).Count -gt 0
+    }
+    else {
+        $highContrastState.acceptance = $highContrastState.original
+        $highContrastResult.acceptance_enabled = $highContrastResult.original_enabled
+        $highContrastResult.system_colors_changed = $false
+    }
+    $capturePrefix = if ($HighContrast) { 'high-contrast' } else { 'current-dpi' }
 
     Invoke-WithIsolatedEnvironment -RuntimeRoot $runtimeRoot -Action {
         $caseRoot = New-PrivateDirectory -Parent $runtimeRoot -Leaf 'keyboard-flow'
@@ -655,6 +798,18 @@ try {
             os_version = [DarkReNamerVmAcceptanceNative]::OsVersion()
             dpi = [DarkReNamerVmAcceptanceNative]::GetDpiForWindow($process.MainWindowHandle)
             high_contrast = [DarkReNamerVmAcceptanceNative]::HighContrastEnabled()
+            high_contrast_flags = $highContrastState.acceptance.Flags
+            high_contrast_scheme = $highContrastState.acceptance.Scheme
+            high_contrast_colors = [ordered]@{
+                window = $highContrastState.acceptance.Window
+                window_text = $highContrastState.acceptance.WindowText
+                button_face = $highContrastState.acceptance.ButtonFace
+                button_text = $highContrastState.acceptance.ButtonText
+                highlight = $highContrastState.acceptance.Highlight
+                highlight_text = $highContrastState.acceptance.HighlightText
+                gray_text = $highContrastState.acceptance.GrayText
+                hot_light = $highContrastState.acceptance.HotLight
+            }
             ui_automation_client = [Windows.Automation.AutomationElement].Assembly.FullName
             ui_automation_types = [Windows.Automation.AutomationProperty].Assembly.FullName
             ui_automation_providers = [UIAutomationClientsideProviders.UIAutomationClientSideProviders].Assembly.FullName
@@ -686,7 +841,7 @@ try {
             -Process $process `
             -ExpectedSession $ExpectedSessionId `
             -Root $verified.output_root `
-            -Leaf 'current-dpi-initial.png' `
+            -Leaf ($capturePrefix + '-initial.png') `
             -Label 'current-DPI initial workbench'))
 
         $result.failure_reason = 'file_dialog_failed'
@@ -724,6 +879,13 @@ try {
             filename = Get-ElementObservation -Element $fileName
             open = Get-ElementObservation -Element $open
         }
+        $captures.Add((Save-WindowScreenshot `
+            -Window $fileDialog `
+            -Process $process `
+            -ExpectedSession $ExpectedSessionId `
+            -Root $verified.output_root `
+            -Leaf ($capturePrefix + '-common-dialog.png') `
+            -Label 'current-DPI common file dialog'))
         $fileName.SetFocus()
         Send-AcceptanceChord -Process $process -ExpectedSession $ExpectedSessionId -Modifier 0x11 -VirtualKey 0x41 -Label 'filename select-all'
         Send-AcceptanceText -Process $process -ExpectedSession $ExpectedSessionId -Value $sourcePath -Label 'filename keyboard input'
@@ -751,25 +913,32 @@ try {
             edit = Get-ElementObservation -Element $promptEdit
             ok = Get-ElementObservation -Element $promptOk
         }
+        $captures.Add((Save-WindowScreenshot `
+            -Window $prompt `
+            -Process $process `
+            -ExpectedSession $ExpectedSessionId `
+            -Root $verified.output_root `
+            -Leaf ($capturePrefix + '-input-prompt.png') `
+            -Label 'current-DPI input prompt'))
         [void](Move-TabFocusToId -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '1004')
         Send-AcceptanceText -Process $process -ExpectedSession $ExpectedSessionId -Value $prefix -Label 'prefix keyboard input'
         [void](Move-TabFocusToId -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '1')
         Send-AcceptanceTap -Process $process -ExpectedSession $ExpectedSessionId -VirtualKey 0x0D -Label 'prefix prompt Enter'
         Wait-ListPreviewName -MainWindow $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -ExpectedName $destinationName -TimeoutSeconds $TimeoutSeconds
-        $captures.Add((Save-WindowScreenshot -Window $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -Root $verified.output_root -Leaf 'current-dpi-preview.png' -Label 'current-DPI rename preview'))
+        $captures.Add((Save-WindowScreenshot -Window $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -Root $verified.output_root -Leaf ($capturePrefix + '-preview.png') -Label 'current-DPI rename preview'))
 
         $result.failure_reason = 'apply_cancellation_failed'
         [void](Move-RailFocusToCommand -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '32771')
         Send-AcceptanceTap -Process $process -ExpectedSession $ExpectedSessionId -VirtualKey 0x20 -Label 'Apply command Space'
         $confirmation = Wait-UniqueAutomationWindow -Process $process -ExpectedSession $ExpectedSessionId -Name 'DarkReNamer - 안전한 적용 확인' -TimeoutSeconds $TimeoutSeconds -Label 'keyboard Apply confirmation'
-        $cancel = Find-UniqueAutomationElement -Root $confirmation -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '2' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $TimeoutSeconds -Label 'Apply cancellation button' -RequireWindowHandle
+        $cancel = Find-UniqueAutomationElement -Root $confirmation -Process $process -ExpectedSession $ExpectedSessionId -AutomationId 'CommandButton_2' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $TimeoutSeconds -Label 'Apply cancellation button' -RequireWindowHandle
         $confirm = Find-UniqueAutomationElement -Root $confirmation -Process $process -ExpectedSession $ExpectedSessionId -AutomationId 'CommandLink_1101' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $TimeoutSeconds -Label 'Apply command link' -RequireWindowHandle
         $observations.apply_confirmation = [ordered]@{
             window = Get-ElementObservation -Element $confirmation
             cancel = Get-ElementObservation -Element $cancel
             confirm = Get-ElementObservation -Element $confirm
         }
-        $captures.Add((Save-WindowScreenshot -Window $confirmation -Process $process -ExpectedSession $ExpectedSessionId -Root $verified.output_root -Leaf 'current-dpi-confirmation.png' -Label 'current-DPI Apply confirmation'))
+        $captures.Add((Save-WindowScreenshot -Window $confirmation -Process $process -ExpectedSession $ExpectedSessionId -Root $verified.output_root -Leaf ($capturePrefix + '-confirmation.png') -Label 'current-DPI Apply confirmation'))
         Send-AcceptanceTap -Process $process -ExpectedSession $ExpectedSessionId -VirtualKey 0x1B -Label 'Apply confirmation Escape'
         $cancellationDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
         do {
@@ -871,6 +1040,62 @@ finally {
             $processState.process.process.Dispose()
         }
     }
+    if ($HighContrast -and $null -ne $highContrastState.original) {
+        try {
+            if ($highContrastState.changed) {
+                [DarkReNamerVmAcceptanceNative]::ApplyHighContrast(
+                    $highContrastState.original.Flags,
+                    $highContrastState.original.Scheme
+                )
+            }
+            $highContrastState.restored = [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot()
+            $highContrastState.restoration_verified = Test-HighContrastSnapshotEqual `
+                -Expected $highContrastState.original `
+                -Actual $highContrastState.restored
+            if (-not $highContrastState.restoration_verified) {
+                throw 'High Contrast flags, scheme, or system colors did not return to their original values.'
+            }
+            $highContrastResult.restoration = 'verified'
+            Write-JsonUtf8Bom -Path $highContrastState.rescue_path -Value ([ordered]@{
+                schema_version = 1
+                source_sha = $verified.source_sha
+                acceptance_script_sha256 = $verified.script_sha256
+                restoration_required = $false
+                original = [ordered]@{
+                    flags = $highContrastState.original.Flags
+                    scheme = $highContrastState.original.Scheme
+                    colors = [ordered]@{
+                        window = $highContrastState.original.Window
+                        window_text = $highContrastState.original.WindowText
+                        button_face = $highContrastState.original.ButtonFace
+                        button_text = $highContrastState.original.ButtonText
+                        highlight = $highContrastState.original.Highlight
+                        highlight_text = $highContrastState.original.HighlightText
+                        gray_text = $highContrastState.original.GrayText
+                        hot_light = $highContrastState.original.HotLight
+                    }
+                }
+                restoration_verified = $true
+                restored = [ordered]@{
+                    flags = $highContrastState.restored.Flags
+                    scheme = $highContrastState.restored.Scheme
+                    colors_match = $true
+                }
+            })
+        }
+        catch {
+            $result.status = 'failed'
+            $result.failure_reason = 'high_contrast_restore_failed'
+            $_ | Out-String | Add-Content -LiteralPath $diagnosticPath -Encoding UTF8
+            $highContrastResult.restoration = 'failed'
+        }
+        if (Test-Path -LiteralPath $highContrastState.rescue_path -PathType Leaf) {
+            $highContrastResult.snapshot = [ordered]@{
+                file = 'high-contrast-restore.json'
+                sha256 = Get-LowerSha256 -Path $highContrastState.rescue_path
+            }
+        }
+    }
     try {
         Exit-TestExecutionState -Previous $previousExecutionState
     }
@@ -909,6 +1134,12 @@ finally {
     }
     $result.guest_cleanup = $runtimeCleanup
     $result.screenshots = $captures.ToArray()
+    if (Test-Path -LiteralPath $diagnosticPath -PathType Leaf) {
+        $result.diagnostic = [ordered]@{
+            file = 'acceptance-error.txt'
+            sha256 = Get-LowerSha256 -Path $diagnosticPath
+        }
+    }
     Write-JsonUtf8Bom -Path $observationPath -Value $observations
     $result.observations = [ordered]@{
         file = 'acceptance-observations.json'

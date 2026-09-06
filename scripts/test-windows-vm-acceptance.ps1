@@ -129,6 +129,14 @@ try {
         ) -lt 0) {
         throw 'The common-dialog filename target must select the editable UIA child.'
     }
+    foreach ($taskDialogId in @('CommandButton_2', 'CommandLink_1101')) {
+        if ($acceptanceText.IndexOf(
+            "-AutomationId '$taskDialogId'",
+            [StringComparison]::Ordinal
+        ) -lt 0) {
+            throw "The acceptance flow is missing TaskDialog automation ID $taskDialogId."
+        }
+    }
 
     . $acceptance `
         -BundleRoot 'unused' `
@@ -148,11 +156,42 @@ try {
     Assert-Fails {
         Get-AcceptanceVerdict -KeyboardStatus unknown -AccessibilityStatus passed -CaptureStatus passed
     } 'status is invalid'
+    $highContrastSnapshot = [pscustomobject]@{
+        Flags = 126
+        Scheme = 'fixture scheme'
+        Window = 1
+        WindowText = 2
+        ButtonFace = 3
+        ButtonText = 4
+        Highlight = 5
+        HighlightText = 6
+        GrayText = 7
+        HotLight = 8
+    }
+    $sameSnapshot = $highContrastSnapshot | Select-Object *
+    if (-not (Test-HighContrastSnapshotEqual -Expected $highContrastSnapshot -Actual $sameSnapshot)) {
+        throw 'Equal High Contrast snapshots must prove restoration.'
+    }
+    $changedSnapshot = $highContrastSnapshot | Select-Object *
+    $changedSnapshot.Highlight = 9
+    if (Test-HighContrastSnapshotEqual -Expected $highContrastSnapshot -Actual $changedSnapshot) {
+        throw 'Changed High Contrast system colors must fail restoration proof.'
+    }
 
     $valid = New-AcceptanceFixture -Name 'valid'
     Invoke-ValidateOnly $valid
     if (Test-Path -LiteralPath $valid.output_root) {
         throw 'ValidateOnly must not create acceptance output.'
+    }
+    & $valid.acceptance `
+        -BundleRoot $valid.bundle_root `
+        -ExpectedSessionId 1 `
+        -OutputRoot $valid.output_root `
+        -ExpectedScriptSha256 $valid.acceptance_sha256 `
+        -HighContrast `
+        -ValidateOnly
+    if (Test-Path -LiteralPath $valid.output_root) {
+        throw 'HighContrast ValidateOnly must not create output or change system state.'
     }
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
         Assert-Fails {
