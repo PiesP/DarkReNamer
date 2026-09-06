@@ -296,6 +296,9 @@ function Assert-AcceptancePartialState {
     }
     $initialByIdentity = @{}
     foreach ($row in $Initial) {
+        if ($initialByIdentity.ContainsKey($row.identity)) {
+            throw 'The initial fixture contains a duplicate NTFS identity.'
+        }
         $initialByIdentity[$row.identity] = $row
     }
     $original = 0
@@ -402,6 +405,11 @@ function Invoke-AcceptanceImportAndPrefix {
     $main = $Application.main
     $main.SetFocus()
     [void][DarkReNamerVmNative]::SetForegroundWindow([IntPtr]$main.Current.NativeWindowHandle)
+    $foregroundDeadline = (Get-Date).AddSeconds(5)
+    while ([DarkReNamerVmNative]::GetForegroundWindow() -ne
+        [IntPtr]$main.Current.NativeWindowHandle -and (Get-Date) -lt $foregroundDeadline) {
+        Start-Sleep -Milliseconds 100
+    }
     if ([DarkReNamerVmNative]::GetForegroundWindow() -ne [IntPtr]$main.Current.NativeWindowHandle) {
         throw 'The verified application is not foreground for Ctrl+Shift+V.'
     }
@@ -782,8 +790,14 @@ if ($MyInvocation.InvocationName -eq '.') {
     return
 }
 
-$guestHelperPath = Get-AcceptanceGuestHelperPath -Root $BundleRoot
-. $guestHelperPath -BundleRoot $BundleRoot -ExpectedSessionId 1 -ValidateOnly
+$requestedBundleRoot = $BundleRoot
+$requestedExpectedSessionId = $ExpectedSessionId
+$requestedValidateOnly = [bool]$ValidateOnly
+$guestHelperPath = Get-AcceptanceGuestHelperPath -Root $requestedBundleRoot
+. $guestHelperPath -BundleRoot $requestedBundleRoot -ExpectedSessionId 1 -ValidateOnly
+$BundleRoot = $requestedBundleRoot
+$ExpectedSessionId = $requestedExpectedSessionId
+$ValidateOnly = $requestedValidateOnly
 $inputs = Resolve-AcceptanceInputs `
     -Root $BundleRoot `
     -RunnerPath $guestHelperPath `
@@ -872,8 +886,16 @@ finally {
     try {
         Exit-TestExecutionState -Previous $previousExecutionState
     }
-    finally {
+    catch {
+        $result.status = 'failed'
+        $result.failure_reason = 'execution_state_restore_failed'
+    }
+    try {
         Exit-DesktopTestLock -Lock $desktopLock
+    }
+    catch {
+        $result.status = 'failed'
+        $result.failure_reason = 'desktop_lock_release_failed'
     }
     Write-AcceptanceUtf8Json -Path (Join-Path $evidenceRoot 'summary.json') -Value $result
     if ($succeeded -and (Test-Path -LiteralPath $runtimeRoot -PathType Container)) {

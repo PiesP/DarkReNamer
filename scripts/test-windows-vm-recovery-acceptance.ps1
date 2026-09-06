@@ -199,6 +199,16 @@ try {
         -ExpectedScriptSha256 $observerHash `
         -ValidateOnly
 
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        Assert-Fails {
+            & $acceptance `
+                -BundleRoot $valid.root `
+                -ExpectedSessionId 7 `
+                -OutputRoot $temporaryRoot `
+                -ExpectedScriptSha256 $observerHash
+        } 'execution requires Windows'
+    }
+
     Assert-Fails {
         & $acceptance `
             -BundleRoot $valid.root `
@@ -207,6 +217,17 @@ try {
             -ExpectedScriptSha256 ('f' * 64) `
             -ValidateOnly
     } 'observer hash does not match'
+
+    $changedRunner = New-TestBundle -Root (Join-Path $temporaryRoot 'changed-runner')
+    [IO.File]::AppendAllText($changedRunner.runner, "`n# changed")
+    Assert-Fails {
+        & $acceptance `
+            -BundleRoot $changedRunner.root `
+            -ExpectedSessionId 1 `
+            -OutputRoot $temporaryRoot `
+            -ExpectedScriptSha256 $observerHash `
+            -ValidateOnly
+    } 'manifest artifact hash mismatch'
 
     $valid.manifest.source_state = 'dirty'
     Write-TestJson -Path (Join-Path $valid.root 'bundle.json') -Value $valid.manifest
