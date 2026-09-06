@@ -174,6 +174,67 @@ def checked_artifact(root, record):
     return path
 
 
+def verify_gui_flow(root, manifest, flow):
+    if not isinstance(flow, dict):
+        raise ValueError('VM production GUI flow is missing or invalid.')
+    if 'status' not in flow:
+        raise ValueError('VM production GUI flow is missing or invalid.')
+    if 'before_file_identity' in flow or 'after_file_identity' in flow:
+        raise ValueError('VM production GUI flow must not expose raw device identity.')
+    if flow.get('status') != 'passed':
+        diagnostic = flow.get('diagnostic')
+        if not isinstance(diagnostic, dict):
+            raise ValueError('Failed VM production GUI flow has no diagnostic artifact.')
+        checked_artifact(root, diagnostic)
+        return False
+    if flow.get('scope') != 'production-file-add-prefix-cancel-confirm':
+        raise ValueError('VM production GUI flow scope is invalid.')
+    if (flow.get('application_file') != manifest['application']['file'] or
+            flow.get('application_sha256') != manifest['application']['sha256']):
+        raise ValueError('VM production GUI flow differs from the application artifact.')
+    if (flow.get('source_name') != 'vm-flow-source.txt' or
+            flow.get('preview_name') != 'vm-confirmed-vm-flow-source.txt'):
+        raise ValueError('VM production GUI flow fixture names are invalid.')
+    digest_pattern = re.compile(r'^[0-9a-f]{64}$')
+    before_digest = flow.get('before_content_sha256')
+    after_digest = flow.get('after_content_sha256')
+    if (not isinstance(before_digest, str) or not digest_pattern.fullmatch(before_digest) or
+            after_digest != before_digest):
+        raise ValueError('VM production GUI flow did not prove content preservation.')
+    before_identity = flow.get('before_file_identity_sha256')
+    after_identity = flow.get('after_file_identity_sha256')
+    if (not isinstance(before_identity, str) or not digest_pattern.fullmatch(before_identity) or
+            after_identity != before_identity):
+        raise ValueError('VM production GUI flow did not prove file identity preservation.')
+    expected_disk_state = {
+        'cancellation_source_present': True,
+        'cancellation_destination_present': False,
+        'confirmed_source_present': False,
+        'confirmed_destination_present': True,
+    }
+    if any(flow.get(key) is not value for key, value in expected_disk_state.items()):
+        raise ValueError('VM production GUI flow disk state is invalid.')
+    if type(flow.get('journal_residue_count')) is not int or flow['journal_residue_count'] != 0:
+        raise ValueError('VM production GUI flow left journal residue.')
+    if flow.get('diagnostic') is not None:
+        raise ValueError('Passing VM production GUI flow unexpectedly has a diagnostic artifact.')
+    screenshots = flow.get('screenshots')
+    if not isinstance(screenshots, list) or len(screenshots) != 2:
+        raise ValueError('VM production GUI flow screenshots are incomplete.')
+    expected_screenshots = {'rename-preview.png', 'apply-confirmation.png'}
+    if {row.get('file') for row in screenshots if isinstance(row, dict)} != expected_screenshots:
+        raise ValueError('VM production GUI flow screenshots are missing or unexpected.')
+    for row in screenshots:
+        screenshot = checked_artifact(root, row)
+        if (type(row.get('width')) is not int or row['width'] <= 0 or
+                type(row.get('height')) is not int or row['height'] <= 0):
+            raise ValueError('VM production GUI flow screenshot dimensions are invalid.')
+        with screenshot.open('rb') as stream:
+            if stream.read(8) != b'\x89PNG\r\n\x1a\n':
+                raise ValueError('VM production GUI flow screenshot is not a PNG.')
+    return True
+
+
 def verify_result(root, manifest, result, expected_transport_kind=None):
     for key in ('schema_version', 'source_sha', 'source_state', 'target'):
         if result.get(key) != manifest[key]:
@@ -212,10 +273,14 @@ def verify_result(root, manifest, result, expected_transport_kind=None):
     if gui.get('status') != 'passed':
         passed = False
     else:
+        if gui.get('scope') != 'launch-window-screenshot-normal-close':
+            raise ValueError('VM GUI smoke scope is invalid.')
         screenshot = checked_artifact(root, gui['screenshot'])
         with screenshot.open('rb') as stream:
             if stream.read(8) != b'\x89PNG\r\n\x1a\n':
                 raise ValueError('GUI screenshot is not a PNG.')
+        if not verify_gui_flow(root, manifest, gui.get('flow', {})):
+            passed = False
     transport = result.get('transport', {})
     if transport.get('guest_cleanup') is not True or total == 0:
         passed = False

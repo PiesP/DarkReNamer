@@ -191,6 +191,12 @@ try {
         foreach ($channel in @('stdout','stderr')) { if ($row.$channel) { $outputs += $row.$channel } }
     }
     if ($result.gui -and $result.gui.PSObject.Properties.Name -contains 'screenshot' -and $result.gui.screenshot) { $outputs += $result.gui.screenshot }
+    if ($result.gui -and $result.gui.flow -and $result.gui.flow.screenshots) {
+        $outputs += @($result.gui.flow.screenshots)
+    }
+    if ($result.gui -and $result.gui.flow -and $result.gui.flow.diagnostic) {
+        $outputs += $result.gui.flow.diagnostic
+    }
     foreach ($output in $outputs) {
         Assert-PlainFile $output.file
         if ($names.ContainsKey($output.file) -or $output.file -in @('bundle.json','result.json','transport.json','run-windows-vm-tests.ps1')) { throw 'Guest output collides with a bundle input.' }
