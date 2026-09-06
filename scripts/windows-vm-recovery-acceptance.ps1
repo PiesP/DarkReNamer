@@ -194,6 +194,28 @@ function Get-AcceptanceWorkerBoundaryClassification {
     'partial-active-worker'
 }
 
+function Get-AcceptanceTransactionNameCounts {
+    param(
+        [Parameter(Mandatory)][string[]] $Names,
+        [Parameter(Mandatory)][string] $Prefix
+    )
+
+    $original = 0
+    $renamed = 0
+    foreach ($name in $Names) {
+        if ($name -cmatch '^item-[0-9]{5}\.txt$') {
+            $original++
+        }
+        elseif ($name -cmatch ('^' + [regex]::Escape($Prefix) + 'item-[0-9]{5}\.txt$')) {
+            $renamed++
+        }
+        else {
+            throw 'The active worker directory contains an unexpected transaction leaf.'
+        }
+    }
+    [pscustomobject]@{ original = $original; renamed = $renamed }
+}
+
 function Get-AcceptanceGuestHelperPath {
     param([Parameter(Mandatory)][string] $Root)
 
@@ -377,7 +399,7 @@ function Get-AcceptanceStateDigest {
     Get-LowerTextSha256 -Value ([string]::Join("`n", $parts))
 }
 
-function Stop-AcceptanceFailedStartupProcess {
+function Stop-AndDisposeAcceptanceOwnedProcess {
     param([Parameter(Mandatory)][object] $Owned)
 
     $process = $Owned.process
@@ -386,7 +408,7 @@ function Stop-AcceptanceFailedStartupProcess {
         if (-not $process.HasExited) {
             $process.Kill()
             if (-not $process.WaitForExit(10000)) {
-                throw 'The exact process from failed startup validation did not terminate.'
+                throw 'The exact owned acceptance process did not terminate.'
             }
         }
     }
@@ -448,7 +470,7 @@ function Start-AcceptanceApplication {
         $startupError = $_
         if ($null -ne $owned) {
             try {
-                Stop-AcceptanceFailedStartupProcess -Owned $owned
+                Stop-AndDisposeAcceptanceOwnedProcess -Owned $owned
             }
             catch {
                 throw "Application startup validation and exact-process cleanup both failed: $($startupError.Exception.Message) Cleanup: $($_.Exception.Message)"
@@ -686,55 +708,57 @@ function Stop-AcceptanceOwnedProcess {
 function Get-AcceptanceActiveWorkerBoundary {
     param(
         [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][object] $Cancel,
         [Parameter(Mandatory)][string] $FixtureRoot,
         [Parameter(Mandatory)][string] $Prefix,
         [Parameter(Mandatory)][string] $LocalAppData,
         [Parameter(Mandatory)][int] $ExpectedCount,
-        [Parameter(Mandatory)][int] $SessionId,
-        [Parameter(Mandatory)][int] $WaitSeconds
+        [Parameter(Mandatory)][int] $SessionId
     )
 
     $process = $Application.owned.process
-    $cancel = Find-UniqueAutomationElement `
-        -Root $Application.main `
+    Assert-AutomationBinding `
+        -Element $Cancel `
         -Process $process `
         -ExpectedSession $SessionId `
-        -AutomationId '1009' `
-        -ControlType ([Windows.Automation.ControlType]::Button) `
-        -TimeoutSeconds $WaitSeconds `
         -Label 'active worker cancellation control' `
-        -RequireEnabled `
         -RequireWindowHandle
-    $cancelVisible = -not $cancel.Current.IsOffscreen
-    if ($cancel.Current.Name -cne '취소') {
-        throw 'The active worker cancellation control has unexpected text.'
+    if ($Cancel.Current.AutomationId -cne '1009' -or
+        $Cancel.Current.ControlType -ne [Windows.Automation.ControlType]::Button -or
+        $Cancel.Current.Name -cne '취소') {
+        throw 'The cached worker cancellation control changed identity or text.'
     }
-    $renamed = [IO.Directory]::GetFiles(
-        $FixtureRoot,
-        ($Prefix + '*.txt'),
-        [IO.SearchOption]::TopDirectoryOnly
-    ).Length
-    $original = [IO.Directory]::GetFiles(
-        $FixtureRoot,
-        'item-*.txt',
-        [IO.SearchOption]::TopDirectoryOnly
-    ).Length
+    $cancelVisible = -not $Cancel.Current.IsOffscreen
+    $counts = $null
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        $names = @(
+            [IO.Directory]::GetFiles(
+                $FixtureRoot,
+                '*.txt',
+                [IO.SearchOption]::TopDirectoryOnly
+            ) | ForEach-Object { [IO.Path]::GetFileName($_) }
+        )
+        $counts = Get-AcceptanceTransactionNameCounts -Names $names -Prefix $Prefix
+        if ($counts.original + $counts.renamed -eq $ExpectedCount) {
+            break
+        }
+    }
     $journalRoot = Join-Path (Join-Path $LocalAppData 'DarkReNamer') 'journal'
     $activeExists = Test-Path -LiteralPath (Join-Path $journalRoot 'active.drj') -PathType Leaf
     $candidateExists = Test-Path -LiteralPath (Join-Path $journalRoot 'candidate.drj') -PathType Leaf
     $classification = Get-AcceptanceWorkerBoundaryClassification `
-        -OriginalCount $original `
-        -RenamedCount $renamed `
+        -OriginalCount $counts.original `
+        -RenamedCount $counts.renamed `
         -ExpectedCount $ExpectedCount `
         -ActiveJournalExists $activeExists `
         -CandidateJournalExists $candidateExists `
-        -CancelEnabled $cancel.Current.IsEnabled `
+        -CancelEnabled $Cancel.Current.IsEnabled `
         -CancelVisible $cancelVisible
     [pscustomobject]@{
         classification = $classification
-        original = $original
-        renamed = $renamed
-        cancel = $cancel
+        original = $counts.original
+        renamed = $counts.renamed
+        cancel = $Cancel
     }
 }
 
@@ -867,6 +891,7 @@ function Invoke-AcceptanceSession {
 
     $first = $null
     $second = $null
+    $sessionError = $null
     try {
         $first = Start-AcceptanceApplication `
             -Inputs $Inputs `
@@ -878,6 +903,19 @@ function Invoke-AcceptanceSession {
             -Prefix $prefix `
             -SessionId $SessionId `
             -WaitSeconds $WaitSeconds
+        $workerCancel = $null
+        if ($Mode -ne 'ProcessCrash') {
+            $workerCancel = Find-UniqueAutomationElement `
+                -Root $first.main `
+                -Process $first.owned.process `
+                -ExpectedSession $SessionId `
+                -AutomationId '1009' `
+                -ControlType ([Windows.Automation.ControlType]::Button) `
+                -TimeoutSeconds $WaitSeconds `
+                -Label 'cached worker cancellation control' `
+                -Scope ([Windows.Automation.TreeScope]::Children) `
+                -RequireWindowHandle
+        }
         Invoke-AcceptanceApply -Application $first -SessionId $SessionId -WaitSeconds $WaitSeconds
 
         $boundaryDeadline = (Get-Date).AddSeconds($WaitSeconds)
@@ -903,12 +941,12 @@ function Invoke-AcceptanceSession {
         if ($Mode -ne 'ProcessCrash') {
             $workerBoundary = Get-AcceptanceActiveWorkerBoundary `
                 -Application $first `
+                -Cancel $workerCancel `
                 -FixtureRoot $fixtureRoot `
                 -Prefix $prefix `
                 -LocalAppData $env:LOCALAPPDATA `
                 -ExpectedCount $Count `
-                -SessionId $SessionId `
-                -WaitSeconds $WaitSeconds
+                -SessionId $SessionId
             if ($Mode -eq 'WorkerCancellation') {
                 Invoke-AutomationControl `
                     -Element $workerBoundary.cancel `
@@ -1097,20 +1135,22 @@ function Invoke-AcceptanceSession {
         throw $sessionError
     }
     finally {
+        $cleanupErrors = [Collections.Generic.List[string]]::new()
         foreach ($application in @($first, $second)) {
             if ($null -eq $application) { continue }
             try {
-                $application.owned.process.Refresh()
-                if (-not $application.owned.process.HasExited) {
-                    $application.owned.process.Kill()
-                    [void]$application.owned.process.WaitForExit(10000)
-                }
+                Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned
             }
             catch {
+                $cleanupErrors.Add($_.Exception.Message)
             }
-            finally {
-                $application.owned.process.Dispose()
+        }
+        if ($cleanupErrors.Count -gt 0) {
+            $cleanupMessage = [string]::Join(' | ', $cleanupErrors)
+            if ($null -ne $sessionError) {
+                throw "Acceptance session and exact-process cleanup both failed: $($sessionError.Exception.Message) Cleanup: $cleanupMessage"
             }
+            throw "Acceptance exact-process cleanup failed: $cleanupMessage"
         }
     }
 }
@@ -1208,6 +1248,15 @@ try {
 }
 catch {
     $result.failure_reason = 'recovery_acceptance_error'
+    $modeFailure = [ordered]@{
+        status = 'failed'
+        reason = 'recovery_acceptance_error'
+    }
+    switch ($Mode) {
+        'ProcessCrash' { $result.process_crash = $modeFailure }
+        'WorkerCancellation' { $result.worker_cancellation = $modeFailure }
+        'WorkerClose' { $result.worker_close = $modeFailure }
+    }
     $uiDiagnosticPath = Join-Path $evidenceRoot 'session-ui-diagnostic.json'
     if (Test-Path -LiteralPath $uiDiagnosticPath -PathType Leaf) {
         $result.ui_diagnostic = [ordered]@{

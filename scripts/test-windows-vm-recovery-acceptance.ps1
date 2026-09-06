@@ -164,6 +164,17 @@ $workerClassification = Get-AcceptanceWorkerBoundaryClassification `
 if ($workerClassification -cne 'partial-active-worker') {
     throw 'The genuine active worker boundary was classified incorrectly.'
 }
+$transactionCounts = Get-AcceptanceTransactionNameCounts `
+    -Names @('item-00000.txt', 'vm-recovered-item-00001.txt', 'item-00002.txt') `
+    -Prefix 'vm-recovered-'
+if ($transactionCounts.original -ne 2 -or $transactionCounts.renamed -ne 1) {
+    throw 'One transaction-name snapshot was counted incorrectly.'
+}
+Assert-Fails {
+    Get-AcceptanceTransactionNameCounts `
+        -Names @('item-00000.txt', 'unrelated.txt') `
+        -Prefix 'vm-recovered-'
+} 'unexpected transaction leaf'
 Assert-Fails {
     Get-AcceptanceWorkerBoundaryClassification `
         -OriginalCount 7 `
@@ -251,6 +262,30 @@ try {
 finally {
     Remove-Item Function:\Get-LowerSha256
     Remove-Item Function:\Start-OwnedProcess
+}
+$timeoutProcess = [pscustomobject]@{
+    HasExited = $false
+    killed = $false
+    disposed = $false
+}
+$timeoutProcess | Add-Member -MemberType ScriptMethod -Name Refresh -Value {}
+$timeoutProcess | Add-Member -MemberType ScriptMethod -Name Kill -Value {
+    $this.killed = $true
+}
+$timeoutProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+    param([int] $Milliseconds)
+    $null = $Milliseconds
+    $false
+}
+$timeoutProcess | Add-Member -MemberType ScriptMethod -Name Dispose -Value {
+    $this.disposed = $true
+}
+Assert-Fails {
+    Stop-AndDisposeAcceptanceOwnedProcess `
+        -Owned ([pscustomobject]@{ process = $timeoutProcess })
+} 'exact owned acceptance process did not terminate'
+if (-not $timeoutProcess.killed -or -not $timeoutProcess.disposed) {
+    throw 'A timed-out owned-process cleanup did not attempt Kill and Dispose.'
 }
 
 $torn = Join-TestBytes -Parts @($stream, [byte[]](0x44, 0x52, 0x4A))
