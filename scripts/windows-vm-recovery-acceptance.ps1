@@ -170,20 +170,19 @@ function Get-AcceptanceCrashClassification {
 
 function Get-AcceptanceWorkerBoundaryClassification {
     param(
-        [Parameter(Mandatory)][int] $OriginalCount,
-        [Parameter(Mandatory)][int] $RenamedCount,
-        [Parameter(Mandatory)][int] $ExpectedCount,
+        [Parameter(Mandatory)][bool] $FirstDestinationObserved,
+        [Parameter(Mandatory)][bool] $LastOriginalObserved,
+        [Parameter(Mandatory)][bool] $WitnessesRechecked,
         [Parameter(Mandatory)][bool] $ActiveJournalExists,
         [Parameter(Mandatory)][bool] $CandidateJournalExists,
         [Parameter(Mandatory)][bool] $CancelEnabled,
         [Parameter(Mandatory)][bool] $CancelVisible
     )
 
-    if ($ExpectedCount -le 1 -or $RenamedCount -le 0 -or $RenamedCount -ge $ExpectedCount) {
-        throw 'The observed worker boundary was not genuinely partial.'
-    }
-    if ($OriginalCount + $RenamedCount -ne $ExpectedCount) {
-        throw 'The worker boundary has missing or unexpected transaction entries.'
+    if (-not $FirstDestinationObserved -or
+        -not $LastOriginalObserved -or
+        -not $WitnessesRechecked) {
+        throw 'The worker boundary does not have stable partial-rename witnesses.'
     }
     if (-not $ActiveJournalExists -or $CandidateJournalExists) {
         throw 'The worker boundary does not have one unambiguous active journal.'
@@ -192,28 +191,6 @@ function Get-AcceptanceWorkerBoundaryClassification {
         throw 'The worker boundary does not expose one active cancellation control.'
     }
     'partial-active-worker'
-}
-
-function Get-AcceptanceTransactionNameCounts {
-    param(
-        [Parameter(Mandatory)][string[]] $Names,
-        [Parameter(Mandatory)][string] $Prefix
-    )
-
-    $original = 0
-    $renamed = 0
-    foreach ($name in $Names) {
-        if ($name -cmatch '^item-[0-9]{5}\.txt$') {
-            $original++
-        }
-        elseif ($name -cmatch ('^' + [regex]::Escape($Prefix) + 'item-[0-9]{5}\.txt$')) {
-            $renamed++
-        }
-        else {
-            throw 'The active worker directory contains an unexpected transaction leaf.'
-        }
-    }
-    [pscustomobject]@{ original = $original; renamed = $renamed }
 }
 
 function Assert-AcceptanceExactProperties {
@@ -837,6 +814,8 @@ function Get-AcceptanceActiveWorkerBoundary {
         [Parameter(Mandatory)][string] $FixtureRoot,
         [Parameter(Mandatory)][string] $Prefix,
         [Parameter(Mandatory)][string] $LocalAppData,
+        [Parameter(Mandatory)][object] $InitialFirst,
+        [Parameter(Mandatory)][object] $InitialLast,
         [Parameter(Mandatory)][int] $ExpectedCount,
         [Parameter(Mandatory)][int] $SessionId
     )
@@ -854,35 +833,60 @@ function Get-AcceptanceActiveWorkerBoundary {
         throw 'The cached worker cancellation control changed identity or text.'
     }
     $cancelVisible = -not $Cancel.Current.IsOffscreen
-    $counts = $null
-    for ($attempt = 0; $attempt -lt 3; $attempt++) {
-        $names = @(
-            [IO.Directory]::GetFiles(
-                $FixtureRoot,
-                '*.txt',
-                [IO.SearchOption]::TopDirectoryOnly
-            ) | ForEach-Object { [IO.Path]::GetFileName($_) }
-        )
-        $counts = Get-AcceptanceTransactionNameCounts -Names $names -Prefix $Prefix
-        if ($counts.original + $counts.renamed -eq $ExpectedCount) {
-            break
-        }
+    $firstOriginalName = 'item-00000.txt'
+    $firstRenamedName = $Prefix + $firstOriginalName
+    $lastOriginalName = 'item-{0:D5}.txt' -f ($ExpectedCount - 1)
+    $firstRenamedPath = Join-Path $FixtureRoot $firstRenamedName
+    $lastOriginalPath = Join-Path $FixtureRoot $lastOriginalName
+    $firstDestinationObserved = Test-Path -LiteralPath $firstRenamedPath -PathType Leaf
+    $lastOriginalObserved = Test-Path -LiteralPath $lastOriginalPath -PathType Leaf
+    if (-not $firstDestinationObserved -or -not $lastOriginalObserved) {
+        throw 'The worker boundary does not expose the required first-destination and last-original witnesses.'
     }
+    if ($InitialFirst.name -cne $firstOriginalName -or
+        $InitialLast.name -cne $lastOriginalName) {
+        throw 'The initial state does not contain unique worker boundary witnesses.'
+    }
+    $firstItem = Get-Item -LiteralPath $firstRenamedPath -Force
+    $lastItem = Get-Item -LiteralPath $lastOriginalPath -Force
+    if (($firstItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        ($lastItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'A worker boundary witness became a reparse point.'
+    }
+    $firstIdentity = [DarkReNamerVmNative]::GetFileIdentity($firstItem.FullName)
+    $lastIdentity = [DarkReNamerVmNative]::GetFileIdentity($lastItem.FullName)
+    $firstContent = Get-LowerSha256 -Path $firstItem.FullName
+    $lastContent = Get-LowerSha256 -Path $lastItem.FullName
+    if ($firstIdentity -cne $InitialFirst.identity -or
+        $lastIdentity -cne $InitialLast.identity -or
+        $firstContent -cne $InitialFirst.content_sha256 -or
+        $lastContent -cne $InitialLast.content_sha256) {
+        throw 'A worker boundary witness changed content or NTFS identity.'
+    }
+    $witnessesRechecked =
+        (Test-Path -LiteralPath $firstRenamedPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $lastOriginalPath -PathType Leaf)
     $journalRoot = Join-Path (Join-Path $LocalAppData 'DarkReNamer') 'journal'
     $activeExists = Test-Path -LiteralPath (Join-Path $journalRoot 'active.drj') -PathType Leaf
     $candidateExists = Test-Path -LiteralPath (Join-Path $journalRoot 'candidate.drj') -PathType Leaf
     $classification = Get-AcceptanceWorkerBoundaryClassification `
-        -OriginalCount $counts.original `
-        -RenamedCount $counts.renamed `
-        -ExpectedCount $ExpectedCount `
+        -FirstDestinationObserved $firstDestinationObserved `
+        -LastOriginalObserved $lastOriginalObserved `
+        -WitnessesRechecked $witnessesRechecked `
         -ActiveJournalExists $activeExists `
         -CandidateJournalExists $candidateExists `
         -CancelEnabled $Cancel.Current.IsEnabled `
         -CancelVisible $cancelVisible
     [pscustomobject]@{
         classification = $classification
-        original = $counts.original
-        renamed = $counts.renamed
+        observed_partial_rename = $true
+        witness_count = 2
+        first_destination_name_sha256 = Get-LowerTextSha256 -Value $firstRenamedName
+        last_original_name_sha256 = Get-LowerTextSha256 -Value $lastOriginalName
+        first_destination_content_sha256 = $firstContent
+        last_original_content_sha256 = $lastContent
+        first_destination_identity_sha256 = Get-LowerTextSha256 -Value $firstIdentity
+        last_original_identity_sha256 = Get-LowerTextSha256 -Value $lastIdentity
         cancel = $Cancel
     }
 }
@@ -1013,6 +1017,12 @@ function Invoke-AcceptanceSession {
     if ($initial.Count -ne $Count + 1) {
         throw 'The initial fixture count is incorrect.'
     }
+    $initialFirst = @($initial | Where-Object name -CEQ 'item-00000.txt')
+    $initialLastName = 'item-{0:D5}.txt' -f ($Count - 1)
+    $initialLast = @($initial | Where-Object name -CEQ $initialLastName)
+    if ($initialFirst.Count -ne 1 -or $initialLast.Count -ne 1) {
+        throw 'The initial fixture does not contain unique boundary witnesses.'
+    }
 
     $first = $null
     $second = $null
@@ -1068,6 +1078,8 @@ function Invoke-AcceptanceSession {
                 -FixtureRoot $fixtureRoot `
                 -Prefix $prefix `
                 -LocalAppData $env:LOCALAPPDATA `
+                -InitialFirst $initialFirst[0] `
+                -InitialLast $initialLast[0] `
                 -ExpectedCount $Count `
                 -SessionId $SessionId
             if ($Mode -eq 'WorkerCancellation') {
@@ -1095,8 +1107,16 @@ function Invoke-AcceptanceSession {
                     classification = $workerBoundary.classification
                     fixture_count = $Count
                     import_bytes = $importBytes
-                    partial_original_count = $workerBoundary.original
-                    partial_renamed_count = $workerBoundary.renamed
+                    observed_partial_rename = $workerBoundary.observed_partial_rename
+                    witnesses = [ordered]@{
+                        count = $workerBoundary.witness_count
+                        first_destination_name_sha256 = $workerBoundary.first_destination_name_sha256
+                        last_original_name_sha256 = $workerBoundary.last_original_name_sha256
+                        first_destination_content_sha256 = $workerBoundary.first_destination_content_sha256
+                        last_original_content_sha256 = $workerBoundary.last_original_content_sha256
+                        first_destination_identity_sha256 = $workerBoundary.first_destination_identity_sha256
+                        last_original_identity_sha256 = $workerBoundary.last_original_identity_sha256
+                    }
                     initial_state_sha256 = Get-AcceptanceStateDigest -State $initial
                     restored_state_sha256 = Get-AcceptanceStateDigest -State $restored
                     journal_residue_count = 0
@@ -1120,8 +1140,16 @@ function Invoke-AcceptanceSession {
                 classification = $workerBoundary.classification
                 fixture_count = $Count
                 import_bytes = $importBytes
-                partial_original_count = $workerBoundary.original
-                partial_renamed_count = $workerBoundary.renamed
+                observed_partial_rename = $workerBoundary.observed_partial_rename
+                witnesses = [ordered]@{
+                    count = $workerBoundary.witness_count
+                    first_destination_name_sha256 = $workerBoundary.first_destination_name_sha256
+                    last_original_name_sha256 = $workerBoundary.last_original_name_sha256
+                    first_destination_content_sha256 = $workerBoundary.first_destination_content_sha256
+                    last_original_content_sha256 = $workerBoundary.last_original_content_sha256
+                    first_destination_identity_sha256 = $workerBoundary.first_destination_identity_sha256
+                    last_original_identity_sha256 = $workerBoundary.last_original_identity_sha256
+                }
                 initial_state_sha256 = Get-AcceptanceStateDigest -State $initial
                 restored_state_sha256 = Get-AcceptanceStateDigest -State $restored
                 journal_residue_count = 0

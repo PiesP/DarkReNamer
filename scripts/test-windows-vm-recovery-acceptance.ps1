@@ -154,9 +154,9 @@ if ($classification -cne 'partial-active-nonterminal') {
     throw 'The genuine partial crash boundary was classified incorrectly.'
 }
 $workerClassification = Get-AcceptanceWorkerBoundaryClassification `
-    -OriginalCount 7 `
-    -RenamedCount 3 `
-    -ExpectedCount 10 `
+    -FirstDestinationObserved $true `
+    -LastOriginalObserved $true `
+    -WitnessesRechecked $true `
     -ActiveJournalExists $true `
     -CandidateJournalExists $false `
     -CancelEnabled $true `
@@ -164,22 +164,11 @@ $workerClassification = Get-AcceptanceWorkerBoundaryClassification `
 if ($workerClassification -cne 'partial-active-worker') {
     throw 'The genuine active worker boundary was classified incorrectly.'
 }
-$transactionCounts = Get-AcceptanceTransactionNameCounts `
-    -Names @('item-00000.txt', 'vm-recovered-item-00001.txt', 'item-00002.txt') `
-    -Prefix 'vm-recovered-'
-if ($transactionCounts.original -ne 2 -or $transactionCounts.renamed -ne 1) {
-    throw 'One transaction-name snapshot was counted incorrectly.'
-}
-Assert-Fails {
-    Get-AcceptanceTransactionNameCounts `
-        -Names @('item-00000.txt', 'unrelated.txt') `
-        -Prefix 'vm-recovered-'
-} 'unexpected transaction leaf'
 Assert-Fails {
     Get-AcceptanceWorkerBoundaryClassification `
-        -OriginalCount 7 `
-        -RenamedCount 3 `
-        -ExpectedCount 10 `
+        -FirstDestinationObserved $true `
+        -LastOriginalObserved $true `
+        -WitnessesRechecked $true `
         -ActiveJournalExists $true `
         -CandidateJournalExists $false `
         -CancelEnabled $false `
@@ -187,19 +176,19 @@ Assert-Fails {
 } 'active cancellation control'
 Assert-Fails {
     Get-AcceptanceWorkerBoundaryClassification `
-        -OriginalCount 0 `
-        -RenamedCount 10 `
-        -ExpectedCount 10 `
+        -FirstDestinationObserved $true `
+        -LastOriginalObserved $false `
+        -WitnessesRechecked $false `
         -ActiveJournalExists $true `
         -CandidateJournalExists $false `
         -CancelEnabled $true `
         -CancelVisible $true
-} 'not genuinely partial'
+} 'partial-rename witnesses'
 Assert-Fails {
     Get-AcceptanceWorkerBoundaryClassification `
-        -OriginalCount 7 `
-        -RenamedCount 3 `
-        -ExpectedCount 10 `
+        -FirstDestinationObserved $true `
+        -LastOriginalObserved $true `
+        -WitnessesRechecked $true `
         -ActiveJournalExists $true `
         -CandidateJournalExists $true `
         -CancelEnabled $true `
