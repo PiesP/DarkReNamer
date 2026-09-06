@@ -862,6 +862,7 @@ pub(super) const fn recovery_command_allowed(command: u16) -> bool {
 }
 
 pub(super) fn prompt_spec(
+    caption: impl Into<String>,
     title: impl Into<String>,
     label_one: &str,
     label_two: &str,
@@ -870,6 +871,7 @@ pub(super) fn prompt_spec(
     choices: &[&str],
 ) -> PromptSpec {
     PromptSpec {
+        caption: caption.into(),
         title: title.into(),
         label_one: label_one.to_owned(),
         label_two: label_two.to_owned(),
@@ -877,6 +879,16 @@ pub(super) fn prompt_spec(
         value_two,
         choices: choices.iter().map(|choice| (*choice).to_owned()).collect(),
     }
+}
+
+fn prompt_caption(command: u16) -> Option<String> {
+    let menu_label = command_ui_spec(command)?.menu_label;
+    Some(
+        menu_label
+            .strip_suffix("...")
+            .unwrap_or(menu_label)
+            .to_owned(),
+    )
 }
 
 pub(super) fn legacy_atoi(text: &LegacyText) -> i32 {
@@ -916,12 +928,14 @@ pub(super) fn legacy_atoi(text: &LegacyText) -> i32 {
 }
 
 fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<PreparedPrompt> {
+    let caption = prompt_caption(command)?;
     let (spec, continuation) = match command {
         MANUAL_CHANGE => {
             let row = selected_indices(state.list_window).first().copied()?;
             let current = state.model.items().get(row)?.proposed_name().clone();
             (
                 prompt_spec(
+                    caption,
                     format!("{} 를", current.to_string_lossy()),
                     "으로",
                     "",
@@ -934,6 +948,7 @@ fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<Prepared
         }
         REPLACE => (
             prompt_spec(
+                caption,
                 "이름에 들어있는 문자열을 바꿉니다.",
                 "를",
                 "으로",
@@ -945,6 +960,7 @@ fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<Prepared
         ),
         PREFIX => (
             prompt_spec(
+                caption,
                 "이름의 앞에 지정한 문자열을 붙여줍니다.",
                 "붙일 문자열",
                 "",
@@ -956,6 +972,7 @@ fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<Prepared
         ),
         SUFFIX => (
             prompt_spec(
+                caption,
                 "이름의 뒤에 지정한 문자열을 붙여줍니다.",
                 "붙일 문자열",
                 "",
@@ -967,6 +984,7 @@ fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<Prepared
         ),
         EXT_ADD => (
             prompt_spec(
+                caption,
                 "확장자를 뒤에 붙입니다.",
                 "붙일 확장자",
                 "",
@@ -978,6 +996,7 @@ fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<Prepared
         ),
         EXT_REPLACE => (
             prompt_spec(
+                caption,
                 "확장자를 바꿔 줍니다.",
                 "바꿀 확장자",
                 "",
@@ -989,6 +1008,7 @@ fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<Prepared
         ),
         PAD_DIGITS => (
             prompt_spec(
+                caption,
                 "숫자부분의 자리수를 맞춰 0을 붙입니다.",
                 "자리수",
                 "",
@@ -1000,6 +1020,7 @@ fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<Prepared
         ),
         SEQUENCE => (
             prompt_spec(
+                caption,
                 "붙일 숫자의 자리수와 시작값을 지정합니다.",
                 "자리수",
                 "시작값",
@@ -1016,6 +1037,7 @@ fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<Prepared
         ),
         DELETE_POSITION => (
             prompt_spec(
+                caption,
                 "지정위치를 삭제합니다.(첫글자는 1번째)",
                 "번째부터",
                 "번째까지",
@@ -1027,6 +1049,7 @@ fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<Prepared
         ),
         DELETE_DELIMITED => (
             prompt_spec(
+                caption,
                 "지정된 문자로 묶인 부분을 삭제합니다.",
                 ":시작문자",
                 ":끝문자",
@@ -1038,6 +1061,7 @@ fn prepare_prompt_command(state: &mut AppState, command: u16) -> Option<Prepared
         ),
         SORT => (
             prompt_spec(
+                caption,
                 "정렬 기준 설정",
                 "",
                 "",
@@ -1750,6 +1774,16 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+
+    #[test]
+    fn prompt_captions_use_recognizable_command_names_without_menu_ellipsis() {
+        let prefix = prompt_caption(PREFIX);
+        let manual_change = prompt_caption(MANUAL_CHANGE);
+
+        assert_eq!(prefix.as_deref(), Some("이름 앞에 문자열 붙이기"));
+        assert_eq!(manual_change.as_deref(), Some("선택 항목 이름 직접 변경"));
+        assert_ne!(prefix, manual_change);
+    }
 
     #[test]
     fn ten_thousand_selected_rows_restore_with_two_linear_index_scans() {

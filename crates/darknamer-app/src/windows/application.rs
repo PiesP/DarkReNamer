@@ -317,38 +317,52 @@ fn recommended_track_height(window: HWND, state: &AppState) -> i32 {
     .saturating_add(nonclient_height(window))
 }
 
-fn initial_dpi_size(window: HWND, state: &AppState) -> (i32, i32) {
+fn window_rect(window: HWND) -> io::Result<RECT> {
+    let mut rect = RECT::default();
+    // SAFETY: callers provide a live top-level HWND and rect remains writable
+    // for this synchronous value query.
+    if unsafe { GetWindowRect(window, &mut rect) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(rect)
+}
+
+fn initial_dpi_placement(window: HWND, state: &AppState) -> io::Result<WindowPlacement> {
     let requested = WindowTrackSize {
         width: minimum_track_width(window, state),
         height: scale_dip(INITIAL_HEIGHT, state.dpi).max(recommended_track_height(window, state)),
     };
-    let effective = nearest_monitor_work_area(window)
-        .ok()
-        .and_then(|work| {
-            constrain_minimum_track_size_to_work_area(
-                requested.width,
-                requested.height,
-                work.right - work.left,
-                work.bottom - work.top,
-            )
-        })
-        .unwrap_or(requested);
-    (effective.width, effective.height)
+    let current = window_rect(window)?;
+    let work = nearest_monitor_work_area(window)?;
+    fit_window_to_work_area(
+        WindowOrigin {
+            x: current.left,
+            y: current.top,
+        },
+        requested,
+        WorkAreaBounds {
+            left: work.left,
+            top: work.top,
+            right: work.right,
+            bottom: work.bottom,
+        },
+    )
+    .ok_or_else(|| io::Error::other("invalid initial window placement"))
 }
 
-fn resize_to_initial_dpi(window: HWND, width: i32, height: i32) -> io::Result<()> {
-    // SAFETY: window is the newly created hidden top-level HWND. The flags keep
-    // its system-selected position and z-order while applying physical pixels
-    // derived from the window's actual DPI before the first ShowWindow call.
+fn resize_to_initial_dpi(window: HWND, placement: WindowPlacement) -> io::Result<()> {
+    // SAFETY: window is the newly created hidden top-level HWND. The placement
+    // was bounded to its nearest monitor's work area. The flags preserve its
+    // z-order and activation while applying physical pixels before ShowWindow.
     if unsafe {
         SetWindowPos(
             window,
             null_mut(),
-            0,
-            0,
-            width,
-            height,
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            placement.x,
+            placement.y,
+            placement.width,
+            placement.height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
         )
     } == 0
     {
@@ -550,9 +564,11 @@ fn run_unsafe() -> io::Result<()> {
         unsafe { DestroyWindow(window) };
         return Err(io::Error::other("window state was not adopted"));
     };
-    let (initial_width, initial_height) = initial_dpi_size(window, state_lease.state());
+    let initial_placement = initial_dpi_placement(window, state_lease.state());
     drop(state_lease);
-    if let Err(error) = resize_to_initial_dpi(window, initial_width, initial_height) {
+    let initial_result =
+        initial_placement.and_then(|placement| resize_to_initial_dpi(window, placement));
+    if let Err(error) = initial_result {
         // SAFETY: window is still hidden and owns the adopted AppState. Its
         // normal teardown reclaims children, GDI resources, and the state.
         unsafe { DestroyWindow(window) };
@@ -2153,6 +2169,39 @@ mod tests {
                 let _disposition = CallbackState::request_reclaim(self.slot);
             }
         }
+    }
+
+    #[test]
+    fn native_initial_resize_fits_an_edge_window_inside_its_work_area()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let app = PublishedFileDialogTestApp::new()?;
+        let original_work = nearest_monitor_work_area(app.owner)?;
+        resize_to_initial_dpi(
+            app.owner,
+            WindowPlacement {
+                x: original_work.right - 1,
+                y: original_work.bottom - 1,
+                width: 100,
+                height: 100,
+            },
+        )?;
+
+        let selected_work = nearest_monitor_work_area(app.owner)?;
+        let lease = app.lease()?;
+        let placement = initial_dpi_placement(app.owner, lease.state())?;
+        drop(lease);
+        resize_to_initial_dpi(app.owner, placement)?;
+        let actual = window_rect(app.owner)?;
+
+        assert_eq!(actual.left, placement.x);
+        assert_eq!(actual.top, placement.y);
+        assert_eq!(actual.right - actual.left, placement.width);
+        assert_eq!(actual.bottom - actual.top, placement.height);
+        assert!(actual.left >= selected_work.left);
+        assert!(actual.top >= selected_work.top);
+        assert!(actual.right <= selected_work.right);
+        assert!(actual.bottom <= selected_work.bottom);
+        Ok(())
     }
 
     #[test]
