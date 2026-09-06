@@ -1028,19 +1028,6 @@ function Invoke-AcceptanceSession {
             -Prefix $prefix `
             -SessionId $SessionId `
             -WaitSeconds $WaitSeconds
-        $workerCancel = $null
-        if ($Mode -ne 'ProcessCrash') {
-            $workerCancel = Find-UniqueAutomationElement `
-                -Root $first.main `
-                -Process $first.owned.process `
-                -ExpectedSession $SessionId `
-                -AutomationId '1009' `
-                -ControlType ([Windows.Automation.ControlType]::Button) `
-                -TimeoutSeconds $WaitSeconds `
-                -Label 'cached worker cancellation control' `
-                -Scope ([Windows.Automation.TreeScope]::Children) `
-                -RequireWindowHandle
-        }
         Invoke-AcceptanceApply -Application $first -SessionId $SessionId -WaitSeconds $WaitSeconds
 
         $boundaryDeadline = (Get-Date).AddSeconds($WaitSeconds)
@@ -1064,6 +1051,17 @@ function Invoke-AcceptanceSession {
         }
 
         if ($Mode -ne 'ProcessCrash') {
+            $workerCancel = Find-UniqueAutomationElement `
+                -Root $first.main `
+                -Process $first.owned.process `
+                -ExpectedSession $SessionId `
+                -AutomationId '1009' `
+                -ControlType ([Windows.Automation.ControlType]::Button) `
+                -TimeoutSeconds $WaitSeconds `
+                -Label 'visible worker cancellation control' `
+                -Scope ([Windows.Automation.TreeScope]::Children) `
+                -RequireEnabled `
+                -RequireWindowHandle
             $workerBoundary = Get-AcceptanceActiveWorkerBoundary `
                 -Application $first `
                 -Cancel $workerCancel `
