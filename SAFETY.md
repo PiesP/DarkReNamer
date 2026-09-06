@@ -87,7 +87,15 @@ accommodate the requested minimum, the minimum window width reserves the widest
 measured rail eligible for the selected preference, so automatic density changes
 cannot overflow the default ListView columns. Preference load or write failure
 uses safe presentation defaults and does not relax or create filesystem mutation
-authority. Resolved Light and Dark themes use an app-owned menu palette while
+authority. Before first display, initial placement uses copied window and monitor
+rectangles to fit both the DPI-derived size and origin within the nearest work
+area.
+
+Appearance-dialog focus scrolling posts session-bound redraw work. Synchronous
+redraw starts after its state lease ends, and default `WM_PAINT` processing holds
+no state lease so a nested `WM_ERASEBKGND` can safely resolve the current palette.
+
+Resolved Light and Dark themes use an app-owned menu palette while
 retaining keyboard mnemonics and native MSAA/UIA metadata. Native System, Forced
 Colors, and an unknown high-contrast query keep the standard Windows menu path.
 Menu replacements are prepared while state is leased, then attached and the old
