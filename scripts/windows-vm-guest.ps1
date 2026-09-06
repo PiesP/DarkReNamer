@@ -1360,7 +1360,12 @@ function Invoke-ProductionRenameFlow {
         }
         $diagnosticLeaf = 'gui-flow-error.txt'
         $diagnosticPath = Join-Path $Root $diagnosticLeaf
-        $_ | Out-String | Set-Content -LiteralPath $diagnosticPath -Encoding UTF8
+        $diagnosticText = $_ | Out-String -Width 4096
+        foreach ($invocation in $pendingInvocations) {
+            $diagnosticText += "`n$($invocation.label): completed=$($invocation.async_result.IsCompleted)`n"
+            $diagnosticText += $invocation.powershell.Streams.Error | Out-String -Width 4096
+        }
+        [IO.File]::WriteAllText($diagnosticPath, $diagnosticText, [Text.UTF8Encoding]::new($true))
         $flow.diagnostic = [ordered]@{
             file = $diagnosticLeaf
             sha256 = Get-LowerSha256 -Path $diagnosticPath
