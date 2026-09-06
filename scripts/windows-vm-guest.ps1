@@ -1148,6 +1148,7 @@ function Invoke-ProductionRenameFlow {
             -Process $Process `
             -ExpectedSession $ExpectedSession `
             -AutomationId '1148' `
+            -ControlType ([Windows.Automation.ControlType]::Edit) `
             -TimeoutSeconds $TimeoutSeconds `
             -Label 'file dialog filename control'
         Set-AutomationControlValue `
