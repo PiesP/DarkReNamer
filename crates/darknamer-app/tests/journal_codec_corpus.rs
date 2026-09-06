@@ -50,36 +50,41 @@ fn histories() -> Vec<Vec<JournalRecord>> {
         corpus.push(committed);
 
         for completed in 0..=count as usize {
-            for retry in [false, true] {
-                let mut rollback = vec![intent.clone()];
-                for step in 0..completed {
-                    completed_step(&mut rollback, step, JournalDirection::Forward);
+            for failed_forward in [false, true] {
+                if failed_forward && completed == count as usize {
+                    continue;
                 }
-                if completed < count as usize {
-                    rollback.push(JournalRecord::Prepared {
-                        step: completed,
-                        direction: JournalDirection::Forward,
-                    });
-                    rollback.push(JournalRecord::NotApplied {
-                        step: completed,
-                        direction: JournalDirection::Forward,
-                    });
-                }
-                for step in (0..completed).rev() {
-                    if retry {
+                for retry in [false, true] {
+                    let mut rollback = vec![intent.clone()];
+                    for step in 0..completed {
+                        completed_step(&mut rollback, step, JournalDirection::Forward);
+                    }
+                    if failed_forward {
                         rollback.push(JournalRecord::Prepared {
-                            step,
-                            direction: JournalDirection::Rollback,
+                            step: completed,
+                            direction: JournalDirection::Forward,
                         });
                         rollback.push(JournalRecord::NotApplied {
-                            step,
-                            direction: JournalDirection::Rollback,
+                            step: completed,
+                            direction: JournalDirection::Forward,
                         });
                     }
-                    completed_step(&mut rollback, step, JournalDirection::Rollback);
+                    for step in (0..completed).rev() {
+                        if retry {
+                            rollback.push(JournalRecord::Prepared {
+                                step,
+                                direction: JournalDirection::Rollback,
+                            });
+                            rollback.push(JournalRecord::NotApplied {
+                                step,
+                                direction: JournalDirection::Rollback,
+                            });
+                        }
+                        completed_step(&mut rollback, step, JournalDirection::Rollback);
+                    }
+                    rollback.push(JournalRecord::Terminal(JournalTerminal::RolledBack));
+                    corpus.push(rollback);
                 }
-                rollback.push(JournalRecord::Terminal(JournalTerminal::RolledBack));
-                corpus.push(rollback);
             }
         }
     }
