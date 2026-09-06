@@ -364,6 +364,10 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 
 public static class DarkReNamerVmAcceptanceNative {
+    private const int MaxHighContrastReads = 8;
+    private static int highContrastReads;
+    private static readonly IntPtr[] retainedSchemePointers = new IntPtr[MaxHighContrastReads];
+
     public sealed class HighContrastSnapshot {
         public uint Flags { get; set; }
         public string Scheme { get; set; }
@@ -440,8 +444,6 @@ public static class DarkReNamerVmAcceptanceNative {
     private static extern uint GetSysColor(int index);
     [DllImport("ntdll.dll", CharSet = CharSet.Unicode)]
     private static extern int RtlGetVersion(ref RTL_OSVERSIONINFOEX version);
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr LocalFree(IntPtr memory);
 
     private static void Send(ushort virtualKey, ushort scanCode, uint flags) {
         INPUT input = new INPUT {
@@ -479,28 +481,33 @@ public static class DarkReNamerVmAcceptanceNative {
     }
 
     public static HighContrastSnapshot GetHighContrastSnapshot() {
+        int slot = System.Threading.Interlocked.Increment(ref highContrastReads) - 1;
+        if (slot >= MaxHighContrastReads) {
+            System.Threading.Interlocked.Decrement(ref highContrastReads);
+            throw new InvalidOperationException("High Contrast snapshot read limit exceeded.");
+        }
         HIGHCONTRAST value = new HIGHCONTRAST();
         value.size = (uint)Marshal.SizeOf(typeof(HIGHCONTRAST));
         if (!SystemParametersInfo(0x42, value.size, ref value, 0)) {
             throw new Win32Exception(Marshal.GetLastWin32Error());
         }
-        try {
-            return new HighContrastSnapshot {
-                Flags = value.flags,
-                Scheme = value.scheme == IntPtr.Zero ? null : Marshal.PtrToStringUni(value.scheme),
-                Window = GetSysColor(5),
-                WindowText = GetSysColor(8),
-                ButtonFace = GetSysColor(15),
-                ButtonText = GetSysColor(18),
-                Highlight = GetSysColor(13),
-                HighlightText = GetSysColor(14),
-                GrayText = GetSysColor(17),
-                HotLight = GetSysColor(26)
-            };
-        }
-        finally {
-            if (value.scheme != IntPtr.Zero) { LocalFree(value.scheme); }
-        }
+        // Supported Windows builds disagree on whether this GET pointer is
+        // caller-owned. Copy it synchronously and retain at most eight pointer
+        // values until this short-lived observer process exits. Freeing the
+        // pointer corrupted the process heap on a source-bound VM run.
+        retainedSchemePointers[slot] = value.scheme;
+        return new HighContrastSnapshot {
+            Flags = value.flags,
+            Scheme = value.scheme == IntPtr.Zero ? null : Marshal.PtrToStringUni(value.scheme),
+            Window = GetSysColor(5),
+            WindowText = GetSysColor(8),
+            ButtonFace = GetSysColor(15),
+            ButtonText = GetSysColor(18),
+            Highlight = GetSysColor(13),
+            HighlightText = GetSysColor(14),
+            GrayText = GetSysColor(17),
+            HotLight = GetSysColor(26)
+        };
     }
 
     public static bool HighContrastEnabled() {

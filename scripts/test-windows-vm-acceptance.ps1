@@ -161,6 +161,15 @@ try {
         throw 'The acceptance script must use Windows PowerShell 5.1-compatible integer type names.'
     }
     $acceptanceText = [IO.File]::ReadAllText($acceptance)
+    if ($acceptanceText -match 'extern IntPtr LocalFree|LocalFree\(value\.scheme\)') {
+        throw 'The acceptance observer must not free ambiguous High Contrast GET pointers.'
+    }
+    if ($acceptanceText.IndexOf(
+        'private const int MaxHighContrastReads = 8;',
+        [StringComparison]::Ordinal
+    ) -lt 0) {
+        throw 'The process-lifetime High Contrast pointer strategy must remain bounded.'
+    }
     if ($acceptanceText.IndexOf("-AutomationId '1148'", [StringComparison]::Ordinal) -lt 0 -or
         $acceptanceText.IndexOf(
             '-ControlType ([Windows.Automation.ControlType]::Edit)',
