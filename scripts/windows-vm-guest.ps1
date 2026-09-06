@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory)]
     [string] $BundleRoot,
@@ -712,20 +712,7 @@ function Find-UniqueAutomationElement {
             throw "$Label was not found before the application exited."
         }
     } while ((Get-Date) -lt $deadline)
-    $observed = @(
-        $Root.FindAll($Scope, [Windows.Automation.Condition]::TrueCondition) |
-            Select-Object -First 64 |
-            ForEach-Object {
-                [ordered]@{
-                    id = $_.Current.AutomationId
-                    name = $_.Current.Name
-                    type = $_.Current.ControlType.ProgrammaticName
-                    enabled = $_.Current.IsEnabled
-                    process = $_.Current.ProcessId
-                }
-            }
-    )
-    throw "$Label was not found before the bounded deadline. Observed controls: $($observed | ConvertTo-Json -Compress -Depth 3)"
+    throw "$Label was not found before the bounded deadline."
 }
 
 function Wait-UniqueAutomationWindow {
@@ -755,21 +742,12 @@ function Wait-UniqueAutomationWindow {
     $condition = [Windows.Automation.AndCondition]::new($conditions)
     $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
     do {
-        $windows = @{}
-        $main = [Windows.Automation.AutomationElement]::FromHandle($Process.MainWindowHandle)
-        $candidates = @($root.FindAll([Windows.Automation.TreeScope]::Children, $condition))
-        if ($null -ne $main) {
-            $candidates += @($main.FindAll([Windows.Automation.TreeScope]::Descendants, $condition))
-        }
-        foreach ($candidate in $candidates) {
-            $windows[[string]$candidate.Current.NativeWindowHandle] = $candidate
-        }
-        $matches = @($windows.Values)
+        $matches = $root.FindAll([Windows.Automation.TreeScope]::Children, $condition)
         if ($matches.Count -gt 1) {
             throw "$Label matched more than one top-level window."
         }
         if ($matches.Count -eq 1) {
-            $element = $matches[0]
+            $element = $matches.Item(0)
             Assert-AutomationBinding `
                 -Element $element `
                 -Process $Process `

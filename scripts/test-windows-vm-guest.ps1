@@ -212,11 +212,24 @@ try {
         Join-GuestWindowsPath -Root $guestTransferRoot -Leaf '..\result.json'
     } 'Invalid bundle file name'
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-        $initScript = @"
-`$ErrorActionPreference = 'Stop'
-. '$($valid.runner.Replace("'", "''"))' -BundleRoot '$($valid.root.Replace("'", "''"))' -ExpectedSessionId 1 -ValidateOnly
+        $initScript = @'
+$ErrorActionPreference = 'Stop'
+$runnerPath = 'GUEST_RUNNER_PATH'
+. $runnerPath -BundleRoot 'GUEST_BUNDLE_PATH' -ExpectedSessionId 1 -ValidateOnly
+$tokens = $null
+$errors = $null
+$fromFile = [Management.Automation.Language.Parser]::ParseFile($runnerPath, [ref]$tokens, [ref]$errors)
+$fromUtf8 = [Management.Automation.Language.Parser]::ParseInput([IO.File]::ReadAllText($runnerPath, [Text.Encoding]::UTF8), [ref]$tokens, [ref]$errors)
+$stringNode = { param($node) $node -is [Management.Automation.Language.StringConstantExpressionAst] }
+$fileStrings = @($fromFile.FindAll($stringNode, $true) | ForEach-Object Value)
+$utf8Strings = @($fromUtf8.FindAll($stringNode, $true) | ForEach-Object Value)
+if ($fileStrings.Count -ne $utf8Strings.Count) { throw 'Guest script string decoding differs from UTF-8.' }
+for ($index = 0; $index -lt $fileStrings.Count; $index++) {
+    if ($fileStrings[$index] -cne $utf8Strings[$index]) { throw 'Guest script string decoding differs from UTF-8.' }
+}
 Initialize-NativeCapture
-"@
+'@
+        $initScript = $initScript.Replace('GUEST_RUNNER_PATH', $valid.runner.Replace("'", "''")).Replace('GUEST_BUNDLE_PATH', $valid.root.Replace("'", "''"))
         $encodedInit = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($initScript))
         $initProcess = Start-OwnedProcess `
             -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') `
