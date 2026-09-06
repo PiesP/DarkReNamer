@@ -2175,17 +2175,18 @@ mod tests {
     fn native_initial_resize_fits_an_edge_window_inside_its_work_area()
     -> Result<(), Box<dyn std::error::Error>> {
         let app = PublishedFileDialogTestApp::new()?;
-        let work = nearest_monitor_work_area(app.owner)?;
+        let original_work = nearest_monitor_work_area(app.owner)?;
         resize_to_initial_dpi(
             app.owner,
             WindowPlacement {
-                x: work.right - 1,
-                y: work.bottom - 1,
+                x: original_work.right - 1,
+                y: original_work.bottom - 1,
                 width: 100,
                 height: 100,
             },
         )?;
 
+        let selected_work = nearest_monitor_work_area(app.owner)?;
         let lease = app.lease()?;
         let placement = initial_dpi_placement(app.owner, lease.state())?;
         drop(lease);
@@ -2196,10 +2197,10 @@ mod tests {
         assert_eq!(actual.top, placement.y);
         assert_eq!(actual.right - actual.left, placement.width);
         assert_eq!(actual.bottom - actual.top, placement.height);
-        assert!(actual.left >= work.left);
-        assert!(actual.top >= work.top);
-        assert!(actual.right <= work.right);
-        assert!(actual.bottom <= work.bottom);
+        assert!(actual.left >= selected_work.left);
+        assert!(actual.top >= selected_work.top);
+        assert!(actual.right <= selected_work.right);
+        assert!(actual.bottom <= selected_work.bottom);
         Ok(())
     }
 
