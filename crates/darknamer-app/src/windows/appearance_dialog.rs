@@ -1624,7 +1624,7 @@ fn apply_appearance_dialog_layout(
     if !dialog.is_null() {
         // SAFETY: the live dialog receives only its copied session identifier;
         // the queued callback resolves current state after this lease unwinds.
-        unsafe {
+        let posted = unsafe {
             PostMessageW(
                 dialog,
                 WM_APP_APPEARANCE_REDRAW,
@@ -1632,6 +1632,20 @@ fn apply_appearance_dialog_layout(
                 state.session_id as isize,
             )
         };
+        if posted == 0 {
+            // Preserve a pending full-client repaint if the thread queue cannot
+            // accept the private message. These flags only mark dirty regions;
+            // they do not synchronously paint while this state lease is held.
+            // SAFETY: dialog and its children remain live for this layout call.
+            unsafe {
+                RedrawWindow(
+                    dialog,
+                    null(),
+                    null_mut(),
+                    RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
+                )
+            };
+        }
     }
 }
 
@@ -2186,7 +2200,7 @@ unsafe extern "system" fn appearance_dialog_proc(
 #[cfg(test)]
 mod native_tests {
     use super::*;
-    use windows_sys::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
+    use windows_sys::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC, SetPixel};
     use windows_sys::Win32::System::SystemServices::{SS_OWNERDRAW, SS_TYPEMASK};
     use windows_sys::Win32::UI::Controls::{
         CDIS_DEFAULT, GetWindowTheme, NM_CUSTOMDRAW, NMCUSTOMDRAW,
@@ -2233,6 +2247,30 @@ mod native_tests {
             Err(io::Error::last_os_error())
         } else {
             Ok(pixel)
+        }
+    }
+
+    fn set_appearance_client_pixel(window: HWND, x: i32, y: i32, color: u32) -> io::Result<()> {
+        // SAFETY: window is the live test-owned dialog. Its client DC remains
+        // live while one bounded pixel is updated and is released before this
+        // helper returns.
+        let (painted, released) = unsafe {
+            let dc = GetDC(window);
+            if dc.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let painted = SetPixel(dc, x, y, color);
+            let released = ReleaseDC(window, dc);
+            (painted, released)
+        };
+        if painted == u32::MAX || released == 0 {
+            Err(io::Error::last_os_error())
+        } else if painted != color {
+            Err(io::Error::other(
+                "appearance test pixel color was approximated",
+            ))
+        } else {
+            Ok(())
         }
     }
 
@@ -2439,8 +2477,15 @@ mod native_tests {
         erase_appearance_client(dialog.raw())?;
         let sample_x = scale_dip(4, dpi);
         let sample_y = constrained.footer.y.saturating_add(scale_dip(4, dpi));
-        let before = appearance_client_pixel(dialog.raw(), sample_x, sample_y)?;
-        assert_eq!(before, GRAPHITE_DARK.surface_dialog);
+        let baseline = appearance_client_pixel(dialog.raw(), sample_x, sample_y)?;
+        assert_eq!(baseline, GRAPHITE_DARK.surface_dialog);
+        let sentinel = PRECISION_LIGHT.surface_dialog;
+        assert_ne!(sentinel, GRAPHITE_DARK.surface_dialog);
+        set_appearance_client_pixel(dialog.raw(), sample_x, sample_y, sentinel)?;
+        assert_eq!(
+            appearance_client_pixel(dialog.raw(), sample_x, sample_y)?,
+            sentinel
+        );
 
         // SAFETY: last_checkbox is a live BS_NOTIFY child below the constrained
         // viewport. Its focus notification must scroll through the real nested
@@ -2449,8 +2494,8 @@ mod native_tests {
         let focus_redraws = dispatch_appearance_redraws(dialog.raw());
         let after = appearance_client_pixel(dialog.raw(), sample_x, sample_y)?;
         assert_eq!(
-            after, before,
-            "focus-scroll repainted the dark footer white"
+            after, GRAPHITE_DARK.surface_dialog,
+            "focus-scroll did not restore the dark footer background"
         );
         assert!(focus_redraws > 0);
         assert!(
