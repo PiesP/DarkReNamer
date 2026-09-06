@@ -165,7 +165,7 @@ try {
         throw 'The acceptance observer must not free ambiguous High Contrast GET pointers.'
     }
     if ($acceptanceText.IndexOf(
-        'private const int MaxHighContrastReads = 8;',
+        'private const int MaxHighContrastReads = 128;',
         [StringComparison]::Ordinal
     ) -lt 0) {
         throw 'The process-lifetime High Contrast pointer strategy must remain bounded.'
@@ -228,6 +228,50 @@ try {
     if (Test-HighContrastSnapshotEqual -Expected $highContrastSnapshot -Actual $changedSnapshot) {
         throw 'Changed High Contrast system colors must fail restoration proof.'
     }
+    $settlementState = [pscustomobject]@{ reads = 0 }
+    $settled = Wait-HighContrastSettlement `
+        -ReadSnapshot {
+            $settlementState.reads++
+            $highContrastSnapshot | Select-Object *
+        } `
+        -AcceptSnapshot { param($candidate) $candidate.Flags -eq 126 } `
+        -Label 'immediate fixture' `
+        -MaximumAttempts 2 `
+        -PollMilliseconds 0
+    if ($settlementState.reads -ne 2 -or
+        -not (Test-HighContrastSnapshotEqual -Expected $highContrastSnapshot -Actual $settled)) {
+        throw 'An immediately stable High Contrast state did not settle in two reads.'
+    }
+    $enabledSnapshot = $highContrastSnapshot | Select-Object *
+    $enabledSnapshot.Flags = 127
+    $enabledSnapshot.Highlight = 9
+    $delayedSequence = @(
+        $highContrastSnapshot,
+        ($enabledSnapshot | Select-Object *),
+        ($enabledSnapshot | Select-Object *)
+    )
+    $delayedState = [pscustomobject]@{ index = 0 }
+    $delayed = Wait-HighContrastSettlement `
+        -ReadSnapshot {
+            $value = $delayedSequence[$delayedState.index]
+            $delayedState.index++
+            $value
+        } `
+        -AcceptSnapshot { param($candidate) $candidate.Flags -eq 127 } `
+        -Label 'delayed fixture' `
+        -MaximumAttempts 3 `
+        -PollMilliseconds 0
+    if ($delayedState.index -ne 3 -or $delayed.Highlight -ne 9) {
+        throw 'A delayed High Contrast state did not wait for stable accepted reads.'
+    }
+    Assert-Fails {
+        Wait-HighContrastSettlement `
+            -ReadSnapshot { $highContrastSnapshot | Select-Object * } `
+            -AcceptSnapshot { param($candidate) $candidate.Flags -eq 127 } `
+            -Label 'timeout fixture' `
+            -MaximumAttempts 3 `
+            -PollMilliseconds 0
+    } 'did not settle within the bounded observation attempts'
 
     $valid = New-AcceptanceFixture -Name 'valid'
     Invoke-ValidateOnly $valid

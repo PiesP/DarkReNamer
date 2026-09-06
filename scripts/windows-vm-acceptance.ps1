@@ -202,6 +202,61 @@ function Test-HighContrastSnapshotEqual {
     $true
 }
 
+function Test-HighContrastColorsEqual {
+    param(
+        [Parameter(Mandatory)][object] $Expected,
+        [Parameter(Mandatory)][object] $Actual
+    )
+
+    foreach ($name in @(
+        'Window','WindowText','ButtonFace','ButtonText',
+        'Highlight','HighlightText','GrayText','HotLight'
+    )) {
+        if ($Expected.$name -ne $Actual.$name) {
+            return $false
+        }
+    }
+    $true
+}
+
+function Wait-HighContrastSettlement {
+    param(
+        [Parameter(Mandatory)][scriptblock] $ReadSnapshot,
+        [Parameter(Mandatory)][scriptblock] $AcceptSnapshot,
+        [Parameter(Mandatory)][string] $Label,
+        [ValidateRange(2, 64)][int] $MaximumAttempts = 50,
+        [ValidateRange(0, 1000)][int] $PollMilliseconds = 200,
+        [ValidateRange(2, 4)][int] $StableReads = 2
+    )
+
+    $previous = $null
+    $stable = 0
+    for ($attempt = 0; $attempt -lt $MaximumAttempts; $attempt++) {
+        $snapshot = & $ReadSnapshot
+        if (& $AcceptSnapshot $snapshot) {
+            if ($null -ne $previous -and
+                (Test-HighContrastSnapshotEqual -Expected $previous -Actual $snapshot)) {
+                $stable++
+            }
+            else {
+                $stable = 1
+            }
+            $previous = $snapshot
+            if ($stable -ge $StableReads) {
+                return $snapshot
+            }
+        }
+        else {
+            $previous = $null
+            $stable = 0
+        }
+        if ($attempt + 1 -lt $MaximumAttempts -and $PollMilliseconds -gt 0) {
+            Start-Sleep -Milliseconds $PollMilliseconds
+        }
+    }
+    throw "$Label did not settle within the bounded observation attempts."
+}
+
 function Resolve-HighContrastRestoreDocument {
     param(
         [Parameter(Mandatory)][string] $OutputDirectory,
@@ -313,10 +368,13 @@ function Invoke-HighContrastRescue {
                 $restore.expected.Flags,
                 $restore.expected.Scheme
             )
-            $actual = [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot()
-            if (-not (Test-HighContrastSnapshotEqual -Expected $restore.expected -Actual $actual)) {
-                throw 'High Contrast rescue could not prove the original settings and colors.'
-            }
+            $actual = Wait-HighContrastSettlement `
+                -ReadSnapshot { [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot() } `
+                -AcceptSnapshot {
+                    param($candidate)
+                    Test-HighContrastSnapshotEqual -Expected $restore.expected -Actual $candidate
+                } `
+                -Label 'High Contrast rescue restoration'
             Write-JsonUtf8Bom -Path $restore.path -Value ([ordered]@{
                 schema_version = 1
                 source_sha = $Verified.source_sha
@@ -375,7 +433,7 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 
 public static class DarkReNamerVmAcceptanceNative {
-    private const int MaxHighContrastReads = 8;
+    private const int MaxHighContrastReads = 128;
     private static int highContrastReads;
     private static readonly IntPtr[] retainedSchemePointers = new IntPtr[MaxHighContrastReads];
 
@@ -504,7 +562,7 @@ public static class DarkReNamerVmAcceptanceNative {
         }
         // Treat the GET pointer as borrowed in this bounded observer. Copy it
         // synchronously without freeing it; the OS reclaims any allocation at
-        // process exit. Retain at most eight pointer values for that lifetime.
+        // process exit. Retain at most 128 pointer values for that lifetime.
         retainedSchemePointers[slot] = value.scheme;
         return new HighContrastSnapshot {
             Flags = value.flags,
@@ -924,15 +982,24 @@ try {
                 $highContrastState.original.Scheme
             )
         }
-        $highContrastState.acceptance = [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot()
+        $highContrastState.acceptance = Wait-HighContrastSettlement `
+            -ReadSnapshot { [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot() } `
+            -AcceptSnapshot {
+                param($candidate)
+                $enabled = ($candidate.Flags -band 1) -ne 0
+                $colorsChanged = -not (Test-HighContrastColorsEqual `
+                    -Expected $highContrastState.original `
+                    -Actual $candidate)
+                $enabled -and ($highContrastResult.original_enabled -or $colorsChanged)
+            } `
+            -Label 'High Contrast activation'
         $highContrastResult.acceptance_enabled = ($highContrastState.acceptance.Flags -band 1) -ne 0
         if (-not $highContrastResult.acceptance_enabled) {
             throw 'Windows did not enable High Contrast for the acceptance session.'
         }
-        $highContrastResult.system_colors_changed = @(
-            'Window','WindowText','ButtonFace','ButtonText','Highlight','HighlightText','GrayText','HotLight' |
-                Where-Object { $highContrastState.original.$_ -ne $highContrastState.acceptance.$_ }
-        ).Count -gt 0
+        $highContrastResult.system_colors_changed = -not (Test-HighContrastColorsEqual `
+            -Expected $highContrastState.original `
+            -Actual $highContrastState.acceptance)
     }
     else {
         $highContrastState.acceptance = $highContrastState.original
@@ -999,7 +1066,7 @@ try {
         $observations.environment = [ordered]@{
             os_version = [DarkReNamerVmAcceptanceNative]::OsVersion()
             dpi = [DarkReNamerVmAcceptanceNative]::GetDpiForWindow($process.MainWindowHandle)
-            high_contrast = [DarkReNamerVmAcceptanceNative]::HighContrastEnabled()
+            high_contrast = ($highContrastState.acceptance.Flags -band 1) -ne 0
             high_contrast_flags = $highContrastState.acceptance.Flags
             high_contrast_scheme = $highContrastState.acceptance.Scheme
             high_contrast_colors = [ordered]@{
@@ -1250,13 +1317,16 @@ finally {
                     $highContrastState.original.Scheme
                 )
             }
-            $highContrastState.restored = [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot()
-            $highContrastState.restoration_verified = Test-HighContrastSnapshotEqual `
-                -Expected $highContrastState.original `
-                -Actual $highContrastState.restored
-            if (-not $highContrastState.restoration_verified) {
-                throw 'High Contrast flags, scheme, or system colors did not return to their original values.'
-            }
+            $highContrastState.restored = Wait-HighContrastSettlement `
+                -ReadSnapshot { [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot() } `
+                -AcceptSnapshot {
+                    param($candidate)
+                    Test-HighContrastSnapshotEqual `
+                        -Expected $highContrastState.original `
+                        -Actual $candidate
+                } `
+                -Label 'High Contrast restoration'
+            $highContrastState.restoration_verified = $true
             $highContrastResult.restoration = 'verified'
             Write-JsonUtf8Bom -Path $highContrastState.rescue_path -Value ([ordered]@{
                 schema_version = 1
