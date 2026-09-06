@@ -194,21 +194,168 @@ function Get-AcceptanceWorkerBoundaryClassification {
     'partial-active-worker'
 }
 
-function Get-AcceptanceGuestHelperPath {
-    param([Parameter(Mandatory)][string] $Root)
+function Get-AcceptanceTransactionNameCounts {
+    param(
+        [Parameter(Mandatory)][string[]] $Names,
+        [Parameter(Mandatory)][string] $Prefix
+    )
+
+    $original = 0
+    $renamed = 0
+    foreach ($name in $Names) {
+        if ($name -cmatch '^item-[0-9]{5}\.txt$') {
+            $original++
+        }
+        elseif ($name -cmatch ('^' + [regex]::Escape($Prefix) + 'item-[0-9]{5}\.txt$')) {
+            $renamed++
+        }
+        else {
+            throw 'The active worker directory contains an unexpected transaction leaf.'
+        }
+    }
+    [pscustomobject]@{ original = $original; renamed = $renamed }
+}
+
+function Assert-AcceptanceExactProperties {
+    param(
+        [Parameter(Mandatory)][object] $Value,
+        [Parameter(Mandatory)][string[]] $Names,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    $actual = @($Value.PSObject.Properties.Name | Sort-Object)
+    $expected = @($Names | Sort-Object)
+    if ($actual.Count -ne $expected.Count) {
+        throw "$Label has unexpected fields."
+    }
+    for ($index = 0; $index -lt $expected.Count; $index++) {
+        if ($actual[$index] -cne $expected[$index]) {
+            throw "$Label has unexpected fields."
+        }
+    }
+}
+
+function Get-AcceptanceBootstrapSha256 {
+    param([Parameter(Mandatory)][string] $Path)
+
+    (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Get-AcceptanceBootstrapBytesSha256 {
+    param([Parameter(Mandatory)][byte[]] $Bytes)
+
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $algorithm.ComputeHash($Bytes)
+        ([BitConverter]::ToString($digest) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        $algorithm.Dispose()
+    }
+}
+
+function Resolve-AcceptanceBootstrap {
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string] $ObserverPath,
+        [Parameter(Mandatory)][string] $ExpectedObserverSha256
+    )
 
     if (-not [IO.Path]::IsPathRooted($Root)) {
         throw 'BundleRoot must be absolute.'
     }
-    $runnerPath = Join-Path $Root 'windows-vm-guest.ps1'
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+        throw 'BundleRoot must be an existing directory.'
+    }
+    $rootItem = Get-Item -LiteralPath $Root -Force
+    if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'BundleRoot must not be a reparse point.'
+    }
+    $manifestPath = Join-Path $rootItem.FullName 'bundle.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw 'The bootstrap bundle manifest is missing.'
+    }
+    $manifestItem = Get-Item -LiteralPath $manifestPath -Force
+    if (($manifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $manifestItem.Length -gt 1MB) {
+        throw 'The bootstrap bundle manifest is unsafe or too large.'
+    }
+    $manifestText = [IO.File]::ReadAllText($manifestItem.FullName)
+    if ($manifestText.IndexOf([char]0) -ge 0) {
+        throw 'The bootstrap bundle manifest contains NUL.'
+    }
+    try {
+        $manifest = $manifestText | ConvertFrom-Json
+    }
+    catch {
+        throw 'The bootstrap bundle manifest is not valid JSON.'
+    }
+    if ($null -eq $manifest -or $null -eq $manifest.runner) {
+        throw 'The bootstrap bundle manifest has no runner object.'
+    }
+    Assert-AcceptanceExactProperties `
+        -Value $manifest.runner `
+        -Names @('file', 'sha256') `
+        -Label 'bootstrap runner'
+    if ($manifest.runner.file -isnot [string] -or
+        $manifest.runner.file -cne 'windows-vm-guest.ps1') {
+        throw 'The bootstrap runner leaf is invalid.'
+    }
+    if ($manifest.runner.sha256 -isnot [string] -or
+        $manifest.runner.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'The bootstrap runner SHA-256 is invalid.'
+    }
+    $runnerPath = Join-Path $rootItem.FullName 'windows-vm-guest.ps1'
     if (-not (Test-Path -LiteralPath $runnerPath -PathType Leaf)) {
         throw 'The frozen guest helper is missing.'
     }
     $runnerItem = Get-Item -LiteralPath $runnerPath -Force
-    if (($runnerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw 'The frozen guest helper must not be a reparse point.'
+    if (($runnerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $runnerItem.Length -gt 2MB) {
+        throw 'The frozen guest helper must be an ordinary bounded file.'
     }
-    $runnerItem.FullName
+    $runnerBytes = [IO.File]::ReadAllBytes($runnerItem.FullName)
+    $runnerSha256 = Get-AcceptanceBootstrapBytesSha256 -Bytes $runnerBytes
+    if ($runnerSha256 -cne $manifest.runner.sha256) {
+        throw 'The bootstrap runner hash does not match bundle.json.'
+    }
+    $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+    try {
+        $runnerText = $strictUtf8.GetString($runnerBytes)
+    }
+    catch {
+        throw 'The authenticated guest helper is not valid UTF-8.'
+    }
+    if ($runnerText.Length -gt 0 -and $runnerText[0] -eq [char]0xFEFF) {
+        $runnerText = $runnerText.Substring(1)
+    }
+    try {
+        $runnerScript = [scriptblock]::Create($runnerText)
+    }
+    catch {
+        throw 'The authenticated guest helper has parser errors.'
+    }
+
+    if ($ExpectedObserverSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        -not (Test-Path -LiteralPath $ObserverPath -PathType Leaf)) {
+        throw 'The recovery acceptance observer bootstrap input is invalid.'
+    }
+    $observerItem = Get-Item -LiteralPath $ObserverPath -Force
+    if ($observerItem.Name -cne 'windows-vm-recovery-acceptance.ps1' -or
+        ($observerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The recovery acceptance observer bootstrap file is invalid.'
+    }
+    $observerSha256 = Get-AcceptanceBootstrapSha256 -Path $observerItem.FullName
+    if ($observerSha256 -cne $ExpectedObserverSha256) {
+        throw 'The recovery acceptance observer hash does not match its staging contract.'
+    }
+    [pscustomobject]@{
+        root = $rootItem.FullName
+        runner_path = $runnerItem.FullName
+        runner_script = $runnerScript
+        runner_sha256 = $runnerSha256
+        observer_sha256 = $observerSha256
+    }
 }
 
 function Resolve-AcceptanceInputs {
@@ -377,7 +524,7 @@ function Get-AcceptanceStateDigest {
     Get-LowerTextSha256 -Value ([string]::Join("`n", $parts))
 }
 
-function Stop-AcceptanceFailedStartupProcess {
+function Stop-AndDisposeAcceptanceOwnedProcess {
     param([Parameter(Mandatory)][object] $Owned)
 
     $process = $Owned.process
@@ -386,7 +533,7 @@ function Stop-AcceptanceFailedStartupProcess {
         if (-not $process.HasExited) {
             $process.Kill()
             if (-not $process.WaitForExit(10000)) {
-                throw 'The exact process from failed startup validation did not terminate.'
+                throw 'The exact owned acceptance process did not terminate.'
             }
         }
     }
@@ -448,7 +595,7 @@ function Start-AcceptanceApplication {
         $startupError = $_
         if ($null -ne $owned) {
             try {
-                Stop-AcceptanceFailedStartupProcess -Owned $owned
+                Stop-AndDisposeAcceptanceOwnedProcess -Owned $owned
             }
             catch {
                 throw "Application startup validation and exact-process cleanup both failed: $($startupError.Exception.Message) Cleanup: $($_.Exception.Message)"
@@ -686,55 +833,57 @@ function Stop-AcceptanceOwnedProcess {
 function Get-AcceptanceActiveWorkerBoundary {
     param(
         [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][object] $Cancel,
         [Parameter(Mandatory)][string] $FixtureRoot,
         [Parameter(Mandatory)][string] $Prefix,
         [Parameter(Mandatory)][string] $LocalAppData,
         [Parameter(Mandatory)][int] $ExpectedCount,
-        [Parameter(Mandatory)][int] $SessionId,
-        [Parameter(Mandatory)][int] $WaitSeconds
+        [Parameter(Mandatory)][int] $SessionId
     )
 
     $process = $Application.owned.process
-    $cancel = Find-UniqueAutomationElement `
-        -Root $Application.main `
+    Assert-AutomationBinding `
+        -Element $Cancel `
         -Process $process `
         -ExpectedSession $SessionId `
-        -AutomationId '1009' `
-        -ControlType ([Windows.Automation.ControlType]::Button) `
-        -TimeoutSeconds $WaitSeconds `
         -Label 'active worker cancellation control' `
-        -RequireEnabled `
         -RequireWindowHandle
-    $cancelVisible = -not $cancel.Current.IsOffscreen
-    if ($cancel.Current.Name -cne '취소') {
-        throw 'The active worker cancellation control has unexpected text.'
+    if ($Cancel.Current.AutomationId -cne '1009' -or
+        $Cancel.Current.ControlType -ne [Windows.Automation.ControlType]::Button -or
+        $Cancel.Current.Name -cne '취소') {
+        throw 'The cached worker cancellation control changed identity or text.'
     }
-    $renamed = [IO.Directory]::GetFiles(
-        $FixtureRoot,
-        ($Prefix + '*.txt'),
-        [IO.SearchOption]::TopDirectoryOnly
-    ).Length
-    $original = [IO.Directory]::GetFiles(
-        $FixtureRoot,
-        'item-*.txt',
-        [IO.SearchOption]::TopDirectoryOnly
-    ).Length
+    $cancelVisible = -not $Cancel.Current.IsOffscreen
+    $counts = $null
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        $names = @(
+            [IO.Directory]::GetFiles(
+                $FixtureRoot,
+                '*.txt',
+                [IO.SearchOption]::TopDirectoryOnly
+            ) | ForEach-Object { [IO.Path]::GetFileName($_) }
+        )
+        $counts = Get-AcceptanceTransactionNameCounts -Names $names -Prefix $Prefix
+        if ($counts.original + $counts.renamed -eq $ExpectedCount) {
+            break
+        }
+    }
     $journalRoot = Join-Path (Join-Path $LocalAppData 'DarkReNamer') 'journal'
     $activeExists = Test-Path -LiteralPath (Join-Path $journalRoot 'active.drj') -PathType Leaf
     $candidateExists = Test-Path -LiteralPath (Join-Path $journalRoot 'candidate.drj') -PathType Leaf
     $classification = Get-AcceptanceWorkerBoundaryClassification `
-        -OriginalCount $original `
-        -RenamedCount $renamed `
+        -OriginalCount $counts.original `
+        -RenamedCount $counts.renamed `
         -ExpectedCount $ExpectedCount `
         -ActiveJournalExists $activeExists `
         -CandidateJournalExists $candidateExists `
-        -CancelEnabled $cancel.Current.IsEnabled `
+        -CancelEnabled $Cancel.Current.IsEnabled `
         -CancelVisible $cancelVisible
     [pscustomobject]@{
         classification = $classification
-        original = $original
-        renamed = $renamed
-        cancel = $cancel
+        original = $counts.original
+        renamed = $counts.renamed
+        cancel = $Cancel
     }
 }
 
@@ -867,6 +1016,7 @@ function Invoke-AcceptanceSession {
 
     $first = $null
     $second = $null
+    $sessionError = $null
     try {
         $first = Start-AcceptanceApplication `
             -Inputs $Inputs `
@@ -901,14 +1051,25 @@ function Invoke-AcceptanceSession {
         }
 
         if ($Mode -ne 'ProcessCrash') {
+            $workerCancel = Find-UniqueAutomationElement `
+                -Root $first.main `
+                -Process $first.owned.process `
+                -ExpectedSession $SessionId `
+                -AutomationId '1009' `
+                -ControlType ([Windows.Automation.ControlType]::Button) `
+                -TimeoutSeconds $WaitSeconds `
+                -Label 'visible worker cancellation control' `
+                -Scope ([Windows.Automation.TreeScope]::Children) `
+                -RequireEnabled `
+                -RequireWindowHandle
             $workerBoundary = Get-AcceptanceActiveWorkerBoundary `
                 -Application $first `
+                -Cancel $workerCancel `
                 -FixtureRoot $fixtureRoot `
                 -Prefix $prefix `
                 -LocalAppData $env:LOCALAPPDATA `
                 -ExpectedCount $Count `
-                -SessionId $SessionId `
-                -WaitSeconds $WaitSeconds
+                -SessionId $SessionId
             if ($Mode -eq 'WorkerCancellation') {
                 Invoke-AutomationControl `
                     -Element $workerBoundary.cancel `
@@ -1097,20 +1258,22 @@ function Invoke-AcceptanceSession {
         throw $sessionError
     }
     finally {
+        $cleanupErrors = [Collections.Generic.List[string]]::new()
         foreach ($application in @($first, $second)) {
             if ($null -eq $application) { continue }
             try {
-                $application.owned.process.Refresh()
-                if (-not $application.owned.process.HasExited) {
-                    $application.owned.process.Kill()
-                    [void]$application.owned.process.WaitForExit(10000)
-                }
+                Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned
             }
             catch {
+                $cleanupErrors.Add($_.Exception.Message)
             }
-            finally {
-                $application.owned.process.Dispose()
+        }
+        if ($cleanupErrors.Count -gt 0) {
+            $cleanupMessage = [string]::Join(' | ', $cleanupErrors)
+            if ($null -ne $sessionError) {
+                throw "Acceptance session and exact-process cleanup both failed: $($sessionError.Exception.Message) Cleanup: $cleanupMessage"
             }
+            throw "Acceptance exact-process cleanup failed: $cleanupMessage"
         }
     }
 }
@@ -1122,16 +1285,23 @@ if ($MyInvocation.InvocationName -eq '.') {
 $requestedBundleRoot = $BundleRoot
 $requestedExpectedSessionId = $ExpectedSessionId
 $requestedValidateOnly = [bool]$ValidateOnly
-$guestHelperPath = Get-AcceptanceGuestHelperPath -Root $requestedBundleRoot
-. $guestHelperPath -BundleRoot $requestedBundleRoot -ExpectedSessionId 1 -ValidateOnly
+$bootstrap = Resolve-AcceptanceBootstrap `
+    -Root $requestedBundleRoot `
+    -ObserverPath $PSCommandPath `
+    -ExpectedObserverSha256 $ExpectedScriptSha256
+. $bootstrap.runner_script -BundleRoot $requestedBundleRoot -ExpectedSessionId 1 -ValidateOnly
 $BundleRoot = $requestedBundleRoot
 $ExpectedSessionId = $requestedExpectedSessionId
 $ValidateOnly = $requestedValidateOnly
 $inputs = Resolve-AcceptanceInputs `
     -Root $BundleRoot `
-    -RunnerPath $guestHelperPath `
+    -RunnerPath $bootstrap.runner_path `
     -ObserverPath $PSCommandPath `
     -ExpectedObserverSha256 $ExpectedScriptSha256
+if ($inputs.runner_sha256 -cne $bootstrap.runner_sha256 -or
+    $inputs.observer_sha256 -cne $bootstrap.observer_sha256) {
+    throw 'Authenticated bootstrap hashes changed during full bundle verification.'
+}
 if ($ValidateOnly) {
     Write-Host "Validated recovery acceptance inputs for source $($inputs.verified.manifest.source_sha)."
     return
@@ -1208,6 +1378,15 @@ try {
 }
 catch {
     $result.failure_reason = 'recovery_acceptance_error'
+    $modeFailure = [ordered]@{
+        status = 'failed'
+        reason = 'recovery_acceptance_error'
+    }
+    switch ($Mode) {
+        'ProcessCrash' { $result.process_crash = $modeFailure }
+        'WorkerCancellation' { $result.worker_cancellation = $modeFailure }
+        'WorkerClose' { $result.worker_close = $modeFailure }
+    }
     $uiDiagnosticPath = Join-Path $evidenceRoot 'session-ui-diagnostic.json'
     if (Test-Path -LiteralPath $uiDiagnosticPath -PathType Leaf) {
         $result.ui_diagnostic = [ordered]@{
