@@ -1774,9 +1774,7 @@ mod tests {
     use std::process::Command;
 
     use crate::rename::{
-        BackendError, BackendOperation, EntryId, EntryIdentity, EntryKind, MutationCertainty,
-        PathKey, PathSnapshot, PlanRequest, RenameBackend, RenameIntent, RenameOperation,
-        ResolvedSource,
+        EntryId, EntryIdentity, EntryKind, PlanRequest, RenameBackend, RenameIntent,
     };
 
     fn create_startup_journal_directory(
@@ -1798,60 +1796,299 @@ mod tests {
         assert_send::<AdmissionWorkerResult>();
     }
 
-    struct CrashBackend {
-        inner: WindowsRenameBackend,
-        fail_on_attempt: Option<usize>,
-        attempts: usize,
+    #[derive(Clone, Copy, Debug)]
+    enum CrashGraph {
+        Swap,
+        CrossParentSwap,
+        ThreeCycle,
+        CaseOnly,
     }
 
-    impl RenameBackend for CrashBackend {
-        fn validate_path_environment(&self, path: &LegacyText) -> Result<(), BackendError> {
-            self.inner.validate_path_environment(path)
-        }
+    impl CrashGraph {
+        const ALL: [Self; 4] = [
+            Self::Swap,
+            Self::CrossParentSwap,
+            Self::ThreeCycle,
+            Self::CaseOnly,
+        ];
 
-        fn path_key(&self, path: &LegacyText) -> PathKey {
-            self.inner.path_key(path)
-        }
-
-        fn resolve_source(&self, path: &LegacyText) -> Result<ResolvedSource, BackendError> {
-            self.inner.resolve_source(path)
-        }
-
-        fn planned_entry_key(
-            &self,
-            parent: EntryIdentity,
-            leaf: &LegacyText,
-        ) -> Result<PathKey, BackendError> {
-            self.inner.planned_entry_key(parent, leaf)
-        }
-
-        fn observe(&self, path: &LegacyText) -> Result<PathSnapshot, BackendError> {
-            self.inner.observe(path)
-        }
-
-        fn is_same_or_descendant(
-            &self,
-            ancestor: &LegacyText,
-            candidate: &LegacyText,
-        ) -> Result<bool, BackendError> {
-            self.inner.is_same_or_descendant(ancestor, candidate)
-        }
-
-        fn next_transaction_nonce(&mut self) -> Result<u128, BackendError> {
-            self.inner.next_transaction_nonce()
-        }
-
-        fn rename_no_replace(&mut self, operation: &RenameOperation) -> Result<(), BackendError> {
-            self.attempts = self.attempts.saturating_add(1);
-            if self.fail_on_attempt == Some(self.attempts) {
-                return Err(BackendError {
-                    operation: BackendOperation::Rename,
-                    code: 123,
-                    certainty: MutationCertainty::NotApplied,
-                });
+        const fn name(self) -> &'static str {
+            match self {
+                Self::Swap => "swap",
+                Self::CrossParentSwap => "cross-parent-swap",
+                Self::ThreeCycle => "three-cycle",
+                Self::CaseOnly => "case-only",
             }
-            self.inner.rename_no_replace(operation)
         }
+
+        const fn primitive_steps(self) -> usize {
+            match self {
+                Self::Swap | Self::CrossParentSwap => 3,
+                Self::ThreeCycle => 4,
+                Self::CaseOnly => 2,
+            }
+        }
+
+        fn parse(value: &str) -> Result<Self, io::Error> {
+            Self::ALL
+                .into_iter()
+                .find(|graph| graph.name() == value)
+                .ok_or_else(|| io::Error::other(format!("unknown crash graph: {value}")))
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct CrashFile {
+        relative: &'static str,
+        content: &'static [u8],
+    }
+
+    const SWAP_ORIGINAL: &[CrashFile] = &[
+        CrashFile {
+            relative: "work\\a.txt",
+            content: b"entry-a",
+        },
+        CrashFile {
+            relative: "work\\b.txt",
+            content: b"entry-b",
+        },
+        CrashFile {
+            relative: "work\\sentinel.txt",
+            content: b"sentinel-work",
+        },
+    ];
+    const SWAP_COMMITTED: &[CrashFile] = &[
+        CrashFile {
+            relative: "work\\a.txt",
+            content: b"entry-b",
+        },
+        CrashFile {
+            relative: "work\\b.txt",
+            content: b"entry-a",
+        },
+        CrashFile {
+            relative: "work\\sentinel.txt",
+            content: b"sentinel-work",
+        },
+    ];
+    const CROSS_PARENT_ORIGINAL: &[CrashFile] = &[
+        CrashFile {
+            relative: "left\\a.txt",
+            content: b"entry-left",
+        },
+        CrashFile {
+            relative: "left\\sentinel.txt",
+            content: b"sentinel-left",
+        },
+        CrashFile {
+            relative: "right\\b.txt",
+            content: b"entry-right",
+        },
+        CrashFile {
+            relative: "right\\sentinel.txt",
+            content: b"sentinel-right",
+        },
+    ];
+    const CROSS_PARENT_COMMITTED: &[CrashFile] = &[
+        CrashFile {
+            relative: "left\\a.txt",
+            content: b"entry-right",
+        },
+        CrashFile {
+            relative: "left\\sentinel.txt",
+            content: b"sentinel-left",
+        },
+        CrashFile {
+            relative: "right\\b.txt",
+            content: b"entry-left",
+        },
+        CrashFile {
+            relative: "right\\sentinel.txt",
+            content: b"sentinel-right",
+        },
+    ];
+    const CYCLE_ORIGINAL: &[CrashFile] = &[
+        CrashFile {
+            relative: "work\\a.txt",
+            content: b"entry-a",
+        },
+        CrashFile {
+            relative: "work\\b.txt",
+            content: b"entry-b",
+        },
+        CrashFile {
+            relative: "work\\c.txt",
+            content: b"entry-c",
+        },
+        CrashFile {
+            relative: "work\\sentinel.txt",
+            content: b"sentinel-work",
+        },
+    ];
+    const CYCLE_COMMITTED: &[CrashFile] = &[
+        CrashFile {
+            relative: "work\\a.txt",
+            content: b"entry-c",
+        },
+        CrashFile {
+            relative: "work\\b.txt",
+            content: b"entry-a",
+        },
+        CrashFile {
+            relative: "work\\c.txt",
+            content: b"entry-b",
+        },
+        CrashFile {
+            relative: "work\\sentinel.txt",
+            content: b"sentinel-work",
+        },
+    ];
+    const CASE_ORIGINAL: &[CrashFile] = &[
+        CrashFile {
+            relative: "work\\mixed.txt",
+            content: b"entry-case",
+        },
+        CrashFile {
+            relative: "work\\sentinel.txt",
+            content: b"sentinel-work",
+        },
+    ];
+    const CASE_COMMITTED: &[CrashFile] = &[
+        CrashFile {
+            relative: "work\\MIXED.TXT",
+            content: b"entry-case",
+        },
+        CrashFile {
+            relative: "work\\sentinel.txt",
+            content: b"sentinel-work",
+        },
+    ];
+
+    impl CrashGraph {
+        const fn original(self) -> &'static [CrashFile] {
+            match self {
+                Self::Swap => SWAP_ORIGINAL,
+                Self::CrossParentSwap => CROSS_PARENT_ORIGINAL,
+                Self::ThreeCycle => CYCLE_ORIGINAL,
+                Self::CaseOnly => CASE_ORIGINAL,
+            }
+        }
+
+        const fn committed(self) -> &'static [CrashFile] {
+            match self {
+                Self::Swap => SWAP_COMMITTED,
+                Self::CrossParentSwap => CROSS_PARENT_COMMITTED,
+                Self::ThreeCycle => CYCLE_COMMITTED,
+                Self::CaseOnly => CASE_COMMITTED,
+            }
+        }
+    }
+
+    struct RollbackAfterForward {
+        requested: AtomicBool,
+    }
+
+    impl ExecutionControl for RollbackAfterForward {
+        fn cancellation_requested(&self) -> bool {
+            self.requested.load(Ordering::Acquire)
+        }
+
+        fn begin_transaction(&self) -> bool {
+            true
+        }
+
+        fn progress(&self, progress: ExecutionProgress) {
+            if progress.phase == ExecutionPhase::Forward && progress.completed == progress.total {
+                self.requested.store(true, Ordering::Release);
+            }
+        }
+    }
+
+    fn crash_plan(
+        data: &Path,
+        graph: CrashGraph,
+        backend: &dyn RenameBackend,
+    ) -> Result<crate::rename::ConfirmedPlan, Box<dyn std::error::Error>> {
+        let work = data.join("work");
+        let left = data.join("left");
+        let right = data.join("right");
+        let intents = match graph {
+            CrashGraph::Swap => vec![
+                RenameIntent::new(
+                    EntryId::new(0),
+                    legacy_path(&work.join("a.txt")),
+                    legacy_path(&work),
+                    "b.txt",
+                    EntryKind::File,
+                ),
+                RenameIntent::new(
+                    EntryId::new(1),
+                    legacy_path(&work.join("b.txt")),
+                    legacy_path(&work),
+                    "a.txt",
+                    EntryKind::File,
+                ),
+            ],
+            CrashGraph::CrossParentSwap => vec![
+                RenameIntent::new(
+                    EntryId::new(0),
+                    legacy_path(&left.join("a.txt")),
+                    legacy_path(&right),
+                    "b.txt",
+                    EntryKind::File,
+                ),
+                RenameIntent::new(
+                    EntryId::new(1),
+                    legacy_path(&right.join("b.txt")),
+                    legacy_path(&left),
+                    "a.txt",
+                    EntryKind::File,
+                ),
+            ],
+            CrashGraph::ThreeCycle => vec![
+                RenameIntent::new(
+                    EntryId::new(0),
+                    legacy_path(&work.join("a.txt")),
+                    legacy_path(&work),
+                    "b.txt",
+                    EntryKind::File,
+                ),
+                RenameIntent::new(
+                    EntryId::new(1),
+                    legacy_path(&work.join("b.txt")),
+                    legacy_path(&work),
+                    "c.txt",
+                    EntryKind::File,
+                ),
+                RenameIntent::new(
+                    EntryId::new(2),
+                    legacy_path(&work.join("c.txt")),
+                    legacy_path(&work),
+                    "a.txt",
+                    EntryKind::File,
+                ),
+            ],
+            CrashGraph::CaseOnly => vec![RenameIntent::new(
+                EntryId::new(0),
+                legacy_path(&work.join("mixed.txt")),
+                legacy_path(&work),
+                "MIXED.TXT",
+                EntryKind::File,
+            )],
+        };
+        let request = if matches!(graph, CrashGraph::CrossParentSwap) {
+            PlanRequest::with_scope(
+                ModelRevision::new(1),
+                intents,
+                crate::rename::MoveScope::SameVolumeFilesOnly,
+            )
+        } else {
+            PlanRequest::new(ModelRevision::new(1), intents)
+        };
+        let plan = RenamePlanner::new(backend).plan(request)?;
+        let id = plan.id();
+        let revision = plan.revision();
+        Ok(plan.confirm_presented(id, revision)?)
     }
 
     #[test]
@@ -1873,60 +2110,168 @@ mod tests {
         {
             return Err(io::Error::other("crash fixture authority mismatch").into());
         }
+        if env::var_os("DARKRENAMER_TEST_RECOVERY_MODE").is_some() {
+            let runtime = initialize_safe_runtime_at(&local_app_data)?;
+            if !runtime.recovery_locked || runtime.active_journal.is_none() {
+                return Err(
+                    io::Error::other("recovery child did not retain active evidence").into(),
+                );
+            }
+            let mut state = AppState::new(runtime);
+            let presentation = recover_confirmed_active_journal(&mut state);
+            return Err(io::Error::other(format!(
+                "configured recovery crash point was not reached: {presentation:?}"
+            ))
+            .into());
+        }
         let journal_directory = create_startup_journal_directory(&local_app_data)?;
         let data = local_app_data.join("data");
-        let source_a = data.join("a.txt");
-        let source_b = data.join("b.txt");
-        let mut backend = CrashBackend {
-            inner: WindowsRenameBackend,
-            fail_on_attempt: (env::var_os("DARKRENAMER_TEST_FORCE_ROLLBACK").is_some())
-                .then_some(2),
-            attempts: 0,
-        };
-        backend.validate_path_environment(&legacy_path(&source_a))?;
-        let intents = vec![
-            RenameIntent::new(
-                EntryId::new(0),
-                legacy_path(&source_a),
-                legacy_path(&data),
-                "b.txt",
-                EntryKind::File,
-            ),
-            RenameIntent::new(
-                EntryId::new(1),
-                legacy_path(&source_b),
-                legacy_path(&data),
-                "a.txt",
-                EntryKind::File,
-            ),
-        ];
-        let plan =
-            RenamePlanner::new(&backend).plan(PlanRequest::new(ModelRevision::new(1), intents))?;
-        let id = plan.id();
-        let revision = plan.revision();
+        let graph = CrashGraph::parse(&env::var("DARKRENAMER_TEST_GRAPH")?)?;
+        let mut backend = WindowsRenameBackend;
+        let confirmed = crash_plan(&data, graph, &backend)?;
         let root = JournalRoot::open(&journal_directory)?;
         let mut journal =
             FileJournal::create_candidate(&root, CANDIDATE_JOURNAL_LEAF, ACTIVE_JOURNAL_LEAF)?;
-
-        let _report = RenameExecutor::new(&mut backend, &mut journal)
-            .execute(plan.confirm_presented(id, revision)?)?;
+        let mut executor = RenameExecutor::new(&mut backend, &mut journal);
+        if env::var_os("DARKRENAMER_TEST_FORCE_ROLLBACK").is_some() {
+            let control = RollbackAfterForward {
+                requested: AtomicBool::new(false),
+            };
+            let _report = executor.execute_with_control(confirmed, &control)?;
+        } else {
+            let _report = executor.execute(confirmed)?;
+        }
         Err(io::Error::other("configured crash point was not reached").into())
     }
 
-    fn run_crash_recovery_case(
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct CrashObservedFile {
+        relative: String,
+        content: Vec<u8>,
+        identity: EntryIdentity,
+        parent: EntryIdentity,
+    }
+
+    fn collect_crash_files(
+        data: &Path,
+        directory: &Path,
+        files: &mut Vec<PathBuf>,
+    ) -> io::Result<()> {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                collect_crash_files(data, &entry.path(), files)?;
+            } else {
+                let path = entry.path();
+                if !path.starts_with(data) {
+                    return Err(io::Error::other("crash fixture escaped its data root"));
+                }
+                files.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    fn observe_crash_files(
+        data: &Path,
+    ) -> Result<Vec<CrashObservedFile>, Box<dyn std::error::Error>> {
+        let mut paths = Vec::new();
+        collect_crash_files(data, data, &mut paths)?;
+        let backend = WindowsRenameBackend;
+        let mut observed = paths
+            .into_iter()
+            .map(|path| {
+                let snapshot = backend.observe(&legacy_path(&path))?;
+                let entry = snapshot
+                    .entry
+                    .ok_or_else(|| io::Error::other("enumerated crash fixture disappeared"))?;
+                Ok(CrashObservedFile {
+                    relative: path.strip_prefix(data)?.to_string_lossy().into_owned(),
+                    content: fs::read(path)?,
+                    identity: entry.identity,
+                    parent: snapshot.parent,
+                })
+            })
+            .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+        observed.sort_by(|left, right| left.relative.cmp(&right.relative));
+        Ok(observed)
+    }
+
+    fn prepare_crash_fixture(
+        root: &Path,
+        graph: CrashGraph,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let data = root.join("data");
+        for file in graph.original().iter().chain(graph.committed()) {
+            let path = data.join(file.relative);
+            fs::create_dir_all(
+                path.parent()
+                    .ok_or_else(|| io::Error::other("crash fixture file has no parent"))?,
+            )?;
+        }
+        for file in graph.original() {
+            fs::write(data.join(file.relative), file.content)?;
+        }
+        Ok(data)
+    }
+
+    fn assert_crash_oracle(
+        data: &Path,
+        expected: &[CrashFile],
+        original: &[CrashObservedFile],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let observed = observe_crash_files(data)?;
+        assert_eq!(
+            observed.len(),
+            expected.len(),
+            "unexpected or missing files"
+        );
+        for expected_file in expected {
+            let actual = observed
+                .iter()
+                .find(|file| file.relative == expected_file.relative)
+                .ok_or_else(|| {
+                    io::Error::other(format!("missing exact leaf {}", expected_file.relative))
+                })?;
+            assert_eq!(actual.content, expected_file.content);
+            let original_file = original
+                .iter()
+                .find(|file| file.content == expected_file.content)
+                .ok_or_else(|| io::Error::other("oracle content has no original identity"))?;
+            assert_eq!(
+                actual.identity, original_file.identity,
+                "file identity changed for {}",
+                expected_file.relative
+            );
+            let expected_parent = original
+                .iter()
+                .find(|file| {
+                    Path::new(&file.relative).parent() == Path::new(expected_file.relative).parent()
+                })
+                .ok_or_else(|| io::Error::other("oracle parent has no captured identity"))?;
+            assert_eq!(
+                actual.parent, expected_parent.parent,
+                "parent identity mismatch for {}",
+                expected_file.relative
+            );
+        }
+        assert!(
+            observed
+                .iter()
+                .all(|file| !file.relative.contains(".__darknamer_")),
+            "temporary rename endpoint remained after recovery"
+        );
+        Ok(())
+    }
+
+    fn crash_child_command(
+        root: &Path,
+        nonce: &str,
+        graph: CrashGraph,
         point: &str,
         force_rollback: bool,
-        expect_swapped: bool,
-        expect_staged_lock: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let directory = tempfile::tempdir()?;
-        let data = directory.path().join("data");
-        fs::create_dir(&data)?;
-        fs::write(data.join("a.txt"), b"a")?;
-        fs::write(data.join("b.txt"), b"b")?;
-        fs::write(data.join("sentinel.txt"), b"external")?;
-        let nonce = format!("{}-{point}", std::process::id());
-        fs::write(directory.path().join("fixture-nonce.txt"), &nonce)?;
+        recovery_mode: bool,
+    ) -> Result<std::process::ExitStatus, Box<dyn std::error::Error>> {
         let mut command = Command::new(std::env::current_exe()?);
         command
             .arg("--exact")
@@ -1934,29 +2279,52 @@ mod tests {
             .arg("--nocapture")
             .arg("--test-threads=1")
             .env("DARKRENAMER_TEST_CHILD_MODE", "1")
-            .env("DARKRENAMER_TEST_CHILD_ROOT", directory.path())
-            .env("DARKRENAMER_TEST_FIXTURE_NONCE", &nonce)
+            .env("DARKRENAMER_TEST_CHILD_ROOT", root)
+            .env("DARKRENAMER_TEST_FIXTURE_NONCE", nonce)
+            .env("DARKRENAMER_TEST_GRAPH", graph.name())
             .env("DARKRENAMER_TEST_CRASH_POINT", point)
-            .env_remove("DARKRENAMER_TEST_FORCE_ROLLBACK");
+            .env_remove("DARKRENAMER_TEST_FORCE_ROLLBACK")
+            .env_remove("DARKRENAMER_TEST_RECOVERY_MODE");
         if force_rollback {
             command.env("DARKRENAMER_TEST_FORCE_ROLLBACK", "1");
         }
+        if recovery_mode {
+            command.env("DARKRENAMER_TEST_RECOVERY_MODE", "1");
+        }
+        Ok(command.status()?)
+    }
 
-        let status = command.status()?;
+    fn run_crash_recovery_case(
+        graph: CrashGraph,
+        point: &str,
+        force_rollback: bool,
+        expect_staged_lock: bool,
+        recovery_crash_point: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let data = prepare_crash_fixture(directory.path(), graph)?;
+        let original = observe_crash_files(&data)?;
+        assert_eq!(original.len(), graph.original().len());
+        let nonce = format!("{}-{}-{point}", std::process::id(), graph.name());
+        fs::write(directory.path().join("fixture-nonce.txt"), &nonce)?;
+        let status = crash_child_command(
+            directory.path(),
+            &nonce,
+            graph,
+            point,
+            force_rollback,
+            false,
+        )?;
         if status.code() != Some(86) {
-            return Err(
-                io::Error::other(format!("child did not stop at {point}: {status}")).into(),
-            );
+            return Err(io::Error::other(format!(
+                "{} child did not stop at {point}: {status}",
+                graph.name()
+            ))
+            .into());
         }
 
-        let mut before_startup = fs::read_dir(&data)?
-            .map(|entry| {
-                let entry = entry?;
-                Ok((entry.file_name(), fs::read(entry.path())?))
-            })
-            .collect::<io::Result<Vec<_>>>()?;
-        before_startup.sort_by(|left, right| left.0.cmp(&right.0));
-        let runtime = initialize_safe_runtime_at(directory.path())?;
+        let before_startup = observe_crash_files(&data)?;
+        let mut runtime = initialize_safe_runtime_at(directory.path())?;
         if expect_staged_lock {
             assert!(runtime.recovery_locked);
             assert!(runtime.staged_journal.is_some());
@@ -1964,45 +2332,53 @@ mod tests {
             assert!(runtime.recovery_locked);
             assert!(runtime.active_journal.is_some());
         }
-        let mut after_startup = fs::read_dir(&data)?
-            .map(|entry| {
-                let entry = entry?;
-                Ok((entry.file_name(), fs::read(entry.path())?))
-            })
-            .collect::<io::Result<Vec<_>>>()?;
-        after_startup.sort_by(|left, right| left.0.cmp(&right.0));
+        let after_startup = observe_crash_files(&data)?;
         assert_eq!(
             before_startup, after_startup,
             "startup discovery mutated files before explicit recovery confirmation"
         );
+
+        if let Some(recovery_point) = recovery_crash_point {
+            assert!(!expect_staged_lock);
+            drop(runtime);
+            let recovery_status =
+                crash_child_command(directory.path(), &nonce, graph, recovery_point, false, true)?;
+            if recovery_status.code() != Some(86) {
+                return Err(io::Error::other(format!(
+                    "recovery child did not stop at {recovery_point}: {recovery_status}"
+                ))
+                .into());
+            }
+            let before_resume_startup = observe_crash_files(&data)?;
+            runtime = initialize_safe_runtime_at(directory.path())?;
+            assert!(runtime.recovery_locked);
+            assert!(runtime.active_journal.is_some());
+            assert_eq!(
+                observe_crash_files(&data)?,
+                before_resume_startup,
+                "startup after interrupted recovery mutated files before confirmation"
+            );
+        }
 
         let mut state = AppState::new(runtime);
         if expect_staged_lock {
             assert!(!state.can_confirm_active_recovery());
         } else {
             assert!(state.can_confirm_active_recovery());
-            recover_confirmed_active_journal(&mut state);
+            let presentation = recover_confirmed_active_journal(&mut state);
+            assert!(presentation.completed, "{}", presentation.status);
             assert!(state.active_journal.is_none());
+            assert!(state.staged_journal.is_none());
+            assert!(!state.recovery_locked);
         }
         drop(state);
 
-        let (expected_a, expected_b) = if expect_swapped {
-            (b"b".as_slice(), b"a".as_slice())
+        let expected = if point == "terminal-committed" {
+            graph.committed()
         } else {
-            (b"a".as_slice(), b"b".as_slice())
+            graph.original()
         };
-        assert_eq!(fs::read(data.join("a.txt"))?, expected_a);
-        assert_eq!(fs::read(data.join("b.txt"))?, expected_b);
-        assert_eq!(fs::read(data.join("sentinel.txt"))?, b"external");
-        assert!(
-            fs::read_dir(&data)?.all(|entry| {
-                entry
-                    .ok()
-                    .and_then(|entry| entry.file_name().into_string().ok())
-                    .is_none_or(|name| !name.contains(".__darknamer_"))
-            }),
-            "temporary rename endpoint remained after startup recovery"
-        );
+        assert_crash_oracle(&data, expected, &original)?;
         let journal_directory = directory.path().join("DarkReNamer").join("journal");
         if expect_staged_lock {
             assert!(journal_directory.join(CANDIDATE_JOURNAL_LEAF).exists());
@@ -2017,19 +2393,70 @@ mod tests {
     #[test]
     fn crash_recovery_matrix_uses_real_windows_backend_and_file_journal()
     -> Result<(), Box<dyn std::error::Error>> {
-        for (point, force_rollback, expect_swapped, expect_staged_lock) in [
-            ("staged-intent-synced", false, false, true),
-            ("active-intent-promoted", false, false, false),
-            ("forward-prepared-0", false, false, false),
-            ("forward-rename-0", false, false, false),
-            ("forward-completed-0", false, false, false),
-            ("rollback-prepared-0", true, false, false),
-            ("rollback-rename-0", true, false, false),
-            ("rollback-completed-0", true, false, false),
-            ("terminal-committed", false, true, false),
-            ("terminal-rolled-back", true, false, false),
-        ] {
-            run_crash_recovery_case(point, force_rollback, expect_swapped, expect_staged_lock)?;
+        for graph in CrashGraph::ALL {
+            for point in ["staged-intent-synced", "active-intent-promoted"] {
+                run_crash_recovery_case(
+                    graph,
+                    point,
+                    false,
+                    point == "staged-intent-synced",
+                    None,
+                )?;
+            }
+            for step in 0..graph.primitive_steps() {
+                for boundary in ["prepared", "rename", "completed"] {
+                    run_crash_recovery_case(
+                        graph,
+                        &format!("forward-{boundary}-{step}"),
+                        false,
+                        false,
+                        None,
+                    )?;
+                    run_crash_recovery_case(
+                        graph,
+                        &format!("rollback-{boundary}-{step}"),
+                        true,
+                        false,
+                        None,
+                    )?;
+                }
+            }
+            run_crash_recovery_case(graph, "terminal-committed", false, false, None)?;
+            run_crash_recovery_case(graph, "terminal-rolled-back", true, false, None)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn interrupted_recovery_resumes_across_every_durable_and_mutation_boundary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for graph in CrashGraph::ALL {
+            let last_step = graph.primitive_steps() - 1;
+            run_crash_recovery_case(
+                graph,
+                &format!("forward-prepared-{last_step}"),
+                false,
+                false,
+                Some(&format!("recovery-reconciled-not-applied-{last_step}")),
+            )?;
+
+            let execution_point = format!("forward-rename-{last_step}");
+            let mut recovery_points = vec![format!("recovery-reconciled-completed-{last_step}")];
+            for step in (0..graph.primitive_steps()).rev() {
+                for boundary in ["prepared", "rename", "completed"] {
+                    recovery_points.push(format!("recovery-rollback-{boundary}-{step}"));
+                }
+            }
+            recovery_points.push("recovery-terminal-rolled-back".to_owned());
+            for recovery_point in recovery_points {
+                run_crash_recovery_case(
+                    graph,
+                    &execution_point,
+                    false,
+                    false,
+                    Some(&recovery_point),
+                )?;
+            }
         }
         Ok(())
     }
