@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 
 TARGET = 'x86_64-pc-windows-msvc'
@@ -24,12 +25,25 @@ def psquote(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def host_command(script, capture=True):
+def windows_host_command(script, capture=True):
     prelude = '$ErrorActionPreference="Stop"; $env:PSModulePath="$PSHOME\\Modules;C:\\Program Files\\WindowsPowerShell\\Modules"; '
     return subprocess.run(
         [str(POWERSHELL), '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'RemoteSigned', '-Command', prelude + script],
         cwd='/mnt/c', text=True, check=True, stdout=subprocess.PIPE if capture else None,
     ).stdout
+
+
+def require_pwsh7():
+    executable = shutil.which('pwsh')
+    if not executable:
+        raise RuntimeError('SSH transport requires PowerShell 7 or newer as pwsh on PATH.')
+    version = subprocess.check_output(
+        [executable, '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.Major'],
+        text=True,
+    ).strip()
+    if not version.isdecimal() or int(version) < 7:
+        raise RuntimeError('SSH transport requires PowerShell 7 or newer as pwsh on PATH.')
+    return executable
 
 
 def winpath(path):
@@ -40,6 +54,99 @@ def leaf(value):
     if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,159}', value) or value in ('.', '..'):
         raise ValueError('Artifact names must be plain ASCII file names.')
     return value
+
+
+def argument_parser():
+    parser = argparse.ArgumentParser(description=__doc__)
+    transport = parser.add_mutually_exclusive_group(required=True)
+    transport.add_argument('--vm-name', help='Existing local Hyper-V VM with an unlocked test-user desktop.')
+    transport.add_argument('--ssh-host', help='OpenSSH config alias for the configured VM test account.')
+    parser.add_argument('--credential-helper', help='Windows path to a private helper returning PSCredential with -Action Load.')
+    parser.add_argument('--output', type=Path, help='New external directory for the bundle, logs, and screenshots.')
+    parser.add_argument('--test-timeout-seconds', type=int, default=300)
+    return parser
+
+
+def parse_arguments(argv=None):
+    parser = argument_parser()
+    args = parser.parse_args(argv)
+    if args.ssh_host and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', args.ssh_host):
+        parser.error('--ssh-host must be a 1-128 character OpenSSH config alias using letters, digits, dot, underscore, or hyphen.')
+    if args.ssh_host and args.credential_helper:
+        parser.error('--credential-helper can only be used with --vm-name PowerShell Direct transport.')
+    if not 10 <= args.test_timeout_seconds <= 1800:
+        parser.error('Test timeout must be between 10 and 1800 seconds.')
+    return args
+
+
+def windows_host_defaults():
+    return json.loads(windows_host_command(
+        '[pscustomobject]@{temp=[IO.Path]::GetTempPath();helper=(Join-Path '
+        '([Environment]::GetFolderPath("LocalApplicationData")) '
+        '"DarkReNamerVmTools\\auth\\credential-store.ps1")} | ConvertTo-Json -Compress'
+    ))
+
+
+def resolve_output_root(repo, args, defaults=None):
+    if args.output:
+        root = args.output
+        if not root.is_absolute():
+            raise ValueError('Output must be an absolute external path.')
+    elif args.ssh_host:
+        root = Path(tempfile.gettempdir()) / ('DarkReNamer-native-' + uuid.uuid4().hex)
+    else:
+        if defaults is None:
+            raise ValueError('PowerShell Direct output resolution requires Windows host defaults.')
+        host_temp = subprocess.check_output(['wslpath', '-u', defaults['temp']], text=True).strip()
+        root = Path(host_temp) / ('DarkReNamer-native-' + uuid.uuid4().hex)
+    if root.exists() or root.is_symlink() or root.resolve().is_relative_to(repo):
+        raise RuntimeError('Output must be a new directory outside the checkout.')
+    if not args.ssh_host and winpath(root).startswith('\\\\'):
+        raise RuntimeError('PowerShell Direct output must be on a Windows drive, not a WSL network path.')
+    return root
+
+
+def prepare_transport(repo, args):
+    if args.ssh_host:
+        pwsh = require_pwsh7()
+        defaults = None
+    else:
+        pwsh = None
+        defaults = windows_host_defaults()
+    return resolve_output_root(repo, args, defaults), defaults, pwsh
+
+
+def controller_invocation(root, args, defaults=None, pwsh=None):
+    script = root / 'run-windows-vm-tests.ps1'
+    common = ['-TestTimeoutSeconds', str(args.test_timeout_seconds)]
+    if args.ssh_host:
+        executable = pwsh or require_pwsh7()
+        return [
+            executable, '-NoLogo', '-NoProfile', '-NonInteractive', '-File', str(script),
+            '-BundleRoot', str(root), '-SshHost', args.ssh_host, *common,
+        ]
+    if defaults is None:
+        raise ValueError('PowerShell Direct invocation requires Windows host defaults.')
+    windows_root = winpath(root)
+    if windows_root.startswith('\\\\'):
+        raise RuntimeError('PowerShell Direct output must be on a Windows drive, not a WSL network path.')
+    helper = args.credential_helper or defaults['helper']
+    transport = (
+        '& ' + psquote(winpath(script)) + ' -BundleRoot ' + psquote(windows_root)
+        + ' -VmName ' + psquote(args.vm_name) + ' -CredentialHelper ' + psquote(helper)
+        + ' -TestTimeoutSeconds ' + str(args.test_timeout_seconds)
+    )
+    prelude = '$ErrorActionPreference="Stop"; $env:PSModulePath="$PSHOME\\Modules;C:\\Program Files\\WindowsPowerShell\\Modules"; '
+    return [
+        str(POWERSHELL), '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'RemoteSigned',
+        '-Command', prelude + transport,
+    ]
+
+
+def run_controller(root, args, defaults=None, pwsh=None):
+    command = controller_invocation(root, args, defaults, pwsh)
+    cwd = root if args.ssh_host else Path('/mnt/c')
+    subprocess.run(command, cwd=cwd, text=True, check=True)
 
 
 def test_artifacts(messages):
@@ -67,7 +174,7 @@ def checked_artifact(root, record):
     return path
 
 
-def verify_result(root, manifest, result):
+def verify_result(root, manifest, result, expected_transport_kind=None):
     for key in ('schema_version', 'source_sha', 'source_state', 'target'):
         if result.get(key) != manifest[key]:
             raise ValueError('VM result source binding mismatch: ' + key)
@@ -109,37 +216,23 @@ def verify_result(root, manifest, result):
         with screenshot.open('rb') as stream:
             if stream.read(8) != b'\x89PNG\r\n\x1a\n':
                 raise ValueError('GUI screenshot is not a PNG.')
-    if result.get('transport', {}).get('guest_cleanup') is not True or total == 0:
+    transport = result.get('transport', {})
+    if transport.get('guest_cleanup') is not True or total == 0:
         passed = False
+    if expected_transport_kind is not None:
+        expected_platform = 'Unix' if expected_transport_kind == 'ssh' else 'Win32NT'
+        if transport.get('kind') != expected_transport_kind or transport.get('host_platform') != expected_platform:
+            raise ValueError('VM result transport binding mismatch.')
     return passed
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--vm-name', required=True, help='Existing local Hyper-V VM with an unlocked test-user desktop.')
-    parser.add_argument('--credential-helper', help='Windows path to a private helper returning PSCredential with -Action Load.')
-    parser.add_argument('--output', type=Path, help='New external Windows-backed WSL directory for the bundle, logs, and screenshots.')
-    parser.add_argument('--test-timeout-seconds', type=int, default=300)
-    args = parser.parse_args()
-    if not 10 <= args.test_timeout_seconds <= 1800:
-        parser.error('Test timeout must be between 10 and 1800 seconds.')
+    args = parse_arguments()
     repo = Path(__file__).resolve().parent.parent
     if subprocess.check_output(['git', 'status', '--porcelain'], cwd=repo, text=True).strip():
         raise RuntimeError('Commit or preserve checkout changes before VM verification; results must bind a clean source SHA.')
     source_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip()
-    defaults = json.loads(host_command('[pscustomobject]@{temp=[IO.Path]::GetTempPath();helper=(Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "DarkReNamerVmTools\\auth\\credential-store.ps1")} | ConvertTo-Json -Compress'))
-    if args.output:
-        root = args.output
-        if not root.is_absolute():
-            parser.error('Output must be an absolute external path.')
-    else:
-        host_temp = subprocess.check_output(['wslpath', '-u', defaults['temp']], text=True).strip()
-        root = Path(host_temp) / ('DarkReNamer-native-' + uuid.uuid4().hex)
-    if root.exists() or root.is_symlink() or root.resolve().is_relative_to(repo):
-        raise RuntimeError('Output must be a new directory outside the checkout.')
-    windows_root = winpath(root)
-    if windows_root.startswith('\\\\'):
-        raise RuntimeError('Output must be on a Windows drive, not a WSL network path.')
+    root, defaults, pwsh = prepare_transport(repo, args)
     root.mkdir(parents=True)
     print('Building Windows tests for source ' + source_sha, flush=True)
     env = dict(os.environ)
@@ -168,20 +261,19 @@ def main():
         'runner': {'file': 'windows-vm-guest.ps1', 'sha256': sha256(root / 'windows-vm-guest.ps1')},
     }
     (root / 'bundle.json').write_text(json.dumps(manifest, indent=2))
-    helper = args.credential_helper or defaults['helper']
-    transport = '& ' + psquote(winpath(root / 'run-windows-vm-tests.ps1')) + ' -BundleRoot ' + psquote(windows_root) + ' -VmName ' + psquote(args.vm_name) + ' -CredentialHelper ' + psquote(helper) + ' -TestTimeoutSeconds ' + str(args.test_timeout_seconds)
     print('Executing ' + str(len(artifacts)) + ' Windows test binaries in the VM.', flush=True)
     print('Evidence: ' + str(root), flush=True)
     transport_ok = True
     try:
-        host_command(transport, capture=False)
+        run_controller(root, args, defaults, pwsh)
     except subprocess.CalledProcessError:
         transport_ok = False
     result_path = root / 'result.json'
     if not result_path.is_file():
         raise RuntimeError('The VM did not return a test result. Inspect the external transport result/logs.')
     result = json.loads(result_path.read_text(encoding='utf-8-sig'))
-    verified = verify_result(root, manifest, result)
+    transport_kind = 'ssh' if args.ssh_host else 'powershell_direct'
+    verified = verify_result(root, manifest, result, transport_kind)
     total = sum(row.get('passed') or 0 for row in result['tests'])
     print(('PASS' if transport_ok and verified else 'FAIL') + ': ' + str(total) + ' tests passed; GUI=' + result.get('gui', {}).get('status', 'not-run'))
     print('This native VM run is not the complete Windows release acceptance matrix.')

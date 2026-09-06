@@ -1,16 +1,33 @@
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Direct')]
 param(
     [Parameter(Mandatory = $true)][string] $BundleRoot,
-    [Parameter(Mandatory = $true)][string] $VmName,
-    [Parameter(Mandatory = $true)][string] $CredentialHelper,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Direct')][string] $VmName,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Direct')][string] $CredentialHelper,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Ssh')]
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z')]
+    [string] $SshHost,
     [ValidateRange(10, 1800)][int] $TestTimeoutSeconds = 300,
     [ValidateRange(60, 14400)][int] $SuiteTimeoutSeconds = 2400
 )
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
-$env:PSModulePath = "$PSHOME\Modules;C:\Program Files\WindowsPowerShell\Modules"
+$transportKind = if ($PSCmdlet.ParameterSetName -eq 'Ssh') { 'ssh' } else { 'powershell_direct' }
+$hostPlatform = if ($PSVersionTable.ContainsKey('Platform')) {
+    [string]$PSVersionTable.Platform
+}
+else {
+    [Environment]::OSVersion.Platform.ToString()
+}
+if ($transportKind -eq 'powershell_direct') {
+    $env:PSModulePath = "$PSHOME\Modules;C:\Program Files\WindowsPowerShell\Modules"
+}
 $BundleRoot = [IO.Path]::GetFullPath($BundleRoot)
-$transport = [ordered]@{status = 'starting'; guest_cleanup = $false}
+$transport = [ordered]@{
+    kind = $transportKind
+    host_platform = $hostPlatform
+    status = 'starting'
+    guest_cleanup = $false
+}
 $credential = $null
 $session = $null
 $guestRoot = $null
@@ -22,6 +39,19 @@ $mutexHeld = $false
 function Assert-PlainFile([string] $Name) {
     if ($Name -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$') { throw 'Invalid bundle file name.' }
 }
+function Join-GuestWindowsPath {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $Leaf
+    )
+
+    Assert-PlainFile $Leaf
+    if ($Root.EndsWith('\', [StringComparison]::Ordinal) -or
+        $Root.EndsWith('/', [StringComparison]::Ordinal)) {
+        return $Root + $Leaf
+    }
+    $Root + '\' + $Leaf
+}
 function Assert-PathWithoutReparse([string] $Path) {
     $item = Get-Item -LiteralPath $Path -Force
     while ($item) {
@@ -29,6 +59,23 @@ function Assert-PathWithoutReparse([string] $Path) {
         $item = if ($item -is [IO.DirectoryInfo]) { $item.Parent } else { $item.Directory }
     }
 }
+
+function New-SshControllerSession([string] $HostAlias) {
+    if ($PSVersionTable.PSVersion.Major -lt 7) {
+        throw 'SSH transport requires PowerShell 7 or newer on the controller host.'
+    }
+    $options = @{
+        BatchMode = 'yes'
+        StrictHostKeyChecking = 'yes'
+        ForwardAgent = 'no'
+    }
+    New-PSSession -HostName $HostAlias -Options $options
+}
+
+if ($MyInvocation.InvocationName -eq '.') {
+    return
+}
+
 try {
     Assert-PathWithoutReparse $BundleRoot
     $manifest = Get-Content -LiteralPath (Join-Path $BundleRoot 'bundle.json') -Raw | ConvertFrom-Json
@@ -43,14 +90,42 @@ try {
         Assert-PathWithoutReparse $path
         if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ine $artifact.sha256) { throw 'Bundle artifact hash mismatch.' }
     }
-    $vm = Get-VM -Name $VmName
-    $mutex = New-Object Threading.Mutex($false, ('Local\DarkReNamerVmTests-' + $vm.Id))
-    try { $mutexHeld = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $mutexHeld = $true }
-    if (-not $mutexHeld) { throw 'Another native test controller is using this VM.' }
-    $credential = & $CredentialHelper -Action Load
-    if ($credential -isnot [Management.Automation.PSCredential]) { throw 'Credential helper did not return a PSCredential.' }
-    if ((Get-VM -Name $VmName).State.ToString() -ne 'Running') { throw 'Start the configured VM before testing.' }
-    $session = New-PSSession -VMName $VmName -Credential $credential
+    if ($transportKind -eq 'powershell_direct') {
+        $vm = Get-VM -Name $VmName
+        $mutex = New-Object Threading.Mutex($false, ('Local\DarkReNamerVmTests-' + $vm.Id))
+        try { $mutexHeld = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $mutexHeld = $true }
+        if (-not $mutexHeld) { throw 'Another native test controller is using this VM.' }
+        $credential = & $CredentialHelper -Action Load
+        if ($credential -isnot [Management.Automation.PSCredential]) { throw 'Credential helper did not return a PSCredential.' }
+        if ((Get-VM -Name $VmName).State.ToString() -ne 'Running') { throw 'Start the configured VM before testing.' }
+        $session = New-PSSession -VMName $VmName -Credential $credential
+    }
+    else {
+        $session = New-SshControllerSession -HostAlias $SshHost
+    }
+    $endpoint = Invoke-Command -Session $session -ScriptBlock {
+        $platform = [Environment]::OSVersion.Platform.ToString()
+        $isAdministrator = $false
+        if ($platform -ceq 'Win32NT') {
+            $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+            $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+            $isAdministrator = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        }
+        [pscustomobject]@{
+            platform = $platform
+            powershell_major = $PSVersionTable.PSVersion.Major
+            is_administrator = $isAdministrator
+        }
+    }
+    if ($endpoint.platform -cne 'Win32NT') {
+        throw 'The selected transport endpoint must be the configured Windows VM.'
+    }
+    if ($transportKind -eq 'ssh' -and $endpoint.powershell_major -lt 7) {
+        throw 'The VM SSH PowerShell subsystem must use PowerShell 7 or newer.'
+    }
+    if (-not $endpoint.is_administrator) {
+        throw 'The VM controller account must be a local administrator so it can register the limited interactive test task.'
+    }
     $desktop = Invoke-Command -Session $session -ScriptBlock {
         $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
         $localUser = @(Get-CimInstance Win32_UserAccount -Filter 'LocalAccount=True' | Where-Object SID -eq $sid)
@@ -69,7 +144,8 @@ try {
     }
     $transport.status = 'copying'
     foreach ($name in @('bundle.json') + @($artifacts | ForEach-Object { $_.file })) {
-        Copy-Item -LiteralPath (Join-Path $BundleRoot $name) -Destination (Join-Path $guestRoot $name) -ToSession $session
+        $guestPath = Join-GuestWindowsPath -Root $guestRoot -Leaf $name
+        Copy-Item -LiteralPath (Join-Path $BundleRoot $name) -Destination $guestPath -ToSession $session
     }
     Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$manifest.runner.sha256 -ScriptBlock {
         param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$runnerHash)
@@ -107,7 +183,8 @@ try {
         if ($state.status -eq 'Ready' -and $state.task_result -ne 0) { throw ('Guest test task failed before producing results: ' + $state.task_result) }
     } while ((Get-Date) -lt $deadline)
     if ($state.status -notin @('passed','failed')) { throw 'VM test suite timed out.' }
-    Copy-Item -LiteralPath (Join-Path $guestRoot 'result.json') -Destination (Join-Path $BundleRoot 'result.json') -FromSession $session
+    $guestResultPath = Join-GuestWindowsPath -Root $guestRoot -Leaf 'result.json'
+    Copy-Item -LiteralPath $guestResultPath -Destination (Join-Path $BundleRoot 'result.json') -FromSession $session
     $result = Get-Content -LiteralPath (Join-Path $BundleRoot 'result.json') -Raw | ConvertFrom-Json
     $outputs = @()
     foreach ($row in $result.tests) {
@@ -117,7 +194,8 @@ try {
     foreach ($output in $outputs) {
         Assert-PlainFile $output.file
         if ($names.ContainsKey($output.file) -or $output.file -in @('bundle.json','result.json','transport.json','run-windows-vm-tests.ps1')) { throw 'Guest output collides with a bundle input.' }
-        Copy-Item -LiteralPath (Join-Path $guestRoot $output.file) -Destination (Join-Path $BundleRoot $output.file) -FromSession $session
+        $guestOutputPath = Join-GuestWindowsPath -Root $guestRoot -Leaf $output.file
+        Copy-Item -LiteralPath $guestOutputPath -Destination (Join-Path $BundleRoot $output.file) -FromSession $session
         if ((Get-FileHash -LiteralPath (Join-Path $BundleRoot $output.file) -Algorithm SHA256).Hash -ine $output.sha256) { throw 'Collected guest output hash mismatch.' }
     }
     $transport.status = 'collected'

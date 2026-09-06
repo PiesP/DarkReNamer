@@ -157,7 +157,151 @@ try {
     }
 
     . $valid.runner -BundleRoot $valid.root -ExpectedSessionId 1 -ValidateOnly
+    $hostRunner = Join-Path $PSScriptRoot 'run-windows-vm-tests.ps1'
+    . $hostRunner -BundleRoot $valid.root -SshHost 'darkrenamer-vm'
+    $script:capturedSshSession = $null
+    function New-PSSession {
+        param(
+            [string] $HostName,
+            [hashtable] $Options
+        )
+        $script:capturedSshSession = [pscustomobject]@{
+            host_name = $HostName
+            options = $Options
+        }
+        [pscustomobject]@{ transport = 'fixture' }
+    }
+    try {
+        $null = New-SshControllerSession -HostAlias 'darkrenamer-vm'
+    }
+    finally {
+        Remove-Item Function:\New-PSSession
+    }
+    if ($script:capturedSshSession.host_name -cne 'darkrenamer-vm' -or
+        $script:capturedSshSession.options.Count -ne 3 -or
+        $script:capturedSshSession.options.BatchMode -cne 'yes' -or
+        $script:capturedSshSession.options.StrictHostKeyChecking -cne 'yes' -or
+        $script:capturedSshSession.options.ForwardAgent -cne 'no') {
+        throw 'The SSH PowerShell session did not enforce the required non-interactive host-key and agent options.'
+    }
+    Assert-Fails {
+        . $hostRunner -BundleRoot $valid.root -SshHost 'user@darkrenamer-vm'
+    } 'SshHost'
+    $guestTransferRoot = 'C:\Users\TestUser\AppData\Local\Temp\DarkReNamerTests-0123456789abcdef0123456789abcdef'
+    $copyInPath = Join-GuestWindowsPath -Root $guestTransferRoot -Leaf 'bundle.json'
+    $copyOutPath = Join-GuestWindowsPath -Root ($guestTransferRoot + '\') -Leaf 'result.json'
+    if ($copyInPath -cne ($guestTransferRoot + '\bundle.json') -or
+        $copyOutPath -cne ($guestTransferRoot + '\result.json')) {
+        throw 'Guest copy paths must use Windows separators without resolving a local PowerShell drive.'
+    }
+    Assert-Fails {
+        Join-GuestWindowsPath -Root $guestTransferRoot -Leaf '..\result.json'
+    } 'Invalid bundle file name'
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $previousExecutionState = Enter-TestExecutionState
+        if ($previousExecutionState -isnot [uint32]) {
+            throw 'The execution-state helper did not return the previous Windows flags.'
+        }
+        Exit-TestExecutionState -Previous $previousExecutionState
+
+        $lockProbe = Join-Path $valid.root 'desktop-lock-probe.ps1'
+        [IO.File]::WriteAllText($lockProbe, @'
+if ($env:DARKRENAMER_LOCK_MODE -ceq 'runner') {
+    try {
+        & $env:DARKRENAMER_LOCK_RUNNER `
+            -BundleRoot $env:DARKRENAMER_LOCK_BUNDLE `
+            -ExpectedSessionId ([int]$env:DARKRENAMER_LOCK_SESSION)
+    }
+    catch {
+    }
+    $result = Get-Content -LiteralPath (Join-Path $env:DARKRENAMER_LOCK_BUNDLE 'result.json') -Raw |
+        ConvertFrom-Json
+    $state = if ($result.status -ceq 'failed' -and
+        $result.failure_reason -ceq 'desktop_busy' -and
+        @($result.tests).Count -eq 0 -and
+        $null -eq $result.gui) { 'busy-result' } else { 'unexpected-result' }
+    [IO.File]::WriteAllText($env:DARKRENAMER_LOCK_OUTPUT, $state)
+    return
+}
+. $env:DARKRENAMER_LOCK_RUNNER `
+    -BundleRoot $env:DARKRENAMER_LOCK_BUNDLE `
+    -ExpectedSessionId ([int]$env:DARKRENAMER_LOCK_SESSION) `
+    -ValidateOnly
+$lock = Enter-DesktopTestLock -SessionId ([int]$env:DARKRENAMER_LOCK_SESSION)
+try {
+    $state = if ($null -eq $lock) { 'busy' } else { 'acquired' }
+    [IO.File]::WriteAllText($env:DARKRENAMER_LOCK_OUTPUT, $state)
+}
+finally {
+    Exit-DesktopTestLock -Lock $lock
+}
+'@)
+        function Invoke-DesktopLockProbe {
+            param(
+                [Parameter(Mandatory)][string] $OutputPath,
+                [switch] $RunGuest
+            )
+
+            $names = @(
+                'DARKRENAMER_LOCK_RUNNER'
+                'DARKRENAMER_LOCK_BUNDLE'
+                'DARKRENAMER_LOCK_SESSION'
+                'DARKRENAMER_LOCK_OUTPUT'
+                'DARKRENAMER_LOCK_MODE'
+            )
+            $original = @{}
+            foreach ($name in $names) {
+                $original[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+            }
+            try {
+                [Environment]::SetEnvironmentVariable('DARKRENAMER_LOCK_RUNNER', $valid.runner, 'Process')
+                [Environment]::SetEnvironmentVariable('DARKRENAMER_LOCK_BUNDLE', $valid.root, 'Process')
+                [Environment]::SetEnvironmentVariable('DARKRENAMER_LOCK_SESSION', [string][Diagnostics.Process]::GetCurrentProcess().SessionId, 'Process')
+                [Environment]::SetEnvironmentVariable('DARKRENAMER_LOCK_OUTPUT', $OutputPath, 'Process')
+                $mode = if ($RunGuest) { 'runner' } else { 'probe' }
+                [Environment]::SetEnvironmentVariable('DARKRENAMER_LOCK_MODE', $mode, 'Process')
+                & (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File $lockProbe
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Desktop lock probe failed with exit code $LASTEXITCODE."
+                }
+            }
+            finally {
+                foreach ($name in $names) {
+                    [Environment]::SetEnvironmentVariable($name, $original[$name], 'Process')
+                }
+            }
+            [IO.File]::ReadAllText($OutputPath)
+        }
+
+        $currentSession = [Diagnostics.Process]::GetCurrentProcess().SessionId
+        $parentLock = Enter-DesktopTestLock -SessionId $currentSession
+        if ($null -eq $parentLock) {
+            throw 'The desktop lock fixture could not acquire its initial lock.'
+        }
+        try {
+            $busyState = Invoke-DesktopLockProbe -OutputPath (Join-Path $valid.root 'desktop-lock-busy.txt')
+            if ($busyState -cne 'busy') {
+                throw 'A concurrent guest process acquired the occupied desktop lock.'
+            }
+            $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+            $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+            if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+                $busyResultState = Invoke-DesktopLockProbe `
+                    -OutputPath (Join-Path $valid.root 'desktop-lock-result.txt') `
+                    -RunGuest
+                if ($busyResultState -cne 'busy-result') {
+                    throw 'A busy guest runner did not write the expected fail-closed result.'
+                }
+            }
+        }
+        finally {
+            Exit-DesktopTestLock -Lock $parentLock
+        }
+        $releasedState = Invoke-DesktopLockProbe -OutputPath (Join-Path $valid.root 'desktop-lock-released.txt')
+        if ($releasedState -cne 'acquired') {
+            throw 'The desktop lock remained occupied after its owner released it.'
+        }
+
         foreach ($expectedExitCode in @(0, 7)) {
             $nativeStdout = Join-Path $valid.root "native-exit-$expectedExitCode.stdout.txt"
             $nativeStderr = Join-Path $valid.root "native-exit-$expectedExitCode.stderr.txt"
@@ -230,7 +374,6 @@ try {
     }
 
     $parsePaths = @($runner)
-    $hostRunner = Join-Path $PSScriptRoot 'run-windows-vm-tests.ps1'
     if (Test-Path -LiteralPath $hostRunner -PathType Leaf) {
         $parsePaths += $hostRunner
     }
