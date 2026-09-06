@@ -212,6 +212,34 @@ try {
         Join-GuestWindowsPath -Root $guestTransferRoot -Leaf '..\result.json'
     } 'Invalid bundle file name'
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $initScript = @"
+`$ErrorActionPreference = 'Stop'
+. '$($valid.runner.Replace("'", "''"))' -BundleRoot '$($valid.root.Replace("'", "''"))' -ExpectedSessionId 1 -ValidateOnly
+Initialize-NativeCapture
+"@
+        $encodedInit = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($initScript))
+        $initProcess = Start-OwnedProcess `
+            -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') `
+            -Arguments "-NoLogo -NoProfile -NonInteractive -EncodedCommand $encodedInit" `
+            -WorkingDirectory $valid.root `
+            -RedirectOutput
+        try {
+            if (-not $initProcess.process.WaitForExit(30000)) {
+                throw 'Fresh Windows PowerShell UI Automation initialization timed out.'
+            }
+            $initProcess.process.WaitForExit()
+            if ($initProcess.process.ExitCode -ne 0) {
+                throw "Fresh Windows PowerShell UI Automation initialization failed: $($initProcess.stderr.GetAwaiter().GetResult())"
+            }
+        }
+        finally {
+            if (-not $initProcess.process.HasExited) {
+                Invoke-TaskkillTree -ProcessId $initProcess.process.Id
+                [void]$initProcess.process.WaitForExit(10000)
+            }
+            $initProcess.process.Dispose()
+        }
+
         $previousExecutionState = Enter-TestExecutionState
         if ($previousExecutionState -isnot [uint32]) {
             throw 'The execution-state helper did not return the previous Windows flags.'

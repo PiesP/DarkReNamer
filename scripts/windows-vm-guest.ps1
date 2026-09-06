@@ -607,10 +607,26 @@ public static class DarkReNamerVmNative {
     }
     Add-Type -AssemblyName System.Drawing
     Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
     Add-Type -AssemblyName UIAutomationClientsideProviders
-    [Windows.Automation.ClientSettings]::RegisterClientSideProviderAssembly(
-        [UIAutomationClientsideProviders.UIAutomationClientSideProviders].Assembly.GetName()
-    )
+    if (-not ('DarkReNamerVmAutomation' -as [type])) {
+        $automationReferences = @(
+            [Windows.Automation.AutomationElement].Assembly.Location
+            [Windows.Automation.AutomationProperty].Assembly.Location
+            [UIAutomationClientsideProviders.UIAutomationClientSideProviders].Assembly.Location
+        )
+        Add-Type -ReferencedAssemblies $automationReferences -TypeDefinition @'
+public static class DarkReNamerVmAutomation {
+    // UIA's default-proxy stack walk cannot inspect PowerShell dynamic frames.
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    public static void Initialize() {
+        System.Windows.Automation.ClientSettings.RegisterClientSideProviderAssembly(
+            typeof(UIAutomationClientsideProviders.UIAutomationClientSideProviders).Assembly.GetName());
+    }
+}
+'@
+    }
+    [DarkReNamerVmAutomation]::Initialize()
 }
 
 function Assert-AutomationBinding {
