@@ -143,6 +143,18 @@ try {
     if (Test-Path -LiteralPath $valid.output_root) {
         throw 'ValidateOnly must not create acceptance output.'
     }
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        Assert-Fails {
+            & $valid.acceptance `
+                -BundleRoot $valid.bundle_root `
+                -ExpectedSessionId 1 `
+                -OutputRoot $valid.output_root `
+                -ExpectedScriptSha256 $valid.acceptance_sha256
+        } 'acceptance requires Windows'
+        if (Test-Path -LiteralPath $valid.output_root) {
+            throw 'The unsupported-platform guard must run before creating acceptance output.'
+        }
+    }
 
     Assert-Fails {
         & $valid.acceptance `

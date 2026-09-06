@@ -484,10 +484,24 @@ $bootstrap = Resolve-AcceptanceBootstrap `
     -Root $BundleRoot `
     -ScriptPath $PSCommandPath `
     -ScriptSha256 $ExpectedScriptSha256
+$acceptanceInvocation = [pscustomobject]@{
+    bundle_root = $BundleRoot
+    expected_session_id = $ExpectedSessionId
+    output_root = $OutputRoot
+    expected_script_sha256 = $ExpectedScriptSha256
+    timeout_seconds = $TimeoutSeconds
+    validate_only = [bool]$ValidateOnly
+}
 . $bootstrap.runner `
     -BundleRoot $bootstrap.root `
     -ExpectedSessionId $ExpectedSessionId `
     -ValidateOnly
+$BundleRoot = $acceptanceInvocation.bundle_root
+$ExpectedSessionId = $acceptanceInvocation.expected_session_id
+$OutputRoot = $acceptanceInvocation.output_root
+$ExpectedScriptSha256 = $acceptanceInvocation.expected_script_sha256
+$TimeoutSeconds = $acceptanceInvocation.timeout_seconds
+$ValidateOnly = $acceptanceInvocation.validate_only
 $verified = Resolve-AcceptanceBundle `
     -Root $BundleRoot `
     -ScriptPath $PSCommandPath `
