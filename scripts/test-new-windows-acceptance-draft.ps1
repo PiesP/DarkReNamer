@@ -180,13 +180,18 @@ function Assert-Draft {
         throw 'Local-build draft must not contain workflow_run.'
     }
     if (@($evidence.operator_context).Count -ne 0 -or
-        @($evidence.ui_matrix).Count -ne 24 -or
+        @($evidence.ui_matrix).Count -ne 12 -or
         @($evidence.visual_captures).Count -ne 0 -or
-        @($evidence.scenarios).Count -ne 20 -or
+        @($evidence.scenarios).Count -ne 10 -or
         @($evidence.benchmarks).Count -ne 0 -or
         @($evidence.durability_trials).Count -ne 4 -or
-        @($evidence.unexecuted).Count -ne 54) {
+        @($evidence.unexecuted).Count -ne 32) {
         throw 'Generated draft acceptance target counts are incorrect.'
+    }
+    if (@($evidence.ui_matrix | Where-Object { $_.windows_product -cne 'Windows 11' }).Count -ne 0 -or
+        @($evidence.scenarios | Where-Object { $_.windows_product -cne 'Windows 11' }).Count -ne 0 -or
+        @($evidence.unexecuted | Where-Object { $_.target -like '*Windows 10*' }).Count -ne 0) {
+        throw 'Generated draft contains a Windows 10 acceptance target.'
     }
     foreach ($row in @($evidence.ui_matrix) + @($evidence.scenarios) + @($evidence.durability_trials)) {
         if ($row.status -cne 'not-run' -or $row.observation_code -cne 'not-executed') {
@@ -200,7 +205,7 @@ function Assert-Draft {
         throw 'Generated draft does not contain all six target-bound benchmark reasons.'
     }
     $ids = @($evidence.unexecuted.id)
-    if (@($ids | Sort-Object -Unique).Count -ne 54) {
+    if (@($ids | Sort-Object -Unique).Count -ne 32) {
         throw 'Generated draft unexecuted identifiers are not unique.'
     }
     $jsonDocument = [Text.Json.JsonDocument]::Parse($raw)

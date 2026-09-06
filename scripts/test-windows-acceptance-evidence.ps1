@@ -257,10 +257,10 @@ function New-VisualCaptures {
     }
 
     foreach ($extra in @(
-            @{ Id = 'surface-native-menu'; Product = 'Windows 10'; Dpi = 100; Appearance = 'system'; Surface = 'native-menu' },
-            @{ Id = 'surface-appearance-dialog'; Product = 'Windows 10'; Dpi = 100; Appearance = 'light'; Surface = 'appearance-dialog' },
-            @{ Id = 'surface-input-prompt'; Product = 'Windows 10'; Dpi = 125; Appearance = 'dark'; Surface = 'input-prompt' },
-            @{ Id = 'surface-common-dialog'; Product = 'Windows 10'; Dpi = 150; Appearance = 'system'; Surface = 'common-dialog'; Scenario = 'common-dialog' },
+            @{ Id = 'surface-native-menu'; Product = 'Windows 11'; Dpi = 100; Appearance = 'system'; Surface = 'native-menu' },
+            @{ Id = 'surface-appearance-dialog'; Product = 'Windows 11'; Dpi = 100; Appearance = 'light'; Surface = 'appearance-dialog' },
+            @{ Id = 'surface-input-prompt'; Product = 'Windows 11'; Dpi = 125; Appearance = 'dark'; Surface = 'input-prompt' },
+            @{ Id = 'surface-common-dialog'; Product = 'Windows 11'; Dpi = 150; Appearance = 'system'; Surface = 'common-dialog'; Scenario = 'common-dialog' },
             @{ Id = 'surface-confirmation-task-dialog'; Product = 'Windows 11'; Dpi = 100; Appearance = 'light'; Surface = 'confirmation-task-dialog' },
             @{ Id = 'surface-recovery-window'; Product = 'Windows 11'; Dpi = 150; Appearance = 'dark'; Surface = 'recovery-window'; Scenario = 'startup-recovery' }
         )) {
@@ -457,6 +457,32 @@ function New-HddUnavailableEvidence {
     return $evidence
 }
 
+function New-Windows11OnlyEvidence {
+    param(
+        [Parameter(Mandatory)]
+        [object] $CompleteEvidence
+    )
+
+    $evidence = Copy-Evidence $CompleteEvidence
+    $evidence.operator_context = @(
+        $evidence.operator_context |
+            Where-Object { $_.windows_product -ceq 'Windows 11' }
+    )
+    $evidence.ui_matrix = @(
+        $evidence.ui_matrix |
+            Where-Object { $_.windows_product -ceq 'Windows 11' }
+    )
+    $evidence.visual_captures = @(
+        $evidence.visual_captures |
+            Where-Object { $_.ui_target -clike 'ui|Windows 11|*' }
+    )
+    $evidence.scenarios = @(
+        $evidence.scenarios |
+            Where-Object { $_.windows_product -ceq 'Windows 11' }
+    )
+    return $evidence
+}
+
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "darkrenamer-acceptance-validator-$([Guid]::NewGuid())"
 try {
     New-Item -ItemType Directory -Path $testRoot | Out-Null
@@ -577,6 +603,78 @@ try {
         -Evidence $complete `
         -Name 'valid-complete-with-visual-root' `
         -VisualEvidenceRoot $visualRoot
+
+    $windows11Only = New-Windows11OnlyEvidence -CompleteEvidence $complete
+    Assert-ValidatorPasses `
+        -Evidence $windows11Only `
+        -Name 'valid-windows-11-only-complete'
+
+    $legacyOptionalOmissionReasons = Copy-Evidence $windows11Only
+    $legacyOptionalOmissionReasons.unexecuted += @(
+        [pscustomobject]@{
+            id = 'legacy-windows-10-ui-omitted'
+            target = 'ui|Windows 10|100|normal'
+            reason_code = 'not-in-run-scope'
+        },
+        [pscustomobject]@{
+            id = 'legacy-windows-10-scenario-omitted'
+            target = 'scenario|Windows 10|keyboard-only'
+            reason_code = 'not-in-run-scope'
+        }
+    )
+    Assert-ValidatorPasses `
+        -Evidence $legacyOptionalOmissionReasons `
+        -Name 'legacy-windows-10-omission-reasons-draft' `
+        -Draft
+
+    $missingWindows11Context = Copy-Evidence $complete
+    $missingWindows11Context.operator_context = @(
+        $missingWindows11Context.operator_context |
+            Where-Object { $_.windows_product -cne 'Windows 11' }
+    )
+    Assert-ValidatorFails `
+        -Evidence $missingWindows11Context `
+        -Name 'missing-windows-11-context' `
+        -ExpectedFragment 'Complete evidence requires operator context for Windows 11'
+
+    $windows10VisualSubstitute = Copy-Evidence $complete
+    $windows10VisualSubstitute.visual_captures = @(
+        $windows10VisualSubstitute.visual_captures |
+            Where-Object { $_.ui_target -clike 'ui|Windows 10|*' }
+    )
+    Assert-ValidatorFails `
+        -Evidence $windows10VisualSubstitute `
+        -Name 'windows-10-visuals-cannot-substitute' `
+        -ExpectedFragment 'missing a main-workbench visual capture for ui|Windows 11|100|normal'
+
+    $optionalWindows10NotRun = Copy-Evidence $complete
+    $optionalWindows10NotRun.ui_matrix[0].status = 'not-run'
+    $optionalWindows10NotRun.ui_matrix[0].observation_code = 'not-executed'
+    $optionalWindows10NotRun.ui_matrix[0] |
+        Add-Member -NotePropertyName unexecuted_id -NotePropertyValue 'optional-windows-10-ui'
+    $optionalWindows10NotRun.scenarios[0].status = 'not-run'
+    $optionalWindows10NotRun.scenarios[0].observation_code = 'not-executed'
+    $optionalWindows10NotRun.scenarios[0] |
+        Add-Member -NotePropertyName unexecuted_id -NotePropertyValue 'optional-windows-10-scenario'
+    $optionalWindows10NotRun.visual_captures = @(
+        $optionalWindows10NotRun.visual_captures |
+            Where-Object { $_.ui_target -cne 'ui|Windows 10|100|normal' }
+    )
+    $optionalWindows10NotRun.unexecuted += @(
+        [pscustomobject]@{
+            id = 'optional-windows-10-ui'
+            target = 'ui|Windows 10|100|normal'
+            reason_code = 'not-in-run-scope'
+        },
+        [pscustomobject]@{
+            id = 'optional-windows-10-scenario'
+            target = 'scenario|Windows 10|keyboard-only'
+            reason_code = 'not-in-run-scope'
+        }
+    )
+    Assert-ValidatorPasses `
+        -Evidence $optionalWindows10NotRun `
+        -Name 'optional-windows-10-not-run-complete'
 
     $visualRootLink = Join-Path $testRoot 'visual-root-link'
     if ($IsWindows) {
@@ -860,7 +958,7 @@ try {
     $mainAppearanceBypass = Copy-Evidence $complete
     foreach ($capture in $mainAppearanceBypass.visual_captures) {
         if ($capture.surface -eq 'main-workbench' -and
-            $capture.ui_target -like 'ui|*|normal') {
+            $capture.ui_target -like 'ui|Windows 11|*|normal') {
             $capture.appearance = 'system'
         }
     }
@@ -877,6 +975,18 @@ try {
     Assert-ValidatorFails `
         -Evidence $missingVisualSurface `
         -Name 'missing-visual-surface' `
+        -ExpectedFragment 'missing visual surface coverage: recovery-window'
+
+    $windows10SurfaceSubstitute = Copy-Evidence $complete
+    $windows10RecoveryCapture = @(
+        $windows10SurfaceSubstitute.visual_captures |
+            Where-Object { $_.surface -ceq 'recovery-window' }
+    )[0]
+    $windows10RecoveryCapture.ui_target = 'ui|Windows 10|150|normal'
+    $windows10RecoveryCapture.scenario_target = 'scenario|Windows 10|startup-recovery'
+    Assert-ValidatorFails `
+        -Evidence $windows10SurfaceSubstitute `
+        -Name 'windows-10-surface-cannot-substitute' `
         -ExpectedFragment 'missing visual surface coverage: recovery-window'
 
     $duplicateVisualFilename = Copy-Evidence $complete
@@ -1201,7 +1311,7 @@ try {
     Assert-ValidatorFails `
         -Evidence $zeroContextComplete `
         -Name 'zero-context-complete' `
-        -ExpectedFragment 'Complete evidence requires operator context for Windows 10'
+        -ExpectedFragment 'Complete evidence requires operator context for Windows 11'
 
     $arm64Context = Copy-Evidence $complete
     foreach ($context in $arm64Context.operator_context) {

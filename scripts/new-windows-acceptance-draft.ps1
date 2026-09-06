@@ -192,7 +192,13 @@ if ($allowedReasons -cnotcontains $DefaultUnexecutedReason) {
     throw 'DefaultUnexecutedReason is not allowed by the Windows acceptance evidence schema.'
 }
 
-$windowsProducts = @($definitions.operatorContext.properties.windows_product.enum)
+$recognizedWindowsProducts = @($definitions.operatorContext.properties.windows_product.enum)
+$requiredWindowsProducts = @('Windows 11')
+foreach ($product in $requiredWindowsProducts) {
+    if ($recognizedWindowsProducts -cnotcontains $product) {
+        throw "Required Windows product is not recognized by the evidence schema: $product"
+    }
+}
 $dpiValues = @($definitions.uiCell.properties.dpi_percent.enum)
 $contrastValues = @($definitions.uiCell.properties.contrast.enum)
 $scenarioKinds = @($definitions.scenario.properties.kind.enum)
@@ -202,7 +208,7 @@ $durabilityKinds = @($definitions.durabilityTrial.properties.kind.enum)
 
 $unexecuted = [Collections.Generic.List[object]]::new()
 $uiMatrix = [Collections.Generic.List[object]]::new()
-foreach ($product in $windowsProducts) {
+foreach ($product in $requiredWindowsProducts) {
     foreach ($dpi in $dpiValues) {
         foreach ($contrast in $contrastValues) {
             $target = "ui|$product|$dpi|$contrast"
@@ -225,7 +231,7 @@ foreach ($product in $windowsProducts) {
 }
 
 $scenarios = [Collections.Generic.List[object]]::new()
-foreach ($product in $windowsProducts) {
+foreach ($product in $requiredWindowsProducts) {
     foreach ($kind in $scenarioKinds) {
         $target = "scenario|$product|$kind"
         $id = Get-StableUnexecutedId -Target $target

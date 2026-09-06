@@ -34,7 +34,7 @@ function New-ReleaseVisualCaptures {
     )
     $captures = [Collections.Generic.List[object]]::new()
     $sequence = 1
-    foreach ($product in 'Windows 10', 'Windows 11') {
+    foreach ($product in 'Windows 11') {
         $productId = $product.ToLowerInvariant().Replace(' ', '')
         $dpiIndex = 0
         foreach ($dpi in 100, 125, 150, 200, 250, 300) {
@@ -73,10 +73,10 @@ function New-ReleaseVisualCaptures {
         }
     }
     foreach ($extra in @(
-            @{ Id = 'surface-native-menu'; Product = 'Windows 10'; Dpi = 100; Appearance = 'system'; Surface = 'native-menu' },
-            @{ Id = 'surface-appearance-dialog'; Product = 'Windows 10'; Dpi = 100; Appearance = 'light'; Surface = 'appearance-dialog' },
-            @{ Id = 'surface-input-prompt'; Product = 'Windows 10'; Dpi = 125; Appearance = 'dark'; Surface = 'input-prompt' },
-            @{ Id = 'surface-common-dialog'; Product = 'Windows 10'; Dpi = 150; Appearance = 'system'; Surface = 'common-dialog'; Scenario = 'common-dialog' },
+            @{ Id = 'surface-native-menu'; Product = 'Windows 11'; Dpi = 100; Appearance = 'system'; Surface = 'native-menu' },
+            @{ Id = 'surface-appearance-dialog'; Product = 'Windows 11'; Dpi = 100; Appearance = 'light'; Surface = 'appearance-dialog' },
+            @{ Id = 'surface-input-prompt'; Product = 'Windows 11'; Dpi = 125; Appearance = 'dark'; Surface = 'input-prompt' },
+            @{ Id = 'surface-common-dialog'; Product = 'Windows 11'; Dpi = 150; Appearance = 'system'; Surface = 'common-dialog'; Scenario = 'common-dialog' },
             @{ Id = 'surface-confirmation-task-dialog'; Product = 'Windows 11'; Dpi = 100; Appearance = 'light'; Surface = 'confirmation-task-dialog' },
             @{ Id = 'surface-recovery-window'; Product = 'Windows 11'; Dpi = 150; Appearance = 'dark'; Surface = 'recovery-window'; Scenario = 'startup-recovery' }
         )) {
@@ -118,7 +118,7 @@ function New-CompleteEvidence {
     )
 
     $uiMatrix = @(
-        foreach ($product in 'Windows 10', 'Windows 11') {
+        foreach ($product in 'Windows 11') {
             foreach ($dpi in 100, 125, 150, 200, 250, 300) {
                 foreach ($contrast in 'normal', 'high-contrast') {
                     [pscustomobject]@{
@@ -138,7 +138,7 @@ function New-CompleteEvidence {
         'recovery-export', 'intent-only-candidate-discard'
     )
     $scenarios = @(
-        foreach ($product in 'Windows 10', 'Windows 11') {
+        foreach ($product in 'Windows 11') {
             foreach ($kind in $scenarioKinds) {
                 $row = [ordered]@{
                     windows_product = $product
@@ -186,7 +186,6 @@ function New-CompleteEvidence {
         }
         recorded_at_utc = '2026-08-30T12:00:00Z'
         operator_context = @(
-            [pscustomobject]@{ windows_product = 'Windows 10'; windows_build = '19045.6216'; architecture = 'x64' },
             [pscustomobject]@{ windows_product = 'Windows 11'; windows_build = '26100.4946'; architecture = 'x64' }
         )
         ui_matrix = $uiMatrix

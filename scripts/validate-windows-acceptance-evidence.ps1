@@ -906,7 +906,13 @@ elseif (Test-Property -Object $artifact -Name 'workflow_run') {
     throw 'artifact.workflow_run is only allowed for actions-handoff evidence.'
 }
 
-$windowsProducts = @($schemaDefinitions.operatorContext.properties.windows_product.enum)
+$recognizedWindowsProducts = @($schemaDefinitions.operatorContext.properties.windows_product.enum)
+$requiredWindowsProducts = @('Windows 11')
+foreach ($product in $requiredWindowsProducts) {
+    if ($recognizedWindowsProducts -cnotcontains $product) {
+        throw "Required Windows product is not recognized by the evidence schema: $product"
+    }
+}
 $dpiValues = @($schemaDefinitions.uiCell.properties.dpi_percent.enum)
 $contrastValues = @($schemaDefinitions.uiCell.properties.contrast.enum)
 $scenarioKinds = @($schemaDefinitions.scenario.properties.kind.enum)
@@ -917,8 +923,8 @@ $durabilityKinds = @($schemaDefinitions.durabilityTrial.properties.kind.enum)
 $statuses = @($schemaDefinitions.status.enum)
 
 $expectedTargets = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-$expectedUiTargets = @(
-    foreach ($product in $windowsProducts) {
+$recognizedUiTargets = @(
+    foreach ($product in $recognizedWindowsProducts) {
         foreach ($dpi in $dpiValues) {
             foreach ($contrast in $contrastValues) {
                 "ui|$product|$dpi|$contrast"
@@ -926,8 +932,24 @@ $expectedUiTargets = @(
         }
     }
 )
-$expectedScenarioTargets = @(
-    foreach ($product in $windowsProducts) {
+$requiredUiTargets = @(
+    foreach ($product in $requiredWindowsProducts) {
+        foreach ($dpi in $dpiValues) {
+            foreach ($contrast in $contrastValues) {
+                "ui|$product|$dpi|$contrast"
+            }
+        }
+    }
+)
+$recognizedScenarioTargets = @(
+    foreach ($product in $recognizedWindowsProducts) {
+        foreach ($kind in $scenarioKinds) {
+            "scenario|$product|$kind"
+        }
+    }
+)
+$requiredScenarioTargets = @(
+    foreach ($product in $requiredWindowsProducts) {
         foreach ($kind in $scenarioKinds) {
             "scenario|$product|$kind"
         }
@@ -941,7 +963,7 @@ $expectedBenchmarkTargets = @(
     }
 )
 $expectedDurabilityTargets = @($durabilityKinds | ForEach-Object { "durability|$_" })
-foreach ($target in $expectedUiTargets + $expectedScenarioTargets + $expectedBenchmarkTargets + $expectedDurabilityTargets) {
+foreach ($target in $recognizedUiTargets + $recognizedScenarioTargets + $expectedBenchmarkTargets + $expectedDurabilityTargets) {
     [void] $expectedTargets.Add($target)
 }
 
@@ -1002,7 +1024,7 @@ $contextIndex = 0
 foreach ($context in @($evidence.operator_context)) {
     $location = "operator_context[$contextIndex]"
     Assert-ObjectShape -Object $context -Required @('windows_product', 'windows_build', 'architecture') -Location $location
-    Assert-Enum -Value $context.windows_product -Allowed $windowsProducts -Location "$location.windows_product"
+    Assert-Enum -Value $context.windows_product -Allowed $recognizedWindowsProducts -Location "$location.windows_product"
     if ($context.windows_build -isnot [string] -or $context.windows_build -notmatch $schemaDefinitions.operatorContext.properties.windows_build.pattern) {
         throw "$location.windows_build must contain only numeric build components."
     }
@@ -1014,7 +1036,7 @@ foreach ($context in @($evidence.operator_context)) {
     $contextIndex++
 }
 if (-not $Draft) {
-    foreach ($product in $windowsProducts) {
+    foreach ($product in $requiredWindowsProducts) {
         if (-not $contextsByProduct.ContainsKey($product)) {
             throw "Complete evidence requires operator context for $product."
         }
@@ -1027,7 +1049,7 @@ $uiIndex = 0
 foreach ($row in @($evidence.ui_matrix)) {
     $location = "ui_matrix[$uiIndex]"
     Assert-ObjectShape -Object $row -Required @('windows_product', 'dpi_percent', 'contrast', 'status', 'observation_code') -Optional @('unexecuted_id') -Location $location
-    Assert-Enum -Value $row.windows_product -Allowed $windowsProducts -Location "$location.windows_product"
+    Assert-Enum -Value $row.windows_product -Allowed $recognizedWindowsProducts -Location "$location.windows_product"
     Assert-Enum -Value $row.dpi_percent -Allowed $dpiValues -Location "$location.dpi_percent"
     Assert-Enum -Value $row.contrast -Allowed $contrastValues -Location "$location.contrast"
     Assert-Enum -Value $row.status -Allowed $statuses -Location "$location.status"
@@ -1059,7 +1081,7 @@ $scenarioIndex = 0
 foreach ($row in @($evidence.scenarios)) {
     $location = "scenarios[$scenarioIndex]"
     Assert-ObjectShape -Object $row -Required @('windows_product', 'kind', 'status', 'observation_code') -Optional @('accessibility_tool', 'unexecuted_id') -Location $location
-    Assert-Enum -Value $row.windows_product -Allowed $windowsProducts -Location "$location.windows_product"
+    Assert-Enum -Value $row.windows_product -Allowed $recognizedWindowsProducts -Location "$location.windows_product"
     Assert-Enum -Value $row.kind -Allowed $scenarioKinds -Location "$location.kind"
     Assert-Enum -Value $row.status -Allowed $statuses -Location "$location.status"
     Assert-Enum -Value $row.observation_code -Allowed @($schemaDefinitions.scenario.properties.observation_code.enum) -Location "$location.observation_code"
@@ -1163,7 +1185,7 @@ foreach ($capture in @($evidence.visual_captures)) {
     }
     $uiTargetObserved = $uiByTarget.ContainsKey($capture.ui_target)
     $uiTargetStatus = if ($uiTargetObserved) { $uiByTarget[$capture.ui_target].status } else { '<missing>' }
-    if ($expectedUiTargets -cnotcontains $capture.ui_target -or
+    if ($recognizedUiTargets -cnotcontains $capture.ui_target -or
         -not $uiTargetObserved -or
         $uiTargetStatus -ne 'pass') {
         throw "$location.ui_target must reference a passed UI matrix cell."
@@ -1183,7 +1205,7 @@ foreach ($capture in @($evidence.visual_captures)) {
         throw "$location.appearance does not match its UI contrast target."
     }
     if (Test-Property -Object $capture -Name 'scenario_target') {
-        if ($expectedScenarioTargets -cnotcontains $capture.scenario_target -or
+        if ($recognizedScenarioTargets -cnotcontains $capture.scenario_target -or
             -not $scenarioByTarget.ContainsKey($capture.scenario_target) -or
             $scenarioByTarget[$capture.scenario_target].status -ne 'pass') {
             throw "$location.scenario_target must reference a passed scenario."
@@ -1235,13 +1257,15 @@ foreach ($capture in @($evidence.visual_captures)) {
             throw "$location image SHA-256 does not match VisualEvidenceRoot bytes."
         }
     }
-    if ($capture.surface -eq 'main-workbench') {
-        [void] $capturedMainTargets.Add($capture.ui_target)
-        if ($contrast -eq 'normal') {
-            [void] $capturedNormalMainAppearances.Add($capture.appearance)
+    if ($requiredWindowsProducts -ccontains $uiParts[1]) {
+        if ($capture.surface -eq 'main-workbench') {
+            [void] $capturedMainTargets.Add($capture.ui_target)
+            if ($contrast -eq 'normal') {
+                [void] $capturedNormalMainAppearances.Add($capture.appearance)
+            }
         }
+        [void] $capturedSurfaces.Add($capture.surface)
     }
-    [void] $capturedSurfaces.Add($capture.surface)
     $captureIndex++
 }
 
@@ -1344,8 +1368,22 @@ function Assert-TargetCoverage {
     }
 }
 
-Assert-TargetCoverage -Expected $expectedUiTargets -Observed $uiByTarget -Label 'UI matrix'
-Assert-TargetCoverage -Expected $expectedScenarioTargets -Observed $scenarioByTarget -Label 'scenario'
+Assert-TargetCoverage -Expected $requiredUiTargets -Observed $uiByTarget -Label 'UI matrix'
+Assert-TargetCoverage -Expected $requiredScenarioTargets -Observed $scenarioByTarget -Label 'scenario'
+foreach ($target in $recognizedUiTargets) {
+    if ($requiredUiTargets -cnotcontains $target -and
+        -not $uiByTarget.ContainsKey($target) -and
+        $unexecutedByTarget.ContainsKey($target)) {
+        [void] $usedUnexecutedIds.Add($unexecutedByTarget[$target].id)
+    }
+}
+foreach ($target in $recognizedScenarioTargets) {
+    if ($requiredScenarioTargets -cnotcontains $target -and
+        -not $scenarioByTarget.ContainsKey($target) -and
+        $unexecutedByTarget.ContainsKey($target)) {
+        [void] $usedUnexecutedIds.Add($unexecutedByTarget[$target].id)
+    }
+}
 $completeHddUnavailable = $false
 if ($Draft) {
     Assert-TargetCoverage -Expected $expectedBenchmarkTargets -Observed $benchmarkByTarget -Label 'benchmark'
@@ -1399,7 +1437,7 @@ foreach ($id in $unexecutedById.Keys) {
 }
 
 if (-not $Draft) {
-    foreach ($target in $expectedUiTargets) {
+    foreach ($target in $requiredUiTargets) {
         if (-not $capturedMainTargets.Contains($target)) {
             throw "Complete evidence is missing a main-workbench visual capture for $target."
         }
@@ -1414,13 +1452,13 @@ if (-not $Draft) {
             throw "Complete evidence is missing visual surface coverage: $surface."
         }
     }
-    foreach ($row in $uiByTarget.Values) {
-        if ($row.status -ne 'pass') {
+    foreach ($target in $requiredUiTargets) {
+        if ($uiByTarget[$target].status -ne 'pass') {
             throw 'Complete evidence requires every UI matrix cell to pass.'
         }
     }
-    foreach ($row in $scenarioByTarget.Values) {
-        if ($row.status -ne 'pass') {
+    foreach ($target in $requiredScenarioTargets) {
+        if ($scenarioByTarget[$target].status -ne 'pass') {
             throw 'Complete evidence requires every required scenario to pass.'
         }
     }
