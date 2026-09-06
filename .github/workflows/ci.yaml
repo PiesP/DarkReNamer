@@ -134,7 +134,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'The Windows test gate failed.' }
 
       - name: Test optimized workspace artifacts
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         shell: pwsh
         run: |
           $env:DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'
