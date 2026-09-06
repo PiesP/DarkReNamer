@@ -7,7 +7,8 @@ use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, COLOR_WINDOW, DT_CALCRECT, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
     DT_WORDBREAK, DrawTextW, EndPaint, FillRect, FrameRect, GetDC, GetMonitorInfoW,
     GetSysColorBrush, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, MonitorFromWindow,
-    PAINTSTRUCT, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow,
+    PAINTSTRUCT, RDW_ERASENOW, RDW_UPDATENOW, ReleaseDC, SelectObject, SetBkMode, SetTextColor,
+    TRANSPARENT, UpdateWindow,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::{SS_EDITCONTROL, SS_NOPREFIX, SS_OWNERDRAW};
@@ -49,7 +50,8 @@ const RESET_DEFAULTS_ID: u16 = 0xA140;
 const APPEARANCE_FINISH_ACCEPTED: u32 = 1 << 31;
 const APPEARANCE_GROUP_SUBCLASS_ID: usize = 1;
 const APPEARANCE_VIEWPORT_SUBCLASS_ID: usize = 2;
-const APPEARANCE_DIALOG_TITLE: &str = "DarkReNamer - 모양 설정";
+const WM_APP_APPEARANCE_REDRAW: u32 = WM_APP + 0x53;
+const APPEARANCE_DIALOG_TITLE: &str = "DarkReNamer - 모양 설정 (미리보기)";
 const DENSITY_GROUP_LABEL: &str = "명령 버튼 배치";
 const DENSITY_LABELS: [&str; 4] = ["자동 (권장)", "여유 있게", "촘촘하게", "메뉴만"];
 const EMPHASIS_GROUP_LABEL: &str = "변경 후 이름 강조";
@@ -60,7 +62,7 @@ const EMPTY_SAFETY_LABEL: &str = "빈 목록에서 안전 안내 표시";
 const FORCED_COLORS_EXPLANATION: &str =
     "고대비가 활성화되어 변경 후 이름의 글자와 셀 배경은 시스템 색상을 사용합니다.";
 const RESET_LABEL: &str = "기본값으로 복원";
-const OK_LABEL: &str = "확인";
+const OK_LABEL: &str = "저장";
 const CANCEL_LABEL: &str = "취소";
 
 pub(super) struct AppearanceDialogSession {
@@ -1613,24 +1615,24 @@ fn apply_appearance_dialog_layout(
     };
     // SAFETY: viewport is live and scroll contains copied bounded values.
     unsafe { SetScrollInfo(state.viewport, SB_VERT, &raw const scroll, 1) };
-    // Redraw the dialog rather than only the viewport: both batches use
-    // SWP_NOREDRAW, and footer controls are siblings of the viewport.
+    // Repaint the dialog rather than only the viewport: both batches use
+    // SWP_NOREDRAW, and footer controls are siblings of the viewport. Post
+    // pointer-free work because focus-scroll layout runs from a viewport
+    // callback while that callback owns the dialog's CallbackState lease.
     // SAFETY: viewport is live and its direct parent is the live dialog.
     let dialog = unsafe { GetParent(state.viewport) };
-    let redraw_target = if dialog.is_null() {
-        state.viewport
-    } else {
-        dialog
-    };
-    // SAFETY: target and all dialog/viewport children are live after layout.
-    unsafe {
-        RedrawWindow(
-            redraw_target,
-            null(),
-            null_mut(),
-            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
-        )
-    };
+    if !dialog.is_null() {
+        // SAFETY: the live dialog receives only its copied session identifier;
+        // the queued callback resolves current state after this lease unwinds.
+        unsafe {
+            PostMessageW(
+                dialog,
+                WM_APP_APPEARANCE_REDRAW,
+                0,
+                state.session_id as isize,
+            )
+        };
+    }
 }
 
 fn apply_appearance_deferred_layout(windows: &[(HWND, LayoutRect)]) {
@@ -1917,6 +1919,15 @@ unsafe extern "system" fn appearance_dialog_proc(
         // SAFETY: arguments are unchanged values from the final callback.
         return unsafe { DefWindowProcW(window, message, wparam, lparam) };
     }
+    if message == WM_PAINT {
+        // Default WM_PAINT processing can synchronously request
+        // WM_ERASEBKGND. Enter it without a CallbackState lease so the nested
+        // erase callback can select the current custom background instead of
+        // falling through to the class COLOR_WINDOW brush.
+        // SAFETY: arguments are unchanged values from this paint callback and
+        // no dialog state/reference has been acquired yet.
+        return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+    }
     // SAFETY: the slot is the current UI-thread publication and remains live
     // until this callback either releases or defers reclamation of its lease.
     let Some(mut state_lease) = (unsafe { CallbackState::try_lease(state_slot) }) else {
@@ -2083,6 +2094,30 @@ unsafe extern "system" fn appearance_dialog_proc(
             }
             0
         }
+        WM_APP_APPEARANCE_REDRAW if !state_ptr.is_null() => {
+            let session_matches = u32::try_from(lparam)
+                .ok()
+                // SAFETY: state_ptr is the live dialog-owned Box on this UI thread.
+                .is_some_and(|session_id| session_id == unsafe { (*state_ptr).session_id });
+            drop(state_lease);
+            if session_matches {
+                // Complete the invalidation only after the CallbackState lease
+                // ends. RDW_UPDATENOW can synchronously enter WM_ERASEBKGND;
+                // that nested callback must be able to acquire the state and
+                // select the current custom or system background brush.
+                // SAFETY: window is the live message target, and the flags
+                // synchronously repaint its client and live child hierarchy.
+                unsafe {
+                    RedrawWindow(
+                        window,
+                        null(),
+                        null_mut(),
+                        RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_ERASENOW | RDW_UPDATENOW,
+                    )
+                };
+            }
+            0
+        }
         WM_APP_APPEARANCE_RESTORE_FOCUS if !state_ptr.is_null() => {
             let session_matches = u32::try_from(lparam)
                 .ok()
@@ -2151,25 +2186,114 @@ unsafe extern "system" fn appearance_dialog_proc(
 #[cfg(test)]
 mod native_tests {
     use super::*;
-    use windows_sys::Win32::Graphics::Gdi::{GetDC, ReleaseDC};
+    use windows_sys::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
     use windows_sys::Win32::System::SystemServices::{SS_OWNERDRAW, SS_TYPEMASK};
     use windows_sys::Win32::UI::Controls::{
         CDIS_DEFAULT, GetWindowTheme, NM_CUSTOMDRAW, NMCUSTOMDRAW,
     };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_RETURN;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        BM_CLICK, BS_TYPEMASK, GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetWindowLongPtrW,
-        IsDialogMessageW, MSG, WM_KEYDOWN,
+        BM_CLICK, BS_TYPEMASK, DispatchMessageW, GWL_EXSTYLE, GWL_STYLE, GetClientRect,
+        GetWindowLongPtrW, IsDialogMessageW, MSG, PM_REMOVE, PeekMessageW, WM_KEYDOWN,
     };
+
+    struct TestWindow(HWND);
+
+    impl TestWindow {
+        const fn raw(&self) -> HWND {
+            self.0
+        }
+    }
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            // SAFETY: this RAII guard solely owns the test-created window and
+            // destroys it at most once while the creating UI thread is live.
+            unsafe {
+                if IsWindow(self.0) != 0 {
+                    DestroyWindow(self.0);
+                }
+            }
+        }
+    }
+
+    fn appearance_client_pixel(window: HWND, x: i32, y: i32) -> io::Result<u32> {
+        // SAFETY: window is a live test-owned HWND. The client DC is sampled
+        // synchronously at a bounded point and released before returning.
+        let (pixel, released) = unsafe {
+            let dc = GetDC(window);
+            if dc.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let pixel = GetPixel(dc, x, y);
+            let released = ReleaseDC(window, dc);
+            (pixel, released)
+        };
+        if pixel == u32::MAX || released == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(pixel)
+        }
+    }
+
+    fn erase_appearance_client(window: HWND) -> io::Result<()> {
+        // SAFETY: window is the live test-owned dialog. Its client DC remains
+        // live for the synchronous production WM_ERASEBKGND callback and is
+        // released before returning.
+        let (erased, released) = unsafe {
+            let dc = GetDC(window);
+            if dc.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let erased = SendMessageW(window, WM_ERASEBKGND, dc as usize, 0);
+            let released = ReleaseDC(window, dc);
+            (erased, released)
+        };
+        if erased == 0 || released == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn dispatch_appearance_redraws(window: HWND) -> usize {
+        let mut count = 0usize;
+        loop {
+            let mut message = MSG::default();
+            // SAFETY: message is exact writable MSG storage. Filtering to the
+            // live test-owned dialog and private scalar message removes only
+            // pointer-free redraw work posted by production layout callbacks.
+            if unsafe {
+                PeekMessageW(
+                    &mut message,
+                    window,
+                    WM_APP_APPEARANCE_REDRAW,
+                    WM_APP_APPEARANCE_REDRAW,
+                    PM_REMOVE,
+                )
+            } == 0
+            {
+                return count;
+            }
+            // SAFETY: the removed message is the exact pointer-free production
+            // message above and its HWND remains owned by this test.
+            unsafe { DispatchMessageW(&message) };
+            count = count.saturating_add(1);
+        }
+    }
 
     #[test]
     fn appearance_copy_names_the_current_settings_exactly() {
-        assert_eq!(APPEARANCE_DIALOG_TITLE, "DarkReNamer - 모양 설정");
+        assert_eq!(
+            APPEARANCE_DIALOG_TITLE,
+            "DarkReNamer - 모양 설정 (미리보기)"
+        );
         assert_eq!(DENSITY_GROUP_LABEL, "명령 버튼 배치");
         assert_eq!(EMPHASIS_GROUP_LABEL, "변경 후 이름 강조");
         assert_eq!(SEPARATOR_LABEL, "명령 버튼 그룹 구분선 표시");
         assert_eq!(TINT_LABEL, "변경 후 이름 셀 배경 강조");
         assert_eq!(EMPTY_SAFETY_LABEL, "빈 목록에서 안전 안내 표시");
+        assert_eq!(OK_LABEL, "저장");
         assert_eq!(
             FORCED_COLORS_EXPLANATION,
             "고대비가 활성화되어 변경 후 이름의 글자와 셀 배경은 시스템 색상을 사용합니다."
@@ -2220,6 +2344,123 @@ mod native_tests {
             DestroyWindow(dialog);
             DestroyWindow(owner);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn appearance_focus_scroll_keeps_dark_footer_background()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // SAFETY: null requests the current process module. The system STATIC
+        // class and current module remain live for this test-owned owner HWND.
+        let owner = TestWindow(unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                800,
+                600,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        });
+        if owner.raw().is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let dialog = TestWindow(create_appearance_dialog_window(
+            owner.raw(),
+            11,
+            UiAppearance {
+                theme: AppThemeMode::Dark,
+                ..UiAppearance::default()
+            },
+            ForcedColorsState::Inactive,
+            Some(ResolvedTheme::Dark),
+        )?);
+        let (viewport, first_density, last_checkbox, layout, dpi, dialog_color) = {
+            let mut state_lease = try_appearance_dialog_state(dialog.raw())
+                .ok_or_else(|| io::Error::other("appearance dialog state is missing"))?;
+            let state = state_lease.state_mut();
+            if state.appearance_resources.is_none() {
+                // Wine does not implement the native control-theme transition
+                // required by apply_dialog_appearance. Install the same owned
+                // production brush set so this callback-paint regression stays
+                // runnable there; native Windows reaches this state normally.
+                state.appearance_resources = Some(AppearanceResources::create(GRAPHITE_DARK)?);
+            }
+            (
+                state.viewport,
+                state.density[0],
+                state.checkboxes[2],
+                state
+                    .layout
+                    .ok_or_else(|| io::Error::other("appearance layout is missing"))?,
+                state.dpi,
+                state
+                    .appearance_resources
+                    .as_ref()
+                    .map(|resources| resources.palette().surface_dialog),
+            )
+        };
+        assert_eq!(dialog_color, Some(GRAPHITE_DARK.surface_dialog));
+        let constrained = AppearanceDialogLayout {
+            body_viewport: LayoutRect {
+                height: scale_dip(70, dpi),
+                ..layout.body_viewport
+            },
+            scroll_page: scale_dip(70, dpi),
+            scroll_max: layout
+                .body_content_height
+                .saturating_sub(scale_dip(70, dpi)),
+            ..layout
+        };
+        {
+            let mut state_lease = try_appearance_dialog_state(dialog.raw())
+                .ok_or_else(|| io::Error::other("appearance dialog state is busy"))?;
+            let state = state_lease.state_mut();
+            state.layout = Some(constrained);
+            state.scroll_y = 0;
+            apply_appearance_dialog_layout(state, constrained);
+        }
+        // Establish a dark footer baseline before triggering the actual child
+        // BN_SETFOCUS -> viewport focus-scroll callback chain.
+        // SAFETY: all HWNDs are live test-owned windows, and SetFocus enters
+        // the production callbacks without any test-held dialog-state lease.
+        unsafe {
+            ShowWindow(owner.raw(), SW_SHOW);
+            ShowWindow(dialog.raw(), SW_SHOW);
+            SetFocus(first_density);
+        }
+        let _initial_redraws = dispatch_appearance_redraws(dialog.raw());
+        erase_appearance_client(dialog.raw())?;
+        let sample_x = scale_dip(4, dpi);
+        let sample_y = constrained.footer.y.saturating_add(scale_dip(4, dpi));
+        let before = appearance_client_pixel(dialog.raw(), sample_x, sample_y)?;
+        assert_eq!(before, GRAPHITE_DARK.surface_dialog);
+
+        // SAFETY: last_checkbox is a live BS_NOTIFY child below the constrained
+        // viewport. Its focus notification must scroll through the real nested
+        // viewport/dialog callback seam exercised by keyboard Tab navigation.
+        unsafe { SetFocus(last_checkbox) };
+        let focus_redraws = dispatch_appearance_redraws(dialog.raw());
+        let after = appearance_client_pixel(dialog.raw(), sample_x, sample_y)?;
+        assert_eq!(
+            after, before,
+            "focus-scroll repainted the dark footer white"
+        );
+        assert!(focus_redraws > 0);
+        assert!(
+            try_appearance_dialog_state(dialog.raw())
+                .ok_or_else(|| io::Error::other("appearance dialog state is busy"))?
+                .state()
+                .scroll_y
+                > 0
+        );
+        assert_ne!(viewport, null_mut());
         Ok(())
     }
 
@@ -2460,6 +2701,7 @@ mod native_tests {
         unsafe { ReleaseDC(density_group, group_dc) };
 
         assert_eq!(window_text(menu_only), LegacyText::from(DENSITY_LABELS[3]));
+        assert_eq!(window_text(ok), LegacyText::from(OK_LABEL));
         // SAFETY: menu_only is live and the borrowed theme handle query retains
         // no caller storage. Custom colors require the classic paint path.
         assert_eq!(unsafe { GetWindowTheme(menu_only) }, 0);
