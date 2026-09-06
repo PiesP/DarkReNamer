@@ -187,6 +187,16 @@ try {
     Assert-Fails {
         . $hostRunner -BundleRoot $valid.root -SshHost 'user@darkrenamer-vm'
     } 'SshHost'
+    $guestTransferRoot = 'C:\Users\TestUser\AppData\Local\Temp\DarkReNamerTests-0123456789abcdef0123456789abcdef'
+    $copyInPath = Join-GuestWindowsPath -Root $guestTransferRoot -Leaf 'bundle.json'
+    $copyOutPath = Join-GuestWindowsPath -Root ($guestTransferRoot + '\') -Leaf 'result.json'
+    if ($copyInPath -cne ($guestTransferRoot + '\bundle.json') -or
+        $copyOutPath -cne ($guestTransferRoot + '\result.json')) {
+        throw 'Guest copy paths must use Windows separators without resolving a local PowerShell drive.'
+    }
+    Assert-Fails {
+        Join-GuestWindowsPath -Root $guestTransferRoot -Leaf '..\result.json'
+    } 'Invalid bundle file name'
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
         $previousExecutionState = Enter-TestExecutionState
         if ($previousExecutionState -isnot [uint32]) {

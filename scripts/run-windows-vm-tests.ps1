@@ -39,6 +39,19 @@ $mutexHeld = $false
 function Assert-PlainFile([string] $Name) {
     if ($Name -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$') { throw 'Invalid bundle file name.' }
 }
+function Join-GuestWindowsPath {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $Leaf
+    )
+
+    Assert-PlainFile $Leaf
+    if ($Root.EndsWith('\', [StringComparison]::Ordinal) -or
+        $Root.EndsWith('/', [StringComparison]::Ordinal)) {
+        return $Root + $Leaf
+    }
+    $Root + '\' + $Leaf
+}
 function Assert-PathWithoutReparse([string] $Path) {
     $item = Get-Item -LiteralPath $Path -Force
     while ($item) {
@@ -131,7 +144,8 @@ try {
     }
     $transport.status = 'copying'
     foreach ($name in @('bundle.json') + @($artifacts | ForEach-Object { $_.file })) {
-        Copy-Item -LiteralPath (Join-Path $BundleRoot $name) -Destination (Join-Path $guestRoot $name) -ToSession $session
+        $guestPath = Join-GuestWindowsPath -Root $guestRoot -Leaf $name
+        Copy-Item -LiteralPath (Join-Path $BundleRoot $name) -Destination $guestPath -ToSession $session
     }
     Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$manifest.runner.sha256 -ScriptBlock {
         param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$runnerHash)
@@ -169,7 +183,8 @@ try {
         if ($state.status -eq 'Ready' -and $state.task_result -ne 0) { throw ('Guest test task failed before producing results: ' + $state.task_result) }
     } while ((Get-Date) -lt $deadline)
     if ($state.status -notin @('passed','failed')) { throw 'VM test suite timed out.' }
-    Copy-Item -LiteralPath (Join-Path $guestRoot 'result.json') -Destination (Join-Path $BundleRoot 'result.json') -FromSession $session
+    $guestResultPath = Join-GuestWindowsPath -Root $guestRoot -Leaf 'result.json'
+    Copy-Item -LiteralPath $guestResultPath -Destination (Join-Path $BundleRoot 'result.json') -FromSession $session
     $result = Get-Content -LiteralPath (Join-Path $BundleRoot 'result.json') -Raw | ConvertFrom-Json
     $outputs = @()
     foreach ($row in $result.tests) {
@@ -179,7 +194,8 @@ try {
     foreach ($output in $outputs) {
         Assert-PlainFile $output.file
         if ($names.ContainsKey($output.file) -or $output.file -in @('bundle.json','result.json','transport.json','run-windows-vm-tests.ps1')) { throw 'Guest output collides with a bundle input.' }
-        Copy-Item -LiteralPath (Join-Path $guestRoot $output.file) -Destination (Join-Path $BundleRoot $output.file) -FromSession $session
+        $guestOutputPath = Join-GuestWindowsPath -Root $guestRoot -Leaf $output.file
+        Copy-Item -LiteralPath $guestOutputPath -Destination (Join-Path $BundleRoot $output.file) -FromSession $session
         if ((Get-FileHash -LiteralPath (Join-Path $BundleRoot $output.file) -Algorithm SHA256).Hash -ine $output.sha256) { throw 'Collected guest output hash mismatch.' }
     }
     $transport.status = 'collected'
