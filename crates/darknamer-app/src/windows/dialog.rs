@@ -306,6 +306,7 @@ pub(super) fn task_dialog(owner: HWND, spec: TaskDialogSpec<'_>) -> io::Result<i
 
 #[derive(Clone, Debug)]
 pub(super) struct PromptSpec {
+    pub(super) caption: String,
     pub(super) title: String,
     pub(super) label_one: String,
     pub(super) label_two: String,
@@ -414,7 +415,7 @@ pub(super) fn prompt_input(
     // SAFETY: A null module name requests the current process module and dereferences no caller memory.
     let instance = unsafe { GetModuleHandleW(null()) };
     let class_name = wide("DarkReNamerInputWindow");
-    let caption = wide("입력창");
+    let caption = wide(&spec.caption);
     let class = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
         style: CS_HREDRAW | CS_VREDRAW,
@@ -1432,6 +1433,7 @@ mod tests {
             let ordinary_second_value = LegacyText::from("둘째 값");
             let mut state = PromptState {
                 spec: PromptSpec {
+                    caption: "테스트 입력".to_owned(),
                     title: "입력".to_owned(),
                     label_one: "첫째".to_owned(),
                     label_two: "둘째".to_owned(),
