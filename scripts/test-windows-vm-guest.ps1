@@ -229,7 +229,7 @@ Initialize-NativeCapture
             }
             $initProcess.process.WaitForExit()
             if ($initProcess.process.ExitCode -ne 0) {
-                throw "Fresh Windows PowerShell UI Automation initialization failed: $($initProcess.stderr.GetAwaiter().GetResult())"
+                throw "Fresh Windows PowerShell UI Automation initialization failed: $($initProcess.stderr_task.GetAwaiter().GetResult())"
             }
         }
         finally {
