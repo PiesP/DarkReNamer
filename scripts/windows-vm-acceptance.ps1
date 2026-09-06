@@ -6,6 +6,7 @@ param(
     [Parameter(Mandatory)][string] $ExpectedScriptSha256,
     [ValidateRange(10, 600)][int] $TimeoutSeconds = 60,
     [switch] $HighContrast,
+    [switch] $RestoreHighContrastOnly,
     [switch] $ValidateOnly
 )
 
@@ -81,7 +82,8 @@ function Resolve-AcceptanceBundle {
         [Parameter(Mandatory)][string] $ScriptPath,
         [Parameter(Mandatory)][string] $ScriptSha256,
         [Parameter(Mandatory)][string] $RequestedOutputRoot,
-        [Parameter(Mandatory)][int] $SessionId
+        [Parameter(Mandatory)][int] $SessionId,
+        [switch] $AllowExistingOutput
     )
 
     if (-not [IO.Path]::IsPathRooted($Root)) {
@@ -130,7 +132,18 @@ function Resolve-AcceptanceBundle {
     )) {
         throw 'OutputRoot must be the task bundle out directory.'
     }
-    if (Test-Path -LiteralPath $outputRoot) {
+    $outputExists = Test-Path -LiteralPath $outputRoot
+    if ($AllowExistingOutput) {
+        if (-not $outputExists) {
+            throw 'High Contrast rescue requires the existing task bundle out directory.'
+        }
+        $outputItem = Get-Item -LiteralPath $outputRoot -Force
+        if (-not $outputItem.PSIsContainer -or
+            ($outputItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'High Contrast rescue output must be an ordinary directory.'
+        }
+    }
+    elseif ($outputExists) {
         throw 'The acceptance output directory already exists; preserve it and use a new bundle.'
     }
     [pscustomobject]@{
@@ -187,6 +200,158 @@ function Test-HighContrastSnapshotEqual {
         }
     }
     $true
+}
+
+function Resolve-HighContrastRestoreDocument {
+    param(
+        [Parameter(Mandatory)][string] $OutputDirectory,
+        [Parameter(Mandatory)][string] $SourceSha,
+        [Parameter(Mandatory)][string] $ScriptSha256
+    )
+
+    $path = Join-Path $OutputDirectory 'high-contrast-restore.json'
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $item.Length -gt 1MB) {
+        throw 'High Contrast restore snapshot must be an ordinary bounded file.'
+    }
+    try {
+        $document = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+    }
+    catch {
+        throw 'High Contrast restore snapshot is not valid JSON.'
+    }
+    if ($document.schema_version -ne 1 -or
+        $document.source_sha -cne $SourceSha -or
+        $document.acceptance_script_sha256 -cne $ScriptSha256) {
+        throw 'High Contrast restore snapshot binding mismatch.'
+    }
+    if ($document.restoration_required -isnot [bool] -or
+        $document.restoration_verified -isnot [bool]) {
+        throw 'High Contrast restore snapshot state is invalid.'
+    }
+    if (($document.original.flags -isnot [int] -and
+        $document.original.flags -isnot [long]) -or
+        ($null -ne $document.original.scheme -and
+        $document.original.scheme -isnot [string])) {
+        throw 'High Contrast restore snapshot settings are invalid.'
+    }
+    $colors = $document.original.colors
+    $expectedColorNames = @(
+        'button_face','button_text','gray_text','highlight',
+        'highlight_text','hot_light','window','window_text'
+    )
+    $actualColorNames = @($colors.PSObject.Properties.Name | Sort-Object)
+    if ($actualColorNames.Count -ne $expectedColorNames.Count) {
+        throw 'High Contrast restore snapshot colors are incomplete.'
+    }
+    for ($index = 0; $index -lt $expectedColorNames.Count; $index++) {
+        $name = $expectedColorNames[$index]
+        if ($actualColorNames[$index] -cne $name -or
+            ($colors.$name -isnot [int] -and $colors.$name -isnot [long])) {
+            throw 'High Contrast restore snapshot colors are invalid.'
+        }
+    }
+    $expected = [pscustomobject]@{
+        Flags = [uint32]$document.original.flags
+        Scheme = $document.original.scheme
+        Window = [uint32]$colors.window
+        WindowText = [uint32]$colors.window_text
+        ButtonFace = [uint32]$colors.button_face
+        ButtonText = [uint32]$colors.button_text
+        Highlight = [uint32]$colors.highlight
+        HighlightText = [uint32]$colors.highlight_text
+        GrayText = [uint32]$colors.gray_text
+        HotLight = [uint32]$colors.hot_light
+    }
+    if (($expected.Flags -band 0x1000) -ne 0) {
+        throw 'High Contrast restore snapshot contains a prohibited toggle option.'
+    }
+    [pscustomobject]@{ path = $path; document = $document; expected = $expected }
+}
+
+function Invoke-HighContrastRescue {
+    param(
+        [Parameter(Mandatory)][object] $Verified,
+        [Parameter(Mandatory)][int] $SessionId
+    )
+
+    $restore = Resolve-HighContrastRestoreDocument `
+        -OutputDirectory $Verified.output_root `
+        -SourceSha $Verified.source_sha `
+        -ScriptSha256 $Verified.script_sha256
+    $resultPath = Join-Path $Verified.output_root 'high-contrast-rescue-result.json'
+    $errorPath = Join-Path $Verified.output_root 'high-contrast-rescue-error.txt'
+    $result = [ordered]@{
+        schema_version = 1
+        source_sha = $Verified.source_sha
+        acceptance_script_sha256 = $Verified.script_sha256
+        status = 'failed'
+        action = $null
+        restoration_verified = $false
+        snapshot_sha256 = Get-LowerSha256 -Path $restore.path
+        failure_reason = 'restore_failed'
+        diagnostic = $null
+    }
+    $lock = $null
+    try {
+        $lock = Enter-DesktopTestLock -SessionId $SessionId
+        if ($null -eq $lock) {
+            throw 'Another Windows VM test runner is using this interactive desktop.'
+        }
+        Initialize-AcceptanceNative
+        if (-not $restore.document.restoration_required -and
+            $restore.document.restoration_verified) {
+            $result.status = 'passed'
+            $result.action = 'no_op_already_restored'
+            $result.restoration_verified = $true
+            $result.failure_reason = $null
+        }
+        else {
+            [DarkReNamerVmAcceptanceNative]::ApplyHighContrast(
+                $restore.expected.Flags,
+                $restore.expected.Scheme
+            )
+            $actual = [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot()
+            if (-not (Test-HighContrastSnapshotEqual -Expected $restore.expected -Actual $actual)) {
+                throw 'High Contrast rescue could not prove the original settings and colors.'
+            }
+            Write-JsonUtf8Bom -Path $restore.path -Value ([ordered]@{
+                schema_version = 1
+                source_sha = $Verified.source_sha
+                acceptance_script_sha256 = $Verified.script_sha256
+                restoration_required = $false
+                original = $restore.document.original
+                restoration_verified = $true
+                restored = [ordered]@{
+                    flags = $actual.Flags
+                    scheme = $actual.Scheme
+                    colors_match = $true
+                }
+            })
+            $result.status = 'passed'
+            $result.action = 'restored'
+            $result.restoration_verified = $true
+            $result.snapshot_sha256 = Get-LowerSha256 -Path $restore.path
+            $result.failure_reason = $null
+        }
+    }
+    catch {
+        $_ | Out-String | Set-Content -LiteralPath $errorPath -Encoding UTF8
+        $result.diagnostic = [ordered]@{
+            file = 'high-contrast-rescue-error.txt'
+            sha256 = Get-LowerSha256 -Path $errorPath
+        }
+    }
+    finally {
+        Exit-DesktopTestLock -Lock $lock
+        Write-JsonUtf8Bom -Path $resultPath -Value $result
+    }
+    if ($result.status -cne 'passed') {
+        throw 'High Contrast rescue failed; inspect its external result and diagnostic.'
+    }
+    Write-Host "High Contrast rescue completed: $($result.action)."
 }
 
 function Initialize-AcceptanceNative {
@@ -275,6 +440,8 @@ public static class DarkReNamerVmAcceptanceNative {
     private static extern uint GetSysColor(int index);
     [DllImport("ntdll.dll", CharSet = CharSet.Unicode)]
     private static extern int RtlGetVersion(ref RTL_OSVERSIONINFOEX version);
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
 
     private static void Send(ushort virtualKey, ushort scanCode, uint flags) {
         INPUT input = new INPUT {
@@ -317,18 +484,23 @@ public static class DarkReNamerVmAcceptanceNative {
         if (!SystemParametersInfo(0x42, value.size, ref value, 0)) {
             throw new Win32Exception(Marshal.GetLastWin32Error());
         }
-        return new HighContrastSnapshot {
-            Flags = value.flags,
-            Scheme = value.scheme == IntPtr.Zero ? null : Marshal.PtrToStringUni(value.scheme),
-            Window = GetSysColor(5),
-            WindowText = GetSysColor(8),
-            ButtonFace = GetSysColor(15),
-            ButtonText = GetSysColor(18),
-            Highlight = GetSysColor(13),
-            HighlightText = GetSysColor(14),
-            GrayText = GetSysColor(17),
-            HotLight = GetSysColor(26)
-        };
+        try {
+            return new HighContrastSnapshot {
+                Flags = value.flags,
+                Scheme = value.scheme == IntPtr.Zero ? null : Marshal.PtrToStringUni(value.scheme),
+                Window = GetSysColor(5),
+                WindowText = GetSysColor(8),
+                ButtonFace = GetSysColor(15),
+                ButtonText = GetSysColor(18),
+                Highlight = GetSysColor(13),
+                HighlightText = GetSysColor(14),
+                GrayText = GetSysColor(17),
+                HotLight = GetSysColor(26)
+            };
+        }
+        finally {
+            if (value.scheme != IntPtr.Zero) { LocalFree(value.scheme); }
+        }
     }
 
     public static bool HighContrastEnabled() {
@@ -565,6 +737,7 @@ $acceptanceInvocation = [pscustomobject]@{
     expected_script_sha256 = $ExpectedScriptSha256
     timeout_seconds = $TimeoutSeconds
     high_contrast = [bool]$HighContrast
+    restore_high_contrast_only = [bool]$RestoreHighContrastOnly
     validate_only = [bool]$ValidateOnly
 }
 . $bootstrap.runner `
@@ -577,14 +750,22 @@ $OutputRoot = $acceptanceInvocation.output_root
 $ExpectedScriptSha256 = $acceptanceInvocation.expected_script_sha256
 $TimeoutSeconds = $acceptanceInvocation.timeout_seconds
 $HighContrast = $acceptanceInvocation.high_contrast
+$RestoreHighContrastOnly = $acceptanceInvocation.restore_high_contrast_only
 $ValidateOnly = $acceptanceInvocation.validate_only
 $verified = Resolve-AcceptanceBundle `
     -Root $BundleRoot `
     -ScriptPath $PSCommandPath `
     -ScriptSha256 $ExpectedScriptSha256 `
     -RequestedOutputRoot $OutputRoot `
-    -SessionId $ExpectedSessionId
+    -SessionId $ExpectedSessionId `
+    -AllowExistingOutput:$RestoreHighContrastOnly
 if ($ValidateOnly) {
+    if ($RestoreHighContrastOnly) {
+        [void](Resolve-HighContrastRestoreDocument `
+            -OutputDirectory $verified.output_root `
+            -SourceSha $verified.source_sha `
+            -ScriptSha256 $verified.script_sha256)
+    }
     Write-Host "Validated current-DPI acceptance bundle for source $($verified.source_sha)."
     return
 }
@@ -600,6 +781,10 @@ if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))
 $currentSession = [Diagnostics.Process]::GetCurrentProcess().SessionId
 if ($currentSession -ne $ExpectedSessionId) {
     throw 'Current-DPI acceptance is running in an unexpected desktop session.'
+}
+if ($RestoreHighContrastOnly) {
+    Invoke-HighContrastRescue -Verified $verified -SessionId $ExpectedSessionId
+    return
 }
 
 [void](New-Item -ItemType Directory -Path $verified.output_root)
@@ -718,7 +903,7 @@ try {
         if (-not $highContrastResult.original_enabled) {
             $highContrastState.changed = $true
             [DarkReNamerVmAcceptanceNative]::ApplyHighContrast(
-                ($highContrastState.original.Flags -bor 1),
+                (($highContrastState.original.Flags -bor 1) -band (-bnot 0x1000)),
                 $highContrastState.original.Scheme
             )
         }

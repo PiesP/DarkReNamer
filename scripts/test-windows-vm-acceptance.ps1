@@ -94,6 +94,45 @@ function Invoke-ValidateOnly([object] $Fixture) {
         -ValidateOnly
 }
 
+function Write-RestoreSnapshot {
+    param(
+        [Parameter(Mandatory)][object] $Fixture,
+        [string] $SourceSha = '0123456789abcdef0123456789abcdef01234567',
+        [string] $ScriptSha256 = $Fixture.acceptance_sha256,
+        [uint32] $Flags = 126,
+        [bool] $RestorationRequired = $true,
+        [bool] $RestorationVerified = $false
+    )
+
+    if (-not (Test-Path -LiteralPath $Fixture.output_root)) {
+        [void](New-Item -ItemType Directory -Path $Fixture.output_root)
+    }
+    Write-Utf8Json `
+        -Path (Join-Path $Fixture.output_root 'high-contrast-restore.json') `
+        -Value ([ordered]@{
+            schema_version = 1
+            source_sha = $SourceSha
+            acceptance_script_sha256 = $ScriptSha256
+            restoration_required = $RestorationRequired
+            original = [ordered]@{
+                flags = $Flags
+                scheme = 'fixture scheme'
+                colors = [ordered]@{
+                    window = 1
+                    window_text = 2
+                    button_face = 3
+                    button_text = 4
+                    highlight = 5
+                    highlight_text = 6
+                    gray_text = 7
+                    hot_light = 8
+                }
+            }
+            restoration_verified = $RestorationVerified
+            restored = $null
+        })
+}
+
 $acceptance = Join-Path $PSScriptRoot 'windows-vm-acceptance.ps1'
 $runner = Join-Path $PSScriptRoot 'windows-vm-guest.ps1'
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
@@ -205,6 +244,40 @@ try {
             throw 'The unsupported-platform guard must run before creating acceptance output.'
         }
     }
+    Write-RestoreSnapshot -Fixture $valid
+    & $valid.acceptance `
+        -BundleRoot $valid.bundle_root `
+        -ExpectedSessionId 1 `
+        -OutputRoot $valid.output_root `
+        -ExpectedScriptSha256 $valid.acceptance_sha256 `
+        -RestoreHighContrastOnly `
+        -ValidateOnly
+    $resolvedRestore = Resolve-HighContrastRestoreDocument `
+        -OutputDirectory $valid.output_root `
+        -SourceSha $valid.manifest.source_sha `
+        -ScriptSha256 $valid.acceptance_sha256
+    if ($resolvedRestore.expected.Flags -ne 126 -or
+        $resolvedRestore.expected.Highlight -ne 5 -or
+        $resolvedRestore.document.restoration_required -ne $true) {
+        throw 'The High Contrast restore snapshot was not parsed exactly.'
+    }
+    Write-RestoreSnapshot -Fixture $valid -SourceSha ('f' * 40)
+    Assert-Fails {
+        & $valid.acceptance `
+            -BundleRoot $valid.bundle_root `
+            -ExpectedSessionId 1 `
+            -OutputRoot $valid.output_root `
+            -ExpectedScriptSha256 $valid.acceptance_sha256 `
+            -RestoreHighContrastOnly `
+            -ValidateOnly
+    } 'restore snapshot binding mismatch'
+    Write-RestoreSnapshot -Fixture $valid -Flags 0x1000
+    Assert-Fails {
+        Resolve-HighContrastRestoreDocument `
+            -OutputDirectory $valid.output_root `
+            -SourceSha $valid.manifest.source_sha `
+            -ScriptSha256 $valid.acceptance_sha256
+    } 'prohibited toggle option'
 
     Assert-Fails {
         & $valid.acceptance `
