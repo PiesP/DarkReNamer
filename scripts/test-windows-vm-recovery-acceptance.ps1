@@ -107,6 +107,15 @@ function New-TestBundle {
 }
 
 $acceptance = Join-Path $PSScriptRoot 'windows-vm-recovery-acceptance.ps1'
+$admissionSource = [IO.File]::ReadAllText(
+    (Join-Path (Split-Path -Parent $PSScriptRoot) 'crates/darknamer-app/src/admission.rs')
+)
+if ($admissionSource.IndexOf(
+    'pub const MAX_IMPORT_BYTES: usize = 2 * 1024 * 1024;',
+    [StringComparison]::Ordinal
+) -lt 0) {
+    throw 'The observer import-byte bound no longer matches the production source contract.'
+}
 . $acceptance `
     -BundleRoot $PSScriptRoot `
     -ExpectedSessionId 1 `
@@ -231,6 +240,21 @@ Assert-Fails {
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-recovery-script-' + [Guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $temporaryRoot)
 try {
+    $smallImport = Join-Path $temporaryRoot 'small-import.txt'
+    $smallImportBytes = Write-AcceptanceUtf16Paths -Path $smallImport -Paths @('A')
+    if ($smallImportBytes -ne 8 -or (Get-Item -LiteralPath $smallImport).Length -ne 8) {
+        throw 'The UTF-16LE import writer did not include its BOM and CRLF in the byte count.'
+    }
+    $oversizedImport = Join-Path $temporaryRoot 'oversized-import.txt'
+    Assert-Fails {
+        Write-AcceptanceUtf16Paths `
+            -Path $oversizedImport `
+            -Paths @(('x' * 1048575))
+    } 'exceeds the production 2 MiB limit'
+    if (Test-Path -LiteralPath $oversizedImport) {
+        throw 'The oversized import writer created a rejected file.'
+    }
+
     $valid = New-TestBundle -Root (Join-Path $temporaryRoot 'valid')
     $observerHash = Get-TestSha256 -Path $acceptance
     & $acceptance `
@@ -302,6 +326,14 @@ $fromFile = [Management.Automation.Language.Parser]::ParseFile(
 )
 if ($errors.Count -ne 0) {
     throw 'The recovery acceptance script has parser errors.'
+}
+$fixtureCountParameter = @(
+    $fromFile.ParamBlock.Parameters |
+        Where-Object { $_.Name.VariablePath.UserPath -ceq 'FixtureCount' }
+)
+if ($fixtureCountParameter.Count -ne 1 -or
+    $fixtureCountParameter[0].DefaultValue.SafeGetValue() -ne 4096) {
+    throw 'The recovery acceptance default fixture count must remain within the import bound.'
 }
 $fromUtf8 = [Management.Automation.Language.Parser]::ParseInput(
     [IO.File]::ReadAllText($acceptance, [Text.Encoding]::UTF8),

@@ -18,7 +18,7 @@ param(
     [string] $Mode = 'ProcessCrash',
 
     [ValidateRange(128, 10000)]
-    [int] $FixtureCount = 10000,
+    [int] $FixtureCount = 4096,
 
     [ValidateRange(10, 600)]
     [int] $TimeoutSeconds = 300,
@@ -269,10 +269,15 @@ function Write-AcceptanceUtf16Paths {
     $text = [string]::Join("`r`n", $Paths) + "`r`n"
     $body = $encoding.GetBytes($text)
     $preamble = $encoding.GetPreamble()
-    $bytes = [byte[]]::new($preamble.Length + $body.Length)
+    $encodedLength = $preamble.Length + $body.Length
+    if ($encodedLength -gt 2MB) {
+        throw "The UTF-16LE path import is $encodedLength bytes and exceeds the production 2 MiB limit. Reduce FixtureCount."
+    }
+    $bytes = [byte[]]::new($encodedLength)
     [Array]::Copy($preamble, 0, $bytes, 0, $preamble.Length)
     [Array]::Copy($body, 0, $bytes, $preamble.Length, $body.Length)
     [IO.File]::WriteAllBytes($Path, $bytes)
+    $encodedLength
 }
 
 function Get-AcceptanceFixtureState {
@@ -418,6 +423,80 @@ function Start-AcceptanceApplication {
         throw 'The owned process is not the verified application artifact.'
     }
     [pscustomobject]@{ owned = $owned; main = $main }
+}
+
+function Get-AcceptanceUiDiagnostic {
+    param([AllowNull()][object] $Application)
+
+    if ($null -eq $Application) {
+        return [pscustomobject]@{
+            process_state = 'not-started'
+            window_titles = @()
+            status_message = $null
+            status_count = $null
+            row_count = $null
+        }
+    }
+    $process = $Application.owned.process
+    $process.Refresh()
+    if ($process.HasExited) {
+        return [pscustomobject]@{
+            process_state = 'exited'
+            exit_code = $process.ExitCode
+            window_titles = @()
+            status_message = $null
+            status_count = $null
+            row_count = $null
+        }
+    }
+    $condition = [Windows.Automation.PropertyCondition]::new(
+        [Windows.Automation.AutomationElement]::ProcessIdProperty,
+        $process.Id
+    )
+    $elements = [Windows.Automation.AutomationElement]::RootElement.FindAll(
+        [Windows.Automation.TreeScope]::Descendants,
+        $condition
+    )
+    $titles = [Collections.Generic.List[string]]::new()
+    $statusMessage = $null
+    $statusCount = $null
+    $rowCount = $null
+    foreach ($element in $elements) {
+        try {
+            if ($element.Current.ControlType -eq [Windows.Automation.ControlType]::Window -and
+                -not [string]::IsNullOrEmpty($element.Current.Name)) {
+                $titles.Add($element.Current.Name)
+            }
+            switch ($element.Current.AutomationId) {
+                '1007' { $statusMessage = $element.Current.Name }
+                '1008' { $statusCount = $element.Current.Name }
+                '1000' {
+                    $gridObject = $null
+                    if ($element.TryGetCurrentPattern(
+                        [Windows.Automation.GridPattern]::Pattern,
+                        [ref]$gridObject
+                    )) {
+                        $rowCount = ([Windows.Automation.GridPattern]$gridObject).Current.RowCount
+                    }
+                    else {
+                        $rowCount = $element.FindAll(
+                            [Windows.Automation.TreeScope]::Children,
+                            [Windows.Automation.Condition]::TrueCondition
+                        ).Count
+                    }
+                }
+            }
+        }
+        catch [Windows.Automation.ElementNotAvailableException] {
+        }
+    }
+    [pscustomobject]@{
+        process_state = 'running'
+        window_titles = @($titles | Sort-Object -Unique)
+        status_message = $statusMessage
+        status_count = $statusCount
+        row_count = $rowCount
+    }
 }
 
 function Invoke-AcceptanceImportAndPrefix {
@@ -747,7 +826,7 @@ function Invoke-AcceptanceSession {
         [Text.UTF8Encoding]::new($false).GetBytes("sentinel`n")
     )
     $pathsFile = Join-Path $RuntimeRoot 'paths-utf16le.txt'
-    Write-AcceptanceUtf16Paths -Path $pathsFile -Paths $paths.ToArray()
+    $importBytes = Write-AcceptanceUtf16Paths -Path $pathsFile -Paths $paths.ToArray()
     $initial = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
     if ($initial.Count -ne $Count + 1) {
         throw 'The initial fixture count is incorrect.'
@@ -821,6 +900,7 @@ function Invoke-AcceptanceSession {
                     mode = $Mode
                     classification = $workerBoundary.classification
                     fixture_count = $Count
+                    import_bytes = $importBytes
                     partial_original_count = $workerBoundary.original
                     partial_renamed_count = $workerBoundary.renamed
                     initial_state_sha256 = Get-AcceptanceStateDigest -State $initial
@@ -845,6 +925,7 @@ function Invoke-AcceptanceSession {
                 mode = $Mode
                 classification = $workerBoundary.classification
                 fixture_count = $Count
+                import_bytes = $importBytes
                 partial_original_count = $workerBoundary.original
                 partial_renamed_count = $workerBoundary.renamed
                 initial_state_sha256 = Get-AcceptanceStateDigest -State $initial
@@ -950,6 +1031,7 @@ function Invoke-AcceptanceSession {
             mode = $Mode
             classification = $classification
             fixture_count = $Count
+            import_bytes = $importBytes
             partial_original_count = $partialCounts.original
             partial_renamed_count = $partialCounts.renamed
             initial_state_sha256 = Get-AcceptanceStateDigest -State $initial
@@ -968,6 +1050,18 @@ function Invoke-AcceptanceSession {
             recovery_screenshot = $recoveryScreenshot
             normal_exit_code = $second.owned.process.ExitCode
         }
+    }
+    catch {
+        $sessionError = $_
+        try {
+            $uiDiagnostic = Get-AcceptanceUiDiagnostic -Application $first
+            Write-AcceptanceUtf8Json `
+                -Path (Join-Path $EvidenceRoot 'session-ui-diagnostic.json') `
+                -Value $uiDiagnostic
+        }
+        catch {
+        }
+        throw $sessionError
     }
     finally {
         foreach ($application in @($first, $second)) {
@@ -1046,6 +1140,7 @@ $result = [ordered]@{
     recovery_export = [ordered]@{ status = 'not-run'; reason = 'optional-flow-not-implemented' }
     failure_reason = $null
     diagnostic = $null
+    ui_diagnostic = $null
 }
 $desktopLock = $null
 $previousExecutionState = $null
@@ -1080,6 +1175,13 @@ try {
 }
 catch {
     $result.failure_reason = 'recovery_acceptance_error'
+    $uiDiagnosticPath = Join-Path $evidenceRoot 'session-ui-diagnostic.json'
+    if (Test-Path -LiteralPath $uiDiagnosticPath -PathType Leaf) {
+        $result.ui_diagnostic = [ordered]@{
+            file = 'session-ui-diagnostic.json'
+            sha256 = Get-LowerSha256 -Path $uiDiagnosticPath
+        }
+    }
     $diagnosticPath = Join-Path $evidenceRoot 'diagnostic.txt'
     [IO.File]::WriteAllText(
         $diagnosticPath,
