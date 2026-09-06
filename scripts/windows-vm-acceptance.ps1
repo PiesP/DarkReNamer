@@ -330,7 +330,7 @@ function Send-AcceptanceTap {
     param(
         [Parameter(Mandatory)][Diagnostics.Process] $Process,
         [Parameter(Mandatory)][int] $ExpectedSession,
-        [Parameter(Mandatory)][ushort] $VirtualKey,
+        [Parameter(Mandatory)][uint16] $VirtualKey,
         [Parameter(Mandatory)][string] $Label
     )
 
@@ -342,8 +342,8 @@ function Send-AcceptanceChord {
     param(
         [Parameter(Mandatory)][Diagnostics.Process] $Process,
         [Parameter(Mandatory)][int] $ExpectedSession,
-        [Parameter(Mandatory)][ushort] $Modifier,
-        [Parameter(Mandatory)][ushort] $VirtualKey,
+        [Parameter(Mandatory)][uint16] $Modifier,
+        [Parameter(Mandatory)][uint16] $VirtualKey,
         [Parameter(Mandatory)][string] $Label
     )
 
@@ -419,7 +419,7 @@ function Move-RailFocusToCommand {
         $currentIndex = [Array]::IndexOf($leftIds, $focused.Current.AutomationId)
         $targetIndex = [Array]::IndexOf($leftIds, $AutomationId)
         $direction = if ($currentIndex -lt $targetIndex) { 0x28 } else { 0x26 }
-        [DarkReNamerVmAcceptanceNative]::Tap([ushort]$direction)
+        [DarkReNamerVmAcceptanceNative]::Tap([uint16]$direction)
         $focused = Get-FocusedAcceptanceElement `
             -Process $Process `
             -ExpectedSession $ExpectedSession `

@@ -118,6 +118,9 @@ try {
             throw "$([IO.Path]::GetFileName($path)) has PowerShell parser errors."
         }
     }
+    if ([IO.File]::ReadAllText($acceptance).IndexOf('[ushort]', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        throw 'The acceptance script must use Windows PowerShell 5.1-compatible integer type names.'
+    }
 
     . $acceptance `
         -BundleRoot 'unused' `
