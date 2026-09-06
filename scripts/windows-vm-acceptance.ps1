@@ -491,10 +491,9 @@ public static class DarkReNamerVmAcceptanceNative {
         if (!SystemParametersInfo(0x42, value.size, ref value, 0)) {
             throw new Win32Exception(Marshal.GetLastWin32Error());
         }
-        // Supported Windows builds disagree on whether this GET pointer is
-        // caller-owned. Copy it synchronously and retain at most eight pointer
-        // values until this short-lived observer process exits. Freeing the
-        // pointer corrupted the process heap on a source-bound VM run.
+        // Treat the GET pointer as borrowed in this bounded observer. Copy it
+        // synchronously without freeing it; the OS reclaims any allocation at
+        // process exit. Retain at most eight pointer values for that lifetime.
         retainedSchemePointers[slot] = value.scheme;
         return new HighContrastSnapshot {
             Flags = value.flags,
