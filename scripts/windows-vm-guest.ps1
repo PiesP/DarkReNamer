@@ -692,7 +692,20 @@ function Find-UniqueAutomationElement {
             throw "$Label was not found before the application exited."
         }
     } while ((Get-Date) -lt $deadline)
-    throw "$Label was not found before the bounded deadline."
+    $observed = @(
+        $Root.FindAll($Scope, [Windows.Automation.Condition]::TrueCondition) |
+            Select-Object -First 64 |
+            ForEach-Object {
+                [ordered]@{
+                    id = $_.Current.AutomationId
+                    name = $_.Current.Name
+                    type = $_.Current.ControlType.ProgrammaticName
+                    enabled = $_.Current.IsEnabled
+                    process = $_.Current.ProcessId
+                }
+            }
+    )
+    throw "$Label was not found before the bounded deadline. Observed controls: $($observed | ConvertTo-Json -Compress -Depth 3)"
 }
 
 function Wait-UniqueAutomationWindow {
