@@ -145,6 +145,16 @@ impl<'a> RenameRecovery<'a> {
                     reason: RecoveryFailure::Journal(error),
                 };
             }
+            #[cfg(test)]
+            super::failpoint::hit(&format!(
+                "recovery-reconciled-{}-{}",
+                if prepared.applied {
+                    "completed"
+                } else {
+                    "not-applied"
+                },
+                prepared.step
+            ));
             match prepared.direction {
                 JournalDirection::Forward if prepared.applied => {
                     transitions.forward.insert(prepared.step);
@@ -179,6 +189,8 @@ impl<'a> RenameRecovery<'a> {
                     reason: RecoveryFailure::Journal(error),
                 };
             }
+            #[cfg(test)]
+            super::failpoint::hit(&format!("recovery-rollback-prepared-{step_index}"));
             let operation = reverse_operation(step);
             if let Err(error) = self.backend.rename_no_replace(&operation) {
                 if error.certainty == MutationCertainty::NotApplied
@@ -198,6 +210,8 @@ impl<'a> RenameRecovery<'a> {
                     reason: RecoveryFailure::Backend(error),
                 };
             }
+            #[cfg(test)]
+            super::failpoint::hit(&format!("recovery-rollback-rename-{step_index}"));
             if let Err(error) = self.journal.authorized_completed(
                 &mut authorization,
                 *step_index,
@@ -208,6 +222,8 @@ impl<'a> RenameRecovery<'a> {
                     reason: RecoveryFailure::Journal(error),
                 };
             }
+            #[cfg(test)]
+            super::failpoint::hit(&format!("recovery-rollback-completed-{step_index}"));
         }
         if let Err(error) = self
             .journal
@@ -218,6 +234,8 @@ impl<'a> RenameRecovery<'a> {
                 reason: RecoveryFailure::Journal(error),
             };
         }
+        #[cfg(test)]
+        super::failpoint::hit("recovery-terminal-rolled-back");
         RecoveryOutcome::Recovered {
             plan,
             restored_steps: remaining.len(),

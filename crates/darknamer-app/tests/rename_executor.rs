@@ -1812,7 +1812,7 @@ impl JournalStore for MatrixJournal {
 
 struct MatrixBackend {
     inner: MemoryBackend,
-    forced_rollback: bool,
+    forced_rollback_at: Option<usize>,
     fault: Option<(usize, MutationCertainty)>,
     rename_attempts: usize,
     timeline: MatrixTimeline,
@@ -1875,7 +1875,7 @@ impl RenameBackend for MatrixBackend {
             self.fault = None;
         }
         let certainty = matrix_fault.or_else(|| {
-            (self.forced_rollback && ordinal == 2).then_some(MutationCertainty::NotApplied)
+            (self.forced_rollback_at == Some(ordinal)).then_some(MutationCertainty::NotApplied)
         });
         match certainty {
             Some(MutationCertainty::NotApplied) => Err(BackendError {
@@ -1902,23 +1902,230 @@ struct ExecutorMatrixEvidence {
     timeline: Vec<MatrixEvent>,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum MatrixGraph {
+    Chain,
+    CrossParent,
+    CaseOnly,
+    MixedCycles,
+}
+
+impl MatrixGraph {
+    const ALL: [Self; 4] = [
+        Self::Chain,
+        Self::CrossParent,
+        Self::CaseOnly,
+        Self::MixedCycles,
+    ];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Chain => "chain",
+            Self::CrossParent => "cross-parent",
+            Self::CaseOnly => "case-only",
+            Self::MixedCycles => "mixed-cycles",
+        }
+    }
+}
+
+struct MatrixFixture {
+    backend: MemoryBackend,
+    confirmed: darknamer_app::rename::ConfirmedPlan,
+    original: Vec<(&'static str, Option<u128>)>,
+    committed: Vec<(&'static str, Option<u128>)>,
+    sentinels: Vec<(&'static str, u128)>,
+}
+
+fn matrix_fixture(graph: MatrixGraph) -> Result<MatrixFixture, Box<dyn std::error::Error>> {
+    let sentinel = ("C:\\watch\\sentinel.txt", 99);
+    let fixture = match graph {
+        MatrixGraph::Chain => {
+            let backend = MemoryBackend::new()
+                .with_file("C:\\work\\a.txt", 1)
+                .with_file("C:\\work\\b.txt", 2)
+                .with_file(sentinel.0, sentinel.1);
+            let confirmed = confirmed_plan(
+                &backend,
+                vec![intent(0, "a.txt", "b.txt"), intent(1, "b.txt", "c.txt")],
+            )?;
+            MatrixFixture {
+                backend,
+                confirmed,
+                original: vec![
+                    ("C:\\work\\a.txt", Some(1)),
+                    ("C:\\work\\b.txt", Some(2)),
+                    ("C:\\work\\c.txt", None),
+                ],
+                committed: vec![
+                    ("C:\\work\\a.txt", None),
+                    ("C:\\work\\b.txt", Some(1)),
+                    ("C:\\work\\c.txt", Some(2)),
+                ],
+                sentinels: vec![sentinel],
+            }
+        }
+        MatrixGraph::CrossParent => {
+            let backend = MemoryBackend::new()
+                .with_file("C:\\left\\a.txt", 1)
+                .with_file("C:\\right\\b.txt", 2)
+                .with_file("C:\\left\\sentinel.txt", 97)
+                .with_file("C:\\right\\sentinel.txt", 98)
+                .with_file(sentinel.0, sentinel.1);
+            let confirmed = confirmed_cross_parent_plan(
+                &backend,
+                vec![
+                    cross_parent_intent(0, "C:\\left\\a.txt", "C:\\right", "a.txt"),
+                    cross_parent_intent(1, "C:\\right\\b.txt", "C:\\left", "renamed.txt"),
+                ],
+            )?;
+            MatrixFixture {
+                backend,
+                confirmed,
+                original: vec![
+                    ("C:\\left\\a.txt", Some(1)),
+                    ("C:\\right\\a.txt", None),
+                    ("C:\\right\\b.txt", Some(2)),
+                    ("C:\\left\\renamed.txt", None),
+                ],
+                committed: vec![
+                    ("C:\\left\\a.txt", None),
+                    ("C:\\right\\a.txt", Some(1)),
+                    ("C:\\right\\b.txt", None),
+                    ("C:\\left\\renamed.txt", Some(2)),
+                ],
+                sentinels: vec![
+                    ("C:\\left\\sentinel.txt", 97),
+                    ("C:\\right\\sentinel.txt", 98),
+                    sentinel,
+                ],
+            }
+        }
+        MatrixGraph::CaseOnly => {
+            let backend = MemoryBackend::new()
+                .with_file("C:\\work\\alpha.txt", 1)
+                .with_file(sentinel.0, sentinel.1);
+            let confirmed = confirmed_plan(&backend, vec![intent(0, "alpha.txt", "ALPHA.TXT")])?;
+            MatrixFixture {
+                backend,
+                confirmed,
+                original: vec![("C:\\work\\alpha.txt", Some(1))],
+                committed: vec![("C:\\work\\ALPHA.TXT", Some(1))],
+                sentinels: vec![sentinel],
+            }
+        }
+        MatrixGraph::MixedCycles => {
+            let backend = MemoryBackend::new()
+                .with_file("C:\\work\\a.txt", 1)
+                .with_file("C:\\work\\b.txt", 2)
+                .with_file("C:\\work\\c.txt", 3)
+                .with_file("C:\\work\\d.txt", 4)
+                .with_file("C:\\work\\e.txt", 5)
+                .with_file("C:\\work\\case.txt", 6)
+                .with_file(sentinel.0, sentinel.1);
+            let confirmed = confirmed_plan(
+                &backend,
+                vec![
+                    intent(0, "a.txt", "b.txt"),
+                    intent(1, "b.txt", "a.txt"),
+                    intent(2, "c.txt", "d.txt"),
+                    intent(3, "d.txt", "e.txt"),
+                    intent(4, "e.txt", "c.txt"),
+                    intent(5, "case.txt", "CASE.TXT"),
+                ],
+            )?;
+            MatrixFixture {
+                backend,
+                confirmed,
+                original: vec![
+                    ("C:\\work\\a.txt", Some(1)),
+                    ("C:\\work\\b.txt", Some(2)),
+                    ("C:\\work\\c.txt", Some(3)),
+                    ("C:\\work\\d.txt", Some(4)),
+                    ("C:\\work\\e.txt", Some(5)),
+                    ("C:\\work\\case.txt", Some(6)),
+                ],
+                committed: vec![
+                    ("C:\\work\\a.txt", Some(2)),
+                    ("C:\\work\\b.txt", Some(1)),
+                    ("C:\\work\\c.txt", Some(5)),
+                    ("C:\\work\\d.txt", Some(3)),
+                    ("C:\\work\\e.txt", Some(4)),
+                    ("C:\\work\\CASE.TXT", Some(6)),
+                ],
+                sentinels: vec![sentinel],
+            }
+        }
+    };
+    Ok(fixture)
+}
+
+fn assert_matrix_mapping(
+    backend: &MemoryBackend,
+    expected: &[(&str, Option<u128>)],
+    graph: MatrixGraph,
+) {
+    for (path, identity) in expected {
+        assert_eq!(
+            backend.file_id(*path),
+            *identity,
+            "{} identity mismatch at {path}",
+            graph.name()
+        );
+    }
+}
+
+fn assert_matrix_identities_are_unique(
+    backend: &MemoryBackend,
+    original: &[(&str, Option<u128>)],
+    committed: &[(&str, Option<u128>)],
+    completed_moves: &[(String, String)],
+    graph: MatrixGraph,
+) {
+    let mut paths = original
+        .iter()
+        .chain(committed)
+        .map(|(path, _)| (*path).to_owned())
+        .collect::<Vec<_>>();
+    for (source, destination) in completed_moves {
+        paths.push(source.clone());
+        paths.push(destination.clone());
+    }
+    paths.sort_by_key(|path| path.to_ascii_lowercase());
+    paths.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    let identities = original
+        .iter()
+        .filter_map(|(_, identity)| *identity)
+        .collect::<Vec<_>>();
+    for identity in identities {
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|path| backend.file_id(path.as_str()) == Some(identity))
+                .count(),
+            1,
+            "{} lost or duplicated identity {identity}",
+            graph.name()
+        );
+    }
+}
+
 fn run_executor_matrix_case(
-    forced_rollback: bool,
+    graph: MatrixGraph,
+    forced_rollback_at: Option<usize>,
     journal_fault: Option<(usize, AppendCertainty)>,
     rename_fault: Option<(usize, MutationCertainty)>,
 ) -> Result<ExecutorMatrixEvidence, Box<dyn std::error::Error>> {
-    let planned_backend = MemoryBackend::new()
-        .with_file("C:\\work\\a.txt", 1)
-        .with_file("C:\\work\\b.txt", 2)
-        .with_file("C:\\work\\sentinel.txt", 99);
-    let confirmed = confirmed_plan(
-        &planned_backend,
-        vec![intent(0, "a.txt", "b.txt"), intent(1, "b.txt", "c.txt")],
-    )?;
+    let MatrixFixture {
+        backend: fixture_backend,
+        confirmed,
+        original,
+        committed,
+        sentinels,
+    } = matrix_fixture(graph)?;
     let timeline = Rc::new(RefCell::new(Vec::new()));
     let mut backend = MatrixBackend {
-        inner: planned_backend,
-        forced_rollback,
+        inner: fixture_backend,
+        forced_rollback_at,
         fault: rename_fault,
         rename_attempts: 0,
         timeline: Rc::clone(&timeline),
@@ -1927,38 +2134,41 @@ fn run_executor_matrix_case(
 
     let result = RenameExecutor::new(&mut backend, &mut journal).execute(confirmed);
 
-    let state = [
-        backend.inner.file_id("C:\\work\\a.txt"),
-        backend.inner.file_id("C:\\work\\b.txt"),
-        backend.inner.file_id("C:\\work\\c.txt"),
-    ];
-    let original = [Some(1), Some(2), None];
-    let committed = [None, Some(1), Some(2)];
-    assert_eq!(backend.inner.file_id("C:\\work\\sentinel.txt"), Some(99));
-    assert_eq!(
-        state.iter().filter(|file_id| **file_id == Some(1)).count(),
-        1
-    );
-    assert_eq!(
-        state.iter().filter(|file_id| **file_id == Some(2)).count(),
-        1
-    );
-    let allowed_endpoints = ["C:\\work\\a.txt", "C:\\work\\b.txt", "C:\\work\\c.txt"];
-    assert!(
-        backend
-            .inner
-            .completed_moves()
-            .iter()
-            .all(|(source, destination)| {
-                allowed_endpoints.contains(&source.as_str())
-                    && allowed_endpoints.contains(&destination.as_str())
-            })
+    for (path, identity) in &sentinels {
+        assert_eq!(backend.inner.file_id(*path), Some(*identity));
+    }
+    assert_matrix_identities_are_unique(
+        &backend.inner,
+        &original,
+        &committed,
+        backend.inner.completed_moves(),
+        graph,
     );
     match &result {
-        Err(_) => assert_eq!(state, original),
+        Err(_) => assert_matrix_mapping(&backend.inner, &original, graph),
         Ok(report) => match report.outcome() {
-            ExecutionOutcome::Completed => assert_eq!(state, committed),
-            ExecutionOutcome::RolledBack { .. } => assert_eq!(state, original),
+            ExecutionOutcome::Completed => {
+                assert_matrix_mapping(&backend.inner, &committed, graph);
+                for (source, destination) in backend.inner.completed_moves() {
+                    if source.contains(".__darknamer_") {
+                        assert_eq!(backend.inner.file_id(source.as_str()), None);
+                    }
+                    if destination.contains(".__darknamer_") {
+                        assert_eq!(backend.inner.file_id(destination.as_str()), None);
+                    }
+                }
+            }
+            ExecutionOutcome::RolledBack { .. } => {
+                assert_matrix_mapping(&backend.inner, &original, graph);
+                for (source, destination) in backend.inner.completed_moves() {
+                    if source.contains(".__darknamer_") {
+                        assert_eq!(backend.inner.file_id(source.as_str()), None);
+                    }
+                    if destination.contains(".__darknamer_") {
+                        assert_eq!(backend.inner.file_id(destination.as_str()), None);
+                    }
+                }
+            }
             ExecutionOutcome::RecoveryRequired { .. } => {}
         },
     }
@@ -1995,50 +2205,81 @@ fn journal_methods_are_covered(calls: &[MatrixJournalCall]) -> bool {
 }
 
 fn run_executor_fault_matrix() -> Result<(), Box<dyn std::error::Error>> {
-    let normal = run_executor_matrix_case(false, None, None)?;
-    let rollback = run_executor_matrix_case(true, None, None)?;
-    assert!(journal_methods_are_covered(
-        &normal
-            .journal_calls
-            .iter()
-            .chain(&rollback.journal_calls)
-            .copied()
-            .collect::<Vec<_>>()
-    ));
+    for graph in MatrixGraph::ALL {
+        let normal = run_executor_matrix_case(graph, None, None, None)?;
+        let rollback = run_executor_matrix_case(graph, Some(normal.rename_attempts), None, None)?;
+        let expected_counts = match graph {
+            MatrixGraph::Chain | MatrixGraph::CrossParent | MatrixGraph::CaseOnly => (6, 2, 8, 3),
+            MatrixGraph::MixedCycles => (20, 9, 36, 17),
+        };
+        assert_eq!(
+            (
+                normal.journal_calls.len(),
+                normal.rename_attempts,
+                rollback.journal_calls.len(),
+                rollback.rename_attempts,
+            ),
+            expected_counts,
+            "{} matrix topology changed",
+            graph.name()
+        );
+        assert!(
+            journal_methods_are_covered(
+                &normal
+                    .journal_calls
+                    .iter()
+                    .chain(&rollback.journal_calls)
+                    .copied()
+                    .collect::<Vec<_>>()
+            ),
+            "{} did not cover every journal method",
+            graph.name()
+        );
 
-    for (forced_rollback, baseline) in [(false, &normal), (true, &rollback)] {
-        for ordinal in 1..=baseline.journal_calls.len() {
-            for certainty in [
-                AppendCertainty::NotAppended,
-                AppendCertainty::MayHaveAppended,
-            ] {
-                let evidence =
-                    run_executor_matrix_case(forced_rollback, Some((ordinal, certainty)), None)?;
-                assert_eq!(
-                    evidence.journal_calls[ordinal - 1],
-                    baseline.journal_calls[ordinal - 1]
-                );
-                if certainty == AppendCertainty::MayHaveAppended {
+        for (forced_rollback_at, baseline) in
+            [(None, &normal), (Some(normal.rename_attempts), &rollback)]
+        {
+            for ordinal in 1..=baseline.journal_calls.len() {
+                for certainty in [
+                    AppendCertainty::NotAppended,
+                    AppendCertainty::MayHaveAppended,
+                ] {
+                    let evidence = run_executor_matrix_case(
+                        graph,
+                        forced_rollback_at,
+                        Some((ordinal, certainty)),
+                        None,
+                    )?;
                     assert_eq!(
-                        evidence.timeline.last(),
-                        Some(&MatrixEvent::Journal(baseline.journal_calls[ordinal - 1]))
+                        evidence.journal_calls[ordinal - 1],
+                        baseline.journal_calls[ordinal - 1]
                     );
+                    if certainty == AppendCertainty::MayHaveAppended {
+                        assert_eq!(
+                            evidence.timeline.last(),
+                            Some(&MatrixEvent::Journal(baseline.journal_calls[ordinal - 1]))
+                        );
+                    }
                 }
             }
-        }
-        for ordinal in 1..=baseline.rename_attempts {
-            for certainty in [
-                MutationCertainty::NotApplied,
-                MutationCertainty::MayHaveApplied,
-            ] {
-                let evidence =
-                    run_executor_matrix_case(forced_rollback, None, Some((ordinal, certainty)))?;
-                assert!(evidence.rename_attempts >= ordinal);
-                if certainty == MutationCertainty::MayHaveApplied {
-                    assert_eq!(
-                        evidence.timeline.last(),
-                        Some(&MatrixEvent::Rename(ordinal))
-                    );
+            for ordinal in 1..=baseline.rename_attempts {
+                for certainty in [
+                    MutationCertainty::NotApplied,
+                    MutationCertainty::MayHaveApplied,
+                ] {
+                    let evidence = run_executor_matrix_case(
+                        graph,
+                        forced_rollback_at,
+                        None,
+                        Some((ordinal, certainty)),
+                    )?;
+                    assert!(evidence.rename_attempts >= ordinal);
+                    if certainty == MutationCertainty::MayHaveApplied {
+                        assert_eq!(
+                            evidence.timeline.last(),
+                            Some(&MatrixEvent::Rename(ordinal))
+                        );
+                    }
                 }
             }
         }

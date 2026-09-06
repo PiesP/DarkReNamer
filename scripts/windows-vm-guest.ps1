@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory)]
     [string] $BundleRoot,
@@ -96,6 +96,19 @@ function Get-LowerSha256 {
     param([Parameter(Mandatory)][string] $Path)
 
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Get-LowerTextSha256 {
+    param([Parameter(Mandatory)][string] $Value)
+
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $algorithm.ComputeHash([Text.Encoding]::UTF8.GetBytes($Value))
+        ([BitConverter]::ToString($digest) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        $algorithm.Dispose()
+    }
 }
 
 function Resolve-VerifiedBundle {
@@ -539,17 +552,864 @@ public static class DarkReNamerVmNative {
     public static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")]
     public static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")]
+    public static extern bool IsWindow(IntPtr window);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern int GetClassName(IntPtr window, System.Text.StringBuilder text, int count);
     [DllImport("user32.dll")]
     public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool GetWindowRect(IntPtr window, out Rect rect);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation {
+        public uint FileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateFile(
+        string path, uint access, uint share, IntPtr securityAttributes,
+        uint creationDisposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(
+        IntPtr file, out ByHandleFileInformation information);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    public static string GetFileIdentity(string path) {
+        IntPtr file = CreateFile(path, 0x80, 1 | 2 | 4, IntPtr.Zero, 3, 0x80, IntPtr.Zero);
+        if (file == new IntPtr(-1)) {
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        }
+        try {
+            ByHandleFileInformation information;
+            if (!GetFileInformationByHandle(file, out information)) {
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            }
+            ulong index = ((ulong)information.FileIndexHigh << 32) | information.FileIndexLow;
+            return information.VolumeSerialNumber.ToString("x8") + ":" + index.ToString("x16");
+        }
+        finally {
+            CloseHandle(file);
+        }
+    }
 }
 '@
     }
     Add-Type -AssemblyName System.Drawing
     Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+    Add-Type -AssemblyName UIAutomationClientsideProviders
+    if (-not ('DarkReNamerVmAutomation' -as [type])) {
+        $automationReferences = @(
+            [Windows.Automation.AutomationElement].Assembly.Location
+            [Windows.Automation.AutomationProperty].Assembly.Location
+            [UIAutomationClientsideProviders.UIAutomationClientSideProviders].Assembly.Location
+        )
+        Add-Type -ReferencedAssemblies $automationReferences -TypeDefinition @'
+public static class DarkReNamerVmAutomation {
+    // UIA's default-proxy stack walk cannot inspect PowerShell dynamic frames.
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    public static void Initialize() {
+        System.Windows.Automation.ClientSettings.RegisterClientSideProviderAssembly(
+            typeof(UIAutomationClientsideProviders.UIAutomationClientSideProviders).Assembly.GetName());
+    }
+}
+'@
+    }
+    [DarkReNamerVmAutomation]::Initialize()
+}
+
+function Assert-AutomationBinding {
+    param(
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Element,
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][string] $Label,
+        [switch] $RequireWindowHandle
+    )
+
+    if ($Element.Current.ProcessId -ne $Process.Id -or $Process.SessionId -ne $ExpectedSession) {
+        throw "$Label is not bound to the expected process and desktop session."
+    }
+    $nativeHandle = [IntPtr]$Element.Current.NativeWindowHandle
+    if ($RequireWindowHandle) {
+        if ($nativeHandle -eq [IntPtr]::Zero -or -not [DarkReNamerVmNative]::IsWindow($nativeHandle)) {
+            throw "$Label does not expose one live native control."
+        }
+        $boundProcessId = [uint32]0
+        [void][DarkReNamerVmNative]::GetWindowThreadProcessId($nativeHandle, [ref]$boundProcessId)
+        if ($boundProcessId -ne $Process.Id) {
+            throw "$Label native control belongs to another process."
+        }
+    }
+}
+
+function Find-UniqueAutomationElement {
+    param(
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Root,
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][string] $AutomationId,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][string] $Label,
+        [Windows.Automation.ControlType] $ControlType,
+        [Windows.Automation.TreeScope] $Scope = [Windows.Automation.TreeScope]::Descendants,
+        [switch] $RequireEnabled,
+        [switch] $RequireWindowHandle
+    )
+
+    $conditions = [Collections.Generic.List[Windows.Automation.Condition]]::new()
+    $conditions.Add([Windows.Automation.PropertyCondition]::new(
+        [Windows.Automation.AutomationElement]::ProcessIdProperty,
+        $Process.Id
+    ))
+    $conditions.Add([Windows.Automation.PropertyCondition]::new(
+        [Windows.Automation.AutomationElement]::AutomationIdProperty,
+        $AutomationId
+    ))
+    if ($null -ne $ControlType) {
+        $conditions.Add([Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::ControlTypeProperty,
+            $ControlType
+        ))
+    }
+    if ($RequireEnabled) {
+        $conditions.Add([Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::IsEnabledProperty,
+            $true
+        ))
+    }
+    $condition = [Windows.Automation.AndCondition]::new($conditions.ToArray())
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    do {
+        $matches = $Root.FindAll($Scope, $condition)
+        if ($matches.Count -gt 1) {
+            throw "$Label matched more than one automation element."
+        }
+        if ($matches.Count -eq 1) {
+            $element = $matches.Item(0)
+            Assert-AutomationBinding `
+                -Element $element `
+                -Process $Process `
+                -ExpectedSession $ExpectedSession `
+                -Label $Label `
+                -RequireWindowHandle:$RequireWindowHandle
+            return $element
+        }
+        Start-Sleep -Milliseconds 100
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            throw "$Label was not found before the application exited."
+        }
+    } while ((Get-Date) -lt $deadline)
+    throw "$Label was not found before the bounded deadline."
+}
+
+function Wait-UniqueAutomationWindow {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][string] $Name,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    $root = [Windows.Automation.AutomationElement]::RootElement
+    $conditions = [Windows.Automation.Condition[]]@(
+        [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::ProcessIdProperty,
+            $Process.Id
+        ),
+        [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::NameProperty,
+            $Name
+        ),
+        [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [Windows.Automation.ControlType]::Window
+        )
+    )
+    $condition = [Windows.Automation.AndCondition]::new($conditions)
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    do {
+        $windows = @{}
+        $main = [Windows.Automation.AutomationElement]::FromHandle($Process.MainWindowHandle)
+        $candidates = @($root.FindAll([Windows.Automation.TreeScope]::Children, $condition))
+        if ($null -ne $main) {
+            # Managed Win32 providers place owned dialogs below their owner.
+            $candidates += @($main.FindAll([Windows.Automation.TreeScope]::Descendants, $condition))
+        }
+        foreach ($candidate in $candidates) {
+            $windows[[string]$candidate.Current.NativeWindowHandle] = $candidate
+        }
+        $matches = @($windows.Values)
+        if ($matches.Count -gt 1) {
+            throw "$Label matched more than one top-level window."
+        }
+        if ($matches.Count -eq 1) {
+            $element = $matches[0]
+            Assert-AutomationBinding `
+                -Element $element `
+                -Process $Process `
+                -ExpectedSession $ExpectedSession `
+                -Label $Label `
+                -RequireWindowHandle
+            return $element
+        }
+        Start-Sleep -Milliseconds 100
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            throw "$Label was not found before the application exited."
+        }
+    } while ((Get-Date) -lt $deadline)
+    throw "$Label was not found before the bounded deadline."
+}
+
+function Invoke-AutomationControl {
+    param(
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Element,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    $pattern = $null
+    if (-not $Element.TryGetCurrentPattern(
+        [Windows.Automation.InvokePattern]::Pattern,
+        [ref]$pattern
+    )) {
+        throw "$Label does not support UI Automation InvokePattern."
+    }
+    ([Windows.Automation.InvokePattern]$pattern).Invoke()
+}
+
+function Start-AutomationControlInvoke {
+    param(
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Element,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    $runspace = [RunspaceFactory]::CreateRunspace()
+    $runspace.ApartmentState = [Threading.ApartmentState]::MTA
+    $runspace.Open()
+    $runspace.SessionStateProxy.SetVariable('automationElement', $Element)
+    $runspace.SessionStateProxy.SetVariable('automationLabel', $Label)
+    $powershell = [PowerShell]::Create()
+    $powershell.Runspace = $runspace
+    [void]$powershell.AddScript(@'
+$invokePattern = $null
+if (-not $automationElement.TryGetCurrentPattern(
+    [Windows.Automation.InvokePattern]::Pattern,
+    [ref]$invokePattern
+)) {
+    throw "$automationLabel does not support UI Automation InvokePattern."
+}
+([Windows.Automation.InvokePattern]$invokePattern).Invoke()
+'@)
+    try {
+        $asyncResult = $powershell.BeginInvoke()
+        [pscustomobject]@{
+            powershell = $powershell
+            runspace = $runspace
+            async_result = $asyncResult
+            label = $Label
+            completed = $false
+        }
+    }
+    catch {
+        $powershell.Dispose()
+        $runspace.Dispose()
+        throw
+    }
+}
+
+function Complete-AutomationControlInvoke {
+    param(
+        [Parameter(Mandatory)][object] $State,
+        [Parameter(Mandatory)][int] $TimeoutSeconds
+    )
+
+    if ($State.completed) {
+        return
+    }
+    $waitMilliseconds = [int]([Math]::Min(
+        [int]::MaxValue,
+        [Math]::Min(30, $TimeoutSeconds) * 1000L
+    ))
+    if (-not $State.async_result.AsyncWaitHandle.WaitOne($waitMilliseconds)) {
+        throw "$($State.label) UI Automation invocation did not return before the bounded deadline."
+    }
+    try {
+        [void]$State.powershell.EndInvoke($State.async_result)
+        if ($State.powershell.HadErrors) {
+            throw "$($State.label) UI Automation invocation failed."
+        }
+    }
+    finally {
+        $State.completed = $true
+        $State.powershell.Dispose()
+        $State.runspace.Dispose()
+    }
+}
+
+function Set-AutomationControlValue {
+    param(
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Element,
+        [Parameter(Mandatory)][string] $Value,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    $pattern = $null
+    if (-not $Element.TryGetCurrentPattern(
+        [Windows.Automation.ValuePattern]::Pattern,
+        [ref]$pattern
+    )) {
+        $editCondition = [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [Windows.Automation.ControlType]::Edit
+        )
+        $edits = $Element.FindAll([Windows.Automation.TreeScope]::Descendants, $editCondition)
+        if ($edits.Count -ne 1 -or -not $edits.Item(0).TryGetCurrentPattern(
+            [Windows.Automation.ValuePattern]::Pattern,
+            [ref]$pattern
+        )) {
+            throw "$Label does not expose one UI Automation value control."
+        }
+    }
+    $valuePattern = [Windows.Automation.ValuePattern]$pattern
+    if ($valuePattern.Current.IsReadOnly) {
+        throw "$Label is read-only."
+    }
+    $valuePattern.SetValue($Value)
+    if ($valuePattern.Current.Value -cne $Value) {
+        throw "$Label did not retain the exact requested value."
+    }
+}
+
+function Wait-WindowClosed {
+    param(
+        [Parameter(Mandatory)][IntPtr] $Handle,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    while ([DarkReNamerVmNative]::IsWindow($Handle) -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 100
+    }
+    if ([DarkReNamerVmNative]::IsWindow($Handle)) {
+        throw "$Label did not close before the bounded deadline."
+    }
+}
+
+function Wait-ListPreviewName {
+    param(
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][string] $ExpectedName,
+        [Parameter(Mandatory)][int] $TimeoutSeconds
+    )
+
+    $list = Find-UniqueAutomationElement `
+        -Root $MainWindow `
+        -Process $Process `
+        -ExpectedSession $ExpectedSession `
+        -AutomationId '1000' `
+        -TimeoutSeconds $TimeoutSeconds `
+        -Label 'production file list' `
+        -RequireWindowHandle
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    do {
+        try {
+            $gridObject = $null
+            if ($list.TryGetCurrentPattern([Windows.Automation.GridPattern]::Pattern, [ref]$gridObject)) {
+                $grid = [Windows.Automation.GridPattern]$gridObject
+                if ($grid.Current.RowCount -eq 1 -and $grid.Current.ColumnCount -ge 2) {
+                    $candidate = $grid.GetItem(0, 1)
+                    if ($candidate.Current.Name -ceq $ExpectedName) {
+                        return
+                    }
+                }
+            }
+        }
+        catch [Windows.Automation.ElementNotAvailableException] {
+        }
+        $nameCondition = [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::NameProperty,
+            $ExpectedName
+        )
+        $matches = $list.FindAll([Windows.Automation.TreeScope]::Descendants, $nameCondition)
+        if ($matches.Count -eq 1) {
+            Assert-AutomationBinding `
+                -Element $matches.Item(0) `
+                -Process $Process `
+                -ExpectedSession $ExpectedSession `
+                -Label 'production preview cell'
+            return
+        }
+        if ($matches.Count -gt 1) {
+            throw 'The expected production preview name was not unique.'
+        }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    throw 'The expected production preview name was not exposed before the bounded deadline.'
+}
+
+function Save-WindowScreenshot {
+    param(
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Window,
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string] $Leaf,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    Assert-SafeLeafName -Value $Leaf -Label "$Label screenshot" -Pattern '^[A-Za-z0-9][A-Za-z0-9._-]*\.png$'
+    Assert-AutomationBinding `
+        -Element $Window `
+        -Process $Process `
+        -ExpectedSession $ExpectedSession `
+        -Label $Label `
+        -RequireWindowHandle
+    $handle = [IntPtr]$Window.Current.NativeWindowHandle
+    if (-not [DarkReNamerVmNative]::IsWindowVisible($handle)) {
+        throw "$Label is not visible for screenshot capture."
+    }
+    if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
+        $Window.SetFocus()
+        [void][DarkReNamerVmNative]::SetForegroundWindow($handle)
+        $foregroundDeadline = (Get-Date).AddSeconds(5)
+        while ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle -and
+            (Get-Date) -lt $foregroundDeadline) {
+            Start-Sleep -Milliseconds 100
+        }
+    }
+    if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
+        throw "$Label is not the foreground window for screenshot capture."
+    }
+    $rect = [DarkReNamerVmNative+Rect]::new()
+    if (-not [DarkReNamerVmNative]::GetWindowRect($handle, [ref]$rect)) {
+        throw "$Label bounds could not be read."
+    }
+    $width = $rect.Right - $rect.Left
+    $height = $rect.Bottom - $rect.Top
+    if ($width -le 0 -or $height -le 0 -or
+        $width -gt 16384 -or $height -gt 16384 -or
+        ([long]$width * [long]$height) -gt 100000000) {
+        throw "$Label bounds are invalid."
+    }
+    $bitmap = $null
+    $graphics = $null
+    try {
+        $bitmap = [Drawing.Bitmap]::new(
+            $width,
+            $height,
+            [Drawing.Imaging.PixelFormat]::Format32bppArgb
+        )
+        $graphics = [Drawing.Graphics]::FromImage($bitmap)
+        $graphics.CopyFromScreen(
+            $rect.Left,
+            $rect.Top,
+            0,
+            0,
+            $bitmap.Size,
+            [Drawing.CopyPixelOperation]::SourceCopy
+        )
+        if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
+            throw "$Label lost foreground during screenshot capture."
+        }
+        $firstColor = $bitmap.GetPixel(0, 0).ToArgb()
+        $hasDifferentColor = $false
+        $stepX = [Math]::Max(1, [int]($width / 64))
+        $stepY = [Math]::Max(1, [int]($height / 64))
+        for ($y = 0; $y -lt $height -and -not $hasDifferentColor; $y += $stepY) {
+            for ($x = 0; $x -lt $width; $x += $stepX) {
+                if ($bitmap.GetPixel($x, $y).ToArgb() -ne $firstColor) {
+                    $hasDifferentColor = $true
+                    break
+                }
+            }
+        }
+        if (-not $hasDifferentColor) {
+            throw "$Label screenshot is a solid image."
+        }
+        $path = Join-Path $Root $Leaf
+        $bitmap.Save($path, [Drawing.Imaging.ImageFormat]::Png)
+        if ((Get-Item -LiteralPath $path).Length -le 0) {
+            throw "$Label screenshot is empty."
+        }
+        [ordered]@{
+            file = $Leaf
+            sha256 = Get-LowerSha256 -Path $path
+            width = $width
+            height = $height
+        }
+    }
+    finally {
+        if ($null -ne $graphics) { $graphics.Dispose() }
+        if ($null -ne $bitmap) { $bitmap.Dispose() }
+    }
+}
+
+function Assert-NoJournalResidue {
+    param([Parameter(Mandatory)][string] $LocalAppData)
+
+    $journalRoot = Join-Path (Join-Path $LocalAppData 'DarkReNamer') 'journal'
+    if (Test-Path -LiteralPath $journalRoot) {
+        $residue = @(
+            Get-ChildItem -LiteralPath $journalRoot -Force |
+                Where-Object Name -cne 'runtime.lock'
+        )
+        if ($residue.Count -ne 0) {
+            throw 'The production flow left rename-journal residue.'
+        }
+    }
+}
+
+function Invoke-ProductionRenameFlow {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][int] $TimeoutSeconds
+    )
+
+    $sourceName = 'vm-flow-source.txt'
+    $prefix = 'vm-confirmed-'
+    $previewName = $prefix + $sourceName
+    $sourcePath = Join-Path $FixtureRoot $sourceName
+    $destinationPath = Join-Path $FixtureRoot $previewName
+    $pendingInvocations = [Collections.Generic.List[object]]::new()
+    $flow = [ordered]@{
+        status = 'failed'
+        scope = 'production-file-add-prefix-cancel-confirm'
+        application_file = 'DarkReNamer.exe'
+        application_sha256 = $null
+        source_name = $sourceName
+        preview_name = $previewName
+        before_content_sha256 = $null
+        after_content_sha256 = $null
+        before_file_identity_sha256 = $null
+        after_file_identity_sha256 = $null
+        cancellation_source_present = $null
+        cancellation_destination_present = $null
+        confirmed_source_present = $null
+        confirmed_destination_present = $null
+        journal_residue_count = $null
+        screenshots = @()
+        diagnostic = $null
+        failure_reason = 'fixture_setup_failed'
+    }
+    try {
+        $flow.application_sha256 = Get-LowerSha256 -Path (Join-Path $Root 'DarkReNamer.exe')
+        $fixtureBytes = [Text.UTF8Encoding]::new($false).GetBytes(
+            "DarkReNamer production VM flow`nidentity and content must survive`n"
+        )
+        [IO.File]::WriteAllBytes($sourcePath, $fixtureBytes)
+        $flow.before_content_sha256 = Get-LowerSha256 -Path $sourcePath
+        $beforeFileIdentity = [DarkReNamerVmNative]::GetFileIdentity($sourcePath)
+        $flow.before_file_identity_sha256 = Get-LowerTextSha256 -Value $beforeFileIdentity
+
+        $flow.failure_reason = 'file_add_failed'
+        $add = Find-UniqueAutomationElement `
+            -Root $MainWindow `
+            -Process $Process `
+            -ExpectedSession $ExpectedSession `
+            -AutomationId ([string]0x8017) `
+            -ControlType ([Windows.Automation.ControlType]::Button) `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Label 'file-add command' `
+            -RequireEnabled `
+            -RequireWindowHandle
+        $invoke = Start-AutomationControlInvoke -Element $add -Label 'file-add command'
+        $pendingInvocations.Add($invoke)
+
+        $fileDialog = Wait-UniqueAutomationWindow `
+            -Process $Process `
+            -ExpectedSession $ExpectedSession `
+            -Name '이름 붙일 파일 불러오기' `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Label 'production file dialog'
+        $fileDialogHandle = [IntPtr]$fileDialog.Current.NativeWindowHandle
+        $fileName = Find-UniqueAutomationElement `
+            -Root $fileDialog `
+            -Process $Process `
+            -ExpectedSession $ExpectedSession `
+            -AutomationId '1148' `
+            -ControlType ([Windows.Automation.ControlType]::Edit) `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Label 'file dialog filename control'
+        Set-AutomationControlValue `
+            -Element $fileName `
+            -Value $sourcePath `
+            -Label 'file dialog filename control'
+        $open = Find-UniqueAutomationElement `
+            -Root $fileDialog `
+            -Process $Process `
+            -ExpectedSession $ExpectedSession `
+            -AutomationId '1' `
+            -ControlType ([Windows.Automation.ControlType]::Button) `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Label 'file dialog open button' `
+            -RequireEnabled `
+            -RequireWindowHandle
+        Invoke-AutomationControl -Element $open -Label 'file dialog open button'
+        Wait-WindowClosed -Handle $fileDialogHandle -TimeoutSeconds $TimeoutSeconds -Label 'production file dialog'
+        Complete-AutomationControlInvoke -State $invoke -TimeoutSeconds $TimeoutSeconds
+        Wait-ListPreviewName `
+            -MainWindow $MainWindow `
+            -Process $Process `
+            -ExpectedSession $ExpectedSession `
+            -ExpectedName $sourceName `
+            -TimeoutSeconds $TimeoutSeconds
+
+        $flow.failure_reason = 'prefix_prompt_failed'
+        $prefixCommand = Find-UniqueAutomationElement `
+            -Root $MainWindow `
+            -Process $Process `
+            -ExpectedSession $ExpectedSession `
+            -AutomationId ([string]0x8005) `
+            -ControlType ([Windows.Automation.ControlType]::Button) `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Label 'prefix command' `
+            -RequireEnabled `
+            -RequireWindowHandle
+        $invoke = Start-AutomationControlInvoke -Element $prefixCommand -Label 'prefix command'
+        $pendingInvocations.Add($invoke)
+        $prompt = Wait-UniqueAutomationWindow `
+            -Process $Process `
+            -ExpectedSession $ExpectedSession `
+            -Name '이름 앞에 문자열 붙이기' `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Label 'prefix prompt'
+        $promptHandle = [IntPtr]$prompt.Current.NativeWindowHandle
+        $prefixEdit = Find-UniqueAutomationElement `
+            -Root $prompt `
+            -Process $Process `
+            -ExpectedSession $ExpectedSession `
+            -AutomationId '1004' `
+            -ControlType ([Windows.Automation.ControlType]::Edit) `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Label 'prefix prompt edit' `
+            -RequireWindowHandle
+        Set-AutomationControlValue -Element $prefixEdit -Value $prefix -Label 'prefix prompt edit'
+        $promptOk = Find-UniqueAutomationElement `
+            -Root $prompt `
+            -Process $Process `
+            -ExpectedSession $ExpectedSession `
+            -AutomationId '1' `
+            -ControlType ([Windows.Automation.ControlType]::Button) `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Label 'prefix prompt confirmation' `
+            -RequireEnabled `
+            -RequireWindowHandle
+        Invoke-AutomationControl -Element $promptOk -Label 'prefix prompt confirmation'
+        Wait-WindowClosed -Handle $promptHandle -TimeoutSeconds $TimeoutSeconds -Label 'prefix prompt'
+        Complete-AutomationControlInvoke -State $invoke -TimeoutSeconds $TimeoutSeconds
+        Wait-ListPreviewName `
+            -MainWindow $MainWindow `
+            -Process $Process `
+            -ExpectedSession $ExpectedSession `
+            -ExpectedName $previewName `
+            -TimeoutSeconds $TimeoutSeconds
+        $flow.failure_reason = 'preview_verification_failed'
+        $screenshots = [Collections.Generic.List[object]]::new()
+        $screenshots.Add((Save-WindowScreenshot `
+            -Window $MainWindow `
+            -Process $Process `
+            -ExpectedSession $ExpectedSession `
+            -Root $Root `
+            -Leaf 'rename-preview.png' `
+            -Label 'production rename preview'))
+        $flow.screenshots = $screenshots.ToArray()
+
+        $flow.failure_reason = 'apply_cancellation_failed'
+        $apply = Find-UniqueAutomationElement `
+            -Root $MainWindow `
+            -Process $Process `
+            -ExpectedSession $ExpectedSession `
+            -AutomationId ([string]0x8003) `
+            -ControlType ([Windows.Automation.ControlType]::Button) `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Label 'apply command' `
+            -RequireEnabled `
+            -RequireWindowHandle
+        $invoke = Start-AutomationControlInvoke -Element $apply -Label 'apply command'
+        $pendingInvocations.Add($invoke)
+        $confirmation = Wait-UniqueAutomationWindow `
+            -Process $Process `
+            -ExpectedSession $ExpectedSession `
+            -Name 'DarkReNamer - 안전한 적용 확인' `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Label 'apply confirmation task dialog'
+        $confirmationHandle = [IntPtr]$confirmation.Current.NativeWindowHandle
+        $screenshots.Add((Save-WindowScreenshot `
+            -Window $confirmation `
+            -Process $Process `
+            -ExpectedSession $ExpectedSession `
+            -Root $Root `
+            -Leaf 'apply-confirmation.png' `
+            -Label 'apply confirmation task dialog'))
+        $flow.screenshots = $screenshots.ToArray()
+        $cancel = Find-UniqueAutomationElement `
+            -Root $confirmation `
+            -Process $Process `
+            -ExpectedSession $ExpectedSession `
+            -AutomationId 'CommandButton_2' `
+            -ControlType ([Windows.Automation.ControlType]::Button) `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Label 'apply confirmation cancel button' `
+            -RequireEnabled `
+            -RequireWindowHandle
+        Invoke-AutomationControl -Element $cancel -Label 'apply confirmation cancel button'
+        Wait-WindowClosed `
+            -Handle $confirmationHandle `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Label 'cancelled apply confirmation task dialog'
+        Complete-AutomationControlInvoke -State $invoke -TimeoutSeconds $TimeoutSeconds
+        $flow.cancellation_source_present = Test-Path -LiteralPath $sourcePath -PathType Leaf
+        $flow.cancellation_destination_present = Test-Path -LiteralPath $destinationPath -PathType Leaf
+        if (-not $flow.cancellation_source_present -or $flow.cancellation_destination_present -or
+            (Get-LowerSha256 -Path $sourcePath) -cne $flow.before_content_sha256 -or
+            [DarkReNamerVmNative]::GetFileIdentity($sourcePath) -cne $beforeFileIdentity) {
+            throw 'Cancelling the production confirmation changed the fixture.'
+        }
+        Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
+
+        $flow.failure_reason = 'confirmed_apply_failed'
+        $apply = Find-UniqueAutomationElement `
+            -Root $MainWindow `
+            -Process $Process `
+            -ExpectedSession $ExpectedSession `
+            -AutomationId ([string]0x8003) `
+            -ControlType ([Windows.Automation.ControlType]::Button) `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Label 'apply command after cancellation' `
+            -RequireEnabled `
+            -RequireWindowHandle
+        $invoke = Start-AutomationControlInvoke `
+            -Element $apply `
+            -Label 'apply command after cancellation'
+        $pendingInvocations.Add($invoke)
+        $confirmation = Wait-UniqueAutomationWindow `
+            -Process $Process `
+            -ExpectedSession $ExpectedSession `
+            -Name 'DarkReNamer - 안전한 적용 확인' `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Label 'second apply confirmation task dialog'
+        $confirmationHandle = [IntPtr]$confirmation.Current.NativeWindowHandle
+        $confirm = Find-UniqueAutomationElement `
+            -Root $confirmation `
+            -Process $Process `
+            -ExpectedSession $ExpectedSession `
+            -AutomationId 'CommandLink_1101' `
+            -ControlType ([Windows.Automation.ControlType]::Button) `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Label 'exact destructive confirmation button' `
+            -RequireEnabled `
+            -RequireWindowHandle
+        Invoke-AutomationControl -Element $confirm -Label 'exact destructive confirmation button'
+        Wait-WindowClosed `
+            -Handle $confirmationHandle `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Label 'confirmed apply task dialog'
+        Complete-AutomationControlInvoke -State $invoke -TimeoutSeconds $TimeoutSeconds
+
+        $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+        do {
+            $sourcePresent = Test-Path -LiteralPath $sourcePath -PathType Leaf
+            $destinationPresent = Test-Path -LiteralPath $destinationPath -PathType Leaf
+            if (-not $sourcePresent -and $destinationPresent) {
+                try {
+                    Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
+                    break
+                }
+                catch {
+                }
+            }
+            Start-Sleep -Milliseconds 100
+        } while ((Get-Date) -lt $deadline)
+        Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
+        $flow.confirmed_source_present = Test-Path -LiteralPath $sourcePath -PathType Leaf
+        $flow.confirmed_destination_present = Test-Path -LiteralPath $destinationPath -PathType Leaf
+        if ($flow.confirmed_source_present -or -not $flow.confirmed_destination_present) {
+            throw 'The confirmed production apply did not perform the expected disk rename.'
+        }
+        $flow.after_content_sha256 = Get-LowerSha256 -Path $destinationPath
+        $afterFileIdentity = [DarkReNamerVmNative]::GetFileIdentity($destinationPath)
+        $flow.after_file_identity_sha256 = Get-LowerTextSha256 -Value $afterFileIdentity
+        if ($flow.after_content_sha256 -cne $flow.before_content_sha256 -or
+            $afterFileIdentity -cne $beforeFileIdentity) {
+            throw 'The confirmed production rename did not preserve file contents and identity.'
+        }
+        $journalRoot = Join-Path (Join-Path $env:LOCALAPPDATA 'DarkReNamer') 'journal'
+        $flow.journal_residue_count = if (Test-Path -LiteralPath $journalRoot) {
+            @(
+                Get-ChildItem -LiteralPath $journalRoot -Force |
+                    Where-Object Name -cne 'runtime.lock'
+            ).Count
+        } else {
+            0
+        }
+        $flow.screenshots = $screenshots.ToArray()
+        $flow.status = 'passed'
+        $flow.failure_reason = $null
+    }
+    catch {
+        if ($flow.failure_reason -eq $null) {
+            $flow.failure_reason = 'production_flow_error'
+        }
+        $diagnosticLeaf = 'gui-flow-error.txt'
+        $diagnosticPath = Join-Path $Root $diagnosticLeaf
+        $diagnosticText = $_ | Out-String -Width 4096
+        foreach ($invocation in $pendingInvocations) {
+            if ($invocation.completed) { continue }
+            $diagnosticText += "`n$($invocation.label): completed=$($invocation.async_result.IsCompleted)`n"
+            $diagnosticText += $invocation.powershell.Streams.Error | Out-String -Width 4096
+        }
+        [IO.File]::WriteAllText($diagnosticPath, $diagnosticText, [Text.UTF8Encoding]::new($true))
+        $flow.diagnostic = [ordered]@{
+            file = $diagnosticLeaf
+            sha256 = Get-LowerSha256 -Path $diagnosticPath
+        }
+    }
+    finally {
+        $incomplete = @($pendingInvocations | Where-Object { -not $_.completed })
+        if ($incomplete.Count -gt 0 -and -not $Process.HasExited) {
+            Invoke-TaskkillTree -ProcessId $Process.Id
+            [void]$Process.WaitForExit(10000)
+        }
+        foreach ($invocation in $incomplete) {
+            try {
+                if ($invocation.async_result.AsyncWaitHandle.WaitOne(10000)) {
+                    [void]$invocation.powershell.EndInvoke($invocation.async_result)
+                }
+                else {
+                    $invocation.powershell.Stop()
+                }
+            }
+            catch {
+            }
+            finally {
+                $invocation.completed = $true
+                $invocation.powershell.Dispose()
+                $invocation.runspace.Dispose()
+            }
+        }
+    }
+    [pscustomobject]$flow
 }
 
 function Invoke-GuiSmoke {
@@ -570,10 +1430,12 @@ function Invoke-GuiSmoke {
         window_class = $null
         window_title = $null
         screenshot = $null
+        flow = $null
         failure_reason = 'process_start_failed'
     }
     $processState = [pscustomobject]@{ process = $null }
     $captureState = [pscustomobject]@{ bitmap = $null; graphics = $null }
+    $flowFixtureRoot = $null
     $screenshotLeaf = 'main-workbench.png'
     $screenshotPath = Join-Path $Root $screenshotLeaf
     try {
@@ -700,6 +1562,30 @@ function Invoke-GuiSmoke {
                 height = $height
             }
 
+            $mainAutomationWindow = [Windows.Automation.AutomationElement]::FromHandle($handle)
+            if ($null -eq $mainAutomationWindow) {
+                $row.failure_reason = 'main_window_automation_unavailable'
+                return
+            }
+            Assert-AutomationBinding `
+                -Element $mainAutomationWindow `
+                -Process $processState.process.process `
+                -ExpectedSession $ExpectedSession `
+                -Label 'production main window' `
+                -RequireWindowHandle
+            $flowFixtureRoot = New-PrivateDirectory -Parent $caseRoot -Leaf 'rename-flow'
+            $row.flow = Invoke-ProductionRenameFlow `
+                -Process $processState.process.process `
+                -MainWindow $mainAutomationWindow `
+                -FixtureRoot $flowFixtureRoot `
+                -Root $Root `
+                -ExpectedSession $ExpectedSession `
+                -TimeoutSeconds $TimeoutSeconds
+            if ($row.flow.status -cne 'passed') {
+                $row.failure_reason = 'production_rename_flow_failed'
+                return
+            }
+
             if (-not $processState.process.process.CloseMainWindow()) {
                 $row.failure_reason = 'normal_close_rejected'
                 return
@@ -739,6 +1625,22 @@ function Invoke-GuiSmoke {
                 $row.failure_reason = 'process_cleanup_failed'
             }
             $processState.process.process.Dispose()
+        }
+        if ($null -ne $flowFixtureRoot -and (Test-Path -LiteralPath $flowFixtureRoot)) {
+            try {
+                $fixtureItem = Get-Item -LiteralPath $flowFixtureRoot -Force
+                if (($fixtureItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw 'Production flow fixture became a reparse point.'
+                }
+                Remove-Item -LiteralPath $flowFixtureRoot -Recurse -Force
+                if (Test-Path -LiteralPath $flowFixtureRoot) {
+                    throw 'Production flow fixture cleanup was incomplete.'
+                }
+            }
+            catch {
+                $row.status = 'failed'
+                $row.failure_reason = 'flow_fixture_cleanup_failed'
+            }
         }
     }
     [pscustomobject]$row

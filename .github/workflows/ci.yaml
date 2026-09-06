@@ -133,6 +133,13 @@ jobs:
           cargo test --workspace --all-targets --all-features --locked -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'The Windows test gate failed.' }
 
+      - name: Test optimized workspace artifacts
+        shell: pwsh
+        run: |
+          $env:DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'
+          cargo test --release --workspace --all-targets --all-features --locked -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'The optimized Windows test gate failed.' }
+
       - name: Build the compatibility executable
         shell: pwsh
         run: |

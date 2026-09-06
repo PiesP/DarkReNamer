@@ -157,6 +157,20 @@ try {
     }
 
     . $valid.runner -BundleRoot $valid.root -ExpectedSessionId 1 -ValidateOnly
+    if ((Get-LowerTextSha256 -Value 'abc') -cne
+        'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad') {
+        throw 'The source-bound identity digest helper returned the wrong SHA-256 value.'
+    }
+    $isolatedLocalAppData = Join-Path $valid.root 'isolated-localappdata'
+    $isolatedJournalRoot = Join-Path (Join-Path $isolatedLocalAppData 'DarkReNamer') 'journal'
+    [void](New-Item -ItemType Directory -Path $isolatedJournalRoot)
+    [IO.File]::WriteAllBytes((Join-Path $isolatedJournalRoot 'runtime.lock'), [byte[]]@())
+    Assert-NoJournalResidue -LocalAppData $isolatedLocalAppData
+    [IO.File]::WriteAllBytes((Join-Path $isolatedJournalRoot 'active.drj'), [byte[]](1, 2, 3))
+    Assert-Fails {
+        Assert-NoJournalResidue -LocalAppData $isolatedLocalAppData
+    } 'rename-journal residue'
+    Remove-Item -LiteralPath (Join-Path $isolatedJournalRoot 'active.drj')
     $hostRunner = Join-Path $PSScriptRoot 'run-windows-vm-tests.ps1'
     . $hostRunner -BundleRoot $valid.root -SshHost 'darkrenamer-vm'
     $script:capturedSshSession = $null
@@ -198,6 +212,47 @@ try {
         Join-GuestWindowsPath -Root $guestTransferRoot -Leaf '..\result.json'
     } 'Invalid bundle file name'
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $initScript = @'
+$ErrorActionPreference = 'Stop'
+$runnerPath = 'GUEST_RUNNER_PATH'
+. $runnerPath -BundleRoot 'GUEST_BUNDLE_PATH' -ExpectedSessionId 1 -ValidateOnly
+$tokens = $null
+$errors = $null
+$fromFile = [Management.Automation.Language.Parser]::ParseFile($runnerPath, [ref]$tokens, [ref]$errors)
+$fromUtf8 = [Management.Automation.Language.Parser]::ParseInput([IO.File]::ReadAllText($runnerPath, [Text.Encoding]::UTF8), [ref]$tokens, [ref]$errors)
+$stringNode = { param($node) $node -is [Management.Automation.Language.StringConstantExpressionAst] }
+$fileStrings = @($fromFile.FindAll($stringNode, $true) | ForEach-Object Value)
+$utf8Strings = @($fromUtf8.FindAll($stringNode, $true) | ForEach-Object Value)
+if ($fileStrings.Count -ne $utf8Strings.Count) { throw 'Guest script string decoding differs from UTF-8.' }
+for ($index = 0; $index -lt $fileStrings.Count; $index++) {
+    if ($fileStrings[$index] -cne $utf8Strings[$index]) { throw 'Guest script string decoding differs from UTF-8.' }
+}
+Initialize-NativeCapture
+'@
+        $initScript = $initScript.Replace('GUEST_RUNNER_PATH', $valid.runner.Replace("'", "''")).Replace('GUEST_BUNDLE_PATH', $valid.root.Replace("'", "''"))
+        $encodedInit = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($initScript))
+        $initProcess = Start-OwnedProcess `
+            -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') `
+            -Arguments "-NoLogo -NoProfile -NonInteractive -EncodedCommand $encodedInit" `
+            -WorkingDirectory $valid.root `
+            -RedirectOutput
+        try {
+            if (-not $initProcess.process.WaitForExit(30000)) {
+                throw 'Fresh Windows PowerShell UI Automation initialization timed out.'
+            }
+            $initProcess.process.WaitForExit()
+            if ($initProcess.process.ExitCode -ne 0) {
+                throw "Fresh Windows PowerShell UI Automation initialization failed: $($initProcess.stderr_task.GetAwaiter().GetResult())"
+            }
+        }
+        finally {
+            if (-not $initProcess.process.HasExited) {
+                Invoke-TaskkillTree -ProcessId $initProcess.process.Id
+                [void]$initProcess.process.WaitForExit(10000)
+            }
+            $initProcess.process.Dispose()
+        }
+
         $previousExecutionState = Enter-TestExecutionState
         if ($previousExecutionState -isnot [uint32]) {
             throw 'The execution-state helper did not return the previous Windows flags.'
