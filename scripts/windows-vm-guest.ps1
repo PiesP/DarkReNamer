@@ -1267,7 +1267,7 @@ function Invoke-ProductionRenameFlow {
             -Root $confirmation `
             -Process $Process `
             -ExpectedSession $ExpectedSession `
-            -AutomationId '2' `
+            -AutomationId 'CommandButton_2' `
             -ControlType ([Windows.Automation.ControlType]::Button) `
             -TimeoutSeconds $TimeoutSeconds `
             -Label 'apply confirmation cancel button' `
@@ -1314,7 +1314,7 @@ function Invoke-ProductionRenameFlow {
             -Root $confirmation `
             -Process $Process `
             -ExpectedSession $ExpectedSession `
-            -AutomationId '1101' `
+            -AutomationId 'CommandLink_1101' `
             -ControlType ([Windows.Automation.ControlType]::Button) `
             -TimeoutSeconds $TimeoutSeconds `
             -Label 'exact destructive confirmation button' `
@@ -1378,27 +1378,6 @@ function Invoke-ProductionRenameFlow {
             if ($invocation.completed) { continue }
             $diagnosticText += "`n$($invocation.label): completed=$($invocation.async_result.IsCompleted)`n"
             $diagnosticText += $invocation.powershell.Streams.Error | Out-String -Width 4096
-        }
-        $ownedCondition = [Windows.Automation.PropertyCondition]::new(
-            [Windows.Automation.AutomationElement]::ProcessIdProperty, $Process.Id
-        )
-        $ownedRoots = [Windows.Automation.AutomationElement]::RootElement.FindAll(
-            [Windows.Automation.TreeScope]::Children, $ownedCondition
-        )
-        foreach ($ownedRoot in $ownedRoots) {
-            $diagnosticText += "`nRoot: $($ownedRoot.Current.Name) [$($ownedRoot.Current.ControlType.ProgrammaticName)]`n"
-            foreach ($child in $ownedRoot.FindAll([Windows.Automation.TreeScope]::Descendants, $ownedCondition)) {
-                if ($child.Current.ControlType -eq [Windows.Automation.ControlType]::Window -or $child.Current.ClassName -eq '#32770') {
-                    $diagnosticText += "Owned window: $($child.Current.Name) [$($child.Current.ControlType.ProgrammaticName)]`n"
-                    $buttonCondition = [Windows.Automation.PropertyCondition]::new(
-                        [Windows.Automation.AutomationElement]::ControlTypeProperty,
-                        [Windows.Automation.ControlType]::Button
-                    )
-                    foreach ($button in ($child.FindAll([Windows.Automation.TreeScope]::Descendants, $buttonCondition) | Select-Object -First 16)) {
-                        $diagnosticText += "Button: id=$($button.Current.AutomationId) name=$($button.Current.Name) handle=$($button.Current.NativeWindowHandle)`n"
-                    }
-                }
-            }
         }
         [IO.File]::WriteAllText($diagnosticPath, $diagnosticText, [Text.UTF8Encoding]::new($true))
         $flow.diagnostic = [ordered]@{
