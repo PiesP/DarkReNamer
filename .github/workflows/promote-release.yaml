@@ -234,7 +234,7 @@ jobs:
           @(
             'Source-complete Windows prerelease. The published files are the exact immutable candidate artifact; they were not rebuilt during promotion.'
             ''
-            'Desktop acceptance is not complete. Real Windows 10/11 interactive UI coverage and physical SSD evidence remain external and must not be inferred from hosted Windows checks.'
+            'Desktop acceptance is not complete. Real Windows 11 interactive UI coverage and physical SSD evidence remain external and must not be inferred from hosted Windows checks.'
             ''
             "Candidate source: $env:CANDIDATE_SOURCE_SHA"
             "Candidate workflow: $env:CANDIDATE_RUN_ID (attempt $env:CANDIDATE_RUN_ATTEMPT)"

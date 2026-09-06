@@ -51,9 +51,13 @@ rollback and later recovery. Existing journals retain their stored source text;
 recovery does not guess or rewrite historical names. Correctness does not depend
 on filesystem name tunneling after a rename.
 
-The v0.1 release-validated scope is Windows 10 and Windows 11 on x64, with a
-local, non-elevated process operating on same-parent, non-reparse entries in a
-case-insensitive NTFS directory. Filesystems other than NTFS are unsupported
+The officially supported OS scope is Windows 11 and later on x64. Windows 10
+may run the application, but is not tested or officially supported and is not
+a release-acceptance target.
+
+The v0.1 filesystem scope uses a local, non-elevated process operating on
+same-parent, non-reparse entries in a case-insensitive NTFS directory.
+Filesystems other than NTFS are unsupported
 and unvalidated for v0.1. That limitation belongs to the release evidence
 contract and the runtime boundary: DarkReNamer queries the filesystem from the
 retained final directory handle and fails closed unless it reports NTFS.
@@ -353,18 +357,21 @@ required UI, scenario, benchmark, and durability target starts as explicitly une
 The generator does not inspect a Windows host, ingest benchmark output or
 medians, invent storage or tool details, or establish any acceptance coverage.
 
+The release gate requires Windows 11 evidence. Existing Windows 10 records may
+be retained as optional observations, but cannot replace Windows 11 coverage.
+
 Complete release-gate evidence requires all of the following:
 
-- one unique UI result for Windows 10 and Windows 11 at 100%, 125%, 150%, 200%,
-  250%, and 300% DPI in both normal and high-contrast modes (24 cells total),
+- one unique UI result for Windows 11 at 100%, 125%, 150%, 200%,
+  250%, and 300% DPI in both normal and high-contrast modes (12 cells total),
   all passed;
-- one main-workbench PNG bound to every passed UI cell; normal-mode captures
+- one main-workbench PNG bound to every required Windows 11 UI cell; normal-mode captures
   collectively cover System, Light, and Dark while high-contrast captures use
   the Forced Colors appearance;
 - visual coverage of the native menu, advanced appearance window, input prompt,
   common dialog, confirmation TaskDialog, and recovery window, with common and
   recovery surfaces bound to their passed scenarios;
-- one passed result per operating system for keyboard-only operation,
+- one passed Windows 11 result for keyboard-only operation,
   accessibility inspection with tool and version, Explorer drag-and-drop,
   common dialogs, clipboard, worker cancellation, worker close, startup
   recovery, recovery export, and Intent-only candidate discard;
