@@ -14,6 +14,9 @@ param(
     [ValidatePattern('^[0-9a-f]{64}$')]
     [string] $ExpectedScriptSha256,
 
+    [ValidateSet('ProcessCrash', 'WorkerCancellation', 'WorkerClose')]
+    [string] $Mode = 'ProcessCrash',
+
     [ValidateRange(128, 10000)]
     [int] $FixtureCount = 10000,
 
@@ -163,6 +166,32 @@ function Get-AcceptanceCrashClassification {
         throw 'The active journal is empty or already terminal.'
     }
     'partial-active-nonterminal'
+}
+
+function Get-AcceptanceWorkerBoundaryClassification {
+    param(
+        [Parameter(Mandatory)][int] $OriginalCount,
+        [Parameter(Mandatory)][int] $RenamedCount,
+        [Parameter(Mandatory)][int] $ExpectedCount,
+        [Parameter(Mandatory)][bool] $ActiveJournalExists,
+        [Parameter(Mandatory)][bool] $CandidateJournalExists,
+        [Parameter(Mandatory)][bool] $CancelEnabled,
+        [Parameter(Mandatory)][bool] $CancelVisible
+    )
+
+    if ($ExpectedCount -le 1 -or $RenamedCount -le 0 -or $RenamedCount -ge $ExpectedCount) {
+        throw 'The observed worker boundary was not genuinely partial.'
+    }
+    if ($OriginalCount + $RenamedCount -ne $ExpectedCount) {
+        throw 'The worker boundary has missing or unexpected transaction entries.'
+    }
+    if (-not $ActiveJournalExists -or $CandidateJournalExists) {
+        throw 'The worker boundary does not have one unambiguous active journal.'
+    }
+    if (-not $CancelEnabled -or -not $CancelVisible) {
+        throw 'The worker boundary does not expose one active cancellation control.'
+    }
+    'partial-active-worker'
 }
 
 function Get-AcceptanceGuestHelperPath {
@@ -542,6 +571,107 @@ function Stop-AcceptanceOwnedProcess {
     }
 }
 
+function Get-AcceptanceActiveWorkerBoundary {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][string] $Prefix,
+        [Parameter(Mandatory)][string] $LocalAppData,
+        [Parameter(Mandatory)][int] $ExpectedCount,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][int] $WaitSeconds
+    )
+
+    $process = $Application.owned.process
+    $cancel = Find-UniqueAutomationElement `
+        -Root $Application.main `
+        -Process $process `
+        -ExpectedSession $SessionId `
+        -AutomationId '1009' `
+        -ControlType ([Windows.Automation.ControlType]::Button) `
+        -TimeoutSeconds $WaitSeconds `
+        -Label 'active worker cancellation control' `
+        -RequireEnabled `
+        -RequireWindowHandle
+    $cancelVisible = -not $cancel.Current.IsOffscreen
+    if ($cancel.Current.Name -cne '취소') {
+        throw 'The active worker cancellation control has unexpected text.'
+    }
+    $renamed = [IO.Directory]::GetFiles(
+        $FixtureRoot,
+        ($Prefix + '*.txt'),
+        [IO.SearchOption]::TopDirectoryOnly
+    ).Length
+    $original = [IO.Directory]::GetFiles(
+        $FixtureRoot,
+        'item-*.txt',
+        [IO.SearchOption]::TopDirectoryOnly
+    ).Length
+    $journalRoot = Join-Path (Join-Path $LocalAppData 'DarkReNamer') 'journal'
+    $activeExists = Test-Path -LiteralPath (Join-Path $journalRoot 'active.drj') -PathType Leaf
+    $candidateExists = Test-Path -LiteralPath (Join-Path $journalRoot 'candidate.drj') -PathType Leaf
+    $classification = Get-AcceptanceWorkerBoundaryClassification `
+        -OriginalCount $original `
+        -RenamedCount $renamed `
+        -ExpectedCount $ExpectedCount `
+        -ActiveJournalExists $activeExists `
+        -CandidateJournalExists $candidateExists `
+        -CancelEnabled $cancel.Current.IsEnabled `
+        -CancelVisible $cancelVisible
+    [pscustomobject]@{
+        classification = $classification
+        original = $original
+        renamed = $renamed
+        cancel = $cancel
+    }
+}
+
+function Wait-AcceptanceWorkerRollback {
+    param(
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][string] $LocalAppData,
+        [Parameter(Mandatory)][object[]] $Initial,
+        [Parameter(Mandatory)][int] $WaitSeconds
+    )
+
+    $deadline = (Get-Date).AddSeconds($WaitSeconds)
+    do {
+        try {
+            Assert-NoJournalResidue -LocalAppData $LocalAppData
+            break
+        }
+        catch {
+            Start-Sleep -Milliseconds 100
+        }
+    } while ((Get-Date) -lt $deadline)
+    Assert-NoJournalResidue -LocalAppData $LocalAppData
+    $state = Get-AcceptanceFixtureState -FixtureRoot $FixtureRoot
+    Assert-AcceptanceStatesEqual -Expected $Initial -Actual $state -Label 'Worker rollback fixture'
+    $state
+}
+
+function Close-AcceptanceApplicationNormally {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][int] $WaitSeconds
+    )
+
+    $process = $Application.owned.process
+    $process.Refresh()
+    if ($process.HasExited -or -not $process.CloseMainWindow()) {
+        throw 'The acceptance application rejected ordinary window close.'
+    }
+    $waitMilliseconds = [int]([Math]::Min([int]::MaxValue, [int64]$WaitSeconds * 1000L))
+    if (-not $process.WaitForExit($waitMilliseconds)) {
+        throw 'The acceptance application did not close before the bounded deadline.'
+    }
+    $process.WaitForExit()
+    if ($process.ExitCode -ne 0) {
+        throw 'The acceptance application returned a nonzero exit code.'
+    }
+    $process.ExitCode
+}
+
 function Invoke-AcceptanceRecovery {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -596,6 +726,8 @@ function Invoke-AcceptanceSession {
         [Parameter(Mandatory)][string] $EvidenceRoot,
         [Parameter(Mandatory)][string] $RuntimeRoot,
         [Parameter(Mandatory)][int] $Count,
+        [Parameter(Mandatory)][ValidateSet('ProcessCrash', 'WorkerCancellation', 'WorkerClose')]
+        [string] $Mode,
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds
     )
@@ -655,6 +787,74 @@ function Invoke-AcceptanceSession {
         if ($renamedObserved -le 0 -or $renamedObserved -ge $Count) {
             throw 'No genuine partial rename boundary was observed before timeout.'
         }
+
+        if ($Mode -ne 'ProcessCrash') {
+            $workerBoundary = Get-AcceptanceActiveWorkerBoundary `
+                -Application $first `
+                -FixtureRoot $fixtureRoot `
+                -Prefix $prefix `
+                -LocalAppData $env:LOCALAPPDATA `
+                -ExpectedCount $Count `
+                -SessionId $SessionId `
+                -WaitSeconds $WaitSeconds
+            if ($Mode -eq 'WorkerCancellation') {
+                Invoke-AutomationControl `
+                    -Element $workerBoundary.cancel `
+                    -Label 'active worker cancellation control'
+                $restored = Wait-AcceptanceWorkerRollback `
+                    -FixtureRoot $fixtureRoot `
+                    -LocalAppData $env:LOCALAPPDATA `
+                    -Initial $initial `
+                    -WaitSeconds $WaitSeconds
+                $screenshot = Save-WindowScreenshot `
+                    -Window $first.main `
+                    -Process $first.owned.process `
+                    -ExpectedSession $SessionId `
+                    -Root $EvidenceRoot `
+                    -Leaf 'worker-cancellation-restored.png' `
+                    -Label 'worker cancellation restored state'
+                $exitCode = Close-AcceptanceApplicationNormally `
+                    -Application $first `
+                    -WaitSeconds $WaitSeconds
+                return [pscustomobject]@{
+                    status = 'passed'
+                    mode = $Mode
+                    classification = $workerBoundary.classification
+                    fixture_count = $Count
+                    partial_original_count = $workerBoundary.original
+                    partial_renamed_count = $workerBoundary.renamed
+                    initial_state_sha256 = Get-AcceptanceStateDigest -State $initial
+                    restored_state_sha256 = Get-AcceptanceStateDigest -State $restored
+                    journal_residue_count = 0
+                    screenshot = $screenshot
+                    normal_exit_code = $exitCode
+                }
+            }
+
+            $exitCode = Close-AcceptanceApplicationNormally `
+                -Application $first `
+                -WaitSeconds $WaitSeconds
+            Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
+            $restored = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
+            Assert-AcceptanceStatesEqual `
+                -Expected $initial `
+                -Actual $restored `
+                -Label 'Worker-close rollback fixture'
+            return [pscustomobject]@{
+                status = 'passed'
+                mode = $Mode
+                classification = $workerBoundary.classification
+                fixture_count = $Count
+                partial_original_count = $workerBoundary.original
+                partial_renamed_count = $workerBoundary.renamed
+                initial_state_sha256 = Get-AcceptanceStateDigest -State $initial
+                restored_state_sha256 = Get-AcceptanceStateDigest -State $restored
+                journal_residue_count = 0
+                screenshot = $null
+                normal_exit_code = $exitCode
+            }
+        }
+
         Stop-AcceptanceOwnedProcess -Application $first
 
         $partial = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
@@ -746,6 +946,8 @@ function Invoke-AcceptanceSession {
         }
 
         [pscustomobject]@{
+            status = 'passed'
+            mode = $Mode
             classification = $classification
             fixture_count = $Count
             partial_original_count = $partialCounts.original
@@ -836,10 +1038,11 @@ $result = [ordered]@{
         sha256 = $inputs.observer_sha256
     }
     status = 'failed'
-    scope = 'production-process-crash-startup-recovery'
-    process_crash = $null
-    worker_cancellation = [ordered]@{ status = 'not-run'; reason = 'separate-session-not-implemented' }
-    worker_close = [ordered]@{ status = 'not-run'; reason = 'separate-session-not-implemented' }
+    scope = 'production-rename-worker-interruption'
+    selected_mode = $Mode
+    process_crash = [ordered]@{ status = 'not-run'; reason = 'mode-not-selected' }
+    worker_cancellation = [ordered]@{ status = 'not-run'; reason = 'mode-not-selected' }
+    worker_close = [ordered]@{ status = 'not-run'; reason = 'mode-not-selected' }
     recovery_export = [ordered]@{ status = 'not-run'; reason = 'optional-flow-not-implemented' }
     failure_reason = $null
     diagnostic = $null
@@ -858,13 +1061,19 @@ try {
     }
     $previousExecutionState = Enter-TestExecutionState
     Invoke-WithIsolatedEnvironment -RuntimeRoot $runtimeRoot -Action {
-        $result.process_crash = Invoke-AcceptanceSession `
+        $modeResult = Invoke-AcceptanceSession `
             -Inputs $inputs `
             -EvidenceRoot $evidenceRoot `
             -RuntimeRoot $runtimeRoot `
             -Count $FixtureCount `
+            -Mode $Mode `
             -SessionId $currentSession `
             -WaitSeconds $TimeoutSeconds
+        switch ($Mode) {
+            'ProcessCrash' { $result.process_crash = $modeResult }
+            'WorkerCancellation' { $result.worker_cancellation = $modeResult }
+            'WorkerClose' { $result.worker_close = $modeResult }
+        }
     }
     $result.status = 'passed'
     $succeeded = $true

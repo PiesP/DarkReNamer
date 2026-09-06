@@ -144,6 +144,47 @@ $classification = Get-AcceptanceCrashClassification `
 if ($classification -cne 'partial-active-nonterminal') {
     throw 'The genuine partial crash boundary was classified incorrectly.'
 }
+$workerClassification = Get-AcceptanceWorkerBoundaryClassification `
+    -OriginalCount 7 `
+    -RenamedCount 3 `
+    -ExpectedCount 10 `
+    -ActiveJournalExists $true `
+    -CandidateJournalExists $false `
+    -CancelEnabled $true `
+    -CancelVisible $true
+if ($workerClassification -cne 'partial-active-worker') {
+    throw 'The genuine active worker boundary was classified incorrectly.'
+}
+Assert-Fails {
+    Get-AcceptanceWorkerBoundaryClassification `
+        -OriginalCount 7 `
+        -RenamedCount 3 `
+        -ExpectedCount 10 `
+        -ActiveJournalExists $true `
+        -CandidateJournalExists $false `
+        -CancelEnabled $false `
+        -CancelVisible $true
+} 'active cancellation control'
+Assert-Fails {
+    Get-AcceptanceWorkerBoundaryClassification `
+        -OriginalCount 0 `
+        -RenamedCount 10 `
+        -ExpectedCount 10 `
+        -ActiveJournalExists $true `
+        -CandidateJournalExists $false `
+        -CancelEnabled $true `
+        -CancelVisible $true
+} 'not genuinely partial'
+Assert-Fails {
+    Get-AcceptanceWorkerBoundaryClassification `
+        -OriginalCount 7 `
+        -RenamedCount 3 `
+        -ExpectedCount 10 `
+        -ActiveJournalExists $true `
+        -CandidateJournalExists $true `
+        -CancelEnabled $true `
+        -CancelVisible $true
+} 'unambiguous active journal'
 
 $torn = Join-TestBytes -Parts @($stream, [byte[]](0x44, 0x52, 0x4A))
 $tornInspection = Get-AcceptanceJournalInspection -Bytes $torn
@@ -197,6 +238,7 @@ try {
         -ExpectedSessionId 1 `
         -OutputRoot $temporaryRoot `
         -ExpectedScriptSha256 $observerHash `
+        -Mode WorkerCancellation `
         -ValidateOnly
 
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
@@ -205,7 +247,8 @@ try {
                 -BundleRoot $valid.root `
                 -ExpectedSessionId 7 `
                 -OutputRoot $temporaryRoot `
-                -ExpectedScriptSha256 $observerHash
+                -ExpectedScriptSha256 $observerHash `
+                -Mode WorkerClose
         } 'execution requires Windows'
     }
 
