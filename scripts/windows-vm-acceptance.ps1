@@ -345,7 +345,18 @@ function Invoke-HighContrastRescue {
         }
     }
     finally {
-        Exit-DesktopTestLock -Lock $lock
+        try {
+            Exit-DesktopTestLock -Lock $lock
+        }
+        catch {
+            $result.status = 'failed'
+            $result.failure_reason = 'desktop_lock_release_failed'
+            $_ | Out-String | Add-Content -LiteralPath $errorPath -Encoding UTF8
+            $result.diagnostic = [ordered]@{
+                file = 'high-contrast-rescue-error.txt'
+                sha256 = Get-LowerSha256 -Path $errorPath
+            }
+        }
         Write-JsonUtf8Bom -Path $resultPath -Value $result
     }
     if ($result.status -cne 'passed') {
@@ -1294,7 +1305,14 @@ finally {
         $result.status = 'failed'
         $result.failure_reason = 'execution_state_restore_failed'
     }
-    Exit-DesktopTestLock -Lock $desktopLock
+    try {
+        Exit-DesktopTestLock -Lock $desktopLock
+    }
+    catch {
+        $result.status = 'failed'
+        $result.failure_reason = 'desktop_lock_release_failed'
+        $_ | Out-String | Add-Content -LiteralPath $diagnosticPath -Encoding UTF8
+    }
     try {
         if (-not $lifecycle.process_terminated) {
             throw 'The owned application process is still running; runtime evidence was retained.'

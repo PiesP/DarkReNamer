@@ -185,6 +185,9 @@ try {
             throw "The acceptance flow is missing TaskDialog automation ID $taskDialogId."
         }
     }
+    if (($acceptanceText | Select-String -Pattern "failure_reason = 'desktop_lock_release_failed'" -AllMatches).Matches.Count -ne 2) {
+        throw 'Both acceptance and rescue must preserve structured evidence after desktop-lock release failure.'
+    }
 
     . $acceptance `
         -BundleRoot 'unused' `
