@@ -130,6 +130,43 @@ native Windows compilation or the complete native development gate. It does not
 establish the Windows 10/11 DPI and Forced Colors matrix, accessibility/IME,
 physical-media benchmarks, or VM power-loss acceptance in `SAFETY.md`.
 
+## Interactive acceptance observers
+
+The optional `scripts/windows-vm-acceptance.ps1` and
+`scripts/windows-vm-recovery-acceptance.ps1` observers reuse an existing VM test
+bundle. Stage the unchanged manifest, runner, and listed binaries in a private
+`bundle` directory, with the selected observer in its parent directory. Record
+the observer's SHA-256 separately from the bundle's source and executable
+digests. Run one observer at a time in the bundle account's unlocked,
+non-elevated Windows PowerShell desktop session, passing `-BundleRoot`,
+`-ExpectedSessionId`, `-OutputRoot`, and `-ExpectedScriptSha256` explicitly.
+Both observers verify those bindings and acquire the shared desktop lock.
+
+The UI observer requires a new output directory. It records the actual window
+DPI, UI Automation metadata, keyboard-only file import and prefix entry,
+Apply cancellation and confirmation, disk contents and identities, and normal
+close. Screenshots require operator review before a UI cell can be accepted.
+`-HighContrast` temporarily enables Windows High Contrast and verifies restoration
+of the original flags, scheme, and system colors. Arrange a separate interactive
+rescue invocation with `-RestoreHighContrastOnly` and the same arguments before
+starting that mode; retain the observer and snapshot until restoration is verified.
+
+The recovery observer requires an existing output directory and creates a unique
+child. `-Mode ProcessCrash` stops only its production application after observing
+a partial fixture rename, then relaunches it with the same journal and profile.
+It checks that startup leaves files unchanged before explicit recovery, and that
+recovery restores names, contents, identities, and clean journal state.
+`WorkerCancellation` and `WorkerClose` instead exercise the enabled cancel
+control or ordinary close during a partial transaction. A missed interruption
+boundary fails the run. `-FixtureCount` controls the workload; its encoded path
+list must fit the application's import limit.
+
+Collect and hash-check all external output before removing a successful session.
+Retain failed-session evidence for diagnosis. These observers do not reset the VM,
+provide storage-fault evidence, change DPI settings, or certify the full acceptance
+matrix. Transfer reviewed observations into a separate draft using `SAFETY.md`;
+do not merge observations from different Windows builds into one operator context.
+
 ## Dependency policy
 
 `Cargo.lock` and `--locked` define reproducible application resolution. Exact
