@@ -127,7 +127,7 @@ and display awake, then restores the thread's previous execution-state flags.
 
 This lane proves actual Windows execution of cross-built test artifacts, not
 native Windows compilation or the complete native development gate. It does not
-establish the Windows 10/11 DPI and Forced Colors matrix, accessibility/IME,
+establish the Windows 11 DPI and Forced Colors matrix, accessibility/IME,
 physical-media benchmarks, or VM power-loss acceptance in `SAFETY.md`.
 
 ## Interactive acceptance observers

@@ -21,9 +21,12 @@ sorting, and import/export. The UTF-16 name transformations retain DarkNamer
 08.02.10 compatibility, while the menu wording and Apply path describe and enforce
 the maintained safe execution model.
 
-The v0.1 release-validated scope is Windows 10 and Windows 11 on x64, using
-local NTFS storage from a non-elevated process for same-parent entries that do
-not traverse reparse points in case-insensitive directories. Other filesystems
+DarkReNamer officially supports Windows 11 and later on x64. Windows 10 may
+run the application, but is not tested or officially supported.
+
+The v0.1 filesystem scope uses local NTFS storage from a non-elevated process
+for same-parent entries that do not traverse reparse points in case-insensitive
+directories. Other filesystems
 are unsupported and unvalidated for v0.1. The runtime enforces the same boundary
 by querying the filesystem from the retained final directory handle and failing
 closed unless it reports NTFS.
