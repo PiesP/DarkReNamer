@@ -216,21 +216,146 @@ function Get-AcceptanceTransactionNameCounts {
     [pscustomobject]@{ original = $original; renamed = $renamed }
 }
 
-function Get-AcceptanceGuestHelperPath {
-    param([Parameter(Mandatory)][string] $Root)
+function Assert-AcceptanceExactProperties {
+    param(
+        [Parameter(Mandatory)][object] $Value,
+        [Parameter(Mandatory)][string[]] $Names,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    $actual = @($Value.PSObject.Properties.Name | Sort-Object)
+    $expected = @($Names | Sort-Object)
+    if ($actual.Count -ne $expected.Count) {
+        throw "$Label has unexpected fields."
+    }
+    for ($index = 0; $index -lt $expected.Count; $index++) {
+        if ($actual[$index] -cne $expected[$index]) {
+            throw "$Label has unexpected fields."
+        }
+    }
+}
+
+function Get-AcceptanceBootstrapSha256 {
+    param([Parameter(Mandatory)][string] $Path)
+
+    (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Get-AcceptanceBootstrapBytesSha256 {
+    param([Parameter(Mandatory)][byte[]] $Bytes)
+
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $algorithm.ComputeHash($Bytes)
+        ([BitConverter]::ToString($digest) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        $algorithm.Dispose()
+    }
+}
+
+function Resolve-AcceptanceBootstrap {
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string] $ObserverPath,
+        [Parameter(Mandatory)][string] $ExpectedObserverSha256
+    )
 
     if (-not [IO.Path]::IsPathRooted($Root)) {
         throw 'BundleRoot must be absolute.'
     }
-    $runnerPath = Join-Path $Root 'windows-vm-guest.ps1'
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+        throw 'BundleRoot must be an existing directory.'
+    }
+    $rootItem = Get-Item -LiteralPath $Root -Force
+    if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'BundleRoot must not be a reparse point.'
+    }
+    $manifestPath = Join-Path $rootItem.FullName 'bundle.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw 'The bootstrap bundle manifest is missing.'
+    }
+    $manifestItem = Get-Item -LiteralPath $manifestPath -Force
+    if (($manifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $manifestItem.Length -gt 1MB) {
+        throw 'The bootstrap bundle manifest is unsafe or too large.'
+    }
+    $manifestText = [IO.File]::ReadAllText($manifestItem.FullName)
+    if ($manifestText.IndexOf([char]0) -ge 0) {
+        throw 'The bootstrap bundle manifest contains NUL.'
+    }
+    try {
+        $manifest = $manifestText | ConvertFrom-Json
+    }
+    catch {
+        throw 'The bootstrap bundle manifest is not valid JSON.'
+    }
+    if ($null -eq $manifest -or $null -eq $manifest.runner) {
+        throw 'The bootstrap bundle manifest has no runner object.'
+    }
+    Assert-AcceptanceExactProperties `
+        -Value $manifest.runner `
+        -Names @('file', 'sha256') `
+        -Label 'bootstrap runner'
+    if ($manifest.runner.file -isnot [string] -or
+        $manifest.runner.file -cne 'windows-vm-guest.ps1') {
+        throw 'The bootstrap runner leaf is invalid.'
+    }
+    if ($manifest.runner.sha256 -isnot [string] -or
+        $manifest.runner.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'The bootstrap runner SHA-256 is invalid.'
+    }
+    $runnerPath = Join-Path $rootItem.FullName 'windows-vm-guest.ps1'
     if (-not (Test-Path -LiteralPath $runnerPath -PathType Leaf)) {
         throw 'The frozen guest helper is missing.'
     }
     $runnerItem = Get-Item -LiteralPath $runnerPath -Force
-    if (($runnerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw 'The frozen guest helper must not be a reparse point.'
+    if (($runnerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $runnerItem.Length -gt 2MB) {
+        throw 'The frozen guest helper must be an ordinary bounded file.'
     }
-    $runnerItem.FullName
+    $runnerBytes = [IO.File]::ReadAllBytes($runnerItem.FullName)
+    $runnerSha256 = Get-AcceptanceBootstrapBytesSha256 -Bytes $runnerBytes
+    if ($runnerSha256 -cne $manifest.runner.sha256) {
+        throw 'The bootstrap runner hash does not match bundle.json.'
+    }
+    $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+    try {
+        $runnerText = $strictUtf8.GetString($runnerBytes)
+    }
+    catch {
+        throw 'The authenticated guest helper is not valid UTF-8.'
+    }
+    if ($runnerText.Length -gt 0 -and $runnerText[0] -eq [char]0xFEFF) {
+        $runnerText = $runnerText.Substring(1)
+    }
+    try {
+        $runnerScript = [scriptblock]::Create($runnerText)
+    }
+    catch {
+        throw 'The authenticated guest helper has parser errors.'
+    }
+
+    if ($ExpectedObserverSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        -not (Test-Path -LiteralPath $ObserverPath -PathType Leaf)) {
+        throw 'The recovery acceptance observer bootstrap input is invalid.'
+    }
+    $observerItem = Get-Item -LiteralPath $ObserverPath -Force
+    if ($observerItem.Name -cne 'windows-vm-recovery-acceptance.ps1' -or
+        ($observerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The recovery acceptance observer bootstrap file is invalid.'
+    }
+    $observerSha256 = Get-AcceptanceBootstrapSha256 -Path $observerItem.FullName
+    if ($observerSha256 -cne $ExpectedObserverSha256) {
+        throw 'The recovery acceptance observer hash does not match its staging contract.'
+    }
+    [pscustomobject]@{
+        root = $rootItem.FullName
+        runner_path = $runnerItem.FullName
+        runner_script = $runnerScript
+        runner_sha256 = $runnerSha256
+        observer_sha256 = $observerSha256
+    }
 }
 
 function Resolve-AcceptanceInputs {
@@ -1162,16 +1287,23 @@ if ($MyInvocation.InvocationName -eq '.') {
 $requestedBundleRoot = $BundleRoot
 $requestedExpectedSessionId = $ExpectedSessionId
 $requestedValidateOnly = [bool]$ValidateOnly
-$guestHelperPath = Get-AcceptanceGuestHelperPath -Root $requestedBundleRoot
-. $guestHelperPath -BundleRoot $requestedBundleRoot -ExpectedSessionId 1 -ValidateOnly
+$bootstrap = Resolve-AcceptanceBootstrap `
+    -Root $requestedBundleRoot `
+    -ObserverPath $PSCommandPath `
+    -ExpectedObserverSha256 $ExpectedScriptSha256
+. $bootstrap.runner_script -BundleRoot $requestedBundleRoot -ExpectedSessionId 1 -ValidateOnly
 $BundleRoot = $requestedBundleRoot
 $ExpectedSessionId = $requestedExpectedSessionId
 $ValidateOnly = $requestedValidateOnly
 $inputs = Resolve-AcceptanceInputs `
     -Root $BundleRoot `
-    -RunnerPath $guestHelperPath `
+    -RunnerPath $bootstrap.runner_path `
     -ObserverPath $PSCommandPath `
     -ExpectedObserverSha256 $ExpectedScriptSha256
+if ($inputs.runner_sha256 -cne $bootstrap.runner_sha256 -or
+    $inputs.observer_sha256 -cne $bootstrap.observer_sha256) {
+    throw 'Authenticated bootstrap hashes changed during full bundle verification.'
+}
 if ($ValidateOnly) {
     Write-Host "Validated recovery acceptance inputs for source $($inputs.verified.manifest.source_sha)."
     return

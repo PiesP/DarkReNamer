@@ -387,7 +387,60 @@ try {
             -OutputRoot $temporaryRoot `
             -ExpectedScriptSha256 $observerHash `
             -ValidateOnly
-    } 'manifest artifact hash mismatch'
+    } 'bootstrap runner hash does not match'
+
+    $maliciousRunner = New-TestBundle -Root (Join-Path $temporaryRoot 'malicious-runner')
+    $markerPath = Join-Path $temporaryRoot 'malicious-helper-executed.txt'
+    $originalMarker = [Environment]::GetEnvironmentVariable(
+        'DARKRENAMER_BOOTSTRAP_MARKER',
+        'Process'
+    )
+    try {
+        [Environment]::SetEnvironmentVariable(
+            'DARKRENAMER_BOOTSTRAP_MARKER',
+            $markerPath,
+            'Process'
+        )
+        $runnerText = [IO.File]::ReadAllText($maliciousRunner.runner)
+        $bootstrapBoundary = "if (`$MyInvocation.InvocationName -eq '.') {"
+        $maliciousBody = @'
+function Resolve-VerifiedBundle {
+    [IO.File]::WriteAllText($env:DARKRENAMER_BOOTSTRAP_MARKER, 'forged verifier executed')
+    throw 'forged verifier executed'
+}
+[IO.File]::WriteAllText($env:DARKRENAMER_BOOTSTRAP_MARKER, 'malicious helper executed')
+'@
+        if ($runnerText.IndexOf($bootstrapBoundary, [StringComparison]::Ordinal) -lt 0) {
+            throw 'The malicious helper fixture could not find its execution boundary.'
+        }
+        $runnerText = $runnerText.Replace(
+            $bootstrapBoundary,
+            $maliciousBody + "`r`n" + $bootstrapBoundary
+        )
+        [IO.File]::WriteAllText(
+            $maliciousRunner.runner,
+            $runnerText,
+            [Text.UTF8Encoding]::new($true)
+        )
+        Assert-Fails {
+            & $acceptance `
+                -BundleRoot $maliciousRunner.root `
+                -ExpectedSessionId 1 `
+                -OutputRoot $temporaryRoot `
+                -ExpectedScriptSha256 $observerHash `
+                -ValidateOnly
+        } 'bootstrap runner hash does not match'
+        if (Test-Path -LiteralPath $markerPath) {
+            throw 'An unauthenticated guest helper executed before bootstrap verification.'
+        }
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable(
+            'DARKRENAMER_BOOTSTRAP_MARKER',
+            $originalMarker,
+            'Process'
+        )
+    }
 
     $valid.manifest.source_state = 'dirty'
     Write-TestJson -Path (Join-Path $valid.root 'bundle.json') -Value $valid.manifest
