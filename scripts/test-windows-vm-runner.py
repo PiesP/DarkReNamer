@@ -24,9 +24,38 @@ class VmRunnerTests(unittest.TestCase):
         stdout = self.artifact('tests.stdout.log', b'test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s\n')
         stderr = self.artifact('tests.stderr.log', b'')
         screenshot = self.artifact('main-workbench.png', b'\x89PNG\r\n\x1a\nfixture')
+        preview_screenshot = dict(self.artifact('rename-preview.png', b'\x89PNG\r\n\x1a\npreview'), width=900, height=700)
+        confirmation_screenshot = dict(self.artifact('apply-confirmation.png', b'\x89PNG\r\n\x1a\nconfirmation'), width=500, height=300)
         self.manifest = {'schema_version': 1, 'source_sha': 'a' * 40, 'source_state': 'clean', 'target': vm.TARGET, 'test_binaries': [self.test], 'application': self.app}
         self.result = dict(self.manifest)
-        self.result.update(status='passed', tests=[dict(self.test, status='passed', exit_code=0, passed=3, failed=0, ignored=1, stdout=stdout, stderr=stderr)], gui=dict(self.app, status='passed', screenshot=screenshot), transport={'kind': 'ssh', 'host_platform': 'Unix', 'guest_cleanup': True})
+        flow = {
+            'status': 'passed',
+            'scope': 'production-file-add-prefix-cancel-confirm',
+            'application_file': self.app['file'],
+            'application_sha256': self.app['sha256'],
+            'source_name': 'vm-flow-source.txt',
+            'preview_name': 'vm-confirmed-vm-flow-source.txt',
+            'before_content_sha256': 'c' * 64,
+            'after_content_sha256': 'c' * 64,
+            'before_file_identity_sha256': 'e' * 64,
+            'after_file_identity_sha256': 'e' * 64,
+            'cancellation_source_present': True,
+            'cancellation_destination_present': False,
+            'confirmed_source_present': False,
+            'confirmed_destination_present': True,
+            'journal_residue_count': 0,
+            'screenshots': [preview_screenshot, confirmation_screenshot],
+            'diagnostic': None,
+            'failure_reason': None,
+        }
+        gui = dict(
+            self.app,
+            status='passed',
+            scope='launch-window-screenshot-normal-close',
+            screenshot=screenshot,
+            flow=flow,
+        )
+        self.result.update(status='passed', tests=[dict(self.test, status='passed', exit_code=0, passed=3, failed=0, ignored=1, stdout=stdout, stderr=stderr)], gui=gui, transport={'kind': 'ssh', 'host_platform': 'Unix', 'guest_cleanup': True})
 
     def artifact(self, name, data):
         (self.root / name).write_bytes(data)
@@ -74,6 +103,57 @@ class VmRunnerTests(unittest.TestCase):
     def test_gui_artifact_binding_is_verified(self):
         self.result['gui']['sha256'] = 'b' * 64
         with self.assertRaisesRegex(ValueError, 'GUI result'):
+            self.verify()
+
+    def test_production_gui_flow_is_required(self):
+        self.result['gui']['flow'] = {}
+        with self.assertRaisesRegex(ValueError, 'missing or invalid'):
+            self.verify()
+        self.result['gui']['flow'] = None
+        with self.assertRaisesRegex(ValueError, 'missing or invalid'):
+            self.verify()
+
+    def test_failed_production_gui_flow_is_not_a_pass(self):
+        self.result['gui']['flow']['diagnostic'] = self.artifact('gui-flow-error.txt', b'fixture error')
+        self.result['gui']['flow']['status'] = 'failed'
+        self.assertFalse(self.verify())
+
+    def test_production_gui_flow_is_bound_to_application_artifact(self):
+        self.result['gui']['flow']['application_sha256'] = 'b' * 64
+        with self.assertRaisesRegex(ValueError, 'application artifact'):
+            self.verify()
+
+    def test_production_gui_flow_requires_cancel_and_confirmed_disk_states(self):
+        self.result['gui']['flow']['cancellation_destination_present'] = True
+        with self.assertRaisesRegex(ValueError, 'disk state'):
+            self.verify()
+
+    def test_production_gui_flow_requires_content_identity_and_journal_cleanup(self):
+        self.result['gui']['flow']['after_content_sha256'] = 'd' * 64
+        with self.assertRaisesRegex(ValueError, 'content preservation'):
+            self.verify()
+        self.result['gui']['flow']['after_content_sha256'] = 'c' * 64
+        self.result['gui']['flow']['after_file_identity_sha256'] = 'f' * 64
+        with self.assertRaisesRegex(ValueError, 'identity preservation'):
+            self.verify()
+        self.result['gui']['flow']['after_file_identity_sha256'] = 'e' * 64
+        self.result['gui']['flow']['journal_residue_count'] = 1
+        with self.assertRaisesRegex(ValueError, 'journal residue'):
+            self.verify()
+
+    def test_production_gui_flow_rejects_raw_device_identity(self):
+        self.result['gui']['flow']['before_file_identity'] = '1234abcd:0123456789abcdef'
+        with self.assertRaisesRegex(ValueError, 'raw device identity'):
+            self.verify()
+
+    def test_production_gui_flow_rejects_missing_or_changed_screenshot(self):
+        screenshots = self.result['gui']['flow']['screenshots']
+        self.result['gui']['flow']['screenshots'] = screenshots[:1]
+        with self.assertRaisesRegex(ValueError, 'screenshots are incomplete'):
+            self.verify()
+        self.result['gui']['flow']['screenshots'] = screenshots
+        (self.root / screenshots[0]['file']).write_bytes(b'changed')
+        with self.assertRaisesRegex(ValueError, 'digest'):
             self.verify()
 
     def test_cleanup_requires_a_boolean_success(self):

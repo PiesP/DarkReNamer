@@ -108,8 +108,12 @@ manifest, runner, and listed binaries into a unique guest test directory.
 Tests run sequentially with required backend capabilities enabled; unavailable
 capabilities fail the run. Ignored benchmarks remain ignored. Every executable
 must produce a libtest summary, and returned counts and log digests are checked
-against the collected output. A separate production-app smoke checks window
-creation, screenshot capture, and normal exit.
+against the collected output. The production EXE lane checks window creation,
+then drives the native file picker, prefix prompt, preview, and Apply task dialog
+through UI Automation. It first cancels Apply and proves the fixture is unchanged,
+then confirms the exact destructive action and proves the on-disk rename preserved
+the file contents and NTFS identity without journal residue. The lane retains
+source-bound preview and confirmation screenshots before closing normally.
 
 Bundles, logs, and screenshots are external. `--output` selects a new absolute
 external path. By default SSH uses the Linux host's temporary directory, while

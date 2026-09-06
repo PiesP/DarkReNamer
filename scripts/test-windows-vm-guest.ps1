@@ -157,6 +157,20 @@ try {
     }
 
     . $valid.runner -BundleRoot $valid.root -ExpectedSessionId 1 -ValidateOnly
+    if ((Get-LowerTextSha256 -Value 'abc') -cne
+        'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad') {
+        throw 'The source-bound identity digest helper returned the wrong SHA-256 value.'
+    }
+    $isolatedLocalAppData = Join-Path $valid.root 'isolated-localappdata'
+    $isolatedJournalRoot = Join-Path (Join-Path $isolatedLocalAppData 'DarkReNamer') 'journal'
+    [void](New-Item -ItemType Directory -Path $isolatedJournalRoot)
+    [IO.File]::WriteAllBytes((Join-Path $isolatedJournalRoot 'runtime.lock'), [byte[]]@())
+    Assert-NoJournalResidue -LocalAppData $isolatedLocalAppData
+    [IO.File]::WriteAllBytes((Join-Path $isolatedJournalRoot 'active.drj'), [byte[]](1, 2, 3))
+    Assert-Fails {
+        Assert-NoJournalResidue -LocalAppData $isolatedLocalAppData
+    } 'rename-journal residue'
+    Remove-Item -LiteralPath (Join-Path $isolatedJournalRoot 'active.drj')
     $hostRunner = Join-Path $PSScriptRoot 'run-windows-vm-tests.ps1'
     . $hostRunner -BundleRoot $valid.root -SshHost 'darkrenamer-vm'
     $script:capturedSshSession = $null
