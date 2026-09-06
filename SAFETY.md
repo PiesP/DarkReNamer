@@ -365,7 +365,7 @@ Complete release-gate evidence requires all of the following:
 - one unique UI result for Windows 11 at 100%, 125%, 150%, 200%,
   250%, and 300% DPI in both normal and high-contrast modes (12 cells total),
   all passed;
-- one main-workbench PNG bound to every passed UI cell; normal-mode captures
+- one main-workbench PNG bound to every required Windows 11 UI cell; normal-mode captures
   collectively cover System, Light, and Dark while high-contrast captures use
   the Forced Colors appearance;
 - visual coverage of the native menu, advanced appearance window, input prompt,
