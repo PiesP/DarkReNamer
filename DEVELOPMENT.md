@@ -59,28 +59,45 @@ gate.
 
 ## Native tests in a local Hyper-V VM
 
-From WSL, run the current checkout's Windows test binaries on a configured
-Windows x64 Hyper-V VM:
+Run the current checkout's Windows test binaries on a configured Windows x64
+Hyper-V VM through an OpenSSH configuration alias:
+
+```bash
+python3 scripts/test-windows-vm.py --ssh-host darkrenamer-vm
+```
+
+The Linux or WSL host needs Python 3.11 or newer, PowerShell 7.4 or newer, Git,
+the pinned Rust toolchain, `cargo-xwin`, and the LLVM resource compiler described
+above. The alias must resolve through the host user's OpenSSH configuration to a
+key-authenticated VM account, and the VM host key must already be pinned in the
+host user's `known_hosts`. The controller enforces batch mode, strict host-key
+checking, and disabled agent forwarding; it never prompts for a password. Put
+the user, key, address, port, and any IPv6 syntax in the OpenSSH configuration,
+not in `--ssh-host`.
+
+The VM needs the PowerShell 7 SSH subsystem and `sshd`, NTFS, the Microsoft
+Visual C++ x64 runtime, Developer Mode for non-elevated symlink fixtures, and one
+unlocked desktop for the same local test account selected by the SSH alias. That
+VM account must be a local administrator because the controller registers and
+manages the scheduled task. The task itself uses `Interactive` logon and
+`RunLevel Limited`, and the guest runner rejects an elevated token. This SSH path
+does not require Hyper-V or administrator rights on the host. The runner does
+not change VM security settings, reset checkpoints, or install tools.
+
+PowerShell Direct remains available from WSL when the Windows host process has
+Hyper-V administration rights:
 
 ```bash
 python3 scripts/test-windows-vm.py --vm-name "$DARKRENAMER_VM_NAME"
 ```
 
-The WSL host needs Python 3.11 or newer, Git, the pinned Rust toolchain,
-`cargo-xwin`, `wslpath`, and the LLVM resource compiler described above. Windows
-PowerShell must be callable through WSL interop with Hyper-V administration
-rights. The VM needs NTFS, the Microsoft Visual C++ x64 runtime, Developer Mode
-for non-elevated symlink fixtures, and one unlocked desktop for its local test
-account. The test processes run with a limited interactive token; the controller
-uses PowerShell Direct only for transport and scheduled-task management. The
-runner does not change VM security settings, reset checkpoints, or install tools.
-
-Credentials stay outside the checkout and bundle. By default the controller
-loads the host user's local `DarkReNamerVmTools/auth/credential-store.ps1` helper
-with `-Action Load`. Use `--credential-helper` to select another trusted local
-Windows helper implementing the same `PSCredential` interface. Register the
-credential separately under the same Windows host account, using Windows DPAPI
-or an equivalent private store. Missing or invalid credentials fail without an
+PowerShell Direct credentials stay outside the checkout and bundle. By default
+that transport loads the Windows host user's local
+`DarkReNamerVmTools/auth/credential-store.ps1` helper with `-Action Load`. Use
+`--credential-helper` with `--vm-name` to select another trusted local Windows
+helper implementing the same `PSCredential` interface. Register the credential
+separately under the same Windows host account, using Windows DPAPI or an
+equivalent private store. Missing or invalid credentials fail without an
 interactive password prompt. GUI login remains a separate prerequisite.
 
 The command requires a clean checkout. It builds all workspace test targets
@@ -94,11 +111,15 @@ must produce a libtest summary, and returned counts and log digests are checked
 against the collected output. A separate production-app smoke checks window
 creation, screenshot capture, and normal exit.
 
-Bundles, logs, and screenshots are external. `--output` selects a new
-Windows-backed WSL path; by default the runner uses the Windows host's temporary
-directory. A failed binary, timeout, missing output, or incomplete guest cleanup
-fails the command. Inspect retained evidence before retrying a failure. Do not
-run other GUI automation on the same VM desktop concurrently.
+Bundles, logs, and screenshots are external. `--output` selects a new absolute
+external path. By default SSH uses the Linux host's temporary directory, while
+PowerShell Direct uses the Windows host's temporary directory and requires a
+Windows-backed WSL path. A failed binary, timeout, missing output, or incomplete
+guest cleanup fails the command. Inspect retained evidence before retrying a
+failure. The guest runner holds a session-local, cross-process desktop lock for
+the suite and fails when another controller is using that interactive desktop.
+For the suite's lifetime, its runner also requests that Windows keep the system
+and display awake, then restores the thread's previous execution-state flags.
 
 This lane proves actual Windows execution of cross-built test artifacts, not
 native Windows compilation or the complete native development gate. It does not

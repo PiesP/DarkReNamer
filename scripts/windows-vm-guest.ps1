@@ -766,6 +766,90 @@ function Write-ResultDocument {
     Move-Item -LiteralPath $temporaryPath -Destination $resultPath -Force
 }
 
+function Initialize-TestExecutionState {
+    if (-not ('DarkReNamerVmExecutionState' -as [type])) {
+        Add-Type @'
+using System.Runtime.InteropServices;
+
+public static class DarkReNamerVmExecutionState {
+    public const uint RequiredForSuite = 0x80000003;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern uint SetThreadExecutionState(uint executionState);
+}
+'@
+    }
+}
+
+function Enter-TestExecutionState {
+    Initialize-TestExecutionState
+    $previous = [DarkReNamerVmExecutionState]::SetThreadExecutionState(
+        [DarkReNamerVmExecutionState]::RequiredForSuite
+    )
+    if ($previous -eq 0) {
+        throw 'Windows refused the temporary test execution-state request.'
+    }
+    [uint32]$previous
+}
+
+function Exit-TestExecutionState {
+    param([AllowNull()][object] $Previous)
+
+    if ($null -eq $Previous) {
+        return
+    }
+    if ([DarkReNamerVmExecutionState]::SetThreadExecutionState([uint32]$Previous) -eq 0) {
+        throw 'Windows refused to restore the previous test execution state.'
+    }
+}
+
+function Enter-DesktopTestLock {
+    param([Parameter(Mandatory)][int] $SessionId)
+
+    # Local named objects are shared by processes on this interactive desktop
+    # without blocking independent test desktops in other Windows sessions.
+    $name = 'Local\DarkReNamerVmDesktopTests-' + $SessionId
+    $mutex = [Threading.Mutex]::new($false, $name)
+    $held = $false
+    try {
+        try {
+            $held = $mutex.WaitOne(0)
+        }
+        catch [Threading.AbandonedMutexException] {
+            $held = $true
+        }
+        if (-not $held) {
+            $mutex.Dispose()
+            return $null
+        }
+        [pscustomobject]@{ mutex = $mutex; held = $true; name = $name }
+    }
+    catch {
+        if ($held) {
+            $mutex.ReleaseMutex()
+        }
+        $mutex.Dispose()
+        throw
+    }
+}
+
+function Exit-DesktopTestLock {
+    param([AllowNull()][object] $Lock)
+
+    if ($null -eq $Lock) {
+        return
+    }
+    try {
+        if ($Lock.held) {
+            $Lock.mutex.ReleaseMutex()
+            $Lock.held = $false
+        }
+    }
+    finally {
+        $Lock.mutex.Dispose()
+    }
+}
+
 if ($MyInvocation.InvocationName -eq '.') {
     return
 }
@@ -805,7 +889,15 @@ if ($currentSession -ne $ExpectedSessionId) {
     throw 'Windows VM guest execution is in an unexpected session.'
 }
 
+$desktopLock = $null
+$previousExecutionState = $null
 try {
+    $desktopLock = Enter-DesktopTestLock -SessionId $currentSession
+    if ($null -eq $desktopLock) {
+        $result.failure_reason = 'desktop_busy'
+        throw 'Another Windows VM test runner is using this interactive desktop.'
+    }
+    $previousExecutionState = Enter-TestExecutionState
     $runtimeRoot = New-PrivateDirectory -Parent $verified.root -Leaf 'runtime'
     $testResults = [Collections.Generic.List[object]]::new()
     for ($index = 0; $index -lt $verified.tests.Count; $index++) {
@@ -831,10 +923,24 @@ try {
 }
 catch {
     $result.status = 'failed'
-    $result.failure_reason = 'runner_error'
+    if ($null -eq $result.failure_reason) {
+        $result.failure_reason = 'runner_error'
+    }
 }
 finally {
-    Write-ResultDocument -Root $verified.root -Result $result
+    try {
+        try {
+            Exit-TestExecutionState -Previous $previousExecutionState
+        }
+        catch {
+            $result.status = 'failed'
+            $result.failure_reason = 'execution_state_restore_failed'
+        }
+        Write-ResultDocument -Root $verified.root -Result $result
+    }
+    finally {
+        Exit-DesktopTestLock -Lock $desktopLock
+    }
 }
 if ($result.status -cne 'passed') {
     throw 'Windows VM guest validation failed; inspect result.json.'
