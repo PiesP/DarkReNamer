@@ -707,6 +707,7 @@ try {
             -Process $process `
             -ExpectedSession $ExpectedSessionId `
             -AutomationId '1148' `
+            -ControlType ([Windows.Automation.ControlType]::Edit) `
             -TimeoutSeconds $TimeoutSeconds `
             -Label 'keyboard filename field'
         $open = Find-UniqueAutomationElement `

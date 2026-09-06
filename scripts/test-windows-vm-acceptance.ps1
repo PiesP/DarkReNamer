@@ -121,6 +121,14 @@ try {
     if ([IO.File]::ReadAllText($acceptance).IndexOf('[ushort]', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
         throw 'The acceptance script must use Windows PowerShell 5.1-compatible integer type names.'
     }
+    $acceptanceText = [IO.File]::ReadAllText($acceptance)
+    if ($acceptanceText.IndexOf("-AutomationId '1148'", [StringComparison]::Ordinal) -lt 0 -or
+        $acceptanceText.IndexOf(
+            '-ControlType ([Windows.Automation.ControlType]::Edit)',
+            [StringComparison]::Ordinal
+        ) -lt 0) {
+        throw 'The common-dialog filename target must select the editable UIA child.'
+    }
 
     . $acceptance `
         -BundleRoot 'unused' `
