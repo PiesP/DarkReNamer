@@ -1233,6 +1233,7 @@ function Invoke-ProductionRenameFlow {
             -Root $Root `
             -Leaf 'rename-preview.png' `
             -Label 'production rename preview'))
+        $flow.screenshots = $screenshots.ToArray()
 
         $flow.failure_reason = 'apply_cancellation_failed'
         $apply = Find-UniqueAutomationElement `
@@ -1261,6 +1262,7 @@ function Invoke-ProductionRenameFlow {
             -Root $Root `
             -Leaf 'apply-confirmation.png' `
             -Label 'apply confirmation task dialog'))
+        $flow.screenshots = $screenshots.ToArray()
         $cancel = Find-UniqueAutomationElement `
             -Root $confirmation `
             -Process $Process `
@@ -1388,6 +1390,13 @@ function Invoke-ProductionRenameFlow {
             foreach ($child in $ownedRoot.FindAll([Windows.Automation.TreeScope]::Descendants, $ownedCondition)) {
                 if ($child.Current.ControlType -eq [Windows.Automation.ControlType]::Window -or $child.Current.ClassName -eq '#32770') {
                     $diagnosticText += "Owned window: $($child.Current.Name) [$($child.Current.ControlType.ProgrammaticName)]`n"
+                    $buttonCondition = [Windows.Automation.PropertyCondition]::new(
+                        [Windows.Automation.AutomationElement]::ControlTypeProperty,
+                        [Windows.Automation.ControlType]::Button
+                    )
+                    foreach ($button in ($child.FindAll([Windows.Automation.TreeScope]::Descendants, $buttonCondition) | Select-Object -First 16)) {
+                        $diagnosticText += "Button: id=$($button.Current.AutomationId) name=$($button.Current.Name) handle=$($button.Current.NativeWindowHandle)`n"
+                    }
                 }
             }
         }
