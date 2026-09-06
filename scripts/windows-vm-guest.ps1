@@ -607,6 +607,10 @@ public static class DarkReNamerVmNative {
     }
     Add-Type -AssemblyName System.Drawing
     Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationClientsideProviders
+    [Windows.Automation.ClientSettings]::RegisterClientSideProviderAssembly(
+        [UIAutomationClientsideProviders.UIAutomationClientSideProviders].Assembly.GetName()
+    )
 }
 
 function Assert-AutomationBinding {
