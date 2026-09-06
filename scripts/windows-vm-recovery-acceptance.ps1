@@ -377,6 +377,24 @@ function Get-AcceptanceStateDigest {
     Get-LowerTextSha256 -Value ([string]::Join("`n", $parts))
 }
 
+function Stop-AcceptanceFailedStartupProcess {
+    param([Parameter(Mandatory)][object] $Owned)
+
+    $process = $Owned.process
+    try {
+        $process.Refresh()
+        if (-not $process.HasExited) {
+            $process.Kill()
+            if (-not $process.WaitForExit(10000)) {
+                throw 'The exact process from failed startup validation did not terminate.'
+            }
+        }
+    }
+    finally {
+        $process.Dispose()
+    }
+}
+
 function Start-AcceptanceApplication {
     param(
         [Parameter(Mandatory)][object] $Inputs,
@@ -388,41 +406,56 @@ function Start-AcceptanceApplication {
     if ((Get-LowerSha256 -Path $Inputs.application_path) -cne $application.sha256) {
         throw 'The application changed after bundle verification.'
     }
-    $owned = Start-OwnedProcess `
-        -FilePath $Inputs.application_path `
-        -Arguments '' `
-        -WorkingDirectory $Inputs.verified.root
-    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $WaitSeconds))
-    do {
-        Start-Sleep -Milliseconds 100
-        $owned.process.Refresh()
-        if ($owned.process.HasExited) {
-            throw 'The source-bound application exited before creating its window.'
+    $owned = $null
+    try {
+        $owned = Start-OwnedProcess `
+            -FilePath $Inputs.application_path `
+            -Arguments '' `
+            -WorkingDirectory $Inputs.verified.root
+        $deadline = (Get-Date).AddSeconds([Math]::Min(30, $WaitSeconds))
+        do {
+            Start-Sleep -Milliseconds 100
+            $owned.process.Refresh()
+            if ($owned.process.HasExited) {
+                throw 'The source-bound application exited before creating its window.'
+            }
+        } while ($owned.process.MainWindowHandle -eq [IntPtr]::Zero -and (Get-Date) -lt $deadline)
+        if ($owned.process.MainWindowHandle -eq [IntPtr]::Zero -or
+            $owned.process.SessionId -ne $SessionId) {
+            throw 'The application did not create a window in the expected session.'
         }
-    } while ($owned.process.MainWindowHandle -eq [IntPtr]::Zero -and (Get-Date) -lt $deadline)
-    if ($owned.process.MainWindowHandle -eq [IntPtr]::Zero -or
-        $owned.process.SessionId -ne $SessionId) {
-        throw 'The application did not create a window in the expected session.'
+        $main = [Windows.Automation.AutomationElement]::FromHandle($owned.process.MainWindowHandle)
+        if ($null -eq $main) {
+            throw 'The application main window is unavailable through UI Automation.'
+        }
+        Assert-AutomationBinding `
+            -Element $main `
+            -Process $owned.process `
+            -ExpectedSession $SessionId `
+            -Label 'recovery acceptance main window' `
+            -RequireWindowHandle
+        $actualProcessPath = $owned.process.MainModule.FileName
+        if (-not [string]::Equals(
+            $actualProcessPath,
+            $Inputs.application_path,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw 'The owned process is not the verified application artifact.'
+        }
+        [pscustomobject]@{ owned = $owned; main = $main }
     }
-    $main = [Windows.Automation.AutomationElement]::FromHandle($owned.process.MainWindowHandle)
-    if ($null -eq $main) {
-        throw 'The application main window is unavailable through UI Automation.'
+    catch {
+        $startupError = $_
+        if ($null -ne $owned) {
+            try {
+                Stop-AcceptanceFailedStartupProcess -Owned $owned
+            }
+            catch {
+                throw "Application startup validation and exact-process cleanup both failed: $($startupError.Exception.Message) Cleanup: $($_.Exception.Message)"
+            }
+        }
+        throw $startupError
     }
-    Assert-AutomationBinding `
-        -Element $main `
-        -Process $owned.process `
-        -ExpectedSession $SessionId `
-        -Label 'recovery acceptance main window' `
-        -RequireWindowHandle
-    $actualProcessPath = $owned.process.MainModule.FileName
-    if (-not [string]::Equals(
-        $actualProcessPath,
-        $Inputs.application_path,
-        [StringComparison]::OrdinalIgnoreCase
-    )) {
-        throw 'The owned process is not the verified application artifact.'
-    }
-    [pscustomobject]@{ owned = $owned; main = $main }
 }
 
 function Get-AcceptanceUiDiagnostic {

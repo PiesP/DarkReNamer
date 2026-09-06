@@ -195,6 +195,64 @@ Assert-Fails {
         -CancelVisible $true
 } 'unambiguous active journal'
 
+$fakeProcess = [pscustomobject]@{
+    HasExited = $false
+    MainWindowHandle = [IntPtr]1
+    SessionId = 99
+    killed = $false
+    disposed = $false
+}
+$fakeProcess | Add-Member -MemberType ScriptMethod -Name Refresh -Value {}
+$fakeProcess | Add-Member -MemberType ScriptMethod -Name Kill -Value {
+    $this.killed = $true
+    $this.HasExited = $true
+}
+$fakeProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+    param([int] $Milliseconds)
+    $null = $Milliseconds
+    $this.HasExited
+}
+$fakeProcess | Add-Member -MemberType ScriptMethod -Name Dispose -Value {
+    $this.disposed = $true
+}
+$script:fakeStartupOwned = [pscustomobject]@{ process = $fakeProcess }
+function Get-LowerSha256 {
+    param([string] $Path)
+    $null = $Path
+    'a' * 64
+}
+function Start-OwnedProcess {
+    param(
+        [string] $FilePath,
+        [string] $Arguments,
+        [string] $WorkingDirectory,
+        [switch] $RedirectOutput
+    )
+    $null = @($FilePath, $Arguments, $WorkingDirectory, $RedirectOutput)
+    $script:fakeStartupOwned
+}
+try {
+    $startupInputs = [pscustomobject]@{
+        application_path = 'fixture.exe'
+        verified = [pscustomobject]@{
+            root = '.'
+            manifest = [pscustomobject]@{
+                application = [pscustomobject]@{ sha256 = 'a' * 64 }
+            }
+        }
+    }
+    Assert-Fails {
+        Start-AcceptanceApplication -Inputs $startupInputs -SessionId 1 -WaitSeconds 10
+    } 'expected session'
+    if (-not $fakeProcess.killed -or -not $fakeProcess.disposed) {
+        throw 'A process rejected during startup validation was not killed and disposed.'
+    }
+}
+finally {
+    Remove-Item Function:\Get-LowerSha256
+    Remove-Item Function:\Start-OwnedProcess
+}
+
 $torn = Join-TestBytes -Parts @($stream, [byte[]](0x44, 0x52, 0x4A))
 $tornInspection = Get-AcceptanceJournalInspection -Bytes $torn
 if ($tornInspection.complete_frames -ne 2 -or $tornInspection.tail -cne 'truncated-header') {
