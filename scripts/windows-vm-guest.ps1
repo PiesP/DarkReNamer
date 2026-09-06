@@ -1362,8 +1362,23 @@ function Invoke-ProductionRenameFlow {
         $diagnosticPath = Join-Path $Root $diagnosticLeaf
         $diagnosticText = $_ | Out-String -Width 4096
         foreach ($invocation in $pendingInvocations) {
+            if ($invocation.completed) { continue }
             $diagnosticText += "`n$($invocation.label): completed=$($invocation.async_result.IsCompleted)`n"
             $diagnosticText += $invocation.powershell.Streams.Error | Out-String -Width 4096
+        }
+        $ownedCondition = [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::ProcessIdProperty, $Process.Id
+        )
+        $ownedRoots = [Windows.Automation.AutomationElement]::RootElement.FindAll(
+            [Windows.Automation.TreeScope]::Children, $ownedCondition
+        )
+        foreach ($ownedRoot in $ownedRoots) {
+            $diagnosticText += "`nRoot: $($ownedRoot.Current.Name) [$($ownedRoot.Current.ControlType.ProgrammaticName)]`n"
+            foreach ($child in $ownedRoot.FindAll([Windows.Automation.TreeScope]::Descendants, $ownedCondition)) {
+                if ($child.Current.ControlType -eq [Windows.Automation.ControlType]::Window -or $child.Current.ClassName -eq '#32770') {
+                    $diagnosticText += "Owned window: $($child.Current.Name) [$($child.Current.ControlType.ProgrammaticName)]`n"
+                }
+            }
         }
         [IO.File]::WriteAllText($diagnosticPath, $diagnosticText, [Text.UTF8Encoding]::new($true))
         $flow.diagnostic = [ordered]@{
