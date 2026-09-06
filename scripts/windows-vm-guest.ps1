@@ -742,12 +742,22 @@ function Wait-UniqueAutomationWindow {
     $condition = [Windows.Automation.AndCondition]::new($conditions)
     $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
     do {
-        $matches = $root.FindAll([Windows.Automation.TreeScope]::Children, $condition)
+        $windows = @{}
+        $main = [Windows.Automation.AutomationElement]::FromHandle($Process.MainWindowHandle)
+        $candidates = @($root.FindAll([Windows.Automation.TreeScope]::Children, $condition))
+        if ($null -ne $main) {
+            # Managed Win32 providers place owned dialogs below their owner.
+            $candidates += @($main.FindAll([Windows.Automation.TreeScope]::Descendants, $condition))
+        }
+        foreach ($candidate in $candidates) {
+            $windows[[string]$candidate.Current.NativeWindowHandle] = $candidate
+        }
+        $matches = @($windows.Values)
         if ($matches.Count -gt 1) {
             throw "$Label matched more than one top-level window."
         }
         if ($matches.Count -eq 1) {
-            $element = $matches.Item(0)
+            $element = $matches[0]
             Assert-AutomationBinding `
                 -Element $element `
                 -Process $Process `
