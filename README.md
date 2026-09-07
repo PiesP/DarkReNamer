@@ -110,6 +110,8 @@ in [`DISTRIBUTION.md`](DISTRIBUTION.md).
 
 ## Development
 
+This project is developed with assistance from AI tools.
+
 See [`DEVELOPMENT.md`](DEVELOPMENT.md) for native Windows prerequisites,
 Linux/WSL checks, cross-build tooling, visual diagnostics, and dependency
 policy.
