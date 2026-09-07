@@ -1011,8 +1011,9 @@ fn apply_dialog_appearance(window: HWND, state: &mut AppearanceDialogWindowState
         replacement = None;
     }
     state.appearance_resources = replacement;
-    super::appearance::apply_scrollbar_theme(
+    super::appearance::apply_native_control_theme(
         state.viewport,
+        super::appearance::NativeThemeTarget::AppearanceViewport,
         if state.appearance_resources.is_some() {
             resolved.theme
         } else {

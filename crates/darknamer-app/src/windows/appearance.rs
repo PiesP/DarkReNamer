@@ -1060,11 +1060,23 @@ pub(super) fn paint_menu_bottom_edge(window: HWND, color: u32) {
     unsafe { FillRect(dc.as_raw(), &rect, brush.as_raw()) };
 }
 
-fn configure_scrollbar_theme(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum NativeThemeTarget {
+    FileList,
+    AppearanceViewport,
+}
+
+fn configure_native_control_theme(
+    target: NativeThemeTarget,
     theme: ResolvedTheme,
     mut set_theme: impl FnMut(Option<&str>) -> bool,
 ) -> bool {
-    let association = (theme == ResolvedTheme::Dark).then_some("DarkMode_Explorer");
+    // Explorer styling also draws ListView column dividers through blank body
+    // space. Keep the file list's default style and apply its palette separately.
+    let association = match (target, theme) {
+        (NativeThemeTarget::AppearanceViewport, ResolvedTheme::Dark) => Some("DarkMode_Explorer"),
+        _ => None,
+    };
     if set_theme(association) {
         return true;
     }
@@ -1074,11 +1086,15 @@ fn configure_scrollbar_theme(
     false
 }
 
-pub(super) fn apply_scrollbar_theme(window: HWND, theme: ResolvedTheme) -> bool {
+pub(super) fn apply_native_control_theme(
+    window: HWND,
+    target: NativeThemeTarget,
+    theme: ResolvedTheme,
+) -> bool {
     if window.is_null() {
         return false;
     }
-    configure_scrollbar_theme(theme, |association| {
+    configure_native_control_theme(target, theme, |association| {
         let name = association.map(wide);
         // SAFETY: window is a live app-owned control. SetWindowTheme copies the
         // optional NUL-terminated association. True null pointers restore the
@@ -1134,9 +1150,13 @@ pub(super) fn apply_native_appearance(window: HWND, state: &mut AppState) -> io:
         },
         |palette| (palette.surface_workspace, palette.text_primary),
     );
-    // Native theme changes can reset control colors; restore the app palette
-    // afterwards. Unsupported associations retain the native scrollbar path.
-    apply_scrollbar_theme(state.list_window, resolved.theme);
+    // Restoring the default control association can reset colors; apply the
+    // resolved palette afterwards, including when the app remains in Dark mode.
+    apply_native_control_theme(
+        state.list_window,
+        NativeThemeTarget::FileList,
+        resolved.theme,
+    );
     // SAFETY: list_window is the live ListView owned by AppState. These messages
     // copy integral COLORREF values and retain no caller pointer.
     unsafe {
@@ -1263,28 +1283,57 @@ pub(super) fn apply_auxiliary_dwm_title_frame(window: HWND, theme: ResolvedTheme
 }
 
 #[cfg(test)]
-mod scrollbar_tests {
+mod native_control_theme_tests {
     use super::*;
 
     #[test]
-    fn theme_transition_and_failure_restore_the_native_association() {
+    fn file_list_always_restores_the_default_association() {
+        let mut calls = Vec::new();
+        for theme in [
+            ResolvedTheme::Dark,
+            ResolvedTheme::Light,
+            ResolvedTheme::Dark,
+            ResolvedTheme::NativeSystem,
+        ] {
+            assert!(configure_native_control_theme(
+                NativeThemeTarget::FileList,
+                theme,
+                |name| {
+                    calls.push(name.map(str::to_owned));
+                    true
+                }
+            ));
+        }
+        assert_eq!(calls, [None, None, None, None]);
+    }
+
+    #[test]
+    fn viewport_transition_and_failure_restore_the_default_association() {
         let mut calls = Vec::new();
         for theme in [
             ResolvedTheme::Dark,
             ResolvedTheme::Light,
             ResolvedTheme::NativeSystem,
         ] {
-            assert!(configure_scrollbar_theme(theme, |name| {
-                calls.push(name.map(str::to_owned));
-                true
-            }));
+            assert!(configure_native_control_theme(
+                NativeThemeTarget::AppearanceViewport,
+                theme,
+                |name| {
+                    calls.push(name.map(str::to_owned));
+                    true
+                }
+            ));
         }
         assert_eq!(calls, [Some("DarkMode_Explorer".to_owned()), None, None]);
         calls.clear();
-        assert!(!configure_scrollbar_theme(ResolvedTheme::Dark, |name| {
-            calls.push(name.map(str::to_owned));
-            name.is_none()
-        }));
+        assert!(!configure_native_control_theme(
+            NativeThemeTarget::AppearanceViewport,
+            ResolvedTheme::Dark,
+            |name| {
+                calls.push(name.map(str::to_owned));
+                name.is_none()
+            }
+        ));
         assert_eq!(calls, [Some("DarkMode_Explorer".to_owned()), None]);
     }
 }

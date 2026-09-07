@@ -29,6 +29,65 @@ pub(super) struct CaptureMeasurement {
     pub(super) used_window_dc_fallback: bool,
 }
 
+pub(super) struct CapturedWindowPixels {
+    measurement: CaptureMeasurement,
+    pixels: Vec<u8>,
+}
+
+impl CapturedWindowPixels {
+    pub(super) const fn measurement(&self) -> CaptureMeasurement {
+        self.measurement
+    }
+
+    pub(super) fn solid_color_mismatch_count(
+        &self,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+        expected_colorref: u32,
+    ) -> io::Result<usize> {
+        if left < 0
+            || top < 0
+            || right <= left
+            || bottom <= top
+            || right > self.measurement.width
+            || bottom > self.measurement.height
+        {
+            return Err(io::Error::other(
+                "pixel comparison rectangle is outside the captured window",
+            ));
+        }
+        let width = usize::try_from(self.measurement.width)
+            .map_err(|_| io::Error::other("captured width is not representable"))?;
+        let expected = [
+            ((expected_colorref >> 16) & 0xff) as u8,
+            ((expected_colorref >> 8) & 0xff) as u8,
+            (expected_colorref & 0xff) as u8,
+        ];
+        let mut mismatches = 0_usize;
+        for y in
+            usize::try_from(top).unwrap_or_default()..usize::try_from(bottom).unwrap_or_default()
+        {
+            for x in usize::try_from(left).unwrap_or_default()
+                ..usize::try_from(right).unwrap_or_default()
+            {
+                let offset = y
+                    .checked_mul(width)
+                    .and_then(|row| row.checked_add(x))
+                    .and_then(|pixel| pixel.checked_mul(4))
+                    .ok_or_else(|| io::Error::other("pixel comparison offset overflowed"))?;
+                let actual = self
+                    .pixels
+                    .get(offset..offset + 3)
+                    .ok_or_else(|| io::Error::other("pixel comparison exceeded capture data"))?;
+                mismatches += usize::from(actual != expected);
+            }
+        }
+        Ok(mismatches)
+    }
+}
+
 struct VisualCaptureRecord {
     filename: &'static str,
     measurement: CaptureMeasurement,
@@ -129,7 +188,7 @@ impl Drop for CaptureResources {
     }
 }
 
-pub(super) fn write_window_bmp(window: HWND, output: &Path) -> io::Result<CaptureMeasurement> {
+pub(super) fn capture_window_pixels(window: HWND) -> io::Result<CapturedWindowPixels> {
     if window.is_null() {
         return Err(io::Error::other("visual capture requires a live window"));
     }
@@ -233,6 +292,32 @@ pub(super) fn write_window_bmp(window: HWND, output: &Path) -> io::Result<Captur
         )));
     }
 
+    Ok(CapturedWindowPixels {
+        measurement: CaptureMeasurement {
+            width,
+            height,
+            distinct_colors: colors.len(),
+            used_window_dc_fallback,
+        },
+        pixels,
+    })
+}
+
+pub(super) fn write_window_bmp(window: HWND, output: &Path) -> io::Result<CaptureMeasurement> {
+    let capture = capture_window_pixels(window)?;
+    let measurement = capture.measurement;
+    let pixel_bytes = capture.pixels.len();
+    let info = BITMAPINFOHEADER {
+        biSize: size_of::<BITMAPINFOHEADER>() as u32,
+        biWidth: measurement.width,
+        biHeight: -measurement.height,
+        biPlanes: 1,
+        biBitCount: 32,
+        biCompression: BI_RGB,
+        biSizeImage: u32::try_from(pixel_bytes)
+            .map_err(|_| io::Error::other("visual capture byte size is not representable"))?,
+        ..BITMAPINFOHEADER::default()
+    };
     let dib_bytes = size_of::<BITMAPINFOHEADER>();
     let file_bytes = BMP_HEADER_BYTES
         .checked_add(dib_bytes)
@@ -254,26 +339,21 @@ pub(super) fn write_window_bmp(window: HWND, output: &Path) -> io::Result<Captur
             .map_err(|_| io::Error::other("visual capture BMP offset overflowed"))?
             .to_le_bytes(),
     )?;
-    file.write_all(&info.bmiHeader.biSize.to_le_bytes())?;
-    file.write_all(&info.bmiHeader.biWidth.to_le_bytes())?;
-    file.write_all(&info.bmiHeader.biHeight.to_le_bytes())?;
-    file.write_all(&info.bmiHeader.biPlanes.to_le_bytes())?;
-    file.write_all(&info.bmiHeader.biBitCount.to_le_bytes())?;
-    file.write_all(&info.bmiHeader.biCompression.to_le_bytes())?;
-    file.write_all(&info.bmiHeader.biSizeImage.to_le_bytes())?;
-    file.write_all(&info.bmiHeader.biXPelsPerMeter.to_le_bytes())?;
-    file.write_all(&info.bmiHeader.biYPelsPerMeter.to_le_bytes())?;
-    file.write_all(&info.bmiHeader.biClrUsed.to_le_bytes())?;
-    file.write_all(&info.bmiHeader.biClrImportant.to_le_bytes())?;
-    file.write_all(&pixels)?;
+    file.write_all(&info.biSize.to_le_bytes())?;
+    file.write_all(&info.biWidth.to_le_bytes())?;
+    file.write_all(&info.biHeight.to_le_bytes())?;
+    file.write_all(&info.biPlanes.to_le_bytes())?;
+    file.write_all(&info.biBitCount.to_le_bytes())?;
+    file.write_all(&info.biCompression.to_le_bytes())?;
+    file.write_all(&info.biSizeImage.to_le_bytes())?;
+    file.write_all(&info.biXPelsPerMeter.to_le_bytes())?;
+    file.write_all(&info.biYPelsPerMeter.to_le_bytes())?;
+    file.write_all(&info.biClrUsed.to_le_bytes())?;
+    file.write_all(&info.biClrImportant.to_le_bytes())?;
+    file.write_all(&capture.pixels)?;
     file.flush()?;
 
-    Ok(CaptureMeasurement {
-        width,
-        height,
-        distinct_colors: colors.len(),
-        used_window_dc_fallback,
-    })
+    Ok(measurement)
 }
 
 fn read_pixels(
@@ -314,6 +394,38 @@ fn distinct_colors(pixels: &[u8]) -> HashSet<u32> {
         }
     }
     colors
+}
+
+#[test]
+fn solid_color_detector_rejects_single_pixel_vertical_lines() -> io::Result<()> {
+    let background = 0x001c_1917_u32;
+    let mut pixels = vec![0_u8; 8 * 4 * 4];
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel[..3].copy_from_slice(&[0x1c, 0x19, 0x17]);
+    }
+    for y in 0..4_usize {
+        let offset = (y * 8 + 3) * 4;
+        pixels[offset..offset + 3].copy_from_slice(&[0x42, 0x42, 0x42]);
+    }
+    let capture = CapturedWindowPixels {
+        measurement: CaptureMeasurement {
+            width: 8,
+            height: 4,
+            distinct_colors: 2,
+            used_window_dc_fallback: false,
+        },
+        pixels,
+    };
+
+    assert_eq!(
+        capture.solid_color_mismatch_count(0, 0, 8, 4, background)?,
+        4
+    );
+    assert_eq!(
+        capture.solid_color_mismatch_count(0, 0, 3, 4, background)?,
+        0
+    );
+    Ok(())
 }
 
 #[test]
