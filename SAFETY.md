@@ -128,13 +128,20 @@ invalid, or over-limit requests cannot select a popup or change menu mode;
 scoping or installation failure keeps the owner-draw palette and its visible
 fallback glyph. The native HMENU tree, command state, hit-testing, keyboard
 handling, and MSAA/UIA metadata are not replaced.
-The file list and appearance viewport use `SetWindowTheme` for native scrollbar
-appearance only. The association is selected from the resolved theme, copied by
-Windows during the call, and removed with null arguments for Light, Native
-System, or a failed dark association. Existing callback guards reject state
-reentry during the synchronous theme notification. List colors are restored
-after the call; theme changes do not replace controls or change rows, selection,
-scroll ranges, model revisions, or mutation authority.
+`SetWindowTheme` changes a control's visual style association, including its
+body rendering. `NativeThemeTarget` in `windows/appearance.rs` separates the
+file list from the app-painted appearance viewport. The file list always
+restores the default association with null arguments, preserving native list
+rendering without Explorer-style dividers through blank body space. Only the
+viewport requests a dark association; Light, Native System, resource fallback,
+or a failed dark association restores its default. Windows copies the optional
+theme name during the call. Existing callback guards reject state reentry during
+the synchronous theme notification. List colors are restored after the call;
+theme changes do not replace controls or change rows, selection, scroll ranges,
+model revisions, or mutation authority. Native pixel regression tests capture
+the v6 ListView and compare full-width empty-body bands, including column
+boundaries, after column changes, scrolling, theme transitions, and row removal.
+The test-only capture resources retain their existing GDI ownership and cleanup.
 
 ## Preview resource boundary
 

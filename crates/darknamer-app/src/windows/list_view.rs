@@ -1254,7 +1254,69 @@ fn format_locale_part(mut format: impl FnMut(*mut u16, i32) -> i32) -> Option<St
 mod native_tests {
     use std::process::Command;
 
+    use super::super::visual_capture::capture_window_pixels;
     use super::*;
+    use windows_sys::Win32::UI::Controls::{
+        LVIR_BOUNDS, LVM_GETITEMRECT, LVM_SCROLL, LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR,
+        LVM_SETTEXTCOLOR,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::SIF_POS;
+
+    const TEST_LIST_BACKGROUND_COLORREF: u32 = 0x001c_1917;
+
+    fn apply_test_list_appearance(list: HWND, theme: ResolvedTheme) {
+        apply_native_control_theme(list, NativeThemeTarget::FileList, theme);
+        // SAFETY: list is the live test-owned ListView. These synchronous
+        // messages copy only integral COLORREF values, matching production.
+        unsafe {
+            SendMessageW(
+                list,
+                LVM_SETBKCOLOR,
+                0,
+                TEST_LIST_BACKGROUND_COLORREF as isize,
+            );
+            SendMessageW(
+                list,
+                LVM_SETTEXTBKCOLOR,
+                0,
+                TEST_LIST_BACKGROUND_COLORREF as isize,
+            );
+            SendMessageW(list, LVM_SETTEXTCOLOR, 0, 0x00f0_f0f0);
+        }
+    }
+
+    fn blank_list_body_mismatch_count(list: HWND, top: i32) -> io::Result<usize> {
+        let mut client = RECT::default();
+        // SAFETY: list is live, client remains writable, and redraw is completed
+        // before the same HWND is synchronously captured.
+        unsafe {
+            RedrawWindow(
+                list,
+                null(),
+                null_mut(),
+                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
+            );
+            UpdateWindow(list);
+            if GetClientRect(list, &mut client) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        let capture = capture_window_pixels(list)?;
+        let measurement = capture.measurement();
+        if measurement.width < client.right || measurement.height < client.bottom {
+            return Err(io::Error::other(
+                "native ListView capture does not cover its client area",
+            ));
+        }
+        let bottom = top.saturating_add(48).min(client.bottom.saturating_sub(2));
+        capture.solid_color_mismatch_count(
+            2,
+            top,
+            client.right.saturating_sub(2),
+            bottom,
+            TEST_LIST_BACKGROUND_COLORREF,
+        )
+    }
 
     #[test]
     fn native_default_columns_leave_no_horizontal_scroll_range() -> io::Result<()> {
@@ -1532,7 +1594,7 @@ mod native_tests {
     }
 
     #[test]
-    fn native_selected_row_exposes_status_through_listview_text_api() -> io::Result<()> {
+    fn native_list_body_stays_solid_and_selected_row_retains_status() -> io::Result<()> {
         let controls = INITCOMMONCONTROLSEX {
             dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
             dwICC: ICC_LISTVIEW_CLASSES,
@@ -1583,6 +1645,15 @@ mod native_tests {
             return Err(io::Error::last_os_error());
         }
         let result = (|| -> io::Result<()> {
+            // SAFETY: list is live and the production extended-style mask is scalar.
+            unsafe {
+                SendMessageW(
+                    list,
+                    LVM_SETEXTENDEDLISTVIEWSTYLE,
+                    0,
+                    LIST_VIEW_EXTENDED_STYLES as isize,
+                )
+            };
             for (index, label) in COLUMNS
                 .iter()
                 .map(|column| column.label)
@@ -1654,14 +1725,58 @@ mod native_tests {
                 return Err(io::Error::other("could not rebuild an empty native list"));
             }
 
+            // Exercise every live column boundary, including zero-width hidden
+            // columns and widths that deliberately require horizontal scrolling.
+            for (column, width) in [180, 160, 220].into_iter().enumerate() {
+                // SAFETY: list is live and each primary column was inserted above.
+                unsafe { SendMessageW(list, LVM_SETCOLUMNWIDTH, column, width as isize) };
+            }
+            for column in 3..NATIVE_STATUS_COLUMN_INDEX {
+                // SAFETY: list is live and each optional column was inserted above.
+                unsafe { SendMessageW(list, LVM_SETCOLUMNWIDTH, column, 0) };
+            }
+            // SAFETY: list is live and the message carries scalar width data.
+            unsafe { SendMessageW(list, LVM_SETCOLUMNWIDTH, NATIVE_STATUS_COLUMN_INDEX, 300) };
+
+            // Keep one explicit dark background through every native association
+            // transition so these pixel comparisons isolate style decoration
+            // instead of conflating it with the production palette transition.
+            let mut pixel_results = Vec::with_capacity(6);
+            apply_test_list_appearance(list, ResolvedTheme::Dark);
+            pixel_results.push((
+                "empty-dark",
+                blank_list_body_mismatch_count(
+                    list,
+                    native_list_header_height_px(list).saturating_add(8),
+                )?,
+            ));
+
             assert!(!set_native_subitem(null_mut(), 0, 1, &row.values[1]));
             assert!(!rebuild_native_rows(
                 null_mut(),
                 core::slice::from_ref(&row)
             ));
-            if !rebuild_native_rows(list, core::slice::from_ref(&row)) {
+            if !rebuild_native_rows(list, &[row.clone(), row.clone()]) {
                 return Err(io::Error::other("could not rebuild native test rows"));
             }
+            // Some common-control builds do not expose a movable scroll range
+            // until the report contains an item. Scroll only after adding rows.
+            // SAFETY: list is live and the message carries scalar scroll data.
+            unsafe { SendMessageW(list, LVM_SCROLL, 96, 0) };
+            let mut horizontal_scroll = SCROLLINFO {
+                cbSize: u32::try_from(size_of::<SCROLLINFO>())
+                    .map_err(|_| io::Error::other("invalid scroll info size"))?,
+                fMask: SIF_POS,
+                ..SCROLLINFO::default()
+            };
+            // SAFETY: list is live and horizontal_scroll is exact writable ABI storage.
+            if unsafe { GetScrollInfo(list, SB_HORZ, &mut horizontal_scroll) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            assert!(
+                horizontal_scroll.nPos > 0,
+                "native ListView did not scroll horizontally"
+            );
             let mut selected = LVITEMW {
                 stateMask: LVIS_SELECTED | LVIS_FOCUSED,
                 state: LVIS_SELECTED | LVIS_FOCUSED,
@@ -1687,13 +1802,35 @@ mod native_tests {
                 ..LVITEMW::default()
             };
             let status_width = list_column_width(list, NATIVE_STATUS_COLUMN_INDEX);
-            for theme in [
-                ResolvedTheme::Dark,
-                ResolvedTheme::Light,
-                ResolvedTheme::NativeSystem,
-                ResolvedTheme::Dark,
+            let mut last_row = RECT {
+                left: LVIR_BOUNDS as i32,
+                ..RECT::default()
+            };
+            // SAFETY: list is live and last_row remains writable for this exact
+            // report-view item rectangle query.
+            if unsafe {
+                SendMessageW(
+                    list,
+                    LVM_GETITEMRECT,
+                    1,
+                    (&mut last_row as *mut RECT) as isize,
+                )
+            } == 0
+            {
+                return Err(io::Error::other(
+                    "could not query the last native row bounds",
+                ));
+            }
+            let blank_body_top = last_row.bottom.saturating_add(8);
+            for (label, theme) in [
+                ("rows-dark-initial", ResolvedTheme::Dark),
+                ("rows-light", ResolvedTheme::Light),
+                ("rows-dark-restored", ResolvedTheme::Dark),
+                ("rows-native-system", ResolvedTheme::NativeSystem),
             ] {
-                apply_scrollbar_theme(list, theme);
+                apply_test_list_appearance(list, theme);
+                pixel_results.push((label, blank_list_body_mismatch_count(list, blank_body_top)?));
+                buffer.fill(0);
                 // SAFETY: list is live and query/buffer are writable for this
                 // synchronous native text retrieval after the theme transition.
                 let copied = unsafe {
@@ -1712,6 +1849,23 @@ mod native_tests {
                     status_width
                 );
             }
+            if !rebuild_native_rows(list, &[]) {
+                return Err(io::Error::other(
+                    "could not remove all native rows after theme transitions",
+                ));
+            }
+            apply_test_list_appearance(list, ResolvedTheme::Dark);
+            pixel_results.push((
+                "empty-after-remove-dark",
+                blank_list_body_mismatch_count(
+                    list,
+                    native_list_header_height_px(list).saturating_add(8),
+                )?,
+            ));
+            assert!(
+                pixel_results.iter().all(|(_, mismatches)| *mismatches == 0),
+                "native ListView blank body contains non-background pixels: {pixel_results:?}",
+            );
             Ok(())
         })();
         // SAFETY: parent owns and destroys the native ListView child exactly once.
