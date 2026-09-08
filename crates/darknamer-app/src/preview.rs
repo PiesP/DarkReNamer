@@ -124,6 +124,24 @@ pub(crate) const fn preview_status_label(
     }
 }
 
+/// Model-only diagnosis shared by pointer tips and keyboard-accessible details.
+#[must_use]
+pub(crate) fn preview_issue_description(issue: PreviewRowIssue) -> Option<String> {
+    match issue {
+        PreviewRowIssue::InvalidName(error) => Some(format!(
+            "잘못된 대상 이름: {} · Windows에서 사용할 수 있는 이름으로 수정하세요.",
+            windows_leaf_name_error_korean(error)
+        )),
+        PreviewRowIssue::DuplicateDestination => Some(
+            "목록의 다른 항목과 대상 경로가 겹칩니다. 이름이나 대상 위치를 수정하세요.".to_owned(),
+        ),
+        PreviewRowIssue::EmptyStem => {
+            Some("이름 본체가 비어 있습니다. 의도한 이름인지 확인하세요.".to_owned())
+        }
+        PreviewRowIssue::None => None,
+    }
+}
+
 /// Finds rows whose rendered Status cell differs from refreshed preview state.
 #[must_use]
 pub(crate) fn preview_status_delta_rows<'a>(
@@ -545,6 +563,24 @@ fn preview_name_has_empty_stem(name: &LegacyText, is_directory: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_diagnostics_explain_the_model_issue_and_corrective_action() {
+        assert_eq!(preview_issue_description(PreviewRowIssue::None), None);
+        let invalid = preview_issue_description(PreviewRowIssue::InvalidName(
+            WindowsLeafNameError::ReservedDeviceName,
+        ))
+        .unwrap_or_default();
+        assert!(invalid.contains("Windows 예약 장치 이름"));
+        assert!(invalid.contains("수정하세요"));
+        let duplicate =
+            preview_issue_description(PreviewRowIssue::DuplicateDestination).unwrap_or_default();
+        assert!(duplicate.contains("목록의 다른 항목"));
+        assert!(duplicate.contains("이름이나 대상 위치를 수정"));
+        let warning = preview_issue_description(PreviewRowIssue::EmptyStem).unwrap_or_default();
+        assert!(warning.contains("확인하세요"));
+        assert!(!warning.contains("차단"));
+    }
 
     #[test]
     fn root_only_moves_count_render_and_block_duplicate_full_destinations() {

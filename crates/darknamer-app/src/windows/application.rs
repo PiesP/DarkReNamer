@@ -2172,6 +2172,65 @@ mod tests {
     }
 
     #[test]
+    fn preview_details_are_read_only_and_require_one_synchronized_row()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _serial = FILE_DIALOG_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let app = PublishedFileDialogTestApp::new()?;
+        app.with_state(|state| {
+            assert!(!state.preview_details_available(0));
+            assert_eq!(
+                state
+                    .model
+                    .append_batch(vec![LegacyListItem::new_with_actual_size(
+                        r"C:\fixture\sample.txt",
+                        false,
+                        1,
+                        1,
+                        0,
+                        0,
+                    )]),
+                Ok(1)
+            );
+            assert!(state.model.prefix_complete(&LegacyText::from("?")).is_ok());
+            refresh(state);
+            select_rows(state.list_window, &[0]);
+            assert!(state.preview_details_available(1));
+            assert!(!state.preview_details_available(2));
+            let revision = state.model_revision;
+            let names = state.model.export_names();
+            assert!(dispatch_command(app.owner, state, PREVIEW_DETAILS).is_none());
+            assert_eq!(state.model_revision, revision);
+            assert_eq!(state.model.export_names(), names);
+            assert!(state.active_journal.is_none());
+        })?;
+        let mut shown = false;
+        assert!(drain_deferred_messages_with(
+            app.owner,
+            |_, text, caption| {
+                shown = true;
+                assert!(caption.contains("선택 항목 진단"));
+                assert!(text.contains("Windows에서 금지된 문자"));
+                assert!(text.contains("수정하세요"));
+                assert!(text.contains("파일 시스템 검사와 실행 확인은 변경 적용 시 별도"));
+            }
+        ));
+        assert!(shown);
+        app.with_state(|state| {
+            state.mark_preview_sync_failed();
+            assert!(!state.preview_details_available(1));
+            assert!(dispatch_command(app.owner, state, PREVIEW_DETAILS).is_none());
+            state.mark_preview_synchronized();
+            state.mutation_locked = true;
+            assert!(!state.preview_details_available(1));
+            state.mutation_locked = false;
+        })?;
+        assert!(!has_deferred_messages(app.owner));
+        Ok(())
+    }
+
+    #[test]
     fn native_initial_resize_fits_an_edge_window_inside_its_work_area()
     -> Result<(), Box<dyn std::error::Error>> {
         let app = PublishedFileDialogTestApp::new()?;

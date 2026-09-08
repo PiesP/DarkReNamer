@@ -823,6 +823,14 @@ impl AppState {
         self.render_status();
     }
 
+    fn preview_details_available(&self, selected_count: usize) -> bool {
+        selected_count == 1
+            && !self.apply_locked()
+            && !self.close_pending
+            && !self.confirmation_pending
+            && self.preview_synchronization.is_synchronized()
+    }
+
     fn set_transient_status(&mut self, message: impl Into<String>) {
         self.ui_status.set_transient(message);
         self.render_status();
@@ -4232,9 +4240,22 @@ mod tests {
                     "production {render_context} File or View popup is unavailable"
                 )));
             }
-            // SAFETY: view_popup is the actual production View menu. Its sixth
-            // item is the Theme parent installed by append_view_popup.
-            let theme_popup = unsafe { GetSubMenu(view_popup, 5) };
+            // SAFETY: view_popup and its child menus are retained by the live
+            // production window. Scalar queries find the theme command group
+            // independently of other View commands' positions.
+            let theme_popup = unsafe {
+                (0..GetMenuItemCount(view_popup))
+                    .map(|index| GetSubMenu(view_popup, index))
+                    .find(|popup| {
+                        !popup.is_null()
+                            && windows_sys::Win32::UI::WindowsAndMessaging::GetMenuState(
+                                *popup,
+                                u32::from(THEME_DARK),
+                                MF_BYCOMMAND,
+                            ) != u32::MAX
+                    })
+                    .unwrap_or(null_mut())
+            };
             if theme_popup.is_null() {
                 return Err(io::Error::other(format!(
                     "production {render_context} Theme submenu is unavailable"

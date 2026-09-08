@@ -675,20 +675,14 @@ pub(super) fn handle_list_infotip(state: &AppState, lparam: LPARAM) -> bool {
         return true;
     };
     let change = item.planned_change_kind();
-    let preview = match state.preview_issue_cache.issue(row) {
-        PreviewRowIssue::InvalidName(error) => format!(
-            "잘못된 대상 이름: {} · Windows에서 사용할 수 있는 이름으로 수정하세요.",
-            windows_leaf_name_error_korean(error)
-        ),
-        PreviewRowIssue::DuplicateDestination => {
-            "대상 경로 충돌 · 이름이나 대상 위치를 수정하세요.".to_owned()
-        }
-        PreviewRowIssue::EmptyStem => "이름 본체가 비어 있음 · 변경 전 확인 필요".to_owned(),
-        PreviewRowIssue::None if change.is_changed() => {
-            preview_status_label(PreviewRowIssue::None, change).to_owned()
-        }
-        PreviewRowIssue::None => "변경 없음".to_owned(),
-    };
+    let preview =
+        preview_issue_description(state.preview_issue_cache.issue(row)).unwrap_or_else(|| {
+            if change.is_changed() {
+                preview_status_label(PreviewRowIssue::None, change).to_owned()
+            } else {
+                "변경 없음".to_owned()
+            }
+        });
     let text = format!(
         "{preview}\n{}\n{}\n정확한 크기: {}",
         item.current_name(),
