@@ -823,6 +823,14 @@ impl AppState {
         self.render_status();
     }
 
+    fn preview_details_available(&self, selected_count: usize) -> bool {
+        selected_count == 1
+            && !self.apply_locked()
+            && !self.close_pending
+            && !self.confirmation_pending
+            && self.preview_synchronization.is_synchronized()
+    }
+
     fn set_transient_status(&mut self, message: impl Into<String>) {
         self.ui_status.set_transient(message);
         self.render_status();

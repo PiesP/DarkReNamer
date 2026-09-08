@@ -79,6 +79,12 @@ in Dark mode. The advanced appearance window's scrolling body separately
 requests a dark native theme in Dark mode, with system rendering as its fallback.
 Both controls retain native scrolling and accessibility behavior.
 
+Planned names use blue emphasis; warnings use amber and blocked names use red.
+The Status column also describes the change or issue in text. Select one row
+and open **보기 > 선택 항목 진단...** with the keyboard or pointer to read its
+diagnosis and corrective action. This model-only preview does not certify the
+filesystem or authorize Apply.
+
 Advanced appearance controls are intentionally under **보기 > 모양 설정...**.
 They offer semantic density and emphasis presets plus separator, changed-name
 background highlight, and empty-state safety-copy visibility. The native dialog

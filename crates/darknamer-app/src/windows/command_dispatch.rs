@@ -654,6 +654,31 @@ pub(super) fn dispatch_command(
     if command == APPEARANCE_ADVANCED {
         return prepare_appearance_dialog(window, state).map(PreparedCommandAction::Appearance);
     }
+    if command == PREVIEW_DETAILS {
+        let selected = selected_indices(state.list_window);
+        if !state.preview_details_available(selected.len()) {
+            return None;
+        }
+        let row = selected[0];
+        let item = state.model.items().get(row)?;
+        let issue = state.preview_issue_cache.issue(row);
+        let status = preview_status_label(issue, item.planned_change_kind());
+        let description = preview_issue_description(issue).unwrap_or_else(|| {
+            "목록 미리보기에서 이름 문제나 중복 대상이 발견되지 않았습니다.".to_owned()
+        });
+        let text = format!(
+            "{}\n\n{description}\n\n현재 이름: {}\n변경 후 이름: {}\n\n파일 시스템 검사와 실행 확인은 변경 적용 시 별도로 수행합니다.",
+            if status.is_empty() {
+                "변경 없음"
+            } else {
+                status
+            },
+            item.current_name(),
+            item.proposed_name(),
+        );
+        message(window, &text, "DarkReNamer - 선택 항목 진단");
+        return None;
+    }
     let mut selection_restore = None;
     let outcome = match command {
         APPLY => {

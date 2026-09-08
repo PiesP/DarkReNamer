@@ -1181,13 +1181,23 @@ pub(super) fn apply_command_states(state: &AppState) {
         activity.admission || activity.plan || activity.apply,
         state.confirmation_pending,
     );
-    // SAFETY: APPEARANCE_ADVANCED is an application-owned auxiliary menu item.
+    // SAFETY: these are application-owned auxiliary menu items on the live menu.
     unsafe {
         EnableMenuItem(
             state.menu,
             u32::from(APPEARANCE_ADVANCED),
             MF_BYCOMMAND
                 | if advanced_enabled {
+                    MF_ENABLED
+                } else {
+                    MF_GRAYED
+                },
+        );
+        EnableMenuItem(
+            state.menu,
+            u32::from(PREVIEW_DETAILS),
+            MF_BYCOMMAND
+                | if state.preview_details_available(selected_indices(state.list_window).len()) {
                     MF_ENABLED
                 } else {
                     MF_GRAYED
@@ -1471,6 +1481,7 @@ fn owner_menu_label_for_tag(data: usize) -> Option<String> {
         THEME_LIGHT => Some("밝게(&L)".to_owned()),
         THEME_DARK => Some("어둡게(&D)".to_owned()),
         APPEARANCE_ADVANCED => Some("모양 설정(&A)...".to_owned()),
+        PREVIEW_DETAILS => Some("선택 항목 진단(&I)...".to_owned()),
         EXPORT_RECOVERY_JOURNAL => Some("복구 데이터 내보내기...".to_owned()),
         DISCARD_STAGED_JOURNAL => Some("시작되지 않은 작업 기록 삭제...".to_owned()),
         SHOW_RECOVERY_STATUS => Some("복구 상태 및 문제 확인...".to_owned()),
@@ -1753,6 +1764,7 @@ fn append_edit_popup(menu: &mut MenuBuilder) -> io::Result<()> {
 fn append_view_popup(menu: &mut MenuBuilder) -> io::Result<()> {
     let mut view = MenuBuilder::popup(menu.owner_draw)?;
     append_catalog_items(&mut view, MenuGroup::View)?;
+    view.item(PREVIEW_DETAILS, "선택 항목 진단(&I)...")?;
     view.separator()?;
     let mut theme = MenuBuilder::popup(menu.owner_draw)?;
     theme.item(THEME_SYSTEM, "시스템 설정(&S)")?;

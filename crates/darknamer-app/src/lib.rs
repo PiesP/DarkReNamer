@@ -14,7 +14,7 @@ pub mod rename;
 #[cfg(windows)]
 pub(crate) use preview::{
     PreviewCountCache, PreviewCounts, PreviewIssueCache, PreviewRowIssue,
-    preview_status_delta_rows, preview_status_label, windows_leaf_name_error_korean,
+    preview_issue_description, preview_status_delta_rows, preview_status_label,
 };
 #[cfg(all(test, not(windows)))]
 pub(crate) use preview::{PreviewCounts, PreviewRowIssue};
@@ -418,13 +418,13 @@ const PRECISION_LIGHT: SemanticPalette = SemanticPalette {
     text_secondary: color_ref(95, 102, 112),
     text_disabled: color_ref(139, 145, 154),
     border: color_ref(177, 183, 192),
-    changed_subtle: color_ref(121, 43, 51),
-    changed_standard: color_ref(143, 38, 51),
-    changed_strong: color_ref(169, 22, 33),
+    changed_subtle: color_ref(67, 86, 119),
+    changed_standard: color_ref(35, 83, 151),
+    changed_strong: color_ref(14, 67, 143),
     warning: color_ref(142, 83, 0),
     collision: color_ref(169, 22, 33),
     preview_tint: color_ref(245, 248, 255),
-    apply_keyline: color_ref(217, 41, 50),
+    apply_keyline: color_ref(35, 83, 151),
 };
 
 #[cfg(any(windows, test))]
@@ -444,13 +444,13 @@ const GRAPHITE_DARK: SemanticPalette = SemanticPalette {
     text_secondary: color_ref(184, 190, 199),
     text_disabled: color_ref(125, 131, 140),
     border: color_ref(83, 89, 99),
-    changed_subtle: color_ref(217, 164, 168),
-    changed_standard: color_ref(255, 102, 112),
-    changed_strong: color_ref(255, 137, 145),
+    changed_subtle: color_ref(167, 184, 210),
+    changed_standard: color_ref(133, 183, 255),
+    changed_strong: color_ref(174, 208, 255),
     warning: color_ref(255, 194, 92),
     collision: color_ref(255, 137, 145),
     preview_tint: color_ref(32, 40, 51),
-    apply_keyline: color_ref(255, 102, 112),
+    apply_keyline: color_ref(133, 183, 255),
 };
 
 #[cfg(any(windows, test))]
@@ -584,6 +584,10 @@ pub(crate) const THEME_LIGHT: u16 = 0x9011;
 pub(crate) const THEME_DARK: u16 = 0x9012;
 #[cfg(any(windows, test))]
 pub(crate) const APPEARANCE_ADVANCED: u16 = 0x9013;
+
+/// Read-only preview details, outside the legacy transformation catalog.
+#[cfg(windows)]
+pub(crate) const PREVIEW_DETAILS: u16 = 0x9014;
 
 #[cfg(any(windows, test))]
 #[must_use]
@@ -5214,6 +5218,39 @@ mod tests {
         let outcome = CommandOutcome::ui(UiEffect::AppearanceChanged);
         assert!(command_effect_fits_policy(THEME_DARK, &outcome));
         assert!(!command_effect_fits_policy(COPY_NAMES, &outcome));
+    }
+
+    #[test]
+    fn planned_change_colors_are_distinct_and_readable_on_preview_surfaces() {
+        fn luminance(color: u32) -> f64 {
+            let channel = |shift: u32| {
+                let value = f64::from((color >> shift) & 255_u32) / 255.0;
+                if value <= 0.04045 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(0) + 0.7152 * channel(8) + 0.0722 * channel(16)
+        }
+
+        for palette in [PRECISION_LIGHT, GRAPHITE_DARK] {
+            for color in [
+                palette.changed_subtle,
+                palette.changed_standard,
+                palette.changed_strong,
+            ] {
+                assert_ne!(color, palette.warning);
+                assert_ne!(color, palette.collision);
+                for background in [palette.surface_workspace, palette.preview_tint] {
+                    let text = luminance(color);
+                    let surface = luminance(background);
+                    let contrast = (text.max(surface) + 0.05) / (text.min(surface) + 0.05);
+                    assert!(contrast >= 4.5, "preview text contrast: {contrast}");
+                }
+            }
+            assert_ne!(palette.apply_keyline, palette.collision);
+        }
     }
 
     #[test]

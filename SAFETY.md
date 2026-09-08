@@ -82,6 +82,12 @@ collision, status, and Apply-readiness previews. The separate path-reset command
 restores each source parent while retaining proposed names; the name-reset
 command independently restores proposed names without changing target folders.
 
+Selected-row diagnostics copy only synchronized model-preview information.
+Their menu command requires one selected row and an idle, unlocked workbench.
+The existing deferred-message path displays the copied explanation after the
+AppState callback lease ends; it neither validates filesystem occupancy nor
+creates a plan, confirmation, or journal capability.
+
 Appearance preferences are non-authorizing input. Theme, command-rail density,
 preview emphasis, separators, tint, and empty-state copy may change presentation
 only. They are stored separately from rename journals and cannot alter model
