@@ -201,6 +201,41 @@ try {
     Assert-Fails {
         . $hostRunner -BundleRoot $valid.root -SshHost 'user@darkrenamer-vm'
     } 'SshHost'
+    $script:expectedVmGuid = [guid]'12345678-1234-5678-9abc-1234567890ab'
+    $script:vmMatches = @([pscustomobject]@{ Id = $script:expectedVmGuid; Name = 'Exact VM'; State = 'Running' })
+    $script:queriedVmId = [guid]::Empty
+    $script:connectedVmId = [guid]::Empty
+    function Get-VM {
+        [CmdletBinding()]
+        param([guid] $Id, [string] $Name)
+        $script:queriedVmId = $Id
+        $script:vmMatches
+    }
+    function New-PSSession {
+        param([guid] $VMId, [Management.Automation.PSCredential] $Credential)
+        $script:connectedVmId = $VMId
+        [pscustomobject]@{ transport = 'direct-fixture' }
+    }
+    $fixtureSecret = [Security.SecureString]::new()
+    $fixtureSecret.AppendChar('x')
+    $fixtureCredential = [Management.Automation.PSCredential]::new('fixture-user', $fixtureSecret)
+    try {
+        $resolved = Resolve-DirectControllerVm -Name 'Exact VM' -ExpectedId $script:expectedVmGuid
+        if ($script:queriedVmId -ne $script:expectedVmGuid) { throw 'Direct VM resolution must query the exact expected GUID.' }
+        $null = New-DirectControllerSession -VmId $resolved.Id -Credential $fixtureCredential
+        if ($script:connectedVmId -ne $script:expectedVmGuid) { throw 'Direct sessions must connect using the resolved GUID.' }
+        Assert-Fails { Resolve-DirectControllerVm -Name 'Another VM' -ExpectedId $script:expectedVmGuid } 'GUID and exact name'
+        Assert-Fails {
+            Resolve-DirectControllerVm -Name 'Exact VM' -ExpectedId ([guid]'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
+        } 'GUID and exact name'
+        $script:vmMatches = @($script:vmMatches[0], $script:vmMatches[0])
+        Assert-Fails { Resolve-DirectControllerVm -Name 'Exact VM' } 'exactly one VM'
+    }
+    finally {
+        Remove-Item Function:\Get-VM
+        Remove-Item Function:\New-PSSession
+        $fixtureSecret.Dispose()
+    }
     $guestTransferRoot = 'C:\Users\TestUser\AppData\Local\Temp\DarkReNamerTests-0123456789abcdef0123456789abcdef'
     $copyInPath = Join-GuestWindowsPath -Root $guestTransferRoot -Leaf 'bundle.json'
     $copyOutPath = Join-GuestWindowsPath -Root ($guestTransferRoot + '\') -Leaf 'result.json'

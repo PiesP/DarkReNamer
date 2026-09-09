@@ -197,6 +197,27 @@ class VmRunnerTests(unittest.TestCase):
         for arguments in ([], ['--vm-name', 'vm', '--ssh-host', 'alias']):
             self.assert_arguments_rejected(arguments)
 
+    def test_direct_vm_identity_is_validated_and_passed_to_the_controller(self):
+        identity = '12345678-1234-5678-9abc-1234567890ab'
+        args = vm.parse_arguments(['--vm-name', 'VM', '--expected-vm-id', identity.upper()])
+        self.assertEqual(args.expected_vm_id, identity)
+        with mock.patch.object(vm, 'winpath', side_effect=lambda path: 'C:\\evidence\\' + Path(path).name):
+            command = vm.controller_invocation(Path('/external/evidence'), args, {'helper': 'C:\\helper.ps1'})
+        self.assertIn("-ExpectedVmId '" + identity + "'", command[-1])
+        for value in ('not-a-guid', '00000000-0000-0000-0000-000000000000'):
+            self.assert_arguments_rejected(['--vm-name', 'VM', '--expected-vm-id', value])
+        self.assert_arguments_rejected(['--ssh-host', 'alias', '--expected-vm-id', identity])
+
+    def test_direct_result_must_match_the_requested_vm_identity(self):
+        identity = '12345678-1234-5678-9abc-1234567890ab'
+        with self.assertRaisesRegex(ValueError, 'Hyper-V identity binding'):
+            vm.verify_result(self.root, self.manifest, self.result, expected_vm_id=identity)
+        self.result['transport']['vm_id'] = identity
+        self.assertTrue(vm.verify_result(self.root, self.manifest, self.result, expected_vm_id=identity))
+        self.result['transport']['vm_id'] = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+        with self.assertRaisesRegex(ValueError, 'Hyper-V identity binding'):
+            vm.verify_result(self.root, self.manifest, self.result, expected_vm_id=identity)
+
     def test_ssh_rejects_credentials_and_unsafe_aliases(self):
         invalid = ('-vm', 'user@vm', 'host:22', 'two words', 'host/guest', 'a' * 129)
         for alias in invalid:

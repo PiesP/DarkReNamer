@@ -2,6 +2,8 @@
 param(
     [Parameter(Mandatory = $true)][string] $BundleRoot,
     [Parameter(Mandatory = $true, ParameterSetName = 'Direct')][string] $VmName,
+    [Parameter(ParameterSetName = 'Direct')]
+    [ValidateScript({ $_ -ne [guid]::Empty })][guid] $ExpectedVmId,
     [Parameter(Mandatory = $true, ParameterSetName = 'Direct')][string] $CredentialHelper,
     [Parameter(Mandatory = $true, ParameterSetName = 'Ssh')]
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z')]
@@ -73,6 +75,28 @@ function New-SshControllerSession([string] $HostAlias) {
     New-PSSession -HostName $HostAlias -Options $options
 }
 
+function Resolve-DirectControllerVm {
+    param([string] $Name, [guid] $ExpectedId = [guid]::Empty)
+    $matches = if ($ExpectedId -ne [guid]::Empty) {
+        @(Get-VM -Id $ExpectedId -ErrorAction Stop)
+    }
+    else {
+        @(Get-VM -Name $Name -ErrorAction Stop)
+    }
+    if (@($matches).Count -ne 1) { throw 'The configured VM must resolve to exactly one VM.' }
+    $vm = @($matches)[0]
+    if ($vm.Name -cne $Name -or
+        ($ExpectedId -ne [guid]::Empty -and $vm.Id -ne $ExpectedId)) {
+        throw 'The configured VM GUID and exact name do not match.'
+    }
+    return $vm
+}
+
+function New-DirectControllerSession {
+    param([guid] $VmId, [Management.Automation.PSCredential] $Credential)
+    New-PSSession -VMId $VmId -Credential $Credential
+}
+
 if ($MyInvocation.InvocationName -eq '.') {
     return
 }
@@ -92,14 +116,16 @@ try {
         if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ine $artifact.sha256) { throw 'Bundle artifact hash mismatch.' }
     }
     if ($transportKind -eq 'powershell_direct') {
-        $vm = Get-VM -Name $VmName
+        $vm = Resolve-DirectControllerVm -Name $VmName -ExpectedId $ExpectedVmId
         $mutex = New-Object Threading.Mutex($false, ('Local\DarkReNamerVmTests-' + $vm.Id))
         try { $mutexHeld = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $mutexHeld = $true }
         if (-not $mutexHeld) { throw 'Another native test controller is using this VM.' }
         $credential = & $CredentialHelper -Action Load
         if ($credential -isnot [Management.Automation.PSCredential]) { throw 'Credential helper did not return a PSCredential.' }
-        if ((Get-VM -Name $VmName).State.ToString() -ne 'Running') { throw 'Start the configured VM before testing.' }
-        $session = New-PSSession -VMName $VmName -Credential $credential
+        $vm = Resolve-DirectControllerVm -Name $VmName -ExpectedId $vm.Id
+        if ($vm.State.ToString() -ne 'Running') { throw 'Start the configured VM before testing.' }
+        $session = New-DirectControllerSession -VmId $vm.Id -Credential $credential
+        $transport.vm_id = $vm.Id.ToString()
     }
     else {
         $session = New-SshControllerSession -HostAlias $SshHost

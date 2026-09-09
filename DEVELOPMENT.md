@@ -112,6 +112,12 @@ Hyper-V administration rights:
 python3 scripts/test-windows-vm.py --vm-name "$DARKRENAMER_VM_NAME"
 ```
 
+Automation can additionally pass `--expected-vm-id <GUID>` to require that exact
+Hyper-V VM identity and name. The controller resolves and rechecks the GUID,
+connects PowerShell Direct by GUID, and verifies the returned transport identity.
+Without the optional GUID, it first resolves one exact VM name and pins that
+resolved GUID for the session.
+
 PowerShell Direct credentials stay outside the checkout and bundle. By default
 that transport loads the Windows host user's local
 `DarkReNamerVmTools/auth/credential-store.ps1` helper with `-Action Load`. Use

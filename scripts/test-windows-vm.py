@@ -62,6 +62,7 @@ def argument_parser():
     transport = parser.add_mutually_exclusive_group(required=True)
     transport.add_argument('--vm-name', help='Existing local Hyper-V VM with an unlocked test-user desktop.')
     transport.add_argument('--ssh-host', help='OpenSSH config alias for the configured VM test account.')
+    parser.add_argument('--expected-vm-id', help='Require this exact Hyper-V VM GUID when using --vm-name.')
     parser.add_argument('--credential-helper', help='Windows path to a private helper returning PSCredential with -Action Load.')
     parser.add_argument('--desktop-mode', choices=('rdp', 'existing'), default='rdp',
                         help='Prepare a managed RDP desktop (default), or use an existing unlocked desktop.')
@@ -79,6 +80,16 @@ def parse_arguments(argv=None):
         parser.error('--ssh-host must be a 1-128 character OpenSSH config alias using letters, digits, dot, underscore, or hyphen.')
     if args.ssh_host and args.credential_helper:
         parser.error('--credential-helper can only be used with --vm-name PowerShell Direct transport.')
+    if args.expected_vm_id is not None:
+        if args.ssh_host:
+            parser.error('--expected-vm-id can only be used with --vm-name PowerShell Direct transport.')
+        try:
+            identity = uuid.UUID(args.expected_vm_id)
+            if identity.int == 0:
+                raise ValueError('Zero UUID')
+            args.expected_vm_id = str(identity)
+        except ValueError:
+            parser.error('--expected-vm-id must be a non-zero UUID.')
     if args.desktop_mode == 'existing' and args.desktop_helper:
         parser.error('--desktop-helper requires --desktop-mode rdp.')
     if not 10 <= args.test_timeout_seconds <= 1800:
@@ -143,6 +154,7 @@ def controller_invocation(root, args, defaults=None, pwsh=None, desktop_sid=None
     transport = (
         '& ' + psquote(winpath(script)) + ' -BundleRoot ' + psquote(windows_root)
         + ' -VmName ' + psquote(args.vm_name) + ' -CredentialHelper ' + psquote(helper)
+        + (' -ExpectedVmId ' + psquote(args.expected_vm_id) if args.expected_vm_id else '')
         + ' -TestTimeoutSeconds ' + str(args.test_timeout_seconds)
         + (' -ExpectedDesktopSid ' + psquote(desktop_sid) if desktop_sid else '')
     )
@@ -288,7 +300,7 @@ def verify_gui_flow(root, manifest, flow):
     return True
 
 
-def verify_result(root, manifest, result, expected_transport_kind=None):
+def verify_result(root, manifest, result, expected_transport_kind=None, expected_vm_id=None):
     for key in ('schema_version', 'source_sha', 'source_state', 'target'):
         if result.get(key) != manifest[key]:
             raise ValueError('VM result source binding mismatch: ' + key)
@@ -341,6 +353,8 @@ def verify_result(root, manifest, result, expected_transport_kind=None):
         expected_platform = 'Unix' if expected_transport_kind == 'ssh' else 'Win32NT'
         if transport.get('kind') != expected_transport_kind or transport.get('host_platform') != expected_platform:
             raise ValueError('VM result transport binding mismatch.')
+    if expected_vm_id is not None and transport.get('vm_id') != expected_vm_id:
+        raise ValueError('VM result Hyper-V identity binding mismatch.')
     return passed
 
 
@@ -391,7 +405,7 @@ def main():
         raise RuntimeError('The VM did not return a test result. Inspect the external transport result/logs.')
     result = json.loads(result_path.read_text(encoding='utf-8-sig'))
     transport_kind = 'ssh' if args.ssh_host else 'powershell_direct'
-    verified = verify_result(root, manifest, result, transport_kind)
+    verified = verify_result(root, manifest, result, transport_kind, args.expected_vm_id)
     total = sum(row.get('passed') or 0 for row in result['tests'])
     print(('PASS' if transport_ok and verified else 'FAIL') + ': ' + str(total) + ' tests passed; GUI=' + result.get('gui', {}).get('status', 'not-run'))
     print('This native VM run is not the complete Windows release acceptance matrix.')
