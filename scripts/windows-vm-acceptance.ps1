@@ -946,6 +946,8 @@ $keyboard = [ordered]@{
     reset_name_enabled_after_prefix = $false
     reset_name_native_enabled_after_prefix = $false
     reset_name_menu_enabled_after_prefix = $false
+    reset_name_selection_pattern_available = $false
+    reset_name_selection_count_after_prefix = $null
     reset_name_proposal_only = $false
     reset_name_displayed_parent_unchanged = $false
     reset_name_disabled_after_reset = $false
@@ -1241,6 +1243,7 @@ try {
             -Name '이름 앞에 문자열 붙이기' `
             -TimeoutSeconds $TimeoutSeconds `
             -Label 'keyboard prefix prompt'
+        $promptHandle = [IntPtr]$prompt.Current.NativeWindowHandle
         $promptEdit = Find-UniqueAutomationElement -Root $prompt -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '1004' -ControlType ([Windows.Automation.ControlType]::Edit) -TimeoutSeconds $TimeoutSeconds -Label 'prefix prompt edit' -RequireWindowHandle
         $promptOk = Find-UniqueAutomationElement -Root $prompt -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '1' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $TimeoutSeconds -Label 'prefix prompt OK' -RequireWindowHandle
         if ($promptEdit.Current.Name -cne '붙일 문자열') {
@@ -1262,6 +1265,23 @@ try {
         Send-AcceptanceText -Process $process -ExpectedSession $ExpectedSessionId -Value $prefix -Label 'prefix keyboard input'
         [void](Move-TabFocusToId -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '1')
         Send-AcceptanceTap -Process $process -ExpectedSession $ExpectedSessionId -VirtualKey 0x0D -Label 'prefix prompt Enter'
+        Wait-WindowClosed `
+            -Handle $promptHandle `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Label 'prefix prompt'
+        $selectionPatternObject = $null
+        if ($list.TryGetCurrentPattern(
+            [Windows.Automation.SelectionPattern]::Pattern,
+            [ref]$selectionPatternObject
+        )) {
+            $keyboard.reset_name_selection_pattern_available = $true
+            $selectionPattern = [Windows.Automation.SelectionPattern]$selectionPatternObject
+            $keyboard.reset_name_selection_count_after_prefix =
+                @($selectionPattern.Current.GetSelection()).Count
+            if ($keyboard.reset_name_selection_count_after_prefix -ne 0) {
+                throw 'The no-selection name reset scenario acquired a list selection after prefix.'
+            }
+        }
         Wait-ListPreviewName -MainWindow $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -ExpectedName $destinationName -TimeoutSeconds $TimeoutSeconds
         $beforeReset = Get-ListPrimarySnapshot -List $list
         $reset = Find-UniqueAutomationElement `
@@ -1293,6 +1313,8 @@ try {
                 rail = Get-ElementObservation -Element $reset
                 native_enabled = $keyboard.reset_name_native_enabled_after_prefix
                 menu_enabled = $keyboard.reset_name_menu_enabled_after_prefix
+                selection_pattern_available = $keyboard.reset_name_selection_pattern_available
+                selected_item_count = $keyboard.reset_name_selection_count_after_prefix
                 row = $beforeReset
             }
             after = $null
