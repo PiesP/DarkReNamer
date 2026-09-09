@@ -56,6 +56,18 @@ require acceptance on a real Windows host.
 Until that evidence exists, releases should distinguish source-complete porting
 from manually verified runtime parity.
 
+## Rename a file
+
+1. Start the app normally, without administrator elevation, and use
+   **파일 추가...** to add files within the supported scope above.
+2. Choose a name transformation and review the proposed names and Status column.
+   Select a blocked row and open **보기 > 선택 항목 진단...** for its explanation.
+3. Choose **변경 적용**, review the newly validated plan, and confirm it to change
+   the files. Cancelling that confirmation leaves the files unchanged.
+4. If execution is interrupted, follow the recovery window before applying
+   further changes. **편집 > 모든 이름 변경 취소** resets proposed names; it does not undo
+   changes already made on disk.
+
 ## Appearance and local settings
 
 The **View** menu provides System, Light, and Dark appearance modes. System is
@@ -122,15 +134,14 @@ See [`DEVELOPMENT.md`](DEVELOPMENT.md) for native Windows prerequisites,
 Linux/WSL checks, cross-build tooling, visual diagnostics, and dependency
 policy.
 
-Run the automated gate:
+Choose the complete gate for your host, including its tooling checks:
 
-```text
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-targets --all-features --locked
-cargo check --workspace --all-targets --all-features \
-  --target x86_64-pc-windows-msvc --locked
-```
+- [Native Windows development](DEVELOPMENT.md#native-windows-development).
+- [Portable Linux/WSL checks](DEVELOPMENT.md#portable-checks-on-linux-or-wsl).
+- [Prepared VM execution](DEVELOPMENT.md#native-tests-in-a-local-hyper-v-vm)
+  and [interactive observers](DEVELOPMENT.md#interactive-acceptance-observers).
+- [Release acceptance evidence](SAFETY.md#windows-acceptance-evidence) and
+  [candidate packaging](DISTRIBUTION.md#publish-free-packaging-validation).
 
 Cross-build the compatibility executable from Linux:
 
