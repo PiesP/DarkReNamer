@@ -34,16 +34,24 @@ def windows_host_command(script, capture=True, timeout=120):
     ).stdout
 
 
-def require_pwsh7():
+def require_pwsh74():
     executable = shutil.which('pwsh')
     if not executable:
-        raise RuntimeError('SSH transport requires PowerShell 7 or newer as pwsh on PATH.')
-    version = subprocess.check_output(
-        [executable, '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.Major'],
-        text=True,
-    ).strip()
-    if not version.isdecimal() or int(version) < 7:
-        raise RuntimeError('SSH transport requires PowerShell 7 or newer as pwsh on PATH.')
+        raise RuntimeError('SSH transport requires PowerShell 7.4 or newer as pwsh on PATH.')
+    try:
+        version = subprocess.check_output(
+            [executable, '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+             '$PSVersionTable.PSVersion.ToString()'],
+            text=True,
+            timeout=10,
+        ).strip()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError('Unable to verify that pwsh is PowerShell 7.4 or newer.') from error
+    if not re.fullmatch(r'[0-9]+\.[0-9]+(?:\.[0-9]+){0,2}', version):
+        raise RuntimeError('SSH transport requires PowerShell 7.4 or newer as pwsh on PATH.')
+    major, minor = (int(part) for part in version.split('.')[:2])
+    if (major, minor) < (7, 4):
+        raise RuntimeError('SSH transport requires PowerShell 7.4 or newer as pwsh on PATH.')
     return executable
 
 
@@ -126,7 +134,7 @@ def resolve_output_root(repo, args, defaults=None):
 
 def prepare_transport(repo, args):
     if args.ssh_host:
-        pwsh = require_pwsh7()
+        pwsh = require_pwsh74()
         defaults = None
     else:
         pwsh = None
@@ -140,7 +148,7 @@ def controller_invocation(root, args, defaults=None, pwsh=None, desktop_sid=None
     if desktop_sid:
         common += ['-ExpectedDesktopSid', desktop_sid]
     if args.ssh_host:
-        executable = pwsh or require_pwsh7()
+        executable = pwsh or require_pwsh74()
         return [
             executable, '-NoLogo', '-NoProfile', '-NonInteractive', '-File', str(script),
             '-BundleRoot', str(root), '-SshHost', args.ssh_host, *common,

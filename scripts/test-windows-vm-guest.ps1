@@ -173,6 +173,17 @@ try {
     Remove-Item -LiteralPath (Join-Path $isolatedJournalRoot 'active.drj')
     $hostRunner = Join-Path $PSScriptRoot 'run-windows-vm-tests.ps1'
     . $hostRunner -BundleRoot $valid.root -SshHost 'darkrenamer-vm'
+    Assert-Fails {
+        Assert-SshPowerShellVersion -Version '7.3.9' -Context 'Fixture SSH endpoint'
+    } '7.4 or newer'
+    foreach ($version in @('7.4', '7.4.0', '7.5.2', '8.0.0')) {
+        Assert-SshPowerShellVersion -Version $version -Context 'Fixture SSH endpoint'
+    }
+    foreach ($version in @('7', '7.4-preview.1', 'not-a-version', $null)) {
+        Assert-Fails {
+            Assert-SshPowerShellVersion -Version $version -Context 'Fixture SSH endpoint'
+        } 'numeric PowerShell version'
+    }
     $script:capturedSshSession = $null
     function New-PSSession {
         param(
