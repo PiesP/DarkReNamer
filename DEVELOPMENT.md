@@ -66,6 +66,27 @@ Hyper-V VM through an OpenSSH configuration alias:
 python3 scripts/test-windows-vm.py --ssh-host darkrenamer-vm
 ```
 
+The default `--desktop-mode rdp` starts a managed RDP desktop before the SSH
+controller runs and disconnects its client after the controller finishes,
+including failures. It requires WSL Windows interop and a separately configured
+Windows host helper at
+`%LocalAppData%\DarkReNamerVmTools\rdp\desktop-session.ps1`.
+Use `--desktop-helper` to select another trusted Windows helper. The helper's
+private local profile must bind the selected SSH alias or VM name to the expected
+guest account and authenticated RDP endpoint. Provision its certificate trust,
+restricted network access, and private credential store separately; credentials
+and endpoint configuration stay outside this repository and its bundles.
+For the local self-signed listener, install its verified public certificate in
+the Windows host's `LocalMachine\Root` store during administrator setup;
+`CurrentUser\Root` alone did not establish RDP trust on the prepared host.
+Normal test runs use the unprivileged helper and do not require elevation.
+
+`--desktop-scale` selects the RDP scale; its default is 200 percent. The runner
+checks the production window's actual DPI against that request. Use
+`--desktop-mode existing` for a separately prepared active, unlocked desktop,
+including console-specific acceptance or hosts without Windows interop. There
+is no automatic fallback when managed RDP preparation fails.
+
 The Linux or WSL host needs Python 3.11 or newer, PowerShell 7.4 or newer, Git,
 the pinned Rust toolchain, `cargo-xwin`, and the LLVM resource compiler described
 above. The alias must resolve through the host user's OpenSSH configuration to a
@@ -98,7 +119,8 @@ that transport loads the Windows host user's local
 helper implementing the same `PSCredential` interface. Register the credential
 separately under the same Windows host account, using Windows DPAPI or an
 equivalent private store. Missing or invalid credentials fail without an
-interactive password prompt. GUI login remains a separate prerequisite.
+interactive password prompt. With `--desktop-mode existing`, GUI login remains
+a separate prerequisite.
 
 The command requires a clean checkout. It builds all workspace test targets
 with locked dependencies, takes executable paths from Cargo's JSON artifacts,
@@ -124,6 +146,9 @@ failure. The guest runner holds a session-local, cross-process desktop lock for
 the suite and fails when another controller is using that interactive desktop.
 For the suite's lifetime, its runner also requests that Windows keep the system
 and display awake, then restores the thread's previous execution-state flags.
+The controller verifies that the desktop is active and unlocked; a disconnected
+Explorer session does not qualify. Managed RDP also binds that desktop account
+to the helper's expected guest SID.
 
 This lane proves actual Windows execution of cross-built test artifacts, not
 native Windows compilation or the complete native development gate. It does not

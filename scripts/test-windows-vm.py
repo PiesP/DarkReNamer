@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build the current checkout's Windows tests and execute them in a Hyper-V VM."""
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -25,11 +26,11 @@ def psquote(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def windows_host_command(script, capture=True):
+def windows_host_command(script, capture=True, timeout=120):
     prelude = '$ErrorActionPreference="Stop"; $env:PSModulePath="$PSHOME\\Modules;C:\\Program Files\\WindowsPowerShell\\Modules"; '
     return subprocess.run(
         [str(POWERSHELL), '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'RemoteSigned', '-Command', prelude + script],
-        cwd='/mnt/c', text=True, check=True, stdout=subprocess.PIPE if capture else None,
+        cwd='/mnt/c', text=True, check=True, stdout=subprocess.PIPE if capture else None, timeout=timeout,
     ).stdout
 
 
@@ -62,6 +63,10 @@ def argument_parser():
     transport.add_argument('--vm-name', help='Existing local Hyper-V VM with an unlocked test-user desktop.')
     transport.add_argument('--ssh-host', help='OpenSSH config alias for the configured VM test account.')
     parser.add_argument('--credential-helper', help='Windows path to a private helper returning PSCredential with -Action Load.')
+    parser.add_argument('--desktop-mode', choices=('rdp', 'existing'), default='rdp',
+                        help='Prepare a managed RDP desktop (default), or use an existing unlocked desktop.')
+    parser.add_argument('--desktop-helper', help='Trusted Windows desktop-session.ps1 path; uses the local RDP profile.')
+    parser.add_argument('--desktop-scale', type=int, choices=(100, 125, 150, 175, 200, 250, 300), default=200)
     parser.add_argument('--output', type=Path, help='New external directory for the bundle, logs, and screenshots.')
     parser.add_argument('--test-timeout-seconds', type=int, default=300)
     return parser
@@ -74,6 +79,8 @@ def parse_arguments(argv=None):
         parser.error('--ssh-host must be a 1-128 character OpenSSH config alias using letters, digits, dot, underscore, or hyphen.')
     if args.ssh_host and args.credential_helper:
         parser.error('--credential-helper can only be used with --vm-name PowerShell Direct transport.')
+    if args.desktop_mode == 'existing' and args.desktop_helper:
+        parser.error('--desktop-helper requires --desktop-mode rdp.')
     if not 10 <= args.test_timeout_seconds <= 1800:
         parser.error('Test timeout must be between 10 and 1800 seconds.')
     return args
@@ -116,9 +123,11 @@ def prepare_transport(repo, args):
     return resolve_output_root(repo, args, defaults), defaults, pwsh
 
 
-def controller_invocation(root, args, defaults=None, pwsh=None):
+def controller_invocation(root, args, defaults=None, pwsh=None, desktop_sid=None):
     script = root / 'run-windows-vm-tests.ps1'
     common = ['-TestTimeoutSeconds', str(args.test_timeout_seconds)]
+    if desktop_sid:
+        common += ['-ExpectedDesktopSid', desktop_sid]
     if args.ssh_host:
         executable = pwsh or require_pwsh7()
         return [
@@ -135,6 +144,7 @@ def controller_invocation(root, args, defaults=None, pwsh=None):
         '& ' + psquote(winpath(script)) + ' -BundleRoot ' + psquote(windows_root)
         + ' -VmName ' + psquote(args.vm_name) + ' -CredentialHelper ' + psquote(helper)
         + ' -TestTimeoutSeconds ' + str(args.test_timeout_seconds)
+        + (' -ExpectedDesktopSid ' + psquote(desktop_sid) if desktop_sid else '')
     )
     prelude = '$ErrorActionPreference="Stop"; $env:PSModulePath="$PSHOME\\Modules;C:\\Program Files\\WindowsPowerShell\\Modules"; '
     return [
@@ -143,10 +153,53 @@ def controller_invocation(root, args, defaults=None, pwsh=None):
     ]
 
 
+@contextmanager
+def managed_desktop(args):
+    if args.desktop_mode == 'existing':
+        yield None
+        return
+    if not POWERSHELL.is_file():
+        raise RuntimeError('Managed RDP requires WSL Windows interop and a configured desktop helper; use --desktop-mode existing for a separately prepared desktop.')
+    helper = psquote(args.desktop_helper) if args.desktop_helper else (
+        '(Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) '
+        '"DarkReNamerVmTools\\rdp\\desktop-session.ps1")')
+    selector = (' -ExpectedSshHost ' + psquote(args.ssh_host) if args.ssh_host else
+                ' -ExpectedVmName ' + psquote(args.vm_name))
+    # Start owns cleanup until it returns a valid lease; the helper bounds an
+    # abandoned child independently of this Python process.
+    lease = json.loads(windows_host_command(
+        '& ' + helper + ' -Action Start' + selector + ' -ScalePercent ' + str(args.desktop_scale)))
+    if (not isinstance(lease, dict) or lease.get('status') != 'ready' or
+            not isinstance(lease.get('leasePath'), str) or
+            not re.fullmatch(r'[A-Za-z]:\\[^\r\n]+', lease['leasePath']) or
+            not isinstance(lease.get('leaseId'), str) or
+            not re.fullmatch(r'[a-f0-9]{32}', lease['leaseId'])):
+        raise ValueError('Desktop helper returned an invalid lease; inspect its bounded session diagnostics.')
+    try:
+        if (not isinstance(lease.get('expectedGuestSid'), str) or
+                not re.fullmatch(r'S-1-5-21-(?:\d+-){2}\d+-\d+', lease['expectedGuestSid']) or
+                type(lease.get('expectedDpi')) is not int or
+                lease['expectedDpi'] != args.desktop_scale * 96 // 100):
+            raise ValueError('Desktop helper returned an unexpected identity or DPI.')
+        yield lease
+    finally:
+        stopped = json.loads(windows_host_command(
+            '& ' + helper + ' -Action Stop -LeasePath ' + psquote(lease['leasePath'])
+            + ' -LeaseId ' + psquote(lease['leaseId'])))
+        if not isinstance(stopped, dict) or stopped.get('status') != 'stopped':
+            raise RuntimeError('Desktop helper did not confirm session cleanup.')
+
+
 def run_controller(root, args, defaults=None, pwsh=None):
-    command = controller_invocation(root, args, defaults, pwsh)
-    cwd = root if args.ssh_host else Path('/mnt/c')
-    subprocess.run(command, cwd=cwd, text=True, check=True)
+    with managed_desktop(args) as desktop:
+        command = controller_invocation(root, args, defaults, pwsh,
+                                        desktop['expectedGuestSid'] if desktop else None)
+        cwd = root if args.ssh_host else Path('/mnt/c')
+        subprocess.run(command, cwd=cwd, text=True, check=True)
+        if desktop:
+            result = json.loads((root / 'result.json').read_text(encoding='utf-8-sig'))
+            if result.get('gui', {}).get('window_dpi') != desktop['expectedDpi']:
+                raise ValueError('Production window DPI differs from the requested RDP scale.')
 
 
 def test_artifacts(messages):
