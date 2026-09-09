@@ -6,6 +6,7 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'Ssh')]
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z')]
     [string] $SshHost,
+    [ValidatePattern('^S-1-5-21-(\d+-){2}\d+-\d+$')][string] $ExpectedDesktopSid,
     [ValidateRange(10, 1800)][int] $TestTimeoutSeconds = 300,
     [ValidateRange(60, 14400)][int] $SuiteTimeoutSeconds = 2400
 )
@@ -126,12 +127,34 @@ try {
     if (-not $endpoint.is_administrator) {
         throw 'The VM controller account must be a local administrator so it can register the limited interactive test task.'
     }
-    $desktop = Invoke-Command -Session $session -ScriptBlock {
+    $desktop = Invoke-Command -Session $session -ArgumentList $ExpectedDesktopSid -ScriptBlock {
+        param($expectedSid)
         $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        if ($expectedSid -and $sid -cne $expectedSid) { throw 'RDP profile and controller account differ.' }
+        Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class VmDesktopState {
+    [DllImport("wtsapi32.dll", SetLastError=true)]
+    static extern bool WTSQuerySessionInformation(IntPtr server, int session, int info, out IntPtr buffer, out int bytes);
+    [DllImport("wtsapi32.dll")] static extern void WTSFreeMemory(IntPtr buffer);
+    public static bool Active(int session) {
+        IntPtr buffer; int bytes;
+        if (!WTSQuerySessionInformation(IntPtr.Zero, session, 8, out buffer, out bytes)) return false;
+        try { return bytes >= 4 && Marshal.ReadInt32(buffer) == 0; }
+        finally { WTSFreeMemory(buffer); }
+    }
+}
+'@
         $localUser = @(Get-CimInstance Win32_UserAccount -Filter 'LocalAccount=True' | Where-Object SID -eq $sid)
         if ($localUser.Count -ne 1) { throw 'The VM test account must be local.' }
-        $sessions = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" | Where-Object { (Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid).Sid -eq $sid } | Select-Object -ExpandProperty SessionId -Unique)
-        $unlocked = @($sessions | Where-Object { $candidate = $_; -not (Get-Process LogonUI -ErrorAction SilentlyContinue | Where-Object SessionId -eq $candidate) })
+        $deadline = (Get-Date).AddSeconds(30)
+        do {
+            $sessions = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" | Where-Object { (Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid).Sid -eq $sid } | Select-Object -ExpandProperty SessionId -Unique)
+            $unlocked = @($sessions | Where-Object { $candidate = $_; [VmDesktopState]::Active($candidate) -and -not (Get-Process LogonUI -ErrorAction SilentlyContinue | Where-Object SessionId -eq $candidate) })
+            if ($unlocked.Count -eq 1) { break }
+            Start-Sleep -Milliseconds 500
+        } while ((Get-Date) -lt $deadline)
         if ($unlocked.Count -ne 1 -or $unlocked[0] -le 0) { throw 'Log in to one unlocked desktop with the configured VM test account.' }
         if (-not (Test-Path "$env:SystemRoot\System32\VCRUNTIME140.dll")) { throw 'Install the Microsoft x64 Visual C++ runtime in the VM before testing.' }
         [pscustomobject]@{sid = $sid; session_id = $unlocked[0]}

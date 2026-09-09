@@ -230,6 +230,71 @@ class VmRunnerTests(unittest.TestCase):
         self.assertIn('-SshHost', ssh)
         self.assertIn('-VmName', direct[-1])
 
+    def desktop_lease(self):
+        return {'status': 'ready', 'leasePath': 'C:\\Temp\\owned', 'leaseId': 'a' * 32,
+                'expectedGuestSid': 'S-1-5-21-1-2-3-1001', 'expectedDpi': 192}
+
+    def test_managed_desktop_is_default_and_binds_transport_selector(self):
+        for selector in (['--ssh-host', 'vm-alias'], ['--vm-name', 'VM']):
+            args = vm.parse_arguments(selector)
+            self.assertEqual(args.desktop_mode, 'rdp')
+            with mock.patch.object(vm.Path, 'is_file', return_value=True), \
+                 mock.patch.object(vm, 'windows_host_command', side_effect=[
+                     json.dumps(self.desktop_lease()), '{"status":"stopped"}']) as host:
+                with vm.managed_desktop(args) as lease:
+                    self.assertEqual(lease['expectedDpi'], 192)
+                start, stop = [call.args[0] for call in host.call_args_list]
+                self.assertIn('-ExpectedSshHost' if args.ssh_host else '-ExpectedVmName', start)
+                self.assertIn('-LeaseId', stop)
+
+    def test_existing_desktop_never_calls_windows_host(self):
+        args = vm.parse_arguments(['--ssh-host', 'vm', '--desktop-mode', 'existing'])
+        with mock.patch.object(vm, 'windows_host_command', side_effect=AssertionError):
+            with vm.managed_desktop(args) as lease:
+                self.assertIsNone(lease)
+
+    def test_desktop_stops_after_controller_failure(self):
+        args = vm.parse_arguments(['--ssh-host', 'vm'])
+        with mock.patch.object(vm.Path, 'is_file', return_value=True), \
+             mock.patch.object(vm, 'windows_host_command', side_effect=[
+                 json.dumps(self.desktop_lease()), '{"status":"stopped"}']) as host:
+            with self.assertRaisesRegex(RuntimeError, 'controller failed'):
+                with vm.managed_desktop(args):
+                    raise RuntimeError('controller failed')
+            self.assertEqual(host.call_count, 2)
+
+    def test_invalid_desktop_identity_is_stopped_before_controller(self):
+        args = vm.parse_arguments(['--ssh-host', 'vm'])
+        lease = self.desktop_lease()
+        lease['expectedGuestSid'] = 'wrong'
+        with mock.patch.object(vm.Path, 'is_file', return_value=True), \
+             mock.patch.object(vm, 'windows_host_command', side_effect=[
+                 json.dumps(lease), '{"status":"stopped"}']) as host:
+            with self.assertRaisesRegex(ValueError, 'identity or DPI'):
+                with vm.managed_desktop(args):
+                    self.fail('Invalid desktop reached controller')
+            self.assertEqual(host.call_count, 2)
+
+    def test_malformed_lease_never_requests_arbitrary_cleanup(self):
+        args = vm.parse_arguments(['--ssh-host', 'vm'])
+        lease = self.desktop_lease()
+        lease['leaseId'] = '../other'
+        with mock.patch.object(vm.Path, 'is_file', return_value=True), \
+             mock.patch.object(vm, 'windows_host_command', return_value=json.dumps(lease)) as host:
+            with self.assertRaisesRegex(ValueError, 'invalid lease'):
+                with vm.managed_desktop(args):
+                    self.fail('Invalid lease reached controller')
+            self.assertEqual(host.call_count, 1)
+
+    def test_cleanup_failure_fails_desktop_context(self):
+        args = vm.parse_arguments(['--ssh-host', 'vm'])
+        with mock.patch.object(vm.Path, 'is_file', return_value=True), \
+             mock.patch.object(vm, 'windows_host_command', side_effect=[
+                 json.dumps(self.desktop_lease()), '{"status":"failed"}']):
+            with self.assertRaisesRegex(RuntimeError, 'cleanup'):
+                with vm.managed_desktop(args):
+                    pass
+
 
 if __name__ == '__main__':
     unittest.main()

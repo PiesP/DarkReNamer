@@ -547,6 +547,8 @@ public static class DarkReNamerVmNative {
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
     [DllImport("user32.dll")]
+    public static extern uint GetDpiForWindow(IntPtr window);
+    [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr window);
@@ -1429,6 +1431,7 @@ function Invoke-GuiSmoke {
         exit_code = $null
         window_class = $null
         window_title = $null
+        window_dpi = $null
         screenshot = $null
         flow = $null
         failure_reason = 'process_start_failed'
@@ -1488,6 +1491,7 @@ function Invoke-GuiSmoke {
             }
             $row.window_class = $windowClass
             $row.window_title = $windowTitle
+            $row.window_dpi = [int][DarkReNamerVmNative]::GetDpiForWindow($handle)
 
             if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
                 try {
