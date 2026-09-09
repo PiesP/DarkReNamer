@@ -76,6 +76,10 @@ private local profile must bind the selected SSH alias or VM name to the expecte
 guest account and authenticated RDP endpoint. Provision its certificate trust,
 restricted network access, and private credential store separately; credentials
 and endpoint configuration stay outside this repository and its bundles.
+For the local self-signed listener, install its verified public certificate in
+the Windows host's `LocalMachine\Root` store during administrator setup;
+`CurrentUser\Root` alone did not establish RDP trust on the prepared host.
+Normal test runs use the unprivileged helper and do not require elevation.
 
 `--desktop-scale` selects the RDP scale; its default is 200 percent. The runner
 checks the production window's actual DPI against that request. Use
