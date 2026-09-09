@@ -507,6 +507,16 @@ public static class DarkReNamerVmAcceptanceNative {
     private static extern uint SendInput(uint count, INPUT[] inputs, int size);
     [DllImport("user32.dll")]
     public static extern uint GetDpiForWindow(IntPtr window);
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowEnabled(IntPtr window);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetMenu(IntPtr window);
+    [DllImport("user32.dll")]
+    private static extern uint GetMenuState(IntPtr menu, uint item, uint flags);
+    [DllImport("user32.dll")]
+    private static extern int GetMenuItemCount(IntPtr menu);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetSubMenu(IntPtr menu, int position);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool SystemParametersInfo(uint action, uint parameter, ref HIGHCONTRAST value, uint flags);
     [DllImport("user32.dll")]
@@ -547,6 +557,34 @@ public static class DarkReNamerVmAcceptanceNative {
         KeyUp(0x10);
         KeyUp(0x11);
         KeyUp(0x12);
+    }
+
+    private static bool TryGetMenuCommandState(IntPtr menu, uint command, out uint state) {
+        state = GetMenuState(menu, command, 0);
+        if (state != UInt32.MaxValue) { return true; }
+        int count = GetMenuItemCount(menu);
+        if (count < 0) {
+            throw new InvalidOperationException("The native menu could not be inspected.");
+        }
+        for (int position = 0; position < count; position++) {
+            IntPtr submenu = GetSubMenu(menu, position);
+            if (submenu != IntPtr.Zero && TryGetMenuCommandState(submenu, command, out state)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static bool IsMenuCommandEnabled(IntPtr window, uint command) {
+        IntPtr root = GetMenu(window);
+        if (root == IntPtr.Zero) {
+            throw new InvalidOperationException("The application window has no native menu.");
+        }
+        uint state;
+        if (!TryGetMenuCommandState(root, command, out state)) {
+            throw new InvalidOperationException("The native menu command was not found.");
+        }
+        return (state & 3) == 0;
     }
 
     public static HighContrastSnapshot GetHighContrastSnapshot() {
@@ -719,26 +757,29 @@ function Move-RailFocusToCommand {
     )
 
     $leftIds = @('32771','32772','32773','32774','32775','32776','32777','32778','32779','32780')
+    $rightIds = @('32781','32783','65535','32784','32788','32789','32790','32785','32786')
+    $railIds = if ($leftIds -contains $AutomationId) { $leftIds } else { $rightIds }
+    if ($railIds -notcontains $AutomationId) { throw 'Unknown command rail automation ID.' }
     $focused = $null
     for ($step = 0; $step -lt 32; $step++) {
         $focused = Get-FocusedAcceptanceElement `
             -Process $Process `
             -ExpectedSession $ExpectedSession `
             -Label 'keyboard command-rail navigation'
-        if ($leftIds -contains $focused.Current.AutomationId) {
+        if ($railIds -contains $focused.Current.AutomationId) {
             break
         }
         [DarkReNamerVmAcceptanceNative]::Tap(0x09)
     }
-    if ($null -eq $focused -or $leftIds -notcontains $focused.Current.AutomationId) {
-        throw 'Keyboard Tab navigation did not enter the left command rail.'
+    if ($null -eq $focused -or $railIds -notcontains $focused.Current.AutomationId) {
+        throw 'Keyboard Tab navigation did not enter the target command rail.'
     }
-    for ($step = 0; $step -lt $leftIds.Count; $step++) {
+    for ($step = 0; $step -lt $railIds.Count; $step++) {
         if ($focused.Current.AutomationId -ceq $AutomationId) {
             return $focused
         }
-        $currentIndex = [Array]::IndexOf($leftIds, $focused.Current.AutomationId)
-        $targetIndex = [Array]::IndexOf($leftIds, $AutomationId)
+        $currentIndex = [Array]::IndexOf($railIds, $focused.Current.AutomationId)
+        $targetIndex = [Array]::IndexOf($railIds, $AutomationId)
         $direction = if ($currentIndex -lt $targetIndex) { 0x28 } else { 0x26 }
         [DarkReNamerVmAcceptanceNative]::Tap([uint16]$direction)
         $focused = Get-FocusedAcceptanceElement `
@@ -788,6 +829,27 @@ function Get-RailAccessibilitySnapshot {
         throw 'The command rail accessibility snapshot is incomplete.'
     }
     $rows.ToArray()
+}
+
+function Get-ListPrimarySnapshot {
+    param([Parameter(Mandatory)][Windows.Automation.AutomationElement] $List)
+
+    $gridObject = $null
+    if (-not $List.TryGetCurrentPattern(
+        [Windows.Automation.GridPattern]::Pattern,
+        [ref]$gridObject
+    )) {
+        throw 'The production file list does not expose GridPattern for reset observation.'
+    }
+    $grid = [Windows.Automation.GridPattern]$gridObject
+    if ($grid.Current.RowCount -ne 1 -or $grid.Current.ColumnCount -lt 3) {
+        throw 'The reset observation requires exactly one row and three primary columns.'
+    }
+    [ordered]@{
+        current_name = $grid.GetItem(0, 0).Current.Name
+        proposed_name = $grid.GetItem(0, 1).Current.Name
+        destination_parent = $grid.GetItem(0, 2).Current.Name
+    }
 }
 
 function Write-JsonUtf8Bom {
@@ -884,6 +946,14 @@ $highContrastState = [pscustomobject]@{
 $captures = [Collections.Generic.List[object]]::new()
 $keyboard = [ordered]@{
     status = 'failed'
+    reset_name_enabled_after_prefix = $false
+    reset_name_native_enabled_after_prefix = $false
+    reset_name_menu_enabled_after_prefix = $false
+    reset_name_selection_pattern_available = $false
+    reset_name_selection_count_after_prefix = $null
+    reset_name_proposal_only = $false
+    reset_name_displayed_parent_unchanged = $false
+    reset_name_disabled_after_reset = $false
     cancellation_unchanged = $false
     confirmed_disk_rename = $false
     content_preserved = $false
@@ -912,6 +982,7 @@ $observations = [ordered]@{
     rail_buttons = @()
     file_dialog = $null
     prefix_prompt = $null
+    name_reset = $null
     apply_confirmation = $null
 }
 $result = [ordered]@{
@@ -1175,8 +1246,12 @@ try {
             -Name '이름 앞에 문자열 붙이기' `
             -TimeoutSeconds $TimeoutSeconds `
             -Label 'keyboard prefix prompt'
+        $promptHandle = [IntPtr]$prompt.Current.NativeWindowHandle
         $promptEdit = Find-UniqueAutomationElement -Root $prompt -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '1004' -ControlType ([Windows.Automation.ControlType]::Edit) -TimeoutSeconds $TimeoutSeconds -Label 'prefix prompt edit' -RequireWindowHandle
         $promptOk = Find-UniqueAutomationElement -Root $prompt -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '1' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $TimeoutSeconds -Label 'prefix prompt OK' -RequireWindowHandle
+        if ($promptEdit.Current.Name -cne '붙일 문자열') {
+            throw "The prefix Edit accessible name is '$($promptEdit.Current.Name)', expected '붙일 문자열'."
+        }
         $observations.prefix_prompt = [ordered]@{
             window = Get-ElementObservation -Element $prompt
             edit = Get-ElementObservation -Element $promptEdit
@@ -1193,8 +1268,118 @@ try {
         Send-AcceptanceText -Process $process -ExpectedSession $ExpectedSessionId -Value $prefix -Label 'prefix keyboard input'
         [void](Move-TabFocusToId -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '1')
         Send-AcceptanceTap -Process $process -ExpectedSession $ExpectedSessionId -VirtualKey 0x0D -Label 'prefix prompt Enter'
+        Wait-WindowClosed `
+            -Handle $promptHandle `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Label 'prefix prompt'
+        $selectionPatternObject = $null
+        if ($list.TryGetCurrentPattern(
+            [Windows.Automation.SelectionPattern]::Pattern,
+            [ref]$selectionPatternObject
+        )) {
+            $keyboard.reset_name_selection_pattern_available = $true
+            $selectionPattern = [Windows.Automation.SelectionPattern]$selectionPatternObject
+            $keyboard.reset_name_selection_count_after_prefix =
+                @($selectionPattern.Current.GetSelection()).Count
+            if ($keyboard.reset_name_selection_count_after_prefix -ne 0) {
+                throw 'The no-selection name reset scenario acquired a list selection after prefix.'
+            }
+        }
+        else {
+            throw 'The production file list does not expose SelectionPattern for the no-selection reset observation.'
+        }
         Wait-ListPreviewName -MainWindow $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -ExpectedName $destinationName -TimeoutSeconds $TimeoutSeconds
-        $captures.Add((Save-WindowScreenshot -Window $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -Root $verified.output_root -Leaf ($capturePrefix + '-preview.png') -Label 'current-DPI rename preview'))
+        $beforeReset = Get-ListPrimarySnapshot -List $list
+        $reset = Find-UniqueAutomationElement `
+            -Root $mainWindow `
+            -Process $process `
+            -ExpectedSession $ExpectedSessionId `
+            -AutomationId '32781' `
+            -ControlType ([Windows.Automation.ControlType]::Button) `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Label 'name reset after prefix' `
+            -RequireEnabled `
+            -RequireWindowHandle
+        $keyboard.reset_name_enabled_after_prefix = $reset.Current.IsEnabled
+        $keyboard.reset_name_native_enabled_after_prefix =
+            [DarkReNamerVmAcceptanceNative]::IsWindowEnabled(
+                [IntPtr]$reset.Current.NativeWindowHandle
+            )
+        $keyboard.reset_name_menu_enabled_after_prefix =
+            [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
+                $process.MainWindowHandle,
+                0x800D
+            )
+        if (-not $keyboard.reset_name_native_enabled_after_prefix -or
+            -not $keyboard.reset_name_menu_enabled_after_prefix) {
+            throw 'Name reset did not become enabled in both the native rail and menu after prefix.'
+        }
+        $observations.name_reset = [ordered]@{
+            before = [ordered]@{
+                rail = Get-ElementObservation -Element $reset
+                native_enabled = $keyboard.reset_name_native_enabled_after_prefix
+                menu_enabled = $keyboard.reset_name_menu_enabled_after_prefix
+                selection_pattern_available = $keyboard.reset_name_selection_pattern_available
+                selected_item_count = $keyboard.reset_name_selection_count_after_prefix
+                row = $beforeReset
+            }
+            after = $null
+        }
+        $captures.Add((Save-WindowScreenshot -Window $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -Root $verified.output_root -Leaf ($capturePrefix + '-preview.png') -Label 'current-DPI rename preview before name reset'))
+
+        [void](Move-RailFocusToCommand -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '32781')
+        Send-AcceptanceTap -Process $process -ExpectedSession $ExpectedSessionId -VirtualKey 0x20 -Label 'name reset Space'
+        Wait-ListPreviewName -MainWindow $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -ExpectedName $sourceName -TimeoutSeconds $TimeoutSeconds
+        $afterReset = Get-ListPrimarySnapshot -List $list
+        $resetAfter = Find-UniqueAutomationElement `
+            -Root $mainWindow `
+            -Process $process `
+            -ExpectedSession $ExpectedSessionId `
+            -AutomationId '32781' `
+            -ControlType ([Windows.Automation.ControlType]::Button) `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Label 'name reset after reset' `
+            -RequireWindowHandle
+        $nativeResetDisabled = -not [DarkReNamerVmAcceptanceNative]::IsWindowEnabled(
+            [IntPtr]$resetAfter.Current.NativeWindowHandle
+        )
+        $menuResetDisabled = -not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
+            $process.MainWindowHandle,
+            0x800D
+        )
+        $keyboard.reset_name_disabled_after_reset =
+            (-not $resetAfter.Current.IsEnabled) -and $nativeResetDisabled -and $menuResetDisabled
+        $keyboard.reset_name_displayed_parent_unchanged =
+            $beforeReset.destination_parent -ceq $afterReset.destination_parent -and
+            $afterReset.destination_parent -ceq $fixtureRoot
+        $keyboard.reset_name_proposal_only =
+            $afterReset.current_name -ceq $sourceName -and
+            $afterReset.proposed_name -ceq $sourceName -and
+            (Test-Path -LiteralPath $sourcePath -PathType Leaf) -and
+            -not (Test-Path -LiteralPath $destinationPath) -and
+            (Get-LowerSha256 -Path $sourcePath) -ceq $beforeContent -and
+            [DarkReNamerVmNative]::GetFileIdentity($sourcePath) -ceq $beforeIdentity
+        if (-not $keyboard.reset_name_disabled_after_reset -or
+            -not $keyboard.reset_name_displayed_parent_unchanged -or
+            -not $keyboard.reset_name_proposal_only) {
+            throw 'Name reset did not restore only the proposal while leaving the displayed parent and disk state unchanged.'
+        }
+        $observations.name_reset.after = [ordered]@{
+            rail = Get-ElementObservation -Element $resetAfter
+            native_enabled = -not $nativeResetDisabled
+            menu_enabled = -not $menuResetDisabled
+            row = $afterReset
+        }
+        $captures.Add((Save-WindowScreenshot -Window $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -Root $verified.output_root -Leaf ($capturePrefix + '-preview-after-name-reset.png') -Label 'current-DPI rename preview after name reset'))
+
+        [void](Move-RailFocusToCommand -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '32773')
+        Send-AcceptanceTap -Process $process -ExpectedSession $ExpectedSessionId -VirtualKey 0x20 -Label 'second prefix command Space'
+        $prompt = Wait-UniqueAutomationWindow -Process $process -ExpectedSession $ExpectedSessionId -Name '이름 앞에 문자열 붙이기' -TimeoutSeconds $TimeoutSeconds -Label 'second keyboard prefix prompt'
+        [void](Move-TabFocusToId -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '1004')
+        Send-AcceptanceText -Process $process -ExpectedSession $ExpectedSessionId -Value $prefix -Label 'second prefix keyboard input'
+        [void](Move-TabFocusToId -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '1')
+        Send-AcceptanceTap -Process $process -ExpectedSession $ExpectedSessionId -VirtualKey 0x0D -Label 'second prefix prompt Enter'
+        Wait-ListPreviewName -MainWindow $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -ExpectedName $destinationName -TimeoutSeconds $TimeoutSeconds
 
         $result.failure_reason = 'apply_cancellation_failed'
         [void](Move-RailFocusToCommand -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '32771')

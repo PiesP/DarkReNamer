@@ -2213,6 +2213,9 @@ mod tests {
                 assert!(caption.contains("선택 항목 진단"));
                 assert!(text.contains("Windows에서 금지된 문자"));
                 assert!(text.contains("수정하세요"));
+                assert!(text.contains("현재 이름: sample.txt"));
+                assert!(text.contains("변경 후 이름: ?sample.txt"));
+                assert!(text.contains(r"대상 전체 경로: C:\fixture\?sample.txt"));
                 assert!(text.contains("파일 시스템 검사와 실행 확인은 변경 적용 시 별도"));
             }
         ));
@@ -2327,7 +2330,79 @@ mod tests {
     }
 
     #[test]
-    fn unify_path_dialog_is_atomic_revision_bound_and_reset_keeps_name_proposals()
+    fn reset_state_transitions_leave_a_deferred_repaint_after_model_updates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use windows_sys::Win32::Graphics::Gdi::{GetUpdateRect, ValidateRect};
+        use windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+
+        let _serial = FILE_DIALOG_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let directory = tempfile::tempdir()?;
+        with_production_popup_window_for_test(directory.path(), false, |window| {
+            // The shared popup fixture starts at the raw 464x408 CreateWindowExW
+            // size. The application normally expands that size for its current
+            // DPI before showing the window; without this step, 200% DPI selects
+            // the menu-only layout and intentionally hides both command rails.
+            let initial_placement = {
+                let lease = try_app_state(window)
+                    .ok_or_else(|| io::Error::other("test AppState is unavailable"))?;
+                initial_dpi_placement(window, lease.state())?
+            };
+            resize_to_initial_dpi(window, initial_placement)?;
+
+            let reset = {
+                let mut lease = try_app_state(window)
+                    .ok_or_else(|| io::Error::other("test AppState is unavailable"))?;
+                let state = lease.state_mut();
+                assert!(state.rails_visible);
+                assert_eq!(
+                    state.model.append(LegacyListItem::new(
+                        r"C:\fixture\before.txt",
+                        false,
+                        1,
+                        2,
+                        3,
+                    )),
+                    Ok(true)
+                );
+                update_controls(state);
+                state
+                    .right_rail
+                    .as_ref()
+                    .and_then(|rail| rail.command_hwnd(RESET))
+                    .ok_or_else(|| io::Error::other("reset button is missing"))?
+            };
+            // SAFETY: reset is the live test-owned command button.
+            assert_ne!(unsafe { IsWindowVisible(reset) }, 0);
+
+            for (name, enabled) in [("renamed.txt", true), ("before.txt", false)] {
+                // SAFETY: reset is a live visible child. Clear prior damage so
+                // this assertion observes only the next model transition.
+                assert_ne!(unsafe { ValidateRect(reset, null()) }, 0);
+                let mut lease = try_app_state(window)
+                    .ok_or_else(|| io::Error::other("test AppState is unavailable"))?;
+                assert_eq!(lease.state_mut().model.manual_change(0, name), Ok(true));
+                update_controls(lease.state_mut());
+                drop(lease);
+                // SAFETY: both calls query the live child after every AppState
+                // reference ended and do not force synchronous painting.
+                let (is_enabled, has_pending_repaint) = unsafe {
+                    (
+                        IsWindowEnabled(reset) != 0,
+                        GetUpdateRect(reset, null_mut(), 0) != 0,
+                    )
+                };
+                assert_eq!(is_enabled, enabled);
+                assert!(has_pending_repaint);
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn unify_path_dialog_is_atomic_revision_bound_and_resets_are_scoped()
     -> Result<(), Box<dyn std::error::Error>> {
         let _serial = FILE_DIALOG_TEST_SERIAL
             .lock()
@@ -2399,19 +2474,34 @@ mod tests {
         );
 
         app.with_state(|state| {
-            assert!(dispatch_command(app.owner, state, RESET_PATH).is_none());
+            assert!(dispatch_command(app.owner, state, RESET).is_none());
             assert_eq!(state.model_revision, original_revision + 2);
+            assert_eq!(state.model.items()[0].root_path(), &expected_destination);
+            assert_eq!(
+                state.model.items()[0].proposed_name(),
+                &LegacyText::from("before.txt")
+            );
+            assert_eq!(state.rendered_rows[0].values[2], expected_destination);
+            assert_eq!(
+                state.rendered_rows[0].values[NATIVE_STATUS_COLUMN_INDEX],
+                LegacyText::from("이동 예정")
+            );
+        })?;
+
+        app.with_state(|state| {
+            assert!(dispatch_command(app.owner, state, RESET_PATH).is_none());
+            assert_eq!(state.model_revision, original_revision + 3);
             assert_eq!(
                 state.model.items()[0].root_path(),
                 &LegacyText::from(r"C:\fixture")
             );
             assert_eq!(
                 state.model.items()[0].proposed_name(),
-                &LegacyText::from("renamed.txt")
+                &LegacyText::from("before.txt")
             );
             assert_eq!(
                 state.rendered_rows[0].values[NATIVE_STATUS_COLUMN_INDEX],
-                LegacyText::from("이름 변경 예정")
+                LegacyText::default()
             );
         })?;
         Ok(())

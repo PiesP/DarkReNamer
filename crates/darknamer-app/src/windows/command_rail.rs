@@ -285,7 +285,16 @@ impl CommandRail {
     pub(super) fn set_enabled(&self, command: CommandId, enabled: bool) {
         if let Some(button) = self.command_hwnd(command) {
             // SAFETY: button is the live child control associated with command.
-            unsafe { EnableWindow(button, enabled as i32) };
+            // Invalidation only schedules paint after the current AppState lease
+            // ends; EnableWindow can request synchronous owner drawing while that
+            // lease prevents the parent from handling WM_DRAWITEM.
+            unsafe {
+                // EnableWindow reports whether the button was previously disabled.
+                let was_enabled = EnableWindow(button, enabled as i32) == 0;
+                if was_enabled != enabled {
+                    InvalidateRect(button, null(), 0);
+                }
+            }
         }
     }
 

@@ -904,12 +904,12 @@ fn arrange_prompt(window: HWND, state: &PromptState, center_on_owner: bool) {
 pub(super) fn create_prompt_children(window: HWND, state: &mut PromptState) -> io::Result<()> {
     state.title = child(window, "STATIC", &state.spec.title, 1001, SS_NOPREFIX)?;
     if !state.spec.label_one.is_empty() {
-        state.edit_one = create_prompt_edit(window, &state.spec.value_one, 1004)?;
         state.label_one = child(window, "STATIC", &state.spec.label_one, 1002, SS_NOPREFIX)?;
+        state.edit_one = create_prompt_edit(window, &state.spec.value_one, 1004)?;
     }
     if !state.spec.label_two.is_empty() {
-        state.edit_two = create_prompt_edit(window, &state.spec.value_two, 1005)?;
         state.label_two = child(window, "STATIC", &state.spec.label_two, 1003, SS_NOPREFIX)?;
+        state.edit_two = create_prompt_edit(window, &state.spec.value_two, 1005)?;
     }
     if !state.spec.choices.is_empty() {
         let combo = child(

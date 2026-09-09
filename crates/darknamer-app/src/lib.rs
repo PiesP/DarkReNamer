@@ -2094,22 +2094,42 @@ impl ApplyConfirmationSummary {
 
 #[cfg(any(windows, test))]
 #[must_use]
-pub(crate) fn apply_confirmation_primary(summary: ApplyConfirmationSummary) -> String {
-    let mut text = format!(
-        "논리적 변경: {}개\n이름만 변경: {}개\n이동만: {}개\n이동 및 이름 변경: {}개\n대소문자만 변경: {}개\n순환 변경 그룹: {}개\n파일 시스템 변경 단계: {}개",
-        summary.logical_changed(),
-        summary.rename_only,
-        summary.move_only,
-        summary.move_and_rename,
-        summary.case_only(),
-        summary.cycle_groups(),
-        summary.primitive_steps(),
-    );
-    if let Some(parent) = summary.common_destination_parent {
+pub(crate) fn apply_confirmation_primary(summary: &ApplyConfirmationSummary) -> String {
+    let mut text = if summary.rename_only == summary.logical_changed() {
+        format!("파일 {}개의 이름을 변경합니다.", summary.logical_changed())
+    } else if summary.move_only == summary.logical_changed() {
+        format!("파일 {}개를 이동합니다.", summary.logical_changed())
+    } else if summary.move_and_rename == summary.logical_changed() {
+        format!(
+            "파일 {}개를 이동하고 이름도 변경합니다.",
+            summary.logical_changed()
+        )
+    } else {
+        format!(
+            "파일 {}개의 이름 또는 대상 폴더를 변경합니다.",
+            summary.logical_changed()
+        )
+    };
+    let kind_count = usize::from(summary.rename_only != 0)
+        .saturating_add(usize::from(summary.move_only != 0))
+        .saturating_add(usize::from(summary.move_and_rename != 0));
+    if kind_count > 1 && summary.rename_only != 0 {
+        text.push_str(&format!("\n이름 변경: {}개", summary.rename_only));
+    }
+    if kind_count > 1 && summary.move_only != 0 {
+        text.push_str(&format!("\n대상 폴더 이동: {}개", summary.move_only));
+    }
+    if kind_count > 1 && summary.move_and_rename != 0 {
+        text.push_str(&format!(
+            "\n이름 변경 및 대상 폴더 이동: {}개",
+            summary.move_and_rename
+        ));
+    }
+    if let Some(parent) = &summary.common_destination_parent {
         text.push_str("\n대상 폴더: ");
         text.push_str(&parent.to_string_lossy());
     }
-    text.push_str("\n대상 덮어쓰기: 허용하지 않음");
+    text.push_str("\n기존 파일을 덮어쓰지 않습니다.");
     text
 }
 
@@ -2131,8 +2151,21 @@ fn split_windows_path(path: &darknamer_core::LegacyText) -> (&[u16], &[u16]) {
 
 #[cfg(any(windows, test))]
 #[must_use]
-pub(crate) fn apply_confirmation_detail(fingerprint: u64, revision: u64) -> String {
-    format!("계획 지문: {fingerprint:016X}\n목록 버전: {revision}")
+pub(crate) fn apply_confirmation_detail(
+    summary: &ApplyConfirmationSummary,
+    fingerprint: u64,
+    revision: u64,
+) -> String {
+    format!(
+        "논리적 변경: {}개\n이름만 변경: {}개\n이동만: {}개\n이동 및 이름 변경: {}개\n대소문자만 변경: {}개\n순환 변경 그룹: {}개\n파일 시스템 변경 단계: {}개\n계획 지문: {fingerprint:016X}\n목록 버전: {revision}",
+        summary.logical_changed(),
+        summary.rename_only,
+        summary.move_only,
+        summary.move_and_rename,
+        summary.case_only(),
+        summary.cycle_groups(),
+        summary.primitive_steps(),
+    )
 }
 
 /// Calculates a message-font-aware prompt layout for the active field combination.
@@ -2243,18 +2276,18 @@ pub(crate) fn calculate_prompt_layout(
     let mut field = |present: bool| {
         present.then(|| {
             let height = next_height();
-            let edit = LayoutRect {
+            let label = LayoutRect {
                 x: horizontal_padding,
                 y,
-                width: edit_width,
+                width: label_width,
                 height,
             };
-            let label = LayoutRect {
+            let edit = LayoutRect {
                 x: horizontal_padding
-                    .saturating_add(edit_width)
+                    .saturating_add(label_width)
                     .saturating_add(horizontal_gap),
                 y,
-                width: label_width,
+                width: edit_width,
                 height,
             };
             y = y.saturating_add(height).saturating_add(vertical_gap);
@@ -6973,22 +7006,50 @@ mod tests {
         assert_eq!(summary.temporary_groups, 2);
         assert_eq!(summary.cycle_groups(), 1);
         assert_eq!(summary.primitive_steps(), 6);
-        let primary = apply_confirmation_primary(summary);
-        assert!(primary.contains("논리적 변경: 4개"));
-        assert!(primary.contains("대소문자만 변경: 1개"));
-        assert!(primary.contains("순환 변경 그룹: 1개"));
-        assert!(primary.contains("파일 시스템 변경 단계: 6개"));
-        assert!(primary.contains("이름만 변경: 1개"));
-        assert!(primary.contains("이동만: 1개"));
-        assert!(primary.contains("이동 및 이름 변경: 2개"));
+        let primary = apply_confirmation_primary(&summary);
+        assert!(primary.contains("파일 4개의 이름 또는 대상 폴더를 변경합니다."));
+        assert!(primary.contains("이름 변경: 1개"));
+        assert!(primary.contains("대상 폴더 이동: 1개"));
+        assert!(primary.contains("이름 변경 및 대상 폴더 이동: 2개"));
         assert!(primary.contains(r"대상 폴더: C:\archive"));
-        assert!(primary.contains("대상 덮어쓰기: 허용하지 않음"));
+        assert!(primary.contains("기존 파일을 덮어쓰지 않습니다."));
+        assert!(!primary.contains("대소문자만 변경"));
+        assert!(!primary.contains("순환 변경 그룹"));
+        assert!(!primary.contains("파일 시스템 변경 단계"));
         assert!(!primary.contains("지문"));
         assert!(!primary.contains("버전"));
 
-        let detail = apply_confirmation_detail(0xA5, 17);
+        let detail = apply_confirmation_detail(&summary, 0xA5, 17);
+        assert!(detail.contains("논리적 변경: 4개"));
+        assert!(detail.contains("대소문자만 변경: 1개"));
+        assert!(detail.contains("순환 변경 그룹: 1개"));
+        assert!(detail.contains("파일 시스템 변경 단계: 6개"));
         assert!(detail.contains("00000000000000A5"));
         assert!(detail.contains("목록 버전: 17"));
+    }
+
+    #[test]
+    fn apply_confirmation_primary_omits_zero_categories_and_execution_diagnostics()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let summary = ApplyConfirmationSummary::from_counts(
+            1,
+            0,
+            0,
+            Some(darknamer_core::LegacyText::from(r"C:\work")),
+            0,
+            1,
+        )
+        .ok_or("consistent rename-only summary")?;
+
+        assert_eq!(
+            apply_confirmation_primary(&summary),
+            "파일 1개의 이름을 변경합니다.\n대상 폴더: C:\\work\n기존 파일을 덮어쓰지 않습니다."
+        );
+        assert_eq!(
+            apply_confirmation_detail(&summary, 0xA5, 17),
+            "논리적 변경: 1개\n이름만 변경: 1개\n이동만: 0개\n이동 및 이름 변경: 0개\n대소문자만 변경: 0개\n순환 변경 그룹: 0개\n파일 시스템 변경 단계: 1개\n계획 지문: 00000000000000A5\n목록 버전: 17"
+        );
+        Ok(())
     }
 
     #[test]
@@ -7112,12 +7173,12 @@ mod tests {
         assert_eq!(summary.move_only, 1);
         assert_eq!(summary.move_and_rename, 1);
         assert_eq!(summary.common_destination_parent, None);
-        let text = apply_confirmation_primary(summary);
-        assert!(text.contains("이름만 변경: 1개"));
-        assert!(text.contains("이동만: 1개"));
-        assert!(text.contains("이동 및 이름 변경: 1개"));
+        let text = apply_confirmation_primary(&summary);
+        assert!(text.contains("이름 변경: 1개"));
+        assert!(text.contains("대상 폴더 이동: 1개"));
+        assert!(text.contains("이름 변경 및 대상 폴더 이동: 1개"));
         assert!(!text.contains("대상 폴더:"));
-        assert!(text.contains("대상 덮어쓰기: 허용하지 않음"));
+        assert!(text.contains("기존 파일을 덮어쓰지 않습니다."));
         Ok(())
     }
 
@@ -7172,6 +7233,18 @@ mod tests {
         assert!(expanded.edit_one.is_some());
         assert!(expanded.edit_two.is_some());
         assert!(expanded.choice.is_some());
+        assert!(
+            expanded
+                .label_one
+                .zip(expanded.edit_one)
+                .is_some_and(|(label, edit)| label.x.saturating_add(label.width) <= edit.x)
+        );
+        assert!(
+            expanded
+                .label_two
+                .zip(expanded.edit_two)
+                .is_some_and(|(label, edit)| label.x.saturating_add(label.width) <= edit.x)
+        );
         assert!(
             expanded
                 .edit_two

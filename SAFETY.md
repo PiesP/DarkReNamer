@@ -12,6 +12,16 @@ interrupted transaction. Paths selected through the UI, imported text, current
 filesystem occupancy, reparse points, parent identities, and concurrent changes
 by other processes are untrusted.
 
+Command-rail enabled-state changes queue a non-erasing repaint after the current
+AppState callback lease ends. They do not force synchronous painting or bypass
+the lease guard: native enable notifications can request owner drawing while
+that guard is active. Repainting changes presentation only, not command or
+filesystem authorization. A Windows regression test verifies that the
+production reset control is visible, clears its update region, and queries its
+enabled state and pending repaint across both transitions. Its four native API
+calls use three narrow unsafe blocks and account for the application module
+budget increase.
+
 The UI may display paths but does not authorize mutation by string alone.
 Planning freezes source, entry, and parent identities. The Windows backend
 reopens and verifies those identities and performs handle-relative,

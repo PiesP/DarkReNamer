@@ -170,6 +170,25 @@ try {
     ) -lt 0) {
         throw 'The process-lifetime High Contrast pointer strategy must remain bounded.'
     }
+    $selectionObservationIndex = $acceptanceText.IndexOf(
+        '        $selectionPatternObject = $null',
+        [StringComparison]::Ordinal
+    )
+    $previewWaitIndex = $acceptanceText.IndexOf(
+        '        Wait-ListPreviewName -MainWindow $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -ExpectedName $destinationName -TimeoutSeconds $TimeoutSeconds',
+        [StringComparison]::Ordinal
+    )
+    $resetFocusIndex = $acceptanceText.IndexOf(
+        "        [void](Move-RailFocusToCommand -Process `$process -ExpectedSession `$ExpectedSessionId -AutomationId '32781')",
+        [StringComparison]::Ordinal
+    )
+    if ($selectionObservationIndex -lt 0 -or
+        $previewWaitIndex -lt 0 -or
+        $resetFocusIndex -lt 0 -or
+        $selectionObservationIndex -gt $previewWaitIndex -or
+        $selectionObservationIndex -gt $resetFocusIndex) {
+        throw 'The no-selection reset observation must precede list refresh and reset focus movement.'
+    }
     if ($acceptanceText.IndexOf("-AutomationId '1148'", [StringComparison]::Ordinal) -lt 0 -or
         $acceptanceText.IndexOf(
             '-ControlType ([Windows.Automation.ControlType]::Edit)',
@@ -195,6 +214,12 @@ try {
         -OutputRoot 'unused' `
         -ExpectedScriptSha256 ('0' * 64) `
         -ValidateOnly
+    Initialize-AcceptanceNative
+    foreach ($method in @('IsWindowEnabled', 'IsMenuCommandEnabled')) {
+        if ($null -eq [DarkReNamerVmAcceptanceNative].GetMethod($method)) {
+            throw "The acceptance native probe is missing $method."
+        }
+    }
     if ((Get-AcceptanceVerdict -KeyboardStatus passed -AccessibilityStatus passed -CaptureStatus passed) -cne 'review_required') {
         throw 'Complete technical evidence must retain the visual-review requirement.'
     }
