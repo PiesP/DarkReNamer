@@ -2333,45 +2333,59 @@ mod tests {
     fn reset_state_transitions_leave_a_deferred_repaint_after_model_updates()
     -> Result<(), Box<dyn std::error::Error>> {
         use windows_sys::Win32::Graphics::Gdi::{GetUpdateRect, ValidateRect};
+        use windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible;
 
         let _serial = FILE_DIALOG_TEST_SERIAL
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let app = PublishedFileDialogTestApp::new()?;
-        app.with_state(|state| {
-            assert_eq!(
-                state.model.append(LegacyListItem::new(
-                    r"C:\fixture\before.txt",
-                    false,
-                    1,
-                    2,
-                    3,
-                )),
-                Ok(true)
-            );
-            update_controls(state);
-        })?;
-        let reset = app
-            .with_state(|state| {
+        let directory = tempfile::tempdir()?;
+        with_production_popup_window_for_test(directory.path(), false, |window| {
+            let reset = {
+                let mut lease = try_app_state(window)
+                    .ok_or_else(|| io::Error::other("test AppState is unavailable"))?;
+                let state = lease.state_mut();
+                assert_eq!(
+                    state.model.append(LegacyListItem::new(
+                        r"C:\fixture\before.txt",
+                        false,
+                        1,
+                        2,
+                        3,
+                    )),
+                    Ok(true)
+                );
+                update_controls(state);
                 state
                     .right_rail
                     .as_ref()
                     .and_then(|rail| rail.command_hwnd(RESET))
-            })?
-            .ok_or_else(|| io::Error::other("reset button is missing"))?;
+                    .ok_or_else(|| io::Error::other("reset button is missing"))?
+            };
+            // SAFETY: reset is the live test-owned command button.
+            assert_ne!(unsafe { IsWindowVisible(reset) }, 0);
 
-        for name in ["renamed.txt", "before.txt"] {
-            // SAFETY: reset is a live child of the test-owned application. Clear
-            // prior damage so this assertion observes only the model transition.
-            unsafe { ValidateRect(reset, null()) };
-            app.with_state(|state| {
-                assert_eq!(state.model.manual_change(0, name), Ok(true));
-                update_controls(state);
-            })?;
-            // SAFETY: this reads the live child's pending update region without
-            // forcing paint while an AppState lease is held.
-            assert_ne!(unsafe { GetUpdateRect(reset, null_mut(), 0) }, 0);
-        }
+            for (name, enabled) in [("renamed.txt", true), ("before.txt", false)] {
+                // SAFETY: reset is a live visible child. Clear prior damage so
+                // this assertion observes only the next model transition.
+                assert_ne!(unsafe { ValidateRect(reset, null()) }, 0);
+                let mut lease = try_app_state(window)
+                    .ok_or_else(|| io::Error::other("test AppState is unavailable"))?;
+                assert_eq!(lease.state_mut().model.manual_change(0, name), Ok(true));
+                update_controls(lease.state_mut());
+                drop(lease);
+                // SAFETY: both calls query the live child after every AppState
+                // reference ended and do not force synchronous painting.
+                let (is_enabled, has_pending_repaint) = unsafe {
+                    (
+                        IsWindowEnabled(reset) != 0,
+                        GetUpdateRect(reset, null_mut(), 0) != 0,
+                    )
+                };
+                assert_eq!(is_enabled, enabled);
+                assert!(has_pending_repaint);
+            }
+            Ok(())
+        })?;
         Ok(())
     }
 
