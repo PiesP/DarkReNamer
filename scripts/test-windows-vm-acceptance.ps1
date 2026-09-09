@@ -179,7 +179,7 @@ try {
         [StringComparison]::Ordinal
     )
     $resetFocusIndex = $acceptanceText.IndexOf(
-        "        [void](Move-TabFocusToId -Process `$process -ExpectedSession `$ExpectedSessionId -AutomationId '32781')",
+        "        [void](Move-RailFocusToCommand -Process `$process -ExpectedSession `$ExpectedSessionId -AutomationId '32781')",
         [StringComparison]::Ordinal
     )
     if ($selectionObservationIndex -lt 0 -or

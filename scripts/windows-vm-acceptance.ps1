@@ -757,26 +757,29 @@ function Move-RailFocusToCommand {
     )
 
     $leftIds = @('32771','32772','32773','32774','32775','32776','32777','32778','32779','32780')
+    $rightIds = @('32781','32783','65535','32784','32788','32789','32790','32785','32786')
+    $railIds = if ($leftIds -contains $AutomationId) { $leftIds } else { $rightIds }
+    if ($railIds -notcontains $AutomationId) { throw 'Unknown command rail automation ID.' }
     $focused = $null
     for ($step = 0; $step -lt 32; $step++) {
         $focused = Get-FocusedAcceptanceElement `
             -Process $Process `
             -ExpectedSession $ExpectedSession `
             -Label 'keyboard command-rail navigation'
-        if ($leftIds -contains $focused.Current.AutomationId) {
+        if ($railIds -contains $focused.Current.AutomationId) {
             break
         }
         [DarkReNamerVmAcceptanceNative]::Tap(0x09)
     }
-    if ($null -eq $focused -or $leftIds -notcontains $focused.Current.AutomationId) {
-        throw 'Keyboard Tab navigation did not enter the left command rail.'
+    if ($null -eq $focused -or $railIds -notcontains $focused.Current.AutomationId) {
+        throw 'Keyboard Tab navigation did not enter the target command rail.'
     }
-    for ($step = 0; $step -lt $leftIds.Count; $step++) {
+    for ($step = 0; $step -lt $railIds.Count; $step++) {
         if ($focused.Current.AutomationId -ceq $AutomationId) {
             return $focused
         }
-        $currentIndex = [Array]::IndexOf($leftIds, $focused.Current.AutomationId)
-        $targetIndex = [Array]::IndexOf($leftIds, $AutomationId)
+        $currentIndex = [Array]::IndexOf($railIds, $focused.Current.AutomationId)
+        $targetIndex = [Array]::IndexOf($railIds, $AutomationId)
         $direction = if ($currentIndex -lt $targetIndex) { 0x28 } else { 0x26 }
         [DarkReNamerVmAcceptanceNative]::Tap([uint16]$direction)
         $focused = Get-FocusedAcceptanceElement `
@@ -1324,7 +1327,7 @@ try {
         }
         $captures.Add((Save-WindowScreenshot -Window $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -Root $verified.output_root -Leaf ($capturePrefix + '-preview.png') -Label 'current-DPI rename preview before name reset'))
 
-        [void](Move-TabFocusToId -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '32781')
+        [void](Move-RailFocusToCommand -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '32781')
         Send-AcceptanceTap -Process $process -ExpectedSession $ExpectedSessionId -VirtualKey 0x20 -Label 'name reset Space'
         Wait-ListPreviewName -MainWindow $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -ExpectedName $sourceName -TimeoutSeconds $TimeoutSeconds
         $afterReset = Get-ListPrimarySnapshot -List $list
