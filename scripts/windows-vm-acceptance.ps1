@@ -1282,6 +1282,9 @@ try {
                 throw 'The no-selection name reset scenario acquired a list selection after prefix.'
             }
         }
+        else {
+            throw 'The production file list does not expose SelectionPattern for the no-selection reset observation.'
+        }
         Wait-ListPreviewName -MainWindow $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -ExpectedName $destinationName -TimeoutSeconds $TimeoutSeconds
         $beforeReset = Get-ListPrimarySnapshot -List $list
         $reset = Find-UniqueAutomationElement `
