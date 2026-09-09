@@ -63,10 +63,20 @@ function Assert-PathWithoutReparse([string] $Path) {
     }
 }
 
-function New-SshControllerSession([string] $HostAlias) {
-    if ($PSVersionTable.PSVersion.Major -lt 7) {
-        throw 'SSH transport requires PowerShell 7 or newer on the controller host.'
+function Assert-SshPowerShellVersion {
+    param([AllowNull()][object] $Version, [string] $Context)
+
+    $versionText = [string] $Version
+    if ($versionText -cnotmatch '^\d+\.\d+(?:\.\d+){0,2}$') {
+        throw "$Context must report a numeric PowerShell version."
     }
+    if ([version] $versionText -lt [version] '7.4') {
+        throw "$Context requires PowerShell 7.4 or newer."
+    }
+}
+
+function New-SshControllerSession([string] $HostAlias) {
+    Assert-SshPowerShellVersion -Version $PSVersionTable.PSVersion.ToString() -Context 'SSH transport controller host'
     $options = @{
         BatchMode = 'yes'
         StrictHostKeyChecking = 'yes'
@@ -140,15 +150,15 @@ try {
         }
         [pscustomobject]@{
             platform = $platform
-            powershell_major = $PSVersionTable.PSVersion.Major
+            powershell_version = $PSVersionTable.PSVersion.ToString()
             is_administrator = $isAdministrator
         }
     }
     if ($endpoint.platform -cne 'Win32NT') {
         throw 'The selected transport endpoint must be the configured Windows VM.'
     }
-    if ($transportKind -eq 'ssh' -and $endpoint.powershell_major -lt 7) {
-        throw 'The VM SSH PowerShell subsystem must use PowerShell 7 or newer.'
+    if ($transportKind -eq 'ssh') {
+        Assert-SshPowerShellVersion -Version $endpoint.powershell_version -Context 'The VM SSH PowerShell subsystem'
     }
     if (-not $endpoint.is_administrator) {
         throw 'The VM controller account must be a local administrator so it can register the limited interactive test task.'

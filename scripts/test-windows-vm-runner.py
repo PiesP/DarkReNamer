@@ -225,12 +225,32 @@ class VmRunnerTests(unittest.TestCase):
                 self.assert_arguments_rejected(['--ssh-host', alias])
         self.assert_arguments_rejected(['--ssh-host', 'darkrenamer-vm', '--credential-helper', 'helper.ps1'])
 
+    def test_ssh_local_pwsh_requires_version_7_4_or_newer(self):
+        with mock.patch.object(vm.shutil, 'which', return_value='/usr/bin/pwsh'), \
+             mock.patch.object(vm.subprocess, 'check_output') as check_output:
+            for version in ('7.4', '7.4.0', '7.5.2', '8.0.0'):
+                with self.subTest(version=version):
+                    check_output.return_value = version + '\n'
+                    self.assertEqual(vm.require_pwsh74(), '/usr/bin/pwsh')
+            command = check_output.call_args.args[0]
+            self.assertIn('$PSVersionTable.PSVersion.ToString()', command)
+            self.assertEqual(check_output.call_args.kwargs['timeout'], 10)
+
+    def test_ssh_local_pwsh_rejects_older_or_malformed_versions(self):
+        with mock.patch.object(vm.shutil, 'which', return_value='/usr/bin/pwsh'), \
+             mock.patch.object(vm.subprocess, 'check_output') as check_output:
+            for version in ('7.3.9', '7', '7.4-preview.1', 'not-a-version', ''):
+                with self.subTest(version=version):
+                    check_output.return_value = version + '\n'
+                    with self.assertRaisesRegex(RuntimeError, '7.4 or newer'):
+                        vm.require_pwsh74()
+
     def test_ssh_plan_uses_local_pwsh_without_windows_host_calls(self):
         output = self.root / 'ssh-output'
         args = vm.parse_arguments(['--ssh-host', 'darkrenamer-vm', '--output', str(output)])
         with mock.patch.object(vm, 'windows_host_defaults', side_effect=AssertionError('Windows host defaults used')), \
              mock.patch.object(vm, 'winpath', side_effect=AssertionError('wslpath used')), \
-             mock.patch.object(vm, 'require_pwsh7', return_value='/usr/bin/pwsh'):
+             mock.patch.object(vm, 'require_pwsh74', return_value='/usr/bin/pwsh'):
             root, defaults, pwsh = vm.prepare_transport(Path('/repo'), args)
             command = vm.controller_invocation(root, args, pwsh=pwsh)
         self.assertEqual(root, output)

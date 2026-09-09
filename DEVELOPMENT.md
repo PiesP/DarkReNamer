@@ -96,7 +96,7 @@ checking, and disabled agent forwarding; it never prompts for a password. Put
 the user, key, address, port, and any IPv6 syntax in the OpenSSH configuration,
 not in `--ssh-host`.
 
-The VM needs the PowerShell 7 SSH subsystem and `sshd`, NTFS, the Microsoft
+The VM needs the PowerShell 7.4 or newer SSH subsystem and `sshd`, NTFS, the Microsoft
 Visual C++ x64 runtime, Developer Mode for non-elevated symlink fixtures, and one
 unlocked desktop for the same local test account selected by the SSH alias. That
 VM account must be a local administrator because the controller registers and
