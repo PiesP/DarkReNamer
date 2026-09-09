@@ -7029,7 +7029,8 @@ mod tests {
     }
 
     #[test]
-    fn apply_confirmation_primary_omits_zero_categories_and_execution_diagnostics() {
+    fn apply_confirmation_primary_omits_zero_categories_and_execution_diagnostics()
+    -> Result<(), Box<dyn std::error::Error>> {
         let summary = ApplyConfirmationSummary::from_counts(
             1,
             0,
@@ -7038,7 +7039,7 @@ mod tests {
             0,
             1,
         )
-        .expect("consistent rename-only summary");
+        .ok_or("consistent rename-only summary")?;
 
         assert_eq!(
             apply_confirmation_primary(&summary),
@@ -7048,6 +7049,7 @@ mod tests {
             apply_confirmation_detail(&summary, 0xA5, 17),
             "논리적 변경: 1개\n이름만 변경: 1개\n이동만: 0개\n이동 및 이름 변경: 0개\n대소문자만 변경: 0개\n순환 변경 그룹: 0개\n파일 시스템 변경 단계: 1개\n계획 지문: 00000000000000A5\n목록 버전: 17"
         );
+        Ok(())
     }
 
     #[test]

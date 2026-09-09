@@ -947,7 +947,7 @@ $keyboard = [ordered]@{
     reset_name_native_enabled_after_prefix = $false
     reset_name_menu_enabled_after_prefix = $false
     reset_name_proposal_only = $false
-    reset_name_destination_preserved = $false
+    reset_name_displayed_parent_unchanged = $false
     reset_name_disabled_after_reset = $false
     cancellation_unchanged = $false
     confirmed_disk_rename = $false
@@ -1321,7 +1321,7 @@ try {
         )
         $keyboard.reset_name_disabled_after_reset =
             (-not $resetAfter.Current.IsEnabled) -and $nativeResetDisabled -and $menuResetDisabled
-        $keyboard.reset_name_destination_preserved =
+        $keyboard.reset_name_displayed_parent_unchanged =
             $beforeReset.destination_parent -ceq $afterReset.destination_parent -and
             $afterReset.destination_parent -ceq $fixtureRoot
         $keyboard.reset_name_proposal_only =
@@ -1332,9 +1332,9 @@ try {
             (Get-LowerSha256 -Path $sourcePath) -ceq $beforeContent -and
             [DarkReNamerVmNative]::GetFileIdentity($sourcePath) -ceq $beforeIdentity
         if (-not $keyboard.reset_name_disabled_after_reset -or
-            -not $keyboard.reset_name_destination_preserved -or
+            -not $keyboard.reset_name_displayed_parent_unchanged -or
             -not $keyboard.reset_name_proposal_only) {
-            throw 'Name reset did not restore only the proposal while preserving destination and disk state.'
+            throw 'Name reset did not restore only the proposal while leaving the displayed parent and disk state unchanged.'
         }
         $observations.name_reset.after = [ordered]@{
             rail = Get-ElementObservation -Element $resetAfter

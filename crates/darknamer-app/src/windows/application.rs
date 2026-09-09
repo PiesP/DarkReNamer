@@ -2330,7 +2330,7 @@ mod tests {
     }
 
     #[test]
-    fn unify_path_dialog_is_atomic_revision_bound_and_reset_keeps_name_proposals()
+    fn unify_path_dialog_is_atomic_revision_bound_and_resets_are_scoped()
     -> Result<(), Box<dyn std::error::Error>> {
         let _serial = FILE_DIALOG_TEST_SERIAL
             .lock()
@@ -2402,19 +2402,34 @@ mod tests {
         );
 
         app.with_state(|state| {
-            assert!(dispatch_command(app.owner, state, RESET_PATH).is_none());
+            assert!(dispatch_command(app.owner, state, RESET).is_none());
             assert_eq!(state.model_revision, original_revision + 2);
+            assert_eq!(state.model.items()[0].root_path(), &expected_destination);
+            assert_eq!(
+                state.model.items()[0].proposed_name(),
+                &LegacyText::from("before.txt")
+            );
+            assert_eq!(state.rendered_rows[0].values[2], expected_destination);
+            assert_eq!(
+                state.rendered_rows[0].values[NATIVE_STATUS_COLUMN_INDEX],
+                LegacyText::from("이동 예정")
+            );
+        })?;
+
+        app.with_state(|state| {
+            assert!(dispatch_command(app.owner, state, RESET_PATH).is_none());
+            assert_eq!(state.model_revision, original_revision + 3);
             assert_eq!(
                 state.model.items()[0].root_path(),
                 &LegacyText::from(r"C:\fixture")
             );
             assert_eq!(
                 state.model.items()[0].proposed_name(),
-                &LegacyText::from("renamed.txt")
+                &LegacyText::from("before.txt")
             );
             assert_eq!(
                 state.rendered_rows[0].values[NATIVE_STATUS_COLUMN_INDEX],
-                LegacyText::from("이름 변경 예정")
+                LegacyText::default()
             );
         })?;
         Ok(())
