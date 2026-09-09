@@ -404,8 +404,9 @@ pub(super) fn handle_ready_plan(
         message(window, "변경할 항목이 없습니다.", "DarkReNamer");
         return None;
     }
-    let primary = apply_confirmation_primary(ready.summary);
-    let detail = apply_confirmation_detail(plan.fingerprint(), state.model_revision);
+    let primary = apply_confirmation_primary(&ready.summary);
+    let detail =
+        apply_confirmation_detail(&ready.summary, plan.fingerprint(), state.model_revision);
     let fingerprint = plan.fingerprint();
     let session = begin_prepared_task_dialog(state)?;
     update_controls(state);

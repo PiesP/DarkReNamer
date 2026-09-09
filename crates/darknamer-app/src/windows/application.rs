@@ -2213,6 +2213,9 @@ mod tests {
                 assert!(caption.contains("선택 항목 진단"));
                 assert!(text.contains("Windows에서 금지된 문자"));
                 assert!(text.contains("수정하세요"));
+                assert!(text.contains("현재 이름: sample.txt"));
+                assert!(text.contains("변경 후 이름: ?sample.txt"));
+                assert!(text.contains(r"대상 전체 경로: C:\fixture\?sample.txt"));
                 assert!(text.contains("파일 시스템 검사와 실행 확인은 변경 적용 시 별도"));
             }
         ));

@@ -666,8 +666,9 @@ pub(super) fn dispatch_command(
         let description = preview_issue_description(issue).unwrap_or_else(|| {
             "목록 미리보기에서 이름 문제나 중복 대상이 발견되지 않았습니다.".to_owned()
         });
+        let planned_path = item.planned_path();
         let text = format!(
-            "{}\n\n{description}\n\n현재 이름: {}\n변경 후 이름: {}\n\n파일 시스템 검사와 실행 확인은 변경 적용 시 별도로 수행합니다.",
+            "{}\n\n{description}\n\n현재 이름: {}\n변경 후 이름: {}\n대상 전체 경로: {}\n\n파일 시스템 검사와 실행 확인은 변경 적용 시 별도로 수행합니다.",
             if status.is_empty() {
                 "변경 없음"
             } else {
@@ -675,6 +676,7 @@ pub(super) fn dispatch_command(
             },
             item.current_name(),
             item.proposed_name(),
+            planned_path,
         );
         message(window, &text, "DarkReNamer - 선택 항목 진단");
         return None;

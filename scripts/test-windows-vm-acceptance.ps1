@@ -195,6 +195,12 @@ try {
         -OutputRoot 'unused' `
         -ExpectedScriptSha256 ('0' * 64) `
         -ValidateOnly
+    Initialize-AcceptanceNative
+    foreach ($method in @('IsWindowEnabled', 'IsMenuCommandEnabled')) {
+        if ($null -eq [DarkReNamerVmAcceptanceNative].GetMethod($method)) {
+            throw "The acceptance native probe is missing $method."
+        }
+    }
     if ((Get-AcceptanceVerdict -KeyboardStatus passed -AccessibilityStatus passed -CaptureStatus passed) -cne 'review_required') {
         throw 'Complete technical evidence must retain the visual-review requirement.'
     }
