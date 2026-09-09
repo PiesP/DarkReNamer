@@ -2330,6 +2330,52 @@ mod tests {
     }
 
     #[test]
+    fn reset_state_transitions_leave_a_deferred_repaint_after_model_updates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use windows_sys::Win32::Graphics::Gdi::{GetUpdateRect, ValidateRect};
+
+        let _serial = FILE_DIALOG_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let app = PublishedFileDialogTestApp::new()?;
+        app.with_state(|state| {
+            assert_eq!(
+                state.model.append(LegacyListItem::new(
+                    r"C:\fixture\before.txt",
+                    false,
+                    1,
+                    2,
+                    3,
+                )),
+                Ok(true)
+            );
+            update_controls(state);
+        })?;
+        let reset = app
+            .with_state(|state| {
+                state
+                    .right_rail
+                    .as_ref()
+                    .and_then(|rail| rail.command_hwnd(RESET))
+            })?
+            .ok_or_else(|| io::Error::other("reset button is missing"))?;
+
+        for name in ["renamed.txt", "before.txt"] {
+            // SAFETY: reset is a live child of the test-owned application. Clear
+            // prior damage so this assertion observes only the model transition.
+            unsafe { ValidateRect(reset, null()) };
+            app.with_state(|state| {
+                assert_eq!(state.model.manual_change(0, name), Ok(true));
+                update_controls(state);
+            })?;
+            // SAFETY: this reads the live child's pending update region without
+            // forcing paint while an AppState lease is held.
+            assert_ne!(unsafe { GetUpdateRect(reset, null_mut(), 0) }, 0);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn unify_path_dialog_is_atomic_revision_bound_and_resets_are_scoped()
     -> Result<(), Box<dyn std::error::Error>> {
         let _serial = FILE_DIALOG_TEST_SERIAL
