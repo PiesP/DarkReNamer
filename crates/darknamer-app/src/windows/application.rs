@@ -2340,10 +2340,22 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let directory = tempfile::tempdir()?;
         with_production_popup_window_for_test(directory.path(), false, |window| {
+            // The shared popup fixture starts at the raw 464x408 CreateWindowExW
+            // size. The application normally expands that size for its current
+            // DPI before showing the window; without this step, 200% DPI selects
+            // the menu-only layout and intentionally hides both command rails.
+            let initial_placement = {
+                let lease = try_app_state(window)
+                    .ok_or_else(|| io::Error::other("test AppState is unavailable"))?;
+                initial_dpi_placement(window, lease.state())?
+            };
+            resize_to_initial_dpi(window, initial_placement)?;
+
             let reset = {
                 let mut lease = try_app_state(window)
                     .ok_or_else(|| io::Error::other("test AppState is unavailable"))?;
                 let state = lease.state_mut();
+                assert!(state.rails_visible);
                 assert_eq!(
                     state.model.append(LegacyListItem::new(
                         r"C:\fixture\before.txt",
