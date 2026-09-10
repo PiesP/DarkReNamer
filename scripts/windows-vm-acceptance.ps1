@@ -1558,6 +1558,88 @@ function Write-JsonUtf8Bom {
     [IO.File]::WriteAllText($Path, $json, [Text.UTF8Encoding]::new($true))
 }
 
+function Initialize-AcceptanceNativeOpen {
+    if ('DarkReNamerAcceptanceNativeOpen' -as [type]) { return }
+    Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class DarkReNamerAcceptanceNativeOpen {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Rect { public int Left; public int Top; public int Right; public int Bottom; }
+
+    [DllImport("user32.dll", SetLastError=true)] public static extern IntPtr GetDlgItem(IntPtr dialog, int controlId);
+    [DllImport("user32.dll", SetLastError=true)] public static extern IntPtr GetParent(IntPtr window);
+    [DllImport("user32.dll", SetLastError=true)] public static extern int GetDlgCtrlID(IntPtr window);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool IsWindow(IntPtr window);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool IsWindowEnabled(IntPtr window);
+    [DllImport("user32.dll", SetLastError=true)] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern int GetClassName(IntPtr window, StringBuilder className, int capacity);
+    [DllImport("user32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool GetWindowRect(IntPtr window, out Rect rect);
+}
+'@
+}
+
+function Resolve-AcceptanceNativeOpen {
+    param(
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Dialog,
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession
+    )
+
+    Initialize-AcceptanceNativeOpen
+    Assert-AutomationBinding -Element $Dialog -Process $Process -ExpectedSession $ExpectedSession -Label 'keyboard file dialog' -RequireWindowHandle
+    $dialogHandle = [IntPtr]$Dialog.Current.NativeWindowHandle
+    $openHandle = [DarkReNamerAcceptanceNativeOpen]::GetDlgItem($dialogHandle, 1)
+    if ($openHandle -eq [IntPtr]::Zero -or -not [DarkReNamerAcceptanceNativeOpen]::IsWindow($openHandle)) {
+        throw 'The source-bound file dialog has no live native control ID 1.'
+    }
+    if ([DarkReNamerAcceptanceNativeOpen]::GetParent($openHandle) -ne $dialogHandle -or
+        [DarkReNamerAcceptanceNativeOpen]::GetDlgCtrlID($openHandle) -ne 1) {
+        throw 'The native Open control is not the exact direct child ID 1 of the source-bound file dialog.'
+    }
+    $openProcessId = [uint32]0
+    $openThreadId = [DarkReNamerAcceptanceNativeOpen]::GetWindowThreadProcessId($openHandle, [ref]$openProcessId)
+    if ($openThreadId -eq 0 -or $openProcessId -ne $Process.Id -or $Process.SessionId -ne $ExpectedSession) {
+        throw 'The native Open control is outside the source-bound process or desktop session.'
+    }
+    $openClass = [Text.StringBuilder]::new(32)
+    if ([DarkReNamerAcceptanceNativeOpen]::GetClassName($openHandle, $openClass, $openClass.Capacity) -le 0 -or
+        $openClass.ToString() -cne 'Button') {
+        throw 'The source-bound file dialog Open control is not a native Button class.'
+    }
+    if (-not [DarkReNamerAcceptanceNativeOpen]::IsWindowVisible($openHandle) -or
+        -not [DarkReNamerAcceptanceNativeOpen]::IsWindowEnabled($openHandle)) {
+        throw 'The source-bound native Open control is not visible and enabled.'
+    }
+    $dialogRect = [DarkReNamerAcceptanceNativeOpen+Rect]::new()
+    $openRect = [DarkReNamerAcceptanceNativeOpen+Rect]::new()
+    if (-not [DarkReNamerAcceptanceNativeOpen]::GetWindowRect($dialogHandle, [ref]$dialogRect) -or
+        -not [DarkReNamerAcceptanceNativeOpen]::GetWindowRect($openHandle, [ref]$openRect) -or
+        $dialogRect.Right -le $dialogRect.Left -or $dialogRect.Bottom -le $dialogRect.Top -or
+        $openRect.Right -le $openRect.Left -or $openRect.Bottom -le $openRect.Top -or
+        $openRect.Left -lt $dialogRect.Left -or $openRect.Top -lt $dialogRect.Top -or
+        $openRect.Right -gt $dialogRect.Right -or $openRect.Bottom -gt $dialogRect.Bottom) {
+        throw 'The source-bound native Open control bounds are invalid or outside its dialog.'
+    }
+    $element = [Windows.Automation.AutomationElement]::FromHandle($openHandle)
+    Assert-AutomationBinding -Element $element -Process $Process -ExpectedSession $ExpectedSession -Label 'native keyboard file dialog Open control' -RequireWindowHandle
+    if ([IntPtr]$element.Current.NativeWindowHandle -ne $openHandle) {
+        throw 'UI Automation did not map back to the exact native Open control.'
+    }
+    [pscustomobject]@{
+        Element = $element
+        Handle = $openHandle
+        ProcessId = $openProcessId
+        ThreadId = $openThreadId
+        ClassName = $openClass.ToString()
+        DialogBounds = [ordered]@{ left = $dialogRect.Left; top = $dialogRect.Top; right = $dialogRect.Right; bottom = $dialogRect.Bottom }
+        ControlBounds = [ordered]@{ left = $openRect.Left; top = $openRect.Top; right = $openRect.Right; bottom = $openRect.Bottom }
+    }
+}
+
 if ($MyInvocation.InvocationName -eq '.') {
     return
 }
@@ -2065,19 +2147,24 @@ try {
             -ControlType ([Windows.Automation.ControlType]::Edit) `
             -TimeoutSeconds $TimeoutSeconds `
             -Label 'keyboard filename field'
-        $open = Find-UniqueAutomationElement `
-            -Root $fileDialog `
+        $nativeOpen = Resolve-AcceptanceNativeOpen `
+            -Dialog $fileDialog `
             -Process $process `
-            -ExpectedSession $ExpectedSessionId `
-            -AutomationId '1' `
-            -ControlType ([Windows.Automation.ControlType]::Button) `
-            -TimeoutSeconds $TimeoutSeconds `
-            -Label 'keyboard file dialog open button' `
-            -RequireWindowHandle
+            -ExpectedSession $ExpectedSessionId
+        $open = $nativeOpen.Element
+        $openHandle = $nativeOpen.Handle
         $observations.file_dialog = [ordered]@{
             window = Get-ElementObservation -Element $fileDialog
             filename = Get-ElementObservation -Element $fileName
             open = Get-ElementObservation -Element $open
+            dialog_native_handle = ([IntPtr]$fileDialog.Current.NativeWindowHandle).ToInt64()
+            open_native_handle = $nativeOpen.Handle.ToInt64()
+            open_native_class = $nativeOpen.ClassName
+            open_native_control_id = 1
+            open_native_process_id = $nativeOpen.ProcessId
+            open_native_thread_id = $nativeOpen.ThreadId
+            dialog_native_bounds = $nativeOpen.DialogBounds
+            open_native_bounds = $nativeOpen.ControlBounds
         }
         $commonDialogCapture = Save-WindowScreenshot `
             -Window $fileDialog `
