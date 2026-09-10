@@ -285,30 +285,35 @@ function Wait-HighContrastRestoration {
         [ValidateRange(0, 1000)][int] $PollMilliseconds = 200
     )
 
-    $observed = [Collections.Generic.List[object]]::new()
-    $state = [pscustomobject]@{ callback_error = $false }
-    $sourceRead = $ReadSnapshot
+    $restorationObservationState = [pscustomobject]@{
+        read_snapshot = $ReadSnapshot
+        expected = $Expected
+        observed = [Collections.Generic.List[object]]::new()
+        callback_error = $false
+    }
     $observingRead = {
         try {
-            $snapshot = & $sourceRead
-            $observed.Add($snapshot)
+            $snapshot = & $restorationObservationState.read_snapshot
+            $restorationObservationState.observed.Add($snapshot)
             $snapshot
         }
         catch {
-            $state.callback_error = $true
+            $restorationObservationState.callback_error = $true
             throw
         }
-    }.GetNewClosure()
+    }
     $acceptExpected = {
         param($candidate)
         try {
-            Test-HighContrastSnapshotEqual -Expected $Expected -Actual $candidate
+            Test-HighContrastSnapshotEqual `
+                -Expected $restorationObservationState.expected `
+                -Actual $candidate
         }
         catch {
-            $state.callback_error = $true
+            $restorationObservationState.callback_error = $true
             throw
         }
-    }.GetNewClosure()
+    }
     $initialFailure = $null
     try {
         return Wait-HighContrastSettlement `
@@ -321,14 +326,18 @@ function Wait-HighContrastRestoration {
     catch {
         $initialFailure = $_
     }
-    if ($state.callback_error -or
+    if ($restorationObservationState.callback_error -or
         $initialFailure.Exception.Message -cne "$Label did not settle within the bounded observation attempts." -or
         -not $AllowPaletteRestore -or
-        $observed.Count -lt 2) {
+        $restorationObservationState.observed.Count -lt 2) {
         throw $initialFailure
     }
-    $previous = $observed[$observed.Count - 2]
-    $last = $observed[$observed.Count - 1]
+    $previous = $restorationObservationState.observed[
+        $restorationObservationState.observed.Count - 2
+    ]
+    $last = $restorationObservationState.observed[
+        $restorationObservationState.observed.Count - 1
+    ]
     if (-not (Test-HighContrastSnapshotEqual -Expected $previous -Actual $last) -or
         $last.Flags -ne $Expected.Flags -or
         -not [string]::Equals(

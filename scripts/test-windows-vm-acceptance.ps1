@@ -503,6 +503,25 @@ try {
         throw 'Exact restoration must complete without writing the captured palette.'
     }
 
+    $nestedScopeState = [pscustomobject]@{ reads = 0; writes = 0 }
+    $nestedScopeRestore = & {
+        Wait-HighContrastRestoration `
+            -Expected $highContrastSnapshot `
+            -ReadSnapshot {
+                $nestedScopeState.reads++
+                $highContrastSnapshot | Select-Object *
+            } `
+            -SetCapturedColors { param($expected) $nestedScopeState.writes++ } `
+            -Label 'nested script scope fixture' `
+            -MaximumAttempts 2 `
+            -FallbackAttempts 2 `
+            -PollMilliseconds 0
+    }
+    if ($nestedScopeState.reads -ne 2 -or $nestedScopeState.writes -ne 0 -or
+        -not (Test-HighContrastSnapshotEqual -Expected $highContrastSnapshot -Actual $nestedScopeRestore)) {
+        throw 'Restoration callbacks must resolve comparators from a nested script scope.'
+    }
+
     $paletteDrift = $highContrastSnapshot | Select-Object *
     $paletteDrift.Highlight = 9
     $repairState = [pscustomobject]@{ reads = 0; writes = 0; repaired = $false }
