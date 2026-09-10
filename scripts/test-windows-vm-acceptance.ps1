@@ -277,7 +277,8 @@ try {
         'IsWindowEnabled',
         'IsMenuCommandEnabled',
         'ReadClipboardSnapshot',
-        'ClearClipboardIfOwned'
+        'ClearClipboardIfOwned',
+        'SetHighContrastColors'
     )) {
         if ($null -eq [DarkReNamerVmAcceptanceNative].GetMethod($method)) {
             throw "The acceptance native probe is missing $method."
@@ -484,6 +485,129 @@ try {
             -MaximumAttempts 3 `
             -PollMilliseconds 0
     } 'did not settle within the bounded observation attempts'
+
+    $exactRestoreState = [pscustomobject]@{ reads = 0; writes = 0 }
+    $exactRestore = Wait-HighContrastRestoration `
+        -Expected $highContrastSnapshot `
+        -ReadSnapshot {
+            $exactRestoreState.reads++
+            $highContrastSnapshot | Select-Object *
+        } `
+        -SetCapturedColors { param($expected) $exactRestoreState.writes++ } `
+        -Label 'exact restoration fixture' `
+        -MaximumAttempts 2 `
+        -FallbackAttempts 2 `
+        -PollMilliseconds 0
+    if ($exactRestoreState.reads -ne 2 -or $exactRestoreState.writes -ne 0 -or
+        -not (Test-HighContrastSnapshotEqual -Expected $highContrastSnapshot -Actual $exactRestore)) {
+        throw 'Exact restoration must complete without writing the captured palette.'
+    }
+
+    $paletteDrift = $highContrastSnapshot | Select-Object *
+    $paletteDrift.Highlight = 9
+    $repairState = [pscustomobject]@{ reads = 0; writes = 0; repaired = $false }
+    $repairedRestore = Wait-HighContrastRestoration `
+        -Expected $highContrastSnapshot `
+        -ReadSnapshot {
+            $repairState.reads++
+            if ($repairState.repaired) { $highContrastSnapshot | Select-Object * }
+            else { $paletteDrift | Select-Object * }
+        } `
+        -SetCapturedColors {
+            param($expected)
+            $repairState.writes++
+            if ($expected.Highlight -ne 5) { throw 'unexpected palette fixture' }
+            $repairState.repaired = $true
+        } `
+        -Label 'single palette drift fixture' `
+        -AllowPaletteRestore `
+        -MaximumAttempts 2 `
+        -FallbackAttempts 2 `
+        -PollMilliseconds 0
+    if ($repairState.reads -ne 4 -or $repairState.writes -ne 1 -or
+        -not (Test-HighContrastSnapshotEqual -Expected $highContrastSnapshot -Actual $repairedRestore)) {
+        throw 'Stable palette-only drift must repair once and require two exact verification reads.'
+    }
+
+    $settingsMismatch = $paletteDrift | Select-Object *
+    $settingsMismatch.Flags = 127
+    $settingsState = [pscustomobject]@{ writes = 0 }
+    Assert-Fails {
+        Wait-HighContrastRestoration `
+            -Expected $highContrastSnapshot `
+            -ReadSnapshot { $settingsMismatch | Select-Object * } `
+            -SetCapturedColors { param($expected) $settingsState.writes++ } `
+            -Label 'settings mismatch fixture' `
+            -AllowPaletteRestore `
+            -MaximumAttempts 2 -FallbackAttempts 2 -PollMilliseconds 0
+    } 'did not settle within the bounded observation attempts'
+    if ($settingsState.writes -ne 0) { throw 'Settings mismatch must not write system colors.' }
+
+    $deniedState = [pscustomobject]@{ writes = 0 }
+    Assert-Fails {
+        Wait-HighContrastRestoration `
+            -Expected $highContrastSnapshot `
+            -ReadSnapshot { $paletteDrift | Select-Object * } `
+            -SetCapturedColors { param($expected) $deniedState.writes++ } `
+            -Label 'not applied by observer fixture' `
+            -MaximumAttempts 2 -FallbackAttempts 2 -PollMilliseconds 0
+    } 'did not settle within the bounded observation attempts'
+    if ($deniedState.writes -ne 0) { throw 'A palette not changed by this observer must never be rewritten.' }
+
+    $unstableState = [pscustomobject]@{ index = 0; writes = 0 }
+    $otherPaletteDrift = $paletteDrift | Select-Object *
+    $otherPaletteDrift.Highlight = 10
+    $unstableSequence = @($paletteDrift, $otherPaletteDrift)
+    Assert-Fails {
+        Wait-HighContrastRestoration `
+            -Expected $highContrastSnapshot `
+            -ReadSnapshot {
+                $value = $unstableSequence[$unstableState.index]
+                $unstableState.index++
+                $value | Select-Object *
+            } `
+            -SetCapturedColors { param($expected) $unstableState.writes++ } `
+            -Label 'unstable palette fixture' `
+            -AllowPaletteRestore `
+            -MaximumAttempts 2 -FallbackAttempts 2 -PollMilliseconds 0
+    } 'did not settle within the bounded observation attempts'
+    if ($unstableState.writes -ne 0) { throw 'Unstable palette observations must not write system colors.' }
+
+    $readErrorState = [pscustomobject]@{ writes = 0 }
+    Assert-Fails {
+        Wait-HighContrastRestoration `
+            -Expected $highContrastSnapshot `
+            -ReadSnapshot { throw 'fixture snapshot read failed' } `
+            -SetCapturedColors { param($expected) $readErrorState.writes++ } `
+            -Label 'read error fixture' `
+            -AllowPaletteRestore `
+            -MaximumAttempts 2 -FallbackAttempts 2 -PollMilliseconds 0
+    } 'fixture snapshot read failed'
+    if ($readErrorState.writes -ne 0) { throw 'Snapshot read failure must not write system colors.' }
+
+    Assert-Fails {
+        Wait-HighContrastRestoration `
+            -Expected $highContrastSnapshot `
+            -ReadSnapshot { $paletteDrift | Select-Object * } `
+            -SetCapturedColors { param($expected) throw 'fixture palette setter failed' } `
+            -Label 'setter error fixture' `
+            -AllowPaletteRestore `
+            -MaximumAttempts 2 -FallbackAttempts 2 -PollMilliseconds 0
+    } 'fixture palette setter failed'
+
+    $fallbackState = [pscustomobject]@{ reads = 0; writes = 0 }
+    Assert-Fails {
+        Wait-HighContrastRestoration `
+            -Expected $highContrastSnapshot `
+            -ReadSnapshot { $fallbackState.reads++; $paletteDrift | Select-Object * } `
+            -SetCapturedColors { param($expected) $fallbackState.writes++ } `
+            -Label 'bounded fallback fixture' `
+            -AllowPaletteRestore `
+            -MaximumAttempts 2 -FallbackAttempts 2 -PollMilliseconds 0
+    } 'palette fallback did not settle within the bounded observation attempts'
+    if ($fallbackState.reads -ne 4 -or $fallbackState.writes -ne 1) {
+        throw 'Palette fallback must remain bounded and must not false-pass persistent drift.'
+    }
 
     $valid = New-AcceptanceFixture -Name 'valid'
     Invoke-ValidateOnly $valid
