@@ -989,6 +989,7 @@ function Invoke-AcceptanceImportAndPrefix {
     $prompt = Wait-UniqueAutomationWindow `
         -Process $process `
         -ExpectedSession $SessionId `
+        -Owner $Application.main `
         -Name '이름 앞에 문자열 붙이기' `
         -TimeoutSeconds $WaitSeconds `
         -Label 'prefix prompt'
@@ -1040,6 +1041,7 @@ function Invoke-AcceptanceApply {
     $confirmation = Wait-UniqueAutomationWindow `
         -Process $process `
         -ExpectedSession $SessionId `
+        -Owner $Application.main `
         -Name 'DarkReNamer - 안전한 적용 확인' `
         -TimeoutSeconds $WaitSeconds `
         -Label 'apply confirmation'

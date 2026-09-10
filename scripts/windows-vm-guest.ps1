@@ -723,9 +723,18 @@ function Wait-UniqueAutomationWindow {
         [Parameter(Mandatory)][int] $ExpectedSession,
         [Parameter(Mandatory)][string] $Name,
         [Parameter(Mandatory)][int] $TimeoutSeconds,
-        [Parameter(Mandatory)][string] $Label
+        [Parameter(Mandatory)][string] $Label,
+        [Windows.Automation.AutomationElement] $Owner
     )
 
+    if ($null -ne $Owner) {
+        Assert-AutomationBinding `
+            -Element $Owner `
+            -Process $Process `
+            -ExpectedSession $ExpectedSession `
+            -Label "$Label owner" `
+            -RequireWindowHandle
+    }
     $root = [Windows.Automation.AutomationElement]::RootElement
     $conditions = [Windows.Automation.Condition[]]@(
         [Windows.Automation.PropertyCondition]::new(
@@ -745,9 +754,17 @@ function Wait-UniqueAutomationWindow {
     $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
     do {
         $windows = @{}
-        $main = [Windows.Automation.AutomationElement]::FromHandle($Process.MainWindowHandle)
+        $main = if ($null -eq $Owner) {
+            [Windows.Automation.AutomationElement]::FromHandle($Process.MainWindowHandle)
+        }
+        else {
+            $null
+        }
         $candidates = @($root.FindAll([Windows.Automation.TreeScope]::Children, $condition))
-        if ($null -ne $main) {
+        if ($null -ne $Owner) {
+            $candidates += @($Owner.FindAll([Windows.Automation.TreeScope]::Children, $condition))
+        }
+        elseif ($null -ne $main) {
             # Managed Win32 providers place owned dialogs below their owner.
             $candidates += @($main.FindAll([Windows.Automation.TreeScope]::Descendants, $condition))
         }
