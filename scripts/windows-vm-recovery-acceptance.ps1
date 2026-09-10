@@ -1293,7 +1293,7 @@ function Invoke-AcceptanceRecoveryExport {
         -Root $dialog `
         -Process $Application.owned.process `
         -ExpectedSession $SessionId `
-        -AutomationId '1148' `
+        -AutomationId '1152' `
         -ControlType ([Windows.Automation.ControlType]::Edit) `
         -TimeoutSeconds $WaitSeconds `
         -Label 'recovery export folder path' `
@@ -1345,6 +1345,30 @@ function Invoke-AcceptanceRecoveryExport {
     }
 }
 
+function Initialize-RecoveryLockNative {
+    if (-not ('DarkReNamerRecoveryLockNative' -as [type])) {
+        Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class DarkReNamerRecoveryLockNative
+{
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr GetDlgItem(IntPtr parent, int controlId);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetParent(IntPtr window);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowEnabled(IntPtr window);
+
+    [DllImport("user32.dll")]
+    public static extern int GetDlgCtrlID(IntPtr window);
+}
+'@
+    }
+}
+
 function Assert-AcceptanceRecoveryLockedControls {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -1361,17 +1385,42 @@ function Assert-AcceptanceRecoveryLockedControls {
         -TimeoutSeconds $WaitSeconds `
         -Label 'Apply while Intent-only recovery is locked' `
         -RequireWindowHandle
-    $add = Find-UniqueAutomationElement `
-        -Root $Application.main `
-        -Process $Application.owned.process `
+    if ($apply.Current.IsEnabled) {
+        throw 'Intent-only startup did not disable Apply under recovery lock.'
+    }
+
+    Initialize-RecoveryLockNative
+    $process = $Application.owned.process
+    Assert-AutomationBinding `
+        -Element $Application.main `
+        -Process $process `
         -ExpectedSession $SessionId `
-        -AutomationId '32791' `
-        -ControlType ([Windows.Automation.ControlType]::Button) `
-        -TimeoutSeconds $WaitSeconds `
-        -Label 'Add Files while Intent-only recovery is locked' `
+        -Label 'Intent-only recovery main window' `
         -RequireWindowHandle
-    if ($apply.Current.IsEnabled -or $add.Current.IsEnabled) {
-        throw 'Intent-only startup did not disable Apply and Add Files under recovery lock.'
+    $mainHandle = [IntPtr]$Application.main.Current.NativeWindowHandle
+    $addHandle = [DarkReNamerRecoveryLockNative]::GetDlgItem($mainHandle, 32791)
+    if ($addHandle -eq [IntPtr]::Zero -or -not [DarkReNamerVmNative]::IsWindow($addHandle)) {
+        throw 'Intent-only recovery Add Files is not one live native control.'
+    }
+    if ([DarkReNamerRecoveryLockNative]::GetParent($addHandle) -ne $mainHandle) {
+        throw 'Intent-only recovery Add Files is not a direct child of the bound main window.'
+    }
+    $addProcessId = [uint32]0
+    [void][DarkReNamerVmNative]::GetWindowThreadProcessId($addHandle, [ref]$addProcessId)
+    if ($addProcessId -ne [uint32]$process.Id -or $process.SessionId -ne $SessionId) {
+        throw 'Intent-only recovery Add Files belongs to another process or desktop session.'
+    }
+    $addClass = [Text.StringBuilder]::new(64)
+    if ([DarkReNamerVmNative]::GetClassName($addHandle, $addClass, $addClass.Capacity) -le 0 -or
+        $addClass.ToString() -cne 'Button') {
+        throw 'Intent-only recovery Add Files is not the expected native Button class.'
+    }
+    if ([DarkReNamerRecoveryLockNative]::GetDlgCtrlID($addHandle) -ne 32791) {
+        throw 'Intent-only recovery Add Files has the wrong native control ID.'
+    }
+    if ([DarkReNamerRecoveryLockNative]::IsWindowEnabled($addHandle) -or
+        [DarkReNamerVmNative]::IsWindowVisible($addHandle)) {
+        throw 'Intent-only startup did not keep Add Files disabled and hidden under recovery lock.'
     }
     $true
 }
