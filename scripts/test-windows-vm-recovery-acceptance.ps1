@@ -52,6 +52,38 @@ function Join-TestBytes {
     $result
 }
 
+function Get-TestCrc32Reference {
+    param([Parameter(Mandatory)][byte[][]] $Parts)
+
+    [uint64]$crc = 0xFFFFFFFFL
+    foreach ($part in $Parts) {
+        foreach ($byte in $part) {
+            $crc = $crc -bxor [uint64]$byte
+            for ($bit = 0; $bit -lt 8; $bit++) {
+                [uint64]$mask = 0
+                if (($crc -band 1) -ne 0) {
+                    $mask = 0xFFFFFFFFL
+                }
+                $crc = (($crc -shr 1) -bxor (0xEDB88320L -band $mask)) -band 0xFFFFFFFFL
+            }
+        }
+    }
+    [uint32](($crc -bxor 0xFFFFFFFFL) -band 0xFFFFFFFFL)
+}
+
+function Assert-TestCrc32 {
+    param(
+        [Parameter(Mandatory)][byte[][]] $Parts,
+        [Parameter(Mandatory)][uint32] $Expected,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    $actual = Get-AcceptanceCrc32 -Parts $Parts
+    if ($actual -ne $Expected) {
+        throw "$Label CRC mismatch: actual=$('{0:x8}' -f $actual) expected=$('{0:x8}' -f $Expected)."
+    }
+}
+
 function New-TestJournalFrame {
     param(
         [Parameter(Mandatory)][uint64] $Sequence,
@@ -155,6 +187,68 @@ foreach ($contract in @(
     -ExpectedSessionId 1 `
     -OutputRoot $PSScriptRoot `
     -ExpectedScriptSha256 ('0' * 64)
+
+if ('DarkReNamerAcceptanceCrc32' -as [type]) {
+    throw 'The recovery observer initialized CRC support before its first checksum operation.'
+}
+
+$knownCrcBytes = [Text.Encoding]::ASCII.GetBytes('123456789')
+Assert-TestCrc32 `
+    -Parts (, $knownCrcBytes) `
+    -Expected ([uint32]3421780262) `
+    -Label 'IEEE known vector'
+if (-not ('DarkReNamerAcceptanceCrc32' -as [type])) {
+    throw 'The recovery observer did not initialize CRC support on first use.'
+}
+Assert-TestCrc32 `
+    -Parts ([byte[][]]@(,[byte[]]::new(0))) `
+    -Expected ([uint32]0) `
+    -Label 'Empty input'
+$splitKnownCrcBytes = [byte[][]]@(
+    [Text.Encoding]::ASCII.GetBytes('123'),
+    [byte[]]::new(0),
+    [Text.Encoding]::ASCII.GetBytes('456'),
+    [Text.Encoding]::ASCII.GetBytes('789')
+)
+Assert-TestCrc32 `
+    -Parts $splitKnownCrcBytes `
+    -Expected ([uint32]3421780262) `
+    -Label 'Split IEEE known vector'
+$allByteValues = [byte[]](0..255)
+Assert-TestCrc32 `
+    -Parts (, $allByteValues) `
+    -Expected ([uint32]688229491) `
+    -Label 'All byte values'
+
+$crcRandom = New-Object Random(171337)
+for ($case = 0; $case -lt 48; $case++) {
+    $length = $crcRandom.Next(0, 513)
+    $bytes = [byte[]]::new($length)
+    $crcRandom.NextBytes($bytes)
+    $parts = [Collections.Generic.List[byte[]]]::new()
+    $offset = 0
+    while ($offset -lt $bytes.Length) {
+        $partLength = [Math]::Min($bytes.Length - $offset, $crcRandom.Next(1, 65))
+        $part = [byte[]]::new($partLength)
+        [Array]::Copy($bytes, $offset, $part, 0, $partLength)
+        $parts.Add($part)
+        $offset += $partLength
+    }
+    if ($parts.Count -eq 0 -or ($case % 3) -eq 0) {
+        $parts.Add([byte[]]::new(0))
+    }
+    [byte[][]]$splitParts = $parts.ToArray()
+    Assert-TestCrc32 `
+        -Parts $splitParts `
+        -Expected (Get-TestCrc32Reference -Parts (, $bytes)) `
+        -Label "Deterministic split case $case"
+}
+
+$largeZeroBytes = [byte[]]::new(4MB)
+Assert-TestCrc32 `
+    -Parts (, $largeZeroBytes) `
+    -Expected ([uint32]289882218) `
+    -Label 'Four MiB zero vector'
 
 foreach ($path in @($acceptance, $PSCommandPath)) {
     $bytes = [IO.File]::ReadAllBytes($path)
@@ -415,6 +509,26 @@ $badChecksum = [byte[]]$stream.Clone()
 $badChecksum[$badChecksum.Length - 1] = $badChecksum[$badChecksum.Length - 1] -bxor 1
 Assert-Fails {
     Get-AcceptanceJournalInspection -Bytes $badChecksum
+} 'checksum mismatch'
+
+$largeIntentPayload = [byte[]]::new(3MB + 257)
+$largeIntentFrame = New-TestJournalFrame `
+    -Sequence 0 `
+    -Kind 1 `
+    -Payload $largeIntentPayload
+$largeInspection = Get-AcceptanceJournalInspection -Bytes $largeIntentFrame
+if ($largeInspection.complete_frames -ne 1 -or
+    $largeInspection.last_kind -ne 1 -or
+    $largeInspection.terminal -or
+    $largeInspection.tail -cne 'none' -or
+    $largeInspection.total_bytes -ne $largeIntentFrame.Length) {
+    throw 'The large nonterminal Intent frame was classified incorrectly.'
+}
+$largeBadChecksum = [byte[]]$largeIntentFrame.Clone()
+$largeBadChecksum[$largeBadChecksum.Length - 1] =
+    $largeBadChecksum[$largeBadChecksum.Length - 1] -bxor 1
+Assert-Fails {
+    Get-AcceptanceJournalInspection -Bytes $largeBadChecksum
 } 'checksum mismatch'
 
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-recovery-script-' + [Guid]::NewGuid().ToString('N'))
