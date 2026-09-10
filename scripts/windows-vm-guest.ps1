@@ -947,6 +947,8 @@ function Wait-ListPreviewName {
         -Label 'production file list' `
         -RequireWindowHandle
     $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    # The row and original-name cell can share the preview name.
+    # Wait for the preview column instead of requiring unique descendant names.
     do {
         try {
             $gridObject = $null
@@ -961,22 +963,6 @@ function Wait-ListPreviewName {
             }
         }
         catch [Windows.Automation.ElementNotAvailableException] {
-        }
-        $nameCondition = [Windows.Automation.PropertyCondition]::new(
-            [Windows.Automation.AutomationElement]::NameProperty,
-            $ExpectedName
-        )
-        $matches = $list.FindAll([Windows.Automation.TreeScope]::Descendants, $nameCondition)
-        if ($matches.Count -eq 1) {
-            Assert-AutomationBinding `
-                -Element $matches.Item(0) `
-                -Process $Process `
-                -ExpectedSession $ExpectedSession `
-                -Label 'production preview cell'
-            return
-        }
-        if ($matches.Count -gt 1) {
-            throw 'The expected production preview name was not unique.'
         }
         Start-Sleep -Milliseconds 100
     } while ((Get-Date) -lt $deadline)
