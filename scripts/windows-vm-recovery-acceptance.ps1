@@ -23,6 +23,10 @@ param(
     [ValidateRange(10, 600)]
     [int] $TimeoutSeconds = 300,
 
+    [switch] $RecoveryExport,
+
+    [switch] $IntentOnlyCandidateDiscard,
+
     [switch] $ValidateOnly
 )
 
@@ -141,6 +145,117 @@ function Get-AcceptanceJournalInspection {
         valid_prefix_bytes = $offset
         total_bytes = $Bytes.Length
     }
+}
+
+function Test-AcceptanceBytesEqual {
+    param(
+        [Parameter(Mandatory)][byte[]] $Expected,
+        [Parameter(Mandatory)][byte[]] $Actual
+    )
+
+    if ($Expected.Length -ne $Actual.Length) {
+        return $false
+    }
+    for ($index = 0; $index -lt $Expected.Length; $index++) {
+        if ($Expected[$index] -ne $Actual[$index]) {
+            return $false
+        }
+    }
+    $true
+}
+
+function Get-AcceptanceLeadingIntentFrame {
+    param(
+        [Parameter(Mandatory)][byte[]] $Bytes,
+        [Parameter(Mandatory)][object] $Inspection
+    )
+
+    if ($Inspection.total_bytes -ne $Bytes.Length -or
+        $Inspection.valid_prefix_bytes -gt $Bytes.Length -or
+        $Inspection.complete_frames -lt 1 -or
+        $Bytes[6] -ne 1) {
+        throw 'Journal does not contain one complete leading Intent frame.'
+    }
+    $frameLength = 24L + [int64](Get-AcceptanceUInt32 -Bytes $Bytes -Offset 16)
+    if ($frameLength -gt $Bytes.Length -or $frameLength -gt [int]::MaxValue) {
+        throw 'The leading Intent frame length is outside the captured journal.'
+    }
+    $intent = [byte[]]::new([int]$frameLength)
+    [Array]::Copy($Bytes, 0, $intent, 0, $intent.Length)
+    $intent
+}
+
+function Get-AcceptanceRecoveryExportClassification {
+    param(
+        [Parameter(Mandatory)][byte[]] $ExpectedBytes,
+        [Parameter(Mandatory)][byte[]] $ExportedBytes,
+        [Parameter(Mandatory)][string[]] $ExportedLeaves
+    )
+
+    if ($ExportedLeaves.Count -ne 1 -or $ExportedLeaves[0] -cne 'active.drj.retained') {
+        throw 'Recovery export created unexpected retained files.'
+    }
+    if (-not (Test-AcceptanceBytesEqual -Expected $ExpectedBytes -Actual $ExportedBytes)) {
+        throw 'The exported retained journal differs from the captured active journal.'
+    }
+    'active-retained-exact'
+}
+
+function Get-AcceptanceRecoveryExportFile {
+    param([Parameter(Mandatory)][string] $Root)
+
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+        throw 'The recovery export directory is unavailable.'
+    }
+    $rootItem = Get-Item -LiteralPath $Root -Force
+    if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The recovery export directory became a reparse point.'
+    }
+    $items = @(Get-ChildItem -LiteralPath $rootItem.FullName -Force)
+    if ($items.Count -ne 1) {
+        throw 'The recovery export must contain exactly one ordinary file.'
+    }
+    $item = $items[0]
+    if ($item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $item.Name -cne 'active.drj.retained' -or
+        $item.Length -gt 64MB) {
+        throw 'The recovery export must contain exactly one ordinary file named active.drj.retained.'
+    }
+    $item
+}
+
+function Get-AcceptanceIntentCandidateClassification {
+    param(
+        [Parameter(Mandatory)][object] $JournalInspection,
+        [Parameter(Mandatory)][bool] $StartupLocked,
+        [Parameter(Mandatory)][bool] $StartupUnchanged,
+        [Parameter(Mandatory)][bool] $CancelPreserved,
+        [Parameter(Mandatory)][bool] $CancelUnchanged,
+        [Parameter(Mandatory)][bool] $CandidateRemoved,
+        [Parameter(Mandatory)][bool] $ActiveAbsent,
+        [Parameter(Mandatory)][bool] $DiscardUnlocked,
+        [Parameter(Mandatory)][bool] $DiscardUnchanged
+    )
+
+    if ($JournalInspection.complete_frames -ne 1 -or
+        $JournalInspection.last_kind -ne 1 -or
+        $JournalInspection.terminal -or
+        $JournalInspection.tail -cne 'none' -or
+        $JournalInspection.valid_prefix_bytes -ne $JournalInspection.total_bytes) {
+        throw 'The staged candidate is not one exact complete Intent-only frame.'
+    }
+    if (-not $StartupLocked -or -not $StartupUnchanged) {
+        throw 'Intent-only startup did not remain recovery-locked and mutation-free.'
+    }
+    if (-not $CancelPreserved -or -not $CancelUnchanged) {
+        throw 'The cancelled discard did not preserve the candidate and fixture state.'
+    }
+    if (-not $CandidateRemoved -or -not $ActiveAbsent -or -not $DiscardUnlocked -or
+        -not $DiscardUnchanged) {
+        throw 'The confirmed discard did not remove only the candidate, unlock, and preserve the fixture.'
+    }
+    'intent-only-cancel-preserved-discard-unlocked'
 }
 
 function Get-AcceptanceCrashClassification {
@@ -656,6 +771,140 @@ function Get-AcceptanceUiDiagnostic {
     }
 }
 
+function Find-AcceptanceAutomationElementByName {
+    param(
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Root,
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][string] $Name,
+        [Parameter(Mandatory)][Windows.Automation.ControlType] $ControlType,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][string] $Label,
+        [switch] $RequireEnabled,
+        [switch] $RequireVisible
+    )
+
+    $conditions = [Windows.Automation.Condition[]]@(
+        [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::ProcessIdProperty,
+            $Process.Id
+        ),
+        [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::NameProperty,
+            $Name
+        ),
+        [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::ControlTypeProperty,
+            $ControlType
+        )
+    )
+    $condition = [Windows.Automation.AndCondition]::new($conditions)
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    do {
+        $matches = $Root.FindAll([Windows.Automation.TreeScope]::Descendants, $condition)
+        if ($matches.Count -gt 1) {
+            throw "$Label matched more than one automation element."
+        }
+        if ($matches.Count -eq 1) {
+            $element = $matches.Item(0)
+            Assert-AutomationBinding `
+                -Element $element `
+                -Process $Process `
+                -ExpectedSession $ExpectedSession `
+                -Label $Label
+            if ($RequireEnabled -and -not $element.Current.IsEnabled) {
+                throw "$Label is not enabled."
+            }
+            if ($RequireVisible -and $element.Current.IsOffscreen) {
+                throw "$Label is not visible."
+            }
+            return $element
+        }
+        Start-Sleep -Milliseconds 100
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            throw "$Label was not found before the application exited."
+        }
+    } while ((Get-Date) -lt $deadline)
+    throw "$Label was not found before the bounded deadline."
+}
+
+function Start-AcceptanceRecoveryMenuInvoke {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][int] $WaitSeconds,
+        [Parameter(Mandatory)][string] $ItemName,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    Add-Type -AssemblyName System.Windows.Forms
+    $process = $Application.owned.process
+    $main = $Application.main
+    $main.SetFocus()
+    $mainHandle = [IntPtr]$main.Current.NativeWindowHandle
+    [void][DarkReNamerVmNative]::SetForegroundWindow($mainHandle)
+    $deadline = (Get-Date).AddSeconds(5)
+    while ([DarkReNamerVmNative]::GetForegroundWindow() -ne $mainHandle -and
+        (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 100
+    }
+    if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $mainHandle) {
+        throw "The verified application is not foreground for $Label."
+    }
+    [Windows.Forms.SendKeys]::SendWait('%r')
+    $item = Find-AcceptanceAutomationElementByName `
+        -Root ([Windows.Automation.AutomationElement]::RootElement) `
+        -Process $process `
+        -ExpectedSession $SessionId `
+        -Name $ItemName `
+        -ControlType ([Windows.Automation.ControlType]::MenuItem) `
+        -TimeoutSeconds $WaitSeconds `
+        -Label $Label `
+        -RequireEnabled `
+        -RequireVisible
+    Start-AutomationControlInvoke -Element $item -Label $Label
+}
+
+function Dismiss-AcceptanceMessage {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][int] $WaitSeconds,
+        [Parameter(Mandatory)][string] $Name,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    Add-Type -AssemblyName System.Windows.Forms
+    $window = Wait-UniqueAutomationWindow `
+        -Process $Application.owned.process `
+        -ExpectedSession $SessionId `
+        -Name $Name `
+        -TimeoutSeconds $WaitSeconds `
+        -Label $Label
+    Assert-AutomationBinding `
+        -Element $window `
+        -Process $Application.owned.process `
+        -ExpectedSession $SessionId `
+        -Label $Label `
+        -RequireWindowHandle
+    $handle = [IntPtr]$window.Current.NativeWindowHandle
+    $window.SetFocus()
+    $deadline = (Get-Date).AddSeconds([Math]::Min(5, $WaitSeconds))
+    do {
+        [void][DarkReNamerVmNative]::SetForegroundWindow($handle)
+        if ([DarkReNamerVmNative]::GetForegroundWindow() -eq $handle) {
+            break
+        }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
+        throw "$Label did not become the exact foreground window before the bounded deadline."
+    }
+    [Windows.Forms.SendKeys]::SendWait('{ENTER}')
+    Wait-WindowClosed -Handle $handle -TimeoutSeconds $WaitSeconds -Label $Label
+}
+
 function Invoke-AcceptanceImportAndPrefix {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -985,6 +1234,382 @@ function Invoke-AcceptanceRecovery {
     $screenshot
 }
 
+function Dismiss-AcceptanceStartupRecovery {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][int] $WaitSeconds
+    )
+
+    $process = $Application.owned.process
+    $prompt = Wait-UniqueAutomationWindow `
+        -Process $process `
+        -ExpectedSession $SessionId `
+        -Name 'DarkReNamer - 이전 변경 복구 확인' `
+        -TimeoutSeconds $WaitSeconds `
+        -Label 'startup recovery cancellation prompt'
+    $promptHandle = [IntPtr]$prompt.Current.NativeWindowHandle
+    $cancel = Find-UniqueAutomationElement `
+        -Root $prompt `
+        -Process $process `
+        -ExpectedSession $SessionId `
+        -AutomationId 'CommandButton_2' `
+        -ControlType ([Windows.Automation.ControlType]::Button) `
+        -TimeoutSeconds $WaitSeconds `
+        -Label 'startup recovery cancellation button' `
+        -RequireEnabled `
+        -RequireWindowHandle
+    Invoke-AutomationControl -Element $cancel -Label 'startup recovery cancellation button'
+    Wait-WindowClosed `
+        -Handle $promptHandle `
+        -TimeoutSeconds $WaitSeconds `
+        -Label 'startup recovery cancellation prompt'
+}
+
+function Invoke-AcceptanceRecoveryExport {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][string] $EvidenceRoot,
+        [Parameter(Mandatory)][byte[]] $ExpectedBytes,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][int] $WaitSeconds
+    )
+
+    $exportRoot = New-PrivateDirectory -Parent $EvidenceRoot -Leaf 'recovery-export'
+    $invoke = Start-AcceptanceRecoveryMenuInvoke `
+        -Application $Application `
+        -SessionId $SessionId `
+        -WaitSeconds $WaitSeconds `
+        -ItemName '복구 데이터 내보내기...' `
+        -Label 'recovery export menu item'
+    $dialog = Wait-UniqueAutomationWindow `
+        -Process $Application.owned.process `
+        -ExpectedSession $SessionId `
+        -Name '복구 저널 원본을 저장할 폴더 선택' `
+        -TimeoutSeconds $WaitSeconds `
+        -Label 'recovery export folder picker'
+    $dialogHandle = [IntPtr]$dialog.Current.NativeWindowHandle
+    $folder = Find-UniqueAutomationElement `
+        -Root $dialog `
+        -Process $Application.owned.process `
+        -ExpectedSession $SessionId `
+        -AutomationId '1148' `
+        -ControlType ([Windows.Automation.ControlType]::Edit) `
+        -TimeoutSeconds $WaitSeconds `
+        -Label 'recovery export folder path' `
+        -RequireWindowHandle
+    Set-AutomationControlValue `
+        -Element $folder `
+        -Value $exportRoot `
+        -Label 'recovery export folder path'
+    $select = Find-UniqueAutomationElement `
+        -Root $dialog `
+        -Process $Application.owned.process `
+        -ExpectedSession $SessionId `
+        -AutomationId '1' `
+        -ControlType ([Windows.Automation.ControlType]::Button) `
+        -TimeoutSeconds $WaitSeconds `
+        -Label 'recovery export folder confirmation' `
+        -RequireEnabled `
+        -RequireWindowHandle
+    Invoke-AutomationControl -Element $select -Label 'recovery export folder confirmation'
+    Wait-WindowClosed `
+        -Handle $dialogHandle `
+        -TimeoutSeconds $WaitSeconds `
+        -Label 'recovery export folder picker'
+    Dismiss-AcceptanceMessage `
+        -Application $Application `
+        -SessionId $SessionId `
+        -WaitSeconds $WaitSeconds `
+        -Name 'DarkReNamer - 진단 내보내기 완료' `
+        -Label 'recovery export completion message'
+    Complete-AutomationControlInvoke -State $invoke -TimeoutSeconds $WaitSeconds
+
+    $exportItem = Get-AcceptanceRecoveryExportFile -Root $exportRoot
+    $leaves = @($exportItem.Name)
+    $exportPath = $exportItem.FullName
+    $exportedBytes = [IO.File]::ReadAllBytes($exportPath)
+    $classification = Get-AcceptanceRecoveryExportClassification `
+        -ExpectedBytes $ExpectedBytes `
+        -ExportedBytes $exportedBytes `
+        -ExportedLeaves $leaves
+    [pscustomobject]@{
+        status = 'passed'
+        classification = $classification
+        directory = 'recovery-export'
+        file = 'active.drj.retained'
+        bytes = $exportedBytes.Length
+        sha256 = Get-LowerSha256 -Path $exportPath
+        captured_active_sha256 = Get-AcceptanceBootstrapBytesSha256 -Bytes $ExpectedBytes
+        exact_bytes = $true
+    }
+}
+
+function Assert-AcceptanceRecoveryLockedControls {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][int] $WaitSeconds
+    )
+
+    $apply = Find-UniqueAutomationElement `
+        -Root $Application.main `
+        -Process $Application.owned.process `
+        -ExpectedSession $SessionId `
+        -AutomationId '32771' `
+        -ControlType ([Windows.Automation.ControlType]::Button) `
+        -TimeoutSeconds $WaitSeconds `
+        -Label 'Apply while Intent-only recovery is locked' `
+        -RequireWindowHandle
+    $add = Find-UniqueAutomationElement `
+        -Root $Application.main `
+        -Process $Application.owned.process `
+        -ExpectedSession $SessionId `
+        -AutomationId '32791' `
+        -ControlType ([Windows.Automation.ControlType]::Button) `
+        -TimeoutSeconds $WaitSeconds `
+        -Label 'Add Files while Intent-only recovery is locked' `
+        -RequireWindowHandle
+    if ($apply.Current.IsEnabled -or $add.Current.IsEnabled) {
+        throw 'Intent-only startup did not disable Apply and Add Files under recovery lock.'
+    }
+    $true
+}
+
+function Invoke-AcceptanceDiscardChoice {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][int] $WaitSeconds,
+        [Parameter(Mandatory)][bool] $Confirm
+    )
+
+    $invoke = Start-AcceptanceRecoveryMenuInvoke `
+        -Application $Application `
+        -SessionId $SessionId `
+        -WaitSeconds $WaitSeconds `
+        -ItemName '시작되지 않은 작업 기록 삭제...' `
+        -Label 'Intent-only candidate discard menu item'
+    $prompt = Wait-UniqueAutomationWindow `
+        -Process $Application.owned.process `
+        -ExpectedSession $SessionId `
+        -Name 'DarkReNamer - 활성화 전 계획 폐기' `
+        -TimeoutSeconds $WaitSeconds `
+        -Label 'Intent-only candidate discard confirmation'
+    $promptHandle = [IntPtr]$prompt.Current.NativeWindowHandle
+    $button = Find-UniqueAutomationElement `
+        -Root $prompt `
+        -Process $Application.owned.process `
+        -ExpectedSession $SessionId `
+        -AutomationId $(if ($Confirm) { 'CommandLink_1201' } else { 'CommandButton_2' }) `
+        -ControlType ([Windows.Automation.ControlType]::Button) `
+        -TimeoutSeconds $WaitSeconds `
+        -Label $(if ($Confirm) { 'exact candidate discard confirmation' } else { 'candidate discard cancellation' }) `
+        -RequireEnabled `
+        -RequireWindowHandle
+    Invoke-AutomationControl `
+        -Element $button `
+        -Label $(if ($Confirm) { 'exact candidate discard confirmation' } else { 'candidate discard cancellation' })
+    Wait-WindowClosed `
+        -Handle $promptHandle `
+        -TimeoutSeconds $WaitSeconds `
+        -Label 'Intent-only candidate discard confirmation'
+    if ($Confirm) {
+        Dismiss-AcceptanceMessage `
+            -Application $Application `
+            -SessionId $SessionId `
+            -WaitSeconds $WaitSeconds `
+            -Name 'DarkReNamer - 폐기 완료' `
+            -Label 'candidate discard completion message'
+    }
+    Complete-AutomationControlInvoke -State $invoke -TimeoutSeconds $WaitSeconds
+}
+
+function Invoke-AcceptanceIntentOnlyCandidateDiscard {
+    param(
+        [Parameter(Mandatory)][object] $Inputs,
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][object[]] $Initial,
+        [Parameter(Mandatory)][byte[]] $IntentBytes,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][int] $WaitSeconds
+    )
+
+    $inspection = Get-AcceptanceJournalInspection -Bytes $IntentBytes
+    $journalRoot = Join-Path (Join-Path $env:LOCALAPPDATA 'DarkReNamer') 'journal'
+    $candidatePath = Join-Path $journalRoot 'candidate.drj'
+    $activePath = Join-Path $journalRoot 'active.drj'
+    if ((Test-Path -LiteralPath $candidatePath) -or
+        (Test-Path -LiteralPath $activePath)) {
+        throw 'Intent-only staging requires a clean isolated journal profile.'
+    }
+    [IO.File]::WriteAllBytes($candidatePath, $IntentBytes)
+    $stagedState = Get-AcceptanceFixtureState -FixtureRoot $FixtureRoot
+    Assert-AcceptanceStatesEqual -Expected $Initial -Actual $stagedState -Label 'Intent-only staging fixture'
+
+    $cancelApplication = $null
+    $discardApplication = $null
+    $scenarioError = $null
+    try {
+        $cancelApplication = Start-AcceptanceApplication `
+            -Inputs $Inputs `
+            -SessionId $SessionId `
+            -WaitSeconds $WaitSeconds
+        $startupNotice = Wait-UniqueAutomationWindow `
+            -Process $cancelApplication.owned.process `
+            -ExpectedSession $SessionId `
+            -Name 'DarkReNamer - 복구 상태' `
+            -TimeoutSeconds $WaitSeconds `
+            -Label 'Intent-only startup recovery-lock notice'
+        $null = $startupNotice
+        $startupState = Get-AcceptanceFixtureState -FixtureRoot $FixtureRoot
+        Assert-AcceptanceStatesEqual `
+            -Expected $Initial `
+            -Actual $startupState `
+            -Label 'Intent-only startup fixture'
+        if (-not (Test-Path -LiteralPath $candidatePath -PathType Leaf) -or
+            (Test-Path -LiteralPath $activePath)) {
+            throw 'Intent-only startup did not preserve one candidate without an active journal.'
+        }
+        Dismiss-AcceptanceMessage `
+            -Application $cancelApplication `
+            -SessionId $SessionId `
+            -WaitSeconds $WaitSeconds `
+            -Name 'DarkReNamer - 복구 상태' `
+            -Label 'Intent-only startup recovery-lock notice'
+        $startupLocked = Assert-AcceptanceRecoveryLockedControls `
+            -Application $cancelApplication `
+            -SessionId $SessionId `
+            -WaitSeconds $WaitSeconds
+
+        Invoke-AcceptanceDiscardChoice `
+            -Application $cancelApplication `
+            -SessionId $SessionId `
+            -WaitSeconds $WaitSeconds `
+            -Confirm $false
+        $cancelState = Get-AcceptanceFixtureState -FixtureRoot $FixtureRoot
+        Assert-AcceptanceStatesEqual `
+            -Expected $Initial `
+            -Actual $cancelState `
+            -Label 'Cancelled Intent-only discard fixture'
+        $cancelPreserved = (Test-Path -LiteralPath $candidatePath -PathType Leaf) -and
+            -not (Test-Path -LiteralPath $activePath)
+        if (-not $cancelPreserved) {
+            throw 'Cancelling Intent-only discard did not preserve only candidate.drj.'
+        }
+        [void](Close-AcceptanceApplicationNormally `
+            -Application $cancelApplication `
+            -WaitSeconds $WaitSeconds)
+        $preservedBytes = [IO.File]::ReadAllBytes($candidatePath)
+        if (-not (Test-AcceptanceBytesEqual -Expected $IntentBytes -Actual $preservedBytes)) {
+            throw 'Cancelling Intent-only discard did not preserve the exact candidate bytes.'
+        }
+
+        $discardApplication = Start-AcceptanceApplication `
+            -Inputs $Inputs `
+            -SessionId $SessionId `
+            -WaitSeconds $WaitSeconds
+        Dismiss-AcceptanceMessage `
+            -Application $discardApplication `
+            -SessionId $SessionId `
+            -WaitSeconds $WaitSeconds `
+            -Name 'DarkReNamer - 복구 상태' `
+            -Label 'Intent-only discard relaunch recovery-lock notice'
+        [void](Assert-AcceptanceRecoveryLockedControls `
+            -Application $discardApplication `
+            -SessionId $SessionId `
+            -WaitSeconds $WaitSeconds)
+        $beforeConfirm = Get-AcceptanceFixtureState -FixtureRoot $FixtureRoot
+        Assert-AcceptanceStatesEqual `
+            -Expected $Initial `
+            -Actual $beforeConfirm `
+            -Label 'Intent-only discard relaunch fixture'
+        Invoke-AcceptanceDiscardChoice `
+            -Application $discardApplication `
+            -SessionId $SessionId `
+            -WaitSeconds $WaitSeconds `
+            -Confirm $true
+        $candidateRemoved = -not (Test-Path -LiteralPath $candidatePath)
+        $activeAbsent = -not (Test-Path -LiteralPath $activePath)
+        Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
+        $add = Find-UniqueAutomationElement `
+            -Root $discardApplication.main `
+            -Process $discardApplication.owned.process `
+            -ExpectedSession $SessionId `
+            -AutomationId '32791' `
+            -ControlType ([Windows.Automation.ControlType]::Button) `
+            -TimeoutSeconds $WaitSeconds `
+            -Label 'Add Files after Intent-only candidate discard' `
+            -RequireEnabled `
+            -RequireWindowHandle
+        $discardUnlocked = $add.Current.IsEnabled
+        $discardState = Get-AcceptanceFixtureState -FixtureRoot $FixtureRoot
+        Assert-AcceptanceStatesEqual `
+            -Expected $Initial `
+            -Actual $discardState `
+            -Label 'Confirmed Intent-only discard fixture'
+        $classification = Get-AcceptanceIntentCandidateClassification `
+            -JournalInspection $inspection `
+            -StartupLocked $startupLocked `
+            -StartupUnchanged $true `
+            -CancelPreserved $cancelPreserved `
+            -CancelUnchanged $true `
+            -CandidateRemoved $candidateRemoved `
+            -ActiveAbsent $activeAbsent `
+            -DiscardUnlocked $discardUnlocked `
+            -DiscardUnchanged $true
+        $exitCode = Close-AcceptanceApplicationNormally `
+            -Application $discardApplication `
+            -WaitSeconds $WaitSeconds
+        [pscustomobject]@{
+            status = 'passed'
+            classification = $classification
+            candidate = [ordered]@{
+                source = 'interrupted-active.drj:first-intent-frame'
+                file = 'candidate.drj'
+                bytes = $IntentBytes.Length
+                sha256 = Get-AcceptanceBootstrapBytesSha256 -Bytes $IntentBytes
+                complete_frames = $inspection.complete_frames
+                last_kind = $inspection.last_kind
+                tail = $inspection.tail
+            }
+            startup_locked = $startupLocked
+            startup_state_sha256 = Get-AcceptanceStateDigest -State $startupState
+            cancel_preserved_exact_bytes = $true
+            cancel_state_sha256 = Get-AcceptanceStateDigest -State $cancelState
+            candidate_removed = $candidateRemoved
+            active_absent = $activeAbsent
+            discard_unlocked = $discardUnlocked
+            fixture_name_content_identity_unchanged = $true
+            discard_state_sha256 = Get-AcceptanceStateDigest -State $discardState
+            normal_exit_code = $exitCode
+        }
+    }
+    catch {
+        $scenarioError = $_
+        throw
+    }
+    finally {
+        $cleanupErrors = [Collections.Generic.List[string]]::new()
+        foreach ($application in @($cancelApplication, $discardApplication)) {
+            if ($null -eq $application) { continue }
+            try {
+                Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned
+            }
+            catch {
+                $cleanupErrors.Add($_.Exception.Message)
+            }
+        }
+        if ($cleanupErrors.Count -gt 0) {
+            $cleanupMessage = [string]::Join(' | ', $cleanupErrors)
+            if ($null -ne $scenarioError) {
+                throw "Intent-only scenario and exact-process cleanup both failed: $($scenarioError.Exception.Message) Cleanup: $cleanupMessage"
+            }
+            throw "Intent-only exact-process cleanup failed: $cleanupMessage"
+        }
+    }
+}
+
 function Invoke-AcceptanceSession {
     param(
         [Parameter(Mandatory)][object] $Inputs,
@@ -994,7 +1619,9 @@ function Invoke-AcceptanceSession {
         [Parameter(Mandatory)][ValidateSet('ProcessCrash', 'WorkerCancellation', 'WorkerClose')]
         [string] $Mode,
         [Parameter(Mandatory)][int] $SessionId,
-        [Parameter(Mandatory)][int] $WaitSeconds
+        [Parameter(Mandatory)][int] $WaitSeconds,
+        [Parameter(Mandatory)][bool] $RunRecoveryExport,
+        [Parameter(Mandatory)][bool] $RunIntentOnlyCandidateDiscard
     )
 
     $prefix = 'vm-recovered-'
@@ -1026,7 +1653,10 @@ function Invoke-AcceptanceSession {
 
     $first = $null
     $second = $null
+    $third = $null
     $sessionError = $null
+    $recoveryExportResult = [ordered]@{ status = 'not-run'; reason = 'switch-not-selected' }
+    $intentDiscardResult = [ordered]@{ status = 'not-run'; reason = 'switch-not-selected' }
     try {
         $first = Start-AcceptanceApplication `
             -Inputs $Inputs `
@@ -1102,6 +1732,44 @@ function Invoke-AcceptanceSession {
                     -Application $first `
                     -WaitSeconds $WaitSeconds
                 return [pscustomobject]@{
+                    mode_result = [pscustomobject]@{
+                        status = 'passed'
+                        mode = $Mode
+                        classification = $workerBoundary.classification
+                        fixture_count = $Count
+                        import_bytes = $importBytes
+                        observed_partial_rename = $workerBoundary.observed_partial_rename
+                        witnesses = [ordered]@{
+                            count = $workerBoundary.witness_count
+                            first_destination_name_sha256 = $workerBoundary.first_destination_name_sha256
+                            last_original_name_sha256 = $workerBoundary.last_original_name_sha256
+                            first_destination_content_sha256 = $workerBoundary.first_destination_content_sha256
+                            last_original_content_sha256 = $workerBoundary.last_original_content_sha256
+                            first_destination_identity_sha256 = $workerBoundary.first_destination_identity_sha256
+                            last_original_identity_sha256 = $workerBoundary.last_original_identity_sha256
+                        }
+                        initial_state_sha256 = Get-AcceptanceStateDigest -State $initial
+                        restored_state_sha256 = Get-AcceptanceStateDigest -State $restored
+                        journal_residue_count = 0
+                        screenshot = $screenshot
+                        normal_exit_code = $exitCode
+                    }
+                    recovery_export = $recoveryExportResult
+                    intent_only_candidate_discard = $intentDiscardResult
+                }
+            }
+
+            $exitCode = Close-AcceptanceApplicationNormally `
+                -Application $first `
+                -WaitSeconds $WaitSeconds
+            Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
+            $restored = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
+            Assert-AcceptanceStatesEqual `
+                -Expected $initial `
+                -Actual $restored `
+                -Label 'Worker-close rollback fixture'
+            return [pscustomobject]@{
+                mode_result = [pscustomobject]@{
                     status = 'passed'
                     mode = $Mode
                     classification = $workerBoundary.classification
@@ -1120,41 +1788,11 @@ function Invoke-AcceptanceSession {
                     initial_state_sha256 = Get-AcceptanceStateDigest -State $initial
                     restored_state_sha256 = Get-AcceptanceStateDigest -State $restored
                     journal_residue_count = 0
-                    screenshot = $screenshot
+                    screenshot = $null
                     normal_exit_code = $exitCode
                 }
-            }
-
-            $exitCode = Close-AcceptanceApplicationNormally `
-                -Application $first `
-                -WaitSeconds $WaitSeconds
-            Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
-            $restored = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
-            Assert-AcceptanceStatesEqual `
-                -Expected $initial `
-                -Actual $restored `
-                -Label 'Worker-close rollback fixture'
-            return [pscustomobject]@{
-                status = 'passed'
-                mode = $Mode
-                classification = $workerBoundary.classification
-                fixture_count = $Count
-                import_bytes = $importBytes
-                observed_partial_rename = $workerBoundary.observed_partial_rename
-                witnesses = [ordered]@{
-                    count = $workerBoundary.witness_count
-                    first_destination_name_sha256 = $workerBoundary.first_destination_name_sha256
-                    last_original_name_sha256 = $workerBoundary.last_original_name_sha256
-                    first_destination_content_sha256 = $workerBoundary.first_destination_content_sha256
-                    last_original_content_sha256 = $workerBoundary.last_original_content_sha256
-                    first_destination_identity_sha256 = $workerBoundary.first_destination_identity_sha256
-                    last_original_identity_sha256 = $workerBoundary.last_original_identity_sha256
-                }
-                initial_state_sha256 = Get-AcceptanceStateDigest -State $initial
-                restored_state_sha256 = Get-AcceptanceStateDigest -State $restored
-                journal_residue_count = 0
-                screenshot = $null
-                normal_exit_code = $exitCode
+                recovery_export = $recoveryExportResult
+                intent_only_candidate_discard = $intentDiscardResult
             }
         }
 
@@ -1181,6 +1819,12 @@ function Invoke-AcceptanceSession {
         }
         $journalBytes = [IO.File]::ReadAllBytes($activePath)
         $inspection = Get-AcceptanceJournalInspection -Bytes $journalBytes
+        $intentBytes = $null
+        if ($RunIntentOnlyCandidateDiscard) {
+            $intentBytes = Get-AcceptanceLeadingIntentFrame `
+                -Bytes $journalBytes `
+                -Inspection $inspection
+        }
         $classification = Get-AcceptanceCrashClassification `
             -OriginalCount $partialCounts.original `
             -RenamedCount $partialCounts.renamed `
@@ -1213,8 +1857,55 @@ function Invoke-AcceptanceSession {
             -Expected $beforeRestart `
             -Actual $afterRestart `
             -Label 'Startup before explicit recovery confirmation'
+
+        $recoveryApplication = $second
+        if ($RunRecoveryExport) {
+            Dismiss-AcceptanceStartupRecovery `
+                -Application $second `
+                -SessionId $SessionId `
+                -WaitSeconds $WaitSeconds
+            $recoveryExportResult = Invoke-AcceptanceRecoveryExport `
+                -Application $second `
+                -EvidenceRoot $EvidenceRoot `
+                -ExpectedBytes $journalBytes `
+                -SessionId $SessionId `
+                -WaitSeconds $WaitSeconds
+            $afterExport = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
+            Assert-AcceptanceStatesEqual `
+                -Expected $beforeRestart `
+                -Actual $afterExport `
+                -Label 'Recovery export fixture'
+            $recoveryExportResult | Add-Member `
+                -NotePropertyName fixture_name_content_identity_unchanged `
+                -NotePropertyValue $true
+            [void](Close-AcceptanceApplicationNormally `
+                -Application $second `
+                -WaitSeconds $WaitSeconds)
+            $third = Start-AcceptanceApplication `
+                -Inputs $Inputs `
+                -SessionId $SessionId `
+                -WaitSeconds $WaitSeconds
+            $recoveryPrompt = Wait-UniqueAutomationWindow `
+                -Process $third.owned.process `
+                -ExpectedSession $SessionId `
+                -Name 'DarkReNamer - 이전 변경 복구 확인' `
+                -TimeoutSeconds $WaitSeconds `
+                -Label 'startup recovery confirmation after export'
+            Assert-AutomationBinding `
+                -Element $recoveryPrompt `
+                -Process $third.owned.process `
+                -ExpectedSession $SessionId `
+                -Label 'startup recovery confirmation after export' `
+                -RequireWindowHandle
+            $afterExportRestart = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
+            Assert-AcceptanceStatesEqual `
+                -Expected $beforeRestart `
+                -Actual $afterExportRestart `
+                -Label 'Startup after recovery export'
+            $recoveryApplication = $third
+        }
         $recoveryScreenshot = Invoke-AcceptanceRecovery `
-            -Application $second `
+            -Application $recoveryApplication `
             -EvidenceRoot $EvidenceRoot `
             -SessionId $SessionId `
             -WaitSeconds $WaitSeconds
@@ -1238,39 +1929,47 @@ function Invoke-AcceptanceSession {
         $restored = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
         Assert-AcceptanceStatesEqual -Expected $initial -Actual $restored -Label 'Recovered fixture'
 
-        $second.owned.process.Refresh()
-        if (-not $second.owned.process.CloseMainWindow() -or
-            -not $second.owned.process.WaitForExit(10000)) {
-            throw 'The recovered application did not close normally.'
-        }
-        $second.owned.process.WaitForExit()
-        if ($second.owned.process.ExitCode -ne 0) {
-            throw 'The recovered application returned a nonzero exit code.'
+        $recoveryExitCode = Close-AcceptanceApplicationNormally `
+            -Application $recoveryApplication `
+            -WaitSeconds $WaitSeconds
+
+        if ($RunIntentOnlyCandidateDiscard) {
+            $intentDiscardResult = Invoke-AcceptanceIntentOnlyCandidateDiscard `
+                -Inputs $Inputs `
+                -FixtureRoot $fixtureRoot `
+                -Initial $initial `
+                -IntentBytes $intentBytes `
+                -SessionId $SessionId `
+                -WaitSeconds $WaitSeconds
         }
 
         [pscustomobject]@{
-            status = 'passed'
-            mode = $Mode
-            classification = $classification
-            fixture_count = $Count
-            import_bytes = $importBytes
-            partial_original_count = $partialCounts.original
-            partial_renamed_count = $partialCounts.renamed
-            initial_state_sha256 = Get-AcceptanceStateDigest -State $initial
-            partial_state_sha256 = Get-AcceptanceStateDigest -State $partial
-            restored_state_sha256 = Get-AcceptanceStateDigest -State $restored
-            journal = [ordered]@{
-                file = 'interrupted-active.drj'
-                sha256 = Get-LowerSha256 -Path $rawJournalPath
-                complete_frames = $inspection.complete_frames
-                last_kind = $inspection.last_kind
-                terminal = $inspection.terminal
-                tail = $inspection.tail
-                bytes = $inspection.total_bytes
+            mode_result = [pscustomobject]@{
+                status = 'passed'
+                mode = $Mode
+                classification = $classification
+                fixture_count = $Count
+                import_bytes = $importBytes
+                partial_original_count = $partialCounts.original
+                partial_renamed_count = $partialCounts.renamed
+                initial_state_sha256 = Get-AcceptanceStateDigest -State $initial
+                partial_state_sha256 = Get-AcceptanceStateDigest -State $partial
+                restored_state_sha256 = Get-AcceptanceStateDigest -State $restored
+                journal = [ordered]@{
+                    file = 'interrupted-active.drj'
+                    sha256 = Get-LowerSha256 -Path $rawJournalPath
+                    complete_frames = $inspection.complete_frames
+                    last_kind = $inspection.last_kind
+                    terminal = $inspection.terminal
+                    tail = $inspection.tail
+                    bytes = $inspection.total_bytes
+                }
+                startup_before_confirmation_unchanged = $true
+                recovery_screenshot = $recoveryScreenshot
+                normal_exit_code = $recoveryExitCode
             }
-            startup_before_confirmation_unchanged = $true
-            recovery_screenshot = $recoveryScreenshot
-            normal_exit_code = $second.owned.process.ExitCode
+            recovery_export = $recoveryExportResult
+            intent_only_candidate_discard = $intentDiscardResult
         }
     }
     catch {
@@ -1287,7 +1986,7 @@ function Invoke-AcceptanceSession {
     }
     finally {
         $cleanupErrors = [Collections.Generic.List[string]]::new()
-        foreach ($application in @($first, $second)) {
+        foreach ($application in @($first, $second, $third)) {
             if ($null -eq $application) { continue }
             try {
                 Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned
@@ -1313,6 +2012,8 @@ if ($MyInvocation.InvocationName -eq '.') {
 $requestedBundleRoot = $BundleRoot
 $requestedExpectedSessionId = $ExpectedSessionId
 $requestedValidateOnly = [bool]$ValidateOnly
+$requestedRecoveryExport = [bool]$RecoveryExport
+$requestedIntentOnlyCandidateDiscard = [bool]$IntentOnlyCandidateDiscard
 $bootstrap = Resolve-AcceptanceBootstrap `
     -Root $requestedBundleRoot `
     -ObserverPath $PSCommandPath `
@@ -1321,6 +2022,8 @@ $bootstrap = Resolve-AcceptanceBootstrap `
 $BundleRoot = $requestedBundleRoot
 $ExpectedSessionId = $requestedExpectedSessionId
 $ValidateOnly = $requestedValidateOnly
+$RecoveryExport = $requestedRecoveryExport
+$IntentOnlyCandidateDiscard = $requestedIntentOnlyCandidateDiscard
 $inputs = Resolve-AcceptanceInputs `
     -Root $BundleRoot `
     -RunnerPath $bootstrap.runner_path `
@@ -1329,6 +2032,9 @@ $inputs = Resolve-AcceptanceInputs `
 if ($inputs.runner_sha256 -cne $bootstrap.runner_sha256 -or
     $inputs.observer_sha256 -cne $bootstrap.observer_sha256) {
     throw 'Authenticated bootstrap hashes changed during full bundle verification.'
+}
+if (($RecoveryExport -or $IntentOnlyCandidateDiscard) -and $Mode -cne 'ProcessCrash') {
+    throw 'RecoveryExport and IntentOnlyCandidateDiscard require Mode ProcessCrash.'
 }
 if ($ValidateOnly) {
     Write-Host "Validated recovery acceptance inputs for source $($inputs.verified.manifest.source_sha)."
@@ -1368,7 +2074,8 @@ $result = [ordered]@{
     process_crash = [ordered]@{ status = 'not-run'; reason = 'mode-not-selected' }
     worker_cancellation = [ordered]@{ status = 'not-run'; reason = 'mode-not-selected' }
     worker_close = [ordered]@{ status = 'not-run'; reason = 'mode-not-selected' }
-    recovery_export = [ordered]@{ status = 'not-run'; reason = 'optional-flow-not-implemented' }
+    recovery_export = [ordered]@{ status = 'not-run'; reason = 'switch-not-selected' }
+    intent_only_candidate_discard = [ordered]@{ status = 'not-run'; reason = 'switch-not-selected' }
     failure_reason = $null
     diagnostic = $null
     ui_diagnostic = $null
@@ -1387,19 +2094,23 @@ try {
     }
     $previousExecutionState = Enter-TestExecutionState
     Invoke-WithIsolatedEnvironment -RuntimeRoot $runtimeRoot -Action {
-        $modeResult = Invoke-AcceptanceSession `
+        $sessionResult = Invoke-AcceptanceSession `
             -Inputs $inputs `
             -EvidenceRoot $evidenceRoot `
             -RuntimeRoot $runtimeRoot `
             -Count $FixtureCount `
             -Mode $Mode `
             -SessionId $currentSession `
-            -WaitSeconds $TimeoutSeconds
+            -WaitSeconds $TimeoutSeconds `
+            -RunRecoveryExport ([bool]$RecoveryExport) `
+            -RunIntentOnlyCandidateDiscard ([bool]$IntentOnlyCandidateDiscard)
         switch ($Mode) {
-            'ProcessCrash' { $result.process_crash = $modeResult }
-            'WorkerCancellation' { $result.worker_cancellation = $modeResult }
-            'WorkerClose' { $result.worker_close = $modeResult }
+            'ProcessCrash' { $result.process_crash = $sessionResult.mode_result }
+            'WorkerCancellation' { $result.worker_cancellation = $sessionResult.mode_result }
+            'WorkerClose' { $result.worker_close = $sessionResult.mode_result }
         }
+        $result.recovery_export = $sessionResult.recovery_export
+        $result.intent_only_candidate_discard = $sessionResult.intent_only_candidate_discard
     }
     $result.status = 'passed'
     $succeeded = $true
@@ -1414,6 +2125,12 @@ catch {
         'ProcessCrash' { $result.process_crash = $modeFailure }
         'WorkerCancellation' { $result.worker_cancellation = $modeFailure }
         'WorkerClose' { $result.worker_close = $modeFailure }
+    }
+    if ($RecoveryExport) {
+        $result.recovery_export = $modeFailure
+    }
+    if ($IntentOnlyCandidateDiscard) {
+        $result.intent_only_candidate_discard = $modeFailure
     }
     $uiDiagnosticPath = Join-Path $evidenceRoot 'session-ui-diagnostic.json'
     if (Test-Path -LiteralPath $uiDiagnosticPath -PathType Leaf) {

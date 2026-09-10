@@ -107,14 +107,48 @@ function New-TestBundle {
 }
 
 $acceptance = Join-Path $PSScriptRoot 'windows-vm-recovery-acceptance.ps1'
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
 $admissionSource = [IO.File]::ReadAllText(
-    (Join-Path (Split-Path -Parent $PSScriptRoot) 'crates/darknamer-app/src/admission.rs')
+    (Join-Path $repositoryRoot 'crates/darknamer-app/src/admission.rs')
 )
 if ($admissionSource.IndexOf(
     'pub const MAX_IMPORT_BYTES: usize = 2 * 1024 * 1024;',
     [StringComparison]::Ordinal
 ) -lt 0) {
     throw 'The observer import-byte bound no longer matches the production source contract.'
+}
+$windowsSource = [IO.File]::ReadAllText(
+    (Join-Path $repositoryRoot 'crates/darknamer-app/src/windows.rs')
+)
+$menuSource = [IO.File]::ReadAllText(
+    (Join-Path $repositoryRoot 'crates/darknamer-app/src/windows/menu.rs')
+)
+$dialogSource = [IO.File]::ReadAllText(
+    (Join-Path $repositoryRoot 'crates/darknamer-app/src/windows/dialog.rs')
+)
+$librarySource = [IO.File]::ReadAllText(
+    (Join-Path $repositoryRoot 'crates/darknamer-app/src/lib.rs')
+)
+$recoveryUiSource = [IO.File]::ReadAllText(
+    (Join-Path $repositoryRoot 'crates/darknamer-app/src/windows/recovery_ui.rs')
+)
+foreach ($contract in @(
+    @{ Text = $windowsSource; Value = 'const EXPORT_RECOVERY_JOURNAL: u16 = 0x9000;' },
+    @{ Text = $windowsSource; Value = 'const DISCARD_STAGED_JOURNAL: u16 = 0x9001;' },
+    @{ Text = $menuSource; Value = 'recovery.item(EXPORT_RECOVERY_JOURNAL, "복구 데이터 내보내기...")?' },
+    @{ Text = $menuSource; Value = 'recovery.item(DISCARD_STAGED_JOURNAL, "시작되지 않은 작업 기록 삭제...")?' },
+    @{ Text = $dialogSource; Value = '.set_title("복구 저널 원본을 저장할 폴더 선택")' },
+    @{ Text = $librarySource; Value = 'pub(crate) const DISCARD_CONFIRM_BUTTON_ID: i32 = 1_201;' },
+    @{ Text = $librarySource; Value = 'pub(crate) const RECOVER_CONFIRM_BUTTON_ID: i32 = 1_202;' },
+    @{ Text = $recoveryUiSource; Value = '&directory.join("active.drj.retained")' },
+    @{ Text = $recoveryUiSource; Value = 'if !state.can_discard_staged_intent() || !journal_matches {' },
+    @{ Text = $recoveryUiSource; Value = '"DarkReNamer - 진단 내보내기 완료"' },
+    @{ Text = $recoveryUiSource; Value = '"DarkReNamer - 활성화 전 계획 폐기".to_owned()' },
+    @{ Text = $recoveryUiSource; Value = '"DarkReNamer - 폐기 완료"' }
+)) {
+    if ($contract.Text.IndexOf($contract.Value, [StringComparison]::Ordinal) -lt 0) {
+        throw "The recovery observer UI contract drifted from production source: $($contract.Value)"
+    }
 }
 . $acceptance `
     -BundleRoot $PSScriptRoot `
@@ -143,6 +177,70 @@ if ($inspection.complete_frames -ne 2 -or
     $inspection.tail -cne 'none') {
     throw 'The nonterminal journal inspection was classified incorrectly.'
 }
+$leadingIntent = Get-AcceptanceLeadingIntentFrame -Bytes $stream -Inspection $inspection
+if ($leadingIntent.Length -ne $intent.Length -or
+    -not [Linq.Enumerable]::SequenceEqual([byte[]]$leadingIntent, [byte[]]$intent)) {
+    throw 'The exact leading Intent frame was not extracted from the genuine journal stream.'
+}
+$intentInspection = Get-AcceptanceJournalInspection -Bytes $leadingIntent
+$intentClassification = Get-AcceptanceIntentCandidateClassification `
+    -JournalInspection $intentInspection `
+    -StartupLocked $true `
+    -StartupUnchanged $true `
+    -CancelPreserved $true `
+    -CancelUnchanged $true `
+    -CandidateRemoved $true `
+    -ActiveAbsent $true `
+    -DiscardUnlocked $true `
+    -DiscardUnchanged $true
+if ($intentClassification -cne 'intent-only-cancel-preserved-discard-unlocked') {
+    throw 'The complete Intent-only candidate scenario was classified incorrectly.'
+}
+Assert-Fails {
+    Get-AcceptanceIntentCandidateClassification `
+        -JournalInspection $intentInspection `
+        -StartupLocked $true `
+        -StartupUnchanged $true `
+        -CancelPreserved $false `
+        -CancelUnchanged $true `
+        -CandidateRemoved $true `
+        -ActiveAbsent $true `
+        -DiscardUnlocked $true `
+        -DiscardUnchanged $true
+} 'cancelled discard did not preserve'
+Assert-Fails {
+    Get-AcceptanceIntentCandidateClassification `
+        -JournalInspection $inspection `
+        -StartupLocked $true `
+        -StartupUnchanged $true `
+        -CancelPreserved $true `
+        -CancelUnchanged $true `
+        -CandidateRemoved $true `
+        -ActiveAbsent $true `
+        -DiscardUnlocked $true `
+        -DiscardUnchanged $true
+} 'not one exact complete Intent-only frame'
+$exportClassification = Get-AcceptanceRecoveryExportClassification `
+    -ExpectedBytes $stream `
+    -ExportedBytes ([byte[]]$stream.Clone()) `
+    -ExportedLeaves @('active.drj.retained')
+if ($exportClassification -cne 'active-retained-exact') {
+    throw 'The exact retained active-journal export was classified incorrectly.'
+}
+$wrongExport = [byte[]]$stream.Clone()
+$wrongExport[$wrongExport.Length - 1] = $wrongExport[$wrongExport.Length - 1] -bxor 1
+Assert-Fails {
+    Get-AcceptanceRecoveryExportClassification `
+        -ExpectedBytes $stream `
+        -ExportedBytes $wrongExport `
+        -ExportedLeaves @('active.drj.retained')
+} 'differs from the captured active journal'
+Assert-Fails {
+    Get-AcceptanceRecoveryExportClassification `
+        -ExpectedBytes $stream `
+        -ExportedBytes $stream `
+        -ExportedLeaves @('active.drj.retained', 'candidate.drj.retained')
+} 'unexpected retained files'
 $classification = Get-AcceptanceCrashClassification `
     -OriginalCount 7 `
     -RenamedCount 3 `
@@ -322,6 +420,18 @@ Assert-Fails {
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-recovery-script-' + [Guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $temporaryRoot)
 try {
+    $exportRoot = Join-Path $temporaryRoot 'export-shape'
+    [void](New-Item -ItemType Directory -Path $exportRoot)
+    [IO.File]::WriteAllBytes((Join-Path $exportRoot 'active.drj.retained'), $stream)
+    $exportItem = Get-AcceptanceRecoveryExportFile -Root $exportRoot
+    if ($exportItem.Name -cne 'active.drj.retained' -or $exportItem.Length -ne $stream.Length) {
+        throw 'The exact recovery export file was not selected.'
+    }
+    [void](New-Item -ItemType Directory -Path (Join-Path $exportRoot 'unexpected-child'))
+    Assert-Fails {
+        Get-AcceptanceRecoveryExportFile -Root $exportRoot
+    } 'exactly one ordinary file'
+
     $smallImport = Join-Path $temporaryRoot 'small-import.txt'
     $smallImportBytes = Write-AcceptanceUtf16Paths -Path $smallImport -Paths @('A')
     if ($smallImportBytes -ne 8 -or (Get-Item -LiteralPath $smallImport).Length -ne 8) {
@@ -346,6 +456,27 @@ try {
         -ExpectedScriptSha256 $observerHash `
         -Mode WorkerCancellation `
         -ValidateOnly
+
+    & $acceptance `
+        -BundleRoot $valid.root `
+        -ExpectedSessionId 1 `
+        -OutputRoot $temporaryRoot `
+        -ExpectedScriptSha256 $observerHash `
+        -Mode ProcessCrash `
+        -RecoveryExport `
+        -IntentOnlyCandidateDiscard `
+        -ValidateOnly
+
+    Assert-Fails {
+        & $acceptance `
+            -BundleRoot $valid.root `
+            -ExpectedSessionId 1 `
+            -OutputRoot $temporaryRoot `
+            -ExpectedScriptSha256 $observerHash `
+            -Mode WorkerCancellation `
+            -RecoveryExport `
+            -ValidateOnly
+    } 'require Mode ProcessCrash'
 
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
         Assert-Fails {
@@ -469,6 +600,41 @@ $fixtureCountParameter = @(
 if ($fixtureCountParameter.Count -ne 1 -or
     $fixtureCountParameter[0].DefaultValue.SafeGetValue() -ne 4096) {
     throw 'The recovery acceptance default fixture count must remain within the import bound.'
+}
+foreach ($switchName in @('RecoveryExport', 'IntentOnlyCandidateDiscard')) {
+    $switchParameter = @(
+        $fromFile.ParamBlock.Parameters |
+            Where-Object { $_.Name.VariablePath.UserPath -ceq $switchName }
+    )
+    if ($switchParameter.Count -ne 1 -or
+        $switchParameter[0].StaticType.FullName -cne 'System.Management.Automation.SwitchParameter') {
+        throw "The recovery acceptance observer is missing opt-in switch $switchName."
+    }
+}
+$dismissFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Dismiss-AcceptanceMessage'
+}, $true))
+if ($dismissFunction.Count -ne 1) {
+    throw 'The recovery message dismissal function is missing or ambiguous.'
+}
+foreach ($fragment in @('GetForegroundWindow', 'bounded deadline', 'SetForegroundWindow')) {
+    if ($dismissFunction[0].Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+        throw "Recovery message dismissal does not enforce exact foreground handling: $fragment"
+    }
+}
+$intentFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Get-AcceptanceLeadingIntentFrame'
+}, $true))
+if ($intentFunction.Count -ne 1 -or
+    $intentFunction[0].Extent.Text.IndexOf(
+        'Get-AcceptanceJournalInspection',
+        [StringComparison]::Ordinal
+    ) -ge 0) {
+    throw 'Leading Intent extraction must reuse the caller validated journal inspection.'
 }
 $fromUtf8 = [Management.Automation.Language.Parser]::ParseInput(
     [IO.File]::ReadAllText($acceptance, [Text.Encoding]::UTF8),
