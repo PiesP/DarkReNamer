@@ -107,29 +107,35 @@ function Write-RestoreSnapshot {
     if (-not (Test-Path -LiteralPath $Fixture.output_root)) {
         [void](New-Item -ItemType Directory -Path $Fixture.output_root)
     }
+    $original = [ordered]@{
+        flags = $Flags
+        scheme = 'fixture scheme'
+        colors = [ordered]@{
+            window = 1
+            window_text = 2
+            button_face = 3
+            button_text = 4
+            highlight = 5
+            highlight_text = 6
+            gray_text = 7
+            hot_light = 8
+        }
+        visual_style = [ordered]@{
+            path = 'C:\Windows\resources\Themes\Aero\Aero.msstyles'
+            color = 'NormalColor'
+            size = 'NormalSize'
+        }
+    }
     Write-Utf8Json `
         -Path (Join-Path $Fixture.output_root 'high-contrast-restore.json') `
         -Value ([ordered]@{
-            schema_version = 1
+            schema_version = 2
             source_sha = $SourceSha
             acceptance_script_sha256 = $ScriptSha256
             restoration_required = $RestorationRequired
-            original = [ordered]@{
-                flags = $Flags
-                scheme = 'fixture scheme'
-                colors = [ordered]@{
-                    window = 1
-                    window_text = 2
-                    button_face = 3
-                    button_text = 4
-                    highlight = 5
-                    highlight_text = 6
-                    gray_text = 7
-                    hot_light = 8
-                }
-            }
+            original = $original
             restoration_verified = $RestorationVerified
-            restored = $null
+            restored = if (-not $RestorationRequired -and $RestorationVerified) { $original } else { $null }
         })
 }
 
@@ -431,6 +437,9 @@ try {
         HighlightText = 6
         GrayText = 7
         HotLight = 8
+        ThemePath = 'C:\Windows\resources\Themes\Aero\Aero.msstyles'
+        ThemeColor = 'NormalColor'
+        ThemeSize = 'NormalSize'
     }
     $sameSnapshot = $highContrastSnapshot | Select-Object *
     if (-not (Test-HighContrastSnapshotEqual -Expected $highContrastSnapshot -Actual $sameSnapshot)) {
@@ -440,6 +449,30 @@ try {
     $changedSnapshot.Highlight = 9
     if (Test-HighContrastSnapshotEqual -Expected $highContrastSnapshot -Actual $changedSnapshot) {
         throw 'Changed High Contrast system colors must fail restoration proof.'
+    }
+    foreach ($themeChange in @(
+        @{ Name = 'ThemePath'; Value = 'C:\Windows\resources\Themes\Aero\AeroLite.msstyles' },
+        @{ Name = 'ThemeColor'; Value = 'HighContrast' },
+        @{ Name = 'ThemeSize'; Value = 'Large' }
+    )) {
+        $changedThemeSnapshot = $highContrastSnapshot | Select-Object *
+        $changedThemeSnapshot.($themeChange.Name) = $themeChange.Value
+        if (Test-HighContrastSnapshotEqual -Expected $highContrastSnapshot -Actual $changedThemeSnapshot) {
+            throw "Changed $($themeChange.Name) must fail restoration proof."
+        }
+        $themeMismatchState = [pscustomobject]@{ writes = 0 }
+        Assert-Fails {
+            Wait-HighContrastRestoration `
+                -Expected $highContrastSnapshot `
+                -ReadSnapshot { $changedThemeSnapshot | Select-Object * } `
+                -SetCapturedColors { param($expected) $themeMismatchState.writes++ } `
+                -Label "changed $($themeChange.Name) fixture" `
+                -AllowPaletteRestore `
+                -MaximumAttempts 2 -FallbackAttempts 2 -PollMilliseconds 0
+        } 'did not settle within the bounded observation attempts'
+        if ($themeMismatchState.writes -ne 0) {
+            throw "Changed $($themeChange.Name) must not invoke the palette setter."
+        }
     }
     $settlementState = [pscustomobject]@{ reads = 0 }
     $settled = Wait-HighContrastSettlement `
@@ -715,9 +748,42 @@ try {
         -ScriptSha256 $valid.acceptance_sha256
     if ($resolvedRestore.expected.Flags -ne 126 -or
         $resolvedRestore.expected.Highlight -ne 5 -or
+        $resolvedRestore.expected.ThemePath -cne 'C:\Windows\resources\Themes\Aero\Aero.msstyles' -or
+        $resolvedRestore.expected.ThemeColor -cne 'NormalColor' -or
+        $resolvedRestore.expected.ThemeSize -cne 'NormalSize' -or
         $resolvedRestore.document.restoration_required -ne $true) {
         throw 'The High Contrast restore snapshot was not parsed exactly.'
     }
+    $malformedRestorePath = Join-Path $valid.output_root 'high-contrast-restore.json'
+    $malformedRestore = Get-Content -LiteralPath $malformedRestorePath -Raw | ConvertFrom-Json
+    $malformedRestore.original.PSObject.Properties.Remove('visual_style')
+    Write-Utf8Json -Path $malformedRestorePath -Value $malformedRestore
+    Assert-Fails {
+        Resolve-HighContrastRestoreDocument `
+            -OutputDirectory $valid.output_root `
+            -SourceSha $valid.manifest.source_sha `
+            -ScriptSha256 $valid.acceptance_sha256
+    } 'fields are invalid'
+    Write-RestoreSnapshot `
+        -Fixture $valid `
+        -RestorationRequired $false `
+        -RestorationVerified $true
+    $verifiedRestore = Resolve-HighContrastRestoreDocument `
+        -OutputDirectory $valid.output_root `
+        -SourceSha $valid.manifest.source_sha `
+        -ScriptSha256 $valid.acceptance_sha256
+    if ($verifiedRestore.document.restoration_verified -ne $true) {
+        throw 'An exact restored visual-style identity must retain verified rescue proof.'
+    }
+    $mismatchedRestore = Get-Content -LiteralPath $malformedRestorePath -Raw | ConvertFrom-Json
+    $mismatchedRestore.restored.visual_style.size = 'DifferentSize'
+    Write-Utf8Json -Path $malformedRestorePath -Value $mismatchedRestore
+    Assert-Fails {
+        Resolve-HighContrastRestoreDocument `
+            -OutputDirectory $valid.output_root `
+            -SourceSha $valid.manifest.source_sha `
+            -ScriptSha256 $valid.acceptance_sha256
+    } 'restored state differs'
     Write-RestoreSnapshot -Fixture $valid -SourceSha ('f' * 40)
     Assert-Fails {
         & $valid.acceptance `

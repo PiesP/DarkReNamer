@@ -187,6 +187,26 @@ function Test-HighContrastSnapshotEqual {
         [Parameter(Mandatory)][object] $Actual
     )
 
+    if (-not (Test-HighContrastIdentityEqual -Expected $Expected -Actual $Actual)) {
+        return $false
+    }
+    foreach ($name in @(
+        'Window','WindowText','ButtonFace','ButtonText',
+        'Highlight','HighlightText','GrayText','HotLight'
+    )) {
+        if ($Expected.$name -ne $Actual.$name) {
+            return $false
+        }
+    }
+    $true
+}
+
+function Test-HighContrastIdentityEqual {
+    param(
+        [Parameter(Mandatory)][object] $Expected,
+        [Parameter(Mandatory)][object] $Actual
+    )
+
     if ($Expected.Flags -ne $Actual.Flags -or
         -not [string]::Equals(
             [string]$Expected.Scheme,
@@ -196,10 +216,13 @@ function Test-HighContrastSnapshotEqual {
         return $false
     }
     foreach ($name in @(
-        'Window','WindowText','ButtonFace','ButtonText',
-        'Highlight','HighlightText','GrayText','HotLight'
+        'ThemePath','ThemeColor','ThemeSize'
     )) {
-        if ($Expected.$name -ne $Actual.$name) {
+        if (-not [string]::Equals(
+            [string]$Expected.$name,
+            [string]$Actual.$name,
+            [StringComparison]::Ordinal
+        )) {
             return $false
         }
     }
@@ -339,12 +362,7 @@ function Wait-HighContrastRestoration {
         $restorationObservationState.observed.Count - 1
     ]
     if (-not (Test-HighContrastSnapshotEqual -Expected $previous -Actual $last) -or
-        $last.Flags -ne $Expected.Flags -or
-        -not [string]::Equals(
-            [string]$last.Scheme,
-            [string]$Expected.Scheme,
-            [StringComparison]::Ordinal
-        ) -or
+        -not (Test-HighContrastIdentityEqual -Expected $Expected -Actual $last) -or
         (Test-HighContrastColorsEqual -Expected $Expected -Actual $last)) {
         throw $initialFailure
     }
@@ -358,6 +376,95 @@ function Wait-HighContrastRestoration {
         -Label "$Label palette fallback" `
         -MaximumAttempts $FallbackAttempts `
         -PollMilliseconds $PollMilliseconds
+}
+
+function ConvertTo-HighContrastDocumentSnapshot {
+    param([Parameter(Mandatory)][object] $Snapshot)
+
+    [ordered]@{
+        flags = $Snapshot.Flags
+        scheme = $Snapshot.Scheme
+        colors = [ordered]@{
+            window = $Snapshot.Window
+            window_text = $Snapshot.WindowText
+            button_face = $Snapshot.ButtonFace
+            button_text = $Snapshot.ButtonText
+            highlight = $Snapshot.Highlight
+            highlight_text = $Snapshot.HighlightText
+            gray_text = $Snapshot.GrayText
+            hot_light = $Snapshot.HotLight
+        }
+        visual_style = [ordered]@{
+            path = $Snapshot.ThemePath
+            color = $Snapshot.ThemeColor
+            size = $Snapshot.ThemeSize
+        }
+    }
+}
+
+function ConvertFrom-HighContrastDocumentSnapshot {
+    param(
+        [Parameter(Mandatory)][object] $Document,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    $expectedNames = @('colors','flags','scheme','visual_style')
+    $actualNames = @($Document.PSObject.Properties.Name | Sort-Object)
+    $fieldDifferences = @(Compare-Object -CaseSensitive $expectedNames $actualNames)
+    if ($actualNames.Count -ne $expectedNames.Count -or
+        $fieldDifferences.Count -ne 0) {
+        throw "High Contrast restore snapshot $Label fields are invalid."
+    }
+    if (($Document.flags -isnot [int] -and $Document.flags -isnot [long]) -or
+        ($null -ne $Document.scheme -and $Document.scheme -isnot [string])) {
+        throw "High Contrast restore snapshot $Label settings are invalid."
+    }
+    $colors = $Document.colors
+    $expectedColorNames = @(
+        'button_face','button_text','gray_text','highlight',
+        'highlight_text','hot_light','window','window_text'
+    )
+    $actualColorNames = @($colors.PSObject.Properties.Name | Sort-Object)
+    $colorDifferences = @(Compare-Object -CaseSensitive $expectedColorNames $actualColorNames)
+    if ($actualColorNames.Count -ne $expectedColorNames.Count -or
+        $colorDifferences.Count -ne 0) {
+        throw "High Contrast restore snapshot $Label colors are incomplete."
+    }
+    foreach ($name in $expectedColorNames) {
+        if ($colors.$name -isnot [int] -and $colors.$name -isnot [long]) {
+            throw "High Contrast restore snapshot $Label colors are invalid."
+        }
+    }
+    $visualStyle = $Document.visual_style
+    $expectedVisualStyleNames = @('color','path','size')
+    $actualVisualStyleNames = @($visualStyle.PSObject.Properties.Name | Sort-Object)
+    $visualStyleDifferences = @(Compare-Object -CaseSensitive $expectedVisualStyleNames $actualVisualStyleNames)
+    if ($actualVisualStyleNames.Count -ne $expectedVisualStyleNames.Count -or
+        $visualStyleDifferences.Count -ne 0 -or
+        $visualStyle.path -isnot [string] -or
+        $visualStyle.path -cnotmatch '^(?:[A-Za-z]:\\|\\\\)' -or
+        $visualStyle.path.Length -gt 510 -or $visualStyle.path -match '[\x00-\x1f]' -or
+        $visualStyle.color -isnot [string] -or [string]::IsNullOrWhiteSpace($visualStyle.color) -or
+        $visualStyle.color.Length -gt 126 -or $visualStyle.color -match '[\x00-\x1f]' -or
+        $visualStyle.size -isnot [string] -or [string]::IsNullOrWhiteSpace($visualStyle.size) -or
+        $visualStyle.size.Length -gt 126 -or $visualStyle.size -match '[\x00-\x1f]') {
+        throw "High Contrast restore snapshot $Label visual style is invalid."
+    }
+    [pscustomobject]@{
+        Flags = [uint32]$Document.flags
+        Scheme = $Document.scheme
+        Window = [uint32]$colors.window
+        WindowText = [uint32]$colors.window_text
+        ButtonFace = [uint32]$colors.button_face
+        ButtonText = [uint32]$colors.button_text
+        Highlight = [uint32]$colors.highlight
+        HighlightText = [uint32]$colors.highlight_text
+        GrayText = [uint32]$colors.gray_text
+        HotLight = [uint32]$colors.hot_light
+        ThemePath = $visualStyle.path
+        ThemeColor = $visualStyle.color
+        ThemeSize = $visualStyle.size
+    }
 }
 
 function Resolve-HighContrastRestoreDocument {
@@ -380,7 +487,17 @@ function Resolve-HighContrastRestoreDocument {
     catch {
         throw 'High Contrast restore snapshot is not valid JSON.'
     }
-    if ($document.schema_version -ne 1 -or
+    $expectedDocumentNames = @(
+        'acceptance_script_sha256','original','restoration_required',
+        'restoration_verified','restored','schema_version','source_sha'
+    )
+    $actualDocumentNames = @($document.PSObject.Properties.Name | Sort-Object)
+    $documentDifferences = @(Compare-Object -CaseSensitive $expectedDocumentNames $actualDocumentNames)
+    if ($actualDocumentNames.Count -ne $expectedDocumentNames.Count -or
+        $documentDifferences.Count -ne 0) {
+        throw 'High Contrast restore snapshot document fields are invalid.'
+    }
+    if ($document.schema_version -ne 2 -or
         $document.source_sha -cne $SourceSha -or
         $document.acceptance_script_sha256 -cne $ScriptSha256) {
         throw 'High Contrast restore snapshot binding mismatch.'
@@ -389,42 +506,27 @@ function Resolve-HighContrastRestoreDocument {
         $document.restoration_verified -isnot [bool]) {
         throw 'High Contrast restore snapshot state is invalid.'
     }
-    if (($document.original.flags -isnot [int] -and
-        $document.original.flags -isnot [long]) -or
-        ($null -ne $document.original.scheme -and
-        $document.original.scheme -isnot [string])) {
-        throw 'High Contrast restore snapshot settings are invalid.'
-    }
-    $colors = $document.original.colors
-    $expectedColorNames = @(
-        'button_face','button_text','gray_text','highlight',
-        'highlight_text','hot_light','window','window_text'
-    )
-    $actualColorNames = @($colors.PSObject.Properties.Name | Sort-Object)
-    if ($actualColorNames.Count -ne $expectedColorNames.Count) {
-        throw 'High Contrast restore snapshot colors are incomplete.'
-    }
-    for ($index = 0; $index -lt $expectedColorNames.Count; $index++) {
-        $name = $expectedColorNames[$index]
-        if ($actualColorNames[$index] -cne $name -or
-            ($colors.$name -isnot [int] -and $colors.$name -isnot [long])) {
-            throw 'High Contrast restore snapshot colors are invalid.'
-        }
-    }
-    $expected = [pscustomobject]@{
-        Flags = [uint32]$document.original.flags
-        Scheme = $document.original.scheme
-        Window = [uint32]$colors.window
-        WindowText = [uint32]$colors.window_text
-        ButtonFace = [uint32]$colors.button_face
-        ButtonText = [uint32]$colors.button_text
-        Highlight = [uint32]$colors.highlight
-        HighlightText = [uint32]$colors.highlight_text
-        GrayText = [uint32]$colors.gray_text
-        HotLight = [uint32]$colors.hot_light
-    }
+    $expected = ConvertFrom-HighContrastDocumentSnapshot `
+        -Document $document.original `
+        -Label 'original'
     if (($expected.Flags -band 0x1000) -ne 0) {
         throw 'High Contrast restore snapshot contains a prohibited toggle option.'
+    }
+    if ($document.restoration_required) {
+        if ($document.restoration_verified -or $null -ne $document.restored) {
+            throw 'High Contrast restore snapshot pending state is invalid.'
+        }
+    }
+    else {
+        if (-not $document.restoration_verified -or $null -eq $document.restored) {
+            throw 'High Contrast restore snapshot verified state is invalid.'
+        }
+        $restored = ConvertFrom-HighContrastDocumentSnapshot `
+            -Document $document.restored `
+            -Label 'restored'
+        if (-not (Test-HighContrastSnapshotEqual -Expected $expected -Actual $restored)) {
+            throw 'High Contrast restore snapshot restored state differs from the original.'
+        }
     }
     [pscustomobject]@{ path = $path; document = $document; expected = $expected }
 }
@@ -477,17 +579,13 @@ function Invoke-HighContrastRescue {
                 -Label 'High Contrast rescue restoration' `
                 -AllowPaletteRestore
             Write-JsonUtf8Bom -Path $restore.path -Value ([ordered]@{
-                schema_version = 1
+                schema_version = 2
                 source_sha = $Verified.source_sha
                 acceptance_script_sha256 = $Verified.script_sha256
                 restoration_required = $false
                 original = $restore.document.original
                 restoration_verified = $true
-                restored = [ordered]@{
-                    flags = $actual.Flags
-                    scheme = $actual.Scheme
-                    colors_match = $true
-                }
+                restored = ConvertTo-HighContrastDocumentSnapshot -Snapshot $actual
             })
             $result.status = 'passed'
             $result.action = 'restored'
@@ -591,6 +689,9 @@ public static class DarkReNamerVmAcceptanceNative {
         public uint HighlightText { get; set; }
         public uint GrayText { get; set; }
         public uint HotLight { get; set; }
+        public string ThemePath { get; set; }
+        public string ThemeColor { get; set; }
+        public string ThemeSize { get; set; }
     }
 
     public sealed class ClipboardSnapshot {
@@ -685,6 +786,14 @@ public static class DarkReNamerVmAcceptanceNative {
     private static extern uint GetSysColor(int index);
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetSysColors(int count, int[] indices, uint[] colors);
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    private static extern int GetCurrentThemeName(
+        StringBuilder themeFileName,
+        int maximumNameCharacters,
+        StringBuilder colorName,
+        int maximumColorCharacters,
+        StringBuilder sizeName,
+        int maximumSizeCharacters);
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool OpenClipboard(IntPtr owner);
     [DllImport("user32.dll", SetLastError = true)]
@@ -925,6 +1034,25 @@ public static class DarkReNamerVmAcceptanceNative {
         // synchronously without freeing it; the OS reclaims any allocation at
         // process exit. Retain at most 128 pointer values for that lifetime.
         retainedSchemePointers[slot] = value.scheme;
+        const int themePathCapacity = 512;
+        const int themeComponentCapacity = 128;
+        StringBuilder themePath = new StringBuilder(themePathCapacity);
+        StringBuilder themeColor = new StringBuilder(themeComponentCapacity);
+        StringBuilder themeSize = new StringBuilder(themeComponentCapacity);
+        int themeResult = GetCurrentThemeName(
+            themePath,
+            themePathCapacity,
+            themeColor,
+            themeComponentCapacity,
+            themeSize,
+            themeComponentCapacity);
+        if (themeResult != 0) { Marshal.ThrowExceptionForHR(themeResult); }
+        if (themePath.Length == 0 || themePath.Length >= themePathCapacity - 1 ||
+            themeColor.Length == 0 || themeColor.Length >= themeComponentCapacity - 1 ||
+            themeSize.Length == 0 || themeSize.Length >= themeComponentCapacity - 1 ||
+            !System.IO.Path.IsPathRooted(themePath.ToString())) {
+            throw new InvalidOperationException("The active visual-style identity is unavailable or truncated.");
+        }
         return new HighContrastSnapshot {
             Flags = value.flags,
             Scheme = value.scheme == IntPtr.Zero ? null : Marshal.PtrToStringUni(value.scheme),
@@ -935,7 +1063,10 @@ public static class DarkReNamerVmAcceptanceNative {
             Highlight = GetSysColor(13),
             HighlightText = GetSysColor(14),
             GrayText = GetSysColor(17),
-            HotLight = GetSysColor(26)
+            HotLight = GetSysColor(26),
+            ThemePath = themePath.ToString(),
+            ThemeColor = themeColor.ToString(),
+            ThemeSize = themeSize.ToString()
         };
     }
 
@@ -1969,24 +2100,11 @@ try {
     if ($HighContrast) {
         $highContrastState.rescue_path = Join-Path $verified.output_root 'high-contrast-restore.json'
         Write-JsonUtf8Bom -Path $highContrastState.rescue_path -Value ([ordered]@{
-            schema_version = 1
+            schema_version = 2
             source_sha = $verified.source_sha
             acceptance_script_sha256 = $verified.script_sha256
             restoration_required = $true
-            original = [ordered]@{
-                flags = $highContrastState.original.Flags
-                scheme = $highContrastState.original.Scheme
-                colors = [ordered]@{
-                    window = $highContrastState.original.Window
-                    window_text = $highContrastState.original.WindowText
-                    button_face = $highContrastState.original.ButtonFace
-                    button_text = $highContrastState.original.ButtonText
-                    highlight = $highContrastState.original.Highlight
-                    highlight_text = $highContrastState.original.HighlightText
-                    gray_text = $highContrastState.original.GrayText
-                    hot_light = $highContrastState.original.HotLight
-                }
-            }
+            original = ConvertTo-HighContrastDocumentSnapshot -Snapshot $highContrastState.original
             restoration_verified = $false
             restored = $null
         })
@@ -2728,30 +2846,13 @@ finally {
             $highContrastState.restoration_verified = $true
             $highContrastResult.restoration = 'verified'
             Write-JsonUtf8Bom -Path $highContrastState.rescue_path -Value ([ordered]@{
-                schema_version = 1
+                schema_version = 2
                 source_sha = $verified.source_sha
                 acceptance_script_sha256 = $verified.script_sha256
                 restoration_required = $false
-                original = [ordered]@{
-                    flags = $highContrastState.original.Flags
-                    scheme = $highContrastState.original.Scheme
-                    colors = [ordered]@{
-                        window = $highContrastState.original.Window
-                        window_text = $highContrastState.original.WindowText
-                        button_face = $highContrastState.original.ButtonFace
-                        button_text = $highContrastState.original.ButtonText
-                        highlight = $highContrastState.original.Highlight
-                        highlight_text = $highContrastState.original.HighlightText
-                        gray_text = $highContrastState.original.GrayText
-                        hot_light = $highContrastState.original.HotLight
-                    }
-                }
+                original = ConvertTo-HighContrastDocumentSnapshot -Snapshot $highContrastState.original
                 restoration_verified = $true
-                restored = [ordered]@{
-                    flags = $highContrastState.restored.Flags
-                    scheme = $highContrastState.restored.Scheme
-                    colors_match = $true
-                }
+                restored = ConvertTo-HighContrastDocumentSnapshot -Snapshot $highContrastState.restored
             })
         }
         catch {
