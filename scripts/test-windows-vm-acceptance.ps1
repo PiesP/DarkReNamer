@@ -207,6 +207,19 @@ try {
     if (($acceptanceText | Select-String -Pattern "failure_reason = 'desktop_lock_release_failed'" -AllMatches).Matches.Count -ne 2) {
         throw 'Both acceptance and rescue must preserve structured evidence after desktop-lock release failure.'
     }
+    $captureResizeIndex = $acceptanceText.IndexOf(
+        '        $captureWindow = Ensure-AcceptanceMainWindowCaptureSize',
+        [StringComparison]::Ordinal
+    )
+    $initialCaptureIndex = $acceptanceText.IndexOf(
+        '        $initialCapture = Save-WindowScreenshot',
+        [StringComparison]::Ordinal
+    )
+    if ($captureResizeIndex -lt 0 -or
+        $initialCaptureIndex -lt 0 -or
+        $captureResizeIndex -gt $initialCaptureIndex) {
+        throw 'Evidence-eligible main-window sizing must precede the first workbench capture.'
+    }
 
     . $acceptance `
         -BundleRoot 'unused' `
@@ -219,6 +232,89 @@ try {
         if ($null -eq [DarkReNamerVmAcceptanceNative].GetMethod($method)) {
             throw "The acceptance native probe is missing $method."
         }
+    }
+    $focusBefore = [pscustomobject]@{
+        Current = [pscustomobject]@{ AutomationId = '1000'; NativeWindowHandle = 100 }
+    }
+    $focusAfter = [pscustomobject]@{
+        Current = [pscustomobject]@{ AutomationId = '32773'; NativeWindowHandle = 200 }
+    }
+    $focusSequence = @($focusBefore, $focusBefore, $focusAfter)
+    $focusState = [pscustomobject]@{ index = 0 }
+    $settledFocus = Wait-AcceptanceFocusTransition `
+        -Before $focusBefore `
+        -ReadFocusedElement {
+            $value = $focusSequence[$focusState.index]
+            $focusState.index++
+            $value
+        } `
+        -Label 'delayed focus fixture' `
+        -MaximumAttempts 3 `
+        -PollMilliseconds 0
+    if ($focusState.index -ne 3 -or
+        $settledFocus.Current.AutomationId -cne '32773') {
+        throw 'Delayed focus navigation did not settle on the changed element.'
+    }
+    Assert-Fails {
+        Wait-AcceptanceFocusTransition `
+            -Before $focusBefore `
+            -ReadFocusedElement { $focusBefore } `
+            -Label 'stalled focus fixture' `
+            -MaximumAttempts 2 `
+            -PollMilliseconds 0
+    } 'did not change focus within the bounded observation attempts'
+
+    $smallCapture = Resolve-AcceptanceWindowResize `
+        -CurrentWidth 594 `
+        -CurrentHeight 508
+    if (-not $smallCapture.resize_required -or
+        $smallCapture.width -ne 640 -or
+        $smallCapture.height -ne 508) {
+        throw 'The 100-percent-DPI window must be enlarged to an evidence-eligible width.'
+    }
+    $largeCapture = Resolve-AcceptanceWindowResize `
+        -CurrentWidth 900 `
+        -CurrentHeight 700
+    if ($largeCapture.resize_required -or
+        $largeCapture.width -ne 900 -or
+        $largeCapture.height -ne 700) {
+        throw 'An already eligible capture window must retain its dimensions.'
+    }
+
+    foreach ($appearanceCase in @(
+        @{ Name = 'system'; Command = 0x9010; Evidence = 'system' },
+        @{ Name = 'light'; Command = 0x9011; Evidence = 'light' },
+        @{ Name = 'dark'; Command = 0x9012; Evidence = 'dark' }
+    )) {
+        $appearanceSpec = Resolve-AcceptanceAppearance -Appearance $appearanceCase.Name
+        if ($appearanceSpec.command_id -ne $appearanceCase.Command -or
+            $appearanceSpec.evidence_name -cne $appearanceCase.Evidence) {
+            throw "Acceptance appearance mapping failed for $($appearanceCase.Name)."
+        }
+    }
+    foreach ($method in @(
+        'IsMenuCommandChecked',
+        'SendMenuCommand',
+        'FindVisiblePopupMenu',
+        'SetWindowPos'
+    )) {
+        if ($null -eq [DarkReNamerVmAcceptanceNative].GetMethod($method)) {
+            throw "The acceptance native probe is missing $method."
+        }
+    }
+    $captureContext = Add-AcceptanceScreenshotContext `
+        -Screenshot ([ordered]@{
+            file = 'fixture.png'
+            sha256 = 'a' * 64
+            width = 640
+            height = 508
+        }) `
+        -Appearance 'dark' `
+        -Surface 'main-workbench'
+    if ($captureContext.appearance -cne 'dark' -or
+        $captureContext.surface -cne 'main-workbench' -or
+        $captureContext.width -ne 640) {
+        throw 'Screenshot context must retain explicit appearance, surface, and dimensions.'
     }
     if ((Get-AcceptanceVerdict -KeyboardStatus passed -AccessibilityStatus passed -CaptureStatus passed) -cne 'review_required') {
         throw 'Complete technical evidence must retain the visual-review requirement.'
@@ -310,6 +406,35 @@ try {
         -ExpectedScriptSha256 $valid.acceptance_sha256 `
         -HighContrast `
         -ValidateOnly
+    & $valid.acceptance `
+        -BundleRoot $valid.bundle_root `
+        -ExpectedSessionId 1 `
+        -OutputRoot $valid.output_root `
+        -ExpectedScriptSha256 $valid.acceptance_sha256 `
+        -Appearance dark `
+        -CaptureNativeMenu `
+        -CaptureAdvancedAppearance `
+        -ValidateOnly
+    Assert-Fails {
+        & $valid.acceptance `
+            -BundleRoot $valid.bundle_root `
+            -ExpectedSessionId 1 `
+            -OutputRoot $valid.output_root `
+            -ExpectedScriptSha256 $valid.acceptance_sha256 `
+            -Appearance dark `
+            -HighContrast `
+            -ValidateOnly
+    } 'High Contrast acceptance uses Forced Colors'
+    Assert-Fails {
+        & $valid.acceptance `
+            -BundleRoot $valid.bundle_root `
+            -ExpectedSessionId 1 `
+            -OutputRoot $valid.output_root `
+            -ExpectedScriptSha256 $valid.acceptance_sha256 `
+            -CaptureAdvancedAppearance `
+            -HighContrast `
+            -ValidateOnly
+    } 'Advanced appearance capture is unavailable'
     if (Test-Path -LiteralPath $valid.output_root) {
         throw 'HighContrast ValidateOnly must not create output or change system state.'
     }
