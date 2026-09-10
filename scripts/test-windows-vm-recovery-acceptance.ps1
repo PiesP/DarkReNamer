@@ -1,5 +1,5 @@
 ﻿[CmdletBinding()]
-param()
+param([switch] $ParserOnly)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -555,6 +555,11 @@ Assert-Fails {
     Get-AcceptanceJournalInspection -Bytes $manyFrameBadChecksum
 } 'checksum mismatch'
 
+if ($ParserOnly) {
+    Write-Host 'Windows PowerShell journal parser tests passed.'
+    return
+}
+
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-recovery-script-' + [Guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $temporaryRoot)
 try {
@@ -795,7 +800,7 @@ if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
     $PSVersionTable.PSVersion.Major -ge 7) {
     # Mandatory array argument binding scales differently in Windows PowerShell
     # 5.1, the observer runtime. Exercise the many-frame case there as well.
-    $invocation = "`$ErrorActionPreference = 'Stop'; & '" + $PSCommandPath.Replace("'", "''") + "'"
+    $invocation = "`$ErrorActionPreference = 'Stop'; & '" + $PSCommandPath.Replace("'", "''") + "' -ParserOnly"
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($invocation))
     $process = [Diagnostics.Process]::new()
     $process.StartInfo.FileName = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -808,16 +813,16 @@ if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
     try {
         $started = $process.Start()
         if (-not $started) {
-            throw 'Windows PowerShell recovery tooling test did not start.'
+            throw 'Windows PowerShell journal parser test did not start.'
         }
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit(90000)) {
-            throw 'Windows PowerShell recovery tooling test exceeded its 90-second deadline.'
+            throw 'Windows PowerShell journal parser test exceeded its 90-second deadline.'
         }
         $process.WaitForExit()
         if ($process.ExitCode -ne 0) {
-            throw "Windows PowerShell recovery tooling test failed: $($stderr.GetAwaiter().GetResult())"
+            throw "Windows PowerShell journal parser test failed: $($stderr.GetAwaiter().GetResult())"
         }
         Write-Host $stdout.GetAwaiter().GetResult().TrimEnd()
     }
