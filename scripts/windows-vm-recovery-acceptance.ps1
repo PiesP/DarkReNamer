@@ -165,10 +165,15 @@ function Test-AcceptanceBytesEqual {
 }
 
 function Get-AcceptanceLeadingIntentFrame {
-    param([Parameter(Mandatory)][byte[]] $Bytes)
+    param(
+        [Parameter(Mandatory)][byte[]] $Bytes,
+        [Parameter(Mandatory)][object] $Inspection
+    )
 
-    $inspection = Get-AcceptanceJournalInspection -Bytes $Bytes
-    if ($inspection.complete_frames -lt 1 -or $Bytes[6] -ne 1) {
+    if ($Inspection.total_bytes -ne $Bytes.Length -or
+        $Inspection.valid_prefix_bytes -gt $Bytes.Length -or
+        $Inspection.complete_frames -lt 1 -or
+        $Bytes[6] -ne 1) {
         throw 'Journal does not contain one complete leading Intent frame.'
     }
     $frameLength = 24L + [int64](Get-AcceptanceUInt32 -Bytes $Bytes -Offset 16)
@@ -194,6 +199,30 @@ function Get-AcceptanceRecoveryExportClassification {
         throw 'The exported retained journal differs from the captured active journal.'
     }
     'active-retained-exact'
+}
+
+function Get-AcceptanceRecoveryExportFile {
+    param([Parameter(Mandatory)][string] $Root)
+
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+        throw 'The recovery export directory is unavailable.'
+    }
+    $rootItem = Get-Item -LiteralPath $Root -Force
+    if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The recovery export directory became a reparse point.'
+    }
+    $items = @(Get-ChildItem -LiteralPath $rootItem.FullName -Force)
+    if ($items.Count -ne 1) {
+        throw 'The recovery export must contain exactly one ordinary file.'
+    }
+    $item = $items[0]
+    if ($item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $item.Name -cne 'active.drj.retained' -or
+        $item.Length -gt 64MB) {
+        throw 'The recovery export must contain exactly one ordinary file named active.drj.retained.'
+    }
+    $item
 }
 
 function Get-AcceptanceIntentCandidateClassification {
@@ -853,9 +882,25 @@ function Dismiss-AcceptanceMessage {
         -Name $Name `
         -TimeoutSeconds $WaitSeconds `
         -Label $Label
+    Assert-AutomationBinding `
+        -Element $window `
+        -Process $Application.owned.process `
+        -ExpectedSession $SessionId `
+        -Label $Label `
+        -RequireWindowHandle
     $handle = [IntPtr]$window.Current.NativeWindowHandle
     $window.SetFocus()
-    [void][DarkReNamerVmNative]::SetForegroundWindow($handle)
+    $deadline = (Get-Date).AddSeconds([Math]::Min(5, $WaitSeconds))
+    do {
+        [void][DarkReNamerVmNative]::SetForegroundWindow($handle)
+        if ([DarkReNamerVmNative]::GetForegroundWindow() -eq $handle) {
+            break
+        }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
+        throw "$Label did not become the exact foreground window before the bounded deadline."
+    }
     [Windows.Forms.SendKeys]::SendWait('{ENTER}')
     Wait-WindowClosed -Handle $handle -TimeoutSeconds $WaitSeconds -Label $Label
 }
@@ -1280,18 +1325,9 @@ function Invoke-AcceptanceRecoveryExport {
         -Label 'recovery export completion message'
     Complete-AutomationControlInvoke -State $invoke -TimeoutSeconds $WaitSeconds
 
-    $items = @(Get-ChildItem -LiteralPath $exportRoot -File -Force | Sort-Object Name)
-    foreach ($item in $items) {
-        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-            $item.Length -gt 64MB) {
-            throw 'The recovery export contains an unsafe or oversized file.'
-        }
-    }
-    $leaves = @($items | ForEach-Object Name)
-    $exportPath = Join-Path $exportRoot 'active.drj.retained'
-    if (-not (Test-Path -LiteralPath $exportPath -PathType Leaf)) {
-        throw 'The recovery export did not create active.drj.retained.'
-    }
+    $exportItem = Get-AcceptanceRecoveryExportFile -Root $exportRoot
+    $leaves = @($exportItem.Name)
+    $exportPath = $exportItem.FullName
     $exportedBytes = [IO.File]::ReadAllBytes($exportPath)
     $classification = Get-AcceptanceRecoveryExportClassification `
         -ExpectedBytes $ExpectedBytes `
@@ -1782,11 +1818,13 @@ function Invoke-AcceptanceSession {
             throw 'The stopped active journal is unsafe or outside the acceptance bound.'
         }
         $journalBytes = [IO.File]::ReadAllBytes($activePath)
+        $inspection = Get-AcceptanceJournalInspection -Bytes $journalBytes
         $intentBytes = $null
         if ($RunIntentOnlyCandidateDiscard) {
-            $intentBytes = Get-AcceptanceLeadingIntentFrame -Bytes $journalBytes
+            $intentBytes = Get-AcceptanceLeadingIntentFrame `
+                -Bytes $journalBytes `
+                -Inspection $inspection
         }
-        $inspection = Get-AcceptanceJournalInspection -Bytes $journalBytes
         $classification = Get-AcceptanceCrashClassification `
             -OriginalCount $partialCounts.original `
             -RenamedCount $partialCounts.renamed `

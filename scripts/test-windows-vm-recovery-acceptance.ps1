@@ -177,7 +177,7 @@ if ($inspection.complete_frames -ne 2 -or
     $inspection.tail -cne 'none') {
     throw 'The nonterminal journal inspection was classified incorrectly.'
 }
-$leadingIntent = Get-AcceptanceLeadingIntentFrame -Bytes $stream
+$leadingIntent = Get-AcceptanceLeadingIntentFrame -Bytes $stream -Inspection $inspection
 if ($leadingIntent.Length -ne $intent.Length -or
     -not [Linq.Enumerable]::SequenceEqual([byte[]]$leadingIntent, [byte[]]$intent)) {
     throw 'The exact leading Intent frame was not extracted from the genuine journal stream.'
@@ -420,6 +420,18 @@ Assert-Fails {
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-recovery-script-' + [Guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $temporaryRoot)
 try {
+    $exportRoot = Join-Path $temporaryRoot 'export-shape'
+    [void](New-Item -ItemType Directory -Path $exportRoot)
+    [IO.File]::WriteAllBytes((Join-Path $exportRoot 'active.drj.retained'), $stream)
+    $exportItem = Get-AcceptanceRecoveryExportFile -Root $exportRoot
+    if ($exportItem.Name -cne 'active.drj.retained' -or $exportItem.Length -ne $stream.Length) {
+        throw 'The exact recovery export file was not selected.'
+    }
+    [void](New-Item -ItemType Directory -Path (Join-Path $exportRoot 'unexpected-child'))
+    Assert-Fails {
+        Get-AcceptanceRecoveryExportFile -Root $exportRoot
+    } 'exactly one ordinary file'
+
     $smallImport = Join-Path $temporaryRoot 'small-import.txt'
     $smallImportBytes = Write-AcceptanceUtf16Paths -Path $smallImport -Paths @('A')
     if ($smallImportBytes -ne 8 -or (Get-Item -LiteralPath $smallImport).Length -ne 8) {
@@ -598,6 +610,31 @@ foreach ($switchName in @('RecoveryExport', 'IntentOnlyCandidateDiscard')) {
         $switchParameter[0].StaticType.FullName -cne 'System.Management.Automation.SwitchParameter') {
         throw "The recovery acceptance observer is missing opt-in switch $switchName."
     }
+}
+$dismissFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Dismiss-AcceptanceMessage'
+}, $true))
+if ($dismissFunction.Count -ne 1) {
+    throw 'The recovery message dismissal function is missing or ambiguous.'
+}
+foreach ($fragment in @('GetForegroundWindow', 'bounded deadline', 'SetForegroundWindow')) {
+    if ($dismissFunction[0].Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+        throw "Recovery message dismissal does not enforce exact foreground handling: $fragment"
+    }
+}
+$intentFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Get-AcceptanceLeadingIntentFrame'
+}, $true))
+if ($intentFunction.Count -ne 1 -or
+    $intentFunction[0].Extent.Text.IndexOf(
+        'Get-AcceptanceJournalInspection',
+        [StringComparison]::Ordinal
+    ) -ge 0) {
+    throw 'Leading Intent extraction must reuse the caller validated journal inspection.'
 }
 $fromUtf8 = [Management.Automation.Language.Parser]::ParseInput(
     [IO.File]::ReadAllText($acceptance, [Text.Encoding]::UTF8),
