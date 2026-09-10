@@ -178,7 +178,9 @@ DPI, UI Automation metadata, keyboard-only file import and prefix entry,
 Apply cancellation and confirmation, disk contents and identities, and normal
 close. Screenshots require operator review before a UI cell can be accepted.
 `-HighContrast` temporarily enables Windows High Contrast and verifies restoration
-of the original flags, scheme, and system colors. Arrange a separate interactive
+of the original flags, scheme, system colors, and active visual-style path, color,
+and size. The private rescue snapshot retains that complete identity while public
+acceptance output exposes only its artifact hash. Arrange a separate interactive
 rescue invocation with `-RestoreHighContrastOnly` and the same arguments before
 starting that mode; retain the observer and snapshot until restoration is verified.
 
