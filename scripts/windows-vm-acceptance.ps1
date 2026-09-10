@@ -261,6 +261,105 @@ function Wait-HighContrastSettlement {
     throw "$Label did not settle within the bounded observation attempts."
 }
 
+function Wait-HighContrastRestoration {
+    param(
+        [Parameter(Mandatory)][object] $Expected,
+        [Parameter(Mandatory)][scriptblock] $ReadSnapshot,
+        [scriptblock] $SetCapturedColors = {
+            param($snapshot)
+            [DarkReNamerVmAcceptanceNative]::SetHighContrastColors(
+                $snapshot.Window,
+                $snapshot.WindowText,
+                $snapshot.ButtonFace,
+                $snapshot.ButtonText,
+                $snapshot.Highlight,
+                $snapshot.HighlightText,
+                $snapshot.GrayText,
+                $snapshot.HotLight
+            )
+        },
+        [Parameter(Mandatory)][string] $Label,
+        [switch] $AllowPaletteRestore,
+        [ValidateRange(2, 50)][int] $MaximumAttempts = 50,
+        [ValidateRange(2, 24)][int] $FallbackAttempts = 24,
+        [ValidateRange(0, 1000)][int] $PollMilliseconds = 200
+    )
+
+    $restorationObservationState = [pscustomobject]@{
+        read_snapshot = $ReadSnapshot
+        expected = $Expected
+        observed = [Collections.Generic.List[object]]::new()
+        callback_error = $false
+    }
+    $observingRead = {
+        try {
+            $snapshot = & $restorationObservationState.read_snapshot
+            $restorationObservationState.observed.Add($snapshot)
+            $snapshot
+        }
+        catch {
+            $restorationObservationState.callback_error = $true
+            throw
+        }
+    }
+    $acceptExpected = {
+        param($candidate)
+        try {
+            Test-HighContrastSnapshotEqual `
+                -Expected $restorationObservationState.expected `
+                -Actual $candidate
+        }
+        catch {
+            $restorationObservationState.callback_error = $true
+            throw
+        }
+    }
+    $initialFailure = $null
+    try {
+        return Wait-HighContrastSettlement `
+            -ReadSnapshot $observingRead `
+            -AcceptSnapshot $acceptExpected `
+            -Label $Label `
+            -MaximumAttempts $MaximumAttempts `
+            -PollMilliseconds $PollMilliseconds
+    }
+    catch {
+        $initialFailure = $_
+    }
+    if ($restorationObservationState.callback_error -or
+        $initialFailure.Exception.Message -cne "$Label did not settle within the bounded observation attempts." -or
+        -not $AllowPaletteRestore -or
+        $restorationObservationState.observed.Count -lt 2) {
+        throw $initialFailure
+    }
+    $previous = $restorationObservationState.observed[
+        $restorationObservationState.observed.Count - 2
+    ]
+    $last = $restorationObservationState.observed[
+        $restorationObservationState.observed.Count - 1
+    ]
+    if (-not (Test-HighContrastSnapshotEqual -Expected $previous -Actual $last) -or
+        $last.Flags -ne $Expected.Flags -or
+        -not [string]::Equals(
+            [string]$last.Scheme,
+            [string]$Expected.Scheme,
+            [StringComparison]::Ordinal
+        ) -or
+        (Test-HighContrastColorsEqual -Expected $Expected -Actual $last)) {
+        throw $initialFailure
+    }
+    [void](& $SetCapturedColors $Expected)
+    Wait-HighContrastSettlement `
+        -ReadSnapshot $ReadSnapshot `
+        -AcceptSnapshot {
+            param($candidate)
+            Test-HighContrastSnapshotEqual -Expected $Expected -Actual $candidate
+        } `
+        -Label "$Label palette fallback" `
+        -MaximumAttempts $FallbackAttempts `
+        -PollMilliseconds $PollMilliseconds
+}
+
 function Resolve-HighContrastRestoreDocument {
     param(
         [Parameter(Mandatory)][string] $OutputDirectory,
@@ -372,13 +471,11 @@ function Invoke-HighContrastRescue {
                 $restore.expected.Flags,
                 $restore.expected.Scheme
             )
-            $actual = Wait-HighContrastSettlement `
+            $actual = Wait-HighContrastRestoration `
+                -Expected $restore.expected `
                 -ReadSnapshot { [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot() } `
-                -AcceptSnapshot {
-                    param($candidate)
-                    Test-HighContrastSnapshotEqual -Expected $restore.expected -Actual $candidate
-                } `
-                -Label 'High Contrast rescue restoration'
+                -Label 'High Contrast rescue restoration' `
+                -AllowPaletteRestore
             Write-JsonUtf8Bom -Path $restore.path -Value ([ordered]@{
                 schema_version = 1
                 source_sha = $Verified.source_sha
@@ -586,6 +683,8 @@ public static class DarkReNamerVmAcceptanceNative {
     private static extern bool SystemParametersInfo(uint action, uint parameter, ref HIGHCONTRAST value, uint flags);
     [DllImport("user32.dll")]
     private static extern uint GetSysColor(int index);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetSysColors(int count, int[] indices, uint[] colors);
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool OpenClipboard(IntPtr owner);
     [DllImport("user32.dll", SetLastError = true)]
@@ -859,6 +958,25 @@ public static class DarkReNamerVmAcceptanceNative {
         }
         finally {
             if (schemeBuffer != IntPtr.Zero) { Marshal.FreeHGlobal(schemeBuffer); }
+        }
+    }
+
+    public static void SetHighContrastColors(
+        uint window,
+        uint windowText,
+        uint buttonFace,
+        uint buttonText,
+        uint highlight,
+        uint highlightText,
+        uint grayText,
+        uint hotLight) {
+        int[] indices = new int[] { 5, 8, 15, 18, 13, 14, 17, 26 };
+        uint[] colors = new uint[] {
+            window, windowText, buttonFace, buttonText,
+            highlight, highlightText, grayText, hotLight
+        };
+        if (!SetSysColors(indices.Length, indices, colors)) {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
         }
     }
 
@@ -2602,15 +2720,11 @@ finally {
                     $highContrastState.original.Scheme
                 )
             }
-            $highContrastState.restored = Wait-HighContrastSettlement `
+            $highContrastState.restored = Wait-HighContrastRestoration `
+                -Expected $highContrastState.original `
                 -ReadSnapshot { [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot() } `
-                -AcceptSnapshot {
-                    param($candidate)
-                    Test-HighContrastSnapshotEqual `
-                        -Expected $highContrastState.original `
-                        -Actual $candidate
-                } `
-                -Label 'High Contrast restoration'
+                -Label 'High Contrast restoration' `
+                -AllowPaletteRestore:$highContrastState.changed
             $highContrastState.restoration_verified = $true
             $highContrastResult.restoration = 'verified'
             Write-JsonUtf8Bom -Path $highContrastState.rescue_path -Value ([ordered]@{
