@@ -33,24 +33,6 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-function Get-AcceptanceUInt16 {
-    param([Parameter(Mandatory)][byte[]] $Bytes, [Parameter(Mandatory)][int] $Offset)
-
-    [BitConverter]::ToUInt16($Bytes, $Offset)
-}
-
-function Get-AcceptanceUInt32 {
-    param([Parameter(Mandatory)][byte[]] $Bytes, [Parameter(Mandatory)][int] $Offset)
-
-    [BitConverter]::ToUInt32($Bytes, $Offset)
-}
-
-function Get-AcceptanceUInt64 {
-    param([Parameter(Mandatory)][byte[]] $Bytes, [Parameter(Mandatory)][int] $Offset)
-
-    [BitConverter]::ToUInt64($Bytes, $Offset)
-}
-
 function Initialize-AcceptanceCrc32 {
     if ('DarkReNamerAcceptanceCrc32' -as [type]) {
         return
@@ -128,7 +110,7 @@ function Get-AcceptanceJournalInspection {
             $Bytes[$offset + 3] -ne 0x31) {
             throw "Journal frame $frame has invalid magic."
         }
-        $version = Get-AcceptanceUInt16 -Bytes $Bytes -Offset ($offset + 4)
+        $version = [BitConverter]::ToUInt16($Bytes, $offset + 4)
         if ($version -ne 1 -and $version -ne 2) {
             throw "Journal frame $frame has an unsupported version."
         }
@@ -136,11 +118,11 @@ function Get-AcceptanceJournalInspection {
         if ($kind -lt 1 -or $kind -gt 5 -or $Bytes[$offset + 7] -ne 0) {
             throw "Journal frame $frame has an invalid kind or flags."
         }
-        $sequence = Get-AcceptanceUInt64 -Bytes $Bytes -Offset ($offset + 8)
+        $sequence = [BitConverter]::ToUInt64($Bytes, $offset + 8)
         if ($sequence -ne [uint64]$frame) {
             throw "Journal frame $frame has an invalid sequence."
         }
-        $payloadLength = [int64](Get-AcceptanceUInt32 -Bytes $Bytes -Offset ($offset + 16))
+        $payloadLength = [int64]([BitConverter]::ToUInt32($Bytes, $offset + 16))
         if ($payloadLength -gt $maximumPayloadBytes) {
             throw "Journal frame $frame exceeds the payload bound."
         }
@@ -149,7 +131,7 @@ function Get-AcceptanceJournalInspection {
             $tail = 'truncated-payload'
             break
         }
-        $expectedCrc = Get-AcceptanceUInt32 -Bytes $Bytes -Offset ($offset + 20)
+        $expectedCrc = [BitConverter]::ToUInt32($Bytes, $offset + 20)
         $crcHeader = [byte[]]::new(16)
         [Array]::Copy($Bytes, $offset + 4, $crcHeader, 0, 16)
         $payload = [byte[]]::new([int]$payloadLength)
@@ -211,7 +193,7 @@ function Get-AcceptanceLeadingIntentFrame {
         $Bytes[6] -ne 1) {
         throw 'Journal does not contain one complete leading Intent frame.'
     }
-    $frameLength = 24L + [int64](Get-AcceptanceUInt32 -Bytes $Bytes -Offset 16)
+    $frameLength = 24L + [int64]([BitConverter]::ToUInt32($Bytes, 16))
     if ($frameLength -gt $Bytes.Length -or $frameLength -gt [int]::MaxValue) {
         throw 'The leading Intent frame length is outside the captured journal.'
     }
