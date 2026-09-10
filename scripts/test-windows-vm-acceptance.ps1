@@ -625,17 +625,36 @@ try {
             throw "Changed $($themeChange.Name) must fail restoration proof."
         }
         $themeMismatchState = [pscustomobject]@{ writes = 0 }
+        $themeDiagnosticPath = Join-Path $temporaryRoot ($themeChange.Name + '-restore-error.json')
         Assert-Fails {
             Wait-HighContrastRestoration `
                 -Expected $highContrastSnapshot `
                 -ReadSnapshot { $changedThemeSnapshot | Select-Object * } `
                 -SetCapturedColors { param($expected) $themeMismatchState.writes++ } `
                 -Label "changed $($themeChange.Name) fixture" `
+                -DiagnosticPath $themeDiagnosticPath `
                 -AllowPaletteRestore `
                 -MaximumAttempts 2 -FallbackAttempts 2 -PollMilliseconds 0
         } 'did not settle within the bounded observation attempts'
         if ($themeMismatchState.writes -ne 0) {
             throw "Changed $($themeChange.Name) must not invoke the palette setter."
+        }
+        $themeDiagnostic = Get-Content -LiteralPath $themeDiagnosticPath -Raw | ConvertFrom-Json
+        if ($themeDiagnostic.kind -cne 'high_contrast_restoration_observations' -or
+            $themeDiagnostic.phase -cne 'initial' -or $themeDiagnostic.observations.Count -ne 2) {
+            throw 'Failed theme restoration must preserve both bounded observations.'
+        }
+        $diagnosticExpected = ConvertFrom-HighContrastDocumentSnapshot -Document $themeDiagnostic.expected -Label 'diagnostic expected'
+        if (-not (Test-HighContrastSnapshotEqual -Expected $highContrastSnapshot -Actual $diagnosticExpected)) {
+            throw 'Failed restoration diagnostics must retain the complete expected state.'
+        }
+        foreach ($observation in $themeDiagnostic.observations) {
+            [void][DateTimeOffset]::Parse([string]$observation.utc)
+            $diagnosticObserved = ConvertFrom-HighContrastDocumentSnapshot -Document $observation.snapshot -Label 'diagnostic observed'
+            if ($observation.phase -cne 'initial' -or
+                -not (Test-HighContrastSnapshotEqual -Expected $changedThemeSnapshot -Actual $diagnosticObserved)) {
+                throw 'Failed restoration diagnostics must retain the actual mismatched state.'
+            }
         }
     }
     $settlementState = [pscustomobject]@{ reads = 0 }
@@ -684,6 +703,7 @@ try {
     } 'did not settle within the bounded observation attempts'
 
     $exactRestoreState = [pscustomobject]@{ reads = 0; writes = 0 }
+    $exactDiagnosticPath = Join-Path $temporaryRoot 'exact-restore-error.json'
     $exactRestore = Wait-HighContrastRestoration `
         -Expected $highContrastSnapshot `
         -ReadSnapshot {
@@ -692,10 +712,12 @@ try {
         } `
         -SetCapturedColors { param($expected) $exactRestoreState.writes++ } `
         -Label 'exact restoration fixture' `
+        -DiagnosticPath $exactDiagnosticPath `
         -MaximumAttempts 2 `
         -FallbackAttempts 2 `
         -PollMilliseconds 0
     if ($exactRestoreState.reads -ne 2 -or $exactRestoreState.writes -ne 0 -or
+        (Test-Path -LiteralPath $exactDiagnosticPath) -or
         -not (Test-HighContrastSnapshotEqual -Expected $highContrastSnapshot -Actual $exactRestore)) {
         throw 'Exact restoration must complete without writing the captured palette.'
     }
@@ -789,17 +811,39 @@ try {
     } 'did not settle within the bounded observation attempts'
     if ($unstableState.writes -ne 0) { throw 'Unstable palette observations must not write system colors.' }
 
-    $readErrorState = [pscustomobject]@{ writes = 0 }
+    $readErrorState = [pscustomobject]@{ reads = 0; writes = 0 }
+    $readErrorDiagnosticPath = Join-Path $temporaryRoot 'read-restore-error.json'
     Assert-Fails {
         Wait-HighContrastRestoration `
             -Expected $highContrastSnapshot `
-            -ReadSnapshot { throw 'fixture snapshot read failed' } `
+            -ReadSnapshot {
+                $readErrorState.reads++
+                if ($readErrorState.reads -eq 1) { return $paletteDrift | Select-Object * }
+                ([Runtime.ExceptionServices.ExceptionDispatchInfo]::Capture(
+                    [ComponentModel.Win32Exception]::new(5, 'fixture snapshot read failed')
+                )).Throw()
+            } `
             -SetCapturedColors { param($expected) $readErrorState.writes++ } `
             -Label 'read error fixture' `
+            -DiagnosticPath $readErrorDiagnosticPath `
             -AllowPaletteRestore `
             -MaximumAttempts 2 -FallbackAttempts 2 -PollMilliseconds 0
     } 'fixture snapshot read failed'
     if ($readErrorState.writes -ne 0) { throw 'Snapshot read failure must not write system colors.' }
+    $readErrorDiagnostic = Get-Content -LiteralPath $readErrorDiagnosticPath -Raw | ConvertFrom-Json
+    if ($readErrorState.reads -ne 2 -or $readErrorDiagnostic.observations.Count -ne 1 -or
+        $readErrorDiagnostic.error.base_type -cne 'System.ComponentModel.Win32Exception' -or
+        $readErrorDiagnostic.error.native_error_code -ne 5) {
+        throw 'A failed native read must preserve prior observations and the underlying Win32 error.'
+    }
+    Assert-Fails {
+        Wait-HighContrastRestoration `
+            -Expected $highContrastSnapshot `
+            -ReadSnapshot { throw 'original restore read failure' } `
+            -Label 'unwritable diagnostic fixture' `
+            -DiagnosticPath $temporaryRoot `
+            -MaximumAttempts 2 -PollMilliseconds 0
+    } 'original restore read failure'
 
     Assert-Fails {
         Wait-HighContrastRestoration `
@@ -812,17 +856,26 @@ try {
     } 'fixture palette setter failed'
 
     $fallbackState = [pscustomobject]@{ reads = 0; writes = 0 }
+    $fallbackDiagnosticPath = Join-Path $temporaryRoot 'fallback-restore-error.json'
     Assert-Fails {
         Wait-HighContrastRestoration `
             -Expected $highContrastSnapshot `
             -ReadSnapshot { $fallbackState.reads++; $paletteDrift | Select-Object * } `
             -SetCapturedColors { param($expected) $fallbackState.writes++ } `
             -Label 'bounded fallback fixture' `
+            -DiagnosticPath $fallbackDiagnosticPath `
             -AllowPaletteRestore `
             -MaximumAttempts 2 -FallbackAttempts 2 -PollMilliseconds 0
     } 'palette fallback did not settle within the bounded observation attempts'
     if ($fallbackState.reads -ne 4 -or $fallbackState.writes -ne 1) {
         throw 'Palette fallback must remain bounded and must not false-pass persistent drift.'
+    }
+    $fallbackDiagnostic = Get-Content -LiteralPath $fallbackDiagnosticPath -Raw | ConvertFrom-Json
+    if ($fallbackDiagnostic.phase -cne 'palette_fallback' -or
+        $fallbackDiagnostic.observations.Count -ne 4 -or
+        @($fallbackDiagnostic.observations | Where-Object phase -CEQ 'initial').Count -ne 2 -or
+        @($fallbackDiagnostic.observations | Where-Object phase -CEQ 'palette_fallback').Count -ne 2) {
+        throw 'Failed palette fallback diagnostics must distinguish both bounded observation phases.'
     }
 
     $valid = New-AcceptanceFixture -Name 'valid'

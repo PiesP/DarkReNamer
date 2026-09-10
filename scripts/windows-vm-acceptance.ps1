@@ -303,6 +303,7 @@ function Wait-HighContrastRestoration {
         },
         [Parameter(Mandatory)][string] $Label,
         [switch] $AllowPaletteRestore,
+        [string] $DiagnosticPath,
         [ValidateRange(2, 50)][int] $MaximumAttempts = 50,
         [ValidateRange(2, 24)][int] $FallbackAttempts = 24,
         [ValidateRange(0, 1000)][int] $PollMilliseconds = 200
@@ -312,12 +313,20 @@ function Wait-HighContrastRestoration {
         read_snapshot = $ReadSnapshot
         expected = $Expected
         observed = [Collections.Generic.List[object]]::new()
+        observations = [Collections.Generic.List[object]]::new()
+        phase = 'initial'
         callback_error = $false
     }
     $observingRead = {
+        $observedUtc = [DateTime]::UtcNow.ToString('o')
         try {
             $snapshot = & $restorationObservationState.read_snapshot
             $restorationObservationState.observed.Add($snapshot)
+            $restorationObservationState.observations.Add([ordered]@{
+                utc = $observedUtc
+                phase = $restorationObservationState.phase
+                snapshot = $snapshot
+            })
             $snapshot
         }
         catch {
@@ -337,45 +346,87 @@ function Wait-HighContrastRestoration {
             throw
         }
     }
-    $initialFailure = $null
     try {
-        return Wait-HighContrastSettlement `
+        $initialFailure = $null
+        try {
+            return Wait-HighContrastSettlement `
+                -ReadSnapshot $observingRead `
+                -AcceptSnapshot $acceptExpected `
+                -Label $Label `
+                -MaximumAttempts $MaximumAttempts `
+                -PollMilliseconds $PollMilliseconds
+        }
+        catch {
+            $initialFailure = $_
+        }
+        if ($restorationObservationState.callback_error -or
+            $initialFailure.Exception.Message -cne "$Label did not settle within the bounded observation attempts." -or
+            -not $AllowPaletteRestore -or
+            $restorationObservationState.observed.Count -lt 2) {
+            throw $initialFailure
+        }
+        $previous = $restorationObservationState.observed[
+            $restorationObservationState.observed.Count - 2
+        ]
+        $last = $restorationObservationState.observed[
+            $restorationObservationState.observed.Count - 1
+        ]
+        if (-not (Test-HighContrastSnapshotEqual -Expected $previous -Actual $last) -or
+            -not (Test-HighContrastIdentityEqual -Expected $Expected -Actual $last) -or
+            (Test-HighContrastColorsEqual -Expected $Expected -Actual $last)) {
+            throw $initialFailure
+        }
+        $restorationObservationState.phase = 'palette_fallback'
+        [void](& $SetCapturedColors $Expected)
+        Wait-HighContrastSettlement `
             -ReadSnapshot $observingRead `
-            -AcceptSnapshot $acceptExpected `
-            -Label $Label `
-            -MaximumAttempts $MaximumAttempts `
+            -AcceptSnapshot {
+                param($candidate)
+                Test-HighContrastSnapshotEqual -Expected $Expected -Actual $candidate
+            } `
+            -Label "$Label palette fallback" `
+            -MaximumAttempts $FallbackAttempts `
             -PollMilliseconds $PollMilliseconds
     }
     catch {
-        $initialFailure = $_
+        $failure = $_
+        if (-not [string]::IsNullOrWhiteSpace($DiagnosticPath)) {
+            # Preserve bounded failed observations only in the existing private
+            # error artifact; public acceptance records retain its hash.
+            try {
+                $baseException = $failure.Exception.GetBaseException()
+                $observations = @($restorationObservationState.observations | ForEach-Object {
+                    [ordered]@{
+                        utc = $_.utc
+                        phase = $_.phase
+                        snapshot = ConvertTo-HighContrastDocumentSnapshot -Snapshot $_.snapshot
+                    }
+                })
+                [ordered]@{
+                    kind = 'high_contrast_restoration_observations'
+                    utc = [DateTime]::UtcNow.ToString('o')
+                    label = $Label
+                    phase = $restorationObservationState.phase
+                    expected = ConvertTo-HighContrastDocumentSnapshot -Snapshot $Expected
+                    observations = $observations
+                    error = [ordered]@{
+                        outer_type = $failure.Exception.GetType().FullName
+                        outer_hresult = $failure.Exception.HResult
+                        base_type = $baseException.GetType().FullName
+                        base_hresult = $baseException.HResult
+                        native_error_code = if ($baseException -is [ComponentModel.Win32Exception]) {
+                            $baseException.NativeErrorCode
+                        }
+                        else { $null }
+                    }
+                } | ConvertTo-Json -Depth 10 | Add-Content -LiteralPath $DiagnosticPath -Encoding UTF8
+            }
+            catch {
+                # Diagnostic failure must not replace the original restoration error.
+            }
+        }
+        throw $failure
     }
-    if ($restorationObservationState.callback_error -or
-        $initialFailure.Exception.Message -cne "$Label did not settle within the bounded observation attempts." -or
-        -not $AllowPaletteRestore -or
-        $restorationObservationState.observed.Count -lt 2) {
-        throw $initialFailure
-    }
-    $previous = $restorationObservationState.observed[
-        $restorationObservationState.observed.Count - 2
-    ]
-    $last = $restorationObservationState.observed[
-        $restorationObservationState.observed.Count - 1
-    ]
-    if (-not (Test-HighContrastSnapshotEqual -Expected $previous -Actual $last) -or
-        -not (Test-HighContrastIdentityEqual -Expected $Expected -Actual $last) -or
-        (Test-HighContrastColorsEqual -Expected $Expected -Actual $last)) {
-        throw $initialFailure
-    }
-    [void](& $SetCapturedColors $Expected)
-    Wait-HighContrastSettlement `
-        -ReadSnapshot $ReadSnapshot `
-        -AcceptSnapshot {
-            param($candidate)
-            Test-HighContrastSnapshotEqual -Expected $Expected -Actual $candidate
-        } `
-        -Label "$Label palette fallback" `
-        -MaximumAttempts $FallbackAttempts `
-        -PollMilliseconds $PollMilliseconds
 }
 
 function ConvertTo-HighContrastDocumentSnapshot {
@@ -577,6 +628,7 @@ function Invoke-HighContrastRescue {
                 -Expected $restore.expected `
                 -ReadSnapshot { [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot() } `
                 -Label 'High Contrast rescue restoration' `
+                -DiagnosticPath $errorPath `
                 -AllowPaletteRestore
             Write-JsonUtf8Bom -Path $restore.path -Value ([ordered]@{
                 schema_version = 2
@@ -595,7 +647,7 @@ function Invoke-HighContrastRescue {
         }
     }
     catch {
-        $_ | Out-String | Set-Content -LiteralPath $errorPath -Encoding UTF8
+        $_ | Out-String | Add-Content -LiteralPath $errorPath -Encoding UTF8
         $result.diagnostic = [ordered]@{
             file = 'high-contrast-rescue-error.txt'
             sha256 = Get-LowerSha256 -Path $errorPath
@@ -2866,6 +2918,7 @@ finally {
                 -Expected $highContrastState.original `
                 -ReadSnapshot { [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot() } `
                 -Label 'High Contrast restoration' `
+                -DiagnosticPath $diagnosticPath `
                 -AllowPaletteRestore:$highContrastState.changed
             $highContrastState.restoration_verified = $true
             $highContrastResult.restoration = 'verified'
