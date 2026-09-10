@@ -1,5 +1,5 @@
 ﻿[CmdletBinding()]
-param()
+param([switch] $ParserOnly)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -531,6 +531,35 @@ Assert-Fails {
     Get-AcceptanceJournalInspection -Bytes $largeBadChecksum
 } 'checksum mismatch'
 
+$manyFrameParts = [Collections.Generic.List[byte[]]]::new()
+$manyFrameParts.Add($largeIntentFrame)
+for ($sequence = 1; $sequence -le 2300; $sequence++) {
+    $manyFrameParts.Add((New-TestJournalFrame `
+        -Sequence ([uint64]$sequence) `
+        -Kind 2 `
+        -Payload $preparedPayload))
+}
+$manyFrameJournal = Join-TestBytes -Parts $manyFrameParts.ToArray()
+$manyFrameInspection = Get-AcceptanceJournalInspection -Bytes $manyFrameJournal
+if ($manyFrameInspection.complete_frames -ne 2301 -or
+    $manyFrameInspection.last_kind -ne 2 -or
+    $manyFrameInspection.terminal -or
+    $manyFrameInspection.tail -cne 'none' -or
+    $manyFrameInspection.total_bytes -ne $manyFrameJournal.Length) {
+    throw 'The large many-frame journal was classified incorrectly.'
+}
+$manyFrameBadChecksum = [byte[]]$manyFrameJournal.Clone()
+$manyFrameBadChecksum[$manyFrameBadChecksum.Length - 1] =
+    $manyFrameBadChecksum[$manyFrameBadChecksum.Length - 1] -bxor 1
+Assert-Fails {
+    Get-AcceptanceJournalInspection -Bytes $manyFrameBadChecksum
+} 'checksum mismatch'
+
+if ($ParserOnly) {
+    Write-Host 'Windows PowerShell journal parser tests passed.'
+    return
+}
+
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-recovery-script-' + [Guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $temporaryRoot)
 try {
@@ -764,6 +793,45 @@ if ($fileStrings.Count -ne $utf8Strings.Count) {
 for ($index = 0; $index -lt $fileStrings.Count; $index++) {
     if ($fileStrings[$index] -cne $utf8Strings[$index]) {
         throw 'Recovery acceptance string decoding differs from explicit UTF-8 parsing.'
+    }
+}
+
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
+    $PSVersionTable.PSVersion.Major -ge 7) {
+    # Mandatory array argument binding scales differently in Windows PowerShell
+    # 5.1, the observer runtime. Exercise the many-frame case there as well.
+    $invocation = "`$ErrorActionPreference = 'Stop'; & '" + $PSCommandPath.Replace("'", "''") + "' -ParserOnly"
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($invocation))
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo.FileName = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $process.StartInfo.Arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -EncodedCommand $encoded"
+    $process.StartInfo.UseShellExecute = $false
+    $process.StartInfo.CreateNoWindow = $true
+    $process.StartInfo.RedirectStandardOutput = $true
+    $process.StartInfo.RedirectStandardError = $true
+    $started = $false
+    try {
+        $started = $process.Start()
+        if (-not $started) {
+            throw 'Windows PowerShell journal parser test did not start.'
+        }
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(90000)) {
+            throw 'Windows PowerShell journal parser test exceeded its 90-second deadline.'
+        }
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) {
+            throw "Windows PowerShell journal parser test failed: $($stderr.GetAwaiter().GetResult())"
+        }
+        Write-Host $stdout.GetAwaiter().GetResult().TrimEnd()
+    }
+    finally {
+        if ($started -and -not $process.HasExited) {
+            $process.Kill($true)
+            [void]$process.WaitForExit(10000)
+        }
+        $process.Dispose()
     }
 }
 
