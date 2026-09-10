@@ -271,6 +271,23 @@ try {
             throw "The acceptance flow is missing required Clipboard contract '$requiredClipboardSource'."
         }
     }
+    $clipboardNamesFailureIndex = $acceptanceText.IndexOf(
+        "            `$result.failure_reason = 'clipboard_names_failed'",
+        [StringComparison]::Ordinal
+    )
+    $clipboardPathsFailureIndex = $acceptanceText.IndexOf(
+        "            `$result.failure_reason = 'clipboard_paths_failed'",
+        [StringComparison]::Ordinal
+    )
+    $clipboardPathsChordIndex = $acceptanceText.IndexOf(
+        '            Send-AcceptanceTwoModifierChord -Process $process',
+        [StringComparison]::Ordinal
+    )
+    if ($clipboardNamesFailureIndex -lt 0 -or
+        $clipboardPathsFailureIndex -le $clipboardNamesFailureIndex -or
+        $clipboardPathsChordIndex -le $clipboardPathsFailureIndex) {
+        throw 'The Copy Paths phase must identify its failure before the Ctrl+Shift+C action.'
+    }
 
     . $acceptance `
         -BundleRoot 'unused' `
@@ -282,6 +299,7 @@ try {
     foreach ($method in @(
         'IsWindowEnabled',
         'IsMenuCommandEnabled',
+        'GetClipboardSequenceNumber',
         'ReadClipboardSnapshot',
         'ClearClipboardIfOwned',
         'SetHighContrastColors'
@@ -331,6 +349,152 @@ try {
             throw 'Changed sequence, text, or foreign formats must preserve the Clipboard.'
         }
     }
+
+    $expectedClipboardText = "expected.txt`r`n"
+    $expectedClipboardSnapshot = [pscustomobject]@{
+        SequenceNumber = [uint32]43
+        UnicodeText = $expectedClipboardText
+        Formats = [uint32[]]@(1, 7, 13, 16)
+    }
+    $unchangedState = [pscustomobject]@{ sequence_reads = 0; snapshot_reads = 0; clock_reads = 0 }
+    Assert-Fails {
+        Wait-AcceptanceClipboardText `
+            -PreviousSequence 42 `
+            -ExpectedText $expectedClipboardText `
+            -TimeoutSeconds 10 `
+            -Label 'unchanged sequence fixture' `
+            -ReadSequence { $unchangedState.sequence_reads++; [uint32]42 } `
+            -ReadSnapshot { $unchangedState.snapshot_reads++; $expectedClipboardSnapshot } `
+            -GetCurrentTime {
+                $value = ([datetime]'2026-01-01T00:00:00Z').AddSeconds(11 * $unchangedState.clock_reads)
+                $unchangedState.clock_reads++
+                $value
+            } `
+            -PollMilliseconds 0
+    } 'did not change the Clipboard sequence before the bounded deadline'
+    if ($unchangedState.snapshot_reads -ne 0) {
+        throw 'An unchanged Clipboard sequence must not open or read the Clipboard.'
+    }
+
+    $transitionState = [pscustomobject]@{ sequence_reads = 0; snapshot_reads = 0; clock_reads = 0 }
+    $transitionResult = Wait-AcceptanceClipboardText `
+        -PreviousSequence 42 `
+        -ExpectedText $expectedClipboardText `
+        -TimeoutSeconds 10 `
+        -Label 'sequence transition fixture' `
+        -ReadSequence {
+            $transitionState.sequence_reads++
+            if ($transitionState.sequence_reads -eq 1) { [uint32]42 } else { [uint32]43 }
+        } `
+        -ReadSnapshot { $transitionState.snapshot_reads++; $expectedClipboardSnapshot } `
+        -GetCurrentTime {
+            $value = ([datetime]'2026-01-01T00:00:00Z').AddSeconds($transitionState.clock_reads)
+            $transitionState.clock_reads++
+            $value
+        } `
+        -PollMilliseconds 0
+    if ($transitionState.snapshot_reads -ne 1 -or $transitionResult.SequenceNumber -ne 43) {
+        throw 'A changed sequence with the exact expected snapshot must succeed after one full read.'
+    }
+
+    $busyState = [pscustomobject]@{ snapshot_reads = 0; clock_reads = 0 }
+    $busyResult = Wait-AcceptanceClipboardText `
+        -PreviousSequence 42 `
+        -ExpectedText $expectedClipboardText `
+        -TimeoutSeconds 10 `
+        -Label 'busy then readable fixture' `
+        -ReadSequence { [uint32]43 } `
+        -ReadSnapshot {
+            $busyState.snapshot_reads++
+            if ($busyState.snapshot_reads -eq 1) { throw 'fixture Clipboard busy' }
+            $expectedClipboardSnapshot
+        } `
+        -GetCurrentTime {
+            $value = ([datetime]'2026-01-01T00:00:00Z').AddSeconds($busyState.clock_reads)
+            $busyState.clock_reads++
+            $value
+        } `
+        -PollMilliseconds 0
+    if ($busyState.snapshot_reads -ne 2 -or $busyResult.SequenceNumber -ne 43) {
+        throw 'A changed sequence must retry a transient busy full snapshot.'
+    }
+
+    foreach ($foreignCase in @(
+        [pscustomobject]@{ SequenceNumber = [uint32]43; UnicodeText = $null; Formats = [uint32[]]@() },
+        [pscustomobject]@{ SequenceNumber = [uint32]43; UnicodeText = "foreign`r`n"; Formats = [uint32[]]@(13) },
+        [pscustomobject]@{ SequenceNumber = [uint32]43; UnicodeText = $expectedClipboardText; Formats = [uint32[]]@(13, 49152) }
+    )) {
+        $foreignState = [pscustomobject]@{ sequence_reads = 0; snapshot_reads = 0; clock_reads = 0 }
+        Assert-Fails {
+            Wait-AcceptanceClipboardText `
+                -PreviousSequence 42 `
+                -ExpectedText $expectedClipboardText `
+                -TimeoutSeconds 10 `
+                -Label 'foreign changed Clipboard fixture' `
+                -ReadSequence { $foreignState.sequence_reads++; [uint32]43 } `
+                -ReadSnapshot { $foreignState.snapshot_reads++; $foreignCase } `
+                -GetCurrentTime {
+                    $value = ([datetime]'2026-01-01T00:00:00Z').AddSeconds($foreignState.clock_reads)
+                    $foreignState.clock_reads++
+                    $value
+                } `
+                -PollMilliseconds 0
+        } 'changed the Clipboard to unexpected text or formats'
+        if ($foreignState.sequence_reads -ne 1 -or $foreignState.snapshot_reads -ne 1) {
+            throw 'Foreign Clipboard text or formats must fail immediately after one full read.'
+        }
+    }
+
+    $continuousBusyState = [pscustomobject]@{ snapshot_reads = 0; clock_reads = 0 }
+    Assert-Fails {
+        Wait-AcceptanceClipboardText `
+            -PreviousSequence 42 `
+            -ExpectedText $expectedClipboardText `
+            -TimeoutSeconds 10 `
+            -Label 'continuous busy fixture' `
+            -ReadSequence { [uint32]43 } `
+            -ReadSnapshot { $continuousBusyState.snapshot_reads++; throw 'fixture Clipboard busy' } `
+            -GetCurrentTime {
+                $value = ([datetime]'2026-01-01T00:00:00Z').AddSeconds(11 * $continuousBusyState.clock_reads)
+                $continuousBusyState.clock_reads++
+                $value
+            } `
+            -PollMilliseconds 0
+    } 'changed, but the exact expected Clipboard snapshot was not readable before the bounded deadline'
+    if ($continuousBusyState.snapshot_reads -ne 1) {
+        throw 'A continuously busy changed Clipboard fixture must stay bounded.'
+    }
+
+    $zeroSequenceState = [pscustomobject]@{ snapshot_reads = 0; clock_reads = 0 }
+    Assert-Fails {
+        Wait-AcceptanceClipboardText `
+            -PreviousSequence 42 `
+            -ExpectedText $expectedClipboardText `
+            -TimeoutSeconds 10 `
+            -Label 'zero sequence fixture' `
+            -ReadSequence { [uint32]0 } `
+            -ReadSnapshot { $zeroSequenceState.snapshot_reads++; $expectedClipboardSnapshot } `
+            -GetCurrentTime {
+                $value = ([datetime]'2026-01-01T00:00:00Z').AddSeconds(11 * $zeroSequenceState.clock_reads)
+                $zeroSequenceState.clock_reads++
+                $value
+            } `
+            -PollMilliseconds 0
+    } 'did not change the Clipboard sequence before the bounded deadline'
+    if ($zeroSequenceState.snapshot_reads -ne 0) {
+        throw 'Clipboard sequence zero must never be treated as a readable change.'
+    }
+    Assert-Fails {
+        Wait-AcceptanceClipboardText `
+            -PreviousSequence 0 `
+            -ExpectedText $expectedClipboardText `
+            -TimeoutSeconds 10 `
+            -Label 'zero baseline fixture' `
+            -ReadSequence { [uint32]43 } `
+            -ReadSnapshot { $expectedClipboardSnapshot } `
+            -GetCurrentTime { [datetime]'2026-01-01T00:00:00Z' } `
+            -PollMilliseconds 0
+    } 'requires a nonzero baseline Clipboard sequence'
     $focusBefore = [pscustomobject]@{
         Current = [pscustomobject]@{ AutomationId = '1000'; NativeWindowHandle = 100 }
     }
@@ -461,17 +625,36 @@ try {
             throw "Changed $($themeChange.Name) must fail restoration proof."
         }
         $themeMismatchState = [pscustomobject]@{ writes = 0 }
+        $themeDiagnosticPath = Join-Path $temporaryRoot ($themeChange.Name + '-restore-error.json')
         Assert-Fails {
             Wait-HighContrastRestoration `
                 -Expected $highContrastSnapshot `
                 -ReadSnapshot { $changedThemeSnapshot | Select-Object * } `
                 -SetCapturedColors { param($expected) $themeMismatchState.writes++ } `
                 -Label "changed $($themeChange.Name) fixture" `
+                -DiagnosticPath $themeDiagnosticPath `
                 -AllowPaletteRestore `
                 -MaximumAttempts 2 -FallbackAttempts 2 -PollMilliseconds 0
         } 'did not settle within the bounded observation attempts'
         if ($themeMismatchState.writes -ne 0) {
             throw "Changed $($themeChange.Name) must not invoke the palette setter."
+        }
+        $themeDiagnostic = Get-Content -LiteralPath $themeDiagnosticPath -Raw | ConvertFrom-Json
+        if ($themeDiagnostic.kind -cne 'high_contrast_restoration_observations' -or
+            $themeDiagnostic.phase -cne 'initial' -or $themeDiagnostic.observations.Count -ne 2) {
+            throw 'Failed theme restoration must preserve both bounded observations.'
+        }
+        $diagnosticExpected = ConvertFrom-HighContrastDocumentSnapshot -Document $themeDiagnostic.expected -Label 'diagnostic expected'
+        if (-not (Test-HighContrastSnapshotEqual -Expected $highContrastSnapshot -Actual $diagnosticExpected)) {
+            throw 'Failed restoration diagnostics must retain the complete expected state.'
+        }
+        foreach ($observation in $themeDiagnostic.observations) {
+            [void][DateTimeOffset]::Parse([string]$observation.utc)
+            $diagnosticObserved = ConvertFrom-HighContrastDocumentSnapshot -Document $observation.snapshot -Label 'diagnostic observed'
+            if ($observation.phase -cne 'initial' -or
+                -not (Test-HighContrastSnapshotEqual -Expected $changedThemeSnapshot -Actual $diagnosticObserved)) {
+                throw 'Failed restoration diagnostics must retain the actual mismatched state.'
+            }
         }
     }
     $settlementState = [pscustomobject]@{ reads = 0 }
@@ -520,6 +703,7 @@ try {
     } 'did not settle within the bounded observation attempts'
 
     $exactRestoreState = [pscustomobject]@{ reads = 0; writes = 0 }
+    $exactDiagnosticPath = Join-Path $temporaryRoot 'exact-restore-error.json'
     $exactRestore = Wait-HighContrastRestoration `
         -Expected $highContrastSnapshot `
         -ReadSnapshot {
@@ -528,10 +712,12 @@ try {
         } `
         -SetCapturedColors { param($expected) $exactRestoreState.writes++ } `
         -Label 'exact restoration fixture' `
+        -DiagnosticPath $exactDiagnosticPath `
         -MaximumAttempts 2 `
         -FallbackAttempts 2 `
         -PollMilliseconds 0
     if ($exactRestoreState.reads -ne 2 -or $exactRestoreState.writes -ne 0 -or
+        (Test-Path -LiteralPath $exactDiagnosticPath) -or
         -not (Test-HighContrastSnapshotEqual -Expected $highContrastSnapshot -Actual $exactRestore)) {
         throw 'Exact restoration must complete without writing the captured palette.'
     }
@@ -625,17 +811,39 @@ try {
     } 'did not settle within the bounded observation attempts'
     if ($unstableState.writes -ne 0) { throw 'Unstable palette observations must not write system colors.' }
 
-    $readErrorState = [pscustomobject]@{ writes = 0 }
+    $readErrorState = [pscustomobject]@{ reads = 0; writes = 0 }
+    $readErrorDiagnosticPath = Join-Path $temporaryRoot 'read-restore-error.json'
     Assert-Fails {
         Wait-HighContrastRestoration `
             -Expected $highContrastSnapshot `
-            -ReadSnapshot { throw 'fixture snapshot read failed' } `
+            -ReadSnapshot {
+                $readErrorState.reads++
+                if ($readErrorState.reads -eq 1) { return $paletteDrift | Select-Object * }
+                ([Runtime.ExceptionServices.ExceptionDispatchInfo]::Capture(
+                    [ComponentModel.Win32Exception]::new(5, 'fixture snapshot read failed')
+                )).Throw()
+            } `
             -SetCapturedColors { param($expected) $readErrorState.writes++ } `
             -Label 'read error fixture' `
+            -DiagnosticPath $readErrorDiagnosticPath `
             -AllowPaletteRestore `
             -MaximumAttempts 2 -FallbackAttempts 2 -PollMilliseconds 0
     } 'fixture snapshot read failed'
     if ($readErrorState.writes -ne 0) { throw 'Snapshot read failure must not write system colors.' }
+    $readErrorDiagnostic = Get-Content -LiteralPath $readErrorDiagnosticPath -Raw | ConvertFrom-Json
+    if ($readErrorState.reads -ne 2 -or $readErrorDiagnostic.observations.Count -ne 1 -or
+        $readErrorDiagnostic.error.base_type -cne 'System.ComponentModel.Win32Exception' -or
+        $readErrorDiagnostic.error.native_error_code -ne 5) {
+        throw 'A failed native read must preserve prior observations and the underlying Win32 error.'
+    }
+    Assert-Fails {
+        Wait-HighContrastRestoration `
+            -Expected $highContrastSnapshot `
+            -ReadSnapshot { throw 'original restore read failure' } `
+            -Label 'unwritable diagnostic fixture' `
+            -DiagnosticPath $temporaryRoot `
+            -MaximumAttempts 2 -PollMilliseconds 0
+    } 'original restore read failure'
 
     Assert-Fails {
         Wait-HighContrastRestoration `
@@ -648,17 +856,26 @@ try {
     } 'fixture palette setter failed'
 
     $fallbackState = [pscustomobject]@{ reads = 0; writes = 0 }
+    $fallbackDiagnosticPath = Join-Path $temporaryRoot 'fallback-restore-error.json'
     Assert-Fails {
         Wait-HighContrastRestoration `
             -Expected $highContrastSnapshot `
             -ReadSnapshot { $fallbackState.reads++; $paletteDrift | Select-Object * } `
             -SetCapturedColors { param($expected) $fallbackState.writes++ } `
             -Label 'bounded fallback fixture' `
+            -DiagnosticPath $fallbackDiagnosticPath `
             -AllowPaletteRestore `
             -MaximumAttempts 2 -FallbackAttempts 2 -PollMilliseconds 0
     } 'palette fallback did not settle within the bounded observation attempts'
     if ($fallbackState.reads -ne 4 -or $fallbackState.writes -ne 1) {
         throw 'Palette fallback must remain bounded and must not false-pass persistent drift.'
+    }
+    $fallbackDiagnostic = Get-Content -LiteralPath $fallbackDiagnosticPath -Raw | ConvertFrom-Json
+    if ($fallbackDiagnostic.phase -cne 'palette_fallback' -or
+        $fallbackDiagnostic.observations.Count -ne 4 -or
+        @($fallbackDiagnostic.observations | Where-Object phase -CEQ 'initial').Count -ne 2 -or
+        @($fallbackDiagnostic.observations | Where-Object phase -CEQ 'palette_fallback').Count -ne 2) {
+        throw 'Failed palette fallback diagnostics must distinguish both bounded observation phases.'
     }
 
     $valid = New-AcceptanceFixture -Name 'valid'
