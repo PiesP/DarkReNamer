@@ -1696,7 +1696,7 @@ $highContrastResult = [ordered]@{
     restoration = if ($HighContrast) { 'pending' } else { 'not_required' }
     snapshot = $null
 }
-$clipboard = if ($Clipboard) {
+$clipboardResult = if ($Clipboard) {
     [ordered]@{
         status = 'failed'
         reason = 'Clipboard acceptance did not complete.'
@@ -1744,7 +1744,7 @@ $result = [ordered]@{
     keyboard = $keyboard
     accessibility = $accessibility
     capture = $capture
-    clipboard = $clipboard
+    clipboard = $clipboardResult
     high_contrast = $highContrastResult
     observations = $null
     screenshots = @()
@@ -2164,7 +2164,7 @@ try {
                 $null -ne $clipboardPreflight.UnicodeText) {
                 throw 'Clipboard acceptance requires an initially empty Clipboard and will not clear existing data.'
             }
-            $clipboard.preflight_empty = $true
+            $clipboardResult.preflight_empty = $true
             $expectedNames = $destinationName + "`r`n"
             $expectedPaths = $sourcePath + "`r`n"
 
@@ -2225,7 +2225,7 @@ try {
             $clipboardState.owned = $true
             $clipboardState.expected_sequence = $namesSnapshot.SequenceNumber
             $clipboardState.expected_text = $expectedNames
-            $clipboard.names = Get-AcceptanceClipboardTextEvidence -Text $namesSnapshot.UnicodeText
+            $clipboardResult.names = Get-AcceptanceClipboardTextEvidence -Text $namesSnapshot.UnicodeText
 
             $mainWindow.SetFocus()
             [void][DarkReNamerVmNative]::SetForegroundWindow($process.MainWindowHandle)
@@ -2260,10 +2260,10 @@ try {
             $clipboardState.expected_sequence = $pathsSnapshot.SequenceNumber
             $clipboardState.expected_text = $expectedPaths
             $clipboardState.checks_complete = $true
-            $clipboard.paths = Get-AcceptanceClipboardTextEvidence -Text $pathsSnapshot.UnicodeText
-            $clipboard.status = 'pending_cleanup'
-            $clipboard.reason = $null
-            $clipboard.cleanup = 'pending'
+            $clipboardResult.paths = Get-AcceptanceClipboardTextEvidence -Text $pathsSnapshot.UnicodeText
+            $clipboardResult.status = 'pending_cleanup'
+            $clipboardResult.reason = $null
+            $clipboardResult.cleanup = 'pending'
         }
         $beforeReset = Get-ListPrimarySnapshot -List $list
         $reset = Find-UniqueAutomationElement `
@@ -2463,16 +2463,16 @@ finally {
                 $clipboardState.expected_text
             )
             if ($clipboardCleanup -ceq 'cleared') {
-                $clipboard.cleanup = 'cleared'
+                $clipboardResult.cleanup = 'cleared'
                 if ($clipboardState.checks_complete) {
-                    $clipboard.status = 'passed'
-                    $clipboard.reason = $null
+                    $clipboardResult.status = 'passed'
+                    $clipboardResult.reason = $null
                 }
             }
             else {
-                $clipboard.status = 'failed'
-                $clipboard.reason = 'Clipboard changed after acceptance; foreign data was preserved.'
-                $clipboard.cleanup = 'preserved_foreign_change'
+                $clipboardResult.status = 'failed'
+                $clipboardResult.reason = 'Clipboard changed after acceptance; foreign data was preserved.'
+                $clipboardResult.cleanup = 'preserved_foreign_change'
                 $result.status = 'failed'
                 if ($null -eq $result.failure_reason) {
                     $result.failure_reason = 'clipboard_cleanup_preserved_foreign_change'
@@ -2480,9 +2480,9 @@ finally {
             }
         }
         catch {
-            $clipboard.status = 'failed'
-            $clipboard.reason = 'Guarded Clipboard cleanup could not be verified.'
-            $clipboard.cleanup = 'failed'
+            $clipboardResult.status = 'failed'
+            $clipboardResult.reason = 'Guarded Clipboard cleanup could not be verified.'
+            $clipboardResult.cleanup = 'failed'
             $result.status = 'failed'
             if ($null -eq $result.failure_reason) {
                 $result.failure_reason = 'clipboard_cleanup_failed'

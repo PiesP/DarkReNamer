@@ -140,6 +140,7 @@ $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
 )
 [void](New-Item -ItemType Directory -Path $temporaryRoot)
 try {
+    $acceptanceAst = $null
     foreach ($path in @($acceptance, $MyInvocation.MyCommand.Path)) {
         $bytes = [IO.File]::ReadAllBytes($path)
         if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or
@@ -148,11 +149,14 @@ try {
         }
         $parseErrors = $null
         $parseTokens = $null
-        [void][Management.Automation.Language.Parser]::ParseFile(
+        $parsedAst = [Management.Automation.Language.Parser]::ParseFile(
             $path,
             [ref]$parseTokens,
             [ref]$parseErrors
         )
+        if ($path -ceq $acceptance) {
+            $acceptanceAst = $parsedAst
+        }
         if ($parseErrors.Count -ne 0) {
             throw "$([IO.Path]::GetFileName($path)) has PowerShell parser errors."
         }
@@ -161,6 +165,17 @@ try {
         throw 'The acceptance script must use Windows PowerShell 5.1-compatible integer type names.'
     }
     $acceptanceText = [IO.File]::ReadAllText($acceptance)
+    $clipboardAssignments = @($acceptanceAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+            $node.Left.VariablePath.UserPath -ieq 'Clipboard'
+    }, $true))
+    if ($clipboardAssignments.Count -ne 1 -or
+        $clipboardAssignments[0].Left.Extent.Text -cne '$Clipboard' -or
+        $clipboardAssignments[0].Right.Extent.Text -cne '$acceptanceInvocation.clipboard') {
+        throw 'The Clipboard switch must not be shadowed by a case-insensitive result variable.'
+    }
     if ($acceptanceText -match 'extern IntPtr LocalFree|LocalFree\(value\.scheme\)') {
         throw 'The acceptance observer must not free ambiguous High Contrast GET pointers.'
     }
