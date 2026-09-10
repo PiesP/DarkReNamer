@@ -140,6 +140,7 @@ $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
 )
 [void](New-Item -ItemType Directory -Path $temporaryRoot)
 try {
+    $acceptanceAst = $null
     foreach ($path in @($acceptance, $MyInvocation.MyCommand.Path)) {
         $bytes = [IO.File]::ReadAllBytes($path)
         if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or
@@ -148,11 +149,14 @@ try {
         }
         $parseErrors = $null
         $parseTokens = $null
-        [void][Management.Automation.Language.Parser]::ParseFile(
+        $parsedAst = [Management.Automation.Language.Parser]::ParseFile(
             $path,
             [ref]$parseTokens,
             [ref]$parseErrors
         )
+        if ($path -ceq $acceptance) {
+            $acceptanceAst = $parsedAst
+        }
         if ($parseErrors.Count -ne 0) {
             throw "$([IO.Path]::GetFileName($path)) has PowerShell parser errors."
         }
@@ -161,6 +165,17 @@ try {
         throw 'The acceptance script must use Windows PowerShell 5.1-compatible integer type names.'
     }
     $acceptanceText = [IO.File]::ReadAllText($acceptance)
+    $clipboardAssignments = @($acceptanceAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+            $node.Left.VariablePath.UserPath -ieq 'Clipboard'
+    }, $true))
+    if ($clipboardAssignments.Count -ne 1 -or
+        $clipboardAssignments[0].Left.Extent.Text -cne '$Clipboard' -or
+        $clipboardAssignments[0].Right.Extent.Text -cne '$acceptanceInvocation.clipboard') {
+        throw 'The Clipboard switch must not be shadowed by a case-insensitive result variable.'
+    }
     if ($acceptanceText -match 'extern IntPtr LocalFree|LocalFree\(value\.scheme\)') {
         throw 'The acceptance observer must not free ambiguous High Contrast GET pointers.'
     }
@@ -207,6 +222,49 @@ try {
     if (($acceptanceText | Select-String -Pattern "failure_reason = 'desktop_lock_release_failed'" -AllMatches).Matches.Count -ne 2) {
         throw 'Both acceptance and rescue must preserve structured evidence after desktop-lock release failure.'
     }
+    $captureResizeIndex = $acceptanceText.IndexOf(
+        '        $captureWindow = Ensure-AcceptanceMainWindowCaptureSize',
+        [StringComparison]::Ordinal
+    )
+    $initialCaptureIndex = $acceptanceText.IndexOf(
+        '        $initialCapture = Save-WindowScreenshot',
+        [StringComparison]::Ordinal
+    )
+    if ($captureResizeIndex -lt 0 -or
+        $initialCaptureIndex -lt 0 -or
+        $captureResizeIndex -gt $initialCaptureIndex) {
+        throw 'Evidence-eligible main-window sizing must precede the first workbench capture.'
+    }
+    $clipboardFlowIndex = $acceptanceText.IndexOf(
+        "        if (`$Clipboard) {",
+        [StringComparison]::Ordinal
+    )
+    $prefixCompleteIndex = $acceptanceText.IndexOf(
+        '        Wait-ListPreviewName -MainWindow $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -ExpectedName $destinationName -TimeoutSeconds $TimeoutSeconds',
+        [StringComparison]::Ordinal
+    )
+    $beforeResetIndex = $acceptanceText.IndexOf(
+        '        $beforeReset = Get-ListPrimarySnapshot -List $list',
+        [StringComparison]::Ordinal
+    )
+    if ($clipboardFlowIndex -lt 0 -or
+        $prefixCompleteIndex -lt 0 -or
+        $beforeResetIndex -lt 0 -or
+        $clipboardFlowIndex -lt $prefixCompleteIndex -or
+        $clipboardFlowIndex -gt $beforeResetIndex) {
+        throw 'Clipboard acceptance must run after import and prefix while the exact row remains known.'
+    }
+    foreach ($requiredClipboardSource in @(
+        '[switch] $Clipboard',
+        '[uint32]0x8018',
+        '[uint32]0x801A',
+        "-Modifier 0x11 -SecondModifier 0x10 -VirtualKey 0x43",
+        'ClearClipboardIfOwned'
+    )) {
+        if ($acceptanceText.IndexOf($requiredClipboardSource, [StringComparison]::Ordinal) -lt 0) {
+            throw "The acceptance flow is missing required Clipboard contract '$requiredClipboardSource'."
+        }
+    }
 
     . $acceptance `
         -BundleRoot 'unused' `
@@ -215,10 +273,139 @@ try {
         -ExpectedScriptSha256 ('0' * 64) `
         -ValidateOnly
     Initialize-AcceptanceNative
-    foreach ($method in @('IsWindowEnabled', 'IsMenuCommandEnabled')) {
+    foreach ($method in @(
+        'IsWindowEnabled',
+        'IsMenuCommandEnabled',
+        'ReadClipboardSnapshot',
+        'ClearClipboardIfOwned'
+    )) {
         if ($null -eq [DarkReNamerVmAcceptanceNative].GetMethod($method)) {
             throw "The acceptance native probe is missing $method."
         }
+    }
+    $clipboardEvidence = Get-AcceptanceClipboardTextEvidence `
+        -Text "accepted-acceptance-source.txt`r`n"
+    if ($clipboardEvidence.utf16le_bytes -ne 64 -or
+        $clipboardEvidence.sha256 -cne 'bf9bd2f940bfb8b88330541879bd52c6b9b42f16e807e1b5f6591b9bfc892d92') {
+        throw 'Clipboard evidence must bind the exact UTF-16LE bytes without retaining text.'
+    }
+    $ownedClipboard = [pscustomobject]@{
+        SequenceNumber = [uint32]42
+        UnicodeText = "accepted-acceptance-source.txt`r`n"
+        Formats = [uint32[]]@(1, 7, 13, 16)
+    }
+    if (-not (Test-AcceptanceClipboardSnapshotOwned `
+        -Snapshot $ownedClipboard `
+        -ExpectedSequence 42 `
+        -ExpectedText "accepted-acceptance-source.txt`r`n")) {
+        throw 'Owned Clipboard text plus Windows-synthesized formats must be cleanup eligible.'
+    }
+    foreach ($foreignClipboard in @(
+        [pscustomobject]@{
+            SequenceNumber = [uint32]43
+            UnicodeText = $ownedClipboard.UnicodeText
+            Formats = $ownedClipboard.Formats
+        },
+        [pscustomobject]@{
+            SequenceNumber = [uint32]42
+            UnicodeText = "foreign`r`n"
+            Formats = $ownedClipboard.Formats
+        },
+        [pscustomobject]@{
+            SequenceNumber = [uint32]42
+            UnicodeText = $ownedClipboard.UnicodeText
+            Formats = [uint32[]]@(13, 49152)
+        }
+    )) {
+        if (Test-AcceptanceClipboardSnapshotOwned `
+            -Snapshot $foreignClipboard `
+            -ExpectedSequence 42 `
+            -ExpectedText $ownedClipboard.UnicodeText) {
+            throw 'Changed sequence, text, or foreign formats must preserve the Clipboard.'
+        }
+    }
+    $focusBefore = [pscustomobject]@{
+        Current = [pscustomobject]@{ AutomationId = '1000'; NativeWindowHandle = 100 }
+    }
+    $focusAfter = [pscustomobject]@{
+        Current = [pscustomobject]@{ AutomationId = '32773'; NativeWindowHandle = 200 }
+    }
+    $focusSequence = @($focusBefore, $focusBefore, $focusAfter)
+    $focusState = [pscustomobject]@{ index = 0 }
+    $settledFocus = Wait-AcceptanceFocusTransition `
+        -Before $focusBefore `
+        -ReadFocusedElement {
+            $value = $focusSequence[$focusState.index]
+            $focusState.index++
+            $value
+        } `
+        -Label 'delayed focus fixture' `
+        -MaximumAttempts 3 `
+        -PollMilliseconds 0
+    if ($focusState.index -ne 3 -or
+        $settledFocus.Current.AutomationId -cne '32773') {
+        throw 'Delayed focus navigation did not settle on the changed element.'
+    }
+    Assert-Fails {
+        Wait-AcceptanceFocusTransition `
+            -Before $focusBefore `
+            -ReadFocusedElement { $focusBefore } `
+            -Label 'stalled focus fixture' `
+            -MaximumAttempts 2 `
+            -PollMilliseconds 0
+    } 'did not change focus within the bounded observation attempts'
+
+    $smallCapture = Resolve-AcceptanceWindowResize `
+        -CurrentWidth 594 `
+        -CurrentHeight 508
+    if (-not $smallCapture.resize_required -or
+        $smallCapture.width -ne 640 -or
+        $smallCapture.height -ne 508) {
+        throw 'The 100-percent-DPI window must be enlarged to an evidence-eligible width.'
+    }
+    $largeCapture = Resolve-AcceptanceWindowResize `
+        -CurrentWidth 900 `
+        -CurrentHeight 700
+    if ($largeCapture.resize_required -or
+        $largeCapture.width -ne 900 -or
+        $largeCapture.height -ne 700) {
+        throw 'An already eligible capture window must retain its dimensions.'
+    }
+
+    foreach ($appearanceCase in @(
+        @{ Name = 'system'; Command = 0x9010; Evidence = 'system' },
+        @{ Name = 'light'; Command = 0x9011; Evidence = 'light' },
+        @{ Name = 'dark'; Command = 0x9012; Evidence = 'dark' }
+    )) {
+        $appearanceSpec = Resolve-AcceptanceAppearance -Appearance $appearanceCase.Name
+        if ($appearanceSpec.command_id -ne $appearanceCase.Command -or
+            $appearanceSpec.evidence_name -cne $appearanceCase.Evidence) {
+            throw "Acceptance appearance mapping failed for $($appearanceCase.Name)."
+        }
+    }
+    foreach ($method in @(
+        'IsMenuCommandChecked',
+        'SendMenuCommand',
+        'FindVisiblePopupMenu',
+        'SetWindowPos'
+    )) {
+        if ($null -eq [DarkReNamerVmAcceptanceNative].GetMethod($method)) {
+            throw "The acceptance native probe is missing $method."
+        }
+    }
+    $captureContext = Add-AcceptanceScreenshotContext `
+        -Screenshot ([ordered]@{
+            file = 'fixture.png'
+            sha256 = 'a' * 64
+            width = 640
+            height = 508
+        }) `
+        -Appearance 'dark' `
+        -Surface 'main-workbench'
+    if ($captureContext.appearance -cne 'dark' -or
+        $captureContext.surface -cne 'main-workbench' -or
+        $captureContext.width -ne 640) {
+        throw 'Screenshot context must retain explicit appearance, surface, and dimensions.'
     }
     if ((Get-AcceptanceVerdict -KeyboardStatus passed -AccessibilityStatus passed -CaptureStatus passed) -cne 'review_required') {
         throw 'Complete technical evidence must retain the visual-review requirement.'
@@ -310,6 +497,42 @@ try {
         -ExpectedScriptSha256 $valid.acceptance_sha256 `
         -HighContrast `
         -ValidateOnly
+    & $valid.acceptance `
+        -BundleRoot $valid.bundle_root `
+        -ExpectedSessionId 1 `
+        -OutputRoot $valid.output_root `
+        -ExpectedScriptSha256 $valid.acceptance_sha256 `
+        -Appearance dark `
+        -CaptureNativeMenu `
+        -CaptureAdvancedAppearance `
+        -ValidateOnly
+    & $valid.acceptance `
+        -BundleRoot $valid.bundle_root `
+        -ExpectedSessionId 1 `
+        -OutputRoot $valid.output_root `
+        -ExpectedScriptSha256 $valid.acceptance_sha256 `
+        -Clipboard `
+        -ValidateOnly
+    Assert-Fails {
+        & $valid.acceptance `
+            -BundleRoot $valid.bundle_root `
+            -ExpectedSessionId 1 `
+            -OutputRoot $valid.output_root `
+            -ExpectedScriptSha256 $valid.acceptance_sha256 `
+            -Appearance dark `
+            -HighContrast `
+            -ValidateOnly
+    } 'High Contrast acceptance uses Forced Colors'
+    Assert-Fails {
+        & $valid.acceptance `
+            -BundleRoot $valid.bundle_root `
+            -ExpectedSessionId 1 `
+            -OutputRoot $valid.output_root `
+            -ExpectedScriptSha256 $valid.acceptance_sha256 `
+            -CaptureAdvancedAppearance `
+            -HighContrast `
+            -ValidateOnly
+    } 'Advanced appearance capture is unavailable'
     if (Test-Path -LiteralPath $valid.output_root) {
         throw 'HighContrast ValidateOnly must not create output or change system state.'
     }
@@ -326,6 +549,16 @@ try {
         }
     }
     Write-RestoreSnapshot -Fixture $valid
+    Assert-Fails {
+        & $valid.acceptance `
+            -BundleRoot $valid.bundle_root `
+            -ExpectedSessionId 1 `
+            -OutputRoot $valid.output_root `
+            -ExpectedScriptSha256 $valid.acceptance_sha256 `
+            -Clipboard `
+            -RestoreHighContrastOnly `
+            -ValidateOnly
+    } 'High Contrast rescue does not accept Clipboard acceptance'
     & $valid.acceptance `
         -BundleRoot $valid.bundle_root `
         -ExpectedSessionId 1 `
