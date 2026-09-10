@@ -805,7 +805,7 @@ public static class DarkReNamerVmAcceptanceNative {
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool EmptyClipboard();
     [DllImport("user32.dll")]
-    private static extern uint GetClipboardSequenceNumber();
+    public static extern uint GetClipboardSequenceNumber();
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr GlobalLock(IntPtr memory);
     [DllImport("kernel32.dll")]
@@ -1342,31 +1342,54 @@ function Wait-AcceptanceClipboardText {
         [Parameter(Mandatory)][uint32] $PreviousSequence,
         [Parameter(Mandatory)][AllowEmptyString()][string] $ExpectedText,
         [Parameter(Mandatory)][int] $TimeoutSeconds,
-        [Parameter(Mandatory)][string] $Label
+        [Parameter(Mandatory)][string] $Label,
+        [scriptblock] $ReadSequence = { [DarkReNamerVmAcceptanceNative]::GetClipboardSequenceNumber() },
+        [scriptblock] $ReadSnapshot = { [DarkReNamerVmAcceptanceNative]::ReadClipboardSnapshot() },
+        [scriptblock] $GetCurrentTime = { Get-Date },
+        [ValidateRange(0, 1000)][int] $PollMilliseconds = 50
     )
 
-    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    if ($PreviousSequence -eq 0) {
+        throw "$Label requires a nonzero baseline Clipboard sequence."
+    }
+    $deadline = (& $GetCurrentTime).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    $observedSequenceChange = $false
+    $unexpectedClipboardMessage = "$Label changed the Clipboard to unexpected text or formats."
     do {
         try {
-            $snapshot = [DarkReNamerVmAcceptanceNative]::ReadClipboardSnapshot()
-            if ($snapshot.SequenceNumber -ne $PreviousSequence) {
-                if (-not (Test-AcceptanceClipboardSnapshotOwned `
-                    -Snapshot $snapshot `
-                    -ExpectedSequence $snapshot.SequenceNumber `
-                    -ExpectedText $ExpectedText)) {
-                    throw "$Label changed the Clipboard to unexpected text or formats."
+            $sequence = [uint32](& $ReadSequence)
+            if ($sequence -ne 0 -and $sequence -ne $PreviousSequence) {
+                $observedSequenceChange = $true
+                $snapshot = & $ReadSnapshot
+                if ($null -eq $snapshot -or
+                    $snapshot.SequenceNumber -eq 0 -or
+                    $snapshot.SequenceNumber -eq $PreviousSequence) {
+                    $snapshot = $null
                 }
-                return $snapshot
+                else {
+                    if (-not (Test-AcceptanceClipboardSnapshotOwned `
+                        -Snapshot $snapshot `
+                        -ExpectedSequence $snapshot.SequenceNumber `
+                        -ExpectedText $ExpectedText)) {
+                        throw $unexpectedClipboardMessage
+                    }
+                    return $snapshot
+                }
             }
         }
         catch {
-            if ($_.Exception.Message.IndexOf('unexpected text or formats', [StringComparison]::Ordinal) -ge 0) {
+            if ($_.Exception.Message -ceq $unexpectedClipboardMessage) {
                 throw
             }
         }
-        Start-Sleep -Milliseconds 50
-    } while ((Get-Date) -lt $deadline)
-    throw "$Label did not produce the exact expected Clipboard text before the bounded deadline."
+        if ($PollMilliseconds -gt 0) {
+            Start-Sleep -Milliseconds $PollMilliseconds
+        }
+    } while ((& $GetCurrentTime) -lt $deadline)
+    if ($observedSequenceChange) {
+        throw "$Label changed, but the exact expected Clipboard snapshot was not readable before the bounded deadline."
+    }
+    throw "$Label did not change the Clipboard sequence before the bounded deadline."
 }
 
 function Send-AcceptanceText {
@@ -2550,6 +2573,7 @@ try {
             $clipboardState.expected_text = $expectedNames
             $clipboardResult.names = Get-AcceptanceClipboardTextEvidence -Text $namesSnapshot.UnicodeText
 
+            $result.failure_reason = 'clipboard_paths_failed'
             $mainWindow.SetFocus()
             [void][DarkReNamerVmNative]::SetForegroundWindow($process.MainWindowHandle)
             $clipboardForegroundDeadline = (Get-Date).AddSeconds(2)
