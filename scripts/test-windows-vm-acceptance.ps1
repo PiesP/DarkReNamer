@@ -220,6 +220,36 @@ try {
         $captureResizeIndex -gt $initialCaptureIndex) {
         throw 'Evidence-eligible main-window sizing must precede the first workbench capture.'
     }
+    $clipboardFlowIndex = $acceptanceText.IndexOf(
+        "        if (`$Clipboard) {",
+        [StringComparison]::Ordinal
+    )
+    $prefixCompleteIndex = $acceptanceText.IndexOf(
+        '        Wait-ListPreviewName -MainWindow $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -ExpectedName $destinationName -TimeoutSeconds $TimeoutSeconds',
+        [StringComparison]::Ordinal
+    )
+    $beforeResetIndex = $acceptanceText.IndexOf(
+        '        $beforeReset = Get-ListPrimarySnapshot -List $list',
+        [StringComparison]::Ordinal
+    )
+    if ($clipboardFlowIndex -lt 0 -or
+        $prefixCompleteIndex -lt 0 -or
+        $beforeResetIndex -lt 0 -or
+        $clipboardFlowIndex -lt $prefixCompleteIndex -or
+        $clipboardFlowIndex -gt $beforeResetIndex) {
+        throw 'Clipboard acceptance must run after import and prefix while the exact row remains known.'
+    }
+    foreach ($requiredClipboardSource in @(
+        '[switch] $Clipboard',
+        '[uint32]0x8018',
+        '[uint32]0x801A',
+        "-Modifier 0x11 -SecondModifier 0x10 -VirtualKey 0x43",
+        'ClearClipboardIfOwned'
+    )) {
+        if ($acceptanceText.IndexOf($requiredClipboardSource, [StringComparison]::Ordinal) -lt 0) {
+            throw "The acceptance flow is missing required Clipboard contract '$requiredClipboardSource'."
+        }
+    }
 
     . $acceptance `
         -BundleRoot 'unused' `
@@ -228,9 +258,55 @@ try {
         -ExpectedScriptSha256 ('0' * 64) `
         -ValidateOnly
     Initialize-AcceptanceNative
-    foreach ($method in @('IsWindowEnabled', 'IsMenuCommandEnabled')) {
+    foreach ($method in @(
+        'IsWindowEnabled',
+        'IsMenuCommandEnabled',
+        'ReadClipboardSnapshot',
+        'ClearClipboardIfOwned'
+    )) {
         if ($null -eq [DarkReNamerVmAcceptanceNative].GetMethod($method)) {
             throw "The acceptance native probe is missing $method."
+        }
+    }
+    $clipboardEvidence = Get-AcceptanceClipboardTextEvidence `
+        -Text "accepted-acceptance-source.txt`r`n"
+    if ($clipboardEvidence.utf16le_bytes -ne 64 -or
+        $clipboardEvidence.sha256 -cne 'bf9bd2f940bfb8b88330541879bd52c6b9b42f16e807e1b5f6591b9bfc892d92') {
+        throw 'Clipboard evidence must bind the exact UTF-16LE bytes without retaining text.'
+    }
+    $ownedClipboard = [pscustomobject]@{
+        SequenceNumber = [uint32]42
+        UnicodeText = "accepted-acceptance-source.txt`r`n"
+        Formats = [uint32[]]@(1, 7, 13, 16)
+    }
+    if (-not (Test-AcceptanceClipboardSnapshotOwned `
+        -Snapshot $ownedClipboard `
+        -ExpectedSequence 42 `
+        -ExpectedText "accepted-acceptance-source.txt`r`n")) {
+        throw 'Owned Clipboard text plus Windows-synthesized formats must be cleanup eligible.'
+    }
+    foreach ($foreignClipboard in @(
+        [pscustomobject]@{
+            SequenceNumber = [uint32]43
+            UnicodeText = $ownedClipboard.UnicodeText
+            Formats = $ownedClipboard.Formats
+        },
+        [pscustomobject]@{
+            SequenceNumber = [uint32]42
+            UnicodeText = "foreign`r`n"
+            Formats = $ownedClipboard.Formats
+        },
+        [pscustomobject]@{
+            SequenceNumber = [uint32]42
+            UnicodeText = $ownedClipboard.UnicodeText
+            Formats = [uint32[]]@(13, 49152)
+        }
+    )) {
+        if (Test-AcceptanceClipboardSnapshotOwned `
+            -Snapshot $foreignClipboard `
+            -ExpectedSequence 42 `
+            -ExpectedText $ownedClipboard.UnicodeText) {
+            throw 'Changed sequence, text, or foreign formats must preserve the Clipboard.'
         }
     }
     $focusBefore = [pscustomobject]@{
@@ -415,6 +491,13 @@ try {
         -CaptureNativeMenu `
         -CaptureAdvancedAppearance `
         -ValidateOnly
+    & $valid.acceptance `
+        -BundleRoot $valid.bundle_root `
+        -ExpectedSessionId 1 `
+        -OutputRoot $valid.output_root `
+        -ExpectedScriptSha256 $valid.acceptance_sha256 `
+        -Clipboard `
+        -ValidateOnly
     Assert-Fails {
         & $valid.acceptance `
             -BundleRoot $valid.bundle_root `
@@ -451,6 +534,16 @@ try {
         }
     }
     Write-RestoreSnapshot -Fixture $valid
+    Assert-Fails {
+        & $valid.acceptance `
+            -BundleRoot $valid.bundle_root `
+            -ExpectedSessionId 1 `
+            -OutputRoot $valid.output_root `
+            -ExpectedScriptSha256 $valid.acceptance_sha256 `
+            -Clipboard `
+            -RestoreHighContrastOnly `
+            -ValidateOnly
+    } 'High Contrast rescue does not accept Clipboard acceptance'
     & $valid.acceptance `
         -BundleRoot $valid.bundle_root `
         -ExpectedSessionId 1 `

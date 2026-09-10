@@ -8,6 +8,7 @@ param(
     [ValidateSet('system', 'light', 'dark')][string] $Appearance = 'system',
     [switch] $CaptureNativeMenu,
     [switch] $CaptureAdvancedAppearance,
+    [switch] $Clipboard,
     [switch] $HighContrast,
     [switch] $RestoreHighContrastOnly,
     [switch] $ValidateOnly
@@ -426,12 +427,52 @@ function Invoke-HighContrastRescue {
     Write-Host "High Contrast rescue completed: $($result.action)."
 }
 
+function Get-AcceptanceClipboardTextEvidence {
+    param([Parameter(Mandatory)][AllowEmptyString()][string] $Text)
+
+    $bytes = [Text.Encoding]::Unicode.GetBytes($Text)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $sha256.ComputeHash($bytes)
+    }
+    finally {
+        $sha256.Dispose()
+    }
+    [ordered]@{
+        utf16le_bytes = $bytes.Length
+        sha256 = -join ($digest | ForEach-Object { $_.ToString('x2') })
+    }
+}
+
+function Test-AcceptanceClipboardSnapshotOwned {
+    param(
+        [Parameter(Mandatory)][object] $Snapshot,
+        [Parameter(Mandatory)][uint32] $ExpectedSequence,
+        [Parameter(Mandatory)][AllowEmptyString()][string] $ExpectedText
+    )
+
+    if ($Snapshot.SequenceNumber -ne $ExpectedSequence -or
+        -not [string]::Equals(
+            [string]$Snapshot.UnicodeText,
+            $ExpectedText,
+            [StringComparison]::Ordinal
+        )) {
+        return $false
+    }
+    $formats = @($Snapshot.Formats)
+    if ($formats.Count -eq 0 -or $formats -notcontains [uint32]13) {
+        return $false
+    }
+    @($formats | Where-Object { $_ -notin @([uint32]1, [uint32]7, [uint32]13, [uint32]16) }).Count -eq 0
+}
+
 function Initialize-AcceptanceNative {
     if ('DarkReNamerVmAcceptanceNative' -as [type]) {
         return
     }
     Add-Type @'
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -453,6 +494,12 @@ public static class DarkReNamerVmAcceptanceNative {
         public uint HighlightText { get; set; }
         public uint GrayText { get; set; }
         public uint HotLight { get; set; }
+    }
+
+    public sealed class ClipboardSnapshot {
+        public uint SequenceNumber { get; set; }
+        public uint[] Formats { get; set; }
+        public string UnicodeText { get; set; }
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -539,8 +586,129 @@ public static class DarkReNamerVmAcceptanceNative {
     private static extern bool SystemParametersInfo(uint action, uint parameter, ref HIGHCONTRAST value, uint flags);
     [DllImport("user32.dll")]
     private static extern uint GetSysColor(int index);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool OpenClipboard(IntPtr owner);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool CloseClipboard();
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint EnumClipboardFormats(uint format);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr GetClipboardData(uint format);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool EmptyClipboard();
+    [DllImport("user32.dll")]
+    private static extern uint GetClipboardSequenceNumber();
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GlobalLock(IntPtr memory);
+    [DllImport("kernel32.dll")]
+    private static extern bool GlobalUnlock(IntPtr memory);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern UIntPtr GlobalSize(IntPtr memory);
+    [DllImport("kernel32.dll", EntryPoint = "SetLastError")]
+    private static extern void SetLastErrorNative(uint code);
     [DllImport("ntdll.dll", CharSet = CharSet.Unicode)]
     private static extern int RtlGetVersion(ref RTL_OSVERSIONINFOEX version);
+
+    private static uint[] EnumerateClipboardFormats() {
+        List<uint> formats = new List<uint>();
+        uint previous = 0;
+        while (true) {
+            SetLastErrorNative(0);
+            uint current = EnumClipboardFormats(previous);
+            if (current == 0) {
+                int error = Marshal.GetLastWin32Error();
+                if (error != 0) { throw new Win32Exception(error); }
+                return formats.ToArray();
+            }
+            formats.Add(current);
+            previous = current;
+            if (formats.Count > 64) {
+                throw new InvalidOperationException("Clipboard format count exceeded the acceptance bound.");
+            }
+        }
+    }
+
+    private static string ReadClipboardUnicodeText(uint[] formats) {
+        if (Array.IndexOf(formats, 13U) < 0) { return null; }
+        IntPtr memory = GetClipboardData(13);
+        if (memory == IntPtr.Zero) {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        ulong byteCount = GlobalSize(memory).ToUInt64();
+        if (byteCount < 2 || byteCount > 2 * 1024 * 1024 || (byteCount & 1) != 0) {
+            throw new InvalidOperationException("Clipboard Unicode text allocation is invalid or over limit.");
+        }
+        IntPtr pointer = GlobalLock(memory);
+        if (pointer == IntPtr.Zero) {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        try {
+            string allocation = Marshal.PtrToStringUni(pointer, checked((int)(byteCount / 2)));
+            int terminator = allocation.IndexOf('\0');
+            if (terminator < 0) {
+                throw new InvalidOperationException("Clipboard Unicode text is not terminated.");
+            }
+            return allocation.Substring(0, terminator);
+        }
+        finally {
+            GlobalUnlock(memory);
+        }
+    }
+
+    private static ClipboardSnapshot ReadOpenClipboardSnapshot() {
+        uint sequence = GetClipboardSequenceNumber();
+        uint[] formats = EnumerateClipboardFormats();
+        string text = ReadClipboardUnicodeText(formats);
+        if (GetClipboardSequenceNumber() != sequence) {
+            throw new InvalidOperationException("Clipboard changed during one acceptance observation.");
+        }
+        return new ClipboardSnapshot {
+            SequenceNumber = sequence,
+            Formats = formats,
+            UnicodeText = text
+        };
+    }
+
+    public static ClipboardSnapshot ReadClipboardSnapshot() {
+        if (!OpenClipboard(IntPtr.Zero)) {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        try { return ReadOpenClipboardSnapshot(); }
+        finally {
+            if (!CloseClipboard()) { throw new Win32Exception(Marshal.GetLastWin32Error()); }
+        }
+    }
+
+    public static string ClearClipboardIfOwned(uint expectedSequence, string expectedText) {
+        if (!OpenClipboard(IntPtr.Zero)) {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        try {
+            ClipboardSnapshot snapshot = ReadOpenClipboardSnapshot();
+            if (snapshot.SequenceNumber != expectedSequence) { return "sequence_changed"; }
+            if (!String.Equals(snapshot.UnicodeText, expectedText, StringComparison.Ordinal)) {
+                return "text_changed";
+            }
+            bool unicode = false;
+            foreach (uint format in snapshot.Formats) {
+                if (format == 13) { unicode = true; }
+                else if (format != 1 && format != 7 && format != 16) {
+                    return "foreign_format";
+                }
+            }
+            if (!unicode || snapshot.Formats.Length == 0) { return "text_format_missing"; }
+            if (!EmptyClipboard()) {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            if (EnumerateClipboardFormats().Length != 0) {
+                throw new InvalidOperationException("Clipboard was not empty after guarded cleanup.");
+            }
+            return "cleared";
+        }
+        finally {
+            if (!CloseClipboard()) { throw new Win32Exception(Marshal.GetLastWin32Error()); }
+        }
+    }
 
     private static void Send(ushort virtualKey, ushort scanCode, uint flags) {
         INPUT input = new INPUT {
@@ -821,6 +989,135 @@ function Send-AcceptanceChord {
     finally {
         [DarkReNamerVmAcceptanceNative]::KeyUp($Modifier)
     }
+}
+
+function Send-AcceptanceTwoModifierChord {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][uint16] $Modifier,
+        [Parameter(Mandatory)][uint16] $SecondModifier,
+        [Parameter(Mandatory)][uint16] $VirtualKey,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    [void](Get-FocusedAcceptanceElement -Process $Process -ExpectedSession $ExpectedSession -Label $Label)
+    try {
+        [DarkReNamerVmAcceptanceNative]::KeyDown($Modifier)
+        [DarkReNamerVmAcceptanceNative]::KeyDown($SecondModifier)
+        [DarkReNamerVmAcceptanceNative]::Tap($VirtualKey)
+    }
+    finally {
+        [DarkReNamerVmAcceptanceNative]::KeyUp($SecondModifier)
+        [DarkReNamerVmAcceptanceNative]::KeyUp($Modifier)
+    }
+}
+
+function Assert-AcceptanceForegroundBinding {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [switch] $RequireMainWindow
+    )
+
+    $foreground = [DarkReNamerVmNative]::GetForegroundWindow()
+    $foregroundProcessId = [uint32]0
+    if ($foreground -eq [IntPtr]::Zero -or
+        [DarkReNamerVmNative]::GetWindowThreadProcessId(
+            $foreground,
+            [ref]$foregroundProcessId
+        ) -eq 0 -or
+        $foregroundProcessId -ne $Process.Id -or
+        $Process.SessionId -ne $ExpectedSession -or
+        ($RequireMainWindow -and $foreground -ne $Process.MainWindowHandle)) {
+        throw 'Clipboard input is not bound to the exact application foreground target and desktop session.'
+    }
+}
+
+function Find-AcceptanceMenuItem {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][string] $Name,
+        [Parameter(Mandatory)][int] $TimeoutSeconds
+    )
+
+    $conditions = [Windows.Automation.Condition[]]@(
+        [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::ProcessIdProperty,
+            $Process.Id
+        ),
+        [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::NameProperty,
+            $Name
+        ),
+        [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [Windows.Automation.ControlType]::MenuItem
+        ),
+        [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::IsEnabledProperty,
+            $true
+        ),
+        [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::IsOffscreenProperty,
+            $false
+        )
+    )
+    $condition = [Windows.Automation.AndCondition]::new($conditions)
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    do {
+        $matches = [Windows.Automation.AutomationElement]::RootElement.FindAll(
+            [Windows.Automation.TreeScope]::Descendants,
+            $condition
+        )
+        if ($matches.Count -gt 1) {
+            throw "Clipboard menu item '$Name' matched more than one automation element."
+        }
+        if ($matches.Count -eq 1) {
+            $item = $matches.Item(0)
+            Assert-AutomationBinding `
+                -Element $item `
+                -Process $Process `
+                -ExpectedSession $ExpectedSession `
+                -Label "Clipboard menu item '$Name'"
+            return $item
+        }
+        Start-Sleep -Milliseconds 50
+    } while ((Get-Date) -lt $deadline)
+    throw "Clipboard menu item '$Name' was not found before the bounded deadline."
+}
+
+function Wait-AcceptanceClipboardText {
+    param(
+        [Parameter(Mandatory)][uint32] $PreviousSequence,
+        [Parameter(Mandatory)][AllowEmptyString()][string] $ExpectedText,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    do {
+        try {
+            $snapshot = [DarkReNamerVmAcceptanceNative]::ReadClipboardSnapshot()
+            if ($snapshot.SequenceNumber -ne $PreviousSequence) {
+                if (-not (Test-AcceptanceClipboardSnapshotOwned `
+                    -Snapshot $snapshot `
+                    -ExpectedSequence $snapshot.SequenceNumber `
+                    -ExpectedText $ExpectedText)) {
+                    throw "$Label changed the Clipboard to unexpected text or formats."
+                }
+                return $snapshot
+            }
+        }
+        catch {
+            if ($_.Exception.Message.IndexOf('unexpected text or formats', [StringComparison]::Ordinal) -ge 0) {
+                throw
+            }
+        }
+        Start-Sleep -Milliseconds 50
+    } while ((Get-Date) -lt $deadline)
+    throw "$Label did not produce the exact expected Clipboard text before the bounded deadline."
 }
 
 function Send-AcceptanceText {
@@ -1278,6 +1575,7 @@ $acceptanceInvocation = [pscustomobject]@{
     appearance = $Appearance
     capture_native_menu = [bool]$CaptureNativeMenu
     capture_advanced_appearance = [bool]$CaptureAdvancedAppearance
+    clipboard = [bool]$Clipboard
     high_contrast = [bool]$HighContrast
     restore_high_contrast_only = [bool]$RestoreHighContrastOnly
     validate_only = [bool]$ValidateOnly
@@ -1294,6 +1592,7 @@ $TimeoutSeconds = $acceptanceInvocation.timeout_seconds
 $Appearance = $acceptanceInvocation.appearance
 $CaptureNativeMenu = $acceptanceInvocation.capture_native_menu
 $CaptureAdvancedAppearance = $acceptanceInvocation.capture_advanced_appearance
+$Clipboard = $acceptanceInvocation.clipboard
 $HighContrast = $acceptanceInvocation.high_contrast
 $RestoreHighContrastOnly = $acceptanceInvocation.restore_high_contrast_only
 $ValidateOnly = $acceptanceInvocation.validate_only
@@ -1313,6 +1612,9 @@ if ($HighContrast -and $CaptureAdvancedAppearance) {
 if ($RestoreHighContrastOnly -and
     ($Appearance -cne 'system' -or $CaptureNativeMenu -or $CaptureAdvancedAppearance)) {
     throw 'High Contrast rescue does not accept appearance or visual-surface controls.'
+}
+if ($RestoreHighContrastOnly -and $Clipboard) {
+    throw 'High Contrast rescue does not accept Clipboard acceptance.'
 }
 if ($ValidateOnly) {
     if ($RestoreHighContrastOnly) {
@@ -1361,6 +1663,12 @@ $highContrastState = [pscustomobject]@{
     rescue_path = $null
     restoration_verified = $false
 }
+$clipboardState = [pscustomobject]@{
+    owned = $false
+    checks_complete = $false
+    expected_sequence = [uint32]0
+    expected_text = $null
+}
 $captures = [Collections.Generic.List[object]]::new()
 $keyboard = [ordered]@{
     status = 'failed'
@@ -1388,9 +1696,21 @@ $highContrastResult = [ordered]@{
     restoration = if ($HighContrast) { 'pending' } else { 'not_required' }
     snapshot = $null
 }
-$clipboard = [ordered]@{
-    status = 'not_run'
-    reason = 'Lossless restoration of every existing clipboard format is unavailable in this session.'
+$clipboard = if ($Clipboard) {
+    [ordered]@{
+        status = 'failed'
+        reason = 'Clipboard acceptance did not complete.'
+        preflight_empty = $false
+        names = $null
+        paths = $null
+        cleanup = 'not_required'
+    }
+}
+else {
+    [ordered]@{
+        status = 'not_run'
+        reason = 'Clipboard acceptance was not requested.'
+    }
 }
 $observations = [ordered]@{
     schema_version = 1
@@ -1837,6 +2157,114 @@ try {
             throw 'The production file list does not expose SelectionPattern for the no-selection reset observation.'
         }
         Wait-ListPreviewName -MainWindow $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -ExpectedName $destinationName -TimeoutSeconds $TimeoutSeconds
+        if ($Clipboard) {
+            $result.failure_reason = 'clipboard_preflight_failed'
+            $clipboardPreflight = [DarkReNamerVmAcceptanceNative]::ReadClipboardSnapshot()
+            if (@($clipboardPreflight.Formats).Count -ne 0 -or
+                $null -ne $clipboardPreflight.UnicodeText) {
+                throw 'Clipboard acceptance requires an initially empty Clipboard and will not clear existing data.'
+            }
+            $clipboard.preflight_empty = $true
+            $expectedNames = $destinationName + "`r`n"
+            $expectedPaths = $sourcePath + "`r`n"
+
+            $result.failure_reason = 'clipboard_names_failed'
+            Assert-AcceptanceForegroundBinding `
+                -Process $process `
+                -ExpectedSession $ExpectedSessionId `
+                -RequireMainWindow
+            if (-not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
+                $process.MainWindowHandle,
+                [uint32]0x8018
+            )) {
+                throw 'The native Copy Names menu command is not enabled for the known row.'
+            }
+            Send-AcceptanceChord `
+                -Process $process `
+                -ExpectedSession $ExpectedSessionId `
+                -Modifier 0x12 `
+                -VirtualKey 0x46 `
+                -Label 'Clipboard native File menu accelerator'
+            [void](Wait-AcceptancePopupMenu `
+                -Process $process `
+                -ExpectedSession $ExpectedSessionId `
+                -Label 'Clipboard native File menu')
+            Send-AcceptanceTap `
+                -Process $process `
+                -ExpectedSession $ExpectedSessionId `
+                -VirtualKey 0x58 `
+                -Label 'Clipboard Export submenu mnemonic'
+            $copyNamesItem = Find-AcceptanceMenuItem `
+                -Process $process `
+                -ExpectedSession $ExpectedSessionId `
+                -Name '변경 후 이름 목록 복사' `
+                -TimeoutSeconds $TimeoutSeconds
+            Assert-AcceptanceForegroundBinding `
+                -Process $process `
+                -ExpectedSession $ExpectedSessionId
+            $clipboardBeforeNames = [DarkReNamerVmAcceptanceNative]::ReadClipboardSnapshot()
+            if ($clipboardBeforeNames.SequenceNumber -ne $clipboardPreflight.SequenceNumber -or
+                @($clipboardBeforeNames.Formats).Count -ne 0 -or
+                $null -ne $clipboardBeforeNames.UnicodeText) {
+                throw 'Clipboard changed before Copy Names; preserving it without invoking the menu item.'
+            }
+            $invokePatternObject = $null
+            if (-not $copyNamesItem.TryGetCurrentPattern(
+                [Windows.Automation.InvokePattern]::Pattern,
+                [ref]$invokePatternObject
+            )) {
+                throw 'The native Copy Names menu item does not expose InvokePattern.'
+            }
+            ([Windows.Automation.InvokePattern]$invokePatternObject).Invoke()
+            Wait-AcceptancePopupMenuClosed -Process $process -Label 'Clipboard native File menu'
+            $namesSnapshot = Wait-AcceptanceClipboardText `
+                -PreviousSequence $clipboardPreflight.SequenceNumber `
+                -ExpectedText $expectedNames `
+                -TimeoutSeconds $TimeoutSeconds `
+                -Label 'Copy Names menu command'
+            $clipboardState.owned = $true
+            $clipboardState.expected_sequence = $namesSnapshot.SequenceNumber
+            $clipboardState.expected_text = $expectedNames
+            $clipboard.names = Get-AcceptanceClipboardTextEvidence -Text $namesSnapshot.UnicodeText
+
+            $mainWindow.SetFocus()
+            [void][DarkReNamerVmNative]::SetForegroundWindow($process.MainWindowHandle)
+            $clipboardForegroundDeadline = (Get-Date).AddSeconds(2)
+            while ([DarkReNamerVmNative]::GetForegroundWindow() -ne $process.MainWindowHandle -and
+                (Get-Date) -lt $clipboardForegroundDeadline) {
+                Start-Sleep -Milliseconds 50
+            }
+            Assert-AcceptanceForegroundBinding `
+                -Process $process `
+                -ExpectedSession $ExpectedSessionId `
+                -RequireMainWindow
+            if (-not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
+                $process.MainWindowHandle,
+                [uint32]0x801A
+            )) {
+                throw 'The native Copy Paths menu command is not enabled for the known row.'
+            }
+            $beforePaths = [DarkReNamerVmAcceptanceNative]::ReadClipboardSnapshot()
+            if (-not (Test-AcceptanceClipboardSnapshotOwned `
+                -Snapshot $beforePaths `
+                -ExpectedSequence $clipboardState.expected_sequence `
+                -ExpectedText $clipboardState.expected_text)) {
+                throw 'Clipboard changed before Copy Paths; preserving it without invoking the shortcut.'
+            }
+            Send-AcceptanceTwoModifierChord -Process $process -ExpectedSession $ExpectedSessionId -Modifier 0x11 -SecondModifier 0x10 -VirtualKey 0x43 -Label 'Ctrl+Shift+C Copy Paths shortcut'
+            $pathsSnapshot = Wait-AcceptanceClipboardText `
+                -PreviousSequence $namesSnapshot.SequenceNumber `
+                -ExpectedText $expectedPaths `
+                -TimeoutSeconds $TimeoutSeconds `
+                -Label 'Ctrl+Shift+C Copy Paths shortcut'
+            $clipboardState.expected_sequence = $pathsSnapshot.SequenceNumber
+            $clipboardState.expected_text = $expectedPaths
+            $clipboardState.checks_complete = $true
+            $clipboard.paths = Get-AcceptanceClipboardTextEvidence -Text $pathsSnapshot.UnicodeText
+            $clipboard.status = 'pending_cleanup'
+            $clipboard.reason = $null
+            $clipboard.cleanup = 'pending'
+        }
         $beforeReset = Get-ListPrimarySnapshot -List $list
         $reset = Find-UniqueAutomationElement `
             -Root $mainWindow `
@@ -2028,6 +2456,40 @@ catch {
 }
 finally {
     try { [DarkReNamerVmAcceptanceNative]::ReleaseModifiers() } catch {}
+    if ($Clipboard -and $clipboardState.owned) {
+        try {
+            $clipboardCleanup = [DarkReNamerVmAcceptanceNative]::ClearClipboardIfOwned(
+                $clipboardState.expected_sequence,
+                $clipboardState.expected_text
+            )
+            if ($clipboardCleanup -ceq 'cleared') {
+                $clipboard.cleanup = 'cleared'
+                if ($clipboardState.checks_complete) {
+                    $clipboard.status = 'passed'
+                    $clipboard.reason = $null
+                }
+            }
+            else {
+                $clipboard.status = 'failed'
+                $clipboard.reason = 'Clipboard changed after acceptance; foreign data was preserved.'
+                $clipboard.cleanup = 'preserved_foreign_change'
+                $result.status = 'failed'
+                if ($null -eq $result.failure_reason) {
+                    $result.failure_reason = 'clipboard_cleanup_preserved_foreign_change'
+                }
+            }
+        }
+        catch {
+            $clipboard.status = 'failed'
+            $clipboard.reason = 'Guarded Clipboard cleanup could not be verified.'
+            $clipboard.cleanup = 'failed'
+            $result.status = 'failed'
+            if ($null -eq $result.failure_reason) {
+                $result.failure_reason = 'clipboard_cleanup_failed'
+            }
+            $_ | Out-String | Add-Content -LiteralPath $diagnosticPath -Encoding UTF8
+        }
+    }
     if ($null -ne $processState.process) {
         try {
             $process = $processState.process.process
