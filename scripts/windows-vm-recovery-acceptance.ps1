@@ -51,23 +51,58 @@ function Get-AcceptanceUInt64 {
     [BitConverter]::ToUInt64($Bytes, $Offset)
 }
 
+function Initialize-AcceptanceCrc32 {
+    if ('DarkReNamerAcceptanceCrc32' -as [type]) {
+        return
+    }
+
+    Add-Type @'
+using System;
+
+public static class DarkReNamerAcceptanceCrc32
+{
+    private static readonly uint[] Table = BuildTable();
+
+    private static uint[] BuildTable()
+    {
+        uint[] table = new uint[256];
+        for (uint value = 0; value < table.Length; value++)
+        {
+            uint remainder = value;
+            for (int bit = 0; bit < 8; bit++)
+            {
+                remainder = (remainder >> 1) ^ ((remainder & 1) == 0 ? 0u : 0xEDB88320u);
+            }
+            table[value] = remainder;
+        }
+        return table;
+    }
+
+    public static uint Compute(byte[][] parts)
+    {
+        uint crc = 0xFFFFFFFFu;
+        if (parts != null)
+        {
+            foreach (byte[] part in parts)
+            {
+                if (part == null) continue;
+                for (int index = 0; index < part.Length; index++)
+                {
+                    crc = (crc >> 8) ^ Table[(crc ^ part[index]) & 0xFFu];
+                }
+            }
+        }
+        return crc ^ 0xFFFFFFFFu;
+    }
+}
+'@
+}
+
 function Get-AcceptanceCrc32 {
     param([Parameter(Mandatory)][byte[][]] $Parts)
 
-    [uint64]$crc = 0xFFFFFFFFL
-    foreach ($part in $Parts) {
-        foreach ($byte in $part) {
-            $crc = $crc -bxor [uint64]$byte
-            for ($bit = 0; $bit -lt 8; $bit++) {
-                [uint64]$mask = 0
-                if (($crc -band 1) -ne 0) {
-                    $mask = 0xFFFFFFFFL
-                }
-                $crc = (($crc -shr 1) -bxor (0xEDB88320L -band $mask)) -band 0xFFFFFFFFL
-            }
-        }
-    }
-    [uint32](($crc -bxor 0xFFFFFFFFL) -band 0xFFFFFFFFL)
+    Initialize-AcceptanceCrc32
+    [DarkReNamerAcceptanceCrc32]::Compute($Parts)
 }
 
 function Get-AcceptanceJournalInspection {
