@@ -1331,6 +1331,7 @@ unsafe extern "system" fn window_proc(
                 );
                 return 0;
             }
+            handle_admission_progress(state);
             if state
                 .plan_worker
                 .as_ref()
@@ -3080,6 +3081,84 @@ mod tests {
         })?;
         app.assert_session_cleared()?;
         assert!(app.with_state(|state| state.admission_worker.is_none())?);
+        Ok(())
+    }
+
+    #[test]
+    fn admission_progress_updates_only_on_ui_poll_and_preserves_cancelled_model()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _serial = FILE_DIALOG_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let app = PublishedFileDialogTestApp::new()?;
+        let original_len = app.with_state(|state| state.model.len())?;
+        let original_revision = app.with_state(|state| state.model_revision)?;
+        let release = app.with_state(|state| {
+            install_controlled_admission_worker(state, AdmissionProgressPhase::SelectingMode)
+        })?;
+        app.with_state(finalize_admission_start)?;
+        let initial_status = app.with_state(|state| state.ui_status.message_text().to_owned())?;
+        assert!(initial_status.contains("선택한 경로의 유형"));
+        assert!(!initial_status.contains("7개"));
+
+        app.with_state(|state| {
+            publish_controlled_admission_progress(state, AdmissionProgressPhase::SelectingMode, 7);
+            assert_eq!(state.ui_status.message_text(), initial_status);
+            handle_admission_progress(state);
+            assert!(state.ui_status.message_text().contains("7개 검사 시작됨"));
+            assert!(
+                state
+                    .ui_status
+                    .message_text()
+                    .contains("선택한 경로의 유형")
+            );
+
+            publish_controlled_admission_progress(state, AdmissionProgressPhase::Collecting, 0);
+            handle_admission_progress(state);
+            assert!(state.ui_status.message_text().contains("경로를 확인"));
+            assert!(!state.ui_status.message_text().contains("7개"));
+
+            publish_controlled_admission_progress(state, AdmissionProgressPhase::Collecting, 3);
+            handle_admission_progress(state);
+            assert!(state.ui_status.message_text().contains("3개 검사 시작됨"));
+            assert_eq!(state.model.len(), original_len);
+            assert_eq!(state.model_revision, original_revision);
+
+            request_active_worker_cancel(state);
+            assert!(
+                state
+                    .ui_status
+                    .message_text()
+                    .contains("경로 확인 3개 검사 시작 후")
+            );
+        })?;
+        app.with_state(|state| {
+            assert_eq!(
+                cancel_control_state(state.worker_activity()),
+                CancelControlState::Requested
+            );
+        })?;
+
+        let cancel_status = app.with_state(|state| state.ui_status.message_text().to_owned())?;
+        app.with_state(|state| {
+            publish_controlled_admission_progress(state, AdmissionProgressPhase::Collecting, 9);
+            handle_admission_progress(state);
+            assert_eq!(state.ui_status.message_text(), cancel_status);
+            assert_eq!(state.model.len(), original_len);
+            assert_eq!(state.model_revision, original_revision);
+        })?;
+
+        release.send(())?;
+        app.drain_admission()?;
+        app.with_state(|state| {
+            assert_eq!(
+                state.ui_status.message_text(),
+                "경로 추가를 취소했습니다. 목록은 변경되지 않았습니다."
+            );
+            assert_eq!(state.model.len(), original_len);
+            assert_eq!(state.model_revision, original_revision);
+            assert!(state.admission_worker.is_none());
+        })?;
         Ok(())
     }
 
