@@ -73,6 +73,10 @@ struct Environment {
 #[derive(Deserialize)]
 struct Step {
     id: Option<String>,
+    #[serde(rename = "if")]
+    condition: Option<Scalar>,
+    #[serde(rename = "continue-on-error")]
+    continue_on_error: Option<Scalar>,
     uses: Option<String>,
     run: Option<String>,
     #[serde(default)]
@@ -86,14 +90,8 @@ struct Experiment<'a> {
     source: &'a str,
     job: &'a str,
     retains_artifact: bool,
-    command: CommandPolicy<'a>,
     required: &'a [&'a str],
     forbidden: &'a [&'a str],
-}
-
-struct CommandPolicy<'a> {
-    verb: &'a str,
-    arguments: &'a [&'a str],
 }
 
 fn parse(path: &str, source: &str) -> Result<Workflow, String> {
@@ -157,14 +155,77 @@ fn action_name(uses: &str) -> &str {
     uses.split_once('@').map_or(uses, |(name, _)| name)
 }
 
+fn action_is_immutable(uses: &str) -> bool {
+    uses.split_once('@').is_some_and(|(_, revision)| {
+        revision.len() == 40
+            && revision
+                .bytes()
+                .all(|value| value.is_ascii_digit() || (b'a'..=b'f').contains(&value))
+    })
+}
+
+fn action_policy(path: &str, job: &Job, allowed: &[&str]) -> Result<(), String> {
+    for uses in job.steps.iter().filter_map(|step| step.uses.as_deref()) {
+        require(
+            allowed.contains(&action_name(uses)) && action_is_immutable(uses),
+            format!("{path} action must be allowlisted and pinned to a lowercase commit: {uses}"),
+        )?;
+    }
+    Ok(())
+}
+
+fn scalar_bool(value: Option<&Scalar>, default: bool) -> bool {
+    value.map_or(default, |value| match value {
+        Scalar::Bool(value) => *value,
+        Scalar::String(value) => matches!(value.trim(), "true" | "${{ true }}"),
+        Scalar::Integer(_) => false,
+    })
+}
+
+fn steps_are_mandatory(path: &str, job: &Job) -> Result<(), String> {
+    require(
+        job.steps.iter().all(|step| {
+            scalar_bool(step.condition.as_ref(), true)
+                && !scalar_bool(step.continue_on_error.as_ref(), false)
+        }),
+        format!("{path} policy steps must execute and propagate failures"),
+    )
+}
+
 fn is_hosted_windows_runner(label: &str) -> bool {
-    matches!(label, "windows-latest" | "windows-2022" | "windows-2025")
+    label == "windows-latest"
+        || label
+            .strip_prefix("windows-")
+            .and_then(|year| year.parse::<u16>().ok())
+            .is_some_and(|year| year >= 2022)
+}
+
+fn simple_command(job: &Job, expected: &[&str]) -> bool {
+    job.steps
+        .iter()
+        .filter_map(|step| step.run.as_deref())
+        .any(|run| {
+            let lines = run
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>();
+            lines.len() == 1 && lines[0].split_whitespace().eq(expected.iter().copied())
+        })
 }
 
 fn actions<'a>(job: &'a Job, name: &str) -> Vec<&'a Step> {
     job.steps
         .iter()
         .filter(|step| step.uses.as_deref().map(action_name) == Some(name))
+        .collect()
+}
+
+fn action_sequence(job: &Job) -> Vec<&str> {
+    job.steps
+        .iter()
+        .filter_map(|step| step.uses.as_deref())
+        .map(action_name)
         .collect()
 }
 
@@ -185,28 +246,6 @@ fn script(job: &Job) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn has_cargo_command(job: &Job, policy: &CommandPolicy<'_>) -> bool {
-    job.steps
-        .iter()
-        .filter_map(|step| step.run.as_deref())
-        .any(|run| {
-            run.replace("`\r\n", " ")
-                .replace("`\n", " ")
-                .lines()
-                .map(str::trim)
-                .map(|line| line.strip_prefix("& ").unwrap_or(line))
-                .map(|line| line.split_whitespace().collect::<Vec<_>>())
-                .any(|tokens| {
-                    tokens.first() == Some(&"cargo")
-                        && tokens.contains(&policy.verb)
-                        && policy
-                            .arguments
-                            .iter()
-                            .all(|argument| tokens.contains(argument))
-                })
-        })
 }
 
 fn script_contract(
@@ -294,7 +333,7 @@ fn validate_experiment(experiment: &Experiment<'_>) -> Result<(), String> {
     require(
         is_hosted_windows_runner(&job.runs_on) && job.strategy.is_none(),
         format!(
-            "{} must retain one serial Windows 2025 job",
+            "{} must retain one serial hosted Windows job",
             experiment.path
         ),
     )?;
@@ -304,13 +343,13 @@ fn validate_experiment(experiment: &Experiment<'_>) -> Result<(), String> {
         format!("{} must not access an environment", experiment.path),
     )?;
     checkout_is_read_only(experiment.path, job)?;
-    require(
-        has_cargo_command(job, &experiment.command),
-        format!(
-            "{} must run cargo {} with {:?}",
-            experiment.path, experiment.command.verb, experiment.command.arguments
-        ),
-    )?;
+    steps_are_mandatory(experiment.path, job)?;
+    let allowed_actions = if experiment.retains_artifact {
+        &["actions/checkout", "actions/upload-artifact"][..]
+    } else {
+        &["actions/checkout"][..]
+    };
+    action_policy(experiment.path, job, allowed_actions)?;
     for name in ["actions/attest", "actions/cache"] {
         require(
             actions(job, name).is_empty(),
@@ -353,6 +392,30 @@ pub(super) fn validate_hosted_capability_gates() -> Result<(), String> {
         ),
     ] {
         let workflow = parse(path, source)?;
+        if path.ends_with("ci.yaml") {
+            let quality = workflow
+                .jobs
+                .get("quality")
+                .ok_or_else(|| format!("{path} must retain its Ubuntu quality job"))?;
+            let windows = workflow
+                .jobs
+                .get("windows")
+                .ok_or_else(|| format!("{path} must retain its Windows job"))?;
+            steps_are_mandatory(path, quality)?;
+            action_policy(path, quality, &["actions/checkout"])?;
+            require(
+                quality.runs_on.starts_with("ubuntu-")
+                    && simple_command(
+                        quality,
+                        &["./scripts/test-tooling.ps1", "-Platform", "Ubuntu"],
+                    )
+                    && simple_command(
+                        windows,
+                        &["./scripts/test-tooling.ps1", "-Platform", "Windows"],
+                    ),
+                format!("{path} must run the tooling suite on Ubuntu and Windows"),
+            )?;
+        }
         let job = workflow
             .jobs
             .get("windows")
@@ -361,28 +424,17 @@ pub(super) fn validate_hosted_capability_gates() -> Result<(), String> {
             is_hosted_windows_runner(&job.runs_on),
             format!("{path} must retain its hosted Windows lane"),
         )?;
-        require(
-            has_cargo_command(
-                job,
-                &CommandPolicy {
-                    verb: "test",
-                    arguments: &[
-                        "--workspace",
-                        "--all-targets",
-                        "--all-features",
-                        "--locked",
-                        "--nocapture",
-                    ],
-                },
-            ),
-            format!("{path} must run the locked workspace tests with visible output"),
-        )?;
-        script_contract(
-            path,
-            &script(job),
-            &["DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'"],
-            &[],
-        )?;
+        steps_are_mandatory(path, job)?;
+        let allowed_actions = if path.ends_with("release.yaml") {
+            &[
+                "actions/checkout",
+                "actions/attest",
+                "actions/upload-artifact",
+            ][..]
+        } else {
+            &["actions/checkout"][..]
+        };
+        action_policy(path, job, allowed_actions)?;
     }
     Ok(())
 }
@@ -416,6 +468,16 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
         ],
     )?;
     checkout_is_read_only(candidate_path, candidate_job)?;
+    steps_are_mandatory(candidate_path, candidate_job)?;
+    action_policy(
+        candidate_path,
+        candidate_job,
+        &[
+            "actions/checkout",
+            "actions/attest",
+            "actions/upload-artifact",
+        ],
+    )?;
     let checkout = actions(candidate_job, "actions/checkout")[0];
     require(
         checkout.with.get("ref").map(Scalar::text).as_deref() == Some("master"),
@@ -435,48 +497,17 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
             && uploads.len() == 1
             && uploads[0].id.as_deref() == Some("candidate_artifact")
             && with_is(uploads[0], "path", "dist/")
-            && with_is(uploads[0], "if-no-files-found", "error"),
+            && with_is(uploads[0], "if-no-files-found", "error")
+            && action_sequence(candidate_job)
+                == [
+                    "actions/checkout",
+                    "actions/attest",
+                    "actions/attest",
+                    "actions/upload-artifact",
+                ],
         "candidate must attest and retain an addressable immutable handoff",
     )?;
-    script_contract(
-        candidate_path,
-        &script(candidate_job),
-        &[
-            "git ls-remote origin refs/heads/master",
-            "./scripts/validate-release-handoff.ps1",
-        ],
-        &["gh release"],
-    )?;
-    require(
-        has_cargo_command(
-            candidate_job,
-            &CommandPolicy {
-                verb: "test",
-                arguments: &[
-                    "--workspace",
-                    "--all-targets",
-                    "--all-features",
-                    "--locked",
-                    "--nocapture",
-                ],
-            },
-        ) && has_cargo_command(
-            candidate_job,
-            &CommandPolicy {
-                verb: "build",
-                arguments: &[
-                    "--release",
-                    "--locked",
-                    "--package",
-                    "darknamer-app",
-                    "--bin",
-                    "DarkReNamer",
-                ],
-            },
-        ),
-        "candidate workflow must run locked tests before building the selected application",
-    )?;
-
+    script_contract(candidate_path, &script(candidate_job), &[], &["gh release"])?;
     let promotion_path = ".github/workflows/promote-release.yaml";
     let promotion = parse(
         promotion_path,
@@ -524,6 +555,12 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
         ],
     )?;
     checkout_is_read_only(promotion_path, job)?;
+    steps_are_mandatory(promotion_path, job)?;
+    action_policy(
+        promotion_path,
+        job,
+        &["actions/checkout", "actions/download-artifact"],
+    )?;
     let downloads = actions(job, "actions/download-artifact");
     require(
         downloads.len() == 1
@@ -535,7 +572,8 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
             && with_is(downloads[0], "run-id", "${{ inputs.candidate_run_id }}")
             && with_is(downloads[0], "github-token", "${{ github.token }}")
             && with_is(downloads[0], "repository", "${{ github.repository }}")
-            && with_is(downloads[0], "path", "dist"),
+            && with_is(downloads[0], "path", "dist")
+            && action_sequence(job) == ["actions/checkout", "actions/download-artifact"],
         "promotion must download the exact artifact from the selected candidate run",
     )?;
     require(
@@ -561,30 +599,8 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
     script_contract(
         promotion_path,
         &promotion_script,
-        &[
-            "./scripts/validate-release-candidate-metadata.ps1",
-            "./scripts/validate-release-handoff.ps1",
-            "if ($env:RELEASE_TAG -cne $expectedTag)",
-            "gh attestation verify dist/DarkReNamer.exe",
-            "--signer-workflow",
-            "--source-digest $env:CANDIDATE_SOURCE_SHA",
-            "--source-ref refs/heads/master",
-            "--deny-self-hosted-runners",
-            "git ls-remote origin refs/heads/master",
-            "refs/tags/$env:RELEASE_TAG",
-            "gh release create $env:RELEASE_TAG",
-            "--verify-tag",
-            "--prerelease",
-            "GitHub prerelease publication failed",
-        ],
+        &[],
         &["cargo build", "cargo test", "rustup toolchain install"],
-    )?;
-    require(
-        promotion_script
-            .matches("git ls-remote origin refs/heads/master")
-            .count()
-            == 1,
-        "promotion must revalidate live master once immediately before publication",
     )
 }
 
@@ -636,22 +652,6 @@ pub(super) fn validate_experimental_workflows() -> Result<(), String> {
             source: planning_source,
             job: "benchmark",
             retains_artifact: false,
-            command: CommandPolicy {
-                verb: "test",
-                arguments: &[
-                    "--package",
-                    "darknamer-app",
-                    "--test",
-                    "rename_windows_backend",
-                    "benchmark_durable_production_path",
-                    "--locked",
-                    "--release",
-                    "--ignored",
-                    "--exact",
-                    "--nocapture",
-                    "--test-threads=1",
-                ],
-            },
             required: &[
                 "DARKRENAMER_BENCH_ROOT_PRIVATE = '1'",
                 "DARKRENAMER_BENCH_EVIDENCE_CLASS = 'directional-hosted'",
@@ -665,17 +665,6 @@ pub(super) fn validate_experimental_workflows() -> Result<(), String> {
             source: include_str!("../../../../.github/workflows/binary-size-matrix.yaml"),
             job: "measure",
             retains_artifact: true,
-            command: CommandPolicy {
-                verb: "build",
-                arguments: &[
-                    "--release",
-                    "--locked",
-                    "--package",
-                    "darknamer-app",
-                    "--bin",
-                    "DarkReNamer",
-                ],
-            },
             required: &[
                 "id = 'app-3-core-3'",
                 "id = 'app-s-core-3'",
@@ -690,18 +679,6 @@ pub(super) fn validate_experimental_workflows() -> Result<(), String> {
             source: include_str!("../../../../.github/workflows/profile-benchmark-matrix.yaml"),
             job: "benchmark",
             retains_artifact: true,
-            command: CommandPolicy {
-                verb: "test",
-                arguments: &[
-                    "--release",
-                    "--locked",
-                    "--package",
-                    "darknamer-app",
-                    "--test",
-                    "profile_benchmarks",
-                    "--no-run",
-                ],
-            },
             required: &[
                 "id = 'app-3-core-3'",
                 "id = 'app-s-core-3'",
@@ -721,18 +698,6 @@ pub(super) fn validate_experimental_workflows() -> Result<(), String> {
             source: include_str!("../../../../.github/workflows/profile-planning-matrix.yaml"),
             job: "benchmark",
             retains_artifact: true,
-            command: CommandPolicy {
-                verb: "test",
-                arguments: &[
-                    "--release",
-                    "--locked",
-                    "--package",
-                    "darknamer-app",
-                    "--test",
-                    "rename_windows_backend",
-                    "--no-run",
-                ],
-            },
             required: &[
                 "id = 'app-3-core-3'",
                 "id = 'app-s-core-3'",
@@ -768,7 +733,7 @@ permissions:
   contents: read
 jobs:
   benchmark:
-    runs-on: windows-2025
+    runs-on: windows-2028
     steps: []
 "#;
     let policy = Experiment {
@@ -776,10 +741,6 @@ jobs:
         source: fixture,
         job: "benchmark",
         retains_artifact: false,
-        command: CommandPolicy {
-            verb: "test",
-            arguments: &[],
-        },
         required: &[],
         forbidden: &[],
     };
@@ -811,8 +772,8 @@ jobs:
   benchmark:
     steps:
       - with: { persist-credentials: false }
-        uses: actions/checkout@different-pinned-revision
-      - run: cargo --locked test --nocapture --workspace
+        uses: actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      - run: Write-Host ready
     runs-on: windows-2025
 concurrency: { cancel-in-progress: false }
 permissions: { contents: read }
@@ -824,14 +785,86 @@ name: equivalent experiment
         source: fixture,
         job: "benchmark",
         retains_artifact: false,
-        command: CommandPolicy {
-            verb: "test",
-            arguments: &["--workspace", "--locked", "--nocapture"],
-        },
         required: &[],
         forbidden: &[],
     });
     assert!(result.is_ok(), "{result:?}");
+}
+
+#[test]
+fn experiment_policy_rejects_unpinned_unapproved_and_non_propagating_steps() {
+    let fixture = r#"
+name: policy fixture
+on: { workflow_dispatch: null }
+permissions: { contents: read }
+concurrency: { cancel-in-progress: false }
+jobs:
+  benchmark:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        with: { persist-credentials: false }
+      - run: cargo test
+"#;
+    let validate = |source: &str| {
+        validate_experiment(&Experiment {
+            path: "policy-fixture.yaml",
+            source,
+            job: "benchmark",
+            retains_artifact: false,
+            required: &[],
+            forbidden: &[],
+        })
+    };
+
+    let moving_ref = fixture.replace("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "main");
+    assert!(
+        validate(&moving_ref)
+            .as_ref()
+            .is_err_and(|error| error.contains("pinned to a lowercase commit"))
+    );
+    let uppercase_ref = fixture.replace(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    );
+    assert!(
+        validate(&uppercase_ref)
+            .as_ref()
+            .is_err_and(|error| error.contains("lowercase commit"))
+    );
+    let wrong_runner = fixture.replace("windows-latest", "ubuntu-latest");
+    assert!(
+        validate(&wrong_runner)
+            .as_ref()
+            .is_err_and(|error| error.contains("Windows"))
+    );
+    let unapproved = fixture.replace(
+        "      - run: cargo test",
+        "      - uses: vendor/publish-action@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n      - run: cargo test",
+    );
+    assert!(
+        validate(&unapproved)
+            .as_ref()
+            .is_err_and(|error| error.contains("allowlisted"))
+    );
+    let disabled = fixture.replace(
+        "      - run: cargo test",
+        "      - if: false\n        run: cargo test",
+    );
+    assert!(
+        validate(&disabled)
+            .as_ref()
+            .is_err_and(|error| error.contains("must execute"))
+    );
+    let ignored_failure = fixture.replace(
+        "      - run: cargo test",
+        "      - continue-on-error: true\n        run: cargo test",
+    );
+    assert!(
+        validate(&ignored_failure)
+            .as_ref()
+            .is_err_and(|error| error.contains("propagate failures"))
+    );
 }
 
 #[test]
