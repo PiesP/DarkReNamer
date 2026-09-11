@@ -18,7 +18,7 @@ darknamer-core = { path = "../darknamer-core", version = "=0.1.0" }
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "=0.6.2"
-rfd = "=0.17.2"
+rfd = { version = "=0.17.2", default-features = false }
 windows = { version = "=0.62.2", features = [
   "UI_ViewManagement",
   "Win32_System_Com",
