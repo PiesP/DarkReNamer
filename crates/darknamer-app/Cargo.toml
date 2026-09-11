@@ -74,4 +74,6 @@ base64 = "0.23.1"
 embed-resource = "3.0.11"
 
 [dev-dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
 tempfile = "3.27.0"
+yaml_serde = "0.10.7"
