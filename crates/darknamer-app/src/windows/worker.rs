@@ -15,6 +15,8 @@ pub(super) struct PlanWorker {
 
 pub(super) struct AdmissionWorker {
     cancellation: Arc<AtomicBool>,
+    progress: Arc<AdmissionProgress>,
+    last_rendered_progress: Option<usize>,
     receiver: Receiver<AdmissionWorkerResult>,
     pub(super) handle: JoinHandle<()>,
 }
@@ -34,6 +36,62 @@ impl PlanWorker {
 impl AdmissionWorker {
     pub(super) fn cancellation_requested(&self) -> bool {
         self.cancellation.load(Ordering::Acquire)
+    }
+}
+
+const ADMISSION_PROGRESS_COLLECTING_FLAG: usize = 1 << (usize::BITS - 1);
+const ADMISSION_PROGRESS_COUNT_MASK: usize = !ADMISSION_PROGRESS_COLLECTING_FLAG;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum AdmissionProgressPhase {
+    SelectingMode,
+    Collecting,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AdmissionProgressSnapshot {
+    phase: AdmissionProgressPhase,
+    inspected: usize,
+}
+
+pub(super) struct AdmissionProgress {
+    snapshot: AtomicUsize,
+}
+
+impl AdmissionProgress {
+    fn new(phase: AdmissionProgressPhase) -> Self {
+        Self {
+            snapshot: AtomicUsize::new(Self::encode(phase, 0)),
+        }
+    }
+
+    const fn encode(phase: AdmissionProgressPhase, inspected: usize) -> usize {
+        let inspected = inspected & ADMISSION_PROGRESS_COUNT_MASK;
+        match phase {
+            AdmissionProgressPhase::SelectingMode => inspected,
+            AdmissionProgressPhase::Collecting => ADMISSION_PROGRESS_COLLECTING_FLAG | inspected,
+        }
+    }
+
+    const fn decode(snapshot: usize) -> AdmissionProgressSnapshot {
+        AdmissionProgressSnapshot {
+            phase: if snapshot & ADMISSION_PROGRESS_COLLECTING_FLAG == 0 {
+                AdmissionProgressPhase::SelectingMode
+            } else {
+                AdmissionProgressPhase::Collecting
+            },
+            inspected: snapshot & ADMISSION_PROGRESS_COUNT_MASK,
+        }
+    }
+
+    fn publish(&self, phase: AdmissionProgressPhase, inspected: usize) {
+        self.snapshot
+            .store(Self::encode(phase, inspected), Ordering::Release);
+    }
+
+    fn load(&self) -> (usize, AdmissionProgressSnapshot) {
+        let encoded = self.snapshot.load(Ordering::Acquire);
+        (encoded, Self::decode(encoded))
     }
 }
 
@@ -1110,15 +1168,18 @@ pub(super) fn request_active_worker_cancel(state: &mut AppState) {
     let progress = match active_worker_kind(state.worker_activity()) {
         Some(ActiveWorkerKind::Admission) => state.admission_worker.as_ref().map(|worker| {
             worker.cancellation.store(true, Ordering::Release);
-            "경로 추가 취소를 요청했습니다. 현재 확인 경계가 끝나면 중단합니다..."
+            let (_, snapshot) = worker.progress.load();
+            admission_cancellation_status(snapshot)
         }),
         Some(ActiveWorkerKind::Plan) => state.plan_worker.as_ref().map(|worker| {
             worker.cancellation.request();
             "파일 변경 계획 취소를 요청했습니다. 현재 파일 시스템 확인 경계가 끝나면 중단합니다..."
+                .to_owned()
         }),
         Some(ActiveWorkerKind::Apply) => state.apply_worker.as_ref().map(|worker| {
             worker.cancellation.request();
             "적용 취소를 요청했습니다. 현재 원시 변경 경계가 끝나면 안전하게 복원합니다..."
+                .to_owned()
         }),
         None => None,
     };
@@ -1155,6 +1216,13 @@ pub(super) fn start_admission_worker(
     }
     let cancellation = Arc::new(AtomicBool::new(false));
     let worker_cancellation = Arc::clone(&cancellation);
+    let initial_progress_phase = if mode.is_some() {
+        AdmissionProgressPhase::Collecting
+    } else {
+        AdmissionProgressPhase::SelectingMode
+    };
+    let progress = Arc::new(AdmissionProgress::new(initial_progress_phase));
+    let worker_progress = Arc::clone(&progress);
     let (sender, receiver) = sync_channel(1);
     // SAFETY: window is the live top-level HWND and the timer has no callback.
     if unsafe { SetTimer(window, APPLY_POLL_TIMER_ID, 100, None) } == 0 {
@@ -1180,10 +1248,11 @@ pub(super) fn start_admission_worker(
                     mode
                 } else {
                     let mut directory = None;
-                    for path in paths.iter().take(capacity) {
+                    for (index, path) in paths.iter().take(capacity).enumerate() {
                         if worker_cancellation.load(Ordering::Acquire) {
                             return AdmissionWorkerResult::Cancelled;
                         }
+                        worker_progress.publish(AdmissionProgressPhase::SelectingMode, index + 1);
                         if path.is_absolute()
                             && adapter.validate_path(path).is_ok()
                             && adapter.metadata(path).is_ok_and(|metadata| {
@@ -1202,16 +1271,22 @@ pub(super) fn start_admission_worker(
                             directory,
                         };
                     }
+                    worker_progress.publish(AdmissionProgressPhase::Collecting, 0);
                     AdmissionMode::Direct
                 };
-                match collect_admission_cancellable_with_budget(
+                match crate::admission::collect_admission_cancellable_with_budget_and_progress(
                     &adapter,
                     paths,
                     mode,
                     capacity,
                     path_budget,
                     |left, right| compare_windows(&legacy_path(left), &legacy_path(right)),
-                    || worker_cancellation.load(Ordering::Acquire),
+                    (
+                        || worker_cancellation.load(Ordering::Acquire),
+                        |inspected| {
+                            worker_progress.publish(AdmissionProgressPhase::Collecting, inspected);
+                        },
+                    ),
                 ) {
                     Ok(report) => AdmissionWorkerResult::Finished { revision, report },
                     Err(_cancelled) => AdmissionWorkerResult::Cancelled,
@@ -1232,6 +1307,8 @@ pub(super) fn start_admission_worker(
     state.mutation_locked = true;
     state.admission_worker = Some(AdmissionWorker {
         cancellation,
+        progress,
+        last_rendered_progress: None,
         receiver,
         handle,
     });
@@ -1239,11 +1316,102 @@ pub(super) fn start_admission_worker(
 }
 
 pub(super) fn finalize_admission_start(state: &mut AppState) {
-    if state.admission_worker.is_none() {
+    let Some(worker) = state.admission_worker.as_ref() else {
+        return;
+    };
+    let (_, snapshot) = worker.progress.load();
+    state.set_progress_status(admission_progress_status(AdmissionProgressSnapshot {
+        inspected: 0,
+        ..snapshot
+    }));
+    update_controls(state);
+}
+
+pub(super) fn handle_admission_progress(state: &mut AppState) {
+    if state.close_pending {
         return;
     }
-    state.set_progress_status("선택한 경로를 확인하고 있습니다...");
-    update_controls(state);
+    let snapshot = {
+        let Some(worker) = state.admission_worker.as_mut() else {
+            return;
+        };
+        if worker.cancellation_requested() || worker.handle.is_finished() {
+            return;
+        }
+        let (encoded, snapshot) = worker.progress.load();
+        if worker.last_rendered_progress == Some(encoded) {
+            return;
+        }
+        worker.last_rendered_progress = Some(encoded);
+        snapshot
+    };
+    state.set_progress_status(admission_progress_status(snapshot));
+}
+
+fn admission_progress_status(snapshot: AdmissionProgressSnapshot) -> String {
+    let phase = match snapshot.phase {
+        AdmissionProgressPhase::SelectingMode => "선택한 경로의 유형을 확인하고 있습니다",
+        AdmissionProgressPhase::Collecting => "경로를 확인하고 있습니다",
+    };
+    if snapshot.inspected == 0 {
+        format!("{phase}... (취소 가능)")
+    } else {
+        format!("{phase}: {}개 검사 시작됨 (취소 가능)", snapshot.inspected)
+    }
+}
+
+fn admission_cancellation_status(snapshot: AdmissionProgressSnapshot) -> String {
+    let phase = match snapshot.phase {
+        AdmissionProgressPhase::SelectingMode => "선택 유형 확인",
+        AdmissionProgressPhase::Collecting => "경로 확인",
+    };
+    if snapshot.inspected == 0 {
+        "경로 추가 취소를 요청했습니다. 현재 확인 경계가 끝나면 중단합니다...".to_owned()
+    } else {
+        format!(
+            "경로 추가 취소를 요청했습니다. {phase} {}개 검사 시작 후 현재 확인 경계가 끝나면 중단합니다...",
+            snapshot.inspected
+        )
+    }
+}
+
+#[cfg(test)]
+pub(super) fn install_controlled_admission_worker(
+    state: &mut AppState,
+    phase: AdmissionProgressPhase,
+) -> std::sync::mpsc::SyncSender<()> {
+    assert!(state.admission_worker.is_none());
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let progress = Arc::new(AdmissionProgress::new(phase));
+    let (sender, receiver) = sync_channel(1);
+    let (release_sender, release_receiver) = sync_channel(0);
+    let handle = thread::spawn(move || {
+        let _released = release_receiver.recv();
+        let _sent = sender.send(AdmissionWorkerResult::Cancelled);
+    });
+    state.mutation_locked = true;
+    state.admission_worker = Some(AdmissionWorker {
+        cancellation,
+        progress,
+        last_rendered_progress: None,
+        receiver,
+        handle,
+    });
+    release_sender
+}
+
+#[cfg(test)]
+pub(super) fn publish_controlled_admission_progress(
+    state: &AppState,
+    phase: AdmissionProgressPhase,
+    inspected: usize,
+) {
+    state
+        .admission_worker
+        .as_ref()
+        .expect("controlled admission worker should be installed")
+        .progress
+        .publish(phase, inspected);
 }
 
 pub(super) fn finalize_admission_start_failure(state: &mut AppState) {

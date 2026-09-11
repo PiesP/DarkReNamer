@@ -587,13 +587,49 @@ pub fn collect_admission_cancellable(
 /// when the caller requests cancellation.
 pub fn collect_admission_cancellable_with_budget(
     adapter: &dyn AdmissionAdapter,
+    roots: Vec<PathBuf>,
+    mode: AdmissionMode,
+    capacity: usize,
+    path_budget: PathBudget,
+    compare_paths: impl Fn(&Path, &Path) -> Ordering + Copy,
+    cancellation_requested: impl Fn() -> bool,
+) -> Result<AdmissionReport, AdmissionCancelled> {
+    collect_admission_cancellable_with_budget_and_progress(
+        adapter,
+        roots,
+        mode,
+        capacity,
+        path_budget,
+        compare_paths,
+        (cancellation_requested, |_| {}),
+    )
+}
+
+/// Collects sources with cooperative cancellation and inspection progress.
+///
+/// The callback pair contains the cancellation probe followed by an observer
+/// that receives the number of candidates whose inspection has started. The
+/// observed count does not indicate that any candidate was admitted or
+/// committed to a caller-owned model.
+///
+/// # Errors
+///
+/// Returns [`AdmissionCancelled`] without exposing a partial report when the
+/// caller requests cancellation.
+pub(crate) fn collect_admission_cancellable_with_budget_and_progress<C, P>(
+    adapter: &dyn AdmissionAdapter,
     mut roots: Vec<PathBuf>,
     mode: AdmissionMode,
     capacity: usize,
     mut path_budget: PathBudget,
     compare_paths: impl Fn(&Path, &Path) -> Ordering + Copy,
-    cancellation_requested: impl Fn() -> bool,
-) -> Result<AdmissionReport, AdmissionCancelled> {
+    callbacks: (C, P),
+) -> Result<AdmissionReport, AdmissionCancelled>
+where
+    C: Fn() -> bool,
+    P: FnMut(usize),
+{
+    let (cancellation_requested, mut inspection_started) = callbacks;
     let capacity = capacity.min(MAX_ADMITTED_SOURCES);
     let mut report = AdmissionReport::default();
     if cancellation_requested() {
@@ -635,6 +671,7 @@ pub fn collect_admission_cancellable_with_budget(
             break;
         }
         inspected += 1;
+        inspection_started(inspected);
         if !path.is_absolute() {
             report
                 .issues
@@ -795,6 +832,142 @@ pub fn collect_admission_cancellable_with_budget(
         ));
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use std::cell::{Cell, RefCell};
+
+    use super::*;
+
+    struct TestAdapter;
+
+    impl AdmissionAdapter for TestAdapter {
+        fn validate_path(&self, _path: &Path) -> Result<(), AdmissionAdapterError> {
+            Ok(())
+        }
+
+        fn metadata(&self, path: &Path) -> Result<AdmissionMetadata, AdmissionAdapterError> {
+            Ok(AdmissionMetadata {
+                is_directory: path == root(),
+                is_reparse_point: false,
+                directory_identity: (path == root()).then(|| EntryIdentity::new(1, 1)),
+                actual_size: 1,
+                created: 2,
+                modified: 3,
+            })
+        }
+
+        fn read_children(
+            &self,
+            path: &Path,
+            budget: AdmissionReadBudget,
+        ) -> Result<AdmissionChildren, AdmissionAdapterError> {
+            if path != root() {
+                return Err(AdmissionAdapterError::new(
+                    AdmissionOperation::ReadDirectory,
+                ));
+            }
+            let mut paths = vec![path.join("a.txt"), path.join("b.txt")];
+            let truncated = paths.len() > budget.path_limit();
+            paths.truncate(budget.path_limit());
+            Ok(AdmissionChildren {
+                paths,
+                had_errors: false,
+                truncated,
+                path_budget_exhausted: false,
+            })
+        }
+
+        fn legacy_path(&self, path: &Path) -> LegacyText {
+            LegacyText::from(path.to_string_lossy().as_ref())
+        }
+    }
+
+    fn root() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\admission-progress")
+        } else {
+            PathBuf::from("/admission-progress")
+        }
+    }
+
+    fn compare(left: &Path, right: &Path) -> Ordering {
+        left.cmp(right)
+    }
+
+    #[test]
+    fn direct_progress_is_monotonic_and_finishes_at_the_inspected_count() {
+        let root = root();
+        let paths = (0..3)
+            .map(|index| root.join(format!("direct-{index}.txt")))
+            .collect::<Vec<_>>();
+        let observed = RefCell::new(Vec::new());
+
+        let report = collect_admission_cancellable_with_budget_and_progress(
+            &TestAdapter,
+            paths,
+            AdmissionMode::Direct,
+            MAX_ADMITTED_SOURCES,
+            PathBudget::new(),
+            compare,
+            (|| false, |inspected| observed.borrow_mut().push(inspected)),
+        )
+        .unwrap_or_default();
+
+        assert_eq!(report.items.len(), 3);
+        assert_eq!(*observed.borrow(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn recursive_progress_counts_every_started_inspection() {
+        let root = root();
+        let children = [root.join("a.txt"), root.join("b.txt")];
+        let observed = RefCell::new(Vec::new());
+
+        let report = collect_admission_cancellable_with_budget_and_progress(
+            &TestAdapter,
+            vec![root],
+            AdmissionMode::Recurse,
+            MAX_ADMITTED_SOURCES,
+            PathBudget::new(),
+            compare,
+            (|| false, |inspected| observed.borrow_mut().push(inspected)),
+        )
+        .unwrap_or_default();
+
+        assert_eq!(report.items.len(), children.len());
+        assert_eq!(*observed.borrow(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn cancellation_after_progress_returns_no_partial_report() {
+        let root = root();
+        let paths = (0..4)
+            .map(|index| root.join(format!("cancel-{index}.txt")))
+            .collect::<Vec<_>>();
+        let cancel = Cell::new(false);
+        let observed = RefCell::new(Vec::new());
+
+        let result = collect_admission_cancellable_with_budget_and_progress(
+            &TestAdapter,
+            paths,
+            AdmissionMode::Direct,
+            MAX_ADMITTED_SOURCES,
+            PathBudget::new(),
+            compare,
+            (
+                || cancel.get(),
+                |inspected| {
+                    observed.borrow_mut().push(inspected);
+                    cancel.set(inspected == 2);
+                },
+            ),
+        );
+
+        assert_eq!(result, Err(AdmissionCancelled));
+        assert_eq!(*observed.borrow(), vec![1, 2]);
+    }
 }
 
 #[cfg(windows)]
