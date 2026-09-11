@@ -174,19 +174,32 @@ fn action_policy(path: &str, job: &Job, allowed: &[&str]) -> Result<(), String> 
     Ok(())
 }
 
-fn scalar_bool(value: Option<&Scalar>, default: bool) -> bool {
-    value.map_or(default, |value| match value {
-        Scalar::Bool(value) => *value,
-        Scalar::String(value) => matches!(value.trim(), "true" | "${{ true }}"),
+fn scalar_is_explicit_boolean(value: &Scalar, expected: bool) -> bool {
+    match value {
+        Scalar::Bool(value) => *value == expected,
+        Scalar::String(value) => {
+            let expected = if expected { "true" } else { "false" };
+            let value = value.trim();
+            value == expected
+                || value
+                    .strip_prefix("${{")
+                    .and_then(|value| value.strip_suffix("}}"))
+                    .is_some_and(|value| value.trim() == expected)
+        }
         Scalar::Integer(_) => false,
-    })
+    }
 }
 
 fn steps_are_mandatory(path: &str, job: &Job) -> Result<(), String> {
     require(
         job.steps.iter().all(|step| {
-            scalar_bool(step.condition.as_ref(), true)
-                && !scalar_bool(step.continue_on_error.as_ref(), false)
+            step.condition
+                .as_ref()
+                .is_none_or(|value| scalar_is_explicit_boolean(value, true))
+                && step
+                    .continue_on_error
+                    .as_ref()
+                    .is_none_or(|value| scalar_is_explicit_boolean(value, false))
         }),
         format!("{path} policy steps must execute and propagate failures"),
     )
@@ -792,7 +805,7 @@ name: equivalent experiment
 }
 
 #[test]
-fn experiment_policy_rejects_unpinned_unapproved_and_non_propagating_steps() {
+fn experiment_policy_rejects_unpinned_actions_and_ambiguous_step_controls() {
     let fixture = r#"
 name: policy fixture
 on: { workflow_dispatch: null }
@@ -847,24 +860,39 @@ jobs:
             .as_ref()
             .is_err_and(|error| error.contains("allowlisted"))
     );
-    let disabled = fixture.replace(
-        "      - run: cargo test",
-        "      - if: false\n        run: cargo test",
-    );
-    assert!(
-        validate(&disabled)
-            .as_ref()
-            .is_err_and(|error| error.contains("must execute"))
-    );
-    let ignored_failure = fixture.replace(
-        "      - run: cargo test",
-        "      - continue-on-error: true\n        run: cargo test",
-    );
-    assert!(
-        validate(&ignored_failure)
-            .as_ref()
-            .is_err_and(|error| error.contains("propagate failures"))
-    );
+    let replace_step = |attributes: &str| {
+        fixture.replace(
+            "      - run: cargo test",
+            &format!("      - {attributes}\n        run: cargo test"),
+        )
+    };
+
+    assert!(validate(fixture).is_ok());
+    for attributes in [
+        "if: true\n        continue-on-error: false",
+        "if: ${{true}}\n        continue-on-error: ${{    false    }}",
+        "if: \"true\"\n        continue-on-error: \"false\"",
+    ] {
+        let source = replace_step(attributes);
+        assert!(validate(&source).is_ok(), "must accept {attributes}");
+    }
+
+    for attributes in [
+        "if: false",
+        "if: ${{ 1 == 1 }}",
+        "if: 1",
+        "continue-on-error: true",
+        "continue-on-error: ${{ 1 == 1 }}",
+        "continue-on-error: 0",
+    ] {
+        let source = replace_step(attributes);
+        assert!(
+            validate(&source)
+                .as_ref()
+                .is_err_and(|error| error.contains("must execute and propagate failures")),
+            "must reject {attributes}"
+        );
+    }
 }
 
 #[test]
