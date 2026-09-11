@@ -1406,12 +1406,13 @@ pub(super) fn publish_controlled_admission_progress(
     phase: AdmissionProgressPhase,
     inspected: usize,
 ) {
-    state
-        .admission_worker
-        .as_ref()
-        .expect("controlled admission worker should be installed")
-        .progress
-        .publish(phase, inspected);
+    assert!(
+        state.admission_worker.is_some(),
+        "controlled admission worker should be installed"
+    );
+    if let Some(worker) = state.admission_worker.as_ref() {
+        worker.progress.publish(phase, inspected);
+    }
 }
 
 pub(super) fn finalize_admission_start_failure(state: &mut AppState) {
