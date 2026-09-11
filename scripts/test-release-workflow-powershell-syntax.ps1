@@ -258,9 +258,13 @@ function Test-CommandContract {
         return $false
     }
     foreach ($option in $RequiredOptions.GetEnumerator()) {
-        $index = [Array]::IndexOf($before, [string] $option.Key)
-        if ($index -lt 0 -or $index + 1 -ge $before.Count -or
-            $before[$index + 1] -cne $option.Value) {
+        $indexes = @(for ($index = 0; $index -lt $before.Count; $index++) {
+            if ($before[$index] -ceq $option.Key) {
+                $index
+            }
+        })
+        if ($indexes.Count -ne 1 -or $indexes[0] + 1 -ge $before.Count -or
+            $before[$indexes[0] + 1] -cne $option.Value) {
             return $false
         }
     }
@@ -328,6 +332,25 @@ function Assert-LineOrder {
 
     for ($index = 1; $index -lt $Lines.Count; $index++) {
         if ($Lines[$index - 1] -ge $Lines[$index]) {
+            throw $Message
+        }
+    }
+}
+
+function Assert-SourceOrder {
+    param(
+        [Parameter(Mandatory)]
+        [object[]] $Records,
+        [Parameter(Mandatory)]
+        [string] $Message
+    )
+
+    for ($index = 1; $index -lt $Records.Count; $index++) {
+        $previous = $Records[$index - 1]
+        $current = $Records[$index]
+        if ($previous.line -gt $current.line -or
+            ($previous.line -eq $current.line -and
+            $previous.ast.Extent.StartOffset -ge $current.ast.Extent.StartOffset)) {
             throw $Message
         }
     }
@@ -470,6 +493,41 @@ function Assert-Assignment {
     }
 }
 
+function Assert-SingleAssignment {
+    param(
+        [Parameter(Mandatory)]
+        [object[]] $Blocks,
+        [Parameter(Mandatory)]
+        [string] $Left,
+        [Parameter(Mandatory)]
+        [string] $Right,
+        [Parameter(Mandatory)]
+        [string] $Message
+    )
+
+    $records = @()
+    foreach ($block in $Blocks) {
+        $assignments = @($block.ast.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.AssignmentStatementAst]
+        }, $true))
+        foreach ($assignment in $assignments) {
+            if ((Test-IsExecutableNode -Node $assignment -Root $block.ast) -and
+                (ConvertTo-NormalizedAstText -Text $assignment.Left.Extent.Text) -ceq $Left) {
+                $records += [pscustomobject]@{
+                    line = $block.line
+                    ast = $assignment
+                }
+            }
+        }
+    }
+    if ($records.Count -ne 1 -or
+        (ConvertTo-NormalizedAstText -Text $records[0].ast.Right.Extent.Text) -cne $Right) {
+        throw "$Message Found $($records.Count)."
+    }
+    $records[0]
+}
+
 function Assert-HashtableContract {
     param(
         [Parameter(Mandatory)]
@@ -523,11 +581,12 @@ function Assert-BinaryGuard {
         [Management.Automation.Language.TokenKind] $Operator,
         [Parameter(Mandatory)]
         [string] $Right,
+        [switch] $PassThru,
         [Parameter(Mandatory)]
         [string] $Message
     )
 
-    $matches = 0
+    $matches = @()
     foreach ($block in $Blocks) {
         $expressions = @($block.ast.FindAll({
             param($node)
@@ -549,12 +608,18 @@ function Assert-BinaryGuard {
                 param($node)
                 $node -is [Management.Automation.Language.ThrowStatementAst]
             }, $true)) {
-                $matches++
+                $matches += [pscustomobject]@{
+                    line = $block.line
+                    ast = $expression
+                }
             }
         }
     }
-    if ($matches -ne 1) {
-        throw "$Message Found $matches."
+    if ($matches.Count -ne 1) {
+        throw "$Message Found $($matches.Count)."
+    }
+    if ($PassThru) {
+        $matches[0]
     }
 }
 
@@ -780,18 +845,30 @@ $null = Assert-OneCommand `
     -Name 'cargo' `
     -Subcommand 'build' `
     -BeforeDelimiter @('build', '--release', '--locked', '--package', 'darknamer-app', '--bin', 'DarkReNamer') `
+    -RequiredOptions @{ '--config' = '$configPath' } `
     -Message 'Binary-size workflow must build the selected release executable.'
 $null = Assert-OneCommand `
     -Commands $profileBenchmarkCommands `
     -Name 'cargo' `
     -Subcommand 'test' `
     -BeforeDelimiter @('test', '--release', '--locked', '--package', 'darknamer-app', '--test', 'profile_benchmarks', '--no-run') `
+    -RequiredOptions @{ '--config' = '$configPath' } `
     -Message 'Profile benchmark must compile its selected harness without running it through Cargo.'
+$null = Assert-OneCommand `
+    -Commands $profileBenchmarkCommands `
+    -Name 'cargo' `
+    -Subcommand 'test' `
+    -BeforeDelimiter @('test', '--release', '--locked', '--package', 'darknamer-app', '--test', 'profile_benchmarks', 'benchmark_release_profile') `
+    -AfterDelimiter @('--ignored', '--exact', '--nocapture', '--test-threads=1') `
+    -RequiredOptions @{ '--config' = '$state.config_path' } `
+    -RequireDelimiter `
+    -Message 'Profile benchmark must execute the measured release profile with visible output.'
 $null = Assert-OneCommand `
     -Commands $profilePlanningCommands `
     -Name 'cargo' `
     -Subcommand 'test' `
     -BeforeDelimiter @('test', '--release', '--locked', '--package', 'darknamer-app', '--test', 'rename_windows_backend', '--no-run') `
+    -RequiredOptions @{ '--config' = '$configPath' } `
     -Message 'Profile planning workflow must compile its selected harness before direct execution.'
 $null = Assert-OneCommand `
     -Commands $profilePlanningCommands `
@@ -799,6 +876,7 @@ $null = Assert-OneCommand `
     -Subcommand 'test' `
     -BeforeDelimiter @('test', '--release', '--locked', '--package', 'darknamer-app', '--test', 'rename_windows_backend', 'benchmark_durable_production_path') `
     -AfterDelimiter @('--ignored', '--exact', '--nocapture', '--test-threads=1') `
+    -RequiredOptions @{ '--config' = '$state.config_path' } `
     -RequireDelimiter `
     -Message 'Profile planning workflow must execute the exact ignored benchmark with visible output.'
 
@@ -1123,27 +1201,38 @@ Assert-BinaryGuard `
     -Right "'parent-validation-v1'" `
     -Message 'Profile planning must reject a mismatched instrumentation revision.'
 
-Assert-Assignment `
+$cargoAssignment = Assert-SingleAssignment `
     -Blocks $workflowBlocks[$promotionPath] `
     -Left '$cargo' `
     -Right 'Get-Content -LiteralPath Cargo.toml -Raw' `
     -Message 'Promotion must read the selected Cargo workspace version.'
-Assert-Assignment `
+$versionAssignment = Assert-SingleAssignment `
     -Blocks $workflowBlocks[$promotionPath] `
     -Left '$versionMatches' `
     -Right '[regex]::Matches($cargo, ''(?m)^version = "([^"]+)"\r?$'')' `
     -Message 'Promotion must derive one semantic version from Cargo.toml.'
-Assert-Assignment `
+$expectedTagAssignment = Assert-SingleAssignment `
     -Blocks $workflowBlocks[$promotionPath] `
     -Left '$expectedTag' `
     -Right '"v$($versionMatches[0].Groups[1].Value)"' `
     -Message 'Promotion must derive its expected tag from the Cargo version.'
-Assert-BinaryGuard `
+$tagGuard = Assert-BinaryGuard `
     -Blocks $workflowBlocks[$promotionPath] `
     -Left '$env:RELEASE_TAG' `
     -Operator ([Management.Automation.Language.TokenKind]::Cne) `
     -Right '$expectedTag' `
+    -PassThru `
     -Message 'Promotion must reject a tag that differs from the Cargo version.'
+Assert-SourceOrder `
+    -Records @(
+        $cargoAssignment,
+        $versionAssignment,
+        $expectedTagAssignment,
+        $tagGuard,
+        $promotionMetadata,
+        $promotionPublish
+    ) `
+    -Message 'Cargo version parsing, tag validation, candidate validation, and publication must remain ordered.'
 Assert-OutputContract `
     -Blocks $workflowBlocks[$promotionPath] `
     -LiteralPath 'release-notes.md' `
@@ -1189,6 +1278,21 @@ Assert-Fails -Action {
         -AfterDelimiter @('--nocapture') `
         -RequireDelimiter `
         -Message 'subcommand fixture'
+} -ExpectedFragment 'Found 0'
+
+$configFixture = @(New-FixtureBlocks -Script @'
+cargo --config $unmeasuredPath test --release --locked --package darknamer-app --test profile_benchmarks --no-run
+cargo --config $configPath test --config $unmeasuredPath --release --locked --package darknamer-app --test profile_benchmarks --no-run
+'@)
+$configCommands = @(Get-ExecutableCommands -Blocks $configFixture)
+Assert-Fails -Action {
+    $null = Assert-OneCommand `
+        -Commands $configCommands `
+        -Name 'cargo' `
+        -Subcommand 'test' `
+        -BeforeDelimiter @('test', '--release', '--locked', '--package', 'darknamer-app', '--test', 'profile_benchmarks', '--no-run') `
+        -RequiredOptions @{ '--config' = '$configPath' } `
+        -Message 'config fixture'
 } -ExpectedFragment 'Found 0'
 
 $uninvokedFixture = @(New-FixtureBlocks -Script @'
@@ -1293,6 +1397,23 @@ Assert-Fails -Action {
         -Right '$expectedTag' `
         -Message 'tag authority fixture'
 } -ExpectedFragment 'Found 0'
+
+$tagOverwriteFixture = @(New-FixtureBlocks -Script @'
+$cargo = Get-Content -LiteralPath Cargo.toml -Raw
+$versionMatches = [regex]::Matches($cargo, '(?m)^version = "([^"]+)"\r?$')
+$expectedTag = "v$($versionMatches[0].Groups[1].Value)"
+$expectedTag = $env:RELEASE_TAG
+if ($env:RELEASE_TAG -cne $expectedTag) {
+    throw 'mismatch'
+}
+'@)
+Assert-Fails -Action {
+    $null = Assert-SingleAssignment `
+        -Blocks $tagOverwriteFixture `
+        -Left '$expectedTag' `
+        -Right '"v$($versionMatches[0].Groups[1].Value)"' `
+        -Message 'tag overwrite fixture'
+} -ExpectedFragment 'Found 2'
 
 $disclosureFixture = @(New-FixtureBlocks -Script @'
 $sourceComplete = 'Source-complete Windows prerelease.'
