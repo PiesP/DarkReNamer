@@ -86,8 +86,14 @@ struct Experiment<'a> {
     source: &'a str,
     job: &'a str,
     retains_artifact: bool,
+    command: CommandPolicy<'a>,
     required: &'a [&'a str],
     forbidden: &'a [&'a str],
+}
+
+struct CommandPolicy<'a> {
+    verb: &'a str,
+    arguments: &'a [&'a str],
 }
 
 fn parse(path: &str, source: &str) -> Result<Workflow, String> {
@@ -151,6 +157,10 @@ fn action_name(uses: &str) -> &str {
     uses.split_once('@').map_or(uses, |(name, _)| name)
 }
 
+fn is_hosted_windows_runner(label: &str) -> bool {
+    matches!(label, "windows-latest" | "windows-2022" | "windows-2025")
+}
+
 fn actions<'a>(job: &'a Job, name: &str) -> Vec<&'a Step> {
     job.steps
         .iter()
@@ -175,6 +185,28 @@ fn script(job: &Job) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn has_cargo_command(job: &Job, policy: &CommandPolicy<'_>) -> bool {
+    job.steps
+        .iter()
+        .filter_map(|step| step.run.as_deref())
+        .any(|run| {
+            run.replace("`\r\n", " ")
+                .replace("`\n", " ")
+                .lines()
+                .map(str::trim)
+                .map(|line| line.strip_prefix("& ").unwrap_or(line))
+                .map(|line| line.split_whitespace().collect::<Vec<_>>())
+                .any(|tokens| {
+                    tokens.first() == Some(&"cargo")
+                        && tokens.contains(&policy.verb)
+                        && policy
+                            .arguments
+                            .iter()
+                            .all(|argument| tokens.contains(argument))
+                })
+        })
 }
 
 fn script_contract(
@@ -260,7 +292,7 @@ fn validate_experiment(experiment: &Experiment<'_>) -> Result<(), String> {
     )?;
     let job = only_job(experiment.path, &workflow, experiment.job)?;
     require(
-        job.runs_on == "windows-2025" && job.strategy.is_none(),
+        is_hosted_windows_runner(&job.runs_on) && job.strategy.is_none(),
         format!(
             "{} must retain one serial Windows 2025 job",
             experiment.path
@@ -272,6 +304,13 @@ fn validate_experiment(experiment: &Experiment<'_>) -> Result<(), String> {
         format!("{} must not access an environment", experiment.path),
     )?;
     checkout_is_read_only(experiment.path, job)?;
+    require(
+        has_cargo_command(job, &experiment.command),
+        format!(
+            "{} must run cargo {} with {:?}",
+            experiment.path, experiment.command.verb, experiment.command.arguments
+        ),
+    )?;
     for name in ["actions/attest", "actions/cache"] {
         require(
             actions(job, name).is_empty(),
@@ -319,16 +358,29 @@ pub(super) fn validate_hosted_capability_gates() -> Result<(), String> {
             .get("windows")
             .ok_or_else(|| format!("{path} must retain its Windows job"))?;
         require(
-            job.runs_on == "windows-2025",
-            format!("{path} must retain its Windows 2025 lane"),
+            is_hosted_windows_runner(&job.runs_on),
+            format!("{path} must retain its hosted Windows lane"),
+        )?;
+        require(
+            has_cargo_command(
+                job,
+                &CommandPolicy {
+                    verb: "test",
+                    arguments: &[
+                        "--workspace",
+                        "--all-targets",
+                        "--all-features",
+                        "--locked",
+                        "--nocapture",
+                    ],
+                },
+            ),
+            format!("{path} must run the locked workspace tests with visible output"),
         )?;
         script_contract(
             path,
             &script(job),
-            &[
-                "DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'",
-                "cargo test --workspace --all-targets --all-features --locked -- --nocapture",
-            ],
+            &["DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'"],
             &[],
         )?;
     }
@@ -350,8 +402,8 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
     let candidate_job = only_job(candidate_path, &candidate, "windows")?;
     require(
         candidate_job.condition.as_deref() == Some("github.ref == 'refs/heads/master'")
-            && candidate_job.runs_on == "windows-2025",
-        "candidate workflow must run only on master in its Windows 2025 lane",
+            && is_hosted_windows_runner(&candidate_job.runs_on),
+        "candidate workflow must run only on master in its hosted Windows lane",
     )?;
     permissions(
         candidate_path,
@@ -391,11 +443,38 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
         &script(candidate_job),
         &[
             "git ls-remote origin refs/heads/master",
-            "cargo test --workspace --all-targets --all-features --locked -- --nocapture",
-            "cargo build --release --locked --package darknamer-app --bin DarkReNamer",
             "./scripts/validate-release-handoff.ps1",
         ],
         &["gh release"],
+    )?;
+    require(
+        has_cargo_command(
+            candidate_job,
+            &CommandPolicy {
+                verb: "test",
+                arguments: &[
+                    "--workspace",
+                    "--all-targets",
+                    "--all-features",
+                    "--locked",
+                    "--nocapture",
+                ],
+            },
+        ) && has_cargo_command(
+            candidate_job,
+            &CommandPolicy {
+                verb: "build",
+                arguments: &[
+                    "--release",
+                    "--locked",
+                    "--package",
+                    "darknamer-app",
+                    "--bin",
+                    "DarkReNamer",
+                ],
+            },
+        ),
+        "candidate workflow must run locked tests before building the selected application",
     )?;
 
     let promotion_path = ".github/workflows/promote-release.yaml";
@@ -431,7 +510,7 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
     let job = only_job(promotion_path, &promotion, "publish")?;
     require(
         job.condition.as_deref() == Some("github.ref == 'refs/heads/master'")
-            && job.runs_on == "windows-2025"
+            && is_hosted_windows_runner(&job.runs_on)
             && job.environment.as_ref().map(|value| value.name.as_str()) == Some("release"),
         "promotion must run only on master in the protected release environment",
     )?;
@@ -557,12 +636,27 @@ pub(super) fn validate_experimental_workflows() -> Result<(), String> {
             source: planning_source,
             job: "benchmark",
             retains_artifact: false,
+            command: CommandPolicy {
+                verb: "test",
+                arguments: &[
+                    "--package",
+                    "darknamer-app",
+                    "--test",
+                    "rename_windows_backend",
+                    "benchmark_durable_production_path",
+                    "--locked",
+                    "--release",
+                    "--ignored",
+                    "--exact",
+                    "--nocapture",
+                    "--test-threads=1",
+                ],
+            },
             required: &[
                 "DARKRENAMER_BENCH_ROOT_PRIVATE = '1'",
                 "DARKRENAMER_BENCH_EVIDENCE_CLASS = 'directional-hosted'",
                 "DARKRENAMER_BENCH_MEDIA = 'virtual'",
                 "DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'",
-                "cargo test --package darknamer-app --test rename_windows_backend benchmark_durable_production_path --locked --release -- --ignored --exact --nocapture --test-threads=1",
             ],
             forbidden: &[],
         },
@@ -571,12 +665,22 @@ pub(super) fn validate_experimental_workflows() -> Result<(), String> {
             source: include_str!("../../../../.github/workflows/binary-size-matrix.yaml"),
             job: "measure",
             retains_artifact: true,
+            command: CommandPolicy {
+                verb: "build",
+                arguments: &[
+                    "--release",
+                    "--locked",
+                    "--package",
+                    "darknamer-app",
+                    "--bin",
+                    "DarkReNamer",
+                ],
+            },
             required: &[
                 "id = 'app-3-core-3'",
                 "id = 'app-s-core-3'",
                 "id = 'app-s-core-s'",
                 "id = 'app-2-core-3'",
-                "cargo --config $configPath build --release --locked --package darknamer-app --bin DarkReNamer",
                 "binary-size-matrix.json",
             ],
             forbidden: &["cargo test"],
@@ -586,6 +690,18 @@ pub(super) fn validate_experimental_workflows() -> Result<(), String> {
             source: include_str!("../../../../.github/workflows/profile-benchmark-matrix.yaml"),
             job: "benchmark",
             retains_artifact: true,
+            command: CommandPolicy {
+                verb: "test",
+                arguments: &[
+                    "--release",
+                    "--locked",
+                    "--package",
+                    "darknamer-app",
+                    "--test",
+                    "profile_benchmarks",
+                    "--no-run",
+                ],
+            },
             required: &[
                 "id = 'app-3-core-3'",
                 "id = 'app-s-core-3'",
@@ -596,7 +712,6 @@ pub(super) fn validate_experimental_workflows() -> Result<(), String> {
                 "recorded_iterations = 5",
                 "workload_count = 10000",
                 "selection_evidence = $false",
-                "cargo --config $configPath test --release --locked --package darknamer-app --test profile_benchmarks --no-run",
                 "profile-benchmark-matrix.json",
             ],
             forbidden: &["WindowsRenameBackend", "FileJournal"],
@@ -606,6 +721,18 @@ pub(super) fn validate_experimental_workflows() -> Result<(), String> {
             source: include_str!("../../../../.github/workflows/profile-planning-matrix.yaml"),
             job: "benchmark",
             retains_artifact: true,
+            command: CommandPolicy {
+                verb: "test",
+                arguments: &[
+                    "--release",
+                    "--locked",
+                    "--package",
+                    "darknamer-app",
+                    "--test",
+                    "rename_windows_backend",
+                    "--no-run",
+                ],
+            },
             required: &[
                 "id = 'app-3-core-3'",
                 "id = 'app-s-core-3'",
@@ -620,7 +747,6 @@ pub(super) fn validate_experimental_workflows() -> Result<(), String> {
                 "selection_evidence = $false",
                 "filesystem_mutation = 'owned-temporary-fixtures-only'",
                 "recorded_iterations = 5",
-                "cargo --config $configPath test --release --locked --package darknamer-app --test rename_windows_backend --no-run",
                 "profile-planning-matrix.json",
             ],
             forbidden: &["id = 'app-s-core-s'", "id = 'app-2-core-3'"],
@@ -650,6 +776,10 @@ jobs:
         source: fixture,
         job: "benchmark",
         retains_artifact: false,
+        command: CommandPolicy {
+            verb: "test",
+            arguments: &[],
+        },
         required: &[],
         forbidden: &[],
     };
@@ -682,6 +812,7 @@ jobs:
     steps:
       - with: { persist-credentials: false }
         uses: actions/checkout@different-pinned-revision
+      - run: cargo --locked test --nocapture --workspace
     runs-on: windows-2025
 concurrency: { cancel-in-progress: false }
 permissions: { contents: read }
@@ -693,6 +824,10 @@ name: equivalent experiment
         source: fixture,
         job: "benchmark",
         retains_artifact: false,
+        command: CommandPolicy {
+            verb: "test",
+            arguments: &["--workspace", "--locked", "--nocapture"],
+        },
         required: &[],
         forbidden: &[],
     });
