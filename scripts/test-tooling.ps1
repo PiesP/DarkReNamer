@@ -7,8 +7,20 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$actualPlatform = if ($IsWindows) {
+    'Windows'
+}
+elseif ($IsLinux) {
+    'Ubuntu'
+}
+else {
+    throw 'Tooling tests require an actual Windows or Linux host.'
+}
 if ($Platform -eq 'Current') {
-    $Platform = if ($IsWindows) { 'Windows' } else { 'Ubuntu' }
+    $Platform = $actualPlatform
+}
+elseif ($Platform -ne $actualPlatform) {
+    throw "Requested tooling platform $Platform does not match actual host $actualPlatform."
 }
 
 $commonTests = @(

@@ -29,15 +29,20 @@ in `SAFETY.md`.
 ## Portable checks on Linux or WSL
 
 Install PowerShell 7.4 or newer in addition to the pinned Rust toolchain. The
-portable gate is:
+Windows-target check also needs the LLVM resource compiler described below;
+set `RC` to its installed path when using a different location. The portable
+gate is:
 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-targets --all-features --locked
-cargo check --workspace --all-targets --all-features \
+RC="${RC:-/usr/bin/llvm-rc-19}" cargo check --workspace --all-targets --all-features \
   --target x86_64-pc-windows-msvc --locked
 pwsh -NoLogo -NoProfile -File ./scripts/test-tooling.ps1
+python3 scripts/test-windows-vm-runner.py
+python3 scripts/test-gui-regression-runner.py
+python3 scripts/test-gui-regression-evidence.py
 ```
 
 ## Linux cross-build and visual diagnostics
@@ -207,6 +212,46 @@ Retain failed-session evidence for diagnosis. These observers do not reset the V
 provide storage-fault evidence, change DPI settings, or certify the full acceptance
 matrix. Transfer reviewed observations into a separate draft using `SAFETY.md`;
 do not merge observations from different Windows builds into one operator context.
+
+## Core GUI regression runs
+
+From a clean checkout, use the prerequisites and trusted managed desktop helper
+described in [Native tests in a local Hyper-V VM](#native-tests-in-a-local-hyper-v-vm).
+This lane requires a Windows 11 x64 guest and a helper that supports explicit
+display geometry. Supply an existing private
+connection profile with `schema_version: 1`, `ssh_host`, `desktop_helper` (an
+absolute Windows path), and `expected_vm_id`. Keep this profile and its private
+helper configuration outside the checkout and submitted evidence.
+The interactive tasks require the guest's installed PowerShell 7.4 or newer
+(Core edition) under its existing RemoteSigned execution policy. The runner
+checks that policy and does not override it.
+
+```bash
+python3 scripts/run-gui-regression.py \
+  --output-root /absolute/new/external-output \
+  --connection-profile /absolute/private/connection.json
+```
+
+The command builds a locked Windows bundle and runs four cells sequentially:
+800x600 at 96 DPI in light mode for full context, standard text at 100 percent,
+and standard text at 150 percent; then 1366x768 at 144 DPI in dark mode for
+tooltip behavior. The requested display settings must match the application's
+observed monitor geometry and DPI. Text scaling requires an actual comparison
+of the same rendered glyphs. Native TaskDialog text scaling remains a separate
+support limitation.
+
+Each run binds its input bytes before execution, collected logs and images,
+actual host and guest environments, and cleanup. The final command invokes
+`scripts/validate-gui-regression-evidence.py`; a shortened run can inherit only
+the explicitly checked full-context semantics from a direct reference with
+the same source SHA and application bytes. It retains its own visual evidence.
+Historical ad-hoc results are external records and are not migrated or relabeled.
+These hashes provide integrity bookkeeping, not independent rebuild proof or
+protection against coordinated changes to all evidence files.
+
+Inspect the original screenshots before accepting a visual result. Passing raw
+regression assertions does not establish human acceptance or satisfy the separate
+release acceptance validators in `SAFETY.md` and `DISTRIBUTION.md`.
 
 ## Dependency policy
 

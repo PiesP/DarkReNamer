@@ -197,6 +197,40 @@ class VmRunnerTests(unittest.TestCase):
         for arguments in ([], ['--vm-name', 'vm', '--ssh-host', 'alias']):
             self.assert_arguments_rejected(arguments)
 
+    def test_prepare_only_is_transport_free_and_requires_new_explicit_output(self):
+        args = vm.parse_arguments(['--prepare-only', '--output', '/external/new-bundle'])
+        self.assertTrue(args.prepare_only)
+        self.assertIsNone(args.ssh_host)
+        self.assertIsNone(args.vm_name)
+        for arguments in (
+                ['--prepare-only'],
+                ['--prepare-only', '--output', '/external/new-bundle', '--ssh-host', 'vm'],
+                ['--prepare-only', '--output', '/external/new-bundle', '--desktop-scale', '100'],
+                ['--prepare-only', '--output', '/external/new-bundle',
+                 '--desktop-width', '800', '--desktop-height', '600']):
+            self.assert_arguments_rejected(arguments)
+
+    def test_prepare_only_output_is_new_absolute_external_and_has_plain_ancestry(self):
+        with tempfile.TemporaryDirectory() as external_directory:
+            external = Path(external_directory)
+            repo = external / 'repo'
+            repo.mkdir()
+            expected = external / 'new-bundle'
+            self.assertEqual(vm.resolve_prepare_output_root(repo, expected), expected)
+            with self.assertRaisesRegex(ValueError, 'absolute'):
+                vm.resolve_prepare_output_root(repo, Path('relative'))
+            with self.assertRaisesRegex(ValueError, 'outside'):
+                vm.resolve_prepare_output_root(repo, repo / 'generated')
+            occupied = external / 'occupied'
+            occupied.mkdir()
+            with self.assertRaisesRegex(ValueError, 'new directory'):
+                vm.resolve_prepare_output_root(repo, occupied)
+            linked_parent = external / 'linked-parent'
+            (external / 'actual-parent').mkdir()
+            linked_parent.symlink_to(external / 'actual-parent', target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, 'symlink'):
+                vm.resolve_prepare_output_root(repo, linked_parent / 'generated')
+
     def test_desktop_geometry_requires_a_bounded_pair(self):
         args = vm.parse_arguments([
             '--ssh-host', 'vm', '--desktop-width', '800', '--desktop-height', '600'])

@@ -67,7 +67,7 @@ def leaf(value):
 
 def argument_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    transport = parser.add_mutually_exclusive_group(required=True)
+    transport = parser.add_mutually_exclusive_group()
     transport.add_argument('--vm-name', help='Existing local Hyper-V VM with an unlocked test-user desktop.')
     transport.add_argument('--ssh-host', help='OpenSSH config alias for the configured VM test account.')
     parser.add_argument('--expected-vm-id', help='Require this exact Hyper-V VM GUID when using --vm-name.')
@@ -81,6 +81,8 @@ def argument_parser():
     parser.add_argument('--desktop-height', type=int,
                         help='Request a managed RDP desktop height; requires --desktop-width.')
     parser.add_argument('--output', type=Path, help='New external directory for the bundle, logs, and screenshots.')
+    parser.add_argument('--prepare-only', action='store_true',
+                        help='Build a clean source-bound bundle without contacting the VM.')
     parser.add_argument('--test-timeout-seconds', type=int, default=300)
     return parser
 
@@ -88,6 +90,15 @@ def argument_parser():
 def parse_arguments(argv=None):
     parser = argument_parser()
     args = parser.parse_args(argv)
+    if not args.vm_name and not args.ssh_host and not args.prepare_only:
+        parser.error('one of --vm-name or --ssh-host is required unless --prepare-only is used.')
+    if args.prepare_only and (args.vm_name or args.ssh_host or args.desktop_helper or
+                              args.credential_helper or args.expected_vm_id or
+                              args.desktop_mode != 'rdp' or args.desktop_scale != 200 or
+                              args.desktop_width is not None or args.desktop_height is not None):
+        parser.error('--prepare-only accepts only build and output options, not transport or desktop options.')
+    if args.prepare_only and args.output is None:
+        parser.error('--prepare-only requires an explicit --output directory.')
     if args.ssh_host and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', args.ssh_host):
         parser.error('--ssh-host must be a 1-128 character OpenSSH config alias using letters, digits, dot, underscore, or hyphen.')
     if args.ssh_host and args.credential_helper:
@@ -141,6 +152,30 @@ def resolve_output_root(repo, args, defaults=None):
     if not args.ssh_host and winpath(root).startswith('\\\\'):
         raise RuntimeError('PowerShell Direct output must be on a Windows drive, not a WSL network path.')
     return root
+
+
+def resolve_prepare_output_root(repo, requested):
+    repo = Path(repo).resolve(strict=True)
+    requested = Path(requested)
+    if not requested.is_absolute():
+        raise ValueError('Prepare-only output must be an absolute external path.')
+    if requested.exists():
+        raise ValueError('Prepare-only output must be a new directory.')
+    parent = requested.parent
+    if parent.is_symlink():
+        raise ValueError('Prepare-only output ancestry must not contain symlinks.')
+    if not parent.is_dir():
+        raise ValueError('Prepare-only output parent must be an existing ordinary directory.')
+    resolved_parent = parent.resolve(strict=True)
+    cursor = parent
+    while cursor != cursor.parent:
+        if cursor.is_symlink():
+            raise ValueError('Prepare-only output ancestry must not contain symlinks.')
+        cursor = cursor.parent
+    target = resolved_parent / leaf(requested.name)
+    if target.is_relative_to(repo) or repo.is_relative_to(target):
+        raise ValueError('Prepare-only output must be outside the checkout.')
+    return target
 
 
 def prepare_transport(repo, args):
@@ -387,13 +422,12 @@ def verify_result(root, manifest, result, expected_transport_kind=None, expected
     return passed
 
 
-def main():
-    args = parse_arguments()
-    repo = Path(__file__).resolve().parent.parent
+def build_bundle(repo, root):
+    repo = Path(repo)
+    root = Path(root)
     if subprocess.check_output(['git', 'status', '--porcelain'], cwd=repo, text=True).strip():
         raise RuntimeError('Commit or preserve checkout changes before VM verification; results must bind a clean source SHA.')
     source_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip()
-    root, defaults, pwsh = prepare_transport(repo, args)
     root.mkdir(parents=True)
     print('Building Windows tests for source ' + source_sha, flush=True)
     env = dict(os.environ)
@@ -422,7 +456,25 @@ def main():
         'runner': {'file': 'windows-vm-guest.ps1', 'sha256': sha256(root / 'windows-vm-guest.ps1')},
     }
     (root / 'bundle.json').write_text(json.dumps(manifest, indent=2))
-    print('Executing ' + str(len(artifacts)) + ' Windows test binaries in the VM.', flush=True)
+    return manifest
+
+
+def main():
+    args = parse_arguments()
+    repo = Path(__file__).resolve().parent.parent
+    if args.prepare_only:
+        root = resolve_prepare_output_root(repo, args.output)
+        manifest = build_bundle(repo, root)
+        print(json.dumps({
+            'status': 'prepared',
+            'source_sha': manifest['source_sha'],
+            'application_sha256': manifest['application']['sha256'],
+            'bundle': str(root),
+        }))
+        return 0
+    root, defaults, pwsh = prepare_transport(repo, args)
+    manifest = build_bundle(repo, root)
+    print('Executing ' + str(len(manifest['test_binaries'])) + ' Windows test binaries in the VM.', flush=True)
     print('Evidence: ' + str(root), flush=True)
     transport_ok = True
     try:

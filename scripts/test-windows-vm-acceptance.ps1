@@ -139,7 +139,37 @@ function Write-RestoreSnapshot {
         })
 }
 
+function Write-TextScaleSnapshot {
+    param(
+        [Parameter(Mandatory)][string] $OutputRoot,
+        [Parameter(Mandatory)][string] $SourceSha,
+        [Parameter(Mandatory)][string] $ScriptSha256,
+        [bool] $RestorationVerified = $false
+    )
+    if (-not (Test-Path -LiteralPath $OutputRoot)) {
+        [void](New-Item -ItemType Directory -Path $OutputRoot)
+    }
+    $original = [ordered]@{
+        registry_key_existed = $true
+        registry_value_existed = $true
+        registry_value_kind = 'DWord'
+        registry_value = 100
+        ui_settings_raw_factor = 1.0
+        ui_settings_percent = 100
+    }
+    Write-Utf8Json -Path (Join-Path $OutputRoot 'text-scale-snapshot.json') -Value ([ordered]@{
+        schema_version = 1
+        source_sha = $SourceSha
+        acceptance_script_sha256 = $ScriptSha256
+        restoration_required = $true
+        original = $original
+        restoration_verified = $RestorationVerified
+        restored = if ($RestorationVerified) { $original } else { $null }
+    })
+}
+
 $acceptance = Join-Path $PSScriptRoot 'windows-vm-acceptance.ps1'
+$controller = Join-Path $PSScriptRoot 'run-windows-vm-tests.ps1'
 $runner = Join-Path $PSScriptRoot 'windows-vm-guest.ps1'
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
     'darkrenamer-vm-acceptance-' + [Guid]::NewGuid().ToString('N')
@@ -167,10 +197,128 @@ try {
             throw "$([IO.Path]::GetFileName($path)) has PowerShell parser errors."
         }
     }
+    $controllerParseErrors = $null
+    $controllerParseTokens = $null
+    [void][Management.Automation.Language.Parser]::ParseFile(
+        $controller,
+        [ref]$controllerParseTokens,
+        [ref]$controllerParseErrors
+    )
+    if ($controllerParseErrors.Count -ne 0) {
+        throw 'run-windows-vm-tests.ps1 has PowerShell parser errors.'
+    }
+    $controllerText = [IO.File]::ReadAllText($controller)
+    foreach ($requiredRescueSource in @(
+        'function Invoke-AcceptanceTextScaleRescue',
+        '-RestoreTextScaleOnly',
+        'text-scale-rescue-result.json',
+        'text-scale-rescue.stdout.txt',
+        'text-scale-rescue.stderr.txt'
+    )) {
+        if ($controllerText.IndexOf($requiredRescueSource, [StringComparison]::Ordinal) -lt 0) {
+            throw "The VM controller is missing the text-scale rescue contract '$requiredRescueSource'."
+        }
+    }
+    if ($controllerText.IndexOf(
+        "(`$state.result_status -cne 'review_required' -or `$state.task_result -ne 0)",
+        [StringComparison]::Ordinal
+    ) -lt 0) {
+        throw 'The VM controller must run its text-scale rescue after every unsuccessful acceptance task.'
+    }
+    foreach ($requiredTerminalSource in @(
+        'result_status = $resultStatus',
+        'task_state = $task.State.ToString()',
+        'task_result = [int]$info.LastTaskResult',
+        '$state.task_state -ceq ''Ready''',
+        '$transport.observer_process = $observerProcess',
+        'exit_code = [int]$state.task_result',
+        '$observerProcess.exit_code -eq 0'
+    )) {
+        if ($controllerText.IndexOf($requiredTerminalSource, [StringComparison]::Ordinal) -lt 0) {
+            throw "The VM controller is missing terminal observer-task evidence '$requiredTerminalSource'."
+        }
+    }
+    $streamCollectionIndex = $controllerText.IndexOf(
+        "foreach (`$leaf in @('observer.stdout.txt', 'observer.stderr.txt'))",
+        [StringComparison]::Ordinal
+    )
+    $successPostlaunchIndex = $controllerText.IndexOf(
+        "if (`$state.result_status -ceq 'review_required' -and `$state.task_result -eq 0)",
+        $streamCollectionIndex,
+        [StringComparison]::Ordinal
+    )
+    $inventoryIndex = $controllerText.IndexOf(
+        '$inventory = @(Invoke-Command',
+        $successPostlaunchIndex,
+        [StringComparison]::Ordinal
+    )
+    if ($streamCollectionIndex -lt 0 -or $successPostlaunchIndex -le $streamCollectionIndex -or
+        $inventoryIndex -le $successPostlaunchIndex) {
+        throw 'Observer streams must be moved before success-only postlaunch identity and bounded inventory collection.'
+    }
+    foreach ($requiredEngineSource in @(
+        "executable = 'pwsh.exe'",
+        "effective_policy = [string]`$acceptanceEngine.effective_policy",
+        "`$engine.effective_policy -cne 'RemoteSigned'",
+        "`$engine.edition -cne 'Core'"
+    )) {
+        if ($controllerText.IndexOf($requiredEngineSource, [StringComparison]::Ordinal) -lt 0) {
+            throw "The VM controller is missing acceptance-engine evidence '$requiredEngineSource'."
+        }
+    }
+    foreach ($line in @($controllerText -split "`r?`n" | Where-Object {
+        $_ -match '\$observerArguments\s*=' -and $_ -notmatch '^\s*#'
+    })) {
+        if ($line.IndexOf('ExecutionPolicy', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            throw 'New GUI acceptance and rescue commands must not override execution policy.'
+        }
+    }
     if ([IO.File]::ReadAllText($acceptance).IndexOf('[ushort]', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
         throw 'The acceptance script must use Windows PowerShell 5.1-compatible integer type names.'
     }
     $acceptanceText = [IO.File]::ReadAllText($acceptance)
+    $regressionModeIndex = $acceptanceText.IndexOf(
+        "if (-not [string]::IsNullOrEmpty(`$RegressionMode))",
+        [StringComparison]::Ordinal
+    )
+    $regressionSaveIndex = $acceptanceText.IndexOf(
+        '$regressionInvocation = [pscustomobject]@{',
+        $regressionModeIndex,
+        [StringComparison]::Ordinal
+    )
+    $regressionGuestIndex = $acceptanceText.IndexOf(
+        '. $bootstrap.runner',
+        $regressionSaveIndex,
+        [StringComparison]::Ordinal
+    )
+    $regressionRestoreIndex = $acceptanceText.IndexOf(
+        '$ValidateOnly = $regressionInvocation.validate_only',
+        $regressionGuestIndex,
+        [StringComparison]::Ordinal
+    )
+    $regressionInvokeIndex = $acceptanceText.IndexOf(
+        'Invoke-GuiRegressionAcceptance',
+        $regressionRestoreIndex,
+        [StringComparison]::Ordinal
+    )
+    if ($regressionModeIndex -lt 0 -or $regressionSaveIndex -le $regressionModeIndex -or
+        $regressionGuestIndex -le $regressionSaveIndex -or
+        $regressionRestoreIndex -le $regressionGuestIndex -or
+        $regressionInvokeIndex -le $regressionRestoreIndex) {
+        throw 'The regression entry must restore its caller ValidateOnly switch after importing the guest helper.'
+    }
+    $probeValidateOnly = $false
+    & {
+        $BundleRoot = 'probe-bundle'
+        $ExpectedSessionId = 1
+        $ValidateOnly = $probeValidateOnly
+        . $runner -BundleRoot $BundleRoot -ExpectedSessionId $ExpectedSessionId -ValidateOnly
+        if (-not $ValidateOnly) {
+            throw 'The guest dot-source contamination probe no longer reproduces the caller-scope switch overwrite.'
+        }
+        $ValidateOnly = $probeValidateOnly
+        if ($ValidateOnly) { throw 'The caller-mode restoration probe failed.' }
+    }
     $clipboardAssignments = @($acceptanceAst.FindAll({
         param($node)
         $node -is [Management.Automation.Language.AssignmentStatementAst] -and
@@ -225,8 +373,8 @@ try {
             throw "The acceptance flow is missing TaskDialog automation ID $taskDialogId."
         }
     }
-    if (($acceptanceText | Select-String -Pattern "failure_reason = 'desktop_lock_release_failed'" -AllMatches).Matches.Count -ne 2) {
-        throw 'Both acceptance and rescue must preserve structured evidence after desktop-lock release failure.'
+    if (($acceptanceText | Select-String -Pattern "failure_reason = 'desktop_lock_release_failed'" -AllMatches).Matches.Count -ne 3) {
+        throw 'Current-DPI, GUI regression, and rescue paths must preserve structured evidence after desktop-lock release failure.'
     }
     $captureResizeIndex = $acceptanceText.IndexOf(
         '        $captureWindow = Ensure-AcceptanceMainWindowCaptureSize',
@@ -295,6 +443,60 @@ try {
         -OutputRoot 'unused' `
         -ExpectedScriptSha256 ('0' * 64) `
         -ValidateOnly
+    foreach ($regressionFunction in @(
+        'Invoke-GuiRegressionAcceptance',
+        'Invoke-ObserverStandardScenario',
+        'Invoke-ObserverContextScenario',
+        'Get-ObserverNativeStaticRasterTarget',
+        'Start-AcceptanceApplication',
+        'Close-AcceptanceApplication'
+    )) {
+        if ($null -eq (Get-Command $regressionFunction -CommandType Function -ErrorAction SilentlyContinue)) {
+            throw "Dot-sourcing did not load GUI regression function $regressionFunction."
+        }
+    }
+    $startFunction = (Get-Command Start-AcceptanceApplication -CommandType Function).Definition
+    if ($startFunction.IndexOf('(Get-Date).AddSeconds($WaitSeconds)', [StringComparison]::Ordinal) -lt 0 -or
+        $startFunction.IndexOf('[Math]::Min(30, $WaitSeconds)', [StringComparison]::Ordinal) -ge 0) {
+        throw 'Shared application startup must preserve the caller-supplied acceptance timeout.'
+    }
+    $textScaleRoot = Join-Path $temporaryRoot 'text-scale-documents'
+    $textScaleSource = '0123456789abcdef0123456789abcdef01234567'
+    $textScaleScript = 'a' * 64
+    Assert-Fails {
+        Resolve-TextScaleRestoreDocument -OutputDirectory $textScaleRoot -SourceSha $textScaleSource -ScriptSha256 $textScaleScript
+    } 'Text-scale snapshot is missing.'
+    Write-TextScaleSnapshot -OutputRoot $textScaleRoot -SourceSha $textScaleSource -ScriptSha256 $textScaleScript
+    $pendingTextScale = Resolve-TextScaleRestoreDocument -OutputDirectory $textScaleRoot -SourceSha $textScaleSource -ScriptSha256 $textScaleScript
+    if (-not $pendingTextScale.document.restoration_required -or
+        $pendingTextScale.document.restoration_verified -or
+        $null -ne $pendingTextScale.document.restored -or
+        $pendingTextScale.path -cne (Join-Path $textScaleRoot 'text-scale-snapshot.json')) {
+        throw 'Pending text-scale rescue document did not retain the exact restoration instruction.'
+    }
+    Write-TextScaleSnapshot -OutputRoot $textScaleRoot -SourceSha $textScaleSource -ScriptSha256 $textScaleScript -RestorationVerified $true
+    $verifiedTextScale = Resolve-TextScaleRestoreDocument -OutputDirectory $textScaleRoot -SourceSha $textScaleSource -ScriptSha256 $textScaleScript
+    if (-not $verifiedTextScale.document.restoration_required -or
+        -not $verifiedTextScale.document.restoration_verified -or
+        -not (Test-TextScaleSnapshotEqual -Expected $verifiedTextScale.expected -Actual (
+            ConvertFrom-TextScaleDocumentSnapshot -Document $verifiedTextScale.document.restored -Label 'verified fixture'
+        ))) {
+        throw 'Verified text-scale rescue document did not prove exact original-state restoration.'
+    }
+    $textScalePath = Join-Path $textScaleRoot 'text-scale-snapshot.json'
+    $boolNumeric = Get-Content -LiteralPath $textScalePath -Raw | ConvertFrom-Json
+    $boolNumeric.original.registry_value = $true
+    Write-Utf8Json -Path $textScalePath -Value $boolNumeric
+    Assert-Fails {
+        Resolve-TextScaleRestoreDocument -OutputDirectory $textScaleRoot -SourceSha $textScaleSource -ScriptSha256 $textScaleScript
+    } 'registry value is invalid'
+    Write-TextScaleSnapshot -OutputRoot $textScaleRoot -SourceSha $textScaleSource -ScriptSha256 $textScaleScript -RestorationVerified $true
+    $boolSchema = Get-Content -LiteralPath $textScalePath -Raw | ConvertFrom-Json
+    $boolSchema.schema_version = $true
+    Write-Utf8Json -Path $textScalePath -Value $boolSchema
+    Assert-Fails {
+        Resolve-TextScaleRestoreDocument -OutputDirectory $textScaleRoot -SourceSha $textScaleSource -ScriptSha256 $textScaleScript
+    } 'binding mismatch'
     Initialize-AcceptanceNative
     foreach ($method in @(
         'IsWindowEnabled',
