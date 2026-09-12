@@ -54,6 +54,31 @@ def png(width: int = 80, height: int = 30, ink_height: int = 8, ink_width: int =
     return b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", header) + png_chunk(b"IDAT", zlib.compress(bytes(pixels))) + png_chunk(b"IEND", b"")
 
 
+def physical_menu_apply_entry() -> dict:
+    def menu_item(name: str, automation_id: str, x: float, y: float,
+                  width: float, height: float) -> dict:
+        return {
+            "automation_id": automation_id,
+            "name": name,
+            "control_type": "ControlType.MenuItem",
+            "enabled": True,
+            "keyboard_focusable": True,
+            "offscreen": False,
+            "native_handle": 0,
+            "bounds": {"x": x, "y": y, "width": width, "height": height},
+        }
+
+    return {
+        "input": "physical-mouse-file-menu-public-apply",
+        "menu_entry": {
+            "file": menu_item("파일(F)", "Item 1", 125.0, 45.0, 99.0, 29.0),
+            "file_target": {"x": 174, "y": 59, "hit_window": 26870924, "root_window": 26870924},
+            "apply": menu_item("변경 사항 적용", "Item 32771", 128.0, 126.0, 385.0, 37.0),
+            "apply_target": {"x": 320, "y": 144, "hit_window": 82903142, "root_window": 82903142},
+        },
+    }
+
+
 def scenario(mode: str) -> dict:
     if mode == "full-context":
         def confirmation() -> dict:
@@ -159,7 +184,7 @@ def scenario(mode: str) -> dict:
                                  for name in ("cancel", "apply", "full_details", "expander")},
             },
             "actual_apply": {
-                "scope": "3/1/2", "apply_entry": {"input": "physical-mouse", "menu_entry": "public-apply"},
+                "scope": "3/1/2", "apply_entry": {"input": "visible-command-rail", "menu_entry": None},
                 "destinations_reached": True,
                 "unchanged_row_preserved": True, "content_and_identity_preserved": True,
                 "journal_residue_count": 0,
@@ -182,7 +207,7 @@ def scenario(mode: str) -> dict:
         ]},
         "surface": {
             "confirmation": {
-                "apply_entry": {"input": "physical-mouse", "menu_entry": "public-apply"},
+                "apply_entry": {"input": "keyboard-ctrl-s-with-visible-listview-infotip", "menu_entry": None},
                 "scope_exact": True,
                 "default_focus": {"is_default_cancel": True},
                 "reachability": {name: {"status": "reachable", "inside_work_area": True,
@@ -775,6 +800,61 @@ class GuiEvidenceTests(unittest.TestCase):
         self.fixture.refresh(self.standard)
         with self.assertRaisesRegex(evidence.EvidenceError, "journal_clean|normal_exit"):
             self.validate(self.standard)
+
+    def test_apply_entry_requires_a_real_public_ui_path(self):
+        self.validate(self.standard)
+        self.validate(self.tooltip)
+
+        raw_path = self.standard / "output/acceptance-result.json"
+        raw = json.loads(raw_path.read_text())
+        raw["assertions"]["scenario"]["actual_apply"]["apply_entry"] = physical_menu_apply_entry()
+        write_json(raw_path, raw)
+        self.fixture.refresh(self.standard)
+        self.validate(self.standard)
+
+        physical_without_target = physical_menu_apply_entry()
+        del physical_without_target["menu_entry"]["apply_target"]
+        physical_with_extra = physical_menu_apply_entry()
+        physical_with_extra["menu_entry"]["unexpected"] = True
+        physical_with_bool_coordinate = physical_menu_apply_entry()
+        physical_with_bool_coordinate["menu_entry"]["file_target"]["x"] = True
+        physical_with_bool_element = physical_menu_apply_entry()
+        physical_with_bool_element["menu_entry"]["apply"]["enabled"] = 1
+        physical_out_of_bounds = physical_menu_apply_entry()
+        physical_out_of_bounds["menu_entry"]["apply_target"]["x"] = 900
+        invalid_entries = {
+            "unknown input": {"input": "unknown-public-path", "menu_entry": None},
+            "old arbitrary strings": {"input": "physical-mouse", "menu_entry": "public-apply"},
+            "rail with menu": {"input": "visible-command-rail", "menu_entry": {}},
+            "physical without menu": {"input": "physical-mouse-file-menu-public-apply", "menu_entry": None},
+            "missing menu field": physical_without_target,
+            "extra menu field": physical_with_extra,
+            "boolean target coordinate": physical_with_bool_coordinate,
+            "non-boolean element state": physical_with_bool_element,
+            "target outside paired bounds": physical_out_of_bounds,
+        }
+        for label, entry in invalid_entries.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                fixture = Fixture(root)
+                run = fixture.build("02-standard-light-800x600-96-text100", "standard")
+                path = run / "output/acceptance-result.json"
+                value = json.loads(path.read_text())
+                value["assertions"]["scenario"]["actual_apply"]["apply_entry"] = entry
+                write_json(path, value)
+                fixture.refresh(run)
+                with self.assertRaisesRegex(evidence.EvidenceError, "application_confirmed"):
+                    evidence.validate_run(root, run.name, SOURCE)
+
+        tooltip_path = self.tooltip / "output/acceptance-result.json"
+        tooltip = json.loads(tooltip_path.read_text())
+        tooltip["assertions"]["scenario"]["surface"]["confirmation"]["apply_entry"] = {
+            "input": "visible-command-rail", "menu_entry": None,
+        }
+        write_json(tooltip_path, tooltip)
+        self.fixture.refresh(self.tooltip)
+        with self.assertRaisesRegex(evidence.EvidenceError, "public_apply_entered"):
+            self.validate(self.tooltip)
 
     def test_raw_observation_mirror_is_type_sensitive(self):
         observations_path = self.standard / "output/acceptance-observations.json"
