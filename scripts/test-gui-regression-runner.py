@@ -68,6 +68,58 @@ class GuiRegressionRunnerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 runner.load_connection_profile(invalid)
 
+    def test_guest_preflight_serializes_strict_document_inside_remote_boundary(self):
+        profile = {
+            "ssh_host": "vm-alias",
+            "expected_vm_id": "12345678-1234-5678-9abc-1234567890ab",
+        }
+        remote = {
+            "system": "windows",
+            "os_version": "Microsoft Windows NT 10.0.26200.0",
+            "build": "26200",
+            "architecture": "X64",
+            "product_caption": "Microsoft Windows 11 Pro",
+            "vm_id": profile["expected_vm_id"],
+        }
+
+        def check_output(command, **keywords):
+            script = command[-1]
+            remote_boundary = script.index("\n    }\n    [Console]::Out.Write")
+            self.assertLess(script.index("| ConvertTo-Json -Compress"), remote_boundary)
+            self.assertNotIn("$value | ConvertTo-Json", script)
+            self.assertEqual(keywords["env"]["DARKRENAMER_GUI_SSH_HOST"], "vm-alias")
+            return json.dumps(remote, separators=(",", ":"))
+
+        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"), \
+                mock.patch.object(runner.subprocess, "check_output", side_effect=check_output):
+            observed = runner.guest_preflight(profile)
+        self.assertEqual(observed["system"], "windows")
+        self.assertEqual(observed["build"], "26200")
+        self.assertEqual(observed["architecture"], "x86_64")
+        self.assertEqual(
+            observed["vm_identity_sha256"], runner.digest_text(profile["expected_vm_id"])
+        )
+
+    def test_guest_preflight_rejects_remoting_metadata(self):
+        remote = {
+            "system": "windows",
+            "os_version": "Microsoft Windows NT 10.0.26200.0",
+            "build": "26200",
+            "architecture": "X64",
+            "product_caption": "Microsoft Windows 11 Pro",
+            "vm_id": "12345678-1234-5678-9abc-1234567890ab",
+            "PSComputerName": "private-host",
+            "RunspaceId": "00000000-0000-0000-0000-000000000000",
+            "PSShowComputerName": True,
+        }
+        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"), \
+                mock.patch.object(runner.subprocess, "check_output", return_value=json.dumps(remote)):
+            with self.assertRaisesRegex(ValueError, "invalid document"):
+                runner.guest_preflight({
+                    "ssh_host": "vm-alias",
+                    "expected_vm_id": "12345678-1234-5678-9abc-1234567890ab",
+                })
+
     def test_reference_pins_input_and_final_result_with_one_fixed_scope(self):
         run_root = self.root / runner.RUNS[0]["run_id"]
         (run_root / "output").mkdir(parents=True)
