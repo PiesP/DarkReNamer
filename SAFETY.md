@@ -114,6 +114,11 @@ area.
 Appearance-dialog focus scrolling posts session-bound redraw work. Synchronous
 redraw starts after its state lease ends, and default `WM_PAINT` processing holds
 no state lease so a nested `WM_ERASEBKGND` can safely resolve the current palette.
+The appearance dialog uses the standard modal caption instead of a compact
+tool-window caption. Creation and DPI/work-area calculations share its extended
+style, retaining Windows-owned close-button painting, hit testing, and keyboard
+handling. Caption close still follows the existing Cancel path and restores the
+appearance draft without saving preferences or changing rename authority.
 
 Resolved Light and Dark themes use an app-owned menu palette while
 retaining keyboard mnemonics and native MSAA/UIA metadata. Native System, Forced

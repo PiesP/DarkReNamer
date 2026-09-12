@@ -29,7 +29,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND,
     WM_FONTCHANGE, WM_GETFONT, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT,
     WM_PRINTCLIENT, WM_SETFONT, WM_SETTINGCHANGE, WM_VSCROLL, WNDCLASSEXW, WS_CAPTION,
-    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT, WS_EX_TOOLWINDOW, WS_GROUP, WS_POPUP,
+    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_GROUP, WS_POPUP,
     WS_SYSMENU, WS_TABSTOP, WS_VSCROLL,
 };
 
@@ -52,6 +52,9 @@ const APPEARANCE_GROUP_SUBCLASS_ID: usize = 1;
 const APPEARANCE_VIEWPORT_SUBCLASS_ID: usize = 2;
 const WM_APP_APPEARANCE_REDRAW: u32 = WM_APP + 0x53;
 const APPEARANCE_DIALOG_TITLE: &str = "DarkReNamer - 모양 설정 (미리보기)";
+// Use the standard modal caption and close target, not the compact tool-window
+// caption. Creation and DPI/work-area sizing must use the same frame metrics.
+const APPEARANCE_DIALOG_EX_STYLE: u32 = WS_EX_DLGMODALFRAME;
 const DENSITY_GROUP_LABEL: &str = "명령 버튼 배치";
 const DENSITY_LABELS: [&str; 4] = ["자동 (권장)", "여유 있게", "촘촘하게", "메뉴만"];
 const EMPHASIS_GROUP_LABEL: &str = "변경 후 이름 강조";
@@ -666,7 +669,7 @@ pub(super) fn create_appearance_dialog_window(
     // remain allocated through synchronous creation and its callbacks.
     let window = unsafe {
         CreateWindowExW(
-            WS_EX_TOOLWINDOW,
+            APPEARANCE_DIALOG_EX_STYLE,
             class_name.as_ptr(),
             title.as_ptr(),
             WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN,
@@ -1481,7 +1484,9 @@ fn arrange_dialog(
     let style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
     let mut chrome = RECT::default();
     // SAFETY: chrome is writable RECT storage and style/DPI are copied values.
-    if unsafe { AdjustWindowRectExForDpi(&mut chrome, style, 0, WS_EX_TOOLWINDOW, state.dpi) } == 0
+    if unsafe {
+        AdjustWindowRectExForDpi(&mut chrome, style, 0, APPEARANCE_DIALOG_EX_STYLE, state.dpi)
+    } == 0
     {
         return false;
     }
@@ -1521,7 +1526,10 @@ fn arrange_dialog(
         bottom: layout.client.height,
     };
     // SAFETY: outer is writable desired-client geometry for the same style/DPI.
-    if unsafe { AdjustWindowRectExForDpi(&mut outer, style, 0, WS_EX_TOOLWINDOW, state.dpi) } == 0 {
+    if unsafe {
+        AdjustWindowRectExForDpi(&mut outer, style, 0, APPEARANCE_DIALOG_EX_STYLE, state.dpi)
+    } == 0
+    {
         return false;
     }
     let width = (outer.right - outer.left).min(work_width).max(1);
