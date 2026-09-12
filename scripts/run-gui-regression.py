@@ -673,9 +673,9 @@ try {
             architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
             product_caption = (Get-CimInstance Win32_OperatingSystem).Caption
             vm_id = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Virtual Machine\Guest\Parameters' -Name VirtualMachineId).VirtualMachineId
-        }
+        } | ConvertTo-Json -Compress
     }
-    $value | ConvertTo-Json -Compress
+    [Console]::Out.Write([string]$value)
 }
 finally { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
 """
