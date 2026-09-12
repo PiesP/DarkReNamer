@@ -87,6 +87,14 @@ checks the production window's actual DPI against that request. Use
 including console-specific acceptance or hosts without Windows interop. There
 is no automatic fallback when managed RDP preparation fails.
 
+For a trusted helper that supports explicit display geometry, pass
+`--desktop-width` and `--desktop-height` together. Without these options, the
+helper retains its configured geometry. An explicit request requires matching
+dimensions in the helper's lease; it does not itself prove the guest display
+size. Small-work-area acceptance must independently record the application's
+target-monitor `rcMonitor` and `rcWork`, actual window DPI, and reachable control
+bounds. RDP smart sizing and a resized application window are not substitutes.
+
 The Linux or WSL host needs Python 3.11 or newer, PowerShell 7.4 or newer, Git,
 the pinned Rust toolchain, `cargo-xwin`, and the LLVM resource compiler described
 above. The alias must resolve through the host user's OpenSSH configuration to a

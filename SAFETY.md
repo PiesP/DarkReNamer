@@ -112,6 +112,17 @@ with Cancel as its default. Final confirmation still checks the original session
 revision and fingerprint before execution. Technical expansion does not duplicate
 full paths, avoiding the native TaskDialog's path-elision behavior. Display-only
 Unicode conversion cannot rewrite the model or the frozen plan.
+Before a main-window prepared TaskDialog starts its nested modal loop, the
+ListView-owned infotip is explicitly deactivated and any displayed tip is
+removed. A main-window-only guard spans the complete TaskDialog/details loop and
+reactivates hover tips after normal, Cancel, and error returns. It copies the
+ListView HWND while AppState is leased, releases that lease before synchronous
+tooltip messages can reenter the owner, and restores only when the same live
+owner, direct-child ListView, and attached tooltip still match. This boundary
+never interprets a PromptState-backed dialog HWND as AppState. The application
+module's two production unsafe blocks cover the validated deactivate/remove and
+conditional restore messages; four test-only blocks install, observe, and remove
+the native tooltip message probe.
 The dialog module's seven additional narrow unsafe blocks cover the owner
 liveness query, read-only mode and owned-copy snapshots,
 the native edit text limit, and three test-only control/style/text probes. The

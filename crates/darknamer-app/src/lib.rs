@@ -186,6 +186,23 @@ pub const fn scale_dip(value: i32, dpi: u32) -> i32 {
     }
 }
 
+/// Scales a GDI font height for the Windows system text-size preference.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn scale_system_font_height(height: i32, text_scale_factor: f64) -> i32 {
+    if !(1.0..=2.25).contains(&text_scale_factor) {
+        return height;
+    }
+    let scaled = f64::from(height) * text_scale_factor;
+    if scaled >= f64::from(i32::MAX) {
+        i32::MAX
+    } else if scaled <= f64::from(i32::MIN) {
+        i32::MIN
+    } else {
+        scaled.round() as i32
+    }
+}
+
 /// Side of the main window occupied by a visible command rail.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RailSide {
@@ -5008,6 +5025,25 @@ mod tests {
         assert_eq!(scale_dip(44, 192), 88);
         assert_eq!(scale_dip(-13, 120), -16);
         assert!(scale_dip(150, 120) < scale_dip(150, 144));
+    }
+
+    #[test]
+    fn system_text_scale_factor_scales_logfont_height_once() {
+        assert_eq!(scale_system_font_height(-12, 1.0), -12);
+        assert_eq!(scale_system_font_height(-12, 1.5), -18);
+        assert_eq!(scale_system_font_height(-12, 2.25), -27);
+        assert_eq!(scale_system_font_height(-13, 1.25), -16);
+        assert_eq!(scale_system_font_height(-13, 1.5), -20);
+        assert_eq!(scale_system_font_height(scale_dip(-12, 144), 1.5), -27);
+    }
+
+    #[test]
+    fn invalid_system_text_scale_factor_preserves_font_height() {
+        for factor in [f64::NAN, f64::NEG_INFINITY, 0.0, 0.99, 2.26, f64::INFINITY] {
+            assert_eq!(scale_system_font_height(-12, factor), -12);
+        }
+        assert_eq!(scale_system_font_height(i32::MAX, 2.25), i32::MAX);
+        assert_eq!(scale_system_font_height(i32::MIN, 2.25), i32::MIN);
     }
 
     #[test]

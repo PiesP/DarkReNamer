@@ -72,26 +72,42 @@ pub(super) fn refresh_forced_colors(state: &mut AppState) {
 }
 
 pub(super) fn create_message_font(dpi: u32) -> HFONT {
-    let Some(metrics) = nonclient_metrics(dpi) else {
-        return null_mut();
-    };
-    // SAFETY: lfMessageFont is fully initialized by SystemParametersInfoForDpi
-    // and the native call copies the descriptor synchronously.
-    unsafe { CreateFontIndirectW(&raw const metrics.lfMessageFont) }
+    create_message_font_at_scale(dpi, query_system_text_scale_factor())
 }
 
-pub(super) fn create_status_font(dpi: u32) -> HFONT {
+fn create_message_font_at_scale(dpi: u32, text_scale_factor: f64) -> HFONT {
     let Some(metrics) = nonclient_metrics(dpi) else {
         return null_mut();
     };
-    // SAFETY: lfStatusFont is fully initialized by SystemParametersInfoForDpi
+    let mut descriptor = metrics.lfMessageFont;
+    // SystemParametersInfoForDpi already accounts for DPI. UISettings text
+    // scaling is an independent accessibility preference applied exactly once.
+    descriptor.lfHeight = scale_system_font_height(descriptor.lfHeight, text_scale_factor);
+    // SAFETY: descriptor is fully initialized by SystemParametersInfoForDpi
     // and the native call copies the descriptor synchronously.
-    unsafe { CreateFontIndirectW(&raw const metrics.lfStatusFont) }
+    unsafe { CreateFontIndirectW(&raw const descriptor) }
+}
+
+#[cfg(test)]
+pub(super) fn create_status_font(dpi: u32) -> HFONT {
+    create_status_font_at_scale(dpi, query_system_text_scale_factor())
+}
+
+fn create_status_font_at_scale(dpi: u32, text_scale_factor: f64) -> HFONT {
+    let Some(metrics) = nonclient_metrics(dpi) else {
+        return null_mut();
+    };
+    let mut descriptor = metrics.lfStatusFont;
+    descriptor.lfHeight = scale_system_font_height(descriptor.lfHeight, text_scale_factor);
+    // SAFETY: descriptor is fully initialized by SystemParametersInfoForDpi
+    // and the native call copies the descriptor synchronously.
+    unsafe { CreateFontIndirectW(&raw const descriptor) }
 }
 
 pub(super) fn refresh_system_fonts(state: &mut AppState) {
-    let message_font = create_message_font(state.dpi);
-    let status_font = create_status_font(state.dpi);
+    let text_scale_factor = query_system_text_scale_factor();
+    let message_font = create_message_font_at_scale(state.dpi, text_scale_factor);
+    let status_font = create_status_font_at_scale(state.dpi, text_scale_factor);
     // SAFETY: child HWNDs are live; a null font selects the control's default.
     unsafe {
         SendMessageW(state.list_window, WM_SETFONT, message_font as usize, 1);
