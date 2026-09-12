@@ -311,6 +311,26 @@ try {
         throw 'The acceptance script must use Windows PowerShell 5.1-compatible integer type names.'
     }
     $acceptanceText = [IO.File]::ReadAllText($acceptance)
+    $mixedTreeAssignments = @($acceptanceAst.FindAll({
+        param($ast)
+        $ast -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $ast.Left.Extent.Text -ceq '$mixedTreeText'
+    }, $true))
+    if ($mixedTreeAssignments.Count -ne 1) {
+        throw 'The mixed confirmation tree must have one text projection.'
+    }
+    $mixedConfirmation = [ordered]@{
+        tree = @(
+            [pscustomobject]@{ name = 'first' },
+            [pscustomobject]@{ name = '' },
+            [pscustomobject]@{ name = 'last' }
+        )
+    }
+    $mixedTreeText = $null
+    . ([scriptblock]::Create($mixedTreeAssignments[0].Extent.Text))
+    if ($mixedTreeText -cne "first`nlast") {
+        throw 'The mixed confirmation text projection must read and filter the returned tree rows.'
+    }
     $scrollInfoProducer = 'return new [] { info.Minimum, info.Maximum, (int)info.Page, info.Position, info.TrackPosition };'
     if ([regex]::Matches($acceptanceText, [regex]::Escape($scrollInfoProducer)).Count -ne 1) {
         throw 'The native scroll-info helper must return its fixed five-value SCROLLINFO projection.'
