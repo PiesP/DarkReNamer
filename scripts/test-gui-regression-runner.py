@@ -83,6 +83,32 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         for entry in invalid:
             self.assertFalse(runner.valid_apply_entry(entry), entry)
 
+    def test_visible_control_accepts_finite_uia_double_bounds_only_inside_work_area(self):
+        work_area = {"left": 0, "top": 0, "right": 800, "bottom": 552}
+
+        def tree(bounds):
+            return [{
+                "automation_id": "CommandLink_1101", "enabled": True, "offscreen": False,
+                "bounds": bounds,
+            }]
+
+        integral = {"x": 203.0, "y": 411.0, "width": 478.0, "height": 41.0}
+        fractional = {"x": 203.25, "y": 410.5, "width": 478.5, "height": 41.25}
+        self.assertTrue(runner.visible_control(tree(integral), "CommandLink_1101", work_area))
+        self.assertTrue(runner.visible_control(tree(fractional), "CommandLink_1101", work_area))
+        for invalid in (
+            {**integral, "x": True},
+            {**integral, "width": float("inf")},
+            {**integral, "height": float("nan")},
+            {**integral, "width": 0.0},
+            {**integral, "x": -0.25},
+            {**integral, "y": 540.0, "height": 12.25},
+        ):
+            self.assertFalse(
+                runner.visible_control(tree(invalid), "CommandLink_1101", work_area),
+                invalid,
+            )
+
     def test_private_profile_is_explicit_bounded_and_not_returned_with_its_path(self):
         profile = self.root / "connection.json"
         value = {
