@@ -2413,8 +2413,8 @@ function Get-ObserverEnvironmentMetadata {
     $screen = [DarkReNamerVmAcceptanceNative]::ReadPhysicalScreenSize()
     $work = [DarkReNamerVmAcceptanceNative]::ReadWorkArea()
     $monitor = [DarkReNamerVmAcceptanceNative]::ReadMonitorInfo($handle)
-    $uiSettings = [Windows.UI.ViewManagement.UISettings,Windows.UI.ViewManagement,ContentType=WindowsRuntime]::new()
-    $textScale = [double]$uiSettings.TextScaleFactor
+    Initialize-TextScaleNative
+    $textScale = [double][DarkReNamerTextScaleNative]::ReadTextScaleFactor()
     if ([double]::IsNaN($textScale) -or $textScale -lt 1.0 -or $textScale -gt 2.25) {
         throw 'UISettings.TextScaleFactor is outside the documented system range.'
     }
@@ -4415,10 +4415,85 @@ using System;
 using System.Runtime.InteropServices;
 
 public static class DarkReNamerTextScaleNative {
+    private const int RpcChangedMode = unchecked((int)0x80010106);
+    private const uint RoInitMultithreaded = 1;
+    private static readonly Guid IidUiSettings2 = new Guid("bad82401-2721-44f9-bb91-2bb228be442f");
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int QueryInterfaceDelegate(IntPtr instance, ref Guid iid, out IntPtr value);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint ReleaseDelegate(IntPtr instance);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int TextScaleFactorDelegate(IntPtr instance, out double value);
+
+    [DllImport("combase.dll")]
+    private static extern int RoInitialize(uint initType);
+    [DllImport("combase.dll")]
+    private static extern void RoUninitialize();
+    [DllImport("combase.dll", CharSet=CharSet.Unicode)]
+    private static extern int WindowsCreateString(string source, uint length, out IntPtr value);
+    [DllImport("combase.dll")]
+    private static extern int WindowsDeleteString(IntPtr value);
+    [DllImport("combase.dll")]
+    private static extern int RoActivateInstance(IntPtr classId, out IntPtr instance);
+
     [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     private static extern IntPtr SendMessageTimeoutW(
         IntPtr window, uint message, UIntPtr wParam, string lParam,
         uint flags, uint timeout, out UIntPtr result);
+
+    private static IntPtr ReadVtableMethod(IntPtr instance, int slot) {
+        if (instance == IntPtr.Zero) {
+            throw new ArgumentException("A COM interface pointer is required.", "instance");
+        }
+        return Marshal.ReadIntPtr(Marshal.ReadIntPtr(instance), slot * IntPtr.Size);
+    }
+
+    private static void Release(ref IntPtr instance) {
+        if (instance == IntPtr.Zero) { return; }
+        var release = (ReleaseDelegate)Marshal.GetDelegateForFunctionPointer(
+            ReadVtableMethod(instance, 2), typeof(ReleaseDelegate));
+        release(instance);
+        instance = IntPtr.Zero;
+    }
+
+    public static double ReadTextScaleFactor() {
+        int initializeResult = RoInitialize(RoInitMultithreaded);
+        bool uninitialize = initializeResult >= 0;
+        if (initializeResult < 0 && initializeResult != RpcChangedMode) {
+            Marshal.ThrowExceptionForHR(initializeResult);
+        }
+
+        IntPtr classId = IntPtr.Zero;
+        IntPtr instance = IntPtr.Zero;
+        IntPtr settings2 = IntPtr.Zero;
+        try {
+            const string runtimeClass = "Windows.UI.ViewManagement.UISettings";
+            int result = WindowsCreateString(runtimeClass, (uint)runtimeClass.Length, out classId);
+            if (result < 0) { Marshal.ThrowExceptionForHR(result); }
+            result = RoActivateInstance(classId, out instance);
+            if (result < 0) { Marshal.ThrowExceptionForHR(result); }
+
+            var query = (QueryInterfaceDelegate)Marshal.GetDelegateForFunctionPointer(
+                ReadVtableMethod(instance, 0), typeof(QueryInterfaceDelegate));
+            Guid iid = IidUiSettings2;
+            result = query(instance, ref iid, out settings2);
+            if (result < 0) { Marshal.ThrowExceptionForHR(result); }
+
+            var read = (TextScaleFactorDelegate)Marshal.GetDelegateForFunctionPointer(
+                ReadVtableMethod(settings2, 6), typeof(TextScaleFactorDelegate));
+            double value;
+            result = read(settings2, out value);
+            if (result < 0) { Marshal.ThrowExceptionForHR(result); }
+            return value;
+        }
+        finally {
+            Release(ref settings2);
+            Release(ref instance);
+            if (classId != IntPtr.Zero) { WindowsDeleteString(classId); }
+            if (uninitialize) { RoUninitialize(); }
+        }
+    }
 
     public static void NotifyAccessibilitySettingChange() {
         UIntPtr result;
@@ -4431,6 +4506,7 @@ public static class DarkReNamerTextScaleNative {
 }
 
 function Get-TextScaleSnapshot {
+    Initialize-TextScaleNative
     $registryPath = 'HKCU:\Software\Microsoft\Accessibility'
     $valueName = 'TextScaleFactor'
     $keyExists = Test-Path -LiteralPath $registryPath -PathType Container
@@ -4445,8 +4521,7 @@ function Get-TextScaleSnapshot {
             $value = [int64]$key.GetValue($valueName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
         }
     }
-    $settings = [Windows.UI.ViewManagement.UISettings,Windows.UI.ViewManagement,ContentType=WindowsRuntime]::new()
-    $rawFactor = [double]$settings.TextScaleFactor
+    $rawFactor = [double][DarkReNamerTextScaleNative]::ReadTextScaleFactor()
     if ([double]::IsNaN($rawFactor) -or $rawFactor -lt 1.0 -or $rawFactor -gt 2.25) {
         throw 'UISettings.TextScaleFactor is outside the documented system range.'
     }

@@ -257,7 +257,22 @@ try {
     Assert-Fails {
         Join-GuestWindowsPath -Root $guestTransferRoot -Leaf '..\result.json'
     } 'Invalid bundle file name'
+    $runnerText = [IO.File]::ReadAllText($runner)
+    foreach ($requiredCoreRegistrationSource in @(
+        'var providerType = typeof(UIAutomationClientsideProviders.UIAutomationClientSideProviders);',
+        'var providerName = providerType.Assembly.GetName();',
+        'providerName.Name = providerType.Namespace;',
+        'RegisterClientSideProviderAssembly(providerName);'
+    )) {
+        if ($runnerText.IndexOf($requiredCoreRegistrationSource, [StringComparison]::Ordinal) -lt 0) {
+            throw "The UI Automation initializer is missing the Core-safe provider registration '$requiredCoreRegistrationSource'."
+        }
+    }
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        Initialize-NativeCapture
+        if ($null -eq [Windows.Automation.AutomationElement]::RootElement) {
+            throw 'In-process PowerShell Core UI Automation initialization returned no root element.'
+        }
         $initScript = @'
 $ErrorActionPreference = 'Stop'
 $runnerPath = 'GUEST_RUNNER_PATH'
