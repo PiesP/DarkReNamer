@@ -88,7 +88,12 @@ fn create_message_font_at_scale(dpi: u32, text_scale_factor: f64) -> HFONT {
     unsafe { CreateFontIndirectW(&raw const descriptor) }
 }
 
-fn create_status_font(dpi: u32, text_scale_factor: f64) -> HFONT {
+#[cfg(test)]
+pub(super) fn create_status_font(dpi: u32) -> HFONT {
+    create_status_font_at_scale(dpi, query_system_text_scale_factor())
+}
+
+fn create_status_font_at_scale(dpi: u32, text_scale_factor: f64) -> HFONT {
     let Some(metrics) = nonclient_metrics(dpi) else {
         return null_mut();
     };
@@ -102,7 +107,7 @@ fn create_status_font(dpi: u32, text_scale_factor: f64) -> HFONT {
 pub(super) fn refresh_system_fonts(state: &mut AppState) {
     let text_scale_factor = query_system_text_scale_factor();
     let message_font = create_message_font_at_scale(state.dpi, text_scale_factor);
-    let status_font = create_status_font(state.dpi, text_scale_factor);
+    let status_font = create_status_font_at_scale(state.dpi, text_scale_factor);
     // SAFETY: child HWNDs are live; a null font selects the control's default.
     unsafe {
         SendMessageW(state.list_window, WM_SETFONT, message_font as usize, 1);
