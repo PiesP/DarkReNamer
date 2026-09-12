@@ -443,6 +443,17 @@ try {
         -OutputRoot 'unused' `
         -ExpectedScriptSha256 ('0' * 64) `
         -ValidateOnly
+    if ($acceptanceText.IndexOf('ContentType=WindowsRuntime', [StringComparison]::Ordinal) -ge 0 -or
+        $acceptanceText.IndexOf('public static double ReadTextScaleFactor()', [StringComparison]::Ordinal) -lt 0) {
+        throw 'Text-scale reads must use the PowerShell Core-compatible native UISettings ABI helper.'
+    }
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        Initialize-TextScaleNative
+        $coreTextScale = [double][DarkReNamerTextScaleNative]::ReadTextScaleFactor()
+        if ([double]::IsNaN($coreTextScale) -or $coreTextScale -lt 1.0 -or $coreTextScale -gt 2.25) {
+            throw 'The in-process PowerShell Core native UISettings factor is invalid.'
+        }
+    }
     foreach ($regressionFunction in @(
         'Invoke-GuiRegressionAcceptance',
         'Invoke-ObserverStandardScenario',
