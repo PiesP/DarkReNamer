@@ -180,7 +180,7 @@ function Invoke-AcceptanceTextScaleRescue {
         $stderr = Join-Path $root 'text-scale-rescue.stderr.txt'
         $powerShell = (Get-Command pwsh.exe -CommandType Application -ErrorAction Stop).Source
         $engineJson = & $powerShell -NoLogo -NoProfile -NonInteractive -Command `
-            '[ordered]@{version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;effective_policy=(Get-ExecutionPolicy)} | ConvertTo-Json -Compress'
+            '[ordered]@{version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;effective_policy=(Get-ExecutionPolicy).ToString()} | ConvertTo-Json -Compress'
         if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the configured PowerShell rescue engine.' }
         $engine = $engineJson | ConvertFrom-Json
         if ([version]$engine.version -lt [version]'7.4' -or $engine.edition -cne 'Core' -or
@@ -416,7 +416,7 @@ public static class VmDesktopState {
             $stderr = Join-Path $root 'observer.stderr.txt'
             $powerShell = (Get-Command pwsh.exe -CommandType Application -ErrorAction Stop).Source
             $engineJson = & $powerShell -NoLogo -NoProfile -NonInteractive -Command `
-                '[ordered]@{version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;effective_policy=(Get-ExecutionPolicy)} | ConvertTo-Json -Compress'
+                '[ordered]@{version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;effective_policy=(Get-ExecutionPolicy).ToString()} | ConvertTo-Json -Compress'
             if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the configured PowerShell acceptance engine.' }
             $engine = $engineJson | ConvertFrom-Json
             if ([version]$engine.version -lt [version]'7.4' -or $engine.edition -cne 'Core' -or
