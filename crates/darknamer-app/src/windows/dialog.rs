@@ -1335,13 +1335,16 @@ pub(super) unsafe extern "system" fn prompt_proc(
                     // or any resulting synchronous window work begins.
                     let text = unsafe { (*state_ptr).spec.value_one.clone() };
                     if let Err(error) = copy_clipboard(window, &text) {
-                        // SAFETY: clipboard work has returned, so state_ptr may
-                        // be borrowed again only to record the terminal error.
-                        unsafe {
-                            (*state_ptr).creation_error = Some(error);
-                            (*state_ptr).done = true;
-                            DestroyWindow(window);
-                        }
+                        // This prompt owns PromptState, not AppState. Report
+                        // directly with no state borrow; the main-window message
+                        // dispatcher must never inspect its user-data pointer.
+                        show_message_now(
+                            window,
+                            &format!(
+                                "클립보드에 복사하지 못했습니다: {error}\n다시 시도할 수 있습니다."
+                            ),
+                            "DarkReNamer - 복사 실패",
+                        );
                     }
                 }
                 PromptButtonAction::Accept => {

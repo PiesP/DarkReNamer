@@ -108,12 +108,15 @@ Cancel as its default. Final confirmation still checks the original session,
 revision and fingerprint before execution. Technical expansion does not duplicate
 full paths, avoiding the native TaskDialog's path-elision behavior. Display-only
 Unicode conversion cannot rewrite the model or the frozen plan.
-The dialog module's eight additional narrow unsafe blocks cover the owner
-liveness query, read-only mode and owned-copy snapshots, clipboard-error close,
+The dialog module's seven additional narrow unsafe blocks cover the owner
+liveness query, read-only mode and owned-copy snapshots,
 the native edit text limit, and three test-only control/style/text probes. The
 read-only mode retains the existing prompt lifetime and owner restoration; default
 window processing receives no held state reference. Clipboard work receives an
 owned snapshot after the modal state borrow ends.
+Copy failure is reported directly with the details window as its owner, without
+closing the details or passing its PromptState pointer to the main-window
+AppState dispatcher. The user can retry the explicit copy operation.
 
 Appearance preferences are non-authorizing input. Theme, command-rail density,
 preview emphasis, separators, tint, and empty-state copy may change presentation
