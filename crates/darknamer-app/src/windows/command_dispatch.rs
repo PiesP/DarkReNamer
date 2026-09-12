@@ -662,22 +662,7 @@ pub(super) fn dispatch_command(
         let row = selected[0];
         let item = state.model.items().get(row)?;
         let issue = state.preview_issue_cache.issue(row);
-        let status = preview_status_label(issue, item.planned_change_kind());
-        let description = preview_issue_description(issue).unwrap_or_else(|| {
-            "목록 미리보기에서 이름 문제나 중복 대상이 발견되지 않았습니다.".to_owned()
-        });
-        let planned_path = item.planned_path();
-        let text = format!(
-            "{}\n\n{description}\n\n현재 이름: {}\n변경 후 이름: {}\n대상 전체 경로: {}\n\n파일 시스템 검사와 실행 확인은 변경 적용 시 별도로 수행합니다.",
-            if status.is_empty() {
-                "변경 없음"
-            } else {
-                status
-            },
-            item.current_name(),
-            item.proposed_name(),
-            planned_path,
-        );
+        let text = preview_item_details(item, issue);
         message(window, &text, "DarkReNamer - 선택 항목 진단");
         return None;
     }
@@ -802,6 +787,9 @@ struct SelectionRestore {
 
 fn model_outcome(state: &mut AppState, changed: bool, effect: UiEffect) -> CommandOutcome {
     state.commit_known_model_change(changed);
+    if changed {
+        state.set_transient_status("미리보기 · ‘변경 적용’ 전에는 파일을 수정하지 않습니다.");
+    }
     CommandOutcome::model(changed, effect)
 }
 

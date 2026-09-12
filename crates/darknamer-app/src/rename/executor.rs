@@ -75,6 +75,8 @@ pub enum ExecutionPhase {
     Forward,
     /// Completed forward primitive steps are being restored.
     Rollback,
+    /// All forward steps completed; the last cancellation check and commit remain.
+    Finalizing,
     /// A verified terminal record was written.
     Terminal,
 }
@@ -580,6 +582,11 @@ impl<'a> RenameExecutor<'a> {
             });
         }
 
+        control.progress(ExecutionProgress {
+            phase: ExecutionPhase::Finalizing,
+            completed: schedule.len(),
+            total: schedule.len(),
+        });
         if control.cancellation_requested() {
             return Ok(self.rollback(
                 plan.id,

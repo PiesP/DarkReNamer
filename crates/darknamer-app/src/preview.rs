@@ -142,6 +142,32 @@ pub(crate) fn preview_issue_description(issue: PreviewRowIssue) -> Option<String
     }
 }
 
+/// The same before/after information for mouse tips and keyboard details.
+pub(crate) fn preview_item_details(
+    item: &darknamer_core::LegacyListItem,
+    issue: PreviewRowIssue,
+) -> String {
+    let status = preview_status_label(issue, item.planned_change_kind());
+    let status = if status.is_empty() {
+        "변경 없음"
+    } else {
+        status
+    };
+    let mut text = format!(
+        "{status}\n\n현재 이름: {}\n변경 후 이름: {}\n현재 전체 경로: {}\n대상 전체 경로: {}",
+        item.current_name(),
+        item.proposed_name(),
+        item.source_path(),
+        item.planned_path(),
+    );
+    if let Some(description) = preview_issue_description(issue) {
+        text.push_str("\n\n");
+        text.push_str(&description);
+    }
+    text.push_str("\n\n파일 시스템 검사와 실행 확인은 변경 적용 시 별도로 수행합니다.");
+    text
+}
+
 /// Finds rows whose rendered Status cell differs from refreshed preview state.
 #[must_use]
 pub(crate) fn preview_status_delta_rows<'a>(
@@ -563,6 +589,36 @@ fn preview_name_has_empty_stem(name: &LegacyText, is_directory: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn details_preserve_full_korean_source_and_moved_destination() {
+        let source = format!(r"C:\{}한글😀.txt", "긴경로\\".repeat(40));
+        let mut list = darknamer_core::LegacyList::default();
+        assert!(
+            list.append(darknamer_core::LegacyListItem::new(
+                source.clone(),
+                false,
+                1,
+                0,
+                0
+            ))
+            .is_ok()
+        );
+        let unchanged = preview_item_details(&list.items()[0], PreviewRowIssue::None);
+        assert!(unchanged.starts_with("변경 없음"));
+        assert!(unchanged.contains(&source));
+        assert!(list.prefix_complete(&LegacyText::from("완료-")).is_ok());
+        assert!(
+            list.unify_destination_parent_changed(&LegacyText::from(r"C:\이동 위치"))
+                .is_ok()
+        );
+        let item = &list.items()[0];
+        let text = preview_item_details(item, PreviewRowIssue::DuplicateDestination);
+        assert!(text.contains(&format!("현재 전체 경로: {source}")));
+        assert!(text.contains(r"대상 전체 경로: C:\이동 위치\완료-한글😀.txt"));
+        assert!(text.contains("이름이나 대상 위치를 수정"));
+        assert_eq!(item.source_path(), &LegacyText::from(source));
+    }
 
     #[test]
     fn row_diagnostics_explain_the_model_issue_and_corrective_action() {

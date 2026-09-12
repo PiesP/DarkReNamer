@@ -13,8 +13,8 @@ pub mod rename;
 
 #[cfg(windows)]
 pub(crate) use preview::{
-    PreviewCountCache, PreviewCounts, PreviewIssueCache, PreviewRowIssue,
-    preview_issue_description, preview_status_delta_rows, preview_status_label,
+    PreviewCountCache, PreviewCounts, PreviewIssueCache, PreviewRowIssue, preview_item_details,
+    preview_status_delta_rows, preview_status_label,
 };
 #[cfg(all(test, not(windows)))]
 pub(crate) use preview::{PreviewCounts, PreviewRowIssue};
@@ -2133,6 +2133,47 @@ pub(crate) fn apply_confirmation_primary(summary: &ApplyConfirmationSummary) -> 
     text
 }
 
+/// Selection is context for the user, never an input to the frozen Apply plan.
+#[cfg(any(windows, test))]
+pub(crate) fn apply_confirmation_scope(total: usize, selected: usize, changed: usize) -> String {
+    format!(
+        "목록 전체 {total}개 · 선택 {selected}개 · 실제 변경 {changed}개\n선택 여부와 관계없이 목록의 변경 예정 항목을 모두 적용합니다."
+    )
+}
+
+/// Samples at most two immutable plan rows; never traverses the whole list.
+#[cfg(any(windows, test))]
+pub(crate) fn apply_confirmation_examples(plan: &crate::rename::RenamePlan, full: bool) -> String {
+    fn short_leaf(path: &darknamer_core::LegacyText) -> String {
+        let (_, leaf) = split_windows_path(path);
+        let leaf = String::from_utf16_lossy(leaf);
+        let mut chars = leaf.chars();
+        let mut text: String = chars.by_ref().take(36).collect();
+        if chars.next().is_some() {
+            text.push('…');
+        }
+        text
+    }
+    let shown = plan.rows().len().min(2);
+    let mut text = format!("변경 예시 ({shown}/{}개)", plan.rows().len());
+    for row in plan.rows().iter().take(shown) {
+        if full {
+            text.push_str(&format!(
+                "\n\n현재: {}\n변경 후: {}",
+                row.source(),
+                row.destination()
+            ));
+        } else {
+            text.push_str(&format!(
+                "\n{} → {}",
+                short_leaf(row.source()),
+                short_leaf(row.destination())
+            ));
+        }
+    }
+    text
+}
+
 #[cfg(any(windows, test))]
 fn split_windows_path(path: &darknamer_core::LegacyText) -> (&[u16], &[u16]) {
     let split = path
@@ -3089,6 +3130,7 @@ pub(crate) const fn proposed_name_visual_decision(
 pub(crate) struct UiStatus {
     counts: PreviewCounts,
     transient: Option<String>,
+    result: Option<String>,
     progress: Option<String>,
     recovery: Option<String>,
     preview_sync_failed: bool,
@@ -3118,10 +3160,16 @@ impl UiStatus {
     }
 
     pub(crate) fn set_transient(&mut self, message: impl Into<String>) {
+        self.result = None;
         self.transient = Some(message.into());
     }
 
+    pub(crate) fn set_result(&mut self, message: impl Into<String>) {
+        self.result = Some(message.into());
+    }
+
     pub(crate) fn set_progress(&mut self, message: impl Into<String>) {
+        self.result = None;
         self.progress = Some(message.into());
     }
 
@@ -3153,6 +3201,7 @@ impl UiStatus {
             .or(self
                 .preview_sync_failed
                 .then_some(PREVIEW_SYNC_FAILURE_STATUS))
+            .or(self.result.as_deref())
             .or(self.preview_notice.as_deref())
             .or(self.transient.as_deref())
             .unwrap_or(EMPTY_LIST_STATUS)
@@ -3175,6 +3224,7 @@ pub(crate) struct WorkerActivity {
     pub(crate) plan: bool,
     pub(crate) apply: bool,
     pub(crate) cancellation_requested: bool,
+    pub(crate) apply_finishing: bool,
 }
 
 /// The single worker whose existing cancellation primitive may be requested.
@@ -3204,6 +3254,7 @@ pub(crate) enum CancelControlState {
     Hidden,
     Enabled,
     Requested,
+    Unavailable,
 }
 
 #[cfg(any(windows, test))]
@@ -3224,6 +3275,8 @@ impl CancelControlState {
 pub(crate) const fn cancel_control_state(activity: WorkerActivity) -> CancelControlState {
     if active_worker_kind(activity).is_none() {
         CancelControlState::Hidden
+    } else if activity.apply_finishing {
+        CancelControlState::Unavailable
     } else if activity.cancellation_requested {
         CancelControlState::Requested
     } else {
@@ -6940,6 +6993,54 @@ mod tests {
     }
 
     #[test]
+    fn finished_work_is_visible_until_the_next_action_without_hiding_recovery() {
+        let mut status = UiStatus::default();
+        status.set_preview_notice(Some("preview warning".into()));
+        status.set_result("restored cancellation");
+        assert_eq!(status.message_text(), "restored cancellation");
+        status.set_recovery("recovery required");
+        assert_eq!(status.message_text(), "recovery required");
+        status.clear_recovery();
+        status.set_preview_sync_failed(true);
+        assert_eq!(status.message_text(), PREVIEW_SYNC_FAILURE_STATUS);
+        status.set_preview_sync_failed(false);
+        status.set_transient("edited preview");
+        assert_eq!(status.message_text(), "preview warning");
+        status.set_preview_notice(None);
+        assert_eq!(status.message_text(), "edited preview");
+        status.set_result("completed");
+        status.set_progress("planning");
+        status.clear_progress();
+        assert_eq!(status.message_text(), "edited preview");
+    }
+
+    #[test]
+    fn rollback_and_terminal_handoff_do_not_offer_cancellation() {
+        for requested in [false, true] {
+            let control = cancel_control_state(WorkerActivity {
+                apply: true,
+                apply_finishing: true,
+                cancellation_requested: requested,
+                ..WorkerActivity::default()
+            });
+            assert_eq!(control, CancelControlState::Unavailable);
+            assert!(control.is_visible());
+            assert!(!control.is_enabled());
+        }
+    }
+
+    #[test]
+    fn apply_scope_distinguishes_selection_from_all_changed_rows() {
+        for selected in [0, 1, 10] {
+            let scope = apply_confirmation_scope(10, selected, 7);
+            assert!(scope.contains("목록 전체 10개"));
+            assert!(scope.contains(&format!("선택 {selected}개")));
+            assert!(scope.contains("실제 변경 7개"));
+            assert!(scope.contains("변경 예정 항목을 모두 적용"));
+        }
+    }
+
+    #[test]
     fn destructive_prompt_accepts_only_its_exact_custom_button() {
         assert_eq!(
             destructive_prompt_choice(APPLY_CONFIRM_BUTTON_ID, APPLY_CONFIRM_BUTTON_ID),
@@ -7100,6 +7201,13 @@ mod tests {
             ],
         ))?;
         let requirements = preflight_plan(&plan, &mut backend)?;
+        let examples = apply_confirmation_examples(&plan, false);
+        assert!(examples.contains("a.txt → x.txt"));
+        assert!(examples.contains("b.txt → c.txt"));
+        assert!(!examples.contains("D.TXT"));
+        let full = apply_confirmation_examples(&plan, true);
+        assert!(full.contains(r"현재: C:\work\a.txt"));
+        assert!(full.contains(r"변경 후: C:\work\x.txt"));
         let summary = ApplyConfirmationSummary::from_plan(
             &plan,
             requirements.primitive_steps(),

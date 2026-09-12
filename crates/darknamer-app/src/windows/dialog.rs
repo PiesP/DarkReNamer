@@ -206,10 +206,10 @@ impl OwnedTaskDialog {
         let expanded_information = spec.expanded_information.map(wide);
         let expanded_control_text = expanded_information
             .as_ref()
-            .map(|_| wide("진단 정보 숨기기"));
+            .map(|_| wide("상세 정보 숨기기"));
         let collapsed_control_text = expanded_information
             .as_ref()
-            .map(|_| wide("진단 정보 표시"));
+            .map(|_| wide("상세 정보 표시"));
         let button_texts = spec
             .buttons
             .iter()

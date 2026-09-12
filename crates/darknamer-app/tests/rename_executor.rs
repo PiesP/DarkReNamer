@@ -1203,6 +1203,7 @@ struct RecordingControl {
     progress: Mutex<Vec<ExecutionProgress>>,
     cancel_after_forward: Option<usize>,
     cancel_after_begin: bool,
+    cancel_at_finalizing: bool,
 }
 
 impl RecordingControl {
@@ -1212,6 +1213,7 @@ impl RecordingControl {
             progress: Mutex::new(Vec::new()),
             cancel_after_forward,
             cancel_after_begin,
+            cancel_at_finalizing: false,
         }
     }
 
@@ -1237,6 +1239,9 @@ impl ExecutionControl for RecordingControl {
     }
 
     fn progress(&self, progress: ExecutionProgress) {
+        if self.cancel_at_finalizing && progress.phase == ExecutionPhase::Finalizing {
+            self.token.request();
+        }
         if progress.phase == ExecutionPhase::Forward
             && self
                 .cancel_after_forward
@@ -1248,6 +1253,47 @@ impl ExecutionControl for RecordingControl {
             events.push(progress);
         }
     }
+}
+
+#[test]
+fn finalizing_reports_completed_steps_without_skipping_the_last_cancel_check()
+-> Result<(), Box<dyn std::error::Error>> {
+    for cancel in [false, true] {
+        let mut backend = MemoryBackend::new().with_file(r"C:\work\a.txt", 1);
+        let confirmed = confirmed_plan(&backend, vec![intent(0, "a.txt", "b.txt")])?;
+        let mut journal = MemoryJournal::new();
+        let mut control = RecordingControl::new(None, false);
+        control.cancel_at_finalizing = cancel;
+        let report = RenameExecutor::new(&mut backend, &mut journal)
+            .execute_with_control(confirmed, &control)?;
+        let events = control.events()?;
+        assert!(
+            events
+                .iter()
+                .any(|event| event.phase == ExecutionPhase::Finalizing
+                    && event.completed == 1
+                    && event.total == 1)
+        );
+        assert_eq!(
+            events.last().map(|event| event.phase),
+            Some(ExecutionPhase::Terminal)
+        );
+        if cancel {
+            assert!(matches!(
+                report.outcome(),
+                ExecutionOutcome::RolledBack {
+                    failure: ExecutionFailure::Cancelled { .. }
+                }
+            ));
+            assert_eq!(backend.file_id(r"C:\work\a.txt"), Some(1));
+            assert_eq!(backend.file_id(r"C:\work\b.txt"), None);
+        } else {
+            assert_eq!(report.outcome(), &ExecutionOutcome::Completed);
+            assert_eq!(backend.file_id(r"C:\work\a.txt"), None);
+            assert_eq!(backend.file_id(r"C:\work\b.txt"), Some(1));
+        }
+    }
+    Ok(())
 }
 
 #[test]

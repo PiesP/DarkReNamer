@@ -800,6 +800,10 @@ impl AppState {
             admission: self.admission_worker.is_some(),
             plan: self.plan_worker.is_some(),
             apply: self.apply_worker.is_some(),
+            apply_finishing: self
+                .apply_worker
+                .as_ref()
+                .is_some_and(ApplyWorker::is_finishing),
             cancellation_requested: self
                 .admission_worker
                 .as_ref()
@@ -832,6 +836,11 @@ impl AppState {
 
     fn set_transient_status(&mut self, message: impl Into<String>) {
         self.ui_status.set_transient(message);
+        self.render_status();
+    }
+
+    fn set_result_status(&mut self, message: impl Into<String>) {
+        self.ui_status.set_result(message);
         self.render_status();
     }
 

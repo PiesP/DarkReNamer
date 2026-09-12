@@ -114,6 +114,15 @@ area.
 Appearance-dialog focus scrolling posts session-bound redraw work. Synchronous
 redraw starts after its state lease ends, and default `WM_PAINT` processing holds
 no state lease so a nested `WM_ERASEBKGND` can safely resolve the current palette.
+The appearance dialog uses the standard modal caption instead of a compact
+tool-window caption. Creation and DPI/work-area calculations share its extended
+style, retaining Windows-owned close-button painting, hit testing, and keyboard
+handling. Caption close still follows the existing Cancel path and restores the
+appearance draft without saving preferences or changing rename authority.
+Default caption dispatch releases the dialog state lease before entering
+`DefWindowProcW`, which can synchronously send `WM_CLOSE`. No state is accessed
+after that call. The native regression exercises `SC_CLOSE` while separately
+retaining the rejection of nested mutable state leases.
 
 Resolved Light and Dark themes use an app-owned menu palette while
 retaining keyboard mnemonics and native MSAA/UIA metadata. Native System, Forced
@@ -210,6 +219,13 @@ Cancellation is linearized against journal begin. Before begin it produces no
 journal or mutation. After begin it is observed only between complete primitive
 steps and uses the same durable reverse-order rollback. Cancellation is ignored
 from `Prepared` through rename reconciliation and throughout rollback.
+
+The UI's Finalizing progress phase is published after all forward steps and
+before the existing final cancellation check. It disables new UI cancellation
+requests during commit; it is not a terminal result and grants no mutation
+authority. In-flight cancellation requests still use the existing check. The UI
+acknowledges a request without promising rollback, and reports only the actual
+execution outcome. Rollback and terminal handoff also disable the Cancel control.
 
 ## Release panic policy
 
