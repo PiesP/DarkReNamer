@@ -3053,7 +3053,7 @@ function Scroll-ObserverTaskDialogToEnd {
     $native = $null
     foreach ($candidate in $nativeCandidates) {
         $values = [DarkReNamerVmAcceptanceNative]::TryReadScrollInfo([IntPtr]$candidate.handle, [int]$candidate.bar)
-        if ($null -eq $values -or $values.Count -ne 6) { continue }
+        if ($null -eq $values -or $values.Count -ne 5) { continue }
         $bottomPosition = [int]$values[1] - [Math]::Max(([int]$values[2] - 1), 0)
         if ([int]$values[1] -le [int]$values[0] -or [int]$values[2] -le 0 -or [int]$values[3] -ge $bottomPosition) { continue }
         $native = [ordered]@{
@@ -3081,7 +3081,7 @@ function Scroll-ObserverTaskDialogToEnd {
             $finalValue = [double]$scrollPattern.Current.VerticalScrollPercent
         } else {
             $values = [DarkReNamerVmAcceptanceNative]::TryReadScrollInfo([IntPtr]$native.handle, [int]$native.bar)
-            if ($null -eq $values -or $values.Count -ne 6) { throw "$Label lost Win32 scroll position state during physical scrolling." }
+            if ($null -eq $values -or $values.Count -ne 5) { throw "$Label lost Win32 scroll position state during physical scrolling." }
             $expectedBottom = [int]$values[1] - [Math]::Max(([int]$values[2] - 1), 0)
             if ($expectedBottom -ne [int]$native.initial.bottom_position) { throw "$Label Win32 scroll range changed during physical scrolling." }
             $finalValue = [int]$values[3]
