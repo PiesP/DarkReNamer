@@ -2200,7 +2200,11 @@ unsafe extern "system" fn appearance_dialog_proc(
             }
         }
         _ => {
-            // SAFETY: arguments are unchanged values from the active callback.
+            // Native caption handling can synchronously send WM_CLOSE. Release
+            // the lease so that callback can enter the existing Cancel path.
+            drop(state_lease);
+            // SAFETY: arguments are unchanged callback values, and no dialog
+            // state is borrowed or accessed after potentially reentrant handling.
             unsafe { DefWindowProcW(window, message, wparam, lparam) }
         }
     }
@@ -2217,7 +2221,8 @@ mod native_tests {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_RETURN;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         BM_CLICK, BS_TYPEMASK, DispatchMessageW, GWL_EXSTYLE, GWL_STYLE, GetClientRect,
-        GetWindowLongPtrW, IsDialogMessageW, MSG, PM_REMOVE, PeekMessageW, WM_KEYDOWN,
+        GetWindowLongPtrW, IsDialogMessageW, MSG, PM_REMOVE, PeekMessageW, SC_CLOSE, WM_KEYDOWN,
+        WM_SYSCOMMAND,
     };
 
     struct TestWindow(HWND);
@@ -2348,7 +2353,8 @@ mod native_tests {
     }
 
     #[test]
-    fn appearance_dialog_rejects_nested_state_lease() -> Result<(), Box<dyn std::error::Error>> {
+    fn appearance_dialog_rejects_nested_state_lease_and_allows_system_close()
+    -> Result<(), Box<dyn std::error::Error>> {
         // SAFETY: null requests the current process module.
         let instance = unsafe { GetModuleHandleW(null()) };
         // SAFETY: the system STATIC class and current module remain live for
@@ -2372,24 +2378,35 @@ mod native_tests {
         if owner.is_null() {
             return Err(io::Error::last_os_error().into());
         }
-        let dialog = create_appearance_dialog_window(
-            owner,
+        let owner = TestWindow(owner);
+        let dialog = TestWindow(create_appearance_dialog_window(
+            owner.raw(),
             7,
             UiAppearance::default(),
             ForcedColorsState::Inactive,
             Some(ResolvedTheme::Light),
-        )?;
-        let outer = try_appearance_dialog_state(dialog)
+        )?);
+        let outer = try_appearance_dialog_state(dialog.raw())
             .ok_or_else(|| io::Error::other("outer appearance lease was rejected"))?;
-        assert!(try_appearance_dialog_state(dialog).is_none());
+        assert!(try_appearance_dialog_state(dialog.raw()).is_none());
         drop(outer);
-        let reacquired = try_appearance_dialog_state(dialog)
+        let reacquired = try_appearance_dialog_state(dialog.raw())
             .ok_or_else(|| io::Error::other("appearance lease did not release"))?;
         drop(reacquired);
-        // SAFETY: both windows are test-owned and no state lease remains.
+        // SAFETY: both windows are test-owned and no state lease remains. The
+        // synchronous system command exercises native dispatch into WM_CLOSE.
         unsafe {
-            DestroyWindow(dialog);
-            DestroyWindow(owner);
+            SendMessageW(dialog.raw(), WM_SYSCOMMAND, SC_CLOSE as WPARAM, 0);
+            assert_eq!(
+                IsWindow(dialog.raw()),
+                0,
+                "system close must dismiss the dialog"
+            );
+            assert_ne!(
+                IsWindow(owner.raw()),
+                0,
+                "system close must preserve the owner"
+            );
         }
         Ok(())
     }
