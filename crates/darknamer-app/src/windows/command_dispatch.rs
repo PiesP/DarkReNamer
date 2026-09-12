@@ -465,6 +465,12 @@ pub(super) enum PreparedCommandAction {
     TaskDialog(PreparedDiscardTaskDialog),
     RecoveryExport(PreparedRecoveryExport),
     Appearance(PreparedAppearanceAction),
+    PreviewDetails(PreparedPreviewDetails),
+}
+
+pub(super) struct PreparedPreviewDetails {
+    pub(super) session: PreparedTaskDialogSession,
+    pub(super) details: PreparedTextDetails,
 }
 
 #[derive(Clone, Copy)]
@@ -663,8 +669,16 @@ pub(super) fn dispatch_command(
         let item = state.model.items().get(row)?;
         let issue = state.preview_issue_cache.issue(row);
         let text = preview_item_details(item, issue);
-        message(window, &text, "DarkReNamer - 선택 항목 진단");
-        return None;
+        let details = PreparedTextDetails {
+            caption: "DarkReNamer - 선택 항목 진단".to_owned(),
+            text,
+            appearance: state.prompt_appearance(),
+        };
+        let session = begin_prepared_task_dialog(state)?;
+        update_controls(state);
+        return Some(PreparedCommandAction::PreviewDetails(
+            PreparedPreviewDetails { session, details },
+        ));
     }
     let mut selection_restore = None;
     let outcome = match command {
@@ -1168,6 +1182,35 @@ pub(super) fn run_prepared_command_action(
         PreparedCommandAction::Appearance(prepared) => {
             run_prepared_appearance_action(window, prepared, appearance_platform);
         }
+        PreparedCommandAction::PreviewDetails(prepared) => {
+            run_prepared_preview_details(window, prepared, |owner, details| {
+                text_details(owner, details.appearance, &details.caption, &details.text)
+            });
+        }
+    }
+}
+
+pub(super) fn run_prepared_preview_details(
+    owner: HWND,
+    prepared: PreparedPreviewDetails,
+    show: impl FnOnce(HWND, &PreparedTextDetails) -> io::Result<()>,
+) {
+    let result = show(owner, &prepared.details);
+    let Some(mut lease) = try_app_state(owner) else {
+        return;
+    };
+    let state = lease.state_mut();
+    let disposition =
+        take_prepared_task_dialog(state, prepared.session, PreparedTaskDialogPolicy::Mutable);
+    update_controls(state);
+    if disposition == PreparedTaskDialogDisposition::Closed {
+        try_finish_window_close(owner, state);
+    } else if let Err(error) = result {
+        message(
+            owner,
+            &format!("전체 정보를 표시하지 못했습니다: {error}"),
+            "DarkReNamer",
+        );
     }
 }
 

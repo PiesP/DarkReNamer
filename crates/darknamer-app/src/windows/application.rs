@@ -2179,6 +2179,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let app = PublishedFileDialogTestApp::new()?;
+        let mut prepared_details = None;
         app.with_state(|state| {
             assert!(!state.preview_details_available(0));
             assert_eq!(
@@ -2201,28 +2202,34 @@ mod tests {
             assert!(!state.preview_details_available(2));
             let revision = state.model_revision;
             let names = state.model.export_names();
-            assert!(dispatch_command(app.owner, state, PREVIEW_DETAILS).is_none());
+            prepared_details = dispatch_command(app.owner, state, PREVIEW_DETAILS);
+            assert!(state.mutation_locked);
             assert_eq!(state.model_revision, revision);
             assert_eq!(state.model.export_names(), names);
             assert!(state.active_journal.is_none());
         })?;
         let mut shown = false;
-        assert!(drain_deferred_messages_with(
-            app.owner,
-            |_, text, caption| {
-                shown = true;
-                assert!(caption.contains("선택 항목 진단"));
-                assert!(text.contains("Windows에서 금지된 문자"));
-                assert!(text.contains("수정하세요"));
-                assert!(text.contains("현재 이름: sample.txt"));
-                assert!(text.contains("변경 후 이름: ?sample.txt"));
-                assert!(text.contains(r"현재 전체 경로: C:\fixture\sample.txt"));
-                assert!(text.contains(r"대상 전체 경로: C:\fixture\?sample.txt"));
-                assert!(text.contains("파일 시스템 검사와 실행 확인은 변경 적용 시 별도"));
-            }
-        ));
+        let Some(PreparedCommandAction::PreviewDetails(prepared)) = prepared_details else {
+            return Err("selected details were not prepared".into());
+        };
+        run_prepared_preview_details(app.owner, prepared, |_, details| {
+            let text = &details.text;
+            let caption = &details.caption;
+            shown = true;
+            assert!(caption.contains("선택 항목 진단"));
+            assert!(text.contains("Windows에서 금지된 문자"));
+            assert!(text.contains("수정하세요"));
+            assert!(text.contains("현재 이름: sample.txt"));
+            assert!(text.contains("변경 후 이름: ?sample.txt"));
+            assert!(text.contains(r"현재 전체 경로: C:\fixture\sample.txt"));
+            assert!(text.contains(r"대상 전체 경로: C:\fixture\?sample.txt"));
+            assert!(text.contains("파일 시스템 검사와 실행 확인은 변경 적용 시 별도"));
+            Ok(())
+        });
         assert!(shown);
         app.with_state(|state| {
+            assert!(!state.mutation_locked);
+            assert!(state.active_prompt.is_none());
             state.mark_preview_sync_failed();
             assert!(!state.preview_details_available(1));
             assert!(dispatch_command(app.owner, state, PREVIEW_DETAILS).is_none());
@@ -2232,6 +2239,54 @@ mod tests {
             state.mutation_locked = false;
         })?;
         assert!(!has_deferred_messages(app.owner));
+        Ok(())
+    }
+
+    #[test]
+    fn preview_details_snapshot_tracks_each_explicit_selection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _serial = FILE_DIALOG_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let app = PublishedFileDialogTestApp::new()?;
+        app.with_state(|state| {
+            for parent in ["first", "second"] {
+                state.model.append(LegacyListItem::new_with_actual_size(
+                    format!(r"C:\fixture\{parent}\한글-𠮷.txt").as_str(),
+                    false,
+                    1,
+                    1,
+                    0,
+                    0,
+                ))?;
+            }
+            refresh(state);
+            select_rows(state.list_window, &[0]);
+            Ok::<_, darknamer_core::ProposalMutationError>(())
+        })??;
+        let first = app.prepare(PREVIEW_DETAILS)?;
+        let PreparedCommandAction::PreviewDetails(first) = first else {
+            return Err("first details were not prepared".into());
+        };
+        run_prepared_preview_details(app.owner, first, |_, details| {
+            assert!(details.text.contains(r"C:\fixture\first\한글-𠮷.txt"));
+            app.with_state(|state| {
+                clear_selection(state.list_window);
+                select_rows(state.list_window, &[1]);
+            })?;
+            assert!(!details.text.contains(r"C:\fixture\second\한글-𠮷.txt"));
+            Ok(())
+        });
+        let second = app.prepare(PREVIEW_DETAILS)?;
+        let PreparedCommandAction::PreviewDetails(second) = second else {
+            return Err("second details were not prepared".into());
+        };
+        run_prepared_preview_details(app.owner, second, |_, details| {
+            assert!(details.text.contains(r"C:\fixture\second\한글-𠮷.txt"));
+            assert!(!details.text.contains(r"C:\fixture\first\한글-𠮷.txt"));
+            Ok(())
+        });
+        app.assert_session_cleared()?;
         Ok(())
     }
 
@@ -3217,8 +3272,30 @@ mod tests {
                 spec.content
                     .contains("목록 전체 3개 · 선택 1개 · 실제 변경 2개")
             );
-            assert!(spec.content.contains("before.txt → after.txt"));
-            assert!(spec.content.contains("unselected.txt → also-changed.txt"));
+            for name in [
+                "before.txt",
+                "after.txt",
+                "unselected.txt",
+                "also-changed.txt",
+            ] {
+                assert!(spec.content.contains(name));
+            }
+            let details = spec
+                .text_details
+                .as_ref()
+                .ok_or_else(|| io::Error::other("missing full plan examples"))?;
+            assert!(details.text.contains(&source.display().to_string()));
+            assert!(
+                details
+                    .text
+                    .contains(&unselected_destination.display().to_string())
+            );
+            assert!(
+                !spec
+                    .expanded_information
+                    .as_ref()
+                    .is_some_and(|text| text.contains("before.txt"))
+            );
             Ok(IDCANCEL)
         })?;
         assert!(source.exists() && unselected.exists() && unchanged.exists());
@@ -3254,7 +3331,16 @@ mod tests {
         app.with_state(|state| apply_changes(app.owner, state))?;
         FILE_DIALOG_DRAWITEM_LEASED.store(false, Ordering::SeqCst);
         app.finish_plan_with_selector(|owner, spec| {
-            assert_eq!(spec.buttons.len(), 1);
+            assert!(
+                spec.buttons
+                    .iter()
+                    .any(|button| button.id == APPLY_CONFIRM_BUTTON_ID)
+            );
+            assert!(
+                spec.buttons
+                    .iter()
+                    .any(|button| button.id == TEXT_DETAILS_BUTTON_ID)
+            );
             // SAFETY: owner is live and the synchronous test subclass probes
             // whether the modal runner released AppState.
             send_synthetic_drawitem(owner);

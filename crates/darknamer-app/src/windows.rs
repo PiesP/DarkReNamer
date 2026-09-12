@@ -5077,6 +5077,7 @@ mod tests {
         }
         let result = (|| -> io::Result<()> {
             let mut state = PromptState {
+                read_only: false,
                 spec: prompt_spec(
                     "테스트 입력",
                     "입력",

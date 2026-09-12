@@ -127,11 +127,20 @@ pub(super) struct PreparedTaskDialogButton {
     pub(super) text: String,
 }
 
+pub(super) const TEXT_DETAILS_BUTTON_ID: i32 = 1_102;
+
+pub(super) struct PreparedTextDetails {
+    pub(super) caption: String,
+    pub(super) text: String,
+    pub(super) appearance: PromptAppearance,
+}
+
 pub(super) struct PreparedTaskDialogSpec {
     pub(super) title: String,
     pub(super) main_instruction: String,
     pub(super) content: String,
     pub(super) expanded_information: Option<String>,
+    pub(super) text_details: Option<PreparedTextDetails>,
     pub(super) buttons: Vec<PreparedTaskDialogButton>,
     pub(super) warning: bool,
 }
@@ -148,17 +157,39 @@ pub(super) fn select_prepared_task_dialog(
             text: &button.text,
         })
         .collect::<Vec<_>>();
-    task_dialog(
-        owner,
-        TaskDialogSpec {
-            title: &prepared.title,
-            main_instruction: &prepared.main_instruction,
-            content: &prepared.content,
-            expanded_information: prepared.expanded_information.as_deref(),
-            buttons: &buttons,
-            warning: prepared.warning,
-        },
-    )
+    loop {
+        let selected = task_dialog(
+            owner,
+            TaskDialogSpec {
+                title: &prepared.title,
+                main_instruction: &prepared.main_instruction,
+                content: &prepared.content,
+                expanded_information: prepared.expanded_information.as_deref(),
+                buttons: &buttons,
+                warning: prepared.warning,
+            },
+        )?;
+        if selected != TEXT_DETAILS_BUTTON_ID {
+            return Ok(selected);
+        }
+        let Some(details) = prepared.text_details.as_ref() else {
+            return Ok(IDCANCEL);
+        };
+        text_details(owner, details.appearance, &details.caption, &details.text)?;
+        // SAFETY: this value query checks whether the exact owner HWND survived
+        // the nested details modal before the confirmation is shown again.
+        if unsafe { IsWindow(owner) } == 0 {
+            return Ok(IDCANCEL);
+        }
+        let Some(state_lease) = try_app_state(owner) else {
+            return Ok(IDCANCEL);
+        };
+        let closing = state_lease.state().close_pending;
+        drop(state_lease);
+        if closing {
+            return Ok(IDCANCEL);
+        }
+    }
 }
 
 struct OwnedTaskDialog {
@@ -331,6 +362,7 @@ pub(super) struct PromptAppearance {
 
 pub(super) struct PromptState {
     pub(super) spec: PromptSpec,
+    pub(super) read_only: bool,
     pub(super) result: Option<PromptResult>,
     pub(super) done: bool,
     pub(super) owner: HWND,
@@ -348,6 +380,10 @@ pub(super) struct PromptState {
     pub(super) appearance_resources: Option<AppearanceResources>,
     pub(super) creation_error: Option<io::Error>,
     pub(super) dpi: u32,
+}
+
+const fn prompt_extended_style(read_only: bool) -> u32 {
+    if read_only { 0 } else { WS_EX_TOOLWINDOW }
 }
 
 pub(super) struct OwnerEnableGuard {
@@ -412,6 +448,15 @@ pub(super) fn prompt_input(
     appearance: PromptAppearance,
     spec: PromptSpec,
 ) -> io::Result<Option<PromptResult>> {
+    prompt_input_variant(owner, appearance, spec, false)
+}
+
+fn prompt_input_variant(
+    owner: HWND,
+    appearance: PromptAppearance,
+    spec: PromptSpec,
+    read_only: bool,
+) -> io::Result<Option<PromptResult>> {
     // SAFETY: A null module name requests the current process module and dereferences no caller memory.
     let instance = unsafe { GetModuleHandleW(null()) };
     let class_name = wide("DarkReNamerInputWindow");
@@ -438,6 +483,7 @@ pub(super) fn prompt_input(
     let dpi = if owner_dpi == 0 { BASE_DPI } else { owner_dpi };
     let mut state = Box::new(PromptState {
         spec,
+        read_only,
         result: None,
         done: false,
         owner,
@@ -461,7 +507,7 @@ pub(super) fn prompt_input(
     // remain allocated for the complete synchronous prompt CreateWindowExW call.
     let dialog = unsafe {
         CreateWindowExW(
-            WS_EX_TOOLWINDOW,
+            prompt_extended_style(read_only),
             class_name.as_ptr(),
             caption.as_ptr(),
             WS_POPUP | WS_CAPTION | WS_SYSMENU,
@@ -523,6 +569,83 @@ pub(super) fn prompt_input(
         return Err(error);
     }
     Ok(state.result.take())
+}
+
+const MAX_TEXT_DETAILS_UTF16_UNITS: usize = MAX_PATH_UNITS * 8;
+
+fn text_details_value(text: &str) -> io::Result<LegacyText> {
+    let mut source = text.encode_utf16().peekable();
+    let mut normalized_len = 0_usize;
+    while let Some(unit) = source.next() {
+        let required = if unit == u16::from(b'\r') && source.peek() == Some(&u16::from(b'\n')) {
+            source.next();
+            2
+        } else if unit == u16::from(b'\r') || unit == u16::from(b'\n') {
+            2
+        } else {
+            if unit == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "전체 정보에 NUL 문자가 포함되어 있습니다.",
+                ));
+            }
+            1
+        };
+        normalized_len = normalized_len.checked_add(required).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "전체 정보가 안전한 표시 길이를 초과했습니다.",
+            )
+        })?;
+        if normalized_len > MAX_TEXT_DETAILS_UTF16_UNITS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "전체 정보가 안전한 표시 길이를 초과했습니다.",
+            ));
+        }
+    }
+    let mut units = Vec::new();
+    units
+        .try_reserve_exact(normalized_len)
+        .map_err(|_| io::Error::other("전체 정보를 표시할 메모리가 부족합니다."))?;
+    let mut source = text.encode_utf16().peekable();
+    while let Some(unit) = source.next() {
+        let newline = unit == u16::from(b'\r') || unit == u16::from(b'\n');
+        if unit == u16::from(b'\r') && source.peek() == Some(&u16::from(b'\n')) {
+            source.next();
+        }
+        if newline {
+            units.extend_from_slice(&[u16::from(b'\r'), u16::from(b'\n')]);
+        } else {
+            units.push(unit);
+        }
+    }
+    debug_assert_eq!(units.len(), normalized_len);
+    Ok(LegacyText::from_units(units))
+}
+
+pub(super) fn text_details(
+    owner: HWND,
+    appearance: PromptAppearance,
+    caption: &str,
+    text: &str,
+) -> io::Result<()> {
+    let value = text_details_value(text)?;
+    prompt_input_variant(
+        owner,
+        appearance,
+        PromptSpec {
+            caption: caption.to_owned(),
+            title: "전체 이름과 경로".to_owned(),
+            label_one: String::new(),
+            label_two: String::new(),
+            value_one: value,
+            value_two: LegacyText::default(),
+            choices: Vec::new(),
+        },
+        true,
+    )?;
+    Ok(())
 }
 
 pub(super) fn prompt_input_or_report(
@@ -728,13 +851,81 @@ fn measure_prompt_font(
         &state.spec.label_two,
         maximum_label_width,
     );
+    let details = if state.read_only {
+        measured_prompt_text(
+            window,
+            state.font.as_raw(),
+            &state.spec.value_one.to_string_lossy(),
+            maximum_title_width,
+        )
+    } else {
+        LayoutRect::default()
+    };
     PromptFontMetrics {
-        title_width: title.width,
+        title_width: title.width.max(details.width),
         title_height: title.height,
         label_width: label_one.width.max(label_two.width),
         label_height: label_one.height.max(label_two.height),
         line_height: line.height,
     }
+}
+
+fn calculate_read_only_prompt_layout(
+    dpi: u32,
+    measured: PromptFontMetrics,
+    maximum_client: LayoutRect,
+) -> PromptLayout {
+    let mut layout = calculate_prompt_layout(
+        dpi,
+        measured,
+        PromptFields {
+            value_one: true,
+            value_two: false,
+            choice: false,
+        },
+        maximum_client,
+    );
+    let Some(mut edit) = layout.edit_one else {
+        return layout;
+    };
+    edit.x = layout.title.x;
+    edit.width = layout.title.width;
+    let desired_edit_height = measured
+        .line_height
+        .max(scale_dip(16, dpi))
+        .saturating_mul(12)
+        .saturating_add(scale_dip(8, dpi));
+    let available_growth = maximum_client
+        .height
+        .saturating_sub(layout.client.height)
+        .max(0);
+    let growth = desired_edit_height
+        .saturating_sub(edit.height)
+        .max(0)
+        .min(available_growth);
+    edit.height = edit.height.saturating_add(growth);
+    layout.edit_one = Some(edit);
+    layout.label_one = None;
+    layout.separator.y = layout.separator.y.saturating_add(growth);
+    layout.ok.y = layout.ok.y.saturating_add(growth);
+    layout.cancel.y = layout.cancel.y.saturating_add(growth);
+    layout.client.height = layout.client.height.saturating_add(growth);
+    let line_height = measured.line_height.max(scale_dip(16, dpi));
+    let button_gap = scale_dip(8, dpi).min(layout.title.width.saturating_sub(2) / 3);
+    let button_width = line_height
+        .saturating_mul(7)
+        .saturating_add(scale_dip(8, dpi))
+        .min(layout.title.width.saturating_sub(button_gap) / 2)
+        .max(1);
+    layout.cancel.width = button_width;
+    layout.cancel.x = layout.title.right().saturating_sub(layout.cancel.width);
+    layout.ok.width = button_width;
+    layout.ok.x = layout
+        .cancel
+        .x
+        .saturating_sub(button_gap)
+        .saturating_sub(layout.ok.width);
+    layout
 }
 
 fn move_prompt_control(window: HWND, rect: LayoutRect) {
@@ -777,7 +968,7 @@ fn maximum_prompt_client(state: &PromptState, anchor: HWND) -> LayoutRect {
             &mut nonclient,
             WS_POPUP | WS_CAPTION | WS_SYSMENU,
             0,
-            WS_EX_TOOLWINDOW,
+            prompt_extended_style(state.read_only),
             state.dpi,
         )
     } != 0;
@@ -818,7 +1009,7 @@ fn position_prompt(window: HWND, state: &PromptState, client: LayoutRect, center
             &mut outer,
             WS_POPUP | WS_CAPTION | WS_SYSMENU,
             0,
-            WS_EX_TOOLWINDOW,
+            prompt_extended_style(state.read_only),
             state.dpi,
         )
     } == 0
@@ -873,12 +1064,12 @@ fn arrange_prompt(window: HWND, state: &PromptState, center_on_owner: bool) {
     };
     let anchor = if center_on_owner { state.owner } else { window };
     let maximum_client = maximum_prompt_client(state, anchor);
-    let layout = calculate_prompt_layout(
-        state.dpi,
-        measure_prompt_font(window, state, maximum_client),
-        fields,
-        maximum_client,
-    );
+    let measured = measure_prompt_font(window, state, maximum_client);
+    let layout = if state.read_only {
+        calculate_read_only_prompt_layout(state.dpi, measured, maximum_client)
+    } else {
+        calculate_prompt_layout(state.dpi, measured, fields, maximum_client)
+    };
     move_prompt_control(state.title, layout.title);
     if let Some(rect) = layout.edit_one {
         move_prompt_control(state.edit_one, rect);
@@ -903,6 +1094,19 @@ fn arrange_prompt(window: HWND, state: &PromptState, center_on_owner: bool) {
 
 pub(super) fn create_prompt_children(window: HWND, state: &mut PromptState) -> io::Result<()> {
     state.title = child(window, "STATIC", &state.spec.title, 1001, SS_NOPREFIX)?;
+    if state.read_only {
+        state.edit_one = create_prompt_details_edit(window, &state.spec.value_one, 1004)?;
+        state.ok = child(window, "BUTTON", "전체 복사(&C)", IDOK as u16, WS_TABSTOP)?;
+        state.cancel = child(
+            window,
+            "BUTTON",
+            "닫기",
+            IDCANCEL as u16,
+            WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
+        )?;
+        state.separator = child(window, "STATIC", "", 1010, SS_OWNERDRAW)?;
+        return Ok(());
+    }
     if !state.spec.label_one.is_empty() {
         state.label_one = child(window, "STATIC", &state.spec.label_one, 1002, SS_NOPREFIX)?;
         state.edit_one = create_prompt_edit(window, &state.spec.value_one, 1004)?;
@@ -1044,7 +1248,9 @@ pub(super) unsafe extern "system" fn prompt_proc(
                     unsafe { DefWindowProcW(window, message, wparam, lparam) }
                 },
                 |resources| {
-                    if lparam as HWND == state.combo {
+                    if lparam as HWND == state.combo
+                        || (state.read_only && lparam as HWND == state.edit_one)
+                    {
                         prompt_input_color(resources, wparam as HDC)
                     } else {
                         prompt_static_color(resources, wparam as HDC)
@@ -1119,25 +1325,47 @@ pub(super) unsafe extern "system" fn prompt_proc(
         WM_COMMAND if !state_ptr.is_null() => {
             let id = (wparam & 0xFFFF) as i32;
             let notification = ((wparam >> 16) & 0xFFFF) as u32;
-            if notification == BN_CLICKED && id == IDOK {
-                // SAFETY: state_ptr borrows prompt_input's live local Box and is
-                // confined to this modal callback thread until WM_NCDESTROY clears it.
-                let state = unsafe { &mut *state_ptr };
-                match prompt_result(state) {
-                    Ok(result) => state.result = Some(result),
-                    Err(error) => state.creation_error = Some(error),
+            // SAFETY: state_ptr is the live prompt state and this scalar read
+            // creates no reference that survives synchronous command handling.
+            let read_only = unsafe { (*state_ptr).read_only };
+            match prompt_button_action(read_only, id, notification) {
+                PromptButtonAction::CopyAll => {
+                    // SAFETY: state_ptr borrows the live local PromptState. The
+                    // cloned text ends this borrow before clipboard ownership
+                    // or any resulting synchronous window work begins.
+                    let text = unsafe { (*state_ptr).spec.value_one.clone() };
+                    if let Err(error) = copy_clipboard(window, &text) {
+                        // SAFETY: clipboard work has returned, so state_ptr may
+                        // be borrowed again only to record the terminal error.
+                        unsafe {
+                            (*state_ptr).creation_error = Some(error);
+                            (*state_ptr).done = true;
+                            DestroyWindow(window);
+                        }
+                    }
                 }
-                state.done = true;
-                // SAFETY: window is the live prompt HWND and IDOK has not yet
-                // destroyed it on this callback path.
-                unsafe { DestroyWindow(window) };
-            } else if notification == BN_CLICKED && id == IDCANCEL {
-                // SAFETY: state_ptr is the non-null borrowed pointer to the live
-                // local PromptState Box for this modal callback.
-                unsafe { (*state_ptr).done = true };
-                // SAFETY: window is the live prompt HWND and IDCANCEL destroys it
-                // exactly once after recording completion.
-                unsafe { DestroyWindow(window) };
+                PromptButtonAction::Accept => {
+                    // SAFETY: state_ptr borrows prompt_input's live local Box and is
+                    // confined to this modal callback thread until WM_NCDESTROY clears it.
+                    let state = unsafe { &mut *state_ptr };
+                    match prompt_result(state) {
+                        Ok(result) => state.result = Some(result),
+                        Err(error) => state.creation_error = Some(error),
+                    }
+                    state.done = true;
+                    // SAFETY: window is the live prompt HWND and IDOK has not yet
+                    // destroyed it on this callback path.
+                    unsafe { DestroyWindow(window) };
+                }
+                PromptButtonAction::Close => {
+                    // SAFETY: state_ptr is the non-null borrowed pointer to the live
+                    // local PromptState Box for this modal callback.
+                    unsafe { (*state_ptr).done = true };
+                    // SAFETY: window is the live prompt HWND and IDCANCEL destroys it
+                    // exactly once after recording completion.
+                    unsafe { DestroyWindow(window) };
+                }
+                PromptButtonAction::None => {}
             }
             0
         }
@@ -1200,6 +1428,69 @@ fn create_prompt_edit(parent: HWND, value: &LegacyText, id: u16) -> io::Result<H
     Ok(edit)
 }
 
+fn create_prompt_details_edit(parent: HWND, value: &LegacyText, id: u16) -> io::Result<HWND> {
+    if value.len() > MAX_TEXT_DETAILS_UTF16_UNITS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "전체 정보가 안전한 표시 길이를 초과했습니다.",
+        ));
+    }
+    let edit = child(
+        parent,
+        "EDIT",
+        "",
+        id,
+        WS_BORDER
+            | WS_TABSTOP
+            | windows_sys::Win32::UI::WindowsAndMessaging::WS_VSCROLL
+            | windows_sys::Win32::UI::WindowsAndMessaging::ES_MULTILINE as u32
+            | windows_sys::Win32::UI::WindowsAndMessaging::ES_AUTOVSCROLL as u32
+            | windows_sys::Win32::UI::WindowsAndMessaging::ES_READONLY as u32,
+    )?;
+    let terminated = wide(&value.to_string_lossy());
+    // SAFETY: edit is the live standard EDIT just created. The first message
+    // carries no pointer, and the second copies the retained terminated text
+    // synchronously after the control limit is raised to the validated bound.
+    let displayed = unsafe {
+        SendMessageW(
+            edit,
+            windows_sys::Win32::UI::Controls::EM_SETLIMITTEXT,
+            MAX_TEXT_DETAILS_UTF16_UNITS,
+            0,
+        );
+        SendMessageW(
+            edit,
+            windows_sys::Win32::UI::WindowsAndMessaging::WM_SETTEXT,
+            0,
+            terminated.as_ptr() as isize,
+        )
+    };
+    if displayed == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(edit)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PromptButtonAction {
+    None,
+    Accept,
+    CopyAll,
+    Close,
+}
+
+fn prompt_button_action(read_only: bool, id: i32, notification: u32) -> PromptButtonAction {
+    if notification != BN_CLICKED {
+        return PromptButtonAction::None;
+    }
+    match id {
+        IDOK if read_only => PromptButtonAction::CopyAll,
+        IDOK => PromptButtonAction::Accept,
+        IDCANCEL => PromptButtonAction::Close,
+        _ => PromptButtonAction::None,
+    }
+}
+
 fn prompt_result(state: &PromptState) -> io::Result<PromptResult> {
     let value_one = prompt_window_text(state.edit_one)?;
     let value_two = prompt_window_text(state.edit_two)?;
@@ -1217,6 +1508,10 @@ fn prompt_result(state: &PromptState) -> io::Result<PromptResult> {
 }
 
 fn prompt_window_text(window: HWND) -> io::Result<LegacyText> {
+    prompt_window_text_with_limit(window, MAX_PROMPT_TEXT_UTF16_UNITS)
+}
+
+fn prompt_window_text_with_limit(window: HWND, maximum: usize) -> io::Result<LegacyText> {
     if window.is_null() {
         return Ok(LegacyText::default());
     }
@@ -1227,10 +1522,17 @@ fn prompt_window_text(window: HWND) -> io::Result<LegacyText> {
     }
     let length = usize::try_from(length)
         .map_err(|_| io::Error::other("invalid native prompt text length"))?;
-    if length > MAX_PROMPT_TEXT_UTF16_UNITS {
-        return Err(prompt_text_too_long(length));
+    if length > maximum {
+        return Err(if maximum == MAX_PROMPT_TEXT_UTF16_UNITS {
+            prompt_text_too_long(length)
+        } else {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "전체 정보가 안전한 표시 길이를 초과했습니다.",
+            )
+        });
     }
-    let mut value = vec![0_u16; MAX_PROMPT_TEXT_UTF16_UNITS + 1];
+    let mut value = vec![0_u16; maximum.saturating_add(1)];
     // SAFETY: value is writable for the fixed maximum plus terminator and
     // remains allocated through the synchronous copy from this live control.
     let copied = unsafe {
@@ -1251,8 +1553,15 @@ fn prompt_window_text(window: HWND) -> io::Result<LegacyText> {
     let final_length = unsafe { GetWindowTextLengthW(window) };
     let final_length = usize::try_from(final_length)
         .map_err(|_| io::Error::other("invalid native prompt text length"))?;
-    if final_length > MAX_PROMPT_TEXT_UTF16_UNITS {
-        return Err(prompt_text_too_long(final_length));
+    if final_length > maximum {
+        return Err(if maximum == MAX_PROMPT_TEXT_UTF16_UNITS {
+            prompt_text_too_long(final_length)
+        } else {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "전체 정보가 안전한 표시 길이를 초과했습니다.",
+            )
+        });
     }
     if copied != final_length || final_length > length {
         return Err(io::Error::new(
@@ -1388,6 +1697,75 @@ mod tests {
     use super::*;
 
     #[test]
+    fn read_only_layout_grows_by_measured_lines_and_keeps_footer_inside_work_area() -> io::Result<()>
+    {
+        let maximum = LayoutRect {
+            x: 0,
+            y: 0,
+            width: 640,
+            height: 480,
+        };
+        let layout = calculate_read_only_prompt_layout(
+            BASE_DPI,
+            PromptFontMetrics {
+                title_width: 520,
+                title_height: 18,
+                label_width: 0,
+                label_height: 0,
+                line_height: 18,
+            },
+            maximum,
+        );
+        let edit = layout
+            .edit_one
+            .ok_or_else(|| io::Error::other("missing read-only edit"))?;
+        assert_eq!(edit.x, layout.title.x);
+        assert_eq!(edit.width, layout.title.width);
+        assert!(edit.height >= 12 * 18);
+        assert!(layout.client.width <= maximum.width);
+        assert!(layout.client.height <= maximum.height);
+        assert!(layout.separator.y >= edit.bottom());
+        assert!(layout.ok.width > scale_dip(75, BASE_DPI));
+        assert!(layout.ok.right() <= layout.cancel.x);
+        assert!(layout.cancel.right() <= layout.client.width);
+        assert!(layout.cancel.bottom() <= layout.client.height);
+
+        let constrained = calculate_read_only_prompt_layout(
+            192,
+            PromptFontMetrics {
+                title_width: 1_200,
+                title_height: 72,
+                label_width: 0,
+                label_height: 0,
+                line_height: 36,
+            },
+            LayoutRect {
+                x: 0,
+                y: 0,
+                width: 360,
+                height: 260,
+            },
+        );
+        assert!(constrained.client.width <= 360);
+        assert!(constrained.client.height <= 260);
+        assert!(constrained.ok.bottom() <= constrained.client.height);
+        assert!(constrained.cancel.bottom() <= constrained.client.height);
+        assert_eq!(prompt_extended_style(false), WS_EX_TOOLWINDOW);
+        assert_eq!(prompt_extended_style(true), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn text_details_reject_text_beyond_the_bounded_path_budget() -> io::Result<()> {
+        let oversized = "x".repeat(MAX_TEXT_DETAILS_UTF16_UNITS + 1);
+        let Err(error) = text_details_value(&oversized) else {
+            return Err(io::Error::other("oversized details were accepted"));
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        Ok(())
+    }
+
+    #[test]
     fn dynamic_system_symbol_resolution_succeeds_and_missing_symbols_fail_closed()
     -> Result<(), Box<dyn std::error::Error>> {
         let kernel = DynamicLibrary::load_system("kernel32.dll")?;
@@ -1441,6 +1819,7 @@ mod tests {
                     value_two: ordinary_second_value.clone(),
                     choices: Vec::new(),
                 },
+                read_only: false,
                 result: None,
                 done: false,
                 owner: parent,
@@ -1505,6 +1884,146 @@ mod tests {
         })();
 
         // SAFETY: parent is test-owned and destroys every prompt child.
+        unsafe { DestroyWindow(parent) };
+        result.map_err(Into::into)
+    }
+
+    #[test]
+    fn read_only_details_preserve_crlf_text_and_native_copy_selection_styles()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // SAFETY: the system STATIC class and current module remain live for
+        // this hidden, test-owned prompt parent.
+        let parent = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                640,
+                480,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            )
+        };
+        if parent.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+
+        let result = (|| -> io::Result<()> {
+            let long_path = format!(r"C:\긴 상위 경로\{}-𠮷.txt", "공통접두어".repeat(3_000));
+            assert!(LegacyText::from(long_path.as_str()).len() <= MAX_PATH_UNITS);
+            let source =
+                format!("현재: {long_path}\n변경 후: {long_path}.renamed\r선택 경로: {long_path}");
+            let details = text_details_value(&source)?;
+            let expected = LegacyText::from(
+                format!(
+                    "현재: {long_path}\r\n변경 후: {long_path}.renamed\r\n선택 경로: {long_path}"
+                )
+                .as_str(),
+            );
+            assert!(details.len() > MAX_PROMPT_TEXT_UTF16_UNITS);
+            assert!(details.len() > MAX_PATH_UNITS);
+            assert_eq!(details, expected);
+
+            let mut state = PromptState {
+                spec: PromptSpec {
+                    caption: "전체 정보".to_owned(),
+                    title: "전체 이름과 경로".to_owned(),
+                    label_one: String::new(),
+                    label_two: String::new(),
+                    value_one: details.clone(),
+                    value_two: LegacyText::default(),
+                    choices: Vec::new(),
+                },
+                read_only: true,
+                result: None,
+                done: false,
+                owner: parent,
+                title: null_mut(),
+                label_one: null_mut(),
+                label_two: null_mut(),
+                edit_one: null_mut(),
+                edit_two: null_mut(),
+                combo: null_mut(),
+                separator: null_mut(),
+                ok: null_mut(),
+                cancel: null_mut(),
+                font: OwnedFont::default(),
+                appearance: PromptAppearance {
+                    preference: UiAppearance::default(),
+                    forced_colors: ForcedColorsState::Inactive,
+                    system_theme: Some(ResolvedTheme::Light),
+                },
+                appearance_resources: None,
+                creation_error: None,
+                dpi: BASE_DPI,
+            };
+            create_prompt_children(parent, &mut state)?;
+
+            // SAFETY: edit_one is the live test-owned EDIT; both queries return
+            // scalar values and use no caller-provided output pointers.
+            let (edit_style, text_limit) = unsafe {
+                (
+                    GetWindowLongPtrW(state.edit_one, GWL_STYLE) as u32,
+                    SendMessageW(
+                        state.edit_one,
+                        windows_sys::Win32::UI::Controls::EM_GETLIMITTEXT,
+                        0,
+                        0,
+                    ),
+                )
+            };
+            assert_ne!(
+                edit_style & windows_sys::Win32::UI::WindowsAndMessaging::ES_MULTILINE as u32,
+                0
+            );
+            assert_ne!(
+                edit_style & windows_sys::Win32::UI::WindowsAndMessaging::ES_READONLY as u32,
+                0
+            );
+            assert_ne!(
+                edit_style & windows_sys::Win32::UI::WindowsAndMessaging::ES_AUTOVSCROLL as u32,
+                0
+            );
+            assert_ne!(
+                edit_style & windows_sys::Win32::UI::WindowsAndMessaging::WS_VSCROLL,
+                0
+            );
+            assert_eq!(edit_style & ES_AUTOHSCROLL as u32, 0);
+            assert_eq!(text_limit, MAX_TEXT_DETAILS_UTF16_UNITS as LRESULT);
+            assert_eq!(
+                prompt_window_text_with_limit(state.edit_one, MAX_TEXT_DETAILS_UTF16_UNITS)?,
+                details
+            );
+            assert_eq!(
+                prompt_window_text(state.ok)?,
+                LegacyText::from("전체 복사(&C)")
+            );
+            assert_eq!(prompt_window_text(state.cancel)?, LegacyText::from("닫기"));
+            assert_eq!(
+                prompt_button_action(true, IDOK, BN_CLICKED),
+                PromptButtonAction::CopyAll
+            );
+            assert_eq!(
+                prompt_button_action(true, IDCANCEL, BN_CLICKED),
+                PromptButtonAction::Close
+            );
+            assert_eq!(
+                prompt_button_action(false, IDOK, BN_CLICKED),
+                PromptButtonAction::Accept
+            );
+            assert_eq!(
+                prompt_button_action(true, IDOK, BN_SETFOCUS),
+                PromptButtonAction::None
+            );
+            Ok(())
+        })();
+
+        // SAFETY: parent is test-owned and destroys every details child.
         unsafe { DestroyWindow(parent) };
         result.map_err(Into::into)
     }

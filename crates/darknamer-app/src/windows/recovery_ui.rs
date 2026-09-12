@@ -407,6 +407,7 @@ pub(super) fn prepare_discard_staged_journal(
             content: "파일 변경은 시작되지 않았습니다. 폐기하면 새 적용을 다시 사용할 수 있습니다."
                 .to_owned(),
             expanded_information: Some(detail),
+            text_details: None,
             buttons: vec![PreparedTaskDialogButton {
                 id: DISCARD_CONFIRM_BUTTON_ID,
                 text: "계획 폐기".to_owned(),

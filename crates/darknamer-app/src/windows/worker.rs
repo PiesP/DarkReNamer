@@ -480,11 +480,13 @@ pub(super) fn handle_ready_plan(
         apply_confirmation_primary(&ready.summary),
         apply_confirmation_examples(&plan, false),
     );
-    let detail = format!(
-        "{}\n\n{}",
-        apply_confirmation_examples(&plan, true),
-        apply_confirmation_detail(&ready.summary, plan.fingerprint(), state.model_revision),
-    );
+    let detail =
+        apply_confirmation_detail(&ready.summary, plan.fingerprint(), state.model_revision);
+    let text_details = PreparedTextDetails {
+        caption: "DarkReNamer - 변경 예시 전체 정보".to_owned(),
+        text: apply_confirmation_examples(&plan, true),
+        appearance: state.prompt_appearance(),
+    };
     let fingerprint = plan.fingerprint();
     let session = begin_prepared_task_dialog(state)?;
     update_controls(state);
@@ -495,10 +497,17 @@ pub(super) fn handle_ready_plan(
             main_instruction: "계획된 파일 변경을 적용하시겠습니까?".to_owned(),
             content: primary,
             expanded_information: Some(detail),
-            buttons: vec![PreparedTaskDialogButton {
-                id: APPLY_CONFIRM_BUTTON_ID,
-                text: "변경 적용".to_owned(),
-            }],
+            text_details: Some(text_details),
+            buttons: vec![
+                PreparedTaskDialogButton {
+                    id: APPLY_CONFIRM_BUTTON_ID,
+                    text: "변경 적용".to_owned(),
+                },
+                PreparedTaskDialogButton {
+                    id: TEXT_DETAILS_BUTTON_ID,
+                    text: "예시 전체 정보 · 복사".to_owned(),
+                },
+            ],
             warning: true,
         },
         revision,
@@ -1592,6 +1601,7 @@ pub(super) fn handle_admission_completion(
                         main_instruction: "선택한 폴더를 어떻게 추가할까요?".to_owned(),
                         content: "목록에 추가할 범위를 선택하세요.".to_owned(),
                         expanded_information: Some(directory_detail),
+                        text_details: None,
                         buttons: vec![
                             PreparedTaskDialogButton {
                                 id: DIRECTORY_DIRECT_BUTTON_ID,

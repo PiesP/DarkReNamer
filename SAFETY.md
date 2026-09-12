@@ -94,9 +94,26 @@ command independently restores proposed names without changing target folders.
 
 Selected-row diagnostics copy only synchronized model-preview information.
 Their menu command requires one selected row and an idle, unlocked workbench.
-The existing deferred-message path displays the copied explanation after the
-AppState callback lease ends; it neither validates filesystem occupancy nor
-creates a plan, confirmation, or journal capability.
+The prepared modal session snapshots one row after synchronized preview and
+displays it after the AppState callback lease ends. A native read-only, wrapping
+edit control exposes the complete explanation and paths; copying requires an
+explicit selection-copy or whole-text copy action. This session neither validates
+filesystem occupancy nor creates a rename plan or journal capability. Its modal
+lock prevents model edits until the session ends.
+
+Apply examples sample at most two rows of the already frozen plan. Short names
+retain visible change context; complete examples use the same read-only details
+control. Returning from details reopens the same prepared confirmation with
+Cancel as its default. Final confirmation still checks the original session,
+revision and fingerprint before execution. Technical expansion does not duplicate
+full paths, avoiding the native TaskDialog's path-elision behavior. Display-only
+Unicode conversion cannot rewrite the model or the frozen plan.
+The dialog module's eight additional narrow unsafe blocks cover the owner
+liveness query, read-only mode and owned-copy snapshots, clipboard-error close,
+the native edit text limit, and three test-only control/style/text probes. The
+read-only mode retains the existing prompt lifetime and owner restoration; default
+window processing receives no held state reference. Clipboard work receives an
+owned snapshot after the modal state borrow ends.
 
 Appearance preferences are non-authorizing input. Theme, command-rail density,
 preview emphasis, separators, tint, and empty-state copy may change presentation

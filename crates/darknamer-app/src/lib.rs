@@ -2125,10 +2125,6 @@ pub(crate) fn apply_confirmation_primary(summary: &ApplyConfirmationSummary) -> 
             summary.move_and_rename
         ));
     }
-    if let Some(parent) = &summary.common_destination_parent {
-        text.push_str("\n대상 폴더: ");
-        text.push_str(&parent.to_string_lossy());
-    }
     text.push_str("\n기존 파일을 덮어쓰지 않습니다.");
     text
 }
@@ -2144,32 +2140,142 @@ pub(crate) fn apply_confirmation_scope(total: usize, selected: usize, changed: u
 /// Samples at most two immutable plan rows; never traverses the whole list.
 #[cfg(any(windows, test))]
 pub(crate) fn apply_confirmation_examples(plan: &crate::rename::RenamePlan, full: bool) -> String {
-    fn short_leaf(path: &darknamer_core::LegacyText) -> String {
-        let (_, leaf) = split_windows_path(path);
-        let leaf = String::from_utf16_lossy(leaf);
-        let mut chars = leaf.chars();
-        let mut text: String = chars.by_ref().take(36).collect();
-        if chars.next().is_some() {
-            text.push('…');
-        }
-        text
-    }
     let shown = plan.rows().len().min(2);
-    let mut text = format!("변경 예시 ({shown}/{}개)", plan.rows().len());
+    let mut elided = false;
+    let mut text = if full {
+        format!("변경 예시 전체 경로 ({shown}/{}개)", plan.rows().len())
+    } else {
+        format!("변경 예시 ({shown}/{}개)", plan.rows().len())
+    };
     for row in plan.rows().iter().take(shown) {
         if full {
+            let (_, source_leaf) = split_windows_path(row.source());
+            let (_, destination_leaf) = split_windows_path(row.destination());
             text.push_str(&format!(
-                "\n\n현재: {}\n변경 후: {}",
+                "\n\n현재 이름: {}\n변경 후 이름: {}\n현재 전체 경로: {}\n변경 후 전체 경로: {}",
+                String::from_utf16_lossy(source_leaf),
+                String::from_utf16_lossy(destination_leaf),
                 row.source(),
                 row.destination()
             ));
         } else {
+            let (_, source_leaf) = split_windows_path(row.source());
+            let (_, destination_leaf) = split_windows_path(row.destination());
+            let (source, destination) = if source_leaf == destination_leaf {
+                (
+                    row.source().to_string_lossy(),
+                    row.destination().to_string_lossy(),
+                )
+            } else {
+                (
+                    String::from_utf16_lossy(source_leaf),
+                    String::from_utf16_lossy(destination_leaf),
+                )
+            };
+            let (source_snippet, destination_snippet) =
+                difference_centered_snippets(&source, &destination);
+            elided |= source != source_snippet || destination != destination_snippet;
             text.push_str(&format!(
-                "\n{} → {}",
-                short_leaf(row.source()),
-                short_leaf(row.destination())
+                "\n\n현재: {source_snippet}\n변경 후: {destination_snippet}"
             ));
         }
+    }
+    if !full {
+        if elided {
+            text.push_str("\n\n긴 부분은 …으로 생략합니다.");
+        }
+        text.push_str("\n전체 이름과 경로: '예시 전체 정보 · 복사'");
+    }
+    text
+}
+
+#[cfg(any(windows, test))]
+const APPLY_CONFIRMATION_SNIPPET_CHARS: usize = 56;
+
+/// Keeps the differing region and nearby context visible without changing filename data.
+#[cfg(any(windows, test))]
+fn difference_centered_snippets(current: &str, after: &str) -> (String, String) {
+    let current: Vec<char> = current.chars().collect();
+    let after: Vec<char> = after.chars().collect();
+    let common_prefix = current
+        .iter()
+        .zip(&after)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let maximum_suffix = current
+        .len()
+        .saturating_sub(common_prefix)
+        .min(after.len().saturating_sub(common_prefix));
+    let common_suffix = current
+        .iter()
+        .rev()
+        .zip(after.iter().rev())
+        .take(maximum_suffix)
+        .take_while(|(left, right)| left == right)
+        .count();
+
+    (
+        bounded_difference_snippet(
+            &current,
+            common_prefix,
+            current.len().saturating_sub(common_suffix),
+        ),
+        bounded_difference_snippet(
+            &after,
+            common_prefix,
+            after.len().saturating_sub(common_suffix),
+        ),
+    )
+}
+
+#[cfg(any(windows, test))]
+fn bounded_difference_snippet(chars: &[char], focus_start: usize, focus_end: usize) -> String {
+    if chars.len() <= APPLY_CONFIRMATION_SNIPPET_CHARS {
+        return chars.iter().collect();
+    }
+
+    let focus_start = focus_start.min(chars.len());
+    let focus_end = focus_end.clamp(focus_start, chars.len());
+    let focus_len = focus_end - focus_start;
+    if focus_len.saturating_add(2) <= APPLY_CONFIRMATION_SNIPPET_CHARS {
+        let mut available_context = APPLY_CONFIRMATION_SNIPPET_CHARS - focus_len - 2;
+        let mut left_context = focus_start.min(available_context / 2);
+        let mut right_context = (chars.len() - focus_end).min(available_context - left_context);
+        available_context -= left_context + right_context;
+        if available_context != 0 {
+            let extra_left = (focus_start - left_context).min(available_context);
+            left_context += extra_left;
+            available_context -= extra_left;
+            right_context += (chars.len() - focus_end - right_context).min(available_context);
+        }
+        let shown_start = focus_start - left_context;
+        let shown_end = focus_end + right_context;
+        let mut text = String::with_capacity(APPLY_CONFIRMATION_SNIPPET_CHARS);
+        if shown_start != 0 {
+            text.push('…');
+        }
+        text.extend(&chars[shown_start..shown_end]);
+        if shown_end != chars.len() {
+            text.push('…');
+        }
+        return text;
+    }
+
+    let leading_ellipsis = usize::from(focus_start != 0);
+    let trailing_ellipsis = usize::from(focus_end != chars.len());
+    let visible_focus =
+        APPLY_CONFIRMATION_SNIPPET_CHARS.saturating_sub(leading_ellipsis + trailing_ellipsis + 1);
+    let leading_focus = visible_focus / 2;
+    let trailing_focus = visible_focus - leading_focus;
+    let mut text = String::with_capacity(APPLY_CONFIRMATION_SNIPPET_CHARS);
+    if leading_ellipsis != 0 {
+        text.push('…');
+    }
+    text.extend(&chars[focus_start..focus_start + leading_focus]);
+    text.push('…');
+    text.extend(&chars[focus_end - trailing_focus..focus_end]);
+    if trailing_ellipsis != 0 {
+        text.push('…');
     }
     text
 }
@@ -2197,16 +2303,22 @@ pub(crate) fn apply_confirmation_detail(
     fingerprint: u64,
     revision: u64,
 ) -> String {
-    format!(
-        "논리적 변경: {}개\n이름만 변경: {}개\n이동만: {}개\n이동 및 이름 변경: {}개\n대소문자만 변경: {}개\n순환 변경 그룹: {}개\n파일 시스템 변경 단계: {}개\n계획 지문: {fingerprint:016X}\n목록 버전: {revision}",
-        summary.logical_changed(),
-        summary.rename_only,
-        summary.move_only,
-        summary.move_and_rename,
-        summary.case_only(),
-        summary.cycle_groups(),
-        summary.primitive_steps(),
-    )
+    let mut lines = Vec::new();
+    if summary.case_only() != 0 {
+        lines.push(format!("대소문자만 변경: {}개", summary.case_only()));
+    }
+    if summary.cycle_groups() != 0 {
+        lines.push(format!("순환 변경 그룹: {}개", summary.cycle_groups()));
+    }
+    if summary.primitive_steps() != summary.logical_changed() {
+        lines.push(format!(
+            "파일 시스템 변경 단계: {}개",
+            summary.primitive_steps()
+        ));
+    }
+    lines.push(format!("계획 지문: {fingerprint:016X}"));
+    lines.push(format!("목록 버전: {revision}"));
+    lines.join("\n")
 }
 
 /// Calculates a message-font-aware prompt layout for the active field combination.
@@ -7078,6 +7190,162 @@ mod tests {
         }
     }
 
+    fn confirmation_plan(
+        pairs: &[(String, String)],
+    ) -> Result<crate::rename::RenamePlan, crate::rename::PlanError> {
+        use crate::rename::{
+            EntryId, EntryKind, MemoryBackend, ModelRevision, MoveScope, PlanRequest, RenameIntent,
+            RenamePlanner,
+        };
+
+        let mut backend = MemoryBackend::new();
+        for (index, (source, _)) in pairs.iter().enumerate() {
+            backend = backend.with_file(source.as_str(), index as u128 + 1);
+        }
+        let intents = pairs
+            .iter()
+            .enumerate()
+            .map(|(index, (source, destination))| {
+                let destination = darknamer_core::LegacyText::from(destination.as_str());
+                let (parent, leaf) = split_windows_path(&destination);
+                RenameIntent::new(
+                    EntryId::new(index as u32),
+                    source.as_str(),
+                    darknamer_core::LegacyText::from_units(parent.to_vec()),
+                    darknamer_core::LegacyText::from_units(leaf.to_vec()),
+                    EntryKind::File,
+                )
+            })
+            .collect();
+        RenamePlanner::new(&backend).plan(PlanRequest::with_scope(
+            ModelRevision::new(1),
+            intents,
+            MoveScope::SameVolumeFilesOnly,
+        ))
+    }
+
+    #[test]
+    fn confirmation_snippets_keep_suffix_and_extension_differences_visible() {
+        let prefix = "긴-공통-접두어-".repeat(8);
+        let current = format!("{prefix}일련번호-000001-source.archive");
+        let after = format!("{prefix}일련번호-000002-target.webp");
+        let (current_snippet, after_snippet) = difference_centered_snippets(&current, &after);
+
+        assert!(current_snippet.starts_with('…'));
+        assert!(after_snippet.starts_with('…'));
+        assert!(current_snippet.contains("000001-source.archive"));
+        assert!(after_snippet.contains("000002-target.webp"));
+        assert_ne!(current_snippet, after_snippet);
+        assert!(current_snippet.chars().count() <= APPLY_CONFIRMATION_SNIPPET_CHARS);
+        assert!(after_snippet.chars().count() <= APPLY_CONFIRMATION_SNIPPET_CHARS);
+    }
+
+    #[test]
+    fn confirmation_short_names_do_not_claim_elision() -> Result<(), Box<dyn std::error::Error>> {
+        let plan =
+            confirmation_plan(&[(r"C:\work\old.txt".to_owned(), r"C:\work\new.txt".to_owned())])?;
+        let examples = apply_confirmation_examples(&plan, false);
+        assert!(examples.contains("현재: old.txt"));
+        assert!(examples.contains("변경 후: new.txt"));
+        assert!(!examples.contains("생략"));
+        Ok(())
+    }
+
+    #[test]
+    fn confirmation_snippets_preserve_korean_supplementary_and_middle_changes() {
+        let shared_start = format!("{}한글-𠮷-", "앞부분".repeat(12));
+        let shared_end = format!("-𠮷-{}-끝.dat", "뒷부분".repeat(12));
+        let current = format!("{shared_start}가운데-현재{shared_end}");
+        let after = format!("{shared_start}가운데-변경{shared_end}");
+        let (current_snippet, after_snippet) = difference_centered_snippets(&current, &after);
+
+        assert!(current_snippet.starts_with('…') && current_snippet.ends_with('…'));
+        assert!(after_snippet.starts_with('…') && after_snippet.ends_with('…'));
+        assert!(current_snippet.contains("현재"));
+        assert!(after_snippet.contains("변경"));
+        assert!(current_snippet.contains('𠮷'));
+        assert!(after_snippet.contains('𠮷'));
+        assert!(!current_snippet.contains('\u{FFFD}'));
+        assert!(!after_snippet.contains('\u{FFFD}'));
+        assert!(current_snippet.chars().count() <= APPLY_CONFIRMATION_SNIPPET_CHARS);
+        assert!(after_snippet.chars().count() <= APPLY_CONFIRMATION_SNIPPET_CHARS);
+    }
+
+    #[test]
+    fn confirmation_examples_distinguish_parent_only_changes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let source = format!(r"C:\{}\same-name.txt", "source-parent-".repeat(8));
+        let destination = format!(r"C:\{}\same-name.txt", "target-parent-".repeat(8));
+        let plan = confirmation_plan(&[(source, destination)])?;
+        let examples = apply_confirmation_examples(&plan, false);
+
+        assert!(examples.contains("source-parent-"));
+        assert!(examples.contains("target-parent-"));
+        assert!(examples.contains("…으로 생략"));
+        assert!(examples.contains("'예시 전체 정보 · 복사'"));
+        Ok(())
+    }
+
+    #[test]
+    fn confirmation_examples_bound_sampling_and_keep_full_original_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let korean_prefix = "긴한글경로".repeat(6);
+        let pairs = vec![
+            (
+                format!(r"C:\work\{korean_prefix}-𠮷-현재-01.txt"),
+                format!(r"C:\work\{korean_prefix}-𠮷-변경-01.webp"),
+            ),
+            (
+                format!(r"C:\work\{korean_prefix}-𠮷-현재-02.txt"),
+                format!(r"C:\work\{korean_prefix}-𠮷-변경-02.webp"),
+            ),
+            (
+                r"C:\work\third-original.txt".to_owned(),
+                r"C:\work\third-after.txt".to_owned(),
+            ),
+        ];
+        let plan = confirmation_plan(&pairs)?;
+
+        let examples = apply_confirmation_examples(&plan, false);
+        assert!(examples.contains("변경 예시 (2/3개)"));
+        assert_eq!(examples.matches("\n현재: ").count(), 2);
+        assert_eq!(examples.matches("\n변경 후: ").count(), 2);
+        assert!(!examples.contains("third-original"));
+        for line in examples.lines().filter(|line| line.starts_with("현재: ")) {
+            assert!(
+                line.trim_start_matches("현재: ").chars().count()
+                    <= APPLY_CONFIRMATION_SNIPPET_CHARS
+            );
+        }
+        for line in examples
+            .lines()
+            .filter(|line| line.starts_with("변경 후: "))
+        {
+            assert!(
+                line.trim_start_matches("변경 후: ").chars().count()
+                    <= APPLY_CONFIRMATION_SNIPPET_CHARS
+            );
+        }
+
+        let full = apply_confirmation_examples(&plan, true);
+        assert!(full.contains("변경 예시 전체 경로 (2/3개)"));
+        for (source, destination) in pairs.iter().take(2) {
+            let source_name = source
+                .rsplit_once('\\')
+                .map_or(source.as_str(), |(_, name)| name);
+            let destination_name = destination
+                .rsplit_once('\\')
+                .map_or(destination.as_str(), |(_, name)| name);
+            assert!(full.contains(&format!("현재 이름: {source_name}")));
+            assert!(full.contains(&format!("변경 후 이름: {destination_name}")));
+            assert!(full.contains(&format!("현재 전체 경로: {source}")));
+            assert!(full.contains(&format!("변경 후 전체 경로: {destination}")));
+        }
+        assert!(!full.contains("third-original"));
+        assert!(!full.contains('\u{FFFD}'));
+        Ok(())
+    }
+
     #[test]
     fn apply_confirmation_summary_reports_exact_non_authorizing_counts() {
         let summary = ApplyConfirmationSummary {
@@ -7112,7 +7380,7 @@ mod tests {
         assert!(primary.contains("이름 변경: 1개"));
         assert!(primary.contains("대상 폴더 이동: 1개"));
         assert!(primary.contains("이름 변경 및 대상 폴더 이동: 2개"));
-        assert!(primary.contains(r"대상 폴더: C:\archive"));
+        assert!(!primary.contains("대상 폴더:"));
         assert!(primary.contains("기존 파일을 덮어쓰지 않습니다."));
         assert!(!primary.contains("대소문자만 변경"));
         assert!(!primary.contains("순환 변경 그룹"));
@@ -7121,12 +7389,15 @@ mod tests {
         assert!(!primary.contains("버전"));
 
         let detail = apply_confirmation_detail(&summary, 0xA5, 17);
-        assert!(detail.contains("논리적 변경: 4개"));
         assert!(detail.contains("대소문자만 변경: 1개"));
         assert!(detail.contains("순환 변경 그룹: 1개"));
         assert!(detail.contains("파일 시스템 변경 단계: 6개"));
         assert!(detail.contains("00000000000000A5"));
         assert!(detail.contains("목록 버전: 17"));
+        assert!(!detail.contains("논리적 변경:"));
+        assert!(!detail.contains("이름만 변경:"));
+        assert!(!detail.contains("이동만:"));
+        assert!(!detail.contains("대상 폴더:"));
     }
 
     #[test]
@@ -7144,11 +7415,11 @@ mod tests {
 
         assert_eq!(
             apply_confirmation_primary(&summary),
-            "파일 1개의 이름을 변경합니다.\n대상 폴더: C:\\work\n기존 파일을 덮어쓰지 않습니다."
+            "파일 1개의 이름을 변경합니다.\n기존 파일을 덮어쓰지 않습니다."
         );
         assert_eq!(
             apply_confirmation_detail(&summary, 0xA5, 17),
-            "논리적 변경: 1개\n이름만 변경: 1개\n이동만: 0개\n이동 및 이름 변경: 0개\n대소문자만 변경: 0개\n순환 변경 그룹: 0개\n파일 시스템 변경 단계: 1개\n계획 지문: 00000000000000A5\n목록 버전: 17"
+            "계획 지문: 00000000000000A5\n목록 버전: 17"
         );
         Ok(())
     }
@@ -7202,12 +7473,12 @@ mod tests {
         ))?;
         let requirements = preflight_plan(&plan, &mut backend)?;
         let examples = apply_confirmation_examples(&plan, false);
-        assert!(examples.contains("a.txt → x.txt"));
-        assert!(examples.contains("b.txt → c.txt"));
+        assert!(examples.contains("현재: a.txt\n변경 후: x.txt"));
+        assert!(examples.contains("현재: b.txt\n변경 후: c.txt"));
         assert!(!examples.contains("D.TXT"));
         let full = apply_confirmation_examples(&plan, true);
-        assert!(full.contains(r"현재: C:\work\a.txt"));
-        assert!(full.contains(r"변경 후: C:\work\x.txt"));
+        assert!(full.contains(r"현재 전체 경로: C:\work\a.txt"));
+        assert!(full.contains(r"변경 후 전체 경로: C:\work\x.txt"));
         let summary = ApplyConfirmationSummary::from_plan(
             &plan,
             requirements.primitive_steps(),
