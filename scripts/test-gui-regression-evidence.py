@@ -909,7 +909,48 @@ class GuiEvidenceTests(unittest.TestCase):
     def test_text_reachability_and_native_crop_binding_are_enforced(self):
         raw_path = self.text / "output/acceptance-result.json"
         raw = json.loads(raw_path.read_text())
+        for row in raw["assertions"]["scenario"]["confirmation"]["tree"]:
+            if row.get("automation_id") in {
+                    "CommandLink_1101", "CommandLink_1102", "ExpandoButton", "CommandButton_2"}:
+                row["bounds"] = {"x": 10.25, "y": 10.5, "width": 40.25, "height": 20.5}
+        write_json(raw_path, raw)
+        self.fixture.refresh(self.text)
+        self.validate(self.text)
+
+        self.setUp()
+        raw_path = self.text / "output/acceptance-result.json"
+        raw = json.loads(raw_path.read_text())
         raw["assertions"]["scenario"]["confirmation"]["reachability"]["apply"]["physical_mouse_target"]["hit_window"] = 0
+        write_json(raw_path, raw)
+        self.fixture.refresh(self.text)
+        with self.assertRaisesRegex(evidence.EvidenceError, "required_controls_reachable"):
+            self.validate(self.text)
+
+        self.setUp()
+        raw_path = self.text / "output/acceptance-result.json"
+        raw = json.loads(raw_path.read_text())
+        tree = raw["assertions"]["scenario"]["confirmation"]["tree"]
+        next(row for row in tree if row.get("automation_id") == "CommandLink_1101")["bounds"]["width"] = True
+        write_json(raw_path, raw)
+        self.fixture.refresh(self.text)
+        with self.assertRaisesRegex(evidence.EvidenceError, "required_controls_reachable"):
+            self.validate(self.text)
+
+        self.setUp()
+        raw_path = self.text / "output/acceptance-result.json"
+        raw = json.loads(raw_path.read_text())
+        tree = raw["assertions"]["scenario"]["confirmation"]["tree"]
+        next(row for row in tree if row.get("automation_id") == "CommandLink_1101")["bounds"]["x"] = float("inf")
+        write_json(raw_path, raw)
+        self.fixture.refresh(self.text)
+        with self.assertRaisesRegex(evidence.EvidenceError, "non-finite"):
+            self.validate(self.text)
+
+        self.setUp()
+        raw_path = self.text / "output/acceptance-result.json"
+        raw = json.loads(raw_path.read_text())
+        tree = raw["assertions"]["scenario"]["confirmation"]["tree"]
+        next(row for row in tree if row.get("automation_id") == "CommandLink_1101")["bounds"]["x"] = -0.5
         write_json(raw_path, raw)
         self.fixture.refresh(self.text)
         with self.assertRaisesRegex(evidence.EvidenceError, "required_controls_reachable"):

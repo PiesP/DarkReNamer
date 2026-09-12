@@ -575,7 +575,10 @@ def control_visible(value: object, work_area: dict) -> bool:
     if not isinstance(value, dict) or value.get("enabled") is not True or value.get("offscreen") is not False:
         return False
     bounds = value.get("bounds")
-    return isinstance(bounds, dict) and all(type(bounds.get(name)) is int for name in ("x", "y", "width", "height")) and \
+    return isinstance(bounds, dict) and all(
+        type(bounds.get(name)) in (int, float) and math.isfinite(bounds[name])
+        for name in ("x", "y", "width", "height")
+    ) and \
         bounds["width"] > 0 and bounds["height"] > 0 and \
         work_area["left"] <= bounds["x"] and work_area["top"] <= bounds["y"] and \
         bounds["x"] + bounds["width"] <= work_area["right"] and \
