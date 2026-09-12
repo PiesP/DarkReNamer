@@ -2125,6 +2125,21 @@ pub(crate) fn apply_confirmation_primary(summary: &ApplyConfirmationSummary) -> 
             summary.move_and_rename
         ));
     }
+    if summary.move_only != 0 || summary.move_and_rename != 0 {
+        if let Some(parent) = &summary.common_destination_parent {
+            let parent = parent.to_string_lossy();
+            let chars: Vec<char> = parent.chars().collect();
+            let snippet = bounded_difference_snippet(&chars, chars.len(), chars.len());
+            let label = if snippet == parent {
+                "대상 폴더"
+            } else {
+                "대상 폴더 (축약)"
+            };
+            text.push_str(&format!("\n{label}: {snippet}"));
+        } else {
+            text.push_str("\n대상 폴더는 항목별로 확인하세요.");
+        }
+    }
     text.push_str("\n기존 파일을 덮어쓰지 않습니다.");
     text
 }
@@ -2142,6 +2157,7 @@ pub(crate) fn apply_confirmation_scope(total: usize, selected: usize, changed: u
 pub(crate) fn apply_confirmation_examples(plan: &crate::rename::RenamePlan, full: bool) -> String {
     let shown = plan.rows().len().min(2);
     let mut elided = false;
+    let mut comparison_hidden = false;
     let mut text = if full {
         format!("변경 예시 전체 경로 ({shown}/{}개)", plan.rows().len())
     } else {
@@ -2159,29 +2175,34 @@ pub(crate) fn apply_confirmation_examples(plan: &crate::rename::RenamePlan, full
                 row.destination()
             ));
         } else {
-            let (_, source_leaf) = split_windows_path(row.source());
-            let (_, destination_leaf) = split_windows_path(row.destination());
-            let (source, destination) = if source_leaf == destination_leaf {
-                (
-                    row.source().to_string_lossy(),
-                    row.destination().to_string_lossy(),
-                )
-            } else {
-                (
-                    String::from_utf16_lossy(source_leaf),
-                    String::from_utf16_lossy(destination_leaf),
-                )
-            };
+            let (source_parent, source_leaf) = split_windows_path(row.source());
+            let (destination_parent, destination_leaf) = split_windows_path(row.destination());
+            let (source, destination) =
+                if source_parent != destination_parent || source_leaf == destination_leaf {
+                    (
+                        row.source().to_string_lossy(),
+                        row.destination().to_string_lossy(),
+                    )
+                } else {
+                    (
+                        String::from_utf16_lossy(source_leaf),
+                        String::from_utf16_lossy(destination_leaf),
+                    )
+                };
             let (source_snippet, destination_snippet) =
                 difference_centered_snippets(&source, &destination);
             elided |= source != source_snippet || destination != destination_snippet;
+            comparison_hidden |=
+                source_snippet == destination_snippet && row.source() != row.destination();
             text.push_str(&format!(
                 "\n\n현재: {source_snippet}\n변경 후: {destination_snippet}"
             ));
         }
     }
     if !full {
-        if elided {
+        if comparison_hidden {
+            text.push_str("\n\n축약문에 차이가 드러나지 않습니다. 전체 정보에서 비교하세요.");
+        } else if elided {
             text.push_str("\n\n긴 부분은 …으로 생략합니다.");
         }
         text.push_str("\n전체 이름과 경로: '예시 전체 정보 · 복사'");
@@ -7225,6 +7246,150 @@ mod tests {
     }
 
     #[test]
+    fn confirmation_repeated_insertions_disclose_identical_snippets()
+    -> Result<(), Box<dyn std::error::Error>> {
+        confirmation_repeated_change_discloses_identical_snippets(100, 101)
+    }
+
+    #[test]
+    fn confirmation_repeated_deletions_disclose_identical_snippets()
+    -> Result<(), Box<dyn std::error::Error>> {
+        confirmation_repeated_change_discloses_identical_snippets(101, 100)
+    }
+
+    fn confirmation_repeated_change_discloses_identical_snippets(
+        before_count: usize,
+        after_count: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut undisclosed = Vec::new();
+        for repeated in ["a", "가", "0", "𠮷"] {
+            let before = format!("{}.txt", repeated.repeat(before_count));
+            let after = format!("{}.txt", repeated.repeat(after_count));
+            let (left, right) = difference_centered_snippets(&before, &after);
+            assert_eq!(left, right, "fixture must exercise the rendering collision");
+            assert!(left.chars().count() <= APPLY_CONFIRMATION_SNIPPET_CHARS);
+            let source = format!(r"C:\work\{before}");
+            let destination = format!(r"C:\work\{after}");
+            let plan = confirmation_plan(&[(source.clone(), destination.clone())])?;
+            let examples = apply_confirmation_examples(&plan, false);
+            if !examples.contains("축약문에 차이가 드러나지 않습니다") {
+                undisclosed.push(format!(
+                    "{repeated} {before_count}->{after_count}: {examples}"
+                ));
+            }
+            let full = apply_confirmation_examples(&plan, true);
+            assert!(full.contains(&source));
+            assert!(full.contains(&destination));
+            assert_eq!(plan.rows()[0].source().to_string_lossy(), source);
+            assert_eq!(plan.rows()[0].destination().to_string_lossy(), destination);
+        }
+        assert!(undisclosed.is_empty(), "{}", undisclosed.join("\n\n"));
+        Ok(())
+    }
+
+    #[test]
+    fn confirmation_move_kinds_show_bounded_destination_context()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (before, after, moves) in [
+            (r"C:\fixture\A\old.txt", r"C:\fixture\A\new.txt", false),
+            (r"C:\fixture\A\old.txt", r"C:\fixture\B\old.txt", true),
+            (r"C:\fixture\A\old.txt", r"C:\fixture\B\new.txt", true),
+        ] {
+            let plan = confirmation_plan(&[(before.to_owned(), after.to_owned())])?;
+            let summary = ApplyConfirmationSummary::from_plan(&plan, 1, |a, b| a == b)
+                .ok_or("consistent summary")?;
+            let primary = apply_confirmation_primary(&summary);
+            assert_eq!(
+                primary.contains(r"대상 폴더: C:\fixture\B"),
+                moves,
+                "{primary}"
+            );
+            assert_eq!(primary.contains("대상 폴더:"), moves);
+            let examples = apply_confirmation_examples(&plan, false);
+            if moves {
+                assert!(examples.contains(before), "{examples}");
+                assert!(examples.contains(after), "{examples}");
+            }
+        }
+        let parent = format!(r"C:\{}\destination", "long-parent\\".repeat(40));
+        let summary = ApplyConfirmationSummary::from_counts(
+            0,
+            0,
+            1,
+            Some(darknamer_core::LegacyText::from(parent.as_str())),
+            0,
+            1,
+        )
+        .ok_or("consistent summary")?;
+        let primary = apply_confirmation_primary(&summary);
+        assert!(primary.contains("destination"));
+        assert!(!primary.contains(&parent));
+        assert!(primary.contains('…'));
+        Ok(())
+    }
+
+    #[test]
+    fn confirmation_mixed_move_destinations_retain_each_example_context()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let plan = confirmation_plan(&[
+            (
+                r"C:\fixture\A\old.txt".to_owned(),
+                r"C:\fixture\B\new.txt".to_owned(),
+            ),
+            (
+                r"C:\fixture\A\second.txt".to_owned(),
+                r"C:\fixture\C\renamed.txt".to_owned(),
+            ),
+            (
+                r"C:\fixture\A\local.txt".to_owned(),
+                r"C:\fixture\A\local-new.txt".to_owned(),
+            ),
+        ])?;
+        let summary = ApplyConfirmationSummary::from_plan(&plan, 3, |a, b| a == b)
+            .ok_or("consistent summary")?;
+        assert_eq!(summary.common_destination_parent, None);
+        assert!(!apply_confirmation_primary(&summary).contains("대상 폴더:"));
+        assert!(apply_confirmation_primary(&summary).contains("대상 폴더는 항목별로 확인하세요."));
+        let examples = apply_confirmation_examples(&plan, false);
+        assert!(examples.contains(r"C:\fixture\B\new.txt"), "{examples}");
+        assert!(examples.contains(r"C:\fixture\C\renamed.txt"), "{examples}");
+        assert!(!examples.contains("local-new"));
+        Ok(())
+    }
+
+    #[test]
+    fn confirmation_unsampled_move_keeps_destination_scope_visible()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let plan = confirmation_plan(&[
+            (
+                r"C:\fixture\A\first.txt".to_owned(),
+                r"C:\fixture\A\first-new.txt".to_owned(),
+            ),
+            (
+                r"C:\fixture\A\second.txt".to_owned(),
+                r"C:\fixture\A\second-new.txt".to_owned(),
+            ),
+            (
+                r"C:\fixture\A\third.txt".to_owned(),
+                r"C:\fixture\B\third.txt".to_owned(),
+            ),
+        ])?;
+        let summary = ApplyConfirmationSummary::from_plan(&plan, 3, |a, b| a == b)
+            .ok_or("consistent summary")?;
+        assert_eq!(summary.common_destination_parent, None);
+        let primary = apply_confirmation_primary(&summary);
+        assert!(primary.contains("대상 폴더 이동: 1개"));
+        assert!(
+            primary.contains("대상 폴더는 항목별로 확인하세요."),
+            "{primary}"
+        );
+        assert!(!primary.contains("대상 폴더:"));
+        assert!(!apply_confirmation_examples(&plan, false).contains("third"));
+        assert!(!apply_confirmation_examples(&plan, true).contains("third"));
+        Ok(())
+    }
+
+    #[test]
     fn confirmation_snippets_keep_suffix_and_extension_differences_visible() {
         let prefix = "긴-공통-접두어-".repeat(8);
         let current = format!("{prefix}일련번호-000001-source.archive");
@@ -7248,6 +7413,7 @@ mod tests {
         assert!(examples.contains("현재: old.txt"));
         assert!(examples.contains("변경 후: new.txt"));
         assert!(!examples.contains("생략"));
+        assert!(!examples.contains("축약문에 차이가 드러나지 않습니다"));
         Ok(())
     }
 
@@ -7380,7 +7546,7 @@ mod tests {
         assert!(primary.contains("이름 변경: 1개"));
         assert!(primary.contains("대상 폴더 이동: 1개"));
         assert!(primary.contains("이름 변경 및 대상 폴더 이동: 2개"));
-        assert!(!primary.contains("대상 폴더:"));
+        assert!(primary.contains(r"대상 폴더: C:\archive"));
         assert!(primary.contains("기존 파일을 덮어쓰지 않습니다."));
         assert!(!primary.contains("대소문자만 변경"));
         assert!(!primary.contains("순환 변경 그룹"));

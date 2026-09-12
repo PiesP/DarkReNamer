@@ -103,8 +103,12 @@ lock prevents model edits until the session ends.
 
 Apply examples sample at most two rows of the already frozen plan. Short names
 retain visible change context; complete examples use the same read-only details
-control. Returning from details reopens the same prepared confirmation with
-Cancel as its default. Final confirmation still checks the original session,
+control. Identical abbreviated comparisons explicitly disclose their comparison
+limit without changing the original names. Parent changes retain bounded path
+context; the prepared summary supplies a bounded common destination only for
+plans with moves, or an item-specific destination reminder when there is no
+common destination. Returning from details reopens the same prepared confirmation
+with Cancel as its default. Final confirmation still checks the original session,
 revision and fingerprint before execution. Technical expansion does not duplicate
 full paths, avoiding the native TaskDialog's path-elision behavior. Display-only
 Unicode conversion cannot rewrite the model or the frozen plan.
