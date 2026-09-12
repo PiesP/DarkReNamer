@@ -229,6 +229,12 @@ pub(super) fn query_system_theme() -> Option<ResolvedTheme> {
     ))
 }
 
+pub(super) fn query_system_text_scale_factor() -> f64 {
+    UISettings::new()
+        .and_then(|settings| settings.TextScaleFactor())
+        .unwrap_or(1.0)
+}
+
 pub(super) fn refresh_system_theme(state: &mut AppState) {
     state.system_theme = query_system_theme();
 }
