@@ -266,6 +266,18 @@ try {
             throw "The VM controller is missing acceptance-engine evidence '$requiredEngineSource'."
         }
     }
+    $policy = Get-ExecutionPolicy
+    $policyRoundTrip = [ordered]@{
+        effective_policy = $policy.ToString()
+    } | ConvertTo-Json -Compress | ConvertFrom-Json
+    if ($policyRoundTrip.effective_policy -isnot [string] -or
+        $policyRoundTrip.effective_policy -cne $policy.ToString()) {
+        throw 'Execution policy evidence must retain its enum name through JSON serialization.'
+    }
+    $policySerialization = 'effective_policy=(Get-ExecutionPolicy).ToString()'
+    if ([regex]::Matches($controllerText, [regex]::Escape($policySerialization)).Count -ne 2) {
+        throw 'Both acceptance and text-scale rescue engine checks must serialize the execution policy name.'
+    }
     foreach ($line in @($controllerText -split "`r?`n" | Where-Object {
         $_ -match '\$observerArguments\s*=' -and $_ -notmatch '^\s*#'
     })) {
