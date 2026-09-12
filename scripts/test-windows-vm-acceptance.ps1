@@ -199,7 +199,7 @@ try {
     }
     $controllerParseErrors = $null
     $controllerParseTokens = $null
-    [void][Management.Automation.Language.Parser]::ParseFile(
+    $controllerAst = [Management.Automation.Language.Parser]::ParseFile(
         $controller,
         [ref]$controllerParseTokens,
         [ref]$controllerParseErrors
@@ -208,6 +208,28 @@ try {
         throw 'run-windows-vm-tests.ps1 has PowerShell parser errors.'
     }
     $controllerText = [IO.File]::ReadAllText($controller)
+    foreach ($functionName in @('Assert-PlainFile', 'Join-GuestWindowsPath')) {
+        $pathFunctions = @($controllerAst.FindAll({
+            param($ast)
+            $ast -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $ast.Name -ceq $functionName
+        }, $true))
+        if ($pathFunctions.Count -ne 1) {
+            throw "The VM controller must define one $functionName helper."
+        }
+        . ([scriptblock]::Create($pathFunctions[0].Extent.Text))
+    }
+    $guestOut = Join-GuestWindowsPath `
+        -Root 'C:\Users\TestUser\AppData\Local\Temp\DarkReNamerTests-fixture' `
+        -Leaf 'out'
+    $guestEvidence = Join-GuestWindowsPath -Root $guestOut -Leaf 'observer.stderr.txt'
+    if ($guestEvidence -cne 'C:\Users\TestUser\AppData\Local\Temp\DarkReNamerTests-fixture\out\observer.stderr.txt') {
+        throw 'The guest Windows path helper must compose nested paths on non-Windows hosts.'
+    }
+    $guestOutputComposition = 'Join-GuestWindowsPath -Root (Join-GuestWindowsPath -Root'
+    if ([regex]::Matches($controllerText, [regex]::Escape($guestOutputComposition)).Count -ne 2) {
+        throw 'Acceptance and rescue collection must compose guest output paths without host Join-Path.'
+    }
     foreach ($requiredRescueSource in @(
         'function Invoke-AcceptanceTextScaleRescue',
         '-RestoreTextScaleOnly',
@@ -289,6 +311,53 @@ try {
         throw 'The acceptance script must use Windows PowerShell 5.1-compatible integer type names.'
     }
     $acceptanceText = [IO.File]::ReadAllText($acceptance)
+    $reachabilityMapIndex = $acceptanceText.IndexOf(
+        '$reachability = [ordered]@{',
+        [StringComparison]::Ordinal
+    )
+    $reachabilityReceiptIndex = if ($reachabilityMapIndex -lt 0) { -1 } else {
+        $acceptanceText.IndexOf(
+            "(`$Prefix + '-reachability.json')",
+            $reachabilityMapIndex,
+            [StringComparison]::Ordinal
+        )
+    }
+    $reachabilityControlsIndex = if ($reachabilityReceiptIndex -lt 0) { -1 } else {
+        $acceptanceText.IndexOf(
+            'controls = $reachability',
+            $reachabilityReceiptIndex,
+            [StringComparison]::Ordinal
+        )
+    }
+    $reachabilityThrowIndex = if ($reachabilityControlsIndex -lt 0) { -1 } else {
+        $acceptanceText.IndexOf(
+            'After context confirmation has a mouse-inaccessible required control',
+            $reachabilityControlsIndex,
+            [StringComparison]::Ordinal
+        )
+    }
+    if ($reachabilityMapIndex -lt 0 -or $reachabilityReceiptIndex -le $reachabilityMapIndex -or
+        $reachabilityControlsIndex -le $reachabilityReceiptIndex -or
+        $reachabilityThrowIndex -le $reachabilityControlsIndex) {
+        throw 'Context confirmation must persist its fixed control reachability map before rejecting inaccessible controls.'
+    }
+    foreach ($diagnosticField in @(
+        'hit_window=', 'hit_process_id=', 'hit_root_window=',
+        'expected_process_id=', 'expected_root_window='
+    )) {
+        if ($acceptanceText.IndexOf($diagnosticField, [StringComparison]::Ordinal) -lt 0) {
+            throw "Physical target failures must retain bounded diagnostic field '$diagnosticField'."
+        }
+    }
+    if ($acceptanceText.IndexOf(
+        '[DarkReNamerVmNative]::GetWindowThreadProcessId($hit',
+        [StringComparison]::Ordinal
+    ) -lt 0 -or $acceptanceText.IndexOf(
+        '[DarkReNamerVmAcceptanceNative]::GetWindowThreadProcessId($hit',
+        [StringComparison]::Ordinal
+    ) -ge 0) {
+        throw 'Physical reachability must call the shared public process-binding API.'
+    }
     $regressionModeIndex = $acceptanceText.IndexOf(
         "if (-not [string]::IsNullOrEmpty(`$RegressionMode))",
         [StringComparison]::Ordinal

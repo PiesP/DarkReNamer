@@ -244,7 +244,7 @@ function Invoke-AcceptanceTextScaleRescue {
     })
     foreach ($file in $rescueFiles) {
         Assert-PlainFile $file.file
-        $guestPath = Join-GuestWindowsPath -Root (Join-Path $GuestRoot 'out') -Leaf $file.file
+        $guestPath = Join-GuestWindowsPath -Root (Join-GuestWindowsPath -Root $GuestRoot -Leaf 'out') -Leaf $file.file
         $hostPath = Join-Path $HostOutputRoot $file.file
         Copy-Item -LiteralPath $guestPath -Destination $hostPath -FromSession $Session
         if ((Get-Item -LiteralPath $hostPath).Length -ne $file.bytes -or
@@ -574,7 +574,7 @@ public static class VmDesktopState {
         })
         foreach ($output in $inventory) {
             Assert-PlainFile $output.file
-            $guestOutputPath = Join-GuestWindowsPath -Root (Join-Path $guestRoot 'out') -Leaf $output.file
+            $guestOutputPath = Join-GuestWindowsPath -Root (Join-GuestWindowsPath -Root $guestRoot -Leaf 'out') -Leaf $output.file
             $hostOutputPath = Join-Path $AcceptanceOutputRoot $output.file
             if (-not (Test-Path -LiteralPath $hostOutputPath)) {
                 Copy-Item -LiteralPath $guestOutputPath -Destination $hostOutputPath -FromSession $session

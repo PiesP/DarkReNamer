@@ -2562,11 +2562,19 @@ function Get-GuiRegressionPhysicalTarget {
     $point.X = $x; $point.Y = $y
     $hit = [DarkReNamerVmAcceptanceNative]::WindowFromPoint($point)
     $targetProcessId = [uint32]0
-    if ($hit -eq [IntPtr]::Zero -or
-        [DarkReNamerVmAcceptanceNative]::GetWindowThreadProcessId($hit, [ref]$targetProcessId) -eq 0 -or
+    $hitThreadId = if ($hit -eq [IntPtr]::Zero) { [uint32]0 } else {
+        [DarkReNamerVmNative]::GetWindowThreadProcessId($hit, [ref]$targetProcessId)
+    }
+    $hitRoot = if ($hit -eq [IntPtr]::Zero) { [IntPtr]::Zero } else {
+        [DarkReNamerVmAcceptanceNative]::GetAncestor($hit, [uint32]2)
+    }
+    if ($hit -eq [IntPtr]::Zero -or $hitThreadId -eq 0 -or
         $targetProcessId -ne $Application.process.Id -or
-        [DarkReNamerVmAcceptanceNative]::GetAncestor($hit, [uint32]2) -ne $ExpectedRoot) {
-        throw "$Label is not physically bound to the expected process/window tree."
+        $hitRoot -ne $ExpectedRoot) {
+        throw ("$Label is not physically bound to the expected process/window tree: " +
+            "hit_window=$($hit.ToInt64()); hit_process_id=$targetProcessId; " +
+            "hit_root_window=$($hitRoot.ToInt64()); expected_process_id=$($Application.process.Id); " +
+            "expected_root_window=$($ExpectedRoot.ToInt64()).")
     }
     $result = [ordered]@{ x = $x; y = $y; hit_window = $hit.ToInt64(); root_window = $ExpectedRoot.ToInt64() }
     if ($Click) {
@@ -3704,9 +3712,15 @@ function Invoke-ObserverContextConfirmation {
         full_details = Get-ObserverControlReachability -Element $detailsButton -Application $Application -SessionId $SessionId -ExpectedRoot $confirmationHandle -WorkArea $WorkArea -Label 'context full details'
         expander = Get-ObserverControlReachability -Element $expanders[0] -Application $Application -SessionId $SessionId -ExpectedRoot $confirmationHandle -WorkArea $WorkArea -Label 'context expander'
     }
+    Write-JsonUtf8Bom -Path (Join-Path $OutputRoot ($Prefix + '-reachability.json')) -Value ([ordered]@{
+        schema_version = 1
+        controls = $reachability
+    })
     $inaccessible = @($reachability.Values | Where-Object { $_.status -cne 'reachable' })
     if ($inaccessible.Count -ne 0) {
-        throw 'After context confirmation has a mouse-inaccessible required control.'
+        $failedLabels = @($inaccessible | ForEach-Object { [string]$_.label })
+        throw ('After context confirmation has a mouse-inaccessible required control: ' +
+            [string]::Join(', ', $failedLabels) + '.')
     }
     $cancel = Find-UniqueAutomationElement -Root $confirmation -Process $Application.process -ExpectedSession $SessionId -AutomationId 'CommandButton_2' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'context Cancel after default scroll' -RequireEnabled -RequireWindowHandle
     $cancel.SetFocus()
