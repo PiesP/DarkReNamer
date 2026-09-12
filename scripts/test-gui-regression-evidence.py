@@ -55,7 +55,6 @@ def png(width: int = 80, height: int = 30, ink_height: int = 8, ink_width: int =
 
 
 def scenario(mode: str) -> dict:
-    projection = {name: True for name in evidence.MODE_SEMANTICS[mode]}
     if mode == "full-context":
         def confirmation() -> dict:
             return {
@@ -71,7 +70,6 @@ def scenario(mode: str) -> dict:
                 },
             }
         return {
-            "semantic_assertions": projection,
             "repeated": {
                 "inputs_in_admission_order": ["0 x101 -> 0 x100", "a x100 -> a x101", "가 x100 -> 가 x101"],
                 "zero_deletion_and_a_insertion_confirmation": confirmation(),
@@ -137,7 +135,6 @@ def scenario(mode: str) -> dict:
         }
     if mode in {"standard", "text-scale"}:
         result = {
-            "semantic_assertions": projection,
             "environment": {"text_scale_factor_percent": 150 if mode == "text-scale" else 100},
             "fixture": {"count": 3, "selected": 1, "changed": 2},
             "selection": {"selected_count": 1},
@@ -178,7 +175,6 @@ def scenario(mode: str) -> dict:
             result["blocking"] = {name: {"blocked": True} for name in ("no_change", "collision", "invalid_name")}
         return result
     return {
-        "semantic_assertions": projection,
         "mode": "context-surface",
         "full_context_coverage": {"omitted": [
             "second-repeated-fixture", "movement-actual-apply",
@@ -330,6 +326,12 @@ class Fixture:
         observations = {"schema_version": 1, "run_id": run_id, "scenario": raw_scenario}
         (output / "observer.stdout.txt").write_text("observer completed\n", encoding="utf-8")
         (output / "observer.stderr.txt").write_bytes(b"")
+        write_json(output / "transport.json", {
+            "kind": "ssh",
+            "status": "collected",
+            "guest_cleanup": True,
+            "observer_process": {"state": "exited", "exit_code": 0},
+        })
         cleanup = {
             "schema_version": 1,
             "run_id": run_id,
@@ -755,7 +757,9 @@ class GuiEvidenceTests(unittest.TestCase):
     def test_all_true_summary_cannot_hide_failed_deep_raw_evidence(self):
         raw_path = self.standard / "output/acceptance-result.json"
         raw = json.loads(raw_path.read_text())
-        self.assertTrue(all(raw["assertions"]["scenario"]["semantic_assertions"].values()))
+        normalized = json.loads((self.standard / "output/run-result.json").read_text())
+        self.assertTrue(all(normalized["assertions"]["semantics"].values()))
+        self.assertNotIn("semantic_assertions", raw["assertions"]["scenario"])
         raw["assertions"]["scenario"]["actual_apply"]["content_and_identity_preserved"] = False
         write_json(raw_path, raw)
         self.fixture.refresh(self.standard)
@@ -898,6 +902,52 @@ class GuiEvidenceTests(unittest.TestCase):
         self.fixture.refresh(self.standard)
         with self.assertRaisesRegex(evidence.EvidenceError, "Normalized target differs"):
             self.validate(self.standard)
+
+    def test_transport_requires_collection_bound_terminal_zero_exit(self):
+        (self.standard / "output/transport.json").unlink()
+        with self.assertRaisesRegex(evidence.EvidenceError, "missing"):
+            self.validate(self.standard)
+
+        for field, value, error in (("status", "failed", "transport status"),
+                                    ("guest_cleanup", False, "guest cleanup")):
+            self.setUp()
+            transport_path = self.standard / "output/transport.json"
+            transport = json.loads(transport_path.read_text())
+            transport[field] = value
+            write_json(transport_path, transport)
+            self.fixture.refresh(self.standard)
+            with self.assertRaisesRegex(evidence.EvidenceError, error):
+                self.validate(self.standard)
+
+        self.setUp()
+        transport_path = self.standard / "output/transport.json"
+        transport = json.loads(transport_path.read_text())
+        del transport["observer_process"]
+        write_json(transport_path, transport)
+        self.fixture.refresh(self.standard)
+        with self.assertRaisesRegex(evidence.EvidenceError, "observer_process"):
+            self.validate(self.standard)
+
+        self.setUp()
+        transport_path = self.standard / "output/transport.json"
+        transport = json.loads(transport_path.read_text())
+        transport["observer_process"]["state"] = "running"
+        write_json(transport_path, transport)
+        self.fixture.refresh(self.standard)
+        with self.assertRaisesRegex(evidence.EvidenceError, "terminal state"):
+            self.validate(self.standard)
+
+        for exit_code in (False, 7):
+            self.setUp()
+            transport_path = self.standard / "output/transport.json"
+            transport = json.loads(transport_path.read_text())
+            transport["observer_process"]["exit_code"] = exit_code
+            write_json(transport_path, transport)
+            self.fixture.refresh(self.standard)
+            normalized = json.loads((self.standard / "output/run-result.json").read_text())
+            self.assertEqual(normalized["exit_code"], 0)
+            with self.assertRaisesRegex(evidence.EvidenceError, "terminal exit code"):
+                self.validate(self.standard)
 
 
 if __name__ == "__main__":
