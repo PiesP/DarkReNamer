@@ -311,6 +311,15 @@ try {
         throw 'The acceptance script must use Windows PowerShell 5.1-compatible integer type names.'
     }
     $acceptanceText = [IO.File]::ReadAllText($acceptance)
+    $scrollInfoProducer = 'return new [] { info.Minimum, info.Maximum, (int)info.Page, info.Position, info.TrackPosition };'
+    if ([regex]::Matches($acceptanceText, [regex]::Escape($scrollInfoProducer)).Count -ne 1) {
+        throw 'The native scroll-info helper must return its fixed five-value SCROLLINFO projection.'
+    }
+    $scrollInfoConsumer = '$values.Count -ne 5'
+    if ([regex]::Matches($acceptanceText, [regex]::Escape($scrollInfoConsumer)).Count -ne 2 -or
+        $acceptanceText.IndexOf('$values.Count -ne 6', [StringComparison]::Ordinal) -ge 0) {
+        throw 'Both native scroll-info consumers must require the producer five-value shape.'
+    }
     $reachabilityMapIndex = $acceptanceText.IndexOf(
         '$reachability = [ordered]@{',
         [StringComparison]::Ordinal
