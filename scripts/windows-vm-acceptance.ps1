@@ -2336,7 +2336,10 @@ function Set-ObserverManualName {
     $deadline = (Get-Date).AddSeconds($WaitSeconds)
     do {
         $actual = $Grid.pattern.GetItem($Row, 1).Current.Name
-        if ($actual -ceq $Name) { return $rasterTarget }
+        if ($actual -ceq $Name) {
+            if ($null -ne $rasterTarget) { return $rasterTarget }
+            return
+        }
         Start-Sleep -Milliseconds 100
     } while ((Get-Date) -lt $deadline)
     throw "Manual row $Row preview did not expose the exact requested name."
