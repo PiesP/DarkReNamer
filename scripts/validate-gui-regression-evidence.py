@@ -513,9 +513,55 @@ def returned_to_preview(value: object, expected_input: str | None = None) -> boo
         value.get("returned_to_preview") is True and value.get("default_cancel_preserved") is True
 
 
+def menu_element_valid(value: object, expected_name: str, *, contains: bool = False) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "automation_id", "name", "control_type", "enabled", "keyboard_focusable",
+        "offscreen", "native_handle", "bounds",
+    }:
+        return False
+    name = value.get("name")
+    if not isinstance(value.get("automation_id"), str) or not isinstance(name, str) or \
+            (expected_name not in name if contains else name != expected_name) or \
+            value.get("control_type") != "ControlType.MenuItem" or \
+            value.get("enabled") is not True or type(value.get("keyboard_focusable")) is not bool or \
+            value.get("offscreen") is not False or type(value.get("native_handle")) is not int:
+        return False
+    bounds = value.get("bounds")
+    return isinstance(bounds, dict) and set(bounds) == {"x", "y", "width", "height"} and \
+        all(type(bounds.get(field)) in (int, float) and math.isfinite(bounds[field])
+            for field in ("x", "y", "width", "height")) and \
+        bounds["width"] > 0 and bounds["height"] > 0
+
+
+def physical_target_valid(value: object, bounds: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {"x", "y", "hit_window", "root_window"} or \
+            not isinstance(bounds, dict) or \
+            not all(type(value.get(field)) is int for field in ("x", "y", "hit_window", "root_window")):
+        return False
+    return value["hit_window"] != 0 and value["root_window"] != 0 and \
+        bounds["x"] <= value["x"] < bounds["x"] + bounds["width"] and \
+        bounds["y"] <= value["y"] < bounds["y"] + bounds["height"]
+
+
 def valid_apply_entry(value: object) -> bool:
-    return isinstance(value, dict) and isinstance(value.get("input"), str) and bool(value["input"]) and \
-        isinstance(value.get("menu_entry"), str) and bool(value["menu_entry"])
+    if not isinstance(value, dict) or set(value) != {"input", "menu_entry"}:
+        return False
+    if value["input"] == "visible-command-rail":
+        return value["menu_entry"] is None
+    if value["input"] != "physical-mouse-file-menu-public-apply":
+        return False
+    menu = value["menu_entry"]
+    if not isinstance(menu, dict) or set(menu) != {"file", "file_target", "apply", "apply_target"} or \
+            not menu_element_valid(menu["file"], "파일(F)") or \
+            not menu_element_valid(menu["apply"], "변경 사항 적용", contains=True):
+        return False
+    return physical_target_valid(menu["file_target"], menu["file"]["bounds"]) and \
+        physical_target_valid(menu["apply_target"], menu["apply"]["bounds"])
+
+
+def valid_tooltip_apply_entry(value: object) -> bool:
+    return isinstance(value, dict) and set(value) == {"input", "menu_entry"} and \
+        value["input"] == "keyboard-ctrl-s-with-visible-listview-infotip" and value["menu_entry"] is None
 
 
 def reachability_valid(value: object) -> bool:
@@ -701,7 +747,7 @@ def derive_raw_semantics(raw: dict, mode: str, cleanup: dict, result: dict) -> d
             "tooltip_hidden_after_expansion": isinstance(after_expansion, dict) and after_expansion.get("bound_tooltip_visible") is False and after_expansion.get("essential_overlap") is False,
             "tooltip_restored_after_cancel": isinstance(after_cancel, dict) and after_cancel.get("bound_tooltip_reexposed") is True and nested(after_cancel, "window", "visible") is True,
             "tooltip_hidden_after_neutral": nested(after_cancel, "neutral_hidden") is True,
-            "public_apply_entered": valid_apply_entry(apply_entry) and
+            "public_apply_entered": valid_tooltip_apply_entry(apply_entry) and
                                     nested(confirmation, "scope_exact") is True and
                                     default_cancel(nested(confirmation, "default_focus")) and
                                     all(reachability_valid(nested(confirmation, "reachability", name))

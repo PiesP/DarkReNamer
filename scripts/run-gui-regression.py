@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -363,9 +364,51 @@ def returned_to_preview(value: object, expected_input: str | None = None) -> boo
 
 
 def valid_apply_entry(value: object) -> bool:
-    return isinstance(value, dict) and all(
-        isinstance(value.get(name), str) and bool(value[name]) for name in ("input", "menu_entry")
-    )
+    if not isinstance(value, dict) or set(value) != {"input", "menu_entry"}:
+        return False
+    if value["input"] == "visible-command-rail":
+        return value["menu_entry"] is None
+    if value["input"] != "physical-mouse-file-menu-public-apply":
+        return False
+    menu = value["menu_entry"]
+    if not isinstance(menu, dict) or set(menu) != {
+        "file", "file_target", "apply", "apply_target",
+    }:
+        return False
+
+    def valid_element(element: object, expected_name: str, contains: bool = False) -> bool:
+        if not isinstance(element, dict) or set(element) != {
+            "automation_id", "name", "control_type", "enabled", "keyboard_focusable",
+            "offscreen", "native_handle", "bounds",
+        }:
+            return False
+        name = element["name"]
+        bounds = element["bounds"]
+        return isinstance(element["automation_id"], str) and isinstance(name, str) and \
+            ((expected_name in name) if contains else (name == expected_name)) and \
+            element["control_type"] == "ControlType.MenuItem" and element["enabled"] is True and \
+            type(element["keyboard_focusable"]) is bool and element["offscreen"] is False and \
+            type(element["native_handle"]) is int and isinstance(bounds, dict) and \
+            set(bounds) == {"x", "y", "width", "height"} and \
+            all(type(bounds[key]) in {int, float} and math.isfinite(bounds[key])
+                for key in bounds) and bounds["width"] > 0 and bounds["height"] > 0
+
+    def valid_target(target: object, element: object) -> bool:
+        if not isinstance(target, dict) or set(target) != {
+            "x", "y", "hit_window", "root_window",
+        } or not all(type(target[key]) is int for key in target):
+            return False
+        bounds = element["bounds"]
+        return target["hit_window"] != 0 and target["root_window"] != 0 and \
+            bounds["x"] <= target["x"] < bounds["x"] + bounds["width"] and \
+            bounds["y"] <= target["y"] < bounds["y"] + bounds["height"]
+
+    file_element = menu["file"]
+    apply_element = menu["apply"]
+    return valid_element(file_element, "파일(F)") and \
+        valid_element(apply_element, "변경 사항 적용", contains=True) and \
+        valid_target(menu["file_target"], file_element) and \
+        valid_target(menu["apply_target"], apply_element)
 
 
 def reachability_valid(value: object) -> bool:
@@ -505,7 +548,7 @@ def project_raw_semantics(observer: dict, cleanup: dict, run_root: Path, mode: s
             "tooltip_hidden_after_expansion": nested(overlay, "after_expansion", "bound_tooltip_visible") is False and nested(overlay, "after_expansion", "essential_overlap") is False,
             "tooltip_restored_after_cancel": nested(overlay, "after_cancel", "bound_tooltip_reexposed") is True and nested(overlay, "after_cancel", "window", "visible") is True,
             "tooltip_hidden_after_neutral": nested(overlay, "after_cancel", "neutral_hidden") is True,
-            "public_apply_entered": valid_apply_entry(nested(confirmation, "apply_entry")) and nested(confirmation, "scope_exact") is True and default_cancel(nested(confirmation, "default_focus")) and all(reachability_valid(nested(confirmation, "reachability", name)) for name in required_controls),
+            "public_apply_entered": nested(confirmation, "apply_entry") == {"input": "keyboard-ctrl-s-with-visible-listview-infotip", "menu_entry": None} and nested(confirmation, "scope_exact") is True and default_cancel(nested(confirmation, "default_focus")) and all(reachability_valid(nested(confirmation, "reachability", name)) for name in required_controls),
             "destination_context_visible": nested(confirmation, "destination_context_visible") is True,
             "cancelled_disk_unchanged": nested(surface, "cancellation_disk_unchanged") is True,
             "cancelled_fixture_identity_unchanged": nested(surface, "fixture_identity_unchanged") is True,
@@ -791,7 +834,7 @@ def normalize_run_result(run_root: Path, input_sha256: str) -> dict:
         "host_platform": manifest["host_preflight"],
         "guest_platform": preflight["guest_platform"],
         "actual": {
-            "appearance": environment.get("appearance"),
+            "appearance": nested(observer, "assertions", "scenario", "appearance"),
             "monitor": monitor,
             "work_area": work,
             "hwnd_dpi": environment.get("hwnd_dpi", environment.get("dpi")),

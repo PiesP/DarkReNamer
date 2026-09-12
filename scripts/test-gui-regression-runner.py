@@ -43,6 +43,46 @@ class GuiRegressionRunnerTests(unittest.TestCase):
             ],
         )
 
+    def test_apply_entry_accepts_only_observed_public_entry_variants(self):
+        rail = {"input": "visible-command-rail", "menu_entry": None}
+        file_element = {
+            "automation_id": "menu", "name": "파일(F)", "control_type": "ControlType.MenuItem",
+            "enabled": True, "keyboard_focusable": True, "offscreen": False,
+            "native_handle": 0,
+            "bounds": {"x": 10.0, "y": 20.0, "width": 100.0, "height": 30.0},
+        }
+        apply_element = {**file_element, "name": "변경 사항 적용"}
+        target = {"x": 60, "y": 35, "hit_window": 101, "root_window": 202}
+        menu = {
+            "input": "physical-mouse-file-menu-public-apply",
+            "menu_entry": {
+                "file": file_element, "file_target": target,
+                "apply": apply_element, "apply_target": dict(target),
+            },
+        }
+        for entry in (rail, menu):
+            self.assertTrue(runner.valid_apply_entry(entry), entry)
+
+        invalid = [
+            {"input": "visible-command-rail", "menu_entry": {}},
+            {"input": "physical-mouse-file-menu-public-apply", "menu_entry": None},
+            {"input": "physical-mouse", "menu_entry": "public-apply"},
+            {"input": "keyboard-ctrl-s-with-visible-listview-infotip", "menu_entry": None},
+            {**rail, "extra": True},
+            {**menu, "menu_entry": {**menu["menu_entry"], "extra": True}},
+            {**menu, "menu_entry": {**menu["menu_entry"], "file_target": {
+                **target, "x": 111,
+            }}},
+            {**menu, "menu_entry": {**menu["menu_entry"], "apply": {
+                **apply_element, "enabled": False,
+            }}},
+            {**menu, "menu_entry": {**menu["menu_entry"], "apply_target": {
+                **target, "hit_window": True,
+            }}},
+        ]
+        for entry in invalid:
+            self.assertFalse(runner.valid_apply_entry(entry), entry)
+
     def test_private_profile_is_explicit_bounded_and_not_returned_with_its_path(self):
         profile = self.root / "connection.json"
         value = {
@@ -154,15 +194,18 @@ class GuiRegressionRunnerTests(unittest.TestCase):
             "status": "review_required",
             "assertions": {
                 "overall": "passed",
-                "scenario": {"semantic_assertions": {
-                    name: True for name in runner.MODE_SEMANTICS["standard"]
-                }},
+                "scenario": {
+                    "appearance": "light",
+                    "semantic_assertions": {
+                        name: True for name in runner.MODE_SEMANTICS["standard"]
+                    },
+                },
             },
             "guest_cleanup": True,
         })
         self.write_json(output / "acceptance-observations.json", {
             "environment": {
-                "appearance": "light", "hwnd_dpi": 96, "text_scale_factor_percent": 100,
+                "hwnd_dpi": 96, "text_scale_factor_percent": 100,
                 "physical_screen": {"left": 0, "top": 0, "right": 800, "bottom": 600, "width": 800, "height": 600},
                 "work_area": {"left": 0, "top": 0, "right": 800, "bottom": 552, "width": 800, "height": 552},
             },
@@ -190,6 +233,7 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         self.assertEqual(result["input_manifest_sha256"], input_hash)
         self.assertEqual(result["collection_sha256"], runner.digest(run_root / "collection.json"))
         self.assertEqual(result["cleanup_sha256"], runner.digest(output / "cleanup.json"))
+        self.assertEqual(result["actual"]["appearance"], "light")
 
     def test_collection_rejects_symlinked_output(self):
         run_root = self.root / "symlink"
@@ -343,7 +387,6 @@ class GuiRegressionRunnerTests(unittest.TestCase):
             output = run_root / "output"
             observations = json.loads((output / "acceptance-observations.json").read_text())
             environment = dict(observations["scenario"]["environment"])
-            environment["appearance"] = observations["scenario"]["appearance"]
             target = json.loads((output / "platform-postlaunch.json").read_text())["target"]
             environment["main_window"] = {
                 "hwnd": target["hwnd"],
