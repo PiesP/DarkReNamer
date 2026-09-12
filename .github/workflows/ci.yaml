@@ -59,7 +59,10 @@ jobs:
         run: ./scripts/test-tooling.ps1 -Platform Ubuntu
 
       - name: Test the WSL VM bundle and evidence contract
-        run: python3 scripts/test-windows-vm-runner.py
+        run: |
+          python3 scripts/test-windows-vm-runner.py
+          python3 scripts/test-gui-regression-runner.py
+          python3 scripts/test-gui-regression-evidence.py
 
       - name: Check formatting and lints
         run: |
