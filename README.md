@@ -85,6 +85,11 @@ and button controls. Native System, Forced Colors, file dialogs, and confirmatio
 TaskDialogs continue to use Windows rendering. Forced Colors keeps system colors
 and native focus and selection precedence across every surface.
 
+App-owned fonts apply the Windows text-size preference in addition to monitor
+DPI, and their layouts use the resulting font measurements. If the preference
+cannot be queried, the normal system font size is retained. Windows-owned
+TaskDialogs keep the operating system's text-sizing behavior.
+
 The file list uses the default Windows ListView style with the app's background
 and text palette. Its scrollbars retain system rendering and may appear light
 in Dark mode. The advanced appearance window's scrolling body separately
