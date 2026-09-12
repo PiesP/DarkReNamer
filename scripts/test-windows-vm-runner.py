@@ -197,6 +197,21 @@ class VmRunnerTests(unittest.TestCase):
         for arguments in ([], ['--vm-name', 'vm', '--ssh-host', 'alias']):
             self.assert_arguments_rejected(arguments)
 
+    def test_desktop_geometry_requires_a_bounded_pair(self):
+        args = vm.parse_arguments([
+            '--ssh-host', 'vm', '--desktop-width', '800', '--desktop-height', '600'])
+        self.assertEqual((args.desktop_width, args.desktop_height), (800, 600))
+        for arguments in (
+                ['--ssh-host', 'vm', '--desktop-width', '800'],
+                ['--ssh-host', 'vm', '--desktop-height', '600'],
+                ['--ssh-host', 'vm', '--desktop-width', '799', '--desktop-height', '600'],
+                ['--ssh-host', 'vm', '--desktop-width', '800', '--desktop-height', '599'],
+                ['--ssh-host', 'vm', '--desktop-width', '8193', '--desktop-height', '600'],
+                ['--ssh-host', 'vm', '--desktop-width', '800', '--desktop-height', '4321'],
+                ['--ssh-host', 'vm', '--desktop-mode', 'existing',
+                 '--desktop-width', '800', '--desktop-height', '600']):
+            self.assert_arguments_rejected(arguments)
+
     def test_direct_vm_identity_is_validated_and_passed_to_the_controller(self):
         identity = '12345678-1234-5678-9abc-1234567890ab'
         args = vm.parse_arguments(['--vm-name', 'VM', '--expected-vm-id', identity.upper()])
@@ -273,7 +288,8 @@ class VmRunnerTests(unittest.TestCase):
 
     def desktop_lease(self):
         return {'status': 'ready', 'leasePath': 'C:\\Temp\\owned', 'leaseId': 'a' * 32,
-                'expectedGuestSid': 'S-1-5-21-1-2-3-1001', 'expectedDpi': 192}
+                'expectedGuestSid': 'S-1-5-21-1-2-3-1001', 'expectedDpi': 192,
+                'expectedDesktopWidth': 3840, 'expectedDesktopHeight': 2160}
 
     def test_managed_desktop_is_default_and_binds_transport_selector(self):
         for selector in (['--ssh-host', 'vm-alias'], ['--vm-name', 'VM']):
@@ -287,6 +303,27 @@ class VmRunnerTests(unittest.TestCase):
                 start, stop = [call.args[0] for call in host.call_args_list]
                 self.assertIn('-ExpectedSshHost' if args.ssh_host else '-ExpectedVmName', start)
                 self.assertIn('-LeaseId', stop)
+
+    def test_managed_desktop_passes_and_checks_requested_geometry(self):
+        args = vm.parse_arguments([
+            '--ssh-host', 'vm', '--desktop-scale', '100',
+            '--desktop-width', '800', '--desktop-height', '600'])
+        lease = self.desktop_lease()
+        lease.update(expectedDpi=96, expectedDesktopWidth=800, expectedDesktopHeight=600)
+        with mock.patch.object(vm.Path, 'is_file', return_value=True), \
+             mock.patch.object(vm, 'windows_host_command', side_effect=[
+                 json.dumps(lease), '{"status":"stopped"}']) as host:
+            with vm.managed_desktop(args) as actual:
+                self.assertEqual(actual['expectedDesktopWidth'], 800)
+            self.assertIn('-DesktopWidth 800 -DesktopHeight 600', host.call_args_list[0].args[0])
+
+        lease['expectedDesktopWidth'] = 801
+        with mock.patch.object(vm.Path, 'is_file', return_value=True), \
+             mock.patch.object(vm, 'windows_host_command', side_effect=[
+                 json.dumps(lease), '{"status":"stopped"}']):
+            with self.assertRaisesRegex(ValueError, 'geometry'):
+                with vm.managed_desktop(args):
+                    self.fail('Mismatched geometry reached the controller')
 
     def test_existing_desktop_never_calls_windows_host(self):
         args = vm.parse_arguments(['--ssh-host', 'vm', '--desktop-mode', 'existing'])
