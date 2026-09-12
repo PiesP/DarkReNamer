@@ -844,6 +844,89 @@ fn run_prepared_command_action_after_state_release<T, R>(
     })
 }
 
+struct MainWindowListInfotipModalGuard {
+    owner: HWND,
+    list_window: HWND,
+    tooltip: HWND,
+    deactivated: bool,
+}
+
+impl MainWindowListInfotipModalGuard {
+    fn inactive(owner: HWND) -> Self {
+        Self {
+            owner,
+            list_window: null_mut(),
+            tooltip: null_mut(),
+            deactivated: false,
+        }
+    }
+
+    fn new(owner: HWND) -> Self {
+        // This constructor is private to the main-window dispatch path. Do not
+        // use it with PromptState-backed dialog HWNDs: their GWLP_USERDATA has a
+        // different type and lifetime.
+        let Some(state_lease) = try_app_state(owner) else {
+            return Self::inactive(owner);
+        };
+        let list_window = state_lease.state().list_window;
+        // Tooltip messages can synchronously notify the owner. End the sole
+        // AppState lease before entering that native reentrancy boundary.
+        drop(state_lease);
+
+        // SAFETY: owner and list_window are copied UI-thread HWND values from
+        // the live main AppState. Validate their relationship before querying
+        // the ListView-owned tooltip, then synchronously deactivate and remove
+        // any displayed tip without retaining native caller storage.
+        let tooltip = unsafe {
+            if IsWindow(owner) == 0 || IsWindow(list_window) == 0 || GetParent(list_window) != owner
+            {
+                return Self::inactive(owner);
+            }
+            let tooltip = SendMessageW(list_window, LVM_GETTOOLTIPS, 0, 0) as HWND;
+            if tooltip.is_null() || IsWindow(tooltip) == 0 {
+                return Self::inactive(owner);
+            }
+            SendMessageW(tooltip, TTM_ACTIVATE, 0, 0);
+            SendMessageW(tooltip, TTM_POP, 0, 0);
+            tooltip
+        };
+        Self {
+            owner,
+            list_window,
+            tooltip,
+            deactivated: true,
+        }
+    }
+}
+
+impl Drop for MainWindowListInfotipModalGuard {
+    fn drop(&mut self) {
+        // SAFETY: the guard runs on the same UI thread as construction and
+        // holds copied HWND values only. Revalidate the main owner, its exact
+        // child ListView, and the currently attached tooltip before restoring
+        // hover tips after every normal, Cancel, or error return.
+        unsafe {
+            if self.deactivated
+                && IsWindow(self.owner) != 0
+                && IsWindow(self.list_window) != 0
+                && GetParent(self.list_window) == self.owner
+                && IsWindow(self.tooltip) != 0
+                && SendMessageW(self.list_window, LVM_GETTOOLTIPS, 0, 0) as HWND == self.tooltip
+            {
+                SendMessageW(self.tooltip, TTM_ACTIVATE, 1, 0);
+            }
+        }
+    }
+}
+
+fn select_main_window_prepared_task_dialog(
+    owner: HWND,
+    prepared: &PreparedTaskDialogSpec,
+) -> io::Result<i32> {
+    let _infotip_guard = MainWindowListInfotipModalGuard::new(owner);
+    select_prepared_task_dialog(owner, prepared)
+}
+
 fn run_prepared_worker_task_dialog_after_state_release<T, R>(
     state_lease: CallbackStateLease<T, R>,
     window: HWND,
@@ -1283,7 +1366,7 @@ unsafe extern "system" fn window_proc(
                 state_lease,
                 window,
                 prepared,
-                select_prepared_task_dialog,
+                select_main_window_prepared_task_dialog,
             );
             0
         }
@@ -1294,7 +1377,7 @@ unsafe extern "system" fn window_proc(
                 state_lease,
                 window,
                 prepared,
-                select_prepared_task_dialog,
+                select_main_window_prepared_task_dialog,
             );
             0
         }
@@ -1327,7 +1410,7 @@ unsafe extern "system" fn window_proc(
                     state_lease,
                     window,
                     prepared,
-                    select_prepared_task_dialog,
+                    select_main_window_prepared_task_dialog,
                 );
                 return 0;
             }
@@ -1342,7 +1425,7 @@ unsafe extern "system" fn window_proc(
                     state_lease,
                     window,
                     prepared,
-                    select_prepared_task_dialog,
+                    select_main_window_prepared_task_dialog,
                 );
                 return 0;
             }
@@ -1523,7 +1606,7 @@ unsafe extern "system" fn window_proc(
                 window,
                 action,
                 select_prepared_file_dialog,
-                select_prepared_task_dialog,
+                select_main_window_prepared_task_dialog,
                 NativeAppearanceDialogPlatform,
             );
             0
@@ -1609,7 +1692,7 @@ unsafe extern "system" fn window_proc(
                         window,
                         action,
                         select_prepared_file_dialog,
-                        select_prepared_task_dialog,
+                        select_main_window_prepared_task_dialog,
                         NativeAppearanceDialogPlatform,
                     );
                     return 0;
@@ -1723,7 +1806,11 @@ mod tests {
     use super::*;
 
     const FILE_DIALOG_DRAWITEM_SUBCLASS_ID: usize = 0xD4B4;
+    const LIST_INFOTIP_MODAL_SUBCLASS_ID: usize = 0xD4B5;
     static FILE_DIALOG_DRAWITEM_LEASED: AtomicBool = AtomicBool::new(false);
+    static LIST_INFOTIP_DEACTIVATIONS: AtomicUsize = AtomicUsize::new(0);
+    static LIST_INFOTIP_POPS: AtomicUsize = AtomicUsize::new(0);
+    static LIST_INFOTIP_ACTIVATIONS: AtomicUsize = AtomicUsize::new(0);
     static FILE_DIALOG_TEST_SERIAL: Mutex<()> = Mutex::new(());
     static APPEARANCE_CREATE_REENTERED: AtomicBool = AtomicBool::new(false);
     static APPEARANCE_FOCUSED: AtomicBool = AtomicBool::new(false);
@@ -1848,6 +1935,30 @@ mod tests {
         }
         // SAFETY: unchanged callback arguments are forwarded exactly once to
         // the system-owned subclass chain.
+        unsafe { DefSubclassProc(window, message, wparam, lparam) }
+    }
+
+    extern "system" fn list_infotip_modal_probe(
+        window: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        subclass_id: usize,
+        _ref_data: usize,
+    ) -> LRESULT {
+        if subclass_id == LIST_INFOTIP_MODAL_SUBCLASS_ID {
+            if message == TTM_ACTIVATE {
+                if wparam == 0 {
+                    LIST_INFOTIP_DEACTIVATIONS.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    LIST_INFOTIP_ACTIVATIONS.fetch_add(1, Ordering::SeqCst);
+                }
+            } else if message == TTM_POP {
+                LIST_INFOTIP_POPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        // SAFETY: unchanged callback arguments are forwarded exactly once to
+        // the system-owned tooltip subclass chain.
         unsafe { DefSubclassProc(window, message, wparam, lparam) }
     }
 
@@ -2170,6 +2281,57 @@ mod tests {
                 let _disposition = CallbackState::request_reclaim(self.slot);
             }
         }
+    }
+
+    #[test]
+    fn main_window_modal_guard_suppresses_and_restores_the_list_infotip()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _serial = FILE_DIALOG_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let app = PublishedFileDialogTestApp::new()?;
+        let list_window = app.with_state(|state| state.list_window)?;
+        // SAFETY: list_window is the live test-owned production ListView; this
+        // synchronous scalar query returns its borrowed tooltip HWND.
+        let tooltip = unsafe { SendMessageW(list_window, LVM_GETTOOLTIPS, 0, 0) as HWND };
+        if tooltip.is_null() {
+            return Err(io::Error::other("production ListView has no infotip control").into());
+        }
+        LIST_INFOTIP_DEACTIVATIONS.store(0, Ordering::SeqCst);
+        LIST_INFOTIP_POPS.store(0, Ordering::SeqCst);
+        LIST_INFOTIP_ACTIVATIONS.store(0, Ordering::SeqCst);
+        // SAFETY: tooltip remains owned by app's live ListView through the
+        // balanced removal below, and the callback retains no borrowed data.
+        if unsafe {
+            SetWindowSubclass(
+                tooltip,
+                Some(list_infotip_modal_probe),
+                LIST_INFOTIP_MODAL_SUBCLASS_ID,
+                0,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+
+        {
+            let _guard = MainWindowListInfotipModalGuard::new(app.owner);
+            assert_eq!(LIST_INFOTIP_DEACTIVATIONS.load(Ordering::SeqCst), 1);
+            assert_eq!(LIST_INFOTIP_POPS.load(Ordering::SeqCst), 1);
+            assert_eq!(LIST_INFOTIP_ACTIVATIONS.load(Ordering::SeqCst), 0);
+        }
+        assert_eq!(LIST_INFOTIP_ACTIVATIONS.load(Ordering::SeqCst), 1);
+
+        // SAFETY: this removes the exact test callback installed on the same
+        // still-live tooltip; removal is idempotent and carries no refdata.
+        unsafe {
+            RemoveWindowSubclass(
+                tooltip,
+                Some(list_infotip_modal_probe),
+                LIST_INFOTIP_MODAL_SUBCLASS_ID,
+            )
+        };
+        Ok(())
     }
 
     #[test]
