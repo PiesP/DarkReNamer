@@ -622,8 +622,11 @@ public static class DarkReNamerVmAutomation {
     // UIA's default-proxy stack walk cannot inspect PowerShell dynamic frames.
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     public static void Initialize() {
-        System.Windows.Automation.ClientSettings.RegisterClientSideProviderAssembly(
-            typeof(UIAutomationClientsideProviders.UIAutomationClientSideProviders).Assembly.GetName());
+        var providerType = typeof(UIAutomationClientsideProviders.UIAutomationClientSideProviders);
+        var providerName = providerType.Assembly.GetName();
+        // .NET 8 changed the assembly name's Side casing while the namespace stayed stable.
+        providerName.Name = providerType.Namespace;
+        System.Windows.Automation.ClientSettings.RegisterClientSideProviderAssembly(providerName);
     }
 }
 '@
