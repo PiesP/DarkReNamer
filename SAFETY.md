@@ -211,6 +211,13 @@ journal or mutation. After begin it is observed only between complete primitive
 steps and uses the same durable reverse-order rollback. Cancellation is ignored
 from `Prepared` through rename reconciliation and throughout rollback.
 
+The UI's Finalizing progress phase is published after all forward steps and
+before the existing final cancellation check. It disables new UI cancellation
+requests during commit; it is not a terminal result and grants no mutation
+authority. In-flight cancellation requests still use the existing check. The UI
+acknowledges a request without promising rollback, and reports only the actual
+execution outcome. Rollback and terminal handoff also disable the Cancel control.
+
 ## Release panic policy
 
 The root `Cargo.toml` `[profile.release]` is the canonical panic policy. Release

@@ -2216,6 +2216,7 @@ mod tests {
                 assert!(text.contains("수정하세요"));
                 assert!(text.contains("현재 이름: sample.txt"));
                 assert!(text.contains("변경 후 이름: ?sample.txt"));
+                assert!(text.contains(r"현재 전체 경로: C:\fixture\sample.txt"));
                 assert!(text.contains(r"대상 전체 경로: C:\fixture\?sample.txt"));
                 assert!(text.contains("파일 시스템 검사와 실행 확인은 변경 적용 시 별도"));
             }
@@ -3171,7 +3172,12 @@ mod tests {
         let app = PublishedFileDialogTestApp::new()?;
         let source = app._directory.path().join("before.txt");
         let destination = app._directory.path().join("after.txt");
+        let unselected = app._directory.path().join("unselected.txt");
+        let unselected_destination = app._directory.path().join("also-changed.txt");
+        let unchanged = app._directory.path().join("unchanged.txt");
         fs::write(&source, b"fixture")?;
+        fs::write(&unselected, b"unselected fixture")?;
+        fs::write(&unchanged, b"unchanged fixture")?;
         app.with_state(|state| -> Result<(), ProposalMutationError> {
             let appended =
                 state
@@ -3182,10 +3188,69 @@ mod tests {
                 .model
                 .manual_change_changed(0, LegacyText::from("after.txt"))?;
             state.commit_known_model_change(changed);
+            state.model.append(LegacyListItem::new(
+                legacy_path(&unselected),
+                false,
+                18,
+                0,
+                0,
+            ))?;
+            state.model.append(LegacyListItem::new(
+                legacy_path(&unchanged),
+                false,
+                17,
+                0,
+                0,
+            ))?;
+            state
+                .model
+                .manual_change_changed(1, LegacyText::from("also-changed.txt"))?;
+            state.commit_known_model_change(true);
             refresh(state);
+            select_rows(state.list_window, &[0]);
             update_controls(state);
             Ok(())
         })??;
+        app.with_state(|state| apply_changes(app.owner, state))?;
+        app.finish_plan_with_selector(|_, spec| {
+            assert!(
+                spec.content
+                    .contains("목록 전체 3개 · 선택 1개 · 실제 변경 2개")
+            );
+            assert!(spec.content.contains("before.txt → after.txt"));
+            assert!(spec.content.contains("unselected.txt → also-changed.txt"));
+            Ok(IDCANCEL)
+        })?;
+        assert!(source.exists() && unselected.exists() && unchanged.exists());
+        assert!(!destination.exists() && !unselected_destination.exists());
+        app.with_state(|state| {
+            assert!(state.apply_worker.is_none());
+            assert!(state.active_journal.is_none());
+            assert!(
+                state
+                    .ui_status
+                    .message_text()
+                    .contains("적용하지 않았습니다")
+            );
+            apply_changes(app.owner, state);
+        })?;
+        app.finish_plan_with_selector(|_, _| {
+            // A separate actor occupies the destination after planning.
+            fs::write(&destination, b"occupied fixture")?;
+            Ok(APPLY_CONFIRM_BUTTON_ID)
+        })?;
+        app.drain_apply()?;
+        assert!(source.exists() && unselected.exists());
+        assert_eq!(fs::read(&destination)?, b"occupied fixture");
+        assert!(!unselected_destination.exists());
+        app.with_state(|state| {
+            assert!(!state.apply_locked());
+            assert!(state.ui_status.message_text().contains("파일 변경 없음"));
+        })?;
+        let refusal = take_deferred_message(app.owner)
+            .ok_or_else(|| io::Error::other("pre-execution refusal was not presented"))?;
+        assert_eq!(refusal.caption, "DarkReNamer - 실행 거부");
+        fs::remove_file(&destination)?;
         app.with_state(|state| apply_changes(app.owner, state))?;
         FILE_DIALOG_DRAWITEM_LEASED.store(false, Ordering::SeqCst);
         app.finish_plan_with_selector(|owner, spec| {
@@ -3201,6 +3266,12 @@ mod tests {
         app.drain_apply()?;
         assert!(!source.exists());
         assert!(destination.exists());
+        assert!(!unselected.exists());
+        assert_eq!(fs::read(unselected_destination)?, b"unselected fixture");
+        assert_eq!(fs::read(unchanged)?, b"unchanged fixture");
+        app.with_state(|state| {
+            assert!(state.ui_status.message_text().contains("2개 변경 완료"));
+        })?;
         Ok(())
     }
 

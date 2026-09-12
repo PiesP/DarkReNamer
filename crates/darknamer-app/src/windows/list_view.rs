@@ -674,19 +674,9 @@ pub(super) fn handle_list_infotip(state: &AppState, lparam: LPARAM) -> bool {
     let Some(item) = state.model.items().get(row) else {
         return true;
     };
-    let change = item.planned_change_kind();
-    let preview =
-        preview_issue_description(state.preview_issue_cache.issue(row)).unwrap_or_else(|| {
-            if change.is_changed() {
-                preview_status_label(PreviewRowIssue::None, change).to_owned()
-            } else {
-                "변경 없음".to_owned()
-            }
-        });
     let text = format!(
-        "{preview}\n{}\n{}\n정확한 크기: {}",
-        item.current_name(),
-        item.source_path(),
+        "{}\n정확한 크기: {}",
+        preview_item_details(item, state.preview_issue_cache.issue(row)),
         format_exact_bytes(item.actual_size())
     );
     let mut text = text.encode_utf16().collect::<Vec<_>>();
