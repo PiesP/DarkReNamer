@@ -581,6 +581,31 @@ try {
         $startFunction.IndexOf('[Math]::Min(30, $WaitSeconds)', [StringComparison]::Ordinal) -ge 0) {
         throw 'Shared application startup must preserve the caller-supplied acceptance timeout.'
     }
+    $manualNameAst = (Get-Command Set-ObserverManualName -CommandType Function).ScriptBlock.Ast
+    $manualNameSuccessBranches = @($manualNameAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.IfStatementAst] -and
+            $node.Clauses.Count -eq 1 -and
+            $node.Clauses[0].Item1.Extent.Text -ceq '$actual -ceq $Name'
+    }, $true))
+    if ($manualNameSuccessBranches.Count -ne 1) {
+        throw 'Manual-name output test could not identify the exact successful observation branch.'
+    }
+    $manualNameSuccessText = $manualNameSuccessBranches[0].Clauses[0].Item2.Extent.Text
+    $manualNameSuccess = [scriptblock]::Create($manualNameSuccessText.Substring(1, $manualNameSuccessText.Length - 2))
+    $actual = 'renamed.txt'
+    $Name = $actual
+    $rasterTarget = $null
+    $defaultManualNameOutput = @(& $manualNameSuccess)
+    if ($defaultManualNameOutput.Count -ne 0) {
+        throw 'Manual-name success without a raster capture must not add a null pipeline result.'
+    }
+    $rasterTarget = [pscustomobject]@{ id = 'prefix-input' }
+    $capturedManualNameOutput = @(& $manualNameSuccess)
+    if ($capturedManualNameOutput.Count -ne 1 -or
+        -not [object]::ReferenceEquals($capturedManualNameOutput[0], $rasterTarget)) {
+        throw 'Manual-name success with a raster capture must return exactly the observed target.'
+    }
     $textScaleRoot = Join-Path $temporaryRoot 'text-scale-documents'
     $textScaleSource = '0123456789abcdef0123456789abcdef01234567'
     $textScaleScript = 'a' * 64
