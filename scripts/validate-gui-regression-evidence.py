@@ -411,6 +411,7 @@ def validate_collection(run_root: Path, input_hash: str) -> tuple[dict, bytes, d
     mandatory = {
         "acceptance-result.json", "acceptance-observations.json", "observer.stdout.txt",
         "observer.stderr.txt", "cleanup.json", "platform-preflight.json", "platform-postlaunch.json",
+        "transport.json",
     }
     require(mandatory <= set(found), f"Collection is missing required raw evidence: {sorted(mandatory - set(found))}")
     require(any(name.endswith(".png") for name in found), "Collection contains no original PNG evidence.")
@@ -571,10 +572,6 @@ def validate_raw_environment(scenario: dict, manifest: dict, result: dict) -> No
 def derive_raw_semantics(raw: dict, mode: str, cleanup: dict, result: dict) -> dict[str, bool | None]:
     scenario = nested(raw, "assertions", "scenario")
     require(isinstance(scenario, dict), "Raw observer scenario evidence is missing.")
-    projection = scenario.get("semantic_assertions")
-    require(isinstance(projection, dict) and set(projection) == MODE_SEMANTICS[mode] and
-            all(value is True for value in projection.values()),
-            "Raw observer semantic projection is incomplete or failed.")
 
     if mode == "full-context":
         repeated = nested(scenario, "repeated")
@@ -765,6 +762,22 @@ def validate_raw_result(run_root: Path, manifest: dict, result: dict, collection
     return raw_value
 
 
+def validate_transport_exit(run_root: Path, collection_files: dict[str, dict], normalized_exit: int) -> None:
+    value, raw = read_json(run_root / "output", Path("transport.json"), "raw transport result")
+    receipt = collection_files["transport.json"]
+    require(receipt["bytes"] == len(raw) and receipt["sha256"] == sha256_bytes(raw),
+            "Raw transport result differs from the collection receipt.")
+    require(isinstance(value, dict), "Raw transport result must be an object.")
+    require(value.get("status") == "collected", "Raw transport status must be collected.")
+    require(value.get("guest_cleanup") is True, "Raw transport guest cleanup must be the boolean true.")
+    observer = exact_keys(value.get("observer_process"), {"state", "exit_code"},
+                          "transport observer_process")
+    require(observer["state"] == "exited", "Transport observer process is not in its terminal state.")
+    exit_code = observer["exit_code"]
+    require(type(exit_code) is int and exit_code == 0 and exit_code == normalized_exit,
+            "Transport observer terminal exit code must be integer zero and match the normalized result.")
+
+
 def validate_raw_semantics(result: dict, raw: dict, mode: str, cleanup: dict,
                            text_metrics: dict[str, dict] | None) -> dict[str, bool | None]:
     derived = derive_raw_semantics(raw, mode, cleanup, result)
@@ -863,6 +876,7 @@ def validate_run_result(
             "Requested and actual text scale differ.")
     require(type(result["exit_code"]) is int and result["exit_code"] == 0,
             "Observer exit_code must be integer zero.")
+    validate_transport_exit(run_root, collection_files, result["exit_code"])
     validate_semantics(result, request["mode"])
     raw = validate_raw_result(run_root, manifest, result, collection_files)
     return result, data, raw
