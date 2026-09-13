@@ -5,10 +5,12 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
+import zlib
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest import mock
@@ -21,6 +23,52 @@ runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runner)
 
 
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def png_chunk(kind, payload, *, checksum=None):
+    if checksum is None:
+        checksum = zlib.crc32(kind + payload) & 0xFFFFFFFF
+    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", checksum)
+
+
+def paeth(left, above, upper_left):
+    predictor = left + above - upper_left
+    distances = (
+        abs(predictor - left), abs(predictor - above), abs(predictor - upper_left),
+    )
+    return (left, above, upper_left)[distances.index(min(distances))]
+
+
+def encode_filtered_rows(rows, channels, filters):
+    previous = bytes(len(rows[0]))
+    encoded = bytearray()
+    for row, filter_type in zip(rows, filters, strict=True):
+        encoded.append(filter_type)
+        for index, value in enumerate(row):
+            left = row[index - channels] if index >= channels else 0
+            above = previous[index]
+            upper_left = previous[index - channels] if index >= channels else 0
+            predictor = (
+                0, left, above, (left + above) // 2, paeth(left, above, upper_left),
+            )[filter_type]
+            encoded.append((value - predictor) & 0xFF)
+        previous = row
+    return bytes(encoded)
+
+
+def png_bytes(width, height, color_type, filtered, *, compressed=None,
+              before_idat=(), after_idat=(), include_iend=True,
+              iend_payload=b"", trailing=b""):
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, color_type, 0, 0, 0)
+    payload = zlib.compress(filtered) if compressed is None else compressed
+    result = PNG_SIGNATURE + png_chunk(b"IHDR", ihdr)
+    result += b"".join(before_idat) + png_chunk(b"IDAT", payload) + b"".join(after_idat)
+    if include_iend:
+        result += png_chunk(b"IEND", iend_payload)
+    return result + trailing
+
+
 class GuiRegressionRunnerTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -30,6 +78,178 @@ class GuiRegressionRunnerTests(unittest.TestCase):
     @staticmethod
     def write_json(path, value):
         path.write_text(json.dumps(value) + "\n")
+
+    def write_png(self, name, value):
+        path = self.root / name
+        path.write_bytes(value)
+        return path
+
+    def test_decode_png_preserves_rgb_rgba_and_all_supported_filters(self):
+        filters = (0, 1, 2, 3, 4)
+        for color_type, channels in ((2, 3), (6, 4)):
+            rows = [
+                bytes((17 + row * 31 + column * 19) & 0xFF
+                      for column in range(channels * 2))
+                for row in range(len(filters))
+            ]
+            filtered = encode_filtered_rows(rows, channels, filters)
+            path = self.write_png(
+                f"filtered-{color_type}.png",
+                png_bytes(
+                    2, len(rows), color_type, filtered,
+                    before_idat=(png_chunk(b"pHYs", struct.pack(">IIB", 3780, 3780, 1)),),
+                    after_idat=(png_chunk(b"tEXt", b"source\x00native-observer"),),
+                ),
+            )
+            width, height, rgba = runner.decode_png(path)
+            expected = bytearray()
+            for row in rows:
+                for offset in range(0, len(row), channels):
+                    expected.extend(row[offset:offset + 3])
+                    expected.append(row[offset + 3] if channels == 4 else 255)
+            self.assertEqual((width, height, rgba), (2, len(rows), bytes(expected)))
+
+    def test_decode_png_requires_strict_chunk_structure_and_complete_zlib_stream(self):
+        filtered = b"\x00\x11\x22\x33"
+        compressed = zlib.compress(filtered)
+        ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+        valid = png_bytes(1, 1, 2, filtered)
+        idat_offset = valid.index(b"IDAT")
+        idat_length = struct.unpack(">I", valid[idat_offset - 4:idat_offset])[0]
+        crc_offset = idat_offset + 4 + idat_length
+        bad_crc = bytearray(valid)
+        bad_crc[crc_offset] ^= 0x01
+        split = len(compressed) // 2
+        contiguous_idat = (
+            PNG_SIGNATURE + png_chunk(b"IHDR", ihdr)
+            + png_chunk(b"IDAT", compressed[:split])
+            + png_chunk(b"IDAT", compressed[split:])
+            + png_chunk(b"IEND", b"")
+        )
+        self.assertEqual(
+            runner.decode_png(self.write_png("contiguous-idat.png", contiguous_idat)),
+            (1, 1, b"\x11\x22\x33\xff"),
+        )
+        fixtures = (
+            ("missing-iend.png", png_bytes(1, 1, 2, filtered, include_iend=False), "missing required PNG chunks"),
+            ("after-iend.png", valid + b"trailing", "trailing bytes after IEND"),
+            ("bad-crc.png", bytes(bad_crc), "chunk checksum differs"),
+            (
+                "idat-before-ihdr.png",
+                PNG_SIGNATURE + png_chunk(b"IDAT", compressed) + png_chunk(b"IHDR", ihdr)
+                + png_chunk(b"IEND", b""),
+                "IDAT is out of order",
+            ),
+            (
+                "noncontiguous-idat.png",
+                PNG_SIGNATURE + png_chunk(b"IHDR", ihdr)
+                + png_chunk(b"IDAT", compressed[:split])
+                + png_chunk(b"tEXt", b"key\x00value")
+                + png_chunk(b"IDAT", compressed[split:])
+                + png_chunk(b"IEND", b""),
+                "IDAT is out of order",
+            ),
+            ("nonempty-iend.png", png_bytes(1, 1, 2, filtered, iend_payload=b"x"), "invalid IEND"),
+            (
+                "zlib-unused-data.png",
+                png_bytes(1, 1, 2, filtered, compressed=compressed + b"unused"),
+                "compressed raster stream or length is invalid",
+            ),
+            (
+                "truncated-zlib.png",
+                png_bytes(1, 1, 2, filtered, compressed=compressed[:-2]),
+                "compressed raster stream or length is invalid",
+            ),
+        )
+        for name, value, message in fixtures:
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, message):
+                    runner.decode_png(self.write_png(name, value))
+
+    def test_decode_png_caps_inflate_to_declared_scanlines_without_flush(self):
+        compressed = zlib.compress(b"\x00" * (1024 * 1024))
+        path = self.write_png(
+            "oversized-inflate.png",
+            png_bytes(1, 1, 2, b"", compressed=compressed),
+        )
+        original_decompressobj = zlib.decompressobj
+        calls = []
+        flush_calls = []
+
+        class ObservedInflater:
+            def __init__(self):
+                self.inner = original_decompressobj()
+
+            def decompress(self, data, max_length=0):
+                result = self.inner.decompress(data, max_length)
+                calls.append({
+                    "input_bytes": len(data),
+                    "max_length": max_length,
+                    "returned_bytes": len(result),
+                })
+                return result
+
+            def flush(self, *arguments):
+                result = self.inner.flush(*arguments)
+                flush_calls.append({"arguments": arguments, "returned_bytes": len(result)})
+                return result
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+        with mock.patch.object(runner.zlib, "decompressobj", side_effect=ObservedInflater):
+            with self.assertRaisesRegex(ValueError, "decoded raster exceeds its declared dimensions"):
+                runner.decode_png(path)
+        self.assertEqual(calls, [{
+            "input_bytes": len(compressed), "max_length": 5, "returned_bytes": 5,
+        }])
+        self.assertEqual(flush_calls, [])
+
+        exact = zlib.compress(b"\x00\x11\x22\x33")
+        calls.clear()
+        with mock.patch.object(runner.zlib, "decompressobj", side_effect=ObservedInflater):
+            decoded = runner.decode_png(self.write_png(
+                "observed-valid.png", png_bytes(1, 1, 2, b"", compressed=exact),
+            ))
+        self.assertEqual(decoded, (1, 1, b"\x11\x22\x33\xff"))
+        self.assertEqual(calls, [{
+            "input_bytes": len(exact), "max_length": 5, "returned_bytes": 4,
+        }])
+        self.assertEqual(flush_calls, [])
+
+        truncated = exact[:-2]
+        calls.clear()
+        with mock.patch.object(runner.zlib, "decompressobj", side_effect=ObservedInflater):
+            with self.assertRaisesRegex(ValueError, "compressed raster stream or length is invalid"):
+                runner.decode_png(self.write_png(
+                    "observed-truncated.png",
+                    png_bytes(1, 1, 2, b"", compressed=truncated),
+                ))
+        self.assertEqual(calls, [{
+            "input_bytes": len(truncated), "max_length": 5, "returned_bytes": 4,
+        }])
+        self.assertEqual(flush_calls, [])
+
+    def test_decode_png_rejects_pixel_and_decoded_byte_budgets_before_inflate(self):
+        inflater = mock.Mock()
+        fixtures = (
+            (
+                "pixel-budget.png",
+                png_bytes(8192, 4097, 2, b"\x00"),
+                "pixel budget",
+            ),
+            (
+                "decoded-budget.png",
+                png_bytes(8192, 4096, 6, b"\x00"),
+                "decoded byte budget",
+            ),
+        )
+        with mock.patch.object(runner.zlib, "decompressobj", inflater):
+            for name, value, message in fixtures:
+                with self.subTest(name=name):
+                    with self.assertRaisesRegex(ValueError, message):
+                        runner.decode_png(self.write_png(name, value))
+        inflater.assert_not_called()
 
     def test_four_runs_are_fixed_and_ordered_for_reference_resolution(self):
         self.assertEqual(
