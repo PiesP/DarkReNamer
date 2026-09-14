@@ -236,6 +236,12 @@ jobs:
             ''
             'Desktop acceptance is not complete. Real Windows 11 interactive UI coverage and physical SSD evidence remain external and must not be inferred from hosted Windows checks.'
             ''
+            'Supports Windows 11 or later on x64, running without elevation. Rename operations require supported local NTFS paths; file moves require an existing folder on the same volume. Existing destinations are never replaced.'
+            ''
+            'Portable means installer-free. Preferences are stored in %LOCALAPPDATA%\DarkReNamer, separately from the executable.'
+            ''
+            'Validation is limited by the equipment available to this personal project. VM and automated results do not establish physical-storage performance, power-loss durability, or human accessibility and visual acceptance. The full acceptance gate remains separate.'
+            ''
             "Candidate source: $env:CANDIDATE_SOURCE_SHA"
             "Candidate workflow: $env:CANDIDATE_RUN_ID (attempt $env:CANDIDATE_RUN_ATTEMPT)"
             "Candidate artifact ID: $env:CANDIDATE_ARTIFACT_ID"
