@@ -157,6 +157,11 @@ try {
     }
 
     . $valid.runner -BundleRoot $valid.root -ExpectedSessionId 1 -ValidateOnly
+    # UI Automation providers may expose an empty Name for a valid focused control.
+    if ((Get-LowerTextSha256 -Value '') -cne
+        'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855') {
+        throw 'The source-bound text digest helper rejected an empty UI Automation name.'
+    }
     if ((Get-LowerTextSha256 -Value 'abc') -cne
         'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad') {
         throw 'The source-bound identity digest helper returned the wrong SHA-256 value.'

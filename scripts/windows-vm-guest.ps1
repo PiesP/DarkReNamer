@@ -99,7 +99,7 @@ function Get-LowerSha256 {
 }
 
 function Get-LowerTextSha256 {
-    param([Parameter(Mandatory)][string] $Value)
+    param([Parameter(Mandatory)][AllowEmptyString()][string] $Value)
 
     $algorithm = [Security.Cryptography.SHA256]::Create()
     try {
