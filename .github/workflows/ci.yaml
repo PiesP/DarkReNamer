@@ -95,16 +95,45 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+
+      - name: Restore pinned Rust security tools
+        id: security-tools-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/darkrenamer-security-tools
+          key: darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-1.97.1-audit-0.22.2-deny-0.20.2
+
       - name: Install pinned Rust security tools
+        if: steps.security-tools-cache.outputs.cache-hit != 'true'
+        env:
+          SECURITY_TOOLS_ROOT: ${{ runner.temp }}/darkrenamer-security-tools
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          cargo install --locked cargo-audit --version 0.22.2
-          cargo install --locked cargo-deny --version 0.20.2
+          cargo install --locked --root "$SECURITY_TOOLS_ROOT" cargo-audit --version 0.22.2
+          cargo install --locked --root "$SECURITY_TOOLS_ROOT" cargo-deny --version 0.20.2
+
+      - name: Validate pinned Rust security tools
+        env:
+          SECURITY_TOOLS_ROOT: ${{ runner.temp }}/darkrenamer-security-tools
+        run: |
+          audit_version="$("$SECURITY_TOOLS_ROOT/bin/cargo-audit" --version)"
+          deny_version="$("$SECURITY_TOOLS_ROOT/bin/cargo-deny" --version)"
+          if [[ "$audit_version" != "cargo-audit 0.22.2" ]]; then
+            printf 'Expected cargo-audit 0.22.2, found %s\n' "$audit_version" >&2
+            exit 1
+          fi
+          if [[ "$deny_version" != "cargo-deny 0.20.2" ]]; then
+            printf 'Expected cargo-deny 0.20.2, found %s\n' "$deny_version" >&2
+            exit 1
+          fi
 
       - name: Audit advisories, licenses, sources, and dependency policy
+        env:
+          SECURITY_TOOLS_ROOT: ${{ runner.temp }}/darkrenamer-security-tools
         run: |
-          cargo audit --deny warnings
-          cargo deny check
+          "$SECURITY_TOOLS_ROOT/bin/cargo-audit" audit --deny warnings
+          "$SECURITY_TOOLS_ROOT/bin/cargo-deny" check
 
   windows:
     name: pr-gate/windows
