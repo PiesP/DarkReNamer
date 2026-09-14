@@ -104,6 +104,14 @@ hosted Windows checks do not establish those claims. This disclosure remains in
 place unless a future policy defines a controlled way to provide the external
 acceptance evidence to the publication boundary.
 
+With limited personal development equipment, prerelease readiness may be
+assessed from automated checks and the prepared Windows VM. Record the exact
+candidate bytes, observed scenarios, failures, cleanup, and unavailable checks
+in external evidence. VM storage measurements must remain labeled as virtual
+storage; omitted physical-media trials and human review cannot be reported as
+passed. This limited readiness decision does not satisfy or weaken the full
+desktop acceptance gate below.
+
 Formal desktop acceptance is complete only when the external evidence passes
 the full release gate documented in repository file `SAFETY.md` and repository
 script `scripts/validate-release-acceptance.ps1` cross-checks it against the
