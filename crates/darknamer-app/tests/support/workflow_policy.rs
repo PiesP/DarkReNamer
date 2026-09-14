@@ -393,6 +393,132 @@ fn validate_experiment(experiment: &Experiment<'_>) -> Result<(), String> {
     )
 }
 
+pub(super) fn validate_ci_security_tools_cache() -> Result<(), String> {
+    const PATH: &str = ".github/workflows/ci.yaml";
+    const CACHE_ACTION: &str = "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9";
+    const TOOLS_ROOT: &str = "${{ runner.temp }}/darkrenamer-security-tools";
+    const CACHE_KEY: &str = "darkrenamer-security-tools-${{ runner.os }}-${{ runner.arch }}-rust-1.97.1-audit-0.22.2-deny-0.20.2";
+
+    let workflow = parse(PATH, include_str!("../../../../.github/workflows/ci.yaml"))?;
+    let security = workflow
+        .jobs
+        .get("security")
+        .ok_or_else(|| format!("{PATH} must retain its security job"))?;
+
+    checkout_is_read_only(PATH, security)?;
+    action_policy(PATH, security, &["actions/checkout", "actions/cache"])?;
+
+    for (name, job) in &workflow.jobs {
+        let caches = actions(job, "actions/cache");
+        require(
+            (name == "security" && caches.len() == 1) || (name != "security" && caches.is_empty()),
+            format!("{PATH} must cache tools only once and only in the security job"),
+        )?;
+    }
+
+    let cache = actions(security, "actions/cache")[0];
+    require(
+        cache.id.as_deref() == Some("security-tools-cache")
+            && cache.uses.as_deref() == Some(CACHE_ACTION)
+            && cache.with.len() == 2
+            && with_is(cache, "path", TOOLS_ROOT)
+            && with_is(cache, "key", CACHE_KEY)
+            && !cache.with.contains_key("restore-keys"),
+        format!(
+            "{PATH} security tools cache must use the pinned action, exact tools root, and exact version key without restore prefixes"
+        ),
+    )?;
+
+    let install_steps = security
+        .steps
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| {
+            step.run
+                .as_deref()
+                .is_some_and(|run| run.contains("cargo install --locked"))
+        })
+        .collect::<Vec<_>>();
+    require(
+        install_steps.len() == 1,
+        format!("{PATH} must contain one security tool installation step"),
+    )?;
+    let (install_index, install) = install_steps[0];
+    let install_script = install.run.as_deref().unwrap_or_default();
+    require(
+        install.condition.as_ref().map(Scalar::text).as_deref()
+            == Some("steps.security-tools-cache.outputs.cache-hit != 'true'")
+            && install.continue_on_error.is_none()
+            && install.env.get("SECURITY_TOOLS_ROOT").map(Scalar::text).as_deref()
+                == Some(TOOLS_ROOT)
+            && install_script.contains(
+                "cargo install --locked --root \"$SECURITY_TOOLS_ROOT\" cargo-audit --version 0.22.2",
+            )
+            && install_script.contains(
+                "cargo install --locked --root \"$SECURITY_TOOLS_ROOT\" cargo-deny --version 0.20.2",
+            ),
+        format!(
+            "{PATH} must install the exact locked security tools into the isolated root only on an exact cache miss"
+        ),
+    )?;
+
+    let validation_steps = security
+        .steps
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| {
+            step.run
+                .as_deref()
+                .is_some_and(|run| run.contains("cargo-audit\" --version"))
+        })
+        .collect::<Vec<_>>();
+    require(
+        validation_steps.len() == 1,
+        format!("{PATH} must contain one security tool version validation step"),
+    )?;
+    let (validation_index, validation) = validation_steps[0];
+    let validation_script = validation.run.as_deref().unwrap_or_default();
+    require(
+        validation.condition.is_none()
+            && validation.continue_on_error.is_none()
+            && validation
+                .env
+                .get("SECURITY_TOOLS_ROOT")
+                .map(Scalar::text)
+                .as_deref()
+                == Some(TOOLS_ROOT)
+            && validation_script.contains("cargo-audit 0.22.2")
+            && validation_script.contains("cargo-deny 0.20.2")
+            && validation_script.contains("$GITHUB_PATH"),
+        format!(
+            "{PATH} must always validate exact cached tool versions before adding their bin directory to PATH"
+        ),
+    )?;
+
+    let cache_index = security
+        .steps
+        .iter()
+        .position(|step| step.id.as_deref() == Some("security-tools-cache"))
+        .ok_or_else(|| format!("{PATH} is missing the security tools cache step"))?;
+    let audit_index = security
+        .steps
+        .iter()
+        .position(|step| {
+            step.run
+                .as_deref()
+                .is_some_and(|run| run.contains("cargo audit --deny warnings"))
+        })
+        .ok_or_else(|| format!("{PATH} is missing the security audit step"))?;
+    require(
+        cache_index < install_index
+            && install_index < validation_index
+            && validation_index < audit_index,
+        format!(
+            "{PATH} must restore, conditionally install, validate, then execute the security tools"
+        ),
+    )
+}
+
 pub(super) fn validate_hosted_capability_gates() -> Result<(), String> {
     for (path, source) in [
         (

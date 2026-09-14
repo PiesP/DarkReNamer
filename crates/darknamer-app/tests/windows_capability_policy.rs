@@ -68,6 +68,11 @@ fn hosted_windows_and_release_gates_require_capabilities_with_visible_output() -
 }
 
 #[test]
+fn ci_caches_exact_security_tool_versions_only_in_the_security_job() -> Result<(), String> {
+    workflow_policy::validate_ci_security_tools_cache()
+}
+
+#[test]
 fn release_workflows_promote_the_immutable_candidate_without_rebuilding() -> Result<(), String> {
     workflow_policy::validate_release_handoff_policy()
 }
