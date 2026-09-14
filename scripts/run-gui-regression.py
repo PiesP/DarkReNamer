@@ -24,6 +24,8 @@ SAFE_LEAF = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,159}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 SOURCE_SHA = re.compile(r"[0-9a-f]{40}")
 WINDOWS_PATH = re.compile(r"[A-Za-z]:\\[^\r\n]+")
+MAX_PNG_PIXELS = 32 * 1024 * 1024
+MAX_PNG_DECODED_BYTES = 128 * 1024 * 1024
 RUNS = (
     {
         "run_id": "01-full-context-light-800x600-96-text100",
@@ -140,6 +142,9 @@ def decode_png(path: Path) -> tuple[int, int, bytes]:
     offset = 8
     width = height = color_type = None
     compressed = bytearray()
+    saw_idat = False
+    ended_idat = False
+    saw_iend = False
     while offset < len(data):
         require(offset + 12 <= len(data), "PNG chunk header is truncated.")
         length = struct.unpack(">I", data[offset:offset + 4])[0]
@@ -149,22 +154,49 @@ def decode_png(path: Path) -> tuple[int, int, bytes]:
         payload = data[offset + 8:offset + 8 + length]
         require(zlib.crc32(kind + payload) & 0xffffffff == struct.unpack(">I", data[end - 4:end])[0],
                 "PNG chunk checksum differs.")
+        require(all(65 <= value <= 90 or 97 <= value <= 122 for value in kind)
+                and not kind[2] & 0x20, "PNG has an invalid chunk type.")
+        require(kind != b"tRNS", "PNG transparency is outside the fixed raster contract.")
+        require(kind in {b"IHDR", b"IDAT", b"IEND"} or kind[0] & 0x20,
+                "PNG uses an unsupported critical chunk.")
         if kind == b"IHDR":
-            require(length == 13 and width is None, "PNG has an invalid IHDR.")
+            require(length == 13 and width is None and offset == 8, "PNG has an invalid IHDR.")
             width, height, depth, color_type, compression, filtering, interlace = struct.unpack(">IIBBBBB", payload)
             require(1 <= width <= 8192 and 1 <= height <= 8192 and depth == 8
                     and color_type in {2, 6} and compression == filtering == interlace == 0,
                     "PNG format is outside the fixed raster contract.")
+            require(width * height <= MAX_PNG_PIXELS, "PNG exceeds its pixel budget.")
+            channels = 4 if color_type == 6 else 3
+            stride = width * channels
+            expected = (stride + 1) * height
+            require(expected <= MAX_PNG_DECODED_BYTES, "PNG exceeds its decoded byte budget.")
         elif kind == b"IDAT":
+            require(width is not None and not saw_iend and not ended_idat,
+                    "PNG IDAT is out of order.")
             compressed.extend(payload)
+            require(len(compressed) <= 128 * 1024 * 1024,
+                    "PNG has too much compressed raster data.")
+            saw_idat = True
         elif kind == b"IEND":
-            break
+            require(length == 0 and width is not None and saw_idat and not saw_iend,
+                    "PNG has an invalid IEND.")
+            saw_iend = True
+            require(end == len(data), "PNG has trailing bytes after IEND.")
+        elif saw_idat:
+            ended_idat = True
         offset = end
-    require(width is not None and compressed, "PNG lacks image data.")
-    channels = 4 if color_type == 6 else 3
-    stride = width * channels
-    raw = zlib.decompress(bytes(compressed))
-    require(len(raw) == (stride + 1) * height, "PNG decompressed size differs.")
+    require(width is not None and saw_idat and saw_iend and compressed,
+            "PNG is missing required PNG chunks.")
+    try:
+        inflater = zlib.decompressobj()
+        raw = inflater.decompress(bytes(compressed), expected + 1)
+    except zlib.error as error:
+        raise ValueError("PNG has invalid compressed raster data.") from error
+    require(len(raw) <= expected and not inflater.unconsumed_tail,
+            "PNG decoded raster exceeds its declared dimensions.")
+    require(len(raw) == expected and inflater.eof and not inflater.unused_data
+            and not inflater.unconsumed_tail,
+            "PNG compressed raster stream or length is invalid.")
     previous = bytearray(stride)
     rgba = bytearray()
     cursor = 0
