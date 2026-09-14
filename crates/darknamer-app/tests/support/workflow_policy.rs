@@ -489,10 +489,48 @@ pub(super) fn validate_ci_security_tools_cache() -> Result<(), String> {
                 == Some(TOOLS_ROOT)
             && validation_script.contains("cargo-audit 0.22.2")
             && validation_script.contains("cargo-deny 0.20.2")
-            && validation_script.contains("$GITHUB_PATH"),
-        format!(
-            "{PATH} must always validate exact cached tool versions before adding their bin directory to PATH"
-        ),
+            && !validation_script.contains("GITHUB_PATH"),
+        format!("{PATH} must always validate exact cached tool versions without relying on PATH"),
+    )?;
+
+    let audit_steps = security
+        .steps
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| {
+            step.run
+                .as_deref()
+                .is_some_and(|run| run.contains("audit --deny warnings"))
+        })
+        .collect::<Vec<_>>();
+    require(
+        audit_steps.len() == 1,
+        format!("{PATH} must contain one security audit execution step"),
+    )?;
+    let (audit_index, audit) = audit_steps[0];
+    let audit_commands = audit
+        .run
+        .as_deref()
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    require(
+        audit.condition.is_none()
+            && audit.continue_on_error.is_none()
+            && audit
+                .env
+                .get("SECURITY_TOOLS_ROOT")
+                .map(Scalar::text)
+                .as_deref()
+                == Some(TOOLS_ROOT)
+            && audit_commands
+                == [
+                    "\"$SECURITY_TOOLS_ROOT/bin/cargo-audit\" audit --deny warnings",
+                    "\"$SECURITY_TOOLS_ROOT/bin/cargo-deny\" check",
+                ],
+        format!("{PATH} must run both security checks through the validated absolute tool paths"),
     )?;
 
     let cache_index = security
@@ -500,15 +538,6 @@ pub(super) fn validate_ci_security_tools_cache() -> Result<(), String> {
         .iter()
         .position(|step| step.id.as_deref() == Some("security-tools-cache"))
         .ok_or_else(|| format!("{PATH} is missing the security tools cache step"))?;
-    let audit_index = security
-        .steps
-        .iter()
-        .position(|step| {
-            step.run
-                .as_deref()
-                .is_some_and(|run| run.contains("cargo audit --deny warnings"))
-        })
-        .ok_or_else(|| format!("{PATH} is missing the security audit step"))?;
     require(
         cache_index < install_index
             && install_index < validation_index

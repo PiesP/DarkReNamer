@@ -127,12 +127,13 @@ jobs:
             printf 'Expected cargo-deny 0.20.2, found %s\n' "$deny_version" >&2
             exit 1
           fi
-          printf '%s\n' "$SECURITY_TOOLS_ROOT/bin" >> "$GITHUB_PATH"
 
       - name: Audit advisories, licenses, sources, and dependency policy
+        env:
+          SECURITY_TOOLS_ROOT: ${{ runner.temp }}/darkrenamer-security-tools
         run: |
-          cargo audit --deny warnings
-          cargo deny check
+          "$SECURITY_TOOLS_ROOT/bin/cargo-audit" audit --deny warnings
+          "$SECURITY_TOOLS_ROOT/bin/cargo-deny" check
 
   windows:
     name: pr-gate/windows
