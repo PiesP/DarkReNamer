@@ -32,6 +32,7 @@ $commonTests = @(
     'test-get-git-blob-sha256.ps1'
     'test-prepare-release-cyclonedx.ps1'
     'test-release-workflow-powershell-syntax.ps1'
+    'test-run-vm-automated-hosted.ps1'
     'test-release-candidate-metadata-validator.ps1'
     'test-windows-acceptance-evidence.ps1'
     'test-new-windows-acceptance-draft.ps1'

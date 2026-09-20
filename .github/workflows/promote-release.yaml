@@ -27,6 +27,30 @@ on:
         description: Existing version tag to publish
         required: true
         type: string
+      ingress_release_id:
+        description: Dedicated private draft ingress release ID
+        required: true
+        type: string
+      ingress_asset_id:
+        description: Exact private raw evidence asset ID
+        required: true
+        type: string
+      ingress_archive_sha256:
+        description: Raw evidence archive SHA-256
+        required: true
+        type: string
+      ingress_archive_size:
+        description: Raw evidence archive byte length
+        required: true
+        type: string
+      validation_run_id:
+        description: Successful hosted VM validation workflow run ID
+        required: true
+        type: string
+      validation_run_attempt:
+        description: Exact hosted VM validation workflow run attempt
+        required: true
+        type: string
 
 permissions:
   actions: read
@@ -66,11 +90,22 @@ jobs:
           CANDIDATE_SOURCE_SHA: ${{ inputs.candidate_source_sha }}
           EXPECTED_EXE_SHA256: ${{ inputs.expected_exe_sha256 }}
           RELEASE_TAG: ${{ inputs.release_tag }}
+          INGRESS_RELEASE_ID: ${{ inputs.ingress_release_id }}
+          INGRESS_ASSET_ID: ${{ inputs.ingress_asset_id }}
+          INGRESS_ARCHIVE_SHA256: ${{ inputs.ingress_archive_sha256 }}
+          INGRESS_ARCHIVE_SIZE: ${{ inputs.ingress_archive_size }}
+          VALIDATION_RUN_ID: ${{ inputs.validation_run_id }}
+          VALIDATION_RUN_ATTEMPT: ${{ inputs.validation_run_attempt }}
         run: |
           foreach ($entry in ([ordered]@{
               CANDIDATE_RUN_ID = $env:CANDIDATE_RUN_ID
               CANDIDATE_RUN_ATTEMPT = $env:CANDIDATE_RUN_ATTEMPT
               CANDIDATE_ARTIFACT_ID = $env:CANDIDATE_ARTIFACT_ID
+              INGRESS_RELEASE_ID = $env:INGRESS_RELEASE_ID
+              INGRESS_ASSET_ID = $env:INGRESS_ASSET_ID
+              INGRESS_ARCHIVE_SIZE = $env:INGRESS_ARCHIVE_SIZE
+              VALIDATION_RUN_ID = $env:VALIDATION_RUN_ID
+              VALIDATION_RUN_ATTEMPT = $env:VALIDATION_RUN_ATTEMPT
             }).GetEnumerator()) {
             if ($entry.Value -notmatch '^[1-9][0-9]*$') {
               throw "$($entry.Key) must be a positive decimal integer."
@@ -81,6 +116,9 @@ jobs:
           }
           if ($env:EXPECTED_EXE_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
             throw 'EXPECTED_EXE_SHA256 must be a lowercase SHA-256 digest.'
+          }
+          if ($env:INGRESS_ARCHIVE_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'INGRESS_ARCHIVE_SHA256 must be a lowercase SHA-256 digest.'
           }
           if ($env:RELEASE_TAG -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$') {
             throw 'RELEASE_TAG must be a v-prefixed semantic version.'
@@ -199,6 +237,78 @@ jobs:
             --deny-self-hosted-runners
           if ($LASTEXITCODE -ne 0) { throw 'Original candidate attestation verification failed.' }
 
+      - name: Recompute canonical automated VM validation statement
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          ./scripts/run-vm-automated-hosted.ps1
+          -Repository '${{ github.repository }}'
+          -CandidateRunId '${{ inputs.candidate_run_id }}'
+          -CandidateRunAttempt '${{ inputs.candidate_run_attempt }}'
+          -CandidateArtifactId '${{ inputs.candidate_artifact_id }}'
+          -CandidateSourceSha '${{ inputs.candidate_source_sha }}'
+          -ExpectedExeSha256 '${{ inputs.expected_exe_sha256 }}'
+          -IngressReleaseId '${{ inputs.ingress_release_id }}'
+          -IngressAssetId '${{ inputs.ingress_asset_id }}'
+          -IngressArchiveSha256 '${{ inputs.ingress_archive_sha256 }}'
+          -IngressArchiveSize '${{ inputs.ingress_archive_size }}'
+          -ValidationRunId '${{ inputs.validation_run_id }}'
+          -ValidationRunAttempt '${{ inputs.validation_run_attempt }}'
+          -CandidateHandoffRoot (Join-Path $PWD 'dist')
+          -TrustedSourceRoot $PWD
+          -OutputPath (Join-Path $PWD 'validation-statement.json')
+          -RunnerTemp $env:RUNNER_TEMP
+
+      - name: Verify exact hosted validation attestation and successful attempt
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SOURCE_SHA: ${{ inputs.candidate_source_sha }}
+          VALIDATION_RUN_ID: ${{ inputs.validation_run_id }}
+          VALIDATION_RUN_ATTEMPT: ${{ inputs.validation_run_attempt }}
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP (
+            'darkrenamer-validation-authority-' + [guid]::NewGuid().ToString('N')
+          )
+          [void](New-Item -ItemType Directory -Path $root)
+          try {
+            $verified = Join-Path $root 'verified-attestations.json'
+            $repository = Join-Path $root 'repository.json'
+            $run = Join-Path $root 'validation-run.json'
+            gh attestation verify validation-statement.json `
+              --repo $env:GITHUB_REPOSITORY `
+              --signer-workflow "$env:GITHUB_REPOSITORY/.github/workflows/vm-acceptance.yaml" `
+              --source-digest $env:CANDIDATE_SOURCE_SHA `
+              --source-ref refs/heads/master `
+              --deny-self-hosted-runners `
+              --format json | Out-File -LiteralPath $verified -Encoding utf8
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Hosted validation attestation verification failed.'
+            }
+            gh api "repos/$env:GITHUB_REPOSITORY" |
+              Out-File -LiteralPath $repository -Encoding utf8
+            if ($LASTEXITCODE -ne 0) { throw 'Repository metadata retrieval failed.' }
+            gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:VALIDATION_RUN_ID/attempts/$env:VALIDATION_RUN_ATTEMPT" |
+              Out-File -LiteralPath $run -Encoding utf8
+            if ($LASTEXITCODE -ne 0) { throw 'Validation attempt metadata retrieval failed.' }
+            python ./scripts/validate-vm-automated-authority.py validation-run `
+              --repository-metadata $repository `
+              --repository $env:GITHUB_REPOSITORY `
+              --source-sha $env:CANDIDATE_SOURCE_SHA `
+              --run-metadata $run `
+              --verified-attestations $verified `
+              --run-id $env:VALIDATION_RUN_ID `
+              --run-attempt $env:VALIDATION_RUN_ATTEMPT `
+              --statement validation-statement.json
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Hosted validation run authority check failed.'
+            }
+          }
+          finally {
+            Remove-Item -LiteralPath $root -Recurse -Force
+          }
+
       - name: Revalidate release tag
         shell: pwsh
         env:
@@ -230,11 +340,13 @@ jobs:
           CANDIDATE_ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
           CANDIDATE_SOURCE_SHA: ${{ inputs.candidate_source_sha }}
           EXPECTED_EXE_SHA256: ${{ inputs.expected_exe_sha256 }}
+          VALIDATION_RUN_ID: ${{ inputs.validation_run_id }}
+          VALIDATION_RUN_ATTEMPT: ${{ inputs.validation_run_attempt }}
         run: |
           @(
             'Source-complete Windows prerelease. The published files are the exact immutable candidate artifact; they were not rebuilt during promotion.'
             ''
-            'Desktop acceptance is not complete. Real Windows 11 interactive UI coverage and physical SSD evidence remain external and must not be inferred from hosted Windows checks.'
+            'The automated VM profile passed its authenticated hosted validation gate. Human visual/accessibility review, physical-media performance, and physical-power-loss durability are outside that automated guarantee.'
             ''
             'Supports Windows 11 or later on x64, running without elevation. Rename operations require supported local NTFS paths; file moves require an existing folder on the same volume. Existing destinations are never replaced.'
             ''
@@ -246,6 +358,7 @@ jobs:
             "Candidate workflow: $env:CANDIDATE_RUN_ID (attempt $env:CANDIDATE_RUN_ATTEMPT)"
             "Candidate artifact ID: $env:CANDIDATE_ARTIFACT_ID"
             "DarkReNamer.exe SHA-256: $env:EXPECTED_EXE_SHA256"
+            "Automated validation workflow: $env:VALIDATION_RUN_ID (attempt $env:VALIDATION_RUN_ATTEMPT)"
             ''
             'The executable is intentionally unsigned. Verify SHA256SUMS.txt and the original candidate attestation before use.'
           ) | Out-File -LiteralPath release-notes.md -Encoding utf8
@@ -264,5 +377,6 @@ jobs:
             dist/THIRD_PARTY_NOTICES.md `
             dist/DISTRIBUTION.md `
             dist/release-handoff.json `
-            dist/release-metrics.json
+            dist/release-metrics.json `
+            validation-statement.json
           if ($LASTEXITCODE -ne 0) { throw 'GitHub prerelease publication failed.' }
