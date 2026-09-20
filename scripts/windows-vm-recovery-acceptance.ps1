@@ -1834,6 +1834,321 @@ public static class DarkReNamerRecoveryMenuNative {
 '@
 }
 
+function Initialize-AcceptanceRecoveryWindowNative {
+    if ('DarkReNamerRecoveryWindowNative' -as [type]) {
+        return
+    }
+    Add-Type @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class DarkReNamerRecoveryWindowNative {
+    private delegate bool EnumWindowsCallback(IntPtr window, IntPtr parameter);
+
+    public sealed class NamedWindowObservation {
+        public long Handle { get; set; }
+        public long OwnerHandle { get; set; }
+        public uint ProcessId { get; set; }
+        public uint SessionId { get; set; }
+        public string Title { get; set; }
+        public string ClassName { get; set; }
+        public bool Visible { get; set; }
+        public int Left { get; set; }
+        public int Top { get; set; }
+        public int Right { get; set; }
+        public int Bottom { get; set; }
+    }
+
+    public sealed class NamedWindowInventory {
+        public int TotalCount { get; set; }
+        public NamedWindowObservation[] Entries { get; set; }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool EnumWindows(EnumWindowsCallback callback, IntPtr parameter);
+    [DllImport("user32.dll")]
+    private static extern bool IsWindow(IntPtr window);
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool ProcessIdToSessionId(uint processId, out uint sessionId);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr window, StringBuilder text, int count);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowTextLengthW(IntPtr window);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowTextW(IntPtr window, StringBuilder text, int count);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetWindow(IntPtr window, uint command);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetWindowRect(IntPtr window, out RECT rect);
+
+    public static NamedWindowInventory ReadOwnedNamedWindows(
+        uint expectedProcessId,
+        uint expectedSessionId,
+        IntPtr expectedOwner,
+        string expectedTitle
+    ) {
+        if (expectedProcessId == 0 || expectedOwner == IntPtr.Zero || !IsWindow(expectedOwner)) {
+            throw new ArgumentException("The recovery-window owner binding is invalid.");
+        }
+        if (String.IsNullOrEmpty(expectedTitle) || expectedTitle.Length > 256) {
+            throw new ArgumentException("The recovery-window title is invalid.");
+        }
+        List<NamedWindowObservation> entries = new List<NamedWindowObservation>(2);
+        int totalCount = 0;
+        int visitedCount = 0;
+        int nativeError = 0;
+        bool overflow = false;
+        bool completed = EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+            visitedCount++;
+            if (visitedCount > 256) {
+                overflow = true;
+                return false;
+            }
+            bool visible = IsWindowVisible(window);
+            if (!visible) { return true; }
+            uint processId;
+            GetWindowThreadProcessId(window, out processId);
+            if (processId != expectedProcessId) { return true; }
+            uint sessionId;
+            if (!ProcessIdToSessionId(processId, out sessionId)) {
+                nativeError = Marshal.GetLastWin32Error();
+                return false;
+            }
+            IntPtr owner = GetWindow(window, 4);
+            if (sessionId != expectedSessionId || owner != expectedOwner) {
+                return true;
+            }
+            StringBuilder className = new StringBuilder(32);
+            if (GetClassName(window, className, className.Capacity) <= 0 ||
+                !String.Equals(className.ToString(), "#32770", StringComparison.Ordinal)) {
+                return true;
+            }
+            int titleLength = GetWindowTextLengthW(window);
+            if (titleLength <= 0 || titleLength > 256) { return true; }
+            StringBuilder title = new StringBuilder(titleLength + 1);
+            if (GetWindowTextW(window, title, title.Capacity) != titleLength ||
+                !String.Equals(title.ToString(), expectedTitle, StringComparison.Ordinal)) {
+                return true;
+            }
+            totalCount++;
+            if (totalCount <= 2) {
+                RECT rect;
+                if (!GetWindowRect(window, out rect)) {
+                    nativeError = Marshal.GetLastWin32Error();
+                    return false;
+                }
+                entries.Add(new NamedWindowObservation {
+                    Handle = window.ToInt64(),
+                    OwnerHandle = owner.ToInt64(),
+                    ProcessId = processId,
+                    SessionId = sessionId,
+                    Title = title.ToString(),
+                    ClassName = className.ToString(),
+                    Visible = visible,
+                    Left = rect.Left,
+                    Top = rect.Top,
+                    Right = rect.Right,
+                    Bottom = rect.Bottom
+                });
+            }
+            return true;
+        }, IntPtr.Zero);
+        if (overflow) {
+            throw new InvalidOperationException("Recovery-window enumeration exceeded 256 top-level windows.");
+        }
+        if (nativeError != 0) {
+            throw new Win32Exception(nativeError);
+        }
+        if (!completed) {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        entries.Sort(delegate(NamedWindowObservation left, NamedWindowObservation right) {
+            return left.Handle.CompareTo(right.Handle);
+        });
+        return new NamedWindowInventory {
+            TotalCount = totalCount,
+            Entries = entries.ToArray()
+        };
+    }
+}
+'@
+}
+
+function ConvertTo-AcceptanceRecoveryWindowObservation {
+    param(
+        [Parameter(Mandatory)][object] $Inventory,
+        [Parameter(Mandatory)][int] $ExpectedProcessId,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][long] $ExpectedOwnerHandle,
+        [Parameter(Mandatory)][string] $ExpectedName
+    )
+
+    if ($Inventory.TotalCount -gt 1) {
+        throw 'Recovery window matched more than one exact native candidate.'
+    }
+    if ($Inventory.TotalCount -eq 0) {
+        return $null
+    }
+    if ($Inventory.TotalCount -ne 1) {
+        throw 'Recovery window native inventory returned an invalid count.'
+    }
+    $rows = @($Inventory.Entries)
+    if ($rows.Count -ne 1) {
+        throw 'Recovery window native inventory is internally inconsistent.'
+    }
+    $row = $rows[0]
+    if ($row.Handle -le 0 -or $row.OwnerHandle -ne $ExpectedOwnerHandle -or
+        $row.ProcessId -ne $ExpectedProcessId -or $row.SessionId -ne $ExpectedSession -or
+        $row.Title -cne $ExpectedName -or $row.ClassName -cne '#32770' -or
+        -not $row.Visible -or $row.Right -le $row.Left -or $row.Bottom -le $row.Top -or
+        ($row.Right - $row.Left) -gt 32768 -or ($row.Bottom - $row.Top) -gt 32768 -or
+        ([long]($row.Right - $row.Left) * [long]($row.Bottom - $row.Top)) -gt 100000000L) {
+        throw 'Recovery window changed its exact native identity or geometry.'
+    }
+    [ordered]@{
+        hwnd = [long]$row.Handle
+        owner_hwnd = [long]$row.OwnerHandle
+        process_id = [int]$row.ProcessId
+        session_id = [int]$row.SessionId
+        window_class = $row.ClassName
+        visible = [bool]$row.Visible
+        rect = [ordered]@{
+            left = [int]$row.Left
+            top = [int]$row.Top
+            right = [int]$row.Right
+            bottom = [int]$row.Bottom
+        }
+    }
+}
+
+function Write-AcceptanceRecoveryWindowProgress {
+    param(
+        [Parameter(Mandatory)][string] $PrivateRoot,
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)]
+        [ValidateSet('startup-default-cancel', 'recovery-relaunch',
+            'recovery-export-relaunch', 'startup-recovery-invoke',
+            'startup-recovery-cancel', 'recovery-completion',
+            'recovery-export-folder-picker', 'recovery-export-completion',
+            'intent-startup-notice', 'intent-relaunch-notice',
+            'intent-discard-notice', 'intent-discard-cancel',
+            'intent-discard-confirm', 'intent-discard-completion')]
+        [string] $Purpose,
+        [Parameter(Mandatory)]
+        [ValidateSet('native-window-found', 'uia-window-bound')]
+        [string] $Phase,
+        [AllowNull()][object] $Observation
+    )
+
+    Assert-AcceptanceProcessBinding -Application $Application
+    Write-AcceptanceNewUtf8Json `
+        -Path (Join-Path $PrivateRoot ('recovery-window-' + $Purpose + '-' + $Phase + '.json')) `
+        -Value ([ordered]@{
+            schema_version = 1
+            phase = $Phase
+            purpose = $Purpose
+            observed_utc_ticks = [DateTime]::UtcNow.Ticks.ToString(
+                [Globalization.CultureInfo]::InvariantCulture
+            )
+            binding = $Application.raw_process_binding
+            observation = $Observation
+        })
+}
+
+function Wait-AcceptanceRecoveryWindow {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][string] $Name,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][string] $Label,
+        [Parameter(Mandatory)][string] $PrivateRoot,
+        [Parameter(Mandatory)][string] $Purpose
+    )
+
+    Assert-AcceptanceProcessBinding -Application $Application
+    $process = $Application.owned.process
+    $process.Refresh()
+    if ($process.HasExited -or $process.SessionId -ne $ExpectedSession) {
+        throw "$Label process is unavailable in the expected desktop session."
+    }
+    Assert-AutomationBinding `
+        -Element $Application.main -Process $process -ExpectedSession $ExpectedSession `
+        -Label "$Label owner" -RequireWindowHandle
+    $ownerHandle = [IntPtr]$Application.main.Current.NativeWindowHandle
+    Initialize-AcceptanceRecoveryWindowNative
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    $native = $null
+    do {
+        $inventory = [DarkReNamerRecoveryWindowNative]::ReadOwnedNamedWindows(
+            [uint32]$process.Id,
+            [uint32]$ExpectedSession,
+            $ownerHandle,
+            $Name
+        )
+        $native = ConvertTo-AcceptanceRecoveryWindowObservation `
+            -Inventory $inventory -ExpectedProcessId $process.Id `
+            -ExpectedSession $ExpectedSession -ExpectedOwnerHandle $ownerHandle.ToInt64() `
+            -ExpectedName $Name
+        if ($null -ne $native) {
+            break
+        }
+        Start-Sleep -Milliseconds 100
+        $process.Refresh()
+        if ($process.HasExited -or $process.SessionId -ne $ExpectedSession) {
+            throw "$Label was not found before the bound process left the expected session."
+        }
+    } while ((Get-Date) -lt $deadline)
+    if ($null -eq $native) {
+        throw "$Label was not found before the bounded native deadline."
+    }
+    Write-AcceptanceRecoveryWindowProgress `
+        -PrivateRoot $PrivateRoot -Application $Application -Purpose $Purpose `
+        -Phase 'native-window-found' -Observation $native
+    $window = [Windows.Automation.AutomationElement]::FromHandle([IntPtr][long]$native.hwnd)
+    if ($null -eq $window) {
+        throw "$Label exact native window is unavailable through UI Automation."
+    }
+    $freshInventory = [DarkReNamerRecoveryWindowNative]::ReadOwnedNamedWindows(
+        [uint32]$process.Id,
+        [uint32]$ExpectedSession,
+        $ownerHandle,
+        $Name
+    )
+    $fresh = ConvertTo-AcceptanceRecoveryWindowObservation `
+        -Inventory $freshInventory -ExpectedProcessId $process.Id `
+        -ExpectedSession $ExpectedSession -ExpectedOwnerHandle $ownerHandle.ToInt64() `
+        -ExpectedName $Name
+    if ($null -eq $fresh -or $fresh.hwnd -ne $native.hwnd) {
+        throw "$Label changed during exact native-to-UIA binding."
+    }
+    Assert-AcceptanceRetainedWindowBinding `
+        -Window $window -Process $process -ExpectedSession $ExpectedSession `
+        -ExpectedName $Name -Label $Label
+    if ([long]$window.Current.NativeWindowHandle -ne $fresh.hwnd) {
+        throw "$Label UI Automation materialized a different native window."
+    }
+    Write-AcceptanceRecoveryWindowProgress `
+        -PrivateRoot $PrivateRoot -Application $Application -Purpose $Purpose `
+        -Phase 'uia-window-bound' -Observation $fresh
+    $window
+}
+
 function Write-AcceptanceExportProgress {
     param(
         [Parameter(Mandatory)][string] $PrivateRoot,
@@ -2476,17 +2791,21 @@ function Dismiss-AcceptanceMessage {
         [Parameter(Mandatory)][int] $WaitSeconds,
         [Parameter(Mandatory)][string] $Name,
         [Parameter(Mandatory)][string] $Label,
+        [Parameter(Mandatory)][string] $PrivateRoot,
+        [Parameter(Mandatory)][string] $Purpose,
         [Windows.Automation.AutomationElement] $Window
     )
 
     Add-Type -AssemblyName System.Windows.Forms
     if ($null -eq $Window) {
-        $Window = Wait-UniqueAutomationWindow `
-            -Process $Application.owned.process `
+        $Window = Wait-AcceptanceRecoveryWindow `
+            -Application $Application `
             -ExpectedSession $SessionId `
             -Name $Name `
             -TimeoutSeconds $WaitSeconds `
-            -Label $Label
+            -Label $Label `
+            -PrivateRoot $PrivateRoot `
+            -Purpose $Purpose
     }
     Assert-AcceptanceRetainedWindowBinding `
         -Window $Window `
@@ -2832,6 +3151,7 @@ function Invoke-AcceptanceRecovery {
     param(
         [Parameter(Mandatory)][object] $Application,
         [Parameter(Mandatory)][string] $EvidenceRoot,
+        [Parameter(Mandatory)][string] $PrivateRoot,
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
         [Parameter(Mandatory)][AllowEmptyCollection()]
@@ -2841,12 +3161,14 @@ function Invoke-AcceptanceRecovery {
 
     $process = $Application.owned.process
     if ($null -eq $Prompt) {
-        $Prompt = Wait-UniqueAutomationWindow `
-            -Process $process `
+        $Prompt = Wait-AcceptanceRecoveryWindow `
+            -Application $Application `
             -ExpectedSession $SessionId `
             -Name 'DarkReNamer - 이전 변경 복구 확인' `
             -TimeoutSeconds $WaitSeconds `
-            -Label 'startup recovery confirmation'
+            -Label 'startup recovery confirmation' `
+            -PrivateRoot $PrivateRoot `
+            -Purpose 'startup-recovery-invoke'
     }
     Assert-AcceptanceRetainedWindowBinding `
         -Window $Prompt `
@@ -2880,7 +3202,9 @@ function Invoke-AcceptanceRecovery {
         -SessionId $SessionId `
         -WaitSeconds $WaitSeconds `
         -Name 'DarkReNamer - 복구 완료' `
-        -Label 'recovery completion message'
+        -Label 'recovery completion message' `
+        -PrivateRoot $PrivateRoot `
+        -Purpose 'recovery-completion'
     Complete-AutomationControlInvoke -State $invoke -TimeoutSeconds $WaitSeconds
     $screenshot
 }
@@ -2890,18 +3214,20 @@ function Dismiss-AcceptanceStartupRecovery {
         [Parameter(Mandatory)][object] $Application,
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
-        [string] $PrivateRoot,
+        [Parameter(Mandatory)][string] $PrivateRoot,
         [Windows.Automation.AutomationElement] $Prompt
     )
 
     $process = $Application.owned.process
     if ($null -eq $Prompt) {
-        $Prompt = Wait-UniqueAutomationWindow `
-            -Process $process -Owner $Application.main `
+        $Prompt = Wait-AcceptanceRecoveryWindow `
+            -Application $Application `
             -ExpectedSession $SessionId `
             -Name 'DarkReNamer - 이전 변경 복구 확인' `
             -TimeoutSeconds $WaitSeconds `
-            -Label 'startup recovery cancellation prompt'
+            -Label 'startup recovery cancellation prompt' `
+            -PrivateRoot $PrivateRoot `
+            -Purpose 'startup-recovery-cancel'
     }
     Assert-AutomationBinding -Element $Prompt -Process $process -ExpectedSession $SessionId `
         -Label 'startup recovery cancellation prompt' -RequireWindowHandle
@@ -2973,13 +3299,14 @@ function Invoke-AcceptanceRecoveryExport {
         -not $menuAction.enter_sent -or -not $menuAction.popup_closed) {
         throw 'Recovery export menu action did not bind the exact native command.'
     }
-    $dialog = Wait-UniqueAutomationWindow `
-        -Process $Application.owned.process `
-        -Owner $Application.main `
+    $dialog = Wait-AcceptanceRecoveryWindow `
+        -Application $Application `
         -ExpectedSession $SessionId `
         -Name '복구 저널 원본을 저장할 폴더 선택' `
         -TimeoutSeconds $WaitSeconds `
-        -Label 'recovery export folder picker'
+        -Label 'recovery export folder picker' `
+        -PrivateRoot $PrivateRoot `
+        -Purpose 'recovery-export-folder-picker'
     Write-AcceptanceExportProgress -PrivateRoot $PrivateRoot -Application $Application -Phase 'picker-found'
     $dialogHandle = [IntPtr]$dialog.Current.NativeWindowHandle
     $folder = Find-UniqueAutomationElement `
@@ -3016,7 +3343,9 @@ function Invoke-AcceptanceRecoveryExport {
         -SessionId $SessionId `
         -WaitSeconds $WaitSeconds `
         -Name 'DarkReNamer - 진단 내보내기 완료' `
-        -Label 'recovery export completion message'
+        -Label 'recovery export completion message' `
+        -PrivateRoot $PrivateRoot `
+        -Purpose 'recovery-export-completion'
     $exportItem = Get-AcceptanceRecoveryExportFile -Root $exportRoot
     $leaves = @($exportItem.Name)
     $exportPath = $exportItem.FullName
@@ -3261,12 +3590,14 @@ function Invoke-AcceptanceDiscardChoice {
         -not $menuAction.enter_sent -or -not $menuAction.popup_closed) {
         throw 'Intent-only discard menu action did not bind the exact native command.'
     }
-    $prompt = Wait-UniqueAutomationWindow `
-        -Process $Application.owned.process `
+    $prompt = Wait-AcceptanceRecoveryWindow `
+        -Application $Application `
         -ExpectedSession $SessionId `
         -Name 'DarkReNamer - 활성화 전 계획 폐기' `
         -TimeoutSeconds $WaitSeconds `
-        -Label 'Intent-only candidate discard confirmation'
+        -Label 'Intent-only candidate discard confirmation' `
+        -PrivateRoot $PrivateRoot `
+        -Purpose $(if ($Confirm) { 'intent-discard-confirm' } else { 'intent-discard-cancel' })
     $promptHandle = [IntPtr]$prompt.Current.NativeWindowHandle
     $button = Find-UniqueAutomationElement `
         -Root $prompt `
@@ -3308,7 +3639,9 @@ function Invoke-AcceptanceDiscardChoice {
             -SessionId $SessionId `
             -WaitSeconds $WaitSeconds `
             -Name 'DarkReNamer - 폐기 완료' `
-            -Label 'candidate discard completion message'
+            -Label 'candidate discard completion message' `
+            -PrivateRoot $PrivateRoot `
+            -Purpose 'intent-discard-completion'
     }
     $completedUtcTicks = [DateTime]::UtcNow.Ticks.ToString(
         [Globalization.CultureInfo]::InvariantCulture
@@ -3387,12 +3720,14 @@ function Invoke-AcceptanceIntentOnlyCandidateDiscard {
         $processes.Add((Write-AcceptanceProcessStartEvidence `
             -Application $cancelApplication -Inputs $Inputs -FixtureRoot $FixtureRoot `
             -PrivateRoot $PrivateRoot -Role 'intent-cancel'))
-        $startupNotice = Wait-UniqueAutomationWindow `
-            -Process $cancelApplication.owned.process `
+        $startupNotice = Wait-AcceptanceRecoveryWindow `
+            -Application $cancelApplication `
             -ExpectedSession $SessionId `
             -Name 'DarkReNamer - 복구 상태' `
             -TimeoutSeconds $WaitSeconds `
-            -Label 'Intent-only startup recovery-lock notice'
+            -Label 'Intent-only startup recovery-lock notice' `
+            -PrivateRoot $PrivateRoot `
+            -Purpose 'intent-startup-notice'
         $startupState = Get-AcceptanceFixtureState -FixtureRoot $FixtureRoot
         Assert-AcceptanceStatesEqual `
             -Expected $Initial `
@@ -3411,6 +3746,8 @@ function Invoke-AcceptanceIntentOnlyCandidateDiscard {
             -WaitSeconds $WaitSeconds `
             -Name 'DarkReNamer - 복구 상태' `
             -Label 'Intent-only startup recovery-lock notice' `
+            -PrivateRoot $PrivateRoot `
+            -Purpose 'intent-startup-notice' `
             -Window $startupNotice
         $startupLock = Assert-AcceptanceRecoveryLockedControls `
             -Application $cancelApplication -PrivateRoot $PrivateRoot `
@@ -3481,7 +3818,9 @@ function Invoke-AcceptanceIntentOnlyCandidateDiscard {
             -SessionId $SessionId `
             -WaitSeconds $WaitSeconds `
             -Name 'DarkReNamer - 복구 상태' `
-            -Label 'Intent-only verification relaunch recovery-lock notice'
+            -Label 'Intent-only verification relaunch recovery-lock notice' `
+            -PrivateRoot $PrivateRoot `
+            -Purpose 'intent-relaunch-notice'
         $relaunchLock = Assert-AcceptanceRecoveryLockedControls `
             -Application $relaunchApplication -PrivateRoot $PrivateRoot `
             -Leaf 'intent-relaunch-lock' -Boundary 'intent-relaunch-lock' `
@@ -3526,7 +3865,8 @@ function Invoke-AcceptanceIntentOnlyCandidateDiscard {
             -PrivateRoot $PrivateRoot -Role 'intent-discard'))
         Dismiss-AcceptanceMessage `
             -Application $discardApplication -SessionId $SessionId -WaitSeconds $WaitSeconds `
-            -Name 'DarkReNamer - 복구 상태' -Label 'Intent-only discard recovery-lock notice'
+            -Name 'DarkReNamer - 복구 상태' -Label 'Intent-only discard recovery-lock notice' `
+            -PrivateRoot $PrivateRoot -Purpose 'intent-discard-notice'
         $discardStartupLock = Assert-AcceptanceRecoveryLockedControls `
             -Application $discardApplication -PrivateRoot $PrivateRoot `
             -Leaf 'intent-discard-startup-lock' -Boundary 'intent-discard-startup-lock' `
@@ -3916,10 +4256,11 @@ function Invoke-AcceptanceSession {
         $processes.Add((Write-AcceptanceProcessStartEvidence `
             -Application $second -Inputs $Inputs -FixtureRoot $fixtureRoot `
             -PrivateRoot $PrivateRoot -Role 'startup-default-cancel'))
-        $recoveryPrompt = Wait-UniqueAutomationWindow `
-            -Process $second.owned.process -ExpectedSession $SessionId `
+        $recoveryPrompt = Wait-AcceptanceRecoveryWindow `
+            -Application $second -ExpectedSession $SessionId `
             -Name 'DarkReNamer - 이전 변경 복구 확인' -TimeoutSeconds $WaitSeconds `
-            -Label 'startup recovery confirmation before default cancel'
+            -Label 'startup recovery confirmation before default cancel' `
+            -PrivateRoot $PrivateRoot -Purpose 'startup-default-cancel'
         Assert-AutomationBinding `
             -Element $recoveryPrompt -Process $second.owned.process -ExpectedSession $SessionId `
             -Label 'startup recovery confirmation before default cancel' -RequireWindowHandle
@@ -3962,10 +4303,11 @@ function Invoke-AcceptanceSession {
         $processes.Add((Write-AcceptanceProcessStartEvidence `
             -Application $third -Inputs $Inputs -FixtureRoot $fixtureRoot `
             -PrivateRoot $PrivateRoot -Role 'recovery-relaunch'))
-        $relaunchPrompt = Wait-UniqueAutomationWindow `
-            -Process $third.owned.process -ExpectedSession $SessionId `
+        $relaunchPrompt = Wait-AcceptanceRecoveryWindow `
+            -Application $third -ExpectedSession $SessionId `
             -Name 'DarkReNamer - 이전 변경 복구 확인' -TimeoutSeconds $WaitSeconds `
-            -Label 'startup recovery confirmation after default cancel'
+            -Label 'startup recovery confirmation after default cancel' `
+            -PrivateRoot $PrivateRoot -Purpose 'recovery-relaunch'
         Assert-AutomationBinding `
             -Element $relaunchPrompt -Process $third.owned.process -ExpectedSession $SessionId `
             -Label 'startup recovery confirmation after default cancel' -RequireWindowHandle
@@ -3985,7 +4327,8 @@ function Invoke-AcceptanceSession {
         if ($RunRecoveryExport) {
             Write-AcceptanceExportProgress -PrivateRoot $PrivateRoot -Application $third -Phase 'before-startup-cancel'
             Dismiss-AcceptanceStartupRecovery `
-                -Application $third -SessionId $SessionId -WaitSeconds $WaitSeconds -Prompt $relaunchPrompt
+                -Application $third -SessionId $SessionId -WaitSeconds $WaitSeconds `
+                -PrivateRoot $PrivateRoot -Prompt $relaunchPrompt
             Write-AcceptanceExportProgress -PrivateRoot $PrivateRoot -Application $third -Phase 'after-startup-cancel'
             $recoveryExportResult = Invoke-AcceptanceRecoveryExport `
                 -Application $third -PrivateRoot $PrivateRoot -ExpectedBytes $journalBytes `
@@ -4019,10 +4362,11 @@ function Invoke-AcceptanceSession {
             $processes.Add((Write-AcceptanceProcessStartEvidence `
                 -Application $fourth -Inputs $Inputs -FixtureRoot $fixtureRoot `
                 -PrivateRoot $PrivateRoot -Role 'recovery-after-export'))
-            $exportRelaunchPrompt = Wait-UniqueAutomationWindow `
-                -Process $fourth.owned.process -ExpectedSession $SessionId `
+            $exportRelaunchPrompt = Wait-AcceptanceRecoveryWindow `
+                -Application $fourth -ExpectedSession $SessionId `
                 -Name 'DarkReNamer - 이전 변경 복구 확인' -TimeoutSeconds $WaitSeconds `
-                -Label 'startup recovery confirmation after export'
+                -Label 'startup recovery confirmation after export' `
+                -PrivateRoot $PrivateRoot -Purpose 'recovery-export-relaunch'
             Assert-AutomationBinding `
                 -Element $exportRelaunchPrompt -Process $fourth.owned.process `
                 -ExpectedSession $SessionId -Label 'startup recovery confirmation after export' `
@@ -4038,7 +4382,7 @@ function Invoke-AcceptanceSession {
         }
 
         $recoveryScreenshot = Invoke-AcceptanceRecovery `
-            -Application $recoveryApplication -EvidenceRoot $EvidenceRoot `
+            -Application $recoveryApplication -EvidenceRoot $EvidenceRoot -PrivateRoot $PrivateRoot `
             -SessionId $SessionId -WaitSeconds $WaitSeconds `
             -ForegroundObservations $foregroundObservations `
             -Prompt $recoveryPromptForAction

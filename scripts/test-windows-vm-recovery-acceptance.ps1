@@ -1949,13 +1949,34 @@ foreach ($contract in @(
         'Find-AcceptanceAutomationElementByName', 'Start-AutomationControlInvoke',
         'SendMenuCommand', '0x0111') },
     @{ Name = 'Invoke-AcceptanceRecoveryExport'; Required = @(
-        '-Owner $Application.main', "-Phase 'picker-found'", "-Phase 'picker-filled'",
+        'Wait-AcceptanceRecoveryWindow', "-Purpose 'recovery-export-folder-picker'",
+        "-Phase 'picker-found'", "-Phase 'picker-filled'",
         "-Purpose 'export'", 'Remove-AcceptanceExportProgress'
     ); Forbidden = @('Complete-AutomationControlInvoke -State $menuAction') },
     @{ Name = 'Dismiss-AcceptanceStartupRecovery'; Required = @(
         '[Windows.Automation.AutomationElement] $Prompt', 'if ($null -eq $Prompt)',
-        '-Owner $Application.main', 'Assert-AutomationBinding'
+        'Wait-AcceptanceRecoveryWindow', 'Assert-AutomationBinding'
     ); Forbidden = @() },
+    @{ Name = 'Wait-AcceptanceRecoveryWindow'; Required = @(
+        'Assert-AcceptanceProcessBinding', 'Assert-AutomationBinding',
+        'ReadOwnedNamedWindows', 'ConvertTo-AcceptanceRecoveryWindowObservation',
+        '[Windows.Automation.AutomationElement]::FromHandle',
+        'Assert-AcceptanceRetainedWindowBinding',
+        "-Phase 'native-window-found'", "-Phase 'uia-window-bound'",
+        '$fresh.hwnd -ne $native.hwnd', '[Math]::Min(30, $TimeoutSeconds)'
+    ); Forbidden = @('::RootElement', '.FindAll(', '[Windows.Automation.TreeScope]',
+        'Wait-UniqueAutomationWindow', "-Phase 'native-search-started'",
+        "-Phase 'uia-materialization-started'") },
+    @{ Name = 'ConvertTo-AcceptanceRecoveryWindowObservation'; Required = @(
+        '$Inventory.TotalCount -gt 1', '$row.ProcessId -ne $ExpectedProcessId',
+        '$row.SessionId -ne $ExpectedSession', '$row.OwnerHandle -ne $ExpectedOwnerHandle',
+        '$row.Title -cne $ExpectedName', '$row.ClassName -cne ''#32770''',
+        '-not $row.Visible', '$row.Right -le $row.Left', '$row.Bottom -le $row.Top'
+    ); Forbidden = @('::RootElement', '.FindAll(', '[Windows.Automation.TreeScope]') },
+    @{ Name = 'Write-AcceptanceRecoveryWindowProgress'; Required = @(
+        'Assert-AcceptanceProcessBinding', 'Write-AcceptanceNewUtf8Json',
+        '$Application.raw_process_binding', '$Observation', 'ValidateSet('
+    ); Forbidden = @('WriteAllText', 'window_title', '.Current.Name') },
     @{ Name = 'Write-AcceptanceExportProgress'; Required = @(
         'Assert-AcceptanceProcessBinding', 'Write-AcceptanceNewUtf8Json',
         '$Application.raw_process_binding', "'export-progress-' + `$Purpose", 'ValidateSet('
@@ -2055,7 +2076,7 @@ foreach ($contract in @(
     $lookups = @($function.FindAll({
         param($node)
         $node -is [Management.Automation.Language.CommandAst] -and
-            $node.GetCommandName() -ceq 'Wait-UniqueAutomationWindow'
+            $node.GetCommandName() -ceq 'Wait-AcceptanceRecoveryWindow'
     }, $true))
     if ($lookups.Count -ne 1) {
         throw "Recovery retained-window function has an ambiguous fallback lookup for $($contract.Parameter)."
@@ -2073,6 +2094,154 @@ foreach ($contract in @(
             'Assert-AcceptanceRetainedWindowBinding', [StringComparison]::Ordinal
         ) -lt 0) {
         throw "A supplied $($contract.Parameter) bypasses retained-window validation."
+    }
+}
+$windowInitializer = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Initialize-AcceptanceRecoveryWindowNative'
+}, $true))
+if ($windowInitializer.Count -ne 1) {
+    throw 'The bounded native recovery-window initializer is missing or ambiguous.'
+}
+$windowNativeText = $windowInitializer[0].Extent.Text
+foreach ($fragment in @(
+    'EnumWindows', 'visitedCount > 256', 'ProcessIdToSessionId',
+    'GetWindow(window, 4)', 'GetWindowTextLengthW', 'GetWindowTextW',
+    'GetClassName', 'IsWindowVisible', 'GetWindowRect', '"#32770"',
+    'ReadOwnedNamedWindows', 'TotalCount', 'Entries'
+)) {
+    if ($windowNativeText.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+        throw "Native recovery-window resolver omits its bounded contract: $fragment"
+    }
+}
+if ($windowNativeText.IndexOf('RootElement', [StringComparison]::Ordinal) -ge 0 -or
+    $windowNativeText.IndexOf('FindAll', [StringComparison]::Ordinal) -ge 0) {
+    throw 'Native recovery-window discovery must not enumerate the UIA tree.'
+}
+Initialize-AcceptanceRecoveryWindowNative
+$windowNativeType = 'DarkReNamerRecoveryWindowNative' -as [type]
+if ($null -eq $windowNativeType -or
+    $null -eq $windowNativeType.GetMethod('ReadOwnedNamedWindows')) {
+    throw 'The native recovery-window helper did not compile with its callable API.'
+}
+$namedWindowProperties = @(
+    $windowNativeType.GetNestedType('NamedWindowObservation').GetProperties().Name | Sort-Object
+)
+if ([string]::Join(',', $namedWindowProperties) -cne
+    'Bottom,ClassName,Handle,Left,OwnerHandle,ProcessId,Right,SessionId,Title,Top,Visible') {
+    throw 'The native recovery-window observation shape changed.'
+}
+$namedInventoryProperties = @(
+    $windowNativeType.GetNestedType('NamedWindowInventory').GetProperties().Name | Sort-Object
+)
+if ([string]::Join(',', $namedInventoryProperties) -cne 'Entries,TotalCount') {
+    throw 'The native recovery-window inventory shape changed.'
+}
+$converter = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'ConvertTo-AcceptanceRecoveryWindowObservation'
+}, $true))
+if ($converter.Count -ne 1) {
+    throw 'The recovery-window inventory validator is missing or ambiguous.'
+}
+& {
+    . ([scriptblock]::Create($converter[0].Extent.Text))
+    $valid = [pscustomobject]@{
+        TotalCount = 1
+        Entries = @([pscustomobject]@{
+            Handle = 4242L; OwnerHandle = 4000L
+            ProcessId = [uint32]123; SessionId = [uint32]7
+            Title = 'Expected recovery window'; ClassName = '#32770'; Visible = $true
+            Left = 10; Top = 20; Right = 210; Bottom = 120
+        })
+    }
+    $observed = ConvertTo-AcceptanceRecoveryWindowObservation `
+        -Inventory $valid -ExpectedProcessId 123 -ExpectedSession 7 `
+        -ExpectedOwnerHandle 4000L -ExpectedName 'Expected recovery window'
+    if ($observed.hwnd -ne 4242L -or $observed.owner_hwnd -ne 4000L -or
+        $observed.process_id -ne 123 -or $observed.session_id -ne 7 -or
+        $observed.window_class -cne '#32770' -or -not $observed.visible -or
+        $null -ne $observed.PSObject.Properties['title']) {
+        throw 'Recovery-window inventory did not retain its exact non-title binding.'
+    }
+    foreach ($case in @(
+        @{ Property = 'OwnerHandle'; Value = 4001L; Expected = 'native identity' },
+        @{ Property = 'ProcessId'; Value = [uint32]124; Expected = 'native identity' },
+        @{ Property = 'SessionId'; Value = [uint32]8; Expected = 'native identity' },
+        @{ Property = 'Title'; Value = 'Other recovery window'; Expected = 'native identity' },
+        @{ Property = 'ClassName'; Value = 'OtherClass'; Expected = 'native identity' },
+        @{ Property = 'Visible'; Value = $false; Expected = 'native identity' }
+    )) {
+        $row = $valid.Entries[0].PSObject.Copy()
+        $row.($case.Property) = $case.Value
+        Assert-Fails {
+            ConvertTo-AcceptanceRecoveryWindowObservation `
+                -Inventory ([pscustomobject]@{ TotalCount = 1; Entries = @($row) }) `
+                -ExpectedProcessId 123 -ExpectedSession 7 `
+                -ExpectedOwnerHandle 4000L -ExpectedName 'Expected recovery window'
+        } $case.Expected
+    }
+    Assert-Fails {
+        ConvertTo-AcceptanceRecoveryWindowObservation `
+            -Inventory ([pscustomobject]@{ TotalCount = 2; Entries = @($valid.Entries[0]) }) `
+            -ExpectedProcessId 123 -ExpectedSession 7 `
+            -ExpectedOwnerHandle 4000L -ExpectedName 'Expected recovery window'
+    } 'more than one'
+}
+$remainingGenericWindowLookups = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq 'Wait-UniqueAutomationWindow'
+}, $true))
+if ($remainingGenericWindowLookups.Count -ne 3) {
+    throw 'Only setup import, prefix, and Apply may retain generic UIA window lookup.'
+}
+foreach ($lookup in $remainingGenericWindowLookups) {
+    $owner = $lookup.Parent
+    while ($null -ne $owner -and $owner -isnot [Management.Automation.Language.FunctionDefinitionAst]) {
+        $owner = $owner.Parent
+    }
+    if ($null -eq $owner -or $owner.Name -cnotin @(
+            'Invoke-AcceptanceImportAndPrefix', 'Invoke-AcceptanceApply'
+        )) {
+        throw 'A recovery modal retained generic UIA tree window discovery.'
+    }
+}
+$nativeRecoveryWindowCalls = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq 'Wait-AcceptanceRecoveryWindow'
+}, $true))
+if ($nativeRecoveryWindowCalls.Count -ne 9) {
+    throw 'The fixed recovery modal set is not fully routed through native discovery.'
+}
+foreach ($call in $nativeRecoveryWindowCalls) {
+    $parameterNames = @($call.CommandElements | Where-Object {
+        $_ -is [Management.Automation.Language.CommandParameterAst]
+    } | ForEach-Object ParameterName)
+    foreach ($required in @(
+        'Application', 'ExpectedSession', 'Name', 'TimeoutSeconds',
+        'Label', 'PrivateRoot', 'Purpose'
+    )) {
+        if ($parameterNames -cnotcontains $required) {
+            throw "A native recovery-window call omits bound parameter $required."
+        }
+    }
+}
+$dismissMessageCalls = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq 'Dismiss-AcceptanceMessage'
+}, $true))
+foreach ($call in $dismissMessageCalls) {
+    $parameterNames = @($call.CommandElements | Where-Object {
+        $_ -is [Management.Automation.Language.CommandParameterAst]
+    } | ForEach-Object ParameterName)
+    if ($parameterNames -cnotcontains 'PrivateRoot' -or
+        $parameterNames -cnotcontains 'Purpose') {
+        throw 'A recovery message dismissal omits its private native-window phase binding.'
     }
 }
 $lockedControlsFunction = @($fromFile.FindAll({
