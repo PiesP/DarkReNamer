@@ -251,7 +251,7 @@ try {
     )
     $schemaReasons = @(
         (Get-Content `
-            -LiteralPath (Join-Path $PSScriptRoot 'windows-acceptance-evidence.schema.json') `
+            -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'config/schemas/windows-acceptance-evidence.schema.json') `
             -Raw |
             ConvertFrom-Json).'$defs'.unexecuted.properties.reason_code.enum
     )

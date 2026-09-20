@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/PiesP/DarkReNamer/blob/master/scripts/windows-acceptance-evidence.schema.json",
+  "$id": "https://github.com/PiesP/DarkReNamer/blob/master/config/schemas/windows-acceptance-evidence.schema.json",
   "title": "DarkReNamer Windows acceptance evidence",
   "description": "Path-free, source-bound evidence. Repository validators define draft and release-gate completeness modes.",
   "type": "object",

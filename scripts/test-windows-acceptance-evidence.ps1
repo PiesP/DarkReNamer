@@ -5,7 +5,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $validator = Join-Path $PSScriptRoot 'validate-windows-acceptance-evidence.ps1'
-$schema = Join-Path $PSScriptRoot 'windows-acceptance-evidence.schema.json'
+$schema = Join-Path (Split-Path -Parent $PSScriptRoot) 'config/schemas/windows-acceptance-evidence.schema.json'
 $visualFixture = Join-Path $PSScriptRoot 'test-visual-evidence-fixture.ps1'
 if (-not (Test-Path -LiteralPath $validator -PathType Leaf)) {
     throw "Windows acceptance evidence validator is missing: $validator"
@@ -180,8 +180,8 @@ function Assert-EvidencePathspec {
 
     $repository = Join-Path $TestRoot 'pathspec-repository'
     $nested = Join-Path $repository 'evidence'
-    $scripts = Join-Path $repository 'scripts'
-    New-Item -ItemType Directory -Path $repository, $nested, $scripts | Out-Null
+    $schemas = Join-Path $repository 'config/schemas'
+    New-Item -ItemType Directory -Path $repository, $nested, $schemas -Force | Out-Null
 
     $rootEvidence = 'windows-acceptance-evidence-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json'
     $nestedEvidence = 'windows-acceptance-evidence-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json'
@@ -192,7 +192,7 @@ function Assert-EvidencePathspec {
     [IO.File]::WriteAllText((Join-Path $repository $mixedRootEvidence), '{}')
     [IO.File]::WriteAllText((Join-Path $nested $mixedNestedEvidence), '{}')
     [IO.File]::WriteAllText(
-        (Join-Path $scripts 'windows-acceptance-evidence.schema.json'),
+        (Join-Path $schemas 'windows-acceptance-evidence.schema.json'),
         '{}'
     )
 

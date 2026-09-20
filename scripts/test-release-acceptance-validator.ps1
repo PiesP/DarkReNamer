@@ -406,12 +406,13 @@ try {
     $replacementEvidence = Copy-JsonObject $complete
     $replacementEvidence.artifact.workflow_run = $replacementRun
     Write-JsonObject -Value $replacementEvidence -Path $evidencePath
-    $validatorBundle = Join-Path $testRoot 'validator-bundle'
-    New-Item -ItemType Directory -Path $validatorBundle | Out-Null
+    $validatorBundle = Join-Path $testRoot 'validator-bundle/scripts'
+    $schemaBundle = Join-Path $testRoot 'validator-bundle/config/schemas'
+    New-Item -ItemType Directory -Path $validatorBundle, $schemaBundle -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'config/schemas/windows-acceptance-evidence.schema.json') -Destination $schemaBundle
     foreach ($name in @(
             'validate-release-acceptance.ps1',
-            'validate-windows-acceptance-evidence.ps1',
-            'windows-acceptance-evidence.schema.json'
+            'validate-windows-acceptance-evidence.ps1'
         )) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $validatorBundle
     }

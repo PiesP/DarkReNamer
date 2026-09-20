@@ -54,10 +54,11 @@ RC=/path/to/llvm-rc-19 cargo xwin build --release --locked \
   --package darknamer-app --bin DarkReNamer
 ```
 
-`scripts/capture-local-visual-gallery.sh` also requires Wine (`wine`,
+`scripts/diagnostics/capture-local-visual-gallery.sh` also requires Wine (`wine`,
 `wineboot`, `winepath`, and `wineserver`), Xvfb, ffmpeg, jq, GNU `timeout`, and
 `sha256sum`. It is a best-effort diagnostic path, not a CI or Windows acceptance
-gate.
+gate. The original `scripts/capture-local-visual-gallery.sh` command remains a
+compatibility entrypoint.
 
 ## Native tests in a local Hyper-V VM
 
