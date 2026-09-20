@@ -169,9 +169,9 @@ def add_processes(builder, roles, methods, root_identity, first=1):
 def control(process, automation_id, control_id, *, enabled=True, visible=True):
     return {"pid": process["pid"], "session_id": process["session"],
             "hwnd": 50000 + control_id, "root_hwnd": process["hwnd"], "class": "Button",
-            "control_id": control_id, "automation_id": automation_id,
+            "control_id": 0 if automation_id.startswith(("CommandButton_", "CommandLink_")) else control_id, "automation_id": automation_id,
             "control_type": "ControlType.Button", "enabled": enabled,
-            "visible": visible, "focused": False}
+            "visible": visible, "focused": automation_id == "CommandButton_2"}
 
 
 def action(builder, relative, boundary, phase, name, process, automation_id, control_id):
@@ -407,6 +407,15 @@ class RecoveryProfileTests(unittest.TestCase):
                 self.assertEqual(verify_recovery_execution(Reader(dict(reader.files)), deepcopy(result),
                                                            deepcopy(bundle), deepcopy(transport), target(),
                                                            run_prefix=prefix), {expected})
+
+    def test_default_cancel_requires_actual_safe_focus(self):
+        reader, result, bundle, transport = self.crash_copy()
+        ref = result["process_crash"]["actions"]["default_cancel"]
+        raw = reader.json(PRIVATE_ROOT + "/startup-default-cancel-action.json")
+        raw["target"]["focused"] = False
+        resign(reader, result, "startup-default-cancel-action.json", raw, [ref])
+        with self.assertRaises(EvidenceError):
+            verify_recovery_execution(reader, result, bundle, transport, target(), run_prefix=RUN_PREFIX)
 
     def test_default_cancel_requires_raw_bound_action(self):
         reader, result, bundle, transport = self.crash_copy()

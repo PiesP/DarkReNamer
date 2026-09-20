@@ -15,6 +15,10 @@ from vm_automated_verifier import (
     verify_authenticated_gate_metadata,
     verify_backend_execution,
     verify_core_execution,
+    verify_execution_freshness,
+    verify_appearance,
+    verify_focus_reachability,
+    FOCUS_ORDER, FOCUS_GROUPS,
     verify_desktop_lease,
     verify_layout_controls,
     verify_setting_restoration,
@@ -218,7 +222,7 @@ class PredicateTests(unittest.TestCase):
 
     def control(self, automation_id, control_type='ControlType.Button', *, enabled=True):
         return {'automation_id': automation_id, 'control_type': control_type,
-                'visible': True, 'enabled': enabled,
+                'visible': True, 'enabled': enabled, 'keyboard_focusable': True,
                 'bounds': {'left': 10, 'top': 10, 'right': 30, 'bottom': 30},
                 'pid': 1234, 'session_id': 2, 'root_hwnd': 12}
 
@@ -226,7 +230,7 @@ class PredicateTests(unittest.TestCase):
         controls = [self.control('', 'ControlType.Window'),
                     self.control('1000', 'ControlType.DataGrid')]
         controls.extend(self.control(identifier) for identifier in sorted(EXPECTED_RAIL_IDS))
-        return {'controls': controls, 'focus': [deepcopy(controls[2])], 'screenshots': []}
+        return {'controls': controls, 'focus': [deepcopy(controls[2])], 'screenshots': [], 'focus_reachability': None}
 
     def test_layout_controls_require_complete_owned_visible_inventory(self):
         layout = self.layout()
@@ -311,7 +315,7 @@ class PredicateTests(unittest.TestCase):
 
     def backend_records(self, root, *, transcript=None, passed=1, guest_cleanup=True):
         files = {}
-        binary_sha = 'e' * 64
+        binary_sha = add_indexed_bytes(root, files, 'backend/required-tests.exe', b'MZ native test fixture').sha256
         if transcript is None:
             transcript = ('running 1 test\n'
                           'test engine::required_regression ... ok\n\n'
@@ -357,6 +361,73 @@ class PredicateTests(unittest.TestCase):
                     verify_backend_execution(
                         reader, 'backend/bundle.json', 'backend/result.json',
                         source_sha=self.source_sha, required_tests=['required_regression'])
+
+    def test_backend_binary_bytes_cannot_be_missing_or_substituted(self):
+        for missing in (True, False):
+            with tempfile.TemporaryDirectory() as directory:
+                reader, _ = self.backend_records(Path(directory))
+                if missing:
+                    del reader.evidence.files['backend/required-tests.exe']
+                else:
+                    (Path(directory) / 'backend/required-tests.exe').write_bytes(b'MZ substituted')
+                with self.assertRaises(EvidenceError):
+                    verify_backend_execution(reader, 'backend/bundle.json', 'backend/result.json',
+                                             source_sha=self.source_sha, required_tests=['required_regression'])
+
+    def test_freshness_rejects_copied_process_lifetime_or_changed_vm(self):
+        result, transport = self.core_records()
+        vm = '12345678-1234-1234-1234-123456789abc'
+        transport.update(vm_id=vm, vm_identity_kind='hyper-v-guest-parameters-virtual-machine-id-v1',
+                         vm_identity_sha256=hashlib.sha256(vm.encode()).hexdigest())
+        seen, vms = set(), set()
+        verify_execution_freshness(None, result, transport, run_prefix='runs/one/', seen=seen, vm_ids=vms)
+        with self.assertRaises(EvidenceError):
+            verify_execution_freshness(None, result, transport, run_prefix='runs/two/', seen=seen, vm_ids=vms)
+        result['gui']['process_lifecycle']['start_time_utc_ticks'] = '639000000000000001'
+        verify_execution_freshness(None, result, transport, run_prefix='runs/two/', seen=seen, vm_ids=vms)
+        transport['vm_id'] = '22345678-1234-1234-1234-123456789abc'
+        transport['vm_identity_sha256'] = hashlib.sha256(transport['vm_id'].encode()).hexdigest()
+        with self.assertRaises(EvidenceError):
+            verify_execution_freshness(None, result, transport, run_prefix='runs/three/', seen=seen, vm_ids=vms)
+
+    def test_appearance_requires_exact_owned_checked_menu(self):
+        raw = {'hwnd': 12, 'pid': 1234, 'session_id': 2,
+               'menu_checked': [{'command_id': command, 'checked': command == 0x9011}
+                                for command in (0x9010, 0x9011, 0x9012)]}
+        target = {**self.target, 'appearance': 'light'}
+        verify_appearance(raw, self.environment, target)
+        for key, value in (('pid', 1235), ('session_id', True), ('hwnd', 13)):
+            with self.assertRaises(EvidenceError):
+                verify_appearance({**raw, key: value}, self.environment, target)
+        raw['menu_checked'][1]['checked'] = False
+        with self.assertRaises(EvidenceError): verify_appearance(raw, self.environment, target)
+
+    def test_full_keyboard_reachability_rejects_gaps_and_state_mutation(self):
+        controls = []
+        for index, (identifier, group) in enumerate(zip(FOCUS_ORDER, FOCUS_GROUPS)):
+            control = self.control(identifier, 'ControlType.DataGrid' if index == 0 else 'ControlType.Button')
+            controls.append({**control, 'rail': 'list' if index == 0 else ('left' if index <= 10 else 'right'),
+                             'rail_group': group, 'expected_reachable': True, 'exclusion_reason': None})
+        bindings = [{key: value for key, value in control.items()
+                     if key not in {'rail', 'rail_group', 'expected_reachable', 'exclusion_reason'}} for control in controls]
+        state = {'fixture_entries': [self.fixture('navigation.txt')], 'journal_entries': []}
+        raw = {'schema_version': 1, 'input_method': 'keyboard', 'initial': bindings[0], 'final': bindings[-1],
+               'controls': controls, 'state_before': deepcopy(state), 'state_after': deepcopy(state),
+               'transitions': [{'sequence': index, 'input': 'tab' if index in {1, 11} else 'down',
+                                'from': bindings[index - 1], 'to': bindings[index]} for index in range(1, len(bindings))]}
+        verify_focus_reachability(raw, self.environment)
+        for mutation in ('missing-target', 'fake-input', 'broken-chain', 'file-change', 'foreign-session', 'unfocused'):
+            changed = deepcopy(raw)
+            if mutation == 'missing-target':
+                changed['transitions'].pop()
+                changed['final'] = changed['transitions'][-1]['to']
+            elif mutation == 'fake-input': changed['transitions'][0]['input'] = 'uia-invoke'
+            elif mutation == 'broken-chain': changed['transitions'][1]['from'] = changed['initial']
+            elif mutation == 'file-change': changed['state_after']['fixture_entries'][0]['content_sha256'] = 'f' * 64
+            elif mutation == 'foreign-session': changed['transitions'][0]['to']['session_id'] = 3
+            else: changed['transitions'][0]['to']['keyboard_focusable'] = False
+            with self.subTest(mutation=mutation), self.assertRaises(EvidenceError):
+                verify_focus_reachability(changed, self.environment)
 
     def test_desktop_lease_is_exact_clean_and_unique(self):
         lease = {'schema_version': 1, 'mode': 'managed-rdp', 'lease_id': 'f' * 32,

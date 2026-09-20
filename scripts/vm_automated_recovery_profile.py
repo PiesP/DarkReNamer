@@ -346,7 +346,10 @@ def _control(value: object, *, pid: int, session: int, automation_id: str, contr
     require_int(row["session_id"], session, session, "Recovery control session")
     require_int(row["hwnd"], 1, (1 << 63) - 1, "Recovery control HWND")
     require_int(row["root_hwnd"], 1, (1 << 63) - 1, "Recovery control root HWND")
-    require_int(row["control_id"], control_id, control_id, "Recovery native control ID")
+    actual_id = require_int(row["control_id"], 0, 0xFFFF, "Recovery native control ID")
+    task_dialog = automation_id.startswith(("CommandButton_", "CommandLink_"))
+    require(actual_id == control_id or (task_dialog and actual_id == 0),
+            "Recovery native control ID differs from its owned control contract.")
     require(row["automation_id"] == automation_id and row["class"] == "Button" and
             row["control_type"] == "ControlType.Button" and
             type(row["enabled"]) is bool and type(row["visible"]) is bool and
@@ -367,6 +370,8 @@ def _action(private: PrivateEvidence, reference: object, relative: str, *, bound
                       automation_id=automation_id, control_id=control_id)
     require(target["enabled"] is True and target["visible"] is True,
             "Recovery action target was not enabled and visible.")
+    if action == "cancel-startup-recovery":
+        require(target["focused"] is True, "Startup recovery Cancel was not the actual default focus.")
     observed = _ticks(raw["observed_utc_ticks"], "Recovery action observation")
     completed = _ticks(raw["completed_utc_ticks"], "Recovery action completion")
     require(process.start_observed <= observed <= completed <= process.exit_observed,

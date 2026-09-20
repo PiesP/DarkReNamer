@@ -149,19 +149,19 @@ RAIL_IDS = {"32771", "32772", "32773", "32774", "32775", "32776", "32777", "3277
 
 
 def verify_layout_controls(layout: object, environment: dict, *, keyboard_focus: bool) -> None:
-    row = require_exact_keys(layout, {"controls", "focus", "screenshots"}, "Layout observations")
+    row = require_exact_keys(layout, {"controls", "focus", "screenshots", "focus_reachability"}, "Layout observations")
     display = environment["target_display"]
     work = rectangle(display["work_rect"])
     require(type(row["controls"]) is list and len(row["controls"]) == 21,
             "Layout must enumerate the workbench, file list and all nineteen rail commands.")
 
     def control(raw: object, *, require_visible: bool) -> dict:
-        item = require_exact_keys(raw, {"automation_id", "control_type", "visible", "enabled", "bounds",
+        item = require_exact_keys(raw, {"automation_id", "control_type", "visible", "enabled", "keyboard_focusable", "bounds",
                                         "pid", "session_id", "root_hwnd"}, "Layout control")
         require_int(item["pid"], display["process_id"], display["process_id"], "Control PID")
         require_int(item["session_id"], display["session_id"], display["session_id"], "Control session")
         require_int(item["root_hwnd"], display["hwnd"], display["hwnd"], "Control root HWND")
-        require(type(item["enabled"]) is bool and type(item["visible"]) is bool,
+        require(type(item["enabled"]) is bool and type(item["visible"]) is bool and type(item["keyboard_focusable"]) is bool,
                 "Control enabled/visible facts are unavailable.")
         bounds = rectangle(item["bounds"])
         if require_visible:
@@ -233,6 +233,9 @@ def verify_backend_execution(reader: EvidenceReader, bundle_path: str, result_pa
     for binary in binaries:
         require(type(binary) is dict and type(binary.get("file")) is str and binary["file"] not in expected,
                 "Backend binary inventory is duplicated or malformed.")
+        require(binary["file"].endswith(".exe"), "Backend test artifact is not an executable member.")
+        binary_path = reader.sibling(bundle_path, {"file": binary["file"], "sha256": binary["sha256"]})
+        reader.bytes(binary_path)
         expected[binary["file"]] = binary["sha256"]
     tests = result.get("tests")
     require(type(tests) is list and len(tests) == len(expected), "Native backend executions are incomplete.")
@@ -266,6 +269,7 @@ def verify_backend_execution(reader: EvidenceReader, bundle_path: str, result_pa
             "Backend runtime cleanup failed or was not observed.")
     return canonical_digest({"bundle_sha256": reader.evidence.files[bundle_path].sha256,
                              "result_sha256": reader.evidence.files[result_path].sha256,
+                             "binary_sha256": dict(sorted(expected.items())),
                              "required_tests": sorted(required_tests)})
 
 
@@ -348,6 +352,118 @@ def verify_appearance(value: object, environment: dict, target: dict) -> None:
         require_int(item["command_id"], command, command, "Appearance command")
         require(item["checked"] is (command == selected), "Actual selected appearance differs from the fixed cell.")
 
+
+
+FOCUS_ORDER = ["1000"] + [str(value) for value in range(32771, 32781)] + [
+    "32781", "32783", "65535", "32784", "32788", "32789", "32790", "32785", "32786"]
+FOCUS_GROUPS = [None, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 0, 1, 1, 1, 2, 2, 2, 3, 3]
+
+
+def verify_focus_reachability(value: object, environment: dict) -> None:
+    from vm_automated_state import fixture_inventory, clean_journal_inventory
+    row = require_exact_keys(value, {"schema_version", "input_method", "initial", "transitions", "final",
+                                     "controls", "state_before", "state_after"}, "Keyboard reachability")
+    require_int(row["schema_version"], 1, 1, "Reachability schema")
+    require(row["input_method"] == "keyboard", "Reachability must use actual keyboard navigation.")
+    display = environment["target_display"]
+    work = rectangle(display["work_rect"])
+    binding_keys = {"automation_id", "control_type", "visible", "enabled", "keyboard_focusable",
+                    "bounds", "pid", "session_id", "root_hwnd"}
+
+    def binding(raw: object, *, focused: bool) -> dict:
+        item = require_exact_keys(raw, binding_keys, "Focus binding")
+        identifier = item["automation_id"]
+        require(type(identifier) is str and identifier in set(FOCUS_ORDER) | {""},
+                "Focus observation is outside the required workbench controls.")
+        expected_type = "ControlType.Window" if identifier == "" else ("ControlType.DataGrid" if identifier == "1000" else "ControlType.Button")
+        require(item["control_type"] == expected_type, "Focused control type differs from its fixed identity.")
+        for key, expected in (("pid", display["process_id"]), ("session_id", display["session_id"]), ("root_hwnd", display["hwnd"])):
+            require_int(item[key], expected, expected, "Focused control ownership")
+        for field in ("visible", "enabled", "keyboard_focusable"):
+            require(type(item[field]) is bool, "Focus availability is unobserved.")
+        bounds = rectangle(item["bounds"])
+        if focused:
+            require(item["visible"] and item["enabled"] and item["keyboard_focusable"] and contains(work, bounds),
+                    "Keyboard focus reached an unavailable or clipped control.")
+        return item
+
+    require(type(row["controls"]) is list and len(row["controls"]) == len(FOCUS_ORDER),
+            "Reachability must inventory the list and every rail command.")
+    required = set()
+    for raw, identifier, group in zip(row["controls"], FOCUS_ORDER, FOCUS_GROUPS, strict=True):
+        control = require_exact_keys(raw, binding_keys | {"rail", "rail_group", "expected_reachable", "exclusion_reason"}, "Reachability control")
+        item = binding({key: control[key] for key in binding_keys}, focused=False)
+        require(item["automation_id"] == identifier, "Reachability command order differs from the source catalog.")
+        rail = "list" if identifier == "1000" else ("left" if identifier in FOCUS_ORDER[1:11] else "right")
+        require(control["rail"] == rail and type(control["rail_group"]) is type(group) and control["rail_group"] == group,
+                "Reachability rail grouping differs from the source catalog.")
+        require(item["visible"] is True and contains(work, rectangle(item["bounds"])),
+                "Required command is outside the observed work area.")
+        # Roving rail peers may initially lack WS_TABSTOP. Every enabled command
+        # remains required because the production arrow navigation can reach it.
+        reachable = item["enabled"]
+        require(control["expected_reachable"] is reachable and
+                control["exclusion_reason"] == (None if reachable else "disabled"),
+                "Reachability exclusions differ from actual command availability.")
+        if reachable:
+            required.add(identifier)
+    require("1000" in required, "The production list must remain keyboard reachable.")
+    current = binding(row["initial"], focused=True)
+    reached = {current["automation_id"]} & required
+    transitions = row["transitions"]
+    require(type(transitions) is list and 0 < len(transitions) <= 256, "Keyboard transition inventory is missing or unbounded.")
+    for sequence, raw in enumerate(transitions, 1):
+        transition = require_exact_keys(raw, {"sequence", "input", "from", "to"}, "Keyboard transition")
+        require_int(transition["sequence"], sequence, sequence, "Transition sequence")
+        require(transition["input"] in {"tab", "f6", "up", "down"}, "Reachability used a non-navigation action.")
+        before = binding(transition["from"], focused=True)
+        after = binding(transition["to"], focused=True)
+        require(before == current, "Keyboard navigation observations are not contiguous.")
+        require(after["automation_id"] != before["automation_id"], "Keyboard input did not move focus.")
+        reached.add(after["automation_id"])
+        current = after
+    require(binding(row["final"], focused=True) == current and required <= reached,
+            "Actual keyboard navigation did not reach every required enabled control.")
+    states = []
+    for name in ("state_before", "state_after"):
+        state = require_exact_keys(row[name], {"fixture_entries", "journal_entries"}, "Navigation state")
+        states.append((fixture_inventory(state["fixture_entries"], full_identity=True),
+                       clean_journal_inventory(state["journal_entries"])))
+    require(states[0] == states[1], "Keyboard reachability changed files or journal state.")
+
+def verify_execution_freshness(reader: EvidenceReader, result: dict, transport: dict, *,
+                               run_prefix: str, seen: set[tuple], vm_ids: set[str]) -> None:
+    vm_id = transport.get("vm_id")
+    require(type(vm_id) is str and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", vm_id) is not None,
+            "Execution VM identity is unavailable.")
+    require(transport.get("vm_identity_kind") == "hyper-v-guest-parameters-virtual-machine-id-v1" and
+            transport.get("vm_identity_sha256") == hashlib.sha256(vm_id.encode("ascii")).hexdigest(),
+            "Execution VM identity digest differs from its actual guest observation.")
+    require(not vm_ids or vm_id in vm_ids, "Required campaign executions changed VM identity.")
+    vm_ids.add(vm_id)
+    lifecycles = []
+    if result.get("observer_role") == "recovery":
+        modes = {"ProcessCrash": "process_crash", "WorkerCancellation": "worker_cancellation", "WorkerClose": "worker_close"}
+        groups = [result[modes[result["selected_mode"]]]]
+        if result["selected_mode"] == "ProcessCrash":
+            groups.append(result["intent_only_candidate_discard"])
+        for group in groups:
+            for reference in group["processes"]:
+                record = reader.json(reader.digest_reference(reference, prefix=run_prefix))
+                if record["boundary"] == "started":
+                    lifecycles.append(record["lifecycle"])
+    elif "raw_layout_runs" in result:
+        lifecycles = [row["process_lifecycle"] for row in result["raw_layout_runs"]]
+    elif "process_lifecycle" in result:
+        lifecycles = [result["process_lifecycle"]]
+    else:
+        lifecycles = [result["gui"]["process_lifecycle"]]
+    require(bool(lifecycles), "Execution has no independently observed process lifetime.")
+    for lifecycle in lifecycles:
+        identity = (vm_id, lifecycle["pid"], lifecycle["start_time_utc_ticks"], lifecycle["executable_sha256"])
+        require(identity not in seen, "A prior process lifetime was replayed as a fresh required execution.")
+        seen.add(identity)
+
 def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_sha256: str,
                               candidate: Candidate, component_hashes: dict[str, str]) -> dict:
     from vm_automated_binding import verify_candidate_bundle
@@ -360,6 +476,8 @@ def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_s
     targets = {target["id"]: target for target in profile["required_targets"]}
     leases: set[str] = set()
     completed: set[str] = set()
+    process_identities: set[tuple] = set()
+    vm_ids: set[str] = set()
     execution_digests = []
     for attempt, slot in zip(attempts, execution_slots(profile), strict=True):
         identifier = slot["targets"][0]
@@ -394,14 +512,17 @@ def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_s
                 pid, session = verify_process_lifecycle(run["process_lifecycle"], executable_sha256=candidate.executable_sha256)
                 verify_environment(run["raw_environment"], target, candidate_pid=pid, session_id=session)
                 verify_appearance(run["raw_appearance"], run["raw_environment"], target)
+                verify_focus_reachability(run["layout_observations"]["focus_reachability"], run["raw_environment"])
                 verify_layout_controls(run["layout_observations"], run["raw_environment"], keyboard_focus=keyboard)
                 verify_layout_raster(reader, attempt["result"], run["layout_observations"], run["raw_environment"])
             verify_setting_restoration(reader, attempt["result"], result, bundle, target)
             verify_cleanup(result["raw_cleanup"], transport["raw_cleanup"])
         else:
             verified = verify_recovery_execution(reader, result, bundle, transport, target,
-                                                  run_prefix="runs/" + slot["id"] + "/")
+                                                  run_prefix=str(PurePosixPath(attempt["transport"]).parent) + "/")
             require(verified == set(slot["targets"]), "Recovery raw observations do not satisfy the complete execution group.")
+        verify_execution_freshness(reader, result, transport, run_prefix="runs/" + slot["id"] + "/",
+                                   seen=process_identities, vm_ids=vm_ids)
         completed.update(slot["targets"])
         execution_digests.append({"slot": slot["id"], **{
             field: reader.evidence.files[attempt[field]].sha256
