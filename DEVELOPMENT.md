@@ -46,6 +46,9 @@ python3 scripts/test-gui-regression-evidence.py
 python3 scripts/test-vm-automated-authority.py
 python3 scripts/test-vm-automated-evidence.py
 python3 scripts/test-vm-automated-state.py
+python3 scripts/test-vm-automated-journal.py
+python3 scripts/test-vm-automated-binding.py
+python3 scripts/test-vm-automated-recovery.py
 ```
 
 ## Linux cross-build and visual diagnostics
