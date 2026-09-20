@@ -2070,6 +2070,51 @@ function Write-AcceptanceRecoveryWindowProgress {
         })
 }
 
+function Remove-AcceptanceRecoveryWindowProgress {
+    param([Parameter(Mandatory)][string] $PrivateRoot)
+
+    $purposes = @(
+        'startup-default-cancel', 'recovery-relaunch',
+        'recovery-export-relaunch', 'startup-recovery-invoke',
+        'startup-recovery-cancel', 'recovery-completion',
+        'recovery-export-folder-picker', 'recovery-export-completion',
+        'intent-startup-notice', 'intent-relaunch-notice',
+        'intent-discard-notice', 'intent-discard-cancel',
+        'intent-discard-confirm', 'intent-discard-completion'
+    )
+    $phases = @('native-window-found', 'uia-window-bound')
+    $ownedPaths = [Collections.Generic.List[string]]::new()
+    foreach ($purpose in $purposes) {
+        $purposePaths = [Collections.Generic.List[string]]::new()
+        foreach ($phase in $phases) {
+            $path = Join-Path $PrivateRoot (
+                'recovery-window-' + $purpose + '-' + $phase + '.json'
+            )
+            if (-not (Test-Path -LiteralPath $path)) {
+                continue
+            }
+            $item = Get-Item -LiteralPath $path -Force
+            if ($item.PSIsContainer -or
+                ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'A recovery-window progress path is not one owned ordinary file.'
+            }
+            $purposePaths.Add($path)
+        }
+        if ($purposePaths.Count -notin @(0, 2)) {
+            throw 'Recovery-window progress has an incomplete phase pair.'
+        }
+        foreach ($path in $purposePaths) {
+            $ownedPaths.Add($path)
+        }
+    }
+    foreach ($path in $ownedPaths) {
+        Remove-Item -LiteralPath $path
+        if (Test-Path -LiteralPath $path) {
+            throw 'Recovery-window progress cleanup was incomplete.'
+        }
+    }
+}
+
 function Wait-AcceptanceRecoveryWindow {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -4769,6 +4814,15 @@ finally {
         }
     }
     try {
+        if ($result.status -ceq 'passed') {
+            try {
+                Remove-AcceptanceRecoveryWindowProgress -PrivateRoot $privateRoot
+            }
+            catch {
+                $result.status = 'failed'
+                $result.failure_reason = 'recovery_window_progress_cleanup_failed'
+            }
+        }
         $result.private_evidence = Write-AcceptancePrivateIndex -PrivateRoot $privateRoot
     }
     catch {

@@ -2429,6 +2429,104 @@ foreach ($phase in @('input-returned', 'native-popup-found', 'native-menu-bound'
         throw "Recovery menu progress cleanup omits $phase."
     }
 }
+$removeWindowProgressFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Remove-AcceptanceRecoveryWindowProgress'
+}, $true))
+if ($removeWindowProgressFunction.Count -ne 1) {
+    throw 'The recovery-window progress cleanup function is missing or ambiguous.'
+}
+$windowCleanupText = $removeWindowProgressFunction[0].Extent.Text
+foreach ($fragment in @(
+    "'native-window-found', 'uia-window-bound'",
+    '[IO.FileAttributes]::ReparsePoint', '$item.PSIsContainer',
+    'Remove-Item -LiteralPath $path', 'Test-Path -LiteralPath $path'
+)) {
+    if ($windowCleanupText.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+        throw "Recovery-window progress cleanup omits its exact-file guard: $fragment"
+    }
+}
+$windowCleanupCalls = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq 'Remove-AcceptanceRecoveryWindowProgress'
+}, $true))
+if ($windowCleanupCalls.Count -ne 1) {
+    throw 'Recovery-window diagnostics must have one cleanup call.'
+}
+$windowCleanupGuard = $windowCleanupCalls[0].Parent
+while ($null -ne $windowCleanupGuard -and
+    $windowCleanupGuard -isnot [Management.Automation.Language.IfStatementAst]) {
+    $windowCleanupGuard = $windowCleanupGuard.Parent
+}
+$privateIndexCall = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq 'Write-AcceptancePrivateIndex'
+}, $true) | Where-Object { $_.Extent.Text.Contains('-PrivateRoot $privateRoot') })
+$privateIndexTry = if ($privateIndexCall.Count -eq 1) { $privateIndexCall[0].Parent } else { $null }
+while ($null -ne $privateIndexTry -and
+    $privateIndexTry -isnot [Management.Automation.Language.TryStatementAst]) {
+    $privateIndexTry = $privateIndexTry.Parent
+}
+$cleanupAncestor = $windowCleanupCalls[0].Parent
+$sharesPrivateIndexTry = $false
+while ($null -ne $cleanupAncestor) {
+    if ([object]::ReferenceEquals($cleanupAncestor, $privateIndexTry)) {
+        $sharesPrivateIndexTry = $true
+        break
+    }
+    $cleanupAncestor = $cleanupAncestor.Parent
+}
+$rawCleanupOffset = $fromFile.Extent.Text.LastIndexOf(
+    '$result.raw_cleanup =', [StringComparison]::Ordinal
+)
+if ($null -eq $windowCleanupGuard -or
+    $windowCleanupGuard.Extent.Text.IndexOf(
+        "`$result.status -ceq 'passed'", [StringComparison]::Ordinal
+    ) -lt 0 -or
+    $privateIndexCall.Count -ne 1 -or
+    -not $sharesPrivateIndexTry -or
+    $windowCleanupCalls[0].Extent.StartOffset -le $rawCleanupOffset -or
+    $windowCleanupCalls[0].Extent.EndOffset -ge $privateIndexCall[0].Extent.StartOffset) {
+    throw 'Recovery-window diagnostics must be removed after cleanup and before private indexing only when passed.'
+}
+& {
+    . ([scriptblock]::Create($removeWindowProgressFunction[0].Extent.Text))
+    $cleanupRoot = Join-Path ([IO.Path]::GetTempPath()) (
+        'darkrenamer-window-cleanup-' + [Guid]::NewGuid().ToString('N')
+    )
+    [void](New-Item -ItemType Directory -Path $cleanupRoot)
+    try {
+        foreach ($leaf in @(
+            'recovery-window-startup-default-cancel-native-window-found.json',
+            'recovery-window-startup-default-cancel-uia-window-bound.json'
+        )) {
+            [IO.File]::WriteAllText((Join-Path $cleanupRoot $leaf), '{}')
+        }
+        [IO.File]::WriteAllText((Join-Path $cleanupRoot 'state-required.json'), '{}')
+        [IO.File]::WriteAllText((Join-Path $cleanupRoot 'unknown-diagnostic.json'), '{}')
+        Remove-AcceptanceRecoveryWindowProgress -PrivateRoot $cleanupRoot
+        if (@(Get-ChildItem -LiteralPath $cleanupRoot -File).Count -ne 2 -or
+            -not (Test-Path -LiteralPath (Join-Path $cleanupRoot 'state-required.json') -PathType Leaf) -or
+            -not (Test-Path -LiteralPath (Join-Path $cleanupRoot 'unknown-diagnostic.json') -PathType Leaf)) {
+            throw 'Recovery-window cleanup removed semantic or unknown evidence.'
+        }
+        $malformed = Join-Path $cleanupRoot `
+            'recovery-window-recovery-relaunch-native-window-found.json'
+        [void](New-Item -ItemType Directory -Path $malformed)
+        Assert-Fails {
+            Remove-AcceptanceRecoveryWindowProgress -PrivateRoot $cleanupRoot
+        } 'ordinary file'
+        if (-not (Test-Path -LiteralPath $malformed -PathType Container)) {
+            throw 'Recovery-window cleanup removed a malformed owned path.'
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $cleanupRoot -Recurse -Force
+    }
+}
 $intentFunction = @($fromFile.FindAll({
     param($node)
     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
