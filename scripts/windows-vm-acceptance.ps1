@@ -21,6 +21,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:acceptanceForegroundObservations = [Collections.Generic.List[object]]::new()
 
 function Assert-AcceptanceBootstrapUniqueJson {
     param(
@@ -2619,7 +2620,7 @@ function Set-ObserverManualName {
     if (-not [string]::IsNullOrEmpty($CaptureRoot) -and -not [string]::IsNullOrEmpty($CaptureLeaf)) {
         if ($null -eq $Captures) { throw 'Editable prompt capture requires the capture ledger.' }
         $rasterTarget = Get-ObserverNativeStaticRasterTarget -Window $prompt -Application $Application -SessionId $SessionId -ControlId 1002 -ExpectedText '으로' -Id 'prefix-input' -Image $CaptureLeaf
-        [void]$Captures.Add((Save-WindowScreenshot -Window $prompt -Process $Application.process -ExpectedSession $SessionId -Root $CaptureRoot -Leaf $CaptureLeaf -Label "manual change row $Row prompt"))
+        [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $prompt -Process $Application.process -ExpectedSession $SessionId -Root $CaptureRoot -Leaf $CaptureLeaf -Label "manual change row $Row prompt"))
     }
     Set-AutomationControlValue -Element $edit -Value $Name -Label "manual change row $Row edit"
     $ok = Find-UniqueAutomationElement -Root $prompt -Process $Application.process -ExpectedSession $SessionId -AutomationId '1' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label "manual change row $Row OK" -RequireEnabled -RequireWindowHandle
@@ -3095,7 +3096,7 @@ function Invoke-ObserverClipboardContention {
     try {
         Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x12 -VirtualKey 0x43 -Label 'copy-all Clipboard contention Alt+C'
         $failure = Wait-UniqueAutomationWindow -Process $Application.process -ExpectedSession $SessionId -Owner $DetailsWindow -Name 'DarkReNamer - 복사 실패' -TimeoutSeconds $WaitSeconds -Label 'copy-all Clipboard contention failure'
-        [void]$Captures.Add((Save-WindowScreenshot -Window $failure -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf $CaptureLeaf -Label 'copy-all Clipboard contention failure'))
+        [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $failure -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf $CaptureLeaf -Label 'copy-all Clipboard contention failure'))
     }
     finally {
         [DarkReNamerVmAcceptanceNative]::ReleaseObserverClipboard()
@@ -3139,7 +3140,7 @@ function Inspect-ObserverDiagnostic {
     )
     $handle = [IntPtr]$Window.Current.NativeWindowHandle
     $tree = Get-ObserverWindowTree -Window $Window -Process $Application.process -SessionId $SessionId -Label "$Prefix diagnostic"
-    [void]$Captures.Add((Save-WindowScreenshot -Window $Window -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-diagnostic.png') -Label "$Prefix diagnostic"))
+    [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $Window -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-diagnostic.png') -Label "$Prefix diagnostic"))
     Write-JsonUtf8Bom -Path (Join-Path $OutputRoot ($Prefix + '-diagnostic-tree.json')) -Value $tree
     $editMatches = @($tree | Where-Object { $_.automation_id -ceq '1004' })
     $result = [ordered]@{
@@ -3165,7 +3166,7 @@ function Inspect-ObserverDiagnostic {
         if (-not $visible.EndsWith($ending, [StringComparison]::Ordinal)) {
             throw "$Prefix did not expose the canonical ending after native scrolling."
         }
-        [void]$Captures.Add((Save-WindowScreenshot -Window $Window -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-diagnostic-end.png') -Label "$Prefix diagnostic end scroll"))
+        [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $Window -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-diagnostic-end.png') -Label "$Prefix diagnostic end scroll"))
         $result.native_end_scroll = [ordered]@{ input = 'native-edit-ctrl-end'; visible_text = $visible; ending_visible = $true }
     switch ($CloseMethod) {
         'escape' {
@@ -3280,7 +3281,7 @@ function Scroll-ObserverTaskDialogToEnd {
     $scrolls = @($Confirmation.FindAll([Windows.Automation.TreeScope]::Descendants, $scrollCondition) |
         Where-Object { $_.Current.IsEnabled -and -not $_.Current.IsOffscreen })
     if ($scrolls.Count -eq 0) {
-        [void]$Captures.Add((Save-WindowScreenshot -Window $Confirmation -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf $CaptureLeaf -Label "$Label fully visible"))
+        [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $Confirmation -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf $CaptureLeaf -Label "$Label fully visible"))
         return [ordered]@{
             input = 'none'
             scrollbar = $null
@@ -3386,7 +3387,7 @@ function Scroll-ObserverTaskDialogToEnd {
         throw "$Label did not reach the verified scrollbar bottom after 128 physical clicks."
     }
     $tree = Get-ObserverWindowTree -Window $Confirmation -Process $Application.process -SessionId $SessionId -Label "$Label bottom"
-    [void]$Captures.Add((Save-WindowScreenshot -Window $Confirmation -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf $CaptureLeaf -Label "$Label bottom"))
+    [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $Confirmation -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf $CaptureLeaf -Label "$Label bottom"))
     [ordered]@{
         input = 'bounded physical mouse clicks on native TaskDialog down-scroll arrow'
         scrollbar = Get-ElementObservation -Element $scroll
@@ -3473,7 +3474,7 @@ function Invoke-ObserverBlockedChecks {
     Start-Sleep -Milliseconds 200
     $applyState = Get-ObserverPublicApplyState -Application $Application -SessionId $SessionId -Label 'blocked-check no-change Apply command'
     if ($applyState.enabled) { throw 'Apply stayed enabled with no changes.' }
-    [void]$Captures.Add((Save-WindowScreenshot -Window $Application.main -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-blocked-no-change.png') -Label 'no-change blocked state'))
+    [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $Application.main -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-blocked-no-change.png') -Label 'no-change blocked state'))
     $noChange = [ordered]@{ apply = $applyState; status = $status.Current.Name; blocked = $true }
 
     $collisionName = '충돌-😀-같은-대상.txt'
@@ -3485,7 +3486,7 @@ function Invoke-ObserverBlockedChecks {
     if ($applyState.enabled -or $collisionStatus.IndexOf('대상 경로 충돌', [StringComparison]::Ordinal) -lt 0) {
         throw 'Collision state did not block Apply with its existing meaning.'
     }
-    [void]$Captures.Add((Save-WindowScreenshot -Window $Application.main -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-blocked-collision.png') -Label 'collision blocked state'))
+    [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $Application.main -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-blocked-collision.png') -Label 'collision blocked state'))
     $collision = [ordered]@{ apply = $applyState; status = $collisionStatus; blocked = $true }
 
     Invoke-AutomationControl -Element $reset -Label 'reset collision proposals'
@@ -3496,7 +3497,7 @@ function Invoke-ObserverBlockedChecks {
     if ($applyState.enabled -or $invalidStatus.IndexOf('잘못된 대상 이름', [StringComparison]::Ordinal) -lt 0) {
         throw 'Invalid-name state did not block Apply with its existing meaning.'
     }
-    [void]$Captures.Add((Save-WindowScreenshot -Window $Application.main -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-blocked-invalid.png') -Label 'invalid-name blocked blocked state'))
+    [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $Application.main -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-blocked-invalid.png') -Label 'invalid-name blocked blocked state'))
     $invalid = [ordered]@{ apply = $applyState; status = $invalidStatus; blocked = $true }
     Invoke-AutomationControl -Element $reset -Label 'reset invalid proposal'
     Start-Sleep -Milliseconds 200
@@ -3522,7 +3523,7 @@ function Invoke-ObserverActualApply {
     Set-ObserverManualName -Application $Application -Grid $Grid -Row 0 -Name $Fixture.destination_names[0] -SessionId $SessionId -WaitSeconds $WaitSeconds
     Set-ObserverManualName -Application $Application -Grid $Grid -Row 1 -Name $Fixture.destination_names[1] -SessionId $SessionId -WaitSeconds $WaitSeconds
     $selection = Set-ObserverSelectedRow -Application $Application -Grid $Grid -Row 0 -SessionId $SessionId
-    [void]$Captures.Add((Save-WindowScreenshot -Window $Application.main -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-actual-apply-preview.png') -Label 'actual 3/1/2 Apply preview'))
+    [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $Application.main -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-actual-apply-preview.png') -Label 'actual 3/1/2 Apply preview'))
 
     $applyTrigger = Start-ObserverApplyFromPublicUi -Application $Application -SessionId $SessionId -Label 'actual 3/1/2 Apply command'
     $applyInvocation = $applyTrigger.invocation
@@ -3531,7 +3532,7 @@ function Invoke-ObserverActualApply {
     if (([string]::Join("`n", @($tree | ForEach-Object { $_.name } | Where-Object { $_ }))).IndexOf('목록 전체 3개 · 선택 1개 · 실제 변경 2개', [StringComparison]::Ordinal) -lt 0) {
         throw 'Actual Apply confirmation lost the exact 3/1/2 scope.'
     }
-    [void]$Captures.Add((Save-WindowScreenshot -Window $confirmation -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-actual-apply-confirmation.png') -Label 'actual 3/1/2 Apply confirmation'))
+    [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $confirmation -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-actual-apply-confirmation.png') -Label 'actual 3/1/2 Apply confirmation'))
     $confirm = Find-UniqueAutomationElement -Root $confirmation -Process $Application.process -ExpectedSession $SessionId -AutomationId 'CommandLink_1101' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'actual Apply command link' -RequireEnabled -RequireWindowHandle
     $confirmInvocation = Start-AutomationControlInvoke -Element $confirm -Label 'actual Apply command link'
     $deadline = (Get-Date).AddSeconds($WaitSeconds)
@@ -3565,7 +3566,7 @@ function Invoke-ObserverActualApply {
         [DarkReNamerVmNative]::GetFileIdentity($actual2.FullName) -ceq $initial2.identity
     if (-not $preserved) { throw 'Actual 3/1/2 Apply changed content or NTFS identity.' }
     Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
-    [void]$Captures.Add((Save-WindowScreenshot -Window $Application.main -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-actual-apply-complete.png') -Label 'actual 3/1/2 Apply completion'))
+    [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $Application.main -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-actual-apply-complete.png') -Label 'actual 3/1/2 Apply completion'))
     [ordered]@{ scope = '3/1/2'; apply_entry = [ordered]@{ input = $applyTrigger.input; menu_entry = $applyTrigger.menu_entry }; selection = $selection; destinations_reached = $true; unchanged_row_preserved = $true; content_and_identity_preserved = $true; journal_residue_count = 0 }
 }
 
@@ -3916,13 +3917,13 @@ function Invoke-ObserverContextConfirmation {
     $tree = Get-ObserverWindowTree -Window $confirmation -Process $Application.process -SessionId $SessionId -Label 'context Apply confirmation'
     $treeText = [string]::Join("`n", @($tree | ForEach-Object { $_.name } | Where-Object { $_ }))
     Write-JsonUtf8Bom -Path (Join-Path $OutputRoot ($Prefix + '-confirmation-tree.json')) -Value $tree
-    [void]$Captures.Add((Save-WindowScreenshot -Window $confirmation -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-confirmation.png') -Label 'context confirmation'))
+    [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $confirmation -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-confirmation.png') -Label 'context confirmation'))
     $modalOverlay = $null
     if ($tooltipProbe) {
         $entryWindows = Get-ObserverProcessWindows -Process $Application.process
         Start-Sleep -Milliseconds 3000
         $settledWindows = Get-ObserverProcessWindows -Process $Application.process
-        [void]$Captures.Add((Save-WindowScreenshot -Window $confirmation -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-confirmation-settled.png') -Label 'context confirmation after tooltip settling interval'))
+        [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $confirmation -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-confirmation-settled.png') -Label 'context confirmation after tooltip settling interval'))
         $essential = @($tree | Where-Object { $_.automation_id -cin @('ContentText', 'CommandLink_1101', 'CommandLink_1102', 'CommandButton_2') })
         $entryTooltip = @($entryWindows | Where-Object { $_.hwnd -eq $tooltipHandle -and $_.visible })
         $settledTooltip = @($settledWindows | Where-Object { $_.hwnd -eq $tooltipHandle -and $_.visible })
@@ -4036,7 +4037,7 @@ function Invoke-ObserverContextConfirmation {
         $selectionCopy = Copy-GuiRegressionDocument -Mode selection -Application $Application -Edit $details.edit -ExpectedText $details.evidence.value_text -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'confirmation full-details native selection'
         $copyAll = Copy-GuiRegressionDocument -Mode mnemonic -Application $Application -ExpectedText $details.evidence.value_text -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'confirmation full-details retry copy all'
     }
-    [void]$Captures.Add((Save-WindowScreenshot -Window $detailsWindow -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-full-details.png') -Label 'context full details'))
+    [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $detailsWindow -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-full-details.png') -Label 'context full details'))
     Assert-AutomationBinding -Element $details.edit -Process $Application.process -ExpectedSession $SessionId -Label 'context full-details edit before end scroll'
     $details.edit.SetFocus()
     Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 -VirtualKey 0x23 -Label 'context full-details Ctrl+End'
@@ -4046,7 +4047,7 @@ function Invoke-ObserverContextConfirmation {
     if (-not $visibleEnd.EndsWith($expectedEnding, [StringComparison]::Ordinal)) {
         throw 'Context full details did not expose the canonical ending after native scrolling.'
     }
-    [void]$Captures.Add((Save-WindowScreenshot -Window $detailsWindow -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-full-details-end.png') -Label 'context full details ending'))
+    [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $detailsWindow -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-full-details-end.png') -Label 'context full details ending'))
     Send-AcceptanceTap -Process $Application.process -ExpectedSession $SessionId -VirtualKey 0x1B -Label 'confirmation full-details Escape close'
     $detailsCloseTarget = $null
     $detailsCloseInput = 'keyboard-escape'
@@ -4057,7 +4058,7 @@ function Invoke-ObserverContextConfirmation {
     if ($tooltipProbe) {
         $afterDetailsWindows = Get-ObserverProcessWindows -Process $Application.process
         $afterDetailsTooltip = @($afterDetailsWindows | Where-Object { $_.hwnd -eq $tooltipHandle -and $_.visible })
-        [void]$Captures.Add((Save-WindowScreenshot -Window $confirmation -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-confirmation-after-details-return.png') -Label 'context confirmation after full-details return'))
+        [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $confirmation -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-confirmation-after-details-return.png') -Label 'context confirmation after full-details return'))
         $modalOverlay['after_details_return'] = [ordered]@{
             windows = $afterDetailsWindows
             bound_tooltip_visible = $afterDetailsTooltip.Count -eq 1
@@ -4081,7 +4082,7 @@ function Invoke-ObserverContextConfirmation {
     Start-Sleep -Milliseconds 200
     $expandedTree = Get-ObserverWindowTree -Window $confirmation -Process $Application.process -SessionId $SessionId -Label 'expanded context confirmation'
     $expandedWindowMetrics = Get-ObserverNativeWindowMetrics -Window $confirmation
-    [void]$Captures.Add((Save-WindowScreenshot -Window $confirmation -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-confirmation-expanded.png') -Label 'expanded context confirmation'))
+    [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $confirmation -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-confirmation-expanded.png') -Label 'expanded context confirmation'))
     if ($tooltipProbe) {
         $expandedWindows = Get-ObserverProcessWindows -Process $Application.process
         $expandedTooltip = @($expandedWindows | Where-Object { $_.hwnd -eq $tooltipHandle -and $_.visible })
@@ -4145,7 +4146,7 @@ function Invoke-ObserverContextConfirmation {
         if ($postVisibleTooltip.Count -ne 1) {
             throw 'Ordinary current-name hover did not restore the bound multiline ListView infotip after Cancel.'
         }
-        [void]$Captures.Add((Save-WindowScreenshot -Window $Application.main -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-after-cancel-infotip.png') -Label 'context ListView infotip restored after Cancel'))
+        [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $Application.main -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-after-cancel-infotip.png') -Label 'context ListView infotip restored after Cancel'))
         [DarkReNamerVmAcceptanceNative]::MoveCursor($neutralPoint.X, $neutralPoint.Y)
         Start-Sleep -Milliseconds 600
         $postNeutralWindows = Get-ObserverProcessWindows -Process $Application.process
@@ -4286,7 +4287,7 @@ function Invoke-ObserverContextScenario {
             Set-ObserverManualName -Application $repeatedApplication -Grid $grid -Row $index -Name $repeatedFixture.destination_names[$index] -SessionId $SessionId -WaitSeconds $WaitSeconds
         }
         $selection = Set-ObserverSelectedRow -Application $repeatedApplication -Grid $grid -Row 0 -SessionId $SessionId
-        [void]$Captures.Add((Save-WindowScreenshot -Window $repeatedApplication.main -Process $repeatedApplication.process -ExpectedSession $SessionId -Root $EvidenceRoot -Leaf ($prefix + '-preview.png') -Label 'repeated-name preview'))
+        [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $repeatedApplication.main -Process $repeatedApplication.process -ExpectedSession $SessionId -Root $EvidenceRoot -Leaf ($prefix + '-preview.png') -Label 'repeated-name preview'))
         $fullText = "변경 예시 전체 경로 (2/3개)`n`n현재 이름: $($repeatedFixture.source_names[0])`n변경 후 이름: $($repeatedFixture.destination_names[0])`n현재 전체 경로: $($repeatedFixture.paths[0])`n변경 후 전체 경로: $($repeatedFixture.destination_paths[0])`n`n현재 이름: $($repeatedFixture.source_names[1])`n변경 후 이름: $($repeatedFixture.destination_names[1])`n현재 전체 경로: $($repeatedFixture.paths[1])`n변경 후 전체 경로: $($repeatedFixture.destination_paths[1])"
         $repeatedConfirmation = Invoke-ObserverContextConfirmation -Application $repeatedApplication -ExpectedScope '목록 전체 3개 · 선택 1개 · 실제 변경 3개' -ExpectedFullText $fullText -ExpectedDestinationParent '' -OutputRoot $EvidenceRoot -Prefix $prefix -SessionId $SessionId -WaitSeconds $WaitSeconds -WorkArea $environment.work_area -Captures $Captures -PhysicalMouseActivation:($script:contract.mode -ceq 'context-surface')
         $afterCancel = Get-ObserverFixtureState -FixtureRoot $repeatedFixture.root
@@ -4330,7 +4331,7 @@ function Invoke-ObserverContextScenario {
         Set-ObserverManualName -Application $repeatedApplication -Grid $grid -Row 1 -Name $repeatedFixture.source_names[1] -SessionId $SessionId -WaitSeconds $WaitSeconds
         $remainingSelection = Set-ObserverSelectedRow -Application $repeatedApplication -Grid $grid -Row 2 -SessionId $SessionId
         $remainingPrefix = 'after-context-repeated-korean-insert-{0}-{1}' -f $Appearance,$minimum.dpi
-        [void]$Captures.Add((Save-WindowScreenshot -Window $repeatedApplication.main -Process $repeatedApplication.process -ExpectedSession $SessionId -Root $EvidenceRoot -Leaf ($remainingPrefix + '-preview.png') -Label 'Korean repeated insertion preview'))
+        [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $repeatedApplication.main -Process $repeatedApplication.process -ExpectedSession $SessionId -Root $EvidenceRoot -Leaf ($remainingPrefix + '-preview.png') -Label 'Korean repeated insertion preview'))
         $remainingFullText = "변경 예시 전체 경로 (1/1개)`n`n현재 이름: $($repeatedFixture.source_names[2])`n변경 후 이름: $($repeatedFixture.destination_names[2])`n현재 전체 경로: $($repeatedFixture.paths[2])`n변경 후 전체 경로: $($repeatedFixture.destination_paths[2])"
         $remainingConfirmation = Invoke-ObserverContextConfirmation -Application $repeatedApplication -ExpectedScope '목록 전체 3개 · 선택 1개 · 실제 변경 1개' -ExpectedFullText $remainingFullText -ExpectedDestinationParent '' -OutputRoot $EvidenceRoot -Prefix $remainingPrefix -SessionId $SessionId -WaitSeconds $WaitSeconds -WorkArea $environment.work_area -Captures $Captures
         $afterRemainingCancel = Get-ObserverFixtureState -FixtureRoot $repeatedFixture.root
@@ -4366,7 +4367,7 @@ function Invoke-ObserverContextScenario {
         $destinationInput = Set-ObserverDestinationParent -Application $moveApplication -Grid $moveGrid -DestinationParent $moveFixture.parent_b -SessionId $SessionId -WaitSeconds $WaitSeconds
         $moveOnlySelection = Set-ObserverSelectedRow -Application $moveApplication -Grid $moveGrid -Row 0 -SessionId $SessionId
         $moveOnlyPrefix = 'after-context-move-only-{0}-{1}' -f $Appearance,$moveMinimum.dpi
-        [void]$Captures.Add((Save-WindowScreenshot -Window $moveApplication.main -Process $moveApplication.process -ExpectedSession $SessionId -Root $EvidenceRoot -Leaf ($moveOnlyPrefix + '-preview.png') -Label 'move-only preview'))
+        [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $moveApplication.main -Process $moveApplication.process -ExpectedSession $SessionId -Root $EvidenceRoot -Leaf ($moveOnlyPrefix + '-preview.png') -Label 'move-only preview'))
         $moveOnlyDestination = Join-Path $moveFixture.parent_b 'old.txt'
         $moveOnlySnippets = Get-ObserverDifferenceSnippetPair -Current $moveFixture.source -After $moveOnlyDestination
         $moveOnlyFullText = "변경 예시 전체 경로 (1/1개)`n`n현재 이름: old.txt`n변경 후 이름: old.txt`n현재 전체 경로: $($moveFixture.source)`n변경 후 전체 경로: $moveOnlyDestination"
@@ -4379,7 +4380,7 @@ function Invoke-ObserverContextScenario {
 
         Set-ObserverManualName -Application $moveApplication -Grid $moveGrid -Row 0 -Name 'new.txt' -SessionId $SessionId -WaitSeconds $WaitSeconds
         $moveSelection = Set-ObserverSelectedRow -Application $moveApplication -Grid $moveGrid -Row 0 -SessionId $SessionId
-        [void]$Captures.Add((Save-WindowScreenshot -Window $moveApplication.main -Process $moveApplication.process -ExpectedSession $SessionId -Root $EvidenceRoot -Leaf ($movePrefix + '-preview.png') -Label 'move-plus-rename preview'))
+        [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $moveApplication.main -Process $moveApplication.process -ExpectedSession $SessionId -Root $EvidenceRoot -Leaf ($movePrefix + '-preview.png') -Label 'move-plus-rename preview'))
         $moveSnippets = Get-ObserverDifferenceSnippetPair -Current $moveFixture.source -After $moveFixture.destination
         $moveFullText = "변경 예시 전체 경로 (1/1개)`n`n현재 이름: old.txt`n변경 후 이름: new.txt`n현재 전체 경로: $($moveFixture.source)`n변경 후 전체 경로: $($moveFixture.destination)"
         $moveConfirmation = Invoke-ObserverContextConfirmation -Application $moveApplication -ExpectedScope '목록 전체 1개 · 선택 1개 · 실제 변경 1개' -ExpectedFullText $moveFullText -ExpectedDestinationParent $moveFixture.parent_b -ExpectedDestinationPath $moveSnippets.after -OutputRoot $EvidenceRoot -Prefix $movePrefix -SessionId $SessionId -WaitSeconds $WaitSeconds -WorkArea $environment.work_area -Captures $Captures
@@ -4395,7 +4396,7 @@ function Invoke-ObserverContextScenario {
         $actualTree = Get-ObserverWindowTree -Window $actualConfirmation -Process $moveApplication.process -SessionId $SessionId -Label 'actual move confirmation'
         $actualText = [string]::Join("`n", @($actualTree | ForEach-Object { $_.name } | Where-Object { $_ }))
         Write-JsonUtf8Bom -Path (Join-Path $EvidenceRoot ($movePrefix + '-actual-apply-confirmation-tree.json')) -Value $actualTree
-        [void]$Captures.Add((Save-WindowScreenshot -Window $actualConfirmation -Process $moveApplication.process -ExpectedSession $SessionId -Root $EvidenceRoot -Leaf ($movePrefix + '-actual-apply-confirmation.png') -Label 'actual move confirmation'))
+        [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $actualConfirmation -Process $moveApplication.process -ExpectedSession $SessionId -Root $EvidenceRoot -Leaf ($movePrefix + '-actual-apply-confirmation.png') -Label 'actual move confirmation'))
         if ($actualText.IndexOf('목록 전체 1개 · 선택 1개 · 실제 변경 1개', [StringComparison]::Ordinal) -lt 0) {
             throw 'Actual move confirmation lost its exact 1/1/1 scope.'
         }
@@ -4437,7 +4438,7 @@ function Invoke-ObserverContextScenario {
         $identityPreserved = [DarkReNamerVmNative]::GetFileIdentity($actual.FullName) -ceq $initial.identity
         if (-not $contentPreserved -or -not $identityPreserved) { throw 'Actual move-plus-rename changed content or NTFS identity.' }
         Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
-        [void]$Captures.Add((Save-WindowScreenshot -Window $moveApplication.main -Process $moveApplication.process -ExpectedSession $SessionId -Root $EvidenceRoot -Leaf ($movePrefix + '-actual-apply-complete.png') -Label 'actual move completion'))
+        [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $moveApplication.main -Process $moveApplication.process -ExpectedSession $SessionId -Root $EvidenceRoot -Leaf ($movePrefix + '-actual-apply-complete.png') -Label 'actual move completion'))
         $moveExit = Close-AcceptanceApplication -Application $moveApplication -SessionId $SessionId -WaitSeconds $WaitSeconds -Input ordinary
         if ($rawLayoutCandidate) {
             Complete-VmAutomatedLayoutRun `
@@ -4516,7 +4517,7 @@ function Invoke-ObserverContextScenario {
             $mixedStatuses.Add([ordered]@{ row = $index; source = $mixedFixture.sources[$index]; destination = $mixedFixture.destinations[$index]; status = $status })
         }
         $mixedSelection = Set-ObserverSelectedRow -Application $mixedApplication -Grid $mixedGrid -Row 0 -SessionId $SessionId
-        [void]$Captures.Add((Save-WindowScreenshot -Window $mixedApplication.main -Process $mixedApplication.process -ExpectedSession $SessionId -Root $EvidenceRoot -Leaf ($mixedPrefix + '-preview.png') -Label 'mixed preview'))
+        [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $mixedApplication.main -Process $mixedApplication.process -ExpectedSession $SessionId -Root $EvidenceRoot -Leaf ($mixedPrefix + '-preview.png') -Label 'mixed preview'))
         $mixedFullText = "변경 예시 전체 경로 (2/3개)`n`n현재 이름: 01-rename.txt`n변경 후 이름: $($mixedFixture.prefix)01-rename.txt`n현재 전체 경로: $($mixedFixture.sources[0])`n변경 후 전체 경로: $($mixedFixture.destinations[0])`n`n현재 이름: 02-rename.txt`n변경 후 이름: $($mixedFixture.prefix)02-rename.txt`n현재 전체 경로: $($mixedFixture.sources[1])`n변경 후 전체 경로: $($mixedFixture.destinations[1])"
         $mixedConfirmation = Invoke-ObserverContextConfirmation -Application $mixedApplication -ExpectedScope '목록 전체 3개 · 선택 1개 · 실제 변경 3개' -ExpectedFullText $mixedFullText -ExpectedDestinationParent '' -ExpectItemSpecificDestination -OutputRoot $EvidenceRoot -Prefix $mixedPrefix -SessionId $SessionId -WaitSeconds $WaitSeconds -WorkArea $environment.work_area -Captures $Captures
         $mixedTreeText = [string]::Join("`n", @($mixedConfirmation.tree | ForEach-Object { $_.name } | Where-Object { $_ }))
@@ -4729,7 +4730,7 @@ function Invoke-ObserverStandardScenario {
             $grid.pattern.GetItem(2, 1).Current.Name -cne $fixture.source_names[2]) {
             throw 'The exact 3/1/2 preview did not settle.'
         }
-        [void]$Captures.Add((Save-WindowScreenshot -Window $application.main -Process $application.process -ExpectedSession $SessionId -Root $EvidenceRoot -Leaf ($prefix + '-minimum-preview.png') -Label 'minimum-size long-name preview'))
+        [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $application.main -Process $application.process -ExpectedSession $SessionId -Root $EvidenceRoot -Leaf ($prefix + '-minimum-preview.png') -Label 'minimum-size long-name preview'))
         $fullText = "변경 예시 전체 경로 (2/2개)`n`n현재 이름: $($fixture.source_names[0])`n변경 후 이름: $($fixture.destination_names[0])`n현재 전체 경로: $($fixture.paths[0])`n변경 후 전체 경로: $($fixture.destinations[0])`n`n현재 이름: $($fixture.source_names[1])`n변경 후 이름: $($fixture.destination_names[1])`n현재 전체 경로: $($fixture.paths[1])`n변경 후 전체 경로: $($fixture.destinations[1])"
         $confirmation = Invoke-ObserverContextConfirmation -Standard -Application $application -ExpectedScope '목록 전체 3개 · 선택 1개 · 실제 변경 2개' -ExpectedFullText $fullText -ExpectedDestinationParent '' -OutputRoot $EvidenceRoot -Prefix $prefix -SessionId $SessionId -WaitSeconds $WaitSeconds -WorkArea $environment.work_area -Captures $Captures
         $afterCancel = Get-ObserverFixtureState -FixtureRoot $fixture.root
@@ -5225,6 +5226,7 @@ function Invoke-GuiRegressionAcceptance {
     $result = New-GuiRegressionResult -Verified $resolved -Appearance $Appearance
     $rawRegression = $resolved.lane -ceq 'candidate-gui-only'
     $observations = [ordered]@{
+        foreground_activation = $script:acceptanceForegroundObservations
         schema_version = 1
         run_id = $input.run_id
         environment = $null
@@ -5656,6 +5658,7 @@ else {
     }
 }
 $observations = [ordered]@{
+        foreground_activation = $script:acceptanceForegroundObservations
     schema_version = 1
     environment = $null
     main_window = $null
@@ -5848,6 +5851,7 @@ try {
         }
 
         $observations.environment = [ordered]@{
+            main_window = Get-ObserverNativeWindowMetrics -Window $mainWindow
             os_version = [DarkReNamerVmAcceptanceNative]::OsVersion()
             dpi = $captureWindow.dpi
             appearance = $appearanceSpec.evidence_name
@@ -5909,7 +5913,7 @@ try {
             }
         }
         $accessibility.status = 'passed'
-        $initialCapture = Save-WindowScreenshot `
+        $initialCapture = Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations `
             -Window $mainWindow `
             -Process $process `
             -ExpectedSession $ExpectedSessionId `
@@ -5976,7 +5980,7 @@ try {
                 window = Get-ElementObservation -Element $appearanceDialog
                 appearance = $appearanceSpec.evidence_name
             }
-            $advancedAppearanceCapture = Save-WindowScreenshot `
+            $advancedAppearanceCapture = Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations `
                 -Window $appearanceDialog `
                 -Process $process `
                 -ExpectedSession $ExpectedSessionId `
@@ -6048,7 +6052,7 @@ try {
             dialog_native_bounds = $nativeOpen.DialogBounds
             open_native_bounds = $nativeOpen.ControlBounds
         }
-        $commonDialogCapture = Save-WindowScreenshot `
+        $commonDialogCapture = Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations `
             -Window $fileDialog `
             -Process $process `
             -ExpectedSession $ExpectedSessionId `
@@ -6090,7 +6094,7 @@ try {
             edit = Get-ElementObservation -Element $promptEdit
             ok = Get-ElementObservation -Element $promptOk
         }
-        $inputPromptCapture = Save-WindowScreenshot `
+        $inputPromptCapture = Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations `
             -Window $prompt `
             -Process $process `
             -ExpectedSession $ExpectedSessionId `
@@ -6276,7 +6280,7 @@ try {
             }
             after = $null
         }
-        $previewCapture = Save-WindowScreenshot -Window $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -Root $verified.output_root -Leaf ($capturePrefix + '-preview.png') -Label 'current-DPI rename preview before name reset'
+        $previewCapture = Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -Root $verified.output_root -Leaf ($capturePrefix + '-preview.png') -Label 'current-DPI rename preview before name reset'
         $captures.Add((Add-AcceptanceScreenshotContext -Screenshot $previewCapture -Appearance $appearanceSpec.evidence_name -Surface 'main-workbench'))
 
         [void](Move-RailFocusToCommand -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '32781')
@@ -6322,7 +6326,7 @@ try {
             menu_enabled = -not $menuResetDisabled
             row = $afterReset
         }
-        $resetCapture = Save-WindowScreenshot -Window $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -Root $verified.output_root -Leaf ($capturePrefix + '-preview-after-name-reset.png') -Label 'current-DPI rename preview after name reset'
+        $resetCapture = Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -Root $verified.output_root -Leaf ($capturePrefix + '-preview-after-name-reset.png') -Label 'current-DPI rename preview after name reset'
         $captures.Add((Add-AcceptanceScreenshotContext -Screenshot $resetCapture -Appearance $appearanceSpec.evidence_name -Surface 'main-workbench'))
 
         [void](Move-RailFocusToCommand -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '32773')
@@ -6345,7 +6349,7 @@ try {
             cancel = Get-ElementObservation -Element $cancel
             confirm = Get-ElementObservation -Element $confirm
         }
-        $confirmationCapture = Save-WindowScreenshot -Window $confirmation -Process $process -ExpectedSession $ExpectedSessionId -Root $verified.output_root -Leaf ($capturePrefix + '-confirmation.png') -Label 'current-DPI Apply confirmation'
+        $confirmationCapture = Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $confirmation -Process $process -ExpectedSession $ExpectedSessionId -Root $verified.output_root -Leaf ($capturePrefix + '-confirmation.png') -Label 'current-DPI Apply confirmation'
         $captures.Add((Add-AcceptanceScreenshotContext -Screenshot $confirmationCapture -Appearance $appearanceSpec.evidence_name -Surface 'confirmation-task-dialog'))
         if ($rawCandidate) {
             $cancelEvent = Get-VmAutomatedKeyboardEventStart `
