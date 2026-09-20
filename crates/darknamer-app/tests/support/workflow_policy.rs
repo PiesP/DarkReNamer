@@ -861,7 +861,7 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
             ("actions", "read"),
             ("artifact-metadata", "write"),
             ("attestations", "write"),
-            ("contents", "read"),
+            ("contents", "write"),
             ("id-token", "write"),
         ],
     )?;
