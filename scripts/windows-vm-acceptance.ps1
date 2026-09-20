@@ -3310,6 +3310,7 @@ function Wait-AcceptanceClipboardText {
         [Parameter(Mandatory)][AllowEmptyString()][string] $ExpectedText,
         [Parameter(Mandatory)][int] $TimeoutSeconds,
         [Parameter(Mandatory)][string] $Label,
+        [switch] $AllowDelayedRendering,
         [scriptblock] $ReadSequence = { [DarkReNamerVmAcceptanceNative]::GetClipboardSequenceNumber() },
         [scriptblock] $ReadSnapshot = { [DarkReNamerVmAcceptanceNative]::ReadClipboardSnapshot() },
         [scriptblock] $GetCurrentTime = { Get-Date },
@@ -3325,8 +3326,11 @@ function Wait-AcceptanceClipboardText {
     do {
         try {
             $sequence = [uint32](& $ReadSequence)
-            if ($sequence -ne 0 -and $sequence -ne $PreviousSequence) {
-                $observedSequenceChange = $true
+            if ($sequence -ne 0 -and
+                ($sequence -ne $PreviousSequence -or $AllowDelayedRendering)) {
+                if ($sequence -ne $PreviousSequence) { $observedSequenceChange = $true }
+                # A native edit may defer rendering until this read. Even then,
+                # only a stable snapshot with a changed sequence can pass.
                 $snapshot = & $ReadSnapshot
                 if ($null -eq $snapshot -or
                     $snapshot.SequenceNumber -eq 0 -or
@@ -3334,6 +3338,7 @@ function Wait-AcceptanceClipboardText {
                     $snapshot = $null
                 }
                 else {
+                    $observedSequenceChange = $true
                     if (-not (Test-AcceptanceClipboardSnapshotOwned `
                         -Snapshot $snapshot `
                         -ExpectedSequence $snapshot.SequenceNumber `
@@ -4090,9 +4095,40 @@ function Copy-GuiRegressionDocument {
     }
     if ($Mode -ceq 'selection') {
         if ($null -eq $Edit) { throw 'Selection copy requires the bound read-only Edit.' }
+        Assert-AutomationBinding -Element $Edit -Process $Application.process `
+            -ExpectedSession $SessionId -Label "$Label exact edit" -RequireWindowHandle
+        $editHandle = [long]$Edit.Current.NativeWindowHandle
         $Edit.SetFocus()
+        $focused = Get-FocusedAcceptanceElement `
+            -Process $Application.process -ExpectedSession $SessionId -Label "$Label edit focus"
+        if ([long]$focused.Current.NativeWindowHandle -ne $editHandle) {
+            throw "$Label did not focus the exact read-only edit before selection."
+        }
         Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 -VirtualKey 0x24 -Label "$Label selection start"
         Send-AcceptanceTwoModifierChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 -SecondModifier 0x10 -VirtualKey 0x23 -Label "$Label select to end"
+        $textObject = $null
+        if (-not $Edit.TryGetCurrentPattern([Windows.Automation.TextPattern]::Pattern, [ref]$textObject)) {
+            throw "$Label read-only edit no longer exposes TextPattern."
+        }
+        $selectionDeadline = (Get-Date).AddSeconds(3)
+        $selectedText = ''
+        do {
+            $focused = Get-FocusedAcceptanceElement `
+                -Process $Application.process -ExpectedSession $SessionId -Label "$Label selected edit focus"
+            if ([long]$focused.Current.NativeWindowHandle -ne $editHandle) {
+                throw "$Label lost the exact read-only edit focus during selection."
+            }
+            $selected = @(([Windows.Automation.TextPattern]$textObject).GetSelection())
+            $selectedText = if ($selected.Count -eq 1) { $selected[0].GetText(-1) } else { '' }
+            if ((Normalize-ObserverText $selectedText) -ceq (Normalize-ObserverText $ExpectedText)) { break }
+            Start-Sleep -Milliseconds 50
+        } while ((Get-Date) -lt $selectionDeadline)
+        if ($selected.Count -ne 1 -or
+            (Normalize-ObserverText $selectedText) -cne (Normalize-ObserverText $ExpectedText)) {
+            throw ("$Label keyboard selection did not cover the exact document; " +
+                "ranges=$($selected.Count), selected_units=$($selectedText.Length), " +
+                "expected_units=$($expectedClipboard.Length), edit_hwnd=$editHandle.")
+        }
         Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 -VirtualKey 0x43 -Label "$Label Ctrl+C"
     }
     else {
@@ -4100,7 +4136,10 @@ function Copy-GuiRegressionDocument {
     }
     $snapshot = $null
     try {
-        $snapshot = Wait-AcceptanceClipboardText -PreviousSequence $before.SequenceNumber -ExpectedText $expectedClipboard -TimeoutSeconds $WaitSeconds -Label $Label
+        $snapshot = Wait-AcceptanceClipboardText `
+            -PreviousSequence $before.SequenceNumber -ExpectedText $expectedClipboard `
+            -TimeoutSeconds $WaitSeconds -Label $Label `
+            -AllowDelayedRendering:($Mode -ceq 'selection')
     }
     finally {
         if ($null -eq $snapshot) {

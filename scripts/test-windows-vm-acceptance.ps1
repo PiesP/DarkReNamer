@@ -1806,6 +1806,55 @@ try {
         throw 'An unchanged Clipboard sequence must not open or read the Clipboard.'
     }
 
+    $delayedState = [pscustomobject]@{ snapshot_reads = 0 }
+    $delayedResult = Wait-AcceptanceClipboardText `
+        -PreviousSequence 42 -ExpectedText $expectedClipboardText -TimeoutSeconds 10 `
+        -Label 'native delayed rendering fixture' -AllowDelayedRendering `
+        -ReadSequence { [uint32]42 } `
+        -ReadSnapshot { $delayedState.snapshot_reads++; $expectedClipboardSnapshot } `
+        -PollMilliseconds 0
+    if ($delayedState.snapshot_reads -ne 1 -or $delayedResult.SequenceNumber -ne 43) {
+        throw 'Native delayed rendering must still prove a changed stable snapshot.'
+    }
+    $delayedUnchanged = [pscustomobject]@{ snapshot_reads = 0; clock_reads = 0 }
+    Assert-Fails {
+        Wait-AcceptanceClipboardText `
+            -PreviousSequence 42 -ExpectedText $expectedClipboardText -TimeoutSeconds 10 `
+            -Label 'delayed unchanged fixture' -AllowDelayedRendering `
+            -ReadSequence { [uint32]42 } `
+            -ReadSnapshot {
+                $delayedUnchanged.snapshot_reads++
+                [pscustomobject]@{
+                    SequenceNumber = [uint32]42
+                    UnicodeText = $expectedClipboardText
+                    Formats = [uint32[]]@(13)
+                }
+            } `
+            -GetCurrentTime {
+                $value = ([datetime]'2026-01-01T00:00:00Z').AddSeconds(11 * $delayedUnchanged.clock_reads)
+                $delayedUnchanged.clock_reads++
+                $value
+            } `
+            -PollMilliseconds 0
+    } 'did not change the Clipboard sequence before the bounded deadline'
+    if ($delayedUnchanged.snapshot_reads -ne 1) {
+        throw 'Delayed rendering must perform a bounded read without accepting unchanged content.'
+    }
+    Assert-Fails {
+        Wait-AcceptanceClipboardText `
+            -PreviousSequence 42 -ExpectedText $expectedClipboardText -TimeoutSeconds 10 `
+            -Label 'delayed foreign fixture' -AllowDelayedRendering `
+            -ReadSequence { [uint32]42 } `
+            -ReadSnapshot {
+                [pscustomobject]@{
+                    SequenceNumber = [uint32]43
+                    UnicodeText = 'foreign'
+                    Formats = [uint32[]]@(13)
+                }
+            } `
+            -PollMilliseconds 0
+    } 'changed the Clipboard to unexpected text or formats'
+
     $transitionState = [pscustomobject]@{ sequence_reads = 0; snapshot_reads = 0; clock_reads = 0 }
     $transitionResult = Wait-AcceptanceClipboardText `
         -PreviousSequence 42 `
