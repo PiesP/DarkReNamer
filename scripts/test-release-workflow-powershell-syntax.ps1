@@ -715,6 +715,7 @@ $workflows = @(
     Join-Path $repositoryRoot '.github/workflows/profile-planning-matrix.yaml'
     Join-Path $repositoryRoot '.github/workflows/release.yaml'
     Join-Path $repositoryRoot '.github/workflows/promote-release.yaml'
+    Join-Path $repositoryRoot '.github/workflows/vm-acceptance.yaml'
 )
 
 $workflowBlocks = @{}
@@ -735,6 +736,7 @@ $profileBenchmarkPath = Join-Path $repositoryRoot '.github/workflows/profile-ben
 $profilePlanningPath = Join-Path $repositoryRoot '.github/workflows/profile-planning-matrix.yaml'
 $candidatePath = Join-Path $repositoryRoot '.github/workflows/release.yaml'
 $promotionPath = Join-Path $repositoryRoot '.github/workflows/promote-release.yaml'
+$validationPath = Join-Path $repositoryRoot '.github/workflows/vm-acceptance.yaml'
 
 $ciCommands = @(Get-ExecutableCommands -Blocks $workflowBlocks[$ciPath])
 $planningCommands = @(Get-ExecutableCommands -Blocks $workflowBlocks[$planningPath])
@@ -743,6 +745,7 @@ $profileBenchmarkCommands = @(Get-ExecutableCommands -Blocks $workflowBlocks[$pr
 $profilePlanningCommands = @(Get-ExecutableCommands -Blocks $workflowBlocks[$profilePlanningPath])
 $candidateCommands = @(Get-ExecutableCommands -Blocks $workflowBlocks[$candidatePath])
 $promotionCommands = @(Get-ExecutableCommands -Blocks $workflowBlocks[$promotionPath])
+$validationCommands = @(Get-ExecutableCommands -Blocks $workflowBlocks[$validationPath])
 
 Assert-Assignment `
     -Blocks $workflowBlocks[$ciPath] `
@@ -770,6 +773,7 @@ $requiredCommonTests = @(
     'test-release-candidate-metadata-validator.ps1'
     'test-prepare-release-cyclonedx.ps1'
     'test-release-workflow-powershell-syntax.ps1'
+    'test-run-vm-automated-hosted.ps1'
 )
 Assert-CommonTestMembership -Ast $toolingAst -Required $requiredCommonTests
 
@@ -984,6 +988,33 @@ $promotionAttestation = Assert-OneCommand `
         '--source-ref' = 'refs/heads/master'
     }) `
     -Message 'Promotion must verify the original candidate attestation.'
+$promotionVmStatement = Assert-OneCommand `
+    -Commands $promotionCommands `
+    -Name './scripts/run-vm-automated-hosted.ps1' `
+    -RequiredOptions ([ordered]@{
+        '-CandidateRunId' = '${{ inputs.candidate_run_id }}'
+        '-CandidateRunAttempt' = '${{ inputs.candidate_run_attempt }}'
+        '-CandidateArtifactId' = '${{ inputs.candidate_artifact_id }}'
+        '-CandidateSourceSha' = '${{ inputs.candidate_source_sha }}'
+        '-ExpectedExeSha256' = '${{ inputs.expected_exe_sha256 }}'
+        '-IngressReleaseId' = '${{ inputs.ingress_release_id }}'
+        '-IngressAssetId' = '${{ inputs.ingress_asset_id }}'
+        '-IngressArchiveSha256' = '${{ inputs.ingress_archive_sha256 }}'
+        '-IngressArchiveSize' = '${{ inputs.ingress_archive_size }}'
+        '-ValidationRunId' = '${{ inputs.validation_run_id }}'
+        '-ValidationRunAttempt' = '${{ inputs.validation_run_attempt }}'
+    }) `
+    -Message 'Promotion must independently recompute the canonical automated VM statement.'
+$promotionVmAuthority = Assert-OneCommand `
+    -Commands $promotionCommands `
+    -Name 'python' `
+    -BeforeDelimiter @('./scripts/validate-vm-automated-authority.py', 'validation-run') `
+    -RequiredOptions ([ordered]@{
+        '--run-id' = '$env:VALIDATION_RUN_ID'
+        '--run-attempt' = '$env:VALIDATION_RUN_ATTEMPT'
+        '--statement' = 'validation-statement.json'
+    }) `
+    -Message 'Promotion must bind the verified certificate to the exact successful validation attempt.'
 $promotionMasterChecks = @($promotionCommands | Where-Object {
     Test-CommandContract -Record $_ -Name 'git' -BeforeDelimiter @('ls-remote', 'origin', 'refs/heads/master')
 })
@@ -1024,12 +1055,58 @@ Assert-InOrder `
         $promotionMetadata,
         $promotionHandoff,
         $promotionAttestation,
+        $promotionVmStatement,
+        $promotionVmAuthority,
         $promotionMasterChecks[0],
         $promotionAnnotatedTag,
         $promotionLightweightTag,
         $promotionPublish
     ) `
     -Message 'Promotion validation, live source recheck, and publication must remain ordered.'
+
+$validationWrapper = Assert-OneCommand `
+    -Commands $validationCommands `
+    -Name './scripts/run-vm-automated-hosted.ps1' `
+    -RequiredOptions ([ordered]@{
+        '-CandidateRunId' = '${{ inputs.candidate_run_id }}'
+        '-CandidateRunAttempt' = '${{ inputs.candidate_run_attempt }}'
+        '-CandidateArtifactId' = '${{ inputs.candidate_artifact_id }}'
+        '-CandidateSourceSha' = '${{ inputs.candidate_source_sha }}'
+        '-ExpectedExeSha256' = '${{ inputs.expected_exe_sha256 }}'
+        '-IngressReleaseId' = '${{ inputs.ingress_release_id }}'
+        '-IngressAssetId' = '${{ inputs.ingress_asset_id }}'
+        '-IngressArchiveSha256' = '${{ inputs.ingress_archive_sha256 }}'
+        '-IngressArchiveSize' = '${{ inputs.ingress_archive_size }}'
+        '-ValidationRunId' = '${{ github.run_id }}'
+        '-ValidationRunAttempt' = '${{ github.run_attempt }}'
+    }) `
+    -Message 'Hosted validation must derive its statement from exact candidate and ingress pins.'
+$validationCandidateAttestation = Assert-OneCommand `
+    -Commands $validationCommands `
+    -Name 'gh' `
+    -BeforeDelimiter @('attestation', 'verify', 'candidate/DarkReNamer.exe', '--source-ref', 'refs/heads/master', '--deny-self-hosted-runners') `
+    -RequiredOptions ([ordered]@{
+        '--repo' = '$env:GITHUB_REPOSITORY'
+        '--source-digest' = '$env:CANDIDATE_SOURCE_SHA'
+        '--source-ref' = 'refs/heads/master'
+    }) `
+    -Message 'Hosted validation must independently verify original candidate provenance.'
+$validationCheckoutLines = @(Get-ActionLines -Path $validationPath -Name 'actions/checkout')
+$validationDownloadLines = @(Get-ActionLines -Path $validationPath -Name 'actions/download-artifact')
+$validationAttestLines = @(Get-ActionLines -Path $validationPath -Name 'actions/attest')
+if ($validationCheckoutLines.Count -ne 1 -or $validationDownloadLines.Count -ne 1 -or
+    $validationAttestLines.Count -ne 1) {
+    throw 'Hosted validation action line mapping must match the YAML action policy.'
+}
+Assert-LineOrder `
+    -Lines @(
+        $validationCheckoutLines[0],
+        $validationDownloadLines[0],
+        $validationWrapper.line,
+        $validationCandidateAttestation.line,
+        $validationAttestLines[0]
+    ) `
+    -Message 'Hosted validation must download, derive, clean, verify candidate provenance, then attest only the statement.'
 Assert-BinaryGuard `
     -Blocks $workflowBlocks[$promotionPath] `
     -Left '$handoff.workflow_run' `
@@ -1240,9 +1317,10 @@ Assert-OutputContract `
         'Source-complete Windows prerelease.'
         'exact immutable candidate artifact'
         'not rebuilt during promotion'
-        'Desktop acceptance is not complete.'
-        'Real Windows 11 interactive UI coverage'
-        'physical SSD evidence remain external'
+        'automated VM profile passed its authenticated hosted validation gate'
+        'Human visual/accessibility review'
+        'physical-media performance'
+        'physical-power-loss durability'
     ) `
     -Message 'Promotion must write the required source-complete and acceptance disclosure.'
 
