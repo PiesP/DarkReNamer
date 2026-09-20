@@ -962,6 +962,19 @@ function Write-AcceptanceJournalInventoryEvidence {
     New-AcceptancePrivateReference -Path $path -PrivateRoot $PrivateRoot -Boundary $Boundary
 }
 
+function Test-AcceptanceControlTargetId {
+    param(
+        [Parameter(Mandatory)][int] $ControlId,
+        [Parameter(Mandatory)][string] $AutomationId
+    )
+
+    if ($ControlId -gt 0) {
+        return $true
+    }
+    return $ControlId -eq 0 -and
+        @('CommandButton_2', 'CommandLink_1101', 'CommandLink_1201') -ccontains $AutomationId
+}
+
 function Assert-AcceptanceControlTargetRecord {
     param([Parameter(Mandatory)][object] $Target)
 
@@ -977,7 +990,10 @@ function Assert-AcceptanceControlTargetRecord {
         @($expectedNames | Where-Object { $names -cnotcontains $_ }).Count -ne 0 -or
         [int]$Target.pid -le 0 -or [int]$Target.session_id -lt 0 -or
         [int64]$Target.hwnd -le 0 -or [int64]$Target.root_hwnd -le 0 -or
-        [string]$Target.class -cne 'Button' -or [int]$Target.control_id -le 0 -or
+        [string]$Target.class -cne 'Button' -or
+        -not (Test-AcceptanceControlTargetId `
+            -ControlId ([int]$Target.control_id) `
+            -AutomationId ([string]$Target.automation_id)) -or
         [string]::IsNullOrWhiteSpace([string]$Target.automation_id) -or
         [string]$Target.control_type -cne 'ControlType.Button' -or
         $Target.enabled -isnot [bool] -or $Target.visible -isnot [bool] -or
@@ -2226,11 +2242,16 @@ function Get-AcceptanceControlTargetObservation {
     $controlId = [DarkReNamerRecoveryLockNative]::GetDlgCtrlID($handle)
     $automationId = $Element.Current.AutomationId
     $controlType = $Element.Current.ControlType.ProgrammaticName
-    # TaskDialog exposes its logical command through UIA while the owned native
-    # Button can have control ID zero. Ordinary application controls keep their
-    # exact native ID requirement.
-    $taskDialogControl = $ExpectedAutomationId -cmatch '^(CommandButton|CommandLink)_[1-9][0-9]*$'
-    if (($controlId -ne $ExpectedControlId -and -not ($taskDialogControl -and $controlId -eq 0)) -or
+    # TaskDialog exposes these logical commands through UIA while the owned
+    # native Button can have control ID zero. Ordinary application controls and
+    # other command links keep their exact native ID requirement.
+    $zeroTaskDialogId = $controlId -eq 0 -and
+        (Test-AcceptanceControlTargetId `
+            -ControlId $controlId `
+            -AutomationId $ExpectedAutomationId)
+    $rootClass = $Root.Current.ClassName
+    if (($controlId -ne $ExpectedControlId -and -not $zeroTaskDialogId) -or
+        ($zeroTaskDialogId -and $rootClass -cne '#32770') -or
         $automationId -cne $ExpectedAutomationId -or
         $controlType -cne 'ControlType.Button') {
         throw "$Label identity mismatch: control_id=$controlId expected_control_id=$ExpectedControlId automation_id=$automationId expected_automation_id=$ExpectedAutomationId control_type=$controlType."

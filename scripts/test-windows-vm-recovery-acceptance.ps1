@@ -1085,12 +1085,31 @@ try {
         hwnd = 4097
         root_hwnd = 4096
         class = 'Button'
-        control_id = 2
+        control_id = 0
         automation_id = 'CommandButton_2'
         control_type = 'ControlType.Button'
         enabled = $true
         visible = $true
         focused = $true
+    }
+    foreach ($automationId in @('CommandButton_2', 'CommandLink_1101', 'CommandLink_1201')) {
+        if (-not (Test-AcceptanceControlTargetId `
+                -ControlId 0 `
+                -AutomationId $automationId)) {
+            throw "TaskDialog control ID zero was rejected for $automationId."
+        }
+    }
+    foreach ($invalid in @(
+            @{ control_id = 0; automation_id = 'CommandLink_9999' }
+            @{ control_id = 0; automation_id = '32771' }
+            @{ control_id = 0; automation_id = 'commandbutton_2' }
+            @{ control_id = -1; automation_id = 'CommandButton_2' }
+        )) {
+        if (Test-AcceptanceControlTargetId `
+                -ControlId $invalid.control_id `
+                -AutomationId $invalid.automation_id) {
+            throw "Invalid control target ID was accepted: $($invalid | ConvertTo-Json -Compress)"
+        }
     }
     $actionReference = Write-AcceptanceActionEvidence `
         -PrivateRoot $privateRoot -Leaf 'action-test' `
@@ -1102,10 +1121,52 @@ try {
     if ([string]::Join(',', @($actionRaw.PSObject.Properties.Name | Sort-Object)) -cne
         'action,boundary,completed_utc_ticks,dispatch_method,observed_utc_ticks,phase,schema_version,target' -or
         $actionRaw.dispatch_method -cne 'uia-invoke' -or
-        $actionRaw.target.control_id -ne 2 -or
+        $actionRaw.target.control_id -ne 0 -or
         $actionRaw.target.focused -ne $true -or
         $actionReference.boundary -cne 'startup-default-cancel-action') {
         throw 'Raw action evidence omitted its exact target, timestamps, or typed reference.'
+    }
+    $applyConfirmationTarget = [ordered]@{}
+    foreach ($property in $actionTarget.GetEnumerator()) {
+        $applyConfirmationTarget[$property.Key] = $property.Value
+    }
+    $applyConfirmationTarget.automation_id = 'CommandLink_1101'
+    Assert-AcceptanceControlTargetRecord -Target $applyConfirmationTarget
+    $discardConfirmationTarget = [ordered]@{}
+    foreach ($property in $actionTarget.GetEnumerator()) {
+        $discardConfirmationTarget[$property.Key] = $property.Value
+    }
+    $discardConfirmationTarget.automation_id = 'CommandLink_1201'
+    $discardConfirmationTarget.focused = $false
+    $discardReference = Write-AcceptanceActionEvidence `
+        -PrivateRoot $privateRoot -Leaf 'discard-confirm-action-test' `
+        -Boundary 'intent-discard-confirm-action' -Phase 'intent-discard-confirm' `
+        -Action 'confirm-candidate-discard' -Target $discardConfirmationTarget `
+        -ObservedUtcTicks '638940000000000012' -CompletedUtcTicks '638940000000000013'
+    $discardRaw = Get-Content `
+        -LiteralPath (Join-Path $privateRoot 'discard-confirm-action-test.json') -Raw |
+        ConvertFrom-Json
+    if ($discardRaw.target.control_id -ne 0 -or
+        $discardRaw.target.automation_id -cne 'CommandLink_1201' -or
+        $discardRaw.action -cne 'confirm-candidate-discard' -or
+        $discardReference.boundary -cne 'intent-discard-confirm-action') {
+        throw 'Intent-only discard confirmation did not retain its exact zero-ID target.'
+    }
+    foreach ($invalid in @(
+            @{ control_id = 0; automation_id = 'CommandLink_9999' }
+            @{ control_id = 0; automation_id = '32771' }
+            @{ control_id = 0; automation_id = 'commandbutton_2' }
+            @{ control_id = -1; automation_id = 'CommandButton_2' }
+        )) {
+        $invalidTarget = [ordered]@{}
+        foreach ($property in $actionTarget.GetEnumerator()) {
+            $invalidTarget[$property.Key] = $property.Value
+        }
+        $invalidTarget.control_id = $invalid.control_id
+        $invalidTarget.automation_id = $invalid.automation_id
+        Assert-Fails {
+            Assert-AcceptanceControlTargetRecord -Target $invalidTarget
+        } 'incomplete or invalid'
     }
     Assert-Fails {
         Write-AcceptanceActionEvidence `
@@ -1172,7 +1233,7 @@ try {
     }
 
     $indexReference = Write-AcceptancePrivateIndex -PrivateRoot $privateRoot
-    if ($indexReference.file_count -ne 6 -or
+    if ($indexReference.file_count -ne 7 -or
         $indexReference.bytes -le 0 -or
         $indexReference.sha256 -cnotmatch '^[0-9a-f]{64}$') {
         throw 'The private index does not bind every pre-index raw file.'
