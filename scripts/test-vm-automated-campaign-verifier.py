@@ -13,10 +13,10 @@ import tempfile
 import unittest
 import zlib
 
-from vm_automated_binding import COMPONENTS, Candidate
-from vm_automated_campaign import execution_slots, new_plan
-from vm_automated_evidence import EvidenceError, ExtractedEvidence, FileReference
-from vm_automated_verifier import EvidenceReader, verify_complete_campaign
+from darkrenamer_tooling.campaign.planning import execution_slots, new_plan
+from darkrenamer_tooling.campaign.verifier import EvidenceReader, verify_complete_campaign
+from darkrenamer_tooling.contracts.binding import COMPONENTS, Candidate
+from darkrenamer_tooling.evidence.archive import EvidenceError, ExtractedEvidence, FileReference
 
 
 SOURCE_SHA = "a" * 40

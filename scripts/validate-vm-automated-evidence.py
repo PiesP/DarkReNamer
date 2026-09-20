@@ -13,16 +13,16 @@ from pathlib import Path
 import subprocess
 import sys
 
-from vm_automated_binding import Candidate, decimal, sha, trusted_component_hashes
-from vm_automated_evidence import (
+from darkrenamer_tooling.campaign.verifier import (
+    EvidenceReader, canonical_digest, require, verify_authenticated_gate_metadata,
+    verify_complete_campaign,
+)
+from darkrenamer_tooling.contracts.binding import Candidate, decimal, sha, trusted_component_hashes
+from darkrenamer_tooling.evidence.archive import (
     EvidenceError, FileReference, MAX_ARCHIVE_BYTES, MAX_MEMBER_BYTES, MAX_JSON_BYTES,
     _open_absolute_regular,
     load_bounded_json, open_indexed_evidence_archive, parse_bounded_json_bytes,
     read_referenced_file, require_exact_keys, require_int, serialize_canonical_statement,
-)
-from vm_automated_verifier import (
-    EvidenceReader, canonical_digest, require, verify_authenticated_gate_metadata,
-    verify_complete_campaign,
 )
 
 

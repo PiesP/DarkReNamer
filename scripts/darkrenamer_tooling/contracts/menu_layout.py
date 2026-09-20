@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import hashlib
 
-from vm_automated_evidence import EvidenceError, require_exact_keys, require_int
-from vm_automated_platform import contains, rectangle
-from vm_automated_state import Identity, clean_journal_inventory, leaf_name
+from darkrenamer_tooling.contracts.platform import contains, rectangle
+from darkrenamer_tooling.contracts.state import Identity, clean_journal_inventory, leaf_name
+from darkrenamer_tooling.evidence.archive import EvidenceError, require_exact_keys, require_int
 
 
 RAIL_IDS = {

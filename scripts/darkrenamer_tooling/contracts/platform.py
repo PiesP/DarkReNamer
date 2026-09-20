@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import re
 
-from vm_automated_evidence import EvidenceError, require_exact_keys, require_int
-from vm_automated_state import Identity, clean_journal_inventory
+from darkrenamer_tooling.contracts.state import Identity, clean_journal_inventory
+from darkrenamer_tooling.evidence.archive import EvidenceError, require_exact_keys, require_int
 
 
 def require(condition: bool, message: str) -> None:

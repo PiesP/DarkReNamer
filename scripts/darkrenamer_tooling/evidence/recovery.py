@@ -9,12 +9,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hmac
 
-from vm_automated_evidence import EvidenceError
-from vm_automated_journal import (
+from darkrenamer_tooling.contracts.state import (
+    Identity, fixture_inventory, interrupted_inventory, restored_inventory,
+)
+from darkrenamer_tooling.evidence.archive import EvidenceError
+from darkrenamer_tooling.evidence.journal import (
     Direction, JournalInspection, RecordKind, ReplayStatus, parse_journal_bytes,
     require_vm_automated_direct_profile, intent_frame_is_byte_identical,
 )
-from vm_automated_state import Identity, fixture_inventory, interrupted_inventory, restored_inventory
 
 
 def require(condition: bool, message: str) -> None:

@@ -4,19 +4,21 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path, PurePosixPath
-import importlib.util
+from pathlib import PurePosixPath
 import re
 
-from vm_automated_binding import Candidate, verify_result_binding
-from vm_automated_campaign import verify_process_lifecycle
-from vm_automated_evidence import (
+from darkrenamer_tooling.campaign.planning import verify_process_lifecycle
+from darkrenamer_tooling.contracts.binding import Candidate, verify_result_binding
+from darkrenamer_tooling.contracts.menu_layout import verify_native_menu_layout
+from darkrenamer_tooling.contracts.platform import (
+    contains, rectangle, verify_cleanup, verify_environment, verify_keyboard_events,
+)
+from darkrenamer_tooling.contracts.state import Identity, core_rename_checkpoints
+from darkrenamer_tooling.evidence.archive import (
     EvidenceError, ExtractedEvidence, MAX_JSON_BYTES, MAX_MEMBER_BYTES,
     parse_bounded_json_bytes, read_referenced_file, require_exact_keys, require_int,
 )
-from vm_automated_platform import contains, rectangle, verify_cleanup, verify_environment, verify_keyboard_events
-from vm_automated_menu_layout import verify_native_menu_layout
-from vm_automated_state import Identity, core_rename_checkpoints
+from darkrenamer_tooling.evidence.png import decode_png
 
 
 def require(condition: bool, message: str) -> None:
@@ -111,7 +113,7 @@ def verify_authenticated_gate_metadata(value: object, candidate: Candidate) -> d
     require_int(artifact["size"], 1, 512 * 1024 * 1024, "Candidate artifact size")
     run = require_exact_keys(artifact["workflow_run"], {"id", "head_sha"}, "Artifact source")
     require_int(run["id"], int(candidate.workflow_run), int(candidate.workflow_run), "Artifact run")
-    from vm_automated_binding import sha
+    from darkrenamer_tooling.contracts.binding import sha
     artifact_digest = sha(source["artifact_sha256"], 64)
     require(artifact["name"] == f"DarkReNamer-dry-run-{candidate.workflow_run}-{candidate.run_attempt}-windows" and
             artifact["expired"] is False and artifact["digest"] == "sha256:" + artifact_digest and
@@ -194,11 +196,6 @@ def verify_layout_raster(reader: EvidenceReader, document: str, layout: dict, en
     require(type(images) is list and 0 < len(images) <= 128, "Layout raster inventory is unavailable.")
     expected = environment["target_display"]["window_rect"]
     main_size = (expected["right"] - expected["left"], expected["bottom"] - expected["top"])
-    decoder_path = Path(__file__).with_name("validate-gui-regression-evidence.py")
-    spec = importlib.util.spec_from_file_location("trusted_vm_png_decoder", decoder_path)
-    require(spec is not None and spec.loader is not None, "Trusted PNG decoder is unavailable.")
-    decoder = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(decoder)
     matching = []
     seen = set()
     for image in images:
@@ -214,7 +211,7 @@ def verify_layout_raster(reader: EvidenceReader, document: str, layout: dict, en
     # One complete workbench raster is required per fixed cell. Other captures
     # remain individually hash-bound artifacts, without claiming human review.
     path, width, height = matching[0]
-    actual_width, actual_height, pixels = decoder.decode_png(reader.bytes(path), "workbench raster")
+    actual_width, actual_height, pixels = decode_png(reader.bytes(path), "workbench raster")
     require((actual_width, actual_height) == (width, height) and
             pixels != pixels[:4] * (width * height), "Workbench raster is empty, uniform or dimensionally inconsistent.")
 
@@ -371,7 +368,7 @@ FOCUS_GROUPS = [None, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 0, 1, 1, 1, 2, 2, 2, 3, 3]
 
 
 def verify_focus_reachability(value: object, environment: dict) -> None:
-    from vm_automated_state import fixture_inventory, clean_journal_inventory
+    from darkrenamer_tooling.contracts.state import clean_journal_inventory, fixture_inventory
     row = require_exact_keys(value, {"schema_version", "input_method", "initial", "transitions", "final",
                                      "controls", "state_before", "state_after"}, "Keyboard reachability")
     require_int(row["schema_version"], 1, 1, "Reachability schema")
@@ -533,9 +530,9 @@ def verify_execution_freshness(reader: EvidenceReader, result: dict, transport: 
 
 def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_sha256: str,
                               candidate: Candidate, component_hashes: dict[str, str]) -> dict:
-    from vm_automated_binding import verify_candidate_bundle
-    from vm_automated_campaign import validate_ledger, execution_slots
-    from vm_automated_recovery_profile import verify_recovery_execution
+    from darkrenamer_tooling.campaign.planning import execution_slots, validate_ledger
+    from darkrenamer_tooling.campaign.recovery import verify_recovery_execution
+    from darkrenamer_tooling.contracts.binding import verify_candidate_bundle
 
     campaign, plan = reader.json("campaign.json"), reader.json("plan.json")
     attempts = validate_ledger(plan, campaign, profile=profile, profile_sha256=profile_sha256,

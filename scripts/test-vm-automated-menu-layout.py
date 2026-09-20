@@ -5,9 +5,11 @@ from copy import deepcopy
 import hashlib
 import unittest
 
-from vm_automated_evidence import EvidenceError
-from vm_automated_menu_layout import (COMMAND_PATHS, ENABLED_COMMANDS, _FIXTURE_DIRECTORIES,
-                                      _FIXTURE_FILES, verify_native_menu_layout)
+from darkrenamer_tooling.contracts.menu_layout import (
+    COMMAND_PATHS, ENABLED_COMMANDS, _FIXTURE_DIRECTORIES, _FIXTURE_FILES,
+    verify_native_menu_layout,
+)
+from darkrenamer_tooling.evidence.archive import EvidenceError
 
 
 PID, SESSION, MAIN = 1234, 2, 5678

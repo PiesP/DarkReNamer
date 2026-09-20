@@ -4,13 +4,13 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import io
 import json
 import os
 from pathlib import Path
 import stat
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -19,13 +19,7 @@ import warnings
 import zlib
 from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile, ZipInfo
 
-
-SCRIPT = Path(__file__).with_name("vm_automated_evidence.py")
-SPEC = importlib.util.spec_from_file_location("vm_automated_evidence", SCRIPT)
-assert SPEC is not None and SPEC.loader is not None
-evidence = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = evidence
-SPEC.loader.exec_module(evidence)
+from darkrenamer_tooling.evidence import archive as evidence
 
 
 def file_reference(data: bytes) -> object:
@@ -552,6 +546,58 @@ class IndexedArchiveTests(unittest.TestCase):
                 with self.extract():
                     self.fail("Forged count hid oversized directory")
             constructor.assert_not_called()
+
+
+class ImportSafetyTests(unittest.TestCase):
+    def test_package_imports_do_not_mutate_files_or_start_processes(self) -> None:
+        modules = (
+            "darkrenamer_tooling.campaign.planning",
+            "darkrenamer_tooling.campaign.recovery",
+            "darkrenamer_tooling.campaign.verifier",
+            "darkrenamer_tooling.contracts.binding",
+            "darkrenamer_tooling.contracts.menu_layout",
+            "darkrenamer_tooling.contracts.platform",
+            "darkrenamer_tooling.contracts.state",
+            "darkrenamer_tooling.evidence.archive",
+            "darkrenamer_tooling.evidence.errors",
+            "darkrenamer_tooling.evidence.journal",
+            "darkrenamer_tooling.evidence.png",
+            "darkrenamer_tooling.evidence.recovery",
+        )
+        program = """
+import importlib
+import os
+import sys
+
+sys.dont_write_bytecode = True
+
+def reject_mutation(event, args):
+    if event == "open":
+        mode = args[1]
+        flags = args[2]
+        if isinstance(mode, str) and any(value in mode for value in "wax+"):
+            raise RuntimeError("file mutation during import: " + mode)
+        if isinstance(flags, int) and flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND):
+            raise RuntimeError("file mutation during import")
+    if event in {
+        "os.chdir", "os.link", "os.mkdir", "os.posix_spawn", "os.putenv", "os.remove",
+        "os.rename", "os.rmdir", "os.symlink", "os.system", "os.unsetenv",
+        "shutil.copyfile", "shutil.copymode", "shutil.copystat", "shutil.move",
+        "socket.connect", "subprocess.Popen",
+    }:
+        raise RuntimeError("host side effect during import: " + event)
+
+sys.addaudithook(reject_mutation)
+for module in sys.argv[1:]:
+    importlib.import_module(module)
+"""
+        subprocess.run(
+            [sys.executable, "-B", "-c", program, *modules],
+            cwd=Path(__file__).parent,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
 
 if __name__ == "__main__":
