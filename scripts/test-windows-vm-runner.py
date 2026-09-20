@@ -1,7 +1,6 @@
 """Contract tests for the host VM bundle and returned native evidence."""
 from contextlib import redirect_stderr
 import hashlib
-import importlib.util
 import io
 import json
 import os
@@ -13,9 +12,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-spec = importlib.util.spec_from_file_location('windows_vm', Path(__file__).with_name('test-windows-vm.py'))
-vm = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(vm)
+from darkrenamer_tooling.vm import launcher as vm
 
 
 class VmRunnerTests(unittest.TestCase):

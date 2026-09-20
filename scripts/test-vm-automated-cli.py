@@ -17,6 +17,7 @@ from unittest.mock import patch
 from zipfile import ZIP_STORED, ZipFile
 
 from darkrenamer_tooling.contracts.binding import COMPONENTS, Candidate
+from darkrenamer_tooling.evidence import cli
 from darkrenamer_tooling.evidence.archive import EvidenceError, parse_canonical_statement_bytes
 
 
@@ -28,7 +29,6 @@ def load_script(filename: str, name: str):
     return module
 
 
-cli = load_script("validate-vm-automated-evidence.py", "campaign_cli_under_test")
 campaign_test = load_script(
     "test-vm-automated-campaign-verifier.py", "complete_campaign_fixture_for_cli")
 
@@ -77,15 +77,23 @@ class CliFixture:
             profile_sha256=hashlib.sha256(self.profile_bytes).hexdigest(),
             candidate=self.candidate, components=self.components,
         )
+        self._add_tooling_evidence()
         self.archive = self.scratch / "evidence.zip"
         self.write_archive(self.archive)
         self.gate_metadata = root / "gate-metadata.json"
         self.gate_metadata.write_bytes(compact(self._gate_facts()))
 
     def _create_trusted_checkout(self) -> dict[str, bytes]:
+        repository = Path(__file__).resolve().parents[1]
         (self.trusted_root / "config").mkdir()
         (self.trusted_root / "scripts").mkdir()
         (self.trusted_root / "config/vm-automated-v1.json").write_bytes(self.profile_bytes)
+        tooling_manifest = (repository / "config/tooling-bundle.json").read_bytes()
+        (self.trusted_root / "config/tooling-bundle.json").write_bytes(tooling_manifest)
+        for entry in json.loads(tooling_manifest)["modules"]:
+            destination = self.trusted_root / entry["source"]
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes((repository / entry["source"]).read_bytes())
         component_bytes = {}
         for role, filename in COMPONENTS.items():
             data = ("trusted component " + role + "\n").encode()
@@ -102,6 +110,39 @@ class CliFixture:
         subprocess.run(["git", "commit", "-q", "--no-gpg-sign", "-m", "test fixture"],
                        cwd=self.trusted_root, check=True)
         return component_bytes
+
+    def _add_tooling_evidence(self) -> None:
+        manifest = (self.trusted_root / "config/tooling-bundle.json").read_bytes()
+        parsed = json.loads(manifest)
+        by_role = {entry["role"]: entry for entry in parsed["modules"]}
+        selected = set()
+
+        def select(role: str) -> None:
+            if role in selected:
+                return
+            for dependency in by_role[role]["dependencies"]:
+                select(dependency)
+            selected.add(role)
+
+        select("vm-launcher")
+        retained = {"tooling-bundle.json": manifest}
+        for entry in parsed["modules"]:
+            if entry["role"] in selected:
+                retained[entry["bundle"]] = (self.trusted_root / entry["source"]).read_bytes()
+        prefixes = {
+            str(Path(attempt["bundle"]).parent).replace("\\", "/") + "/"
+            for attempt in self.campaign.campaign["attempts"]
+        } | {"backend/"}
+        for prefix in prefixes:
+            for name, data in retained.items():
+                reference = self.campaign.add_bytes(prefix + name, data)
+                if prefix == "backend/":
+                    self.campaign.campaign["backend"]["files"].append({
+                        "file": prefix + name,
+                        "sha256": reference.sha256,
+                        "size": reference.size,
+                    })
+        self.campaign.add_json("campaign.json", self.campaign.campaign)
 
     def _gate_facts(self) -> dict:
         def run(identifier: int, path: str, event: str) -> dict:
@@ -136,12 +177,17 @@ class CliFixture:
             },
         }
 
-    def write_archive(self, destination: Path, *, campaign: dict | None = None) -> None:
-        overrides = {}
+    def write_archive(self, destination: Path, *, campaign: dict | None = None,
+                      replacements: dict[str, bytes] | None = None,
+                      omitted: set[str] | None = None) -> None:
+        overrides = dict(replacements or {})
+        omitted = set(omitted or ())
         if campaign is not None:
             overrides["campaign.json"] = compact(campaign)
         pins = {}
         for path, reference in self.campaign.files.items():
+            if path in omitted:
+                continue
             data = overrides.get(path)
             pins[path] = {
                 "sha256": (hashlib.sha256(data).hexdigest() if data is not None else reference.sha256),
@@ -151,6 +197,8 @@ class CliFixture:
         with ZipFile(destination, "w", compression=ZIP_STORED, allowZip64=False) as archive:
             archive.writestr("evidence-index.json", index)
             for path in self.campaign.files:
+                if path in omitted:
+                    continue
                 archive.writestr(path, overrides.get(path, (self.raw_root / path).read_bytes()))
 
     def args(self, archive: Path | None = None, output: Path | None = None) -> Namespace:
@@ -183,7 +231,7 @@ class VmAutomatedCliTests(unittest.TestCase):
         for name, value in vars(args).items():
             argv.extend(["--" + name.replace("_", "-"), str(value)])
         with patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            return cli.main()
+            return cli.main(Path(__file__).resolve().parent.parent)
 
     def test_validate_and_main_emit_one_canonical_path_free_statement(self):
         direct = cli.validate(self.fixture.args())
@@ -219,6 +267,19 @@ class VmAutomatedCliTests(unittest.TestCase):
             setattr(args, field, value)
             with self.subTest(field=field), self.assertRaises(EvidenceError):
                 cli.validate(args)
+
+    def test_omitted_or_tampered_retained_tooling_fails_source_binding(self):
+        module = next(
+            path for path in self.fixture.campaign.files
+            if path.endswith("/tooling-vm-launcher.py")
+        )
+        for mode in ("omitted", "tampered"):
+            archive = self.fixture.scratch / (mode + "-tooling.zip")
+            options = ({"omitted": {module}} if mode == "omitted" else
+                       {"replacements": {module: b"TOOLING_EXECUTED = True\n"}})
+            self.fixture.write_archive(archive, **options)
+            with self.subTest(mode=mode), self.assertRaises(EvidenceError):
+                cli.validate(self.fixture.args(archive=archive))
 
     def test_incomplete_campaign_fails_and_main_removes_private_extraction(self):
         incomplete = deepcopy(self.fixture.campaign.campaign)

@@ -5,24 +5,18 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 from pathlib import Path
 import subprocess
-import sys
 import tempfile
 import types
 import unittest
 from unittest.mock import patch
 from zipfile import ZIP_STORED, ZipFile
 
+from darkrenamer_tooling.campaign import runner
 
-SCRIPT = Path(__file__).with_name("run-vm-automated-campaign.py")
-SPEC = importlib.util.spec_from_file_location("run_vm_automated_campaign", SCRIPT)
-assert SPEC is not None and SPEC.loader is not None
-runner = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = runner
-SPEC.loader.exec_module(runner)
+REPOSITORY = Path(__file__).resolve().parent.parent
 
 
 CANDIDATE_SHA = "2" * 40
@@ -71,7 +65,7 @@ class CampaignRunnerTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.repo = SCRIPT.parent.parent
+        self.repo = REPOSITORY
         self.output = self.root / "campaign"
         self.archive = self.root / "campaign.zip"
         self.connection = self.root / "connection.json"
@@ -196,10 +190,12 @@ class CampaignRunnerTests(unittest.TestCase):
             return CANDIDATE_SHA if Path(path) == self.source else HARNESS_SHA
         FakeGuiRunner.plan_path = self.output / "plan.json"
         try:
-            with patch.object(runner, "load_common_modules", return_value=(FakeNativeRunner, FakeGuiRunner)), \
+            with patch.object(runner, "launcher", FakeNativeRunner), \
+                    patch.object(runner, "gui", FakeGuiRunner), \
+                    patch.object(runner, "staged_tooling_files", return_value=[]), \
                     patch.object(runner, "clean_source_sha", side_effect=source_sha), \
                     patch.object(runner.subprocess, "run", side_effect=command):
-                return runner.execute(args)
+                return runner.execute(args, repo=self.repo)
         finally:
             FakeGuiRunner.plan_path = None
 
@@ -303,14 +299,15 @@ class CampaignRunnerTests(unittest.TestCase):
         def source_sha(path):
             return CANDIDATE_SHA if Path(path) == self.source else "1" * 40
 
-        with patch.object(
-                runner, "load_common_modules", return_value=(FakeNativeRunner, FakeGuiRunner)), \
+        with patch.object(runner, "launcher", FakeNativeRunner), \
+                patch.object(runner, "gui", FakeGuiRunner), \
+                patch.object(runner, "staged_tooling_files", return_value=[]), \
                 patch.object(runner, "clean_source_sha", side_effect=source_sha), \
                 patch.object(FakeGuiRunner, "load_connection_profile",
                              side_effect=AssertionError("connection input reached")), \
                 patch.object(runner.subprocess, "run", side_effect=command):
             with self.assertRaisesRegex(ValueError, "harness source"):
-                runner.execute(args)
+                runner.execute(args, repo=self.repo)
         self.assertFalse(self.output.exists())
         self.assertFalse(self.archive.exists())
         self.assertEqual(calls, [])

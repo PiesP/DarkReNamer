@@ -3,14 +3,11 @@
 
 import copy
 import hashlib
-import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
 
-SPEC = importlib.util.spec_from_file_location('authority', Path(__file__).with_name('validate-vm-automated-authority.py'))
-authority = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(authority)
+from darkrenamer_tooling.contracts import authority
 REPO = 'PiesP/DarkReNamer'
 SOURCE = 'a' * 40
 DIGEST = 'b' * 64

@@ -529,10 +529,12 @@ def verify_execution_freshness(reader: EvidenceReader, result: dict, transport: 
         seen.add(identity)
 
 def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_sha256: str,
-                              candidate: Candidate, component_hashes: dict[str, str]) -> dict:
+                              candidate: Candidate, component_hashes: dict[str, str],
+                              tooling_inventory: dict[str, object] | None = None) -> dict:
     from darkrenamer_tooling.campaign.planning import execution_slots, validate_ledger
     from darkrenamer_tooling.campaign.recovery import verify_recovery_execution
     from darkrenamer_tooling.contracts.binding import verify_candidate_bundle
+    from darkrenamer_tooling.contracts.tooling import verify_retained_tooling
 
     campaign, plan = reader.json("campaign.json"), reader.json("plan.json")
     attempts = validate_ledger(plan, campaign, profile=profile, profile_sha256=profile_sha256,
@@ -543,6 +545,7 @@ def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_s
     process_identities: set[tuple] = set()
     vm_ids: set[str] = set()
     execution_digests = []
+    tooling_digests = []
     for attempt, slot in zip(attempts, execution_slots(profile), strict=True):
         identifier = slot["targets"][0]
         target = dict(profile["representative_core_environment"])
@@ -553,6 +556,9 @@ def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_s
         require(type(result) is dict and type(transport) is dict, "Execution result and transport must be objects.")
         verify_candidate_bundle(bundle, expected=candidate, harness_sha=candidate.source_sha,
                                 component_hashes=component_hashes, release=True)
+        if tooling_inventory is not None:
+            prefix = str(PurePosixPath(attempt["bundle"]).parent) + "/"
+            tooling_digests.append(verify_retained_tooling(reader, prefix, tooling_inventory))
         require(result.get("failure_reason") is None, "Observer reported an incomplete execution.")
         verify_desktop_lease(reader.json(attempt["desktop_lease"]), target, leases)
         if identifier == "core-uia-flow":
@@ -617,6 +623,10 @@ def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_s
     for path in (backend[field] for field in ("bundle", "result", "transport")):
         require(type(path) is str and path.startswith("backend/"), "Backend reference is outside its owned evidence root.")
     backend_bundle = reader.json(backend["bundle"])
+    if tooling_inventory is not None:
+        tooling_digests.append(verify_retained_tooling(reader, "backend/", tooling_inventory))
+        require(len(set(tooling_digests)) == 1,
+                "Retained tooling closures differ across campaign evidence.")
     require(backend_bundle.get("runner", {}).get("sha256") == component_hashes["runner"],
             "Backend runner differs from the trusted source.")
     backend_transport = reader.json(backend["transport"])
@@ -628,4 +638,5 @@ def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_s
             "profile_evidence_sha256": canonical_digest({"profile_sha256": profile_sha256,
                 "plan_sha256": reader.evidence.files["plan.json"].sha256,
                 "campaign_sha256": reader.evidence.files["campaign.json"].sha256,
-                "executions": execution_digests})}
+                "executions": execution_digests,
+                "tooling_sha256": tooling_digests[0] if tooling_digests else None})}

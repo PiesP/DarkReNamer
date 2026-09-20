@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 from pathlib import Path
 import struct
@@ -13,13 +12,9 @@ import tempfile
 import unittest
 import zlib
 
+from darkrenamer_tooling.evidence import gui as evidence
 
 SCRIPT = Path(__file__).with_name("validate-gui-regression-evidence.py")
-SPEC = importlib.util.spec_from_file_location("gui_evidence", SCRIPT)
-assert SPEC is not None and SPEC.loader is not None
-evidence = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(evidence)
-
 SOURCE = "a" * 40
 TREE = "b" * 40
 
