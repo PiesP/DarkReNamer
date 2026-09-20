@@ -1258,6 +1258,17 @@ try {
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
             $node.Name -ceq 'Invoke-VmAutomatedMenuKey'
     }, $true)
+    $menuHighlightFunction = $acceptanceAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Get-VmAutomatedMenuHighlight'
+    }, $true)
+    $closedMenuBinding = [scriptblock]::Create(
+        $menuHighlightFunction.Body.ParamBlock.Extent.Text + "`n" + '$Popups.Count'
+    )
+    if ((& $closedMenuBinding -MainWindowHandle ([IntPtr]1) -OpenMenuPaths @() -Popups @()) -ne 0) {
+        throw 'Escape must allow an empty popup inventory at the menu highlight boundary.'
+    }
     $reservedInputParameters = @(
         @($menuKeyFunction, $menuReachabilityFunction) | ForEach-Object {
             $_.FindAll({

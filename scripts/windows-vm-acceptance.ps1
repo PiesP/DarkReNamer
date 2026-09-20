@@ -2203,7 +2203,7 @@ function Get-VmAutomatedMenuHighlight {
     param(
         [Parameter(Mandatory)][IntPtr] $MainWindowHandle,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $OpenMenuPaths,
-        [Parameter(Mandatory)][object[]] $Popups
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Popups
     )
 
     $native = @([DarkReNamerVmAcceptanceNative]::ReadHighlightedNativeMenuItems($MainWindowHandle))
