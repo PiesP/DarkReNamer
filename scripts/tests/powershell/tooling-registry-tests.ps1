@@ -1,8 +1,12 @@
+. (Join-Path $PSScriptRoot '../support/paths.ps1')
+$toolingTestPaths = Get-ToolingTestPaths
+$toolingScriptsRoot = $toolingTestPaths.ScriptsRoot
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$suitePath = Join-Path $PSScriptRoot 'test-tooling.ps1'
+$repositoryRoot = (Resolve-Path (Join-Path $toolingScriptsRoot '..')).Path
+$suitePath = Join-Path $toolingScriptsRoot 'test-tooling.ps1'
 $actualPlatform = if ($IsWindows) { 'Windows' } else { 'Ubuntu' }
 $otherPlatform = if ($IsWindows) { 'Ubuntu' } else { 'Windows' }
 
@@ -42,9 +46,9 @@ function New-RegistryFixture {
     $config = Join-Path $root 'config'
     $null = New-Item -ItemType Directory -Path $scripts,$config
     Copy-Item -LiteralPath $suitePath -Destination (Join-Path $scripts 'test-tooling.ps1')
-    Set-Content -LiteralPath (Join-Path $scripts 'test-visual-evidence-fixture.ps1') -Value '# fixture helper'
-    $null = New-Item -ItemType Directory -Path (Join-Path $scripts 'test-support')
-    Set-Content -LiteralPath (Join-Path $scripts 'test-support/windows-binary-fixture.ps1') -Value '# support fixture'
+    $null = New-Item -ItemType Directory -Path (Join-Path $scripts 'tests/support')
+    Set-Content -LiteralPath (Join-Path $scripts 'tests/support/visual-evidence-fixture.ps1') -Value '# fixture helper'
+    Set-Content -LiteralPath (Join-Path $scripts 'tests/support/windows-binary-fixture.ps1') -Value '# support fixture'
     Set-Content -LiteralPath (Join-Path $scripts 'test-windows-vm.py') -Value '# VM CLI'
     foreach ($item in $Files.GetEnumerator()) {
         $path = Join-Path $root $item.Key
@@ -58,8 +62,8 @@ function New-RegistryFixture {
             patterns = @('test-*.ps1', 'test-*.py')
             exclusions = @(
                 [ordered]@{ path = 'scripts/test-tooling.ps1'; reason = 'suite-entrypoint' }
-                [ordered]@{ path = 'scripts/test-visual-evidence-fixture.ps1'; reason = 'fixture-helper' }
-                [ordered]@{ path = 'scripts/test-support/windows-binary-fixture.ps1'; reason = 'fixture-helper' }
+                [ordered]@{ path = 'scripts/tests/support/visual-evidence-fixture.ps1'; reason = 'fixture-helper' }
+                [ordered]@{ path = 'scripts/tests/support/windows-binary-fixture.ps1'; reason = 'fixture-helper' }
                 [ordered]@{ path = 'scripts/test-windows-vm.py'; reason = 'vm-cli' }
             )
         }
@@ -126,21 +130,21 @@ $registry = Get-Content -LiteralPath (Join-Path $repositoryRoot 'config/tooling-
 $powerShellPaths = @($registry.tests | Where-Object runner -ceq 'PowerShell' | ForEach-Object path)
 $pythonPaths = @($registry.tests | Where-Object runner -ceq 'Python' | ForEach-Object path)
 $expectedPowerShell = @(
-    'scripts/test-release-handoff-validator.ps1'
+    'scripts/tests/powershell/test-release-handoff-validator.ps1'
     'scripts/test-windows-vm-guest.ps1'
     'scripts/test-windows-vm-acceptance.ps1'
     'scripts/test-windows-vm-recovery-acceptance.ps1'
-    'scripts/test-toolchain-consistency.ps1'
-    'scripts/test-measure-windows-binary.ps1'
-    'scripts/test-get-git-blob-sha256.ps1'
-    'scripts/test-prepare-release-cyclonedx.ps1'
-    'scripts/test-release-workflow-powershell-syntax.ps1'
-    'scripts/test-run-vm-automated-hosted.ps1'
-    'scripts/test-release-candidate-metadata-validator.ps1'
-    'scripts/test-windows-acceptance-evidence.ps1'
-    'scripts/test-new-windows-acceptance-draft.ps1'
-    'scripts/test-add-windows-acceptance-benchmark.ps1'
-    'scripts/test-release-acceptance-validator.ps1'
+    'scripts/tests/powershell/test-toolchain-consistency.ps1'
+    'scripts/tests/powershell/test-measure-windows-binary.ps1'
+    'scripts/tests/powershell/test-get-git-blob-sha256.ps1'
+    'scripts/tests/powershell/test-prepare-release-cyclonedx.ps1'
+    'scripts/tests/powershell/test-release-workflow-powershell-syntax.ps1'
+    'scripts/tests/powershell/test-run-vm-automated-hosted.ps1'
+    'scripts/tests/powershell/test-release-candidate-metadata-validator.ps1'
+    'scripts/tests/powershell/test-windows-acceptance-evidence.ps1'
+    'scripts/tests/powershell/test-new-windows-acceptance-draft.ps1'
+    'scripts/tests/powershell/test-add-windows-acceptance-benchmark.ps1'
+    'scripts/tests/powershell/test-release-acceptance-validator.ps1'
 )
 $expectedPython = @(
     'scripts/test-windows-vm-runner.py'
@@ -165,7 +169,7 @@ foreach ($expected in $expectedPowerShell) {
     $matches = @($registry.tests | Where-Object { $_.path -ceq $expected })
     Assert-True ($matches.Count -eq 1) `
         "PowerShell registry mapping is missing or duplicated: $expected"
-    $expectedPlatforms = if ($expected -ceq 'scripts/test-release-handoff-validator.ps1') {
+    $expectedPlatforms = if ($expected -ceq 'scripts/tests/powershell/test-release-handoff-validator.ps1') {
         @('Ubuntu')
     }
     else {
@@ -277,11 +281,11 @@ try {
         -Fragment 'scripts/test-windows-vm.py'
 
     $fixtureHelperRoot = New-RegistryFixture `
-        -Entries @((New-TestEntry -Id 'fixture-helper' -Path 'scripts/test-visual-evidence-fixture.ps1')) `
+        -Entries @((New-TestEntry -Id 'fixture-helper' -Path 'scripts/tests/support/visual-evidence-fixture.ps1')) `
         -Files @{}
     $roots.Add($fixtureHelperRoot)
     Assert-FailsWith -Result (Invoke-RegistryFixture -Root $fixtureHelperRoot -Arguments @('-List')) `
-        -Fragment 'scripts/test-visual-evidence-fixture.ps1'
+        -Fragment 'scripts/tests/support/visual-evidence-fixture.ps1'
 
     $vmRoot = New-RegistryFixture `
         -Entries @((New-TestEntry -Id 'requires-vm' -Path 'scripts/test-requires-vm.ps1' -RequiresVm $true)) `

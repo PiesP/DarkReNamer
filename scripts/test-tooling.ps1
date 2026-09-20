@@ -102,8 +102,8 @@ function Read-ToolingRegistry {
 
     $requiredExclusions = [ordered]@{
         'scripts/test-tooling.ps1' = 'suite-entrypoint'
-        'scripts/test-visual-evidence-fixture.ps1' = 'fixture-helper'
-        'scripts/test-support/windows-binary-fixture.ps1' = 'fixture-helper'
+        'scripts/tests/support/visual-evidence-fixture.ps1' = 'fixture-helper'
+        'scripts/tests/support/windows-binary-fixture.ps1' = 'fixture-helper'
         'scripts/test-windows-vm.py' = 'vm-cli'
     }
     $exclusions = @{}

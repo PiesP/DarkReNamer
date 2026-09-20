@@ -177,7 +177,7 @@ else {
     }
 }
 
-$schemaPath = Join-Path $PSScriptRoot 'windows-acceptance-evidence.schema.json'
+$schemaPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'config/schemas/windows-acceptance-evidence.schema.json'
 $evidenceValidator = Join-Path $PSScriptRoot 'validate-windows-acceptance-evidence.ps1'
 if (-not (Test-Path -LiteralPath $schemaPath -PathType Leaf)) {
     throw "Windows acceptance evidence schema is missing: $schemaPath"
