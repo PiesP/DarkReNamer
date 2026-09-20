@@ -758,14 +758,14 @@ def verify_foreground_evidence(gui):
 def verify_flow_foreground_observation(observation, gui, expected_label, expected_class):
     if not isinstance(observation, dict) or set(observation) != {
             'label', 'target_hwnd', 'initial', 'uia_set_focus',
-            'set_foreground_window', 'final', 'capture_change'}:
+            'set_foreground_window', 'final', 'capture_complete', 'capture_change'}:
         raise ValueError('VM candidate flow foreground observation shape is invalid.')
     if observation['label'] != expected_label:
         raise ValueError('VM candidate flow foreground label is invalid.')
     target_hwnd = observation['target_hwnd']
     if type(target_hwnd) is not int or target_hwnd <= 0:
         raise ValueError('VM candidate flow foreground target is invalid.')
-    for name in ('initial', 'final'):
+    for name in ('initial', 'final', 'capture_complete'):
         actual = observation[name]
         if (not isinstance(actual, dict) or set(actual) != {
                 'hwnd', 'process_id', 'session_id', 'window_class'} or
@@ -785,6 +785,8 @@ def verify_flow_foreground_observation(observation, gui, expected_label, expecte
         raise ValueError('VM candidate flow foreground session binding is invalid.')
     if final['window_class'] != expected_class:
         raise ValueError('VM candidate flow foreground window class is invalid.')
+    if observation['capture_complete'] != final:
+        raise ValueError('VM candidate flow foreground changed before capture completed.')
     if observation['uia_set_focus'] not in {
             'not_attempted', 'succeeded', 'failed', 'element_unavailable'}:
         raise ValueError('VM candidate flow foreground activation outcome is invalid.')

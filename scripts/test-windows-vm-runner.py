@@ -465,7 +465,8 @@ class VmRunnerTests(unittest.TestCase):
             candidate_result['gui']['flow']['foreground_observations'].append({
                 'label': label, 'target_hwnd': hwnd, 'initial': dict(observed),
                 'uia_set_focus': 'not_attempted', 'set_foreground_window': None,
-                'final': dict(observed), 'capture_change': None,
+                'final': dict(observed), 'capture_complete': dict(observed),
+                'capture_change': None,
             })
         candidate_result['gui'].update(
             window_handle=100, process_id=200, session_id=1,
@@ -809,6 +810,30 @@ class VmRunnerTests(unittest.TestCase):
                     observation['initial'][field.split('.', 1)[1]] = value
                 else:
                     observation[field] = value
+                with self.assertRaisesRegex(ValueError, 'foreground'):
+                    vm.verify_result(self.root, manifest, result)
+
+    def test_candidate_flow_capture_completion_requires_unchanged_bound_window(self):
+        mutations = (
+            ('hwnd', 999), ('process_id', 999), ('session_id', 9),
+            ('window_class', 'OtherWindow'), ('hwnd', True),
+            ('process_id', True), ('session_id', True), ('window_class', 7),
+        )
+        for field, value in mutations:
+            with self.subTest(field=field, value=value):
+                manifest, result = self.candidate_evidence()
+                observation = result['gui']['flow']['foreground_observations'][0]
+                observation['capture_complete'][field] = value
+                with self.assertRaisesRegex(ValueError, 'foreground'):
+                    vm.verify_result(self.root, manifest, result)
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                manifest, result = self.candidate_evidence()
+                observation = result['gui']['flow']['foreground_observations'][0]
+                if missing:
+                    del observation['capture_complete']
+                else:
+                    observation['capture_complete'] = None
                 with self.assertRaisesRegex(ValueError, 'foreground'):
                     vm.verify_result(self.root, manifest, result)
 
