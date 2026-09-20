@@ -148,7 +148,7 @@ def _tree(value: object) -> dict[tuple[int, ...], dict]:
         position = require_int(row["position"], 0, 31, "Native menu position")
         path = parent + (position,)
         require(path not in tree, "Native menu path is duplicated.")
-        require(row["item_type"] in {"command", "submenu", "separator"} and
+        require(type(row["item_type"]) is str and row["item_type"] in {"command", "submenu", "separator"} and
                 type(row["enabled"]) is bool and type(row["checked"]) is bool,
                 "Native menu item metadata is malformed.")
         flags = require_int(row["state_flags"], 0, 0xFF, "Native menu state flags")
@@ -298,7 +298,8 @@ def verify_native_menu_layout(layout: object, environment: dict) -> None:
                                                "open_menu_paths", "highlighted", "popups"}, "Native-menu event")
         require_int(event["sequence"], sequence, sequence, "Native-menu event sequence")
         action = event["input"]
-        require(action in _VK and event["virtual_keys"] == _VK[action], "Native-menu input is outside the frozen keyboard contract.")
+        require(type(action) is str and action in _VK and event["virtual_keys"] == _VK[action],
+                "Native-menu input is outside the frozen keyboard contract.")
         opener = action.startswith("alt-")
         if opener:
             require(not open_paths and highlighted is None, "Menu mnemonic was sent while another popup was open.")
