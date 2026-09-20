@@ -1572,6 +1572,55 @@ if ($exportScenarioFunction.Count -ne 1 -or
     ) -lt 0) {
     throw 'Recovery export must retain the interrupted active-journal source reference.'
 }
+foreach ($contract in @(
+    @{ Name = 'Wait-AcceptanceRecoveryMenuPopup'; Required = @(
+        '[Windows.Automation.TreeScope]::Children', 'ProcessIdProperty', 'ClassNameProperty',
+        "'#32768'", '[Windows.Automation.ControlType]::Menu', 'IsOffscreenProperty',
+        '$matches.Count -gt 1', '-RequireWindowHandle'
+    ); Forbidden = @('[Windows.Automation.TreeScope]::Descendants') },
+    @{ Name = 'Find-AcceptanceAutomationElementByName'; Required = @(
+        '[Windows.Automation.TreeScope]::Children', 'ProcessIdProperty', 'NameProperty',
+        '$matches.Count -gt 1', 'Assert-AutomationBinding'
+    ); Forbidden = @('[Windows.Automation.TreeScope]::Descendants') },
+    @{ Name = 'Start-AcceptanceRecoveryMenuInvoke'; Required = @(
+        '-Root $popup', 'Wait-AcceptanceRecoveryMenuPopup', "-Phase 'popup-found'",
+        "-Phase 'menu-item-found'", "-Phase 'invoke-started'"
+    ); Forbidden = @('::RootElement') },
+    @{ Name = 'Invoke-AcceptanceRecoveryExport'; Required = @(
+        '-Owner $Application.main', "-Phase 'picker-found'", "-Phase 'picker-filled'",
+        'Remove-AcceptanceExportProgress'
+    ); Forbidden = @() },
+    @{ Name = 'Dismiss-AcceptanceStartupRecovery'; Required = @(
+        '[Windows.Automation.AutomationElement] $Prompt', 'if ($null -eq $Prompt)',
+        '-Owner $Application.main', 'Assert-AutomationBinding'
+    ); Forbidden = @() },
+    @{ Name = 'Write-AcceptanceExportProgress'; Required = @(
+        'Assert-AcceptanceProcessBinding', 'Write-AcceptanceNewUtf8Json',
+        '$Application.raw_process_binding', 'ValidateSet('
+    ); Forbidden = @('WriteAllText') }
+)) {
+    $functions = @($fromFile.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq $contract.Name
+    }, $true))
+    if ($functions.Count -ne 1) { throw "Missing unique recovery lookup contract: $($contract.Name)" }
+    $text = $functions[0].Extent.Text
+    foreach ($fragment in $contract.Required) {
+        if (-not $text.Contains($fragment)) {
+            throw "Recovery lookup contract $($contract.Name) omits $fragment"
+        }
+    }
+    foreach ($fragment in $contract.Forbidden) {
+        if ($text.Contains($fragment)) {
+            throw "Recovery lookup contract $($contract.Name) contains forbidden $fragment"
+        }
+    }
+}
+if ($exportScenarioFunction[0].Extent.Text.IndexOf('Remove-AcceptanceExportProgress', [StringComparison]::Ordinal) -lt
+    $exportScenarioFunction[0].Extent.Text.IndexOf('Get-AcceptanceRecoveryExportClassification', [StringComparison]::Ordinal)) {
+    throw 'Export progress diagnostics must survive until exact exported bytes are verified.'
+}
 $dismissFunction = @($fromFile.FindAll({
     param($node)
     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and

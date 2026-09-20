@@ -1587,7 +1587,7 @@ function Find-AcceptanceAutomationElementByName {
     $condition = [Windows.Automation.AndCondition]::new($conditions)
     $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
     do {
-        $matches = $Root.FindAll([Windows.Automation.TreeScope]::Descendants, $condition)
+        $matches = $Root.FindAll([Windows.Automation.TreeScope]::Children, $condition)
         if ($matches.Count -gt 1) {
             throw "$Label matched more than one automation element."
         }
@@ -1615,13 +1615,86 @@ function Find-AcceptanceAutomationElementByName {
     throw "$Label was not found before the bounded deadline."
 }
 
+function Write-AcceptanceExportProgress {
+    param(
+        [Parameter(Mandatory)][string] $PrivateRoot,
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)]
+        [ValidateSet('before-startup-cancel', 'after-startup-cancel', 'before-menu-popup',
+            'popup-found', 'menu-item-found', 'invoke-started', 'picker-found', 'picker-filled')]
+        [string] $Phase
+    )
+
+    Assert-AcceptanceProcessBinding -Application $Application
+    Write-AcceptanceNewUtf8Json `
+        -Path (Join-Path $PrivateRoot ('export-progress-' + $Phase + '.json')) `
+        -Value ([ordered]@{
+            schema_version = 1
+            phase = $Phase
+            observed_utc_ticks = [DateTime]::UtcNow.Ticks.ToString(
+                [Globalization.CultureInfo]::InvariantCulture
+            )
+            binding = $Application.raw_process_binding
+        })
+}
+
+function Remove-AcceptanceExportProgress {
+    param([Parameter(Mandatory)][string] $PrivateRoot)
+
+    foreach ($phase in @('before-startup-cancel', 'after-startup-cancel', 'before-menu-popup',
+            'popup-found', 'menu-item-found', 'invoke-started', 'picker-found', 'picker-filled')) {
+        Remove-Item -LiteralPath (Join-Path $PrivateRoot ('export-progress-' + $phase + '.json'))
+    }
+}
+
+function Wait-AcceptanceRecoveryMenuPopup {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][int] $TimeoutSeconds
+    )
+
+    $conditions = [Windows.Automation.Condition[]]@(
+        [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::ProcessIdProperty, $Process.Id),
+        [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [Windows.Automation.ControlType]::Menu),
+        [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::ClassNameProperty, '#32768'),
+        [Windows.Automation.PropertyCondition]::new(
+            [Windows.Automation.AutomationElement]::IsOffscreenProperty, $false)
+    )
+    $condition = [Windows.Automation.AndCondition]::new($conditions)
+    $root = [Windows.Automation.AutomationElement]::RootElement
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    do {
+        $matches = $root.FindAll([Windows.Automation.TreeScope]::Children, $condition)
+        if ($matches.Count -gt 1) { throw 'Recovery menu matched more than one candidate popup.' }
+        if ($matches.Count -eq 1) {
+            $popup = $matches.Item(0)
+            Assert-AutomationBinding -Element $popup -Process $Process `
+                -ExpectedSession $ExpectedSession -Label 'recovery menu popup' -RequireWindowHandle
+            if ($popup.Current.ClassName -cne '#32768' -or $popup.Current.IsOffscreen) {
+                throw 'Recovery menu popup changed its native class or visibility.'
+            }
+            return $popup
+        }
+        Start-Sleep -Milliseconds 100
+        $Process.Refresh()
+        if ($Process.HasExited) { throw 'The candidate exited before its recovery menu appeared.' }
+    } while ((Get-Date) -lt $deadline)
+    throw 'Recovery menu popup was not found before the bounded deadline.'
+}
+
 function Start-AcceptanceRecoveryMenuInvoke {
     param(
         [Parameter(Mandatory)][object] $Application,
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
         [Parameter(Mandatory)][string] $ItemName,
-        [Parameter(Mandatory)][string] $Label
+        [Parameter(Mandatory)][string] $Label,
+        [Parameter(Mandatory)][string] $PrivateRoot
     )
 
     Add-Type -AssemblyName System.Windows.Forms
@@ -1638,9 +1711,13 @@ function Start-AcceptanceRecoveryMenuInvoke {
     if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $mainHandle) {
         throw "The verified application is not foreground for $Label."
     }
+    Write-AcceptanceExportProgress -PrivateRoot $PrivateRoot -Application $Application -Phase 'before-menu-popup'
     [Windows.Forms.SendKeys]::SendWait('%r')
+    $popup = Wait-AcceptanceRecoveryMenuPopup `
+        -Process $process -ExpectedSession $SessionId -TimeoutSeconds $WaitSeconds
+    Write-AcceptanceExportProgress -PrivateRoot $PrivateRoot -Application $Application -Phase 'popup-found'
     $item = Find-AcceptanceAutomationElementByName `
-        -Root ([Windows.Automation.AutomationElement]::RootElement) `
+        -Root $popup `
         -Process $process `
         -ExpectedSession $SessionId `
         -Name $ItemName `
@@ -1649,7 +1726,10 @@ function Start-AcceptanceRecoveryMenuInvoke {
         -Label $Label `
         -RequireEnabled `
         -RequireVisible
-    Start-AutomationControlInvoke -Element $item -Label $Label
+    Write-AcceptanceExportProgress -PrivateRoot $PrivateRoot -Application $Application -Phase 'menu-item-found'
+    $invoke = Start-AutomationControlInvoke -Element $item -Label $Label
+    Write-AcceptanceExportProgress -PrivateRoot $PrivateRoot -Application $Application -Phase 'invoke-started'
+    $invoke
 }
 
 function Dismiss-AcceptanceMessage {
@@ -2061,16 +2141,24 @@ function Dismiss-AcceptanceStartupRecovery {
         [Parameter(Mandatory)][object] $Application,
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
-        [string] $PrivateRoot
+        [string] $PrivateRoot,
+        [Windows.Automation.AutomationElement] $Prompt
     )
 
     $process = $Application.owned.process
-    $prompt = Wait-UniqueAutomationWindow `
-        -Process $process `
-        -ExpectedSession $SessionId `
-        -Name 'DarkReNamer - 이전 변경 복구 확인' `
-        -TimeoutSeconds $WaitSeconds `
-        -Label 'startup recovery cancellation prompt'
+    if ($null -eq $Prompt) {
+        $Prompt = Wait-UniqueAutomationWindow `
+            -Process $process -Owner $Application.main `
+            -ExpectedSession $SessionId `
+            -Name 'DarkReNamer - 이전 변경 복구 확인' `
+            -TimeoutSeconds $WaitSeconds `
+            -Label 'startup recovery cancellation prompt'
+    }
+    Assert-AutomationBinding -Element $Prompt -Process $process -ExpectedSession $SessionId `
+        -Label 'startup recovery cancellation prompt' -RequireWindowHandle
+    if ($Prompt.Current.Name -cne 'DarkReNamer - 이전 변경 복구 확인') {
+        throw 'The retained startup cancellation prompt has a different name.'
+    }
     $promptHandle = [IntPtr]$prompt.Current.NativeWindowHandle
     $cancel = Find-UniqueAutomationElement `
         -Root $prompt `
@@ -2129,13 +2217,16 @@ function Invoke-AcceptanceRecoveryExport {
         -SessionId $SessionId `
         -WaitSeconds $WaitSeconds `
         -ItemName '복구 데이터 내보내기...' `
-        -Label 'recovery export menu item'
+        -Label 'recovery export menu item' `
+        -PrivateRoot $PrivateRoot
     $dialog = Wait-UniqueAutomationWindow `
         -Process $Application.owned.process `
+        -Owner $Application.main `
         -ExpectedSession $SessionId `
         -Name '복구 저널 원본을 저장할 폴더 선택' `
         -TimeoutSeconds $WaitSeconds `
         -Label 'recovery export folder picker'
+    Write-AcceptanceExportProgress -PrivateRoot $PrivateRoot -Application $Application -Phase 'picker-found'
     $dialogHandle = [IntPtr]$dialog.Current.NativeWindowHandle
     $folder = Find-UniqueAutomationElement `
         -Root $dialog `
@@ -2150,6 +2241,7 @@ function Invoke-AcceptanceRecoveryExport {
         -Element $folder `
         -Value $exportRoot `
         -Label 'recovery export folder path'
+    Write-AcceptanceExportProgress -PrivateRoot $PrivateRoot -Application $Application -Phase 'picker-filled'
     $select = Find-UniqueAutomationElement `
         -Root $dialog `
         -Process $Application.owned.process `
@@ -2181,6 +2273,7 @@ function Invoke-AcceptanceRecoveryExport {
         -ExpectedBytes $ExpectedBytes `
         -ExportedBytes $exportedBytes `
         -ExportedLeaves $leaves
+    Remove-AcceptanceExportProgress -PrivateRoot $PrivateRoot
     [pscustomobject]@{
         status = 'passed'
         classification = $classification
@@ -3077,6 +3170,7 @@ function Invoke-AcceptanceSession {
             -ExpectedRootIdentity $rootIdentity -State $startupState
         $defaultCancelAction = Dismiss-AcceptanceStartupRecovery `
             -Application $second -SessionId $SessionId -WaitSeconds $WaitSeconds `
+            -Prompt $recoveryPrompt `
             -PrivateRoot $PrivateRoot
         $cancelState = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
         Assert-AcceptanceStatesEqual `
@@ -3126,8 +3220,10 @@ function Invoke-AcceptanceSession {
         $afterExportStateReference = $null
         $exportRelaunchStateReference = $null
         if ($RunRecoveryExport) {
+            Write-AcceptanceExportProgress -PrivateRoot $PrivateRoot -Application $third -Phase 'before-startup-cancel'
             Dismiss-AcceptanceStartupRecovery `
-                -Application $third -SessionId $SessionId -WaitSeconds $WaitSeconds
+                -Application $third -SessionId $SessionId -WaitSeconds $WaitSeconds -Prompt $relaunchPrompt
+            Write-AcceptanceExportProgress -PrivateRoot $PrivateRoot -Application $third -Phase 'after-startup-cancel'
             $recoveryExportResult = Invoke-AcceptanceRecoveryExport `
                 -Application $third -PrivateRoot $PrivateRoot -ExpectedBytes $journalBytes `
                 -SourceActiveJournalReference $interruptedJournalReference `
