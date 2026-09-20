@@ -485,6 +485,84 @@ try {
         -Message 'Tampered Python dependency caused PowerShell execution.'
 
     $fixture = New-DrTestFixture
+    $manifestDigest = Write-DrTestManifest -Fixture $fixture
+    & {
+        function Get-Item { throw 'shadowed Get-Item ran' }
+        function Join-Path { throw 'shadowed Join-Path ran' }
+        function ConvertFrom-Json { throw 'shadowed ConvertFrom-Json ran' }
+        function Where-Object { throw 'shadowed Where-Object ran' }
+        function Write-Output { throw 'shadowed Write-Output ran' }
+
+        $shadowVerified = Get-DrToolingVerifiedBundle `
+            -Root $fixture.Root `
+            -ManifestLocation $fixture.ManifestLocation `
+            -ExpectedManifestSha256 $manifestDigest `
+            -Mode checkout `
+            -RequiredRoles @('powershell-common')
+        $shadowBytes = Get-DrToolingVerifiedBytes `
+            -VerifiedBundle $shadowVerified `
+            -Role 'powershell-common'
+        Assert-DrTestTrue `
+            -Condition ((Get-DrTestSha256 -Bytes $shadowBytes) -ceq $fixture.Entries[1].sha256) `
+            -Message 'A shadowed built-in command changed verified bytes.'
+        $shadowScriptBlock = New-DrToolingVerifiedScriptBlock `
+            -VerifiedBundle $shadowVerified `
+            -Role 'powershell-common'
+        & $shadowScriptBlock
+        Assert-DrTestTrue `
+            -Condition ($global:DrToolingExecutionMarker -ceq 'original') `
+            -Message 'A shadowed built-in command changed verified execution.'
+    }
+    Remove-Variable -Name DrToolingExecutionMarker -Scope Global -ErrorAction SilentlyContinue
+
+    $fixture = New-DrTestFixture
+    $verified = Get-DrTestVerified -Fixture $fixture
+    $mutatedBytes = $script:DrTestUtf8.GetBytes(
+        "`$global:DrToolingExecutionMarker = 'mutated-public'`n"
+    )
+    $verified.Records[0].FrozenBase64 = [Convert]::ToBase64String($mutatedBytes)
+    $verified.Records[0].Length = $mutatedBytes.Length
+    $verified.Records[0].Sha256 = Get-DrTestSha256 -Bytes $mutatedBytes
+    $verified.Records[0].Kind = 'powershell'
+    $verifiedBytes = Get-DrToolingVerifiedBytes `
+        -VerifiedBundle $verified `
+        -Role 'powershell-common'
+    Assert-DrTestTrue `
+        -Condition ((Get-DrTestSha256 -Bytes $verifiedBytes) -ceq $fixture.Entries[1].sha256) `
+        -Message 'Mutated public closure data changed verified bytes.'
+    $scriptBlock = New-DrToolingVerifiedScriptBlock `
+        -VerifiedBundle $verified `
+        -Role 'powershell-common'
+    & $scriptBlock
+    Assert-DrTestTrue `
+        -Condition ($global:DrToolingExecutionMarker -ceq 'original') `
+        -Message 'Mutated public closure data changed verified execution.'
+    Remove-Variable -Name DrToolingExecutionMarker -Scope Global -ErrorAction SilentlyContinue
+
+    $forgedBytes = $script:DrTestUtf8.GetBytes(
+        "`$global:DrToolingExecutionMarker = 'forged'`n"
+    )
+    $forgedRecord = [pscustomobject]@{
+        Role = 'powershell-common'
+        Kind = 'powershell'
+        FrozenBase64 = [Convert]::ToBase64String($forgedBytes)
+        Length = $forgedBytes.Length
+        Sha256 = Get-DrTestSha256 -Bytes $forgedBytes
+    }
+    $forgedBundle = [pscustomobject]@{ Records = [object[]] @($forgedRecord) }
+    $forgedBundle.PSObject.TypeNames.Insert(0, 'DarkReNamer.Tooling.VerifiedBundle')
+    Assert-DrTestThrows -Message 'A forged verified-bundle handle returned bytes.' -Action {
+        Get-DrToolingVerifiedBytes `
+            -VerifiedBundle $forgedBundle `
+            -Role 'powershell-common'
+    }
+    Assert-DrTestThrows -Message 'A forged verified-bundle handle produced a ScriptBlock.' -Action {
+        New-DrToolingVerifiedScriptBlock `
+            -VerifiedBundle $forgedBundle `
+            -Role 'powershell-common'
+    }
+
+    $fixture = New-DrTestFixture
     $verified = Get-DrTestVerified -Fixture $fixture
     Write-DrTestText `
         -Path (Get-DrTestModulePath -Fixture $fixture -Entry $fixture.Entries[1]) `
