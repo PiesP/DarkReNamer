@@ -746,9 +746,8 @@ $fakeProcess | Add-Member -MemberType ScriptMethod -Name Kill -Value {
     $this.HasExited = $true
 }
 $fakeProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
-    param([int] $Milliseconds)
-    $null = $Milliseconds
-    $this.HasExited
+    param([Nullable[int]] $Milliseconds)
+    if ($null -ne $Milliseconds) { $this.HasExited }
 }
 $fakeProcess | Add-Member -MemberType ScriptMethod -Name Dispose -Value {
     $this.disposed = $true
@@ -788,10 +787,53 @@ try {
     if (-not $fakeProcess.killed -or -not $fakeProcess.disposed) {
         throw 'A process rejected during startup validation was not killed and disposed.'
     }
+
+    # A same-process auxiliary window must not replace the resolved main handle.
+    $fakeProcess.HasExited = $false
+    $fakeProcess.SessionId = 1
+    $fakeProcess.MainWindowHandle = [IntPtr]999
+    $fakeProcess.killed = $false
+    $fakeProcess.disposed = $false
+    $fakeProcess | Add-Member -NotePropertyName MainModule -NotePropertyValue (
+        [pscustomobject]@{ FileName = 'fixture.exe' }
+    )
+    $fakeProcess | Add-Member -NotePropertyName ExitCode -NotePropertyValue 0
+    $script:resolvedRecoveryMain = [pscustomobject]@{
+        handle = [IntPtr]5151
+        element = [pscustomobject]@{ fixture = 'exact main' }
+    }
+    function Wait-ExactApplicationMainWindow {
+        param($Process, $ExpectedSession, $ExpectedClassName, $ExpectedTitle, $TimeoutSeconds, $Label)
+        if ($ExpectedSession -ne 1 -or $Process -ne $script:fakeStartupOwned.process) {
+            throw 'Recovery startup did not pass its owned process and expected session.'
+        }
+        $script:resolvedRecoveryMain
+    }
+    function Close-ExactApplicationMainWindow {
+        param($Process, $ExpectedSession, $MainWindowHandle, $MainWindow, $ExpectedClassName, $ExpectedTitle, $Label)
+        if ($ExpectedSession -ne 1 -or $MainWindowHandle -ne [IntPtr]5151 -or
+            $MainWindow -ne $script:resolvedRecoveryMain.element -or
+            $Process -ne $script:fakeStartupOwned.process) {
+            throw 'Recovery normal close did not retain the exact startup binding.'
+        }
+        $Process.HasExited = $true
+    }
+    $boundApplication = Start-AcceptanceApplication -Inputs $startupInputs -SessionId 1 -WaitSeconds 10
+    if ($boundApplication.main_handle -ne [IntPtr]5151 -or
+        $boundApplication.main -ne $script:resolvedRecoveryMain.element -or
+        $boundApplication.session_id -ne 1) {
+        throw 'Recovery startup did not retain the resolved native/UIA main binding.'
+    }
+    if ((Close-AcceptanceApplicationNormally -Application $boundApplication -WaitSeconds 1) -ne 0 -or
+        -not $fakeProcess.HasExited -or $fakeProcess.killed) {
+        throw 'Pinned recovery normal close did not preserve ordinary exit handling.'
+    }
 }
 finally {
     Remove-Item Function:\Get-LowerSha256
     Remove-Item Function:\Start-OwnedProcess
+    Remove-Item Function:\Wait-ExactApplicationMainWindow -ErrorAction SilentlyContinue
+    Remove-Item Function:\Close-ExactApplicationMainWindow -ErrorAction SilentlyContinue
 }
 $timeoutProcess = [pscustomobject]@{
     HasExited = $false

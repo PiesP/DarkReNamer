@@ -185,6 +185,34 @@ try {
         throw 'The candidate product and harness normalization contract is invalid.'
     }
 
+    $exactMain = [pscustomobject]@{
+        Handle = 5151L; Owner = 0L; ProcessId = 700
+        ClassName = 'DarkReNamerWindow'; Title = 'DarkReNamer'; Visible = $true
+        Left = 10; Top = 20; Right = 810; Bottom = 620
+    }
+    $ownerlessShadow = [pscustomobject]@{
+        Handle = 4141L; Owner = 0L; ProcessId = 700
+        ClassName = 'SysShadow'; Title = ''; Visible = $true
+        Left = 600; Top = 300; Right = 900; Bottom = 350
+    }
+    $selectedMain = Resolve-ExactApplicationMainWindowCandidate `
+        -Windows @($ownerlessShadow, $exactMain) `
+        -ExpectedProcessId 700 `
+        -ExpectedClassName 'DarkReNamerWindow' `
+        -ExpectedTitle 'DarkReNamer'
+    if ($selectedMain.Handle -ne 5151L) {
+        throw 'Exact main-window selection accepted an ownerless shadow before the application window.'
+    }
+    $duplicateMain = $exactMain | ConvertTo-Json | ConvertFrom-Json
+    $duplicateMain.Handle = 5152L
+    Assert-Fails {
+        Resolve-ExactApplicationMainWindowCandidate `
+            -Windows @($exactMain, $duplicateMain) `
+            -ExpectedProcessId 700 `
+            -ExpectedClassName 'DarkReNamerWindow' `
+            -ExpectedTitle 'DarkReNamer'
+    } 'matched more than one exact native window'
+
     $topLevelCandidate = [pscustomobject]@{
         Current = [pscustomobject]@{ NativeWindowHandle = 101 }
     }

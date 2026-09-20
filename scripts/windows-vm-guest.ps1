@@ -777,11 +777,27 @@ function Initialize-NativeCapture {
     if (-not ('DarkReNamerVmNative' -as [type])) {
         Add-Type @'
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 public static class DarkReNamerVmNative {
     [StructLayout(LayoutKind.Sequential)]
     public struct Rect { public int Left, Top, Right, Bottom; }
+
+    public sealed class WindowMeasurement {
+        public long Handle;
+        public long Owner;
+        public uint ProcessId;
+        public string ClassName;
+        public string Title;
+        public bool Visible;
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    private delegate bool EnumWindowsCallback(IntPtr window, IntPtr parameter);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct MonitorInfo {
@@ -821,6 +837,8 @@ public static class DarkReNamerVmNative {
     [DllImport("user32.dll")]
     public static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")]
+    public static extern bool IsWindowEnabled(IntPtr window);
+    [DllImport("user32.dll")]
     public static extern bool IsWindow(IntPtr window);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern int GetClassName(IntPtr window, System.Text.StringBuilder text, int count);
@@ -830,6 +848,14 @@ public static class DarkReNamerVmNative {
     public static extern bool GetWindowRect(IntPtr window, out Rect rect);
     [DllImport("user32.dll")]
     public static extern IntPtr GetAncestor(IntPtr window, uint flags);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetWindow(IntPtr window, uint command);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool EnumWindows(EnumWindowsCallback callback, IntPtr parameter);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowTextW(IntPtr window, System.Text.StringBuilder text, int count);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool PostMessageW(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromWindow(IntPtr window, uint flags);
     [DllImport("user32.dll", SetLastError = true)]
@@ -892,6 +918,52 @@ public static class DarkReNamerVmNative {
         }
         finally {
             CloseHandle(file);
+        }
+    }
+
+    public static WindowMeasurement[] ReadProcessTopLevelWindows(uint expectedProcessId) {
+        List<WindowMeasurement> windows = new List<WindowMeasurement>();
+        bool exceededBound = false;
+        bool completed = EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+            uint processId;
+            GetWindowThreadProcessId(window, out processId);
+            if (processId != expectedProcessId) return true;
+            if (windows.Count >= 128) {
+                exceededBound = true;
+                return false;
+            }
+            Rect rect;
+            if (!GetWindowRect(window, out rect)) rect = new Rect();
+            System.Text.StringBuilder className = new System.Text.StringBuilder(128);
+            System.Text.StringBuilder title = new System.Text.StringBuilder(1024);
+            GetClassName(window, className, className.Capacity);
+            GetWindowTextW(window, title, title.Capacity);
+            windows.Add(new WindowMeasurement {
+                Handle = window.ToInt64(),
+                Owner = GetWindow(window, 4).ToInt64(),
+                ProcessId = processId,
+                ClassName = className.ToString(),
+                Title = title.ToString(),
+                Visible = IsWindowVisible(window),
+                Left = rect.Left,
+                Top = rect.Top,
+                Right = rect.Right,
+                Bottom = rect.Bottom
+            });
+            return true;
+        }, IntPtr.Zero);
+        if (exceededBound) {
+            throw new InvalidOperationException("Process window inventory exceeded its bound.");
+        }
+        if (!completed) {
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        }
+        return windows.ToArray();
+    }
+
+    public static void RequestWindowClose(IntPtr window) {
+        if (!PostMessageW(window, 0x0010, IntPtr.Zero, IntPtr.Zero)) {
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
         }
     }
 
@@ -1284,6 +1356,189 @@ function Assert-AutomationBinding {
     }
 }
 
+function Resolve-ExactApplicationMainWindowCandidate {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Windows,
+        [Parameter(Mandatory)][int] $ExpectedProcessId,
+        [Parameter(Mandatory)][string] $ExpectedClassName,
+        [Parameter(Mandatory)][string] $ExpectedTitle
+    )
+
+    $matches = @($Windows | Where-Object {
+        [long]$_.Handle -gt 0 -and
+        [long]$_.Owner -eq 0 -and
+        [int]$_.ProcessId -eq $ExpectedProcessId -and
+        [string]$_.ClassName -ceq $ExpectedClassName -and
+        [string]$_.Title -ceq $ExpectedTitle -and
+        [bool]$_.Visible -and
+        [int]$_.Right -gt [int]$_.Left -and
+        [int]$_.Bottom -gt [int]$_.Top -and
+        ([long]$_.Right - [long]$_.Left) -le 32768L -and
+        ([long]$_.Bottom - [long]$_.Top) -le 32768L -and
+        (([long]$_.Right - [long]$_.Left) *
+            ([long]$_.Bottom - [long]$_.Top)) -le 100000000L
+    })
+    if ($matches.Count -gt 1) {
+        throw 'Application main window matched more than one exact native window.'
+    }
+    if ($matches.Count -eq 1) {
+        return $matches[0]
+    }
+    return $null
+}
+
+function Assert-ExactApplicationMainWindowBinding {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][IntPtr] $MainWindowHandle,
+        [Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][string] $ExpectedClassName,
+        [Parameter(Mandatory)][string] $ExpectedTitle,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    $Process.Refresh()
+    if ($Process.HasExited -or $Process.SessionId -ne $ExpectedSession -or
+        $MainWindowHandle -eq [IntPtr]::Zero) {
+        throw "$Label is not bound to the expected process and desktop session."
+    }
+    $native = Resolve-ExactApplicationMainWindowCandidate `
+        -Windows @([DarkReNamerVmNative]::ReadProcessTopLevelWindows([uint32]$Process.Id)) `
+        -ExpectedProcessId $Process.Id `
+        -ExpectedClassName $ExpectedClassName `
+        -ExpectedTitle $ExpectedTitle
+    if ($null -eq $native -or [long]$native.Handle -ne $MainWindowHandle.ToInt64()) {
+        throw "$Label does not retain the exact pinned native main window."
+    }
+    if ($null -ne $MainWindow) {
+        Assert-AutomationBinding `
+            -Element $MainWindow `
+            -Process $Process `
+            -ExpectedSession $ExpectedSession `
+            -Label $Label `
+            -RequireWindowHandle
+        if ([long]$MainWindow.Current.NativeWindowHandle -ne $MainWindowHandle.ToInt64() -or
+            $MainWindow.Current.Name -cne $ExpectedTitle -or
+            $MainWindow.Current.ControlType -ne [Windows.Automation.ControlType]::Window) {
+            throw "$Label does not retain the exact pinned UI Automation main window."
+        }
+    }
+}
+
+function Wait-ExactApplicationMainWindow {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][string] $ExpectedClassName,
+        [Parameter(Mandatory)][string] $ExpectedTitle,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    $nativeFound = $false
+    $uiaIdentityMismatch = $false
+    do {
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            throw "$Label exited before creating its main window."
+        }
+        if ($Process.SessionId -ne $ExpectedSession) {
+            throw "$Label left the expected desktop session."
+        }
+        $native = Resolve-ExactApplicationMainWindowCandidate `
+            -Windows @([DarkReNamerVmNative]::ReadProcessTopLevelWindows([uint32]$Process.Id)) `
+            -ExpectedProcessId $Process.Id `
+            -ExpectedClassName $ExpectedClassName `
+            -ExpectedTitle $ExpectedTitle
+        if ($null -ne $native) {
+            $nativeFound = $true
+            try {
+                $window = [Windows.Automation.AutomationElement]::FromHandle(
+                    [IntPtr][long]$native.Handle
+                )
+            }
+            catch {
+                $window = $null
+            }
+            if ($null -ne $window) {
+                $fresh = Resolve-ExactApplicationMainWindowCandidate `
+                    -Windows @([DarkReNamerVmNative]::ReadProcessTopLevelWindows([uint32]$Process.Id)) `
+                    -ExpectedProcessId $Process.Id `
+                    -ExpectedClassName $ExpectedClassName `
+                    -ExpectedTitle $ExpectedTitle
+                if ($null -eq $fresh -or [long]$fresh.Handle -ne [long]$native.Handle) {
+                    throw "$Label changed during exact native-to-UIA binding."
+                }
+                try {
+                    $uiaProcessId = [int]$window.Current.ProcessId
+                    $uiaHandle = [long]$window.Current.NativeWindowHandle
+                    $uiaName = [string]$window.Current.Name
+                    $uiaControlType = $window.Current.ControlType
+                }
+                catch {
+                    $uiaIdentityMismatch = $true
+                    $uiaProcessId = 0
+                    $uiaHandle = 0L
+                    $uiaName = ''
+                    $uiaControlType = $null
+                }
+                if ($uiaProcessId -ne 0 -and $uiaProcessId -ne $Process.Id) {
+                    throw "$Label UI Automation provider is bound to a foreign process."
+                }
+                if ($uiaHandle -ne 0 -and $uiaHandle -ne [long]$fresh.Handle) {
+                    throw "$Label UI Automation provider changed from the exact native window."
+                }
+                if ($uiaProcessId -ne $Process.Id -or $uiaHandle -ne [long]$fresh.Handle -or
+                    $uiaName -cne $ExpectedTitle -or
+                    $uiaControlType -ne [Windows.Automation.ControlType]::Window) {
+                    $uiaIdentityMismatch = $true
+                }
+                else {
+                    return [pscustomobject]@{
+                        handle = [IntPtr][long]$fresh.Handle
+                        element = $window
+                    }
+                }
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    if ($uiaIdentityMismatch) {
+        throw "$Label exact native window did not publish the expected UI Automation identity before the bounded deadline."
+    }
+    if ($nativeFound) {
+        throw "$Label exact native window did not become available through UI Automation before the bounded deadline."
+    }
+    throw "$Label exact native window was not found before the bounded deadline."
+}
+
+function Close-ExactApplicationMainWindow {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][IntPtr] $MainWindowHandle,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][string] $ExpectedClassName,
+        [Parameter(Mandatory)][string] $ExpectedTitle,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    Assert-ExactApplicationMainWindowBinding `
+        -Process $Process `
+        -ExpectedSession $ExpectedSession `
+        -MainWindowHandle $MainWindowHandle `
+        -MainWindow $MainWindow `
+        -ExpectedClassName $ExpectedClassName `
+        -ExpectedTitle $ExpectedTitle `
+        -Label $Label
+    if (-not [DarkReNamerVmNative]::IsWindowEnabled($MainWindowHandle)) {
+        throw "$Label did not expose an enabled main window for ordinary close."
+    }
+    [DarkReNamerVmNative]::RequestWindowClose($MainWindowHandle)
+}
+
 function Find-UniqueAutomationElement {
     param(
         [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Root,
@@ -1377,7 +1632,8 @@ function Wait-UniqueAutomationWindow {
         [Parameter(Mandatory)][string] $Name,
         [Parameter(Mandatory)][int] $TimeoutSeconds,
         [Parameter(Mandatory)][string] $Label,
-        [Windows.Automation.AutomationElement] $Owner
+        [Windows.Automation.AutomationElement] $Owner,
+        [IntPtr] $MainWindowHandle = [IntPtr]::Zero
     )
 
     if ($null -ne $Owner) {
@@ -1387,6 +1643,9 @@ function Wait-UniqueAutomationWindow {
             -ExpectedSession $ExpectedSession `
             -Label "$Label owner" `
             -RequireWindowHandle
+    }
+    elseif ($MainWindowHandle -eq [IntPtr]::Zero) {
+        throw "$Label requires the exact pinned main-window handle when no owner is supplied."
     }
     $root = [Windows.Automation.AutomationElement]::RootElement
     $conditions = [Windows.Automation.Condition[]]@(
@@ -1407,7 +1666,18 @@ function Wait-UniqueAutomationWindow {
     $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
     do {
         $main = if ($null -eq $Owner) {
-            [Windows.Automation.AutomationElement]::FromHandle($Process.MainWindowHandle)
+            $candidateMain = [Windows.Automation.AutomationElement]::FromHandle($MainWindowHandle)
+            if ($null -ne $candidateMain) {
+                Assert-ExactApplicationMainWindowBinding `
+                    -Process $Process `
+                    -ExpectedSession $ExpectedSession `
+                    -MainWindowHandle $MainWindowHandle `
+                    -MainWindow $candidateMain `
+                    -ExpectedClassName 'DarkReNamerWindow' `
+                    -ExpectedTitle 'DarkReNamer' `
+                    -Label "$Label main window"
+            }
+            $candidateMain
         }
         else {
             $null
@@ -2040,6 +2310,7 @@ function Invoke-ProductionRenameFlow {
     param(
         [Parameter(Mandatory)][Diagnostics.Process] $Process,
         [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][IntPtr] $MainWindowHandle,
         [Parameter(Mandatory)][string] $FixtureRoot,
         [Parameter(Mandatory)][string] $Root,
         [Parameter(Mandatory)][int] $ExpectedSession,
@@ -2118,6 +2389,7 @@ function Invoke-ProductionRenameFlow {
         $fileDialog = Wait-UniqueAutomationWindow `
             -Process $Process `
             -ExpectedSession $ExpectedSession `
+            -MainWindowHandle $MainWindowHandle `
             -Name '이름 붙일 파일 불러오기' `
             -TimeoutSeconds $TimeoutSeconds `
             -Label 'production file dialog'
@@ -2170,6 +2442,7 @@ function Invoke-ProductionRenameFlow {
         $prompt = Wait-UniqueAutomationWindow `
             -Process $Process `
             -ExpectedSession $ExpectedSession `
+            -MainWindowHandle $MainWindowHandle `
             -Name '이름 앞에 문자열 붙이기' `
             -TimeoutSeconds $TimeoutSeconds `
             -Label 'prefix prompt'
@@ -2231,6 +2504,7 @@ function Invoke-ProductionRenameFlow {
         $confirmation = Wait-UniqueAutomationWindow `
             -Process $Process `
             -ExpectedSession $ExpectedSession `
+            -MainWindowHandle $MainWindowHandle `
             -Name 'DarkReNamer - 안전한 적용 확인' `
             -TimeoutSeconds $TimeoutSeconds `
             -Label 'apply confirmation task dialog'
@@ -2297,6 +2571,7 @@ function Invoke-ProductionRenameFlow {
         $confirmation = Wait-UniqueAutomationWindow `
             -Process $Process `
             -ExpectedSession $ExpectedSession `
+            -MainWindowHandle $MainWindowHandle `
             -Name 'DarkReNamer - 안전한 적용 확인' `
             -TimeoutSeconds $TimeoutSeconds `
             -Label 'second apply confirmation task dialog'
@@ -2514,38 +2789,38 @@ function Invoke-GuiSmoke {
                     exit_code = $null
                 }
             }
-            $windowDeadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
-            do {
-                Start-Sleep -Milliseconds 200
+            try {
+                $mainBinding = Wait-ExactApplicationMainWindow `
+                    -Process $processState.process.process `
+                    -ExpectedSession $ExpectedSession `
+                    -ExpectedClassName 'DarkReNamerWindow' `
+                    -ExpectedTitle 'DarkReNamer' `
+                    -TimeoutSeconds $TimeoutSeconds `
+                    -Label 'production application'
+            }
+            catch {
                 $processState.process.process.Refresh()
                 if ($processState.process.process.HasExited) {
                     $row.exit_code = $processState.process.process.ExitCode
                     $row.failure_reason = 'app_exited_before_window'
-                    return
                 }
-            } while ($processState.process.process.MainWindowHandle -eq [IntPtr]::Zero -and (Get-Date) -lt $windowDeadline)
-
-            $handle = $processState.process.process.MainWindowHandle
-            if ($handle -eq [IntPtr]::Zero) {
-                $row.failure_reason = 'window_timeout'
+                elseif ($_.Exception.Message.IndexOf(
+                    'exact native window was not found',
+                    [StringComparison]::Ordinal
+                ) -ge 0) {
+                    $row.failure_reason = 'window_timeout'
+                }
+                else {
+                    $row.failure_reason = 'unexpected_window'
+                }
                 return
             }
+            $handle = [IntPtr]$mainBinding.handle
+            $mainAutomationWindow = $mainBinding.element
             $boundProcessId = [uint32]0
             [void][DarkReNamerVmNative]::GetWindowThreadProcessId($handle, [ref]$boundProcessId)
-            $classText = [Text.StringBuilder]::new(128)
-            [void][DarkReNamerVmNative]::GetClassName($handle, $classText, $classText.Capacity)
-            $windowClass = $classText.ToString()
-            $windowTitle = $processState.process.process.MainWindowTitle
-            if ($boundProcessId -ne $processState.process.process.Id -or
-                $processState.process.process.SessionId -ne $ExpectedSession -or
-                $windowClass -cne 'DarkReNamerWindow' -or
-                $windowTitle -cne 'DarkReNamer' -or
-                -not [DarkReNamerVmNative]::IsWindowVisible($handle)) {
-                $row.failure_reason = 'unexpected_window'
-                return
-            }
-            $row.window_class = $windowClass
-            $row.window_title = $windowTitle
+            $row.window_class = 'DarkReNamerWindow'
+            $row.window_title = 'DarkReNamer'
             $row.window_handle = [long]$handle
             $row.process_id = [int]$boundProcessId
             $row.session_id = [int]$processState.process.process.SessionId
@@ -2632,21 +2907,19 @@ function Invoke-GuiSmoke {
                 height = $height
             }
 
-            $mainAutomationWindow = [Windows.Automation.AutomationElement]::FromHandle($handle)
-            if ($null -eq $mainAutomationWindow) {
-                $row.failure_reason = 'main_window_automation_unavailable'
-                return
-            }
-            Assert-AutomationBinding `
-                -Element $mainAutomationWindow `
+            Assert-ExactApplicationMainWindowBinding `
                 -Process $processState.process.process `
                 -ExpectedSession $ExpectedSession `
-                -Label 'production main window' `
-                -RequireWindowHandle
+                -MainWindowHandle $handle `
+                -MainWindow $mainAutomationWindow `
+                -ExpectedClassName 'DarkReNamerWindow' `
+                -ExpectedTitle 'DarkReNamer' `
+                -Label 'production main window'
             $flowFixtureRoot = New-PrivateDirectory -Parent $caseRoot -Leaf 'rename-flow'
             $row.flow = Invoke-ProductionRenameFlow `
                 -Process $processState.process.process `
                 -MainWindow $mainAutomationWindow `
+                -MainWindowHandle $handle `
                 -FixtureRoot $flowFixtureRoot `
                 -Root $Root `
                 -ExpectedSession $ExpectedSession `
@@ -2657,7 +2930,17 @@ function Invoke-GuiSmoke {
                 return
             }
 
-            if (-not $processState.process.process.CloseMainWindow()) {
+            try {
+                Close-ExactApplicationMainWindow `
+                    -Process $processState.process.process `
+                    -ExpectedSession $ExpectedSession `
+                    -MainWindowHandle $handle `
+                    -MainWindow $mainAutomationWindow `
+                    -ExpectedClassName 'DarkReNamerWindow' `
+                    -ExpectedTitle 'DarkReNamer' `
+                    -Label 'production application ordinary close'
+            }
+            catch {
                 $row.failure_reason = 'normal_close_rejected'
                 return
             }
