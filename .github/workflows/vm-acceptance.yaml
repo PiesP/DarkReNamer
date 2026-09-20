@@ -57,7 +57,8 @@ jobs:
       actions: read
       artifact-metadata: write
       attestations: write
-      contents: read
+      # Draft release evidence is hidden from a read-only GITHUB_TOKEN.
+      contents: write
       id-token: write
     steps:
       - name: Checkout trusted validator source
