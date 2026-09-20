@@ -252,8 +252,13 @@ function Resolve-VerifiedBundle {
             'launcher'
             'controller'
             'runner'
+            'observers'
             'validators'
         ) -Label 'bundle.json harness'
+        Assert-ExactProperties -Value $manifest.harness.observers -Names @(
+            'ui'
+            'recovery'
+        ) -Label 'bundle.json harness observers'
         Assert-ExactProperties -Value $manifest.harness.validators -Names @(
             'release_handoff'
             'candidate_metadata'
@@ -287,6 +292,7 @@ function Resolve-VerifiedBundle {
         $candidateArtifacts = @(
             @($manifest.product.provenance.PSObject.Properties | ForEach-Object Value) +
             @($manifest.harness.launcher, $manifest.harness.controller) +
+            @($manifest.harness.observers.PSObject.Properties | ForEach-Object Value) +
             @($manifest.harness.validators.PSObject.Properties | ForEach-Object Value)
         )
     }
@@ -412,6 +418,15 @@ function Resolve-VerifiedBundle {
             $manifest.harness.controller.file -cne 'run-windows-vm-tests.ps1') {
             throw 'bundle.json candidate harness filenames are invalid.'
         }
+        $expectedObservers = [ordered]@{
+            ui = 'windows-vm-acceptance.ps1'
+            recovery = 'windows-vm-recovery-acceptance.ps1'
+        }
+        foreach ($name in $expectedObservers.Keys) {
+            if ($manifest.harness.observers.$name.file -cne $expectedObservers[$name]) {
+                throw "bundle.json candidate harness observer $name file is invalid."
+            }
+        }
         $expectedValidators = [ordered]@{
             release_handoff = 'validate-release-handoff.ps1'
             candidate_metadata = 'validate-release-candidate-metadata.ps1'
@@ -457,6 +472,7 @@ function Resolve-VerifiedBundle {
             harness_source_sha = $manifest.harness.source_sha
             harness_source_state = $manifest.harness.source_state
             runner = $runner
+            observers = $manifest.harness.observers
             validators = $manifest.harness.validators
         }
     } else {
@@ -468,6 +484,7 @@ function Resolve-VerifiedBundle {
             harness_source_sha = $manifest.source_sha
             harness_source_state = $manifest.source_state
             runner = $runner
+            observers = $null
             validators = $null
         }
     }

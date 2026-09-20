@@ -33,6 +33,8 @@ CANDIDATE_HARNESS_FILES = (
     'test-windows-vm.py',
     'run-windows-vm-tests.ps1',
     'windows-vm-guest.ps1',
+    'windows-vm-acceptance.ps1',
+    'windows-vm-recovery-acceptance.ps1',
     'validate-release-handoff.ps1',
     'validate-release-candidate-metadata.ps1',
     'measure-windows-binary.ps1',
@@ -705,7 +707,8 @@ def verify_result(root, manifest, result, expected_transport_kind=None, expected
         for record in (
                 *manifest['product']['provenance'].values(),
                 manifest['harness']['launcher'], manifest['harness']['controller'],
-                manifest['harness']['runner'], *manifest['harness']['validators'].values()):
+                manifest['harness']['runner'], *manifest['harness']['observers'].values(),
+                *manifest['harness']['validators'].values()):
             checked_artifact(root, record)
     else:
         for key in ('schema_version', 'source_sha', 'source_state', 'target'):
@@ -980,6 +983,16 @@ def build_candidate_bundle(repo, root, args):
             'runner': {
                 'file': 'windows-vm-guest.ps1',
                 'sha256': frozen['scripts/windows-vm-guest.ps1'],
+            },
+            'observers': {
+                'ui': {
+                    'file': 'windows-vm-acceptance.ps1',
+                    'sha256': frozen['scripts/windows-vm-acceptance.ps1'],
+                },
+                'recovery': {
+                    'file': 'windows-vm-recovery-acceptance.ps1',
+                    'sha256': frozen['scripts/windows-vm-recovery-acceptance.ps1'],
+                },
             },
             'validators': {
                 'release_handoff': {

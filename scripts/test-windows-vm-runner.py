@@ -77,6 +77,11 @@ class VmRunnerTests(unittest.TestCase):
             'launcher': self.artifact('test-windows-vm.py', b'launcher'),
             'controller': self.artifact('run-windows-vm-tests.ps1', b'controller'),
             'runner': self.artifact('windows-vm-guest.ps1', b'runner'),
+            'observers': {
+                'ui': self.artifact('windows-vm-acceptance.ps1', b'ui observer'),
+                'recovery': self.artifact(
+                    'windows-vm-recovery-acceptance.ps1', b'recovery observer'),
+            },
             'validators': {
                 'release_handoff': self.artifact('validate-release-handoff.ps1', b'handoff'),
                 'candidate_metadata': self.artifact(
@@ -228,6 +233,13 @@ class VmRunnerTests(unittest.TestCase):
         manifest, result = self.candidate_evidence()
         manifest['product']['application']['sha256'] = 'f' * 64
         result['product']['application']['sha256'] = 'f' * 64
+        with self.assertRaisesRegex(ValueError, 'digest mismatch'):
+            vm.verify_result(self.root, manifest, result)
+
+    def test_candidate_observer_digest_mismatch_is_rejected(self):
+        manifest, result = self.candidate_evidence()
+        manifest['harness']['observers']['ui']['sha256'] = 'f' * 64
+        result['harness']['observers']['ui']['sha256'] = 'f' * 64
         with self.assertRaisesRegex(ValueError, 'digest mismatch'):
             vm.verify_result(self.root, manifest, result)
 
@@ -524,6 +536,13 @@ class VmRunnerTests(unittest.TestCase):
         self.assertEqual(
             manifest['product']['candidate']['origin_authentication'], 'pending-hosted')
         self.assertEqual((output / 'DarkReNamer.exe').read_bytes(), b'exact candidate bytes')
+        for role, leaf in (
+                ('ui', 'windows-vm-acceptance.ps1'),
+                ('recovery', 'windows-vm-recovery-acceptance.ps1')):
+            self.assertEqual(manifest['harness']['observers'][role]['file'], leaf)
+            self.assertEqual(
+                manifest['harness']['observers'][role]['sha256'],
+                hashlib.sha256((output / leaf).read_bytes()).hexdigest())
 
     def test_candidate_prepare_rejects_duplicate_run_and_artifact_metadata_keys(self):
         for metadata_kind in ('run', 'artifact'):

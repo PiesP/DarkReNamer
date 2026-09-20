@@ -295,6 +295,7 @@ try {
             $manifest.harness.launcher
             $manifest.harness.controller
             $manifest.harness.runner
+            @($manifest.harness.observers.PSObject.Properties | ForEach-Object Value)
             @($manifest.harness.validators.PSObject.Properties | ForEach-Object Value)
         )
         if ($manifest.harness.controller.file -cne 'run-windows-vm-tests.ps1' -or
@@ -327,8 +328,13 @@ try {
             throw 'Acceptance output must be an existing empty ordinary directory.'
         }
         $acceptanceInput = Get-Content -LiteralPath $AcceptanceManifest -Raw | ConvertFrom-Json
+        $expectedAcceptanceSourceSha = if ($candidateLane) {
+            $manifest.product.source_sha
+        } else {
+            $manifest.source_sha
+        }
         if ($acceptanceInput.schema_version -ne 1 -or
-            $acceptanceInput.source_sha -cne $manifest.source_sha -or
+            $acceptanceInput.source_sha -cne $expectedAcceptanceSourceSha -or
             $acceptanceInput.request.mode -cne $AcceptanceMode -or
             $acceptanceInput.request.appearance -cne $AcceptanceAppearance -or
             $acceptanceInput.request.text_scale_percent -ne $AcceptanceTextScalePercent) {
@@ -338,6 +344,11 @@ try {
         if ($observer.file -cne 'inputs/windows-vm-acceptance.ps1' -or
             (Get-FileHash -LiteralPath (Join-Path $BundleRoot 'windows-vm-acceptance.ps1') -Algorithm SHA256).Hash -ine $observer.sha256) {
             throw 'Acceptance observer differs from the immutable input manifest.'
+        }
+        if ($candidateLane -and
+            ($manifest.harness.observers.ui.file -cne 'windows-vm-acceptance.ps1' -or
+             $manifest.harness.observers.ui.sha256 -ine $observer.sha256)) {
+            throw 'Acceptance observer differs from the frozen candidate harness role.'
         }
     }
     if ($transportKind -eq 'powershell_direct') {

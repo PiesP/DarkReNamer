@@ -22,6 +22,32 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Assert-AcceptanceBootstrapUniqueJson {
+    param(
+        [Parameter(Mandatory)][Text.Json.JsonElement] $Element,
+        [Parameter(Mandatory)][string] $Location
+    )
+
+    if ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Object) {
+        $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($property in $Element.EnumerateObject()) {
+            if (-not $names.Add($property.Name)) {
+                throw "$Location contains a duplicate field: $($property.Name)."
+            }
+            Assert-AcceptanceBootstrapUniqueJson `
+                -Element $property.Value `
+                -Location "$Location.$($property.Name)"
+        }
+    }
+    elseif ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Array) {
+        $index = 0
+        foreach ($item in $Element.EnumerateArray()) {
+            Assert-AcceptanceBootstrapUniqueJson -Element $item -Location "$Location[$index]"
+            $index++
+        }
+    }
+}
+
 function Resolve-AcceptanceBootstrap {
     param(
         [Parameter(Mandatory)][string] $Root,
@@ -63,23 +89,43 @@ function Resolve-AcceptanceBootstrap {
         $manifestItem.Length -gt 1MB) {
         throw 'bundle.json must be an ordinary bounded file.'
     }
+    $manifestText = Get-Content -LiteralPath $manifestPath -Raw
+    $manifestDocument = $null
     try {
-        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        $manifestDocument = [Text.Json.JsonDocument]::Parse($manifestText)
+        Assert-AcceptanceBootstrapUniqueJson `
+            -Element $manifestDocument.RootElement `
+            -Location 'bundle.json'
+        $manifest = $manifestText | ConvertFrom-Json
     }
     catch {
-        throw 'bundle.json is not valid JSON.'
+        throw "bundle.json is not valid unique-key JSON: $($_.Exception.Message)"
     }
-    if ($manifest.runner.file -cne 'windows-vm-guest.ps1' -or
-        $manifest.runner.sha256 -isnot [string] -or
-        $manifest.runner.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+    finally {
+        if ($null -ne $manifestDocument) {
+            $manifestDocument.Dispose()
+        }
+    }
+    $candidateLane = $manifest.schema_version -eq 2
+    $runner = if ($candidateLane) { $manifest.harness.runner } else { $manifest.runner }
+    if ($runner.file -cne 'windows-vm-guest.ps1' -or
+        $runner.sha256 -isnot [string] -or
+        $runner.sha256 -cnotmatch '^[0-9a-f]{64}$') {
         throw 'bundle.json runner binding is invalid.'
+    }
+    if ($candidateLane) {
+        $uiObserver = $manifest.harness.observers.ui
+        if ($uiObserver.file -cne 'windows-vm-acceptance.ps1' -or
+            $uiObserver.sha256 -cne $ScriptSha256) {
+            throw 'bundle.json UI observer binding is invalid.'
+        }
     }
     $runnerPath = Join-Path $resolvedRoot 'windows-vm-guest.ps1'
     $runnerItem = Get-Item -LiteralPath $runnerPath -Force -ErrorAction Stop
     if ($runnerItem.PSIsContainer -or
         ($runnerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
         (Get-FileHash -LiteralPath $runnerPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
-            $manifest.runner.sha256) {
+            $runner.sha256) {
         throw 'Windows VM helper hash mismatch.'
     }
     [pscustomobject]@{ root = $resolvedRoot; runner = $runnerPath }
@@ -126,8 +172,22 @@ function Resolve-AcceptanceBundle {
     Assert-OrdinaryFile -Path $runnerPath -Label 'Windows VM helper'
     . $runnerPath -BundleRoot $resolvedRoot -ExpectedSessionId $SessionId -ValidateOnly
     $verified = Resolve-VerifiedBundle -Root $resolvedRoot -InvokedScriptPath $runnerPath
-    if ($verified.manifest.source_state -cne 'clean') {
+    if ($verified.contract.product_source_state -cne 'clean' -or
+        $verified.contract.harness_source_state -cne 'clean') {
         throw 'A clean source-bound bundle is required for acceptance evidence.'
+    }
+    $observer = if ($verified.contract.lane -ceq 'candidate-gui-only') {
+        $verified.contract.observers.ui
+    }
+    else {
+        [pscustomobject]@{
+            file = 'windows-vm-acceptance.ps1'
+            sha256 = $ScriptSha256
+        }
+    }
+    if ($observer.file -cne 'windows-vm-acceptance.ps1' -or
+        $observer.sha256 -cne $ScriptSha256) {
+        throw 'The invoked UI observer differs from the verified harness role.'
     }
     if (-not [IO.Path]::IsPathRooted($RequestedOutputRoot)) {
         throw 'OutputRoot must be an absolute directory path.'
@@ -158,10 +218,22 @@ function Resolve-AcceptanceBundle {
     [pscustomobject]@{
         root = $resolvedRoot
         output_root = $outputRoot
-        application = $verified.manifest.application
-        source_sha = $verified.manifest.source_sha
+        lane = $verified.contract.lane
+        application = $verified.contract.application
+        source_sha = $verified.contract.product_source_sha
+        product_source_state = $verified.contract.product_source_state
+        harness_source_sha = $verified.contract.harness_source_sha
+        harness_source_state = $verified.contract.harness_source_state
+        product = if ($verified.contract.lane -ceq 'candidate-gui-only') {
+            $verified.manifest.product
+        } else { $null }
+        harness = if ($verified.contract.lane -ceq 'candidate-gui-only') {
+            $verified.manifest.harness
+        } else { $null }
         target = $verified.manifest.target
-        runner_sha256 = $verified.manifest.runner.sha256
+        runner = $verified.contract.runner
+        observer = $observer
+        runner_sha256 = $verified.contract.runner.sha256
         script_sha256 = $ScriptSha256
     }
 }
@@ -5317,32 +5389,40 @@ $observations = [ordered]@{
     apply_confirmation = $null
 }
 $result = [ordered]@{
-    schema_version = 1
-    source_sha = $verified.source_sha
+    schema_version = if ($verified.lane -ceq 'candidate-gui-only') { 2 } else { 1 }
     target = $verified.target
     application = [ordered]@{
         file = $verified.application.file
         sha256 = $verified.application.sha256
     }
-    runner_sha256 = $verified.runner_sha256
-    acceptance_script_sha256 = $verified.script_sha256
-    appearance = [ordered]@{
-        requested = $Appearance
-        observed = $null
-    }
-    status = 'failed'
-    visual_review = 'required'
-    keyboard = $keyboard
-    accessibility = $accessibility
-    capture = $capture
-    clipboard = $clipboardResult
-    high_contrast = $highContrastResult
-    observations = $null
-    screenshots = @()
-    guest_cleanup = $false
-    failure_reason = 'setup_failed'
-    diagnostic = $null
 }
+if ($verified.lane -ceq 'candidate-gui-only') {
+    $result['lane'] = $verified.lane
+    $result['product'] = $verified.product
+    $result['harness'] = $verified.harness
+    $result['observer_role'] = 'ui'
+}
+else {
+    $result['source_sha'] = $verified.source_sha
+}
+$result['runner_sha256'] = $verified.runner_sha256
+$result['acceptance_script_sha256'] = $verified.script_sha256
+$result['appearance'] = [ordered]@{
+    requested = $Appearance
+    observed = $null
+}
+$result['status'] = 'failed'
+$result['visual_review'] = 'required'
+$result['keyboard'] = $keyboard
+$result['accessibility'] = $accessibility
+$result['capture'] = $capture
+$result['clipboard'] = $clipboardResult
+$result['high_contrast'] = $highContrastResult
+$result['observations'] = $null
+$result['screenshots'] = @()
+$result['guest_cleanup'] = $false
+$result['failure_reason'] = 'setup_failed'
+$result['diagnostic'] = $null
 
 try {
     $desktopLock = Enter-DesktopTestLock -SessionId $currentSession

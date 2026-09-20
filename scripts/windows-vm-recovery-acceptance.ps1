@@ -33,6 +33,32 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Assert-RecoveryBootstrapUniqueJson {
+    param(
+        [Parameter(Mandatory)][Text.Json.JsonElement] $Element,
+        [Parameter(Mandatory)][string] $Location
+    )
+
+    if ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Object) {
+        $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($property in $Element.EnumerateObject()) {
+            if (-not $names.Add($property.Name)) {
+                throw "$Location contains a duplicate field: $($property.Name)."
+            }
+            Assert-RecoveryBootstrapUniqueJson `
+                -Element $property.Value `
+                -Location "$Location.$($property.Name)"
+        }
+    }
+    elseif ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Array) {
+        $index = 0
+        foreach ($item in $Element.EnumerateArray()) {
+            Assert-RecoveryBootstrapUniqueJson -Element $item -Location "$Location[$index]"
+            $index++
+        }
+    }
+}
+
 function Initialize-AcceptanceCrc32 {
     if ('DarkReNamerAcceptanceCrc32' -as [type]) {
         return
@@ -393,26 +419,45 @@ function Resolve-AcceptanceBootstrap {
     if ($manifestText.IndexOf([char]0) -ge 0) {
         throw 'The bootstrap bundle manifest contains NUL.'
     }
+    $manifestDocument = $null
     try {
+        $manifestDocument = [Text.Json.JsonDocument]::Parse($manifestText)
+        Assert-RecoveryBootstrapUniqueJson `
+            -Element $manifestDocument.RootElement `
+            -Location 'bundle.json'
         $manifest = $manifestText | ConvertFrom-Json
     }
     catch {
-        throw 'The bootstrap bundle manifest is not valid JSON.'
+        throw "The bootstrap bundle manifest is not valid unique-key JSON: $($_.Exception.Message)"
     }
-    if ($null -eq $manifest -or $null -eq $manifest.runner) {
+    finally {
+        if ($null -ne $manifestDocument) {
+            $manifestDocument.Dispose()
+        }
+    }
+    $candidateLane = $manifest.schema_version -eq 2
+    $runner = if ($candidateLane) { $manifest.harness.runner } else { $manifest.runner }
+    if ($null -eq $manifest -or $null -eq $runner) {
         throw 'The bootstrap bundle manifest has no runner object.'
     }
     Assert-AcceptanceExactProperties `
-        -Value $manifest.runner `
+        -Value $runner `
         -Names @('file', 'sha256') `
         -Label 'bootstrap runner'
-    if ($manifest.runner.file -isnot [string] -or
-        $manifest.runner.file -cne 'windows-vm-guest.ps1') {
+    if ($runner.file -isnot [string] -or
+        $runner.file -cne 'windows-vm-guest.ps1') {
         throw 'The bootstrap runner leaf is invalid.'
     }
-    if ($manifest.runner.sha256 -isnot [string] -or
-        $manifest.runner.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+    if ($runner.sha256 -isnot [string] -or
+        $runner.sha256 -cnotmatch '^[0-9a-f]{64}$') {
         throw 'The bootstrap runner SHA-256 is invalid.'
+    }
+    if ($candidateLane) {
+        $recoveryObserver = $manifest.harness.observers.recovery
+        if ($recoveryObserver.file -cne 'windows-vm-recovery-acceptance.ps1' -or
+            $recoveryObserver.sha256 -cne $ExpectedObserverSha256) {
+            throw 'The bootstrap recovery observer binding is invalid.'
+        }
     }
     $runnerPath = Join-Path $rootItem.FullName 'windows-vm-guest.ps1'
     if (-not (Test-Path -LiteralPath $runnerPath -PathType Leaf)) {
@@ -425,7 +470,7 @@ function Resolve-AcceptanceBootstrap {
     }
     $runnerBytes = [IO.File]::ReadAllBytes($runnerItem.FullName)
     $runnerSha256 = Get-AcceptanceBootstrapBytesSha256 -Bytes $runnerBytes
-    if ($runnerSha256 -cne $manifest.runner.sha256) {
+    if ($runnerSha256 -cne $runner.sha256) {
         throw 'The bootstrap runner hash does not match bundle.json.'
     }
     $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
@@ -476,7 +521,8 @@ function Resolve-AcceptanceInputs {
     )
 
     $verified = Resolve-VerifiedBundle -Root $Root -InvokedScriptPath $RunnerPath
-    if ($verified.manifest.source_state -cne 'clean') {
+    if ($verified.contract.product_source_state -cne 'clean' -or
+        $verified.contract.harness_source_state -cne 'clean') {
         throw 'Recovery acceptance requires a clean source-bound bundle.'
     }
     Assert-OrdinaryFile -Path $ObserverPath -Label 'recovery acceptance observer'
@@ -485,12 +531,27 @@ function Resolve-AcceptanceInputs {
     if ($observerSha256 -cne $ExpectedObserverSha256) {
         throw 'The recovery acceptance observer hash does not match its staging contract.'
     }
+    $observer = if ($verified.contract.lane -ceq 'candidate-gui-only') {
+        $verified.contract.observers.recovery
+    }
+    else {
+        [pscustomobject]@{
+            file = 'windows-vm-recovery-acceptance.ps1'
+            sha256 = $observerSha256
+        }
+    }
+    if ($observer.file -cne 'windows-vm-recovery-acceptance.ps1' -or
+        $observer.sha256 -cne $observerSha256) {
+        throw 'The invoked recovery observer differs from the verified harness role.'
+    }
     [pscustomobject]@{
         verified = $verified
-        application_path = Join-Path $verified.root $verified.manifest.application.file
+        contract = $verified.contract
+        application_path = Join-Path $verified.root $verified.contract.application.file
         observer_file = $observerItem.Name
         observer_sha256 = $observerSha256
-        runner_sha256 = $verified.hashes[$verified.manifest.runner.file]
+        observer = $observer
+        runner_sha256 = $verified.hashes[$verified.contract.runner.file]
     }
 }
 
@@ -658,7 +719,7 @@ function Start-AcceptanceApplication {
         [Parameter(Mandatory)][int] $WaitSeconds
     )
 
-    $application = $Inputs.verified.manifest.application
+    $application = $Inputs.contract.application
     if ((Get-LowerSha256 -Path $Inputs.application_path) -cne $application.sha256) {
         throw 'The application changed after bundle verification.'
     }
@@ -2105,7 +2166,7 @@ if (($RecoveryExport -or $IntentOnlyCandidateDiscard) -and $Mode -cne 'ProcessCr
     throw 'RecoveryExport and IntentOnlyCandidateDiscard require Mode ProcessCrash.'
 }
 if ($ValidateOnly) {
-    Write-Host "Validated recovery acceptance inputs for source $($inputs.verified.manifest.source_sha)."
+    Write-Host "Validated recovery acceptance inputs for product source $($inputs.contract.product_source_sha) and harness source $($inputs.contract.harness_source_sha)."
     return
 }
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
@@ -2124,30 +2185,38 @@ if ($currentSession -ne $ExpectedSessionId) {
 $evidenceRoot = New-AcceptanceOutputDirectory -Parent $OutputRoot
 $runtimeRoot = New-PrivateDirectory -Parent $evidenceRoot -Leaf 'runtime'
 $result = [ordered]@{
-    schema_version = 1
-    source_sha = $inputs.verified.manifest.source_sha
-    source_state = $inputs.verified.manifest.source_state
+    schema_version = if ($inputs.contract.lane -ceq 'candidate-gui-only') { 2 } else { 1 }
     application = [ordered]@{
-        file = $inputs.verified.manifest.application.file
-        sha256 = $inputs.verified.manifest.application.sha256
+        file = $inputs.contract.application.file
+        sha256 = $inputs.contract.application.sha256
     }
-    runner_sha256 = $inputs.runner_sha256
-    observer = [ordered]@{
-        file = $inputs.observer_file
-        sha256 = $inputs.observer_sha256
-    }
-    status = 'failed'
-    scope = 'production-rename-worker-interruption'
-    selected_mode = $Mode
-    process_crash = [ordered]@{ status = 'not-run'; reason = 'mode-not-selected' }
-    worker_cancellation = [ordered]@{ status = 'not-run'; reason = 'mode-not-selected' }
-    worker_close = [ordered]@{ status = 'not-run'; reason = 'mode-not-selected' }
-    recovery_export = [ordered]@{ status = 'not-run'; reason = 'switch-not-selected' }
-    intent_only_candidate_discard = [ordered]@{ status = 'not-run'; reason = 'switch-not-selected' }
-    failure_reason = $null
-    diagnostic = $null
-    ui_diagnostic = $null
 }
+if ($inputs.contract.lane -ceq 'candidate-gui-only') {
+    $result['lane'] = $inputs.contract.lane
+    $result['product'] = $inputs.verified.manifest.product
+    $result['harness'] = $inputs.verified.manifest.harness
+    $result['observer_role'] = 'recovery'
+}
+else {
+    $result['source_sha'] = $inputs.contract.product_source_sha
+    $result['source_state'] = $inputs.contract.product_source_state
+}
+$result['runner_sha256'] = $inputs.runner_sha256
+$result['observer'] = [ordered]@{
+    file = $inputs.observer_file
+    sha256 = $inputs.observer_sha256
+}
+$result['status'] = 'failed'
+$result['scope'] = 'production-rename-worker-interruption'
+$result['selected_mode'] = $Mode
+$result['process_crash'] = [ordered]@{ status = 'not-run'; reason = 'mode-not-selected' }
+$result['worker_cancellation'] = [ordered]@{ status = 'not-run'; reason = 'mode-not-selected' }
+$result['worker_close'] = [ordered]@{ status = 'not-run'; reason = 'mode-not-selected' }
+$result['recovery_export'] = [ordered]@{ status = 'not-run'; reason = 'switch-not-selected' }
+$result['intent_only_candidate_discard'] = [ordered]@{ status = 'not-run'; reason = 'switch-not-selected' }
+$result['failure_reason'] = $null
+$result['diagnostic'] = $null
+$result['ui_diagnostic'] = $null
 $desktopLock = $null
 $previousExecutionState = $null
 $succeeded = $false

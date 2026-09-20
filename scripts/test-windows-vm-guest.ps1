@@ -76,6 +76,8 @@ function New-CandidateFixture {
     foreach ($row in @(
         @{ name = 'test-windows-vm.py'; content = 'launcher fixture' }
         @{ name = 'run-windows-vm-tests.ps1'; content = 'controller fixture' }
+        @{ name = 'windows-vm-acceptance.ps1'; content = 'ui observer fixture' }
+        @{ name = 'windows-vm-recovery-acceptance.ps1'; content = 'recovery observer fixture' }
         @{ name = 'validate-release-handoff.ps1'; content = 'handoff validator fixture' }
         @{ name = 'validate-release-candidate-metadata.ps1'; content = 'metadata validator fixture' }
         @{ name = 'measure-windows-binary.ps1'; content = 'binary measurement fixture' }
@@ -122,6 +124,10 @@ function New-CandidateFixture {
             launcher = & $artifact 'test-windows-vm.py'
             controller = & $artifact 'run-windows-vm-tests.ps1'
             runner = & $artifact 'windows-vm-guest.ps1'
+            observers = [ordered]@{
+                ui = & $artifact 'windows-vm-acceptance.ps1'
+                recovery = & $artifact 'windows-vm-recovery-acceptance.ps1'
+            }
             validators = [ordered]@{
                 release_handoff = & $artifact 'validate-release-handoff.ps1'
                 candidate_metadata = & $artifact 'validate-release-candidate-metadata.ps1'
@@ -173,9 +179,34 @@ try {
     if ($candidateContract.contract.lane -cne 'candidate-gui-only' -or
         $candidateContract.contract.product_source_sha -cne ('a' * 40) -or
         $candidateContract.contract.harness_source_sha -cne ('b' * 40) -or
+        $candidateContract.contract.observers.ui.file -cne 'windows-vm-acceptance.ps1' -or
+        $candidateContract.contract.observers.recovery.file -cne 'windows-vm-recovery-acceptance.ps1' -or
         $candidateContract.tests.Count -ne 0) {
         throw 'The candidate product and harness normalization contract is invalid.'
     }
+
+    $candidateSwappedObserver = New-CandidateFixture -Name 'candidate-swapped-observer'
+    $uiObserver = $candidateSwappedObserver.manifest.harness.observers.ui
+    $candidateSwappedObserver.manifest.harness.observers.ui =
+        $candidateSwappedObserver.manifest.harness.observers.recovery
+    $candidateSwappedObserver.manifest.harness.observers.recovery = $uiObserver
+    Save-Manifest $candidateSwappedObserver
+    Assert-Fails {
+        & $candidateSwappedObserver.runner `
+            -BundleRoot $candidateSwappedObserver.root `
+            -ExpectedSessionId 1 `
+            -ValidateOnly
+    } 'observer ui file is invalid'
+
+    $candidateObserverHashMismatch = New-CandidateFixture -Name 'candidate-observer-hash-mismatch'
+    $candidateObserverHashMismatch.manifest.harness.observers.ui.sha256 = 'f' * 64
+    Save-Manifest $candidateObserverHashMismatch
+    Assert-Fails {
+        & $candidateObserverHashMismatch.runner `
+            -BundleRoot $candidateObserverHashMismatch.root `
+            -ExpectedSessionId 1 `
+            -ValidateOnly
+    } 'manifest artifact hash mismatch'
 
     $candidateMetadataMismatch = New-CandidateFixture -Name 'candidate-metadata-mismatch'
     $candidateMetadataMismatch.manifest.product.candidate.artifact_id = '21'

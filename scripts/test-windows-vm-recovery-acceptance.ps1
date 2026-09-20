@@ -138,6 +138,77 @@ function New-TestBundle {
     [pscustomobject]@{ root = $Root; manifest = $manifest; runner = $runnerPath }
 }
 
+function New-CandidateTestBundle {
+    param([Parameter(Mandatory)][string] $Root)
+
+    $fixture = New-TestBundle -Root $Root
+    Remove-Item -LiteralPath (Join-Path $Root 'fixture-tests.exe')
+    Copy-Item -LiteralPath $script:acceptance `
+        -Destination (Join-Path $Root 'windows-vm-recovery-acceptance.ps1')
+    foreach ($row in @(
+        @{ name = 'test-windows-vm.py'; content = 'launcher fixture' }
+        @{ name = 'run-windows-vm-tests.ps1'; content = 'controller fixture' }
+        @{ name = 'windows-vm-acceptance.ps1'; content = 'ui observer fixture' }
+        @{ name = 'validate-release-handoff.ps1'; content = 'handoff validator fixture' }
+        @{ name = 'validate-release-candidate-metadata.ps1'; content = 'metadata validator fixture' }
+        @{ name = 'measure-windows-binary.ps1'; content = 'binary measurement fixture' }
+        @{ name = 'release-handoff.json'; content = '{"source_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","workflow_run":"10","executable":{"filename":"DarkReNamer.exe","sha256":"APP_HASH"}}' }
+        @{ name = 'candidate-run.json'; content = '{"id":10,"run_attempt":1,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' }
+        @{ name = 'candidate-artifact.json'; content = '{"id":20,"name":"DarkReNamer-dry-run-10-1-windows","workflow_run":{"id":10,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}' }
+    )) {
+        [IO.File]::WriteAllText((Join-Path $Root $row.name), $row.content)
+    }
+    $applicationHash = Get-TestSha256 -Path (Join-Path $Root 'DarkReNamer.exe')
+    $handoffPath = Join-Path $Root 'release-handoff.json'
+    [IO.File]::WriteAllText(
+        $handoffPath,
+        ([IO.File]::ReadAllText($handoffPath).Replace('APP_HASH', $applicationHash))
+    )
+    $artifact = {
+        param([string] $Leaf)
+        [ordered]@{ file = $Leaf; sha256 = Get-TestSha256 -Path (Join-Path $Root $Leaf) }
+    }
+    $fixture.manifest = [ordered]@{
+        schema_version = 2
+        lane = 'candidate-gui-only'
+        target = 'x86_64-pc-windows-msvc'
+        product = [ordered]@{
+            source_sha = 'a' * 40
+            source_state = 'clean'
+            candidate = [ordered]@{
+                workflow_run = '10'; run_attempt = '1'; artifact_id = '20'
+                artifact_name = 'DarkReNamer-dry-run-10-1-windows'
+                origin_authentication = 'pending-hosted'
+            }
+            application = & $artifact 'DarkReNamer.exe'
+            provenance = [ordered]@{
+                release_handoff = & $artifact 'release-handoff.json'
+                run_metadata = & $artifact 'candidate-run.json'
+                artifact_metadata = & $artifact 'candidate-artifact.json'
+            }
+        }
+        harness = [ordered]@{
+            source_sha = 'b' * 40
+            source_state = 'clean'
+            launcher = & $artifact 'test-windows-vm.py'
+            controller = & $artifact 'run-windows-vm-tests.ps1'
+            runner = & $artifact 'windows-vm-guest.ps1'
+            observers = [ordered]@{
+                ui = & $artifact 'windows-vm-acceptance.ps1'
+                recovery = & $artifact 'windows-vm-recovery-acceptance.ps1'
+            }
+            validators = [ordered]@{
+                release_handoff = & $artifact 'validate-release-handoff.ps1'
+                candidate_metadata = & $artifact 'validate-release-candidate-metadata.ps1'
+                binary_measurement = & $artifact 'measure-windows-binary.ps1'
+            }
+        }
+        test_binaries = @()
+    }
+    Write-TestJson -Path (Join-Path $Root 'bundle.json') -Value $fixture.manifest
+    $fixture
+}
+
 $acceptance = Join-Path $PSScriptRoot 'windows-vm-recovery-acceptance.ps1'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $admissionSource = [IO.File]::ReadAllText(
@@ -426,6 +497,9 @@ function Start-OwnedProcess {
 try {
     $startupInputs = [pscustomobject]@{
         application_path = 'fixture.exe'
+        contract = [pscustomobject]@{
+            application = [pscustomobject]@{ sha256 = 'a' * 64 }
+        }
         verified = [pscustomobject]@{
             root = '.'
             manifest = [pscustomobject]@{
@@ -609,6 +683,67 @@ try {
         -RecoveryExport `
         -IntentOnlyCandidateDiscard `
         -ValidateOnly
+
+    $candidateValid = New-CandidateTestBundle `
+        -Root (Join-Path $temporaryRoot 'candidate-valid')
+    & $acceptance `
+        -BundleRoot $candidateValid.root `
+        -ExpectedSessionId 1 `
+        -OutputRoot $temporaryRoot `
+        -ExpectedScriptSha256 $observerHash `
+        -Mode ProcessCrash `
+        -RecoveryExport `
+        -IntentOnlyCandidateDiscard `
+        -ValidateOnly
+
+    $candidateSwappedObserver = New-CandidateTestBundle `
+        -Root (Join-Path $temporaryRoot 'candidate-swapped-observer')
+    $candidateSwappedObserver.manifest.harness.observers.recovery =
+        $candidateSwappedObserver.manifest.harness.observers.ui
+    Write-TestJson `
+        -Path (Join-Path $candidateSwappedObserver.root 'bundle.json') `
+        -Value $candidateSwappedObserver.manifest
+    Assert-Fails {
+        & $acceptance `
+            -BundleRoot $candidateSwappedObserver.root `
+            -ExpectedSessionId 1 `
+            -OutputRoot $temporaryRoot `
+            -ExpectedScriptSha256 $observerHash `
+            -ValidateOnly
+    } 'recovery observer binding is invalid'
+
+    $candidateFalseAlias = New-CandidateTestBundle `
+        -Root (Join-Path $temporaryRoot 'candidate-false-alias')
+    $candidateFalseAlias.manifest['runner'] = $candidateFalseAlias.manifest.harness.runner
+    Write-TestJson `
+        -Path (Join-Path $candidateFalseAlias.root 'bundle.json') `
+        -Value $candidateFalseAlias.manifest
+    Assert-Fails {
+        & $acceptance `
+            -BundleRoot $candidateFalseAlias.root `
+            -ExpectedSessionId 1 `
+            -OutputRoot $temporaryRoot `
+            -ExpectedScriptSha256 $observerHash `
+            -ValidateOnly
+    } 'unexpected fields'
+
+    $candidateDuplicate = New-CandidateTestBundle `
+        -Root (Join-Path $temporaryRoot 'candidate-duplicate')
+    $candidateManifestPath = Join-Path $candidateDuplicate.root 'bundle.json'
+    $candidateManifestText = [IO.File]::ReadAllText($candidateManifestPath)
+    [IO.File]::WriteAllText(
+        $candidateManifestPath,
+        $candidateManifestText.Replace('"schema_version": 2,', '"schema_version": 2, "schema_version": 2,'),
+        [Text.UTF8Encoding]::new($false)
+    )
+    Assert-Fails {
+        & $acceptance `
+            -BundleRoot $candidateDuplicate.root `
+            -ExpectedSessionId 1 `
+            -OutputRoot $temporaryRoot `
+            -ExpectedScriptSha256 $observerHash `
+            -ValidateOnly
+    } 'duplicate field: schema_version'
 
     Assert-Fails {
         & $acceptance `

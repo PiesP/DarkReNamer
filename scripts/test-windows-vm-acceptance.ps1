@@ -85,6 +85,77 @@ function New-AcceptanceFixture {
     }
 }
 
+function New-CandidateAcceptanceFixture {
+    param([Parameter(Mandatory)][string] $Name)
+
+    $fixture = New-AcceptanceFixture -Name $Name
+    Remove-Item -LiteralPath (Join-Path $fixture.bundle_root 'fixture-tests.exe')
+    Copy-Item -LiteralPath $script:acceptance `
+        -Destination (Join-Path $fixture.bundle_root 'windows-vm-acceptance.ps1')
+    foreach ($row in @(
+        @{ name = 'test-windows-vm.py'; content = 'launcher fixture' }
+        @{ name = 'run-windows-vm-tests.ps1'; content = 'controller fixture' }
+        @{ name = 'windows-vm-recovery-acceptance.ps1'; content = 'recovery observer fixture' }
+        @{ name = 'validate-release-handoff.ps1'; content = 'handoff validator fixture' }
+        @{ name = 'validate-release-candidate-metadata.ps1'; content = 'metadata validator fixture' }
+        @{ name = 'measure-windows-binary.ps1'; content = 'binary measurement fixture' }
+        @{ name = 'release-handoff.json'; content = '{"source_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","workflow_run":"10","executable":{"filename":"DarkReNamer.exe","sha256":"APP_HASH"}}' }
+        @{ name = 'candidate-run.json'; content = '{"id":10,"run_attempt":1,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' }
+        @{ name = 'candidate-artifact.json'; content = '{"id":20,"name":"DarkReNamer-dry-run-10-1-windows","workflow_run":{"id":10,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}' }
+    )) {
+        [IO.File]::WriteAllText((Join-Path $fixture.bundle_root $row.name), $row.content)
+    }
+    $applicationHash = Get-Sha256 (Join-Path $fixture.bundle_root 'DarkReNamer.exe')
+    $handoffPath = Join-Path $fixture.bundle_root 'release-handoff.json'
+    [IO.File]::WriteAllText(
+        $handoffPath,
+        ([IO.File]::ReadAllText($handoffPath).Replace('APP_HASH', $applicationHash))
+    )
+    $artifact = {
+        param([string] $Leaf)
+        [ordered]@{ file = $Leaf; sha256 = Get-Sha256 (Join-Path $fixture.bundle_root $Leaf) }
+    }
+    $fixture.manifest = [ordered]@{
+        schema_version = 2
+        lane = 'candidate-gui-only'
+        target = 'x86_64-pc-windows-msvc'
+        product = [ordered]@{
+            source_sha = 'a' * 40
+            source_state = 'clean'
+            candidate = [ordered]@{
+                workflow_run = '10'; run_attempt = '1'; artifact_id = '20'
+                artifact_name = 'DarkReNamer-dry-run-10-1-windows'
+                origin_authentication = 'pending-hosted'
+            }
+            application = & $artifact 'DarkReNamer.exe'
+            provenance = [ordered]@{
+                release_handoff = & $artifact 'release-handoff.json'
+                run_metadata = & $artifact 'candidate-run.json'
+                artifact_metadata = & $artifact 'candidate-artifact.json'
+            }
+        }
+        harness = [ordered]@{
+            source_sha = 'b' * 40
+            source_state = 'clean'
+            launcher = & $artifact 'test-windows-vm.py'
+            controller = & $artifact 'run-windows-vm-tests.ps1'
+            runner = & $artifact 'windows-vm-guest.ps1'
+            observers = [ordered]@{
+                ui = & $artifact 'windows-vm-acceptance.ps1'
+                recovery = & $artifact 'windows-vm-recovery-acceptance.ps1'
+            }
+            validators = [ordered]@{
+                release_handoff = & $artifact 'validate-release-handoff.ps1'
+                candidate_metadata = & $artifact 'validate-release-candidate-metadata.ps1'
+                binary_measurement = & $artifact 'measure-windows-binary.ps1'
+            }
+        }
+        test_binaries = @()
+    }
+    Write-Utf8Json -Path (Join-Path $fixture.bundle_root 'bundle.json') -Value $fixture.manifest
+    $fixture
+}
+
 function Invoke-ValidateOnly([object] $Fixture) {
     & $Fixture.acceptance `
         -BundleRoot $Fixture.bundle_root `
@@ -286,6 +357,19 @@ try {
     )) {
         if ($controllerText.IndexOf($requiredEngineSource, [StringComparison]::Ordinal) -lt 0) {
             throw "The VM controller is missing acceptance-engine evidence '$requiredEngineSource'."
+        }
+    }
+    foreach ($requiredCandidateObserverSource in @(
+        '@($manifest.harness.observers.PSObject.Properties | ForEach-Object Value)',
+        '$expectedAcceptanceSourceSha = if ($candidateLane)',
+        '$manifest.harness.observers.ui.file -cne ''windows-vm-acceptance.ps1''',
+        '$manifest.harness.observers.ui.sha256 -ine $observer.sha256'
+    )) {
+        if ($controllerText.IndexOf(
+            $requiredCandidateObserverSource,
+            [StringComparison]::Ordinal
+        ) -lt 0) {
+            throw "The VM controller is missing frozen candidate observer staging '$requiredCandidateObserverSource'."
         }
     }
     $policy = Get-ExecutionPolicy
@@ -1228,6 +1312,34 @@ try {
 
     $valid = New-AcceptanceFixture -Name 'valid'
     Invoke-ValidateOnly $valid
+
+    $candidateValid = New-CandidateAcceptanceFixture -Name 'candidate-valid'
+    Invoke-ValidateOnly $candidateValid
+
+    $candidateSwappedObserver = New-CandidateAcceptanceFixture -Name 'candidate-swapped-observer'
+    $candidateSwappedObserver.manifest.harness.observers.ui =
+        $candidateSwappedObserver.manifest.harness.observers.recovery
+    Write-Utf8Json `
+        -Path (Join-Path $candidateSwappedObserver.bundle_root 'bundle.json') `
+        -Value $candidateSwappedObserver.manifest
+    Assert-Fails { Invoke-ValidateOnly $candidateSwappedObserver } 'UI observer binding is invalid'
+
+    $candidateFalseAlias = New-CandidateAcceptanceFixture -Name 'candidate-false-alias'
+    $candidateFalseAlias.manifest['runner'] = $candidateFalseAlias.manifest.harness.runner
+    Write-Utf8Json `
+        -Path (Join-Path $candidateFalseAlias.bundle_root 'bundle.json') `
+        -Value $candidateFalseAlias.manifest
+    Assert-Fails { Invoke-ValidateOnly $candidateFalseAlias } 'unexpected fields'
+
+    $candidateDuplicate = New-CandidateAcceptanceFixture -Name 'candidate-duplicate'
+    $candidateManifestPath = Join-Path $candidateDuplicate.bundle_root 'bundle.json'
+    $candidateManifestText = [IO.File]::ReadAllText($candidateManifestPath)
+    [IO.File]::WriteAllText(
+        $candidateManifestPath,
+        $candidateManifestText.Replace('"schema_version": 2,', '"schema_version": 2, "schema_version": 2,'),
+        [Text.UTF8Encoding]::new($false)
+    )
+    Assert-Fails { Invoke-ValidateOnly $candidateDuplicate } 'duplicate field: schema_version'
     if (Test-Path -LiteralPath $valid.output_root) {
         throw 'ValidateOnly must not create acceptance output.'
     }
