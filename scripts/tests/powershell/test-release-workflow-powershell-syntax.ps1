@@ -1,6 +1,10 @@
 [CmdletBinding()]
 param()
 
+. (Join-Path $PSScriptRoot '../support/paths.ps1')
+$toolingTestPaths = Get-ToolingTestPaths
+$toolingScriptsRoot = $toolingTestPaths.ScriptsRoot
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -701,7 +705,7 @@ function Assert-ToolingRegistryMembership {
     }
 }
 
-$repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$repositoryRoot = (Resolve-Path (Join-Path $toolingScriptsRoot '..')).Path
 $workflows = @(
     Join-Path $repositoryRoot '.github/workflows/ci.yaml'
     Join-Path $repositoryRoot '.github/workflows/benchmark-planning.yaml'
@@ -767,10 +771,10 @@ if ($toolingErrors.Count -ne 0) {
 $toolingRegistry = Get-Content -LiteralPath (Join-Path $repositoryRoot 'config/tooling-tests.json') -Raw |
     ConvertFrom-Json -Depth 20
 $requiredCommonTests = @(
-    'scripts/test-release-candidate-metadata-validator.ps1'
-    'scripts/test-prepare-release-cyclonedx.ps1'
-    'scripts/test-release-workflow-powershell-syntax.ps1'
-    'scripts/test-run-vm-automated-hosted.ps1'
+    'scripts/tests/powershell/test-release-candidate-metadata-validator.ps1'
+    'scripts/tests/powershell/test-prepare-release-cyclonedx.ps1'
+    'scripts/tests/powershell/test-release-workflow-powershell-syntax.ps1'
+    'scripts/tests/powershell/test-run-vm-automated-hosted.ps1'
 )
 Assert-ToolingRegistryMembership -Registry $toolingRegistry -Required $requiredCommonTests
 $ciSource = Get-Content -LiteralPath $ciPath -Raw
@@ -1521,13 +1525,13 @@ Assert-Fails -Action {
 
 $toolingFixture = [pscustomobject]@{ tests = @(
     [pscustomobject]@{
-        path = 'scripts/test-release-candidate-metadata-validator.ps1'
+        path = 'scripts/tests/powershell/test-release-candidate-metadata-validator.ps1'
         runner = 'PowerShell'
         platforms = @('Ubuntu', 'Windows')
         requiresVm = $false
     }
     [pscustomobject]@{
-        path = 'scripts/test-prepare-release-cyclonedx.ps1'
+        path = 'scripts/tests/powershell/test-prepare-release-cyclonedx.ps1'
         runner = 'PowerShell'
         platforms = @('Ubuntu', 'Windows')
         requiresVm = $false
@@ -1535,7 +1539,7 @@ $toolingFixture = [pscustomobject]@{ tests = @(
 ) }
 Assert-Fails -Action {
     Assert-ToolingRegistryMembership -Registry $toolingFixture -Required $requiredCommonTests
-} -ExpectedFragment 'must contain scripts/test-release-workflow-powershell-syntax.ps1 exactly once'
+} -ExpectedFragment 'must contain scripts/tests/powershell/test-release-workflow-powershell-syntax.ps1 exactly once'
 
 $aboutConfigPath = Join-Path $repositoryRoot 'about.toml'
 if (-not (Test-Path -LiteralPath $aboutConfigPath -PathType Leaf)) {

@@ -1,10 +1,14 @@
 [CmdletBinding()]
 param()
 
+. (Join-Path $PSScriptRoot '../support/paths.ps1')
+$toolingTestPaths = Get-ToolingTestPaths
+$toolingScriptsRoot = $toolingTestPaths.ScriptsRoot
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$validator = Join-Path $PSScriptRoot 'validate-release-candidate-metadata.ps1'
+$validator = Join-Path $toolingScriptsRoot 'validate-release-candidate-metadata.ps1'
 if (-not (Test-Path -LiteralPath $validator -PathType Leaf)) {
     throw "Release candidate metadata validator is missing: $validator"
 }

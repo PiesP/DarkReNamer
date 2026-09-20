@@ -1,12 +1,16 @@
 [CmdletBinding()]
 param()
 
+. (Join-Path $PSScriptRoot '../support/paths.ps1')
+$toolingTestPaths = Get-ToolingTestPaths
+$toolingScriptsRoot = $toolingTestPaths.ScriptsRoot
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'test-support/windows-binary-fixture.ps1')
+. (Join-Path $toolingScriptsRoot 'tests/support/windows-binary-fixture.ps1')
 
-$generator = Join-Path $PSScriptRoot 'new-windows-acceptance-draft.ps1'
-$validator = Join-Path $PSScriptRoot 'validate-windows-acceptance-evidence.ps1'
+$generator = Join-Path $toolingScriptsRoot 'new-windows-acceptance-draft.ps1'
+$validator = Join-Path $toolingScriptsRoot 'validate-windows-acceptance-evidence.ps1'
 if (-not (Test-Path -LiteralPath $generator -PathType Leaf)) {
     throw "Windows acceptance draft generator is missing: $generator"
 }
@@ -228,7 +232,7 @@ function Assert-Draft {
     }
 }
 
-$sourceRoot = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
+$sourceRoot = (Resolve-Path -LiteralPath (Split-Path -Parent $toolingScriptsRoot)).Path
 $sourceSha = (& git -C $sourceRoot rev-parse HEAD).Trim()
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "darkrenamer-acceptance-draft-$([Guid]::NewGuid())"
 $insideRepositoryOutput = Join-Path $sourceRoot '.stage4-generator-test-output.json'
@@ -251,7 +255,7 @@ try {
     )
     $schemaReasons = @(
         (Get-Content `
-            -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'config/schemas/windows-acceptance-evidence.schema.json') `
+            -LiteralPath (Join-Path (Split-Path -Parent $toolingScriptsRoot) 'config/schemas/windows-acceptance-evidence.schema.json') `
             -Raw |
             ConvertFrom-Json).'$defs'.unexecuted.properties.reason_code.enum
     )
@@ -370,7 +374,7 @@ try {
     $invalidRootOutput = Join-Path $testRoot 'invalid-root.json'
     Assert-GeneratorFails `
         -Command {
-            & $generator -SourceRoot $PSScriptRoot -OutputPath $invalidRootOutput -ExecutablePath $executablePath
+            & $generator -SourceRoot $toolingScriptsRoot -OutputPath $invalidRootOutput -ExecutablePath $executablePath
         } `
         -ExpectedFragment 'exact Git worktree root' `
         -OutputPath $invalidRootOutput

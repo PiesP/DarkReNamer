@@ -1,12 +1,16 @@
 [CmdletBinding()]
 param()
 
+. (Join-Path $PSScriptRoot '../support/paths.ps1')
+$toolingTestPaths = Get-ToolingTestPaths
+$toolingScriptsRoot = $toolingTestPaths.ScriptsRoot
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$validator = Join-Path $PSScriptRoot 'validate-windows-acceptance-evidence.ps1'
-$schema = Join-Path (Split-Path -Parent $PSScriptRoot) 'config/schemas/windows-acceptance-evidence.schema.json'
-$visualFixture = Join-Path $PSScriptRoot 'test-visual-evidence-fixture.ps1'
+$validator = Join-Path $toolingScriptsRoot 'validate-windows-acceptance-evidence.ps1'
+$schema = Join-Path (Split-Path -Parent $toolingScriptsRoot) 'config/schemas/windows-acceptance-evidence.schema.json'
+$visualFixture = Join-Path $toolingScriptsRoot 'tests/support/visual-evidence-fixture.ps1'
 if (-not (Test-Path -LiteralPath $validator -PathType Leaf)) {
     throw "Windows acceptance evidence validator is missing: $validator"
 }

@@ -1,12 +1,16 @@
 [CmdletBinding()]
 param()
 
+. (Join-Path $PSScriptRoot '../support/paths.ps1')
+$toolingTestPaths = Get-ToolingTestPaths
+$toolingScriptsRoot = $toolingTestPaths.ScriptsRoot
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'test-support/windows-binary-fixture.ps1')
+. (Join-Path $toolingScriptsRoot 'tests/support/windows-binary-fixture.ps1')
 
-$validator = Join-Path $PSScriptRoot 'validate-release-acceptance.ps1'
-$visualFixture = Join-Path $PSScriptRoot 'test-visual-evidence-fixture.ps1'
+$validator = Join-Path $toolingScriptsRoot 'validate-release-acceptance.ps1'
+$visualFixture = Join-Path $toolingScriptsRoot 'tests/support/visual-evidence-fixture.ps1'
 if (-not (Test-Path -LiteralPath $validator -PathType Leaf)) {
     throw "Release acceptance validator is missing: $validator"
 }
@@ -409,14 +413,14 @@ try {
     $validatorBundle = Join-Path $testRoot 'validator-bundle/scripts'
     $schemaBundle = Join-Path $testRoot 'validator-bundle/config/schemas'
     New-Item -ItemType Directory -Path $validatorBundle, $schemaBundle -Force | Out-Null
-    Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'config/schemas/windows-acceptance-evidence.schema.json') -Destination $schemaBundle
+    Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $toolingScriptsRoot) 'config/schemas/windows-acceptance-evidence.schema.json') -Destination $schemaBundle
     foreach ($name in @(
             'validate-release-acceptance.ps1',
             'validate-windows-acceptance-evidence.ps1'
         )) {
-        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $validatorBundle
+        Copy-Item -LiteralPath (Join-Path $toolingScriptsRoot $name) -Destination $validatorBundle
     }
-    $realHandoffValidator = (Join-Path $PSScriptRoot 'validate-release-handoff.ps1').Replace("'", "''")
+    $realHandoffValidator = (Join-Path $toolingScriptsRoot 'validate-release-handoff.ps1').Replace("'", "''")
     $replacementShim = @"
 [CmdletBinding()]
 param(

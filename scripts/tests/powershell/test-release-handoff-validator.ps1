@@ -1,14 +1,18 @@
 [CmdletBinding()]
 param()
 
+. (Join-Path $PSScriptRoot '../support/paths.ps1')
+$toolingTestPaths = Get-ToolingTestPaths
+$toolingScriptsRoot = $toolingTestPaths.ScriptsRoot
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$validator = Join-Path $PSScriptRoot 'validate-release-handoff.ps1'
+$validator = Join-Path $toolingScriptsRoot 'validate-release-handoff.ps1'
 if (-not (Test-Path -LiteralPath $validator -PathType Leaf)) {
     throw "Release handoff validator is missing: $validator"
 }
-. (Join-Path $PSScriptRoot 'test-support/windows-binary-fixture.ps1')
+. (Join-Path $toolingScriptsRoot 'tests/support/windows-binary-fixture.ps1')
 
 function Write-Utf8NoBom {
     param(
