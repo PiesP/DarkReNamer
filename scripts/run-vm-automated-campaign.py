@@ -298,18 +298,29 @@ def backend_files(result: dict) -> list[str]:
 def prepare_backend(source: Path, destination: Path, profile: dict,
                     harness_sha: str, native_runner) -> dict:
     source = ordinary_directory(source, "Backend evidence root")
-    manifest = load_bounded_json(source / "bundle.json", label="Backend bundle")
-    result = load_bounded_json(source / "result.json", label="Backend result")
-    transport = load_bounded_json(source / "transport.json", label="Backend transport")
+    # Native PowerShell records may contain one UTF-8 BOM. Freeze their exact
+    # bytes before parsing and independently derive required test functions
+    # from each binary's complete stdout transcript.
+    from vm_automated_evidence import ExtractedEvidence, FileReference
+    from vm_automated_verifier import EvidenceReader, verify_backend_execution
+    pins = {}
+    for name in ("bundle.json", "result.json", "transport.json"):
+        frozen = frozen_file(source / name)
+        pins[name] = FileReference(frozen["sha256"], frozen["size"])
+    reader = EvidenceReader(ExtractedEvidence(source, pins))
+    manifest, result, transport = (reader.json(name) for name in ("bundle.json", "result.json", "transport.json"))
     require(type(manifest) is dict and manifest.get("schema_version") == 1 and
             manifest.get("source_sha") == harness_sha and manifest.get("source_state") == "clean" and
             type(manifest.get("test_binaries")) is list and manifest["test_binaries"],
             "Backend evidence is not a clean source-bound native bundle.")
+    for name in backend_files(result):
+        frozen = frozen_file(source / name)
+        pins[name] = FileReference(frozen["sha256"], frozen["size"])
+    verify_backend_execution(reader, "bundle.json", "result.json", source_sha=harness_sha,
+                             required_tests=profile["required_backend_test_names"])
+    require(transport.get("guest_cleanup") is True, "Backend controller cleanup did not finish.")
     require(native_runner.verify_result(source, manifest, result),
             "Backend native runner result did not pass its existing validator.")
-    required = set(profile["required_backend_test_names"])
-    observed = {row.get("name") for row in result["tests"] if type(row) is dict}
-    require(required <= observed, "Backend result omits required native safety tests.")
     destination.mkdir()
     selected = ["bundle.json", "result.json", "transport.json", *backend_files(result)]
     require(len(selected) == len(set(name.casefold() for name in selected)),

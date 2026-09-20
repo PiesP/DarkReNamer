@@ -102,12 +102,13 @@ class CampaignRunnerTests(unittest.TestCase):
         for index, name in enumerate(required):
             stdout = f"test-{index}.stdout.txt"
             stderr = f"test-{index}.stderr.txt"
-            (self.backend / stdout).write_text("test result: ok\n", encoding="utf-8")
+            (self.backend / stdout).write_text(f"test native::{name} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n", encoding="utf-8")
             (self.backend / stderr).write_text("", encoding="utf-8")
             tests.append({
-                "name": name,
-                "stdout": {"file": stdout, "sha256": "a" * 64},
-                "stderr": {"file": stderr, "sha256": "b" * 64},
+                "name": f"native-binary-{index}", "file": f"test-{index}.exe",
+                "sha256": "c" * 64, "exit_code": 0, "passed": 1, "failed": 0, "ignored": 0,
+                "stdout": {"file": stdout, "sha256": hashlib.sha256((self.backend / stdout).read_bytes()).hexdigest()},
+                "stderr": {"file": stderr, "sha256": hashlib.sha256(b"").hexdigest()},
             })
             binaries.append({"name": name, "file": f"test-{index}.exe", "sha256": "c" * 64})
             (self.backend / f"test-{index}.exe").write_bytes(b"large executable")
@@ -121,7 +122,11 @@ class CampaignRunnerTests(unittest.TestCase):
             "application": {"file": "DarkReNamer.exe", "sha256": "e" * 64},
             "runner": {"file": "windows-vm-guest.ps1", "sha256": "f" * 64},
         })
-        write_json(self.backend / "result.json", {"tests": tests})
+        write_json(self.backend / "result.json", {"schema_version": 1, "source_sha": HARNESS_SHA,
+            "source_state": "clean", "target": "x86_64-pc-windows-msvc", "tests": tests,
+            "failure_reason": None, "transport": {"guest_cleanup": True}})
+        result_path = self.backend / "result.json"
+        result_path.write_bytes(b"\xef\xbb\xbf" + result_path.read_bytes())
         write_json(self.backend / "transport.json", {"guest_cleanup": True})
 
     def args(self) -> argparse.Namespace:
