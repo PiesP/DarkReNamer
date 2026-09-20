@@ -11,9 +11,11 @@ import json
 import os
 from pathlib import Path
 import py_compile
+import queue
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from unittest import mock
@@ -409,6 +411,83 @@ class ToolingBootstrapTests(unittest.TestCase):
             with self.assertRaises(bootstrap.ToolingBootstrapError):
                 with verified.importer():
                     self.fail("concurrent verified importer was accepted")
+
+    def test_separately_loaded_library_cannot_replace_active_closure(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "tooling_alias_probe", SCRIPT_DIR / "tooling_bootstrap.py"
+        )
+        alias = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = alias
+        try:
+            spec.loader.exec_module(alias)
+            first = self.fixture.verify()
+            self.fixture.sources["campaign-planning"] = b"VALUE = 'other closure'\n"
+            self.fixture.entries[2]["sha256"] = digest(self.fixture.sources["campaign-planning"])
+            self.fixture.write_modules()
+            other = alias.verify_tooling(
+                root=self.root, manifest_location=self.fixture.manifest_location,
+                expected_manifest_sha256=self.fixture.write_manifest(), mode="checkout",
+                required_roles=("campaign-planning",),
+            )
+            with first.importer() as imports:
+                with self.assertRaises(alias.ToolingBootstrapError):
+                    with other.importer():
+                        self.fail("a separately loaded verifier replaced the active closure")
+                self.assertEqual(imports.import_role("campaign-planning").VALUE, "verified")
+        finally:
+            sys.modules.pop(spec.name, None)
+
+    def test_simultaneous_threads_cannot_own_two_closures(self) -> None:
+        verified = self.fixture.verify()
+        for _ in range(8):
+            barrier = threading.Barrier(2)
+            release = threading.Event()
+            outcomes = queue.Queue()
+
+            def enter() -> None:
+                try:
+                    barrier.wait(timeout=5)
+                    with verified.importer():
+                        outcomes.put("entered")
+                        release.wait(timeout=5)
+                except bootstrap.ToolingBootstrapError:
+                    outcomes.put("rejected")
+                except Exception as error:
+                    outcomes.put(type(error).__name__)
+
+            threads = [threading.Thread(target=enter) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            try:
+                actual = sorted(outcomes.get(timeout=5) for _ in range(2))
+                self.assertEqual(actual, ["entered", "rejected"])
+            finally:
+                release.set()
+                for thread in threads:
+                    thread.join(timeout=5)
+                    self.assertFalse(thread.is_alive())
+
+    def test_foreign_module_is_rejected_and_preserved_during_cleanup(self) -> None:
+        foreign = types.ModuleType("darkrenamer_tooling.campaign.planning")
+        with self.fixture.verify().importer() as imports:
+            importlib.import_module("darkrenamer_tooling.campaign")
+            sys.modules[foreign.__name__] = foreign
+            with self.assertRaises(bootstrap.ToolingBootstrapError):
+                imports.import_role("campaign-planning")
+        self.assertIs(sys.modules[foreign.__name__], foreign)
+
+    def test_loader_library_requires_its_package_and_loads_normally(self) -> None:
+        self.fixture.sources["tooling-loader"] = b"VALUE = 'loader'\n"
+        row = self.fixture.entry(
+            "tooling-loader", "scripts/tooling_bootstrap.py", "tooling-loader.py",
+            "python", "darkrenamer_tooling.loader", ["package-root"],
+        )
+        self.fixture.entries.append(row)
+        self.fixture.write_modules()
+        with self.fixture.verify(("tooling-loader",)).importer() as imports:
+            self.assertEqual(imports.import_role("tooling-loader").VALUE, "loader")
+        row["dependencies"] = []
+        self.assert_rejected(self.fixture.write_manifest(), roles=("tooling-loader",))
 
     def test_importing_library_has_no_io_process_or_external_mutation(self) -> None:
         source = (SCRIPT_DIR / "tooling_bootstrap.py").read_bytes()
