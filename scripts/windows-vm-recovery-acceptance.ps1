@@ -1557,64 +1557,6 @@ function Get-AcceptanceUiDiagnostic {
     }
 }
 
-function Find-AcceptanceAutomationElementByName {
-    param(
-        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Root,
-        [Parameter(Mandatory)][Diagnostics.Process] $Process,
-        [Parameter(Mandatory)][int] $ExpectedSession,
-        [Parameter(Mandatory)][string] $Name,
-        [Parameter(Mandatory)][Windows.Automation.ControlType] $ControlType,
-        [Parameter(Mandatory)][int] $TimeoutSeconds,
-        [Parameter(Mandatory)][string] $Label,
-        [switch] $RequireEnabled,
-        [switch] $RequireVisible
-    )
-
-    $conditions = [Windows.Automation.Condition[]]@(
-        [Windows.Automation.PropertyCondition]::new(
-            [Windows.Automation.AutomationElement]::ProcessIdProperty,
-            $Process.Id
-        ),
-        [Windows.Automation.PropertyCondition]::new(
-            [Windows.Automation.AutomationElement]::NameProperty,
-            $Name
-        ),
-        [Windows.Automation.PropertyCondition]::new(
-            [Windows.Automation.AutomationElement]::ControlTypeProperty,
-            $ControlType
-        )
-    )
-    $condition = [Windows.Automation.AndCondition]::new($conditions)
-    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
-    do {
-        $matches = $Root.FindAll([Windows.Automation.TreeScope]::Children, $condition)
-        if ($matches.Count -gt 1) {
-            throw "$Label matched more than one automation element."
-        }
-        if ($matches.Count -eq 1) {
-            $element = $matches.Item(0)
-            Assert-AutomationBinding `
-                -Element $element `
-                -Process $Process `
-                -ExpectedSession $ExpectedSession `
-                -Label $Label
-            if ($RequireEnabled -and -not $element.Current.IsEnabled) {
-                throw "$Label is not enabled."
-            }
-            if ($RequireVisible -and $element.Current.IsOffscreen) {
-                throw "$Label is not visible."
-            }
-            return $element
-        }
-        Start-Sleep -Milliseconds 100
-        $Process.Refresh()
-        if ($Process.HasExited) {
-            throw "$Label was not found before the application exited."
-        }
-    } while ((Get-Date) -lt $deadline)
-    throw "$Label was not found before the bounded deadline."
-}
-
 function Initialize-AcceptanceRecoveryMenuNative {
     if ('DarkReNamerRecoveryMenuNative' -as [type]) {
         return
@@ -1651,12 +1593,40 @@ public static class DarkReNamerRecoveryMenuNative {
         public PopupObservation[] Entries { get; set; }
     }
 
+    public sealed class RecoveryMenuItemObservation {
+        public int RootPosition { get; set; }
+        public int Position { get; set; }
+        public string ItemType { get; set; }
+        public int? CommandId { get; set; }
+        public uint StateFlags { get; set; }
+        public int Left { get; set; }
+        public int Top { get; set; }
+        public int Right { get; set; }
+        public int Bottom { get; set; }
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT {
         public int Left;
         public int Top;
         public int Right;
         public int Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct MENUITEMINFO {
+        public uint Size;
+        public uint Mask;
+        public uint Type;
+        public uint State;
+        public uint Id;
+        public IntPtr SubMenu;
+        public IntPtr CheckedBitmap;
+        public IntPtr UncheckedBitmap;
+        public UIntPtr ItemData;
+        public IntPtr TypeData;
+        public uint TextLength;
+        public IntPtr ItemBitmap;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1702,6 +1672,20 @@ public static class DarkReNamerRecoveryMenuNative {
     private static extern int GetClassName(IntPtr window, StringBuilder text, int count);
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetWindowRect(IntPtr window, out RECT rect);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetMenu(IntPtr window);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetSubMenu(IntPtr menu, int position);
+    [DllImport("user32.dll")]
+    private static extern int GetMenuItemCount(IntPtr menu);
+    [DllImport("user32.dll")]
+    private static extern uint GetMenuState(IntPtr menu, uint item, uint flags);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool GetMenuItemInfoW(
+        IntPtr menu, uint item, bool byPosition, ref MENUITEMINFO information);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetMenuItemRect(
+        IntPtr window, IntPtr menu, uint item, out RECT rect);
 
     private static INPUT Key(ushort virtualKey, uint flags) {
         return new INPUT {
@@ -1715,6 +1699,22 @@ public static class DarkReNamerRecoveryMenuNative {
                     extraInfo = UIntPtr.Zero
                 }
             }
+        };
+    }
+
+    public static KeyboardResult SendKeyTap(ushort virtualKey) {
+        INPUT[] inputs = new [] { Key(virtualKey, 0), Key(virtualKey, 2) };
+        uint sent = SendInput(2, inputs, Marshal.SizeOf(typeof(INPUT)));
+        int error = sent == 2 ? 0 : Marshal.GetLastWin32Error();
+        uint released = 0;
+        if (sent != 2) {
+            released = SendInput(1, new [] { Key(virtualKey, 2) }, Marshal.SizeOf(typeof(INPUT)));
+        }
+        return new KeyboardResult {
+            RequestedCount = 2,
+            SentCount = sent,
+            ErrorCode = error,
+            ReleaseSentCount = released
         };
     }
 
@@ -1786,6 +1786,50 @@ public static class DarkReNamerRecoveryMenuNative {
             Entries = entries.ToArray()
         };
     }
+
+    public static RecoveryMenuItemObservation[] ReadRecoveryMenuItems(IntPtr window) {
+        const int recoveryRootPosition = 4;
+        IntPtr root = GetMenu(window);
+        if (root == IntPtr.Zero || GetMenuItemCount(root) != 6) {
+            throw new InvalidOperationException("The application menu bar is not the exact six-item tree.");
+        }
+        IntPtr recovery = GetSubMenu(root, recoveryRootPosition);
+        if (recovery == IntPtr.Zero || GetMenuItemCount(recovery) != 4) {
+            throw new InvalidOperationException("The recovery menu is not the exact four-item subtree.");
+        }
+        List<RecoveryMenuItemObservation> rows = new List<RecoveryMenuItemObservation>(4);
+        for (int position = 0; position < 4; position++) {
+            uint state = GetMenuState(recovery, (uint)position, 0x400);
+            if (state == UInt32.MaxValue) {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            MENUITEMINFO information = new MENUITEMINFO {
+                Size = (uint)Marshal.SizeOf(typeof(MENUITEMINFO)),
+                Mask = 0x00000107
+            };
+            if (!GetMenuItemInfoW(recovery, (uint)position, true, ref information)) {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            bool separator = (information.Type & 0x800) != 0;
+            bool submenu = information.SubMenu != IntPtr.Zero;
+            RECT rect;
+            if (!GetMenuItemRect(IntPtr.Zero, recovery, (uint)position, out rect)) {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            rows.Add(new RecoveryMenuItemObservation {
+                RootPosition = recoveryRootPosition,
+                Position = position,
+                ItemType = separator ? "separator" : submenu ? "submenu" : "command",
+                CommandId = separator || submenu ? (int?)null : checked((int)information.Id),
+                StateFlags = state & 0xFF,
+                Left = rect.Left,
+                Top = rect.Top,
+                Right = rect.Right,
+                Bottom = rect.Bottom
+            });
+        }
+        return rows.ToArray();
+    }
 }
 '@
 }
@@ -1843,7 +1887,9 @@ function Write-AcceptanceRecoveryMenuProgress {
         [ValidateSet('export', 'discard-cancel', 'discard-confirm')]
         [string] $Purpose,
         [Parameter(Mandatory)]
-        [ValidateSet('input-returned', 'native-popup-found', 'uia-popup-started', 'uia-popup-bound')]
+        [ValidateSet('input-returned', 'native-popup-found', 'native-menu-bound',
+            'navigation-1', 'navigation-2', 'navigation-3', 'navigation-4',
+            'native-command-highlighted', 'native-enter-returned')]
         [string] $Phase,
         [Parameter(Mandatory)][object] $Observation
     )
@@ -1877,11 +1923,19 @@ function Remove-AcceptanceRecoveryMenuProgress {
                 'export-progress-' + $Purpose + '-' + $phase + '.json'
             ))
     }
-    foreach ($phase in @('input-returned', 'native-popup-found', 'uia-popup-started',
-            'uia-popup-bound')) {
+    foreach ($phase in @('input-returned', 'native-popup-found', 'native-menu-bound',
+            'native-command-highlighted', 'native-enter-returned')) {
         Remove-Item -LiteralPath (Join-Path $PrivateRoot (
                 'recovery-menu-' + $Purpose + '-' + $phase + '.json'
             ))
+    }
+    foreach ($phase in @('navigation-1', 'navigation-2', 'navigation-3', 'navigation-4')) {
+        $optionalPath = Join-Path $PrivateRoot (
+            'recovery-menu-' + $Purpose + '-' + $phase + '.json'
+        )
+        if (Test-Path -LiteralPath $optionalPath -PathType Leaf) {
+            Remove-Item -LiteralPath $optionalPath
+        }
     }
 }
 
@@ -1940,6 +1994,177 @@ function ConvertTo-AcceptanceRecoveryMenuObservation {
     }
 }
 
+function ConvertTo-AcceptanceRecoveryMenuState {
+    param(
+        [Parameter(Mandatory)][object[]] $Rows,
+        [Parameter(Mandatory)][int] $TargetCommandId,
+        [Parameter(Mandatory)][int] $TargetPosition,
+        [Parameter(Mandatory)][object] $Popup,
+        [switch] $RequireHighlight
+    )
+
+    if (($TargetCommandId -ne 0x9000 -or $TargetPosition -ne 1) -and
+        ($TargetCommandId -ne 0x9001 -or $TargetPosition -ne 3)) {
+        throw 'Recovery menu target command and position are invalid.'
+    }
+    if ($Popup.hwnd -le 0 -or $Popup.window_class -cne '#32768' -or
+        -not $Popup.visible -or $Popup.rect.right -le $Popup.rect.left -or
+        $Popup.rect.bottom -le $Popup.rect.top) {
+        throw 'Recovery menu popup binding is invalid.'
+    }
+    $expectedTypes = @('command', 'command', 'separator', 'command')
+    $expectedCommands = @(0x9002, 0x9000, $null, 0x9001)
+    if ($Rows.Count -ne 4) {
+        throw 'Recovery menu must contain exactly four native rows.'
+    }
+    $normalized = [Collections.Generic.List[object]]::new()
+    $highlights = [Collections.Generic.List[object]]::new()
+    for ($position = 0; $position -lt 4; $position++) {
+        $matches = @($Rows | Where-Object { $_.Position -eq $position })
+        if ($matches.Count -ne 1) {
+            throw 'Recovery menu positions are missing or duplicated.'
+        }
+        $row = $matches[0]
+        $commandId = if ($null -eq $row.CommandId) { $null } else { [int]$row.CommandId }
+        if ($row.RootPosition -ne 4 -or $row.Position -ne $position -or
+            $row.ItemType -cne $expectedTypes[$position] -or
+            (($null -eq $expectedCommands[$position]) -ne ($null -eq $commandId)) -or
+            ($null -ne $commandId -and $commandId -ne $expectedCommands[$position]) -or
+            $row.StateFlags -lt 0 -or $row.StateFlags -gt 255 -or
+            $row.Right -le $row.Left -or $row.Bottom -le $row.Top -or
+            $row.Left -lt $Popup.rect.left -or $row.Top -lt $Popup.rect.top -or
+            $row.Right -gt $Popup.rect.right -or $row.Bottom -gt $Popup.rect.bottom) {
+            throw 'Recovery menu row identity, state, or geometry is invalid.'
+        }
+        $enabled = ([int]$row.StateFlags -band 0x3) -eq 0
+        $item = [ordered]@{
+            root_position = 4
+            position = $position
+            item_type = [string]$row.ItemType
+            command_id = $commandId
+            state_flags = [int]$row.StateFlags
+            enabled = $enabled
+            rect = [ordered]@{
+                left = [int]$row.Left; top = [int]$row.Top
+                right = [int]$row.Right; bottom = [int]$row.Bottom
+            }
+        }
+        $normalized.Add($item)
+        if (($item.state_flags -band 0x80) -ne 0) {
+            $highlights.Add($item)
+        }
+    }
+    if ($highlights.Count -gt 1) {
+        throw 'Recovery menu has more than one native highlighted row.'
+    }
+    $highlight = if ($highlights.Count -eq 1) { $highlights[0] } else { $null }
+    if ($null -ne $highlight -and
+        ($highlight.item_type -cne 'command' -or -not $highlight.enabled)) {
+        throw 'Recovery menu highlighted a separator, submenu, or disabled command.'
+    }
+    if ($RequireHighlight -and $null -eq $highlight) {
+        throw 'Recovery menu has no native highlighted command.'
+    }
+    $target = $normalized[$TargetPosition]
+    if ($target.command_id -ne $TargetCommandId -or -not $target.enabled) {
+        throw 'Recovery menu target command is missing or disabled.'
+    }
+    [ordered]@{
+        popup = $Popup
+        rows = $normalized.ToArray()
+        target = $target
+        highlighted = $highlight
+    }
+}
+
+function Get-AcceptanceRecoveryMenuState {
+    param(
+        [Parameter(Mandatory)][IntPtr] $MainWindowHandle,
+        [Parameter(Mandatory)][object] $Popup,
+        [Parameter(Mandatory)][int] $TargetCommandId,
+        [Parameter(Mandatory)][int] $TargetPosition,
+        [switch] $RequireHighlight
+    )
+
+    $rows = @([DarkReNamerRecoveryMenuNative]::ReadRecoveryMenuItems($MainWindowHandle))
+    ConvertTo-AcceptanceRecoveryMenuState `
+        -Rows $rows `
+        -TargetCommandId $TargetCommandId `
+        -TargetPosition $TargetPosition `
+        -Popup $Popup `
+        -RequireHighlight:$RequireHighlight
+}
+
+function Wait-AcceptanceRecoveryMenuHighlightChange {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][IntPtr] $MainWindowHandle,
+        [Parameter(Mandatory)][object] $Popup,
+        [Parameter(Mandatory)][int] $TargetCommandId,
+        [Parameter(Mandatory)][int] $TargetPosition,
+        [AllowNull()][object] $PreviousHighlight
+    )
+
+    $deadline = (Get-Date).AddSeconds(2)
+    do {
+        $inventory = [DarkReNamerRecoveryMenuNative]::ReadVisiblePopups([uint32]$Process.Id)
+        $currentPopup = ConvertTo-AcceptanceRecoveryMenuObservation `
+            -Inventory $inventory -ExpectedProcessId $Process.Id `
+            -ExpectedSession $ExpectedSession -ActualSession $Process.SessionId
+        if ($null -eq $currentPopup -or $currentPopup.hwnd -ne $Popup.hwnd) {
+            throw 'Recovery menu popup changed while navigating its commands.'
+        }
+        $state = Get-AcceptanceRecoveryMenuState `
+            -MainWindowHandle $MainWindowHandle -Popup $currentPopup `
+            -TargetCommandId $TargetCommandId -TargetPosition $TargetPosition
+        if ($null -ne $state.highlighted -and
+            ($null -eq $PreviousHighlight -or
+                $state.highlighted.position -ne $PreviousHighlight.position -or
+                $state.highlighted.command_id -ne $PreviousHighlight.command_id)) {
+            return $state
+        }
+        Start-Sleep -Milliseconds 50
+        $Process.Refresh()
+        if ($Process.HasExited -or $Process.SessionId -ne $ExpectedSession) {
+            throw 'The candidate changed process state during recovery menu navigation.'
+        }
+    } while ((Get-Date) -lt $deadline)
+    throw 'Recovery menu highlight did not change before the bounded deadline.'
+}
+
+function Wait-AcceptanceRecoveryMenuClosed {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][long] $ExpectedPopupHandle,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [scriptblock] $ReadInventory = {
+            param([uint32] $ExpectedProcessId)
+            [DarkReNamerRecoveryMenuNative]::ReadVisiblePopups($ExpectedProcessId)
+        }
+    )
+
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    do {
+        $inventory = & $ReadInventory ([uint32]$Process.Id)
+        $Process.Refresh()
+        if ($Process.HasExited -or $Process.SessionId -ne $ExpectedSession) {
+            throw 'The candidate changed process state before its recovery menu closed.'
+        }
+        if ($inventory.TotalCount -eq 0) { return }
+        if ($inventory.TotalCount -ne 1) {
+            throw 'Recovery menu activation left an ambiguous native popup inventory.'
+        }
+        $entries = @($inventory.Entries)
+        if ($entries.Count -ne 1 -or $entries[0].Handle -ne $ExpectedPopupHandle) {
+            throw 'Recovery menu activation replaced the exact native popup.'
+        }
+        Start-Sleep -Milliseconds 50
+    } while ((Get-Date) -lt $deadline)
+    throw 'Recovery menu popup did not close before the bounded deadline.'
+}
+
 function Wait-AcceptanceRecoveryMenuPopup {
     param(
         [Parameter(Mandatory)][Diagnostics.Process] $Process,
@@ -1976,6 +2201,38 @@ function Wait-AcceptanceRecoveryMenuPopup {
     throw 'Recovery menu popup was not found before the bounded deadline.'
 }
 
+function Assert-AcceptanceRecoveryMenuForegroundObservation {
+    param(
+        [Parameter(Mandatory)][object] $Observation,
+        [Parameter(Mandatory)][int] $ExpectedProcessId,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][IntPtr] $MainWindowHandle,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    if ($Observation.hwnd -ne [long]$MainWindowHandle -or
+        $Observation.process_id -ne $ExpectedProcessId -or
+        $Observation.session_id -ne $ExpectedSession -or
+        $Observation.window_class -cne 'DarkReNamerWindow') {
+        throw "The verified application foreground binding changed before $Label."
+    }
+}
+
+function Get-AcceptanceRecoveryMenuForeground {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][IntPtr] $MainWindowHandle,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    $foreground = Get-ForegroundObservation
+    Assert-AcceptanceRecoveryMenuForegroundObservation `
+        -Observation $foreground -ExpectedProcessId $Process.Id `
+        -ExpectedSession $ExpectedSession -MainWindowHandle $MainWindowHandle -Label $Label
+    $foreground
+}
+
 function Start-AcceptanceRecoveryMenuInvoke {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -2002,13 +2259,28 @@ function Start-AcceptanceRecoveryMenuInvoke {
     if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $mainHandle) {
         throw "The verified application is not foreground for $Label."
     }
-    $foregroundBefore = Get-ForegroundObservation
-    if ($foregroundBefore.hwnd -ne [long]$mainHandle -or
-        $foregroundBefore.process_id -ne $process.Id -or
-        $foregroundBefore.session_id -ne $SessionId -or
-        $foregroundBefore.window_class -cne 'DarkReNamerWindow') {
-        throw "The verified application foreground binding changed before $Label."
+    $targetSpec = switch ($Purpose) {
+        'export' {
+            [ordered]@{
+                command_id = 0x9000
+                position = 1
+                item_name = '복구 데이터 내보내기...'
+            }
+        }
+        { $_ -in @('discard-cancel', 'discard-confirm') } {
+            [ordered]@{
+                command_id = 0x9001
+                position = 3
+                item_name = '시작되지 않은 작업 기록 삭제...'
+            }
+        }
     }
+    if ($null -eq $targetSpec -or $ItemName -cne $targetSpec.item_name) {
+        throw 'Recovery menu purpose and source-bound item name differ.'
+    }
+    $foregroundBefore = Get-AcceptanceRecoveryMenuForeground `
+        -Process $process -ExpectedSession $SessionId `
+        -MainWindowHandle $mainHandle -Label $Label
     Write-AcceptanceExportProgress `
         -PrivateRoot $PrivateRoot -Application $Application `
         -Purpose $Purpose -Phase 'before-menu-popup'
@@ -2033,70 +2305,147 @@ function Start-AcceptanceRecoveryMenuInvoke {
     if ($inputResult.RequestedCount -ne 4 -or $inputResult.SentCount -ne 4) {
         throw "Native recovery-menu input was incomplete (sent $($inputResult.SentCount) of 4, error $($inputResult.ErrorCode))."
     }
-    if ($foregroundAfter.hwnd -ne [long]$mainHandle -or
-        $foregroundAfter.process_id -ne $process.Id -or
-        $foregroundAfter.session_id -ne $SessionId -or
-        $foregroundAfter.window_class -cne 'DarkReNamerWindow') {
-        throw "The verified application foreground binding changed after input for $Label."
-    }
+    Assert-AcceptanceRecoveryMenuForegroundObservation `
+        -Observation $foregroundAfter -ExpectedProcessId $process.Id `
+        -ExpectedSession $SessionId -MainWindowHandle $mainHandle -Label "$Label Alt+R return"
     $nativePopup = Wait-AcceptanceRecoveryMenuPopup `
         -Process $process -ExpectedSession $SessionId -TimeoutSeconds $WaitSeconds
     Write-AcceptanceRecoveryMenuProgress `
         -PrivateRoot $PrivateRoot -Application $Application `
         -Purpose $Purpose -Phase 'native-popup-found' -Observation $nativePopup
-    Write-AcceptanceRecoveryMenuProgress `
-        -PrivateRoot $PrivateRoot -Application $Application `
-        -Purpose $Purpose -Phase 'uia-popup-started' -Observation $nativePopup
-    $popup = [Windows.Automation.AutomationElement]::FromHandle([IntPtr]$nativePopup.hwnd)
-    if ($null -eq $popup) {
-        throw 'The native recovery menu popup did not expose an automation element.'
-    }
-    Assert-AutomationBinding `
-        -Element $popup `
-        -Process $process `
-        -ExpectedSession $SessionId `
-        -Label 'recovery menu popup' `
-        -RequireWindowHandle
-    if ([long]$popup.Current.NativeWindowHandle -ne $nativePopup.hwnd -or
-        $popup.Current.ClassName -cne '#32768' -or
-        $popup.Current.ControlType -ne [Windows.Automation.ControlType]::Menu -or
-        $popup.Current.IsOffscreen) {
-        throw 'Recovery menu automation binding changed its native identity or visibility.'
-    }
+    $menuState = Get-AcceptanceRecoveryMenuState `
+        -MainWindowHandle $mainHandle -Popup $nativePopup `
+        -TargetCommandId $targetSpec.command_id -TargetPosition $targetSpec.position
     Write-AcceptanceRecoveryMenuProgress `
         -PrivateRoot $PrivateRoot `
         -Application $Application `
         -Purpose $Purpose `
-        -Phase 'uia-popup-bound' `
+        -Phase 'native-menu-bound' `
         -Observation ([ordered]@{
-            hwnd = [long]$popup.Current.NativeWindowHandle
-            process_id = [int]$popup.Current.ProcessId
-            session_id = [int]$SessionId
-            window_class = $popup.Current.ClassName
-            control_type = $popup.Current.ControlType.ProgrammaticName
-            visible = -not [bool]$popup.Current.IsOffscreen
+            popup = $nativePopup
+            rows = $menuState.rows
+            target = $menuState.target
+            highlighted = $menuState.highlighted
         })
     Write-AcceptanceExportProgress `
         -PrivateRoot $PrivateRoot -Application $Application `
         -Purpose $Purpose -Phase 'popup-found'
-    $item = Find-AcceptanceAutomationElementByName `
-        -Root $popup `
-        -Process $process `
-        -ExpectedSession $SessionId `
-        -Name $ItemName `
-        -ControlType ([Windows.Automation.ControlType]::MenuItem) `
-        -TimeoutSeconds $WaitSeconds `
-        -Label $Label `
-        -RequireEnabled `
-        -RequireVisible
+
+    $navigationCount = 0
+    while ($null -eq $menuState.highlighted -or
+        $menuState.highlighted.command_id -ne $targetSpec.command_id) {
+        if ($navigationCount -ge 4) {
+            throw 'Recovery menu keyboard navigation did not reach the exact target command.'
+        }
+        $navigationCount++
+        $downBefore = Get-AcceptanceRecoveryMenuForeground `
+            -Process $process -ExpectedSession $SessionId `
+            -MainWindowHandle $mainHandle -Label "$Label Down $navigationCount"
+        $downResult = [DarkReNamerRecoveryMenuNative]::SendKeyTap([uint16]0x28)
+        $downAfter = Get-ForegroundObservation
+        Write-AcceptanceRecoveryMenuProgress `
+            -PrivateRoot $PrivateRoot -Application $Application `
+            -Purpose $Purpose -Phase ('navigation-' + $navigationCount) `
+            -Observation ([ordered]@{
+                input_method = 'native-sendinput'
+                virtual_keys = [int[]]@(0x28)
+                requested_event_count = [int]$downResult.RequestedCount
+                sent_event_count = [int]$downResult.SentCount
+                win32_error = [int]$downResult.ErrorCode
+                release_sent_count = [int]$downResult.ReleaseSentCount
+                foreground_before = $downBefore
+                foreground_after = $downAfter
+            })
+        if ($downResult.RequestedCount -ne 2 -or $downResult.SentCount -ne 2) {
+            throw "Recovery menu Down input $navigationCount was incomplete."
+        }
+        Assert-AcceptanceRecoveryMenuForegroundObservation `
+            -Observation $downAfter -ExpectedProcessId $process.Id `
+            -ExpectedSession $SessionId -MainWindowHandle $mainHandle `
+            -Label "$Label Down $navigationCount return"
+        $previousHighlight = $menuState.highlighted
+        $menuState = Wait-AcceptanceRecoveryMenuHighlightChange `
+            -Process $process -ExpectedSession $SessionId `
+            -MainWindowHandle $mainHandle -Popup $nativePopup `
+            -TargetCommandId $targetSpec.command_id -TargetPosition $targetSpec.position `
+            -PreviousHighlight $previousHighlight
+    }
+    $menuState = Get-AcceptanceRecoveryMenuState `
+        -MainWindowHandle $mainHandle -Popup $nativePopup `
+        -TargetCommandId $targetSpec.command_id -TargetPosition $targetSpec.position `
+        -RequireHighlight
+    if ($menuState.highlighted.command_id -ne $targetSpec.command_id -or
+        $menuState.highlighted.position -ne $targetSpec.position) {
+        throw 'Recovery menu native highlight is not the exact target command.'
+    }
+    Write-AcceptanceRecoveryMenuProgress `
+        -PrivateRoot $PrivateRoot -Application $Application `
+        -Purpose $Purpose -Phase 'native-command-highlighted' `
+        -Observation ([ordered]@{
+            popup = $nativePopup
+            target = $menuState.target
+            highlighted = $menuState.highlighted
+            down_input_count = $navigationCount
+        })
     Write-AcceptanceExportProgress `
         -PrivateRoot $PrivateRoot -Application $Application `
         -Purpose $Purpose -Phase 'menu-item-found'
-    $invoke = Start-AutomationControlInvoke -Element $item -Label $Label
+
+    $enterBefore = Get-AcceptanceRecoveryMenuForeground `
+        -Process $process -ExpectedSession $SessionId `
+        -MainWindowHandle $mainHandle -Label "$Label Enter"
+    $popupInventory = [DarkReNamerRecoveryMenuNative]::ReadVisiblePopups([uint32]$process.Id)
+    $enterPopup = ConvertTo-AcceptanceRecoveryMenuObservation `
+        -Inventory $popupInventory -ExpectedProcessId $process.Id `
+        -ExpectedSession $SessionId -ActualSession $process.SessionId
+    if ($null -eq $enterPopup -or $enterPopup.hwnd -ne $nativePopup.hwnd) {
+        throw 'Recovery menu popup changed before exact target activation.'
+    }
+    $enterState = Get-AcceptanceRecoveryMenuState `
+        -MainWindowHandle $mainHandle -Popup $enterPopup `
+        -TargetCommandId $targetSpec.command_id -TargetPosition $targetSpec.position `
+        -RequireHighlight
+    if ($enterState.highlighted.command_id -ne $targetSpec.command_id -or
+        $enterState.highlighted.position -ne $targetSpec.position) {
+        throw 'Recovery menu highlight changed before exact target activation.'
+    }
+    $enterResult = [DarkReNamerRecoveryMenuNative]::SendKeyTap([uint16]0x0D)
+    $enterAfter = Get-ForegroundObservation
+    Write-AcceptanceRecoveryMenuProgress `
+        -PrivateRoot $PrivateRoot -Application $Application `
+        -Purpose $Purpose -Phase 'native-enter-returned' `
+        -Observation ([ordered]@{
+            input_method = 'native-sendinput'
+            virtual_keys = [int[]]@(0x0D)
+            requested_event_count = [int]$enterResult.RequestedCount
+            sent_event_count = [int]$enterResult.SentCount
+            win32_error = [int]$enterResult.ErrorCode
+            release_sent_count = [int]$enterResult.ReleaseSentCount
+            foreground_before = $enterBefore
+            foreground_after = $enterAfter
+            target = $enterState.target
+            highlighted = $enterState.highlighted
+        })
+    if ($enterResult.RequestedCount -ne 2 -or $enterResult.SentCount -ne 2) {
+        throw 'Recovery menu Enter input was incomplete.'
+    }
+    if ($enterAfter.process_id -ne $process.Id -or $enterAfter.session_id -ne $SessionId) {
+        throw 'Recovery menu activation changed foreground to another process or session.'
+    }
+    Wait-AcceptanceRecoveryMenuClosed `
+        -Process $process -ExpectedSession $SessionId `
+        -ExpectedPopupHandle $nativePopup.hwnd -TimeoutSeconds $WaitSeconds
     Write-AcceptanceExportProgress `
         -PrivateRoot $PrivateRoot -Application $Application `
         -Purpose $Purpose -Phase 'invoke-started'
-    $invoke
+    [pscustomobject][ordered]@{
+        input = 'native-keyboard-down-enter'
+        target_command_id = [int]$targetSpec.command_id
+        target_position = [int]$targetSpec.position
+        down_input_count = $navigationCount
+        enter_sent = $true
+        popup_closed = $true
+    }
 }
 
 function Dismiss-AcceptanceMessage {
@@ -2579,7 +2928,7 @@ function Invoke-AcceptanceRecoveryExport {
     )
 
     $exportRoot = New-PrivateDirectory -Parent $PrivateRoot -Leaf 'recovery-export'
-    $invoke = Start-AcceptanceRecoveryMenuInvoke `
+    $menuAction = Start-AcceptanceRecoveryMenuInvoke `
         -Application $Application `
         -SessionId $SessionId `
         -WaitSeconds $WaitSeconds `
@@ -2587,6 +2936,10 @@ function Invoke-AcceptanceRecoveryExport {
         -Label 'recovery export menu item' `
         -PrivateRoot $PrivateRoot `
         -Purpose 'export'
+    if ($menuAction.target_command_id -ne 0x9000 -or
+        -not $menuAction.enter_sent -or -not $menuAction.popup_closed) {
+        throw 'Recovery export menu action did not bind the exact native command.'
+    }
     $dialog = Wait-UniqueAutomationWindow `
         -Process $Application.owned.process `
         -Owner $Application.main `
@@ -2631,8 +2984,6 @@ function Invoke-AcceptanceRecoveryExport {
         -WaitSeconds $WaitSeconds `
         -Name 'DarkReNamer - 진단 내보내기 완료' `
         -Label 'recovery export completion message'
-    Complete-AutomationControlInvoke -State $invoke -TimeoutSeconds $WaitSeconds
-
     $exportItem = Get-AcceptanceRecoveryExportFile -Root $exportRoot
     $leaves = @($exportItem.Name)
     $exportPath = $exportItem.FullName
@@ -2864,7 +3215,7 @@ function Invoke-AcceptanceDiscardChoice {
         [Parameter(Mandatory)][bool] $Confirm
     )
 
-    $invoke = Start-AcceptanceRecoveryMenuInvoke `
+    $menuAction = Start-AcceptanceRecoveryMenuInvoke `
         -Application $Application `
         -PrivateRoot $PrivateRoot `
         -Purpose $(if ($Confirm) { 'discard-confirm' } else { 'discard-cancel' }) `
@@ -2872,6 +3223,10 @@ function Invoke-AcceptanceDiscardChoice {
         -WaitSeconds $WaitSeconds `
         -ItemName '시작되지 않은 작업 기록 삭제...' `
         -Label 'Intent-only candidate discard menu item'
+    if ($menuAction.target_command_id -ne 0x9001 -or
+        -not $menuAction.enter_sent -or -not $menuAction.popup_closed) {
+        throw 'Intent-only discard menu action did not bind the exact native command.'
+    }
     $prompt = Wait-UniqueAutomationWindow `
         -Process $Application.owned.process `
         -ExpectedSession $SessionId `
@@ -2921,7 +3276,6 @@ function Invoke-AcceptanceDiscardChoice {
             -Name 'DarkReNamer - 폐기 완료' `
             -Label 'candidate discard completion message'
     }
-    Complete-AutomationControlInvoke -State $invoke -TimeoutSeconds $WaitSeconds
     $completedUtcTicks = [DateTime]::UtcNow.Ticks.ToString(
         [Globalization.CultureInfo]::InvariantCulture
     )
