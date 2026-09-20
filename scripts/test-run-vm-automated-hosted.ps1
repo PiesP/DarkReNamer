@@ -369,7 +369,7 @@ function Invoke-HostedInvocationScenario {
             events = $events
         }
         foreach ($name in @('git', 'gh', 'Invoke-WebRequest', 'Remove-Item')) {
-            Microsoft.PowerShell.Management\Remove-Item -LiteralPath ("Function:\global:$name") `
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath ("Function:\$name") `
                 -Force -ErrorAction SilentlyContinue
         }
         foreach ($entry in $oldEnvironment.GetEnumerator()) {
