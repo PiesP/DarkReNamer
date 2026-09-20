@@ -263,9 +263,9 @@ class PredicateTests(unittest.TestCase):
         text_scale = {'registry_key_existed': True, 'registry_value_existed': True,
                       'registry_value_kind': 'DWord', 'registry_value': 100,
                       'ui_settings_raw_factor': 1.0, 'ui_settings_percent': 100}
-        snapshot = {'schema_version': 1, 'source_sha': self.source_sha,
+        snapshot = {'schema_version': 2, 'source_sha': self.source_sha,
                     'acceptance_script_sha256': self.observer_sha,
-                    'restoration_required': True, 'restoration_verified': True,
+                    'restoration_required': False, 'restoration_verified': True,
                     'original': deepcopy(high_contrast), 'restored': deepcopy(high_contrast)}
         snapshot_pin = add_indexed_json(root, files, 'runs/cell/high-contrast.json', snapshot)
         result = {'high_contrast': {'snapshot': {'file': 'high-contrast.json',
@@ -312,6 +312,27 @@ class PredicateTests(unittest.TestCase):
             with self.assertRaises(EvidenceError):
                 verify_setting_restoration(reader, 'runs/cell/result.json', result,
                                            self.bundle, target)
+
+    def test_setting_restoration_rejects_wrong_schema_state_and_unknown_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, files = Path(directory), {}
+            result, snapshot = self.restoration_records(root, files)
+            target = {**self.target, 'contrast': 'high-contrast', 'text_scale_percent': 100}
+
+            for name, mutate in (
+                ('old-schema', lambda row: row.update(schema_version=1)),
+                ('pending-state', lambda row: row.update(restoration_required=True)),
+                ('non-boolean-state', lambda row: row.update(restoration_verified=1)),
+                ('unknown-field', lambda row: row.update(unexpected=True)),
+            ):
+                changed = deepcopy(snapshot)
+                mutate(changed)
+                pin = add_indexed_json(root, files, 'runs/cell/high-contrast.json', changed)
+                result['high_contrast']['snapshot']['sha256'] = pin.sha256
+                reader = EvidenceReader(ExtractedEvidence(root, files))
+                with self.subTest(name=name), self.assertRaises(EvidenceError):
+                    verify_setting_restoration(reader, 'runs/cell/result.json', result,
+                                               self.bundle, target)
 
     def backend_records(self, root, *, transcript=None, passed=1, guest_cleanup=True):
         files = {}

@@ -296,9 +296,9 @@ class CampaignFixture:
                  "highlight_text", "gray_text", "hot_light"), start=1)}
             setting = {"flags": 1, "scheme": "High Contrast Black", "colors": colors,
                        "visual_style": {"path": "", "color": "", "size": ""}}
-            snapshot = {"schema_version": 1, "source_sha": self.candidate.source_sha,
+            snapshot = {"schema_version": 2, "source_sha": self.candidate.source_sha,
                         "acceptance_script_sha256": observer_sha,
-                        "restoration_required": True, "restoration_verified": True,
+                        "restoration_required": False, "restoration_verified": True,
                         "original": setting, "restored": deepcopy(setting)}
             pin = self.add_json(prefix + "/high-contrast.json", snapshot)
             result["high_contrast"] = {"snapshot": {"file": "high-contrast.json",

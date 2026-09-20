@@ -276,21 +276,30 @@ def verify_backend_execution(reader: EvidenceReader, bundle_path: str, result_pa
 def verify_setting_restoration(reader: EvidenceReader, document: str, result: dict,
                                 bundle: dict, target: dict) -> None:
     """Compare actual before/after setting snapshots, not restoration labels."""
-    def bound_snapshot(reference: object) -> dict:
-        snapshot = reader.json(reader.sibling(document, reference))
-        require(type(snapshot) is dict and snapshot.get("source_sha") == bundle["product"]["source_sha"] and
-                snapshot.get("acceptance_script_sha256") == bundle["harness"]["observers"]["ui"]["sha256"],
+    def bound_snapshot(reference: object, *, schema_version: int,
+                       restoration_required: bool) -> dict:
+        snapshot = require_exact_keys(
+            reader.json(reader.sibling(document, reference)),
+            {"schema_version", "source_sha", "acceptance_script_sha256", "restoration_required",
+             "restoration_verified", "original", "restored"},
+            "Setting restoration snapshot",
+        )
+        require(snapshot["source_sha"] == bundle["product"]["source_sha"] and
+                snapshot["acceptance_script_sha256"] == bundle["harness"]["observers"]["ui"]["sha256"],
                 "Setting snapshot belongs to another candidate or observer.")
-        require_int(snapshot.get("schema_version"), 1, 1, "Setting snapshot schema")
-        require(snapshot.get("restoration_required") is True and snapshot.get("restoration_verified") is True,
+        require_int(snapshot["schema_version"], schema_version, schema_version, "Setting snapshot schema")
+        require(type(snapshot["restoration_required"]) is bool and
+                snapshot["restoration_required"] is restoration_required and
+                type(snapshot["restoration_verified"]) is bool and snapshot["restoration_verified"] is True,
                 "Setting restoration observation is incomplete.")
-        require(type(snapshot.get("original")) is dict and type(snapshot.get("restored")) is dict and
+        require(type(snapshot["original"]) is dict and type(snapshot["restored"]) is dict and
                 canonical_digest(snapshot["original"]) == canonical_digest(snapshot["restored"]),
                 "Actual restored setting differs from its original snapshot.")
         return snapshot
 
     if target["contrast"] == "high-contrast":
-        snapshot = bound_snapshot(result["high_contrast"]["snapshot"])
+        snapshot = bound_snapshot(result["high_contrast"]["snapshot"], schema_version=2,
+                                  restoration_required=False)
         for key in ("original", "restored"):
             row = require_exact_keys(snapshot[key], {"flags", "scheme", "colors", "visual_style"}, "High Contrast snapshot")
             require_int(row["flags"], 0, 0xFFFFFFFF, "High Contrast flags")
@@ -303,7 +312,8 @@ def verify_setting_restoration(reader: EvidenceReader, document: str, result: di
     if target["text_scale_percent"] == 150:
         raw = require_exact_keys(result["raw_text_scale"], {"original", "active", "active_winrt_percent", "restored",
                                                            "snapshot", "activation", "restoration"}, "Text scale observations")
-        snapshot = bound_snapshot(raw["snapshot"])
+        snapshot = bound_snapshot(raw["snapshot"], schema_version=1,
+                                  restoration_required=True)
         require(canonical_digest(raw["original"]) == canonical_digest(snapshot["original"]) and
                 canonical_digest(raw["restored"]) == canonical_digest(snapshot["restored"]),
                 "Text-scale raw snapshots differ from their bound restoration document.")
