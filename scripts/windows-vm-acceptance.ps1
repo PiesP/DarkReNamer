@@ -1470,6 +1470,226 @@ function Get-FocusedAcceptanceElement {
     $focused
 }
 
+function Get-VmAutomatedControlObservation {
+    param(
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Element,
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    Assert-AutomationBinding -Element $Element -Process $Process -ExpectedSession $ExpectedSession -Label $Label
+    $nativeHandle = [IntPtr]$Element.Current.NativeWindowHandle
+    $bindingHandle = $nativeHandle
+    $ancestor = $Element
+    while ($bindingHandle -eq [IntPtr]::Zero -and $null -ne $ancestor) {
+        $ancestor = [Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($ancestor)
+        if ($null -ne $ancestor -and $ancestor.Current.ProcessId -eq $Process.Id) {
+            $bindingHandle = [IntPtr]$ancestor.Current.NativeWindowHandle
+        }
+    }
+    $rootHandle = if ($bindingHandle -ne [IntPtr]::Zero) {
+        [DarkReNamerVmNative]::GetAncestor($bindingHandle, 2)
+    } else { [IntPtr]::Zero }
+    $bounds = $Element.Current.BoundingRectangle
+    [ordered]@{
+        automation_id = [string]$Element.Current.AutomationId
+        control_type = [string]$Element.Current.ControlType.ProgrammaticName
+        visible = -not [bool]$Element.Current.IsOffscreen
+        enabled = [bool]$Element.Current.IsEnabled
+        bounds = [ordered]@{
+            left = [int][Math]::Round($bounds.Left)
+            top = [int][Math]::Round($bounds.Top)
+            right = [int][Math]::Round($bounds.Right)
+            bottom = [int][Math]::Round($bounds.Bottom)
+        }
+        pid = [int]$Element.Current.ProcessId
+        session_id = [int]$Process.SessionId
+        root_hwnd = [long]$rootHandle
+    }
+}
+
+function Get-VmAutomatedKeyboardEventStart {
+    param(
+        [Parameter(Mandatory)][ValidateSet('escape', 'enter')][string] $Action,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Confirmation,
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][string] $ExpectedAutomationId,
+        [Parameter(Mandatory)][int] $TimeoutSeconds
+    )
+
+    $targetHandle = [IntPtr]$Confirmation.Current.NativeWindowHandle
+    Assert-AutomationBinding -Element $Confirmation -Process $Process -ExpectedSession $ExpectedSession -Label "$Action confirmation target" -RequireWindowHandle
+    $targetProcessId = [uint32]0
+    if ([DarkReNamerVmNative]::GetWindowThreadProcessId($targetHandle, [ref]$targetProcessId) -eq 0) {
+        throw "$Action confirmation target process is unavailable."
+    }
+    $targetClass = [Text.StringBuilder]::new(128)
+    [void][DarkReNamerVmNative]::GetClassName($targetHandle, $targetClass, $targetClass.Capacity)
+    $focusDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $focused = Get-FocusedAcceptanceElement -Process $Process -ExpectedSession $ExpectedSession -Label "$Action confirmation control"
+        if ($focused.Current.AutomationId -ceq $ExpectedAutomationId) { break }
+        Start-Sleep -Milliseconds 50
+    } while ((Get-Date) -lt $focusDeadline)
+    $focusedHandle = [IntPtr]$focused.Current.NativeWindowHandle
+    $focusedClass = [Text.StringBuilder]::new(128)
+    [void][DarkReNamerVmNative]::GetClassName($focusedHandle, $focusedClass, $focusedClass.Capacity)
+    $rootHandle = [DarkReNamerVmNative]::GetAncestor($focusedHandle, 2)
+    $foreground = Get-ForegroundObservation
+    $event = [ordered]@{
+        action = $Action
+        input_method = 'keyboard'
+        target = [ordered]@{
+            hwnd = [long]$targetHandle
+            pid = [int]$targetProcessId
+            session_id = [int]$Process.SessionId
+            class = $targetClass.ToString()
+        }
+        focused_before = [ordered]@{
+            hwnd = [long]$focusedHandle
+            pid = [int]$focused.Current.ProcessId
+            session_id = [int]$Process.SessionId
+            class = $focusedClass.ToString()
+            automation_id = [string]$focused.Current.AutomationId
+            control_type = [string]$focused.Current.ControlType.ProgrammaticName
+            root_hwnd = [long]$rootHandle
+        }
+        foreground_before = $foreground
+        foreground_after = $null
+    }
+    if ($event.target.class -cne '#32770' -or
+        $event.target.pid -ne $Process.Id -or
+        $event.target.session_id -ne $ExpectedSession -or
+        $event.focused_before.class -cne 'Button' -or
+        $event.focused_before.automation_id -cne $ExpectedAutomationId -or
+        $event.focused_before.control_type -cne 'ControlType.Button' -or
+        $event.focused_before.root_hwnd -ne $event.target.hwnd -or
+        $foreground.hwnd -ne $event.target.hwnd -or
+        $foreground.process_id -ne $Process.Id -or
+        $foreground.session_id -ne $ExpectedSession -or
+        $foreground.window_class -cne '#32770') {
+        throw "$Action keyboard target or focus binding is invalid."
+    }
+    $event
+}
+
+function Complete-VmAutomatedKeyboardEvent {
+    param(
+        [Parameter(Mandatory)][Collections.IDictionary] $Event,
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][IntPtr] $MainWindowHandle,
+        [Parameter(Mandatory)][int] $TimeoutSeconds
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $foreground = Get-ForegroundObservation
+        if ($foreground.hwnd -eq [long]$MainWindowHandle -and
+            $foreground.process_id -eq $Process.Id -and
+            $foreground.session_id -eq $ExpectedSession -and
+            $foreground.window_class -ceq 'DarkReNamerWindow') {
+            $Event.foreground_after = $foreground
+            return
+        }
+        Start-Sleep -Milliseconds 50
+    } while ((Get-Date) -lt $deadline)
+    $Event.foreground_after = Get-ForegroundObservation
+    throw 'Keyboard action did not return foreground ownership to the candidate workbench.'
+}
+
+function New-VmAutomatedLayoutRun {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][string] $ApplicationPath,
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][object] $Grid,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][int] $TimeoutSeconds
+    )
+
+    $controls = [Collections.Generic.List[object]]::new()
+    $controls.Add((Get-VmAutomatedControlObservation `
+        -Element $Application.main -Process $Application.process `
+        -ExpectedSession $ExpectedSession -Label 'raw layout main workbench'))
+    $controls.Add((Get-VmAutomatedControlObservation `
+        -Element $Grid.element -Process $Application.process `
+        -ExpectedSession $ExpectedSession -Label 'raw layout file list'))
+    foreach ($railId in @(
+        '32771','32772','32773','32774','32775','32776','32777','32778','32779','32780',
+        '32781','32783','65535','32784','32788','32789','32790','32785','32786'
+    )) {
+        $rail = Find-UniqueAutomationElement `
+            -Root $Application.main -Process $Application.process -ExpectedSession $ExpectedSession `
+            -AutomationId $railId -ControlType ([Windows.Automation.ControlType]::Button) `
+            -TimeoutSeconds $TimeoutSeconds -Label "raw layout command rail $railId" `
+            -RequireWindowHandle
+        $controls.Add((Get-VmAutomatedControlObservation `
+            -Element $rail -Process $Application.process -ExpectedSession $ExpectedSession `
+            -Label "raw layout command rail $railId"))
+    }
+    $focused = Get-FocusedAcceptanceElement `
+        -Process $Application.process -ExpectedSession $ExpectedSession -Label 'raw layout focus'
+    $focusObservation = Get-VmAutomatedControlObservation `
+        -Element $focused -Process $Application.process `
+        -ExpectedSession $ExpectedSession -Label 'raw layout focused control'
+    $mainHandle = [long]$Application.main.Current.NativeWindowHandle
+    $misbound = @($controls | Where-Object {
+        $_.pid -ne $Application.process.Id -or $_.session_id -ne $ExpectedSession -or
+        $_.root_hwnd -ne $mainHandle
+    })
+    if ($misbound.Count -ne 0 -or $focusObservation.pid -ne $Application.process.Id -or
+        $focusObservation.session_id -ne $ExpectedSession -or
+        $focusObservation.root_hwnd -ne $mainHandle) {
+        throw 'Raw layout control or focus ownership differs from the candidate workbench.'
+    }
+    $Application.process.Refresh()
+    [ordered]@{
+        raw_environment = Get-VmAutomatedEnvironment `
+            -Process $Application.process `
+            -WindowHandle ([IntPtr]$Application.main.Current.NativeWindowHandle) `
+            -FixtureRoot $FixtureRoot
+        process_lifecycle = [ordered]@{
+            pid = [int]$Application.process.Id
+            session_id = [int]$Application.process.SessionId
+            start_time_utc_ticks = $Application.process.StartTime.ToUniversalTime().Ticks.ToString(
+                [Globalization.CultureInfo]::InvariantCulture
+            )
+            executable_path = $ApplicationPath
+            executable_sha256 = Get-LowerSha256 -Path $ApplicationPath
+            start_observed = $true
+            exit_observed = $false
+            exit_method = $null
+            exit_code = $null
+        }
+        layout_observations = [ordered]@{
+            controls = $controls.ToArray()
+            focus = @($focusObservation)
+            screenshots = @()
+        }
+    }
+}
+
+function Complete-VmAutomatedLayoutRun {
+    param(
+        [Parameter(Mandatory)][Collections.IDictionary] $Run,
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExitCode,
+        [Parameter(Mandatory)][object[]] $Screenshots
+    )
+
+    $Process.Refresh()
+    if (-not $Process.HasExited -or $ExitCode -ne 0 -or $Process.ExitCode -ne $ExitCode) {
+        throw 'Raw layout application lifecycle did not observe a normal zero exit.'
+    }
+    $Run.process_lifecycle.exit_observed = $true
+    $Run.process_lifecycle.exit_method = 'normal-close'
+    $Run.process_lifecycle.exit_code = $ExitCode
+    $Run.layout_observations.screenshots = @($Screenshots)
+}
+
 function Wait-AcceptanceFocusTransition {
     param(
         [Parameter(Mandatory)][object] $Before,
@@ -4002,6 +4222,7 @@ function Invoke-ObserverContextScenario {
         [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures
     )
     $applicationPath = Join-Path $Verified.root $Verified.application.file
+    $rawLayoutCandidate = $Verified.lane -ceq 'candidate-gui-only'
     if ((Get-LowerSha256 -Path $applicationPath) -cne $Verified.application.sha256) {
         throw 'Application changed after bundle verification.'
     }
@@ -4012,6 +4233,11 @@ function Invoke-ObserverContextScenario {
     $moveApplication = $null
     $mixedFixture = $null
     $mixedApplication = $null
+    $rawLayoutRuns = [Collections.Generic.List[object]]::new()
+    $rawRepeatedRun = $null
+    $rawMoveRun = $null
+    $rawMixedRun = $null
+    $rawCaptureStart = $Captures.Count
     try {
         $repeatedApplication = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'repeated-name GUI regression application'
         $appearanceSpec = Set-AcceptanceAppearance -Process $repeatedApplication.process -ExpectedSession $SessionId -Appearance $Appearance
@@ -4050,6 +4276,12 @@ function Invoke-ObserverContextScenario {
         $prefix = 'after-context-repeated-{0}-{1}' -f $Appearance,$minimum.dpi
         $import = Import-GuiRegressionPathList -Application $repeatedApplication -PathsFile $repeatedFixture.paths_file -ExpectedRows 3 -SessionId $SessionId -WaitSeconds $WaitSeconds
         $grid = $import.grid
+        if ($rawLayoutCandidate) {
+            $rawRepeatedRun = New-VmAutomatedLayoutRun `
+                -Application $repeatedApplication -ApplicationPath $applicationPath `
+                -FixtureRoot $repeatedFixture.root -Grid $grid -ExpectedSession $SessionId `
+                -TimeoutSeconds $WaitSeconds
+        }
         for ($index = 0; $index -lt 3; $index++) {
             Set-ObserverManualName -Application $repeatedApplication -Grid $grid -Row $index -Name $repeatedFixture.destination_names[$index] -SessionId $SessionId -WaitSeconds $WaitSeconds
         }
@@ -4064,9 +4296,16 @@ function Invoke-ObserverContextScenario {
         Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
         if ($script:contract.mode -ceq 'context-surface') {
             $repeatedExit = Close-AcceptanceApplication -Application $repeatedApplication -SessionId $SessionId -WaitSeconds $WaitSeconds -Input ordinary
+            if ($rawLayoutCandidate) {
+                Complete-VmAutomatedLayoutRun `
+                    -Run $rawRepeatedRun -Process $repeatedApplication.process -ExitCode $repeatedExit `
+                    -Screenshots @($Captures.ToArray() | Select-Object -Skip $rawCaptureStart)
+                $rawLayoutRuns.Add($rawRepeatedRun)
+            }
             $repeatedApplication.owned.process.Dispose()
             $repeatedApplication = $null
             return [ordered]@{
+                raw_layout_runs = $rawLayoutRuns.ToArray()
                 mode = 'context-surface'
                 full_context_coverage = [ordered]@{
                     status = 'covered-by-separate-full-context-cell'
@@ -4100,10 +4339,17 @@ function Invoke-ObserverContextScenario {
         }
         Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
         $repeatedExit = Close-AcceptanceApplication -Application $repeatedApplication -SessionId $SessionId -WaitSeconds $WaitSeconds -Input ordinary
+        if ($rawLayoutCandidate) {
+            Complete-VmAutomatedLayoutRun `
+                -Run $rawRepeatedRun -Process $repeatedApplication.process -ExitCode $repeatedExit `
+                -Screenshots @($Captures.ToArray() | Select-Object -Skip $rawCaptureStart)
+            $rawLayoutRuns.Add($rawRepeatedRun)
+        }
         $repeatedApplication.owned.process.Dispose()
         $repeatedApplication = $null
 
         $moveFixture = New-ObserverMoveFixture -RuntimeRoot $RuntimeRoot
+        $rawCaptureStart = $Captures.Count
         $moveApplication = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'movement GUI regression application'
         $moveAppearance = Set-AcceptanceAppearance -Process $moveApplication.process -ExpectedSession $SessionId -Appearance $Appearance
         $moveMinimum = Ensure-AcceptanceMainWindowCaptureSize -MainWindow $moveApplication.main -Process $moveApplication.process -ExpectedSession $SessionId
@@ -4111,6 +4357,12 @@ function Invoke-ObserverContextScenario {
         $movePrefix = 'after-context-move-{0}-{1}' -f $Appearance,$moveMinimum.dpi
         $moveImport = Import-GuiRegressionPathList -Application $moveApplication -PathsFile $moveFixture.paths_file -ExpectedRows 1 -SessionId $SessionId -WaitSeconds $WaitSeconds
         $moveGrid = $moveImport.grid
+        if ($rawLayoutCandidate) {
+            $rawMoveRun = New-VmAutomatedLayoutRun `
+                -Application $moveApplication -ApplicationPath $applicationPath `
+                -FixtureRoot $moveFixture.root -Grid $moveGrid -ExpectedSession $SessionId `
+                -TimeoutSeconds $WaitSeconds
+        }
         $destinationInput = Set-ObserverDestinationParent -Application $moveApplication -Grid $moveGrid -DestinationParent $moveFixture.parent_b -SessionId $SessionId -WaitSeconds $WaitSeconds
         $moveOnlySelection = Set-ObserverSelectedRow -Application $moveApplication -Grid $moveGrid -Row 0 -SessionId $SessionId
         $moveOnlyPrefix = 'after-context-move-only-{0}-{1}' -f $Appearance,$moveMinimum.dpi
@@ -4187,10 +4439,17 @@ function Invoke-ObserverContextScenario {
         Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
         [void]$Captures.Add((Save-WindowScreenshot -Window $moveApplication.main -Process $moveApplication.process -ExpectedSession $SessionId -Root $EvidenceRoot -Leaf ($movePrefix + '-actual-apply-complete.png') -Label 'actual move completion'))
         $moveExit = Close-AcceptanceApplication -Application $moveApplication -SessionId $SessionId -WaitSeconds $WaitSeconds -Input ordinary
+        if ($rawLayoutCandidate) {
+            Complete-VmAutomatedLayoutRun `
+                -Run $rawMoveRun -Process $moveApplication.process -ExitCode $moveExit `
+                -Screenshots @($Captures.ToArray() | Select-Object -Skip $rawCaptureStart)
+            $rawLayoutRuns.Add($rawMoveRun)
+        }
         $moveApplication.owned.process.Dispose()
         $moveApplication = $null
 
         $mixedFixture = New-ObserverMixedFixture -RuntimeRoot $RuntimeRoot
+        $rawCaptureStart = $Captures.Count
         $mixedApplication = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'mixed GUI regression application'
         $mixedAppearance = Set-AcceptanceAppearance -Process $mixedApplication.process -ExpectedSession $SessionId -Appearance $Appearance
         $mixedMinimum = Ensure-AcceptanceMainWindowCaptureSize -MainWindow $mixedApplication.main -Process $mixedApplication.process -ExpectedSession $SessionId
@@ -4198,6 +4457,12 @@ function Invoke-ObserverContextScenario {
         $mixedPrefix = 'after-context-mixed-{0}-{1}' -f $Appearance,$mixedMinimum.dpi
         $mixedImport = Import-GuiRegressionPathList -Application $mixedApplication -PathsFile $mixedFixture.first_paths_file -ExpectedRows 1 -SessionId $SessionId -WaitSeconds $WaitSeconds
         $mixedGrid = $mixedImport.grid
+        if ($rawLayoutCandidate) {
+            $rawMixedRun = New-VmAutomatedLayoutRun `
+                -Application $mixedApplication -ApplicationPath $applicationPath `
+                -FixtureRoot $mixedFixture.root -Grid $mixedGrid -ExpectedSession $SessionId `
+                -TimeoutSeconds $WaitSeconds
+        }
         if ($mixedGrid.pattern.GetItem(0, 0).Current.Name -cne '03-unsampled-move.txt') {
             throw 'Unsampled-move source was not the first admitted row.'
         }
@@ -4285,10 +4550,17 @@ function Invoke-ObserverContextScenario {
         if (-not (Test-ObserverFixtureStateEqual -Expected $mixedFixture.initial -Actual $mixedAfterEnterCancel)) { throw 'Default Enter cancellation changed mixed fixture disk state.' }
         Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
         $mixedExit = Close-AcceptanceApplication -Application $mixedApplication -SessionId $SessionId -WaitSeconds $WaitSeconds -Input ordinary
+        if ($rawLayoutCandidate) {
+            Complete-VmAutomatedLayoutRun `
+                -Run $rawMixedRun -Process $mixedApplication.process -ExitCode $mixedExit `
+                -Screenshots @($Captures.ToArray() | Select-Object -Skip $rawCaptureStart)
+            $rawLayoutRuns.Add($rawMixedRun)
+        }
         $mixedApplication.owned.process.Dispose()
         $mixedApplication = $null
 
         [ordered]@{
+            raw_layout_runs = $rawLayoutRuns.ToArray()
             environment = $environment
             appearance = $appearanceSpec.evidence_name
             minimum_window = $minimum
@@ -4396,7 +4668,10 @@ function Invoke-ObserverStandardScenario {
         [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures
     )
     $fixture = New-ObserverStandardFixture -RuntimeRoot $RuntimeRoot
+    $rawLayoutCandidate = $Verified.lane -ceq 'candidate-gui-only'
     $application = $null
+    $rawLayoutRun = $null
+    $rawCaptureStart = $Captures.Count
     try {
         $applicationPath = Join-Path $Verified.root $Verified.application.file
         if ((Get-LowerSha256 -Path $applicationPath) -cne $Verified.application.sha256) {
@@ -4439,6 +4714,12 @@ function Invoke-ObserverStandardScenario {
         $prefix = 'after-standard-{0}-{1}' -f $Appearance,$minimum.dpi
         $import = Import-GuiRegressionPathList -Application $application -PathsFile $fixture.paths_file -ExpectedRows 3 -SessionId $SessionId -WaitSeconds $WaitSeconds
         $grid = $import.grid
+        if ($rawLayoutCandidate) {
+            $rawLayoutRun = New-VmAutomatedLayoutRun `
+                -Application $application -ApplicationPath $applicationPath `
+                -FixtureRoot $fixture.root -Grid $grid -ExpectedSession $SessionId `
+                -TimeoutSeconds $WaitSeconds
+        }
         $importMs = $import.elapsed_ms
         $prefixRasterTarget = Set-ObserverManualName -Application $application -Grid $grid -Row 0 -Name $fixture.destination_names[0] -SessionId $SessionId -WaitSeconds $WaitSeconds -CaptureRoot $EvidenceRoot -CaptureLeaf ($prefix + '-editable-input-prompt.png') -Captures $Captures
         Set-ObserverManualName -Application $application -Grid $grid -Row 1 -Name $fixture.destination_names[1] -SessionId $SessionId -WaitSeconds $WaitSeconds
@@ -4464,7 +4745,13 @@ function Invoke-ObserverStandardScenario {
         }
         $actualApply = Invoke-ObserverActualApply -Application $application -Grid $grid -Fixture $fixture -OutputRoot $EvidenceRoot -Prefix $prefix -SessionId $SessionId -WaitSeconds $WaitSeconds -Captures $Captures
         $exitCode = Close-AcceptanceApplication -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds -Input ordinary
+        if ($rawLayoutCandidate) {
+            Complete-VmAutomatedLayoutRun `
+                -Run $rawLayoutRun -Process $application.process -ExitCode $exitCode `
+                -Screenshots @($Captures.ToArray() | Select-Object -Skip $rawCaptureStart)
+        }
         [ordered]@{
+            raw_layout_runs = @($rawLayoutRun)
             environment = $environment
             fixture = [ordered]@{
                 count = 3; selected = 1; changed = 2
@@ -4495,103 +4782,6 @@ function Invoke-ObserverStandardScenario {
             $application.owned.process.Dispose()
         }
     }
-}
-
-function Initialize-TextScaleNative {
-    if ('DarkReNamerTextScaleNative' -as [type]) { return }
-    Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-
-public static class DarkReNamerTextScaleNative {
-    private const int RpcChangedMode = unchecked((int)0x80010106);
-    private const uint RoInitMultithreaded = 1;
-    private static readonly Guid IidUiSettings2 = new Guid("bad82401-2721-44f9-bb91-2bb228be442f");
-
-    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-    private delegate int QueryInterfaceDelegate(IntPtr instance, ref Guid iid, out IntPtr value);
-    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-    private delegate uint ReleaseDelegate(IntPtr instance);
-    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-    private delegate int TextScaleFactorDelegate(IntPtr instance, out double value);
-
-    [DllImport("combase.dll")]
-    private static extern int RoInitialize(uint initType);
-    [DllImport("combase.dll")]
-    private static extern void RoUninitialize();
-    [DllImport("combase.dll", CharSet=CharSet.Unicode)]
-    private static extern int WindowsCreateString(string source, uint length, out IntPtr value);
-    [DllImport("combase.dll")]
-    private static extern int WindowsDeleteString(IntPtr value);
-    [DllImport("combase.dll")]
-    private static extern int RoActivateInstance(IntPtr classId, out IntPtr instance);
-
-    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
-    private static extern IntPtr SendMessageTimeoutW(
-        IntPtr window, uint message, UIntPtr wParam, string lParam,
-        uint flags, uint timeout, out UIntPtr result);
-
-    private static IntPtr ReadVtableMethod(IntPtr instance, int slot) {
-        if (instance == IntPtr.Zero) {
-            throw new ArgumentException("A COM interface pointer is required.", "instance");
-        }
-        return Marshal.ReadIntPtr(Marshal.ReadIntPtr(instance), slot * IntPtr.Size);
-    }
-
-    private static void Release(ref IntPtr instance) {
-        if (instance == IntPtr.Zero) { return; }
-        var release = (ReleaseDelegate)Marshal.GetDelegateForFunctionPointer(
-            ReadVtableMethod(instance, 2), typeof(ReleaseDelegate));
-        release(instance);
-        instance = IntPtr.Zero;
-    }
-
-    public static double ReadTextScaleFactor() {
-        int initializeResult = RoInitialize(RoInitMultithreaded);
-        bool uninitialize = initializeResult >= 0;
-        if (initializeResult < 0 && initializeResult != RpcChangedMode) {
-            Marshal.ThrowExceptionForHR(initializeResult);
-        }
-
-        IntPtr classId = IntPtr.Zero;
-        IntPtr instance = IntPtr.Zero;
-        IntPtr settings2 = IntPtr.Zero;
-        try {
-            const string runtimeClass = "Windows.UI.ViewManagement.UISettings";
-            int result = WindowsCreateString(runtimeClass, (uint)runtimeClass.Length, out classId);
-            if (result < 0) { Marshal.ThrowExceptionForHR(result); }
-            result = RoActivateInstance(classId, out instance);
-            if (result < 0) { Marshal.ThrowExceptionForHR(result); }
-
-            var query = (QueryInterfaceDelegate)Marshal.GetDelegateForFunctionPointer(
-                ReadVtableMethod(instance, 0), typeof(QueryInterfaceDelegate));
-            Guid iid = IidUiSettings2;
-            result = query(instance, ref iid, out settings2);
-            if (result < 0) { Marshal.ThrowExceptionForHR(result); }
-
-            var read = (TextScaleFactorDelegate)Marshal.GetDelegateForFunctionPointer(
-                ReadVtableMethod(settings2, 6), typeof(TextScaleFactorDelegate));
-            double value;
-            result = read(settings2, out value);
-            if (result < 0) { Marshal.ThrowExceptionForHR(result); }
-            return value;
-        }
-        finally {
-            Release(ref settings2);
-            Release(ref instance);
-            if (classId != IntPtr.Zero) { WindowsDeleteString(classId); }
-            if (uninitialize) { RoUninitialize(); }
-        }
-    }
-
-    public static void NotifyAccessibilitySettingChange() {
-        UIntPtr result;
-        SendMessageTimeoutW(
-            new IntPtr(0xffff), 0x001A, UIntPtr.Zero, "Accessibility",
-            0x0002, 5000, out result);
-    }
-}
-'@
 }
 
 function Get-TextScaleSnapshot {
@@ -4870,6 +5060,9 @@ function New-GuiRegressionResult {
         $result['product'] = $Verified.product
         $result['harness'] = $Verified.harness
         $result['observer_role'] = 'ui'
+        $result['raw_layout_runs'] = @()
+        $result['raw_text_scale'] = $null
+        $result['raw_cleanup'] = $null
     }
     else {
         $result['source_sha'] = $Verified.source_sha
@@ -5021,6 +5214,7 @@ function Invoke-GuiRegressionAcceptance {
     $executionState = $null
     $runtimeRoot = $null
     $runtimeCleaned = $false
+    $rawRegressionJournalAfter = @()
     $cursor = $null
     $textOriginal = $null
     $textAcceptance = $null
@@ -5029,6 +5223,7 @@ function Invoke-GuiRegressionAcceptance {
     $observationPath = Join-Path $resolved.output_root 'acceptance-observations.json'
     $diagnosticPath = Join-Path $resolved.output_root 'acceptance-error.txt'
     $result = New-GuiRegressionResult -Verified $resolved -Appearance $Appearance
+    $rawRegression = $resolved.lane -ceq 'candidate-gui-only'
     $observations = [ordered]@{
         schema_version = 1
         run_id = $input.run_id
@@ -5097,6 +5292,12 @@ function Invoke-GuiRegressionAcceptance {
             if ($RegressionMode -eq 'text-scale') {
                 $scenario['limitations'] = @('native-taskdialog-text-scale-not-observed')
             }
+            if ($scenario -is [Collections.IDictionary]) {
+                if ($rawRegression) {
+                    $result.raw_layout_runs = @($scenario.raw_layout_runs)
+                }
+                [void]$scenario.Remove('raw_layout_runs')
+            }
             $observations.environment = $scenario.environment
             $observations.scenario = $scenario
             if ($RegressionMode -in @('standard', 'text-scale')) {
@@ -5129,6 +5330,16 @@ function Invoke-GuiRegressionAcceptance {
         try { [DarkReNamerVmAcceptanceNative]::ReleaseAllButtons() } catch {}
         if ($null -ne $cursor) {
             try { [DarkReNamerVmAcceptanceNative]::MoveCursor($cursor.X, $cursor.Y) } catch {}
+        }
+        if ($rawRegression -and $null -ne $runtimeRoot) {
+            try {
+                $rawRegressionJournalAfter = @(Get-VmAutomatedJournalInventory `
+                    -LocalAppData (Join-Path $runtimeRoot 'localappdata'))
+            }
+            catch {
+                $result.status = 'failed'
+                $result.failure_reason = 'raw_journal_observation_failed'
+            }
         }
         if ($null -ne $runtimeRoot -and (Test-Path -LiteralPath $runtimeRoot)) {
             try {
@@ -5194,6 +5405,21 @@ function Invoke-GuiRegressionAcceptance {
                     snapshot = $snapshot
                     activation_attempt = $activation
                 }
+                if ($rawRegression) {
+                    $restorationArtifact = [ordered]@{
+                        file = 'text-scale-restoration.json'
+                        sha256 = Get-LowerSha256 -Path (Join-Path $resolved.output_root 'text-scale-restoration.json')
+                    }
+                    $result.raw_text_scale = [ordered]@{
+                        original = ConvertTo-TextScaleDocumentSnapshot $textOriginal
+                        active = ConvertTo-TextScaleDocumentSnapshot $textAcceptance
+                        active_winrt_percent = [int]$observations.scenario.environment.text_scale_factor_percent
+                        restored = ConvertTo-TextScaleDocumentSnapshot $textRestored
+                        snapshot = $snapshot
+                        activation = $activation
+                        restoration = $restorationArtifact
+                    }
+                }
             }
             catch {
                 $result.status = 'failed'
@@ -5212,6 +5438,18 @@ function Invoke-GuiRegressionAcceptance {
         }
         $result.process_cleanup = $runtimeCleaned
         $result.guest_cleanup = $runtimeCleaned
+        if ($rawRegression) {
+            $ownedAfter = @(Get-VmAutomatedOwnedProcessInventory -Root $resolved.root)
+            $result.raw_cleanup = [ordered]@{
+                owned_processes_after = $ownedAfter
+                runtime_root_after = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
+                journal_after = [ordered]@{ entries = $rawRegressionJournalAfter }
+            }
+            if ($ownedAfter.Count -ne 0 -or -not $runtimeCleaned) {
+                $result.status = 'failed'
+                $result.failure_reason = 'raw_cleanup_failed'
+            }
+        }
         $result.screenshots = $captures.ToArray()
         Write-JsonUtf8Bom -Path $observationPath -Value $observations
         Write-JsonUtf8Bom -Path $resultPath -Value $result
@@ -5371,6 +5609,10 @@ $clipboardState = [pscustomobject]@{
     expected_text = $null
 }
 $captures = [Collections.Generic.List[object]]::new()
+$rawCandidate = $verified.lane -ceq 'candidate-gui-only'
+$rawCheckpoints = [Collections.Generic.List[object]]::new()
+$keyboardEvents = [Collections.Generic.List[object]]::new()
+$rawControls = [Collections.Generic.List[object]]::new()
 $keyboard = [ordered]@{
     status = 'failed'
     reset_name_enabled_after_prefix = $false
@@ -5439,6 +5681,12 @@ if ($verified.lane -ceq 'candidate-gui-only') {
     $result['product'] = $verified.product
     $result['harness'] = $verified.harness
     $result['observer_role'] = 'ui'
+    $result['raw_environment'] = $null
+    $result['raw_checkpoints'] = @()
+    $result['keyboard_events'] = @()
+    $result['process_lifecycle'] = $null
+    $result['raw_cleanup'] = $null
+    $result['layout_observations'] = $null
 }
 else {
     $result['source_sha'] = $verified.source_sha
@@ -5558,6 +5806,22 @@ try {
         $lifecycle.process_terminated = $false
         $process = $application.process
         $mainWindow = $application.main
+        if ($rawCandidate) {
+            $process.Refresh()
+            $result.process_lifecycle = [ordered]@{
+                pid = [int]$process.Id
+                session_id = [int]$process.SessionId
+                start_time_utc_ticks = $process.StartTime.ToUniversalTime().Ticks.ToString(
+                    [Globalization.CultureInfo]::InvariantCulture
+                )
+                executable_path = $applicationPath
+                executable_sha256 = Get-LowerSha256 -Path $applicationPath
+                start_observed = $true
+                exit_observed = $false
+                exit_method = $null
+                exit_code = $null
+            }
+        }
 
         $appearanceSpec = if ($HighContrast) {
             [ordered]@{ command_id = $null; evidence_name = 'forced-colors' }
@@ -5573,6 +5837,15 @@ try {
             -MainWindow $mainWindow `
             -Process $process `
             -ExpectedSession $ExpectedSessionId
+        if ($rawCandidate) {
+            $result.raw_environment = Get-VmAutomatedEnvironment `
+                -Process $process `
+                -WindowHandle ([IntPtr]$mainWindow.Current.NativeWindowHandle) `
+                -FixtureRoot $fixtureRoot
+            $rawControls.Add((Get-VmAutomatedControlObservation `
+                -Element $mainWindow -Process $process -ExpectedSession $ExpectedSessionId `
+                -Label 'raw main workbench'))
+        }
 
         $observations.environment = [ordered]@{
             os_version = [DarkReNamerVmAcceptanceNative]::OsVersion()
@@ -5617,6 +5890,24 @@ try {
             throw 'The production file list does not expose GridPattern.'
         }
         $observations.list = Get-ElementObservation -Element $list
+        if ($rawCandidate) {
+            $rawControls.Add((Get-VmAutomatedControlObservation `
+                -Element $list -Process $process -ExpectedSession $ExpectedSessionId `
+                -Label 'raw file list'))
+            foreach ($railId in @(
+                '32771','32772','32773','32774','32775','32776','32777','32778','32779','32780',
+                '32781','32783','65535','32784','32788','32789','32790','32785','32786'
+            )) {
+                $rawRail = Find-UniqueAutomationElement `
+                    -Root $mainWindow -Process $process -ExpectedSession $ExpectedSessionId `
+                    -AutomationId $railId -ControlType ([Windows.Automation.ControlType]::Button) `
+                    -TimeoutSeconds $TimeoutSeconds -Label "raw command rail button $railId" `
+                    -RequireWindowHandle
+                $rawControls.Add((Get-VmAutomatedControlObservation `
+                    -Element $rawRail -Process $process -ExpectedSession $ExpectedSessionId `
+                    -Label "raw command rail button $railId"))
+            }
+        }
         $accessibility.status = 'passed'
         $initialCapture = Save-WindowScreenshot `
             -Window $mainWindow `
@@ -5835,6 +6126,11 @@ try {
             throw 'The production file list does not expose SelectionPattern for the no-selection reset observation.'
         }
         Wait-ListPreviewName -MainWindow $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -ExpectedName $destinationName -TimeoutSeconds $TimeoutSeconds
+
+        if ($rawCandidate) {
+            $rawCheckpoints.Add((Get-VmAutomatedCheckpoint `
+                -Phase initial -FixtureRoot $fixtureRoot -LocalAppData $env:LOCALAPPDATA))
+        }
         if ($Clipboard) {
             $result.failure_reason = 'clipboard_preflight_failed'
             $clipboardPreflight = [DarkReNamerVmAcceptanceNative]::ReadClipboardSnapshot()
@@ -6051,7 +6347,19 @@ try {
         }
         $confirmationCapture = Save-WindowScreenshot -Window $confirmation -Process $process -ExpectedSession $ExpectedSessionId -Root $verified.output_root -Leaf ($capturePrefix + '-confirmation.png') -Label 'current-DPI Apply confirmation'
         $captures.Add((Add-AcceptanceScreenshotContext -Screenshot $confirmationCapture -Appearance $appearanceSpec.evidence_name -Surface 'confirmation-task-dialog'))
+        if ($rawCandidate) {
+            $cancelEvent = Get-VmAutomatedKeyboardEventStart `
+                -Action escape -Confirmation $confirmation -Process $process `
+                -ExpectedSession $ExpectedSessionId -ExpectedAutomationId 'CommandButton_2' `
+                -TimeoutSeconds $TimeoutSeconds
+        }
         Send-AcceptanceTap -Process $process -ExpectedSession $ExpectedSessionId -VirtualKey 0x1B -Label 'Apply confirmation Escape'
+        if ($rawCandidate) {
+            Complete-VmAutomatedKeyboardEvent `
+                -Event $cancelEvent -Process $process -ExpectedSession $ExpectedSessionId `
+                -MainWindowHandle $process.MainWindowHandle -TimeoutSeconds $TimeoutSeconds
+            $keyboardEvents.Add($cancelEvent)
+        }
         $cancellationDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
         do {
             if ((Test-Path -LiteralPath $sourcePath -PathType Leaf) -and
@@ -6071,13 +6379,29 @@ try {
         if (-not $keyboard.cancellation_unchanged) {
             throw 'Escape cancellation changed the acceptance fixture.'
         }
+        if ($rawCandidate) {
+            $rawCheckpoints.Add((Get-VmAutomatedCheckpoint `
+                -Phase after_cancel -FixtureRoot $fixtureRoot -LocalAppData $env:LOCALAPPDATA))
+        }
 
         $result.failure_reason = 'apply_confirmation_failed'
         [void](Move-RailFocusToCommand -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '32771')
         Send-AcceptanceTap -Process $process -ExpectedSession $ExpectedSessionId -VirtualKey 0x20 -Label 'second Apply command Space'
         $confirmation = Wait-UniqueAutomationWindow -Process $process -ExpectedSession $ExpectedSessionId -Name 'DarkReNamer - 안전한 적용 확인' -TimeoutSeconds $TimeoutSeconds -Label 'second keyboard Apply confirmation'
         [void](Move-TabFocusToId -Process $process -ExpectedSession $ExpectedSessionId -AutomationId 'CommandLink_1101')
+        if ($rawCandidate) {
+            $applyEvent = Get-VmAutomatedKeyboardEventStart `
+                -Action enter -Confirmation $confirmation -Process $process `
+                -ExpectedSession $ExpectedSessionId -ExpectedAutomationId 'CommandLink_1101' `
+                -TimeoutSeconds $TimeoutSeconds
+        }
         Send-AcceptanceTap -Process $process -ExpectedSession $ExpectedSessionId -VirtualKey 0x0D -Label 'Apply confirmation Enter'
+        if ($rawCandidate) {
+            Complete-VmAutomatedKeyboardEvent `
+                -Event $applyEvent -Process $process -ExpectedSession $ExpectedSessionId `
+                -MainWindowHandle $process.MainWindowHandle -TimeoutSeconds $TimeoutSeconds
+            $keyboardEvents.Add($applyEvent)
+        }
         $applyDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
         do {
             if (-not (Test-Path -LiteralPath $sourcePath) -and
@@ -6104,12 +6428,37 @@ try {
             @(Get-ChildItem -LiteralPath $journalRoot -Force | Where-Object Name -cne 'runtime.lock').Count
         } else { 0 }
         $keyboard.status = 'passed'
+        if ($rawCandidate) {
+            $rawCheckpoints.Add((Get-VmAutomatedCheckpoint `
+                -Phase after_apply -FixtureRoot $fixtureRoot -LocalAppData $env:LOCALAPPDATA))
+        }
         $capture.status = 'passed'
         $capture.screenshot_count = $captures.Count
 
         $result.failure_reason = 'normal_close_failed'
-        [void](Close-AcceptanceApplication -Application $application -SessionId $ExpectedSessionId -WaitSeconds 10 -Input keyboard)
+        $normalExitCode = Close-AcceptanceApplication -Application $application -SessionId $ExpectedSessionId -WaitSeconds 10 -Input keyboard
         $lifecycle.process_terminated = $true
+        if ($rawCandidate) {
+            $result.process_lifecycle.exit_observed = $true
+            $result.process_lifecycle.exit_method = 'normal-close'
+            $result.process_lifecycle.exit_code = [int]$normalExitCode
+            $rawCheckpoints.Add((Get-VmAutomatedCheckpoint `
+                -Phase post_close -FixtureRoot $fixtureRoot -LocalAppData $env:LOCALAPPDATA))
+            $result.raw_checkpoints = $rawCheckpoints.ToArray()
+            $result.keyboard_events = $keyboardEvents.ToArray()
+            $rawMainHandle = [long]$mainWindow.Current.NativeWindowHandle
+            if (@($rawControls | Where-Object {
+                $_.pid -ne $process.Id -or $_.session_id -ne $ExpectedSessionId -or
+                $_.root_hwnd -ne $rawMainHandle
+            }).Count -ne 0) {
+                throw 'Current-DPI raw layout controls differ from the candidate workbench.'
+            }
+            $result.layout_observations = [ordered]@{
+                controls = $rawControls.ToArray()
+                focus = @($keyboardEvents | ForEach-Object focused_before)
+                screenshots = $captures.ToArray()
+            }
+        }
     }
 
     $result.status = Get-AcceptanceVerdict `
@@ -6170,6 +6519,11 @@ finally {
                 if (-not $process.WaitForExit(10000)) {
                     $result.status = 'failed'
                     $result.failure_reason = 'process_cleanup_failed'
+                }
+                elseif ($rawCandidate -and $null -ne $result.process_lifecycle) {
+                    $result.process_lifecycle.exit_observed = $true
+                    $result.process_lifecycle.exit_method = 'forced-termination'
+                    $result.process_lifecycle.exit_code = [int]$process.ExitCode
                 }
             }
             $lifecycle.process_terminated = $process.HasExited
@@ -6236,6 +6590,13 @@ finally {
         if (-not $lifecycle.process_terminated) {
             throw 'The owned application process is still running; runtime evidence was retained.'
         }
+        $rawJournalAfter = if ($rawCandidate -and $rawCheckpoints.Count -gt 0) {
+            @($rawCheckpoints[$rawCheckpoints.Count - 1].journal_entries)
+        }
+        elseif ($rawCandidate) {
+            @(Get-VmAutomatedJournalInventory -LocalAppData (Join-Path $runtimeRoot 'localappdata'))
+        }
+        else { @() }
         if (Test-Path -LiteralPath $runtimeRoot) {
             $runtimeItem = Get-Item -LiteralPath $runtimeRoot -Force
             if (($runtimeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -6255,10 +6616,28 @@ finally {
             Remove-Item -LiteralPath $runtimeRoot -Recurse -Force
         }
         $runtimeCleanup = -not (Test-Path -LiteralPath $runtimeRoot)
+        if ($rawCandidate) {
+            $ownedAfter = @(Get-VmAutomatedOwnedProcessInventory -Root $verified.root)
+            $result.raw_cleanup = [ordered]@{
+                owned_processes_after = $ownedAfter
+                runtime_root_after = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
+                journal_after = [ordered]@{ entries = $rawJournalAfter }
+            }
+            if ($ownedAfter.Count -ne 0 -or -not $runtimeCleanup) {
+                throw 'Current-DPI raw cleanup retained owned state.'
+            }
+        }
     }
     catch {
         $result.status = 'failed'
         $result.failure_reason = 'runtime_cleanup_failed'
+        if ($rawCandidate) {
+            $result.raw_cleanup = [ordered]@{
+                owned_processes_after = @(Get-VmAutomatedOwnedProcessInventory -Root $verified.root)
+                runtime_root_after = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
+                journal_after = [ordered]@{ entries = @() }
+            }
+        }
     }
     $result.guest_cleanup = $runtimeCleanup
     $result.screenshots = $captures.ToArray()

@@ -273,6 +273,17 @@ function Assert-AcceptanceInputArtifactBinding {
     }
 }
 
+function Assert-SafeAcceptanceRunId {
+    param([AllowNull()][object] $RunId)
+
+    if ($RunId -isnot [string] -or
+        $RunId -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' -or
+        $RunId.EndsWith('.', [StringComparison]::Ordinal) -or
+        $RunId.EndsWith(' ', [StringComparison]::Ordinal)) {
+        throw 'Acceptance input run_id must be a bounded safe token.'
+    }
+}
+
 function Assert-ObserverResultBinding {
     param(
         [Parameter(Mandatory = $true)][object] $Result,
@@ -709,6 +720,7 @@ try {
             throw 'Acceptance output must be an existing empty ordinary directory.'
         }
         $acceptanceInput = Get-Content -LiteralPath $AcceptanceManifest -Raw | ConvertFrom-Json
+        Assert-SafeAcceptanceRunId -RunId $acceptanceInput.run_id
         $expectedAcceptanceSourceSha = if ($candidateLane) {
             $manifest.product.source_sha
         } else {
@@ -1103,8 +1115,10 @@ public static class VmDesktopState {
             param($root)
             $bundle = Join-Path $root 'bundle'
             $out = Join-Path $root 'out'
+            $private = Join-Path $root 'private'
             [void](New-Item -ItemType Directory -Path $bundle)
             [void](New-Item -ItemType Directory -Path $out)
+            [void](New-Item -ItemType Directory -Path $private)
             $bundle
         }
         foreach ($name in @('bundle.json') + @($artifacts | ForEach-Object { $_.file })) {
@@ -1123,6 +1137,7 @@ public static class VmDesktopState {
             }
             $bundle = Join-Path $root 'bundle'
             $out = Join-Path $root 'out'
+            $private = Join-Path $root 'private'
             $stdout = Join-Path $root 'observer.stdout.txt'
             $stderr = Join-Path $root 'observer.stderr.txt'
             $powerShell = (Get-Command pwsh.exe -CommandType Application -ErrorAction Stop).Source
@@ -1134,7 +1149,7 @@ public static class VmDesktopState {
                 $engine.effective_policy -cne 'RemoteSigned') {
                 throw 'Recovery acceptance requires the configured PowerShell 7.4+ Core engine under its existing RemoteSigned policy.'
             }
-            $observerArguments = '-NoProfile -NonInteractive -WindowStyle Normal -File "' + $observerPath + '" -BundleRoot "' + $bundle + '" -ExpectedSessionId ' + $desktopSession + ' -OutputRoot "' + $out + '" -ExpectedScriptSha256 ' + $observerHash + ' -Mode ' + $mode + ' -FixtureCount ' + $fixtureCount + ' -TimeoutSeconds ' + $testTimeout
+            $observerArguments = '-NoProfile -NonInteractive -WindowStyle Normal -File "' + $observerPath + '" -BundleRoot "' + $bundle + '" -ExpectedSessionId ' + $desktopSession + ' -OutputRoot "' + $out + '" -PrivateEvidenceRoot "' + $private + '" -ExpectedScriptSha256 ' + $observerHash + ' -Mode ' + $mode + ' -FixtureCount ' + $fixtureCount + ' -TimeoutSeconds ' + $testTimeout
             if ($recoveryExport) { $observerArguments += ' -RecoveryExport' }
             if ($intentOnlyCandidateDiscard) {
                 $observerArguments += ' -IntentOnlyCandidateDiscard'
@@ -1222,51 +1237,58 @@ public static class VmDesktopState {
         }
         $inventory = @(Invoke-Command -Session $session -ArgumentList $guestRoot -ScriptBlock {
             param($root)
-            $out = Join-Path $root 'out'
-            $outItem = Get-Item -LiteralPath $out -Force
-            if (($outItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                throw 'Recovery output root became a reparse point.'
-            }
+            $evidenceRoots = @(
+                [pscustomobject]@{ item = Get-Item -LiteralPath (Join-Path $root 'out') -Force; prefix = '' },
+                [pscustomobject]@{ item = Get-Item -LiteralPath (Join-Path $root 'private') -Force; prefix = 'private/' }
+            )
             $pending = [Collections.Generic.Stack[IO.DirectoryInfo]]::new()
-            $pending.Push($outItem)
-            $rows = [Collections.Generic.List[IO.FileInfo]]::new()
+            $rows = [Collections.Generic.List[object]]::new()
             $directoryCount = 0
-            while ($pending.Count -gt 0) {
-                $directory = $pending.Pop()
-                foreach ($item in @(Get-ChildItem -LiteralPath $directory.FullName -Force)) {
-                    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                        throw 'Recovery output contains a reparse entry.'
-                    }
-                    if ($item.PSIsContainer) {
-                        $directoryCount++
-                        if ($directoryCount -gt 32) {
-                            throw 'Recovery output directory count exceeds its bound.'
+            foreach ($evidenceRoot in $evidenceRoots) {
+                if (($evidenceRoot.item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw 'Recovery evidence root became a reparse point.'
+                }
+                $pending.Push($evidenceRoot.item)
+                while ($pending.Count -gt 0) {
+                    $directory = $pending.Pop()
+                    foreach ($item in @(Get-ChildItem -LiteralPath $directory.FullName -Force)) {
+                        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                            throw 'Recovery output contains a reparse entry.'
                         }
-                        $pending.Push($item)
-                    }
-                    else {
-                        $rows.Add($item)
-                        if ($rows.Count -gt 256) {
-                            throw 'Recovery output file count exceeds its bound.'
+                        if ($item.PSIsContainer) {
+                            $directoryCount++
+                            if ($directoryCount -gt 32) {
+                                throw 'Recovery output directory count exceeds its bound.'
+                            }
+                            $pending.Push($item)
+                        }
+                        else {
+                            $relative = $item.FullName.Substring($evidenceRoot.item.FullName.Length + 1).Replace('\', '/')
+                            $rows.Add([pscustomobject]@{
+                                item = $item
+                                file = $evidenceRoot.prefix + $relative
+                            })
+                            if ($rows.Count -gt 256) {
+                                throw 'Recovery output file count exceeds its bound.'
+                            }
                         }
                     }
                 }
             }
             $total = [long]0
             foreach ($row in $rows) {
-                if (($row.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                    $row.Length -gt 128MB) {
+                if (($row.item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                    $row.item.Length -gt 128MB) {
                     throw 'Recovery output contains an unsafe file.'
                 }
-                $relative = $row.FullName.Substring($outItem.FullName.Length + 1).Replace('\', '/')
-                $total += $row.Length
+                $total += $row.item.Length
                 if ($total -gt 512MB) {
                     throw 'Recovery output exceeds its aggregate size bound.'
                 }
                 [pscustomobject]@{
-                    file = $relative
-                    bytes = $row.Length
-                    sha256 = (Get-FileHash -LiteralPath $row.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                    file = $row.file
+                    bytes = $row.item.Length
+                    sha256 = (Get-FileHash -LiteralPath $row.item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
                 }
             }
         })
@@ -1277,9 +1299,14 @@ public static class VmDesktopState {
         }
         foreach ($output in $inventory) {
             $segments = @(Get-SafeEvidencePathSegments $output.file)
-            $guestOutputPath = Join-GuestEvidencePath `
-                -Root (Join-GuestWindowsPath -Root $guestRoot -Leaf 'out') `
-                -RelativePath $output.file
+            $guestOutputPath = if ($output.file.StartsWith('private/', [StringComparison]::Ordinal)) {
+                Join-GuestEvidencePath -Root $guestRoot -RelativePath $output.file
+            }
+            else {
+                Join-GuestEvidencePath `
+                    -Root (Join-GuestWindowsPath -Root $guestRoot -Leaf 'out') `
+                    -RelativePath $output.file
+            }
             $hostOutputPath = $RecoveryOutputRoot
             foreach ($segment in $segments) {
                 $hostOutputPath = Join-Path $hostOutputPath $segment
@@ -1471,7 +1498,21 @@ public static class VmDesktopState {
                             $owned.Dispose()
                         }
                     }
-                    if (-not $mayDelete) { return $false }
+                    $taskPresentBeforeDelete = [bool](Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)
+                    if (-not $mayDelete -or $taskPresentBeforeDelete) {
+                        return [pscustomobject]@{
+                            guest_cleanup = $false
+                            raw_cleanup = [ordered]@{
+                                scheduled_task_present = $taskPresentBeforeDelete
+                                guest_root_present = [bool](Test-Path -LiteralPath $root)
+                                owned_processes_after = @(Get-CimInstance Win32_Process | Where-Object {
+                                    $_.ExecutablePath -and $_.ExecutablePath.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)
+                                } | Sort-Object ProcessId | ForEach-Object {
+                                    [ordered]@{ pid = [int]$_.ProcessId; session_id = [int]$_.SessionId; executable_path = [string]$_.ExecutablePath }
+                                })
+                            }
+                        }
+                    }
                     $pending = New-Object 'Collections.Generic.Stack[string]'
                     $pending.Push($root)
                     while ($pending.Count -gt 0) {
@@ -1483,10 +1524,28 @@ public static class VmDesktopState {
                         }
                     }
                     Remove-Item -LiteralPath $root -Recurse -Force
-                    -not (Test-Path -LiteralPath $root)
+                    $rootPresent = [bool](Test-Path -LiteralPath $root)
+                    $ownedAfter = @(Get-CimInstance Win32_Process | Where-Object {
+                        $_.ExecutablePath -and $_.ExecutablePath.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)
+                    } | Sort-Object ProcessId | ForEach-Object {
+                        [ordered]@{ pid = [int]$_.ProcessId; session_id = [int]$_.SessionId; executable_path = [string]$_.ExecutablePath }
+                    })
+                    $taskPresent = [bool](Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)
+                    [pscustomobject]@{
+                        guest_cleanup = (-not $rootPresent -and -not $taskPresent -and $ownedAfter.Count -eq 0)
+                        raw_cleanup = [ordered]@{
+                            scheduled_task_present = $taskPresent
+                            guest_root_present = $rootPresent
+                            owned_processes_after = $ownedAfter
+                        }
+                    }
                 }
-                if ($cleanupResult -isnot [bool]) { throw 'Guest cleanup did not return a boolean.' }
-                $transport.guest_cleanup = [bool]$cleanupResult
+                if ($null -eq $cleanupResult -or $cleanupResult.guest_cleanup -isnot [bool] -or
+                    $null -eq $cleanupResult.raw_cleanup) {
+                    throw 'Guest cleanup did not return its bound raw observation.'
+                }
+                $transport.guest_cleanup = [bool]$cleanupResult.guest_cleanup
+                $transport['raw_cleanup'] = $cleanupResult.raw_cleanup
             }
         } catch {
             $transport.status='failed'; $transport.cleanup_error='Guest cleanup failed; inspect cleanup-error.txt.'; $transport.guest_cleanup=$false

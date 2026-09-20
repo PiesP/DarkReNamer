@@ -526,8 +526,17 @@ def controller_invocation(root, args, defaults=None, pwsh=None, desktop_sid=None
     ]
 
 
+def write_desktop_lease_document(root, document):
+    if root is None:
+        return
+    path = Path(root) / 'desktop-lease.json'
+    temporary = path.with_name(path.name + '.tmp')
+    temporary.write_text(json.dumps(document, indent=2) + '\n', encoding='utf-8')
+    temporary.replace(path)
+
+
 @contextmanager
-def managed_desktop(args):
+def managed_desktop(args, evidence_root=None):
     if args.desktop_mode == 'existing':
         yield None
         return
@@ -543,6 +552,9 @@ def managed_desktop(args):
     geometry = ('' if args.desktop_width is None else
                 ' -DesktopWidth ' + str(args.desktop_width)
                 + ' -DesktopHeight ' + str(args.desktop_height))
+    lease_document_path = None if evidence_root is None else Path(evidence_root) / 'desktop-lease.json'
+    if lease_document_path is not None and lease_document_path.exists():
+        raise ValueError('Managed desktop lease evidence path already exists.')
     lease = json.loads(windows_host_command(
         '& ' + helper + ' -Action Start' + selector + ' -ScalePercent '
         + str(args.desktop_scale) + geometry))
@@ -552,6 +564,19 @@ def managed_desktop(args):
             not isinstance(lease.get('leaseId'), str) or
             not re.fullmatch(r'[a-f0-9]{32}', lease['leaseId'])):
         raise ValueError('Desktop helper returned an invalid lease; inspect its bounded session diagnostics.')
+    lease_document = {
+        'schema_version': 1,
+        'mode': 'managed-rdp',
+        'lease_id': lease['leaseId'],
+        'requested_scale': args.desktop_scale,
+        'requested_width': args.desktop_width,
+        'requested_height': args.desktop_height,
+        'expected_dpi': lease.get('expectedDpi'),
+        'start_status': 'ready',
+        'stop_status': 'failed',
+        'cleanup_observed': False,
+    }
+    write_desktop_lease_document(evidence_root, lease_document)
     try:
         if (not isinstance(lease.get('expectedGuestSid'), str) or
                 not re.fullmatch(r'S-1-5-21-(?:\d+-){2}\d+-\d+', lease['expectedGuestSid']) or
@@ -566,15 +591,23 @@ def managed_desktop(args):
             raise ValueError('Desktop helper returned unexpected desktop geometry.')
         yield lease
     finally:
-        stopped = json.loads(windows_host_command(
-            '& ' + helper + ' -Action Stop -LeasePath ' + psquote(lease['leasePath'])
-            + ' -LeaseId ' + psquote(lease['leaseId'])))
-        if not isinstance(stopped, dict) or stopped.get('status') != 'stopped':
+        try:
+            stopped = json.loads(windows_host_command(
+                '& ' + helper + ' -Action Stop -LeasePath ' + psquote(lease['leasePath'])
+                + ' -LeaseId ' + psquote(lease['leaseId'])))
+        except Exception:
+            write_desktop_lease_document(evidence_root, lease_document)
+            raise
+        cleanup_observed = isinstance(stopped, dict) and stopped.get('status') == 'stopped'
+        lease_document['stop_status'] = 'stopped' if cleanup_observed else 'failed'
+        lease_document['cleanup_observed'] = cleanup_observed
+        write_desktop_lease_document(evidence_root, lease_document)
+        if not cleanup_observed:
             raise RuntimeError('Desktop helper did not confirm session cleanup.')
 
 
 def run_controller(root, args, defaults=None, pwsh=None):
-    with managed_desktop(args) as desktop:
+    with managed_desktop(args, root) as desktop:
         command = controller_invocation(root, args, defaults, pwsh,
                                         desktop['expectedGuestSid'] if desktop else None)
         cwd = root if args.ssh_host else Path('/mnt/c')

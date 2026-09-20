@@ -1001,6 +1001,37 @@ class VmRunnerTests(unittest.TestCase):
                 with vm.managed_desktop(args):
                     self.fail('Mismatched geometry reached the controller')
 
+    def test_managed_desktop_persists_distinct_actual_lease_lifecycle(self):
+        args = vm.parse_arguments(['--ssh-host', 'vm'])
+        observed = []
+        for index, lease_id in enumerate(('a' * 32, 'b' * 32)):
+            evidence = self.root / ('lease-' + str(index))
+            evidence.mkdir()
+            lease = self.desktop_lease()
+            lease['leaseId'] = lease_id
+            with mock.patch.object(vm.Path, 'is_file', return_value=True), \
+                 mock.patch.object(vm, 'windows_host_command', side_effect=[
+                     json.dumps(lease), '{"status":"stopped"}']):
+                with vm.managed_desktop(args, evidence):
+                    pending = json.loads((evidence / 'desktop-lease.json').read_text())
+                    self.assertEqual(pending['stop_status'], 'failed')
+                    self.assertFalse(pending['cleanup_observed'])
+            document = json.loads((evidence / 'desktop-lease.json').read_text())
+            self.assertEqual(document, {
+                'schema_version': 1,
+                'mode': 'managed-rdp',
+                'lease_id': lease_id,
+                'requested_scale': 200,
+                'requested_width': None,
+                'requested_height': None,
+                'expected_dpi': 192,
+                'start_status': 'ready',
+                'stop_status': 'stopped',
+                'cleanup_observed': True,
+            })
+            observed.append(document['lease_id'])
+        self.assertEqual(len(set(observed)), 2)
+
     def test_existing_desktop_never_calls_windows_host(self):
         args = vm.parse_arguments(['--ssh-host', 'vm', '--desktop-mode', 'existing'])
         with mock.patch.object(vm, 'windows_host_command', side_effect=AssertionError):
@@ -1042,12 +1073,17 @@ class VmRunnerTests(unittest.TestCase):
 
     def test_cleanup_failure_fails_desktop_context(self):
         args = vm.parse_arguments(['--ssh-host', 'vm'])
+        evidence = self.root / 'failed-lease'
+        evidence.mkdir()
         with mock.patch.object(vm.Path, 'is_file', return_value=True), \
              mock.patch.object(vm, 'windows_host_command', side_effect=[
                  json.dumps(self.desktop_lease()), '{"status":"failed"}']):
             with self.assertRaisesRegex(RuntimeError, 'cleanup'):
-                with vm.managed_desktop(args):
+                with vm.managed_desktop(args, evidence):
                     pass
+        document = json.loads((evidence / 'desktop-lease.json').read_text())
+        self.assertEqual(document['stop_status'], 'failed')
+        self.assertFalse(document['cleanup_observed'])
 
 
 if __name__ == '__main__':

@@ -783,6 +783,33 @@ public static class DarkReNamerVmNative {
     [StructLayout(LayoutKind.Sequential)]
     public struct Rect { public int Left, Top, Right, Bottom; }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MonitorInfo {
+        public uint Size;
+        public Rect Monitor;
+        public Rect Work;
+        public uint Flags;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct HighContrast {
+        public uint Size;
+        public uint Flags;
+        public IntPtr DefaultScheme;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileId128 {
+        public ulong LowPart;
+        public ulong HighPart;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileIdInfo {
+        public ulong VolumeSerialNumber;
+        public FileId128 FileId;
+    }
+
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
     [DllImport("user32.dll")]
@@ -801,6 +828,20 @@ public static class DarkReNamerVmNative {
     public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool GetWindowRect(IntPtr window, out Rect rect);
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetAncestor(IntPtr window, uint flags);
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr window, uint flags);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetMonitorInfoW(IntPtr monitor, ref MonitorInfo information);
+    [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW", SetLastError = true)]
+    private static extern bool SystemParametersInfo(uint action, uint parameter, ref HighContrast value, uint flags);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint desiredAccess);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SwitchDesktop(IntPtr desktop);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool CloseDesktop(IntPtr desktop);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct ByHandleFileInformation {
@@ -824,6 +865,16 @@ public static class DarkReNamerVmNative {
     private static extern bool GetFileInformationByHandle(
         IntPtr file, out ByHandleFileInformation information);
     [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandleEx(
+        IntPtr file, int informationClass, out FileIdInfo information, uint size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint access, bool inherit, uint processId);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetTokenInformation(
+        IntPtr token, int informationClass, out int information, uint length, out uint returned);
+    [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr handle);
 
     public static string GetFileIdentity(string path) {
@@ -842,6 +893,90 @@ public static class DarkReNamerVmNative {
         finally {
             CloseHandle(file);
         }
+    }
+
+    public static string[] GetFullFileIdentity(string path) {
+        IntPtr file = CreateFile(path, 0x80, 1 | 2 | 4, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+        if (file == new IntPtr(-1)) {
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        }
+        try {
+            FileIdInfo information;
+            if (!GetFileInformationByHandleEx(
+                    file, 18, out information, (uint)Marshal.SizeOf(typeof(FileIdInfo)))) {
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            }
+            return new string[] {
+                information.VolumeSerialNumber.ToString("x16"),
+                FormatFileIdNumeric(information.FileId.LowPart, information.FileId.HighPart)
+            };
+        }
+        finally {
+            CloseHandle(file);
+        }
+    }
+
+    public static string FormatFileIdNumeric(ulong lowPart, ulong highPart) {
+        // FILE_ID_128 stores the little-endian bytes of the product's u128.
+        // Render the numeric value so this matches u128::from_le_bytes.
+        return highPart.ToString("x16") + lowPart.ToString("x16");
+    }
+
+    public static int[] ReadMonitorInfo(IntPtr window) {
+        IntPtr monitor = MonitorFromWindow(window, 2);
+        if (monitor == IntPtr.Zero) {
+            throw new InvalidOperationException("MonitorFromWindow returned no target monitor.");
+        }
+        MonitorInfo information = new MonitorInfo();
+        information.Size = (uint)Marshal.SizeOf(typeof(MonitorInfo));
+        if (!GetMonitorInfoW(monitor, ref information)) {
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        }
+        return new int[] {
+            information.Monitor.Left, information.Monitor.Top,
+            information.Monitor.Right, information.Monitor.Bottom,
+            information.Work.Left, information.Work.Top,
+            information.Work.Right, information.Work.Bottom
+        };
+    }
+
+    public static uint GetHighContrastFlags() {
+        HighContrast value = new HighContrast();
+        value.Size = (uint)Marshal.SizeOf(typeof(HighContrast));
+        if (!SystemParametersInfo(0x42, value.Size, ref value, 0)) {
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        }
+        return value.Flags;
+    }
+
+    public static bool InputDesktopAvailable() {
+        IntPtr desktop = OpenInputDesktop(0, false, 0x0100);
+        if (desktop == IntPtr.Zero) return false;
+        try { return SwitchDesktop(desktop); }
+        finally { CloseDesktop(desktop); }
+    }
+
+    public static bool IsProcessElevated(uint processId) {
+        IntPtr process = OpenProcess(0x1000, false, processId);
+        if (process == IntPtr.Zero) {
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        }
+        try {
+            IntPtr token;
+            if (!OpenProcessToken(process, 0x0008, out token)) {
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            }
+            try {
+                int elevation;
+                uint returned;
+                if (!GetTokenInformation(token, 20, out elevation, 4, out returned) || returned != 4) {
+                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                }
+                return elevation != 0;
+            }
+            finally { CloseHandle(token); }
+        }
+        finally { CloseHandle(process); }
     }
 }
 '@
@@ -871,6 +1006,257 @@ public static class DarkReNamerVmAutomation {
 '@
     }
     [DarkReNamerVmAutomation]::Initialize()
+}
+
+function Get-VmAutomatedCanonicalRootPath {
+    param([Parameter(Mandatory)][string] $Path)
+
+    if (-not [IO.Path]::IsPathRooted($Path)) {
+        throw 'VM-Automated fixture root must be drive-absolute.'
+    }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'VM-Automated fixture root must be an ordinary directory.'
+    }
+    $full = $item.FullName
+    $ordinaryDrive = $full -cmatch '^[A-Za-z]:\\.'
+    $verbatimDrive = $full -cmatch '^\\\\\?\\[A-Za-z]:\\.'
+    if ((-not $ordinaryDrive -and -not $verbatimDrive) -or
+        $full.StartsWith('\\\\.\\', [StringComparison]::Ordinal) -or
+        $full -cmatch '^\\\\(?!\?\\)') {
+        throw 'VM-Automated fixture root must use a canonical local drive path.'
+    }
+    $relative = if ($verbatimDrive) { $full.Substring(7) } else { $full.Substring(3) }
+    $components = @($relative.Split([char]92))
+    if ([string]::IsNullOrEmpty($relative) -or $components -contains '' -or
+        @($components | Where-Object {
+            $_ -in @('.', '..') -or $_.EndsWith('.', [StringComparison]::Ordinal) -or
+            $_.EndsWith(' ', [StringComparison]::Ordinal) -or
+            $_.IndexOfAny([char[]]'<>:"/|?*') -ge 0 -or
+            $_.Split('.')[0] -imatch '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$'
+        }).Count -ne 0) {
+        throw 'VM-Automated fixture root must not be a drive root or contain dot segments.'
+    }
+    $full
+}
+
+function Get-FullFileIdentity {
+    param([Parameter(Mandatory)][string] $Path)
+
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        throw 'FILE_ID_INFO observation requires Windows.'
+    }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        (-not $item.PSIsContainer -and $item -isnot [IO.FileInfo])) {
+        throw 'FILE_ID_INFO observation requires an ordinary file or directory.'
+    }
+    Initialize-NativeCapture
+    $identity = [DarkReNamerVmNative]::GetFullFileIdentity($item.FullName)
+    if ($identity.Count -ne 2 -or
+        $identity[0] -cnotmatch '^[0-9a-f]{16}$' -or
+        $identity[1] -cnotmatch '^[0-9a-f]{32}$') {
+        throw 'FILE_ID_INFO observation returned a malformed identity.'
+    }
+    [ordered]@{
+        volume_serial = $identity[0]
+        file_id = $identity[1]
+    }
+}
+
+function Initialize-TextScaleNative {
+    if ('DarkReNamerTextScaleNative' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class DarkReNamerTextScaleNative {
+    private const int RpcChangedMode = unchecked((int)0x80010106);
+    private const uint RoInitMultithreaded = 1;
+    private static readonly Guid IidUiSettings2 = new Guid("bad82401-2721-44f9-bb91-2bb228be442f");
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int QueryInterfaceDelegate(IntPtr instance, ref Guid iid, out IntPtr value);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint ReleaseDelegate(IntPtr instance);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int TextScaleFactorDelegate(IntPtr instance, out double value);
+
+    [DllImport("combase.dll")]
+    private static extern int RoInitialize(uint initType);
+    [DllImport("combase.dll")]
+    private static extern void RoUninitialize();
+    [DllImport("combase.dll", CharSet=CharSet.Unicode)]
+    private static extern int WindowsCreateString(string source, uint length, out IntPtr value);
+    [DllImport("combase.dll")]
+    private static extern int WindowsDeleteString(IntPtr value);
+    [DllImport("combase.dll")]
+    private static extern int RoActivateInstance(IntPtr classId, out IntPtr instance);
+
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    private static extern IntPtr SendMessageTimeoutW(
+        IntPtr window, uint message, UIntPtr wParam, string lParam,
+        uint flags, uint timeout, out UIntPtr result);
+
+    private static IntPtr ReadVtableMethod(IntPtr instance, int slot) {
+        if (instance == IntPtr.Zero) {
+            throw new ArgumentException("A COM interface pointer is required.", "instance");
+        }
+        return Marshal.ReadIntPtr(Marshal.ReadIntPtr(instance), slot * IntPtr.Size);
+    }
+
+    private static void Release(ref IntPtr instance) {
+        if (instance == IntPtr.Zero) { return; }
+        var release = (ReleaseDelegate)Marshal.GetDelegateForFunctionPointer(
+            ReadVtableMethod(instance, 2), typeof(ReleaseDelegate));
+        release(instance);
+        instance = IntPtr.Zero;
+    }
+
+    public static double ReadTextScaleFactor() {
+        int initializeResult = RoInitialize(RoInitMultithreaded);
+        bool uninitialize = initializeResult >= 0;
+        if (initializeResult < 0 && initializeResult != RpcChangedMode) {
+            Marshal.ThrowExceptionForHR(initializeResult);
+        }
+
+        IntPtr classId = IntPtr.Zero;
+        IntPtr instance = IntPtr.Zero;
+        IntPtr settings2 = IntPtr.Zero;
+        try {
+            const string runtimeClass = "Windows.UI.ViewManagement.UISettings";
+            int result = WindowsCreateString(runtimeClass, (uint)runtimeClass.Length, out classId);
+            if (result < 0) { Marshal.ThrowExceptionForHR(result); }
+            result = RoActivateInstance(classId, out instance);
+            if (result < 0) { Marshal.ThrowExceptionForHR(result); }
+
+            var query = (QueryInterfaceDelegate)Marshal.GetDelegateForFunctionPointer(
+                ReadVtableMethod(instance, 0), typeof(QueryInterfaceDelegate));
+            Guid iid = IidUiSettings2;
+            result = query(instance, ref iid, out settings2);
+            if (result < 0) { Marshal.ThrowExceptionForHR(result); }
+
+            var read = (TextScaleFactorDelegate)Marshal.GetDelegateForFunctionPointer(
+                ReadVtableMethod(settings2, 6), typeof(TextScaleFactorDelegate));
+            double value;
+            result = read(settings2, out value);
+            if (result < 0) { Marshal.ThrowExceptionForHR(result); }
+            return value;
+        }
+        finally {
+            Release(ref settings2);
+            Release(ref instance);
+            if (classId != IntPtr.Zero) { WindowsDeleteString(classId); }
+            if (uninitialize) { RoUninitialize(); }
+        }
+    }
+
+    public static void NotifyAccessibilitySettingChange() {
+        UIntPtr result;
+        SendMessageTimeoutW(
+            new IntPtr(0xffff), 0x001A, UIntPtr.Zero, "Accessibility",
+            0x0002, 5000, out result);
+    }
+}
+'@
+}
+
+function Get-VmAutomatedEnvironment {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][IntPtr] $WindowHandle,
+        [Parameter(Mandatory)][string] $FixtureRoot
+    )
+
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        throw 'VM-Automated environment observation requires Windows.'
+    }
+    Initialize-NativeCapture
+    $rootPath = Get-VmAutomatedCanonicalRootPath -Path $FixtureRoot
+    $Process.Refresh()
+    if ($Process.HasExited -or $WindowHandle -eq [IntPtr]::Zero -or
+        -not [DarkReNamerVmNative]::IsWindow($WindowHandle)) {
+        throw 'VM-Automated environment requires a live candidate window.'
+    }
+    $windowProcessId = [uint32]0
+    if ([DarkReNamerVmNative]::GetWindowThreadProcessId(
+            $WindowHandle,
+            [ref]$windowProcessId
+        ) -eq 0 -or $windowProcessId -ne $Process.Id) {
+        throw 'VM-Automated target window is outside the candidate process.'
+    }
+    $windowRect = [DarkReNamerVmNative+Rect]::new()
+    if (-not [DarkReNamerVmNative]::GetWindowRect($WindowHandle, [ref]$windowRect)) {
+        throw 'VM-Automated target window bounds are unavailable.'
+    }
+    $monitor = [DarkReNamerVmNative]::ReadMonitorInfo($WindowHandle)
+    $dpi = [int][DarkReNamerVmNative]::GetDpiForWindow($WindowHandle)
+    if ($dpi -le 0) { throw 'VM-Automated target window DPI is unavailable.' }
+    $version = Get-ItemProperty `
+        -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' `
+        -ErrorAction Stop
+    $operatingSystem = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+    $drivePath = if ($rootPath.StartsWith('\\?\', [StringComparison]::Ordinal)) {
+        $rootPath.Substring(4)
+    } else { $rootPath }
+    $drive = [IO.DriveInfo]::new($drivePath.Substring(0, 3))
+    Initialize-TextScaleNative
+    $textScaleFactor = [double][DarkReNamerTextScaleNative]::ReadTextScaleFactor()
+    if ([double]::IsNaN($textScaleFactor) -or [double]::IsInfinity($textScaleFactor) -or
+        $textScaleFactor -lt 1.0 -or $textScaleFactor -gt 2.25) {
+        throw 'VM-Automated actual UISettings text scale is unavailable or invalid.'
+    }
+    $textScale = [int][Math]::Round($textScaleFactor * 100)
+    $desktopAvailable = [bool][DarkReNamerVmNative]::InputDesktopAvailable()
+    [ordered]@{
+        schema_version = 1
+        platform = [ordered]@{
+            os_product_name = [string]$version.ProductName
+            display_version = [string]$version.DisplayVersion
+            build_number = [int]$version.CurrentBuildNumber
+            product_type = [int]$operatingSystem.ProductType
+            architecture = if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq
+                [Runtime.InteropServices.Architecture]::X64) { 'x86_64' } else {
+                [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+            }
+        }
+        process = [ordered]@{
+            pid = [int]$Process.Id
+            session_id = [int]$Process.SessionId
+            is_elevated = [bool][DarkReNamerVmNative]::IsProcessElevated([uint32]$Process.Id)
+        }
+        desktop = [ordered]@{
+            input_desktop_active = $desktopAvailable
+            locked = -not $desktopAvailable
+        }
+        fixture_volume = [ordered]@{
+            filesystem = [string]$drive.DriveFormat
+            root_path = $rootPath
+            root_identity = Get-FullFileIdentity -Path $rootPath
+        }
+        target_display = [ordered]@{
+            hwnd = [long]$WindowHandle
+            process_id = [int]$windowProcessId
+            session_id = [int]$Process.SessionId
+            dpi_x = $dpi
+            dpi_y = $dpi
+            monitor_rect = [ordered]@{
+                left = $monitor[0]; top = $monitor[1]
+                right = $monitor[2]; bottom = $monitor[3]
+            }
+            work_rect = [ordered]@{
+                left = $monitor[4]; top = $monitor[5]
+                right = $monitor[6]; bottom = $monitor[7]
+            }
+            window_rect = [ordered]@{
+                left = $windowRect.Left; top = $windowRect.Top
+                right = $windowRect.Right; bottom = $windowRect.Bottom
+            }
+            text_scale_percent = [int]$textScale
+            high_contrast_flags = [long][DarkReNamerVmNative]::GetHighContrastFlags()
+        }
+    }
 }
 
 function Assert-AutomationBinding {
@@ -1241,6 +1627,7 @@ function Save-WindowScreenshot {
         uia_set_focus = 'not_attempted'
         set_foreground_window = $null
         final = $null
+        capture_complete = $null
         capture_change = $null
     }
     if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
@@ -1292,6 +1679,7 @@ function Save-WindowScreenshot {
             $bitmap.Size,
             [Drawing.CopyPixelOperation]::SourceCopy
         )
+        $activationObservation.capture_complete = Get-ForegroundObservation
         if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
             $activationObservation.capture_change = Get-ForegroundObservation
             throw "$Label lost foreground during screenshot capture."
@@ -1394,6 +1782,129 @@ function Get-FlowCheckpoint {
     }
 }
 
+function Get-VmAutomatedFixtureInventory {
+    param([Parameter(Mandatory)][string] $FixtureRoot)
+
+    $root = Get-VmAutomatedCanonicalRootPath -Path $FixtureRoot
+    $items = @(Get-ChildItem -LiteralPath $root -Force | Sort-Object Name)
+    if ($items.Count -gt 10001) {
+        throw 'The VM-Automated fixture inventory exceeds its bound.'
+    }
+    $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $total = [long]0
+    @($items | ForEach-Object {
+        if (-not $names.Add($_.Name) -or
+            $_.Name -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$' -or
+            $_.Name.EndsWith('.', [StringComparison]::Ordinal) -or
+            $_.Name.EndsWith(' ', [StringComparison]::Ordinal) -or
+            $_.Name.Split('.')[0] -imatch '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') {
+            throw 'The VM-Automated fixture inventory contains an unsafe name.'
+        }
+        if ($_.PSIsContainer -or
+            ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $_ -isnot [IO.FileInfo]) {
+            throw 'The VM-Automated fixture inventory requires ordinary files.'
+        }
+        if ($_.Length -gt 64MB) {
+            throw 'The VM-Automated fixture inventory contains an oversized file.'
+        }
+        $total += $_.Length
+        if ($total -gt 512MB) {
+            throw 'The VM-Automated fixture inventory exceeds its aggregate size bound.'
+        }
+        [ordered]@{
+            name = $_.Name
+            kind = 'file'
+            bytes = [long]$_.Length
+            content_sha256 = Get-LowerSha256 -Path $_.FullName
+            file_identity = Get-FullFileIdentity -Path $_.FullName
+        }
+    })
+}
+
+function Get-VmAutomatedJournalInventory {
+    param([Parameter(Mandatory)][string] $LocalAppData)
+
+    $journalRoot = Join-Path (Join-Path $LocalAppData 'DarkReNamer') 'journal'
+    if (-not (Test-Path -LiteralPath $journalRoot)) { return @() }
+    $root = Get-Item -LiteralPath $journalRoot -Force
+    if (-not $root.PSIsContainer -or
+        ($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The VM-Automated journal root is not an ordinary directory.'
+    }
+    $items = @(Get-ChildItem -LiteralPath $root.FullName -Force | Sort-Object Name)
+    if ($items.Count -gt 256) {
+        throw 'The VM-Automated journal inventory exceeds its bound.'
+    }
+    @($items | ForEach-Object {
+        if ($_.Name -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$' -or
+            $_.Name.EndsWith('.', [StringComparison]::Ordinal) -or
+            $_.Name.EndsWith(' ', [StringComparison]::Ordinal) -or
+            $_.Name.Split('.')[0] -imatch '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$' -or
+            ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The VM-Automated journal inventory contains an unsafe entry.'
+        }
+        [ordered]@{
+            name = $_.Name
+            kind = if ($_.PSIsContainer) { 'directory' } else { 'file' }
+            bytes = if ($_.PSIsContainer) { [long]0 } else { [long]$_.Length }
+        }
+    })
+}
+
+function Get-VmAutomatedCheckpoint {
+    param(
+        [Parameter(Mandatory)][ValidateSet('initial', 'after_cancel', 'after_apply', 'post_close')]
+        [string] $Phase,
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][string] $LocalAppData
+    )
+    [ordered]@{
+        phase = $Phase
+        fixture_entries = @(Get-VmAutomatedFixtureInventory -FixtureRoot $FixtureRoot)
+        journal_entries = @(Get-VmAutomatedJournalInventory -LocalAppData $LocalAppData)
+    }
+}
+
+function Get-VmAutomatedOwnedProcessInventory {
+    param([Parameter(Mandatory)][string] $Root)
+
+    $prefix = [IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
+    @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+        $_.ExecutablePath -and
+        $_.ExecutablePath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
+    } | Sort-Object ProcessId | ForEach-Object {
+        [ordered]@{
+            pid = [int]$_.ProcessId
+            session_id = [int]$_.SessionId
+            executable_path = [string]$_.ExecutablePath
+        }
+    })
+}
+
+function Get-VmAutomatedRuntimeRootObservation {
+    param([Parameter(Mandatory)][string] $Root)
+
+    if (-not (Test-Path -LiteralPath $Root)) {
+        return [ordered]@{ exists = $false; entries = @() }
+    }
+    $rootItem = Get-Item -LiteralPath $Root -Force
+    if (-not $rootItem.PSIsContainer -or
+        ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The VM-Automated runtime root is unsafe.'
+    }
+    $entries = @(Get-ChildItem -LiteralPath $rootItem.FullName -Force -Recurse | ForEach-Object {
+        if (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The VM-Automated runtime root contains a reparse point.'
+        }
+        [ordered]@{
+            path = $_.FullName.Substring($rootItem.FullName.Length + 1).Replace('\', '/')
+            kind = if ($_.PSIsContainer) { 'directory' } else { 'file' }
+        }
+    })
+    [ordered]@{ exists = $true; entries = $entries }
+}
+
 function Invoke-ProductionRenameFlow {
     param(
         [Parameter(Mandatory)][Diagnostics.Process] $Process,
@@ -1401,7 +1912,8 @@ function Invoke-ProductionRenameFlow {
         [Parameter(Mandatory)][string] $FixtureRoot,
         [Parameter(Mandatory)][string] $Root,
         [Parameter(Mandatory)][int] $ExpectedSession,
-        [Parameter(Mandatory)][int] $TimeoutSeconds
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [switch] $RawEvidence
     )
 
     $sourceName = 'vm-flow-source.txt'
@@ -1447,6 +1959,16 @@ function Invoke-ProductionRenameFlow {
             -Phase initial `
             -FixtureRoot $FixtureRoot `
             -LocalAppData $env:LOCALAPPDATA))
+        if ($RawEvidence) {
+            $flow['raw_environment'] = Get-VmAutomatedEnvironment `
+                -Process $Process `
+                -WindowHandle ([IntPtr]$MainWindow.Current.NativeWindowHandle) `
+                -FixtureRoot $FixtureRoot
+            $flow['raw_checkpoints'] = @((Get-VmAutomatedCheckpoint `
+                -Phase initial `
+                -FixtureRoot $FixtureRoot `
+                -LocalAppData $env:LOCALAPPDATA))
+        }
 
         $flow.failure_reason = 'file_add_failed'
         $add = Find-UniqueAutomationElement `
@@ -1618,6 +2140,12 @@ function Invoke-ProductionRenameFlow {
             -Phase after_cancel `
             -FixtureRoot $FixtureRoot `
             -LocalAppData $env:LOCALAPPDATA)
+        if ($RawEvidence) {
+            $flow.raw_checkpoints += (Get-VmAutomatedCheckpoint `
+                -Phase after_cancel `
+                -FixtureRoot $FixtureRoot `
+                -LocalAppData $env:LOCALAPPDATA)
+        }
         Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
 
         $flow.failure_reason = 'confirmed_apply_failed'
@@ -1677,6 +2205,12 @@ function Invoke-ProductionRenameFlow {
             -Phase after_apply `
             -FixtureRoot $FixtureRoot `
             -LocalAppData $env:LOCALAPPDATA)
+        if ($RawEvidence) {
+            $flow.raw_checkpoints += (Get-VmAutomatedCheckpoint `
+                -Phase after_apply `
+                -FixtureRoot $FixtureRoot `
+                -LocalAppData $env:LOCALAPPDATA)
+        }
         Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
         $flow.confirmed_source_present = Test-Path -LiteralPath $sourcePath -PathType Leaf
         $flow.confirmed_destination_present = Test-Path -LiteralPath $destinationPath -PathType Leaf
@@ -1783,7 +2317,8 @@ function Invoke-GuiSmoke {
         [Parameter(Mandatory)][string] $Root,
         [Parameter(Mandatory)][string] $RuntimeRoot,
         [Parameter(Mandatory)][int] $ExpectedSession,
-        [Parameter(Mandatory)][int] $TimeoutSeconds
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [switch] $RawEvidence
     )
 
     $row = [ordered]@{
@@ -1832,6 +2367,22 @@ function Invoke-GuiSmoke {
                 -FilePath $applicationPath `
                 -Arguments '' `
                 -WorkingDirectory $Root
+            if ($RawEvidence) {
+                $processState.process.process.Refresh()
+                $row['process_lifecycle'] = [ordered]@{
+                    pid = [int]$processState.process.process.Id
+                    session_id = [int]$processState.process.process.SessionId
+                    start_time_utc_ticks = $processState.process.process.StartTime.ToUniversalTime().Ticks.ToString(
+                        [Globalization.CultureInfo]::InvariantCulture
+                    )
+                    executable_path = $applicationPath
+                    executable_sha256 = Get-LowerSha256 -Path $applicationPath
+                    start_observed = $true
+                    exit_observed = $false
+                    exit_method = $null
+                    exit_code = $null
+                }
+            }
             $windowDeadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
             do {
                 Start-Sleep -Milliseconds 200
@@ -1968,7 +2519,8 @@ function Invoke-GuiSmoke {
                 -FixtureRoot $flowFixtureRoot `
                 -Root $Root `
                 -ExpectedSession $ExpectedSession `
-                -TimeoutSeconds $TimeoutSeconds
+                -TimeoutSeconds $TimeoutSeconds `
+                -RawEvidence:$RawEvidence
             if ($row.flow.status -cne 'passed') {
                 $row.failure_reason = 'production_rename_flow_failed'
                 return
@@ -1984,6 +2536,11 @@ function Invoke-GuiSmoke {
             }
             $processState.process.process.WaitForExit()
             $row.exit_code = $processState.process.process.ExitCode
+            if ($RawEvidence) {
+                $row.process_lifecycle.exit_observed = $true
+                $row.process_lifecycle.exit_method = 'normal-close'
+                $row.process_lifecycle.exit_code = [int]$row.exit_code
+            }
             if ($processState.process.process.ExitCode -ne 0) {
                 $row.failure_reason = 'app_exit_failed'
                 return
@@ -1992,6 +2549,12 @@ function Invoke-GuiSmoke {
                 -Phase post_close `
                 -FixtureRoot $flowFixtureRoot `
                 -LocalAppData $env:LOCALAPPDATA)
+            if ($RawEvidence) {
+                $row.flow.raw_checkpoints += (Get-VmAutomatedCheckpoint `
+                    -Phase post_close `
+                    -FixtureRoot $flowFixtureRoot `
+                    -LocalAppData $env:LOCALAPPDATA)
+            }
             $row.status = 'passed'
             $row.failure_reason = $null
         }
@@ -2009,6 +2572,11 @@ function Invoke-GuiSmoke {
                     Invoke-TaskkillTree -ProcessId $processState.process.process.Id
                     if (-not $processState.process.process.WaitForExit(10000)) {
                         throw 'Owned application process did not terminate.'
+                    }
+                    if ($RawEvidence -and $row.Contains('process_lifecycle')) {
+                        $row.process_lifecycle.exit_observed = $true
+                        $row.process_lifecycle.exit_method = 'forced-termination'
+                        $row.process_lifecycle.exit_code = [int]$processState.process.process.ExitCode
                     }
                 }
             }
@@ -2055,7 +2623,7 @@ function Write-ResultDocument {
             }
         }
     }
-    $json = $Result | ConvertTo-Json -Depth 8
+    $json = $Result | ConvertTo-Json -Depth 16
     [IO.File]::WriteAllText($temporaryPath, $json, [Text.UTF8Encoding]::new($false))
     Move-Item -LiteralPath $temporaryPath -Destination $resultPath -Force
 }
@@ -2205,6 +2773,7 @@ if ($currentSession -ne $ExpectedSessionId) {
 
 $desktopLock = $null
 $previousExecutionState = $null
+$runtimeRoot = $null
 try {
     $desktopLock = Enter-DesktopTestLock -SessionId $currentSession
     if ($null -eq $desktopLock) {
@@ -2233,7 +2802,8 @@ try {
         -Root $verified.root `
         -RuntimeRoot $runtimeRoot `
         -ExpectedSession $ExpectedSessionId `
-        -TimeoutSeconds $TestTimeoutSeconds
+        -TimeoutSeconds $TestTimeoutSeconds `
+        -RawEvidence:$candidateLane
 
     $testFailures = @($result.tests | Where-Object { $_.status -cne 'passed' })
     if ($testFailures.Count -eq 0 -and $result.gui.status -ceq 'passed' -and
@@ -2255,6 +2825,39 @@ finally {
         catch {
             $result.status = 'failed'
             $result.failure_reason = 'execution_state_restore_failed'
+        }
+        if ($candidateLane -and $null -ne $runtimeRoot) {
+            try {
+                $journalAfter = if ($null -ne $result.gui -and
+                    $null -ne $result.gui.flow -and
+                    @($result.gui.flow.raw_checkpoints).Count -gt 0) {
+                    @($result.gui.flow.raw_checkpoints)[-1].journal_entries
+                } else {
+                    @(Get-VmAutomatedJournalInventory -LocalAppData (Join-Path $runtimeRoot 'gui\localappdata'))
+                }
+                $ownedAfter = @(Get-VmAutomatedOwnedProcessInventory -Root $verified.root)
+                if ($ownedAfter.Count -ne 0) {
+                    throw 'An owned candidate process remains after the GUI flow.'
+                }
+                if (Test-Path -LiteralPath $runtimeRoot) {
+                    [void](Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot)
+                    Remove-Item -LiteralPath $runtimeRoot -Recurse -Force
+                }
+                $result['raw_cleanup'] = [ordered]@{
+                    owned_processes_after = $ownedAfter
+                    runtime_root_after = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
+                    journal_after = [ordered]@{ entries = @($journalAfter) }
+                }
+            }
+            catch {
+                $result.status = 'failed'
+                $result.failure_reason = 'raw_cleanup_failed'
+                $result['raw_cleanup'] = [ordered]@{
+                    owned_processes_after = @(Get-VmAutomatedOwnedProcessInventory -Root $verified.root)
+                    runtime_root_after = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
+                    journal_after = [ordered]@{ entries = @() }
+                }
+            }
         }
         Write-ResultDocument -Root $verified.root -Result $result
     }

@@ -360,6 +360,85 @@ try {
         'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad') {
         throw 'The source-bound identity digest helper returned the wrong SHA-256 value.'
     }
+    foreach ($helper in @(
+        'Get-FullFileIdentity',
+        'Get-VmAutomatedEnvironment',
+        'Get-VmAutomatedFixtureInventory',
+        'Get-VmAutomatedJournalInventory',
+        'Get-VmAutomatedCheckpoint',
+        'Get-VmAutomatedOwnedProcessInventory',
+        'Get-VmAutomatedRuntimeRootObservation'
+    )) {
+        if ($null -eq (Get-Command $helper -CommandType Function -ErrorAction SilentlyContinue)) {
+            throw "The shared VM-Automated helper $helper is unavailable after dot-sourcing."
+        }
+    }
+    $runnerText = [IO.File]::ReadAllText($runner)
+    foreach ($requiredRawSource in @(
+        'GetFileInformationByHandleEx(',
+        'information.VolumeSerialNumber.ToString("x16")',
+        'FormatFileIdNumeric(information.FileId.LowPart, information.FileId.HighPart)',
+        'Get-VmAutomatedCanonicalRootPath -Path $FixtureRoot',
+        'product_type = [int]$operatingSystem.ProductType',
+        'root_identity = Get-FullFileIdentity -Path $rootPath',
+        'is_elevated = [bool][DarkReNamerVmNative]::IsProcessElevated',
+        'input_desktop_active = $desktopAvailable',
+        'high_contrast_flags = [long][DarkReNamerVmNative]::GetHighContrastFlags()'
+        "exit_method = 'normal-close'"
+        "exit_method = 'forced-termination'"
+        "`$result['raw_cleanup'] = [ordered]@{"
+        '-RawEvidence:$candidateLane'
+    )) {
+        if ($runnerText.IndexOf($requiredRawSource, [StringComparison]::Ordinal) -lt 0) {
+            throw "The shared VM-Automated raw contract is missing '$requiredRawSource'."
+        }
+    }
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        Initialize-NativeCapture
+        $numericFileId = [DarkReNamerVmNative]::FormatFileIdNumeric(
+            [Convert]::ToUInt64('0706050403020100', 16),
+            [Convert]::ToUInt64('0f0e0d0c0b0a0908', 16)
+        )
+        if ($numericFileId -cne '0f0e0d0c0b0a09080706050403020100') {
+            throw 'FILE_ID_128 was not encoded as the product u128 numeric value.'
+        }
+        $identityRoot = Join-Path $valid.root 'full-identity'
+        [void](New-Item -ItemType Directory -Path $identityRoot)
+        $identityFile = Join-Path $identityRoot 'fixture.txt'
+        [IO.File]::WriteAllText($identityFile, 'identity fixture')
+        $directoryIdentity = Get-FullFileIdentity -Path $identityRoot
+        $fileIdentity = Get-FullFileIdentity -Path $identityFile
+        foreach ($observed in @($directoryIdentity, $fileIdentity)) {
+            if ($observed.volume_serial -cnotmatch '^[0-9a-f]{16}$' -or
+                $observed.file_id -cnotmatch '^[0-9a-f]{32}$') {
+                throw 'FILE_ID_INFO did not retain its full lowercase numeric width.'
+            }
+        }
+        if ($directoryIdentity.volume_serial -cne $fileIdentity.volume_serial -or
+            $directoryIdentity.file_id -ceq $fileIdentity.file_id) {
+            throw 'FILE_ID_INFO did not bind distinct entries on the same fixture volume.'
+        }
+        $rawFixture = Join-Path $valid.root 'raw-fixture'
+        [void](New-Item -ItemType Directory -Path $rawFixture)
+        $rawFile = Join-Path $rawFixture 'source.txt'
+        [IO.File]::WriteAllText($rawFile, 'raw fixture')
+        $rawCheckpoint = Get-VmAutomatedCheckpoint `
+            -Phase initial -FixtureRoot $rawFixture `
+            -LocalAppData (Join-Path $valid.root 'raw-localappdata')
+        if (@($rawCheckpoint.fixture_entries).Count -ne 1 -or
+            $rawCheckpoint.fixture_entries[0].name -cne 'source.txt' -or
+            $rawCheckpoint.fixture_entries[0].kind -cne 'file' -or
+            $rawCheckpoint.fixture_entries[0].file_identity.file_id -cne
+                (Get-FullFileIdentity -Path $rawFile).file_id -or
+            @($rawCheckpoint.journal_entries).Count -ne 0) {
+            throw 'The raw checkpoint did not preserve complete fixture identity and journal state.'
+        }
+    }
+    else {
+        Assert-Fails {
+            Get-FullFileIdentity -Path $valid.root
+        } 'requires Windows'
+    }
     $isolatedLocalAppData = Join-Path $valid.root 'isolated-localappdata'
     $isolatedJournalRoot = Join-Path (Join-Path $isolatedLocalAppData 'DarkReNamer') 'journal'
     [void](New-Item -ItemType Directory -Path $isolatedJournalRoot)
@@ -463,7 +542,6 @@ try {
     Assert-Fails {
         Join-GuestWindowsPath -Root $guestTransferRoot -Leaf '..\result.json'
     } 'Invalid bundle file name'
-    $runnerText = [IO.File]::ReadAllText($runner)
     $bindingTokens = $null
     $bindingErrors = $null
     $runnerAst = [Management.Automation.Language.Parser]::ParseInput(

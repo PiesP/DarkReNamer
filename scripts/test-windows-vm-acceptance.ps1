@@ -286,6 +286,7 @@ try {
         'Join-GuestEvidencePath',
         'Resolve-ControllerTaskSelection',
         'Assert-AcceptanceInputArtifactBinding',
+        'Assert-SafeAcceptanceRunId',
         'Assert-ObserverResultBinding'
     )) {
         $pathFunctions = @($controllerAst.FindAll({
@@ -394,7 +395,7 @@ try {
     Assert-Fails {
         Get-SafeEvidencePathSegments 'fixture/trailing.'
     } 'Invalid Windows ordinary file name'
-    $earlyAggregatePattern = '\$total\s*\+=\s*\$row\.Length\s*' +
+    $earlyAggregatePattern = '\$total\s*\+=\s*\$row(?:\.item)?\.Length\s*' +
         'if\s*\(\$total\s*-gt\s*512MB\)\s*\{\s*throw\s*' +
         "'[^']+aggregate size bound[^']*'\s*\}\s*\[pscustomobject\]@\{"
     if ([regex]::Matches(
@@ -426,6 +427,8 @@ try {
         'elseif ($recovery)',
         'Recovery output file count exceeds its bound.',
         'Recovery output contains a reparse entry.',
+        '-PrivateEvidenceRoot "'' + $private + ''"',
+        "prefix = 'private/'",
         'recovery-inventory.json',
         '-Role recovery',
         'Assert-ObserverResultBinding',
@@ -433,6 +436,17 @@ try {
     )) {
         if ($controllerText.IndexOf($requiredObserverSource, [StringComparison]::Ordinal) -lt 0) {
             throw "The shared controller is missing observer contract '$requiredObserverSource'."
+        }
+    }
+    foreach ($requiredRawCleanupSource in @(
+        'scheduled_task_present =',
+        'guest_root_present =',
+        'owned_processes_after =',
+        "`$transport['raw_cleanup'] = `$cleanupResult.raw_cleanup",
+        'Guest cleanup did not return its bound raw observation.'
+    )) {
+        if ($controllerText.IndexOf($requiredRawCleanupSource, [StringComparison]::Ordinal) -lt 0) {
+            throw "The shared controller is missing raw cleanup evidence '$requiredRawCleanupSource'."
         }
     }
     if ($controllerText.IndexOf(
@@ -690,6 +704,28 @@ try {
             throw "The acceptance flow is missing TaskDialog automation ID $taskDialogId."
         }
     }
+    foreach ($requiredRawObservation in @(
+        'function Get-VmAutomatedKeyboardEventStart',
+        "-ExpectedAutomationId 'CommandButton_2'",
+        "-ExpectedAutomationId 'CommandLink_1101'",
+        'root_hwnd = [long]$rootHandle',
+        'Complete-VmAutomatedKeyboardEvent',
+        'Get-VmAutomatedCheckpoint',
+        '$result.raw_environment = Get-VmAutomatedEnvironment',
+        "exit_method = 'normal-close'",
+        "exit_method = 'forced-termination'",
+        '$result.raw_cleanup = [ordered]@{',
+        '$result.layout_observations = [ordered]@{'
+        'function New-VmAutomatedLayoutRun'
+        'function Complete-VmAutomatedLayoutRun'
+        '$result.raw_layout_runs = @($scenario.raw_layout_runs)'
+        '$result.raw_text_scale = [ordered]@{'
+        'active_winrt_percent = [int]$observations.scenario.environment.text_scale_factor_percent'
+    )) {
+        if ($acceptanceText.IndexOf($requiredRawObservation, [StringComparison]::Ordinal) -lt 0) {
+            throw "The candidate UI raw observation contract is missing '$requiredRawObservation'."
+        }
+    }
     if (($acceptanceText | Select-String -Pattern "failure_reason = 'desktop_lock_release_failed'" -AllMatches).Matches.Count -ne 3) {
         throw 'Current-DPI, GUI regression, and rescue paths must preserve structured evidence after desktop-lock release failure.'
     }
@@ -761,10 +797,11 @@ try {
         -ExpectedScriptSha256 ('0' * 64) `
         -ValidateOnly
     if ($acceptanceText.IndexOf('ContentType=WindowsRuntime', [StringComparison]::Ordinal) -ge 0 -or
-        $acceptanceText.IndexOf('public static double ReadTextScaleFactor()', [StringComparison]::Ordinal) -lt 0) {
+        ([IO.File]::ReadAllText($runner)).IndexOf('public static double ReadTextScaleFactor()', [StringComparison]::Ordinal) -lt 0) {
         throw 'Text-scale reads must use the PowerShell Core-compatible native UISettings ABI helper.'
     }
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        . $runner -BundleRoot 'unused' -ExpectedSessionId 1 -ValidateOnly
         Initialize-TextScaleNative
         $coreTextScale = [double][DarkReNamerTextScaleNative]::ReadTextScaleFactor()
         if ([double]::IsNaN($coreTextScale) -or $coreTextScale -lt 1.0 -or $coreTextScale -gt 2.25) {
@@ -1488,6 +1525,23 @@ try {
         -InputDocument ([pscustomobject]@{}) `
         -Manifest $legacyManifest `
         -CandidateLane $false
+    foreach ($validRunId in @('run-1', '20260920.ui_01', ('a' * 128))) {
+        Assert-SafeAcceptanceRunId -RunId $validRunId
+    }
+    foreach ($invalidRunId in @($null, '', '../run', 'run id', ('a' * 129), 'run.')) {
+        Assert-Fails { Assert-SafeAcceptanceRunId -RunId $invalidRunId } 'bounded safe token'
+    }
+    $runIdValidationIndex = $controllerText.IndexOf(
+        'Assert-SafeAcceptanceRunId -RunId $acceptanceInput.run_id',
+        [StringComparison]::Ordinal
+    )
+    $sessionCreationIndex = $controllerText.IndexOf(
+        '$session = New-SshControllerSession',
+        [StringComparison]::Ordinal
+    )
+    if ($runIdValidationIndex -lt 0 -or $sessionCreationIndex -le $runIdValidationIndex) {
+        throw 'Acceptance run_id validation must fail before any VM session is created.'
+    }
     $candidateRegressionResolved = [pscustomobject]@{
         lane = 'candidate-gui-only'
         target = $candidateManifest.target
