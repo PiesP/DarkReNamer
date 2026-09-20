@@ -210,6 +210,55 @@ function Assert-PlainFile([string] $Name) {
         throw 'Invalid Windows ordinary file name.'
     }
 }
+
+function Get-CoreGuiFailureDiagnosticOutputs {
+    param([AllowNull()][object] $Gui)
+
+    $outputs = [Collections.Generic.List[object]]::new()
+    if ($null -eq $Gui -or
+        $Gui.PSObject.Properties.Name -cnotcontains 'flow' -or
+        $null -eq $Gui.flow -or
+        $Gui.flow.PSObject.Properties.Name -cnotcontains 'foreground_observations') {
+        return $outputs.ToArray()
+    }
+    $seen = @{}
+    foreach ($observation in @($Gui.flow.foreground_observations)) {
+        if ($null -eq $observation -or
+            $observation.PSObject.Properties.Name -cnotcontains 'solid_image_diagnostic') {
+            continue
+        }
+        $diagnostic = $observation.solid_image_diagnostic
+        $required = @('classification', 'scope', 'file', 'sha256', 'bytes')
+        if ($null -eq $diagnostic -or
+            @($required | Where-Object {
+                $diagnostic.PSObject.Properties.Name -cnotcontains $_
+            }).Count -ne 0 -or
+            $diagnostic.classification -cne 'sampled-grid-uniform' -or
+            $diagnostic.scope -cne 'sparse-samples-only' -or
+            $diagnostic.file -isnot [string] -or
+            $diagnostic.sha256 -isnot [string] -or
+            $diagnostic.sha256 -cnotmatch '^[0-9a-f]{64}\z' -or
+            ($diagnostic.bytes -isnot [int] -and $diagnostic.bytes -isnot [long]) -or
+            $diagnostic.bytes -le 0 -or $diagnostic.bytes -gt 128MB) {
+            throw 'Core GUI failure diagnostic has a malformed reference.'
+        }
+        Assert-PlainFile $diagnostic.file
+        if ($diagnostic.file -cnotmatch '\.solid-diagnostic\.png\z') {
+            throw 'Core GUI failure diagnostic has a malformed reference.'
+        }
+        if ($seen.ContainsKey($diagnostic.file)) {
+            throw 'Core GUI failure diagnostic has a duplicate file reference.'
+        }
+        $seen[$diagnostic.file] = $true
+        $outputs.Add([pscustomobject]@{
+            file = [string]$diagnostic.file
+            sha256 = [string]$diagnostic.sha256
+            bytes = [long]$diagnostic.bytes
+        })
+    }
+    $outputs.ToArray()
+}
+
 function Join-GuestWindowsPath {
     param(
         [Parameter(Mandatory = $true)][string] $Root,
@@ -1742,12 +1791,45 @@ public static class VmDesktopState {
     if ($result.gui -and $result.gui.flow -and $result.gui.flow.diagnostic) {
         $outputs += $result.gui.flow.diagnostic
     }
+    $failureDiagnostics = @(Get-CoreGuiFailureDiagnosticOutputs -Gui $result.gui)
+    $collectedOutputNames = @{}
     foreach ($output in $outputs) {
         Assert-PlainFile $output.file
+        if ($collectedOutputNames.ContainsKey($output.file)) {
+            throw 'Guest output contains a duplicate file reference.'
+        }
         if ($names.ContainsKey($output.file) -or $output.file -in @('bundle.json','result.json','transport.json','run-windows-vm-tests.ps1')) { throw 'Guest output collides with a bundle input.' }
+        $collectedOutputNames[$output.file] = $true
         $guestOutputPath = Join-GuestWindowsPath -Root $guestRoot -Leaf $output.file
         Copy-Item -LiteralPath $guestOutputPath -Destination (Join-Path $BundleRoot $output.file) -FromSession $session
         if ((Get-FileHash -LiteralPath (Join-Path $BundleRoot $output.file) -Algorithm SHA256).Hash -ine $output.sha256) { throw 'Collected guest output hash mismatch.' }
+    }
+    foreach ($diagnosticOutput in $failureDiagnostics) {
+        Assert-PlainFile $diagnosticOutput.file
+        if ($collectedOutputNames.ContainsKey($diagnosticOutput.file) -or
+            $names.ContainsKey($diagnosticOutput.file) -or
+            $diagnosticOutput.file -in @(
+                'bundle.json','result.json','transport.json','run-windows-vm-tests.ps1'
+            )) {
+            throw 'Guest failure diagnostic collides with another output or bundle input.'
+        }
+        $collectedOutputNames[$diagnosticOutput.file] = $true
+        $guestDiagnosticPath = Join-GuestWindowsPath `
+            -Root $guestRoot `
+            -Leaf $diagnosticOutput.file
+        $hostDiagnosticPath = Join-Path $BundleRoot $diagnosticOutput.file
+        if (Test-Path -LiteralPath $hostDiagnosticPath) {
+            throw 'Guest failure diagnostic collides with an existing host path.'
+        }
+        Copy-Item `
+            -LiteralPath $guestDiagnosticPath `
+            -Destination $hostDiagnosticPath `
+            -FromSession $session
+        if ((Get-Item -LiteralPath $hostDiagnosticPath).Length -ne $diagnosticOutput.bytes -or
+            (Get-FileHash -LiteralPath $hostDiagnosticPath -Algorithm SHA256).Hash -ine
+                $diagnosticOutput.sha256) {
+            throw 'Collected guest failure diagnostic hash or size mismatch.'
+        }
     }
     $transport.status = 'collected'
     }
