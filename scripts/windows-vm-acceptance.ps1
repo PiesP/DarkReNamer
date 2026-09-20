@@ -1562,6 +1562,8 @@ function Get-VmAutomatedFocusState {
     )
 
     [ordered]@{
+        fixture_root = Get-VmAutomatedCanonicalRootPath -Path $FixtureRoot
+        root_identity = Get-FullFileIdentity -Path $FixtureRoot
         fixture_entries = @(Get-VmAutomatedFixtureInventory -FixtureRoot $FixtureRoot)
         journal_entries = @(Get-VmAutomatedJournalInventory -LocalAppData $LocalAppData)
     }

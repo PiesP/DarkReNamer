@@ -651,6 +651,16 @@ try {
                 $node.Name -ceq 'Get-VmAutomatedFocusState'
         }, $true)
         . ([scriptblock]::Create($stateFunction.Extent.Text))
+        function Get-VmAutomatedCanonicalRootPath {
+            param([Parameter(Mandatory)][string] $Path)
+            if ($Path -cne 'fixture-root') { throw 'Unexpected fixture root.' }
+            'C:\fixture-root'
+        }
+        function Get-FullFileIdentity {
+            param([Parameter(Mandatory)][string] $Path)
+            if ($Path -cne 'fixture-root') { throw 'Unexpected identity root.' }
+            [ordered]@{ volume_serial = '1' * 16; file_id = '2' * 32 }
+        }
         function Get-VmAutomatedFixtureInventory {
             param([Parameter(Mandatory)][string] $FixtureRoot)
             if ($FixtureRoot -cne 'fixture-root') { throw 'Unexpected fixture root.' }

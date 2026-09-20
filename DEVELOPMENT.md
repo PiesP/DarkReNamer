@@ -54,6 +54,8 @@ python3 scripts/test-vm-automated-campaign.py
 python3 scripts/test-vm-automated-recovery-profile.py
 python3 scripts/test-vm-automated-verifier.py
 python3 scripts/test-vm-automated-campaign-runner.py
+python3 scripts/test-vm-automated-campaign-verifier.py
+python3 scripts/test-vm-automated-cli.py
 ```
 
 ## Linux cross-build and visual diagnostics
