@@ -17,7 +17,8 @@ param(
     [string] $AcceptanceMode,
     [ValidateSet('light', 'dark')][string] $AcceptanceAppearance,
     [ValidateSet(100, 150)][int] $AcceptanceTextScalePercent = 100,
-    [guid] $ExpectedGuestVmId = [guid]::Empty
+    [guid] $ExpectedGuestVmId = [guid]::Empty,
+    [ValidatePattern('^[0-9a-f]{64}\z')][string] $ExpectedBundleManifestSha256
 )
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -263,9 +264,52 @@ if ($MyInvocation.InvocationName -eq '.') {
 
 try {
     Assert-PathWithoutReparse $BundleRoot
-    $manifest = Get-Content -LiteralPath (Join-Path $BundleRoot 'bundle.json') -Raw | ConvertFrom-Json
-    if ($manifest.schema_version -ne 1 -or $manifest.source_sha -cnotmatch '^[0-9a-f]{40}$' -or $manifest.source_state -ne 'clean') { throw 'A clean source-bound bundle is required.' }
-    $artifacts = @($manifest.test_binaries) + @($manifest.application, $manifest.runner)
+    $bundleManifestPath = Join-Path $BundleRoot 'bundle.json'
+    if (-not [string]::IsNullOrEmpty($ExpectedBundleManifestSha256) -and
+        (Get-FileHash -LiteralPath $bundleManifestPath -Algorithm SHA256).Hash -ine
+            $ExpectedBundleManifestSha256) {
+        throw 'Bundle manifest differs from the launcher-frozen input.'
+    }
+    $manifest = Get-Content -LiteralPath $bundleManifestPath -Raw | ConvertFrom-Json
+    $candidateLane = $manifest.schema_version -eq 2 -and $manifest.lane -ceq 'candidate-gui-only'
+    if ($candidateLane) {
+        if ($manifest.product.source_sha -cnotmatch '^[0-9a-f]{40}$' -or
+            $manifest.product.source_state -cne 'clean' -or
+            $manifest.harness.source_sha -cnotmatch '^[0-9a-f]{40}$' -or
+            $manifest.harness.source_state -cne 'clean' -or
+            $manifest.product.candidate.origin_authentication -cne 'pending-hosted' -or
+            @($manifest.test_binaries).Count -ne 0) {
+            throw 'An exact-candidate GUI-only bundle is invalid.'
+        }
+        if ($ExpectedGuestVmId -eq [guid]::Empty) {
+            throw 'Exact-candidate execution requires an expected guest VM identity.'
+        }
+        if ([string]::IsNullOrEmpty($ExpectedBundleManifestSha256)) {
+            throw 'Exact-candidate execution requires a launcher-frozen bundle manifest digest.'
+        }
+        $artifacts = @(
+            $manifest.product.application
+            $manifest.product.provenance.release_handoff
+            $manifest.product.provenance.run_metadata
+            $manifest.product.provenance.artifact_metadata
+            $manifest.harness.launcher
+            $manifest.harness.controller
+            $manifest.harness.runner
+            @($manifest.harness.validators.PSObject.Properties | ForEach-Object Value)
+        )
+        if ($manifest.harness.controller.file -cne 'run-windows-vm-tests.ps1' -or
+            (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash -ine
+                $manifest.harness.controller.sha256) {
+            throw 'The invoked controller differs from the frozen candidate harness.'
+        }
+    }
+    else {
+        if ($manifest.schema_version -ne 1 -or $manifest.source_sha -cnotmatch '^[0-9a-f]{40}$' -or
+            $manifest.source_state -ne 'clean' -or @($manifest.test_binaries).Count -eq 0) {
+            throw 'A clean source-bound bundle with native tests is required.'
+        }
+        $artifacts = @($manifest.test_binaries) + @($manifest.application, $manifest.runner)
+    }
     $names = @{}
     foreach ($artifact in $artifacts) {
         Assert-PlainFile $artifact.file
@@ -337,7 +381,7 @@ try {
     if (-not $endpoint.is_administrator) {
         throw 'The VM controller account must be a local administrator so it can register the limited interactive test task.'
     }
-    if ($acceptance) {
+    if ($acceptance -or $candidateLane) {
         $expectedGuestId = $ExpectedGuestVmId.ToString('D').ToLowerInvariant()
         try { $actualGuestId = ([guid]$endpoint.vm_id).ToString('D').ToLowerInvariant() }
         catch { throw 'The guest did not expose a canonical Hyper-V Guest Parameters VM identity.' }
@@ -345,10 +389,12 @@ try {
             throw 'The SSH endpoint Hyper-V VM identity differs from the private connection profile.'
         }
         $guestIdentitySha256 = Get-LowerTextSha256 $actualGuestId
-        if ($acceptanceInput.guest_preflight.vm_identity_kind -cne 'hyper-v-guest-parameters-virtual-machine-id-v1' -or
-            $acceptanceInput.guest_preflight.vm_identity_sha256 -cne $guestIdentitySha256) {
+        if ($acceptance -and
+            ($acceptanceInput.guest_preflight.vm_identity_kind -cne 'hyper-v-guest-parameters-virtual-machine-id-v1' -or
+             $acceptanceInput.guest_preflight.vm_identity_sha256 -cne $guestIdentitySha256)) {
             throw 'The post-connection guest VM identity differs from the immutable preflight.'
         }
+        $transport.vm_id = $actualGuestId
         $transport.vm_identity_kind = 'hyper-v-guest-parameters-virtual-machine-id-v1'
         $transport.vm_identity_sha256 = $guestIdentitySha256
     }
@@ -604,16 +650,51 @@ public static class VmDesktopState {
         $guestPath = Join-GuestWindowsPath -Root $guestRoot -Leaf $name
         Copy-Item -LiteralPath (Join-Path $BundleRoot $name) -Destination $guestPath -ToSession $session
     }
-    Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$manifest.runner.sha256 -ScriptBlock {
+    if ($candidateLane) {
+        Invoke-Command -Session $session -ArgumentList $guestRoot,$manifest.product.application.file,$manifest.product.application.sha256 -ScriptBlock {
+            param($root,$applicationFile,$applicationHash)
+            $path = Join-Path $root $applicationFile
+            if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ine $applicationHash) {
+                throw 'Transferred candidate executable hash mismatch.'
+            }
+            $signature = Get-AuthenticodeSignature -FilePath $path
+            if ($signature.Status -ne 'NotSigned') {
+                throw "Candidate Authenticode status differs from the current unsigned policy: $($signature.Status)."
+            }
+        }
+    }
+    $runnerArtifact = if ($candidateLane) { $manifest.harness.runner } else { $manifest.runner }
+    $runnerEngine = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid,$desktop.session_id,$taskName,$TestTimeoutSeconds,$SuiteTimeoutSeconds,$runnerArtifact.sha256 -ScriptBlock {
         param($root,$sid,$desktopSession,$name,$testTimeout,$suiteTimeout,$runnerHash)
         $runner = Join-Path $root 'windows-vm-guest.ps1'
         if ((Get-FileHash -LiteralPath $runner -Algorithm SHA256).Hash -ine $runnerHash) { throw 'Transferred guest runner hash mismatch.' }
-        $arguments = '-NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -WindowStyle Normal -File "' + $runner + '" -BundleRoot "' + $root + '" -ExpectedSessionId ' + $desktopSession + ' -TestTimeoutSeconds ' + $testTimeout
-        $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument $arguments -WorkingDirectory $root
+        $powerShell = (Get-Command pwsh.exe -CommandType Application -ErrorAction Stop).Source
+        $engineJson = & $powerShell -NoLogo -NoProfile -NonInteractive -Command `
+            '[ordered]@{version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;effective_policy=(Get-ExecutionPolicy).ToString()} | ConvertTo-Json -Compress'
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the configured PowerShell guest engine.' }
+        $engine = $engineJson | ConvertFrom-Json
+        if ([version]$engine.version -lt [version]'7.4' -or $engine.edition -cne 'Core' -or
+            $engine.effective_policy -cne 'RemoteSigned') {
+            throw 'Native VM validation requires the configured PowerShell 7.4+ Core engine under its existing RemoteSigned policy.'
+        }
+        $arguments = '-NoProfile -NonInteractive -WindowStyle Normal -File "' + $runner + '" -BundleRoot "' + $root + '" -ExpectedSessionId ' + $desktopSession + ' -TestTimeoutSeconds ' + $testTimeout
+        $action = New-ScheduledTaskAction -Execute $powerShell -Argument $arguments -WorkingDirectory $root
         $principal = New-ScheduledTaskPrincipal -UserId $sid -LogonType Interactive -RunLevel Limited
         $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds ($suiteTimeout + 60))
         Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Settings $settings | Out-Null
         Start-ScheduledTask -TaskName $name
+        [pscustomobject]@{
+            executable = $powerShell
+            version = [string]$engine.version
+            edition = [string]$engine.edition
+            effective_policy = [string]$engine.effective_policy
+        }
+    }
+    $transport.runner_engine = [ordered]@{
+        executable = [string]$runnerEngine.executable
+        version = [string]$runnerEngine.version
+        edition = [string]$runnerEngine.edition
+        effective_policy = [string]$runnerEngine.effective_policy
     }
     $transport.status = 'running'
     $deadline = (Get-Date).AddSeconds($SuiteTimeoutSeconds)

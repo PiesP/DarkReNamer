@@ -297,8 +297,8 @@ try {
         throw 'Execution policy evidence must retain its enum name through JSON serialization.'
     }
     $policySerialization = 'effective_policy=(Get-ExecutionPolicy).ToString()'
-    if ([regex]::Matches($controllerText, [regex]::Escape($policySerialization)).Count -ne 2) {
-        throw 'Both acceptance and text-scale rescue engine checks must serialize the execution policy name.'
+    if ([regex]::Matches($controllerText, [regex]::Escape($policySerialization)).Count -ne 3) {
+        throw 'Native, acceptance, and text-scale rescue engine checks must serialize the execution policy name.'
     }
     foreach ($line in @($controllerText -split "`r?`n" | Where-Object {
         $_ -match '\$observerArguments\s*=' -and $_ -notmatch '^\s*#'

@@ -6,6 +6,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -64,9 +65,145 @@ class VmRunnerTests(unittest.TestCase):
     def verify(self):
         return vm.verify_result(self.root, self.manifest, self.result)
 
+    def candidate_evidence(self):
+        metadata = {
+            'release_handoff': self.artifact('release-handoff.json', b'{"validated":true}'),
+            'run_metadata': self.artifact('candidate-run.json', b'{"id":1}'),
+            'artifact_metadata': self.artifact('candidate-artifact.json', b'{"id":2}'),
+        }
+        harness = {
+            'source_sha': 'b' * 40,
+            'source_state': 'clean',
+            'launcher': self.artifact('test-windows-vm.py', b'launcher'),
+            'controller': self.artifact('run-windows-vm-tests.ps1', b'controller'),
+            'runner': self.artifact('windows-vm-guest.ps1', b'runner'),
+            'validators': {
+                'release_handoff': self.artifact('validate-release-handoff.ps1', b'handoff'),
+                'candidate_metadata': self.artifact(
+                    'validate-release-candidate-metadata.ps1', b'metadata'),
+                'binary_measurement': self.artifact('measure-windows-binary.ps1', b'measure'),
+            },
+        }
+        product = {
+            'source_sha': 'a' * 40,
+            'source_state': 'clean',
+            'candidate': {
+                'workflow_run': '10', 'run_attempt': '1', 'artifact_id': '20',
+                'artifact_name': 'DarkReNamer-dry-run-10-1-windows',
+                'origin_authentication': 'pending-hosted',
+            },
+            'application': self.app,
+            'provenance': metadata,
+        }
+        manifest = {
+            'schema_version': 2, 'lane': 'candidate-gui-only', 'target': vm.TARGET,
+            'product': product, 'harness': harness, 'test_binaries': [],
+        }
+        digest = self.result['gui']['flow']['before_content_sha256']
+        identity = self.result['gui']['flow']['before_file_identity_sha256']
+        def checkpoint(phase, source, destination):
+            def file_row(name):
+                return {
+                    'name': name, 'kind': 'file', 'bytes': 12,
+                    'content_sha256': digest,
+                    'file_identity_sha256': identity,
+                }
+            entries = []
+            if source:
+                entries.append(file_row('vm-flow-source.txt'))
+            if destination:
+                entries.append(file_row('vm-confirmed-vm-flow-source.txt'))
+            return {
+                'phase': phase,
+                'fixture_entries': entries,
+                'journal_entries': [],
+            }
+        candidate_result = json.loads(json.dumps(self.result))
+        for key in ('source_sha', 'source_state'):
+            candidate_result.pop(key)
+        candidate_result.update(
+            schema_version=2, lane='candidate-gui-only',
+            product=json.loads(json.dumps(product)),
+            harness=json.loads(json.dumps(harness)),
+            tests=[])
+        candidate_result['gui']['flow']['input_mode'] = 'uia-functional'
+        candidate_result['gui']['flow']['checkpoints'] = [
+            checkpoint('initial', True, False),
+            checkpoint('after_cancel', True, False),
+            checkpoint('after_apply', False, True),
+            checkpoint('post_close', False, True),
+        ]
+        foreground = {
+            'hwnd': 100, 'process_id': 200, 'session_id': 1,
+            'window_class': 'DarkReNamerWindow',
+        }
+        candidate_result['gui']['flow']['foreground_observations'] = []
+        for label, hwnd, window_class in (
+                ('production rename preview', 100, 'DarkReNamerWindow'),
+                ('apply confirmation task dialog', 101, '#32770')):
+            observed = dict(foreground, hwnd=hwnd, window_class=window_class)
+            candidate_result['gui']['flow']['foreground_observations'].append({
+                'label': label, 'target_hwnd': hwnd, 'initial': dict(observed),
+                'uia_set_focus': 'not_attempted', 'set_foreground_window': None,
+                'final': dict(observed), 'capture_change': None,
+            })
+        candidate_result['gui'].update(
+            window_handle=100, process_id=200, session_id=1,
+            window_class='DarkReNamerWindow',
+            exit_code=0,
+            foreground_activation={
+                'initial': dict(foreground), 'uia_set_focus': 'not_attempted',
+                'set_foreground_window': None, 'final': dict(foreground),
+                'capture_change': None,
+            })
+        candidate_result['transport']['runner_engine'] = {
+            'executable': 'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+            'version': '7.4.0', 'edition': 'Core', 'effective_policy': 'RemoteSigned',
+        }
+        return manifest, candidate_result
+
     def assert_arguments_rejected(self, arguments):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             vm.parse_arguments(arguments)
+
+    def candidate_build_inputs(self, suffix=''):
+        repo = Path(__file__).resolve().parent.parent
+        product_source = self.root / ('product-source' + suffix)
+        handoff = self.root / ('handoff' + suffix)
+        product_source.mkdir()
+        handoff.mkdir()
+        for name in vm.HANDOFF_FILES:
+            (handoff / name).write_bytes(('fixture ' + name).encode())
+        exe = handoff / 'DarkReNamer.exe'
+        exe.write_bytes(b'exact candidate bytes')
+        executable_hash = hashlib.sha256(exe.read_bytes()).hexdigest()
+        (handoff / 'release-handoff.json').write_text(json.dumps({
+            'schema_version': 1,
+            'source_sha': 'a' * 40,
+            'workflow_run': '10',
+            'executable': {'filename': 'DarkReNamer.exe', 'sha256': executable_hash},
+        }))
+        run_metadata = self.root / ('run' + suffix + '.json')
+        artifact_metadata = self.root / ('artifact' + suffix + '.json')
+        run_metadata.write_text(json.dumps({
+            'id': 10, 'run_attempt': 1, 'event': 'workflow_dispatch',
+            'status': 'completed', 'conclusion': 'success', 'head_branch': 'master',
+            'head_sha': 'a' * 40, 'path': '.github/workflows/release.yaml',
+        }))
+        artifact_metadata.write_text(json.dumps({
+            'id': 20, 'name': 'DarkReNamer-dry-run-10-1-windows', 'expired': False,
+            'workflow_run': {'id': 10, 'head_branch': 'master', 'head_sha': 'a' * 40},
+        }))
+        args = SimpleNamespace(
+            candidate_source_root=product_source,
+            candidate_handoff_root=handoff,
+            candidate_run_metadata=run_metadata,
+            candidate_artifact_metadata=artifact_metadata,
+            candidate_source_sha='a' * 40,
+            candidate_workflow_run='10', candidate_run_attempt='1',
+            candidate_artifact_id='20', candidate_executable_sha256=executable_hash,
+        )
+        return repo, product_source, handoff, run_metadata, artifact_metadata, args
 
     def test_complete_native_evidence(self):
         self.assertTrue(self.verify())
@@ -75,6 +212,126 @@ class VmRunnerTests(unittest.TestCase):
         self.result['tests'] = []
         with self.assertRaisesRegex(ValueError, 'missing'):
             self.verify()
+
+    def test_candidate_gui_only_evidence_is_distinct_from_default_tests(self):
+        manifest, result = self.candidate_evidence()
+        self.assertTrue(vm.verify_result(self.root, manifest, result))
+        result['tests'] = [dict(self.result['tests'][0])]
+        with self.assertRaisesRegex(ValueError, 'unexpected test binaries'):
+            vm.verify_result(self.root, manifest, result)
+
+    def test_candidate_metadata_and_executable_mismatches_are_rejected(self):
+        manifest, result = self.candidate_evidence()
+        result['product']['candidate']['artifact_id'] = '21'
+        with self.assertRaisesRegex(ValueError, 'candidate binding'):
+            vm.verify_result(self.root, manifest, result)
+        manifest, result = self.candidate_evidence()
+        manifest['product']['application']['sha256'] = 'f' * 64
+        result['product']['application']['sha256'] = 'f' * 64
+        with self.assertRaisesRegex(ValueError, 'digest mismatch'):
+            vm.verify_result(self.root, manifest, result)
+
+    def test_candidate_checkpoints_recompute_disk_identity_and_journal_state(self):
+        manifest, result = self.candidate_evidence()
+        result['gui']['flow']['checkpoints'][2]['fixture_entries'][0]['file_identity_sha256'] = 'f' * 64
+        with self.assertRaisesRegex(ValueError, 'preserve content and identity'):
+            vm.verify_result(self.root, manifest, result)
+        manifest, result = self.candidate_evidence()
+        result['gui']['flow']['checkpoints'][3]['journal_entries'] = [{
+            'name': 'active.drj', 'kind': 'file', 'bytes': 1,
+        }]
+        with self.assertRaisesRegex(ValueError, 'journal residue'):
+            vm.verify_result(self.root, manifest, result)
+        manifest, result = self.candidate_evidence()
+        result['gui']['flow']['checkpoints'][1]['fixture_entries'].append({
+            'name': 'unexpected.txt', 'kind': 'file', 'bytes': 1,
+            'content_sha256': 'd' * 64, 'file_identity_sha256': 'e' * 64,
+        })
+        with self.assertRaisesRegex(ValueError, 'filename is invalid'):
+            vm.verify_result(self.root, manifest, result)
+        manifest, result = self.candidate_evidence()
+        result['gui']['flow']['checkpoints'][0]['journal_entries'] = [
+            {'name': 'runtime.lock', 'kind': 'file', 'bytes': 0},
+            {'name': 'runtime.lock', 'kind': 'file', 'bytes': 0},
+        ]
+        with self.assertRaisesRegex(ValueError, 'runtime lock inventory'):
+            vm.verify_result(self.root, manifest, result)
+        manifest, result = self.candidate_evidence()
+        result['gui']['flow']['checkpoints'][0]['journal_entries'] = [
+            {'name': 'runtime.lock', 'kind': 'file', 'bytes': 1},
+        ]
+        with self.assertRaisesRegex(ValueError, 'runtime lock inventory'):
+            vm.verify_result(self.root, manifest, result)
+
+    def test_candidate_summary_and_exit_must_match_raw_evidence(self):
+        manifest, result = self.candidate_evidence()
+        result['gui']['flow']['before_content_sha256'] = 'f' * 64
+        result['gui']['flow']['after_content_sha256'] = 'f' * 64
+        with self.assertRaisesRegex(ValueError, 'contradicts raw checkpoints'):
+            vm.verify_result(self.root, manifest, result)
+        manifest, result = self.candidate_evidence()
+        result['gui']['flow']['cancellation_source_present'] = False
+        with self.assertRaisesRegex(ValueError, 'disk state is invalid'):
+            vm.verify_result(self.root, manifest, result)
+        manifest, result = self.candidate_evidence()
+        result['gui']['exit_code'] = True
+        with self.assertRaisesRegex(ValueError, 'exit code'):
+            vm.verify_result(self.root, manifest, result)
+
+    def test_candidate_flow_foreground_is_bound_to_target_process_session_and_class(self):
+        mutations = (
+            ('target_hwnd', 999, 'target'),
+            ('final.hwnd', 999, 'target'),
+            ('final.process_id', 999, 'process'),
+            ('final.session_id', 9, 'session'),
+            ('final.window_class', 'OtherWindow', 'class'),
+        )
+        for field, value, message in mutations:
+            with self.subTest(field=field):
+                manifest, result = self.candidate_evidence()
+                observation = result['gui']['flow']['foreground_observations'][0]
+                if field.startswith('final.'):
+                    observation['final'][field.split('.', 1)[1]] = value
+                else:
+                    observation[field] = value
+                with self.assertRaisesRegex(ValueError, message):
+                    vm.verify_result(self.root, manifest, result)
+
+    def test_candidate_flow_foreground_activation_types_are_strict(self):
+        for field, value in (
+                ('uia_set_focus', True),
+                ('set_foreground_window', 1),
+                ('initial.hwnd', True),
+                ('initial.process_id', True),
+                ('initial.session_id', True),
+                ('initial.window_class', 7)):
+            with self.subTest(field=field):
+                manifest, result = self.candidate_evidence()
+                observation = result['gui']['flow']['foreground_observations'][0]
+                if field.startswith('initial.'):
+                    observation['initial'][field.split('.', 1)[1]] = value
+                else:
+                    observation[field] = value
+                with self.assertRaisesRegex(ValueError, 'foreground'):
+                    vm.verify_result(self.root, manifest, result)
+
+    def test_candidate_malformed_raw_rows_fail_with_bounded_validation_errors(self):
+        manifest, result = self.candidate_evidence()
+        result['gui']['flow']['checkpoints'][0]['fixture_entries'] = [None]
+        with self.assertRaisesRegex(ValueError, 'file shape'):
+            vm.verify_result(self.root, manifest, result)
+        manifest, result = self.candidate_evidence()
+        result['tests'] = [None]
+        with self.assertRaisesRegex(ValueError, 'unexpected test binaries'):
+            vm.verify_result(self.root, manifest, result)
+
+    def test_strict_json_rejects_duplicate_keys_and_keeps_boolean_distinct(self):
+        duplicate = self.root / 'duplicate.json'
+        duplicate.write_text('{"schema_version":2,"schema_version":1}')
+        with self.assertRaisesRegex(ValueError, 'duplicate field'):
+            vm.read_json_strict(duplicate)
+        boolean = self.artifact('boolean.json', b'{"bytes":true}')
+        self.assertIs(vm.read_json_strict(self.root / boolean['file'])['bytes'], True)
 
     def test_duplicate_binary_is_rejected(self):
         self.result['tests'] *= 2
@@ -209,6 +466,152 @@ class VmRunnerTests(unittest.TestCase):
                 ['--prepare-only', '--output', '/external/new-bundle',
                  '--desktop-width', '800', '--desktop-height', '600']):
             self.assert_arguments_rejected(arguments)
+
+    def test_candidate_options_are_atomic_and_require_vm_identity_for_execution(self):
+        common = [
+            '--candidate-handoff-root', '/handoff', '--candidate-source-root', '/source',
+            '--candidate-run-metadata', '/run.json',
+            '--candidate-artifact-metadata', '/artifact.json',
+            '--candidate-source-sha', 'a' * 40, '--candidate-workflow-run', '10',
+            '--candidate-run-attempt', '1', '--candidate-artifact-id', '20',
+            '--candidate-executable-sha256', 'b' * 64,
+        ]
+        prepared = vm.parse_arguments(['--prepare-only', '--output', '/external/new', *common])
+        self.assertTrue(prepared.candidate_mode)
+        self.assert_arguments_rejected(['--prepare-only', '--output', '/external/new', *common[:-2]])
+        self.assert_arguments_rejected(['--ssh-host', 'vm', *common])
+        identity = '12345678-1234-5678-9abc-1234567890ab'
+        running = vm.parse_arguments(['--ssh-host', 'vm', '--expected-vm-id', identity, *common])
+        self.assertTrue(running.candidate_mode)
+        self.assertEqual(running.expected_vm_id, identity)
+        bundle = self.root / 'candidate-plan'
+        bundle.mkdir()
+        (bundle / 'bundle.json').write_text('{"schema_version":2}')
+        command = vm.controller_invocation(bundle, running, pwsh='/usr/bin/pwsh')
+        self.assertIn('-ExpectedGuestVmId', command)
+        self.assertIn('-ExpectedBundleManifestSha256', command)
+        self.assertIn(hashlib.sha256((bundle / 'bundle.json').read_bytes()).hexdigest(), command)
+        direct = vm.parse_arguments(['--vm-name', 'vm', '--expected-vm-id', identity, *common])
+        with mock.patch.object(vm, 'winpath', side_effect=lambda path: 'C:\\evidence\\' + Path(path).name):
+            direct_command = vm.controller_invocation(
+                bundle, direct, {'helper': 'C:\\helper.ps1'})
+        self.assertIn('-ExpectedGuestVmId', direct_command[-1])
+        self.assertIn('-ExpectedBundleManifestSha256', direct_command[-1])
+
+    def test_candidate_bundle_uses_validated_handoff_without_building(self):
+        repo, product_source, _, _, _, args = self.candidate_build_inputs()
+        output = self.root / 'candidate-bundle'
+        identities = [(repo, 'b' * 40), (product_source, 'a' * 40),
+                      (repo, 'b' * 40), (product_source, 'a' * 40)]
+        with mock.patch.object(vm, 'clean_source_identity', side_effect=identities), \
+             mock.patch.object(vm, 'run_candidate_validators',
+                               return_value='DarkReNamer-dry-run-10-1-windows') as validators, \
+             mock.patch.object(vm.subprocess, 'run', side_effect=AssertionError('unexpected build')):
+            manifest = vm.build_candidate_bundle(repo, output, args)
+        validators.assert_called_once()
+        validator_root, staged_source, staged_handoff, staged_run, staged_artifact, _ = \
+            validators.call_args.args
+        self.assertEqual(staged_source, product_source)
+        self.assertEqual(validator_root.name, 'scripts')
+        self.assertEqual(staged_handoff.name, 'handoff')
+        self.assertEqual(staged_run.name, 'candidate-run.json')
+        self.assertEqual(staged_artifact.name, 'candidate-artifact.json')
+        self.assertNotEqual(staged_handoff, args.candidate_handoff_root)
+        self.assertNotEqual(staged_run, args.candidate_run_metadata)
+        self.assertNotEqual(staged_artifact, args.candidate_artifact_metadata)
+        self.assertEqual(manifest['lane'], 'candidate-gui-only')
+        self.assertEqual(manifest['test_binaries'], [])
+        self.assertEqual(
+            manifest['product']['candidate']['origin_authentication'], 'pending-hosted')
+        self.assertEqual((output / 'DarkReNamer.exe').read_bytes(), b'exact candidate bytes')
+
+    def test_candidate_prepare_rejects_duplicate_run_and_artifact_metadata_keys(self):
+        for metadata_kind in ('run', 'artifact'):
+            with self.subTest(metadata_kind=metadata_kind):
+                (repo, product_source, _, run_metadata,
+                 artifact_metadata, args) = self.candidate_build_inputs('-' + metadata_kind)
+                path = run_metadata if metadata_kind == 'run' else artifact_metadata
+                text = path.read_text()
+                path.write_text(text.replace('{', '{"id":999,', 1))
+                with mock.patch.object(
+                        vm, 'clean_source_identity',
+                        side_effect=[(repo, 'b' * 40), (product_source, 'a' * 40)]), \
+                     mock.patch.object(vm, 'run_candidate_validators') as validators:
+                    with self.assertRaisesRegex(ValueError, 'duplicate field'):
+                        vm.build_candidate_bundle(
+                            repo, self.root / ('bundle-' + metadata_kind), args)
+                validators.assert_not_called()
+
+    def test_candidate_prepare_rejects_boolean_numeric_provenance_fields(self):
+        mutations = (
+            ('handoff', 'schema_version', True),
+            ('run', 'id', True),
+            ('artifact', 'expired', 0),
+        )
+        for metadata_kind, field, value in mutations:
+            with self.subTest(metadata_kind=metadata_kind, field=field):
+                (repo, product_source, handoff, run_metadata,
+                 artifact_metadata, args) = self.candidate_build_inputs(
+                     '-' + metadata_kind + '-' + field)
+                path = {
+                    'handoff': handoff / 'release-handoff.json',
+                    'run': run_metadata,
+                    'artifact': artifact_metadata,
+                }[metadata_kind]
+                metadata = json.loads(path.read_text())
+                metadata[field] = value
+                path.write_text(json.dumps(metadata))
+                with mock.patch.object(
+                        vm, 'clean_source_identity',
+                        side_effect=[(repo, 'b' * 40), (product_source, 'a' * 40)]), \
+                     mock.patch.object(vm, 'run_candidate_validators') as validators:
+                    with self.assertRaisesRegex(ValueError, 'type|integer|identity'):
+                        vm.build_candidate_bundle(
+                            repo, self.root / ('typed-bundle-' + metadata_kind), args)
+                validators.assert_not_called()
+
+    def test_candidate_prepare_detects_source_mutation_during_staging_copy(self):
+        (repo, product_source, _, run_metadata,
+         _, args) = self.candidate_build_inputs()
+        output = self.root / 'mutated-source-bundle'
+        identities = [(repo, 'b' * 40), (product_source, 'a' * 40)]
+        real_copyfile = vm.shutil.copyfile
+        mutated = False
+
+        def copy_and_mutate(source, destination):
+            nonlocal mutated
+            result = real_copyfile(source, destination)
+            if not mutated and Path(source) == run_metadata:
+                run_metadata.write_text('{"mutated":true}')
+                mutated = True
+            return result
+
+        with mock.patch.object(vm, 'clean_source_identity', side_effect=identities), \
+             mock.patch.object(vm, 'run_candidate_validators',
+                               return_value='DarkReNamer-dry-run-10-1-windows'), \
+             mock.patch.object(vm.shutil, 'copyfile', side_effect=copy_and_mutate):
+            with self.assertRaisesRegex(RuntimeError, 'Candidate inputs changed'):
+                vm.build_candidate_bundle(repo, output, args)
+
+    def test_candidate_prepare_detects_destination_mutation_during_copy(self):
+        repo, product_source, _, _, _, args = self.candidate_build_inputs()
+        output = self.root / 'mutated-destination-bundle'
+        identities = [(repo, 'b' * 40), (product_source, 'a' * 40)]
+        real_copyfile = vm.shutil.copyfile
+
+        def copy_and_corrupt(source, destination):
+            result = real_copyfile(source, destination)
+            if (Path(destination).parent == output and
+                    Path(destination).name == 'candidate-artifact.json'):
+                Path(destination).write_bytes(b'corrupt')
+            return result
+
+        with mock.patch.object(vm, 'clean_source_identity', side_effect=identities), \
+             mock.patch.object(vm, 'run_candidate_validators') as validators, \
+             mock.patch.object(vm.shutil, 'copyfile', side_effect=copy_and_corrupt):
+            with self.assertRaisesRegex(RuntimeError, 'frozen digest'):
+                vm.build_candidate_bundle(repo, output, args)
+        validators.assert_called_once()
 
     def test_prepare_only_output_is_new_absolute_external_and_has_plain_ancestry(self):
         with tempfile.TemporaryDirectory() as external_directory:

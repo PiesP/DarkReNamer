@@ -40,6 +40,58 @@ function Assert-ExactProperties {
     }
 }
 
+function Assert-UniqueJsonProperties {
+    param(
+        [Parameter(Mandatory)][Text.Json.JsonElement] $Element,
+        [Parameter(Mandatory)][string] $Location
+    )
+
+    if ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Object) {
+        $observed = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($property in $Element.EnumerateObject()) {
+            if (-not $observed.Add($property.Name)) {
+                throw "$Location contains a duplicate field: $($property.Name)."
+            }
+            Assert-UniqueJsonProperties -Element $property.Value -Location "$Location.$($property.Name)"
+        }
+    }
+    elseif ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Array) {
+        $index = 0
+        foreach ($item in $Element.EnumerateArray()) {
+            Assert-UniqueJsonProperties -Element $item -Location "$Location[$index]"
+            $index++
+        }
+    }
+}
+
+function Read-UniqueJsonObject {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    Assert-OrdinaryFile -Path $Path -Label $Label
+    if ((Get-Item -LiteralPath $Path -Force).Length -gt 4MB) {
+        throw "$Label is too large."
+    }
+    $text = Get-Content -LiteralPath $Path -Raw
+    $document = $null
+    try {
+        $document = [Text.Json.JsonDocument]::Parse($text)
+        if ($document.RootElement.ValueKind -ne [Text.Json.JsonValueKind]::Object) {
+            throw "$Label must be a JSON object."
+        }
+        Assert-UniqueJsonProperties -Element $document.RootElement -Location $Label
+        $text | ConvertFrom-Json
+    }
+    catch {
+        throw "$Label is not valid unique-key JSON: $($_.Exception.Message)"
+    }
+    finally {
+        if ($null -ne $document) { $document.Dispose() }
+    }
+}
+
 function Assert-SafeLeafName {
     param(
         [Parameter(Mandatory)]
@@ -141,63 +193,155 @@ function Resolve-VerifiedBundle {
     if ($manifestText.IndexOf([char]0) -ge 0) {
         throw 'bundle.json contains NUL.'
     }
+    $manifestDocument = $null
     try {
+        $manifestDocument = [Text.Json.JsonDocument]::Parse($manifestText)
+        Assert-UniqueJsonProperties -Element $manifestDocument.RootElement -Location 'bundle.json'
         $manifest = $manifestText | ConvertFrom-Json
     }
     catch {
-        throw 'bundle.json is not valid JSON.'
+        throw "bundle.json is not valid unique-key JSON: $($_.Exception.Message)"
+    }
+    finally {
+        if ($null -ne $manifestDocument) {
+            $manifestDocument.Dispose()
+        }
     }
     if ($null -eq $manifest) {
         throw 'bundle.json must contain an object.'
     }
 
-    Assert-ExactProperties -Value $manifest -Names @(
-        'schema_version'
-        'source_sha'
-        'source_state'
-        'target'
-        'cargo_lock_sha256'
-        'test_binaries'
-        'application'
-        'runner'
-    ) -Label 'bundle.json'
-    if (($manifest.schema_version -isnot [int] -and $manifest.schema_version -isnot [long]) -or
-        $manifest.schema_version -ne 1) {
-        throw 'bundle.json schema_version must be 1.'
+    $candidateLane = $manifest.schema_version -eq 2
+    if ($candidateLane) {
+        if ($manifest.schema_version -isnot [int] -and $manifest.schema_version -isnot [long]) {
+            throw 'bundle.json candidate schema_version must be the JSON integer 2.'
+        }
+        Assert-ExactProperties -Value $manifest -Names @(
+            'schema_version'
+            'lane'
+            'target'
+            'product'
+            'harness'
+            'test_binaries'
+        ) -Label 'bundle.json'
+        if ($manifest.lane -cne 'candidate-gui-only') {
+            throw 'bundle.json candidate lane is invalid.'
+        }
+        Assert-ExactProperties -Value $manifest.product -Names @(
+            'source_sha'
+            'source_state'
+            'candidate'
+            'application'
+            'provenance'
+        ) -Label 'bundle.json product'
+        Assert-ExactProperties -Value $manifest.product.candidate -Names @(
+            'workflow_run'
+            'run_attempt'
+            'artifact_id'
+            'artifact_name'
+            'origin_authentication'
+        ) -Label 'bundle.json product candidate'
+        Assert-ExactProperties -Value $manifest.product.provenance -Names @(
+            'release_handoff'
+            'run_metadata'
+            'artifact_metadata'
+        ) -Label 'bundle.json product provenance'
+        Assert-ExactProperties -Value $manifest.harness -Names @(
+            'source_sha'
+            'source_state'
+            'launcher'
+            'controller'
+            'runner'
+            'validators'
+        ) -Label 'bundle.json harness'
+        Assert-ExactProperties -Value $manifest.harness.validators -Names @(
+            'release_handoff'
+            'candidate_metadata'
+            'binary_measurement'
+        ) -Label 'bundle.json harness validators'
+        foreach ($binding in @($manifest.product, $manifest.harness)) {
+            if ($binding.source_sha -isnot [string] -or $binding.source_sha -cnotmatch '^[0-9a-f]{40}$' -or
+                $binding.source_state -cne 'clean') {
+                throw 'bundle.json source binding is invalid.'
+            }
+        }
+        foreach ($name in @('workflow_run', 'run_attempt', 'artifact_id')) {
+            if ($manifest.product.candidate.$name -isnot [string] -or
+                $manifest.product.candidate.$name -cnotmatch '^[1-9][0-9]*$') {
+                throw "bundle.json product candidate $name is invalid."
+            }
+        }
+        $expectedArtifactName = "DarkReNamer-dry-run-$($manifest.product.candidate.workflow_run)-$($manifest.product.candidate.run_attempt)-windows"
+        if ($manifest.product.candidate.artifact_name -cne $expectedArtifactName) {
+            throw 'bundle.json product candidate artifact name is invalid.'
+        }
+        if ($manifest.product.candidate.origin_authentication -cne 'pending-hosted') {
+            throw 'bundle.json product candidate origin authentication scope is invalid.'
+        }
+        if (@($manifest.test_binaries).Count -ne 0) {
+            throw 'bundle.json candidate GUI-only lane must not contain test binaries.'
+        }
+        $application = $manifest.product.application
+        $runner = $manifest.harness.runner
+        $testBinaryRows = @()
+        $candidateArtifacts = @(
+            @($manifest.product.provenance.PSObject.Properties | ForEach-Object Value) +
+            @($manifest.harness.launcher, $manifest.harness.controller) +
+            @($manifest.harness.validators.PSObject.Properties | ForEach-Object Value)
+        )
     }
-    if ($manifest.source_sha -isnot [string] -or $manifest.source_sha -cnotmatch '^[0-9a-f]{40}$') {
-        throw 'bundle.json source_sha must be a lowercase full Git SHA.'
-    }
-    if ($manifest.source_state -isnot [string] -or
-        $manifest.source_state -cne 'clean' -and $manifest.source_state -cne 'dirty') {
-        throw 'bundle.json source_state is invalid.'
+    else {
+        Assert-ExactProperties -Value $manifest -Names @(
+            'schema_version'
+            'source_sha'
+            'source_state'
+            'target'
+            'cargo_lock_sha256'
+            'test_binaries'
+            'application'
+            'runner'
+        ) -Label 'bundle.json'
+        if (($manifest.schema_version -isnot [int] -and $manifest.schema_version -isnot [long]) -or
+            $manifest.schema_version -ne 1) {
+            throw 'bundle.json schema_version must be 1 or the exact candidate schema 2.'
+        }
+        if ($manifest.source_sha -isnot [string] -or $manifest.source_sha -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'bundle.json source_sha must be a lowercase full Git SHA.'
+        }
+        if ($manifest.source_state -isnot [string] -or
+            $manifest.source_state -cne 'clean' -and $manifest.source_state -cne 'dirty') {
+            throw 'bundle.json source_state is invalid.'
+        }
+        Assert-Sha256 -Value $manifest.cargo_lock_sha256 -Label 'bundle.json cargo_lock_sha256'
+        if ($manifest.test_binaries -isnot [array] -or $manifest.test_binaries.Count -le 0) {
+            throw 'bundle.json test_binaries must be a non-empty array.'
+        }
+        $application = $manifest.application
+        $runner = $manifest.runner
+        $testBinaryRows = @($manifest.test_binaries)
+        $candidateArtifacts = @()
     }
     if ($manifest.target -isnot [string] -or $manifest.target -cne 'x86_64-pc-windows-msvc') {
         throw 'bundle.json target is invalid.'
     }
-    Assert-Sha256 -Value $manifest.cargo_lock_sha256 -Label 'bundle.json cargo_lock_sha256'
-
-    if ($manifest.test_binaries -isnot [array] -or $manifest.test_binaries.Count -le 0) {
-        throw 'bundle.json test_binaries must be a non-empty array.'
-    }
-    Assert-ExactProperties -Value $manifest.application -Names @('file', 'sha256') -Label 'bundle.json application'
-    Assert-ExactProperties -Value $manifest.runner -Names @('file', 'sha256') -Label 'bundle.json runner'
-    Assert-SafeLeafName -Value $manifest.application.file -Label 'application file' -Pattern '^[A-Za-z0-9][A-Za-z0-9._-]*\.exe$'
-    if ($manifest.application.file -cne 'DarkReNamer.exe') {
+    Assert-ExactProperties -Value $application -Names @('file', 'sha256') -Label 'bundle.json application'
+    Assert-ExactProperties -Value $runner -Names @('file', 'sha256') -Label 'bundle.json runner'
+    Assert-SafeLeafName -Value $application.file -Label 'application file' -Pattern '^[A-Za-z0-9][A-Za-z0-9._-]*\.exe$'
+    if ($application.file -cne 'DarkReNamer.exe') {
         throw 'bundle.json application file is invalid.'
     }
-    Assert-Sha256 -Value $manifest.application.sha256 -Label 'application sha256'
-    Assert-SafeLeafName -Value $manifest.runner.file -Label 'runner file' -Pattern '^[A-Za-z0-9][A-Za-z0-9._-]*\.ps1$'
-    if ($manifest.runner.file -cne 'windows-vm-guest.ps1') {
+    Assert-Sha256 -Value $application.sha256 -Label 'application sha256'
+    Assert-SafeLeafName -Value $runner.file -Label 'runner file' -Pattern '^[A-Za-z0-9][A-Za-z0-9._-]*\.ps1$'
+    if ($runner.file -cne 'windows-vm-guest.ps1') {
         throw 'bundle.json runner file is invalid.'
     }
-    Assert-Sha256 -Value $manifest.runner.sha256 -Label 'runner sha256'
+    Assert-Sha256 -Value $runner.sha256 -Label 'runner sha256'
 
     $leafNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $testNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $artifacts = [Collections.Generic.List[object]]::new()
     $testRows = [Collections.Generic.List[object]]::new()
-    foreach ($binary in @($manifest.test_binaries)) {
+    foreach ($binary in @($testBinaryRows)) {
         Assert-ExactProperties -Value $binary -Names @('name', 'file', 'sha256') -Label 'bundle.json test binary'
         if ($binary.name -isnot [string] -or $binary.name -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
             throw 'A test binary name is invalid.'
@@ -221,7 +365,10 @@ function Resolve-VerifiedBundle {
             sha256 = $binary.sha256
         })
     }
-    foreach ($artifact in @($manifest.application, $manifest.runner)) {
+    foreach ($artifact in @($application, $runner) + $candidateArtifacts) {
+        Assert-ExactProperties -Value $artifact -Names @('file', 'sha256') -Label 'bundle.json artifact'
+        Assert-SafeLeafName -Value $artifact.file -Label 'artifact file' -Pattern '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+        Assert-Sha256 -Value $artifact.sha256 -Label 'artifact sha256'
         if (-not $leafNames.Add($artifact.file)) {
             throw 'Artifact filenames must be unique.'
         }
@@ -232,7 +379,7 @@ function Resolve-VerifiedBundle {
         })
     }
 
-    $runnerPath = Join-Path $resolvedRoot $manifest.runner.file
+    $runnerPath = Join-Path $resolvedRoot $runner.file
     Assert-OrdinaryFile -Path $runnerPath -Label 'runner artifact'
     $actualScriptPath = (Get-Item -LiteralPath $InvokedScriptPath -Force).FullName
     if (-not [string]::Equals($runnerPath, $actualScriptPath, [StringComparison]::OrdinalIgnoreCase)) {
@@ -250,9 +397,84 @@ function Resolve-VerifiedBundle {
         $verifiedHashes[$artifact.file] = $actualHash
     }
 
+    if ($candidateLane) {
+        $expectedFiles = [ordered]@{
+            release_handoff = 'release-handoff.json'
+            run_metadata = 'candidate-run.json'
+            artifact_metadata = 'candidate-artifact.json'
+        }
+        foreach ($name in $expectedFiles.Keys) {
+            if ($manifest.product.provenance.$name.file -cne $expectedFiles[$name]) {
+                throw "bundle.json product provenance $name file is invalid."
+            }
+        }
+        if ($manifest.harness.launcher.file -cne 'test-windows-vm.py' -or
+            $manifest.harness.controller.file -cne 'run-windows-vm-tests.ps1') {
+            throw 'bundle.json candidate harness filenames are invalid.'
+        }
+        $expectedValidators = [ordered]@{
+            release_handoff = 'validate-release-handoff.ps1'
+            candidate_metadata = 'validate-release-candidate-metadata.ps1'
+            binary_measurement = 'measure-windows-binary.ps1'
+        }
+        foreach ($name in $expectedValidators.Keys) {
+            if ($manifest.harness.validators.$name.file -cne $expectedValidators[$name]) {
+                throw "bundle.json candidate harness validator $name file is invalid."
+            }
+        }
+        $handoff = Read-UniqueJsonObject `
+            -Path (Join-Path $resolvedRoot 'release-handoff.json') `
+            -Label 'release-handoff.json'
+        if ($handoff.source_sha -cne $manifest.product.source_sha -or
+            $handoff.workflow_run -cne $manifest.product.candidate.workflow_run -or
+            $handoff.executable.filename -cne $application.file -or
+            $handoff.executable.sha256 -cne $application.sha256) {
+            throw 'Frozen release handoff metadata differs from the candidate identity.'
+        }
+        $runMetadata = Read-UniqueJsonObject `
+            -Path (Join-Path $resolvedRoot 'candidate-run.json') `
+            -Label 'candidate-run.json'
+        $artifactMetadata = Read-UniqueJsonObject `
+            -Path (Join-Path $resolvedRoot 'candidate-artifact.json') `
+            -Label 'candidate-artifact.json'
+        if ([string]$runMetadata.id -cne $manifest.product.candidate.workflow_run -or
+            [string]$runMetadata.run_attempt -cne $manifest.product.candidate.run_attempt -or
+            $runMetadata.head_sha -cne $manifest.product.source_sha -or
+            [string]$artifactMetadata.id -cne $manifest.product.candidate.artifact_id -or
+            $artifactMetadata.name -cne $manifest.product.candidate.artifact_name -or
+            [string]$artifactMetadata.workflow_run.id -cne $manifest.product.candidate.workflow_run -or
+            $artifactMetadata.workflow_run.head_sha -cne $manifest.product.source_sha) {
+            throw 'Frozen GitHub metadata differs from the candidate identity.'
+        }
+    }
+
+    $contract = if ($candidateLane) {
+        [pscustomobject]@{
+            lane = 'candidate-gui-only'
+            product_source_sha = $manifest.product.source_sha
+            product_source_state = $manifest.product.source_state
+            application = $application
+            harness_source_sha = $manifest.harness.source_sha
+            harness_source_state = $manifest.harness.source_state
+            runner = $runner
+            validators = $manifest.harness.validators
+        }
+    } else {
+        [pscustomobject]@{
+            lane = 'source-built-native'
+            product_source_sha = $manifest.source_sha
+            product_source_state = $manifest.source_state
+            application = $application
+            harness_source_sha = $manifest.source_sha
+            harness_source_state = $manifest.source_state
+            runner = $runner
+            validators = $null
+        }
+    }
     [pscustomobject]@{
         root = $resolvedRoot
         manifest = $manifest
+        contract = $contract
         tests = $testRows.ToArray()
         hashes = $verifiedHashes
     }
@@ -979,7 +1201,9 @@ function Save-WindowScreenshot {
         [Parameter(Mandatory)][int] $ExpectedSession,
         [Parameter(Mandatory)][string] $Root,
         [Parameter(Mandatory)][string] $Leaf,
-        [Parameter(Mandatory)][string] $Label
+        [Parameter(Mandatory)][string] $Label,
+        [Parameter(Mandatory)][AllowEmptyCollection()]
+        [Collections.Generic.List[object]] $ForegroundObservations
     )
 
     Assert-SafeLeafName -Value $Leaf -Label "$Label screenshot" -Pattern '^[A-Za-z0-9][A-Za-z0-9._-]*\.png$'
@@ -993,15 +1217,33 @@ function Save-WindowScreenshot {
     if (-not [DarkReNamerVmNative]::IsWindowVisible($handle)) {
         throw "$Label is not visible for screenshot capture."
     }
+    $activation = [ordered]@{
+        label = $Label
+        target_hwnd = [long]$handle
+        initial = Get-ForegroundObservation
+        uia_set_focus = 'not_attempted'
+        set_foreground_window = $null
+        final = $null
+        capture_change = $null
+    }
     if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
-        $Window.SetFocus()
-        [void][DarkReNamerVmNative]::SetForegroundWindow($handle)
+        try {
+            $Window.SetFocus()
+            $activation.uia_set_focus = 'succeeded'
+        }
+        catch {
+            $activation.uia_set_focus = 'failed'
+        }
+        $activation.set_foreground_window = [bool][DarkReNamerVmNative]::SetForegroundWindow($handle)
         $foregroundDeadline = (Get-Date).AddSeconds(5)
         while ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle -and
             (Get-Date) -lt $foregroundDeadline) {
             Start-Sleep -Milliseconds 100
         }
     }
+    $activation.final = Get-ForegroundObservation
+    $activationObservation = [pscustomobject]$activation
+    $ForegroundObservations.Add($activationObservation)
     if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
         throw "$Label is not the foreground window for screenshot capture."
     }
@@ -1034,6 +1276,7 @@ function Save-WindowScreenshot {
             [Drawing.CopyPixelOperation]::SourceCopy
         )
         if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
+            $activationObservation.capture_change = Get-ForegroundObservation
             throw "$Label lost foreground during screenshot capture."
         }
         $firstColor = $bitmap.GetPixel(0, 0).ToArgb()
@@ -1084,6 +1327,56 @@ function Assert-NoJournalResidue {
     }
 }
 
+function Get-FlowCheckpoint {
+    param(
+        [Parameter(Mandatory)][ValidateSet('initial', 'after_cancel', 'after_apply', 'post_close')]
+        [string] $Phase,
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][string] $LocalAppData
+    )
+
+    $fixtureItems = @(Get-ChildItem -LiteralPath $FixtureRoot -Force | Sort-Object Name)
+    if ($fixtureItems.Count -gt 8) {
+        throw 'The production flow fixture inventory exceeds its bound.'
+    }
+    $fixtureEntries = foreach ($item in $fixtureItems) {
+        $reparse = ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+        $kind = if ($reparse) { 'reparse' } elseif ($item.PSIsContainer) { 'directory' } else { 'file' }
+        [ordered]@{
+            name = $item.Name
+            kind = $kind
+            bytes = if ($kind -ceq 'file') { [long]$item.Length } else { [long]0 }
+            content_sha256 = if ($kind -ceq 'file') { Get-LowerSha256 -Path $item.FullName } else { $null }
+            file_identity_sha256 = if ($kind -ceq 'file') {
+                Get-LowerTextSha256 -Value ([DarkReNamerVmNative]::GetFileIdentity($item.FullName))
+            } else { $null }
+        }
+    }
+    $journalRoot = Join-Path (Join-Path $LocalAppData 'DarkReNamer') 'journal'
+    $journalEntries = @()
+    if (Test-Path -LiteralPath $journalRoot -PathType Container) {
+        $items = @(Get-ChildItem -LiteralPath $journalRoot -Force | Sort-Object Name)
+        if ($items.Count -gt 16) {
+            throw 'The production flow journal inventory exceeds its bound.'
+        }
+        $journalEntries = @($items | ForEach-Object {
+            if (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'The production flow journal inventory contains a reparse point.'
+            }
+            [ordered]@{
+                name = $_.Name
+                kind = if ($_.PSIsContainer) { 'directory' } else { 'file' }
+                bytes = if ($_.PSIsContainer) { [long]0 } else { [long]$_.Length }
+            }
+        })
+    }
+    [ordered]@{
+        phase = $Phase
+        fixture_entries = @($fixtureEntries)
+        journal_entries = @($journalEntries)
+    }
+}
+
 function Invoke-ProductionRenameFlow {
     param(
         [Parameter(Mandatory)][Diagnostics.Process] $Process,
@@ -1100,9 +1393,11 @@ function Invoke-ProductionRenameFlow {
     $sourcePath = Join-Path $FixtureRoot $sourceName
     $destinationPath = Join-Path $FixtureRoot $previewName
     $pendingInvocations = [Collections.Generic.List[object]]::new()
+    $foregroundObservations = [Collections.Generic.List[object]]::new()
     $flow = [ordered]@{
         status = 'failed'
         scope = 'production-file-add-prefix-cancel-confirm'
+        input_mode = 'uia-functional'
         application_file = 'DarkReNamer.exe'
         application_sha256 = $null
         source_name = $sourceName
@@ -1116,6 +1411,8 @@ function Invoke-ProductionRenameFlow {
         confirmed_source_present = $null
         confirmed_destination_present = $null
         journal_residue_count = $null
+        checkpoints = @()
+        foreground_observations = $foregroundObservations
         screenshots = @()
         diagnostic = $null
         failure_reason = 'fixture_setup_failed'
@@ -1129,6 +1426,10 @@ function Invoke-ProductionRenameFlow {
         $flow.before_content_sha256 = Get-LowerSha256 -Path $sourcePath
         $beforeFileIdentity = [DarkReNamerVmNative]::GetFileIdentity($sourcePath)
         $flow.before_file_identity_sha256 = Get-LowerTextSha256 -Value $beforeFileIdentity
+        $flow.checkpoints = @((Get-FlowCheckpoint `
+            -Phase initial `
+            -FixtureRoot $FixtureRoot `
+            -LocalAppData $env:LOCALAPPDATA))
 
         $flow.failure_reason = 'file_add_failed'
         $add = Find-UniqueAutomationElement `
@@ -1240,7 +1541,8 @@ function Invoke-ProductionRenameFlow {
             -ExpectedSession $ExpectedSession `
             -Root $Root `
             -Leaf 'rename-preview.png' `
-            -Label 'production rename preview'))
+            -Label 'production rename preview' `
+            -ForegroundObservations $foregroundObservations))
         $flow.screenshots = $screenshots.ToArray()
 
         $flow.failure_reason = 'apply_cancellation_failed'
@@ -1269,7 +1571,8 @@ function Invoke-ProductionRenameFlow {
             -ExpectedSession $ExpectedSession `
             -Root $Root `
             -Leaf 'apply-confirmation.png' `
-            -Label 'apply confirmation task dialog'))
+            -Label 'apply confirmation task dialog' `
+            -ForegroundObservations $foregroundObservations))
         $flow.screenshots = $screenshots.ToArray()
         $cancel = Find-UniqueAutomationElement `
             -Root $confirmation `
@@ -1294,6 +1597,10 @@ function Invoke-ProductionRenameFlow {
             [DarkReNamerVmNative]::GetFileIdentity($sourcePath) -cne $beforeFileIdentity) {
             throw 'Cancelling the production confirmation changed the fixture.'
         }
+        $flow.checkpoints += (Get-FlowCheckpoint `
+            -Phase after_cancel `
+            -FixtureRoot $FixtureRoot `
+            -LocalAppData $env:LOCALAPPDATA)
         Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
 
         $flow.failure_reason = 'confirmed_apply_failed'
@@ -1349,6 +1656,10 @@ function Invoke-ProductionRenameFlow {
             }
             Start-Sleep -Milliseconds 100
         } while ((Get-Date) -lt $deadline)
+        $flow.checkpoints += (Get-FlowCheckpoint `
+            -Phase after_apply `
+            -FixtureRoot $FixtureRoot `
+            -LocalAppData $env:LOCALAPPDATA)
         Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
         $flow.confirmed_source_present = Test-Path -LiteralPath $sourcePath -PathType Leaf
         $flow.confirmed_destination_present = Test-Path -LiteralPath $destinationPath -PathType Leaf
@@ -1420,6 +1731,35 @@ function Invoke-ProductionRenameFlow {
     [pscustomobject]$flow
 }
 
+function Get-ForegroundObservation {
+    $handle = [DarkReNamerVmNative]::GetForegroundWindow()
+    $processId = [uint32]0
+    $sessionId = $null
+    $windowClass = ''
+    if ($handle -ne [IntPtr]::Zero) {
+        [void][DarkReNamerVmNative]::GetWindowThreadProcessId($handle, [ref]$processId)
+        $classText = [Text.StringBuilder]::new(256)
+        [void][DarkReNamerVmNative]::GetClassName($handle, $classText, $classText.Capacity)
+        $windowClass = $classText.ToString()
+        if ($processId -gt 0) {
+            try {
+                $foregroundProcess = Get-Process -Id $processId -ErrorAction Stop
+                $sessionId = [int]$foregroundProcess.SessionId
+                $foregroundProcess.Dispose()
+            }
+            catch {
+                $sessionId = $null
+            }
+        }
+    }
+    [ordered]@{
+        hwnd = [long]$handle
+        process_id = [int]$processId
+        session_id = $sessionId
+        window_class = $windowClass
+    }
+}
+
 function Invoke-GuiSmoke {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -1437,7 +1777,17 @@ function Invoke-GuiSmoke {
         exit_code = $null
         window_class = $null
         window_title = $null
+        window_handle = $null
+        process_id = $null
+        session_id = $null
         window_dpi = $null
+        foreground_activation = [ordered]@{
+            initial = $null
+            uia_set_focus = 'not_attempted'
+            set_foreground_window = $null
+            final = $null
+            capture_change = $null
+        }
         screenshot = $null
         flow = $null
         failure_reason = 'process_start_failed'
@@ -1497,24 +1847,34 @@ function Invoke-GuiSmoke {
             }
             $row.window_class = $windowClass
             $row.window_title = $windowTitle
+            $row.window_handle = [long]$handle
+            $row.process_id = [int]$boundProcessId
+            $row.session_id = [int]$processState.process.process.SessionId
             $row.window_dpi = [int][DarkReNamerVmNative]::GetDpiForWindow($handle)
 
+            $row.foreground_activation.initial = Get-ForegroundObservation
             if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
                 try {
                     $automationElement = [Windows.Automation.AutomationElement]::FromHandle($handle)
                     if ($null -ne $automationElement) {
                         $automationElement.SetFocus()
+                        $row.foreground_activation.uia_set_focus = 'succeeded'
+                    }
+                    else {
+                        $row.foreground_activation.uia_set_focus = 'element_unavailable'
                     }
                 }
                 catch {
+                    $row.foreground_activation.uia_set_focus = 'failed'
                 }
-                [void][DarkReNamerVmNative]::SetForegroundWindow($handle)
+                $row.foreground_activation.set_foreground_window = [bool][DarkReNamerVmNative]::SetForegroundWindow($handle)
                 $foregroundDeadline = (Get-Date).AddSeconds(5)
                 while ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle -and
                     (Get-Date) -lt $foregroundDeadline) {
                     Start-Sleep -Milliseconds 100
                 }
             }
+            $row.foreground_activation.final = Get-ForegroundObservation
             if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
                 $row.failure_reason = 'window_not_foreground'
                 return
@@ -1537,6 +1897,7 @@ function Invoke-GuiSmoke {
             $captureState.graphics = [Drawing.Graphics]::FromImage($captureState.bitmap)
             $captureState.graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $captureState.bitmap.Size, [Drawing.CopyPixelOperation]::SourceCopy)
             if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
+                $row.foreground_activation.capture_change = Get-ForegroundObservation
                 $row.failure_reason = 'foreground_changed_during_capture'
                 return
             }
@@ -1610,6 +1971,10 @@ function Invoke-GuiSmoke {
                 $row.failure_reason = 'app_exit_failed'
                 return
             }
+            $row.flow.checkpoints += (Get-FlowCheckpoint `
+                -Phase post_close `
+                -FixtureRoot $flowFixtureRoot `
+                -LocalAppData $env:LOCALAPPDATA)
             $row.status = 'passed'
             $row.failure_reason = $null
         }
@@ -1768,19 +2133,39 @@ if ($MyInvocation.InvocationName -eq '.') {
 
 $verified = Resolve-VerifiedBundle -Root $BundleRoot -InvokedScriptPath $PSCommandPath
 if ($ValidateOnly) {
-    Write-Host "Validated Windows VM bundle for source $($verified.manifest.source_sha)."
+    $validatedSource = if ($verified.manifest.schema_version -eq 2) {
+        $verified.manifest.product.source_sha
+    } else {
+        $verified.manifest.source_sha
+    }
+    Write-Host "Validated Windows VM bundle for source $validatedSource."
     return
 }
 
-$result = [ordered]@{
-    schema_version = 1
-    source_sha = $verified.manifest.source_sha
-    source_state = $verified.manifest.source_state
-    target = $verified.manifest.target
-    status = 'failed'
-    tests = @()
-    gui = $null
-    failure_reason = $null
+$candidateLane = $verified.manifest.schema_version -eq 2
+$result = if ($candidateLane) {
+    [ordered]@{
+        schema_version = 2
+        lane = $verified.manifest.lane
+        target = $verified.manifest.target
+        product = $verified.manifest.product
+        harness = $verified.manifest.harness
+        status = 'failed'
+        tests = @()
+        gui = $null
+        failure_reason = $null
+    }
+} else {
+    [ordered]@{
+        schema_version = 1
+        source_sha = $verified.manifest.source_sha
+        source_state = $verified.manifest.source_state
+        target = $verified.manifest.target
+        status = 'failed'
+        tests = @()
+        gui = $null
+        failure_reason = $null
+    }
 }
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     $result.failure_reason = 'unsupported_platform'
@@ -1821,15 +2206,21 @@ try {
             -TimeoutSeconds $TestTimeoutSeconds))
         $result.tests = $testResults.ToArray()
     }
+    $applicationArtifact = if ($candidateLane) {
+        $verified.manifest.product.application
+    } else {
+        $verified.manifest.application
+    }
     $result.gui = Invoke-GuiSmoke `
-        -Application $verified.manifest.application `
+        -Application $applicationArtifact `
         -Root $verified.root `
         -RuntimeRoot $runtimeRoot `
         -ExpectedSession $ExpectedSessionId `
         -TimeoutSeconds $TestTimeoutSeconds
 
     $testFailures = @($result.tests | Where-Object { $_.status -cne 'passed' })
-    if ($testFailures.Count -eq 0 -and $result.gui.status -ceq 'passed') {
+    if ($testFailures.Count -eq 0 -and $result.gui.status -ceq 'passed' -and
+        ($candidateLane -or $result.tests.Count -gt 0)) {
         $result.status = 'passed'
     }
 }

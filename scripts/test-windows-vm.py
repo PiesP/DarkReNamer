@@ -15,11 +15,119 @@ import uuid
 
 TARGET = 'x86_64-pc-windows-msvc'
 POWERSHELL = Path('/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe')
+WINDOWS_PWSH = Path('/mnt/c/Program Files/PowerShell/7/pwsh.exe')
+HANDOFF_FILES = (
+    'DarkReNamer-debug-symbols.zip',
+    'DarkReNamer.cdx.json',
+    'DarkReNamer.exe',
+    'DarkReNamer.pdb',
+    'DISTRIBUTION.md',
+    'LICENSE',
+    'release-handoff.json',
+    'release-metrics.json',
+    'SHA256SUMS.txt',
+    'THIRD_PARTY_LICENSES.html',
+    'THIRD_PARTY_NOTICES.md',
+)
+CANDIDATE_HARNESS_FILES = (
+    'test-windows-vm.py',
+    'run-windows-vm-tests.ps1',
+    'windows-vm-guest.ps1',
+    'validate-release-handoff.ps1',
+    'validate-release-candidate-metadata.ps1',
+    'measure-windows-binary.ps1',
+)
 
 
 def sha256(path):
     with Path(path).open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def read_json_strict(path):
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError('JSON contains a duplicate field: ' + key)
+            value[key] = item
+        return value
+    return json.loads(Path(path).read_text(encoding='utf-8-sig'), object_pairs_hook=unique_object)
+
+
+def copy_frozen_file(source, destination, expected_sha256, label):
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+    if sha256(destination) != expected_sha256:
+        raise RuntimeError(label + ' copy differs from its frozen digest.')
+
+
+def verify_frozen_files(sources, frozen, label):
+    if any(sha256(source) != frozen[name] for name, source in sources.items()):
+        raise RuntimeError(label + ' changed during candidate bundle creation.')
+
+
+def require_positive_json_integer(value, label):
+    if type(value) is not int or value <= 0:
+        raise ValueError(label + ' must be a positive JSON integer.')
+    return str(value)
+
+
+def validate_candidate_provenance_json(handoff_path, run_path, artifact_path, args):
+    handoff = read_json_strict(handoff_path)
+    run = read_json_strict(run_path)
+    artifact = read_json_strict(artifact_path)
+    if (not isinstance(handoff, dict) or set(handoff) != {
+            'schema_version', 'source_sha', 'workflow_run', 'executable'} or
+            type(handoff.get('schema_version')) is not int or handoff['schema_version'] != 1 or
+            handoff.get('source_sha') != args.candidate_source_sha or
+            handoff.get('workflow_run') != args.candidate_workflow_run or
+            not isinstance(handoff.get('executable'), dict) or
+            set(handoff['executable']) != {'filename', 'sha256'} or
+            handoff['executable'].get('filename') != 'DarkReNamer.exe' or
+            handoff['executable'].get('sha256') != args.candidate_executable_sha256):
+        raise ValueError('Release handoff JSON identity or type is invalid.')
+    if not isinstance(run, dict):
+        raise ValueError('Run metadata must be a JSON object.')
+    required_run = {
+        'id': args.candidate_workflow_run,
+        'run_attempt': args.candidate_run_attempt,
+    }
+    for name, expected in required_run.items():
+        if require_positive_json_integer(run.get(name), 'Run metadata.' + name) != expected:
+            raise ValueError('Run metadata identity differs from the explicit candidate.')
+    expected_run_strings = {
+        'event': 'workflow_dispatch',
+        'status': 'completed',
+        'conclusion': 'success',
+        'head_branch': 'master',
+        'head_sha': args.candidate_source_sha,
+        'path': '.github/workflows/release.yaml',
+    }
+    if any(not isinstance(run.get(name), str) or run[name] != expected
+           for name, expected in expected_run_strings.items()):
+        raise ValueError('Run metadata identity or type is invalid.')
+    if not isinstance(artifact, dict):
+        raise ValueError('Artifact metadata must be a JSON object.')
+    if (require_positive_json_integer(
+            artifact.get('id'), 'Artifact metadata.id') != args.candidate_artifact_id or
+            not isinstance(artifact.get('name'), str) or
+            artifact['name'] != ('DarkReNamer-dry-run-' + args.candidate_workflow_run + '-'
+                                 + args.candidate_run_attempt + '-windows') or
+            type(artifact.get('expired')) is not bool or artifact['expired']):
+        raise ValueError('Artifact metadata identity or type is invalid.')
+    artifact_run = artifact.get('workflow_run')
+    if (not isinstance(artifact_run, dict) or
+            require_positive_json_integer(
+                artifact_run.get('id'), 'Artifact metadata.workflow_run.id') !=
+            args.candidate_workflow_run or
+            not isinstance(artifact_run.get('head_branch'), str) or
+            artifact_run['head_branch'] != 'master' or
+            not isinstance(artifact_run.get('head_sha'), str) or
+            artifact_run['head_sha'] != args.candidate_source_sha):
+        raise ValueError('Artifact workflow run identity or type is invalid.')
+    return handoff
 
 
 def psquote(value):
@@ -83,6 +191,19 @@ def argument_parser():
     parser.add_argument('--output', type=Path, help='New external directory for the bundle, logs, and screenshots.')
     parser.add_argument('--prepare-only', action='store_true',
                         help='Build a clean source-bound bundle without contacting the VM.')
+    parser.add_argument('--candidate-handoff-root', type=Path,
+                        help='Validated release handoff directory for an exact-candidate GUI-only bundle.')
+    parser.add_argument('--candidate-source-root', type=Path,
+                        help='Clean source checkout at the candidate source commit.')
+    parser.add_argument('--candidate-run-metadata', type=Path,
+                        help='Downloaded GitHub Actions run metadata JSON for the candidate.')
+    parser.add_argument('--candidate-artifact-metadata', type=Path,
+                        help='Downloaded GitHub Actions artifact metadata JSON for the candidate.')
+    parser.add_argument('--candidate-source-sha')
+    parser.add_argument('--candidate-workflow-run')
+    parser.add_argument('--candidate-run-attempt')
+    parser.add_argument('--candidate-artifact-id')
+    parser.add_argument('--candidate-executable-sha256')
     parser.add_argument('--test-timeout-seconds', type=int, default=300)
     return parser
 
@@ -92,6 +213,26 @@ def parse_arguments(argv=None):
     args = parser.parse_args(argv)
     if not args.vm_name and not args.ssh_host and not args.prepare_only:
         parser.error('one of --vm-name or --ssh-host is required unless --prepare-only is used.')
+    candidate_names = (
+        'candidate_handoff_root', 'candidate_source_root', 'candidate_run_metadata',
+        'candidate_artifact_metadata', 'candidate_source_sha', 'candidate_workflow_run',
+        'candidate_run_attempt', 'candidate_artifact_id', 'candidate_executable_sha256',
+    )
+    candidate_values = [getattr(args, name) for name in candidate_names]
+    if any(value is not None for value in candidate_values) and not all(
+            value is not None for value in candidate_values):
+        parser.error('all exact-candidate handoff, metadata, identity, and digest options must be supplied together.')
+    args.candidate_mode = all(value is not None for value in candidate_values)
+    if args.candidate_mode:
+        if not re.fullmatch(r'[0-9a-f]{40}', args.candidate_source_sha):
+            parser.error('--candidate-source-sha must be a lowercase full Git SHA.')
+        if not re.fullmatch(r'[0-9a-f]{64}', args.candidate_executable_sha256):
+            parser.error('--candidate-executable-sha256 must be a lowercase SHA-256 digest.')
+        for name in ('candidate_workflow_run', 'candidate_run_attempt', 'candidate_artifact_id'):
+            if not re.fullmatch(r'[1-9][0-9]*', getattr(args, name)):
+                parser.error('--' + name.replace('_', '-') + ' must be a positive decimal integer.')
+        if not args.prepare_only and args.expected_vm_id is None:
+            parser.error('exact-candidate execution requires --expected-vm-id for either transport.')
     if args.prepare_only and (args.vm_name or args.ssh_host or args.desktop_helper or
                               args.credential_helper or args.expected_vm_id or
                               args.desktop_mode != 'rdp' or args.desktop_scale != 200 or
@@ -104,7 +245,7 @@ def parse_arguments(argv=None):
     if args.ssh_host and args.credential_helper:
         parser.error('--credential-helper can only be used with --vm-name PowerShell Direct transport.')
     if args.expected_vm_id is not None:
-        if args.ssh_host:
+        if args.ssh_host and not args.candidate_mode:
             parser.error('--expected-vm-id can only be used with --vm-name PowerShell Direct transport.')
         try:
             identity = uuid.UUID(args.expected_vm_id)
@@ -193,6 +334,11 @@ def controller_invocation(root, args, defaults=None, pwsh=None, desktop_sid=None
     common = ['-TestTimeoutSeconds', str(args.test_timeout_seconds)]
     if desktop_sid:
         common += ['-ExpectedDesktopSid', desktop_sid]
+    if args.candidate_mode and args.expected_vm_id:
+        common += [
+            '-ExpectedGuestVmId', args.expected_vm_id,
+            '-ExpectedBundleManifestSha256', sha256(root / 'bundle.json'),
+        ]
     if args.ssh_host:
         executable = pwsh or require_pwsh74()
         return [
@@ -211,6 +357,9 @@ def controller_invocation(root, args, defaults=None, pwsh=None, desktop_sid=None
         + (' -ExpectedVmId ' + psquote(args.expected_vm_id) if args.expected_vm_id else '')
         + ' -TestTimeoutSeconds ' + str(args.test_timeout_seconds)
         + (' -ExpectedDesktopSid ' + psquote(desktop_sid) if desktop_sid else '')
+        + (' -ExpectedGuestVmId ' + psquote(args.expected_vm_id)
+           + ' -ExpectedBundleManifestSha256 ' + psquote(sha256(root / 'bundle.json'))
+           if args.candidate_mode and args.expected_vm_id else '')
     )
     prelude = '$ErrorActionPreference="Stop"; $env:PSModulePath="$PSHOME\\Modules;C:\\Program Files\\WindowsPowerShell\\Modules"; '
     return [
@@ -273,7 +422,7 @@ def run_controller(root, args, defaults=None, pwsh=None):
         cwd = root if args.ssh_host else Path('/mnt/c')
         subprocess.run(command, cwd=cwd, text=True, check=True)
         if desktop:
-            result = json.loads((root / 'result.json').read_text(encoding='utf-8-sig'))
+            result = read_json_strict(root / 'result.json')
             if result.get('gui', {}).get('window_dpi') != desktop['expectedDpi']:
                 raise ValueError('Production window DPI differs from the requested RDP scale.')
 
@@ -303,7 +452,160 @@ def checked_artifact(root, record):
     return path
 
 
-def verify_gui_flow(root, manifest, flow):
+def application_record(manifest):
+    if manifest.get('schema_version') == 2:
+        return manifest['product']['application']
+    return manifest['application']
+
+
+def verify_flow_checkpoints(flow):
+    checkpoints = flow.get('checkpoints')
+    if not isinstance(checkpoints, list) or [row.get('phase') for row in checkpoints
+                                             if isinstance(row, dict)] != [
+            'initial', 'after_cancel', 'after_apply', 'post_close']:
+        raise ValueError('VM production GUI flow checkpoints are incomplete.')
+    parsed = {}
+    digest_pattern = re.compile(r'^[0-9a-f]{64}$')
+    for checkpoint in checkpoints:
+        if (not isinstance(checkpoint, dict) or
+                set(checkpoint) != {'phase', 'fixture_entries', 'journal_entries'}):
+            raise ValueError('VM production GUI flow checkpoint shape is invalid.')
+        entries = checkpoint['fixture_entries']
+        if not isinstance(entries, list) or len(entries) > 8:
+            raise ValueError('VM production GUI flow checkpoint fixture inventory is invalid.')
+        by_name = {}
+        for row in entries:
+            if (not isinstance(row, dict) or
+                    set(row) != {'name', 'kind', 'bytes', 'content_sha256', 'file_identity_sha256'}):
+                raise ValueError('VM production GUI flow checkpoint file shape is invalid.')
+            if row['name'] not in ('vm-flow-source.txt', 'vm-confirmed-vm-flow-source.txt'):
+                raise ValueError('VM production GUI flow checkpoint filename is invalid.')
+            if (row['kind'] != 'file' or type(row['bytes']) is not int or row['bytes'] < 0 or
+                    not isinstance(row['content_sha256'], str) or
+                    not digest_pattern.fullmatch(row['content_sha256']) or
+                    not isinstance(row['file_identity_sha256'], str) or
+                    not digest_pattern.fullmatch(row['file_identity_sha256']) or
+                    row['name'] in by_name):
+                raise ValueError('VM production GUI flow checkpoint file evidence is invalid.')
+            by_name[row['name']] = row
+        journal_entries = checkpoint['journal_entries']
+        if not isinstance(journal_entries, list) or len(journal_entries) > 16:
+            raise ValueError('VM production GUI flow journal inventory is invalid.')
+        journal_names = set()
+        for entry in journal_entries:
+            if (not isinstance(entry, dict) or set(entry) != {'name', 'kind', 'bytes'} or
+                    not isinstance(entry['name'], str) or
+                    entry['kind'] not in ('file', 'directory', 'reparse') or
+                    type(entry['bytes']) is not int or entry['bytes'] < 0):
+                raise ValueError('VM production GUI flow journal entry is invalid.')
+            if entry['name'] != 'runtime.lock' or entry['kind'] != 'file':
+                raise ValueError('VM production GUI flow checkpoints contain journal residue.')
+            if entry['name'] in journal_names or entry['bytes'] != 0:
+                raise ValueError('VM production GUI flow runtime lock inventory is invalid.')
+            journal_names.add(entry['name'])
+        parsed[checkpoint['phase']] = (by_name, journal_entries)
+    initial, initial_journal = parsed['initial']
+    cancelled, cancelled_journal = parsed['after_cancel']
+    applied, applied_journal = parsed['after_apply']
+    closed, closed_journal = parsed['post_close']
+    source_name = 'vm-flow-source.txt'
+    destination_name = 'vm-confirmed-vm-flow-source.txt'
+    if (set(initial) != {source_name} or set(cancelled) != {source_name} or
+            set(applied) != {destination_name} or set(closed) != {destination_name}):
+        raise ValueError('VM production GUI flow checkpoint disk state is invalid.')
+    baseline = initial[source_name]
+    for observed in (cancelled[source_name], applied[destination_name], closed[destination_name]):
+        if (observed['bytes'] != baseline['bytes'] or
+                observed['content_sha256'] != baseline['content_sha256'] or
+                observed['file_identity_sha256'] != baseline['file_identity_sha256']):
+            raise ValueError('VM production GUI flow checkpoints do not preserve content and identity.')
+    # runtime.lock is the live process lock, not a journal transaction. Every
+    # other entry is rejected above, so the serialized inventories prove zero
+    # journal residue without hiding the lock file.
+    return {
+        'initial': initial[source_name],
+        'after_cancel': cancelled[source_name],
+        'after_apply': applied[destination_name],
+        'post_close': closed[destination_name],
+    }
+
+
+def verify_foreground_evidence(gui):
+    expected = {
+        'hwnd': gui.get('window_handle'),
+        'process_id': gui.get('process_id'),
+        'session_id': gui.get('session_id'),
+        'window_class': gui.get('window_class'),
+    }
+    if (any(type(expected[key]) is not int or expected[key] <= 0
+            for key in ('hwnd', 'process_id', 'session_id')) or
+            expected['window_class'] != 'DarkReNamerWindow'):
+        raise ValueError('VM candidate GUI target window binding is invalid.')
+    activation = gui.get('foreground_activation')
+    if not isinstance(activation, dict) or set(activation) != {
+            'initial', 'uia_set_focus', 'set_foreground_window', 'final', 'capture_change'}:
+        raise ValueError('VM candidate foreground activation evidence is invalid.')
+    for name in ('initial', 'final'):
+        observed = activation[name]
+        if (not isinstance(observed, dict) or set(observed) != set(expected) or
+                type(observed['hwnd']) is not int or type(observed['process_id']) is not int or
+                (observed['session_id'] is not None and type(observed['session_id']) is not int) or
+                not isinstance(observed['window_class'], str) or
+                len(observed['window_class']) > 255):
+            raise ValueError('VM candidate foreground window observation is invalid.')
+    if activation['final'] != expected or activation['capture_change'] is not None:
+        raise ValueError('VM candidate GUI did not retain the bound foreground window.')
+    if activation['uia_set_focus'] not in {
+            'not_attempted', 'succeeded', 'failed', 'element_unavailable'}:
+        raise ValueError('VM candidate foreground activation outcome is invalid.')
+    attempted = activation['uia_set_focus'] != 'not_attempted'
+    if ((not attempted and activation['set_foreground_window'] is not None) or
+            (attempted and type(activation['set_foreground_window']) is not bool)):
+        raise ValueError('VM candidate SetForegroundWindow outcome is invalid.')
+
+
+def verify_flow_foreground_observation(observation, gui, expected_label, expected_class):
+    if not isinstance(observation, dict) or set(observation) != {
+            'label', 'target_hwnd', 'initial', 'uia_set_focus',
+            'set_foreground_window', 'final', 'capture_change'}:
+        raise ValueError('VM candidate flow foreground observation shape is invalid.')
+    if observation['label'] != expected_label:
+        raise ValueError('VM candidate flow foreground label is invalid.')
+    target_hwnd = observation['target_hwnd']
+    if type(target_hwnd) is not int or target_hwnd <= 0:
+        raise ValueError('VM candidate flow foreground target is invalid.')
+    for name in ('initial', 'final'):
+        actual = observation[name]
+        if (not isinstance(actual, dict) or set(actual) != {
+                'hwnd', 'process_id', 'session_id', 'window_class'} or
+                type(actual['hwnd']) is not int or actual['hwnd'] < 0 or
+                type(actual['process_id']) is not int or actual['process_id'] < 0 or
+                (actual['session_id'] is not None and
+                 (type(actual['session_id']) is not int or actual['session_id'] < 0)) or
+                not isinstance(actual['window_class'], str) or
+                len(actual['window_class']) > 255):
+            raise ValueError('VM candidate flow foreground window evidence is invalid.')
+    final = observation['final']
+    if final['hwnd'] != target_hwnd:
+        raise ValueError('VM candidate flow foreground final HWND differs from its target.')
+    if final['process_id'] != gui['process_id']:
+        raise ValueError('VM candidate flow foreground process binding is invalid.')
+    if final['session_id'] != gui['session_id']:
+        raise ValueError('VM candidate flow foreground session binding is invalid.')
+    if final['window_class'] != expected_class:
+        raise ValueError('VM candidate flow foreground window class is invalid.')
+    if observation['uia_set_focus'] not in {
+            'not_attempted', 'succeeded', 'failed', 'element_unavailable'}:
+        raise ValueError('VM candidate flow foreground activation outcome is invalid.')
+    attempted = observation['uia_set_focus'] != 'not_attempted'
+    if ((not attempted and observation['set_foreground_window'] is not None) or
+            (attempted and type(observation['set_foreground_window']) is not bool)):
+        raise ValueError('VM candidate flow foreground SetForegroundWindow outcome is invalid.')
+    if observation['capture_change'] is not None:
+        raise ValueError('VM candidate flow foreground changed during capture.')
+
+
+def verify_gui_flow(root, manifest, flow, require_checkpoints=False, gui_binding=None):
     if not isinstance(flow, dict):
         raise ValueError('VM production GUI flow is missing or invalid.')
     if 'status' not in flow:
@@ -318,9 +620,12 @@ def verify_gui_flow(root, manifest, flow):
         return False
     if flow.get('scope') != 'production-file-add-prefix-cancel-confirm':
         raise ValueError('VM production GUI flow scope is invalid.')
-    if (flow.get('application_file') != manifest['application']['file'] or
-            flow.get('application_sha256') != manifest['application']['sha256']):
+    application = application_record(manifest)
+    if (flow.get('application_file') != application['file'] or
+            flow.get('application_sha256') != application['sha256']):
         raise ValueError('VM production GUI flow differs from the application artifact.')
+    if require_checkpoints and flow.get('input_mode') != 'uia-functional':
+        raise ValueError('VM candidate GUI flow input mode is invalid.')
     if (flow.get('source_name') != 'vm-flow-source.txt' or
             flow.get('preview_name') != 'vm-confirmed-vm-flow-source.txt'):
         raise ValueError('VM production GUI flow fixture names are invalid.')
@@ -361,16 +666,56 @@ def verify_gui_flow(root, manifest, flow):
         with screenshot.open('rb') as stream:
             if stream.read(8) != b'\x89PNG\r\n\x1a\n':
                 raise ValueError('VM production GUI flow screenshot is not a PNG.')
+    if require_checkpoints:
+        observations = flow.get('foreground_observations')
+        expected_observations = (
+            ('production rename preview', 'DarkReNamerWindow'),
+            ('apply confirmation task dialog', '#32770'),
+        )
+        if not isinstance(observations, list) or len(observations) != len(expected_observations):
+            raise ValueError('VM candidate flow foreground observations are incomplete.')
+        for observation, (label, window_class) in zip(observations, expected_observations):
+            verify_flow_foreground_observation(
+                observation, gui_binding, label, window_class)
+        raw = verify_flow_checkpoints(flow)
+        if (flow.get('before_content_sha256') != raw['initial']['content_sha256'] or
+                flow.get('after_content_sha256') != raw['after_apply']['content_sha256'] or
+                flow.get('before_file_identity_sha256') != raw['initial']['file_identity_sha256'] or
+                flow.get('after_file_identity_sha256') != raw['after_apply']['file_identity_sha256'] or
+                flow.get('cancellation_source_present') is not True or
+                flow.get('cancellation_destination_present') is not False or
+                flow.get('confirmed_source_present') is not False or
+                flow.get('confirmed_destination_present') is not True or
+                type(flow.get('journal_residue_count')) is not int or
+                flow['journal_residue_count'] != 0):
+            raise ValueError('VM candidate GUI summary contradicts raw checkpoints.')
     return True
 
 
 def verify_result(root, manifest, result, expected_transport_kind=None, expected_vm_id=None):
-    for key in ('schema_version', 'source_sha', 'source_state', 'target'):
-        if result.get(key) != manifest[key]:
-            raise ValueError('VM result source binding mismatch: ' + key)
+    if type(manifest.get('schema_version')) is not int or manifest['schema_version'] not in (1, 2):
+        raise ValueError('VM bundle schema version is invalid.')
+    candidate = manifest['schema_version'] == 2
+    if candidate:
+        for key in ('schema_version', 'lane', 'target', 'product', 'harness'):
+            if result.get(key) != manifest[key]:
+                raise ValueError('VM result candidate binding mismatch: ' + key)
+        if manifest.get('lane') != 'candidate-gui-only':
+            raise ValueError('VM candidate lane is invalid.')
+        for record in (
+                *manifest['product']['provenance'].values(),
+                manifest['harness']['launcher'], manifest['harness']['controller'],
+                manifest['harness']['runner'], *manifest['harness']['validators'].values()):
+            checked_artifact(root, record)
+    else:
+        for key in ('schema_version', 'source_sha', 'source_state', 'target'):
+            if result.get(key) != manifest[key]:
+                raise ValueError('VM result source binding mismatch: ' + key)
     expected = {row['file']: row for row in manifest['test_binaries']}
     rows = result.get('tests', [])
-    if len(rows) != len(expected) or {row['file'] for row in rows} != set(expected):
+    if (not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows) or
+            len(rows) != len(expected) or
+            {row.get('file') for row in rows} != set(expected)):
         raise ValueError('VM result has missing, duplicate, or unexpected test binaries.')
     passed = result.get('status') == 'passed'
     total = 0
@@ -395,9 +740,10 @@ def verify_result(root, manifest, result, expected_transport_kind=None, expected
             passed = False
         if type(row.get('passed')) is int:
             total += row['passed']
-    checked_artifact(root, manifest['application'])
+    application = application_record(manifest)
+    checked_artifact(root, application)
     gui = result.get('gui', {})
-    if gui.get('file') != manifest['application']['file'] or gui.get('sha256') != manifest['application']['sha256']:
+    if gui.get('file') != application['file'] or gui.get('sha256') != application['sha256']:
         raise ValueError('VM GUI result differs from the application artifact.')
     if gui.get('status') != 'passed':
         passed = False
@@ -408,11 +754,26 @@ def verify_result(root, manifest, result, expected_transport_kind=None, expected
         with screenshot.open('rb') as stream:
             if stream.read(8) != b'\x89PNG\r\n\x1a\n':
                 raise ValueError('GUI screenshot is not a PNG.')
-        if not verify_gui_flow(root, manifest, gui.get('flow', {})):
+        if not verify_gui_flow(root, manifest, gui.get('flow', {}), candidate, gui):
             passed = False
+        if candidate:
+            if type(gui.get('exit_code')) is not int or gui['exit_code'] != 0:
+                raise ValueError('VM candidate GUI process exit code is invalid.')
+            verify_foreground_evidence(gui)
     transport = result.get('transport', {})
-    if transport.get('guest_cleanup') is not True or total == 0:
+    if transport.get('guest_cleanup') is not True or (not candidate and total == 0):
         passed = False
+    if candidate:
+        engine = transport.get('runner_engine')
+        if (not isinstance(engine, dict) or set(engine) != {
+                'executable', 'version', 'edition', 'effective_policy'} or
+                not isinstance(engine['executable'], str) or
+                not engine['executable'].lower().endswith('\\pwsh.exe') or
+                not isinstance(engine['version'], str) or
+                not re.fullmatch(r'[0-9]+\.[0-9]+(?:\.[0-9]+){0,2}', engine['version']) or
+                tuple(int(part) for part in engine['version'].split('.')[:2]) < (7, 4) or
+                engine['edition'] != 'Core' or engine['effective_policy'] != 'RemoteSigned'):
+            raise ValueError('VM candidate runner engine binding is invalid.')
     if expected_transport_kind is not None:
         expected_platform = 'Unix' if expected_transport_kind == 'ssh' else 'Win32NT'
         if transport.get('kind') != expected_transport_kind or transport.get('host_platform') != expected_platform:
@@ -420,6 +781,225 @@ def verify_result(root, manifest, result, expected_transport_kind=None, expected
     if expected_vm_id is not None and transport.get('vm_id') != expected_vm_id:
         raise ValueError('VM result Hyper-V identity binding mismatch.')
     return passed
+
+
+def clean_source_identity(root, label):
+    root = Path(root).resolve(strict=True)
+    top = Path(subprocess.check_output(
+        ['git', '-C', str(root), 'rev-parse', '--show-toplevel'], text=True).strip()).resolve(strict=True)
+    if top != root:
+        raise ValueError(label + ' must be an exact Git worktree root.')
+    if subprocess.check_output(['git', '-C', str(root), 'status', '--porcelain'], text=True).strip():
+        raise ValueError(label + ' must be clean.')
+    source_sha = subprocess.check_output(
+        ['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
+    if not re.fullmatch(r'[0-9a-f]{40}', source_sha):
+        raise ValueError(label + ' HEAD is invalid.')
+    return root, source_sha
+
+
+def ordinary_input_file(path, label):
+    path = Path(path)
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        raise ValueError(label + ' must be an absolute ordinary file.')
+    return path.resolve(strict=True)
+
+
+def ordinary_input_directory(path, label):
+    path = Path(path)
+    if not path.is_absolute() or path.is_symlink() or not path.is_dir():
+        raise ValueError(label + ' must be an absolute ordinary directory.')
+    return path.resolve(strict=True)
+
+
+def require_windows_pwsh74():
+    if not WINDOWS_PWSH.is_file():
+        raise RuntimeError('Candidate handoff validation requires installed Windows PowerShell 7.4+ Core.')
+    engine = json.loads(subprocess.check_output([
+        str(WINDOWS_PWSH), '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+        '[ordered]@{version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;'
+        'effective_policy=(Get-ExecutionPolicy).ToString()} | ConvertTo-Json -Compress',
+    ], text=True, timeout=30))
+    try:
+        version = tuple(int(part) for part in engine['version'].split('.')[:2])
+    except (KeyError, AttributeError, ValueError):
+        version = (0, 0)
+    if (version < (7, 4) or engine.get('edition') != 'Core' or
+            engine.get('effective_policy') != 'RemoteSigned'):
+        raise RuntimeError('Candidate validation requires Windows PowerShell 7.4+ Core under its existing RemoteSigned policy.')
+    return WINDOWS_PWSH
+
+
+def run_candidate_validators(validator_root, source_root, handoff_root, run_metadata,
+                             artifact_metadata, args):
+    executable = require_windows_pwsh74()
+    handoff_validator = validator_root / 'validate-release-handoff.ps1'
+    metadata_validator = validator_root / 'validate-release-candidate-metadata.ps1'
+    subprocess.run([
+        str(executable), '-NoLogo', '-NoProfile', '-NonInteractive', '-File',
+        winpath(handoff_validator), '-SourceRoot', winpath(source_root),
+        '-HandoffRoot', winpath(handoff_root),
+    ], text=True, check=True, timeout=300)
+    artifact_name = ('DarkReNamer-dry-run-' + args.candidate_workflow_run + '-'
+                     + args.candidate_run_attempt + '-windows')
+    subprocess.run([
+        str(executable), '-NoLogo', '-NoProfile', '-NonInteractive', '-File',
+        winpath(metadata_validator), '-RunMetadataPath', winpath(run_metadata),
+        '-ArtifactMetadataPath', winpath(artifact_metadata),
+        '-ExpectedRunId', args.candidate_workflow_run,
+        '-ExpectedRunAttempt', args.candidate_run_attempt,
+        '-ExpectedArtifactId', args.candidate_artifact_id,
+        '-ExpectedSourceSha', args.candidate_source_sha,
+        '-ExpectedArtifactName', artifact_name,
+    ], text=True, check=True, timeout=60)
+    return artifact_name
+
+
+def build_candidate_bundle(repo, root, args):
+    repo, harness_sha = clean_source_identity(repo, 'Harness source')
+    source_root, product_sha = clean_source_identity(args.candidate_source_root, 'Candidate source')
+    if product_sha != args.candidate_source_sha:
+        raise ValueError('Candidate source HEAD does not match --candidate-source-sha.')
+    handoff_root = ordinary_input_directory(args.candidate_handoff_root, 'Candidate handoff root')
+    run_metadata = ordinary_input_file(args.candidate_run_metadata, 'Candidate run metadata')
+    artifact_metadata = ordinary_input_file(
+        args.candidate_artifact_metadata, 'Candidate artifact metadata')
+    handoff_metadata = ordinary_input_file(
+        handoff_root / 'release-handoff.json', 'Release handoff metadata')
+    handoff_executable = ordinary_input_file(
+        handoff_root / 'DarkReNamer.exe', 'Release handoff executable')
+    actual_handoff_names = {entry.name for entry in handoff_root.iterdir()}
+    if actual_handoff_names != set(HANDOFF_FILES):
+        raise ValueError('Candidate handoff root must contain the exact release handoff layout.')
+    handoff_sources = {
+        'handoff/' + name: ordinary_input_file(
+            handoff_root / name, 'Release handoff file ' + name)
+        for name in HANDOFF_FILES
+    }
+    metadata_sources = {
+        'metadata/candidate-run.json': run_metadata,
+        'metadata/candidate-artifact.json': artifact_metadata,
+    }
+    harness_sources = {
+        'scripts/' + name: ordinary_input_file(
+            repo / 'scripts' / name, 'Candidate harness file ' + name)
+        for name in CANDIDATE_HARNESS_FILES
+    }
+    frozen_sources = {**handoff_sources, **metadata_sources, **harness_sources}
+    # Freeze every externally supplied and harness input before the first copy.
+    frozen = {name: sha256(path) for name, path in frozen_sources.items()}
+    if frozen['handoff/DarkReNamer.exe'] != args.candidate_executable_sha256:
+        raise ValueError('Release handoff executable differs from the explicit candidate digest.')
+
+    root = Path(root)
+    with tempfile.TemporaryDirectory(
+            prefix='.darkrenamer-vm-stage-', dir=handoff_root.parent) as stage_directory:
+        stage = Path(stage_directory)
+        for name, source in frozen_sources.items():
+            copy_frozen_file(source, stage / name, frozen[name], 'Candidate staged ' + name)
+        staged_handoff = stage / 'handoff'
+        staged_run = stage / 'metadata' / 'candidate-run.json'
+        staged_artifact = stage / 'metadata' / 'candidate-artifact.json'
+        validate_candidate_provenance_json(
+            staged_handoff / 'release-handoff.json', staged_run, staged_artifact, args)
+        artifact_name = run_candidate_validators(
+            stage / 'scripts', source_root, staged_handoff,
+            staged_run, staged_artifact, args)
+        verify_frozen_files(
+            {name: stage / name for name in frozen_sources}, frozen,
+            'Staged candidate inputs')
+
+        root.mkdir(parents=True)
+        bundle_sources = {
+            'DarkReNamer.exe': 'handoff/DarkReNamer.exe',
+            'release-handoff.json': 'handoff/release-handoff.json',
+            'candidate-run.json': 'metadata/candidate-run.json',
+            'candidate-artifact.json': 'metadata/candidate-artifact.json',
+            **{name: 'scripts/' + name for name in CANDIDATE_HARNESS_FILES},
+        }
+        for destination_name, staged_name in bundle_sources.items():
+            copy_frozen_file(
+                stage / staged_name, root / destination_name, frozen[staged_name],
+                'Candidate bundle ' + destination_name)
+        bundle_frozen_sources = {
+            staged_name: root / destination_name
+            for destination_name, staged_name in bundle_sources.items()
+        }
+        verify_frozen_files(bundle_frozen_sources, frozen, 'Candidate bundle files')
+
+    verify_frozen_files(frozen_sources, frozen, 'Candidate inputs')
+    _, final_harness_sha = clean_source_identity(repo, 'Harness source')
+    _, final_product_sha = clean_source_identity(source_root, 'Candidate source')
+    if final_harness_sha != harness_sha or final_product_sha != product_sha:
+        raise RuntimeError('Source checkout changed during candidate bundle creation.')
+    verify_frozen_files(bundle_frozen_sources, frozen, 'Candidate bundle files')
+    manifest = {
+        'schema_version': 2,
+        'lane': 'candidate-gui-only',
+        'target': TARGET,
+        'product': {
+            'source_sha': product_sha,
+            'source_state': 'clean',
+            'candidate': {
+                'workflow_run': args.candidate_workflow_run,
+                'run_attempt': args.candidate_run_attempt,
+                'artifact_id': args.candidate_artifact_id,
+                'artifact_name': artifact_name,
+                'origin_authentication': 'pending-hosted',
+            },
+            'application': {
+                'file': 'DarkReNamer.exe',
+                'sha256': frozen['handoff/DarkReNamer.exe'],
+            },
+            'provenance': {
+                'release_handoff': {
+                    'file': 'release-handoff.json',
+                    'sha256': frozen['handoff/release-handoff.json'],
+                },
+                'run_metadata': {
+                    'file': 'candidate-run.json',
+                    'sha256': frozen['metadata/candidate-run.json'],
+                },
+                'artifact_metadata': {
+                    'file': 'candidate-artifact.json',
+                    'sha256': frozen['metadata/candidate-artifact.json'],
+                },
+            },
+        },
+        'harness': {
+            'source_sha': harness_sha,
+            'source_state': 'clean',
+            'launcher': {
+                'file': 'test-windows-vm.py',
+                'sha256': frozen['scripts/test-windows-vm.py'],
+            },
+            'controller': {
+                'file': 'run-windows-vm-tests.ps1',
+                'sha256': frozen['scripts/run-windows-vm-tests.ps1'],
+            },
+            'runner': {
+                'file': 'windows-vm-guest.ps1',
+                'sha256': frozen['scripts/windows-vm-guest.ps1'],
+            },
+            'validators': {
+                'release_handoff': {
+                    'file': 'validate-release-handoff.ps1',
+                    'sha256': frozen['scripts/validate-release-handoff.ps1'],
+                },
+                'candidate_metadata': {
+                    'file': 'validate-release-candidate-metadata.ps1',
+                    'sha256': frozen['scripts/validate-release-candidate-metadata.ps1'],
+                },
+                'binary_measurement': {
+                    'file': 'measure-windows-binary.ps1',
+                    'sha256': frozen['scripts/measure-windows-binary.ps1'],
+                },
+            },
+        },
+        'test_binaries': [],
+    }
+    (root / 'bundle.json').write_text(json.dumps(manifest, indent=2))
+    return manifest
 
 
 def build_bundle(repo, root):
@@ -464,17 +1044,25 @@ def main():
     repo = Path(__file__).resolve().parent.parent
     if args.prepare_only:
         root = resolve_prepare_output_root(repo, args.output)
-        manifest = build_bundle(repo, root)
+        manifest = (build_candidate_bundle(repo, root, args) if args.candidate_mode
+                    else build_bundle(repo, root))
+        application = application_record(manifest)
         print(json.dumps({
             'status': 'prepared',
-            'source_sha': manifest['source_sha'],
-            'application_sha256': manifest['application']['sha256'],
+            'lane': manifest.get('lane', 'source-built-native'),
+            'source_sha': (manifest['product']['source_sha'] if args.candidate_mode
+                           else manifest['source_sha']),
+            'application_sha256': application['sha256'],
             'bundle': str(root),
         }))
         return 0
     root, defaults, pwsh = prepare_transport(repo, args)
-    manifest = build_bundle(repo, root)
-    print('Executing ' + str(len(manifest['test_binaries'])) + ' Windows test binaries in the VM.', flush=True)
+    manifest = (build_candidate_bundle(repo, root, args) if args.candidate_mode
+                else build_bundle(repo, root))
+    if args.candidate_mode:
+        print('Executing exact-candidate GUI-only validation in the VM.', flush=True)
+    else:
+        print('Executing ' + str(len(manifest['test_binaries'])) + ' Windows test binaries in the VM.', flush=True)
     print('Evidence: ' + str(root), flush=True)
     transport_ok = True
     try:
@@ -484,11 +1072,12 @@ def main():
     result_path = root / 'result.json'
     if not result_path.is_file():
         raise RuntimeError('The VM did not return a test result. Inspect the external transport result/logs.')
-    result = json.loads(result_path.read_text(encoding='utf-8-sig'))
+    result = read_json_strict(result_path)
     transport_kind = 'ssh' if args.ssh_host else 'powershell_direct'
     verified = verify_result(root, manifest, result, transport_kind, args.expected_vm_id)
     total = sum(row.get('passed') or 0 for row in result['tests'])
-    print(('PASS' if transport_ok and verified else 'FAIL') + ': ' + str(total) + ' tests passed; GUI=' + result.get('gui', {}).get('status', 'not-run'))
+    print(('PASS' if transport_ok and verified else 'FAIL') + ': ' + str(total) +
+          ' tests passed; GUI=' + result.get('gui', {}).get('status', 'not-run'))
     print('This native VM run is not the complete Windows release acceptance matrix.')
     return 0 if transport_ok and verified else 1
 
