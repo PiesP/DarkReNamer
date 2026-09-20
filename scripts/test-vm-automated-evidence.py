@@ -14,6 +14,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import warnings
 import zlib
 from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile, ZipInfo
@@ -444,6 +445,113 @@ class CanonicalStatementTests(unittest.TestCase):
         statement["required_gates"].pop()
         with self.assertRaisesRegex(evidence.EvidenceError, "gate IDs"):
             evidence.serialize_canonical_statement(statement)
+
+
+class IndexedArchiveTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.archive = self.root / "evidence.zip"
+        self.entries = {"campaign.json": b'{"attempts": []}', "raw/checkpoint.json": b'{}'}
+
+    def write(self, *, index_bytes=None, extra=None) -> None:
+        index = {"schema": "darkrenamer-vm-automated-index-v1", "files": {
+            path: {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+            for path, data in self.entries.items()}}
+        entries = {"evidence-index.json": index_bytes if index_bytes is not None else json.dumps(index).encode(),
+                   **self.entries, **(extra or {})}
+        write_zip(self.archive, entries)
+
+    def extract(self):
+        return evidence.open_indexed_evidence_archive(self.archive, archive_reference(self.archive), self.root)
+
+    def test_pinned_index_extracts_and_cleans(self) -> None:
+        self.write()
+        with self.extract() as result:
+            path = result.root
+            self.assertEqual((path / "campaign.json").read_bytes(), self.entries["campaign.json"])
+            self.assertEqual(set(result.files), {*self.entries, "evidence-index.json"})
+        self.assertFalse(path.exists())
+
+    def test_external_pin_is_required_before_bootstrap(self) -> None:
+        self.write()
+        with self.assertRaises(evidence.EvidenceError):
+            with evidence.open_indexed_evidence_archive(self.archive, file_reference(b"other"), self.root):
+                self.fail("Wrong pin accepted")
+
+    def test_unindexed_member_rejected(self) -> None:
+        self.write(extra={"surprise.ps1": b"exit 0"})
+        with self.assertRaisesRegex(evidence.EvidenceError, "unexpected file"):
+            with self.extract():
+                self.fail("Unindexed file accepted")
+
+    def test_duplicate_index_and_json_keys_rejected(self) -> None:
+        self.write(index_bytes=b'{"schema":"a","schema":"b","files":{}}')
+        with self.assertRaises(evidence.EvidenceError):
+            with self.extract():
+                self.fail("Duplicate JSON key accepted")
+        self.write()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            with ZipFile(self.archive, "a") as archive:
+                archive.writestr("evidence-index.json", b"{}")
+        with self.assertRaisesRegex(evidence.EvidenceError, "one fixed"):
+            with self.extract():
+                self.fail("Duplicate index accepted")
+
+    def test_index_cannot_refer_to_itself_or_escape(self) -> None:
+        for name in ("evidence-index.json", "../outside", "Campaign.json"):
+            index = {"schema": "darkrenamer-vm-automated-index-v1", "files": {
+                "campaign.json": {"sha256": "0" * 64, "size": 0},
+                name: {"sha256": "0" * 64, "size": 0}}}
+            self.write(index_bytes=json.dumps(index).encode())
+            with self.subTest(name=name), self.assertRaises(evidence.EvidenceError):
+                with self.extract():
+                    self.fail("Unsafe index accepted")
+
+    def test_forged_index_size_cannot_hide_raw_tail(self) -> None:
+        self.write(index_bytes=b'{}' + b' ' * 100)
+        underreport_first_member(self.archive, b'{}')
+        with self.assertRaises(evidence.EvidenceError):
+            with self.extract():
+                self.fail("Hidden index payload accepted")
+
+    def test_index_member_size_bound(self) -> None:
+        self.write(index_bytes=b'x' * (1024 * 1024 + 1))
+        with self.assertRaisesRegex(evidence.EvidenceError, "bound"):
+            with self.extract():
+                self.fail("Oversized index accepted")
+
+    def test_directory_bound_precedes_zipinfo_allocation(self) -> None:
+        self.write()
+        original = self.archive.read_bytes()
+        for mutation in ("count", "zip64", "directory_size", "hidden_entries"):
+            data = bytearray(original)
+            end = data.rfind(b"PK\x05\x06")
+            if mutation in ("count", "zip64", "hidden_entries"):
+                count = {"count": 2049, "zip64": 0xFFFF, "hidden_entries": 1}[mutation]
+                struct.pack_into("<HH", data, end + 8, count, count)
+            else:
+                struct.pack_into("<I", data, end + 12, 4 * 1024 * 1024 + 1)
+            self.archive.write_bytes(data)
+            with self.subTest(mutation=mutation), patch.object(evidence, "ZipFile") as constructor:
+                with self.assertRaises(evidence.EvidenceError):
+                    with self.extract():
+                        self.fail("Unsafe directory accepted")
+                constructor.assert_not_called()
+
+    def test_actual_over_entry_directory_rejected_before_constructor(self) -> None:
+        write_zip(self.archive, {f"f{number}": b"" for number in range(2049)})
+        data = bytearray(self.archive.read_bytes())
+        end = data.rfind(b"PK\x05\x06")
+        struct.pack_into("<HH", data, end + 8, 1, 1)
+        self.archive.write_bytes(data)
+        with patch.object(evidence, "ZipFile") as constructor:
+            with self.assertRaisesRegex(evidence.EvidenceError, "too many"):
+                with self.extract():
+                    self.fail("Forged count hid oversized directory")
+            constructor.assert_not_called()
 
 
 if __name__ == "__main__":
