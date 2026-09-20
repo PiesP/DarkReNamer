@@ -1458,6 +1458,31 @@ function Write-AcceptanceWorkerPartialWitnessEvidence {
         -Path $path -PrivateRoot $PrivateRoot -Boundary 'worker-partial'
 }
 
+function Select-AcceptanceUiDiagnosticApplication {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Applications)
+
+    $latest = $null
+    for ($index = $Applications.Count - 1; $index -ge 0; $index--) {
+        $application = $Applications[$index]
+        if ($null -eq $application) {
+            continue
+        }
+        if ($null -eq $latest) {
+            $latest = $application
+        }
+        try {
+            $process = $application.owned.process
+            $process.Refresh()
+            if (-not $process.HasExited) {
+                return $application
+            }
+        }
+        catch {
+        }
+    }
+    return $latest
+}
+
 function Get-AcceptanceUiDiagnostic {
     param([AllowNull()][object] $Application)
 
@@ -3249,7 +3274,9 @@ function Invoke-AcceptanceSession {
     catch {
         $sessionError = $_
         try {
-            $uiDiagnostic = Get-AcceptanceUiDiagnostic -Application $first
+            $diagnosticApplication = Select-AcceptanceUiDiagnosticApplication `
+                -Applications $applications.ToArray()
+            $uiDiagnostic = Get-AcceptanceUiDiagnostic -Application $diagnosticApplication
             Write-AcceptanceNewUtf8Json `
                 -Path (Join-Path $PrivateRoot 'session-ui-diagnostic.json') -Value $uiDiagnostic
         }

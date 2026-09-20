@@ -1079,6 +1079,25 @@ try {
         throw 'The worker partial witness omitted actual names, process binding, or root identity.'
     }
 
+    $exitedDiagnosticProcess = [pscustomobject]@{ HasExited = $true }
+    $exitedDiagnosticProcess | Add-Member -MemberType ScriptMethod -Name Refresh -Value {}
+    $runningDiagnosticProcess = [pscustomobject]@{ HasExited = $false }
+    $runningDiagnosticProcess | Add-Member -MemberType ScriptMethod -Name Refresh -Value {}
+    $exitedDiagnosticApplication = [pscustomobject]@{
+        owned = [pscustomobject]@{ process = $exitedDiagnosticProcess }
+    }
+    $runningDiagnosticApplication = [pscustomobject]@{
+        owned = [pscustomobject]@{ process = $runningDiagnosticProcess }
+    }
+    $diagnosticApplication = Select-AcceptanceUiDiagnosticApplication `
+        -Applications @($exitedDiagnosticApplication, $runningDiagnosticApplication)
+    if (-not [object]::ReferenceEquals(
+            $diagnosticApplication,
+            $runningDiagnosticApplication
+        )) {
+        throw 'Failure diagnostics did not select the latest live acceptance application.'
+    }
+
     $actionTarget = [ordered]@{
         pid = 101
         session_id = 1

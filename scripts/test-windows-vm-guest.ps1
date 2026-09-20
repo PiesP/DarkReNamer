@@ -185,6 +185,50 @@ try {
         throw 'The candidate product and harness normalization contract is invalid.'
     }
 
+    $topLevelCandidate = [pscustomobject]@{
+        Current = [pscustomobject]@{ NativeWindowHandle = 101 }
+    }
+    $fallbackCandidate = [pscustomobject]@{
+        Current = [pscustomobject]@{ NativeWindowHandle = 102 }
+    }
+    $fallbackProbe = [pscustomobject]@{ calls = 0 }
+    $fallbackQuery = {
+        $fallbackProbe.calls++
+        $fallbackCandidate
+    }.GetNewClosure()
+    $selected = Resolve-UniqueAutomationWindowCandidate `
+        -TopLevelCandidates @($topLevelCandidate) `
+        -FallbackQuery $fallbackQuery `
+        -Label 'top-level fixture'
+    if ($selected.Current.NativeWindowHandle -ne 101 -or $fallbackProbe.calls -ne 0) {
+        throw 'A unique top-level window did not bypass the descendant fallback query.'
+    }
+    $selected = Resolve-UniqueAutomationWindowCandidate `
+        -TopLevelCandidates @() `
+        -FallbackQuery $fallbackQuery `
+        -Label 'fallback fixture'
+    if ($selected.Current.NativeWindowHandle -ne 102 -or $fallbackProbe.calls -ne 1) {
+        throw 'The descendant fallback did not run exactly once after an empty top-level query.'
+    }
+    $ambiguousCandidate = [pscustomobject]@{
+        Current = [pscustomobject]@{ NativeWindowHandle = 103 }
+    }
+    Assert-Fails {
+        Resolve-UniqueAutomationWindowCandidate `
+            -TopLevelCandidates @($topLevelCandidate, $ambiguousCandidate) `
+            -FallbackQuery $fallbackQuery `
+            -Label 'ambiguous fixture'
+    } 'matched more than one top-level window'
+    if ($fallbackProbe.calls -ne 1) {
+        throw 'An ambiguous top-level query incorrectly invoked the descendant fallback.'
+    }
+    Assert-Fails {
+        Resolve-UniqueAutomationWindowCandidate `
+            -TopLevelCandidates @() `
+            -FallbackQuery { @($fallbackCandidate, $ambiguousCandidate) } `
+            -Label 'ambiguous fallback fixture'
+    } 'matched more than one top-level window'
+
     $candidateSwappedObserver = New-CandidateFixture -Name 'candidate-swapped-observer'
     $uiObserver = $candidateSwappedObserver.manifest.harness.observers.ui
     $candidateSwappedObserver.manifest.harness.observers.ui =

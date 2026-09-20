@@ -1345,6 +1345,31 @@ function Find-UniqueAutomationElement {
     throw "$Label was not found before the bounded deadline."
 }
 
+function Resolve-UniqueAutomationWindowCandidate {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $TopLevelCandidates,
+        [AllowNull()][scriptblock] $FallbackQuery,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    $candidates = @($TopLevelCandidates)
+    if ($candidates.Count -eq 0 -and $null -ne $FallbackQuery) {
+        $candidates = @(& $FallbackQuery)
+    }
+    $windows = @{}
+    foreach ($candidate in $candidates) {
+        $windows[[string]$candidate.Current.NativeWindowHandle] = $candidate
+    }
+    $matches = @($windows.Values)
+    if ($matches.Count -gt 1) {
+        throw "$Label matched more than one top-level window."
+    }
+    if ($matches.Count -eq 1) {
+        return $matches[0]
+    }
+    return $null
+}
+
 function Wait-UniqueAutomationWindow {
     param(
         [Parameter(Mandatory)][Diagnostics.Process] $Process,
@@ -1381,7 +1406,6 @@ function Wait-UniqueAutomationWindow {
     $condition = [Windows.Automation.AndCondition]::new($conditions)
     $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
     do {
-        $windows = @{}
         $main = if ($null -eq $Owner) {
             [Windows.Automation.AutomationElement]::FromHandle($Process.MainWindowHandle)
         }
@@ -1392,19 +1416,20 @@ function Wait-UniqueAutomationWindow {
         if ($null -ne $Owner) {
             $candidates += @($Owner.FindAll([Windows.Automation.TreeScope]::Children, $condition))
         }
-        elseif ($null -ne $main) {
+        $fallbackQuery = if ($null -eq $Owner -and $null -ne $main) {
             # Managed Win32 providers place owned dialogs below their owner.
-            $candidates += @($main.FindAll([Windows.Automation.TreeScope]::Descendants, $condition))
+            {
+                @($main.FindAll([Windows.Automation.TreeScope]::Descendants, $condition))
+            }.GetNewClosure()
         }
-        foreach ($candidate in $candidates) {
-            $windows[[string]$candidate.Current.NativeWindowHandle] = $candidate
+        else {
+            $null
         }
-        $matches = @($windows.Values)
-        if ($matches.Count -gt 1) {
-            throw "$Label matched more than one top-level window."
-        }
-        if ($matches.Count -eq 1) {
-            $element = $matches[0]
+        $element = Resolve-UniqueAutomationWindowCandidate `
+            -TopLevelCandidates $candidates `
+            -FallbackQuery $fallbackQuery `
+            -Label $Label
+        if ($null -ne $element) {
             Assert-AutomationBinding `
                 -Element $element `
                 -Process $Process `
