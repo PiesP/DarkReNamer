@@ -1,0 +1,374 @@
+{
+  "schema_version": 1,
+  "modules": [
+    {
+      "role": "tooling-loader",
+      "source": "scripts/tooling_bootstrap.py",
+      "bundle": "tooling-loader.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.loader",
+      "sha256": "3df749e355d4580b6fd6d772b987fa59215742d4a64728bbe4f0fa46ac97a0da",
+      "dependencies": [
+        "package-root"
+      ]
+    },
+    {
+      "role": "package-root",
+      "source": "scripts/darkrenamer_tooling/__init__.py",
+      "bundle": "tooling-package-root.py",
+      "kind": "python-package",
+      "module": "darkrenamer_tooling",
+      "sha256": "d03d882854e0a9f31a777aaceda31876d465f4fa15c010958bb3f58b29ee7b45",
+      "dependencies": []
+    },
+    {
+      "role": "package-campaign",
+      "source": "scripts/darkrenamer_tooling/campaign/__init__.py",
+      "bundle": "tooling-package-campaign.py",
+      "kind": "python-package",
+      "module": "darkrenamer_tooling.campaign",
+      "sha256": "6a39876a71528017a7794f95cabfa962e9d1f9531441697da964536a243780d3",
+      "dependencies": [
+        "package-root"
+      ]
+    },
+    {
+      "role": "campaign-planning",
+      "source": "scripts/darkrenamer_tooling/campaign/planning.py",
+      "bundle": "tooling-campaign-planning.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.campaign.planning",
+      "sha256": "503072d892f13482ac8993088bc740b8b322970491b7d0a4bfdbe7b94bfe9e04",
+      "dependencies": [
+        "package-root",
+        "package-campaign",
+        "package-contracts",
+        "contracts-binding",
+        "contracts-platform",
+        "package-evidence",
+        "evidence-archive"
+      ]
+    },
+    {
+      "role": "campaign-recovery",
+      "source": "scripts/darkrenamer_tooling/campaign/recovery.py",
+      "bundle": "tooling-campaign-recovery.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.campaign.recovery",
+      "sha256": "0a6a11b75a93ec1e825dbe7da370cc00b4099cce4e8c59ef8d993d46d8af6aae",
+      "dependencies": [
+        "package-root",
+        "package-campaign",
+        "campaign-planning",
+        "package-contracts",
+        "contracts-binding",
+        "contracts-platform",
+        "contracts-state",
+        "package-evidence",
+        "evidence-archive",
+        "evidence-png",
+        "evidence-recovery"
+      ]
+    },
+    {
+      "role": "campaign-verifier",
+      "source": "scripts/darkrenamer_tooling/campaign/verifier.py",
+      "bundle": "tooling-campaign-verifier.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.campaign.verifier",
+      "sha256": "70fe9d56f6953d1b175143c8ea27019cd844e402973c08906d2b90a5c7007d44",
+      "dependencies": [
+        "package-root",
+        "package-campaign",
+        "campaign-planning",
+        "campaign-recovery",
+        "package-contracts",
+        "contracts-binding",
+        "contracts-menu-layout",
+        "contracts-platform",
+        "contracts-state",
+        "contracts-tooling",
+        "package-evidence",
+        "evidence-archive",
+        "evidence-png"
+      ]
+    },
+    {
+      "role": "campaign-runner",
+      "source": "scripts/darkrenamer_tooling/campaign/runner.py",
+      "bundle": "tooling-campaign-runner.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.campaign.runner",
+      "sha256": "7a6f2a48ac91c5242008c580e2904777fa7f6b9c4d203e5e6c1545935570fde3",
+      "dependencies": [
+        "tooling-loader",
+        "package-root",
+        "package-campaign",
+        "campaign-planning",
+        "campaign-verifier",
+        "package-contracts",
+        "contracts-binding",
+        "contracts-tooling",
+        "package-evidence",
+        "evidence-archive",
+        "package-vm",
+        "vm-launcher",
+        "vm-gui"
+      ]
+    },
+    {
+      "role": "package-vm",
+      "source": "scripts/darkrenamer_tooling/vm/__init__.py",
+      "bundle": "tooling-package-vm.py",
+      "kind": "python-package",
+      "module": "darkrenamer_tooling.vm",
+      "sha256": "086d43165dd9eca25f5f0c3d28702829d95dd57e641988d7ab91dc0c57bf39c2",
+      "dependencies": [
+        "package-root"
+      ]
+    },
+    {
+      "role": "vm-launcher",
+      "source": "scripts/darkrenamer_tooling/vm/launcher.py",
+      "bundle": "tooling-vm-launcher.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.vm.launcher",
+      "sha256": "9eecd49f988550608d81bdfcb632581ba7479f2c47b79074a32ab18bc2ae2d4e",
+      "dependencies": [
+        "tooling-loader",
+        "package-root",
+        "package-vm",
+        "package-contracts",
+        "contracts-tooling",
+        "package-evidence",
+        "evidence-errors"
+      ]
+    },
+    {
+      "role": "vm-gui",
+      "source": "scripts/darkrenamer_tooling/vm/gui.py",
+      "bundle": "tooling-vm-gui.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.vm.gui",
+      "sha256": "d8b3090b23968ca4934b01d88eb93ed1994d4f6fe92f3c89507a6b89af22df60",
+      "dependencies": [
+        "tooling-loader",
+        "package-root",
+        "package-vm",
+        "vm-launcher",
+        "package-contracts",
+        "contracts-tooling",
+        "package-evidence",
+        "evidence-errors"
+      ]
+    },
+    {
+      "role": "package-contracts",
+      "source": "scripts/darkrenamer_tooling/contracts/__init__.py",
+      "bundle": "tooling-package-contracts.py",
+      "kind": "python-package",
+      "module": "darkrenamer_tooling.contracts",
+      "sha256": "8fe2a85224b0b96f4163c86a72375247d0aa4da9d4deb550cb0daaeed5b4924d",
+      "dependencies": [
+        "package-root"
+      ]
+    },
+    {
+      "role": "contracts-binding",
+      "source": "scripts/darkrenamer_tooling/contracts/binding.py",
+      "bundle": "tooling-contracts-binding.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.contracts.binding",
+      "sha256": "c545ddf594d22710ae0c96e7b81da1e7fe78d469cedd8fe4d7362f72aa3daa8a",
+      "dependencies": [
+        "package-root",
+        "package-contracts",
+        "package-evidence",
+        "evidence-archive"
+      ]
+    },
+    {
+      "role": "contracts-menu-layout",
+      "source": "scripts/darkrenamer_tooling/contracts/menu_layout.py",
+      "bundle": "tooling-contracts-menu-layout.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.contracts.menu_layout",
+      "sha256": "75f478dea9949d1ba3c2637d3dea7482d1bd48cfd6f45662946bddb5999a7034",
+      "dependencies": [
+        "package-root",
+        "package-contracts",
+        "contracts-platform",
+        "contracts-state",
+        "package-evidence",
+        "evidence-archive"
+      ]
+    },
+    {
+      "role": "contracts-platform",
+      "source": "scripts/darkrenamer_tooling/contracts/platform.py",
+      "bundle": "tooling-contracts-platform.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.contracts.platform",
+      "sha256": "bc4331b380db008385a7c192bcb070c1f1d56baf4eb60b084cd582cec610a1b7",
+      "dependencies": [
+        "package-root",
+        "package-contracts",
+        "contracts-state",
+        "package-evidence",
+        "evidence-archive"
+      ]
+    },
+    {
+      "role": "contracts-state",
+      "source": "scripts/darkrenamer_tooling/contracts/state.py",
+      "bundle": "tooling-contracts-state.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.contracts.state",
+      "sha256": "ca3ee9188f579140d514d7097a6c1c84afca0e8b8448d732edad5e185cceae48",
+      "dependencies": [
+        "package-root",
+        "package-contracts",
+        "package-evidence",
+        "evidence-archive"
+      ]
+    },
+    {
+      "role": "contracts-authority",
+      "source": "scripts/darkrenamer_tooling/contracts/authority.py",
+      "bundle": "tooling-contracts-authority.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.contracts.authority",
+      "sha256": "1857e70db10c541748249e8a6c58dc51d9aad0b7d5df4a8c2b3635d78d15de03",
+      "dependencies": [
+        "tooling-loader",
+        "package-root",
+        "package-contracts"
+      ]
+    },
+    {
+      "role": "contracts-tooling",
+      "source": "scripts/darkrenamer_tooling/contracts/tooling.py",
+      "bundle": "tooling-contracts-tooling.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.contracts.tooling",
+      "sha256": "f23acd7b1e1e77a6801a59e22fb5b3547405f4067ba3b89c7ba3632f51dbd459",
+      "dependencies": [
+        "package-root",
+        "package-contracts",
+        "package-evidence",
+        "evidence-errors"
+      ]
+    },
+    {
+      "role": "package-evidence",
+      "source": "scripts/darkrenamer_tooling/evidence/__init__.py",
+      "bundle": "tooling-package-evidence.py",
+      "kind": "python-package",
+      "module": "darkrenamer_tooling.evidence",
+      "sha256": "90a2379aa368bf28cbf4dc68bde9a80e6f656082667e641d24af9762c14a06b6",
+      "dependencies": [
+        "package-root"
+      ]
+    },
+    {
+      "role": "evidence-archive",
+      "source": "scripts/darkrenamer_tooling/evidence/archive.py",
+      "bundle": "tooling-evidence-archive.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.evidence.archive",
+      "sha256": "01290b7b8768552bb9b3f2b3bd3e780fb937db3ae1f74a59c78a12dac1a12481",
+      "dependencies": [
+        "package-root",
+        "package-evidence",
+        "evidence-errors"
+      ]
+    },
+    {
+      "role": "evidence-journal",
+      "source": "scripts/darkrenamer_tooling/evidence/journal.py",
+      "bundle": "tooling-evidence-journal.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.evidence.journal",
+      "sha256": "71bc5c98ab73f533cfd2e437af025c0bb1514bc7b7692ebb4d02057b65b797ff",
+      "dependencies": [
+        "package-root",
+        "package-evidence"
+      ]
+    },
+    {
+      "role": "evidence-png",
+      "source": "scripts/darkrenamer_tooling/evidence/png.py",
+      "bundle": "tooling-evidence-png.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.evidence.png",
+      "sha256": "26f311162752d1da1f2571aa23ba9f2694df90e3d87294b0d374c051a245246c",
+      "dependencies": [
+        "package-root",
+        "package-evidence",
+        "evidence-errors"
+      ]
+    },
+    {
+      "role": "evidence-recovery",
+      "source": "scripts/darkrenamer_tooling/evidence/recovery.py",
+      "bundle": "tooling-evidence-recovery.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.evidence.recovery",
+      "sha256": "a3ef630ed85423d8cf5b217447f4817c7ca5220e886bf6792a430218989cede1",
+      "dependencies": [
+        "package-root",
+        "package-evidence",
+        "evidence-archive",
+        "evidence-journal",
+        "package-contracts",
+        "contracts-state"
+      ]
+    },
+    {
+      "role": "evidence-errors",
+      "source": "scripts/darkrenamer_tooling/evidence/errors.py",
+      "bundle": "tooling-evidence-errors.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.evidence.errors",
+      "sha256": "7231e8ebcbda9331b4109e8ccf257d2789b2caada63b90809bd7ebc8cc9f784a",
+      "dependencies": [
+        "package-root",
+        "package-evidence"
+      ]
+    },
+    {
+      "role": "evidence-gui",
+      "source": "scripts/darkrenamer_tooling/evidence/gui.py",
+      "bundle": "tooling-evidence-gui.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.evidence.gui",
+      "sha256": "1f89fc5b28ce14773ccb5b64f1fc2b5dbabc6fc98c34cbf8ba404dbda8a9e1c4",
+      "dependencies": [
+        "tooling-loader",
+        "package-root",
+        "package-evidence",
+        "evidence-errors",
+        "evidence-png"
+      ]
+    },
+    {
+      "role": "evidence-cli",
+      "source": "scripts/darkrenamer_tooling/evidence/cli.py",
+      "bundle": "tooling-evidence-cli.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.evidence.cli",
+      "sha256": "8912b797b31a5b017f3c0f95e407928cf5c09b52af58704d12c645b58476a19f",
+      "dependencies": [
+        "tooling-loader",
+        "package-root",
+        "package-evidence",
+        "evidence-archive",
+        "package-campaign",
+        "campaign-verifier",
+        "package-contracts",
+        "contracts-binding",
+        "contracts-tooling"
+      ]
+    }
+  ]
+}

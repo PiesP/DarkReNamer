@@ -15,12 +15,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest import mock
 
-
-SPEC = importlib.util.spec_from_file_location(
-    "gui_regression", Path(__file__).with_name("run-gui-regression.py")
-)
-runner = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(runner)
+from darkrenamer_tooling.vm import gui as runner
 
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -552,7 +547,8 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         }
         self.write_json(bundle / "bundle.json", manifest)
 
-        with mock.patch.object(runner, "source_identity", return_value=(source, "b" * 40)):
+        with mock.patch.object(runner, "source_identity", return_value=(source, "b" * 40)), \
+                mock.patch.object(runner, "staged_tooling_files", return_value=[]):
             run_root = self.root / "complete"
             run_root.mkdir()
             runner.run_input_artifacts(repo, bundle, run_root)
