@@ -457,11 +457,15 @@ try {
     }
     foreach ($requiredTerminalSource in @(
         'result_status = $resultStatus',
-        'task_state = $task.State.ToString()',
-        'task_result = [int]$info.LastTaskResult',
-        '$state.task_state -ceq ''Ready''',
+        'task_state = $taskState',
+        'task_result = $taskResult',
+        'last_run_time_ticks = [long]$info.LastRunTime.Ticks',
+        '$taskResult = [long]$terminalInfo.LastTaskResult',
+        'Resolve-ObserverTaskPollState',
+        '-RegisteredLastRunTimeTicks $acceptanceEngine.registered_last_run_time_ticks',
+        'if ($state.terminal) { break }',
         '$transport.observer_process = $observerProcess',
-        'exit_code = [int]$state.task_result',
+        'exit_code = [long]$state.task_result',
         '$observerProcess.exit_code -eq 0'
     )) {
         if ($controllerText.IndexOf($requiredTerminalSource, [StringComparison]::Ordinal) -lt 0) {
