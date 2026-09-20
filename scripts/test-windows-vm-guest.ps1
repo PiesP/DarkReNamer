@@ -629,6 +629,106 @@ try {
     Assert-Fails {
         Join-GuestWindowsPath -Root $guestTransferRoot -Leaf '..\result.json'
     } 'Invalid bundle file name'
+    $failureDiagnostic = [pscustomobject]@{
+        classification = 'sampled-grid-uniform'
+        scope = 'sparse-samples-only'
+        file = 'rename-preview.solid-diagnostic.png'
+        sha256 = 'a' * 64
+        bytes = 1234L
+    }
+    $diagnosticGui = [pscustomobject]@{
+        flow = [pscustomobject]@{
+            foreground_observations = @(
+                [pscustomobject]@{ label = 'first' }
+                [pscustomobject]@{
+                    label = 'failed capture'
+                    solid_image_diagnostic = $failureDiagnostic
+                }
+            )
+        }
+    }
+    $selectedDiagnostics = @(Get-CoreGuiFailureDiagnosticOutputs -Gui $diagnosticGui)
+    if ($selectedDiagnostics.Count -ne 1 -or
+        $selectedDiagnostics[0].file -cne $failureDiagnostic.file -or
+        $selectedDiagnostics[0].sha256 -cne $failureDiagnostic.sha256 -or
+        $selectedDiagnostics[0].bytes -ne $failureDiagnostic.bytes) {
+        throw 'Core GUI failure diagnostic selection changed its exact file binding.'
+    }
+    if (@(Get-CoreGuiFailureDiagnosticOutputs -Gui $null).Count -ne 0 -or
+        @(Get-CoreGuiFailureDiagnosticOutputs -Gui ([pscustomobject]@{
+            flow = [pscustomobject]@{ foreground_observations = @() }
+        })).Count -ne 0) {
+        throw 'Core GUI failure diagnostic selection did not remain optional.'
+    }
+    $duplicateDiagnosticGui = $diagnosticGui | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $duplicateDiagnosticGui.flow.foreground_observations += [pscustomobject]@{
+        label = 'duplicate'
+        solid_image_diagnostic = $failureDiagnostic
+    }
+    Assert-Fails {
+        Get-CoreGuiFailureDiagnosticOutputs -Gui $duplicateDiagnosticGui
+    } 'duplicate file reference'
+    foreach ($mutation in @('unsafe', 'missing', 'malformed')) {
+        $changedDiagnosticGui = $diagnosticGui | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+        $changed = $changedDiagnosticGui.flow.foreground_observations[1].solid_image_diagnostic
+        switch ($mutation) {
+            'unsafe' { $changed.file = '..\capture.png' }
+            'missing' { $changed.PSObject.Properties.Remove('file') }
+            'malformed' { $changed.sha256 = 'not-a-digest' }
+        }
+        Assert-Fails {
+            Get-CoreGuiFailureDiagnosticOutputs -Gui $changedDiagnosticGui
+        } $(if ($mutation -ceq 'unsafe') {
+            'Invalid bundle file name'
+        } else {
+            'malformed reference'
+        })
+    }
+    $solidSamples = Measure-ScreenshotSparseVariation `
+        -Width 128 `
+        -Height 128 `
+        -ReadArgb { param($x, $y) 7 }
+    if ($solidSamples.has_sampled_variation -or
+        $solidSamples.first_argb -ne 7 -or
+        $solidSamples.step_x -ne 2 -or
+        $solidSamples.step_y -ne 2 -or
+        $solidSamples.sample_count -ne 4096 -or
+        $solidSamples.distinct_sample_count -ne 1) {
+        throw 'Sparse screenshot measurement did not identify a uniform sample grid.'
+    }
+    $unsampledVariation = Measure-ScreenshotSparseVariation `
+        -Width 128 `
+        -Height 128 `
+        -ReadArgb {
+            param($x, $y)
+            if ($x -eq 1 -and $y -eq 1) { 9 } else { 7 }
+        }
+    if ($unsampledVariation.has_sampled_variation -or
+        $unsampledVariation.sample_count -ne 4096 -or
+        $unsampledVariation.distinct_sample_count -ne 1) {
+        throw 'Sparse screenshot measurement claimed knowledge of an unsampled pixel.'
+    }
+    $sampledVariation = Measure-ScreenshotSparseVariation `
+        -Width 128 `
+        -Height 128 `
+        -ReadArgb {
+            param($x, $y)
+            if ($x -eq 2 -and $y -eq 0) { 9 } else { 7 }
+        }
+    if (-not $sampledVariation.has_sampled_variation -or
+        $sampledVariation.first_argb -ne 7 -or
+        $sampledVariation.step_x -ne 2 -or
+        $sampledVariation.step_y -ne 2 -or
+        $sampledVariation.sample_count -ne 2 -or
+        $sampledVariation.distinct_sample_count -ne 2) {
+        throw 'Sparse screenshot measurement did not identify sampled variation.'
+    }
+    Assert-Fails {
+        Measure-ScreenshotSparseVariation `
+            -Width 10001 `
+            -Height 10000 `
+            -ReadArgb { param($x, $y) 7 }
+    } 'Screenshot sample bounds exceed the resource limit'
     $bindingTokens = $null
     $bindingErrors = $null
     $runnerAst = [Management.Automation.Language.Parser]::ParseInput(
@@ -638,6 +738,53 @@ try {
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
             $node.Name -ceq 'Save-WindowScreenshot'
     }, $true)
+    $captureText = $captureFunction.Extent.Text
+    $sampleIndex = $captureText.IndexOf(
+        '$sampleObservation = Measure-ScreenshotSparseVariation',
+        [StringComparison]::Ordinal
+    )
+    $diagnosticSaveIndex = $captureText.IndexOf(
+        '$bitmap.Save($diagnosticPath, [Drawing.Imaging.ImageFormat]::Png)',
+        [StringComparison]::Ordinal
+    )
+    $diagnosticHashIndex = $captureText.IndexOf(
+        'sha256 = Get-LowerSha256 -Path $diagnosticPath',
+        [StringComparison]::Ordinal
+    )
+    $diagnosticObservationIndex = $captureText.IndexOf(
+        '-NotePropertyName solid_image_diagnostic',
+        [StringComparison]::Ordinal
+    )
+    $solidFailureIndex = $captureText.IndexOf(
+        'throw "$Label screenshot is a solid image."',
+        [StringComparison]::Ordinal
+    )
+    if ($sampleIndex -lt 0 -or
+        $diagnosticSaveIndex -le $sampleIndex -or
+        $diagnosticObservationIndex -le $diagnosticSaveIndex -or
+        $diagnosticHashIndex -le $diagnosticObservationIndex -or
+        $solidFailureIndex -le $diagnosticHashIndex) {
+        throw 'Sparse-solid capture must preserve and hash the exact failed bitmap before failing.'
+    }
+    $failureSelectionIndex = $hostRunnerText.IndexOf(
+        '$failureDiagnostics = @(Get-CoreGuiFailureDiagnosticOutputs -Gui $result.gui)',
+        [StringComparison]::Ordinal
+    )
+    $acceptedOutputLoopIndex = $hostRunnerText.IndexOf(
+        'foreach ($output in $outputs)',
+        $failureSelectionIndex,
+        [StringComparison]::Ordinal
+    )
+    $failureOutputLoopIndex = $hostRunnerText.IndexOf(
+        'foreach ($diagnosticOutput in $failureDiagnostics)',
+        $acceptedOutputLoopIndex,
+        [StringComparison]::Ordinal
+    )
+    if ($failureSelectionIndex -lt 0 -or
+        $acceptedOutputLoopIndex -le $failureSelectionIndex -or
+        $failureOutputLoopIndex -le $acceptedOutputLoopIndex) {
+        throw 'Core GUI failure diagnostics must be collected separately from accepted screenshots.'
+    }
     $collectionParameter = @($captureFunction.Body.ParamBlock.Parameters | Where-Object {
         $_.Name.VariablePath.UserPath -ceq 'ForegroundObservations'
     })

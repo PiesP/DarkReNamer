@@ -1622,6 +1622,49 @@ function Wait-ListPreviewName {
     throw 'The expected production preview name was not exposed before the bounded deadline.'
 }
 
+function Measure-ScreenshotSparseVariation {
+    param(
+        [Parameter(Mandatory)][ValidateRange(1, 16384)][int] $Width,
+        [Parameter(Mandatory)][ValidateRange(1, 16384)][int] $Height,
+        [Parameter(Mandatory)][scriptblock] $ReadArgb
+    )
+
+    if (([long]$Width * [long]$Height) -gt 100000000L) {
+        throw 'Screenshot sample bounds exceed the resource limit.'
+    }
+    $stepX = [Math]::Max(1, [int]($Width / 64))
+    $stepY = [Math]::Max(1, [int]($Height / 64))
+    $firstArgb = [int]0
+    $sampleCount = 0
+    for ($y = 0; $y -lt $Height; $y += $stepY) {
+        for ($x = 0; $x -lt $Width; $x += $stepX) {
+            $argb = [int](& $ReadArgb $x $y)
+            $sampleCount++
+            if ($sampleCount -eq 1) {
+                $firstArgb = $argb
+            }
+            elseif ($argb -ne $firstArgb) {
+                return [pscustomobject][ordered]@{
+                    first_argb = $firstArgb
+                    step_x = $stepX
+                    step_y = $stepY
+                    sample_count = $sampleCount
+                    distinct_sample_count = 2
+                    has_sampled_variation = $true
+                }
+            }
+        }
+    }
+    [pscustomobject][ordered]@{
+        first_argb = $firstArgb
+        step_x = $stepX
+        step_y = $stepY
+        sample_count = $sampleCount
+        distinct_sample_count = 1
+        has_sampled_variation = $false
+    }
+}
+
 function Save-WindowScreenshot {
     param(
         [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Window,
@@ -1709,19 +1752,53 @@ function Save-WindowScreenshot {
             $activationObservation.capture_change = Get-ForegroundObservation
             throw "$Label lost foreground during screenshot capture."
         }
-        $firstColor = $bitmap.GetPixel(0, 0).ToArgb()
-        $hasDifferentColor = $false
-        $stepX = [Math]::Max(1, [int]($width / 64))
-        $stepY = [Math]::Max(1, [int]($height / 64))
-        for ($y = 0; $y -lt $height -and -not $hasDifferentColor; $y += $stepY) {
-            for ($x = 0; $x -lt $width; $x += $stepX) {
-                if ($bitmap.GetPixel($x, $y).ToArgb() -ne $firstColor) {
-                    $hasDifferentColor = $true
-                    break
-                }
+        $sampleObservation = Measure-ScreenshotSparseVariation `
+            -Width $width `
+            -Height $height `
+            -ReadArgb {
+                param($x, $y)
+                $bitmap.GetPixel($x, $y).ToArgb()
+            }.GetNewClosure()
+        if (-not $sampleObservation.has_sampled_variation) {
+            $diagnosticLeaf = $Leaf.Substring(0, $Leaf.Length - 4) +
+                '.solid-diagnostic.png'
+            Assert-SafeLeafName `
+                -Value $diagnosticLeaf `
+                -Label "$Label solid-image diagnostic" `
+                -Pattern '^[A-Za-z0-9][A-Za-z0-9._-]*\.png$'
+            $diagnosticPath = Join-Path $Root $diagnosticLeaf
+            if (Test-Path -LiteralPath $diagnosticPath) {
+                throw "$Label solid-image diagnostic path already exists."
             }
-        }
-        if (-not $hasDifferentColor) {
+            $bitmap.Save($diagnosticPath, [Drawing.Imaging.ImageFormat]::Png)
+            $diagnosticItem = Get-Item -LiteralPath $diagnosticPath
+            if ($diagnosticItem.Length -le 0) {
+                throw "$Label solid-image diagnostic is empty."
+            }
+            $activationObservation | Add-Member `
+                -NotePropertyName solid_image_diagnostic `
+                -NotePropertyValue ([ordered]@{
+                    classification = 'sampled-grid-uniform'
+                    scope = 'sparse-samples-only'
+                    file = $diagnosticLeaf
+                    sha256 = Get-LowerSha256 -Path $diagnosticPath
+                    bytes = [long]$diagnosticItem.Length
+                    rect = [ordered]@{
+                        left = [int]$rect.Left
+                        top = [int]$rect.Top
+                        right = [int]$rect.Right
+                        bottom = [int]$rect.Bottom
+                        width = $width
+                        height = $height
+                    }
+                    first_argb = [int]$sampleObservation.first_argb
+                    step_x = [int]$sampleObservation.step_x
+                    step_y = [int]$sampleObservation.step_y
+                    sample_count = [int]$sampleObservation.sample_count
+                    distinct_sample_count = [int]$sampleObservation.distinct_sample_count
+                    has_sampled_variation = $false
+                    foreground = $activationObservation.capture_complete
+                })
             throw "$Label screenshot is a solid image."
         }
         $path = Join-Path $Root $Leaf
