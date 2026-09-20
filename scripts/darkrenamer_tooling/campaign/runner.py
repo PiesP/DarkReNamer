@@ -407,7 +407,7 @@ def candidate_arguments(args) -> list[str]:
 def run_command(repo: Path, bundle: Path, input_path: Path | None, runtime: dict,
                 args, connection: dict) -> list[str]:
     command = [
-        sys.executable, str(repo / "scripts" / "test-windows-vm.py"),
+        sys.executable, "-I", str(repo / "scripts" / "test-windows-vm.py"),
         "--ssh-host", connection["ssh_host"],
         "--expected-vm-id", connection["expected_vm_id"],
         "--desktop-mode", "rdp",

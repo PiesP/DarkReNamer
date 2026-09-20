@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 """Build the current checkout's Windows tests and execute them in a Hyper-V VM."""
 
+import sys
+
+# Adjacent files and PYTHONPATH must not supply bootstrap or stdlib imports.
+# sys and the platform OS module are built-ins, so isolation precedes file imports.
+if __name__ == "__main__" and not sys.flags.isolated:
+    _platform_os = __import__("nt" if sys.platform == "win32" else "posix")
+    _platform_os.execv(sys.executable, [sys.executable, "-I", __file__, *sys.argv[1:]])
+
 import hashlib
 import os
 from pathlib import Path
 import stat
-import sys
 import types
 
-TOOLING_MANIFEST_SHA256 = "e724d646b5e57141e5ab96d431fffe9d3ed112929451f54e7b404bc4732d2c37"
+TOOLING_MANIFEST_SHA256 = "2309aef430e475111afc4d928d2cac70edf4874021fd15172b0b69540c9f9675"
 TOOLING_LOADER_SHA256 = "cffb17faf73f0643b293dbe5c4a7cefe9475e8a19008b03f9ce45d8b3565497d"
 IMPLEMENTATION_ROLE = "vm-launcher"
 

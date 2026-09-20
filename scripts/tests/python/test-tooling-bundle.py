@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from tooling_test_paths import REPOSITORY_ROOT
 import shutil
@@ -154,6 +155,51 @@ class ToolingBundleTests(unittest.TestCase):
             path.symlink_to(tooling.MANIFEST_NAME)
             with self.assertRaisesRegex(EvidenceError, "safely read|ordinary file"):
                 tooling.staged_tooling_files(root)
+
+    def test_public_clis_isolate_adjacent_and_pythonpath_imports(self) -> None:
+        for location in ("adjacent", "pythonpath"):
+            for name, role in ENTRYPOINTS.items():
+                with self.subTest(location=location, command=name), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    bundle = root / "bundle"
+                    bundle.mkdir()
+                    entrypoint = self.stage(bundle, name, role)
+                    shadow = bundle if location == "adjacent" else root / "shadow"
+                    shadow.mkdir(exist_ok=True)
+                    marker = root / "unexpected-import"
+                    for module in ("hashlib", "dataclasses", "subprocess", "argparse"):
+                        (shadow / (module + ".py")).write_text(
+                            f"open({str(marker)!r}, 'w').write('executed')\n"
+                            "raise RuntimeError('unregistered import executed')\n"
+                        )
+                    environment = dict(os.environ, PYTHONPATH=str(shadow))
+                    completed = subprocess.run(
+                        [sys.executable, str(entrypoint), "--help"],
+                        cwd=shadow, env=environment, capture_output=True,
+                    )
+                    self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+                    self.assertIn(b"usage:", completed.stdout)
+                    self.assertFalse(marker.exists(), "Unregistered Python code executed.")
+
+    def test_isolated_invocations_ignore_python_startup_hooks(self) -> None:
+        for name, role in ENTRYPOINTS.items():
+            with self.subTest(command=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                bundle = root / "bundle"
+                bundle.mkdir()
+                entrypoint = self.stage(bundle, name, role)
+                shadow = root / "startup"
+                shadow.mkdir()
+                marker = root / "unexpected-startup"
+                (shadow / "sitecustomize.py").write_text(
+                    f"open({str(marker)!r}, 'w').write('executed')\n"
+                )
+                completed = subprocess.run(
+                    [sys.executable, "-I", str(entrypoint), "--help"],
+                    env=dict(os.environ, PYTHONPATH=str(shadow)), capture_output=True,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+                self.assertFalse(marker.exists(), "Python startup hook executed.")
 
     def test_generated_manifest_and_pins_are_current(self) -> None:
         subprocess.run(

@@ -125,8 +125,9 @@ function New-HostedInvocationFixture {
     }
     $mockPython = Join-Path $Root 'mock-python.ps1'
     [IO.File]::WriteAllText($mockPython, @'
-param([Parameter(ValueFromRemainingArguments = $true)][object[]] $MockArguments)
-$validator = [string]$MockArguments[0]
+$MockArguments = @($args)
+if ($MockArguments[0] -cne '-I') { throw 'Hosted Python must start in isolated mode.' }
+$validator = [string]$MockArguments[1]
 [IO.File]::AppendAllText($env:MOCK_HOSTED_LOG, "python:$validator`n")
 if ($validator.EndsWith('validate-vm-automated-evidence.py', [StringComparison]::Ordinal)) {
     if ($env:MOCK_HOSTED_SCENARIO -ceq 'raw-validator-failure') {

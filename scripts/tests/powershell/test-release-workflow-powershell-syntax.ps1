@@ -1021,7 +1021,7 @@ $promotionVmStatement = Assert-OneCommand `
 $promotionVmAuthority = Assert-OneCommand `
     -Commands $promotionCommands `
     -Name 'python' `
-    -BeforeDelimiter @('./scripts/validate-vm-automated-authority.py', 'validation-run') `
+    -BeforeDelimiter @('-I', './scripts/validate-vm-automated-authority.py', 'validation-run') `
     -RequiredOptions ([ordered]@{
         '--run-id' = '$env:VALIDATION_RUN_ID'
         '--run-attempt' = '$env:VALIDATION_RUN_ATTEMPT'

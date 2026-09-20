@@ -154,6 +154,7 @@ class CampaignRunnerTests(unittest.TestCase):
             calls.append(list(command))
             stdout.write("controller stdout\n")
             stderr.write("controller stderr\n")
+            self.assertEqual(command[1], "-I", "Campaign subprocess must start isolated.")
             bundle = Path(command[command.index("--output") + 1])
             bundle.mkdir()
             write_json(bundle / "bundle.json", {"schema_version": 2})

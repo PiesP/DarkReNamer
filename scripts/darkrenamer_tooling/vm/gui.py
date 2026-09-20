@@ -687,7 +687,7 @@ def input_manifest(repo: Path, bundle: Path, run_root: Path, run: dict, profile_
         },
         "expected_guest_platform": "windows",
         "command": [
-            "python3", "scripts/run-gui-regression.py", "--output-root",
+            "python3", "-I", "scripts/run-gui-regression.py", "--output-root",
             "<external-output-root>", "--connection-profile", "<private-connection-profile>",
         ],
     }
@@ -966,7 +966,7 @@ def validate_all(repo: Path, result_root: Path, output_root: Path) -> None:
     ordinary_file(validator, 2 * 1024 * 1024, "GUI regression evidence validator")
     source_sha, _ = source_identity(repo)
     command = [
-        sys.executable, str(validator), "--result-root", str(result_root),
+        sys.executable, "-I", str(validator), "--result-root", str(result_root),
         "--expected-source-sha", source_sha,
     ]
     for run in RUNS:
