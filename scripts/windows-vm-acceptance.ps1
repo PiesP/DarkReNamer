@@ -1632,7 +1632,7 @@ function Invoke-VmAutomatedFocusReachability {
     $navigation = [ordered]@{ current = $focused }
     $transitions = [Collections.Generic.List[object]]::new()
     $step = {
-        param([string] $Input, [uint16] $VirtualKey)
+        param([string] $NavigationInput, [uint16] $VirtualKey)
 
         if ($transitions.Count -ge 256) {
             throw 'Raw focus reachability transition count exceeds its bound.'
@@ -1642,13 +1642,13 @@ function Invoke-VmAutomatedFocusReachability {
             -ExpectedSession $ExpectedSession -Label 'raw focus transition source'
         $next = Invoke-AcceptanceNavigationStep `
             -Process $Application.process -ExpectedSession $ExpectedSession `
-            -VirtualKey $VirtualKey -Label "raw focus $Input navigation"
+            -VirtualKey $VirtualKey -Label "raw focus $NavigationInput navigation"
         $to = Get-VmAutomatedFocusBinding `
             -Element $next -Process $Application.process `
             -ExpectedSession $ExpectedSession -Label 'raw focus transition destination'
         $transitions.Add([ordered]@{
             sequence = [int]$transitions.Count + 1
-            input = $Input
+            input = $NavigationInput
             from = $from
             to = $to
         })
@@ -3816,11 +3816,11 @@ function Close-AcceptanceApplication {
         [Parameter(Mandatory)][object] $Application,
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
-        [Parameter(Mandatory)][ValidateSet('keyboard', 'ordinary')][string] $Input
+        [Parameter(Mandatory)][ValidateSet('keyboard', 'ordinary')][string] $CloseInput
     )
     $Application.process.Refresh()
     if ($Application.process.HasExited) { throw 'The acceptance application exited before normal close.' }
-    if ($Input -ceq 'keyboard') {
+    if ($CloseInput -ceq 'keyboard') {
         $Application.main.SetFocus()
         Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x12 -VirtualKey 0x73 -Label 'application Alt+F4 close'
     }
@@ -4537,7 +4537,7 @@ function Invoke-ObserverContextScenario {
         }
         Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
         if ($script:contract.mode -ceq 'context-surface') {
-            $repeatedExit = Close-AcceptanceApplication -Application $repeatedApplication -SessionId $SessionId -WaitSeconds $WaitSeconds -Input ordinary
+            $repeatedExit = Close-AcceptanceApplication -Application $repeatedApplication -SessionId $SessionId -WaitSeconds $WaitSeconds -CloseInput ordinary
             if ($rawLayoutCandidate) {
                 Complete-VmAutomatedLayoutRun `
                     -Run $rawRepeatedRun -Process $repeatedApplication.process -ExitCode $repeatedExit `
@@ -4580,7 +4580,7 @@ function Invoke-ObserverContextScenario {
             throw 'Korean repeated-insertion confirmation cancellation changed disk state or identity.'
         }
         Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
-        $repeatedExit = Close-AcceptanceApplication -Application $repeatedApplication -SessionId $SessionId -WaitSeconds $WaitSeconds -Input ordinary
+        $repeatedExit = Close-AcceptanceApplication -Application $repeatedApplication -SessionId $SessionId -WaitSeconds $WaitSeconds -CloseInput ordinary
         if ($rawLayoutCandidate) {
             Complete-VmAutomatedLayoutRun `
                 -Run $rawRepeatedRun -Process $repeatedApplication.process -ExitCode $repeatedExit `
@@ -4680,7 +4680,7 @@ function Invoke-ObserverContextScenario {
         if (-not $contentPreserved -or -not $identityPreserved) { throw 'Actual move-plus-rename changed content or NTFS identity.' }
         Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
         [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $moveApplication.main -Process $moveApplication.process -ExpectedSession $SessionId -Root $EvidenceRoot -Leaf ($movePrefix + '-actual-apply-complete.png') -Label 'actual move completion'))
-        $moveExit = Close-AcceptanceApplication -Application $moveApplication -SessionId $SessionId -WaitSeconds $WaitSeconds -Input ordinary
+        $moveExit = Close-AcceptanceApplication -Application $moveApplication -SessionId $SessionId -WaitSeconds $WaitSeconds -CloseInput ordinary
         if ($rawLayoutCandidate) {
             Complete-VmAutomatedLayoutRun `
                 -Run $rawMoveRun -Process $moveApplication.process -ExitCode $moveExit `
@@ -4791,7 +4791,7 @@ function Invoke-ObserverContextScenario {
         $mixedAfterEnterCancel = Get-ObserverFixtureState -FixtureRoot $mixedFixture.root
         if (-not (Test-ObserverFixtureStateEqual -Expected $mixedFixture.initial -Actual $mixedAfterEnterCancel)) { throw 'Default Enter cancellation changed mixed fixture disk state.' }
         Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
-        $mixedExit = Close-AcceptanceApplication -Application $mixedApplication -SessionId $SessionId -WaitSeconds $WaitSeconds -Input ordinary
+        $mixedExit = Close-AcceptanceApplication -Application $mixedApplication -SessionId $SessionId -WaitSeconds $WaitSeconds -CloseInput ordinary
         if ($rawLayoutCandidate) {
             Complete-VmAutomatedLayoutRun `
                 -Run $rawMixedRun -Process $mixedApplication.process -ExitCode $mixedExit `
@@ -4986,7 +4986,7 @@ function Invoke-ObserverStandardScenario {
             Invoke-ObserverBlockedChecks -Application $application -Grid $grid -Fixture $fixture -OutputRoot $EvidenceRoot -Prefix $prefix -SessionId $SessionId -WaitSeconds $WaitSeconds -Captures $Captures
         }
         $actualApply = Invoke-ObserverActualApply -Application $application -Grid $grid -Fixture $fixture -OutputRoot $EvidenceRoot -Prefix $prefix -SessionId $SessionId -WaitSeconds $WaitSeconds -Captures $Captures
-        $exitCode = Close-AcceptanceApplication -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds -Input ordinary
+        $exitCode = Close-AcceptanceApplication -Application $application -SessionId $SessionId -WaitSeconds $WaitSeconds -CloseInput ordinary
         if ($rawLayoutCandidate) {
             Complete-VmAutomatedLayoutRun `
                 -Run $rawLayoutRun -Process $application.process -ExitCode $exitCode `
@@ -6703,7 +6703,7 @@ try {
         $capture.screenshot_count = $captures.Count
 
         $result.failure_reason = 'normal_close_failed'
-        $normalExitCode = Close-AcceptanceApplication -Application $application -SessionId $ExpectedSessionId -WaitSeconds 10 -Input keyboard
+        $normalExitCode = Close-AcceptanceApplication -Application $application -SessionId $ExpectedSessionId -WaitSeconds 10 -CloseInput keyboard
         $lifecycle.process_terminated = $true
         if ($rawCandidate) {
             $result.process_lifecycle.exit_observed = $true

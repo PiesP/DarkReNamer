@@ -676,6 +676,67 @@ try {
             throw 'Focus state did not preserve complete fixture and journal arrays.'
         }
     }
+    & {
+        $reachability = $acceptanceAst.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Invoke-VmAutomatedFocusReachability'
+        }, $true)
+        $stepAssignment = $reachability.Find({
+            param($node)
+            $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -ceq '$step'
+        }, $true)
+        . ([scriptblock]::Create($stepAssignment.Extent.Text))
+        function Get-VmAutomatedFocusBinding {
+            param($Element, $Process, $ExpectedSession, $Label)
+            [ordered]@{ automation_id = $Element }
+        }
+        function Invoke-AcceptanceNavigationStep {
+            param($Process, $ExpectedSession, $VirtualKey, $Label)
+            if ($VirtualKey -eq 0x09) { '32772' } else { '32773' }
+        }
+        $Application = @{ process = $null }
+        $ExpectedSession = 1
+        $navigation = @{ current = '1000' }
+        $transitions = [Collections.Generic.List[object]]::new()
+        [void](& $step 'tab' 0x09)
+        [void](& $step 'down' 0x28)
+        if ($transitions.Count -ne 2 -or $transitions[0].input -cne 'tab' -or
+            $transitions[1].input -cne 'down' -or $transitions[1].from.automation_id -cne '32772') {
+            throw 'Actual navigation step must retain its key labels and contiguous focus observations.'
+        }
+    }
+    & {
+        $closeFunction = $acceptanceAst.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Close-AcceptanceApplication'
+        }, $true)
+        . ([scriptblock]::Create($closeFunction.Extent.Text))
+        $script:closeProbe = @{ keyboard = 0; ordinary = 0 }
+        function Send-AcceptanceChord {
+            param($Process, $ExpectedSession, $Modifier, $VirtualKey, $Label)
+            if ($Modifier -ne 0x12 -or $VirtualKey -ne 0x73) { throw 'Expected Alt+F4.' }
+            $script:closeProbe.keyboard++
+        }
+        $process = [pscustomobject]@{ HasExited = $false; ExitCode = 0 }
+        $process | Add-Member ScriptMethod Refresh { }
+        $process | Add-Member ScriptMethod WaitForExit { param($Milliseconds) $true }
+        $process | Add-Member ScriptMethod CloseMainWindow { $script:closeProbe.ordinary++; $true }
+        $window = [pscustomobject]@{ }
+        $window | Add-Member ScriptMethod SetFocus { }
+        $application = @{ process = $process; main = $window }
+        [void](Close-AcceptanceApplication -Application $application -SessionId 1 -WaitSeconds 1 -CloseInput keyboard)
+        if ($script:closeProbe.keyboard -ne 1 -or $script:closeProbe.ordinary -ne 0) {
+            throw 'Keyboard close must deliver Alt+F4 through the actual close helper.'
+        }
+        [void](Close-AcceptanceApplication -Application $application -SessionId 1 -WaitSeconds 1 -CloseInput ordinary)
+        if ($script:closeProbe.keyboard -ne 1 -or $script:closeProbe.ordinary -ne 1) {
+            throw 'Ordinary close must call CloseMainWindow through the actual close helper.'
+        }
+        Remove-Variable closeProbe -Scope Script
+    }
     $probeValidateOnly = $false
     & {
         $BundleRoot = 'probe-bundle'
