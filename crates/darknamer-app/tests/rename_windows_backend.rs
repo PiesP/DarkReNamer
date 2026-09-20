@@ -1835,6 +1835,66 @@ fn planner_rejects_an_existing_short_name_source_alias_when_available()
 }
 
 #[test]
+fn occupied_distinct_destination_is_never_replaced() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("source.txt");
+    let destination = directory.path().join("occupied.txt");
+    fs::write(&source, b"source sentinel\n")?;
+    fs::write(&destination, b"distinct destination sentinel\n")?;
+    if !case_query_supported(directory.path())? {
+        return Ok(());
+    }
+
+    let inventory = || -> std::io::Result<BTreeSet<std::ffi::OsString>> {
+        fs::read_dir(directory.path())?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect()
+    };
+    let initial_inventory = inventory()?;
+    let source_contents = fs::read(&source)?;
+    let destination_contents = fs::read(&destination)?;
+    let source_size = fs::metadata(&source)?.len();
+    let destination_size = fs::metadata(&destination)?.len();
+    let mut backend = WindowsRenameBackend;
+    let source_snapshot = backend.observe(&legacy_path(&source))?;
+    let destination_snapshot = backend.observe(&legacy_path(&destination))?;
+    let source_identity = source_snapshot
+        .entry
+        .ok_or_else(|| std::io::Error::other("source identity missing"))?
+        .identity;
+    let destination_identity = destination_snapshot
+        .entry
+        .ok_or_else(|| std::io::Error::other("destination identity missing"))?
+        .identity;
+    assert_ne!(source_identity, destination_identity);
+    let operation = RenameOperation::new(
+        legacy_path(&source),
+        legacy_path(&destination),
+        source_identity,
+        source_snapshot.parent,
+        destination_snapshot.parent,
+    );
+
+    let error = backend
+        .rename_no_replace(&operation)
+        .err()
+        .ok_or_else(|| std::io::Error::other("occupied destination was replaced"))?;
+
+    assert_eq!(error.certainty, MutationCertainty::NotApplied);
+    assert_eq!(backend.observe(&legacy_path(&source))?, source_snapshot);
+    assert_eq!(
+        backend.observe(&legacy_path(&destination))?,
+        destination_snapshot
+    );
+    assert_eq!(fs::read(&source)?, source_contents);
+    assert_eq!(fs::read(&destination)?, destination_contents);
+    assert_eq!(fs::metadata(&source)?.len(), source_size);
+    assert_eq!(fs::metadata(&destination)?.len(), destination_size);
+    assert_eq!(inventory()?, initial_inventory);
+    Ok(())
+}
+
+#[test]
 fn hard_link_destination_is_never_replaced() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let source = directory.path().join("source.txt");

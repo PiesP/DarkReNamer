@@ -1,0 +1,508 @@
+{
+  "schema": "darkrenamer-vm-automated-profile-v1",
+  "profile_id": "vm-automated-v1-win11-ntfs",
+  "revision": 1,
+  "environment": {
+    "os_family": "Windows 11",
+    "architecture": "x86_64",
+    "filesystem": "NTFS",
+    "desktop_mode": "managed-rdp",
+    "elevated": false,
+    "concurrency": 1
+  },
+  "required_targets": [
+    {
+      "id": "core-uia-flow",
+      "executor": "candidate-gui-only",
+      "input": "uia",
+      "required_observations": [
+        "initial",
+        "after_cancel",
+        "after_apply",
+        "post_close",
+        "journal_inventory",
+        "process_exit",
+        "cleanup"
+      ]
+    },
+    {
+      "id": "core-keyboard-flow",
+      "executor": "windows-vm-acceptance",
+      "input": "keyboard",
+      "contrast": "normal",
+      "required_observations": [
+        "actual_keys",
+        "focus",
+        "safe_default",
+        "cancel_unchanged",
+        "apply_identity",
+        "normal_exit",
+        "cleanup"
+      ]
+    },
+    {
+      "id": "layout-normal-100",
+      "executor": "windows-vm-acceptance",
+      "contrast": "normal",
+      "appearance": "system",
+      "scale_percent": 100,
+      "hwnd_dpi": 96,
+      "text_scale_percent": 100,
+      "required_observations": [
+        "actual_dpi",
+        "monitor",
+        "work_area",
+        "controls",
+        "focus_reachability",
+        "captured_raster",
+        "cleanup"
+      ],
+      "desktop_width": 3840,
+      "desktop_height": 2160
+    },
+    {
+      "id": "layout-high-contrast-100",
+      "executor": "windows-vm-acceptance",
+      "contrast": "high-contrast",
+      "appearance": "system",
+      "scale_percent": 100,
+      "hwnd_dpi": 96,
+      "text_scale_percent": 100,
+      "required_observations": [
+        "actual_dpi",
+        "monitor",
+        "work_area",
+        "controls",
+        "focus_reachability",
+        "captured_raster",
+        "cleanup",
+        "contrast_restoration"
+      ],
+      "desktop_width": 3840,
+      "desktop_height": 2160
+    },
+    {
+      "id": "layout-normal-125",
+      "executor": "windows-vm-acceptance",
+      "contrast": "normal",
+      "appearance": "light",
+      "scale_percent": 125,
+      "hwnd_dpi": 120,
+      "text_scale_percent": 100,
+      "required_observations": [
+        "actual_dpi",
+        "monitor",
+        "work_area",
+        "controls",
+        "focus_reachability",
+        "captured_raster",
+        "cleanup"
+      ],
+      "desktop_width": 3840,
+      "desktop_height": 2160
+    },
+    {
+      "id": "layout-high-contrast-125",
+      "executor": "windows-vm-acceptance",
+      "contrast": "high-contrast",
+      "appearance": "system",
+      "scale_percent": 125,
+      "hwnd_dpi": 120,
+      "text_scale_percent": 100,
+      "required_observations": [
+        "actual_dpi",
+        "monitor",
+        "work_area",
+        "controls",
+        "focus_reachability",
+        "captured_raster",
+        "cleanup",
+        "contrast_restoration"
+      ],
+      "desktop_width": 3840,
+      "desktop_height": 2160
+    },
+    {
+      "id": "layout-normal-150",
+      "executor": "windows-vm-acceptance",
+      "contrast": "normal",
+      "appearance": "dark",
+      "scale_percent": 150,
+      "hwnd_dpi": 144,
+      "text_scale_percent": 100,
+      "required_observations": [
+        "actual_dpi",
+        "monitor",
+        "work_area",
+        "controls",
+        "focus_reachability",
+        "captured_raster",
+        "cleanup"
+      ],
+      "desktop_width": 3840,
+      "desktop_height": 2160
+    },
+    {
+      "id": "layout-high-contrast-150",
+      "executor": "windows-vm-acceptance",
+      "contrast": "high-contrast",
+      "appearance": "system",
+      "scale_percent": 150,
+      "hwnd_dpi": 144,
+      "text_scale_percent": 100,
+      "required_observations": [
+        "actual_dpi",
+        "monitor",
+        "work_area",
+        "controls",
+        "focus_reachability",
+        "captured_raster",
+        "cleanup",
+        "contrast_restoration"
+      ],
+      "desktop_width": 3840,
+      "desktop_height": 2160
+    },
+    {
+      "id": "layout-normal-200",
+      "executor": "windows-vm-acceptance",
+      "contrast": "normal",
+      "appearance": "system",
+      "scale_percent": 200,
+      "hwnd_dpi": 192,
+      "text_scale_percent": 100,
+      "required_observations": [
+        "actual_dpi",
+        "monitor",
+        "work_area",
+        "controls",
+        "focus_reachability",
+        "captured_raster",
+        "cleanup"
+      ],
+      "desktop_width": 3840,
+      "desktop_height": 2160
+    },
+    {
+      "id": "layout-high-contrast-200",
+      "executor": "windows-vm-acceptance",
+      "contrast": "high-contrast",
+      "appearance": "system",
+      "scale_percent": 200,
+      "hwnd_dpi": 192,
+      "text_scale_percent": 100,
+      "required_observations": [
+        "actual_dpi",
+        "monitor",
+        "work_area",
+        "controls",
+        "focus_reachability",
+        "captured_raster",
+        "cleanup",
+        "contrast_restoration"
+      ],
+      "desktop_width": 3840,
+      "desktop_height": 2160
+    },
+    {
+      "id": "layout-normal-250",
+      "executor": "windows-vm-acceptance",
+      "contrast": "normal",
+      "appearance": "light",
+      "scale_percent": 250,
+      "hwnd_dpi": 240,
+      "text_scale_percent": 100,
+      "required_observations": [
+        "actual_dpi",
+        "monitor",
+        "work_area",
+        "controls",
+        "focus_reachability",
+        "captured_raster",
+        "cleanup"
+      ],
+      "desktop_width": 3840,
+      "desktop_height": 2160
+    },
+    {
+      "id": "layout-high-contrast-250",
+      "executor": "windows-vm-acceptance",
+      "contrast": "high-contrast",
+      "appearance": "system",
+      "scale_percent": 250,
+      "hwnd_dpi": 240,
+      "text_scale_percent": 100,
+      "required_observations": [
+        "actual_dpi",
+        "monitor",
+        "work_area",
+        "controls",
+        "focus_reachability",
+        "captured_raster",
+        "cleanup",
+        "contrast_restoration"
+      ],
+      "desktop_width": 3840,
+      "desktop_height": 2160
+    },
+    {
+      "id": "layout-normal-300",
+      "executor": "windows-vm-acceptance",
+      "contrast": "normal",
+      "appearance": "dark",
+      "scale_percent": 300,
+      "hwnd_dpi": 288,
+      "text_scale_percent": 100,
+      "required_observations": [
+        "actual_dpi",
+        "monitor",
+        "work_area",
+        "controls",
+        "focus_reachability",
+        "captured_raster",
+        "cleanup"
+      ],
+      "desktop_width": 3840,
+      "desktop_height": 2160
+    },
+    {
+      "id": "layout-high-contrast-300",
+      "executor": "windows-vm-acceptance",
+      "contrast": "high-contrast",
+      "appearance": "system",
+      "scale_percent": 300,
+      "hwnd_dpi": 288,
+      "text_scale_percent": 100,
+      "required_observations": [
+        "actual_dpi",
+        "monitor",
+        "work_area",
+        "controls",
+        "focus_reachability",
+        "captured_raster",
+        "cleanup",
+        "contrast_restoration"
+      ],
+      "desktop_width": 3840,
+      "desktop_height": 2160
+    },
+    {
+      "id": "layout-small-normal-100",
+      "executor": "windows-vm-acceptance",
+      "contrast": "normal",
+      "appearance": "light",
+      "scale_percent": 100,
+      "hwnd_dpi": 96,
+      "text_scale_percent": 100,
+      "desktop_width": 800,
+      "desktop_height": 600,
+      "required_observations": [
+        "actual_dpi",
+        "actual_requested_monitor",
+        "work_area",
+        "controls",
+        "focus_reachability",
+        "captured_raster",
+        "cleanup"
+      ]
+    },
+    {
+      "id": "layout-small-high-contrast-100",
+      "executor": "windows-vm-acceptance",
+      "contrast": "high-contrast",
+      "appearance": "system",
+      "scale_percent": 100,
+      "hwnd_dpi": 96,
+      "text_scale_percent": 100,
+      "desktop_width": 800,
+      "desktop_height": 600,
+      "required_observations": [
+        "actual_dpi",
+        "actual_requested_monitor",
+        "work_area",
+        "controls",
+        "focus_reachability",
+        "captured_raster",
+        "cleanup",
+        "contrast_restoration"
+      ]
+    },
+    {
+      "id": "layout-small-text150-100",
+      "executor": "windows-vm-acceptance",
+      "layout_variant": "native-menu-only",
+      "contrast": "normal",
+      "appearance": "light",
+      "scale_percent": 100,
+      "hwnd_dpi": 96,
+      "text_scale_percent": 150,
+      "desktop_width": 800,
+      "desktop_height": 600,
+      "required_observations": [
+        "actual_dpi",
+        "actual_requested_monitor",
+        "actual_text_scale",
+        "work_area",
+        "visible_controls",
+        "hidden_command_rails",
+        "native_menu_commands",
+        "menu_keyboard_reachability",
+        "captured_raster",
+        "text_scale_restoration",
+        "cleanup"
+      ]
+    },
+    {
+      "id": "process-crash",
+      "executor": "windows-vm-recovery-acceptance",
+      "mode": "ProcessCrash",
+      "recovery_export": true,
+      "intent_only_candidate_discard": true,
+      "fixture_count": 4096,
+      "required_observations": [
+        "initial",
+        "quiescent_partial",
+        "startup_unchanged",
+        "default_cancel_unchanged",
+        "restored",
+        "journal_inventory",
+        "process_lifecycle",
+        "cleanup"
+      ],
+      "execution_group": "process-crash-export-intent"
+    },
+    {
+      "id": "recovery-export",
+      "execution_group": "process-crash-export-intent",
+      "executor": "windows-vm-recovery-acceptance",
+      "required_observations": [
+        "journal_before",
+        "export_bytes",
+        "journal_after_exit",
+        "fixture_unchanged",
+        "recovery_lock",
+        "cleanup"
+      ]
+    },
+    {
+      "id": "intent-only-discard",
+      "execution_group": "process-crash-export-intent",
+      "executor": "windows-vm-recovery-acceptance",
+      "fixture_kind": "authentic-frame-injected",
+      "required_observations": [
+        "authentic_intent_frame",
+        "injection_no_active_journal",
+        "startup_and_cancel_unchanged",
+        "relaunch_unchanged",
+        "explicit_candidate_discard",
+        "no_file_mutation",
+        "journal_inventory",
+        "cleanup"
+      ]
+    },
+    {
+      "id": "worker-cancellation",
+      "executor": "windows-vm-recovery-acceptance",
+      "mode": "WorkerCancellation",
+      "fixture_count": 4096,
+      "required_observations": [
+        "initial",
+        "partial_witness",
+        "restored",
+        "journal_inventory",
+        "process_exit",
+        "cleanup"
+      ]
+    },
+    {
+      "id": "worker-close",
+      "executor": "windows-vm-recovery-acceptance",
+      "mode": "WorkerClose",
+      "fixture_count": 4096,
+      "required_observations": [
+        "initial",
+        "partial_witness",
+        "restored",
+        "journal_inventory",
+        "process_exit",
+        "cleanup"
+      ]
+    }
+  ],
+  "required_automated_gates": [
+    "locked-host-gate",
+    "windows-backend-source-bound",
+    "candidate-package-and-provenance",
+    "profile-raw-evidence-verifier",
+    "immutable-promotion-binding"
+  ],
+  "diagnostic_only": [
+    "vm-storage-performance"
+  ],
+  "outside_v1_claims": [
+    "human-visual-and-assistive-technology-acceptance",
+    "physical-device-performance",
+    "physical-power-loss",
+    "vm-reset-and-storage-fault",
+    "actual-ime-and-explorer-drag-drop",
+    "display-combinations-outside-the-fixed-required-cells"
+  ],
+  "failure_rules": {
+    "missing_required_target": "fail",
+    "target_failure": "fail",
+    "evidence_gap": "fail",
+    "environment_mismatch": "fail",
+    "cleanup_failure": "fail",
+    "retry_replaces_first_attempt": false
+  },
+  "required_backend_test_names": [
+    "occupied_distinct_destination_is_never_replaced",
+    "occupied_destination_and_relative_path_are_rejected",
+    "hard_link_destination_is_never_replaced",
+    "stale_source_parent_or_destination_refuses_before_journal_and_mutation",
+    "active_collision_preserves_both_files_and_poisons_candidate"
+  ],
+  "representative_core_environment": {
+    "scale_percent": 200,
+    "hwnd_dpi": 192,
+    "text_scale_percent": 100,
+    "contrast": "normal",
+    "desktop_width": 3840,
+    "desktop_height": 2160
+  },
+  "stability": {
+    "fresh_core_runs": 10,
+    "recreate_managed_rdp_lease_each_run": true,
+    "retain_all_attempts": true,
+    "automatic_retry_replaces_first_attempt": false,
+    "environment": {
+      "scale_percent": 200,
+      "hwnd_dpi": 192,
+      "text_scale_percent": 100,
+      "contrast": "normal",
+      "desktop_width": 3840,
+      "desktop_height": 2160
+    }
+  },
+  "recovery": {
+    "transaction_file_count": 4096,
+    "protected_files": [
+      "sentinel.bin"
+    ],
+    "identity": "FILE_ID_INFO-u64-volume-u128-file-id",
+    "journal_version": 2,
+    "schedule": "direct-same-parent-files",
+    "torn_tail": "retain-product-supported-final-torn-frame-and-bind-valid-prefix-to-whole-state",
+    "intent_candidate": "byte-identical-first-complete-intent-frame"
+  },
+  "binding": {
+    "repository": "PiesP/DarkReNamer",
+    "source_ref": "refs/heads/master",
+    "candidate_workflow": ".github/workflows/release.yaml",
+    "validation_workflow": ".github/workflows/vm-acceptance.yaml",
+    "publication_workflow": ".github/workflows/promote-release.yaml",
+    "require_product_harness_and_hosted_source_equal": true,
+    "raw_evidence_visibility": "private-draft-asset",
+    "public_evidence": "canonical-attested-statement-only"
+  }
+}

@@ -48,13 +48,18 @@ folder merging, and destination-folder creation remain outside the Safe v2
 boundary. The confirmation separates rename-only, move-only, and combined
 changes and states that existing destinations are not overwritten.
 
-Portable transformation and state behavior are covered by automated tests, and
-the Windows binary cross-builds from Linux. Native focus and menu timing,
-Explorer drag/drop, common dialogs, clipboard operations, native startup
-recovery, same-volume path unification, and interactive failure handling still
-require acceptance on a real Windows host.
-Until that evidence exists, releases should distinguish source-complete porting
-from manually verified runtime parity.
+Release validation follows the
+[VM-Automated contract](SAFETY.md#vm-automated-release-validation): automated
+source/backend checks and a fixed Windows VM profile tied to the exact candidate
+EXE. VM-Automated v1 defines 22 derived targets and five required gates. Its
+fixed execution matrix contains 20 primary cells plus 10 independent stability
+executions. Only an authenticated canonical statement from a complete passing
+campaign identifies a verified candidate and profile; this repository text does
+not claim that the matrix has passed. The scope excludes physical-device
+performance, physical power loss, VM reset and storage faults, human visual or
+comprehensive assistive-technology acceptance, and actual IME or Explorer
+drag-and-drop validation. It does not claim manually verified runtime parity
+with DarkNamer.
 
 ## Rename a file
 
@@ -106,9 +111,10 @@ Advanced appearance controls are intentionally under **보기 > 모양 설정...
 They offer semantic density and emphasis presets plus separator, changed-name
 background highlight, and empty-state safety-copy visibility. The native dialog
 keeps Reset, OK, and Cancel in a fixed footer while its settings body scrolls at
-narrow work-area sizes, large system fonts, and high DPI. The acceptance
-evidence contract includes 250% and 300% targets, but those targets remain
-unexecuted until source-bound results from real Windows hosts are recorded.
+narrow work-area sizes, large system fonts, and high DPI. The fixed VM-Automated
+profile includes 250% and 300% targets. They count only when a source-bound
+campaign records their raw Windows observations and the hosted verifier derives
+a passing statement; listing them here is not a pass.
 Appearance settings do not affect the rename model, Apply authorization,
 journal, recovery state, or Undo data.
 
@@ -145,7 +151,7 @@ Choose the complete gate for your host, including its tooling checks:
 - [Portable Linux/WSL checks](DEVELOPMENT.md#portable-checks-on-linux-or-wsl).
 - [Prepared VM execution](DEVELOPMENT.md#native-tests-in-a-local-hyper-v-vm)
   and [interactive observers](DEVELOPMENT.md#interactive-acceptance-observers).
-- [Release acceptance evidence](SAFETY.md#windows-acceptance-evidence) and
+- [Release validation](SAFETY.md#vm-automated-release-validation) and
   [candidate packaging](DISTRIBUTION.md#publish-free-packaging-validation).
 
 Cross-build the compatibility executable from Linux:

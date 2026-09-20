@@ -370,7 +370,113 @@ VM or hardware power loss, storage write-cache loss, or power-loss durability
 of directory-entry updates. Those cases require separate fault-injection or
 manual acceptance evidence bound to the tested source SHA and storage setup.
 
+## VM-Automated release validation
+
+Release validation uses automated source checks, Windows backend tests, and
+candidate-bound Windows VM observations under the fixed
+[`config/vm-automated-v1.json`](config/vm-automated-v1.json) profile. Human input
+and visual review are not required pass conditions and cannot substitute for
+missing automated evidence. This changes the release evidence contract; the
+filesystem, identity, no-replacement, journal and recovery invariants above
+remain mandatory.
+
+The profile is frozen before a campaign. It declares 22 target verdicts: two
+core flows, 15 layout cells, and five recovery targets. The recovery-export and
+Intent-only-discard targets share the process-crash execution group, so the
+predeclared fixed matrix contains 20 primary execution cells. Ten additional
+stability executions each run the core UIA flow under a newly created managed
+RDP lease. They are independent executions, not retries, and do not claim a new
+Windows logon session for each connection.
+
+The 800 by 600, 100% DPI, 150% text cell predeclares the product's native
+menu-only layout. Its main window and list must remain visible and bounded;
+all 19 command-rail buttons must exist as hidden candidate-owned controls and
+match the enabled states of their exact native menu commands. Actual keyboard
+menu navigation must reach every enabled command without executing it, with
+unchanged complete fixture and journal state afterward. The other layout cells
+retain their visible command-rail and keyboard-focus requirements. Missing
+rails never select a fallback during a run.
+
+The complete campaign therefore has 30 predeclared first attempts. The plan is
+written before VM access. Missing, failed, unavailable, environment-mismatched,
+or incompletely cleaned attempts fail validation, and the controller stops
+subsequent VM workloads after the first failure. A diagnostic archive may retain
+that partial history, but a later retry cannot replace the failed attempt or
+fill its missing slots. Passing requires a new campaign with a new complete
+execution history.
+
+The independent verifier derives all 22 target verdicts from raw observations;
+producer summaries, `passed` flags, and legacy `review_required` values are not
+verdict inputs. The five required gate records bind separate properties:
+
+| Gate ID | Bound property |
+| --- | --- |
+| `locked-host-gate` | Authenticated successful exact-source CI jobs on master |
+| `windows-backend-source-bound` | Exact-source native test binaries, their complete actual transcripts, and controller cleanup |
+| `candidate-package-and-provenance` | Immutable candidate run, artifact, handoff, executable digest, and original GitHub provenance |
+| `profile-raw-evidence-verifier` | Frozen profile plus the complete indexed raw-evidence derivation |
+| `immutable-promotion-binding` | Exact candidate, private ingress, hosted validation run and attempt, and pinned master source tuple used by promotion |
+
+The product source, clean harness source, and hosted validator checkout
+must be the same commit. Candidate bytes are never rebuilt for the VM campaign
+or promotion. An older candidate exercised by a newer harness remains a
+development diagnostic and cannot satisfy this release contract.
+
+| Previous requirement | Property checked by VM-Automated v1 | Evidence boundary |
+| --- | --- | --- |
+| Manual import, preview and Apply | Separate UIA and real keyboard flows; safe default Cancel; complete disk and journal invariance after cancellation; exact source-to-destination disk change | Immutable candidate EXE, actual input/focus records and complete checkpoint inventories |
+| DPI, Forced Colors and small work areas | Every fixed display cell; actual HWND DPI, monitor/work-area bounds, exposed control geometry and focus reachability; setting restoration | Requested RDP values alone cannot pass a cell |
+| Visual and accessibility inspection | Bounded decoded captures, UIA automation IDs, control types, visible/enabled/focusable states, geometry and defined keyboard navigation | No claim of human visual quality or comprehensive assistive-technology acceptance |
+| Cancellation, close and process crash | Genuine partial mutation, complete original/restored file identities and contents, safe recovery default and journal locking | Process loss only; no VM reset, storage fault or power-loss claim |
+| Recovery export and candidate discard | Export bytes equal the retained interrupted journal; explicitly injected candidate equals its authentic first Intent frame; explicit discard preserves files | Injected Intent is identified as injected, not a naturally observed crash artifact |
+| Physical SSD/HDD benchmark matrix | Optional VM storage diagnostics only | Physical-device performance is outside the release claim |
+| IME and Explorer drag-and-drop | Existing source/backend regressions where applicable | Actual IME and Explorer interaction are outside this fixed profile |
+| Release packaging and publication | Immutable candidate identity, independently verified raw evidence and exact successful hosted validation attempt | Original candidate bytes plus an attested path-free validation statement |
+
+The required backend regressions include a direct no-replacement primitive with
+distinct occupied source and destination files. Both files' contents, sizes,
+identities and the complete directory inventory must survive refusal. Planner
+collision checks alone do not establish this primitive property. The gate keeps
+the source-bound native test executables and complete stdout/stderr transcripts;
+test names copied into a summary do not establish execution.
+
+Recovery evidence records full `FILE_ID_INFO` identities: a 64-bit volume serial
+and 128-bit file ID. The independent journal parser validates frame integrity,
+payloads and state transitions, then binds Intent paths and identities to whole
+fixture inventories. A pending Prepared operation may be either before or after
+its on-disk rename; the observed state must match exactly one valid partial
+prefix. Every protected sentinel remains outside the mutation schedule. A
+product-supported final torn frame is retained with its raw length,
+valid-prefix length, and tail kind. Only the complete valid prefix participates
+in replay. Corrupt complete frames, invalid payloads and invalid transitions
+fail validation; no bytes are
+silently discarded to manufacture a passing trial.
+
+Raw paths, user/VM identities, file identities, journals, images and logs remain
+private external evidence. Frozen observer hashes must match trusted source;
+the private archive is owner controlled and is not a remotely attested VM
+measurement. The archive index, bounds, hashes and cross-bindings can detect
+missing, substituted or inconsistent evidence, but they cannot prove that the
+producer or VM administrator reported every observation honestly.
+
+The hosted validation and promotion boundary is described in
+[`DISTRIBUTION.md`](DISTRIBUTION.md#immutable-prerelease-promotion). An attestation
+binds the checked statement and workflow execution; it does not make a
+compromised VM or administrator a trustworthy hardware observer. The
+owner-authenticated archive ingress still relies on the raw producer to report
+actual execution;
+raw consistency checking is not remote VM attestation. The hosted workflow
+removes its private scratch and extracted archive before it returns success;
+only then is the canonical path-free statement attested. Validation does not
+authorize publication: tagging and publishing still require owner authorization.
+
 ## Windows acceptance evidence
+
+This section preserves the historical formal desktop-acceptance contract and
+its validators. Its human review and physical-media requirements retain their
+original meaning for historical artifacts. The active release contract is
+[VM-Automated release validation](#vm-automated-release-validation); no old
+failure, `not-run`, or `review_required` record is upgraded by that transition.
 
 Windows acceptance is recorded as a local or external JSON artifact. Evidence
 files are not source files, must not be committed, and must not contain local
@@ -381,8 +487,8 @@ identified only as a local build. Visual capture rows bind PNG filenames,
 dimensions, image digests, UI and optional scenario targets, appearance, and
 surface to that same executable digest. Image bytes remain external.
 
-For a release decision, validate the complete external evidence against the
-downloaded Actions handoff and matching checkout with
+For a historical formal-acceptance decision, validate the complete external
+evidence against the downloaded Actions handoff and matching checkout with
 [`scripts/validate-release-acceptance.ps1`](scripts/validate-release-acceptance.ps1).
 This cross-check requires the evidence to identify `actions-handoff` and match
 the handoff's source SHA, workflow run, executable filename, executable digest,

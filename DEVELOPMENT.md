@@ -43,6 +43,20 @@ pwsh -NoLogo -NoProfile -File ./scripts/test-tooling.ps1
 python3 scripts/test-windows-vm-runner.py
 python3 scripts/test-gui-regression-runner.py
 python3 scripts/test-gui-regression-evidence.py
+python3 scripts/test-vm-automated-authority.py
+python3 scripts/test-vm-automated-evidence.py
+python3 scripts/test-vm-automated-state.py
+python3 scripts/test-vm-automated-journal.py
+python3 scripts/test-vm-automated-binding.py
+python3 scripts/test-vm-automated-recovery.py
+python3 scripts/test-vm-automated-platform.py
+python3 scripts/test-vm-automated-campaign.py
+python3 scripts/test-vm-automated-recovery-profile.py
+python3 scripts/test-vm-automated-verifier.py
+python3 scripts/test-vm-automated-menu-layout.py
+python3 scripts/test-vm-automated-campaign-runner.py
+python3 scripts/test-vm-automated-campaign-verifier.py
+python3 scripts/test-vm-automated-cli.py
 ```
 
 ## Linux cross-build and visual diagnostics
@@ -174,11 +188,53 @@ native Windows compilation or the complete native development gate. It does not
 establish the Windows 11 DPI and Forced Colors matrix, accessibility/IME,
 physical-media benchmarks, or VM power-loss acceptance in `SAFETY.md`.
 
+### VM-Automated campaign development
+
+[`config/vm-automated-v1.json`](config/vm-automated-v1.json) is the canonical
+fixed profile. It declares 22 derived targets and five required gates. The
+campaign runner converts those targets into 20 primary execution cells, because
+process crash, recovery export and Intent-only candidate discard share one
+execution group, then adds 10 independent core-UIA stability executions. The
+result is a predeclared 30-slot first-attempt plan.
+
+[`scripts/run-vm-automated-campaign.py`](scripts/run-vm-automated-campaign.py)
+uses the common [`scripts/test-windows-vm.py`](scripts/test-windows-vm.py) host
+controller for each VM cell. It requires a new absolute output directory outside
+the checkout, writes `plan.json` before VM access, runs workloads sequentially
+under the one-VM lock, and stops after the first failed attempt. It retains the
+partial ledger and diagnostics, but does not retry or replace a failed slot. A
+passing campaign must begin again with a new output root and complete plan.
+
+The product checkout, clean harness checkout and eventual hosted
+validator checkout must resolve to the same source commit. The campaign reuses
+the immutable candidate EXE and records its exact handoff identity. Its native
+backend preparation retains source-bound test binaries, the complete actual
+stdout/stderr transcripts, result and transport records, and cleanup evidence.
+
+The campaign ZIP is private raw input, not a release verdict. It contains the
+complete indexed observations and failed records without normalizing producer
+summaries into passes. The repository owner uploads it as the sole asset of the
+dedicated private draft ingress release. The hosted validation workflow pins
+that release, asset, digest and size; revalidates candidate, source, profile and
+all raw evidence; removes its private scratch; and then attests only the
+canonical path-free statement. Promotion separately recomputes the statement,
+verifies that exact hosted run and attestation, and publishes the unchanged
+candidate bytes.
+
+Local tooling checks, a packaged archive, or this documented profile do not
+show that the matrix has passed. The VM producer remains trusted to report its
+observations honestly; archive validation is not remote VM attestation. Human
+visual or comprehensive assistive-technology acceptance, actual IME and
+Explorer drag-and-drop, physical-media performance, physical power loss, and VM
+reset or storage-fault durability remain outside VM-Automated v1.
+
 ## Interactive acceptance observers
 
-The optional `scripts/windows-vm-acceptance.ps1` and
-`scripts/windows-vm-recovery-acceptance.ps1` observers reuse an existing VM test
-bundle. Stage the unchanged manifest, runner, and listed binaries in a private
+The campaign controller stages the UI and recovery observers automatically.
+For standalone diagnostics or historical formal acceptance,
+`scripts/windows-vm-acceptance.ps1` and
+`scripts/windows-vm-recovery-acceptance.ps1` reuse an existing VM test bundle.
+Stage the unchanged manifest, runner, and listed binaries in a private
 `bundle` directory, with the selected observer in its parent directory. Record
 the observer's SHA-256 separately from the bundle's source and executable
 digests. Run one observer at a time in the bundle account's unlocked,
@@ -189,7 +245,9 @@ Both observers verify those bindings and acquire the shared desktop lock.
 The UI observer requires a new output directory. It records the actual window
 DPI, UI Automation metadata, keyboard-only file import and prefix entry,
 Apply cancellation and confirmation, disk contents and identities, and normal
-close. Screenshots require operator review before a UI cell can be accepted.
+close. Historical formal UI acceptance requires operator review of screenshots.
+VM-Automated release validation derives its defined raster and geometry checks
+from the raw observations without treating operator review as a pass condition.
 `-HighContrast` temporarily enables Windows High Contrast and verifies restoration
 of the original flags, scheme, system colors, and active visual-style path, color,
 and size. The private rescue snapshot retains that complete identity while public
@@ -249,9 +307,9 @@ Historical ad-hoc results are external records and are not migrated or relabeled
 These hashes provide integrity bookkeeping, not independent rebuild proof or
 protection against coordinated changes to all evidence files.
 
-Inspect the original screenshots before accepting a visual result. Passing raw
-regression assertions does not establish human acceptance or satisfy the separate
-release acceptance validators in `SAFETY.md` and `DISTRIBUTION.md`.
+Inspect the original screenshots before making a human visual-acceptance claim.
+Passing this diagnostic suite does not establish human acceptance or replace the
+complete VM-Automated campaign required by `SAFETY.md` and `DISTRIBUTION.md`.
 
 ## Dependency policy
 

@@ -1,0 +1,154 @@
+name: Validate private automated VM evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful candidate workflow run ID
+        required: true
+        type: string
+      candidate_run_attempt:
+        description: Exact candidate workflow run attempt
+        required: true
+        type: string
+      candidate_artifact_id:
+        description: Immutable candidate artifact ID
+        required: true
+        type: string
+      candidate_source_sha:
+        description: Full candidate and trusted harness source SHA
+        required: true
+        type: string
+      expected_exe_sha256:
+        description: Candidate DarkReNamer.exe SHA-256
+        required: true
+        type: string
+      ingress_release_id:
+        description: Dedicated private draft ingress release ID
+        required: true
+        type: string
+      ingress_asset_id:
+        description: Exact private raw evidence asset ID
+        required: true
+        type: string
+      ingress_archive_sha256:
+        description: Raw evidence archive SHA-256
+        required: true
+        type: string
+      ingress_archive_size:
+        description: Raw evidence archive byte length
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vm-acceptance-${{ inputs.ingress_asset_id }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.ref == 'refs/heads/master'
+    name: vm-acceptance/validate-private-evidence
+    runs-on: windows-2025
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout trusted validator source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+          persist-credentials: false
+
+      - name: Validate dispatch envelope before acquisition
+        shell: pwsh
+        env:
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          CANDIDATE_RUN_ATTEMPT: ${{ inputs.candidate_run_attempt }}
+          CANDIDATE_ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
+          CANDIDATE_SOURCE_SHA: ${{ inputs.candidate_source_sha }}
+          EXPECTED_EXE_SHA256: ${{ inputs.expected_exe_sha256 }}
+          INGRESS_RELEASE_ID: ${{ inputs.ingress_release_id }}
+          INGRESS_ASSET_ID: ${{ inputs.ingress_asset_id }}
+          INGRESS_ARCHIVE_SHA256: ${{ inputs.ingress_archive_sha256 }}
+          INGRESS_ARCHIVE_SIZE: ${{ inputs.ingress_archive_size }}
+        run: |
+          foreach ($value in @(
+              $env:CANDIDATE_RUN_ID,
+              $env:CANDIDATE_RUN_ATTEMPT,
+              $env:CANDIDATE_ARTIFACT_ID,
+              $env:INGRESS_RELEASE_ID,
+              $env:INGRESS_ASSET_ID,
+              $env:INGRESS_ARCHIVE_SIZE
+          )) {
+            if ($value -cnotmatch '^[1-9][0-9]{0,18}$') {
+              throw 'Hosted validation numeric input is invalid.'
+            }
+          }
+          if ($env:CANDIDATE_SOURCE_SHA -cnotmatch '^[0-9a-f]{40}$' -or
+              $env:EXPECTED_EXE_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:INGRESS_ARCHIVE_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'Hosted validation digest input is invalid.'
+          }
+          $source = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $source -cne $env:CANDIDATE_SOURCE_SHA -or
+              $source -cne '${{ github.sha }}') {
+            throw 'Hosted validator source must equal the exact candidate source.'
+          }
+
+      - name: Download exact immutable candidate artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ inputs.candidate_artifact_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
+          path: candidate
+
+      - name: Derive canonical statement from private raw evidence
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          ./scripts/run-vm-automated-hosted.ps1
+          -Repository '${{ github.repository }}'
+          -CandidateRunId '${{ inputs.candidate_run_id }}'
+          -CandidateRunAttempt '${{ inputs.candidate_run_attempt }}'
+          -CandidateArtifactId '${{ inputs.candidate_artifact_id }}'
+          -CandidateSourceSha '${{ inputs.candidate_source_sha }}'
+          -ExpectedExeSha256 '${{ inputs.expected_exe_sha256 }}'
+          -IngressReleaseId '${{ inputs.ingress_release_id }}'
+          -IngressAssetId '${{ inputs.ingress_asset_id }}'
+          -IngressArchiveSha256 '${{ inputs.ingress_archive_sha256 }}'
+          -IngressArchiveSize '${{ inputs.ingress_archive_size }}'
+          -ValidationRunId '${{ github.run_id }}'
+          -ValidationRunAttempt '${{ github.run_attempt }}'
+          -CandidateHandoffRoot (Join-Path $PWD 'candidate')
+          -TrustedSourceRoot $PWD
+          -OutputPath (Join-Path $PWD 'validation-statement.json')
+          -RunnerTemp $env:RUNNER_TEMP
+
+      - name: Verify original candidate provenance
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SOURCE_SHA: ${{ inputs.candidate_source_sha }}
+        run: |
+          gh attestation verify candidate/DarkReNamer.exe `
+            --repo $env:GITHUB_REPOSITORY `
+            --signer-workflow "$env:GITHUB_REPOSITORY/.github/workflows/release.yaml" `
+            --source-digest $env:CANDIDATE_SOURCE_SHA `
+            --source-ref refs/heads/master `
+            --deny-self-hosted-runners
+          if ($LASTEXITCODE -ne 0) { throw 'Original candidate attestation verification failed.' }
+
+      - name: Attest only the canonical path-free statement
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: validation-statement.json

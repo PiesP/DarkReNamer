@@ -68,6 +68,78 @@ function New-Fixture {
     [pscustomobject]@{ root = $root; manifest = $manifest; runner = $runnerPath }
 }
 
+function New-CandidateFixture {
+    param([Parameter(Mandatory)][string] $Name)
+
+    $fixture = New-Fixture -Name $Name
+    Remove-Item -LiteralPath (Join-Path $fixture.root 'core-tests.exe')
+    foreach ($row in @(
+        @{ name = 'test-windows-vm.py'; content = 'launcher fixture' }
+        @{ name = 'run-windows-vm-tests.ps1'; content = 'controller fixture' }
+        @{ name = 'windows-vm-acceptance.ps1'; content = 'ui observer fixture' }
+        @{ name = 'windows-vm-recovery-acceptance.ps1'; content = 'recovery observer fixture' }
+        @{ name = 'validate-release-handoff.ps1'; content = 'handoff validator fixture' }
+        @{ name = 'validate-release-candidate-metadata.ps1'; content = 'metadata validator fixture' }
+        @{ name = 'measure-windows-binary.ps1'; content = 'binary measurement fixture' }
+        @{ name = 'release-handoff.json'; content = '{"source_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","workflow_run":"10","executable":{"filename":"DarkReNamer.exe","sha256":"APP_HASH"}}' }
+        @{ name = 'candidate-run.json'; content = '{"id":10,"run_attempt":1,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' }
+        @{ name = 'candidate-artifact.json'; content = '{"id":20,"name":"DarkReNamer-dry-run-10-1-windows","workflow_run":{"id":10,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}' }
+    )) {
+        [IO.File]::WriteAllText((Join-Path $fixture.root $row.name), $row.content)
+    }
+    $applicationHash = Get-Sha256 (Join-Path $fixture.root 'DarkReNamer.exe')
+    $handoffPath = Join-Path $fixture.root 'release-handoff.json'
+    [IO.File]::WriteAllText(
+        $handoffPath,
+        ([IO.File]::ReadAllText($handoffPath).Replace('APP_HASH', $applicationHash))
+    )
+    $artifact = {
+        param([string] $Leaf)
+        [ordered]@{ file = $Leaf; sha256 = Get-Sha256 (Join-Path $fixture.root $Leaf) }
+    }
+    $fixture.manifest = [ordered]@{
+        schema_version = 2
+        lane = 'candidate-gui-only'
+        target = 'x86_64-pc-windows-msvc'
+        product = [ordered]@{
+            source_sha = 'a' * 40
+            source_state = 'clean'
+            candidate = [ordered]@{
+                workflow_run = '10'
+                run_attempt = '1'
+                artifact_id = '20'
+                artifact_name = 'DarkReNamer-dry-run-10-1-windows'
+                origin_authentication = 'pending-hosted'
+            }
+            application = & $artifact 'DarkReNamer.exe'
+            provenance = [ordered]@{
+                release_handoff = & $artifact 'release-handoff.json'
+                run_metadata = & $artifact 'candidate-run.json'
+                artifact_metadata = & $artifact 'candidate-artifact.json'
+            }
+        }
+        harness = [ordered]@{
+            source_sha = 'b' * 40
+            source_state = 'clean'
+            launcher = & $artifact 'test-windows-vm.py'
+            controller = & $artifact 'run-windows-vm-tests.ps1'
+            runner = & $artifact 'windows-vm-guest.ps1'
+            observers = [ordered]@{
+                ui = & $artifact 'windows-vm-acceptance.ps1'
+                recovery = & $artifact 'windows-vm-recovery-acceptance.ps1'
+            }
+            validators = [ordered]@{
+                release_handoff = & $artifact 'validate-release-handoff.ps1'
+                candidate_metadata = & $artifact 'validate-release-candidate-metadata.ps1'
+                binary_measurement = & $artifact 'measure-windows-binary.ps1'
+            }
+        }
+        test_binaries = @()
+    }
+    Save-Manifest $fixture
+    $fixture
+}
+
 function Save-Manifest([object] $Fixture) {
     Write-Utf8Json -Path (Join-Path $Fixture.root 'bundle.json') -Value $Fixture.manifest
 }
@@ -97,6 +169,172 @@ try {
             throw 'The result document must not contain BundleRoot.'
         }
     }
+
+    $candidate = New-CandidateFixture -Name 'candidate-valid'
+    & $candidate.runner -BundleRoot $candidate.root -ExpectedSessionId 1 -ValidateOnly
+    . $candidate.runner -BundleRoot $candidate.root -ExpectedSessionId 1 -ValidateOnly
+    $candidateContract = Resolve-VerifiedBundle `
+        -Root $candidate.root `
+        -InvokedScriptPath $candidate.runner
+    if ($candidateContract.contract.lane -cne 'candidate-gui-only' -or
+        $candidateContract.contract.product_source_sha -cne ('a' * 40) -or
+        $candidateContract.contract.harness_source_sha -cne ('b' * 40) -or
+        $candidateContract.contract.observers.ui.file -cne 'windows-vm-acceptance.ps1' -or
+        $candidateContract.contract.observers.recovery.file -cne 'windows-vm-recovery-acceptance.ps1' -or
+        $candidateContract.tests.Count -ne 0) {
+        throw 'The candidate product and harness normalization contract is invalid.'
+    }
+
+    $topLevelCandidate = [pscustomobject]@{
+        Current = [pscustomobject]@{ NativeWindowHandle = 101 }
+    }
+    $fallbackCandidate = [pscustomobject]@{
+        Current = [pscustomobject]@{ NativeWindowHandle = 102 }
+    }
+    $fallbackProbe = [pscustomobject]@{ calls = 0 }
+    $fallbackQuery = {
+        $fallbackProbe.calls++
+        $fallbackCandidate
+    }.GetNewClosure()
+    $selected = Resolve-UniqueAutomationWindowCandidate `
+        -TopLevelCandidates @($topLevelCandidate) `
+        -FallbackQuery $fallbackQuery `
+        -Label 'top-level fixture'
+    if ($selected.Current.NativeWindowHandle -ne 101 -or $fallbackProbe.calls -ne 0) {
+        throw 'A unique top-level window did not bypass the descendant fallback query.'
+    }
+    $selected = Resolve-UniqueAutomationWindowCandidate `
+        -TopLevelCandidates @() `
+        -FallbackQuery $fallbackQuery `
+        -Label 'fallback fixture'
+    if ($selected.Current.NativeWindowHandle -ne 102 -or $fallbackProbe.calls -ne 1) {
+        throw 'The descendant fallback did not run exactly once after an empty top-level query.'
+    }
+    $ambiguousCandidate = [pscustomobject]@{
+        Current = [pscustomobject]@{ NativeWindowHandle = 103 }
+    }
+    Assert-Fails {
+        Resolve-UniqueAutomationWindowCandidate `
+            -TopLevelCandidates @($topLevelCandidate, $ambiguousCandidate) `
+            -FallbackQuery $fallbackQuery `
+            -Label 'ambiguous fixture'
+    } 'matched more than one top-level window'
+    if ($fallbackProbe.calls -ne 1) {
+        throw 'An ambiguous top-level query incorrectly invoked the descendant fallback.'
+    }
+    Assert-Fails {
+        Resolve-UniqueAutomationWindowCandidate `
+            -TopLevelCandidates @() `
+            -FallbackQuery { @($fallbackCandidate, $ambiguousCandidate) } `
+            -Label 'ambiguous fallback fixture'
+    } 'matched more than one top-level window'
+
+    $candidateSwappedObserver = New-CandidateFixture -Name 'candidate-swapped-observer'
+    $uiObserver = $candidateSwappedObserver.manifest.harness.observers.ui
+    $candidateSwappedObserver.manifest.harness.observers.ui =
+        $candidateSwappedObserver.manifest.harness.observers.recovery
+    $candidateSwappedObserver.manifest.harness.observers.recovery = $uiObserver
+    Save-Manifest $candidateSwappedObserver
+    Assert-Fails {
+        & $candidateSwappedObserver.runner `
+            -BundleRoot $candidateSwappedObserver.root `
+            -ExpectedSessionId 1 `
+            -ValidateOnly
+    } 'observer ui file is invalid'
+
+    $candidateObserverHashMismatch = New-CandidateFixture -Name 'candidate-observer-hash-mismatch'
+    $candidateObserverHashMismatch.manifest.harness.observers.ui.sha256 = 'f' * 64
+    Save-Manifest $candidateObserverHashMismatch
+    Assert-Fails {
+        & $candidateObserverHashMismatch.runner `
+            -BundleRoot $candidateObserverHashMismatch.root `
+            -ExpectedSessionId 1 `
+            -ValidateOnly
+    } 'manifest artifact hash mismatch'
+
+    $candidateMetadataMismatch = New-CandidateFixture -Name 'candidate-metadata-mismatch'
+    $candidateMetadataMismatch.manifest.product.candidate.artifact_id = '21'
+    Save-Manifest $candidateMetadataMismatch
+    Assert-Fails {
+        & $candidateMetadataMismatch.runner `
+            -BundleRoot $candidateMetadataMismatch.root `
+            -ExpectedSessionId 1 `
+            -ValidateOnly
+    } 'GitHub metadata differs'
+
+    $candidateHashMismatch = New-CandidateFixture -Name 'candidate-hash-mismatch'
+    $candidateHashMismatch.manifest.product.application.sha256 = 'f' * 64
+    Save-Manifest $candidateHashMismatch
+    Assert-Fails {
+        & $candidateHashMismatch.runner `
+            -BundleRoot $candidateHashMismatch.root `
+            -ExpectedSessionId 1 `
+            -ValidateOnly
+    } 'manifest artifact hash mismatch'
+
+    $candidateDuplicateMetadata = New-CandidateFixture -Name 'candidate-duplicate-metadata'
+    $duplicateRunPath = Join-Path $candidateDuplicateMetadata.root 'candidate-run.json'
+    [IO.File]::WriteAllText(
+        $duplicateRunPath,
+        '{"id":10,"id":10,"run_attempt":1,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
+    )
+    $candidateDuplicateMetadata.manifest.product.provenance.run_metadata.sha256 =
+        Get-Sha256 $duplicateRunPath
+    Save-Manifest $candidateDuplicateMetadata
+    Assert-Fails {
+        & $candidateDuplicateMetadata.runner `
+            -BundleRoot $candidateDuplicateMetadata.root `
+            -ExpectedSessionId 1 `
+            -ValidateOnly
+    } 'duplicate field: id'
+
+    $candidateDuplicateArtifact = New-CandidateFixture -Name 'candidate-duplicate-artifact'
+    $duplicateArtifactPath = Join-Path $candidateDuplicateArtifact.root 'candidate-artifact.json'
+    [IO.File]::WriteAllText(
+        $duplicateArtifactPath,
+        '{"id":20,"id":20,"name":"DarkReNamer-dry-run-10-1-windows","workflow_run":{"id":10,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}'
+    )
+    $candidateDuplicateArtifact.manifest.product.provenance.artifact_metadata.sha256 =
+        Get-Sha256 $duplicateArtifactPath
+    Save-Manifest $candidateDuplicateArtifact
+    Assert-Fails {
+        & $candidateDuplicateArtifact.runner `
+            -BundleRoot $candidateDuplicateArtifact.root `
+            -ExpectedSessionId 1 `
+            -ValidateOnly
+    } 'duplicate field: id'
+
+    $emptyDefault = New-Fixture -Name 'empty-default'
+    $emptyDefault.manifest.test_binaries = @()
+    Save-Manifest $emptyDefault
+    Assert-Fails {
+        & $emptyDefault.runner -BundleRoot $emptyDefault.root -ExpectedSessionId 1 -ValidateOnly
+    } 'non-empty array'
+
+    $duplicateManifest = New-Fixture -Name 'duplicate-manifest'
+    $duplicateJson = $duplicateManifest.manifest | ConvertTo-Json -Depth 8
+    $duplicateJson = $duplicateJson.Replace(
+        '"schema_version": 1,',
+        '"schema_version": 1, "schema_version": 1,'
+    )
+    [IO.File]::WriteAllText(
+        (Join-Path $duplicateManifest.root 'bundle.json'),
+        $duplicateJson,
+        [Text.UTF8Encoding]::new($false)
+    )
+    Assert-Fails {
+        & $duplicateManifest.runner `
+            -BundleRoot $duplicateManifest.root `
+            -ExpectedSessionId 1 `
+            -ValidateOnly
+    } 'duplicate field: schema_version'
+
+    $numericType = New-CandidateFixture -Name 'candidate-numeric-type'
+    $numericType.manifest.schema_version = [double]2.0
+    Save-Manifest $numericType
+    Assert-Fails {
+        & $numericType.runner -BundleRoot $numericType.root -ExpectedSessionId 1 -ValidateOnly
+    } 'JSON integer 2'
 
     $badHash = New-Fixture -Name 'bad-hash'
     $badHash.manifest.test_binaries[0].sha256 = '2' * 64
@@ -166,6 +404,128 @@ try {
         'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad') {
         throw 'The source-bound identity digest helper returned the wrong SHA-256 value.'
     }
+    foreach ($helper in @(
+        'Get-FullFileIdentity',
+        'Get-VmAutomatedEnvironment',
+        'Get-VmAutomatedFixtureInventory',
+        'Get-VmAutomatedJournalInventory',
+        'Get-VmAutomatedCheckpoint',
+        'Get-VmAutomatedOwnedProcessInventory',
+        'Get-VmAutomatedRuntimeRootObservation',
+        'New-VmAutomatedJournalCleanupObservation'
+    )) {
+        if ($null -eq (Get-Command $helper -CommandType Function -ErrorAction SilentlyContinue)) {
+            throw "The shared VM-Automated helper $helper is unavailable after dot-sourcing."
+        }
+    }
+    $observedJournal = New-VmAutomatedJournalCleanupObservation `
+        -Observed $true `
+        -Entries @([ordered]@{ name = 'runtime.lock'; kind = 'file'; bytes = [long]0 })
+    if ($null -eq $observedJournal -or
+        @($observedJournal.entries).Count -ne 1 -or
+        $observedJournal.entries[0].name -cne 'runtime.lock' -or
+        $null -ne (New-VmAutomatedJournalCleanupObservation -Observed $false -Entries @())) {
+        throw 'Cleanup journal evidence must distinguish an observed inventory from an unobserved one.'
+    }
+    $runtimeObservationRoot = Join-Path $valid.root 'runtime-observation'
+    [void](New-Item -ItemType Directory -Path $runtimeObservationRoot)
+    [IO.File]::WriteAllText((Join-Path $runtimeObservationRoot 'first.txt'), 'first')
+    [IO.File]::WriteAllText((Join-Path $runtimeObservationRoot 'second.txt'), 'second')
+    $runtimeObservation = Get-VmAutomatedRuntimeRootObservation `
+        -Root $runtimeObservationRoot `
+        -MaximumEntries 2
+    if (-not $runtimeObservation.exists -or @($runtimeObservation.entries).Count -ne 2) {
+        throw 'The bounded runtime inventory did not enumerate its complete ordinary tree.'
+    }
+    [IO.File]::WriteAllText((Join-Path $runtimeObservationRoot 'third.txt'), 'third')
+    Assert-Fails {
+        Get-VmAutomatedRuntimeRootObservation -Root $runtimeObservationRoot -MaximumEntries 2
+    } 'entry count exceeds its bound'
+    $reparseTarget = Join-Path $valid.root 'runtime-reparse-target'
+    [void](New-Item -ItemType Directory -Path $reparseTarget)
+    $reparsePath = Join-Path $runtimeObservationRoot 'linked'
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        & "$env:SystemRoot\System32\cmd.exe" /d /c mklink /J $reparsePath $reparseTarget | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Could not create the runtime-observation junction fixture.' }
+    }
+    else {
+        [void](New-Item -ItemType SymbolicLink -Path $reparsePath -Target $reparseTarget)
+    }
+    Assert-Fails {
+        Get-VmAutomatedRuntimeRootObservation -Root $runtimeObservationRoot -MaximumEntries 8
+    } 'contains a reparse point'
+    $runnerText = [IO.File]::ReadAllText($runner)
+    if ($runnerText.IndexOf(
+        'journal_after = [ordered]@{ entries = @() }',
+        [StringComparison]::Ordinal
+    ) -ge 0) {
+        throw 'Candidate cleanup must not serialize an unobserved journal as an empty inventory.'
+    }
+    foreach ($requiredRawSource in @(
+        'GetFileInformationByHandleEx(',
+        'information.VolumeSerialNumber.ToString("x16")',
+        'FormatFileIdNumeric(information.FileId.LowPart, information.FileId.HighPart)',
+        'Get-VmAutomatedCanonicalRootPath -Path $FixtureRoot',
+        'product_type = [int]$operatingSystem.ProductType',
+        'root_identity = Get-FullFileIdentity -Path $rootPath',
+        'is_elevated = [bool][DarkReNamerVmNative]::IsProcessElevated',
+        'input_desktop_active = $desktopAvailable',
+        'high_contrast_flags = [long][DarkReNamerVmNative]::GetHighContrastFlags()'
+        "exit_method = 'normal-close'"
+        "exit_method = 'forced-termination'"
+        "`$result['raw_cleanup'] = [ordered]@{"
+        '-RawEvidence:$candidateLane'
+    )) {
+        if ($runnerText.IndexOf($requiredRawSource, [StringComparison]::Ordinal) -lt 0) {
+            throw "The shared VM-Automated raw contract is missing '$requiredRawSource'."
+        }
+    }
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        Initialize-NativeCapture
+        $numericFileId = [DarkReNamerVmNative]::FormatFileIdNumeric(
+            [Convert]::ToUInt64('0706050403020100', 16),
+            [Convert]::ToUInt64('0f0e0d0c0b0a0908', 16)
+        )
+        if ($numericFileId -cne '0f0e0d0c0b0a09080706050403020100') {
+            throw 'FILE_ID_128 was not encoded as the product u128 numeric value.'
+        }
+        $identityRoot = Join-Path $valid.root 'full-identity'
+        [void](New-Item -ItemType Directory -Path $identityRoot)
+        $identityFile = Join-Path $identityRoot 'fixture.txt'
+        [IO.File]::WriteAllText($identityFile, 'identity fixture')
+        $directoryIdentity = Get-FullFileIdentity -Path $identityRoot
+        $fileIdentity = Get-FullFileIdentity -Path $identityFile
+        foreach ($observed in @($directoryIdentity, $fileIdentity)) {
+            if ($observed.volume_serial -cnotmatch '^[0-9a-f]{16}$' -or
+                $observed.file_id -cnotmatch '^[0-9a-f]{32}$') {
+                throw 'FILE_ID_INFO did not retain its full lowercase numeric width.'
+            }
+        }
+        if ($directoryIdentity.volume_serial -cne $fileIdentity.volume_serial -or
+            $directoryIdentity.file_id -ceq $fileIdentity.file_id) {
+            throw 'FILE_ID_INFO did not bind distinct entries on the same fixture volume.'
+        }
+        $rawFixture = Join-Path $valid.root 'raw-fixture'
+        [void](New-Item -ItemType Directory -Path $rawFixture)
+        $rawFile = Join-Path $rawFixture 'source.txt'
+        [IO.File]::WriteAllText($rawFile, 'raw fixture')
+        $rawCheckpoint = Get-VmAutomatedCheckpoint `
+            -Phase initial -FixtureRoot $rawFixture `
+            -LocalAppData (Join-Path $valid.root 'raw-localappdata')
+        if (@($rawCheckpoint.fixture_entries).Count -ne 1 -or
+            $rawCheckpoint.fixture_entries[0].name -cne 'source.txt' -or
+            $rawCheckpoint.fixture_entries[0].kind -cne 'file' -or
+            $rawCheckpoint.fixture_entries[0].file_identity.file_id -cne
+                (Get-FullFileIdentity -Path $rawFile).file_id -or
+            @($rawCheckpoint.journal_entries).Count -ne 0) {
+            throw 'The raw checkpoint did not preserve complete fixture identity and journal state.'
+        }
+    }
+    else {
+        Assert-Fails {
+            Get-FullFileIdentity -Path $valid.root
+        } 'requires Windows'
+    }
     $isolatedLocalAppData = Join-Path $valid.root 'isolated-localappdata'
     $isolatedJournalRoot = Join-Path (Join-Path $isolatedLocalAppData 'DarkReNamer') 'journal'
     [void](New-Item -ItemType Directory -Path $isolatedJournalRoot)
@@ -177,6 +537,13 @@ try {
     } 'rename-journal residue'
     Remove-Item -LiteralPath (Join-Path $isolatedJournalRoot 'active.drj')
     $hostRunner = Join-Path $PSScriptRoot 'run-windows-vm-tests.ps1'
+    $hostRunnerText = [IO.File]::ReadAllText($hostRunner)
+    if ($hostRunnerText.IndexOf('-ExecutionPolicy RemoteSigned', [StringComparison]::Ordinal) -ge 0 -or
+        $hostRunnerText.IndexOf('Get-Command pwsh.exe', [StringComparison]::Ordinal) -lt 0 -or
+        $hostRunnerText.IndexOf("edition -cne 'Core'", [StringComparison]::Ordinal) -lt 0 -or
+        $hostRunnerText.IndexOf("effective_policy -cne 'RemoteSigned'", [StringComparison]::Ordinal) -lt 0) {
+        throw 'The native scheduled task must use the inspected PowerShell 7.4+ Core RemoteSigned engine without a policy override.'
+    }
     . $hostRunner -BundleRoot $valid.root -SshHost 'darkrenamer-vm'
     Assert-Fails {
         Assert-SshPowerShellVersion -Version '7.3.9' -Context 'Fixture SSH endpoint'
@@ -262,7 +629,26 @@ try {
     Assert-Fails {
         Join-GuestWindowsPath -Root $guestTransferRoot -Leaf '..\result.json'
     } 'Invalid bundle file name'
-    $runnerText = [IO.File]::ReadAllText($runner)
+    $bindingTokens = $null
+    $bindingErrors = $null
+    $runnerAst = [Management.Automation.Language.Parser]::ParseInput(
+        $runnerText, [ref]$bindingTokens, [ref]$bindingErrors)
+    $captureFunction = $runnerAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Save-WindowScreenshot'
+    }, $true)
+    $collectionParameter = @($captureFunction.Body.ParamBlock.Parameters | Where-Object {
+        $_.Name.VariablePath.UserPath -ceq 'ForegroundObservations'
+    })
+    if ($collectionParameter.Count -ne 1) { throw 'Screenshot observation parameter is missing.' }
+    $bindingProbe = [scriptblock]::Create(
+        'param(' + $collectionParameter[0].Extent.Text + ') $ForegroundObservations.Add("first"); $ForegroundObservations.Count')
+    $emptyObservations = [Collections.Generic.List[object]]::new()
+    if ((& $bindingProbe -ForegroundObservations $emptyObservations) -ne 1 -or
+        $emptyObservations.Count -ne 1) {
+        throw 'The first screenshot must accept and populate the initially empty observation list.'
+    }
     foreach ($requiredCoreRegistrationSource in @(
         'var providerType = typeof(UIAutomationClientsideProviders.UIAutomationClientSideProviders);',
         'var providerName = providerType.Assembly.GetName();',
@@ -298,17 +684,17 @@ Initialize-NativeCapture
         $initScript = $initScript.Replace('GUEST_RUNNER_PATH', $valid.runner.Replace("'", "''")).Replace('GUEST_BUNDLE_PATH', $valid.root.Replace("'", "''"))
         $encodedInit = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($initScript))
         $initProcess = Start-OwnedProcess `
-            -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') `
+            -FilePath (Join-Path $PSHOME 'pwsh.exe') `
             -Arguments "-NoLogo -NoProfile -NonInteractive -EncodedCommand $encodedInit" `
             -WorkingDirectory $valid.root `
             -RedirectOutput
         try {
             if (-not $initProcess.process.WaitForExit(30000)) {
-                throw 'Fresh Windows PowerShell UI Automation initialization timed out.'
+                throw 'Fresh PowerShell Core UI Automation initialization timed out.'
             }
             $initProcess.process.WaitForExit()
             if ($initProcess.process.ExitCode -ne 0) {
-                throw "Fresh Windows PowerShell UI Automation initialization failed: $($initProcess.stderr_task.GetAwaiter().GetResult())"
+                throw "Fresh PowerShell Core UI Automation initialization failed: $($initProcess.stderr_task.GetAwaiter().GetResult())"
             }
         }
         finally {

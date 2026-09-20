@@ -689,7 +689,13 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
         "candidate_run_id",
         "candidate_source_sha",
         "expected_exe_sha256",
+        "ingress_archive_sha256",
+        "ingress_archive_size",
+        "ingress_asset_id",
+        "ingress_release_id",
         "release_tag",
+        "validation_run_attempt",
+        "validation_run_id",
     ];
     require(
         inputs.keys().map(String::as_str).eq(names)
@@ -754,7 +760,13 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
         ("CANDIDATE_ARTIFACT_ID", "candidate_artifact_id"),
         ("CANDIDATE_SOURCE_SHA", "candidate_source_sha"),
         ("EXPECTED_EXE_SHA256", "expected_exe_sha256"),
+        ("INGRESS_ARCHIVE_SHA256", "ingress_archive_sha256"),
+        ("INGRESS_ARCHIVE_SIZE", "ingress_archive_size"),
+        ("INGRESS_ASSET_ID", "ingress_asset_id"),
+        ("INGRESS_RELEASE_ID", "ingress_release_id"),
         ("RELEASE_TAG", "release_tag"),
+        ("VALIDATION_RUN_ATTEMPT", "validation_run_attempt"),
+        ("VALIDATION_RUN_ID", "validation_run_id"),
     ] {
         env_is_bound(
             promotion_path,
@@ -767,8 +779,153 @@ pub(super) fn validate_release_handoff_policy() -> Result<(), String> {
     script_contract(
         promotion_path,
         &promotion_script,
-        &[],
+        &[
+            "run-vm-automated-hosted.ps1",
+            "validate-vm-automated-authority.py validation-run",
+            ".github/workflows/vm-acceptance.yaml",
+            "--source-ref refs/heads/master",
+            "--deny-self-hosted-runners",
+            "validation-statement.json",
+        ],
         &["cargo build", "cargo test", "rustup toolchain install"],
+    )?;
+    let recompute = promotion_script
+        .find("run-vm-automated-hosted.ps1")
+        .ok_or_else(|| "promotion must recompute automated VM evidence".to_owned())?;
+    let verify = promotion_script
+        .find("validate-vm-automated-authority.py validation-run")
+        .ok_or_else(|| "promotion must verify validation authority".to_owned())?;
+    let publish = promotion_script
+        .find("gh release create")
+        .ok_or_else(|| "promotion must retain its publication step".to_owned())?;
+    require(
+        recompute < verify && verify < publish,
+        "promotion publication must remain unreachable before recomputation and authority verification",
+    )?;
+
+    let validation_path = ".github/workflows/vm-acceptance.yaml";
+    let validation = parse(
+        validation_path,
+        include_str!("../../../../.github/workflows/vm-acceptance.yaml"),
+    )?;
+    manual_only(validation_path, &validation)?;
+    let validation_inputs = dispatch_inputs(validation_path, &validation)?;
+    let validation_names = [
+        "candidate_artifact_id",
+        "candidate_run_attempt",
+        "candidate_run_id",
+        "candidate_source_sha",
+        "expected_exe_sha256",
+        "ingress_archive_sha256",
+        "ingress_archive_size",
+        "ingress_asset_id",
+        "ingress_release_id",
+    ];
+    require(
+        validation_inputs
+            .keys()
+            .map(String::as_str)
+            .eq(validation_names)
+            && validation_inputs.values().all(|input| {
+                input.required == Some(true)
+                    && input.kind.as_deref() == Some("string")
+                    && input.default.is_none()
+                    && input.options.is_empty()
+            }),
+        "hosted VM validation inputs must bind candidate and private ingress identity",
+    )?;
+    permissions(
+        validation_path,
+        &validation.permissions,
+        &[("contents", "read")],
+    )?;
+    require(
+        validation
+            .concurrency
+            .as_ref()
+            .is_some_and(|concurrency| !concurrency.cancel_in_progress),
+        "hosted VM validation must serialize each private ingress without cancellation",
+    )?;
+    let validation_job = only_job(validation_path, &validation, "validate")?;
+    require(
+        validation_job.condition.as_deref() == Some("github.ref == 'refs/heads/master'")
+            && is_hosted_windows_runner(&validation_job.runs_on)
+            && validation_job.environment.is_none()
+            && validation_job.strategy.is_none(),
+        "hosted VM validation must use one trusted hosted Windows job on master",
+    )?;
+    permissions(
+        validation_path,
+        &validation_job.permissions,
+        &[
+            ("actions", "read"),
+            ("artifact-metadata", "write"),
+            ("attestations", "write"),
+            ("contents", "read"),
+            ("id-token", "write"),
+        ],
+    )?;
+    checkout_is_read_only(validation_path, validation_job)?;
+    steps_are_mandatory(validation_path, validation_job)?;
+    action_policy(
+        validation_path,
+        validation_job,
+        &[
+            "actions/checkout",
+            "actions/download-artifact",
+            "actions/attest",
+        ],
+    )?;
+    let validation_downloads = actions(validation_job, "actions/download-artifact");
+    let validation_attestations = actions(validation_job, "actions/attest");
+    require(
+        validation_downloads.len() == 1
+            && with_is(
+                validation_downloads[0],
+                "artifact-ids",
+                "${{ inputs.candidate_artifact_id }}",
+            )
+            && with_is(
+                validation_downloads[0],
+                "run-id",
+                "${{ inputs.candidate_run_id }}",
+            )
+            && with_is(
+                validation_downloads[0],
+                "github-token",
+                "${{ github.token }}",
+            )
+            && with_is(
+                validation_downloads[0],
+                "repository",
+                "${{ github.repository }}",
+            )
+            && validation_attestations.len() == 1
+            && with_is(
+                validation_attestations[0],
+                "subject-path",
+                "validation-statement.json",
+            )
+            && actions(validation_job, "actions/upload-artifact").is_empty()
+            && action_sequence(validation_job)
+                == [
+                    "actions/checkout",
+                    "actions/download-artifact",
+                    "actions/attest",
+                ],
+        "hosted VM validation must download only the candidate and attest only the path-free statement",
+    )?;
+    script_contract(
+        validation_path,
+        &script(validation_job),
+        &[
+            "run-vm-automated-hosted.ps1",
+            "gh attestation verify candidate/DarkReNamer.exe",
+            ".github/workflows/release.yaml",
+            "--source-ref refs/heads/master",
+            "--deny-self-hosted-runners",
+        ],
+        &["gh release", "upload-artifact", "artifact upload"],
     )
 }
 
