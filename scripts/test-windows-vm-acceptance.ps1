@@ -644,6 +644,28 @@ try {
         $regressionInvokeIndex -le $regressionRestoreIndex) {
         throw 'The regression entry must restore its caller ValidateOnly switch after importing the guest helper.'
     }
+    & {
+        $stateFunction = $acceptanceAst.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Get-VmAutomatedFocusState'
+        }, $true)
+        . ([scriptblock]::Create($stateFunction.Extent.Text))
+        function Get-VmAutomatedFixtureInventory {
+            param([Parameter(Mandatory)][string] $FixtureRoot)
+            if ($FixtureRoot -cne 'fixture-root') { throw 'Unexpected fixture root.' }
+            [ordered]@{ name = 'source.txt'; kind = 'file'; bytes = 1 }
+        }
+        function Get-VmAutomatedJournalInventory {
+            param([Parameter(Mandatory)][string] $LocalAppData)
+            if ($LocalAppData -cne 'local-app-data') { throw 'Unexpected local app data.' }
+            @()
+        }
+        $state = Get-VmAutomatedFocusState -FixtureRoot 'fixture-root' -LocalAppData 'local-app-data'
+        if (@($state.fixture_entries).Count -ne 1 -or @($state.journal_entries).Count -ne 0) {
+            throw 'Focus state did not preserve complete fixture and journal arrays.'
+        }
+    }
     $probeValidateOnly = $false
     & {
         $BundleRoot = 'probe-bundle'
@@ -736,7 +758,7 @@ try {
         'focus_reachability = $rawFocusReachability'
         "& `$step 'tab' 0x09"
         "& `$step 'down' 0x28"
-        'Get-VmAutomatedFixtureInventory -Root $FixtureRoot'
+        'Get-VmAutomatedFixtureInventory -FixtureRoot $FixtureRoot'
         'Get-VmAutomatedJournalInventory -LocalAppData $LocalAppData'
     )) {
         if ($acceptanceText.IndexOf($requiredRawObservation, [StringComparison]::Ordinal) -lt 0) {
