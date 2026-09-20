@@ -39,7 +39,10 @@ def _read_loader(path: Path) -> bytes:
 
 def _run(argv) -> int:
     script_dir = Path(__file__).absolute().parent
-    checkout = script_dir.name == "scripts" and (script_dir.parent / "config" / "tooling-bundle.json").is_file()
+    checkout = (script_dir / "tooling_bootstrap.py").is_file() and (script_dir.parent / "config" / "tooling-bundle.json").is_file()
+    bundle = (script_dir / "tooling-loader.py").is_file() and (script_dir / "tooling-bundle.json").is_file()
+    if checkout == bundle:
+        raise RuntimeError("Tooling CLI layout is missing or ambiguous.")
     root = script_dir.parent if checkout else script_dir
     manifest = "config/tooling-bundle.json" if checkout else "tooling-bundle.json"
     loader_path = script_dir / ("tooling_bootstrap.py" if checkout else "tooling-loader.py")
