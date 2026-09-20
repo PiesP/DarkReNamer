@@ -279,7 +279,15 @@ try {
         throw 'run-windows-vm-tests.ps1 has PowerShell parser errors.'
     }
     $controllerText = [IO.File]::ReadAllText($controller)
-    foreach ($functionName in @('Assert-PlainFile', 'Join-GuestWindowsPath')) {
+    foreach ($functionName in @(
+        'Assert-PlainFile',
+        'Join-GuestWindowsPath',
+        'Get-SafeEvidencePathSegments',
+        'Join-GuestEvidencePath',
+        'Resolve-ControllerTaskSelection',
+        'Assert-AcceptanceInputArtifactBinding',
+        'Assert-ObserverResultBinding'
+    )) {
         $pathFunctions = @($controllerAst.FindAll({
             param($ast)
             $ast -is [Management.Automation.Language.FunctionDefinitionAst] -and
@@ -290,6 +298,77 @@ try {
         }
         . ([scriptblock]::Create($pathFunctions[0].Extent.Text))
     }
+    $selectionDefaults = @{
+        RequestedKind = ''
+        HasUiOutput = $false
+        HasUiManifest = $false
+        HasUiMode = $false
+        HasUiAppearance = $false
+        UiMode = ''
+        UiAppearance = ''
+        UiTextScalePercent = 100
+        HasUiTextScalePercent = $false
+        UiHighContrast = $false
+        UiClipboard = $false
+        UiCaptureNativeMenu = $false
+        UiCaptureAdvancedAppearance = $false
+        HasRecoveryOutput = $false
+        HasRecoveryMode = $false
+        HasRecoveryObserverSha256 = $false
+        RecoveryMode = ''
+        RecoveryExport = $false
+        RecoveryIntentOnlyCandidateDiscard = $false
+        HasRecoveryFixtureCount = $false
+        TimeoutSeconds = 300
+    }
+    $coreSelection = Resolve-ControllerTaskSelection @selectionDefaults
+    if ($coreSelection.kind -cne 'core' -or $coreSelection.is_observer) {
+        throw 'The default controller task selection must preserve the native core lane.'
+    }
+    $uiSelectionArguments = $selectionDefaults.Clone()
+    $uiSelectionArguments.HasUiOutput = $true
+    $uiSelectionArguments.HasUiManifest = $true
+    $uiSelectionArguments.HasUiMode = $true
+    $uiSelectionArguments.HasUiAppearance = $true
+    $uiSelectionArguments.UiMode = 'current-dpi'
+    $uiSelectionArguments.UiAppearance = 'system'
+    $uiSelectionArguments.UiHighContrast = $true
+    $uiSelection = Resolve-ControllerTaskSelection @uiSelectionArguments
+    if ($uiSelection.kind -cne 'ui' -or -not $uiSelection.is_observer) {
+        throw 'Legacy acceptance arguments must select the shared UI observer task.'
+    }
+    $recoverySelectionArguments = $selectionDefaults.Clone()
+    $recoverySelectionArguments.RequestedKind = 'recovery'
+    $recoverySelectionArguments.HasRecoveryOutput = $true
+    $recoverySelectionArguments.HasRecoveryMode = $true
+    $recoverySelectionArguments.HasRecoveryObserverSha256 = $true
+    $recoverySelectionArguments.RecoveryMode = 'ProcessCrash'
+    $recoverySelectionArguments.RecoveryExport = $true
+    $recoverySelection = Resolve-ControllerTaskSelection @recoverySelectionArguments
+    if ($recoverySelection.kind -cne 'recovery' -or -not $recoverySelection.is_observer) {
+        throw 'Explicit recovery arguments must select the shared recovery observer task.'
+    }
+    $invalidSelectionArguments = $selectionDefaults.Clone()
+    $invalidSelectionArguments.RequestedKind = 'core'
+    $invalidSelectionArguments.HasRecoveryOutput = $true
+    Assert-Fails {
+        Resolve-ControllerTaskSelection @invalidSelectionArguments
+    } 'Core tasks do not accept observer arguments'
+    $invalidSelectionArguments = $recoverySelectionArguments.Clone()
+    $invalidSelectionArguments.RecoveryMode = 'WorkerClose'
+    Assert-Fails {
+        Resolve-ControllerTaskSelection @invalidSelectionArguments
+    } 'require ProcessCrash mode'
+    $invalidSelectionArguments = $uiSelectionArguments.Clone()
+    $invalidSelectionArguments.UiCaptureAdvancedAppearance = $true
+    Assert-Fails {
+        Resolve-ControllerTaskSelection @invalidSelectionArguments
+    } 'unavailable during High Contrast'
+    $invalidSelectionArguments = $uiSelectionArguments.Clone()
+    $invalidSelectionArguments.HasRecoveryOutput = $true
+    Assert-Fails {
+        Resolve-ControllerTaskSelection @invalidSelectionArguments
+    } 'cannot be combined'
     $guestOut = Join-GuestWindowsPath `
         -Root 'C:\Users\TestUser\AppData\Local\Temp\DarkReNamerTests-fixture' `
         -Leaf 'out'
@@ -297,9 +376,37 @@ try {
     if ($guestEvidence -cne 'C:\Users\TestUser\AppData\Local\Temp\DarkReNamerTests-fixture\out\observer.stderr.txt') {
         throw 'The guest Windows path helper must compose nested paths on non-Windows hosts.'
     }
+    $nestedEvidence = Join-GuestEvidencePath `
+        -Root 'C:\Users\TestUser\AppData\Local\Temp\DarkReNamerTests-fixture\out' `
+        -RelativePath 'recovery-acceptance-fixture/summary.json'
+    if ($nestedEvidence -cne 'C:\Users\TestUser\AppData\Local\Temp\DarkReNamerTests-fixture\out\recovery-acceptance-fixture\summary.json') {
+        throw 'The controller must compose validated nested recovery evidence paths.'
+    }
+    Assert-Fails {
+        Get-SafeEvidencePathSegments '../summary.json'
+    } 'Invalid relative evidence path segment'
+    Assert-Fails {
+        Get-SafeEvidencePathSegments 'fixture\summary.json'
+    } 'Invalid relative evidence path'
+    Assert-Fails {
+        Get-SafeEvidencePathSegments 'fixture/NUL.txt'
+    } 'Invalid Windows ordinary file name'
+    Assert-Fails {
+        Get-SafeEvidencePathSegments 'fixture/trailing.'
+    } 'Invalid Windows ordinary file name'
+    $earlyAggregatePattern = '\$total\s*\+=\s*\$row\.Length\s*' +
+        'if\s*\(\$total\s*-gt\s*512MB\)\s*\{\s*throw\s*' +
+        "'[^']+aggregate size bound[^']*'\s*\}\s*\[pscustomobject\]@\{"
+    if ([regex]::Matches(
+        $controllerText,
+        $earlyAggregatePattern,
+        [Text.RegularExpressions.RegexOptions]::IgnoreCase
+    ).Count -ne 2) {
+        throw 'UI and recovery collection must reject the aggregate limit before hashing rows.'
+    }
     $guestOutputComposition = 'Join-GuestWindowsPath -Root (Join-GuestWindowsPath -Root'
-    if ([regex]::Matches($controllerText, [regex]::Escape($guestOutputComposition)).Count -ne 2) {
-        throw 'Acceptance and rescue collection must compose guest output paths without host Join-Path.'
+    if ([regex]::Matches($controllerText, [regex]::Escape($guestOutputComposition)).Count -ne 3) {
+        throw 'Acceptance, text-scale rescue, and High Contrast rescue collection must compose guest output paths without host Join-Path.'
     }
     foreach ($requiredRescueSource in @(
         'function Invoke-AcceptanceTextScaleRescue',
@@ -310,6 +417,22 @@ try {
     )) {
         if ($controllerText.IndexOf($requiredRescueSource, [StringComparison]::Ordinal) -lt 0) {
             throw "The VM controller is missing the text-scale rescue contract '$requiredRescueSource'."
+        }
+    }
+    foreach ($requiredObserverSource in @(
+        'function Invoke-AcceptanceHighContrastRescue',
+        '-RestoreHighContrastOnly',
+        'high-contrast-rescue-result.json',
+        'elseif ($recovery)',
+        'Recovery output file count exceeds its bound.',
+        'Recovery output contains a reparse entry.',
+        'recovery-inventory.json',
+        '-Role recovery',
+        'Assert-ObserverResultBinding',
+        '(-not $observerTask -or $acceptancePassed)'
+    )) {
+        if ($controllerText.IndexOf($requiredObserverSource, [StringComparison]::Ordinal) -lt 0) {
+            throw "The shared controller is missing observer contract '$requiredObserverSource'."
         }
     }
     if ($controllerText.IndexOf(
@@ -381,8 +504,8 @@ try {
         throw 'Execution policy evidence must retain its enum name through JSON serialization.'
     }
     $policySerialization = 'effective_policy=(Get-ExecutionPolicy).ToString()'
-    if ([regex]::Matches($controllerText, [regex]::Escape($policySerialization)).Count -ne 3) {
-        throw 'Native, acceptance, and text-scale rescue engine checks must serialize the execution policy name.'
+    if ([regex]::Matches($controllerText, [regex]::Escape($policySerialization)).Count -ne 5) {
+        throw 'Core, observer, and rescue engine checks must serialize the execution policy name.'
     }
     foreach ($line in @($controllerText -split "`r?`n" | Where-Object {
         $_ -match '\$observerArguments\s*=' -and $_ -notmatch '^\s*#'
@@ -659,6 +782,13 @@ try {
         if ($null -eq (Get-Command $regressionFunction -CommandType Function -ErrorAction SilentlyContinue)) {
             throw "Dot-sourcing did not load GUI regression function $regressionFunction."
         }
+    }
+    if ($acceptanceText.IndexOf('$Verified.manifest.application', [StringComparison]::Ordinal) -ge 0 -or
+        [regex]::Matches(
+            $acceptanceText,
+            [regex]::Escape('$Verified.application')
+        ).Count -lt 4) {
+        throw 'GUI regression scenarios must use the normalized verified application binding.'
     }
     $startFunction = (Get-Command Start-AcceptanceApplication -CommandType Function).Definition
     if ($startFunction.IndexOf('(Get-Date).AddSeconds($WaitSeconds)', [StringComparison]::Ordinal) -lt 0 -or
@@ -1312,9 +1442,182 @@ try {
 
     $valid = New-AcceptanceFixture -Name 'valid'
     Invoke-ValidateOnly $valid
+    $legacyManifest = $valid.manifest | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+    $legacyUiResult = [pscustomobject]@{
+        schema_version = [long]1
+        source_sha = $legacyManifest.source_sha
+        application = $legacyManifest.application
+        runner_sha256 = $legacyManifest.runner.sha256
+        acceptance_script_sha256 = Get-Sha256 $valid.acceptance
+    }
+    Assert-ObserverResultBinding `
+        -Result $legacyUiResult `
+        -Manifest $legacyManifest `
+        -Role ui `
+        -ExpectedObserverSha256 $legacyUiResult.acceptance_script_sha256
 
     $candidateValid = New-CandidateAcceptanceFixture -Name 'candidate-valid'
     Invoke-ValidateOnly $candidateValid
+    $candidateManifest = $candidateValid.manifest | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+    $candidateCurrentDpiInput = [pscustomobject]@{
+        artifacts = [pscustomobject]@{
+            application = [pscustomobject]@{
+                sha256 = $candidateManifest.product.application.sha256
+            }
+            runner = [pscustomobject]@{
+                sha256 = $candidateManifest.harness.runner.sha256
+            }
+        }
+    }
+    Assert-AcceptanceInputArtifactBinding `
+        -InputDocument $candidateCurrentDpiInput `
+        -Manifest $candidateManifest `
+        -CandidateLane $true
+    foreach ($field in @('application', 'runner')) {
+        $wrongCandidateCurrentDpiInput = $candidateCurrentDpiInput |
+            ConvertTo-Json -Depth 5 | ConvertFrom-Json
+        $wrongCandidateCurrentDpiInput.artifacts.$field.sha256 = 'f' * 64
+        Assert-Fails {
+            Assert-AcceptanceInputArtifactBinding `
+                -InputDocument $wrongCandidateCurrentDpiInput `
+                -Manifest $candidateManifest `
+                -CandidateLane $true
+        } 'candidate application or runner'
+    }
+    Assert-AcceptanceInputArtifactBinding `
+        -InputDocument ([pscustomobject]@{}) `
+        -Manifest $legacyManifest `
+        -CandidateLane $false
+    $candidateRegressionResolved = [pscustomobject]@{
+        lane = 'candidate-gui-only'
+        target = $candidateManifest.target
+        application = $candidateManifest.product.application
+        source_sha = $candidateManifest.product.source_sha
+        runner = $candidateManifest.harness.runner
+        runner_sha256 = $candidateManifest.harness.runner.sha256
+        script_sha256 = $candidateManifest.harness.observers.ui.sha256
+        product = $candidateManifest.product
+        harness = $candidateManifest.harness
+    }
+    $candidateRegressionInput = [pscustomobject]@{
+        schema_version = [long]1
+        source_sha = $candidateManifest.product.source_sha
+        artifacts = [pscustomobject]@{
+            application = $candidateManifest.product.application
+            runner = $candidateManifest.harness.runner
+            observer = $candidateManifest.harness.observers.ui
+        }
+        request = [pscustomobject]@{
+            mode = 'text-scale'; appearance = 'light'; text_scale_percent = [long]150
+        }
+    }
+    Assert-GuiRegressionInvocationBinding `
+        -ManifestInput $candidateRegressionInput `
+        -Verified $candidateRegressionResolved `
+        -RegressionMode text-scale `
+        -Appearance light `
+        -TextScalePercent 150 `
+        -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    $candidateRegressionResult = New-GuiRegressionResult `
+        -Verified $candidateRegressionResolved `
+        -Appearance light
+    if ($candidateRegressionResult.schema_version -ne 2 -or
+        $candidateRegressionResult.lane -cne 'candidate-gui-only' -or
+        $candidateRegressionResult.observer_role -cne 'ui' -or
+        $candidateRegressionResult.product -ne $candidateManifest.product -or
+        $candidateRegressionResult.harness -ne $candidateManifest.harness -or
+        $candidateRegressionResult.PSObject.Properties.Name -ccontains 'source_sha') {
+        throw 'Candidate GUI regression results must preserve v2 product and harness provenance.'
+    }
+    $candidateRegressionResult.status = 'review_required'
+    $candidateRegressionResultDocument = $candidateRegressionResult |
+        ConvertTo-Json -Depth 12 | ConvertFrom-Json
+    Assert-ObserverResultBinding `
+        -Result $candidateRegressionResultDocument `
+        -Manifest $candidateManifest `
+        -Role ui `
+        -ExpectedObserverSha256 $candidateManifest.harness.observers.ui.sha256
+    $wrongCandidateRegressionInput = $candidateRegressionInput |
+        ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $wrongCandidateRegressionInput.source_sha = 'c' * 40
+    Assert-Fails {
+        Assert-GuiRegressionInvocationBinding `
+            -ManifestInput $wrongCandidateRegressionInput `
+            -Verified $candidateRegressionResolved `
+            -RegressionMode text-scale `
+            -Appearance light `
+            -TextScalePercent 150 `
+            -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    } 'immutable manifest'
+    $legacyRegressionResolved = [pscustomobject]@{
+        lane = 'source-built'
+        target = $legacyManifest.target
+        application = $legacyManifest.application
+        source_sha = $legacyManifest.source_sha
+        runner = $legacyManifest.runner
+        runner_sha256 = $legacyManifest.runner.sha256
+        script_sha256 = $legacyUiResult.acceptance_script_sha256
+        product = $null
+        harness = $null
+    }
+    $legacyRegressionResult = New-GuiRegressionResult `
+        -Verified $legacyRegressionResolved `
+        -Appearance light
+    if ($legacyRegressionResult.schema_version -ne 1 -or
+        $legacyRegressionResult.source_sha -cne $legacyManifest.source_sha -or
+        $legacyRegressionResult.PSObject.Properties.Name -ccontains 'product' -or
+        $legacyRegressionResult.PSObject.Properties.Name -ccontains 'harness' -or
+        $legacyRegressionResult.PSObject.Properties.Name -ccontains 'observer_role') {
+        throw 'Legacy GUI regression result shape must remain schema 1.'
+    }
+    $candidateUiResult = [pscustomobject]@{
+        schema_version = [long]2
+        lane = 'candidate-gui-only'
+        product = $candidateManifest.product
+        harness = $candidateManifest.harness
+        observer_role = 'ui'
+        application = $candidateManifest.product.application
+        runner_sha256 = $candidateManifest.harness.runner.sha256
+        acceptance_script_sha256 = $candidateManifest.harness.observers.ui.sha256
+    }
+    Assert-ObserverResultBinding `
+        -Result $candidateUiResult `
+        -Manifest $candidateManifest `
+        -Role ui `
+        -ExpectedObserverSha256 $candidateManifest.harness.observers.ui.sha256
+    $candidateRecoveryResult = [pscustomobject]@{
+        schema_version = [long]2
+        lane = 'candidate-gui-only'
+        product = $candidateManifest.product
+        harness = $candidateManifest.harness
+        observer_role = 'recovery'
+        application = $candidateManifest.product.application
+        runner_sha256 = $candidateManifest.harness.runner.sha256
+        observer = $candidateManifest.harness.observers.recovery
+    }
+    Assert-ObserverResultBinding `
+        -Result $candidateRecoveryResult `
+        -Manifest $candidateManifest `
+        -Role recovery `
+        -ExpectedObserverSha256 $candidateManifest.harness.observers.recovery.sha256
+    $wrongRoleResult = $candidateRecoveryResult | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+    $wrongRoleResult.observer_role = 'ui'
+    Assert-Fails {
+        Assert-ObserverResultBinding `
+            -Result $wrongRoleResult `
+            -Manifest $candidateManifest `
+            -Role recovery `
+            -ExpectedObserverSha256 $candidateManifest.harness.observers.recovery.sha256
+    } 'role or provenance shape is invalid'
+    $wrongProductResult = $candidateUiResult | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+    $wrongProductResult.product.candidate.artifact_id = '21'
+    Assert-Fails {
+        Assert-ObserverResultBinding `
+            -Result $wrongProductResult `
+            -Manifest $candidateManifest `
+            -Role ui `
+            -ExpectedObserverSha256 $candidateManifest.harness.observers.ui.sha256
+    } 'product or harness provenance differs'
 
     $candidateSwappedObserver = New-CandidateAcceptanceFixture -Name 'candidate-swapped-observer'
     $candidateSwappedObserver.manifest.harness.observers.ui =

@@ -4001,8 +4001,8 @@ function Invoke-ObserverContextScenario {
         [Parameter(Mandatory)][int] $WaitSeconds,
         [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures
     )
-    $applicationPath = Join-Path $Verified.root $Verified.manifest.application.file
-    if ((Get-LowerSha256 -Path $applicationPath) -cne $Verified.manifest.application.sha256) {
+    $applicationPath = Join-Path $Verified.root $Verified.application.file
+    if ((Get-LowerSha256 -Path $applicationPath) -cne $Verified.application.sha256) {
         throw 'Application changed after bundle verification.'
     }
     $repeatedFixture = New-ObserverRepeatedFixture -RuntimeRoot $RuntimeRoot
@@ -4398,8 +4398,8 @@ function Invoke-ObserverStandardScenario {
     $fixture = New-ObserverStandardFixture -RuntimeRoot $RuntimeRoot
     $application = $null
     try {
-        $applicationPath = Join-Path $Verified.root $Verified.manifest.application.file
-        if ((Get-LowerSha256 -Path $applicationPath) -cne $Verified.manifest.application.sha256) {
+        $applicationPath = Join-Path $Verified.root $Verified.application.file
+        if ((Get-LowerSha256 -Path $applicationPath) -cne $Verified.application.sha256) {
             throw 'Application changed after bundle verification.'
         }
         $application = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'standard GUI regression application'
@@ -4829,6 +4829,69 @@ function Invoke-TextScaleRescue {
 
 
 
+function Assert-GuiRegressionInvocationBinding {
+    param(
+        [Parameter(Mandatory)][object] $ManifestInput,
+        [Parameter(Mandatory)][object] $Verified,
+        [Parameter(Mandatory)][string] $RegressionMode,
+        [Parameter(Mandatory)][string] $Appearance,
+        [Parameter(Mandatory)][int] $TextScalePercent,
+        [Parameter(Mandatory)][string] $ExpectedScriptSha256
+    )
+
+    if ($ManifestInput.schema_version -ne 1 -or
+        $ManifestInput.source_sha -cne $Verified.source_sha -or
+        $ManifestInput.artifacts.application.sha256 -cne $Verified.application.sha256 -or
+        $ManifestInput.artifacts.runner.sha256 -cne $Verified.runner.sha256 -or
+        $ManifestInput.artifacts.observer.sha256 -cne $ExpectedScriptSha256 -or
+        $ManifestInput.request.mode -cne $RegressionMode -or
+        $ManifestInput.request.appearance -cne $Appearance -or
+        $ManifestInput.request.text_scale_percent -ne $TextScalePercent) {
+        throw 'Regression invocation differs from its immutable manifest.'
+    }
+}
+
+function New-GuiRegressionResult {
+    param(
+        [Parameter(Mandatory)][object] $Verified,
+        [Parameter(Mandatory)][string] $Appearance
+    )
+
+    $result = [ordered]@{
+        schema_version = if ($Verified.lane -ceq 'candidate-gui-only') { 2 } else { 1 }
+        target = $Verified.target
+        application = [ordered]@{
+            file = $Verified.application.file
+            sha256 = $Verified.application.sha256
+        }
+    }
+    if ($Verified.lane -ceq 'candidate-gui-only') {
+        $result['lane'] = $Verified.lane
+        $result['product'] = $Verified.product
+        $result['harness'] = $Verified.harness
+        $result['observer_role'] = 'ui'
+    }
+    else {
+        $result['source_sha'] = $Verified.source_sha
+    }
+    $result['runner_sha256'] = $Verified.runner_sha256
+    $result['acceptance_script_sha256'] = $Verified.script_sha256
+    $result['appearance'] = [ordered]@{ requested = $Appearance; observed = $null }
+    $result['status'] = 'failed'
+    $result['visual_review'] = 'required'
+    $result['keyboard'] = [ordered]@{ status = 'failed' }
+    $result['accessibility'] = [ordered]@{ status = 'failed' }
+    $result['capture'] = [ordered]@{ status = 'failed' }
+    $result['assertions'] = [ordered]@{ overall = 'failed'; scenario = $null }
+    $result['text_scale'] = $null
+    $result['process_cleanup'] = $false
+    $result['guest_cleanup'] = $false
+    $result['screenshots'] = @()
+    $result['failure_reason'] = 'setup_failed'
+    $result['diagnostic'] = $null
+    $result
+}
+
 function Invoke-GuiRegressionAcceptance {
     $resolved = Resolve-AcceptanceBundle `
         -Root $BundleRoot `
@@ -4844,6 +4907,7 @@ function Invoke-GuiRegressionAcceptance {
         root = $resolved.root
         output_root = $resolved.output_root
         manifest = $bundleManifest
+        application = $resolved.application
     }
     $inputItem = Get-Item -LiteralPath $InputManifestPath -Force -ErrorAction Stop
     $expectedInput = Join-Path (Split-Path -Parent $resolved.root) 'input-manifest.json'
@@ -4858,16 +4922,13 @@ function Invoke-GuiRegressionAcceptance {
     }
     $input = Get-Content -LiteralPath $inputItem.FullName -Raw | ConvertFrom-Json
     $inputHash = Get-LowerSha256 -Path $inputItem.FullName
-    if ($input.schema_version -ne 1 -or
-        $input.source_sha -cne $bundleManifest.source_sha -or
-        $input.artifacts.application.sha256 -cne $bundleManifest.application.sha256 -or
-        $input.artifacts.runner.sha256 -cne $bundleManifest.runner.sha256 -or
-        $input.artifacts.observer.sha256 -cne $ExpectedScriptSha256 -or
-        $input.request.mode -cne $RegressionMode -or
-        $input.request.appearance -cne $Appearance -or
-        $input.request.text_scale_percent -ne $TextScalePercent) {
-        throw 'Regression invocation differs from its immutable manifest.'
-    }
+    Assert-GuiRegressionInvocationBinding `
+        -ManifestInput $input `
+        -Verified $resolved `
+        -RegressionMode $RegressionMode `
+        -Appearance $Appearance `
+        -TextScalePercent $TextScalePercent `
+        -ExpectedScriptSha256 $ExpectedScriptSha256
     if ($ValidateOnly) {
         Write-Host "Validated GUI regression observer for source $($input.source_sha)."
         return
@@ -4967,30 +5028,7 @@ function Invoke-GuiRegressionAcceptance {
     $resultPath = Join-Path $resolved.output_root 'acceptance-result.json'
     $observationPath = Join-Path $resolved.output_root 'acceptance-observations.json'
     $diagnosticPath = Join-Path $resolved.output_root 'acceptance-error.txt'
-    $result = [ordered]@{
-        schema_version = 1
-        source_sha = $input.source_sha
-        target = $bundleManifest.target
-        application = [ordered]@{
-            file = $bundleManifest.application.file
-            sha256 = $bundleManifest.application.sha256
-        }
-        runner_sha256 = $bundleManifest.runner.sha256
-        acceptance_script_sha256 = $ExpectedScriptSha256
-        appearance = [ordered]@{ requested = $Appearance; observed = $null }
-        status = 'failed'
-        visual_review = 'required'
-        keyboard = [ordered]@{ status = 'failed' }
-        accessibility = [ordered]@{ status = 'failed' }
-        capture = [ordered]@{ status = 'failed' }
-        assertions = [ordered]@{ overall = 'failed'; scenario = $null }
-        text_scale = $null
-        process_cleanup = $false
-        guest_cleanup = $false
-        screenshots = @()
-        failure_reason = 'setup_failed'
-        diagnostic = $null
-    }
+    $result = New-GuiRegressionResult -Verified $resolved -Appearance $Appearance
     $observations = [ordered]@{
         schema_version = 1
         run_id = $input.run_id

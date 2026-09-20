@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -225,6 +226,20 @@ class VmRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'unexpected test binaries'):
             vm.verify_result(self.root, manifest, result)
 
+    def test_candidate_transport_requires_bound_vm_identity_proof(self):
+        identity = '12345678-1234-5678-9abc-1234567890ab'
+        manifest, result = self.candidate_evidence()
+        result['transport']['vm_id'] = identity
+        with self.assertRaisesRegex(ValueError, 'identity binding'):
+            vm.verify_result(self.root, manifest, result, 'ssh', identity)
+        result['transport'].update(
+            vm_identity_kind='hyper-v-guest-parameters-virtual-machine-id-v1',
+            vm_identity_sha256=hashlib.sha256(identity.encode()).hexdigest())
+        self.assertTrue(vm.verify_result(self.root, manifest, result, 'ssh', identity))
+        result['transport']['vm_identity_sha256'] = '0' * 64
+        with self.assertRaisesRegex(ValueError, 'identity binding'):
+            vm.verify_result(self.root, manifest, result, 'ssh', identity)
+
     def test_candidate_metadata_and_executable_mismatches_are_rejected(self):
         manifest, result = self.candidate_evidence()
         result['product']['candidate']['artifact_id'] = '21'
@@ -242,6 +257,162 @@ class VmRunnerTests(unittest.TestCase):
         result['harness']['observers']['ui']['sha256'] = 'f' * 64
         with self.assertRaisesRegex(ValueError, 'digest mismatch'):
             vm.verify_result(self.root, manifest, result)
+
+    def test_candidate_observer_results_and_recovery_inventory_are_bound(self):
+        manifest, _ = self.candidate_evidence()
+        identity = '12345678-1234-5678-9abc-1234567890ab'
+        identity_hash = hashlib.sha256(identity.encode()).hexdigest()
+        ui_result = {
+            'schema_version': 2, 'lane': 'candidate-gui-only',
+            'product': json.loads(json.dumps(manifest['product'])),
+            'harness': json.loads(json.dumps(manifest['harness'])),
+            'observer_role': 'ui',
+            'application': json.loads(json.dumps(manifest['product']['application'])),
+            'runner_sha256': manifest['harness']['runner']['sha256'],
+            'acceptance_script_sha256': manifest['harness']['observers']['ui']['sha256'],
+            'status': 'review_required',
+        }
+        self.assertTrue(vm.verify_observer_result(
+            manifest, ui_result, 'ui', manifest['harness']['observers']['ui']['sha256']))
+        ui_result['observer_role'] = 'recovery'
+        with self.assertRaisesRegex(ValueError, 'provenance or role'):
+            vm.verify_observer_result(
+                manifest, ui_result, 'ui', manifest['harness']['observers']['ui']['sha256'])
+
+        output = self.root / 'observer-output'
+        session = output / 'recovery-acceptance-fixture'
+        session.mkdir(parents=True)
+        recovery_result = {
+            'schema_version': 2, 'lane': 'candidate-gui-only',
+            'product': json.loads(json.dumps(manifest['product'])),
+            'harness': json.loads(json.dumps(manifest['harness'])),
+            'observer_role': 'recovery',
+            'application': json.loads(json.dumps(manifest['product']['application'])),
+            'runner_sha256': manifest['harness']['runner']['sha256'],
+            'observer': json.loads(json.dumps(
+                manifest['harness']['observers']['recovery'])),
+            'status': 'passed',
+        }
+        summary = session / 'summary.json'
+        summary.write_text(json.dumps(recovery_result))
+        (self.root / 'bundle.json').write_text(json.dumps(manifest))
+        relative = 'recovery-acceptance-fixture/summary.json'
+        inventory = {
+            'schema_version': 1, 'task_kind': 'recovery',
+            'observer_role': 'recovery',
+            'bundle_manifest_sha256': vm.sha256(self.root / 'bundle.json'),
+            'observer': manifest['harness']['observers']['recovery'],
+            'summary_file': relative,
+            'files': [{
+                'file': relative, 'bytes': summary.stat().st_size,
+                'sha256': vm.sha256(summary),
+            }],
+        }
+        (output / 'recovery-inventory.json').write_text(json.dumps(inventory))
+        (output / 'transport.json').write_text(json.dumps({
+            'kind': 'ssh', 'task_kind': 'recovery', 'host_platform': 'Unix',
+            'status': 'collected', 'guest_cleanup': True,
+            'vm_id': identity,
+            'vm_identity_kind': 'hyper-v-guest-parameters-virtual-machine-id-v1',
+            'vm_identity_sha256': identity_hash,
+            'observer_process': {'state': 'exited', 'exit_code': 0},
+            'recovery_engine': {
+                'version': '7.4.0', 'edition': 'Core',
+                'effective_policy': 'RemoteSigned',
+            },
+        }))
+        self.assertEqual(
+            vm.verify_recovery_inventory(output, manifest, 'ssh', identity)['status'],
+            'passed')
+        transport_path = output / 'transport.json'
+        valid_transport = json.loads(transport_path.read_text())
+        for field, value in (
+                ('vm_id', 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'),
+                ('vm_id', None),
+                ('vm_identity_kind', None),
+                ('vm_identity_sha256', '0' * 64)):
+            with self.subTest(field=field, value=value):
+                invalid_transport = dict(valid_transport)
+                if value is None:
+                    invalid_transport.pop(field)
+                else:
+                    invalid_transport[field] = value
+                transport_path.write_text(json.dumps(invalid_transport))
+                with self.assertRaisesRegex(ValueError, 'identity binding'):
+                    vm.verify_recovery_inventory(output, manifest, 'ssh', identity)
+        invalid_transport = dict(valid_transport, kind='powershell_direct')
+        transport_path.write_text(json.dumps(invalid_transport))
+        with self.assertRaisesRegex(ValueError, 'transport binding'):
+            vm.verify_recovery_inventory(output, manifest, 'ssh', identity)
+        transport_path.write_text(json.dumps(valid_transport))
+        inventory['files'][0]['bytes'] = True
+        (output / 'recovery-inventory.json').write_text(json.dumps(inventory))
+        with self.assertRaisesRegex(ValueError, 'file row'):
+            vm.verify_recovery_inventory(output, manifest, 'ssh', identity)
+        inventory['files'][0]['bytes'] = summary.stat().st_size
+        for relative_path in ('fixture/NUL.txt', 'fixture/trailing.'):
+            with self.subTest(relative_path=relative_path):
+                inventory['files'][0]['file'] = relative_path
+                (output / 'recovery-inventory.json').write_text(json.dumps(inventory))
+                with self.assertRaisesRegex(ValueError, 'relative path'):
+                    vm.verify_recovery_inventory(output, manifest, 'ssh', identity)
+
+    def test_recovery_inventory_stops_before_hashing_over_aggregate_limit(self):
+        manifest, _ = self.candidate_evidence()
+        output = self.root / 'aggregate-output'
+        output.mkdir()
+        (self.root / 'bundle.json').write_text(json.dumps(manifest))
+        bundle_hash = vm.sha256(self.root / 'bundle.json')
+        rows = []
+        for index in range(5):
+            path = output / ('item-' + str(index) + '.bin')
+            path.touch()
+            os.truncate(path, 128 * 1024 * 1024)
+            rows.append({
+                'file': path.name, 'bytes': path.stat().st_size,
+                'sha256': 'a' * 64,
+            })
+        (output / 'recovery-inventory.json').write_text(json.dumps({
+            'schema_version': 1, 'task_kind': 'recovery',
+            'observer_role': 'recovery',
+            'bundle_manifest_sha256': bundle_hash,
+            'observer': manifest['harness']['observers']['recovery'],
+            'summary_file': 'item-0.bin', 'files': rows,
+        }))
+        hashed = []
+
+        def fake_sha256(path):
+            path = Path(path)
+            hashed.append(path)
+            return bundle_hash if path.name == 'bundle.json' else 'a' * 64
+
+        with mock.patch.object(vm, 'sha256', side_effect=fake_sha256), \
+                self.assertRaisesRegex(ValueError, 'aggregate size'):
+            vm.verify_recovery_inventory(
+                output, manifest, 'ssh', '12345678-1234-5678-9abc-1234567890ab')
+        self.assertNotIn(output / 'item-4.bin', hashed)
+
+    def test_ui_observer_input_is_frozen_and_duplicate_keys_are_rejected(self):
+        manifest, _ = self.candidate_evidence()
+        source = self.root / 'ui-input.json'
+        source.write_text('{"schema_version":1,"run_id":"fixture"}')
+        prepared = vm.prepare_observer_inputs(
+            self.root, manifest,
+            SimpleNamespace(task_kind='ui', acceptance_manifest=source))
+        self.assertEqual(prepared['output'], self.root / 'observer-output')
+        self.assertEqual(
+            (self.root / 'acceptance-input.json').read_bytes(), source.read_bytes())
+        with tempfile.TemporaryDirectory() as directory:
+            duplicate_root = Path(directory)
+            for name in ('windows-vm-acceptance.ps1',
+                         'windows-vm-recovery-acceptance.ps1'):
+                (duplicate_root / name).write_bytes((self.root / name).read_bytes())
+            duplicate = duplicate_root / 'ui-input.json'
+            duplicate.write_text('{"schema_version":1,"schema_version":1}')
+            with self.assertRaisesRegex(ValueError, 'duplicate field'):
+                vm.prepare_observer_inputs(
+                    duplicate_root, manifest,
+                    SimpleNamespace(task_kind='ui', acceptance_manifest=duplicate))
 
     def test_candidate_checkpoints_recompute_disk_identity_and_journal_state(self):
         manifest, result = self.candidate_evidence()
@@ -510,6 +681,53 @@ class VmRunnerTests(unittest.TestCase):
         self.assertIn('-ExpectedGuestVmId', direct_command[-1])
         self.assertIn('-ExpectedBundleManifestSha256', direct_command[-1])
 
+    def test_observer_cli_flags_are_role_scoped_and_forwarded(self):
+        identity = '12345678-1234-5678-9abc-1234567890ab'
+        ui = vm.parse_arguments([
+            '--ssh-host', 'vm', '--expected-vm-id', identity,
+            '--task-kind', 'ui', '--acceptance-manifest', '/inputs/ui.json',
+            '--acceptance-mode', 'current-dpi', '--acceptance-appearance', 'system',
+            '--acceptance-high-contrast',
+        ])
+        ui_command = vm.controller_invocation(self.root, ui, pwsh='/usr/bin/pwsh')
+        for value in (
+                '-TaskKind', 'ui', '-AcceptanceOutputRoot', '-AcceptanceManifest',
+                '-AcceptanceMode', 'current-dpi', '-AcceptanceHighContrast',
+                '-ExpectedGuestVmId'):
+            self.assertIn(value, ui_command)
+        recovery_observer = self.root / 'windows-vm-recovery-acceptance.ps1'
+        recovery_observer.write_bytes(b'recovery observer')
+        recovery = vm.parse_arguments([
+            '--ssh-host', 'vm', '--expected-vm-id', identity,
+            '--task-kind', 'recovery', '--recovery-mode', 'ProcessCrash',
+            '--recovery-export', '--recovery-intent-only-candidate-discard',
+        ])
+        recovery_command = vm.controller_invocation(
+            self.root, recovery, pwsh='/usr/bin/pwsh')
+        for value in (
+                '-TaskKind', 'recovery', '-RecoveryOutputRoot', '-RecoveryMode',
+                'ProcessCrash', '-RecoveryObserverSha256', '-RecoveryExport',
+                '-RecoveryIntentOnlyCandidateDiscard', '-ExpectedGuestVmId'):
+            self.assertIn(value, recovery_command)
+        for arguments in (
+                ['--ssh-host', 'vm', '--task-kind', 'ui'],
+                ['--ssh-host', 'vm', '--expected-vm-id', identity,
+                 '--task-kind', 'ui', '--acceptance-manifest', '/inputs/ui.json',
+                 '--acceptance-mode', 'standard', '--acceptance-appearance', 'light',
+                 '--acceptance-high-contrast'],
+                ['--ssh-host', 'vm', '--expected-vm-id', identity,
+                 '--task-kind', 'recovery', '--recovery-mode', 'WorkerClose',
+                 '--recovery-export'],
+                ['--ssh-host', 'vm', '--expected-vm-id', identity,
+                 '--acceptance-mode', 'standard'],
+                ['--ssh-host', 'vm', '--acceptance-text-scale-percent', '100'],
+                ['--ssh-host', 'vm', '--recovery-fixture-count', '4096'],
+                ['--ssh-host', 'vm', '--expected-vm-id', identity,
+                 '--task-kind', 'recovery', '--recovery-mode', 'ProcessCrash',
+                 '--test-timeout-seconds', '601'],
+        ):
+            self.assert_arguments_rejected(arguments)
+
     def test_candidate_bundle_uses_validated_handoff_without_building(self):
         repo, product_source, _, _, _, args = self.candidate_build_inputs()
         output = self.root / 'candidate-bundle'
@@ -728,7 +946,9 @@ class VmRunnerTests(unittest.TestCase):
         self.assertIsNone(defaults)
         self.assertEqual(pwsh, '/usr/bin/pwsh')
         self.assertEqual(command[:6], ['/usr/bin/pwsh', '-NoLogo', '-NoProfile', '-NonInteractive', '-File', str(output / 'run-windows-vm-tests.ps1')])
-        self.assertEqual(command[6:], ['-BundleRoot', str(output), '-SshHost', 'darkrenamer-vm', '-TestTimeoutSeconds', '300'])
+        self.assertEqual(command[6:], [
+            '-BundleRoot', str(output), '-SshHost', 'darkrenamer-vm',
+            '-TestTimeoutSeconds', '300', '-TaskKind', 'core'])
 
     def test_both_transports_use_the_same_controller(self):
         ssh_args = vm.parse_arguments(['--ssh-host', 'darkrenamer-vm'])

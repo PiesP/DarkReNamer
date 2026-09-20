@@ -169,8 +169,18 @@ def winpath(path):
     return subprocess.check_output(['wslpath', '-w', str(path)], text=True).strip()
 
 
+def safe_ordinary_segment(value):
+    if (not isinstance(value, str) or
+            not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,159}', value) or
+            value in ('.', '..') or value.endswith(('.', ' '))):
+        return False
+    basename = value.split('.', 1)[0]
+    return re.fullmatch(r'(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])', basename,
+                        re.IGNORECASE) is None
+
+
 def leaf(value):
-    if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,159}', value) or value in ('.', '..'):
+    if not safe_ordinary_segment(value):
         raise ValueError('Artifact names must be plain ASCII file names.')
     return value
 
@@ -206,13 +216,31 @@ def argument_parser():
     parser.add_argument('--candidate-run-attempt')
     parser.add_argument('--candidate-artifact-id')
     parser.add_argument('--candidate-executable-sha256')
+    parser.add_argument('--task-kind', choices=('core', 'ui', 'recovery'), default='core')
+    parser.add_argument('--acceptance-manifest', type=Path)
+    parser.add_argument('--acceptance-mode', choices=(
+        'current-dpi', 'full-context', 'standard', 'text-scale', 'tooltip'))
+    parser.add_argument('--acceptance-appearance', choices=('system', 'light', 'dark'))
+    parser.add_argument('--acceptance-text-scale-percent', type=int, choices=(100, 150), default=100)
+    parser.add_argument('--acceptance-high-contrast', action='store_true')
+    parser.add_argument('--acceptance-clipboard', action='store_true')
+    parser.add_argument('--acceptance-capture-native-menu', action='store_true')
+    parser.add_argument('--acceptance-capture-advanced-appearance', action='store_true')
+    parser.add_argument('--recovery-mode', choices=(
+        'ProcessCrash', 'WorkerCancellation', 'WorkerClose'))
+    parser.add_argument('--recovery-fixture-count', type=int, default=4096)
+    parser.add_argument('--recovery-export', action='store_true')
+    parser.add_argument('--recovery-intent-only-candidate-discard', action='store_true')
     parser.add_argument('--test-timeout-seconds', type=int, default=300)
     return parser
 
 
 def parse_arguments(argv=None):
     parser = argument_parser()
-    args = parser.parse_args(argv)
+    raw_arguments = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(raw_arguments)
+    def supplied(name):
+        return any(value == name or value.startswith(name + '=') for value in raw_arguments)
     if not args.vm_name and not args.ssh_host and not args.prepare_only:
         parser.error('one of --vm-name or --ssh-host is required unless --prepare-only is used.')
     candidate_names = (
@@ -225,6 +253,59 @@ def parse_arguments(argv=None):
             value is not None for value in candidate_values):
         parser.error('all exact-candidate handoff, metadata, identity, and digest options must be supplied together.')
     args.candidate_mode = all(value is not None for value in candidate_values)
+    ui_options = any((
+        args.acceptance_manifest is not None,
+        args.acceptance_mode is not None,
+        args.acceptance_appearance is not None,
+        supplied('--acceptance-text-scale-percent'),
+        args.acceptance_high_contrast,
+        args.acceptance_clipboard,
+        args.acceptance_capture_native_menu,
+        args.acceptance_capture_advanced_appearance,
+    ))
+    recovery_options = any((
+        args.recovery_mode is not None,
+        supplied('--recovery-fixture-count'),
+        args.recovery_export,
+        args.recovery_intent_only_candidate_discard,
+    ))
+    if args.task_kind == 'core' and (ui_options or recovery_options):
+        parser.error('core tasks do not accept UI or recovery observer options.')
+    if args.task_kind == 'ui':
+        if recovery_options:
+            parser.error('UI tasks do not accept recovery observer options.')
+        if (args.acceptance_manifest is None or args.acceptance_mode is None or
+                args.acceptance_appearance is None):
+            parser.error('UI tasks require --acceptance-manifest, --acceptance-mode, and --acceptance-appearance.')
+        if ((args.acceptance_mode == 'text-scale') !=
+                (args.acceptance_text_scale_percent == 150)):
+            parser.error('only text-scale UI tasks may request 150 percent text.')
+        current_dpi_option = any((
+            args.acceptance_high_contrast,
+            args.acceptance_clipboard,
+            args.acceptance_capture_native_menu,
+            args.acceptance_capture_advanced_appearance,
+        ))
+        if current_dpi_option and args.acceptance_mode != 'current-dpi':
+            parser.error('current-DPI UI options require --acceptance-mode current-dpi.')
+        if args.acceptance_high_contrast and args.acceptance_appearance != 'system':
+            parser.error('High Contrast UI tasks require --acceptance-appearance system.')
+        if args.acceptance_high_contrast and args.acceptance_capture_advanced_appearance:
+            parser.error('advanced appearance capture is unavailable during High Contrast.')
+    if args.task_kind == 'recovery':
+        if ui_options:
+            parser.error('recovery tasks do not accept UI observer options.')
+        if args.recovery_mode is None:
+            parser.error('recovery tasks require --recovery-mode.')
+        if not 128 <= args.recovery_fixture_count <= 10000:
+            parser.error('--recovery-fixture-count must be between 128 and 10000.')
+        if ((args.recovery_export or args.recovery_intent_only_candidate_discard) and
+                args.recovery_mode != 'ProcessCrash'):
+            parser.error('recovery export and intent-only discard require ProcessCrash mode.')
+    if args.task_kind != 'recovery' and recovery_options:
+        parser.error('recovery observer options require --task-kind recovery.')
+    if args.task_kind != 'ui' and ui_options:
+        parser.error('UI observer options require --task-kind ui.')
     if args.candidate_mode:
         if not re.fullmatch(r'[0-9a-f]{40}', args.candidate_source_sha):
             parser.error('--candidate-source-sha must be a lowercase full Git SHA.')
@@ -235,10 +316,13 @@ def parse_arguments(argv=None):
                 parser.error('--' + name.replace('_', '-') + ' must be a positive decimal integer.')
         if not args.prepare_only and args.expected_vm_id is None:
             parser.error('exact-candidate execution requires --expected-vm-id for either transport.')
+    if args.task_kind != 'core' and not args.prepare_only and args.expected_vm_id is None:
+        parser.error('observer execution requires --expected-vm-id for either transport.')
     if args.prepare_only and (args.vm_name or args.ssh_host or args.desktop_helper or
                               args.credential_helper or args.expected_vm_id or
                               args.desktop_mode != 'rdp' or args.desktop_scale != 200 or
-                              args.desktop_width is not None or args.desktop_height is not None):
+                              args.desktop_width is not None or args.desktop_height is not None or
+                              args.task_kind != 'core' or ui_options or recovery_options):
         parser.error('--prepare-only accepts only build and output options, not transport or desktop options.')
     if args.prepare_only and args.output is None:
         parser.error('--prepare-only requires an explicit --output directory.')
@@ -247,7 +331,7 @@ def parse_arguments(argv=None):
     if args.ssh_host and args.credential_helper:
         parser.error('--credential-helper can only be used with --vm-name PowerShell Direct transport.')
     if args.expected_vm_id is not None:
-        if args.ssh_host and not args.candidate_mode:
+        if args.ssh_host and not args.candidate_mode and args.task_kind == 'core':
             parser.error('--expected-vm-id can only be used with --vm-name PowerShell Direct transport.')
         try:
             identity = uuid.UUID(args.expected_vm_id)
@@ -267,6 +351,8 @@ def parse_arguments(argv=None):
         parser.error('Desktop geometry must be within 800..8192 by 600..4320 pixels.')
     if not 10 <= args.test_timeout_seconds <= 1800:
         parser.error('Test timeout must be between 10 and 1800 seconds.')
+    if args.task_kind != 'core' and args.test_timeout_seconds > 600:
+        parser.error('observer timeout must be between 10 and 600 seconds.')
     return args
 
 
@@ -331,16 +417,82 @@ def prepare_transport(repo, args):
     return resolve_output_root(repo, args, defaults), defaults, pwsh
 
 
+def prepare_observer_inputs(root, manifest, args):
+    if args.task_kind == 'core':
+        return None
+    output = root / 'observer-output'
+    output.mkdir()
+    role = args.task_kind
+    observer_name = ('windows-vm-acceptance.ps1' if role == 'ui'
+                     else 'windows-vm-recovery-acceptance.ps1')
+    observer = (manifest['harness']['observers'][role]
+                if manifest['schema_version'] == 2 else {
+                    'file': observer_name,
+                    'sha256': sha256(root / observer_name),
+                })
+    if observer.get('file') != observer_name or sha256(root / observer_name) != observer.get('sha256'):
+        raise ValueError('Observer artifact differs from its selected frozen role.')
+    prepared = {'output': output, 'observer': observer}
+    if role == 'ui':
+        source = args.acceptance_manifest
+        if (not source.is_absolute() or not source.is_file() or source.is_symlink() or
+                source.stat().st_size > 1024 * 1024):
+            raise ValueError('Acceptance manifest must be an absolute ordinary bounded file.')
+        frozen = sha256(source)
+        destination = root / 'acceptance-input.json'
+        copy_frozen_file(source, destination, frozen, 'Acceptance manifest')
+        if sha256(source) != frozen:
+            raise RuntimeError('Acceptance manifest changed while preparing the observer task.')
+        read_json_strict(destination)
+        prepared['manifest'] = destination
+    return prepared
+
+
+def controller_task_arguments(root, args, path_converter=str):
+    arguments = ['-TaskKind', args.task_kind]
+    if args.task_kind == 'ui':
+        arguments += [
+            '-AcceptanceOutputRoot', path_converter(root / 'observer-output'),
+            '-AcceptanceManifest', path_converter(root / 'acceptance-input.json'),
+            '-AcceptanceMode', args.acceptance_mode,
+            '-AcceptanceAppearance', args.acceptance_appearance,
+            '-AcceptanceTextScalePercent', str(args.acceptance_text_scale_percent),
+        ]
+        for enabled, switch in (
+                (args.acceptance_high_contrast, '-AcceptanceHighContrast'),
+                (args.acceptance_clipboard, '-AcceptanceClipboard'),
+                (args.acceptance_capture_native_menu, '-AcceptanceCaptureNativeMenu'),
+                (args.acceptance_capture_advanced_appearance,
+                 '-AcceptanceCaptureAdvancedAppearance')):
+            if enabled:
+                arguments.append(switch)
+    elif args.task_kind == 'recovery':
+        arguments += [
+            '-RecoveryOutputRoot', path_converter(root / 'observer-output'),
+            '-RecoveryMode', args.recovery_mode,
+            '-RecoveryFixtureCount', str(args.recovery_fixture_count),
+            '-RecoveryObserverSha256', sha256(
+                root / 'windows-vm-recovery-acceptance.ps1'),
+        ]
+        if args.recovery_export:
+            arguments.append('-RecoveryExport')
+        if args.recovery_intent_only_candidate_discard:
+            arguments.append('-RecoveryIntentOnlyCandidateDiscard')
+    return arguments
+
+
 def controller_invocation(root, args, defaults=None, pwsh=None, desktop_sid=None):
     script = root / 'run-windows-vm-tests.ps1'
-    common = ['-TestTimeoutSeconds', str(args.test_timeout_seconds)]
+    common = [
+        '-TestTimeoutSeconds', str(args.test_timeout_seconds),
+        *controller_task_arguments(root, args),
+    ]
     if desktop_sid:
         common += ['-ExpectedDesktopSid', desktop_sid]
+    if args.expected_vm_id and (args.candidate_mode or args.task_kind != 'core'):
+        common += ['-ExpectedGuestVmId', args.expected_vm_id]
     if args.candidate_mode and args.expected_vm_id:
-        common += [
-            '-ExpectedGuestVmId', args.expected_vm_id,
-            '-ExpectedBundleManifestSha256', sha256(root / 'bundle.json'),
-        ]
+        common += ['-ExpectedBundleManifestSha256', sha256(root / 'bundle.json')]
     if args.ssh_host:
         executable = pwsh or require_pwsh74()
         return [
@@ -353,14 +505,18 @@ def controller_invocation(root, args, defaults=None, pwsh=None, desktop_sid=None
     if windows_root.startswith('\\\\'):
         raise RuntimeError('PowerShell Direct output must be on a Windows drive, not a WSL network path.')
     helper = args.credential_helper or defaults['helper']
+    task_arguments = controller_task_arguments(root, args, winpath)
     transport = (
         '& ' + psquote(winpath(script)) + ' -BundleRoot ' + psquote(windows_root)
         + ' -VmName ' + psquote(args.vm_name) + ' -CredentialHelper ' + psquote(helper)
         + (' -ExpectedVmId ' + psquote(args.expected_vm_id) if args.expected_vm_id else '')
         + ' -TestTimeoutSeconds ' + str(args.test_timeout_seconds)
+        + ''.join(' ' + (value if value.startswith('-') else psquote(value))
+                  for value in task_arguments)
         + (' -ExpectedDesktopSid ' + psquote(desktop_sid) if desktop_sid else '')
         + (' -ExpectedGuestVmId ' + psquote(args.expected_vm_id)
-           + ' -ExpectedBundleManifestSha256 ' + psquote(sha256(root / 'bundle.json'))
+           if args.expected_vm_id and (args.candidate_mode or args.task_kind != 'core') else '')
+        + (' -ExpectedBundleManifestSha256 ' + psquote(sha256(root / 'bundle.json'))
            if args.candidate_mode and args.expected_vm_id else '')
     )
     prelude = '$ErrorActionPreference="Stop"; $env:PSModulePath="$PSHOME\\Modules;C:\\Program Files\\WindowsPowerShell\\Modules"; '
@@ -423,7 +579,7 @@ def run_controller(root, args, defaults=None, pwsh=None):
                                         desktop['expectedGuestSid'] if desktop else None)
         cwd = root if args.ssh_host else Path('/mnt/c')
         subprocess.run(command, cwd=cwd, text=True, check=True)
-        if desktop:
+        if desktop and args.task_kind == 'core':
             result = read_json_strict(root / 'result.json')
             if result.get('gui', {}).get('window_dpi') != desktop['expectedDpi']:
                 raise ValueError('Production window DPI differs from the requested RDP scale.')
@@ -694,6 +850,27 @@ def verify_gui_flow(root, manifest, flow, require_checkpoints=False, gui_binding
     return True
 
 
+def verify_transport_binding(transport, expected_transport_kind=None, expected_vm_id=None,
+                             require_identity_proof=False):
+    if not isinstance(transport, dict):
+        raise ValueError('VM result transport binding mismatch.')
+    if expected_transport_kind is not None:
+        expected_platform = 'Unix' if expected_transport_kind == 'ssh' else 'Win32NT'
+        if (transport.get('kind') != expected_transport_kind or
+                transport.get('host_platform') != expected_platform):
+            raise ValueError('VM result transport binding mismatch.')
+    if expected_vm_id is not None:
+        if transport.get('vm_id') != expected_vm_id:
+            raise ValueError('VM result Hyper-V identity binding mismatch.')
+        expected_identity_sha256 = hashlib.sha256(expected_vm_id.encode()).hexdigest()
+        if require_identity_proof and (
+                transport.get('vm_identity_kind') !=
+                'hyper-v-guest-parameters-virtual-machine-id-v1' or
+                transport.get('vm_identity_sha256') != expected_identity_sha256):
+            raise ValueError('VM result Hyper-V identity binding mismatch.')
+    return True
+
+
 def verify_result(root, manifest, result, expected_transport_kind=None, expected_vm_id=None):
     if type(manifest.get('schema_version')) is not int or manifest['schema_version'] not in (1, 2):
         raise ValueError('VM bundle schema version is invalid.')
@@ -777,12 +954,9 @@ def verify_result(root, manifest, result, expected_transport_kind=None, expected
                 tuple(int(part) for part in engine['version'].split('.')[:2]) < (7, 4) or
                 engine['edition'] != 'Core' or engine['effective_policy'] != 'RemoteSigned'):
             raise ValueError('VM candidate runner engine binding is invalid.')
-    if expected_transport_kind is not None:
-        expected_platform = 'Unix' if expected_transport_kind == 'ssh' else 'Win32NT'
-        if transport.get('kind') != expected_transport_kind or transport.get('host_platform') != expected_platform:
-            raise ValueError('VM result transport binding mismatch.')
-    if expected_vm_id is not None and transport.get('vm_id') != expected_vm_id:
-        raise ValueError('VM result Hyper-V identity binding mismatch.')
+    verify_transport_binding(
+        transport, expected_transport_kind, expected_vm_id,
+        require_identity_proof=candidate)
     return passed
 
 
@@ -1040,7 +1214,9 @@ def build_bundle(repo, root):
         shutil.copyfile(row.pop('path'), root / row['file'])
         row['sha256'] = sha256(root / row['file'])
     shutil.copyfile(application, root / 'DarkReNamer.exe')
-    for name in ('windows-vm-guest.ps1', 'run-windows-vm-tests.ps1'):
+    for name in (
+            'windows-vm-guest.ps1', 'run-windows-vm-tests.ps1',
+            'windows-vm-acceptance.ps1', 'windows-vm-recovery-acceptance.ps1'):
         shutil.copyfile(repo / 'scripts' / name, root / name)
     manifest = {
         'schema_version': 1, 'source_sha': source_sha, 'source_state': 'clean', 'target': TARGET,
@@ -1050,6 +1226,152 @@ def build_bundle(repo, root):
     }
     (root / 'bundle.json').write_text(json.dumps(manifest, indent=2))
     return manifest
+
+
+def verify_observer_result(manifest, result, role, observer_sha256):
+    if not isinstance(result, dict) or type(result.get('schema_version')) is not int:
+        raise ValueError('Observer result schema is invalid.')
+    if result['schema_version'] != manifest['schema_version']:
+        raise ValueError('Observer result schema differs from the bundle.')
+    candidate = manifest['schema_version'] == 2
+    if candidate:
+        if (result.get('lane') != 'candidate-gui-only' or
+                result.get('observer_role') != role or
+                result.get('product') != manifest['product'] or
+                result.get('harness') != manifest['harness']):
+            raise ValueError('Candidate observer result provenance or role differs from the bundle.')
+        application = manifest['product']['application']
+        runner = manifest['harness']['runner']
+        observer = manifest['harness']['observers'][role]
+    else:
+        if any(name in result for name in ('lane', 'product', 'harness', 'observer_role')):
+            raise ValueError('Legacy observer result contains candidate-only provenance.')
+        if result.get('source_sha') != manifest['source_sha']:
+            raise ValueError('Legacy observer result source differs from the bundle.')
+        if role == 'recovery' and result.get('source_state') != manifest['source_state']:
+            raise ValueError('Legacy recovery result state differs from the bundle.')
+        application = manifest['application']
+        runner = manifest['runner']
+        observer = {
+            'file': ('windows-vm-acceptance.ps1' if role == 'ui'
+                     else 'windows-vm-recovery-acceptance.ps1'),
+            'sha256': observer_sha256,
+        }
+    if (observer != {
+            'file': ('windows-vm-acceptance.ps1' if role == 'ui'
+                     else 'windows-vm-recovery-acceptance.ps1'),
+            'sha256': observer_sha256,
+            } or result.get('application') != application or
+            result.get('runner_sha256') != runner['sha256']):
+        raise ValueError('Observer result executable or script binding is invalid.')
+    if role == 'ui':
+        if (result.get('acceptance_script_sha256') != observer_sha256 or
+                result.get('status') != 'review_required'):
+            raise ValueError('UI observer did not return a bound review-required result.')
+    elif (result.get('observer') != observer or result.get('status') != 'passed'):
+        raise ValueError('Recovery observer did not return a bound passing result.')
+    return True
+
+
+def verify_observer_transport(root, role, expected_transport_kind, expected_vm_id):
+    transport = read_json_strict(Path(root) / 'transport.json')
+    engine_name = 'acceptance_engine' if role == 'ui' else 'recovery_engine'
+    engine = transport.get(engine_name) if isinstance(transport, dict) else None
+    process = transport.get('observer_process') if isinstance(transport, dict) else None
+    if (not isinstance(transport, dict) or transport.get('task_kind') != role or
+            transport.get('status') != 'collected' or
+            transport.get('guest_cleanup') is not True or
+            not isinstance(process, dict) or process.get('state') != 'exited' or
+            type(process.get('exit_code')) is not int or process['exit_code'] != 0 or
+            not isinstance(engine, dict) or engine.get('edition') != 'Core' or
+            engine.get('effective_policy') != 'RemoteSigned'):
+        raise ValueError('Observer transport result is incomplete or invalid.')
+    try:
+        if tuple(int(part) for part in engine['version'].split('.')[:2]) < (7, 4):
+            raise ValueError
+    except (AttributeError, KeyError, ValueError):
+        raise ValueError('Observer transport engine version is invalid.') from None
+    verify_transport_binding(
+        transport, expected_transport_kind, expected_vm_id,
+        require_identity_proof=True)
+    return True
+
+
+def verify_recovery_inventory(root, manifest, expected_transport_kind, expected_vm_id):
+    root = Path(root)
+    inventory = read_json_strict(root / 'recovery-inventory.json')
+    if (not isinstance(inventory, dict) or set(inventory) != {
+            'schema_version', 'task_kind', 'observer_role', 'bundle_manifest_sha256',
+            'observer', 'summary_file', 'files'} or
+            type(inventory.get('schema_version')) is not int or
+            inventory['schema_version'] != 1 or
+            inventory.get('task_kind') != 'recovery' or
+            inventory.get('observer_role') != 'recovery' or
+            inventory.get('bundle_manifest_sha256') != sha256(root.parent / 'bundle.json')):
+        raise ValueError('Recovery collection inventory binding is invalid.')
+    expected_observer = (manifest['harness']['observers']['recovery']
+                         if manifest['schema_version'] == 2 else {
+                             'file': 'windows-vm-recovery-acceptance.ps1',
+                             'sha256': sha256(root.parent / 'windows-vm-recovery-acceptance.ps1'),
+                         })
+    if inventory.get('observer') != expected_observer:
+        raise ValueError('Recovery collection observer binding is invalid.')
+    rows = inventory.get('files')
+    if not isinstance(rows, list) or not rows:
+        raise ValueError('Recovery collection inventory is empty or invalid.')
+    if len(rows) > 256:
+        raise ValueError('Recovery collection file count exceeds its bound.')
+    seen = set()
+    by_name = {}
+    total = 0
+    for row in rows:
+        if (not isinstance(row, dict) or set(row) != {'file', 'bytes', 'sha256'} or
+                not isinstance(row.get('file'), str) or len(row['file']) > 512 or
+                type(row.get('bytes')) is not int or row['bytes'] < 0 or
+                row['bytes'] > 128 * 1024 * 1024 or
+                not isinstance(row.get('sha256'), str) or
+                not re.fullmatch(r'[0-9a-f]{64}', row['sha256'])):
+            raise ValueError('Recovery collection file row is invalid.')
+        parts = row['file'].split('/')
+        if (not 1 <= len(parts) <= 8 or
+                any(not safe_ordinary_segment(part) for part in parts)):
+            raise ValueError('Recovery collection relative path is invalid.')
+        folded = row['file'].casefold()
+        if folded in seen:
+            raise ValueError('Recovery collection contains duplicate paths.')
+        seen.add(folded)
+        total += row['bytes']
+        if total > 512 * 1024 * 1024:
+            raise ValueError('Recovery collection aggregate size exceeds its bound.')
+        path = root.joinpath(*parts)
+        if (not path.is_file() or path.is_symlink() or path.stat().st_size != row['bytes'] or
+                sha256(path) != row['sha256']):
+            raise ValueError('Recovery collection file differs from its inventory.')
+        by_name[row['file']] = row
+    summary_file = inventory.get('summary_file')
+    if (not isinstance(summary_file, str) or summary_file not in by_name or
+            not re.fullmatch(r'[^/]+/summary\.json', summary_file)):
+        raise ValueError('Recovery collection summary binding is invalid.')
+    result = read_json_strict(root.joinpath(*summary_file.split('/')))
+    verify_observer_result(
+        manifest, result, 'recovery', expected_observer['sha256'])
+    actual = set()
+    for directory, directory_names, file_names in os.walk(root, followlinks=False):
+        directory_path = Path(directory)
+        for name in directory_names:
+            if (directory_path / name).is_symlink():
+                raise ValueError('Recovery collection contains a linked directory.')
+        for name in file_names:
+            path = directory_path / name
+            if path.is_symlink():
+                raise ValueError('Recovery collection contains a linked file.')
+            actual.add(path.relative_to(root).as_posix())
+    expected = set(by_name) | {'recovery-inventory.json', 'transport.json'}
+    if actual != expected:
+        raise ValueError('Recovery collection inventory is not complete.')
+    verify_observer_transport(
+        root, 'recovery', expected_transport_kind, expected_vm_id)
+    return result
 
 
 def main():
@@ -1072,8 +1394,9 @@ def main():
     root, defaults, pwsh = prepare_transport(repo, args)
     manifest = (build_candidate_bundle(repo, root, args) if args.candidate_mode
                 else build_bundle(repo, root))
+    observer_inputs = prepare_observer_inputs(root, manifest, args)
     if args.candidate_mode:
-        print('Executing exact-candidate GUI-only validation in the VM.', flush=True)
+        print('Executing exact-candidate ' + args.task_kind + ' validation in the VM.', flush=True)
     else:
         print('Executing ' + str(len(manifest['test_binaries'])) + ' Windows test binaries in the VM.', flush=True)
     print('Evidence: ' + str(root), flush=True)
@@ -1082,15 +1405,33 @@ def main():
         run_controller(root, args, defaults, pwsh)
     except subprocess.CalledProcessError:
         transport_ok = False
-    result_path = root / 'result.json'
-    if not result_path.is_file():
-        raise RuntimeError('The VM did not return a test result. Inspect the external transport result/logs.')
-    result = read_json_strict(result_path)
     transport_kind = 'ssh' if args.ssh_host else 'powershell_direct'
-    verified = verify_result(root, manifest, result, transport_kind, args.expected_vm_id)
-    total = sum(row.get('passed') or 0 for row in result['tests'])
-    print(('PASS' if transport_ok and verified else 'FAIL') + ': ' + str(total) +
-          ' tests passed; GUI=' + result.get('gui', {}).get('status', 'not-run'))
+    if args.task_kind == 'core':
+        result_path = root / 'result.json'
+        if not result_path.is_file():
+            raise RuntimeError('The VM did not return a test result. Inspect the external transport result/logs.')
+        result = read_json_strict(result_path)
+        verified = verify_result(root, manifest, result, transport_kind, args.expected_vm_id)
+        total = sum(row.get('passed') or 0 for row in result['tests'])
+        print(('PASS' if transport_ok and verified else 'FAIL') + ': ' + str(total) +
+              ' tests passed; GUI=' + result.get('gui', {}).get('status', 'not-run'))
+    elif args.task_kind == 'ui':
+        result_path = observer_inputs['output'] / 'acceptance-result.json'
+        if not result_path.is_file():
+            raise RuntimeError('The VM did not return a UI observer result.')
+        result = read_json_strict(result_path)
+        verified = verify_observer_result(
+            manifest, result, 'ui', observer_inputs['observer']['sha256'])
+        verify_observer_transport(
+            observer_inputs['output'], 'ui', transport_kind, args.expected_vm_id)
+        print(('PASS' if transport_ok and verified else 'FAIL') +
+              ': UI observer returned review_required with frozen provenance.')
+    else:
+        result = verify_recovery_inventory(
+            observer_inputs['output'], manifest, transport_kind, args.expected_vm_id)
+        verified = True
+        print(('PASS' if transport_ok else 'FAIL') + ': recovery observer returned ' +
+              result['status'] + ' with a verified collection inventory.')
     print('This native VM run is not the complete Windows release acceptance matrix.')
     return 0 if transport_ok and verified else 1
 
