@@ -2208,7 +2208,10 @@ function Get-VmAutomatedMenuHighlight {
 
     $native = @([DarkReNamerVmAcceptanceNative]::ReadHighlightedNativeMenuItems($MainWindowHandle))
     if ($OpenMenuPaths.Count -eq 0) {
-        if ($native.Count -ne 0) { throw 'A closed native menu retained a highlighted item.' }
+        if ($native.Count -ne 0) {
+            $observed = $native | ConvertTo-Json -Compress -Depth 4
+            throw "A closed native menu retained highlighted items: $observed"
+        }
         return $null
     }
     $deepest = $OpenMenuPaths[0]
