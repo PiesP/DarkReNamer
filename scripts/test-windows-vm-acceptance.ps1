@@ -242,6 +242,7 @@ function Write-TextScaleSnapshot {
 $acceptance = Join-Path $PSScriptRoot 'windows-vm-acceptance.ps1'
 $controller = Join-Path $PSScriptRoot 'run-windows-vm-tests.ps1'
 $runner = Join-Path $PSScriptRoot 'windows-vm-guest.ps1'
+$recovery = Join-Path $PSScriptRoot 'windows-vm-recovery-acceptance.ps1'
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
     'darkrenamer-vm-acceptance-' + [Guid]::NewGuid().ToString('N')
 )
@@ -277,6 +278,34 @@ try {
     )
     if ($controllerParseErrors.Count -ne 0) {
         throw 'run-windows-vm-tests.ps1 has PowerShell parser errors.'
+    }
+    $runnerParseErrors = $null
+    $runnerParseTokens = $null
+    $runnerAst = [Management.Automation.Language.Parser]::ParseFile(
+        $runner,
+        [ref]$runnerParseTokens,
+        [ref]$runnerParseErrors
+    )
+    if ($runnerParseErrors.Count -ne 0) {
+        throw 'windows-vm-guest.ps1 has PowerShell parser errors.'
+    }
+    $mainWindowSelector = @($runnerAst.FindAll({
+        param($ast)
+        $ast -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $ast.Name -ceq 'Resolve-ExactApplicationMainWindowCandidate'
+    }, $true))
+    if ($mainWindowSelector.Count -ne 1) {
+        throw 'The VM guest helper must define one exact application main-window selector.'
+    }
+    . ([scriptblock]::Create($mainWindowSelector[0].Extent.Text))
+
+    foreach ($observerPath in @($acceptance, $runner, $recovery)) {
+        $observerText = [IO.File]::ReadAllText($observerPath)
+        foreach ($heuristic in @('.MainWindowHandle', '.MainWindowTitle', '.CloseMainWindow(')) {
+            if ($observerText.IndexOf($heuristic, [StringComparison]::Ordinal) -ge 0) {
+                throw "$([IO.Path]::GetFileName($observerPath)) must not use process main-window heuristics '$heuristic'."
+            }
+        }
     }
     $controllerText = [IO.File]::ReadAllText($controller)
     foreach ($functionName in @(
@@ -739,6 +768,84 @@ try {
         }
     }
     & {
+        $cleanupFunction = $acceptanceAst.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Stop-AndDisposeAcceptanceOwnedProcess'
+        }, $true)
+        $startFunction = $acceptanceAst.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Start-AcceptanceApplication'
+        }, $true)
+        . ([scriptblock]::Create($cleanupFunction.Extent.Text))
+        . ([scriptblock]::Create($startFunction.Extent.Text))
+        function Start-OwnedProcess {
+            param($FilePath, $Arguments, $WorkingDirectory)
+            $script:startupOwned
+        }
+        function Wait-ExactApplicationMainWindow {
+            param(
+                $Process, $ExpectedSession, $ExpectedClassName,
+                $ExpectedTitle, $TimeoutSeconds, $Label
+            )
+            if ($Process -ne $script:startupOwned.process) {
+                throw 'Startup validation received a different process.'
+            }
+            throw 'Pinned startup binding failed.'
+        }
+        $startupProcess = [pscustomobject]@{
+            HasExited = $false
+            killed = $false
+            disposed = $false
+            waited_milliseconds = 0
+        }
+        $startupProcess | Add-Member ScriptMethod Refresh { }
+        $startupProcess | Add-Member ScriptMethod Kill { $this.killed = $true }
+        $startupProcess | Add-Member ScriptMethod WaitForExit {
+            param([int] $Milliseconds)
+            $this.waited_milliseconds = $Milliseconds
+            $true
+        }
+        $startupProcess | Add-Member ScriptMethod Dispose { $this.disposed = $true }
+        $script:startupOwned = [pscustomobject]@{ process = $startupProcess }
+        Assert-Fails {
+            Start-AcceptanceApplication `
+                -FilePath 'fixture.exe' `
+                -WorkingDirectory 'fixture-root' `
+                -SessionId 1 `
+                -WaitSeconds 10 `
+                -Label 'startup fixture'
+        } 'Pinned startup binding failed'
+        if (-not $startupProcess.killed -or -not $startupProcess.disposed -or
+            $startupProcess.waited_milliseconds -ne 10000) {
+            throw 'Failed startup must terminate and dispose the exact owned process within the fixed bound.'
+        }
+
+        $timeoutProcess = [pscustomobject]@{
+            HasExited = $false
+            killed = $false
+            disposed = $false
+        }
+        $timeoutProcess | Add-Member ScriptMethod Refresh { }
+        $timeoutProcess | Add-Member ScriptMethod Kill { $this.killed = $true }
+        $timeoutProcess | Add-Member ScriptMethod WaitForExit { param([int] $Milliseconds) $false }
+        $timeoutProcess | Add-Member ScriptMethod Dispose { $this.disposed = $true }
+        $script:startupOwned = [pscustomobject]@{ process = $timeoutProcess }
+        Assert-Fails {
+            Start-AcceptanceApplication `
+                -FilePath 'fixture.exe' `
+                -WorkingDirectory 'fixture-root' `
+                -SessionId 1 `
+                -WaitSeconds 10 `
+                -Label 'startup cleanup-timeout fixture'
+        } 'Application startup validation and exact-process cleanup both failed: Pinned startup binding failed. Cleanup: The exact owned acceptance process did not terminate.'
+        if (-not $timeoutProcess.killed -or -not $timeoutProcess.disposed) {
+            throw 'Timed-out startup cleanup must still attempt exact process termination and disposal.'
+        }
+        Remove-Variable startupOwned -Scope Script
+    }
+    & {
         $closeFunction = $acceptanceAst.Find({
             param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
@@ -751,20 +858,38 @@ try {
             if ($Modifier -ne 0x12 -or $VirtualKey -ne 0x73) { throw 'Expected Alt+F4.' }
             $script:closeProbe.keyboard++
         }
+        function Assert-ExactApplicationMainWindowBinding {
+            param(
+                $Process, $ExpectedSession, $MainWindowHandle, $MainWindow,
+                $ExpectedClassName, $ExpectedTitle, $Label
+            )
+            if ([long]$MainWindowHandle -ne 5151L -or
+                $ExpectedClassName -cne 'DarkReNamerWindow' -or
+                $ExpectedTitle -cne 'DarkReNamer') {
+                throw 'Close binding did not retain the pinned main window.'
+            }
+        }
+        function Close-ExactApplicationMainWindow {
+            param(
+                $Process, $ExpectedSession, $MainWindowHandle, $MainWindow,
+                $ExpectedClassName, $ExpectedTitle, $Label
+            )
+            Assert-ExactApplicationMainWindowBinding @PSBoundParameters
+            $script:closeProbe.ordinary++
+        }
         $process = [pscustomobject]@{ HasExited = $false; ExitCode = 0 }
         $process | Add-Member ScriptMethod Refresh { }
         $process | Add-Member ScriptMethod WaitForExit { param($Milliseconds) $true }
-        $process | Add-Member ScriptMethod CloseMainWindow { $script:closeProbe.ordinary++; $true }
         $window = [pscustomobject]@{ }
         $window | Add-Member ScriptMethod SetFocus { }
-        $application = @{ process = $process; main = $window }
+        $application = @{ process = $process; main = $window; main_handle = [IntPtr]5151 }
         [void](Close-AcceptanceApplication -Application $application -SessionId 1 -WaitSeconds 1 -CloseInput keyboard)
         if ($script:closeProbe.keyboard -ne 1 -or $script:closeProbe.ordinary -ne 0) {
             throw 'Keyboard close must deliver Alt+F4 through the actual close helper.'
         }
         [void](Close-AcceptanceApplication -Application $application -SessionId 1 -WaitSeconds 1 -CloseInput ordinary)
         if ($script:closeProbe.keyboard -ne 1 -or $script:closeProbe.ordinary -ne 1) {
-            throw 'Ordinary close must call CloseMainWindow through the actual close helper.'
+            throw 'Ordinary close must target the exact pinned main window.'
         }
         Remove-Variable closeProbe -Scope Script
     }
@@ -1553,6 +1678,67 @@ try {
             -ExpectedOwnerHandle 100L `
             -ExpectedName '이름 앞에 문자열 붙이기'
     } 'matched more than one exact native window'
+    $pinnedMainCandidate = [pscustomobject]@{
+        Handle = 100L
+        Owner = 0L
+        ProcessId = 200
+        ClassName = 'DarkReNamerWindow'
+        Title = 'DarkReNamer'
+        Visible = $true
+        Left = 10
+        Top = 20
+        Right = 810
+        Bottom = 620
+    }
+    $ownerlessShadowCandidate = [pscustomobject]@{
+        Handle = 99L
+        Owner = 0L
+        ProcessId = 200
+        ClassName = 'SysShadow'
+        Title = ''
+        Visible = $true
+        Left = 600
+        Top = 300
+        Right = 900
+        Bottom = 350
+    }
+    $selectedMainCandidate = Resolve-ExactApplicationMainWindowCandidate `
+        -Windows @($ownerlessShadowCandidate, $pinnedMainCandidate) `
+        -ExpectedProcessId 200 `
+        -ExpectedClassName 'DarkReNamerWindow' `
+        -ExpectedTitle 'DarkReNamer'
+    if ($selectedMainCandidate.Handle -ne 100L) {
+        throw 'Pinned main-window selection did not ignore an ownerless visible shadow window.'
+    }
+    foreach ($mutation in @('handle', 'owner', 'pid', 'class', 'title', 'hidden', 'geometry')) {
+        $changedMainCandidate = $pinnedMainCandidate | ConvertTo-Json | ConvertFrom-Json
+        switch ($mutation) {
+            'handle' { $changedMainCandidate.Handle = 0L }
+            'owner' { $changedMainCandidate.Owner = 99L }
+            'pid' { $changedMainCandidate.ProcessId = 201 }
+            'class' { $changedMainCandidate.ClassName = 'SysShadow' }
+            'title' { $changedMainCandidate.Title = 'Other' }
+            'hidden' { $changedMainCandidate.Visible = $false }
+            'geometry' { $changedMainCandidate.Right = $changedMainCandidate.Left }
+        }
+        $rejectedMainCandidate = Resolve-ExactApplicationMainWindowCandidate `
+            -Windows @($changedMainCandidate) `
+            -ExpectedProcessId 200 `
+            -ExpectedClassName 'DarkReNamerWindow' `
+            -ExpectedTitle 'DarkReNamer'
+        if ($null -ne $rejectedMainCandidate) {
+            throw "Pinned main-window selection accepted a $mutation mismatch."
+        }
+    }
+    $duplicateMainCandidate = $pinnedMainCandidate | ConvertTo-Json | ConvertFrom-Json
+    $duplicateMainCandidate.Handle = 101L
+    Assert-Fails {
+        Resolve-ExactApplicationMainWindowCandidate `
+            -Windows @($pinnedMainCandidate, $duplicateMainCandidate) `
+            -ExpectedProcessId 200 `
+            -ExpectedClassName 'DarkReNamerWindow' `
+            -ExpectedTitle 'DarkReNamer'
+    } 'matched more than one exact native window'
     $prefixMoveIndex = $acceptanceText.IndexOf(
         "Move-RailFocusToCommand -Process `$process -ExpectedSession `$ExpectedSessionId -AutomationId '32773'",
         [StringComparison]::Ordinal
@@ -1629,9 +1815,32 @@ try {
         throw 'GUI regression scenarios must use the normalized verified application binding.'
     }
     $startFunction = (Get-Command Start-AcceptanceApplication -CommandType Function).Definition
-    if ($startFunction.IndexOf('(Get-Date).AddSeconds($WaitSeconds)', [StringComparison]::Ordinal) -lt 0 -or
-        $startFunction.IndexOf('[Math]::Min(30, $WaitSeconds)', [StringComparison]::Ordinal) -ge 0) {
-        throw 'Shared application startup must preserve the caller-supplied acceptance timeout.'
+    if ($startFunction.IndexOf('Wait-ExactApplicationMainWindow', [StringComparison]::Ordinal) -lt 0 -or
+        $startFunction.IndexOf('-TimeoutSeconds $WaitSeconds', [StringComparison]::Ordinal) -lt 0 -or
+        $startFunction.IndexOf('main_handle = $mainHandle', [StringComparison]::Ordinal) -lt 0) {
+        throw 'Shared application startup must retain the exact native-to-UIA main-window binding.'
+    }
+    if ($acceptanceText.IndexOf('.MainWindowHandle', [StringComparison]::Ordinal) -ge 0) {
+        throw 'Acceptance actions must not recompute the pinned application main window.'
+    }
+    $unboundWindowWaits = @($acceptanceAst.FindAll({
+        param($node)
+        if ($node -isnot [Management.Automation.Language.CommandAst] -or
+            $node.GetCommandName() -cne 'Wait-UniqueAutomationWindow') {
+            return $false
+        }
+        $parameters = @($node.CommandElements | Where-Object {
+            $_ -is [Management.Automation.Language.CommandParameterAst]
+        } | ForEach-Object ParameterName)
+        -not ($parameters -contains 'Owner') -and -not ($parameters -contains 'MainWindowHandle')
+    }, $true))
+    if ($unboundWindowWaits.Count -ne 0) {
+        throw 'Every acceptance dialog wait must bind an owner or the exact pinned main-window handle.'
+    }
+    $closeFunction = (Get-Command Close-AcceptanceApplication -CommandType Function).Definition
+    if ($closeFunction.IndexOf('CloseMainWindow', [StringComparison]::Ordinal) -ge 0 -or
+        $closeFunction.IndexOf('Close-ExactApplicationMainWindow', [StringComparison]::Ordinal) -lt 0) {
+        throw 'Ordinary acceptance close must target the exact pinned main window.'
     }
     $manualNameAst = (Get-Command Set-ObserverManualName -CommandType Function).ScriptBlock.Ast
     $manualNameSuccessBranches = @($manualNameAst.FindAll({

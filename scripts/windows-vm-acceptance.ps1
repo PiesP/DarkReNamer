@@ -1303,10 +1303,22 @@ public static class DarkReNamerVmAcceptanceNative {
         }
     }
 
+    private static InvalidOperationException NoNativeMenuException(IntPtr window) {
+        uint processId;
+        GetWindowThreadProcessId(window, out processId);
+        StringBuilder className = new StringBuilder(128);
+        GetClassName(window, className, className.Capacity);
+        return new InvalidOperationException(
+            "The application window has no native menu (hwnd=" +
+            window.ToInt64().ToString(System.Globalization.CultureInfo.InvariantCulture) +
+            ", pid=" + processId.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+            ", class=" + className.ToString() + ").");
+    }
+
     public static NativeMenuItemMeasurement[] ReadNativeMenuTree(IntPtr window) {
         IntPtr root = GetMenu(window);
         if (root == IntPtr.Zero) {
-            throw new InvalidOperationException("The application window has no native menu.");
+            throw NoNativeMenuException(window);
         }
         List<NativeMenuItemMeasurement> rows = new List<NativeMenuItemMeasurement>();
         ReadNativeMenuTree(root, new List<int>(), rows, 0);
@@ -1365,7 +1377,7 @@ public static class DarkReNamerVmAcceptanceNative {
     public static NativeMenuHighlightMeasurement[] ReadHighlightedNativeMenuItems(IntPtr window) {
         IntPtr root = GetMenu(window);
         if (root == IntPtr.Zero) {
-            throw new InvalidOperationException("The application window has no native menu.");
+            throw NoNativeMenuException(window);
         }
         List<NativeMenuHighlightMeasurement> rows = new List<NativeMenuHighlightMeasurement>();
         ReadHighlightedNativeMenuItems(window, root, new List<int>(), rows, 0);
@@ -1375,7 +1387,7 @@ public static class DarkReNamerVmAcceptanceNative {
     public static bool IsMenuCommandEnabled(IntPtr window, uint command) {
         IntPtr root = GetMenu(window);
         if (root == IntPtr.Zero) {
-            throw new InvalidOperationException("The application window has no native menu.");
+            throw NoNativeMenuException(window);
         }
         uint state;
         if (!TryGetMenuCommandState(root, command, out state)) {
@@ -1387,7 +1399,7 @@ public static class DarkReNamerVmAcceptanceNative {
     public static bool IsMenuCommandChecked(IntPtr window, uint command) {
         IntPtr root = GetMenu(window);
         if (root == IntPtr.Zero) {
-            throw new InvalidOperationException("The application window has no native menu.");
+            throw NoNativeMenuException(window);
         }
         uint state;
         if (!TryGetMenuCommandState(root, command, out state)) {
@@ -2114,7 +2126,7 @@ function Get-VmAutomatedHiddenRailControls {
     )
 
     Initialize-AcceptanceNativeOpen
-    $mainHandle = [IntPtr]$Application.main.Current.NativeWindowHandle
+    $mainHandle = [IntPtr]$Application.main_handle
     $rootHandle = [DarkReNamerVmNative]::GetAncestor($mainHandle, 2)
     if ($rootHandle -ne $mainHandle -or $Application.process.SessionId -ne $ExpectedSession) {
         throw 'Native menu-only workbench ownership is invalid.'
@@ -2460,7 +2472,8 @@ function Invoke-VmAutomatedNativeMenuOnlyReachability {
     $List.SetFocus()
     [void][DarkReNamerVmNative]::SetForegroundWindow($mainHandle)
     Assert-AcceptanceForegroundBinding `
-        -Process $Application.process -ExpectedSession $ExpectedSession -RequireMainWindow
+        -Process $Application.process -ExpectedSession $ExpectedSession `
+        -MainWindowHandle $mainHandle -RequireMainWindow
     $initial = Get-VmAutomatedMenuEndpoint `
         -Application $Application -List $List -ExpectedSession $ExpectedSession
     $stateBefore = Get-VmAutomatedNativeMenuState `
@@ -2619,6 +2632,7 @@ function Invoke-VmAutomatedFocusReachability {
         [ordered]@{ automation_id = '32785'; rail = 'right'; rail_group = 3 }
         [ordered]@{ automation_id = '32786'; rail = 'right'; rail_group = 3 }
     )
+    $mainHandle = [long]$Application.main_handle
     $controls = [Collections.Generic.List[object]]::new()
     foreach ($spec in $specs) {
         $element = if ($spec.rail -ceq 'list') {
@@ -2866,6 +2880,7 @@ function New-VmAutomatedLayoutRun {
         [Parameter(Mandatory)][ValidateSet('command-rails','native-menu-only')][string] $LayoutVariant
     )
 
+    $mainHandle = [long]$Application.main_handle
     $controls = [Collections.Generic.List[object]]::new()
     $controls.Add((Get-VmAutomatedControlObservation `
         -Element $Application.main -Process $Application.process `
@@ -2891,17 +2906,17 @@ function New-VmAutomatedLayoutRun {
     else {
         $Grid.element.SetFocus()
         [void][DarkReNamerVmNative]::SetForegroundWindow(
-            [IntPtr]$Application.main.Current.NativeWindowHandle
+            [IntPtr]$Application.main_handle
         )
         Assert-AcceptanceForegroundBinding `
-            -Process $Application.process -ExpectedSession $ExpectedSession -RequireMainWindow
+            -Process $Application.process -ExpectedSession $ExpectedSession `
+            -MainWindowHandle ([IntPtr]$Application.main_handle) -RequireMainWindow
     }
     $focused = Get-FocusedAcceptanceElement `
         -Process $Application.process -ExpectedSession $ExpectedSession -Label 'raw layout focus'
     $focusObservation = Get-VmAutomatedControlObservation `
         -Element $focused -Process $Application.process `
         -ExpectedSession $ExpectedSession -Label 'raw layout focused control'
-    $mainHandle = [long]$Application.main.Current.NativeWindowHandle
     $misbound = @($controls | Where-Object {
         $_.pid -ne $Application.process.Id -or $_.session_id -ne $ExpectedSession -or
         $_.root_hwnd -ne $mainHandle
@@ -3361,9 +3376,17 @@ function Assert-AcceptanceForegroundBinding {
     param(
         [Parameter(Mandatory)][Diagnostics.Process] $Process,
         [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][IntPtr] $MainWindowHandle,
         [switch] $RequireMainWindow
     )
 
+    Assert-ExactApplicationMainWindowBinding `
+        -Process $Process `
+        -ExpectedSession $ExpectedSession `
+        -MainWindowHandle $MainWindowHandle `
+        -ExpectedClassName 'DarkReNamerWindow' `
+        -ExpectedTitle 'DarkReNamer' `
+        -Label 'acceptance foreground main window'
     $foreground = [DarkReNamerVmNative]::GetForegroundWindow()
     $foregroundProcessId = [uint32]0
     if ($foreground -eq [IntPtr]::Zero -or
@@ -3373,7 +3396,7 @@ function Assert-AcceptanceForegroundBinding {
         ) -eq 0 -or
         $foregroundProcessId -ne $Process.Id -or
         $Process.SessionId -ne $ExpectedSession -or
-        ($RequireMainWindow -and $foreground -ne $Process.MainWindowHandle)) {
+        ($RequireMainWindow -and $foreground -ne $MainWindowHandle)) {
         throw 'Clipboard input is not bound to the exact application foreground target and desktop session.'
     }
 }
@@ -3737,22 +3760,27 @@ function Set-AcceptanceAppearance {
     param(
         [Parameter(Mandatory)][Diagnostics.Process] $Process,
         [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][IntPtr] $MainWindowHandle,
         [Parameter(Mandatory)][ValidateSet('system', 'light', 'dark')][string] $Appearance
     )
 
-    if ($Process.SessionId -ne $ExpectedSession -or $Process.MainWindowHandle -eq [IntPtr]::Zero) {
-        throw 'Acceptance appearance target is not bound to the expected desktop session.'
-    }
+    Assert-ExactApplicationMainWindowBinding `
+        -Process $Process `
+        -ExpectedSession $ExpectedSession `
+        -MainWindowHandle $MainWindowHandle `
+        -ExpectedClassName 'DarkReNamerWindow' `
+        -ExpectedTitle 'DarkReNamer' `
+        -Label 'acceptance appearance target'
     $spec = Resolve-AcceptanceAppearance -Appearance $Appearance
     [DarkReNamerVmAcceptanceNative]::SendMenuCommand(
-        $Process.MainWindowHandle,
+        $MainWindowHandle,
         [uint32]$spec.command_id
     )
     $stableReads = 0
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
         Start-Sleep -Milliseconds 50
         if ([DarkReNamerVmAcceptanceNative]::IsMenuCommandChecked(
-            $Process.MainWindowHandle,
+            $MainWindowHandle,
             [uint32]$spec.command_id
         )) {
             $stableReads++
@@ -4043,6 +4071,24 @@ function Get-ObserverWindowTree {
     $rows.ToArray()
 }
 
+function Stop-AndDisposeAcceptanceOwnedProcess {
+    param([Parameter(Mandatory)][object] $Owned)
+
+    $process = $Owned.process
+    try {
+        $process.Refresh()
+        if (-not $process.HasExited) {
+            $process.Kill()
+            if (-not $process.WaitForExit(10000)) {
+                throw 'The exact owned acceptance process did not terminate.'
+            }
+        }
+    }
+    finally {
+        $process.Dispose()
+    }
+}
+
 function Start-AcceptanceApplication {
     param(
         [Parameter(Mandatory)][string] $FilePath,
@@ -4051,27 +4097,49 @@ function Start-AcceptanceApplication {
         [Parameter(Mandatory)][int] $WaitSeconds,
         [Parameter(Mandatory)][string] $Label
     )
-    $owned = Start-OwnedProcess -FilePath $FilePath -Arguments '' -WorkingDirectory $WorkingDirectory
-    $process = $owned.process
-    $deadline = (Get-Date).AddSeconds($WaitSeconds)
-    do {
-        Start-Sleep -Milliseconds 100
-        $process.Refresh()
-        if ($process.HasExited) { throw "$Label exited before creating its window." }
-    } while ($process.MainWindowHandle -eq [IntPtr]::Zero -and (Get-Date) -lt $deadline)
-    if ($process.MainWindowHandle -eq [IntPtr]::Zero -or $process.SessionId -ne $SessionId) {
-        throw "$Label did not create a window in the expected session."
+    $owned = $null
+    try {
+        $owned = Start-OwnedProcess -FilePath $FilePath -Arguments '' -WorkingDirectory $WorkingDirectory
+        $process = $owned.process
+        $binding = Wait-ExactApplicationMainWindow `
+            -Process $process `
+            -ExpectedSession $SessionId `
+            -ExpectedClassName 'DarkReNamerWindow' `
+            -ExpectedTitle 'DarkReNamer' `
+            -TimeoutSeconds $WaitSeconds `
+            -Label $Label
+        $window = $binding.element
+        $mainHandle = [IntPtr]$binding.handle
+        $window.SetFocus()
+        [void][DarkReNamerVmNative]::SetForegroundWindow($mainHandle)
+        $foregroundDeadline = (Get-Date).AddSeconds(5)
+        while ([DarkReNamerVmNative]::GetForegroundWindow() -ne $mainHandle -and (Get-Date) -lt $foregroundDeadline) {
+            Start-Sleep -Milliseconds 50
+        }
+        Assert-AcceptanceForegroundBinding `
+            -Process $process `
+            -ExpectedSession $SessionId `
+            -MainWindowHandle $mainHandle `
+            -RequireMainWindow
+        [pscustomobject]@{
+            owned = $owned
+            process = $process
+            main = $window
+            main_handle = $mainHandle
+        }
     }
-    $window = [Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
-    Assert-AutomationBinding -Element $window -Process $process -ExpectedSession $SessionId -Label "$Label main window" -RequireWindowHandle
-    $window.SetFocus()
-    [void][DarkReNamerVmNative]::SetForegroundWindow($process.MainWindowHandle)
-    $foregroundDeadline = (Get-Date).AddSeconds(5)
-    while ([DarkReNamerVmNative]::GetForegroundWindow() -ne $process.MainWindowHandle -and (Get-Date) -lt $foregroundDeadline) {
-        Start-Sleep -Milliseconds 50
+    catch {
+        $startupError = $_
+        if ($null -ne $owned) {
+            try {
+                Stop-AndDisposeAcceptanceOwnedProcess -Owned $owned
+            }
+            catch {
+                throw "Application startup validation and exact-process cleanup both failed: $($startupError.Exception.Message) Cleanup: $($_.Exception.Message)"
+            }
+        }
+        throw $startupError
     }
-    Assert-AcceptanceForegroundBinding -Process $process -ExpectedSession $SessionId -RequireMainWindow
-    [pscustomobject]@{ owned = $owned; process = $process; main = $window }
 }
 
 function Get-ObserverGrid {
@@ -4110,10 +4178,13 @@ function Import-GuiRegressionPathList {
     }
     Add-Type -AssemblyName System.Windows.Forms
     $Application.main.SetFocus()
-    [void][DarkReNamerVmNative]::SetForegroundWindow($Application.process.MainWindowHandle)
-    Assert-AcceptanceForegroundBinding -Process $Application.process -ExpectedSession $SessionId -RequireMainWindow
+    [void][DarkReNamerVmNative]::SetForegroundWindow([IntPtr]$Application.main_handle)
+    Assert-AcceptanceForegroundBinding -Process $Application.process -ExpectedSession $SessionId `
+        -MainWindowHandle ([IntPtr]$Application.main_handle) -RequireMainWindow
     [Windows.Forms.SendKeys]::SendWait('^+v')
-    $dialog = Wait-UniqueAutomationWindow -Process $Application.process -ExpectedSession $SessionId -Name '파일에서 경로목록 읽어 추가하기' -TimeoutSeconds $WaitSeconds -Label 'GUI regression path-list import dialog'
+    $dialog = Wait-UniqueAutomationWindow -Process $Application.process -ExpectedSession $SessionId `
+        -MainWindowHandle ([IntPtr]$Application.main_handle) -Name '파일에서 경로목록 읽어 추가하기' `
+        -TimeoutSeconds $WaitSeconds -Label 'GUI regression path-list import dialog'
     $handle = [IntPtr]$dialog.Current.NativeWindowHandle
     $edit = Find-UniqueAutomationElement -Root $dialog -Process $Application.process -ExpectedSession $SessionId -AutomationId '1148' -ControlType ([Windows.Automation.ControlType]::Edit) -TimeoutSeconds $WaitSeconds -Label 'path-list import filename' -RequireWindowHandle
     Set-AutomationControlValue -Element $edit -Value $PathsFile -Label 'path-list import filename'
@@ -4143,9 +4214,10 @@ function Set-ObserverSelectedRow {
     if ($Row -ge $Grid.pattern.Current.RowCount) { throw 'Requested row is outside the file list.' }
     $Application.main.SetFocus()
 
-    [void][DarkReNamerVmNative]::SetForegroundWindow($Application.process.MainWindowHandle)
+    [void][DarkReNamerVmNative]::SetForegroundWindow([IntPtr]$Application.main_handle)
 
-    Assert-AcceptanceForegroundBinding -Process $Application.process -ExpectedSession $SessionId -RequireMainWindow
+    Assert-AcceptanceForegroundBinding -Process $Application.process -ExpectedSession $SessionId `
+        -MainWindowHandle ([IntPtr]$Application.main_handle) -RequireMainWindow
     $cell = $Grid.pattern.GetItem($Row, 0)
     $Grid.element.SetFocus()
     Send-AcceptanceTap -Process $Application.process -ExpectedSession $SessionId -VirtualKey 0x24 -Label 'select first preview row'
@@ -4478,7 +4550,7 @@ function Get-GuiRegressionPhysicalTarget {
     if ($Click) {
         [DarkReNamerVmAcceptanceNative]::MoveCursor($x, $y)
         $foreground = [DarkReNamerVmNative]::GetForegroundWindow()
-        if ($foreground -ne $ExpectedRoot -and $foreground -ne $Application.process.MainWindowHandle) {
+        if ($foreground -ne $ExpectedRoot -and $foreground -ne [IntPtr]$Application.main_handle) {
             throw "$Label foreground does not belong to the expected modal path."
         }
         [DarkReNamerVmAcceptanceNative]::Click()
@@ -4661,21 +4733,24 @@ function Get-ObserverVisibleText {
 function Wait-AcceptanceMainWindowForeground {
     param([Parameter(Mandatory)][object] $Application, [Parameter(Mandatory)][int] $WaitSeconds, [Parameter(Mandatory)][string] $Label)
     $deadline = (Get-Date).AddSeconds([Math]::Min(5, $WaitSeconds))
-    while ([DarkReNamerVmNative]::GetForegroundWindow() -ne $Application.process.MainWindowHandle -and (Get-Date) -lt $deadline) {
+    while ([DarkReNamerVmNative]::GetForegroundWindow() -ne [IntPtr]$Application.main_handle -and (Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 50
     }
-    if (-not [DarkReNamerVmAcceptanceNative]::IsWindowEnabled($Application.process.MainWindowHandle)) {
+    if (-not [DarkReNamerVmAcceptanceNative]::IsWindowEnabled([IntPtr]$Application.main_handle)) {
         throw "$Label did not restore the enabled owner."
     }
-    Assert-AcceptanceForegroundBinding -Process $Application.process -ExpectedSession $Application.process.SessionId -RequireMainWindow
+    Assert-AcceptanceForegroundBinding -Process $Application.process `
+        -ExpectedSession $Application.process.SessionId `
+        -MainWindowHandle ([IntPtr]$Application.main_handle) -RequireMainWindow
 }
 function Open-ObserverDiagnosticKeyboard {
     param([Parameter(Mandatory)][object] $Application, [Parameter(Mandatory)][int] $SessionId, [Parameter(Mandatory)][int] $WaitSeconds)
     $Application.main.SetFocus()
 
-    [void][DarkReNamerVmNative]::SetForegroundWindow($Application.process.MainWindowHandle)
+    [void][DarkReNamerVmNative]::SetForegroundWindow([IntPtr]$Application.main_handle)
 
-    Assert-AcceptanceForegroundBinding -Process $Application.process -ExpectedSession $SessionId -RequireMainWindow
+    Assert-AcceptanceForegroundBinding -Process $Application.process -ExpectedSession $SessionId `
+        -MainWindowHandle ([IntPtr]$Application.main_handle) -RequireMainWindow
     Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x12 -VirtualKey 0x56 -Label 'View menu Alt+V'
     [void](Wait-AcceptancePopupMenu -Process $Application.process -ExpectedSession $SessionId -Label 'View menu for keyboard diagnostics')
     Send-AcceptanceTap -Process $Application.process -ExpectedSession $SessionId -VirtualKey 0x49 -Label 'View diagnostic mnemonic I'
@@ -4837,9 +4912,10 @@ function Start-ObserverApplyFromPublicUi {
     $menu = Get-ElementObservation -Element $fileMenus[0]
     $Application.main.SetFocus()
 
-    [void][DarkReNamerVmNative]::SetForegroundWindow($Application.process.MainWindowHandle)
+    [void][DarkReNamerVmNative]::SetForegroundWindow([IntPtr]$Application.main_handle)
 
-    Assert-AcceptanceForegroundBinding -Process $Application.process -ExpectedSession $SessionId -RequireMainWindow
+    Assert-AcceptanceForegroundBinding -Process $Application.process -ExpectedSession $SessionId `
+        -MainWindowHandle ([IntPtr]$Application.main_handle) -RequireMainWindow
     $mainHandle = [IntPtr]$Application.main.Current.NativeWindowHandle
     $fileTarget = Get-GuiRegressionPhysicalTarget -Click -Element $fileMenus[0] -Application $Application -SessionId $SessionId -ExpectedRoot $mainHandle -Label "$Label File menu"
     $popup = Wait-AcceptancePopupMenu -Process $Application.process -ExpectedSession $SessionId -Label "$Label File popup"
@@ -5041,9 +5117,10 @@ function Get-ObserverPublicApplyState {
     if ($fileMenus.Count -ne 1) { throw "$Label public File menu matched $($fileMenus.Count) elements." }
     $Application.main.SetFocus()
 
-    [void][DarkReNamerVmNative]::SetForegroundWindow($Application.process.MainWindowHandle)
+    [void][DarkReNamerVmNative]::SetForegroundWindow([IntPtr]$Application.main_handle)
 
-    Assert-AcceptanceForegroundBinding -Process $Application.process -ExpectedSession $SessionId -RequireMainWindow
+    Assert-AcceptanceForegroundBinding -Process $Application.process -ExpectedSession $SessionId `
+        -MainWindowHandle ([IntPtr]$Application.main_handle) -RequireMainWindow
     $fileTarget = Get-GuiRegressionPhysicalTarget -Click -Element $fileMenus[0] -Application $Application -SessionId $SessionId -ExpectedRoot ([IntPtr]$Application.main.Current.NativeWindowHandle) -Label "$Label File menu"
     $popup = Wait-AcceptancePopupMenu -Process $Application.process -ExpectedSession $SessionId -Label "$Label File popup"
     try {
@@ -5182,11 +5259,26 @@ function Close-AcceptanceApplication {
     $Application.process.Refresh()
     if ($Application.process.HasExited) { throw 'The acceptance application exited before normal close.' }
     if ($CloseInput -ceq 'keyboard') {
+        Assert-ExactApplicationMainWindowBinding `
+            -Process $Application.process `
+            -ExpectedSession $SessionId `
+            -MainWindowHandle ([IntPtr]$Application.main_handle) `
+            -MainWindow $Application.main `
+            -ExpectedClassName 'DarkReNamerWindow' `
+            -ExpectedTitle 'DarkReNamer' `
+            -Label 'acceptance application keyboard close'
         $Application.main.SetFocus()
         Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x12 -VirtualKey 0x73 -Label 'application Alt+F4 close'
     }
-    elseif (-not $Application.process.CloseMainWindow()) {
-        throw 'The acceptance application rejected ordinary close.'
+    else {
+        Close-ExactApplicationMainWindow `
+            -Process $Application.process `
+            -ExpectedSession $SessionId `
+            -MainWindowHandle ([IntPtr]$Application.main_handle) `
+            -MainWindow $Application.main `
+            -ExpectedClassName 'DarkReNamerWindow' `
+            -ExpectedTitle 'DarkReNamer' `
+            -Label 'acceptance application ordinary close'
     }
     if (-not $Application.process.WaitForExit([Math]::Min(30, $WaitSeconds) * 1000)) {
         throw 'The acceptance application did not close before the bounded deadline.'
@@ -5338,9 +5430,10 @@ function Set-ObserverDestinationParent {
     Add-Type -AssemblyName System.Windows.Forms
     $Application.main.SetFocus()
 
-    [void][DarkReNamerVmNative]::SetForegroundWindow($Application.process.MainWindowHandle)
+    [void][DarkReNamerVmNative]::SetForegroundWindow([IntPtr]$Application.main_handle)
 
-    Assert-AcceptanceForegroundBinding -Process $Application.process -ExpectedSession $SessionId -RequireMainWindow
+    Assert-AcceptanceForegroundBinding -Process $Application.process -ExpectedSession $SessionId `
+        -MainWindowHandle ([IntPtr]$Application.main_handle) -RequireMainWindow
     [Windows.Forms.SendKeys]::SendWait('%ed{ENTER}')
     $dialog = Wait-UniqueAutomationWindow -Process $Application.process -ExpectedSession $SessionId -Owner $Application.main -Name '모든 파일을 이동할 대상 폴더 선택' -TimeoutSeconds $WaitSeconds -Label 'move destination folder picker'
     $handle = [IntPtr]$dialog.Current.NativeWindowHandle
@@ -5543,7 +5636,7 @@ function Invoke-ObserverContextConfirmation {
             settling_interval_ms = 3000
             listview_hwnd = $listViewHandle.ToInt64()
             listview_tooltip_hwnd = $tooltipHandle
-            owner_disabled = -not [DarkReNamerVmAcceptanceNative]::IsWindowEnabled($Application.process.MainWindowHandle)
+            owner_disabled = -not [DarkReNamerVmAcceptanceNative]::IsWindowEnabled([IntPtr]$Application.main_handle)
             at_entry = $entryWindows
             at_entry_bound_tooltip_visible = $entryTooltip.Count -eq 1
             after_settling = $settledWindows
@@ -5843,7 +5936,7 @@ function Invoke-ObserverContextScenario {
     $rawCaptureStart = $Captures.Count
     try {
         $repeatedApplication = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'repeated-name GUI regression application'
-        $appearanceSpec = Set-AcceptanceAppearance -Process $repeatedApplication.process -ExpectedSession $SessionId -Appearance $Appearance
+        $appearanceSpec = Set-AcceptanceAppearance -Process $repeatedApplication.process -ExpectedSession $SessionId -MainWindowHandle ([IntPtr]$repeatedApplication.main_handle) -Appearance $Appearance
         $minimum = Ensure-AcceptanceMainWindowCaptureSize -MainWindow $repeatedApplication.main -Process $repeatedApplication.process -ExpectedSession $SessionId
         $environment = Get-ObserverEnvironmentMetadata -Application $repeatedApplication
         $environment['main_window'] = Get-ObserverNativeWindowMetrics -Window $repeatedApplication.main
@@ -5954,7 +6047,7 @@ function Invoke-ObserverContextScenario {
         $moveFixture = New-ObserverMoveFixture -RuntimeRoot $RuntimeRoot
         $rawCaptureStart = $Captures.Count
         $moveApplication = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'movement GUI regression application'
-        $moveAppearance = Set-AcceptanceAppearance -Process $moveApplication.process -ExpectedSession $SessionId -Appearance $Appearance
+        $moveAppearance = Set-AcceptanceAppearance -Process $moveApplication.process -ExpectedSession $SessionId -MainWindowHandle ([IntPtr]$moveApplication.main_handle) -Appearance $Appearance
         $moveMinimum = Ensure-AcceptanceMainWindowCaptureSize -MainWindow $moveApplication.main -Process $moveApplication.process -ExpectedSession $SessionId
         if ($moveMinimum.dpi -ne $script:contract.expected_dpi) { throw 'Move context HWND DPI differs from the staged contract.' }
         $movePrefix = 'after-context-move-{0}-{1}' -f $Appearance,$moveMinimum.dpi
@@ -6054,7 +6147,7 @@ function Invoke-ObserverContextScenario {
         $mixedFixture = New-ObserverMixedFixture -RuntimeRoot $RuntimeRoot
         $rawCaptureStart = $Captures.Count
         $mixedApplication = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'mixed GUI regression application'
-        $mixedAppearance = Set-AcceptanceAppearance -Process $mixedApplication.process -ExpectedSession $SessionId -Appearance $Appearance
+        $mixedAppearance = Set-AcceptanceAppearance -Process $mixedApplication.process -ExpectedSession $SessionId -MainWindowHandle ([IntPtr]$mixedApplication.main_handle) -Appearance $Appearance
         $mixedMinimum = Ensure-AcceptanceMainWindowCaptureSize -MainWindow $mixedApplication.main -Process $mixedApplication.process -ExpectedSession $SessionId
         if ($mixedMinimum.dpi -ne $script:contract.expected_dpi) { throw 'Mixed context HWND DPI differs from the staged contract.' }
         $mixedPrefix = 'after-context-mixed-{0}-{1}' -f $Appearance,$mixedMinimum.dpi
@@ -6144,7 +6237,7 @@ function Invoke-ObserverContextScenario {
         $enterConfirmation = Wait-ObserverConfirmation -Application $mixedApplication -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'mixed default Enter cancellation confirmation'
         $enterHandle = [IntPtr]$enterConfirmation.Current.NativeWindowHandle
         $enterFocus = Get-ObserverConfirmationDefaultFocus -Application $mixedApplication -SessionId $SessionId
-        if ([DarkReNamerVmAcceptanceNative]::IsWindowEnabled($mixedApplication.process.MainWindowHandle)) { throw 'Default Enter confirmation owner remained enabled.' }
+        if ([DarkReNamerVmAcceptanceNative]::IsWindowEnabled([IntPtr]$mixedApplication.main_handle)) { throw 'Default Enter confirmation owner remained enabled.' }
         Send-AcceptanceTap -Process $mixedApplication.process -ExpectedSession $SessionId -VirtualKey 0x0D -Label 'mixed default Cancel Enter'
         Wait-WindowClosed -Handle $enterHandle -TimeoutSeconds $WaitSeconds -Label 'mixed default Enter cancellation confirmation'
         if ($null -ne $enterTrigger.invocation) { Complete-AutomationControlInvoke -State $enterTrigger.invocation -TimeoutSeconds $WaitSeconds }
@@ -6281,7 +6374,7 @@ function Invoke-ObserverStandardScenario {
             throw 'Application changed after bundle verification.'
         }
         $application = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'standard GUI regression application'
-        $appearanceSpec = Set-AcceptanceAppearance -Process $application.process -ExpectedSession $SessionId -Appearance $Appearance
+        $appearanceSpec = Set-AcceptanceAppearance -Process $application.process -ExpectedSession $SessionId -MainWindowHandle ([IntPtr]$application.main_handle) -Appearance $Appearance
         $minimum = Ensure-AcceptanceMainWindowCaptureSize -MainWindow $application.main -Process $application.process -ExpectedSession $SessionId
         $environment = Get-ObserverEnvironmentMetadata -Application $application
         $environment['main_window'] = Get-ObserverNativeWindowMetrics -Window $application.main
@@ -7523,6 +7616,7 @@ try {
         $lifecycle.process_terminated = $false
         $process = $application.process
         $mainWindow = $application.main
+        $mainHandle = [IntPtr]$application.main_handle
         if ($rawCandidate) {
             $process.Refresh()
             $result.process_lifecycle = [ordered]@{
@@ -7547,6 +7641,7 @@ try {
             Set-AcceptanceAppearance `
                 -Process $process `
                 -ExpectedSession $ExpectedSessionId `
+                -MainWindowHandle $mainHandle `
                 -Appearance $Appearance
         }
         $result.appearance.observed = $appearanceSpec.evidence_name
@@ -7682,12 +7777,13 @@ try {
         if ($CaptureAdvancedAppearance) {
             $result.failure_reason = 'advanced_appearance_capture_failed'
             [DarkReNamerVmAcceptanceNative]::SendMenuCommand(
-                $process.MainWindowHandle,
+                $mainHandle,
                 [uint32]0x9013
             )
             $appearanceDialog = Wait-UniqueAutomationWindow `
                 -Process $process `
                 -ExpectedSession $ExpectedSessionId `
+                -MainWindowHandle $mainHandle `
                 -Name 'DarkReNamer - 모양 설정 (미리보기)' `
                 -TimeoutSeconds $TimeoutSeconds `
                 -Label 'advanced appearance window'
@@ -7717,13 +7813,13 @@ try {
                 -TimeoutSeconds $TimeoutSeconds `
                 -Label 'advanced appearance window'
             $mainWindow.SetFocus()
-            [void][DarkReNamerVmNative]::SetForegroundWindow($process.MainWindowHandle)
+            [void][DarkReNamerVmNative]::SetForegroundWindow($mainHandle)
             $advancedReturnDeadline = (Get-Date).AddSeconds(2)
-            while ([DarkReNamerVmNative]::GetForegroundWindow() -ne $process.MainWindowHandle -and
+            while ([DarkReNamerVmNative]::GetForegroundWindow() -ne $mainHandle -and
                 (Get-Date) -lt $advancedReturnDeadline) {
                 Start-Sleep -Milliseconds 50
             }
-            if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $process.MainWindowHandle) {
+            if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $mainHandle) {
                 throw 'The application did not regain foreground after advanced appearance capture.'
             }
         }
@@ -7738,6 +7834,7 @@ try {
         $fileDialog = Wait-UniqueAutomationWindow `
             -Process $process `
             -ExpectedSession $ExpectedSessionId `
+            -MainWindowHandle $mainHandle `
             -Name '이름 붙일 파일 불러오기' `
             -TimeoutSeconds $TimeoutSeconds `
             -Label 'keyboard file dialog'
@@ -7885,9 +7982,10 @@ try {
             Assert-AcceptanceForegroundBinding `
                 -Process $process `
                 -ExpectedSession $ExpectedSessionId `
+                -MainWindowHandle $mainHandle `
                 -RequireMainWindow
             if (-not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
-                $process.MainWindowHandle,
+                $mainHandle,
                 [uint32]0x8018
             )) {
                 throw 'The native Copy Names menu command is not enabled for the known row.'
@@ -7914,7 +8012,8 @@ try {
                 -TimeoutSeconds $TimeoutSeconds
             Assert-AcceptanceForegroundBinding `
                 -Process $process `
-                -ExpectedSession $ExpectedSessionId
+                -ExpectedSession $ExpectedSessionId `
+                -MainWindowHandle $mainHandle
             $clipboardBeforeNames = [DarkReNamerVmAcceptanceNative]::ReadClipboardSnapshot()
             if ($clipboardBeforeNames.SequenceNumber -ne $clipboardPreflight.SequenceNumber -or
                 @($clipboardBeforeNames.Formats).Count -ne 0 -or
@@ -7942,18 +8041,19 @@ try {
 
             $result.failure_reason = 'clipboard_paths_failed'
             $mainWindow.SetFocus()
-            [void][DarkReNamerVmNative]::SetForegroundWindow($process.MainWindowHandle)
+            [void][DarkReNamerVmNative]::SetForegroundWindow($mainHandle)
             $clipboardForegroundDeadline = (Get-Date).AddSeconds(2)
-            while ([DarkReNamerVmNative]::GetForegroundWindow() -ne $process.MainWindowHandle -and
+            while ([DarkReNamerVmNative]::GetForegroundWindow() -ne $mainHandle -and
                 (Get-Date) -lt $clipboardForegroundDeadline) {
                 Start-Sleep -Milliseconds 50
             }
             Assert-AcceptanceForegroundBinding `
                 -Process $process `
                 -ExpectedSession $ExpectedSessionId `
+                -MainWindowHandle $mainHandle `
                 -RequireMainWindow
             if (-not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
-                $process.MainWindowHandle,
+                $mainHandle,
                 [uint32]0x801A
             )) {
                 throw 'The native Copy Paths menu command is not enabled for the known row.'
@@ -7997,7 +8097,7 @@ try {
             )
         $keyboard.reset_name_menu_enabled_after_prefix =
             [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
-                $process.MainWindowHandle,
+                $mainHandle,
                 0x800D
             )
         if (-not $keyboard.reset_name_native_enabled_after_prefix -or
@@ -8035,7 +8135,7 @@ try {
             [IntPtr]$resetAfter.Current.NativeWindowHandle
         )
         $menuResetDisabled = -not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
-            $process.MainWindowHandle,
+            $mainHandle,
             0x800D
         )
         $keyboard.reset_name_disabled_after_reset =
@@ -8082,7 +8182,9 @@ try {
         $result.failure_reason = 'apply_cancellation_failed'
         [void](Move-RailFocusToCommand -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '32771')
         Send-AcceptanceTap -Process $process -ExpectedSession $ExpectedSessionId -VirtualKey 0x20 -Label 'Apply command Space'
-        $confirmation = Wait-UniqueAutomationWindow -Process $process -ExpectedSession $ExpectedSessionId -Name 'DarkReNamer - 안전한 적용 확인' -TimeoutSeconds $TimeoutSeconds -Label 'keyboard Apply confirmation'
+        $confirmation = Wait-UniqueAutomationWindow -Process $process -ExpectedSession $ExpectedSessionId `
+            -MainWindowHandle $mainHandle -Name 'DarkReNamer - 안전한 적용 확인' `
+            -TimeoutSeconds $TimeoutSeconds -Label 'keyboard Apply confirmation'
         $cancel = Find-UniqueAutomationElement -Root $confirmation -Process $process -ExpectedSession $ExpectedSessionId -AutomationId 'CommandButton_2' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $TimeoutSeconds -Label 'Apply cancellation button' -RequireWindowHandle
         $confirm = Find-UniqueAutomationElement -Root $confirmation -Process $process -ExpectedSession $ExpectedSessionId -AutomationId 'CommandLink_1101' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $TimeoutSeconds -Label 'Apply command link' -RequireWindowHandle
         $observations.apply_confirmation = [ordered]@{
@@ -8102,14 +8204,14 @@ try {
         if ($rawCandidate) {
             Complete-VmAutomatedKeyboardEvent `
                 -Event $cancelEvent -Process $process -ExpectedSession $ExpectedSessionId `
-                -MainWindowHandle $process.MainWindowHandle -TimeoutSeconds $TimeoutSeconds
+                -MainWindowHandle $mainHandle -TimeoutSeconds $TimeoutSeconds
             $keyboardEvents.Add($cancelEvent)
         }
         $cancellationDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
         do {
             if ((Test-Path -LiteralPath $sourcePath -PathType Leaf) -and
                 -not (Test-Path -LiteralPath $destinationPath) -and
-                [DarkReNamerVmNative]::GetForegroundWindow() -eq $process.MainWindowHandle) {
+                [DarkReNamerVmNative]::GetForegroundWindow() -eq $mainHandle) {
                 break
             }
             Start-Sleep -Milliseconds 100
@@ -8132,7 +8234,9 @@ try {
         $result.failure_reason = 'apply_confirmation_failed'
         [void](Move-RailFocusToCommand -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '32771')
         Send-AcceptanceTap -Process $process -ExpectedSession $ExpectedSessionId -VirtualKey 0x20 -Label 'second Apply command Space'
-        $confirmation = Wait-UniqueAutomationWindow -Process $process -ExpectedSession $ExpectedSessionId -Name 'DarkReNamer - 안전한 적용 확인' -TimeoutSeconds $TimeoutSeconds -Label 'second keyboard Apply confirmation'
+        $confirmation = Wait-UniqueAutomationWindow -Process $process -ExpectedSession $ExpectedSessionId `
+            -MainWindowHandle $mainHandle -Name 'DarkReNamer - 안전한 적용 확인' `
+            -TimeoutSeconds $TimeoutSeconds -Label 'second keyboard Apply confirmation'
         [void](Move-TabFocusToId -Process $process -ExpectedSession $ExpectedSessionId -AutomationId 'CommandLink_1101')
         if ($rawCandidate) {
             $applyEvent = Get-VmAutomatedKeyboardEventStart `
@@ -8144,7 +8248,7 @@ try {
         if ($rawCandidate) {
             Complete-VmAutomatedKeyboardEvent `
                 -Event $applyEvent -Process $process -ExpectedSession $ExpectedSessionId `
-                -MainWindowHandle $process.MainWindowHandle -TimeoutSeconds $TimeoutSeconds
+                -MainWindowHandle $mainHandle -TimeoutSeconds $TimeoutSeconds
             $keyboardEvents.Add($applyEvent)
         }
         $applyDeadline = (Get-Date).AddSeconds($TimeoutSeconds)

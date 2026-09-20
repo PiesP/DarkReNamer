@@ -1200,28 +1200,20 @@ function Start-AcceptanceApplication {
             -FilePath $Inputs.application_path `
             -Arguments '' `
             -WorkingDirectory $Inputs.verified.root
-        $deadline = (Get-Date).AddSeconds([Math]::Min(30, $WaitSeconds))
-        do {
-            Start-Sleep -Milliseconds 100
-            $owned.process.Refresh()
-            if ($owned.process.HasExited) {
-                throw 'The source-bound application exited before creating its window.'
-            }
-        } while ($owned.process.MainWindowHandle -eq [IntPtr]::Zero -and (Get-Date) -lt $deadline)
-        if ($owned.process.MainWindowHandle -eq [IntPtr]::Zero -or
-            $owned.process.SessionId -ne $SessionId) {
+        $owned.process.Refresh()
+        if ($owned.process.HasExited) {
+            throw 'The source-bound application exited before creating its window.'
+        }
+        if ($owned.process.SessionId -ne $SessionId) {
             throw 'The application did not create a window in the expected session.'
         }
-        $main = [Windows.Automation.AutomationElement]::FromHandle($owned.process.MainWindowHandle)
-        if ($null -eq $main) {
-            throw 'The application main window is unavailable through UI Automation.'
-        }
-        Assert-AutomationBinding `
-            -Element $main `
+        $binding = Wait-ExactApplicationMainWindow `
             -Process $owned.process `
             -ExpectedSession $SessionId `
-            -Label 'recovery acceptance main window' `
-            -RequireWindowHandle
+            -ExpectedClassName 'DarkReNamerWindow' `
+            -ExpectedTitle 'DarkReNamer' `
+            -TimeoutSeconds $WaitSeconds `
+            -Label 'recovery acceptance main window'
         $actualProcessPath = $owned.process.MainModule.FileName
         if (-not [string]::Equals(
             $actualProcessPath,
@@ -1230,7 +1222,12 @@ function Start-AcceptanceApplication {
         )) {
             throw 'The owned process is not the verified application artifact.'
         }
-        [pscustomobject]@{ owned = $owned; main = $main }
+        [pscustomobject]@{
+            owned = $owned
+            main = $binding.element
+            main_handle = $binding.handle
+            session_id = $SessionId
+        }
     }
     catch {
         $startupError = $_
@@ -1263,12 +1260,20 @@ function Write-AcceptanceProcessStartEvidence {
     if ($process.HasExited) {
         throw 'The candidate process exited before its raw start observation.'
     }
+    Assert-ExactApplicationMainWindowBinding `
+        -Process $process `
+        -ExpectedSession $Application.session_id `
+        -MainWindowHandle $Application.main_handle `
+        -MainWindow $Application.main `
+        -ExpectedClassName 'DarkReNamerWindow' `
+        -ExpectedTitle 'DarkReNamer' `
+        -Label 'recovery start environment'
     $script:AcceptanceProcessSequence++
     $sequence = $script:AcceptanceProcessSequence
     $startUtc = $process.StartTime.ToUniversalTime()
     $environment = Get-VmAutomatedEnvironment `
         -Process $process `
-        -WindowHandle $process.MainWindowHandle `
+        -WindowHandle $Application.main_handle `
         -FixtureRoot $FixtureRoot
     $binding = [pscustomobject][ordered]@{
         sequence = $sequence
@@ -2901,6 +2906,7 @@ function Invoke-AcceptanceImportAndPrefix {
     $dialog = Wait-UniqueAutomationWindow `
         -Process $process `
         -ExpectedSession $SessionId `
+        -MainWindowHandle $Application.main_handle `
         -Name '파일에서 경로목록 읽어 추가하기' `
         -TimeoutSeconds $WaitSeconds `
         -Label 'path-list import dialog'
@@ -3178,9 +3184,17 @@ function Close-AcceptanceApplicationNormally {
 
     $process = $Application.owned.process
     $process.Refresh()
-    if ($process.HasExited -or -not $process.CloseMainWindow()) {
+    if ($process.HasExited) {
         throw 'The acceptance application rejected ordinary window close.'
     }
+    Close-ExactApplicationMainWindow `
+        -Process $process `
+        -ExpectedSession $Application.session_id `
+        -MainWindowHandle $Application.main_handle `
+        -MainWindow $Application.main `
+        -ExpectedClassName 'DarkReNamerWindow' `
+        -ExpectedTitle 'DarkReNamer' `
+        -Label 'recovery ordinary window close'
     $waitMilliseconds = [int]([Math]::Min([int]::MaxValue, [int64]$WaitSeconds * 1000L))
     if (-not $process.WaitForExit($waitMilliseconds)) {
         throw 'The acceptance application did not close before the bounded deadline.'
