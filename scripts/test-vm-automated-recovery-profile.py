@@ -5,8 +5,10 @@ from copy import deepcopy
 import hashlib
 import importlib.util
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import struct
 import unittest
+import zlib
 
 from vm_automated_evidence import EvidenceError
 from vm_automated_recovery_profile import verify_recovery_execution
@@ -15,11 +17,27 @@ from vm_automated_recovery_profile import verify_recovery_execution
 ROOT = r"C:\fixture"
 RUN_PREFIX = "runs/process-crash/"
 PRIVATE_ROOT = RUN_PREFIX + "private/recovery-raw-test"
+RESULT_PATH = RUN_PREFIX + "recovery-acceptance-test/summary.json"
+SCREENSHOT_PATH = RUN_PREFIX + "recovery-acceptance-test/startup-recovery-confirmation.png"
 EMPTY_SHA = hashlib.sha256(b"").hexdigest()
 
 
 def encode(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def png_chunk(kind, body):
+    return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+
+
+def png(uniform=False):
+    colors = ([b"\xff\x00\x00\xff"] * 4 if uniform else
+              [b"\xff\x00\x00\xff", b"\x00\xff\x00\xff",
+               b"\x00\x00\xff\xff", b"\xff\xff\xff\xff"])
+    pixels = b"\x00" + b"".join(colors[:2]) + b"\x00" + b"".join(colors[2:])
+    return (b"\x89PNG\r\n\x1a\n" +
+            png_chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 6, 0, 0, 0)) +
+            png_chunk(b"IDAT", zlib.compress(pixels)) + png_chunk(b"IEND", b""))
 
 
 class Reader:
@@ -41,6 +59,15 @@ class Reader:
         if not matches:
             raise EvidenceError("mock digest reference is absent")
         return sorted(matches)[0]
+
+    def sibling(self, document, reference):
+        file = reference.get("file") if type(reference) is dict else None
+        if type(file) is not str or "/" in file or "\\" in file:
+            raise EvidenceError("invalid mock sibling reference")
+        path = str(PurePosixPath(document).parent / file)
+        if path not in self.files or hashlib.sha256(self.files[path]).hexdigest() != reference.get("sha256"):
+            raise EvidenceError("missing or changed mock sibling")
+        return path
 
 
 class RawBuilder:
@@ -193,9 +220,10 @@ def lock(builder, relative, boundary, phase, process, *, locked, observed_offset
                                   "observed_utc_ticks": str(process["start"] + observed_offset)}, boundary)
 
 
-def foreground(builder, process, label):
-    snapshot = {"hwnd": process["hwnd"], "process_id": process["pid"],
-                "session_id": process["session"], "window_class": "DarkReNamerWindow"}
+def foreground(builder, process, label, *, task_dialog=False):
+    snapshot = {"hwnd": process["hwnd"] + (777 if task_dialog else 0),
+                "process_id": process["pid"], "session_id": process["session"],
+                "window_class": "#32770" if task_dialog else "DarkReNamerWindow"}
     row = {"label": label, "target_hwnd": snapshot["hwnd"], "initial": snapshot,
            "uia_set_focus": "succeeded", "set_foreground_window": True,
            "final": snapshot, "capture_change": None, "capture_complete": snapshot}
@@ -247,12 +275,17 @@ def build_crash():
     default_action = action(builder, "startup-default-cancel-action.json",
                             "startup-default-cancel-action", "startup-default-cancel",
                             "cancel-startup-recovery", process[1], "CommandButton_2", 2)
-    fg = foreground(builder, process[3], "startup recovery confirmation")
+    fg = foreground(builder, process[3], "startup recovery confirmation", task_dialog=True)
+    screenshot = png()
+    builder.files[SCREENSHOT_PATH] = screenshot
     mode = {"raw_states": states, "processes": processes,
             "actions": {"default_cancel": default_action},
             "journal": {"interrupted": interrupted_ref, "after_default_cancel": after_cancel,
                         "after_export": after_export},
-            "journal_inventories": inventories, "foreground_observations": fg}
+            "journal_inventories": inventories, "foreground_observations": fg,
+            "recovery_screenshot": {
+                "file": "startup-recovery-confirmation.png",
+                "sha256": hashlib.sha256(screenshot).hexdigest(), "width": 2, "height": 2}}
     result["process_crash"] = mode
     exported = builder.add("recovery-export/active.drj.retained", interrupted, "recovery-export")
     result["recovery_export"] = {"source_active_journal": interrupted_ref, "raw": exported}
@@ -397,7 +430,7 @@ class RecoveryProfileTests(unittest.TestCase):
     def test_complete_crash_group_derives_three_targets(self):
         reader, result, bundle, transport = self.crash_copy()
         self.assertEqual(verify_recovery_execution(reader, result, bundle, transport, target(),
-                                                   run_prefix=RUN_PREFIX),
+                                                   run_prefix=RUN_PREFIX, result_path=RESULT_PATH),
                          {"process-crash", "recovery-export", "intent-only-discard"})
 
     def test_two_worker_modes_derive_only_their_own_targets(self):
@@ -415,13 +448,13 @@ class RecoveryProfileTests(unittest.TestCase):
         raw["target"]["focused"] = False
         resign(reader, result, "startup-default-cancel-action.json", raw, [ref])
         with self.assertRaises(EvidenceError):
-            verify_recovery_execution(reader, result, bundle, transport, target(), run_prefix=RUN_PREFIX)
+            verify_recovery_execution(reader, result, bundle, transport, target(), run_prefix=RUN_PREFIX, result_path=RESULT_PATH)
 
     def test_default_cancel_requires_raw_bound_action(self):
         reader, result, bundle, transport = self.crash_copy()
         result["process_crash"]["actions"]["default_cancel"]["boundary"] = "forged"
         with self.assertRaises(EvidenceError):
-            verify_recovery_execution(reader, result, bundle, transport, target(), run_prefix=RUN_PREFIX)
+            verify_recovery_execution(reader, result, bundle, transport, target(), run_prefix=RUN_PREFIX, result_path=RESULT_PATH)
 
     def test_full_identity_state_mutation_fails_even_when_summary_is_unchanged(self):
         reader, result, bundle, transport = self.crash_copy()
@@ -430,7 +463,7 @@ class RecoveryProfileTests(unittest.TestCase):
         raw["fixture_entries"][0]["file_identity"]["file_id"] = "0" * 32
         resign(reader, result, "state-default-cancel.json", raw, [ref])
         with self.assertRaises(EvidenceError):
-            verify_recovery_execution(reader, result, bundle, transport, target(), run_prefix=RUN_PREFIX)
+            verify_recovery_execution(reader, result, bundle, transport, target(), run_prefix=RUN_PREFIX, result_path=RESULT_PATH)
 
     def test_process_pair_role_and_exit_time_are_not_producer_flags(self):
         for mutation in ("role", "time"):
@@ -443,7 +476,7 @@ class RecoveryProfileTests(unittest.TestCase):
                 raw["observed_utc_ticks"] = "1"
             resign(reader, result, "process-01-crash-stop.json", raw, [ref])
             with self.subTest(mutation=mutation), self.assertRaises(EvidenceError):
-                verify_recovery_execution(reader, result, bundle, transport, target(), run_prefix=RUN_PREFIX)
+                verify_recovery_execution(reader, result, bundle, transport, target(), run_prefix=RUN_PREFIX, result_path=RESULT_PATH)
 
     def test_export_and_intent_must_reuse_interrupted_reference_and_bytes(self):
         for mutation in ("source", "candidate"):
@@ -456,7 +489,7 @@ class RecoveryProfileTests(unittest.TestCase):
                 resign(reader, result, "intent-after-relaunch.drj",
                        reader.files[PRIVATE_ROOT + "/intent-after-relaunch.drj"] + b"x", [ref])
             with self.subTest(mutation=mutation), self.assertRaises(EvidenceError):
-                verify_recovery_execution(reader, result, bundle, transport, target(), run_prefix=RUN_PREFIX)
+                verify_recovery_execution(reader, result, bundle, transport, target(), run_prefix=RUN_PREFIX, result_path=RESULT_PATH)
 
     def test_intent_lock_and_explicit_discard_observations_are_required(self):
         for mutation in ("locked", "action"):
@@ -472,7 +505,7 @@ class RecoveryProfileTests(unittest.TestCase):
                 raw["target"]["automation_id"] = "CommandButton_2"
                 resign(reader, result, "intent-discard-confirm-action.json", raw, [ref])
             with self.subTest(mutation=mutation), self.assertRaises(EvidenceError):
-                verify_recovery_execution(reader, result, bundle, transport, target(), run_prefix=RUN_PREFIX)
+                verify_recovery_execution(reader, result, bundle, transport, target(), run_prefix=RUN_PREFIX, result_path=RESULT_PATH)
 
     def test_worker_witness_requires_actual_names_full_identity_and_lifetime(self):
         reader0, result0, bundle0, transport0, prefix = self.cancel
@@ -513,20 +546,53 @@ class RecoveryProfileTests(unittest.TestCase):
         result["private_evidence"] = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
                                       "file_count": len(index["files"])}
         with self.assertRaises(EvidenceError):
-            verify_recovery_execution(reader, result, bundle, transport, target(), run_prefix=RUN_PREFIX)
+            verify_recovery_execution(reader, result, bundle, transport, target(), run_prefix=RUN_PREFIX, result_path=RESULT_PATH)
         reader, result, bundle, transport = self.crash_copy()
         transport["raw_cleanup"]["scheduled_task_present"] = True
         with self.assertRaises(EvidenceError):
-            verify_recovery_execution(reader, result, bundle, transport, target(), run_prefix=RUN_PREFIX)
+            verify_recovery_execution(reader, result, bundle, transport, target(), run_prefix=RUN_PREFIX, result_path=RESULT_PATH)
 
-    def test_screenshot_capture_completion_is_bound_to_candidate_workbench(self):
-        reader, result, bundle, transport = self.crash_copy()
-        reference = result["process_crash"]["foreground_observations"]
-        raw = reader.json(PRIVATE_ROOT + "/foreground-observations.json")
-        raw["observations"][0]["capture_complete"]["hwnd"] += 1
-        resign(reader, result, "foreground-observations.json", raw, [reference])
-        with self.assertRaises(EvidenceError):
-            verify_recovery_execution(reader, result, bundle, transport, target(), run_prefix=RUN_PREFIX)
+    def test_recovery_screenshot_requires_stable_owned_task_dialog(self):
+        for mutation in ("capture_hwnd", "foreign_class", "foreign_pid", "foreign_session"):
+            reader, result, bundle, transport = self.crash_copy()
+            reference = result["process_crash"]["foreground_observations"]
+            raw = reader.json(PRIVATE_ROOT + "/foreground-observations.json")
+            observation = raw["observations"][0]
+            if mutation == "capture_hwnd":
+                observation["capture_complete"]["hwnd"] += 1
+            elif mutation == "foreign_class":
+                observation["final"]["window_class"] = "DarkReNamerWindow"
+                observation["capture_complete"]["window_class"] = "DarkReNamerWindow"
+            elif mutation == "foreign_pid":
+                observation["final"]["process_id"] += 1
+                observation["capture_complete"]["process_id"] += 1
+            else:
+                observation["final"]["session_id"] += 1
+                observation["capture_complete"]["session_id"] += 1
+            resign(reader, result, "foreground-observations.json", raw, [reference])
+            with self.subTest(mutation=mutation), self.assertRaises(EvidenceError):
+                verify_recovery_execution(reader, result, bundle, transport, target(),
+                                          run_prefix=RUN_PREFIX, result_path=RESULT_PATH)
+
+    def test_recovery_screenshot_requires_indexed_nonuniform_exact_dimensions(self):
+        for mutation in ("missing_reference", "missing_file", "wrong_digest", "dimensions", "uniform"):
+            reader, result, bundle, transport = self.crash_copy()
+            screenshot = result["process_crash"]["recovery_screenshot"]
+            if mutation == "missing_reference":
+                del result["process_crash"]["recovery_screenshot"]
+            elif mutation == "missing_file":
+                del reader.files[SCREENSHOT_PATH]
+            elif mutation == "wrong_digest":
+                screenshot["sha256"] = "0" * 64
+            elif mutation == "dimensions":
+                screenshot["width"] += 1
+            else:
+                data = png(uniform=True)
+                reader.files[SCREENSHOT_PATH] = data
+                screenshot["sha256"] = hashlib.sha256(data).hexdigest()
+            with self.subTest(mutation=mutation), self.assertRaises(EvidenceError):
+                verify_recovery_execution(reader, result, bundle, transport, target(),
+                                          run_prefix=RUN_PREFIX, result_path=RESULT_PATH)
 
 
 if __name__ == "__main__":

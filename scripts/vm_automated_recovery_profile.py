@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-from pathlib import PurePosixPath
+import importlib.util
+from pathlib import Path, PurePosixPath
 import re
 from typing import Protocol
 
@@ -42,6 +43,7 @@ class EvidenceReader(Protocol):
     def json(self, path: str) -> object: ...
     def bytes(self, path: str, maximum: int = MAX_MEMBER_BYTES) -> bytes: ...
     def digest_reference(self, reference: object, *, prefix: str) -> str: ...
+    def sibling(self, document: str, reference: object) -> str: ...
 
 
 def require(condition: bool, message: str) -> None:
@@ -411,7 +413,7 @@ def _lock_state(private: PrivateEvidence, reference: object, relative: str, *, b
 
 
 def _foreground(private: PrivateEvidence, reference: object, *, process: Process,
-                expected_label: str) -> None:
+                expected_label: str, expected_class: str, expected_hwnd: int | None) -> None:
     raw = require_exact_keys(private.json(reference, "foreground-observations.json",
                                           boundary="screenshot-foreground-observations"),
                              {"schema_version", "observations"}, "Recovery foreground evidence")
@@ -424,19 +426,60 @@ def _foreground(private: PrivateEvidence, reference: object, *, process: Process
                                                "capture_complete"}, "Recovery foreground observation")
     require(row["label"] == expected_label and
             row["capture_change"] is None, "Recovery screenshot lacks exact foreground completion.")
-    require_int(row["target_hwnd"], process.environment["target_display"]["hwnd"],
-                process.environment["target_display"]["hwnd"], "Foreground target HWND")
+    target_hwnd = require_int(row["target_hwnd"], 1, (1 << 63) - 1, "Foreground target HWND")
+    if expected_hwnd is not None:
+        require_int(target_hwnd, expected_hwnd, expected_hwnd, "Foreground target HWND")
+    for name in ("initial", "final", "capture_complete"):
+        observed = require_exact_keys(row[name], {"hwnd", "process_id", "session_id", "window_class"},
+                                      name.replace("_", " ").title() + " foreground window")
+        require_int(observed["hwnd"], 0, (1 << 63) - 1, name + " foreground HWND")
+        require_int(observed["process_id"], 0, 0xFFFFFFFF, name + " foreground PID")
+        require_int(observed["session_id"], 0, 0xFFFFFFFF, name + " foreground session")
+        require(type(observed["window_class"]) is str and len(observed["window_class"]) <= 128,
+                name + " foreground class is invalid.")
+    require(row["uia_set_focus"] in {"not_attempted", "succeeded", "failed", "element_unavailable"},
+            "Recovery foreground focus result is invalid.")
+    attempted = row["uia_set_focus"] != "not_attempted"
+    require((not attempted and row["set_foreground_window"] is None) or
+            (attempted and type(row["set_foreground_window"]) is bool),
+            "Recovery SetForegroundWindow result is invalid.")
     final = require_exact_keys(row["final"], {"hwnd", "process_id", "session_id", "window_class"},
                                "Final foreground window")
-    require_int(final["hwnd"], row["target_hwnd"], row["target_hwnd"], "Final foreground HWND")
+    require_int(final["hwnd"], target_hwnd, target_hwnd, "Final foreground HWND")
     require_int(final["process_id"], process.pid, process.pid, "Final foreground PID")
     require_int(final["session_id"], process.session, process.session, "Final foreground session")
-    require(type(final["window_class"]) is str and 0 < len(final["window_class"]) <= 128,
-            "Final foreground window class is unavailable.")
+    require(final["window_class"] == expected_class,
+            "Final foreground window class differs from the expected owned window.")
     complete = require_exact_keys(row["capture_complete"],
                                   {"hwnd", "process_id", "session_id", "window_class"},
                                   "Completed foreground capture")
     require(complete == final, "Foreground ownership changed during screenshot capture.")
+
+
+def _recovery_screenshot(private: PrivateEvidence, result_path: str, reference: object) -> None:
+    image = require_exact_keys(reference, {"file", "sha256", "width", "height"},
+                               "Recovery screenshot reference")
+    require(image["file"] == "startup-recovery-confirmation.png",
+            "Recovery screenshot has the wrong fixed artifact name.")
+    _sha(image["sha256"], "Recovery screenshot digest")
+    width = require_int(image["width"], 1, 16_384, "Recovery screenshot width")
+    height = require_int(image["height"], 1, 16_384, "Recovery screenshot height")
+    require(width * height <= 100_000_000, "Recovery screenshot dimensions exceed the capture bound.")
+    path = private.reader.sibling(result_path, image)
+    expected_path = str(PurePosixPath(result_path).parent / image["file"])
+    require(path == expected_path and path.startswith(private.run_prefix),
+            "Recovery screenshot resolved outside its execution result directory.")
+    decoder_path = Path(__file__).with_name("validate-gui-regression-evidence.py")
+    spec = importlib.util.spec_from_file_location("trusted_recovery_png_decoder", decoder_path)
+    require(spec is not None and spec.loader is not None, "Trusted PNG decoder is unavailable.")
+    decoder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(decoder)
+    actual_width, actual_height, pixels = decoder.decode_png(
+        private.reader.bytes(path, MAX_MEMBER_BYTES), "recovery confirmation screenshot")
+    require((actual_width, actual_height) == (width, height),
+            "Recovery screenshot differs from its captured dialog dimensions.")
+    require(pixels != pixels[:4] * (width * height),
+            "Recovery screenshot is uniform and cannot evidence the captured dialog.")
 
 
 def _worker(private: PrivateEvidence, result: dict, bundle: dict, target: dict, *, close: bool) -> set[str]:
@@ -500,11 +543,14 @@ def _worker(private: PrivateEvidence, result: dict, bundle: dict, target: dict, 
             boundary="worker-cancellation-action", phase="worker-cancellation",
             action="cancel-active-worker", process=process, automation_id="1009", control_id=1009)
     _foreground(private, mode["foreground_observations"], process=process,
-                expected_label="worker cancellation restored state")
+                expected_label="worker cancellation restored state",
+                expected_class="DarkReNamerWindow",
+                expected_hwnd=process.environment["target_display"]["hwnd"])
     return {"worker-cancellation"}
 
 
-def _process_crash(private: PrivateEvidence, result: dict, bundle: dict, target: dict) -> set[str]:
+def _process_crash(private: PrivateEvidence, result: dict, bundle: dict, target: dict,
+                   result_path: str) -> set[str]:
     mode = _required_keys(result.get("process_crash"),
                           {"processes", "raw_states", "journal", "journal_inventories", "actions",
                            "foreground_observations"}, "Process-crash result")
@@ -571,7 +617,9 @@ def _process_crash(private: PrivateEvidence, result: dict, bundle: dict, target:
                        "recovered-normal-exit", None, None)
     verify_recovery_export(interrupted, interrupted, after_cancel)
     _foreground(private, mode["foreground_observations"], process=processes[3],
-                expected_label="startup recovery confirmation")
+                expected_label="startup recovery confirmation", expected_class="#32770",
+                expected_hwnd=None)
+    _recovery_screenshot(private, result_path, mode.get("recovery_screenshot"))
 
     export = _required_keys(result.get("recovery_export"), {"source_active_journal", "raw"},
                             "Recovery export result")
@@ -675,10 +723,11 @@ def _process_crash(private: PrivateEvidence, result: dict, bundle: dict, target:
 
 
 def verify_recovery_execution(reader: EvidenceReader, result: dict, bundle: dict, transport: dict,
-                              target: dict, *, run_prefix: str) -> set[str]:
+                              target: dict, *, run_prefix: str,
+                              result_path: str | None = None) -> set[str]:
     """Return only the fixed recovery targets derived from one complete execution."""
     require(type(reader) is not type(None) and all(hasattr(reader, name)
-                                                   for name in ("json", "bytes", "digest_reference")),
+                                                   for name in ("json", "bytes", "digest_reference", "sibling")),
             "Recovery evidence reader is unavailable.")
     require(type(result) is dict and type(bundle) is dict and type(transport) is dict and
             type(target) is dict, "Recovery execution inputs must be objects.")
@@ -687,7 +736,11 @@ def verify_recovery_execution(reader: EvidenceReader, result: dict, bundle: dict
             "Recovery execution mode is unsupported or unavailable.")
     private = PrivateEvidence(reader, result, run_prefix)
     if result["selected_mode"] == "ProcessCrash":
-        targets = _process_crash(private, result, bundle, target)
+        require(type(result_path) is str and result_path.startswith(run_prefix) and
+                PurePosixPath(result_path).as_posix() == result_path and
+                PurePosixPath(result_path).name == "summary.json",
+                "Recovery result path is not the indexed execution summary.")
+        targets = _process_crash(private, result, bundle, target, result_path)
     elif result["selected_mode"] == "WorkerCancellation":
         targets = _worker(private, result, bundle, target, close=False)
     else:

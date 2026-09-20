@@ -413,7 +413,7 @@ class CampaignFixture:
         private_root = str(Path(private_index_path).parent)
         rows = []
         for path, data in sorted(raw_files.items()):
-            if path == private_index_path:
+            if path == private_index_path or not path.startswith(private_root + "/"):
                 continue
             rows.append({"file": path[len(private_root) + 1:], "bytes": len(data),
                          "sha256": hashlib.sha256(data).hexdigest()})

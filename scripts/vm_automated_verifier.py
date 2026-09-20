@@ -585,7 +585,8 @@ def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_s
             verify_cleanup(result["raw_cleanup"], transport["raw_cleanup"])
         else:
             verified = verify_recovery_execution(reader, result, bundle, transport, target,
-                                                  run_prefix=str(PurePosixPath(attempt["transport"]).parent) + "/")
+                                                  run_prefix=str(PurePosixPath(attempt["transport"]).parent) + "/",
+                                                  result_path=attempt["result"])
             require(verified == set(slot["targets"]), "Recovery raw observations do not satisfy the complete execution group.")
         verify_execution_freshness(reader, result, transport, run_prefix="runs/" + slot["id"] + "/",
                                    seen=process_identities, vm_ids=vm_ids)
