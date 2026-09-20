@@ -46,6 +46,9 @@ def load_test_module(name: str):
     return module
 
 
+MENU_FIXTURE = load_test_module("test-vm-automated-menu-layout.py")
+
+
 def encode(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
 
@@ -234,7 +237,13 @@ class CampaignFixture:
                 "pid": environment["process"]["pid"], "session_id": environment["process"]["session_id"],
                 "root_hwnd": environment["target_display"]["hwnd"]}
 
-    def layout_observations(self, path: str, environment: dict) -> dict:
+    def layout_observations(self, path: str, environment: dict, target: dict) -> dict:
+        if target.get("layout_variant", "command-rails") == "native-menu-only":
+            result = MENU_FIXTURE.layout_for_environment(environment)
+            image = self.add_bytes(str(Path(path).parent / "workbench.png"), tiny_png())
+            result["screenshots"] = [{"file": "workbench.png", "sha256": image.sha256,
+                                      "width": 2, "height": 2}]
+            return result
         controls = [self.control(environment, "", "ControlType.Window", offset=0),
                     self.control(environment, "1000", "ControlType.DataGrid", offset=1)]
         controls.extend(self.control(environment, identifier, "ControlType.Button", offset=index + 2)
@@ -340,7 +349,7 @@ class CampaignFixture:
                                  for command in (0x9010, 0x9011, 0x9012)],
             },
             "process_lifecycle": lifecycle,
-            "layout_observations": self.layout_observations(result_path, environment),
+            "layout_observations": self.layout_observations(result_path, environment, target),
         }], raw_cleanup=guest)
         self.restoration(result_path, result, target)
         return result, host
@@ -603,6 +612,25 @@ class CompleteCampaignTests(unittest.TestCase):
         with self.fixture.change_json(path, mutate):
             with self.assertRaises(EvidenceError):
                 self.verify()
+
+    def test_menu_only_cell_requires_native_identity_and_profile_discriminator(self):
+        path = "runs/layout-small-text150-100/result.json"
+        def mutate(value):
+            native = value["raw_layout_runs"][0]["layout_observations"]["native_menu_only"]
+            native["hidden_rail_controls"][0]["parent_hwnd"] = 99
+        with self.fixture.change_json(path, mutate):
+            with self.assertRaises(EvidenceError):
+                self.verify()
+
+        target = next(row for row in self.fixture.profile["required_targets"]
+                      if row["id"] == "layout-small-text150-100")
+        original = target["layout_variant"]
+        try:
+            target["layout_variant"] = "command-rails"
+            with self.assertRaises(EvidenceError):
+                self.verify()
+        finally:
+            target["layout_variant"] = original
 
 
 if __name__ == "__main__":

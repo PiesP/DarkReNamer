@@ -358,7 +358,8 @@ def slot_runtime(slot: dict, profile: dict) -> dict:
     if slot["id"] == "core-keyboard-flow":
         environment = profile["representative_core_environment"]
         return {"kind": "ui", **environment, "mode": "current-dpi",
-                "appearance": "system", "high_contrast": False}
+                "appearance": "system", "high_contrast": False,
+                "layout_variant": "command-rails"}
     return {
         "kind": "ui",
         "scale_percent": target["scale_percent"],
@@ -369,6 +370,7 @@ def slot_runtime(slot: dict, profile: dict) -> dict:
         "mode": "text-scale" if target["text_scale_percent"] == 150 else "current-dpi",
         "appearance": target["appearance"],
         "high_contrast": target["contrast"] == "high-contrast",
+        "layout_variant": target.get("layout_variant", "command-rails"),
     }
 
 
@@ -396,6 +398,7 @@ def acceptance_manifest(slot: dict, runtime: dict, args, connection: dict,
             "desktop": {"width": runtime["desktop_width"],
                         "height": runtime["desktop_height"], "dpi": runtime["hwnd_dpi"]},
             "text_scale_percent": runtime["text_scale_percent"],
+            "layout_variant": runtime["layout_variant"],
         },
     }
 

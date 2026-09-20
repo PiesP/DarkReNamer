@@ -15,6 +15,7 @@ from vm_automated_evidence import (
     parse_bounded_json_bytes, read_referenced_file, require_exact_keys, require_int,
 )
 from vm_automated_platform import contains, rectangle, verify_cleanup, verify_environment, verify_keyboard_events
+from vm_automated_menu_layout import verify_native_menu_layout
 from vm_automated_state import Identity, core_rename_checkpoints
 
 
@@ -578,8 +579,16 @@ def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_s
                 pid, session = verify_process_lifecycle(run["process_lifecycle"], executable_sha256=candidate.executable_sha256)
                 verify_environment(run["raw_environment"], target, candidate_pid=pid, session_id=session)
                 verify_appearance(run["raw_appearance"], run["raw_environment"], target)
-                verify_focus_reachability(run["layout_observations"]["focus_reachability"], run["raw_environment"])
-                verify_layout_controls(run["layout_observations"], run["raw_environment"], keyboard_focus=keyboard)
+                layout_variant = target.get("layout_variant", "command-rails")
+                require(layout_variant in {"command-rails", "native-menu-only"},
+                        "Layout variant differs from the frozen profile contract.")
+                require((identifier == "layout-small-text150-100") == (layout_variant == "native-menu-only"),
+                        "Native menu-only evidence is authorized for exactly the fixed text-150 small cell.")
+                if layout_variant == "native-menu-only":
+                    verify_native_menu_layout(run["layout_observations"], run["raw_environment"])
+                else:
+                    verify_layout_controls(run["layout_observations"], run["raw_environment"], keyboard_focus=keyboard)
+                    verify_focus_reachability(run["layout_observations"]["focus_reachability"], run["raw_environment"])
                 verify_layout_raster(reader, attempt["result"], run["layout_observations"], run["raw_environment"])
             verify_setting_restoration(reader, attempt["result"], result, bundle, target)
             verify_cleanup(result["raw_cleanup"], transport["raw_cleanup"])

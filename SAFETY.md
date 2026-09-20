@@ -388,6 +388,15 @@ stability executions each run the core UIA flow under a newly created managed
 RDP lease. They are independent executions, not retries, and do not claim a new
 Windows logon session for each connection.
 
+The 800 by 600, 100% DPI, 150% text cell predeclares the product's native
+menu-only layout. Its main window and list must remain visible and bounded;
+all 19 command-rail buttons must exist as hidden candidate-owned controls and
+match the enabled states of their exact native menu commands. Actual keyboard
+menu navigation must reach every enabled command without executing it, with
+unchanged complete fixture and journal state afterward. The other layout cells
+retain their visible command-rail and keyboard-focus requirements. Missing
+rails never select a fallback during a run.
+
 The complete campaign therefore has 30 predeclared first attempts. The plan is
 written before VM access. Missing, failed, unavailable, environment-mismatched,
 or incompletely cleaned attempts fail validation, and the controller stops

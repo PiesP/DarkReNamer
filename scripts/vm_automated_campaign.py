@@ -46,6 +46,9 @@ def execution_slots(profile: dict) -> list[dict]:
     slots = []
     for target in targets:
         name = target["id"]
+        expected_variant = "native-menu-only" if name == "layout-small-text150-100" else "command-rails"
+        require(target.get("layout_variant", "command-rails") == expected_variant,
+                "Layout variant differs from the predeclared target contract.")
         if name in {"recovery-export", "intent-only-discard"}:
             continue
         members = (["process-crash", "recovery-export", "intent-only-discard"]
