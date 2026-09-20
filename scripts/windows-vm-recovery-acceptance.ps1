@@ -2448,28 +2448,52 @@ function Start-AcceptanceRecoveryMenuInvoke {
     }
 }
 
+function Assert-AcceptanceRetainedWindowBinding {
+    param(
+        [Parameter(Mandatory)][object] $Window,
+        [Parameter(Mandatory)][object] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][string] $ExpectedName,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    Assert-AutomationBinding `
+        -Element $Window `
+        -Process $Process `
+        -ExpectedSession $ExpectedSession `
+        -Label $Label `
+        -RequireWindowHandle
+    if ($Window.Current.Name -cne $ExpectedName -or
+        $Window.Current.ControlType.ProgrammaticName -cne 'ControlType.Window') {
+        throw "$Label name or control type changed after its exact lookup."
+    }
+}
+
 function Dismiss-AcceptanceMessage {
     param(
         [Parameter(Mandatory)][object] $Application,
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
         [Parameter(Mandatory)][string] $Name,
-        [Parameter(Mandatory)][string] $Label
+        [Parameter(Mandatory)][string] $Label,
+        [Windows.Automation.AutomationElement] $Window
     )
 
     Add-Type -AssemblyName System.Windows.Forms
-    $window = Wait-UniqueAutomationWindow `
+    if ($null -eq $Window) {
+        $Window = Wait-UniqueAutomationWindow `
+            -Process $Application.owned.process `
+            -ExpectedSession $SessionId `
+            -Name $Name `
+            -TimeoutSeconds $WaitSeconds `
+            -Label $Label
+    }
+    Assert-AcceptanceRetainedWindowBinding `
+        -Window $Window `
         -Process $Application.owned.process `
         -ExpectedSession $SessionId `
-        -Name $Name `
-        -TimeoutSeconds $WaitSeconds `
+        -ExpectedName $Name `
         -Label $Label
-    Assert-AutomationBinding `
-        -Element $window `
-        -Process $Application.owned.process `
-        -ExpectedSession $SessionId `
-        -Label $Label `
-        -RequireWindowHandle
     $handle = [IntPtr]$window.Current.NativeWindowHandle
     $window.SetFocus()
     $deadline = (Get-Date).AddSeconds([Math]::Min(5, $WaitSeconds))
@@ -2811,15 +2835,24 @@ function Invoke-AcceptanceRecovery {
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
         [Parameter(Mandatory)][AllowEmptyCollection()]
-        [Collections.Generic.List[object]] $ForegroundObservations
+        [Collections.Generic.List[object]] $ForegroundObservations,
+        [Windows.Automation.AutomationElement] $Prompt
     )
 
     $process = $Application.owned.process
-    $prompt = Wait-UniqueAutomationWindow `
+    if ($null -eq $Prompt) {
+        $Prompt = Wait-UniqueAutomationWindow `
+            -Process $process `
+            -ExpectedSession $SessionId `
+            -Name 'DarkReNamer - 이전 변경 복구 확인' `
+            -TimeoutSeconds $WaitSeconds `
+            -Label 'startup recovery confirmation'
+    }
+    Assert-AcceptanceRetainedWindowBinding `
+        -Window $Prompt `
         -Process $process `
         -ExpectedSession $SessionId `
-        -Name 'DarkReNamer - 이전 변경 복구 확인' `
-        -TimeoutSeconds $WaitSeconds `
+        -ExpectedName 'DarkReNamer - 이전 변경 복구 확인' `
         -Label 'startup recovery confirmation'
     $screenshot = Save-WindowScreenshot `
         -Window $prompt `
@@ -3137,6 +3170,7 @@ function Assert-AcceptanceRecoveryLockedControls {
         -ExpectedSession $SessionId `
         -AutomationId '32771' `
         -ControlType ([Windows.Automation.ControlType]::Button) `
+        -Scope ([Windows.Automation.TreeScope]::Children) `
         -TimeoutSeconds $WaitSeconds `
         -Label 'Apply while Intent-only recovery is locked' `
         -RequireWindowHandle
@@ -3359,7 +3393,6 @@ function Invoke-AcceptanceIntentOnlyCandidateDiscard {
             -Name 'DarkReNamer - 복구 상태' `
             -TimeoutSeconds $WaitSeconds `
             -Label 'Intent-only startup recovery-lock notice'
-        $null = $startupNotice
         $startupState = Get-AcceptanceFixtureState -FixtureRoot $FixtureRoot
         Assert-AcceptanceStatesEqual `
             -Expected $Initial `
@@ -3377,7 +3410,8 @@ function Invoke-AcceptanceIntentOnlyCandidateDiscard {
             -SessionId $SessionId `
             -WaitSeconds $WaitSeconds `
             -Name 'DarkReNamer - 복구 상태' `
-            -Label 'Intent-only startup recovery-lock notice'
+            -Label 'Intent-only startup recovery-lock notice' `
+            -Window $startupNotice
         $startupLock = Assert-AcceptanceRecoveryLockedControls `
             -Application $cancelApplication -PrivateRoot $PrivateRoot `
             -Leaf 'intent-startup-lock' -Boundary 'intent-startup-lock' `
@@ -3943,6 +3977,7 @@ function Invoke-AcceptanceSession {
             -FixtureRoot $fixtureRoot -ExpectedRootIdentity $rootIdentity -State $relaunchState
 
         $recoveryApplication = $third
+        $recoveryPromptForAction = $relaunchPrompt
         $afterExportJournalReference = $null
         $afterExportInventory = $null
         $afterExportStateReference = $null
@@ -3999,12 +4034,14 @@ function Invoke-AcceptanceSession {
                 -PrivateRoot $PrivateRoot -Leaf 'state-export-relaunch' -Boundary 'recovery-export-relaunch' `
                 -FixtureRoot $fixtureRoot -ExpectedRootIdentity $rootIdentity -State $exportRelaunchState
             $recoveryApplication = $fourth
+            $recoveryPromptForAction = $exportRelaunchPrompt
         }
 
         $recoveryScreenshot = Invoke-AcceptanceRecovery `
             -Application $recoveryApplication -EvidenceRoot $EvidenceRoot `
             -SessionId $SessionId -WaitSeconds $WaitSeconds `
-            -ForegroundObservations $foregroundObservations
+            -ForegroundObservations $foregroundObservations `
+            -Prompt $recoveryPromptForAction
         $restoreDeadline = (Get-Date).AddSeconds($WaitSeconds)
         do {
             try {

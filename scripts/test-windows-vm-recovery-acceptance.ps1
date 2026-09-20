@@ -1689,6 +1689,79 @@ foreach ($fragment in @(
         throw "Raw control observations are missing an ownership or identity field: $fragment"
     }
 }
+$retainedWindowBindingFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Assert-AcceptanceRetainedWindowBinding'
+}, $true))
+foreach ($fragment in @(
+    'Assert-AutomationBinding',
+    '-RequireWindowHandle',
+    '$Window.Current.Name -cne $ExpectedName',
+    '$Window.Current.ControlType.ProgrammaticName -cne ''ControlType.Window'''
+)) {
+    if ($retainedWindowBindingFunction.Count -ne 1 -or
+        $retainedWindowBindingFunction[0].Extent.Text.IndexOf(
+            $fragment, [StringComparison]::Ordinal
+        ) -lt 0) {
+        throw "Retained recovery windows omit an exact binding check: $fragment"
+    }
+}
+& {
+    . ([scriptblock]::Create($retainedWindowBindingFunction[0].Extent.Text))
+    $script:retainedWindowBindingCalls = 0
+    function Assert-AutomationBinding {
+        param(
+            [Parameter(Mandatory)][object] $Element,
+            [Parameter(Mandatory)][object] $Process,
+            [Parameter(Mandatory)][int] $ExpectedSession,
+            [Parameter(Mandatory)][string] $Label,
+            [switch] $RequireWindowHandle
+        )
+        $script:retainedWindowBindingCalls++
+        if (-not $RequireWindowHandle -or
+            $Element.Current.ProcessId -ne $Process.Id -or
+            $Process.SessionId -ne $ExpectedSession -or
+            [IntPtr]$Element.Current.NativeWindowHandle -eq [IntPtr]::Zero) {
+            throw 'mock exact binding rejection'
+        }
+    }
+    $process = [pscustomobject]@{ Id = 123; SessionId = 7 }
+    $window = [pscustomobject]@{
+        Current = [pscustomobject]@{
+            ProcessId = 123
+            NativeWindowHandle = 4242L
+            Name = 'Expected window'
+            ControlType = [pscustomobject]@{ ProgrammaticName = 'ControlType.Window' }
+        }
+    }
+    Assert-AcceptanceRetainedWindowBinding `
+        -Window $window -Process $process -ExpectedSession 7 `
+        -ExpectedName 'Expected window' -Label 'retained-window fixture'
+    if ($script:retainedWindowBindingCalls -ne 1) {
+        throw 'A retained recovery window bypassed the exact binding helper.'
+    }
+    $window.Current.Name = 'Other window'
+    Assert-Fails {
+        Assert-AcceptanceRetainedWindowBinding `
+            -Window $window -Process $process -ExpectedSession 7 `
+            -ExpectedName 'Expected window' -Label 'retained-window fixture'
+    } 'name or control type changed'
+    $window.Current.Name = 'Expected window'
+    $window.Current.ControlType.ProgrammaticName = 'ControlType.Button'
+    Assert-Fails {
+        Assert-AcceptanceRetainedWindowBinding `
+            -Window $window -Process $process -ExpectedSession 7 `
+            -ExpectedName 'Expected window' -Label 'retained-window fixture'
+    } 'name or control type changed'
+    $window.Current.ControlType.ProgrammaticName = 'ControlType.Window'
+    $window.Current.ProcessId = 124
+    Assert-Fails {
+        Assert-AcceptanceRetainedWindowBinding `
+            -Window $window -Process $process -ExpectedSession 7 `
+            -ExpectedName 'Expected window' -Label 'retained-window fixture'
+    } 'mock exact binding rejection'
+}
 $sessionFunction = @($fromFile.FindAll({
     param($node)
     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
@@ -1951,6 +2024,82 @@ if ($dismissFunction.Count -ne 1) {
 foreach ($fragment in @('GetForegroundWindow', 'bounded deadline', 'SetForegroundWindow')) {
     if ($dismissFunction[0].Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
         throw "Recovery message dismissal does not enforce exact foreground handling: $fragment"
+    }
+}
+$invokeRecoveryFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Invoke-AcceptanceRecovery'
+}, $true))
+foreach ($contract in @(
+    @{ Function = $dismissFunction; Parameter = 'Window' },
+    @{ Function = $invokeRecoveryFunction; Parameter = 'Prompt' }
+)) {
+    if ($contract.Function.Count -ne 1) {
+        throw "Missing unique optional retained-window function for $($contract.Parameter)."
+    }
+    $function = $contract.Function[0]
+    $parameters = @($function.Body.ParamBlock.Parameters | Where-Object {
+        $_.Name.VariablePath.UserPath -ceq $contract.Parameter
+    })
+    $typeNames = if ($parameters.Count -eq 1) {
+        @($parameters[0].Attributes | ForEach-Object TypeName | ForEach-Object FullName)
+    }
+    else {
+        @()
+    }
+    if ($parameters.Count -ne 1 -or
+        $typeNames -cnotcontains 'Windows.Automation.AutomationElement') {
+        throw "Recovery retained-window function is missing parameter $($contract.Parameter)."
+    }
+    $lookups = @($function.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -ceq 'Wait-UniqueAutomationWindow'
+    }, $true))
+    if ($lookups.Count -ne 1) {
+        throw "Recovery retained-window function has an ambiguous fallback lookup for $($contract.Parameter)."
+    }
+    $owner = $lookups[0].Parent
+    while ($null -ne $owner -and $owner -isnot [Management.Automation.Language.IfStatementAst]) {
+        $owner = $owner.Parent
+    }
+    if ($null -eq $owner -or $owner.Extent.Text.IndexOf(
+            "`$null -eq `$$($contract.Parameter)", [StringComparison]::Ordinal
+        ) -lt 0) {
+        throw "A supplied $($contract.Parameter) does not bypass the fallback window lookup."
+    }
+    if ($function.Extent.Text.IndexOf(
+            'Assert-AcceptanceRetainedWindowBinding', [StringComparison]::Ordinal
+        ) -lt 0) {
+        throw "A supplied $($contract.Parameter) bypasses retained-window validation."
+    }
+}
+$lockedControlsFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Assert-AcceptanceRecoveryLockedControls'
+}, $true))
+if ($lockedControlsFunction.Count -ne 1 -or
+    $lockedControlsFunction[0].Extent.Text.IndexOf(
+        '-Scope ([Windows.Automation.TreeScope]::Children)', [StringComparison]::Ordinal
+    ) -lt 0) {
+    throw 'Intent-only Apply lock observations must search only direct main-window children.'
+}
+if ($intentScenarioFunction[0].Extent.Text.IndexOf(
+        '-Window $startupNotice', [StringComparison]::Ordinal
+    ) -lt 0 -or $intentScenarioFunction[0].Extent.Text.IndexOf(
+        '$null = $startupNotice', [StringComparison]::Ordinal
+    ) -ge 0) {
+    throw 'Intent-only startup must reuse its already bound recovery-lock notice.'
+}
+foreach ($fragment in @(
+    '$recoveryPromptForAction = $relaunchPrompt',
+    '$recoveryPromptForAction = $exportRelaunchPrompt',
+    '-Prompt $recoveryPromptForAction'
+)) {
+    if ($sessionFunction[0].Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+        throw "Recovery execution does not retain its same-process startup prompt: $fragment"
     }
 }
 $sendKeys = @($fromFile.FindAll({
