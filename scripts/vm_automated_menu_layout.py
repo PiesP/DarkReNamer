@@ -370,9 +370,11 @@ def verify_native_menu_layout(layout: object, environment: dict) -> None:
     roots_seen: set[tuple[int, ...]] = set()
     reached: set[int] = set()
 
-    def selectable(parent: tuple[int, ...]) -> list[tuple[int, ...]]:
+    def navigable(parent: tuple[int, ...]) -> list[tuple[int, ...]]:
+        # Native menus highlight disabled commands while navigating; only
+        # separators are skipped. Highlighting does not activate a command.
         return [path for path, item in sorted(tree.items())
-                if path[:-1] == parent and item["item_type"] != "separator" and item["enabled"]]
+                if path[:-1] == parent and item["item_type"] != "separator"]
 
     for sequence, raw_event in enumerate(events, 1):
         event = require_exact_keys(raw_event, {"sequence", "input", "virtual_keys", "foreground",
@@ -389,15 +391,16 @@ def verify_native_menu_layout(layout: object, environment: dict) -> None:
             roots_seen.add(root)
         elif action == "down":
             require(bool(open_paths), "Down was sent without an open candidate menu.")
-            choices = selectable(open_paths[-1])
-            require(bool(choices), "Down targeted a menu with no selectable item.")
+            choices = navigable(open_paths[-1])
+            require(bool(choices), "Down targeted a menu with no navigable item.")
             highlighted = choices[0] if highlighted is None else choices[(choices.index(highlighted) + 1) % len(choices)]
         elif action == "right":
-            require(highlighted is not None and tree[highlighted]["item_type"] == "submenu" and len(open_paths) < 2,
+            require(highlighted is not None and tree[highlighted]["item_type"] == "submenu" and
+                    tree[highlighted]["enabled"] and len(open_paths) < 2,
                     "Right did not enter the currently highlighted bounded submenu.")
             open_paths.append(highlighted)
-            choices = selectable(highlighted)
-            require(bool(choices), "Opened submenu has no selectable item.")
+            choices = navigable(highlighted)
+            require(bool(choices), "Opened submenu has no navigable item.")
             highlighted = choices[0]
         elif action == "left":
             require(len(open_paths) == 2, "Left did not close a nested candidate submenu.")
@@ -416,15 +419,15 @@ def verify_native_menu_layout(layout: object, environment: dict) -> None:
             {key: event[key] for key in {"foreground", "open_menu_paths", "highlighted", "popups"}},
             endpoint=False, event=True)
         if opener:
-            choices = selectable(open_paths[-1])
-            require(bool(choices), "Menu mnemonic opened a menu with no keyboard-selectable row.")
+            choices = navigable(open_paths[-1])
+            require(bool(choices), "Menu mnemonic opened a menu with no keyboard-navigable row.")
             require(observed_paths == open_paths and observed_highlight in {None, choices[0]},
-                    "Menu mnemonic selected an item other than the first keyboard-selectable row.")
+                    "Menu mnemonic highlighted an item other than the first keyboard-navigable row.")
             highlighted = observed_highlight
         else:
             require(observed_paths == open_paths and observed_highlight == highlighted,
                     "Native-menu observations do not replay the frozen keyboard state machine.")
-        if highlighted is not None and tree[highlighted]["item_type"] == "command":
+        if highlighted is not None and tree[highlighted]["item_type"] == "command" and tree[highlighted]["enabled"]:
             reached.add(tree[highlighted]["command_id"])
     final_paths, _ = observation(row["final"], endpoint=True)
     require(not final_paths and row["final"]["popups"] == [] and open_paths == [] and highlighted is None,

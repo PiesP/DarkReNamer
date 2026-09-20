@@ -51,7 +51,7 @@ def fixture_state() -> dict:
 
 def tree_item(parent: tuple[int, ...], position: int, kind: str, command: int | None,
               *, enabled: bool = True) -> dict:
-    flags = (0x10 if kind == "submenu" else 0) if enabled else 3
+    flags = (0x10 if kind == "submenu" else 0) | (0 if enabled else 3 if kind == "separator" else 1)
     return {"menu_path": list(parent), "position": position, "item_type": kind,
             "command_id": command, "state_flags": flags, "enabled": enabled, "checked": False}
 
@@ -141,9 +141,11 @@ def layout(*, opener_highlights: bool = False) -> dict:
     emit("alt-f", [(0,)], (0, 0) if opener_highlights else None)
     emit("escape", [], (0,))
     emit("escape", [], None)
-    emit("alt-e", [(1,)], (1, 5) if opener_highlights else None)
+    emit("alt-e", [(1,)], (1, 0) if opener_highlights else None)
     if not opener_highlights:
-        emit("down", [(1,)], (1, 5))
+        emit("down", [(1,)], (1, 0))
+    for position in (1, 3, 4, 5):
+        emit("down", [(1,)], (1, position))
     emit("escape", [], (1,))
     emit("escape", [], None)
     groups = ((32772, 32773, 32774), (32775, 32776, 32777), (32778, 32779, 32780),
@@ -196,6 +198,24 @@ class NativeMenuLayoutTests(unittest.TestCase):
     def test_complete_native_menu_transcript_passes(self):
         verify_native_menu_layout(layout(), environment())
         verify_native_menu_layout(layout(opener_highlights=True), environment())
+
+    def test_disabled_highlights_preserve_navigation_and_enabled_coverage(self):
+        for mutation in ("wrong-opener", "skipped-disabled-row", "missing-enabled-command"):
+            changed = layout(opener_highlights=True)
+            events = changed["native_menu_only"]["events"]
+            if mutation == "wrong-opener":
+                opener = next(event for event in events if event["input"] == "alt-e")
+                opener["highlighted"].update(position=1, command_id=65535)
+            else:
+                position = 1 if mutation == "skipped-disabled-row" else 5
+                events[:] = [event for event in events if not (
+                    event["input"] == "down" and event["highlighted"]["menu_path"] == [1]
+                    and event["highlighted"]["position"] == position)]
+                for sequence, event in enumerate(events, 1):
+                    event["sequence"] = sequence
+            expected = "enabled required command" if mutation == "missing-enabled-command" else "keyboard"
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(EvidenceError, expected):
+                verify_native_menu_layout(changed, environment())
 
     def test_identity_tree_state_and_replay_fail_closed(self):
         mutations = {
