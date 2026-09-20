@@ -2,10 +2,12 @@
 """Unit tests for the frozen native-menu-only layout predicate."""
 
 from copy import deepcopy
+import hashlib
 import unittest
 
 from vm_automated_evidence import EvidenceError
-from vm_automated_menu_layout import COMMAND_PATHS, ENABLED_COMMANDS, verify_native_menu_layout
+from vm_automated_menu_layout import (COMMAND_PATHS, ENABLED_COMMANDS, _FIXTURE_DIRECTORIES,
+                                      _FIXTURE_FILES, verify_native_menu_layout)
 
 
 PID, SESSION, MAIN = 1234, 2, 5678
@@ -28,10 +30,22 @@ def environment() -> dict:
 
 
 def fixture_state() -> dict:
+    rows = []
+    for path in _FIXTURE_DIRECTORIES:
+        rows.append((path, "directory", 0, None))
+    for path, body in _FIXTURE_FILES.items():
+        rows.append((path, "file", len(body), hashlib.sha256(body).hexdigest()))
+
+    entries = []
+    next_id = 3
+    for path, kind, size, content in sorted(rows):
+        entries.append({"relative_path": path, "kind": kind, "bytes": size,
+                        "content_sha256": content,
+                        "file_identity": {"volume_serial": "1" * 16,
+                                          "file_id": f"{next_id:032x}"}})
+        next_id += 1
     return {"fixture_root": r"C:\fixture", "root_identity": deepcopy(IDENTITY),
-            "fixture_entries": [{"name": "menu-sentinel.txt", "kind": "file", "bytes": 5,
-                                 "content_sha256": "3" * 64,
-                                 "file_identity": {"volume_serial": "1" * 16, "file_id": "4" * 32}}],
+            "fixture_entries": entries,
             "journal_entries": []}
 
 
@@ -165,8 +179,9 @@ def layout_for_environment(raw_environment: dict) -> dict:
         state = result["native_menu_only"][phase]
         state["fixture_root"] = raw_environment["fixture_volume"]["root_path"]
         state["root_identity"] = deepcopy(raw_environment["fixture_volume"]["root_identity"])
-        state["fixture_entries"][0]["file_identity"]["volume_serial"] = \
-            raw_environment["fixture_volume"]["root_identity"]["volume_serial"]
+        for entry in state["fixture_entries"]:
+            entry["file_identity"]["volume_serial"] = \
+                raw_environment["fixture_volume"]["root_identity"]["volume_serial"]
     return result
 
 
@@ -191,8 +206,37 @@ class NativeMenuLayoutTests(unittest.TestCase):
             "object-item-type": lambda row: row["native_menu_only"]["menu_tree"][0].update(item_type={}),
             "wrong-key-code": lambda row: row["native_menu_only"]["events"][0].update(virtual_keys=[70]),
             "foreign-foreground": lambda row: row["native_menu_only"]["events"][0]["foreground"].update(process_id=99),
-            "fixture-mutation": lambda row: row["native_menu_only"]["state_after"]["fixture_entries"][0].update(bytes=6),
+            "fixture-mutation": lambda row: row["native_menu_only"]["state_after"]["fixture_entries"][2].update(bytes=24),
             "open-final-popup": lambda row: row["native_menu_only"]["final"].update(open_menu_paths=[[0]]),
+        }
+        for name, mutate in mutations.items():
+            changed = layout()
+            mutate(changed)
+            with self.subTest(name=name), self.assertRaises(EvidenceError):
+                verify_native_menu_layout(changed, environment())
+
+    def test_recursive_standard_fixture_fails_closed(self):
+        def entries(row: dict, phase: str = "state_before") -> list[dict]:
+            return row["native_menu_only"][phase]["fixture_entries"]
+
+        mutations = {
+            "missing-directory": lambda row: entries(row).pop(0),
+            "missing-file": lambda row: entries(row).pop(),
+            "foreign-root": lambda row: row["native_menu_only"]["state_before"].update(
+                fixture_root=r"D:\fixture"),
+            "foreign-volume": lambda row: entries(row)[0]["file_identity"].update(
+                volume_serial="9" * 16),
+            "alias-path": lambda row: entries(row)[1].update(
+                relative_path=entries(row)[0]["relative_path"].swapcase()),
+            "backslash-path": lambda row: entries(row)[2].update(
+                relative_path=entries(row)[2]["relative_path"].replace("/", "\\")),
+            "reparse-kind": lambda row: entries(row)[0].update(kind="reparse"),
+            "content-mutation": lambda row: entries(row)[2].update(content_sha256="f" * 64),
+            "root-identity-alias": lambda row: entries(row)[0].update(
+                file_identity=deepcopy(row["native_menu_only"]["state_before"]["root_identity"])),
+            "duplicate-identity": lambda row: entries(row)[1].update(
+                file_identity=deepcopy(entries(row)[0]["file_identity"])),
+            "noncanonical-order": lambda row: entries(row).reverse(),
         }
         for name, mutate in mutations.items():
             changed = layout()

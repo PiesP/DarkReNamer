@@ -1773,6 +1773,138 @@ function Get-VmAutomatedFocusState {
     }
 }
 
+function Assert-VmAutomatedNativeMenuPathSegment {
+    param([Parameter(Mandatory)][string] $Segment)
+
+    if ([string]::IsNullOrEmpty($Segment) -or $Segment.Length -gt 240 -or
+        $Segment -cin @('.', '..') -or
+        $Segment.EndsWith('.', [StringComparison]::Ordinal) -or
+        $Segment.EndsWith(' ', [StringComparison]::Ordinal) -or
+        $Segment.IndexOfAny([char[]]'<>:"/\|?*') -ge 0 -or
+        $Segment.Split('.')[0] -imatch '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') {
+        throw 'The native menu fixture inventory contains an unsafe path segment.'
+    }
+    for ($index = 0; $index -lt $Segment.Length; $index++) {
+        $character = $Segment[$index]
+        if ([int]$character -lt 32) {
+            throw 'The native menu fixture inventory contains an unsafe path segment.'
+        }
+        if ([char]::IsHighSurrogate($character)) {
+            if ($index + 1 -ge $Segment.Length -or
+                -not [char]::IsLowSurrogate($Segment[$index + 1])) {
+                throw 'The native menu fixture inventory contains invalid UTF-16.'
+            }
+            $index++
+        }
+        elseif ([char]::IsLowSurrogate($character)) {
+            throw 'The native menu fixture inventory contains invalid UTF-16.'
+        }
+    }
+}
+
+function ConvertTo-VmAutomatedNativeMenuRelativePath {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]] $ParentSegments,
+        [Parameter(Mandatory)][string] $Leaf
+    )
+
+    $segments = @($ParentSegments) + @($Leaf)
+    if ($segments.Count -gt 3) {
+        throw 'The native menu fixture inventory exceeds depth three.'
+    }
+    foreach ($segment in $segments) {
+        Assert-VmAutomatedNativeMenuPathSegment -Segment $segment
+    }
+    $segments -join '/'
+}
+
+function Get-VmAutomatedNativeMenuState {
+    param(
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][string] $LocalAppData
+    )
+
+    $root = Get-VmAutomatedCanonicalRootPath -Path $FixtureRoot
+    $rootIdentity = Get-FullFileIdentity -Path $root
+    $entries = [Collections.Generic.List[object]]::new()
+    $relativePaths = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    $bounds = [pscustomobject]@{ total_bytes = [long]0 }
+    $visit = {
+        param(
+            [Parameter(Mandatory)][string] $CurrentPath,
+            [Parameter(Mandatory)][AllowEmptyCollection()][string[]] $ParentSegments
+        )
+
+        $enumerator = [IO.Directory]::EnumerateFileSystemEntries($CurrentPath).GetEnumerator()
+        try {
+            while ($enumerator.MoveNext()) {
+                if ($entries.Count -ge 16) {
+                    throw 'The native menu fixture inventory exceeds sixteen entries.'
+                }
+                $item = Get-Item -LiteralPath ([string]$enumerator.Current) -Force -ErrorAction Stop
+                $relativePath = ConvertTo-VmAutomatedNativeMenuRelativePath `
+                    -ParentSegments $ParentSegments -Leaf $item.Name
+                if (-not $relativePaths.Add($relativePath)) {
+                    throw 'The native menu fixture inventory contains a case-alias path.'
+                }
+                if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw 'The native menu fixture inventory contains a reparse point.'
+                }
+                if ($item.PSIsContainer) {
+                    $entries.Add([ordered]@{
+                        relative_path = $relativePath
+                        kind = 'directory'
+                        bytes = [long]0
+                        content_sha256 = $null
+                        file_identity = Get-FullFileIdentity -Path $item.FullName
+                    })
+                    & $visit `
+                        -CurrentPath $item.FullName `
+                        -ParentSegments (@($ParentSegments) + @($item.Name))
+                    continue
+                }
+                if ($item -isnot [IO.FileInfo]) {
+                    throw 'The native menu fixture inventory requires ordinary files or directories.'
+                }
+                if ($item.Length -gt 64MB) {
+                    throw 'The native menu fixture inventory contains an oversized file.'
+                }
+                $bounds.total_bytes += [long]$item.Length
+                if ($bounds.total_bytes -gt 512MB) {
+                    throw 'The native menu fixture inventory exceeds its aggregate size bound.'
+                }
+                $entries.Add([ordered]@{
+                    relative_path = $relativePath
+                    kind = 'file'
+                    bytes = [long]$item.Length
+                    content_sha256 = Get-LowerSha256 -Path $item.FullName
+                    file_identity = Get-FullFileIdentity -Path $item.FullName
+                })
+            }
+        }
+        finally {
+            if ($enumerator -is [IDisposable]) { $enumerator.Dispose() }
+        }
+    }
+    & $visit -CurrentPath $root -ParentSegments ([string[]]@())
+    $sortedEntries = [object[]]$entries.ToArray()
+    [Array]::Sort($sortedEntries, [Comparison[object]]{
+        param($left, $right)
+        [StringComparer]::Ordinal.Compare(
+            [string]$left.relative_path,
+            [string]$right.relative_path
+        )
+    })
+    [ordered]@{
+        fixture_root = $root
+        root_identity = $rootIdentity
+        fixture_entries = @($sortedEntries)
+        journal_entries = @(Get-VmAutomatedJournalInventory -LocalAppData $LocalAppData)
+    }
+}
+
 function Get-VmAutomatedNativeMenuCommandSpec {
     @(
         [ordered]@{ command_id = 32771; menu_path = [int[]]@(0); position = 2; expected_enabled = $false }
@@ -2155,14 +2287,14 @@ function Invoke-VmAutomatedMenuKey {
     param(
         [Parameter(Mandatory)][object] $Application,
         [Parameter(Mandatory)][int] $ExpectedSession,
-        [Parameter(Mandatory)][ValidateSet('alt-f','alt-e','alt-t','down','right','left','escape')][string] $Input,
+        [Parameter(Mandatory)][ValidateSet('alt-f','alt-e','alt-t','down','right','left','escape')][string] $KeyAction,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $OpenMenuPaths,
         [Parameter(Mandatory)][Collections.IDictionary] $PathHandles,
         [AllowNull()][object] $PreviousHighlight,
         [Parameter(Mandatory)][ValidateRange(1, 128)][int] $Sequence
     )
 
-    $virtualKeys = switch ($Input) {
+    $virtualKeys = @(switch ($KeyAction) {
         'alt-f' { [int[]]@(0x12, 0x46) }
         'alt-e' { [int[]]@(0x12, 0x45) }
         'alt-t' { [int[]]@(0x12, 0x54) }
@@ -2170,17 +2302,17 @@ function Invoke-VmAutomatedMenuKey {
         'right' { [int[]]@(0x27) }
         'left' { [int[]]@(0x25) }
         'escape' { [int[]]@(0x1B) }
-    }
-    if ($Input.StartsWith('alt-', [StringComparison]::Ordinal)) {
+    })
+    if ($KeyAction.StartsWith('alt-', [StringComparison]::Ordinal)) {
         Send-AcceptanceChord `
             -Process $Application.process -ExpectedSession $ExpectedSession `
             -Modifier ([uint16]$virtualKeys[0]) -VirtualKey ([uint16]$virtualKeys[1]) `
-            -Label "native menu $Input"
+            -Label "native menu $KeyAction"
     }
     else {
         Send-AcceptanceTap `
             -Process $Application.process -ExpectedSession $ExpectedSession `
-            -VirtualKey ([uint16]$virtualKeys[0]) -Label "native menu $Input"
+            -VirtualKey ([uint16]$virtualKeys[0]) -Label "native menu $KeyAction"
     }
     $popups = $null
     $highlight = $null
@@ -2196,7 +2328,7 @@ function Invoke-VmAutomatedMenuKey {
             $highlight = Get-VmAutomatedMenuHighlight `
                 -MainWindowHandle ([IntPtr]$Application.main.Current.NativeWindowHandle) `
                 -OpenMenuPaths $OpenMenuPaths -Popups $popups
-            if ($Input -ceq 'down' -and (
+            if ($KeyAction -ceq 'down' -and (
                 $null -eq $highlight -or
                 ($null -ne $PreviousHighlight -and
                     $highlight.position -eq $PreviousHighlight.position -and
@@ -2208,18 +2340,18 @@ function Invoke-VmAutomatedMenuKey {
             break
         }
     }
-    if ($null -eq $popups) { throw "Native menu $Input did not reach its expected popup state." }
+    if ($null -eq $popups) { throw "Native menu $KeyAction did not reach its expected popup state." }
     $foreground = Get-ForegroundObservation
     $mainHandle = [long]$Application.main.Current.NativeWindowHandle
     if ($foreground.hwnd -ne $mainHandle -or
         $foreground.process_id -ne $Application.process.Id -or
         $foreground.session_id -ne $ExpectedSession -or
         $foreground.window_class -cne 'DarkReNamerWindow') {
-        throw "Native menu $Input lost the exact candidate foreground binding."
+        throw "Native menu $KeyAction lost the exact candidate foreground binding."
     }
     [ordered]@{
         sequence = $Sequence
-        input = $Input
+        input = $KeyAction
         virtual_keys = $virtualKeys
         open_menu_paths = [object[]]@($OpenMenuPaths | ForEach-Object {
             ,([int[]]@($_))
@@ -2265,14 +2397,14 @@ function Invoke-VmAutomatedNativeMenuOnlyReachability {
         -Process $Application.process -ExpectedSession $ExpectedSession -RequireMainWindow
     $initial = Get-VmAutomatedMenuEndpoint `
         -Application $Application -List $List -ExpectedSession $ExpectedSession
-    $stateBefore = Get-VmAutomatedFocusState `
+    $stateBefore = Get-VmAutomatedNativeMenuState `
         -FixtureRoot $FixtureRoot -LocalAppData $env:LOCALAPPDATA
     $events = [Collections.Generic.List[object]]::new()
     $visited = [Collections.Generic.HashSet[int]]::new()
     $navigation = [pscustomobject]@{ sequence = 0 }
     $addEvent = {
         param(
-            [string] $Input,
+            [string] $KeyAction,
             [object[]] $OpenMenuPaths,
             [Collections.IDictionary] $PathHandles
         )
@@ -2288,7 +2420,7 @@ function Invoke-VmAutomatedNativeMenuOnlyReachability {
         }
         $event = Invoke-VmAutomatedMenuKey `
             -Application $Application -ExpectedSession $ExpectedSession `
-            -Input $Input -OpenMenuPaths $OpenMenuPaths `
+            -KeyAction $KeyAction -OpenMenuPaths $OpenMenuPaths `
             -PathHandles $PathHandles -PreviousHighlight $previousHighlight `
             -Sequence $navigation.sequence
         Assert-VmAutomatedMenuHighlightBinding `
@@ -2363,7 +2495,7 @@ function Invoke-VmAutomatedNativeMenuOnlyReachability {
     }
     $final = Get-VmAutomatedMenuEndpoint `
         -Application $Application -List $List -ExpectedSession $ExpectedSession
-    $stateAfter = Get-VmAutomatedFocusState `
+    $stateAfter = Get-VmAutomatedNativeMenuState `
         -FixtureRoot $FixtureRoot -LocalAppData $env:LOCALAPPDATA
     if (($stateBefore | ConvertTo-Json -Compress -Depth 12) -cne
         ($stateAfter | ConvertTo-Json -Compress -Depth 12)) {

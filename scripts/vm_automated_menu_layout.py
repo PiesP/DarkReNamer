@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from vm_automated_evidence import EvidenceError, require_exact_keys, require_int
 from vm_automated_platform import contains, rectangle
-from vm_automated_state import Identity, clean_journal_inventory, fixture_inventory
+from vm_automated_state import Identity, clean_journal_inventory, leaf_name
 
 
 RAIL_IDS = {
@@ -37,6 +39,19 @@ COMMAND_PATHS = {
 }
 ENABLED_COMMANDS = frozenset(COMMAND_PATHS) - {32771, 32781, 32783, 65535}
 DISABLED_COMMANDS = frozenset(COMMAND_PATHS) - ENABLED_COMMANDS
+
+_PARENT_PREFIX = "한글-매우-긴-상위-경로-공통-자료-보관-2026-09-"
+_LEAF_PREFIX = "한글-😀-아주긴공통접두어-월별정리-원본자료-검토완료-배포대기-장기보존-최종승인-추가검증-"
+_FIXTURE_DIRECTORIES = (_PARENT_PREFIX + "A-😀", _PARENT_PREFIX + "B-😀")
+_FIXTURE_FILES = {
+    _FIXTURE_DIRECTORIES[0] + "/" + _LEAF_PREFIX + "0001-final.txt": b"long-name-ux-fixture-0\n",
+    _FIXTURE_DIRECTORIES[0] + "/" + _LEAF_PREFIX + "0002-final.md": b"long-name-ux-fixture-1\n",
+    _FIXTURE_DIRECTORIES[1] + "/" + _LEAF_PREFIX + "0001-final.txt": b"long-name-ux-fixture-2\n",
+}
+_MAX_MENU_FIXTURE_ENTRIES = 16
+_MAX_MENU_FIXTURE_DEPTH = 3
+_MAX_MENU_FIXTURE_BYTES = 64 * 1024 * 1024
+_MAX_MENU_FIXTURE_AGGREGATE_BYTES = 512 * 1024 * 1024
 
 _VK = {
     "alt-f": [18, 70], "alt-e": [18, 69], "alt-t": [18, 84],
@@ -185,6 +200,65 @@ def _tree(value: object) -> dict[tuple[int, ...], dict]:
     return tree
 
 
+def _relative_path(value: object) -> str:
+    require(type(value) is str and 0 < len(value) <= 767 and "\\" not in value,
+            "Menu fixture relative path is missing, unbounded, or non-canonical.")
+    segments = value.split("/")
+    require(1 <= len(segments) <= _MAX_MENU_FIXTURE_DEPTH and
+            all(segment and leaf_name(segment) == segment for segment in segments),
+            "Menu fixture relative path is unsafe or exceeds its depth bound.")
+    return "/".join(segments)
+
+
+def _fixture_entries(value: object, root_identity: Identity) -> dict[str, tuple[str, int, object, Identity]]:
+    require(type(value) is list and 0 < len(value) <= _MAX_MENU_FIXTURE_ENTRIES,
+            "Menu fixture inventory is missing or exceeds its entry bound.")
+    entries: dict[str, tuple[str, int, object, Identity]] = {}
+    folded: set[str] = set()
+    identities = {root_identity}
+    ordered_paths: list[str] = []
+    aggregate_bytes = 0
+    for raw in value:
+        row = require_exact_keys(raw, {"relative_path", "kind", "bytes", "content_sha256",
+                                       "file_identity"}, "Menu fixture row")
+        path = _relative_path(row["relative_path"])
+        require(path.casefold() not in folded, "Menu fixture inventory repeats or aliases a path.")
+        require(type(row["kind"]) is str and row["kind"] in {"directory", "file"},
+                "Menu fixture row is not an ordinary file or directory.")
+        size = require_int(row["bytes"], 0, _MAX_MENU_FIXTURE_BYTES, "Menu fixture bytes")
+        aggregate_bytes += size
+        require(aggregate_bytes <= _MAX_MENU_FIXTURE_AGGREGATE_BYTES,
+                "Menu fixture inventory exceeds its aggregate byte bound.")
+        identity = Identity.parse(row["file_identity"])
+        require(identity.volume == root_identity.volume and identity not in identities,
+                "Menu fixture identity is foreign, duplicated, or aliases the root.")
+        if row["kind"] == "directory":
+            require(size == 0 and row["content_sha256"] is None,
+                    "Menu fixture directory carries file content metadata.")
+        else:
+            require(type(row["content_sha256"]) is str,
+                    "Menu fixture file digest is missing.")
+        identities.add(identity)
+        folded.add(path.casefold())
+        ordered_paths.append(path)
+        entries[path] = (row["kind"], size, row["content_sha256"], identity)
+
+    require(ordered_paths == sorted(ordered_paths),
+            "Menu fixture inventory is not in canonical relative-path order.")
+    expected_paths = set(_FIXTURE_DIRECTORIES) | set(_FIXTURE_FILES)
+    require(set(entries) == expected_paths, "Menu fixture inventory differs from the fixed standard fixture.")
+    for directory in _FIXTURE_DIRECTORIES:
+        require(entries[directory][0:3] == ("directory", 0, None),
+                "Menu fixture directory metadata differs from the fixed standard fixture.")
+    for path, body in _FIXTURE_FILES.items():
+        expected = ("file", len(body), hashlib.sha256(body).hexdigest())
+        require(entries[path][0:3] == expected,
+                "Menu fixture file content differs from the fixed standard fixture.")
+        require(path.rsplit("/", 1)[0] in entries,
+                "Menu fixture file has no observed parent directory.")
+    return entries
+
+
 def _state(value: object, environment: dict) -> dict:
     row = require_exact_keys(value, {"fixture_root", "root_identity", "fixture_entries", "journal_entries"},
                              "Menu navigation state")
@@ -192,10 +266,8 @@ def _state(value: object, environment: dict) -> dict:
     require(row["fixture_root"] == volume["root_path"] and
             Identity.parse(row["root_identity"]) == Identity.parse(volume["root_identity"]),
             "Menu navigation state belongs to another fixture root.")
-    files = fixture_inventory(row["fixture_entries"], full_identity=True)
     root_identity = Identity.parse(row["root_identity"])
-    require(all(item.identity.volume == root_identity.volume for item in files.values()),
-            "Menu navigation fixture belongs to another volume.")
+    _fixture_entries(row["fixture_entries"], root_identity)
     clean_journal_inventory(row["journal_entries"])
     return row
 

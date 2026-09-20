@@ -852,6 +852,9 @@ try {
         'raw_appearance = Get-VmAutomatedAppearance'
         'function Resolve-GuiRegressionLayoutVariant'
         'function Get-VmAutomatedNativeMenuCommandSpec'
+        'function Assert-VmAutomatedNativeMenuPathSegment'
+        'function ConvertTo-VmAutomatedNativeMenuRelativePath'
+        'function Get-VmAutomatedNativeMenuState'
         'function Assert-VmAutomatedNativeMenuTree'
         'function Get-VmAutomatedHiddenRailControls'
         'function Invoke-VmAutomatedNativeMenuOnlyReachability'
@@ -979,6 +982,8 @@ try {
         }
     }
     foreach ($menuHelperName in @(
+        'Assert-VmAutomatedNativeMenuPathSegment',
+        'ConvertTo-VmAutomatedNativeMenuRelativePath',
         'Get-VmAutomatedNativeMenuCommandSpec',
         'ConvertTo-VmAutomatedMenuPathKey',
         'Test-VmAutomatedMenuPathEqual',
@@ -994,6 +999,128 @@ try {
             throw "The acceptance script is missing native menu helper $menuHelperName."
         }
         . ([scriptblock]::Create($menuHelper.Extent.Text))
+    }
+    $nativeMenuFixtureParent = '한글-매우-긴-상위-경로-A-😀'
+    $nativeMenuFixtureLeaf = '한글-😀-0001-final.txt'
+    $nativeMenuRelativePath = ConvertTo-VmAutomatedNativeMenuRelativePath `
+        -ParentSegments @($nativeMenuFixtureParent) -Leaf $nativeMenuFixtureLeaf
+    if ($nativeMenuRelativePath -cne "$nativeMenuFixtureParent/$nativeMenuFixtureLeaf") {
+        throw 'Native menu fixture paths must preserve Unicode segments with canonical separators.'
+    }
+    Assert-Fails {
+        ConvertTo-VmAutomatedNativeMenuRelativePath `
+            -ParentSegments @('one','two','three') -Leaf 'four.txt'
+    } 'depth'
+    Assert-Fails {
+        ConvertTo-VmAutomatedNativeMenuRelativePath `
+            -ParentSegments @() -Leaf ('bad-' + [char]0xD800)
+    } 'UTF-16'
+    Assert-Fails {
+        ConvertTo-VmAutomatedNativeMenuRelativePath -ParentSegments @() -Leaf 'bad.'
+    } 'unsafe'
+    $nativeMenuStateFunction = $acceptanceAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Get-VmAutomatedNativeMenuState'
+    }, $true)
+    $nativeMenuStateSource = $nativeMenuStateFunction.Extent.Text
+    foreach ($requiredStateSource in @(
+        'The native menu fixture inventory exceeds sixteen entries.',
+        '[IO.FileAttributes]::ReparsePoint',
+        'The native menu fixture inventory contains an oversized file.',
+        'The native menu fixture inventory exceeds its aggregate size bound.',
+        '[StringComparer]::Ordinal.Compare',
+        'relative_path = $relativePath',
+        'file_identity = Get-FullFileIdentity -Path $item.FullName'
+    )) {
+        if ($nativeMenuStateSource.IndexOf($requiredStateSource, [StringComparison]::Ordinal) -lt 0) {
+            throw "Native menu recursive fixture state is missing '$requiredStateSource'."
+        }
+    }
+    & {
+        . ([scriptblock]::Create($nativeMenuStateFunction.Extent.Text))
+        function Get-VmAutomatedCanonicalRootPath {
+            param([string] $Path)
+            (Get-Item -LiteralPath $Path -Force -ErrorAction Stop).FullName
+        }
+        function Get-FullFileIdentity {
+            param([string] $Path)
+            $digest = [Convert]::ToHexString(
+                [Security.Cryptography.SHA256]::HashData(
+                    [Text.Encoding]::UTF8.GetBytes($Path)
+                )
+            ).ToLowerInvariant()
+            [ordered]@{ volume_serial = '0123456789abcdef'; file_id = $digest.Substring(0, 32) }
+        }
+        function Get-LowerSha256 {
+            param([string] $Path)
+            Get-Sha256 $Path
+        }
+        function Get-VmAutomatedJournalInventory { param([string] $LocalAppData) @() }
+
+        $probeRoot = Join-Path $temporaryRoot 'native-menu-recursive-state'
+        $parentA = Join-Path $probeRoot '한글-A-😀'
+        $parentB = Join-Path $probeRoot '한글-B-😀'
+        [void](New-Item -ItemType Directory -Path $parentA)
+        [void](New-Item -ItemType Directory -Path $parentB)
+        [IO.File]::WriteAllText(
+            (Join-Path $parentA '한글-😀-0001-final.txt'),
+            "long-name-ux-fixture-0`n",
+            [Text.UTF8Encoding]::new($false)
+        )
+        [IO.File]::WriteAllText(
+            (Join-Path $parentA '한글-😀-0002-final.md'),
+            "long-name-ux-fixture-1`n",
+            [Text.UTF8Encoding]::new($false)
+        )
+        [IO.File]::WriteAllText(
+            (Join-Path $parentB '한글-😀-0001-final.txt'),
+            "long-name-ux-fixture-2`n",
+            [Text.UTF8Encoding]::new($false)
+        )
+        $recursiveState = Get-VmAutomatedNativeMenuState `
+            -FixtureRoot $probeRoot -LocalAppData $temporaryRoot
+        $expectedRelativePaths = @(
+            '한글-A-😀',
+            '한글-A-😀/한글-😀-0001-final.txt',
+            '한글-A-😀/한글-😀-0002-final.md',
+            '한글-B-😀',
+            '한글-B-😀/한글-😀-0001-final.txt'
+        )
+        if ($recursiveState.fixture_entries.Count -ne 5 -or
+            @(Compare-Object -CaseSensitive `
+                @($recursiveState.fixture_entries.relative_path) `
+                $expectedRelativePaths -SyncWindow 0).Count -ne 0) {
+            throw 'Native menu recursive state did not retain the complete sorted Unicode fixture.'
+        }
+        foreach ($row in $recursiveState.fixture_entries) {
+            $expectedRowKeys = @('relative_path','kind','bytes','content_sha256','file_identity')
+            if (@(Compare-Object -CaseSensitive @($row.Keys) $expectedRowKeys -SyncWindow 0).Count -ne 0 -or
+                $row.bytes -isnot [long]) {
+                throw 'Native menu recursive state emitted a malformed fixture row.'
+            }
+            if ($row.kind -ceq 'directory' -and
+                ($row.bytes -ne 0 -or $null -ne $row.content_sha256)) {
+                throw 'Native menu directory rows must retain zero bytes and a null content digest.'
+            }
+            if ($row.kind -ceq 'file' -and
+                ($row.bytes -ne 23 -or $row.content_sha256 -cnotmatch '^[0-9a-f]{64}$')) {
+                throw 'Native menu file rows must retain their exact bytes and content digest.'
+            }
+        }
+
+        $overBoundRoot = Join-Path $temporaryRoot 'native-menu-over-bound'
+        [void](New-Item -ItemType Directory -Path $overBoundRoot)
+        foreach ($index in 0..16) {
+            [IO.File]::WriteAllBytes(
+                (Join-Path $overBoundRoot ("item-{0:D2}.txt" -f $index)),
+                [byte[]]@()
+            )
+        }
+        Assert-Fails {
+            Get-VmAutomatedNativeMenuState `
+                -FixtureRoot $overBoundRoot -LocalAppData $temporaryRoot
+        } 'exceeds sixteen entries'
     }
     $menuTree = [Collections.Generic.List[object]]::new()
     $addMenuRow = {
@@ -1116,6 +1243,53 @@ try {
             $node.Name -ceq 'Invoke-VmAutomatedNativeMenuOnlyReachability'
     }, $true)
     $menuReachabilitySource = $menuReachabilityFunction.Extent.Text
+    if ([regex]::Matches(
+            $menuReachabilitySource,
+            [regex]::Escape('Get-VmAutomatedNativeMenuState')
+        ).Count -ne 2 -or
+        $menuReachabilitySource.IndexOf(
+            'Get-VmAutomatedFocusState',
+            [StringComparison]::Ordinal
+        ) -ge 0) {
+        throw 'Native menu traversal must use the bounded recursive fixture state before and after input.'
+    }
+    $menuKeyFunction = $acceptanceAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Invoke-VmAutomatedMenuKey'
+    }, $true)
+    $reservedInputParameters = @(
+        @($menuKeyFunction, $menuReachabilityFunction) | ForEach-Object {
+            $_.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.ParameterAst] -and
+                    $node.Name.VariablePath.UserPath -ieq 'Input'
+            }, $true)
+        }
+    )
+    if ($reservedInputParameters.Count -ne 0) {
+        throw 'Native menu helpers must not shadow the PowerShell automatic $input variable.'
+    }
+    $virtualKeyAssignment = $menuKeyFunction.Find({
+        param($node)
+        $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -ceq '$virtualKeys'
+    }, $true)
+    foreach ($dispatchCase in @(
+        [ordered]@{ action = 'alt-f'; expected = [int[]]@(0x12, 0x46) }
+        [ordered]@{ action = 'down'; expected = [int[]]@(0x28) }
+        [ordered]@{ action = 'escape'; expected = [int[]]@(0x1B) }
+    )) {
+        & {
+            $KeyAction = $dispatchCase.action
+            . ([scriptblock]::Create($virtualKeyAssignment.Extent.Text))
+            if ($virtualKeys -isnot [array] -or
+                @($virtualKeys).Count -ne $dispatchCase.expected.Count -or
+                @(Compare-Object @($virtualKeys) @($dispatchCase.expected) -SyncWindow 0).Count -ne 0) {
+                throw "The production native-menu key dispatcher lost or scalarized $KeyAction."
+            }
+        }
+    }
     foreach ($requiredMenuInput in @("'alt-f'", "'alt-e'", "'alt-t'", "'down'", "'right'", "'escape'")) {
         if ($menuReachabilitySource.IndexOf($requiredMenuInput, [StringComparison]::Ordinal) -lt 0) {
             throw "Native menu reachability is missing actual input $requiredMenuInput."
