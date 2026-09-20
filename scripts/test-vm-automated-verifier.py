@@ -410,13 +410,16 @@ class PredicateTests(unittest.TestCase):
                              'rail_group': group, 'expected_reachable': True, 'exclusion_reason': None})
         bindings = [{key: value for key, value in control.items()
                      if key not in {'rail', 'rail_group', 'expected_reachable', 'exclusion_reason'}} for control in controls]
-        state = {'fixture_entries': [self.fixture('navigation.txt')], 'journal_entries': []}
-        raw = {'schema_version': 1, 'input_method': 'keyboard', 'initial': bindings[0], 'final': bindings[-1],
+        state = {'fixture_root': self.environment['fixture_volume']['root_path'],
+                 'root_identity': self.environment['fixture_volume']['root_identity'],
+                 'fixture_entries': [self.fixture('navigation.txt')], 'journal_entries': []}
+        raw = {'schema_version': 1, 'input_method': 'keyboard', 'initial': bindings[0], 'final': bindings[0],
                'controls': controls, 'state_before': deepcopy(state), 'state_after': deepcopy(state),
                'transitions': [{'sequence': index, 'input': 'tab' if index in {1, 11} else 'down',
                                 'from': bindings[index - 1], 'to': bindings[index]} for index in range(1, len(bindings))]}
+        raw['transitions'].append({'sequence': len(bindings), 'input': 'tab', 'from': bindings[-1], 'to': bindings[0]})
         verify_focus_reachability(raw, self.environment)
-        for mutation in ('missing-target', 'fake-input', 'broken-chain', 'file-change', 'foreign-session', 'unfocused'):
+        for mutation in ('missing-target', 'fake-input', 'broken-chain', 'file-change', 'foreign-session', 'unfocused', 'all-tab', 'catalog-disabled', 'foreign-volume'):
             changed = deepcopy(raw)
             if mutation == 'missing-target':
                 changed['transitions'].pop()
@@ -425,7 +428,14 @@ class PredicateTests(unittest.TestCase):
             elif mutation == 'broken-chain': changed['transitions'][1]['from'] = changed['initial']
             elif mutation == 'file-change': changed['state_after']['fixture_entries'][0]['content_sha256'] = 'f' * 64
             elif mutation == 'foreign-session': changed['transitions'][0]['to']['session_id'] = 3
-            else: changed['transitions'][0]['to']['keyboard_focusable'] = False
+            elif mutation == 'unfocused': changed['transitions'][0]['to']['keyboard_focusable'] = False
+            elif mutation == 'all-tab':
+                for transition in changed['transitions']: transition['input'] = 'tab'
+            elif mutation == 'catalog-disabled':
+                changed['controls'][1].update(enabled=False, expected_reachable=False, exclusion_reason='disabled')
+            else:
+                for phase in ('state_before', 'state_after'):
+                    changed[phase]['fixture_entries'][0]['file_identity']['volume_serial'] = 'f' * 16
             with self.subTest(mutation=mutation), self.assertRaises(EvidenceError):
                 verify_focus_reachability(changed, self.environment)
 

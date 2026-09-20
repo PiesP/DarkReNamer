@@ -390,6 +390,7 @@ def verify_focus_reachability(value: object, environment: dict) -> None:
     require(type(row["controls"]) is list and len(row["controls"]) == len(FOCUS_ORDER),
             "Reachability must inventory the list and every rail command.")
     required = set()
+    catalog = {}
     for raw, identifier, group in zip(row["controls"], FOCUS_ORDER, FOCUS_GROUPS, strict=True):
         control = require_exact_keys(raw, binding_keys | {"rail", "rail_group", "expected_reachable", "exclusion_reason"}, "Reachability control")
         item = binding({key: control[key] for key in binding_keys}, focused=False)
@@ -405,31 +406,86 @@ def verify_focus_reachability(value: object, environment: dict) -> None:
         require(control["expected_reachable"] is reachable and
                 control["exclusion_reason"] == (None if reachable else "disabled"),
                 "Reachability exclusions differ from actual command availability.")
+        catalog[identifier] = item
         if reachable:
             required.add(identifier)
     require("1000" in required, "The production list must remain keyboard reachable.")
-    current = binding(row["initial"], focused=True)
-    reached = {current["automation_id"]} & required
+    def joined_binding(raw: object) -> dict:
+        item = binding(raw, focused=True)
+        identifier = item["automation_id"]
+        if identifier in catalog:
+            immutable = binding_keys - {"keyboard_focusable"}
+            require({key: item[key] for key in immutable} ==
+                    {key: catalog[identifier][key] for key in immutable},
+                    "Focused binding differs from the observed control catalog.")
+        else:
+            require(identifier == "", "Focus belongs to an unknown command.")
+        return item
+
+    current = joined_binding(row["initial"])
     transitions = row["transitions"]
     require(type(transitions) is list and 0 < len(transitions) <= 256, "Keyboard transition inventory is missing or unbounded.")
+    parsed = []
     for sequence, raw in enumerate(transitions, 1):
         transition = require_exact_keys(raw, {"sequence", "input", "from", "to"}, "Keyboard transition")
         require_int(transition["sequence"], sequence, sequence, "Transition sequence")
-        require(transition["input"] in {"tab", "f6", "up", "down"}, "Reachability used a non-navigation action.")
-        before = binding(transition["from"], focused=True)
-        after = binding(transition["to"], focused=True)
-        require(before == current, "Keyboard navigation observations are not contiguous.")
+        require(transition["input"] in {"tab", "down"}, "Reachability used an action outside the frozen navigation contract.")
+        before = joined_binding(transition["from"])
+        after = joined_binding(transition["to"])
         require(after["automation_id"] != before["automation_id"], "Keyboard input did not move focus.")
-        reached.add(after["automation_id"])
+        parsed.append((transition["input"], before, after))
+    offset = 0
+
+    def consume(expected_input: str) -> None:
+        nonlocal offset, current
+        require(offset < len(parsed), "Required navigation transition is missing.")
+        action, before, after = parsed[offset]
+        require(action == expected_input and before == current,
+                "Keyboard transcript does not replay the frozen Tab/Down navigation state machine.")
         current = after
-    require(binding(row["final"], focused=True) == current and required <= reached,
-            "Actual keyboard navigation did not reach every required enabled control.")
+        offset += 1
+
+    def move_to_scope(identifiers: set[str]) -> None:
+        for _ in range(32):
+            if current["automation_id"] in identifiers:
+                return
+            consume("tab")
+        raise EvidenceError("Keyboard Tab did not reach the required scope within its bound.")
+
+    visited = set()
+    scopes = ({"1000"}, set(FOCUS_ORDER[1:11]), set(FOCUS_ORDER[11:]))
+    for scope in scopes:
+        members = required & scope
+        if not members:
+            continue
+        move_to_scope(members)
+        identifier = current["automation_id"]
+        require(identifier not in visited, "Keyboard traversal revisited a rail before entering its required scope.")
+        visited.add(identifier)
+        if members != {"1000"}:
+            while not members <= visited:
+                consume("down")
+                identifier = current["automation_id"]
+                require(identifier in members and identifier not in visited,
+                        "Keyboard arrow navigation left its rail or cycled before reaching every enabled command.")
+                visited.add(identifier)
+    move_to_scope({"1000"})
+    require(offset == len(parsed) and joined_binding(row["final"]) == current and visited == required,
+            "Keyboard transcript has unused transitions or incomplete required command coverage.")
     states = []
+    environment_root = environment["fixture_volume"]
+    root_identity = Identity.parse(environment_root["root_identity"])
     for name in ("state_before", "state_after"):
-        state = require_exact_keys(row[name], {"fixture_entries", "journal_entries"}, "Navigation state")
-        states.append((fixture_inventory(state["fixture_entries"], full_identity=True),
-                       clean_journal_inventory(state["journal_entries"])))
+        state = require_exact_keys(row[name], {"fixture_root", "root_identity", "fixture_entries", "journal_entries"}, "Navigation state")
+        require(state["fixture_root"] == environment_root["root_path"] and
+                Identity.parse(state["root_identity"]) == root_identity,
+                "Navigation state belongs to another observed fixture root.")
+        inventory = fixture_inventory(state["fixture_entries"], full_identity=True)
+        require(all(item.identity.volume == root_identity.volume for item in inventory.values()),
+                "Navigation fixture file belongs to another observed volume.")
+        states.append((inventory, clean_journal_inventory(state["journal_entries"])))
     require(states[0] == states[1], "Keyboard reachability changed files or journal state.")
+
 
 def verify_execution_freshness(reader: EvidenceReader, result: dict, transport: dict, *,
                                run_prefix: str, seen: set[tuple], vm_ids: set[str]) -> None:
