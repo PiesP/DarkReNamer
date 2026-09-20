@@ -12,6 +12,7 @@
   },
   "tests": [
     { "id": "tooling-registry", "path": "scripts/tooling-registry-tests.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "category": "registry", "requiresVm": false, "timeout": 120 },
+    { "id": "tooling-powershell-bootstrap", "path": "scripts/test-tooling-powershell-bootstrap.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "category": "vm-contract", "requiresVm": false, "timeout": 120 },
     { "id": "tooling-bootstrap", "path": "scripts/test-tooling-bootstrap.py", "runner": "Python", "platforms": ["Ubuntu"], "category": "vm-contract", "requiresVm": false, "timeout": 120 },
     { "id": "release-handoff-validator", "path": "scripts/test-release-handoff-validator.ps1", "runner": "PowerShell", "platforms": ["Ubuntu"], "category": "release", "requiresVm": false, "timeout": 300 },
     { "id": "windows-vm-guest", "path": "scripts/test-windows-vm-guest.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "category": "vm-contract", "requiresVm": false, "timeout": 300 },
