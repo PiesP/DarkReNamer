@@ -418,6 +418,33 @@ function New-DirectControllerSession {
     New-PSSession -VMId $VmId -Credential $Credential
 }
 
+function Resolve-AcceptanceRescuePollState {
+    param(
+        [AllowNull()][string] $ResultStatus,
+        [Parameter(Mandatory = $true)][string] $TaskState,
+        [Parameter(Mandatory = $true)][object] $TaskResult,
+        [Parameter(Mandatory = $true)][long] $RegisteredLastRunTimeTicks,
+        [Parameter(Mandatory = $true)][long] $LastRunTimeTicks
+    )
+
+    if (($TaskResult -isnot [int] -and $TaskResult -isnot [long] -and
+            $TaskResult -isnot [uint32]) -or
+        [decimal]$TaskResult -lt 0 -or [decimal]$TaskResult -gt [uint32]::MaxValue) {
+        throw 'Rescue task polling returned an invalid LastTaskResult.'
+    }
+    if ($RegisteredLastRunTimeTicks -lt 0 -or $LastRunTimeTicks -lt 0) {
+        throw 'Rescue task polling returned an invalid LastRunTime.'
+    }
+    [pscustomobject][ordered]@{
+        result_status = $ResultStatus
+        task_state = $TaskState
+        task_result = [long]$TaskResult
+        last_run_time_ticks = $LastRunTimeTicks
+        terminal = $TaskState -ceq 'Ready' -and
+            $LastRunTimeTicks -gt $RegisteredLastRunTimeTicks
+    }
+}
+
 function Invoke-AcceptanceTextScaleRescue {
     param(
         [Parameter(Mandatory = $true)][Management.Automation.Runspaces.PSSession] $Session,
@@ -433,7 +460,7 @@ function Invoke-AcceptanceTextScaleRescue {
     )
 
     $rescueTimeout = [Math]::Max(120, [Math]::Min(600, $SuiteTimeoutSeconds))
-    Invoke-Command -Session $Session -ArgumentList $GuestRoot,$DesktopSid,$DesktopSessionId,$TaskName,$TestTimeoutSeconds,$rescueTimeout,$ObserverSha256,$Appearance -ScriptBlock {
+    $rescueGeneration = Invoke-Command -Session $Session -ArgumentList $GuestRoot,$DesktopSid,$DesktopSessionId,$TaskName,$TestTimeoutSeconds,$rescueTimeout,$ObserverSha256,$Appearance -ScriptBlock {
         param($root,$sid,$desktopSession,$name,$testTimeout,$rescueSeconds,$observerHash,$appearance)
         $existing = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
         if ($existing) {
@@ -468,29 +495,54 @@ function Invoke-AcceptanceTextScaleRescue {
         $principal = New-ScheduledTaskPrincipal -UserId $sid -LogonType Interactive -RunLevel Limited
         $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds ($rescueSeconds + 30))
         Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Settings $settings | Out-Null
-        Start-ScheduledTask -TaskName $name
+        $registered = Get-ScheduledTaskInfo -TaskName $name
+        $registeredTicks = [long]$registered.LastRunTime.Ticks
+        Start-ScheduledTask -TaskName $name | Out-Null
+        [pscustomobject][ordered]@{
+            registered_last_run_time_ticks = $registeredTicks
+        }
     }
 
     $deadline = (Get-Date).AddSeconds($rescueTimeout)
+    $rescue = $null
     do {
         Start-Sleep -Seconds 2
-        $rescue = Invoke-Command -Session $Session -ArgumentList $GuestRoot,$TaskName -ScriptBlock {
+        $observed = Invoke-Command -Session $Session -ArgumentList $GuestRoot,$TaskName -ScriptBlock {
             param($root,$name)
             $resultPath = Join-Path (Join-Path $root 'out') 'text-scale-rescue-result.json'
+            $info = Get-ScheduledTaskInfo -TaskName $name
+            $task = Get-ScheduledTask -TaskName $name
+            $taskState = $task.State.ToString()
+            $taskResult = [long]$info.LastTaskResult
+            if ($taskState -ceq 'Ready') {
+                $terminalInfo = Get-ScheduledTaskInfo -TaskName $name
+                $taskResult = [long]$terminalInfo.LastTaskResult
+            }
+            $resultStatus = $null
             if (Test-Path -LiteralPath $resultPath) {
                 try {
                     $document = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
-                    [pscustomobject]@{status=[string]$document.status;task_result=0}
-                    return
+                    $resultStatus = [string]$document.status
                 } catch {}
             }
-            $task = Get-ScheduledTask -TaskName $name
-            $info = Get-ScheduledTaskInfo -TaskName $name
-            [pscustomobject]@{status=$task.State.ToString();task_result=$info.LastTaskResult}
+            [pscustomobject]@{
+                result_status = $resultStatus
+                task_state = $taskState
+                task_result = $taskResult
+                last_run_time_ticks = [long]$info.LastRunTime.Ticks
+            }
         }
-        if ($rescue.status -in @('passed', 'failed')) { break }
-        if ($rescue.status -eq 'Ready' -and $rescue.task_result -ne 0) { break }
+        $rescue = Resolve-AcceptanceRescuePollState `
+            -ResultStatus $observed.result_status `
+            -TaskState $observed.task_state `
+            -TaskResult $observed.task_result `
+            -RegisteredLastRunTimeTicks $rescueGeneration.registered_last_run_time_ticks `
+            -LastRunTimeTicks $observed.last_run_time_ticks
+        if ($rescue.terminal) { break }
     } while ((Get-Date) -lt $deadline)
+    if ($null -eq $rescue -or -not $rescue.terminal) {
+        throw 'Text-scale rescue timed out before the scheduled task reached its terminal state.'
+    }
 
     $rescueFiles = @(Invoke-Command -Session $Session -ArgumentList $GuestRoot -ScriptBlock {
         param($root)
@@ -527,7 +579,7 @@ function Invoke-AcceptanceTextScaleRescue {
             throw 'Collected text-scale rescue evidence hash mismatch.'
         }
     }
-    if ($rescue.status -cne 'passed') {
+    if ($rescue.result_status -cne 'passed' -or $rescue.task_result -ne 0) {
         throw 'Text-scale rescue did not verify exact restoration; inspect rescue evidence.'
     }
 }
@@ -546,7 +598,7 @@ function Invoke-AcceptanceHighContrastRescue {
     )
 
     $rescueTimeout = [Math]::Max(120, [Math]::Min(600, $SuiteTimeoutSeconds))
-    Invoke-Command -Session $Session -ArgumentList $GuestRoot,$DesktopSid,$DesktopSessionId,$TaskName,$TestTimeoutSeconds,$rescueTimeout,$ObserverSha256 -ScriptBlock {
+    $rescueGeneration = Invoke-Command -Session $Session -ArgumentList $GuestRoot,$DesktopSid,$DesktopSessionId,$TaskName,$TestTimeoutSeconds,$rescueTimeout,$ObserverSha256 -ScriptBlock {
         param($root,$sid,$desktopSession,$name,$testTimeout,$rescueSeconds,$observerHash)
         $existing = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
         if ($existing) {
@@ -580,29 +632,54 @@ function Invoke-AcceptanceHighContrastRescue {
         $principal = New-ScheduledTaskPrincipal -UserId $sid -LogonType Interactive -RunLevel Limited
         $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds ($rescueSeconds + 30))
         Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Settings $settings | Out-Null
-        Start-ScheduledTask -TaskName $name
+        $registered = Get-ScheduledTaskInfo -TaskName $name
+        $registeredTicks = [long]$registered.LastRunTime.Ticks
+        Start-ScheduledTask -TaskName $name | Out-Null
+        [pscustomobject][ordered]@{
+            registered_last_run_time_ticks = $registeredTicks
+        }
     }
 
     $deadline = (Get-Date).AddSeconds($rescueTimeout)
+    $rescue = $null
     do {
         Start-Sleep -Seconds 2
-        $rescue = Invoke-Command -Session $Session -ArgumentList $GuestRoot,$TaskName -ScriptBlock {
+        $observed = Invoke-Command -Session $Session -ArgumentList $GuestRoot,$TaskName -ScriptBlock {
             param($root,$name)
             $resultPath = Join-Path (Join-Path $root 'out') 'high-contrast-rescue-result.json'
+            $info = Get-ScheduledTaskInfo -TaskName $name
+            $task = Get-ScheduledTask -TaskName $name
+            $taskState = $task.State.ToString()
+            $taskResult = [long]$info.LastTaskResult
+            if ($taskState -ceq 'Ready') {
+                $terminalInfo = Get-ScheduledTaskInfo -TaskName $name
+                $taskResult = [long]$terminalInfo.LastTaskResult
+            }
+            $resultStatus = $null
             if (Test-Path -LiteralPath $resultPath) {
                 try {
                     $document = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
-                    [pscustomobject]@{status=[string]$document.status;task_result=0}
-                    return
+                    $resultStatus = [string]$document.status
                 } catch {}
             }
-            $task = Get-ScheduledTask -TaskName $name
-            $info = Get-ScheduledTaskInfo -TaskName $name
-            [pscustomobject]@{status=$task.State.ToString();task_result=$info.LastTaskResult}
+            [pscustomobject]@{
+                result_status = $resultStatus
+                task_state = $taskState
+                task_result = $taskResult
+                last_run_time_ticks = [long]$info.LastRunTime.Ticks
+            }
         }
-        if ($rescue.status -in @('passed', 'failed')) { break }
-        if ($rescue.status -eq 'Ready' -and $rescue.task_result -ne 0) { break }
+        $rescue = Resolve-AcceptanceRescuePollState `
+            -ResultStatus $observed.result_status `
+            -TaskState $observed.task_state `
+            -TaskResult $observed.task_result `
+            -RegisteredLastRunTimeTicks $rescueGeneration.registered_last_run_time_ticks `
+            -LastRunTimeTicks $observed.last_run_time_ticks
+        if ($rescue.terminal) { break }
     } while ((Get-Date) -lt $deadline)
+    if ($null -eq $rescue -or -not $rescue.terminal) {
+        throw 'High Contrast rescue timed out before the scheduled task reached its terminal state.'
+    }
 
     $rescueFiles = @(Invoke-Command -Session $Session -ArgumentList $GuestRoot -ScriptBlock {
         param($root)
@@ -645,7 +722,7 @@ function Invoke-AcceptanceHighContrastRescue {
             throw 'Collected High Contrast rescue evidence hash mismatch.'
         }
     }
-    if ($rescue.status -cne 'passed') {
+    if ($rescue.result_status -cne 'passed' -or $rescue.task_result -ne 0) {
         throw 'High Contrast rescue did not verify exact restoration; inspect rescue evidence.'
     }
 }

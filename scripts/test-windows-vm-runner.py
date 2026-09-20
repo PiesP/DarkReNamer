@@ -6,6 +6,8 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -65,6 +67,114 @@ class VmRunnerTests(unittest.TestCase):
 
     def verify(self):
         return vm.verify_result(self.root, self.manifest, self.result)
+
+    def powershell_function(self, name):
+        pwsh = shutil.which('pwsh')
+        if pwsh is None:
+            self.skipTest('PowerShell 7 is unavailable')
+        controller = Path(__file__).with_name('run-windows-vm-tests.ps1')
+        command = r'''
+            $tokens = $null
+            $parseErrors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile(
+                $env:VM_RUNNER_CONTROLLER, [ref]$tokens, [ref]$parseErrors)
+            if ($parseErrors.Count -ne 0) { throw 'Controller has PowerShell parse errors.' }
+            $functionName = $env:VM_RUNNER_FUNCTION
+            $functions = @($ast.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -ceq $functionName
+            }, $true))
+            if ($functions.Count -ne 1) { throw 'Expected exactly one matching function.' }
+            $functions[0].Extent.Text
+        '''
+        completed = subprocess.run(
+            [pwsh, '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+             command], check=True, capture_output=True, text=True, timeout=20,
+            env={**os.environ, 'VM_RUNNER_CONTROLLER': str(controller),
+                 'VM_RUNNER_FUNCTION': name})
+        return completed.stdout
+
+    def test_rescue_poll_requires_terminal_task_after_result_document(self):
+        function = self.powershell_function('Resolve-AcceptanceRescuePollState')
+        cases = [
+            {'result_status': 'passed', 'task_state': 'Ready', 'task_result': 0,
+             'registered_ticks': 100, 'last_run_ticks': 100},
+            {'result_status': 'failed', 'task_state': 'Running', 'task_result': 1,
+             'registered_ticks': 100, 'last_run_ticks': 101},
+            {'result_status': 'passed', 'task_state': 'Ready', 'task_result': 0,
+             'registered_ticks': 100, 'last_run_ticks': 101},
+            {'result_status': 'passed', 'task_state': 'Ready', 'task_result': 3221225786,
+             'registered_ticks': 100, 'last_run_ticks': 101},
+            {'result_status': None, 'task_state': 'Ready', 'task_result': 7,
+             'registered_ticks': 100, 'last_run_ticks': 101},
+        ]
+        script = function + r'''
+            $cases = $env:VM_RUNNER_CASES | ConvertFrom-Json
+            @($cases | ForEach-Object {
+                Resolve-AcceptanceRescuePollState `
+                    -ResultStatus $_.result_status `
+                    -TaskState $_.task_state `
+                    -TaskResult $_.task_result `
+                    -RegisteredLastRunTimeTicks $_.registered_ticks `
+                    -LastRunTimeTicks $_.last_run_ticks
+            }) | ConvertTo-Json -Compress -Depth 4
+        '''
+        completed = subprocess.run(
+            [shutil.which('pwsh'), '-NoLogo', '-NoProfile', '-NonInteractive',
+             '-Command', script], check=True, capture_output=True, text=True,
+            timeout=20, env={**os.environ, 'VM_RUNNER_CASES': json.dumps(
+                cases, separators=(',', ':'))})
+        observed = json.loads(completed.stdout)
+        self.assertEqual([row['terminal'] for row in observed],
+                         [False, False, True, True, True])
+        self.assertEqual(
+            [(row['result_status'], row['task_state'], row['task_result'],
+              row['last_run_time_ticks'])
+             for row in observed],
+            [(row['result_status'], row['task_state'], row['task_result'],
+              row['last_run_ticks'])
+             for row in cases[:-1]] + [('', 'Ready', 7, 101)])
+
+    def test_rescue_collectors_wait_for_terminal_task_before_moving_streams(self):
+        for name, label in (
+                ('Invoke-AcceptanceTextScaleRescue', 'Text-scale'),
+                ('Invoke-AcceptanceHighContrastRescue', 'High Contrast')):
+            with self.subTest(function=name):
+                function = self.powershell_function(name)
+                self.assertIn('Get-ScheduledTaskInfo -TaskName $name', function)
+                baseline = function.index(
+                    '$registered = Get-ScheduledTaskInfo -TaskName $name')
+                start = function.index('Start-ScheduledTask -TaskName $name')
+                self.assertLess(baseline, start)
+                poll = function.index(
+                    '$info = Get-ScheduledTaskInfo -TaskName $name', start)
+                task_state = function.index(
+                    '$task = Get-ScheduledTask -TaskName $name', poll)
+                terminal_result = function.index(
+                    '$terminalInfo = Get-ScheduledTaskInfo -TaskName $name',
+                    task_state)
+                result = function.index(
+                    'Get-Content -LiteralPath $resultPath', terminal_result)
+                self.assertLess(poll, task_state)
+                self.assertLess(task_state, terminal_result)
+                self.assertLess(terminal_result, result)
+                self.assertIn(
+                    "if ($taskState -ceq 'Ready')", function)
+                self.assertIn(
+                    '$taskResult = [long]$terminalInfo.LastTaskResult', function)
+                self.assertIn('Resolve-AcceptanceRescuePollState', function)
+                self.assertIn(
+                    '-RegisteredLastRunTimeTicks '
+                    '$rescueGeneration.registered_last_run_time_ticks', function)
+                self.assertIn('if ($rescue.terminal) { break }', function)
+                timeout = function.index(
+                    f"throw '{label} rescue timed out before the scheduled task "
+                    "reached its terminal state.'")
+                self.assertLess(timeout, function.index('Move-Item -LiteralPath'))
+                self.assertIn("$rescue.result_status -cne 'passed'", function)
+                self.assertIn('$rescue.task_result -ne 0', function)
+                self.assertNotIn("$rescue.status -in @('passed', 'failed')", function)
 
     def candidate_evidence(self):
         metadata = {
