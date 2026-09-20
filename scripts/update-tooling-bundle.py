@@ -39,6 +39,84 @@ INVENTORY = (
     ("evidence-cli", "scripts/darkrenamer_tooling/evidence/cli.py", "tooling-evidence-cli.py", "python", "darkrenamer_tooling.evidence.cli", ("tooling-loader", "package-root", "package-evidence", "evidence-archive", "package-campaign", "campaign-verifier", "package-contracts", "contracts-binding", "contracts-tooling")),
 )
 
+GUEST_PRIVATE_ROLES = (
+    "powershell-guest-contracts", "powershell-guest-process", "powershell-guest-native",
+    "powershell-guest-platform", "powershell-guest-uia", "powershell-guest-state",
+    "powershell-guest-scenario", "powershell-guest-runtime",
+)
+UI_PRIVATE_ROLES = (
+    "powershell-ui-bootstrap", "powershell-ui-appearance", "powershell-ui-native",
+    "powershell-ui-menu", "powershell-ui-input", "powershell-ui-application",
+    "powershell-ui-fixtures", "powershell-ui-context-scenarios",
+    "powershell-ui-regression", "powershell-ui-current-dpi",
+)
+RECOVERY_PRIVATE_ROLES = (
+    "powershell-recovery-bootstrap", "powershell-recovery-journal",
+    "powershell-recovery-evidence", "powershell-recovery-process",
+    "powershell-recovery-native", "powershell-recovery-worker",
+    "powershell-recovery-scenarios",
+)
+CONTROLLER_PRIVATE_ROLES = (
+    "powershell-controller-contracts", "powershell-controller-transport",
+    "powershell-controller-poll", "powershell-controller-rescue",
+)
+
+
+def powershell_entry(role: str, filename: str, dependencies: tuple[str, ...] = ()):
+    return (
+        role,
+        "scripts/" + filename if role == "powershell-loader" else
+        "scripts/modules/powershell/" + filename,
+        "tooling-loader.ps1" if role == "powershell-loader" else filename,
+        "powershell",
+        None,
+        dependencies,
+    )
+
+
+POWERSHELL_INVENTORY = (
+    powershell_entry("powershell-loader", "tooling-bootstrap.ps1"),
+    powershell_entry("powershell-guest-contracts", "guest-contracts.ps1"),
+    powershell_entry("powershell-guest-process", "guest-process.ps1"),
+    powershell_entry("powershell-guest-native", "guest-native.ps1"),
+    powershell_entry("powershell-guest-platform", "guest-platform.ps1"),
+    powershell_entry("powershell-guest-uia", "guest-uia.ps1"),
+    powershell_entry("powershell-guest-state", "guest-state.ps1"),
+    powershell_entry("powershell-guest-scenario", "guest-scenario.ps1"),
+    powershell_entry("powershell-guest-runtime", "guest-runtime.ps1"),
+    powershell_entry("powershell-guest-entry", "guest-entry.psm1",
+                     ("powershell-loader", *GUEST_PRIVATE_ROLES)),
+    powershell_entry("powershell-ui-bootstrap", "ui-bootstrap.ps1"),
+    powershell_entry("powershell-ui-appearance", "ui-appearance.ps1"),
+    powershell_entry("powershell-ui-native", "ui-native.ps1"),
+    powershell_entry("powershell-ui-menu", "ui-menu.ps1"),
+    powershell_entry("powershell-ui-input", "ui-input.ps1"),
+    powershell_entry("powershell-ui-application", "ui-application.ps1"),
+    powershell_entry("powershell-ui-fixtures", "ui-fixtures.ps1"),
+    powershell_entry("powershell-ui-context-scenarios", "ui-context-scenarios.ps1"),
+    powershell_entry("powershell-ui-regression", "ui-regression.ps1"),
+    powershell_entry("powershell-ui-current-dpi", "ui-current-dpi.ps1"),
+    powershell_entry("powershell-ui-entry", "ui-entry.psm1",
+                     ("powershell-loader", *UI_PRIVATE_ROLES, *GUEST_PRIVATE_ROLES)),
+    powershell_entry("powershell-recovery-bootstrap", "recovery-bootstrap.ps1"),
+    powershell_entry("powershell-recovery-journal", "recovery-journal.ps1"),
+    powershell_entry("powershell-recovery-evidence", "recovery-evidence.ps1"),
+    powershell_entry("powershell-recovery-process", "recovery-process.ps1"),
+    powershell_entry("powershell-recovery-native", "recovery-native.ps1"),
+    powershell_entry("powershell-recovery-worker", "recovery-worker.ps1"),
+    powershell_entry("powershell-recovery-scenarios", "recovery-scenarios.ps1"),
+    powershell_entry("powershell-recovery-entry", "recovery-entry.psm1",
+                     ("powershell-loader", *RECOVERY_PRIVATE_ROLES, *GUEST_PRIVATE_ROLES)),
+    powershell_entry("powershell-controller-contracts", "controller-contracts.ps1"),
+    powershell_entry("powershell-controller-transport", "controller-transport.ps1"),
+    powershell_entry("powershell-controller-poll", "controller-poll.ps1"),
+    powershell_entry("powershell-controller-rescue", "controller-rescue.ps1"),
+    powershell_entry("powershell-controller-entry", "controller-entry.psm1", (
+        "powershell-loader", *CONTROLLER_PRIVATE_ROLES, "powershell-guest-entry",
+        "powershell-ui-entry", "powershell-recovery-entry",
+    )),
+)
+
 PUBLIC_BOOTSTRAPS = (
     "scripts/test-windows-vm.py",
     "scripts/run-gui-regression.py",
@@ -47,8 +125,18 @@ PUBLIC_BOOTSTRAPS = (
     "scripts/validate-vm-automated-evidence.py",
     "scripts/validate-vm-automated-authority.py",
 )
+POWERSHELL_BOOTSTRAPS = (
+    "scripts/run-windows-vm-tests.ps1",
+    "scripts/windows-vm-guest.ps1",
+    "scripts/windows-vm-acceptance.ps1",
+    "scripts/windows-vm-recovery-acceptance.ps1",
+)
 PIN_PATTERN = re.compile(
     r'^(TOOLING_(?:MANIFEST|LOADER)_SHA256 = )(?:(?:"[0-9a-f]{64}")|(?:"0" \* 64))$',
+    re.MULTILINE,
+)
+POWERSHELL_PIN_PATTERN = re.compile(
+    r"^(\$(?:ToolingManifestSha256|ToolingLoaderSha256) = )'[0-9a-f]{64}'$",
     re.MULTILINE,
 )
 
@@ -57,9 +145,15 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def selected_inventory(root: Path):
+    if (root / "scripts" / "modules" / "powershell").exists():
+        return INVENTORY + POWERSHELL_INVENTORY
+    return INVENTORY
+
+
 def manifest_bytes(root: Path) -> bytes:
     modules = []
-    for role, source, bundle, kind, module, dependencies in INVENTORY:
+    for role, source, bundle, kind, module, dependencies in selected_inventory(root):
         data = (root / source).read_bytes()
         modules.append({
             "role": role,
@@ -90,8 +184,28 @@ def updated_bootstrap(data: bytes, *, manifest_sha256: str, loader_sha256: str) 
     return changed.encode()
 
 
+def updated_powershell_bootstrap(
+    data: bytes, *, manifest_sha256: str, loader_sha256: str
+) -> bytes:
+    text = data.decode("utf-8-sig")
+    replacements = {
+        "$ToolingManifestSha256": manifest_sha256,
+        "$ToolingLoaderSha256": loader_sha256,
+    }
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(1).split(" =", 1)[0]
+        return match.group(1) + "'" + replacements[name] + "'"
+
+    changed, count = POWERSHELL_PIN_PATTERN.subn(replace, text)
+    if count != 2:
+        raise ValueError("PowerShell bootstrap does not contain exactly two generated tooling pins.")
+    prefix = b"\xef\xbb\xbf" if data.startswith(b"\xef\xbb\xbf") else b""
+    return prefix + changed.encode("utf-8")
+
+
 def unregistered_modules(root: Path) -> list[str]:
-    registered = {source for _role, source, _bundle, _kind, _module, _deps in INVENTORY}
+    registered = {source for _role, source, _bundle, _kind, _module, _deps in selected_inventory(root)}
     actual = {
         path.relative_to(root).as_posix()
         for path in (root / "scripts" / "darkrenamer_tooling").rglob("*.py")
@@ -104,7 +218,8 @@ def main(argv=None) -> int:
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parent.parent
-    missing = [source for _role, source, _bundle, _kind, _module, _deps in INVENTORY
+    inventory = selected_inventory(root)
+    missing = [source for _role, source, _bundle, _kind, _module, _deps in inventory
                if not (root / source).is_file()]
     extras = unregistered_modules(root)
     if missing or extras:
@@ -122,6 +237,14 @@ def main(argv=None) -> int:
         expected[path] = updated_bootstrap(
             path.read_bytes(), manifest_sha256=manifest_sha256, loader_sha256=loader_sha256
         )
+    if inventory != INVENTORY:
+        powershell_loader_sha256 = digest((root / "scripts" / "tooling-bootstrap.ps1").read_bytes())
+        for relative in POWERSHELL_BOOTSTRAPS:
+            path = root / relative
+            expected[path] = updated_powershell_bootstrap(
+                path.read_bytes(), manifest_sha256=manifest_sha256,
+                loader_sha256=powershell_loader_sha256,
+            )
     stale = [path for path, data in expected.items() if not path.is_file() or path.read_bytes() != data]
     if args.check:
         for path in stale:

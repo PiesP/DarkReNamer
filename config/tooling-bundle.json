@@ -251,7 +251,7 @@
       "bundle": "tooling-contracts-tooling.py",
       "kind": "python",
       "module": "darkrenamer_tooling.contracts.tooling",
-      "sha256": "925cfc048211e6bddb2efb5e6aed4102e31ee9fbbb2069dc59540da1e8044fc2",
+      "sha256": "d8001f574e34fae63775696ef3db62c5361b3025eaf638a17f2d98879a6e52e0",
       "dependencies": [
         "package-root",
         "package-contracts",

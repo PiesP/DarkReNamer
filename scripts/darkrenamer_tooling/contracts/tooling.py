@@ -200,7 +200,9 @@ def verify_retained_tooling(reader, prefix: str, trusted: dict[str, object]) -> 
         PurePosixPath(path).name
         for path in reader.evidence.files
         if str(PurePosixPath(path).parent) == parent
-        and PurePosixPath(path).name.startswith("tooling-")
+        and PurePosixPath(path).name.startswith(
+            ("tooling-", "guest-", "ui-", "recovery-", "controller-")
+        )
         and PurePosixPath(path).suffix in {".py", ".ps1", ".psm1"}
     }
     _require(observed_names == expected_names - {MANIFEST_NAME},
