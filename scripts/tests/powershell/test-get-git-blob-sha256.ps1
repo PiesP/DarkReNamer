@@ -1,10 +1,14 @@
 [CmdletBinding()]
 param()
 
+. (Join-Path $PSScriptRoot '../support/paths.ps1')
+$toolingTestPaths = Get-ToolingTestPaths
+$toolingScriptsRoot = $toolingTestPaths.ScriptsRoot
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$hasher = Join-Path $PSScriptRoot 'get-git-blob-sha256.ps1'
+$hasher = Join-Path $toolingScriptsRoot 'get-git-blob-sha256.ps1'
 if (-not (Test-Path -LiteralPath $hasher -PathType Leaf)) {
     throw "Git blob hasher is missing: $hasher"
 }

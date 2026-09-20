@@ -1,14 +1,18 @@
 [CmdletBinding()]
 param()
 
+. (Join-Path $PSScriptRoot '../support/paths.ps1')
+$toolingTestPaths = Get-ToolingTestPaths
+$toolingScriptsRoot = $toolingTestPaths.ScriptsRoot
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$measurer = Join-Path $PSScriptRoot 'measure-windows-binary.ps1'
+$measurer = Join-Path $toolingScriptsRoot 'measure-windows-binary.ps1'
 if (-not (Test-Path -LiteralPath $measurer -PathType Leaf)) {
     throw "Windows binary measurer is missing: $measurer"
 }
-. (Join-Path $PSScriptRoot 'test-support/windows-binary-fixture.ps1')
+. (Join-Path $toolingScriptsRoot 'tests/support/windows-binary-fixture.ps1')
 
 function Assert-MeasurerFails {
     param(

@@ -1,11 +1,15 @@
 [CmdletBinding()]
 param()
+. (Join-Path $PSScriptRoot '../support/paths.ps1')
+$toolingTestPaths = Get-ToolingTestPaths
+$toolingScriptsRoot = $toolingTestPaths.ScriptsRoot
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$augmenter = Join-Path $PSScriptRoot 'add-windows-acceptance-benchmark.ps1'
-$draftGenerator = Join-Path $PSScriptRoot 'new-windows-acceptance-draft.ps1'
-$validator = Join-Path $PSScriptRoot 'validate-windows-acceptance-evidence.ps1'
+$augmenter = Join-Path $toolingScriptsRoot 'add-windows-acceptance-benchmark.ps1'
+$draftGenerator = Join-Path $toolingScriptsRoot 'new-windows-acceptance-draft.ps1'
+$validator = Join-Path $toolingScriptsRoot 'validate-windows-acceptance-evidence.ps1'
 foreach ($path in $augmenter, $draftGenerator, $validator) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required acceptance script is missing: $path" }
 }
@@ -89,7 +93,7 @@ function New-DirectoryLink([string]$Path, [string]$Target) {
     $script:links.Add($Path)
 }
 
-$sourceRoot = (Resolve-Path (Split-Path -Parent $PSScriptRoot)).Path
+$sourceRoot = (Resolve-Path (Split-Path -Parent $toolingScriptsRoot)).Path
 $sourceSha = (& git -C $sourceRoot rev-parse HEAD).Trim()
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "darkrenamer-benchmark-import-$([Guid]::NewGuid())"
 $links = [Collections.Generic.List[string]]::new()

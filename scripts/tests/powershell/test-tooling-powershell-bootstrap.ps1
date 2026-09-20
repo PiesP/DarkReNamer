@@ -1,6 +1,10 @@
-﻿$ErrorActionPreference = 'Stop'
+﻿. (Join-Path $PSScriptRoot '../support/paths.ps1')
+$toolingTestPaths = Get-ToolingTestPaths
+$toolingScriptsRoot = $toolingTestPaths.ScriptsRoot
 
-$bootstrapPath = Join-Path $PSScriptRoot 'tooling-bootstrap.ps1'
+$ErrorActionPreference = 'Stop'
+
+$bootstrapPath = Join-Path $toolingScriptsRoot 'tooling-bootstrap.ps1'
 $script:DrTestRoots = [Collections.Generic.List[string]]::new()
 $script:DrTestAssertions = 0
 $script:DrTestUtf8 = [Text.UTF8Encoding]::new($false)

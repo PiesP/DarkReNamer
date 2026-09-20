@@ -1,3 +1,7 @@
+. (Join-Path $PSScriptRoot '../support/paths.ps1')
+$toolingTestPaths = Get-ToolingTestPaths
+$toolingScriptsRoot = $toolingTestPaths.ScriptsRoot
+
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
@@ -13,7 +17,7 @@ function Assert-Fails {
     throw "Expected failure containing '$Fragment'."
 }
 
-$wrapper = Join-Path $PSScriptRoot 'run-vm-automated-hosted.ps1'
+$wrapper = Join-Path $toolingScriptsRoot 'run-vm-automated-hosted.ps1'
 . $wrapper -LibraryOnly
 
 Assert-HostedDecimal -Value '1' -Label 'fixture'
@@ -445,7 +449,7 @@ foreach ($forbidden in @('upload-artifact', 'http://', '-Uri $')) {
 }
 
 $workflow = Get-Content -LiteralPath (
-    Join-Path (Split-Path -Parent $PSScriptRoot) '.github/workflows/vm-acceptance.yaml'
+    Join-Path (Split-Path -Parent $toolingScriptsRoot) '.github/workflows/vm-acceptance.yaml'
 ) -Raw
 $deriveIndex = $workflow.IndexOf('name: Derive canonical statement from private raw evidence',
     [StringComparison]::Ordinal)

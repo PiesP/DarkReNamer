@@ -8,6 +8,7 @@ before entering the returned object's importer context.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import _imp
 import hashlib
 import importlib
 import importlib.abc
@@ -18,6 +19,7 @@ from pathlib import Path
 import re
 import stat
 import sys
+import threading
 from types import CodeType, MappingProxyType, ModuleType
 from typing import Any, Sequence
 
@@ -31,24 +33,66 @@ TOOLING_NAMESPACE = "darkrenamer_tooling"
 # Roles are authorization identifiers, not user-extensible labels. A manifest may
 # use only the roles and implementation kinds declared here.
 SUPPORTED_ROLES = MappingProxyType({
-    "tooling-bootstrap": ("python", "darkrenamer_tooling.bootstrap"),
+    "tooling-loader": ("python", "darkrenamer_tooling.loader"),
     "package-root": ("python-package", "darkrenamer_tooling"),
     "package-campaign": ("python-package", "darkrenamer_tooling.campaign"),
     "campaign-planning": ("python", "darkrenamer_tooling.campaign.planning"),
     "campaign-recovery": ("python", "darkrenamer_tooling.campaign.recovery"),
     "campaign-verifier": ("python", "darkrenamer_tooling.campaign.verifier"),
+    "campaign-runner": ("python", "darkrenamer_tooling.campaign.runner"),
+    "package-vm": ("python-package", "darkrenamer_tooling.vm"),
+    "vm-launcher": ("python", "darkrenamer_tooling.vm.launcher"),
+    "vm-gui": ("python", "darkrenamer_tooling.vm.gui"),
     "package-contracts": ("python-package", "darkrenamer_tooling.contracts"),
     "contracts-binding": ("python", "darkrenamer_tooling.contracts.binding"),
     "contracts-menu-layout": ("python", "darkrenamer_tooling.contracts.menu_layout"),
     "contracts-platform": ("python", "darkrenamer_tooling.contracts.platform"),
     "contracts-state": ("python", "darkrenamer_tooling.contracts.state"),
+    "contracts-authority": ("python", "darkrenamer_tooling.contracts.authority"),
+    "contracts-tooling": ("python", "darkrenamer_tooling.contracts.tooling"),
     "package-evidence": ("python-package", "darkrenamer_tooling.evidence"),
     "evidence-archive": ("python", "darkrenamer_tooling.evidence.archive"),
     "evidence-journal": ("python", "darkrenamer_tooling.evidence.journal"),
     "evidence-png": ("python", "darkrenamer_tooling.evidence.png"),
     "evidence-recovery": ("python", "darkrenamer_tooling.evidence.recovery"),
     "evidence-errors": ("python", "darkrenamer_tooling.evidence.errors"),
+    "evidence-gui": ("python", "darkrenamer_tooling.evidence.gui"),
+    "evidence-cli": ("python", "darkrenamer_tooling.evidence.cli"),
     "powershell-common": ("powershell", None),
+    "powershell-loader": ("powershell", None),
+    "powershell-guest-contracts": ("powershell", None),
+    "powershell-guest-process": ("powershell", None),
+    "powershell-guest-native": ("powershell", None),
+    "powershell-guest-platform": ("powershell", None),
+    "powershell-guest-uia": ("powershell", None),
+    "powershell-guest-state": ("powershell", None),
+    "powershell-guest-scenario": ("powershell", None),
+    "powershell-guest-runtime": ("powershell", None),
+    "powershell-guest-entry": ("powershell", None),
+    "powershell-ui-bootstrap": ("powershell", None),
+    "powershell-ui-appearance": ("powershell", None),
+    "powershell-ui-native": ("powershell", None),
+    "powershell-ui-menu": ("powershell", None),
+    "powershell-ui-input": ("powershell", None),
+    "powershell-ui-application": ("powershell", None),
+    "powershell-ui-fixtures": ("powershell", None),
+    "powershell-ui-context-scenarios": ("powershell", None),
+    "powershell-ui-regression": ("powershell", None),
+    "powershell-ui-current-dpi": ("powershell", None),
+    "powershell-ui-entry": ("powershell", None),
+    "powershell-recovery-bootstrap": ("powershell", None),
+    "powershell-recovery-journal": ("powershell", None),
+    "powershell-recovery-evidence": ("powershell", None),
+    "powershell-recovery-process": ("powershell", None),
+    "powershell-recovery-native": ("powershell", None),
+    "powershell-recovery-worker": ("powershell", None),
+    "powershell-recovery-scenarios": ("powershell", None),
+    "powershell-recovery-entry": ("powershell", None),
+    "powershell-controller-contracts": ("powershell", None),
+    "powershell-controller-transport": ("powershell", None),
+    "powershell-controller-poll": ("powershell", None),
+    "powershell-controller-rescue": ("powershell", None),
+    "powershell-controller-entry": ("powershell", None),
     "powershell-guest": ("powershell", None),
     "powershell-ui-observer": ("powershell", None),
     "powershell-recovery-observer": ("powershell", None),
@@ -107,6 +151,14 @@ class VerifiedTooling:
     required_roles: tuple[str, ...]
     entries: tuple[ManifestEntry, ...]
     _modules: tuple[_FrozenModule, ...]
+    _files: tuple[tuple[str, bytes], ...]
+
+    def bytes_for_role(self, role: str) -> bytes:
+        """Return the frozen bytes for staging without reopening a source file."""
+        for selected_role, data in self._files:
+            if selected_role == role:
+                return data
+        raise ToolingBootstrapError(f"role is outside the verified closure: {role}")
 
     def importer(self) -> _ImportScope:
         """Return a context that imports only the verified Python closure."""
@@ -114,8 +166,9 @@ class VerifiedTooling:
 
 
 class _FrozenLoader(importlib.abc.Loader):
-    def __init__(self, frozen: _FrozenModule) -> None:
+    def __init__(self, frozen: _FrozenModule, owner: object) -> None:
         self._frozen = frozen
+        self._tooling_owner = owner
 
     def create_module(self, spec: Any) -> ModuleType | None:
         return None
@@ -150,10 +203,24 @@ class _FrozenFinder(importlib.abc.MetaPathFinder):
         origin = f"verified-{frozen.entry.source}"
         return importlib.util.spec_from_loader(
             fullname,
-            _FrozenLoader(frozen),
+            _FrozenLoader(frozen, self),
             origin=origin,
             is_package=is_package,
         )
+
+
+def _shared_import_state() -> dict[str, Any]:
+    # The import lock protects lazy initialization across separately loaded
+    # copies of this library. No process state changes when merely importing it.
+    _imp.acquire_lock()
+    try:
+        state = getattr(sys, "_darkrenamer_verified_tooling_state", None)
+        if state is None:
+            state = {"lock": threading.RLock(), "owner": None}
+            sys._darkrenamer_verified_tooling_state = state
+        return state
+    finally:
+        _imp.release_lock()
 
 
 class _ImportScope:
@@ -161,44 +228,64 @@ class _ImportScope:
         self._verified = verified
         self._finder = _FrozenFinder(verified._modules)
         self._active = False
+        self._state: dict[str, Any] | None = None
 
     def __enter__(self) -> _ImportScope:
-        if self._active:
-            raise ToolingBootstrapError("verified importer is already active")
-        if any(isinstance(finder, _FrozenFinder) for finder in sys.meta_path):
-            raise ToolingBootstrapError("another verified tooling importer is active")
-        shadowed = sorted(
-            name
-            for name in sys.modules
-            if name == TOOLING_NAMESPACE or name.startswith(TOOLING_NAMESPACE + ".")
-        )
-        if shadowed:
-            raise ToolingBootstrapError(
-                f"tooling namespace is already loaded: {', '.join(shadowed)}"
+        state = _shared_import_state()
+        with state["lock"]:
+            if self._active:
+                raise ToolingBootstrapError("verified importer is already active")
+            if state["owner"] is not None:
+                raise ToolingBootstrapError("another verified tooling importer is active")
+            shadowed = sorted(
+                name
+                for name in sys.modules
+                if name == TOOLING_NAMESPACE or name.startswith(TOOLING_NAMESPACE + ".")
             )
-        sys.meta_path.insert(0, self._finder)
-        self._active = True
+            if shadowed:
+                raise ToolingBootstrapError(
+                    f"tooling namespace is already loaded: {', '.join(shadowed)}"
+                )
+            sys.meta_path.insert(0, self._finder)
+            state["owner"] = self._finder
+            self._state = state
+            self._active = True
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         del exc_type, exc, traceback
-        if self._active:
-            sys.meta_path[:] = [finder for finder in sys.meta_path if finder is not self._finder]
-            for name in list(sys.modules):
-                if name == TOOLING_NAMESPACE or name.startswith(TOOLING_NAMESPACE + "."):
-                    del sys.modules[name]
-            self._active = False
+        if self._state is not None:
+            with self._state["lock"]:
+                if not self._active:
+                    return
+                if self._state["owner"] is not self._finder:
+                    raise ToolingBootstrapError("verified importer lost process ownership")
+                sys.meta_path[:] = [finder for finder in sys.meta_path if finder is not self._finder]
+                for name, module in list(sys.modules.items()):
+                    loader = getattr(module, "__loader__", None)
+                    if getattr(loader, "_tooling_owner", None) is self._finder:
+                        del sys.modules[name]
+                self._state["owner"] = None
+                self._active = False
 
     def import_role(self, role: str) -> ModuleType:
-        if not self._active:
+        if self._state is None:
             raise ToolingBootstrapError("verified importer context is not active")
-        matches = [entry for entry in self._verified.entries if entry.role == role]
-        if not matches:
-            raise ToolingBootstrapError(f"role is outside the verified closure: {role}")
-        entry = matches[0]
-        if entry.module is None:
-            raise ToolingBootstrapError(f"role is not a Python module: {role}")
-        return importlib.import_module(entry.module)
+        with self._state["lock"]:
+            if not self._active or self._state["owner"] is not self._finder:
+                raise ToolingBootstrapError("verified importer context is not active")
+            matches = [entry for entry in self._verified.entries if entry.role == role]
+            if not matches:
+                raise ToolingBootstrapError(f"role is outside the verified closure: {role}")
+            entry = matches[0]
+            if entry.module is None:
+                raise ToolingBootstrapError(f"role is not a Python module: {role}")
+            module = importlib.import_module(entry.module)
+            if (getattr(getattr(module, "__loader__", None), "_tooling_owner", None)
+                    is not self._finder or
+                    getattr(module, "__tooling_sha256__", None) != entry.sha256):
+                raise ToolingBootstrapError("imported module differs from its verified owner or digest")
+            return module
 
 
 def _sha256(data: bytes) -> str:
@@ -434,7 +521,7 @@ def _parse_manifest(manifest_bytes: bytes) -> tuple[ManifestEntry, ...]:
     package_entries = [entry for entry in entries if entry.kind == "python-package"]
     packages_by_module = {entry.module: entry for entry in package_entries}
     if any(
-        entry.kind in {"python", "python-package"} and entry.role != "tooling-bootstrap"
+        entry.kind in {"python", "python-package"}
         for entry in entries
     ):
         root_package = packages_by_module.get(TOOLING_NAMESPACE)
@@ -446,7 +533,7 @@ def _parse_manifest(manifest_bytes: bytes) -> tuple[ManifestEntry, ...]:
             raise ToolingBootstrapError(
                 f"role {entry.role} has unknown dependencies: {', '.join(unknown)}"
             )
-        if entry.kind in {"python", "python-package"} and entry.role != "tooling-bootstrap":
+        if entry.kind in {"python", "python-package"}:
             if entry.module is None:
                 raise ToolingBootstrapError(f"Python role {entry.role} has no module name")
             parts = entry.module.split(".")
@@ -535,6 +622,7 @@ def verify_tooling(
 
     selected_entries = tuple(entry for entry in entries if entry.role in closure)
     frozen_modules: list[_FrozenModule] = []
+    frozen_files: list[tuple[str, bytes]] = []
     total_module_bytes = 0
     for entry in selected_entries:
         relative = entry.source if mode == "checkout" else entry.bundle
@@ -546,6 +634,7 @@ def verify_tooling(
         total_module_bytes += len(source_bytes)
         if total_module_bytes > MAX_TOTAL_MODULE_BYTES:
             raise ToolingBootstrapError("selected tooling closure exceeds the aggregate size limit")
+        frozen_files.append((entry.role, source_bytes))
         if entry.kind != "powershell":
             origin = f"verified-{entry.source}"
             try:
@@ -563,4 +652,5 @@ def verify_tooling(
         required_roles=selected,
         entries=selected_entries,
         _modules=tuple(frozen_modules),
+        _files=tuple(frozen_files),
     )

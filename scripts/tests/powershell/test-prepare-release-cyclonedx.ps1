@@ -1,10 +1,14 @@
 [CmdletBinding()]
 param()
 
+. (Join-Path $PSScriptRoot '../support/paths.ps1')
+$toolingTestPaths = Get-ToolingTestPaths
+$toolingScriptsRoot = $toolingTestPaths.ScriptsRoot
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$preparer = Join-Path $PSScriptRoot 'prepare-release-cyclonedx.ps1'
+$preparer = Join-Path $toolingScriptsRoot 'prepare-release-cyclonedx.ps1'
 if (-not (Test-Path -LiteralPath $preparer -PathType Leaf)) {
     throw "Release CycloneDX preparer is missing: $preparer"
 }

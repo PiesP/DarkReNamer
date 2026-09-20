@@ -42,6 +42,28 @@ RC="${RC:-/usr/bin/llvm-rc-19}" cargo check --workspace --all-targets --all-feat
 pwsh -NoLogo -NoProfile -File ./scripts/test-tooling.ps1
 ```
 
+## Tooling tests
+
+`scripts/test-tooling.ps1` is the tooling test entrypoint for local gates and CI.
+`config/tooling-tests.json` declares each test's path, runner, supported platforms,
+category, VM requirement and timeout. Discovery checks for missing registrations;
+it does not select executable tests. Fixture helpers and the VM CLI have explicit
+exclusions. Add or move a test by updating its registry record in the same change.
+
+List the current platform's selection or run a focused category:
+
+```powershell
+./scripts/test-tooling.ps1 -List
+./scripts/test-tooling.ps1 -Category release
+./scripts/test-tooling.ps1 -Id tooling-registry,tooling-bootstrap
+```
+
+The runner rejects a platform different from the current host and does not run
+VM workloads. It propagates child-process failures and enforces per-test deadlines.
+PowerShell test support lives in `scripts/tests/support`; `Get-ToolingTestPaths`
+in `paths.ps1` resolves production scripts and schema paths for relocated tests.
+Acceptance evidence uses `config/schemas/windows-acceptance-evidence.schema.json`.
+
 ## Linux cross-build and visual diagnostics
 
 The cross-build path additionally requires `cargo-xwin` and an LLVM resource
@@ -54,10 +76,11 @@ RC=/path/to/llvm-rc-19 cargo xwin build --release --locked \
   --package darknamer-app --bin DarkReNamer
 ```
 
-`scripts/capture-local-visual-gallery.sh` also requires Wine (`wine`,
+`scripts/diagnostics/capture-local-visual-gallery.sh` also requires Wine (`wine`,
 `wineboot`, `winepath`, and `wineserver`), Xvfb, ffmpeg, jq, GNU `timeout`, and
 `sha256sum`. It is a best-effort diagnostic path, not a CI or Windows acceptance
-gate.
+gate. The original `scripts/capture-local-visual-gallery.sh` command remains a
+compatibility entrypoint.
 
 ## Native tests in a local Hyper-V VM
 
