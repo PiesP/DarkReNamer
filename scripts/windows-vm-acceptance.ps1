@@ -5445,7 +5445,7 @@ function Invoke-GuiRegressionAcceptance {
             $result.raw_cleanup = [ordered]@{
                 owned_processes_after = $ownedAfter
                 runtime_root_after = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
-                journal_after = [ordered]@{ entries = $rawRegressionJournalAfter }
+                journal_after = [ordered]@{ entries = @($rawRegressionJournalAfter) }
             }
             if ($ownedAfter.Count -ne 0 -or -not $runtimeCleaned) {
                 $result.status = 'failed'
@@ -6594,13 +6594,13 @@ finally {
         if (-not $lifecycle.process_terminated) {
             throw 'The owned application process is still running; runtime evidence was retained.'
         }
-        $rawJournalAfter = if ($rawCandidate -and $rawCheckpoints.Count -gt 0) {
+        $rawJournalAfter = @(if ($rawCandidate -and $rawCheckpoints.Count -gt 0) {
             @($rawCheckpoints[$rawCheckpoints.Count - 1].journal_entries)
         }
         elseif ($rawCandidate) {
             @(Get-VmAutomatedJournalInventory -LocalAppData (Join-Path $runtimeRoot 'localappdata'))
         }
-        else { @() }
+        else { @() })
         if (Test-Path -LiteralPath $runtimeRoot) {
             $runtimeItem = Get-Item -LiteralPath $runtimeRoot -Force
             if (($runtimeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -6625,7 +6625,7 @@ finally {
             $result.raw_cleanup = [ordered]@{
                 owned_processes_after = $ownedAfter
                 runtime_root_after = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
-                journal_after = [ordered]@{ entries = $rawJournalAfter }
+                journal_after = [ordered]@{ entries = @($rawJournalAfter) }
             }
             if ($ownedAfter.Count -ne 0 -or -not $runtimeCleanup) {
                 throw 'Current-DPI raw cleanup retained owned state.'
