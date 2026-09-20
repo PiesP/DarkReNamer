@@ -211,6 +211,10 @@ class ToolingBootstrapTests(unittest.TestCase):
         self.fixture.write_modules()
         verified = self.fixture.verify(("powershell-common",))
         self.assertEqual([entry.role for entry in verified.entries], ["powershell-common"])
+        self.fixture.module_path(self.fixture.entries[-1]).write_bytes(b"throw 'changed'\n")
+        self.assertEqual(verified.bytes_for_role("powershell-common"), source)
+        with self.assertRaises(bootstrap.ToolingBootstrapError):
+            verified.bytes_for_role("campaign-planning")
         with verified.importer() as imports:
             with self.assertRaises(bootstrap.ToolingBootstrapError):
                 imports.import_role("powershell-common")
@@ -382,6 +386,8 @@ class ToolingBootstrapTests(unittest.TestCase):
             b"PACKAGE_VALUE = 'mutated'\n"
         )
         self.fixture.module_path(self.fixture.entries[2]).write_bytes(b"VALUE = 'mutated'\n")
+        self.assertEqual(verified.bytes_for_role("package-root"), PACKAGE_SOURCE)
+        self.assertEqual(verified.bytes_for_role("campaign-planning"), WORKER_SOURCE)
         with verified.importer() as imports:
             module = imports.import_role("campaign-planning")
             self.assertEqual(module.VALUE, "verified")

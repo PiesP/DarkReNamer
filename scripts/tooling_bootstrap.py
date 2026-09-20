@@ -37,17 +37,25 @@ SUPPORTED_ROLES = MappingProxyType({
     "campaign-planning": ("python", "darkrenamer_tooling.campaign.planning"),
     "campaign-recovery": ("python", "darkrenamer_tooling.campaign.recovery"),
     "campaign-verifier": ("python", "darkrenamer_tooling.campaign.verifier"),
+    "campaign-runner": ("python", "darkrenamer_tooling.campaign.runner"),
+    "package-vm": ("python-package", "darkrenamer_tooling.vm"),
+    "vm-launcher": ("python", "darkrenamer_tooling.vm.launcher"),
+    "vm-gui": ("python", "darkrenamer_tooling.vm.gui"),
     "package-contracts": ("python-package", "darkrenamer_tooling.contracts"),
     "contracts-binding": ("python", "darkrenamer_tooling.contracts.binding"),
     "contracts-menu-layout": ("python", "darkrenamer_tooling.contracts.menu_layout"),
     "contracts-platform": ("python", "darkrenamer_tooling.contracts.platform"),
     "contracts-state": ("python", "darkrenamer_tooling.contracts.state"),
+    "contracts-authority": ("python", "darkrenamer_tooling.contracts.authority"),
+    "contracts-tooling": ("python", "darkrenamer_tooling.contracts.tooling"),
     "package-evidence": ("python-package", "darkrenamer_tooling.evidence"),
     "evidence-archive": ("python", "darkrenamer_tooling.evidence.archive"),
     "evidence-journal": ("python", "darkrenamer_tooling.evidence.journal"),
     "evidence-png": ("python", "darkrenamer_tooling.evidence.png"),
     "evidence-recovery": ("python", "darkrenamer_tooling.evidence.recovery"),
     "evidence-errors": ("python", "darkrenamer_tooling.evidence.errors"),
+    "evidence-gui": ("python", "darkrenamer_tooling.evidence.gui"),
+    "evidence-cli": ("python", "darkrenamer_tooling.evidence.cli"),
     "powershell-common": ("powershell", None),
     "powershell-guest": ("powershell", None),
     "powershell-ui-observer": ("powershell", None),
@@ -107,6 +115,14 @@ class VerifiedTooling:
     required_roles: tuple[str, ...]
     entries: tuple[ManifestEntry, ...]
     _modules: tuple[_FrozenModule, ...]
+    _files: tuple[tuple[str, bytes], ...]
+
+    def bytes_for_role(self, role: str) -> bytes:
+        """Return the frozen bytes for staging without reopening a source file."""
+        for selected_role, data in self._files:
+            if selected_role == role:
+                return data
+        raise ToolingBootstrapError(f"role is outside the verified closure: {role}")
 
     def importer(self) -> _ImportScope:
         """Return a context that imports only the verified Python closure."""
@@ -535,6 +551,7 @@ def verify_tooling(
 
     selected_entries = tuple(entry for entry in entries if entry.role in closure)
     frozen_modules: list[_FrozenModule] = []
+    frozen_files: list[tuple[str, bytes]] = []
     total_module_bytes = 0
     for entry in selected_entries:
         relative = entry.source if mode == "checkout" else entry.bundle
@@ -546,6 +563,7 @@ def verify_tooling(
         total_module_bytes += len(source_bytes)
         if total_module_bytes > MAX_TOTAL_MODULE_BYTES:
             raise ToolingBootstrapError("selected tooling closure exceeds the aggregate size limit")
+        frozen_files.append((entry.role, source_bytes))
         if entry.kind != "powershell":
             origin = f"verified-{entry.source}"
             try:
@@ -563,4 +581,5 @@ def verify_tooling(
         required_roles=selected,
         entries=selected_entries,
         _modules=tuple(frozen_modules),
+        _files=tuple(frozen_files),
     )
