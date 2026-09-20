@@ -664,6 +664,12 @@ def execute(args, *, connection_loaded=None) -> int:
     """Execute one campaign while the caller holds campaign_lock for the VM."""
     repo = Path(__file__).resolve().parent.parent
     native_runner, gui_runner = load_common_modules(repo)
+    harness_sha = clean_source_sha(repo)
+    product_sha = clean_source_sha(Path(args.candidate_source_root))
+    require(product_sha == args.candidate_source_sha,
+            "Candidate source checkout differs from the selected source SHA.")
+    require(harness_sha == args.candidate_source_sha,
+            "Campaign harness source differs from the selected candidate source SHA.")
     profile_path = ordinary_file(Path(args.profile), "VM-automated profile", MAX_INDEX_BYTES)
     profile_frozen = frozen_file(profile_path)
     profile = load_bounded_json(profile_path, max_bytes=MAX_INDEX_BYTES, label="VM-automated profile")
@@ -678,10 +684,6 @@ def execute(args, *, connection_loaded=None) -> int:
         connection, connection_sha = connection_loaded
     require(connection_sha == connection_frozen["sha256"],
             "Connection profile loader did not bind its exact bytes.")
-    harness_sha = clean_source_sha(repo)
-    product_sha = clean_source_sha(Path(args.candidate_source_root))
-    require(product_sha == args.candidate_source_sha,
-            "Candidate source checkout differs from the selected source SHA.")
     candidate_inputs = freeze_campaign_inputs(args)
     candidate = candidate_from_args(args)
     requested_output = Path(args.output_root)

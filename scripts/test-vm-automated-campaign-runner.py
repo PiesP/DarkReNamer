@@ -25,8 +25,8 @@ sys.modules[SPEC.name] = runner
 SPEC.loader.exec_module(runner)
 
 
-HARNESS_SHA = "1" * 40
 CANDIDATE_SHA = "2" * 40
+HARNESS_SHA = CANDIDATE_SHA
 VM_ID = "11111111-2222-3333-4444-555555555555"
 
 
@@ -292,6 +292,27 @@ class CampaignRunnerTests(unittest.TestCase):
         calls, command = self.fake_command()
         with self.assertRaisesRegex(ValueError, "new"):
             self.execute(self.args(), command)
+        self.assertEqual(calls, [])
+
+    def test_harness_source_mismatch_fails_before_inputs_output_or_vm(self) -> None:
+        calls, command = self.fake_command()
+        args = self.args()
+        args.profile = self.root / "unread-profile.json"
+        args.connection_profile = self.root / "unread-connection.json"
+
+        def source_sha(path):
+            return CANDIDATE_SHA if Path(path) == self.source else "1" * 40
+
+        with patch.object(
+                runner, "load_common_modules", return_value=(FakeNativeRunner, FakeGuiRunner)), \
+                patch.object(runner, "clean_source_sha", side_effect=source_sha), \
+                patch.object(FakeGuiRunner, "load_connection_profile",
+                             side_effect=AssertionError("connection input reached")), \
+                patch.object(runner.subprocess, "run", side_effect=command):
+            with self.assertRaisesRegex(ValueError, "harness source"):
+                runner.execute(args)
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.archive.exists())
         self.assertEqual(calls, [])
 
     def test_backend_source_mismatch_fails_after_plan_and_before_vm(self) -> None:
