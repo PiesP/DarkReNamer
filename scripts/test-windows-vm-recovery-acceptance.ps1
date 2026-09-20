@@ -1320,6 +1320,37 @@ if ($processStartFunction.Count -ne 1 -or
     ) -lt 0) {
     throw 'Raw process-start evidence is missing its actual observation timestamp.'
 }
+# The retained kernel handle identifies an exited process even when SessionId
+# can no longer be queried after Process.Refresh().
+$bindingFunction = $fromFile.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Assert-AcceptanceProcessBinding'
+}, $true)
+& {
+    . ([scriptblock]::Create($bindingFunction.Extent.Text))
+    $handle = [pscustomobject]@{ IsClosed = $false; IsInvalid = $false }
+    $handle | Add-Member ScriptMethod DangerousGetHandle { [IntPtr]42 }
+    $started = [DateTime]::UtcNow
+    $process = [pscustomobject]@{ Id = 123; HasExited = $true; StartTime = $started; SafeHandle = $handle }
+    $process | Add-Member ScriptMethod Refresh {}
+    $process | Add-Member ScriptProperty SessionId { throw 'Exited SessionId must not be read.' }
+    $binding = [pscustomobject]@{
+        pid = 123; session_id = 2
+        start_time_utc_ticks = $started.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
+    }
+    $application = [pscustomobject]@{
+        owned = [pscustomobject]@{ process = $process }
+        raw_process_object = $process; raw_process_handle = [IntPtr]42
+        raw_process_binding = $binding
+    }
+    Assert-AcceptanceProcessBinding -Application $application
+    $application.raw_process_handle = [IntPtr]43
+    Assert-Fails { Assert-AcceptanceProcessBinding -Application $application } 'identity changed'
+    $application.raw_process_handle = [IntPtr]42
+    $handle.IsClosed = $true
+    Assert-Fails { Assert-AcceptanceProcessBinding -Application $application } 'identity changed'
+}
 $controlObservationFunction = @($fromFile.FindAll({
     param($node)
     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and

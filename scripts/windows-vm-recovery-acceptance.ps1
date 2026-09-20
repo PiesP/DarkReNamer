@@ -1294,6 +1294,11 @@ function Write-AcceptanceProcessStartEvidence {
         lifecycle = $lifecycle
         environment = $environment
     })
+    # Keep the original process object and kernel handle alive through exit.
+    # SessionId is no longer queryable reliably after Refresh on an exited process.
+    $Application | Add-Member -NotePropertyName raw_process_object -NotePropertyValue $process -Force
+    $Application | Add-Member -NotePropertyName raw_process_handle `
+        -NotePropertyValue $process.SafeHandle.DangerousGetHandle() -Force
     $Application | Add-Member -NotePropertyName raw_process_binding -NotePropertyValue $binding -Force
     $Application | Add-Member -NotePropertyName raw_process_exit_recorded -NotePropertyValue $false -Force
     $Application | Add-Member -NotePropertyName raw_process_start_reference `
@@ -1308,8 +1313,11 @@ function Assert-AcceptanceProcessBinding {
     $process = $Application.owned.process
     $binding = $Application.raw_process_binding
     $process.Refresh()
-    if ($process.Id -ne $binding.pid -or
-        $process.SessionId -ne $binding.session_id -or
+    if (-not [Object]::ReferenceEquals($process, $Application.raw_process_object) -or
+        $process.SafeHandle.IsClosed -or $process.SafeHandle.IsInvalid -or
+        $process.SafeHandle.DangerousGetHandle() -ne $Application.raw_process_handle -or
+        $process.Id -ne $binding.pid -or
+        (-not $process.HasExited -and $process.SessionId -ne $binding.session_id) -or
         $process.StartTime.ToUniversalTime().Ticks.ToString(
             [Globalization.CultureInfo]::InvariantCulture
         ) -cne $binding.start_time_utc_ticks) {
