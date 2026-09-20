@@ -362,21 +362,69 @@ function Resolve-DrToolingRoot {
         throw 'Tooling root must be absolute.'
     }
     $fullRoot = [IO.Path]::GetFullPath($Root)
-    $rootItem = Get-Item -LiteralPath $fullRoot -Force -ErrorAction Stop
-    if ($rootItem -isnot [IO.DirectoryInfo] -or
-        ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw 'Tooling root must be an ordinary non-reparse directory.'
-    }
     $current = $fullRoot
     while ($null -ne $current) {
-        $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
-        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw 'Tooling root ancestors must not contain reparse points.'
-        }
+        [void] (Get-DrToolingPathSnapshot `
+                -Path $current `
+                -Directory `
+                -Label 'tooling root ancestor')
         $parent = [IO.Directory]::GetParent($current)
         $current = if ($null -eq $parent) { $null } else { $parent.FullName }
     }
     return $fullRoot
+}
+
+function Get-DrToolingPathSnapshot {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][string] $Label,
+        [switch] $Directory
+    )
+
+    $item = if ($Directory) {
+        [IO.DirectoryInfo]::new($Path)
+    }
+    else {
+        [IO.FileInfo]::new($Path)
+    }
+    $item.Refresh()
+    if (-not $item.Exists) {
+        throw "$Label does not exist."
+    }
+    $attributes = $item.Attributes
+    $isDirectory = ($attributes -band [IO.FileAttributes]::Directory) -ne 0
+    if ($isDirectory -ne [bool] $Directory -or
+        ($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "$Label must be an ordinary non-reparse $(if ($Directory) { 'directory' } else { 'file' })."
+    }
+    return [pscustomobject]@{
+        Path = $item.FullName
+        Directory = [bool] $Directory
+        Attributes = [int] $attributes
+        CreationTimeUtcTicks = $item.CreationTimeUtc.Ticks
+        LastWriteTimeUtcTicks = $item.LastWriteTimeUtc.Ticks
+        Length = if ($Directory) { [long] -1 } else { [long] $item.Length }
+    }
+}
+
+function Assert-DrToolingPathSnapshotsUnchanged {
+    param(
+        [Parameter(Mandatory)][object[]] $Snapshots,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    foreach ($expected in $Snapshots) {
+        $actual = Get-DrToolingPathSnapshot `
+            -Path $expected.Path `
+            -Directory:$expected.Directory `
+            -Label $Label
+        if ($actual.Attributes -ne $expected.Attributes -or
+            $actual.CreationTimeUtcTicks -ne $expected.CreationTimeUtcTicks -or
+            $actual.LastWriteTimeUtcTicks -ne $expected.LastWriteTimeUtcTicks -or
+            $actual.Length -ne $expected.Length) {
+            throw "$Label path changed while it was read."
+        }
+    }
 }
 
 function Get-DrToolingFullPath {
@@ -386,14 +434,23 @@ function Get-DrToolingFullPath {
     )
 
     $current = $Root
-    foreach ($component in $Relative.Split('/')) {
-        $current = Join-Path $current $component
-        $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
-        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "Tooling path must not contain reparse points: $Relative"
-        }
+    $snapshots = [Collections.Generic.List[object]]::new()
+    $snapshots.Add((Get-DrToolingPathSnapshot `
+                -Path $current `
+                -Directory `
+                -Label "tooling path $Relative"))
+    $components = $Relative.Split('/')
+    for ($index = 0; $index -lt $components.Count; $index++) {
+        $current = [IO.Path]::Combine($current, $components[$index])
+        $snapshots.Add((Get-DrToolingPathSnapshot `
+                    -Path $current `
+                    -Directory:($index -lt $components.Count - 1) `
+                    -Label "tooling path $Relative"))
     }
-    return $current
+    return [pscustomobject]@{
+        Path = $current
+        Snapshots = [object[]] $snapshots.ToArray()
+    }
 }
 
 function Read-DrToolingRegularFile {
@@ -404,19 +461,14 @@ function Read-DrToolingRegularFile {
         [Parameter(Mandatory)][string] $Label
     )
 
-    $path = Get-DrToolingFullPath -Root $Root -Relative $Relative
-    $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
-    if ($item -isnot [IO.FileInfo] -or
-        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "$Label must be an ordinary non-reparse file."
-    }
-    if ($item.Length -gt $MaximumBytes -or $item.Length -gt [int]::MaxValue) {
+    $resolved = Get-DrToolingFullPath -Root $Root -Relative $Relative
+    $path = $resolved.Path
+    $before = $resolved.Snapshots[$resolved.Snapshots.Count - 1]
+    if ($before.Length -gt $MaximumBytes -or $before.Length -gt [int]::MaxValue) {
         throw "$Label exceeds its byte limit."
     }
-    $beforeLength = $item.Length
-    $beforeWrite = $item.LastWriteTimeUtc.Ticks
     $stream = [IO.FileStream]::new(
-        $item.FullName,
+        $path,
         [IO.FileMode]::Open,
         [IO.FileAccess]::Read,
         [IO.FileShare]::Read,
@@ -424,7 +476,8 @@ function Read-DrToolingRegularFile {
         [IO.FileOptions]::SequentialScan
     )
     try {
-        if ($stream.Length -ne $beforeLength) {
+        Assert-DrToolingPathSnapshotsUnchanged -Snapshots $resolved.Snapshots -Label $Label
+        if ($stream.Length -ne $before.Length) {
             throw "$Label changed before it was read."
         }
         $bytes = [byte[]]::new([int] $stream.Length)
@@ -436,20 +489,15 @@ function Read-DrToolingRegularFile {
             }
             $offset += $read
         }
-        if ($stream.Length -ne $beforeLength) {
+        if ($stream.Length -ne $before.Length) {
             throw "$Label changed while it was read."
         }
+        Assert-DrToolingPathSnapshotsUnchanged -Snapshots $resolved.Snapshots -Label $Label
     }
     finally {
         $stream.Dispose()
     }
-    $after = Get-Item -LiteralPath $path -Force -ErrorAction Stop
-    if ($after -isnot [IO.FileInfo] -or
-        ($after.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-        $after.Length -ne $beforeLength -or
-        $after.LastWriteTimeUtc.Ticks -ne $beforeWrite) {
-        throw "$Label changed while it was read."
-    }
+    Assert-DrToolingPathSnapshotsUnchanged -Snapshots $resolved.Snapshots -Label $Label
     return [pscustomobject]@{ Bytes = $bytes }
 }
 
@@ -612,6 +660,57 @@ function ConvertTo-DrToolingManifestRecords {
     }
 }
 
+function Get-DrToolingVerifiedStateTable {
+    $stateVariable = $ExecutionContext.SessionState.PSVariable.Get(
+        'script:DrToolingBootstrapVerifiedStateTable'
+    )
+    if ($null -eq $stateVariable -or $null -eq $stateVariable.Value) {
+        $script:DrToolingBootstrapVerifiedStateTable =
+            [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
+        return ,$script:DrToolingBootstrapVerifiedStateTable
+    }
+    if ($stateVariable.Value -isnot
+        [Runtime.CompilerServices.ConditionalWeakTable[object, object]]) {
+        throw 'The private tooling verifier state has an invalid type.'
+    }
+    return ,$stateVariable.Value
+}
+
+function Add-DrToolingVerifiedState {
+    param(
+        [Parameter(Mandatory)][object] $VerifiedBundle,
+        [Parameter(Mandatory)][object] $State
+    )
+
+    $table = Get-DrToolingVerifiedStateTable
+    $table.Add($VerifiedBundle, $State)
+}
+
+function Get-DrToolingVerifiedState {
+    param([Parameter(Mandatory)][object] $VerifiedBundle)
+
+    $table = Get-DrToolingVerifiedStateTable
+    $state = $null
+    if (-not $table.TryGetValue($VerifiedBundle, [ref] $state)) {
+        throw 'VerifiedBundle was not produced by the tooling verifier.'
+    }
+    return $state
+}
+
+function Get-DrToolingVerifiedRecord {
+    param(
+        [Parameter(Mandatory)][object] $VerifiedBundle,
+        [Parameter(Mandatory)][string] $Role
+    )
+
+    $state = Get-DrToolingVerifiedState -VerifiedBundle $VerifiedBundle
+    $record = $null
+    if (-not $state.Records.TryGetValue($Role, [ref] $record)) {
+        throw "Role is outside the verified closure: $Role"
+    }
+    return $record
+}
+
 function Get-DrToolingVerifiedBundle {
     param(
         [Parameter(Mandatory)][string] $Root,
@@ -654,7 +753,8 @@ function Get-DrToolingVerifiedBundle {
         -Label 'tooling manifest'
     Assert-DrToolingUniqueJson -Text $manifestText
     try {
-        $manifest = $manifestText | ConvertFrom-Json -ErrorAction Stop
+        $manifest = $manifestText |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json -ErrorAction Stop
     }
     catch {
         throw "Tooling manifest is invalid JSON: $($_.Exception.Message)"
@@ -682,6 +782,8 @@ function Get-DrToolingVerifiedBundle {
     }
 
     $frozen = [Collections.Generic.List[object]]::new()
+    $privateRecords =
+        [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     $totalBytes = [long] 0
     foreach ($record in $parsed.Records) {
         if (-not $selected.Contains($record.Role)) {
@@ -701,6 +803,7 @@ function Get-DrToolingVerifiedBundle {
         if ($totalBytes -gt (32 * 1024 * 1024)) {
             throw 'Selected tooling closure exceeds the aggregate size limit.'
         }
+        $frozenBase64 = [Convert]::ToBase64String($bytes)
         $frozen.Add([pscustomobject]@{
             Role = $record.Role
             Source = $record.Source
@@ -709,7 +812,13 @@ function Get-DrToolingVerifiedBundle {
             Module = $record.Module
             Sha256 = $record.Sha256
             Dependencies = [string[]] $record.Dependencies.Clone()
-            FrozenBase64 = [Convert]::ToBase64String($bytes)
+            FrozenBase64 = $frozenBase64
+            Length = $bytes.Length
+        })
+        $privateRecords.Add($record.Role, [pscustomobject]@{
+            Kind = $record.Kind
+            Sha256 = $record.Sha256
+            FrozenBase64 = $frozenBase64
             Length = $bytes.Length
         })
     }
@@ -742,6 +851,9 @@ function Get-DrToolingVerifiedBundle {
         Records = [object[]] $frozen.ToArray()
     }
     $result.PSObject.TypeNames.Insert(0, 'DarkReNamer.Tooling.VerifiedBundle')
+    Add-DrToolingVerifiedState `
+        -VerifiedBundle $result `
+        -State ([pscustomobject]@{ Records = $privateRecords })
     return $result
 }
 
@@ -751,22 +863,13 @@ function Get-DrToolingVerifiedBytes {
         [Parameter(Mandatory)][string] $Role
     )
 
-    if ($VerifiedBundle.PSObject.TypeNames -notcontains 'DarkReNamer.Tooling.VerifiedBundle') {
-        throw 'VerifiedBundle was not produced by the tooling verifier.'
+    $record = Get-DrToolingVerifiedRecord -VerifiedBundle $VerifiedBundle -Role $Role
+    $bytes = [Convert]::FromBase64String($record.FrozenBase64)
+    if ($bytes.Length -ne $record.Length -or
+        (Get-DrToolingSha256 -Bytes $bytes) -cne $record.Sha256) {
+        throw "Frozen bytes are invalid for tooling role: $Role"
     }
-    foreach ($record in $VerifiedBundle.Records) {
-        if ($record.Role -cne $Role) {
-            continue
-        }
-        $bytes = [Convert]::FromBase64String($record.FrozenBase64)
-        if ($bytes.Length -ne $record.Length -or
-            (Get-DrToolingSha256 -Bytes $bytes) -cne $record.Sha256) {
-            throw "Frozen bytes are invalid for tooling role: $Role"
-        }
-        Write-Output -NoEnumerate $bytes
-        return
-    }
-    throw "Role is outside the verified closure: $Role"
+    return ,$bytes
 }
 
 function New-DrToolingVerifiedScriptBlock {
@@ -775,11 +878,8 @@ function New-DrToolingVerifiedScriptBlock {
         [Parameter(Mandatory)][string] $Role
     )
 
-    $record = @($VerifiedBundle.Records | Where-Object { $_.Role -ceq $Role })
-    if ($record.Count -ne 1) {
-        throw "Role is outside the verified closure: $Role"
-    }
-    if ($record[0].Kind -cne 'powershell') {
+    $record = Get-DrToolingVerifiedRecord -VerifiedBundle $VerifiedBundle -Role $Role
+    if ($record.Kind -cne 'powershell') {
         throw "Role is not a PowerShell module: $Role"
     }
     $bytes = Get-DrToolingVerifiedBytes -VerifiedBundle $VerifiedBundle -Role $Role
