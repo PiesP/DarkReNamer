@@ -3214,12 +3214,15 @@ function Dismiss-AcceptanceStartupRecovery {
         [Parameter(Mandatory)][object] $Application,
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
-        [Parameter(Mandatory)][string] $PrivateRoot,
+        [string] $PrivateRoot,
         [Windows.Automation.AutomationElement] $Prompt
     )
 
     $process = $Application.owned.process
     if ($null -eq $Prompt) {
+        if ([string]::IsNullOrEmpty($PrivateRoot)) {
+            throw 'Startup recovery cancellation discovery requires private evidence.'
+        }
         $Prompt = Wait-AcceptanceRecoveryWindow `
             -Application $Application `
             -ExpectedSession $SessionId `
@@ -4328,7 +4331,7 @@ function Invoke-AcceptanceSession {
             Write-AcceptanceExportProgress -PrivateRoot $PrivateRoot -Application $third -Phase 'before-startup-cancel'
             Dismiss-AcceptanceStartupRecovery `
                 -Application $third -SessionId $SessionId -WaitSeconds $WaitSeconds `
-                -PrivateRoot $PrivateRoot -Prompt $relaunchPrompt
+                -Prompt $relaunchPrompt
             Write-AcceptanceExportProgress -PrivateRoot $PrivateRoot -Application $third -Phase 'after-startup-cancel'
             $recoveryExportResult = Invoke-AcceptanceRecoveryExport `
                 -Application $third -PrivateRoot $PrivateRoot -ExpectedBytes $journalBytes `

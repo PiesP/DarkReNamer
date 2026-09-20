@@ -1856,6 +1856,54 @@ foreach ($fragment in @(
         throw "Startup default-cancel action evidence differs from its fixed contract: $fragment"
     }
 }
+$startupCancelPrivateRoot = @($startupCancelFunction[0].Body.ParamBlock.Parameters | Where-Object {
+    $_.Name.VariablePath.UserPath -ceq 'PrivateRoot'
+})
+if ($startupCancelPrivateRoot.Count -ne 1 -or
+    $startupCancelPrivateRoot[0].Extent.Text.IndexOf(
+        'Parameter(Mandatory)', [StringComparison]::Ordinal
+    ) -ge 0 -or
+    $startupCancelFunction[0].Extent.Text.IndexOf(
+        '[string]::IsNullOrEmpty($PrivateRoot)', [StringComparison]::Ordinal
+    ) -lt 0) {
+    throw 'Retained startup prompts must keep private action evidence optional.'
+}
+$sessionFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Invoke-AcceptanceSession'
+}, $true))
+if ($sessionFunction.Count -ne 1) {
+    throw 'The recovery session function is missing or ambiguous.'
+}
+$sessionStartupCancelCalls = @($sessionFunction[0].FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq 'Dismiss-AcceptanceStartupRecovery'
+}, $true))
+if ($sessionStartupCancelCalls.Count -ne 2) {
+    throw 'The recovery session must retain exactly default-cancel and export-cancel calls.'
+}
+$recordingStartupCancelCalls = @($sessionStartupCancelCalls | Where-Object {
+    @($_.CommandElements | Where-Object {
+        $_ -is [Management.Automation.Language.CommandParameterAst]
+    } | ForEach-Object ParameterName) -ccontains 'PrivateRoot'
+})
+$nonRecordingStartupCancelCalls = @($sessionStartupCancelCalls | Where-Object {
+    @($_.CommandElements | Where-Object {
+        $_ -is [Management.Automation.Language.CommandParameterAst]
+    } | ForEach-Object ParameterName) -cnotcontains 'PrivateRoot'
+})
+if ($recordingStartupCancelCalls.Count -ne 1 -or
+    $recordingStartupCancelCalls[0].Extent.Text.IndexOf(
+        '-Application $second', [StringComparison]::Ordinal
+    ) -lt 0 -or
+    $nonRecordingStartupCancelCalls.Count -ne 1 -or
+    $nonRecordingStartupCancelCalls[0].Extent.Text.IndexOf(
+        '-Application $third', [StringComparison]::Ordinal
+    ) -lt 0) {
+    throw 'Only the second-lifetime default cancel may record startup-default-cancel-action.'
+}
 $discardChoiceFunction = @($fromFile.FindAll({
     param($node)
     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
