@@ -4051,7 +4051,8 @@ function Copy-GuiRegressionDocument {
     $expectedClipboard = (Normalize-ObserverText $ExpectedText).Replace("`n", "`r`n")
     $before = [DarkReNamerVmAcceptanceNative]::ReadClipboardSnapshot()
     if ($before.SequenceNumber -eq 0 -or $before.Formats.Count -ne 0) {
-        throw "$Label requires an empty Clipboard with a nonzero sequence preflight."
+        throw ("$Label requires an empty Clipboard with a nonzero sequence preflight; " +
+            "observed sequence=$($before.SequenceNumber), formats=$($before.Formats -join ',').")
     }
     if ($Mode -ceq 'selection') {
         if ($null -eq $Edit) { throw 'Selection copy requires the bound read-only Edit.' }
