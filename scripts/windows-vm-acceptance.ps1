@@ -843,6 +843,37 @@ public static class DarkReNamerVmAcceptanceNative {
         public int Bottom;
     }
 
+    public sealed class NativeMenuItemMeasurement {
+        public int[] MenuPath;
+        public int Position;
+        public string ItemType;
+        public int? CommandId;
+        public uint StateFlags;
+        public bool Enabled;
+        public bool Checked;
+    }
+
+    public sealed class NativeMenuHighlightMeasurement {
+        public int[] MenuPath;
+        public int Position;
+        public int? CommandId;
+        public uint StateFlags;
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    public sealed class NativePopupMeasurement {
+        public long Handle;
+        public uint ProcessId;
+        public string ClassName;
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     public struct Point { public int X; public int Y; }
 
@@ -866,6 +897,22 @@ public static class DarkReNamerVmAcceptanceNative {
         public uint Page;
         public int Position;
         public int TrackPosition;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct MENUITEMINFO {
+        public uint Size;
+        public uint Mask;
+        public uint Type;
+        public uint State;
+        public uint Id;
+        public IntPtr SubMenu;
+        public IntPtr CheckedBitmap;
+        public IntPtr UncheckedBitmap;
+        public UIntPtr ItemData;
+        public IntPtr TypeData;
+        public uint TextLength;
+        public IntPtr ItemBitmap;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -959,6 +1006,12 @@ public static class DarkReNamerVmAcceptanceNative {
     private static extern int GetMenuItemCount(IntPtr menu);
     [DllImport("user32.dll")]
     private static extern IntPtr GetSubMenu(IntPtr menu, int position);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool GetMenuItemInfoW(
+        IntPtr menu, uint item, bool byPosition, ref MENUITEMINFO info);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetMenuItemRect(
+        IntPtr window, IntPtr menu, uint item, out Rect rect);
     [DllImport("user32.dll")]
     private static extern IntPtr SendMessageW(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll", SetLastError = true)]
@@ -1161,6 +1214,126 @@ public static class DarkReNamerVmAcceptanceNative {
         return false;
     }
 
+    private static MENUITEMINFO ReadMenuItem(IntPtr menu, int position) {
+        MENUITEMINFO info = new MENUITEMINFO {
+            Size = (uint)Marshal.SizeOf(typeof(MENUITEMINFO)),
+            Mask = 0x00000107
+        };
+        if (!GetMenuItemInfoW(menu, (uint)position, true, ref info)) {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        return info;
+    }
+
+    private static void ReadNativeMenuTree(
+        IntPtr menu,
+        List<int> path,
+        List<NativeMenuItemMeasurement> rows,
+        int depth) {
+        if (depth > 3) {
+            throw new InvalidOperationException("Native menu depth exceeded its bound.");
+        }
+        int count = GetMenuItemCount(menu);
+        if (count < 0 || count > 32) {
+            throw new InvalidOperationException("Native menu item count is invalid or over limit.");
+        }
+        for (int position = 0; position < count; position++) {
+            uint state = GetMenuState(menu, (uint)position, 0x400);
+            if (state == UInt32.MaxValue) {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            MENUITEMINFO info = ReadMenuItem(menu, position);
+            bool separator = (info.Type & 0x800) != 0;
+            bool submenu = info.SubMenu != IntPtr.Zero;
+            rows.Add(new NativeMenuItemMeasurement {
+                MenuPath = path.ToArray(),
+                Position = position,
+                ItemType = separator ? "separator" : submenu ? "submenu" : "command",
+                CommandId = separator || submenu ? (int?)null : checked((int)info.Id),
+                StateFlags = state & 0xFF,
+                Enabled = (state & 0x3) == 0,
+                Checked = (state & 0x8) != 0
+            });
+            if (rows.Count > 128) {
+                throw new InvalidOperationException("Native menu tree exceeded its item bound.");
+            }
+            if (submenu) {
+                path.Add(position);
+                ReadNativeMenuTree(info.SubMenu, path, rows, depth + 1);
+                path.RemoveAt(path.Count - 1);
+            }
+        }
+    }
+
+    public static NativeMenuItemMeasurement[] ReadNativeMenuTree(IntPtr window) {
+        IntPtr root = GetMenu(window);
+        if (root == IntPtr.Zero) {
+            throw new InvalidOperationException("The application window has no native menu.");
+        }
+        List<NativeMenuItemMeasurement> rows = new List<NativeMenuItemMeasurement>();
+        ReadNativeMenuTree(root, new List<int>(), rows, 0);
+        return rows.ToArray();
+    }
+
+    private static void ReadHighlightedNativeMenuItems(
+        IntPtr window,
+        IntPtr menu,
+        List<int> path,
+        List<NativeMenuHighlightMeasurement> rows,
+        int depth) {
+        if (depth > 3) {
+            throw new InvalidOperationException("Native highlighted menu depth exceeded its bound.");
+        }
+        int count = GetMenuItemCount(menu);
+        if (count < 0 || count > 32) {
+            throw new InvalidOperationException("Native highlighted menu item count is invalid or over limit.");
+        }
+        for (int position = 0; position < count; position++) {
+            uint state = GetMenuState(menu, (uint)position, 0x400);
+            if (state == UInt32.MaxValue) {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            MENUITEMINFO info = ReadMenuItem(menu, position);
+            bool separator = (info.Type & 0x800) != 0;
+            bool submenu = info.SubMenu != IntPtr.Zero;
+            if ((state & 0x80) != 0) {
+                Rect rect;
+                IntPtr itemOwner = depth == 0 ? window : IntPtr.Zero;
+                if (!GetMenuItemRect(itemOwner, menu, (uint)position, out rect)) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+                rows.Add(new NativeMenuHighlightMeasurement {
+                    MenuPath = path.ToArray(),
+                    Position = position,
+                    CommandId = separator || submenu ? (int?)null : checked((int)info.Id),
+                    StateFlags = state & 0xFF,
+                    Left = rect.Left,
+                    Top = rect.Top,
+                    Right = rect.Right,
+                    Bottom = rect.Bottom
+                });
+                if (rows.Count > 4) {
+                    throw new InvalidOperationException("Native highlighted menu count exceeded its bound.");
+                }
+            }
+            if (submenu) {
+                path.Add(position);
+                ReadHighlightedNativeMenuItems(window, info.SubMenu, path, rows, depth + 1);
+                path.RemoveAt(path.Count - 1);
+            }
+        }
+    }
+
+    public static NativeMenuHighlightMeasurement[] ReadHighlightedNativeMenuItems(IntPtr window) {
+        IntPtr root = GetMenu(window);
+        if (root == IntPtr.Zero) {
+            throw new InvalidOperationException("The application window has no native menu.");
+        }
+        List<NativeMenuHighlightMeasurement> rows = new List<NativeMenuHighlightMeasurement>();
+        ReadHighlightedNativeMenuItems(window, root, new List<int>(), rows, 0);
+        return rows.ToArray();
+    }
+
     public static bool IsMenuCommandEnabled(IntPtr window, uint command) {
         IntPtr root = GetMenu(window);
         if (root == IntPtr.Zero) {
@@ -1209,6 +1382,37 @@ public static class DarkReNamerVmAcceptanceNative {
             throw new InvalidOperationException("More than one visible native menu popup was found.");
         }
         return match;
+    }
+
+    public static NativePopupMeasurement[] ReadVisibleNativeMenuPopups(uint expectedProcessId) {
+        List<NativePopupMeasurement> rows = new List<NativePopupMeasurement>();
+        EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+            if (!IsWindowVisible(window)) { return true; }
+            uint processId;
+            GetWindowThreadProcessId(window, out processId);
+            if (processId != expectedProcessId) { return true; }
+            StringBuilder className = new StringBuilder(32);
+            if (GetClassName(window, className, className.Capacity) > 0 &&
+                String.Equals(className.ToString(), "#32768", StringComparison.Ordinal)) {
+                Rect rect;
+                if (!GetWindowRect(window, out rect)) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+                rows.Add(new NativePopupMeasurement {
+                    Handle = window.ToInt64(), ProcessId = processId,
+                    ClassName = className.ToString(),
+                    Left = rect.Left, Top = rect.Top, Right = rect.Right, Bottom = rect.Bottom
+                });
+                if (rows.Count > 2) {
+                    throw new InvalidOperationException("Visible native menu popup count exceeded its bound.");
+                }
+            }
+            return true;
+        }, IntPtr.Zero);
+        rows.Sort(delegate(NativePopupMeasurement left, NativePopupMeasurement right) {
+            return left.Handle.CompareTo(right.Handle);
+        });
+        return rows.ToArray();
     }
 
     public static HighContrastSnapshot GetHighContrastSnapshot() {
@@ -1569,6 +1773,613 @@ function Get-VmAutomatedFocusState {
     }
 }
 
+function Get-VmAutomatedNativeMenuCommandSpec {
+    @(
+        [ordered]@{ command_id = 32771; menu_path = [int[]]@(0); position = 2; expected_enabled = $false }
+        [ordered]@{ command_id = 32772; menu_path = [int[]]@(3,0); position = 0; expected_enabled = $true }
+        [ordered]@{ command_id = 32773; menu_path = [int[]]@(3,0); position = 1; expected_enabled = $true }
+        [ordered]@{ command_id = 32774; menu_path = [int[]]@(3,0); position = 2; expected_enabled = $true }
+        [ordered]@{ command_id = 32775; menu_path = [int[]]@(3,1); position = 0; expected_enabled = $true }
+        [ordered]@{ command_id = 32776; menu_path = [int[]]@(3,1); position = 1; expected_enabled = $true }
+        [ordered]@{ command_id = 32777; menu_path = [int[]]@(3,1); position = 2; expected_enabled = $true }
+        [ordered]@{ command_id = 32778; menu_path = [int[]]@(3,2); position = 0; expected_enabled = $true }
+        [ordered]@{ command_id = 32779; menu_path = [int[]]@(3,2); position = 1; expected_enabled = $true }
+        [ordered]@{ command_id = 32780; menu_path = [int[]]@(3,2); position = 2; expected_enabled = $true }
+        [ordered]@{ command_id = 32781; menu_path = [int[]]@(1); position = 7; expected_enabled = $false }
+        [ordered]@{ command_id = 32783; menu_path = [int[]]@(1); position = 0; expected_enabled = $false }
+        [ordered]@{ command_id = 65535; menu_path = [int[]]@(1); position = 1; expected_enabled = $false }
+        [ordered]@{ command_id = 32784; menu_path = [int[]]@(1); position = 5; expected_enabled = $true }
+        [ordered]@{ command_id = 32788; menu_path = [int[]]@(3,3); position = 0; expected_enabled = $true }
+        [ordered]@{ command_id = 32789; menu_path = [int[]]@(3,3); position = 1; expected_enabled = $true }
+        [ordered]@{ command_id = 32790; menu_path = [int[]]@(3,3); position = 2; expected_enabled = $true }
+        [ordered]@{ command_id = 32785; menu_path = [int[]]@(3,4); position = 0; expected_enabled = $true }
+        [ordered]@{ command_id = 32786; menu_path = [int[]]@(3,4); position = 1; expected_enabled = $true }
+    )
+}
+
+function ConvertTo-VmAutomatedMenuPathKey {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]] $MenuPath)
+    if ($MenuPath.Count -eq 0) { return '<root>' }
+    ($MenuPath | ForEach-Object { ([int]$_).ToString([Globalization.CultureInfo]::InvariantCulture) }) -join '/'
+}
+
+function Test-VmAutomatedMenuPathEqual {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Left,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Right
+    )
+    if ($Left.Count -ne $Right.Count) { return $false }
+    for ($index = 0; $index -lt $Left.Count; $index++) {
+        if ([int]$Left[$index] -ne [int]$Right[$index]) { return $false }
+    }
+    $true
+}
+
+function Get-VmAutomatedNativeMenuTree {
+    param([Parameter(Mandatory)][IntPtr] $MainWindowHandle)
+
+    $rows = @([DarkReNamerVmAcceptanceNative]::ReadNativeMenuTree($MainWindowHandle))
+    if ($rows.Count -lt 1 -or $rows.Count -gt 128) {
+        throw 'Native menu tree count is missing or over limit.'
+    }
+    @($rows | ForEach-Object {
+        [ordered]@{
+            menu_path = [int[]]@($_.MenuPath)
+            position = [int]$_.Position
+            item_type = [string]$_.ItemType
+            command_id = if ($null -eq $_.CommandId) { $null } else { [int]$_.CommandId }
+            state_flags = [int]$_.StateFlags
+            enabled = [bool]$_.Enabled
+            checked = [bool]$_.Checked
+        }
+    })
+}
+
+function Assert-VmAutomatedNativeMenuTree {
+    param([Parameter(Mandatory)][object[]] $MenuTree)
+
+    if ($MenuTree.Count -lt 1 -or $MenuTree.Count -gt 128) {
+        throw 'Native menu tree count is missing or over limit.'
+    }
+    $positions = @{}
+    $rowsBySlot = @{}
+    $commandIds = [Collections.Generic.HashSet[int]]::new()
+    $expectedKeys = @(
+        'menu_path','position','item_type','command_id','state_flags','enabled','checked'
+    )
+    foreach ($row in $MenuTree) {
+        if ($row -isnot [Collections.IDictionary]) {
+            throw 'Native menu tree row is malformed.'
+        }
+        $keys = @($row.Keys | ForEach-Object { [string]$_ })
+        $path = @($row.menu_path)
+        if ($keys.Count -ne $expectedKeys.Count -or
+            @(Compare-Object -CaseSensitive $expectedKeys $keys).Count -ne 0 -or
+            $row.menu_path -isnot [array] -or
+            $path.Count -gt 2 -or @($path | Where-Object {
+            $_ -isnot [byte] -and $_ -isnot [int16] -and $_ -isnot [int32] -and $_ -isnot [int64]
+        }).Count -ne 0 -or @($path | Where-Object { $_ -lt 0 -or $_ -gt 31 }).Count -ne 0 -or
+            $row.position -isnot [int] -or $row.position -lt 0 -or $row.position -gt 31 -or
+            $row.item_type -cnotin @('command','submenu','separator') -or
+            $row.state_flags -isnot [int] -or $row.state_flags -lt 0 -or $row.state_flags -gt 255 -or
+            $row.enabled -isnot [bool] -or $row.checked -isnot [bool] -or
+            $row.enabled -ne (($row.state_flags -band 0x3) -eq 0) -or
+            $row.checked -ne (($row.state_flags -band 0x8) -ne 0)) {
+            throw 'Native menu tree row is malformed.'
+        }
+        if ($row.item_type -ceq 'command') {
+            if ($row.command_id -isnot [int] -or $row.command_id -le 0 -or
+                -not $commandIds.Add($row.command_id)) {
+                throw 'Native menu command identity is missing or duplicated.'
+            }
+        }
+        elseif ($null -ne $row.command_id) {
+            throw 'Native menu non-command unexpectedly has a command identity.'
+        }
+        $key = ConvertTo-VmAutomatedMenuPathKey -MenuPath $path
+        if (-not $positions.ContainsKey($key)) {
+            $positions[$key] = [Collections.Generic.List[int]]::new()
+        }
+        $positions[$key].Add([int]$row.position)
+        $slot = "$key`:$([int]$row.position)"
+        if ($rowsBySlot.ContainsKey($slot)) {
+            throw 'Native menu position is duplicated.'
+        }
+        $rowsBySlot[$slot] = $row
+    }
+    if (-not $positions.ContainsKey('<root>')) {
+        throw 'Native menu tree is missing its menu bar.'
+    }
+    foreach ($key in @($positions.Keys)) {
+        $actual = @($positions[$key] | Sort-Object)
+        for ($index = 0; $index -lt $actual.Count; $index++) {
+            if ($actual[$index] -ne $index) {
+                throw 'Native menu positions are not complete and contiguous.'
+            }
+        }
+    }
+    foreach ($row in $MenuTree) {
+        $path = @($row.menu_path)
+        if ($path.Count -gt 0) {
+            $parentKey = if ($path.Count -eq 1) {
+                '<root>'
+            }
+            else {
+                ConvertTo-VmAutomatedMenuPathKey -MenuPath @($path[0..($path.Count - 2)])
+            }
+            $parentSlot = "$parentKey`:$([int]$path[-1])"
+            if (-not $rowsBySlot.ContainsKey($parentSlot) -or
+                $rowsBySlot[$parentSlot].item_type -cne 'submenu') {
+                throw 'Native menu path is not owned by its parent submenu.'
+            }
+        }
+        if ($row.item_type -ceq 'submenu') {
+            $childPath = @($path) + @([int]$row.position)
+            if (-not $positions.ContainsKey(
+                    (ConvertTo-VmAutomatedMenuPathKey -MenuPath $childPath)
+                )) {
+                throw 'Native menu submenu has no bounded child inventory.'
+            }
+        }
+    }
+    $required = @(Get-VmAutomatedNativeMenuCommandSpec)
+    foreach ($spec in $required) {
+        $matches = @($MenuTree | Where-Object {
+            $_.item_type -ceq 'command' -and $_.command_id -eq $spec.command_id -and
+            $_.position -eq $spec.position -and
+            (Test-VmAutomatedMenuPathEqual -Left @($_.menu_path) -Right @($spec.menu_path))
+        })
+        if ($matches.Count -ne 1 -or $matches[0].enabled -ne $spec.expected_enabled) {
+            throw "Native menu command $($spec.command_id) path or enabled state differs from the fixed fixture."
+        }
+    }
+    $required
+}
+
+function Get-VmAutomatedHiddenRailControls {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][object[]] $MenuTree
+    )
+
+    Initialize-AcceptanceNativeOpen
+    $mainHandle = [IntPtr]$Application.main.Current.NativeWindowHandle
+    $rootHandle = [DarkReNamerVmNative]::GetAncestor($mainHandle, 2)
+    if ($rootHandle -ne $mainHandle -or $Application.process.SessionId -ne $ExpectedSession) {
+        throw 'Native menu-only workbench ownership is invalid.'
+    }
+    $seenHandles = [Collections.Generic.HashSet[long]]::new()
+    @(
+        foreach ($spec in @(Assert-VmAutomatedNativeMenuTree -MenuTree $MenuTree)) {
+            $handle = [DarkReNamerAcceptanceNativeOpen]::GetDlgItem($mainHandle, [int]$spec.command_id)
+            if ($handle -eq [IntPtr]::Zero -or
+                -not [DarkReNamerAcceptanceNativeOpen]::IsWindow($handle) -or
+                [DarkReNamerAcceptanceNativeOpen]::GetParent($handle) -ne $mainHandle -or
+                [DarkReNamerAcceptanceNativeOpen]::GetDlgCtrlID($handle) -ne $spec.command_id -or
+                -not $seenHandles.Add($handle.ToInt64())) {
+                throw "Native hidden rail $($spec.command_id) is missing, misbound, or duplicated."
+            }
+            $processId = [uint32]0
+            if ([DarkReNamerAcceptanceNativeOpen]::GetWindowThreadProcessId($handle, [ref]$processId) -eq 0 -or
+                $processId -ne $Application.process.Id) {
+                throw "Native hidden rail $($spec.command_id) belongs to another process."
+            }
+            $className = [Text.StringBuilder]::new(32)
+            if ([DarkReNamerAcceptanceNativeOpen]::GetClassName($handle, $className, $className.Capacity) -le 0 -or
+                $className.ToString() -cne 'Button' -or
+                [DarkReNamerAcceptanceNativeOpen]::IsWindowVisible($handle)) {
+                throw "Native hidden rail $($spec.command_id) class or visibility is invalid."
+            }
+            $menuRow = @($MenuTree | Where-Object { $_.command_id -eq $spec.command_id })
+            $enabled = [DarkReNamerAcceptanceNativeOpen]::IsWindowEnabled($handle)
+            if ($menuRow.Count -ne 1 -or $enabled -ne [bool]$menuRow[0].enabled) {
+                throw "Native hidden rail $($spec.command_id) enabled state differs from its menu command."
+            }
+            $rect = [DarkReNamerAcceptanceNativeOpen+Rect]::new()
+            if (-not [DarkReNamerAcceptanceNativeOpen]::GetWindowRect($handle, [ref]$rect) -or
+                $rect.Right -lt $rect.Left -or $rect.Bottom -lt $rect.Top) {
+                throw "Native hidden rail $($spec.command_id) bounds are invalid."
+            }
+            [ordered]@{
+                command_id = [int]$spec.command_id
+                hwnd = [long]$handle
+                control_id = [int][DarkReNamerAcceptanceNativeOpen]::GetDlgCtrlID($handle)
+                window_class = $className.ToString()
+                visible = $false
+                enabled = [bool]$enabled
+                pid = [int]$processId
+                session_id = [int]$Application.process.SessionId
+                parent_hwnd = [long]$mainHandle
+                root_hwnd = [long]$rootHandle
+                rect = [ordered]@{
+                    left = [int]$rect.Left; top = [int]$rect.Top
+                    right = [int]$rect.Right; bottom = [int]$rect.Bottom
+                }
+            }
+        }
+    )
+}
+
+function Get-VmAutomatedVisibleMenuPopups {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $OpenMenuPaths,
+        [Parameter(Mandatory)][Collections.IDictionary] $PathHandles
+    )
+
+    if ($OpenMenuPaths.Count -gt 2 -or $Process.SessionId -ne $ExpectedSession) {
+        throw 'Native menu popup request is invalid or outside the expected session.'
+    }
+    $native = @([DarkReNamerVmAcceptanceNative]::ReadVisibleNativeMenuPopups([uint32]$Process.Id))
+    if ($native.Count -ne $OpenMenuPaths.Count) {
+        throw 'Native menu popup count differs from the keyboard traversal state.'
+    }
+    $liveHandles = [Collections.Generic.HashSet[long]]::new()
+    foreach ($row in $native) { [void]$liveHandles.Add([long]$row.Handle) }
+    foreach ($key in @($PathHandles.Keys)) {
+        if (-not $liveHandles.Contains([long]$PathHandles[$key])) {
+            $PathHandles.Remove($key)
+        }
+    }
+    $unassignedRows = [Collections.Generic.List[object]]::new()
+    foreach ($row in $native) {
+        if (@($PathHandles.Values | Where-Object { [long]$_ -eq [long]$row.Handle }).Count -eq 0) {
+            $unassignedRows.Add($row)
+        }
+    }
+    $unassignedPaths = [Collections.Generic.List[object]]::new()
+    foreach ($path in $OpenMenuPaths) {
+        $key = ConvertTo-VmAutomatedMenuPathKey -MenuPath @($path)
+        if (-not $PathHandles.Contains($key)) { $unassignedPaths.Add([int[]]@($path)) }
+    }
+    if ($unassignedRows.Count -ne $unassignedPaths.Count -or $unassignedRows.Count -gt 1) {
+        throw 'Native menu popup identities changed ambiguously during traversal.'
+    }
+    if ($unassignedRows.Count -eq 1) {
+        $PathHandles[(ConvertTo-VmAutomatedMenuPathKey -MenuPath @($unassignedPaths[0]))] =
+            [long]$unassignedRows[0].Handle
+    }
+    @(
+        foreach ($path in $OpenMenuPaths) {
+            $key = ConvertTo-VmAutomatedMenuPathKey -MenuPath @($path)
+            $handle = [long]$PathHandles[$key]
+            $matches = @($native | Where-Object { [long]$_.Handle -eq $handle })
+            if ($matches.Count -ne 1 -or $matches[0].ClassName -cne '#32768' -or
+                $matches[0].ProcessId -ne $Process.Id -or
+                $matches[0].Right -le $matches[0].Left -or
+                $matches[0].Bottom -le $matches[0].Top) {
+                throw 'Native menu popup ownership, class, or bounds are invalid.'
+            }
+            [ordered]@{
+                menu_path = [int[]]@($path)
+                hwnd = $handle
+                pid = [int]$matches[0].ProcessId
+                session_id = [int]$Process.SessionId
+                window_class = [string]$matches[0].ClassName
+                rect = [ordered]@{
+                    left = [int]$matches[0].Left; top = [int]$matches[0].Top
+                    right = [int]$matches[0].Right; bottom = [int]$matches[0].Bottom
+                }
+            }
+        }
+    )
+}
+
+function Get-VmAutomatedMenuHighlight {
+    param(
+        [Parameter(Mandatory)][IntPtr] $MainWindowHandle,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $OpenMenuPaths,
+        [Parameter(Mandatory)][object[]] $Popups
+    )
+
+    $native = @([DarkReNamerVmAcceptanceNative]::ReadHighlightedNativeMenuItems($MainWindowHandle))
+    if ($OpenMenuPaths.Count -eq 0) {
+        if ($native.Count -ne 0) { throw 'A closed native menu retained a highlighted item.' }
+        return $null
+    }
+    $deepest = $OpenMenuPaths[0]
+    foreach ($path in $OpenMenuPaths) {
+        if (@($path).Count -gt @($deepest).Count) { $deepest = $path }
+    }
+    $matches = @($native | Where-Object {
+        Test-VmAutomatedMenuPathEqual -Left @($_.MenuPath) -Right @($deepest)
+    })
+    if ($matches.Count -eq 0) { return $null }
+    if ($matches.Count -ne 1 -or (($matches[0].StateFlags -band 0x80) -eq 0) -or
+        $matches[0].Right -le $matches[0].Left -or $matches[0].Bottom -le $matches[0].Top) {
+        throw 'Native menu highlight is duplicated, unmarked, or has invalid bounds.'
+    }
+    $popup = @($Popups | Where-Object {
+        Test-VmAutomatedMenuPathEqual -Left @($_.menu_path) -Right @($deepest)
+    })
+    if ($popup.Count -ne 1 -or
+        $matches[0].Left -lt $popup[0].rect.left -or
+        $matches[0].Top -lt $popup[0].rect.top -or
+        $matches[0].Right -gt $popup[0].rect.right -or
+        $matches[0].Bottom -gt $popup[0].rect.bottom) {
+        throw 'Native menu highlight is outside its exact owned popup.'
+    }
+    [ordered]@{
+        menu_path = [int[]]@($matches[0].MenuPath)
+        position = [int]$matches[0].Position
+        command_id = if ($null -eq $matches[0].CommandId) { $null } else { [int]$matches[0].CommandId }
+        item_rect = [ordered]@{
+            left = [int]$matches[0].Left; top = [int]$matches[0].Top
+            right = [int]$matches[0].Right; bottom = [int]$matches[0].Bottom
+        }
+        state_flags = [int]$matches[0].StateFlags
+    }
+}
+
+function Get-VmAutomatedMenuEndpoint {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $List,
+        [Parameter(Mandatory)][int] $ExpectedSession
+    )
+
+    $popups = @([DarkReNamerVmAcceptanceNative]::ReadVisibleNativeMenuPopups(
+        [uint32]$Application.process.Id
+    ))
+    if ($popups.Count -ne 0) { throw 'Native menu endpoint retained an open popup.' }
+    $foreground = Get-ForegroundObservation
+    $mainHandle = [long]$Application.main.Current.NativeWindowHandle
+    if ($foreground.hwnd -ne $mainHandle -or
+        $foreground.process_id -ne $Application.process.Id -or
+        $foreground.session_id -ne $ExpectedSession -or
+        $foreground.window_class -cne 'DarkReNamerWindow') {
+        throw 'Native menu endpoint foreground differs from the candidate workbench.'
+    }
+    $focused = Get-FocusedAcceptanceElement `
+        -Process $Application.process -ExpectedSession $ExpectedSession `
+        -Label 'native menu endpoint focus'
+    $binding = Get-VmAutomatedFocusBinding `
+        -Element $focused -Process $Application.process -ExpectedSession $ExpectedSession `
+        -Label 'native menu endpoint focus'
+    if ($binding.automation_id -cne '1000' -or
+        $binding.root_hwnd -ne $mainHandle -or
+        [IntPtr]$List.Current.NativeWindowHandle -ne [IntPtr]$focused.Current.NativeWindowHandle) {
+        throw 'Native menu endpoint focus is not the exact file list.'
+    }
+    [ordered]@{
+        foreground = $foreground
+        focused = $binding
+        open_menu_paths = @()
+        popups = @()
+    }
+}
+
+function Invoke-VmAutomatedMenuKey {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][ValidateSet('alt-f','alt-e','alt-t','down','right','left','escape')][string] $Input,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $OpenMenuPaths,
+        [Parameter(Mandatory)][Collections.IDictionary] $PathHandles,
+        [AllowNull()][object] $PreviousHighlight,
+        [Parameter(Mandatory)][ValidateRange(1, 128)][int] $Sequence
+    )
+
+    $virtualKeys = switch ($Input) {
+        'alt-f' { [int[]]@(0x12, 0x46) }
+        'alt-e' { [int[]]@(0x12, 0x45) }
+        'alt-t' { [int[]]@(0x12, 0x54) }
+        'down' { [int[]]@(0x28) }
+        'right' { [int[]]@(0x27) }
+        'left' { [int[]]@(0x25) }
+        'escape' { [int[]]@(0x1B) }
+    }
+    if ($Input.StartsWith('alt-', [StringComparison]::Ordinal)) {
+        Send-AcceptanceChord `
+            -Process $Application.process -ExpectedSession $ExpectedSession `
+            -Modifier ([uint16]$virtualKeys[0]) -VirtualKey ([uint16]$virtualKeys[1]) `
+            -Label "native menu $Input"
+    }
+    else {
+        Send-AcceptanceTap `
+            -Process $Application.process -ExpectedSession $ExpectedSession `
+            -VirtualKey ([uint16]$virtualKeys[0]) -Label "native menu $Input"
+    }
+    $popups = $null
+    $highlight = $null
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        Start-Sleep -Milliseconds 50
+        $actual = @([DarkReNamerVmAcceptanceNative]::ReadVisibleNativeMenuPopups(
+            [uint32]$Application.process.Id
+        ))
+        if ($actual.Count -eq $OpenMenuPaths.Count) {
+            $popups = @(Get-VmAutomatedVisibleMenuPopups `
+                -Process $Application.process -ExpectedSession $ExpectedSession `
+                -OpenMenuPaths $OpenMenuPaths -PathHandles $PathHandles)
+            $highlight = Get-VmAutomatedMenuHighlight `
+                -MainWindowHandle ([IntPtr]$Application.main.Current.NativeWindowHandle) `
+                -OpenMenuPaths $OpenMenuPaths -Popups $popups
+            if ($Input -ceq 'down' -and (
+                $null -eq $highlight -or
+                ($null -ne $PreviousHighlight -and
+                    $highlight.position -eq $PreviousHighlight.position -and
+                    (Test-VmAutomatedMenuPathEqual `
+                        -Left @($highlight.menu_path) -Right @($PreviousHighlight.menu_path))))) {
+                $popups = $null
+                continue
+            }
+            break
+        }
+    }
+    if ($null -eq $popups) { throw "Native menu $Input did not reach its expected popup state." }
+    $foreground = Get-ForegroundObservation
+    $mainHandle = [long]$Application.main.Current.NativeWindowHandle
+    if ($foreground.hwnd -ne $mainHandle -or
+        $foreground.process_id -ne $Application.process.Id -or
+        $foreground.session_id -ne $ExpectedSession -or
+        $foreground.window_class -cne 'DarkReNamerWindow') {
+        throw "Native menu $Input lost the exact candidate foreground binding."
+    }
+    [ordered]@{
+        sequence = $Sequence
+        input = $Input
+        virtual_keys = $virtualKeys
+        open_menu_paths = [object[]]@($OpenMenuPaths | ForEach-Object {
+            ,([int[]]@($_))
+        })
+        highlighted = $highlight
+        popups = $popups
+        foreground = $foreground
+    }
+}
+
+function Assert-VmAutomatedMenuHighlightBinding {
+    param(
+        [AllowNull()][object] $Highlight,
+        [Parameter(Mandatory)][object[]] $MenuTree
+    )
+
+    if ($null -eq $Highlight) { return }
+    $matches = @($MenuTree | Where-Object {
+        $_.position -eq $Highlight.position -and
+        (Test-VmAutomatedMenuPathEqual -Left @($_.menu_path) -Right @($Highlight.menu_path))
+    })
+    if ($matches.Count -ne 1 -or
+        $matches[0].command_id -ne $Highlight.command_id -or
+        (($Highlight.state_flags -band 0x80) -eq 0) -or
+        (($Highlight.state_flags -band 0x7F) -ne ($matches[0].state_flags -band 0x7F))) {
+        throw 'Native menu highlight differs from the immutable menu tree row.'
+    }
+}
+
+function Invoke-VmAutomatedNativeMenuOnlyReachability {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $List,
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][object[]] $MenuTree
+    )
+
+    $mainHandle = [IntPtr]$Application.main.Current.NativeWindowHandle
+    $List.SetFocus()
+    [void][DarkReNamerVmNative]::SetForegroundWindow($mainHandle)
+    Assert-AcceptanceForegroundBinding `
+        -Process $Application.process -ExpectedSession $ExpectedSession -RequireMainWindow
+    $initial = Get-VmAutomatedMenuEndpoint `
+        -Application $Application -List $List -ExpectedSession $ExpectedSession
+    $stateBefore = Get-VmAutomatedFocusState `
+        -FixtureRoot $FixtureRoot -LocalAppData $env:LOCALAPPDATA
+    $events = [Collections.Generic.List[object]]::new()
+    $visited = [Collections.Generic.HashSet[int]]::new()
+    $navigation = [pscustomobject]@{ sequence = 0 }
+    $addEvent = {
+        param(
+            [string] $Input,
+            [object[]] $OpenMenuPaths,
+            [Collections.IDictionary] $PathHandles
+        )
+        if ($events.Count -ge 128) {
+            throw 'Native menu keyboard event count exceeds its bound.'
+        }
+        $navigation.sequence++
+        $previousHighlight = if ($events.Count -eq 0) {
+            $null
+        }
+        else {
+            $events[$events.Count - 1].highlighted
+        }
+        $event = Invoke-VmAutomatedMenuKey `
+            -Application $Application -ExpectedSession $ExpectedSession `
+            -Input $Input -OpenMenuPaths $OpenMenuPaths `
+            -PathHandles $PathHandles -PreviousHighlight $previousHighlight `
+            -Sequence $navigation.sequence
+        Assert-VmAutomatedMenuHighlightBinding `
+            -Highlight $event.highlighted -MenuTree $MenuTree
+        if ($null -ne $event.highlighted -and $null -ne $event.highlighted.command_id) {
+            $required = @(Get-VmAutomatedNativeMenuCommandSpec | Where-Object {
+                $_.command_id -eq $event.highlighted.command_id -and $_.expected_enabled
+            })
+            if ($required.Count -eq 1) { [void]$visited.Add([int]$event.highlighted.command_id) }
+        }
+        $events.Add($event)
+        $event
+    }
+    $visitSession = {
+        param(
+            [string] $OpenInput,
+            [int] $RootPosition,
+            [AllowNull()][object] $ChildPosition,
+            [int[]] $RequiredCommandIds
+        )
+        $pathHandles = @{}
+        $paths = [Collections.Generic.List[object]]::new()
+        $paths.Add([int[]]@($RootPosition))
+        $current = & $addEvent $OpenInput $paths.ToArray() $pathHandles
+        if ($null -ne $ChildPosition) {
+            $selected = $false
+            for ($attempt = 0; $attempt -lt 16; $attempt++) {
+                if ($null -ne $current.highlighted -and
+                    $null -eq $current.highlighted.command_id -and
+                    $current.highlighted.position -eq [int]$ChildPosition -and
+                    (Test-VmAutomatedMenuPathEqual `
+                        -Left @($current.highlighted.menu_path) -Right @($RootPosition))) {
+                    $selected = $true
+                    break
+                }
+                $current = & $addEvent 'down' $paths.ToArray() $pathHandles
+            }
+            if (-not $selected) {
+                throw "Native Transform submenu $ChildPosition was not reached by bounded Down input."
+            }
+            $paths.Add([int[]]@($RootPosition, [int]$ChildPosition))
+            $current = & $addEvent 'right' $paths.ToArray() $pathHandles
+        }
+        for ($attempt = 0; $attempt -lt 32; $attempt++) {
+            $missing = @($RequiredCommandIds | Where-Object { -not $visited.Contains($_) })
+            if ($missing.Count -eq 0) { break }
+            $current = & $addEvent 'down' $paths.ToArray() $pathHandles
+        }
+        $missing = @($RequiredCommandIds | Where-Object { -not $visited.Contains($_) })
+        if ($missing.Count -ne 0) {
+            throw "Native menu keyboard traversal missed enabled commands: $($missing -join ', ')."
+        }
+        while ($paths.Count -gt 0) {
+            $paths.RemoveAt($paths.Count - 1)
+            [void](& $addEvent 'escape' $paths.ToArray() $pathHandles)
+        }
+    }
+
+    & $visitSession 'alt-f' 0 $null ([int[]]@())
+    & $visitSession 'alt-e' 1 $null ([int[]]@(32784))
+    & $visitSession 'alt-t' 3 0 ([int[]]@(32772,32773,32774))
+    & $visitSession 'alt-t' 3 1 ([int[]]@(32775,32776,32777))
+    & $visitSession 'alt-t' 3 2 ([int[]]@(32778,32779,32780))
+    & $visitSession 'alt-t' 3 3 ([int[]]@(32788,32789,32790))
+    & $visitSession 'alt-t' 3 4 ([int[]]@(32785,32786))
+
+    $expectedEnabled = @(Get-VmAutomatedNativeMenuCommandSpec | Where-Object expected_enabled |
+        ForEach-Object command_id)
+    $missingAll = @($expectedEnabled | Where-Object { -not $visited.Contains($_) })
+    if ($missingAll.Count -ne 0 -or $visited.Count -ne 15) {
+        throw "Native menu keyboard traversal did not cover the exact enabled commands: $($missingAll -join ', ')."
+    }
+    $final = Get-VmAutomatedMenuEndpoint `
+        -Application $Application -List $List -ExpectedSession $ExpectedSession
+    $stateAfter = Get-VmAutomatedFocusState `
+        -FixtureRoot $FixtureRoot -LocalAppData $env:LOCALAPPDATA
+    if (($stateBefore | ConvertTo-Json -Compress -Depth 12) -cne
+        ($stateAfter | ConvertTo-Json -Compress -Depth 12)) {
+        throw 'Native menu keyboard traversal changed the fixture or journal state.'
+    }
+    [ordered]@{
+        schema_version = 1
+        variant = 'native-menu-only'
+        initial = $initial
+        events = $events.ToArray()
+        final = $final
+        state_before = $stateBefore
+        state_after = $stateAfter
+    }
+}
+
 function Invoke-VmAutomatedFocusReachability {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -1843,7 +2654,8 @@ function New-VmAutomatedLayoutRun {
         [Parameter(Mandatory)][string] $FixtureRoot,
         [Parameter(Mandatory)][object] $Grid,
         [Parameter(Mandatory)][int] $ExpectedSession,
-        [Parameter(Mandatory)][int] $TimeoutSeconds
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][ValidateSet('command-rails','native-menu-only')][string] $LayoutVariant
     )
 
     $controls = [Collections.Generic.List[object]]::new()
@@ -1853,18 +2665,28 @@ function New-VmAutomatedLayoutRun {
     $controls.Add((Get-VmAutomatedControlObservation `
         -Element $Grid.element -Process $Application.process `
         -ExpectedSession $ExpectedSession -Label 'raw layout file list'))
-    foreach ($railId in @(
-        '32771','32772','32773','32774','32775','32776','32777','32778','32779','32780',
-        '32781','32783','65535','32784','32788','32789','32790','32785','32786'
-    )) {
-        $rail = Find-UniqueAutomationElement `
-            -Root $Application.main -Process $Application.process -ExpectedSession $ExpectedSession `
-            -AutomationId $railId -ControlType ([Windows.Automation.ControlType]::Button) `
-            -TimeoutSeconds $TimeoutSeconds -Label "raw layout command rail $railId" `
-            -RequireWindowHandle
-        $controls.Add((Get-VmAutomatedControlObservation `
-            -Element $rail -Process $Application.process -ExpectedSession $ExpectedSession `
-            -Label "raw layout command rail $railId"))
+    if ($LayoutVariant -ceq 'command-rails') {
+        foreach ($railId in @(
+            '32771','32772','32773','32774','32775','32776','32777','32778','32779','32780',
+            '32781','32783','65535','32784','32788','32789','32790','32785','32786'
+        )) {
+            $rail = Find-UniqueAutomationElement `
+                -Root $Application.main -Process $Application.process -ExpectedSession $ExpectedSession `
+                -AutomationId $railId -ControlType ([Windows.Automation.ControlType]::Button) `
+                -TimeoutSeconds $TimeoutSeconds -Label "raw layout command rail $railId" `
+                -RequireWindowHandle
+            $controls.Add((Get-VmAutomatedControlObservation `
+                -Element $rail -Process $Application.process -ExpectedSession $ExpectedSession `
+                -Label "raw layout command rail $railId"))
+        }
+    }
+    else {
+        $Grid.element.SetFocus()
+        [void][DarkReNamerVmNative]::SetForegroundWindow(
+            [IntPtr]$Application.main.Current.NativeWindowHandle
+        )
+        Assert-AcceptanceForegroundBinding `
+            -Process $Application.process -ExpectedSession $ExpectedSession -RequireMainWindow
     }
     $focused = Get-FocusedAcceptanceElement `
         -Process $Application.process -ExpectedSession $ExpectedSession -Label 'raw layout focus'
@@ -1881,10 +2703,55 @@ function New-VmAutomatedLayoutRun {
         $focusObservation.root_hwnd -ne $mainHandle) {
         throw 'Raw layout control or focus ownership differs from the candidate workbench.'
     }
-    $focusReachability = Invoke-VmAutomatedFocusReachability `
-        -Application $Application -List $Grid.element -FixtureRoot $FixtureRoot `
-        -ExpectedSession $ExpectedSession -TimeoutSeconds $TimeoutSeconds
+    $focusReachability = $null
+    $nativeMenuOnly = $null
+    if ($LayoutVariant -ceq 'command-rails') {
+        $focusReachability = Invoke-VmAutomatedFocusReachability `
+            -Application $Application -List $Grid.element -FixtureRoot $FixtureRoot `
+            -ExpectedSession $ExpectedSession -TimeoutSeconds $TimeoutSeconds
+    }
+    else {
+        $menuTree = @(Get-VmAutomatedNativeMenuTree `
+            -MainWindowHandle ([IntPtr]$Application.main.Current.NativeWindowHandle)
+        )
+        [void](Assert-VmAutomatedNativeMenuTree -MenuTree $menuTree)
+        $hiddenRails = @(Get-VmAutomatedHiddenRailControls `
+            -Application $Application -ExpectedSession $ExpectedSession -MenuTree $menuTree)
+        if ($hiddenRails.Count -ne 19) {
+            throw 'Native menu-only layout did not retain all nineteen hidden rail HWNDs.'
+        }
+        $reachability = Invoke-VmAutomatedNativeMenuOnlyReachability `
+            -Application $Application -List $Grid.element -FixtureRoot $FixtureRoot `
+            -ExpectedSession $ExpectedSession -MenuTree $menuTree
+        $nativeMenuOnly = [ordered]@{
+            schema_version = 1
+            variant = 'native-menu-only'
+            hidden_rail_controls = $hiddenRails
+            menu_tree = $menuTree
+            initial = $reachability.initial
+            events = $reachability.events
+            final = $reachability.final
+            state_before = $reachability.state_before
+            state_after = $reachability.state_after
+        }
+    }
     $Application.process.Refresh()
+    $layoutObservations = if ($LayoutVariant -ceq 'command-rails') {
+        [ordered]@{
+            controls = $controls.ToArray()
+            focus = @($focusObservation)
+            focus_reachability = $focusReachability
+            screenshots = @()
+        }
+    }
+    else {
+        [ordered]@{
+            controls = $controls.ToArray()
+            focus = @($focusObservation)
+            native_menu_only = $nativeMenuOnly
+            screenshots = @()
+        }
+    }
     [ordered]@{
         raw_appearance = Get-VmAutomatedAppearance -Window $Application.main `
             -Process $Application.process -ExpectedSession $ExpectedSession
@@ -1905,12 +2772,7 @@ function New-VmAutomatedLayoutRun {
             exit_method = $null
             exit_code = $null
         }
-        layout_observations = [ordered]@{
-            controls = $controls.ToArray()
-            focus = @($focusObservation)
-            focus_reachability = $focusReachability
-            screenshots = @()
-        }
+        layout_observations = $layoutObservations
     }
 }
 
@@ -4649,7 +5511,7 @@ function Invoke-ObserverContextScenario {
             $rawRepeatedRun = New-VmAutomatedLayoutRun `
                 -Application $repeatedApplication -ApplicationPath $applicationPath `
                 -FixtureRoot $repeatedFixture.root -Grid $grid -ExpectedSession $SessionId `
-                -TimeoutSeconds $WaitSeconds
+                -TimeoutSeconds $WaitSeconds -LayoutVariant $script:contract.layout_variant
         }
         for ($index = 0; $index -lt 3; $index++) {
             Set-ObserverManualName -Application $repeatedApplication -Grid $grid -Row $index -Name $repeatedFixture.destination_names[$index] -SessionId $SessionId -WaitSeconds $WaitSeconds
@@ -4730,7 +5592,7 @@ function Invoke-ObserverContextScenario {
             $rawMoveRun = New-VmAutomatedLayoutRun `
                 -Application $moveApplication -ApplicationPath $applicationPath `
                 -FixtureRoot $moveFixture.root -Grid $moveGrid -ExpectedSession $SessionId `
-                -TimeoutSeconds $WaitSeconds
+                -TimeoutSeconds $WaitSeconds -LayoutVariant $script:contract.layout_variant
         }
         $destinationInput = Set-ObserverDestinationParent -Application $moveApplication -Grid $moveGrid -DestinationParent $moveFixture.parent_b -SessionId $SessionId -WaitSeconds $WaitSeconds
         $moveOnlySelection = Set-ObserverSelectedRow -Application $moveApplication -Grid $moveGrid -Row 0 -SessionId $SessionId
@@ -4830,7 +5692,7 @@ function Invoke-ObserverContextScenario {
             $rawMixedRun = New-VmAutomatedLayoutRun `
                 -Application $mixedApplication -ApplicationPath $applicationPath `
                 -FixtureRoot $mixedFixture.root -Grid $mixedGrid -ExpectedSession $SessionId `
-                -TimeoutSeconds $WaitSeconds
+                -TimeoutSeconds $WaitSeconds -LayoutVariant $script:contract.layout_variant
         }
         if ($mixedGrid.pattern.GetItem(0, 0).Current.Name -cne '03-unsampled-move.txt') {
             throw 'Unsampled-move source was not the first admitted row.'
@@ -5087,7 +5949,7 @@ function Invoke-ObserverStandardScenario {
             $rawLayoutRun = New-VmAutomatedLayoutRun `
                 -Application $application -ApplicationPath $applicationPath `
                 -FixtureRoot $fixture.root -Grid $grid -ExpectedSession $SessionId `
-                -TimeoutSeconds $WaitSeconds
+                -TimeoutSeconds $WaitSeconds -LayoutVariant $script:contract.layout_variant
         }
         $importMs = $import.elapsed_ms
         $prefixRasterTarget = Set-ObserverManualName -Application $application -Grid $grid -Row 0 -Name $fixture.destination_names[0] -SessionId $SessionId -WaitSeconds $WaitSeconds -CaptureRoot $EvidenceRoot -CaptureLeaf ($prefix + '-editable-input-prompt.png') -Captures $Captures
@@ -5408,6 +6270,46 @@ function Assert-GuiRegressionInvocationBinding {
         $ManifestInput.request.text_scale_percent -ne $TextScalePercent) {
         throw 'Regression invocation differs from its immutable manifest.'
     }
+    [void](Resolve-GuiRegressionLayoutVariant `
+        -ManifestInput $ManifestInput `
+        -Verified $Verified `
+        -RegressionMode $RegressionMode `
+        -Appearance $Appearance `
+        -TextScalePercent $TextScalePercent)
+}
+
+function Resolve-GuiRegressionLayoutVariant {
+    param(
+        [Parameter(Mandatory)][object] $ManifestInput,
+        [Parameter(Mandatory)][object] $Verified,
+        [Parameter(Mandatory)][string] $RegressionMode,
+        [Parameter(Mandatory)][string] $Appearance,
+        [Parameter(Mandatory)][int] $TextScalePercent
+    )
+
+    $property = $ManifestInput.request.PSObject.Properties['layout_variant']
+    if ($null -eq $property) {
+        return 'command-rails'
+    }
+    if ($property.Value -isnot [string] -or
+        $property.Value -cnotin @('command-rails', 'native-menu-only')) {
+        throw 'Regression layout variant is invalid.'
+    }
+    $variant = [string]$property.Value
+    if ($variant -ceq 'native-menu-only') {
+        $desktop = $ManifestInput.request.PSObject.Properties['desktop']
+        if ($Verified.lane -cne 'candidate-gui-only' -or
+            $RegressionMode -cne 'text-scale' -or
+            $Appearance -cne 'light' -or
+            $TextScalePercent -ne 150 -or
+            $null -eq $desktop -or
+            $desktop.Value.width -ne 800 -or
+            $desktop.Value.height -ne 600 -or
+            $desktop.Value.dpi -ne 96) {
+            throw 'Native-menu-only is restricted to the fixed text-150 cell.'
+        }
+    }
+    $variant
 }
 
 function Assert-GuiRegressionGuestPreflightBinding {
@@ -5621,6 +6523,12 @@ function Invoke-GuiRegressionAcceptance {
         observer = $Appearance
         expected_dpi = [int]$input.request.desktop.dpi
         expected_text_scale_percent = $TextScalePercent
+        layout_variant = Resolve-GuiRegressionLayoutVariant `
+            -ManifestInput $input `
+            -Verified $resolved `
+            -RegressionMode $RegressionMode `
+            -Appearance $Appearance `
+            -TextScalePercent $TextScalePercent
         requested_small_workspace = $input.request.desktop
         tooltip_regression = $RegressionMode -eq 'tooltip'
         source_sha = $input.source_sha
