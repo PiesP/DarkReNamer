@@ -50,6 +50,7 @@ python3 scripts/test-vm-automated-journal.py
 python3 scripts/test-vm-automated-binding.py
 python3 scripts/test-vm-automated-recovery.py
 python3 scripts/test-vm-automated-platform.py
+python3 scripts/test-vm-automated-campaign.py
 ```
 
 ## Linux cross-build and visual diagnostics
