@@ -43,6 +43,9 @@ pwsh -NoLogo -NoProfile -File ./scripts/test-tooling.ps1
 python3 scripts/test-windows-vm-runner.py
 python3 scripts/test-gui-regression-runner.py
 python3 scripts/test-gui-regression-evidence.py
+python3 scripts/test-vm-automated-authority.py
+python3 scripts/test-vm-automated-evidence.py
+python3 scripts/test-vm-automated-state.py
 ```
 
 ## Linux cross-build and visual diagnostics
