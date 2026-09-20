@@ -3192,6 +3192,118 @@ function Get-BoundedAcceptanceProcessWindowInventory {
     }
 }
 
+function Resolve-AcceptanceOwnedInputWindowCandidate {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Windows,
+        [Parameter(Mandatory)][int] $ExpectedProcessId,
+        [Parameter(Mandatory)][long] $ExpectedOwnerHandle,
+        [Parameter(Mandatory)][string] $ExpectedName
+    )
+
+    $matches = @($Windows | Where-Object {
+        [long]$_.Handle -gt 0 -and
+        [long]$_.Owner -eq $ExpectedOwnerHandle -and
+        [int]$_.ProcessId -eq $ExpectedProcessId -and
+        [string]$_.ClassName -ceq 'DarkReNamerInputWindow' -and
+        [string]$_.Title -ceq $ExpectedName -and
+        [bool]$_.Visible -and
+        [int]$_.Right -gt [int]$_.Left -and
+        [int]$_.Bottom -gt [int]$_.Top -and
+        ([long]$_.Right - [long]$_.Left) -le 32768L -and
+        ([long]$_.Bottom - [long]$_.Top) -le 32768L -and
+        (([long]$_.Right - [long]$_.Left) *
+            ([long]$_.Bottom - [long]$_.Top)) -le 100000000L
+    })
+    if ($matches.Count -gt 1) {
+        throw 'Owned input prompt matched more than one exact native window.'
+    }
+    if ($matches.Count -eq 1) {
+        return $matches[0]
+    }
+    return $null
+}
+
+function Wait-AcceptanceOwnedInputWindow {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Owner,
+        [Parameter(Mandatory)][string] $Name,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    Assert-AutomationBinding `
+        -Element $Owner `
+        -Process $Process `
+        -ExpectedSession $ExpectedSession `
+        -Label "$Label owner" `
+        -RequireWindowHandle
+    $ownerHandle = [long]$Owner.Current.NativeWindowHandle
+    $deadline = (Get-Date).AddSeconds([Math]::Min(30, $TimeoutSeconds))
+    $nativeFound = $false
+    $uiaIdentityMismatch = $false
+    do {
+        $Process.Refresh()
+        if ($Process.HasExited -or $Process.SessionId -ne $ExpectedSession) {
+            throw "$Label process left the expected desktop session."
+        }
+        $windows = @(
+            [DarkReNamerVmAcceptanceNative]::ReadProcessTopLevelWindows(
+                [uint32]$Process.Id
+            )
+        )
+        $native = Resolve-AcceptanceOwnedInputWindowCandidate `
+            -Windows $windows `
+            -ExpectedProcessId $Process.Id `
+            -ExpectedOwnerHandle $ownerHandle `
+            -ExpectedName $Name
+        if ($null -ne $native) {
+            $nativeFound = $true
+            $window = [Windows.Automation.AutomationElement]::FromHandle(
+                [IntPtr][long]$native.Handle
+            )
+            if ($null -ne $window) {
+                $freshWindows = @(
+                    [DarkReNamerVmAcceptanceNative]::ReadProcessTopLevelWindows(
+                        [uint32]$Process.Id
+                    )
+                )
+                $fresh = Resolve-AcceptanceOwnedInputWindowCandidate `
+                    -Windows $freshWindows `
+                    -ExpectedProcessId $Process.Id `
+                    -ExpectedOwnerHandle $ownerHandle `
+                    -ExpectedName $Name
+                if ($null -eq $fresh -or [long]$fresh.Handle -ne [long]$native.Handle) {
+                    throw "$Label changed during exact native-to-UIA binding."
+                }
+                Assert-AutomationBinding `
+                    -Element $window `
+                    -Process $Process `
+                    -ExpectedSession $ExpectedSession `
+                    -Label $Label `
+                    -RequireWindowHandle
+                if ([long]$window.Current.NativeWindowHandle -ne [long]$fresh.Handle -or
+                    $window.Current.Name -cne $Name -or
+                    $window.Current.ControlType -ne [Windows.Automation.ControlType]::Window) {
+                    $uiaIdentityMismatch = $true
+                }
+                else {
+                    return $window
+                }
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    if ($uiaIdentityMismatch) {
+        throw "$Label exact native window did not publish the expected UI Automation identity before the bounded deadline."
+    }
+    if ($nativeFound) {
+        throw "$Label exact native window did not become available through UI Automation before the bounded deadline."
+    }
+    throw "$Label exact native window was not found before the bounded deadline."
+}
+
 function Send-AcceptanceChord {
     param(
         [Parameter(Mandatory)][Diagnostics.Process] $Process,
@@ -7698,9 +7810,10 @@ try {
             -ExpectedAutomationId '32773'
         [DarkReNamerVmAcceptanceNative]::Tap(0x20)
         $prefixActivationAttempt.input_sent = $true
-        $prompt = Wait-UniqueAutomationWindow `
+        $prompt = Wait-AcceptanceOwnedInputWindow `
             -Process $process `
             -ExpectedSession $ExpectedSessionId `
+            -Owner $mainWindow `
             -Name '이름 앞에 문자열 붙이기' `
             -TimeoutSeconds $TimeoutSeconds `
             -Label 'keyboard prefix prompt'
@@ -7953,7 +8066,13 @@ try {
 
         [void](Move-RailFocusToCommand -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '32773')
         Send-AcceptanceTap -Process $process -ExpectedSession $ExpectedSessionId -VirtualKey 0x20 -Label 'second prefix command Space'
-        $prompt = Wait-UniqueAutomationWindow -Process $process -ExpectedSession $ExpectedSessionId -Name '이름 앞에 문자열 붙이기' -TimeoutSeconds $TimeoutSeconds -Label 'second keyboard prefix prompt'
+        $prompt = Wait-AcceptanceOwnedInputWindow `
+            -Process $process `
+            -ExpectedSession $ExpectedSessionId `
+            -Owner $mainWindow `
+            -Name '이름 앞에 문자열 붙이기' `
+            -TimeoutSeconds $TimeoutSeconds `
+            -Label 'second keyboard prefix prompt'
         [void](Move-TabFocusToId -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '1004')
         Send-AcceptanceText -Process $process -ExpectedSession $ExpectedSessionId -Value $prefix -Label 'second prefix keyboard input'
         [void](Move-TabFocusToId -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '1')
