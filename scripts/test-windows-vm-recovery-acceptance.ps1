@@ -257,6 +257,7 @@ foreach ($contract in @(
     -BundleRoot $PSScriptRoot `
     -ExpectedSessionId 1 `
     -OutputRoot $PSScriptRoot `
+    -PrivateEvidenceRoot $PSScriptRoot `
     -ExpectedScriptSha256 ('0' * 64)
 
 if ('DarkReNamerAcceptanceCrc32' -as [type]) {
@@ -354,6 +355,8 @@ $intentClassification = Get-AcceptanceIntentCandidateClassification `
     -StartupUnchanged $true `
     -CancelPreserved $true `
     -CancelUnchanged $true `
+    -CancelLocked $true `
+    -RelaunchPreserved $true `
     -CandidateRemoved $true `
     -ActiveAbsent $true `
     -DiscardUnlocked $true `
@@ -368,6 +371,8 @@ Assert-Fails {
         -StartupUnchanged $true `
         -CancelPreserved $false `
         -CancelUnchanged $true `
+        -CancelLocked $true `
+        -RelaunchPreserved $true `
         -CandidateRemoved $true `
         -ActiveAbsent $true `
         -DiscardUnlocked $true `
@@ -375,11 +380,41 @@ Assert-Fails {
 } 'cancelled discard did not preserve'
 Assert-Fails {
     Get-AcceptanceIntentCandidateClassification `
+        -JournalInspection $intentInspection `
+        -StartupLocked $true `
+        -StartupUnchanged $true `
+        -CancelPreserved $true `
+        -CancelUnchanged $true `
+        -CancelLocked $false `
+        -RelaunchPreserved $true `
+        -CandidateRemoved $true `
+        -ActiveAbsent $true `
+        -DiscardUnlocked $true `
+        -DiscardUnchanged $true
+} 'cancelled discard did not preserve'
+Assert-Fails {
+    Get-AcceptanceIntentCandidateClassification `
+        -JournalInspection $intentInspection `
+        -StartupLocked $true `
+        -StartupUnchanged $true `
+        -CancelPreserved $true `
+        -CancelUnchanged $true `
+        -CancelLocked $true `
+        -RelaunchPreserved $false `
+        -CandidateRemoved $true `
+        -ActiveAbsent $true `
+        -DiscardUnlocked $true `
+        -DiscardUnchanged $true
+} 'verification relaunch did not preserve'
+Assert-Fails {
+    Get-AcceptanceIntentCandidateClassification `
         -JournalInspection $inspection `
         -StartupLocked $true `
         -StartupUnchanged $true `
         -CancelPreserved $true `
         -CancelUnchanged $true `
+        -CancelLocked $true `
+        -RelaunchPreserved $true `
         -CandidateRemoved $true `
         -ActiveAbsent $true `
         -DiscardUnlocked $true `
@@ -670,6 +705,7 @@ try {
         -BundleRoot $valid.root `
         -ExpectedSessionId 1 `
         -OutputRoot $temporaryRoot `
+        -PrivateEvidenceRoot $temporaryRoot `
         -ExpectedScriptSha256 $observerHash `
         -Mode WorkerCancellation `
         -ValidateOnly
@@ -678,6 +714,7 @@ try {
         -BundleRoot $valid.root `
         -ExpectedSessionId 1 `
         -OutputRoot $temporaryRoot `
+        -PrivateEvidenceRoot $temporaryRoot `
         -ExpectedScriptSha256 $observerHash `
         -Mode ProcessCrash `
         -RecoveryExport `
@@ -690,6 +727,7 @@ try {
         -BundleRoot $candidateValid.root `
         -ExpectedSessionId 1 `
         -OutputRoot $temporaryRoot `
+        -PrivateEvidenceRoot $temporaryRoot `
         -ExpectedScriptSha256 $observerHash `
         -Mode ProcessCrash `
         -RecoveryExport `
@@ -708,6 +746,7 @@ try {
             -BundleRoot $candidateSwappedObserver.root `
             -ExpectedSessionId 1 `
             -OutputRoot $temporaryRoot `
+            -PrivateEvidenceRoot $temporaryRoot `
             -ExpectedScriptSha256 $observerHash `
             -ValidateOnly
     } 'recovery observer binding is invalid'
@@ -723,6 +762,7 @@ try {
             -BundleRoot $candidateFalseAlias.root `
             -ExpectedSessionId 1 `
             -OutputRoot $temporaryRoot `
+            -PrivateEvidenceRoot $temporaryRoot `
             -ExpectedScriptSha256 $observerHash `
             -ValidateOnly
     } 'unexpected fields'
@@ -741,6 +781,7 @@ try {
             -BundleRoot $candidateDuplicate.root `
             -ExpectedSessionId 1 `
             -OutputRoot $temporaryRoot `
+            -PrivateEvidenceRoot $temporaryRoot `
             -ExpectedScriptSha256 $observerHash `
             -ValidateOnly
     } 'duplicate field: schema_version'
@@ -750,6 +791,7 @@ try {
             -BundleRoot $valid.root `
             -ExpectedSessionId 1 `
             -OutputRoot $temporaryRoot `
+            -PrivateEvidenceRoot $temporaryRoot `
             -ExpectedScriptSha256 $observerHash `
             -Mode WorkerCancellation `
             -RecoveryExport `
@@ -762,6 +804,7 @@ try {
                 -BundleRoot $valid.root `
                 -ExpectedSessionId 7 `
                 -OutputRoot $temporaryRoot `
+                -PrivateEvidenceRoot $temporaryRoot `
                 -ExpectedScriptSha256 $observerHash `
                 -Mode WorkerClose
         } 'execution requires Windows'
@@ -772,6 +815,7 @@ try {
             -BundleRoot $valid.root `
             -ExpectedSessionId 1 `
             -OutputRoot $temporaryRoot `
+            -PrivateEvidenceRoot $temporaryRoot `
             -ExpectedScriptSha256 ('f' * 64) `
             -ValidateOnly
     } 'observer hash does not match'
@@ -783,6 +827,7 @@ try {
             -BundleRoot $changedRunner.root `
             -ExpectedSessionId 1 `
             -OutputRoot $temporaryRoot `
+            -PrivateEvidenceRoot $temporaryRoot `
             -ExpectedScriptSha256 $observerHash `
             -ValidateOnly
     } 'bootstrap runner hash does not match'
@@ -825,6 +870,7 @@ function Resolve-VerifiedBundle {
                 -BundleRoot $maliciousRunner.root `
                 -ExpectedSessionId 1 `
                 -OutputRoot $temporaryRoot `
+                -PrivateEvidenceRoot $temporaryRoot `
                 -ExpectedScriptSha256 $observerHash `
                 -ValidateOnly
         } 'bootstrap runner hash does not match'
@@ -847,6 +893,7 @@ function Resolve-VerifiedBundle {
             -BundleRoot $valid.root `
             -ExpectedSessionId 1 `
             -OutputRoot $temporaryRoot `
+            -PrivateEvidenceRoot $temporaryRoot `
             -ExpectedScriptSha256 $observerHash `
             -ValidateOnly
     } 'requires a clean source-bound bundle'
@@ -858,6 +905,302 @@ finally {
             throw 'The test fixture root became a reparse point.'
         }
         Remove-Item -LiteralPath $temporaryRoot -Recurse -Force
+    }
+}
+
+$rawTestRoot = Join-Path ([IO.Path]::GetTempPath()) (
+    'darkrenamer-recovery-raw-' + [Guid]::NewGuid().ToString('N')
+)
+[void](New-Item -ItemType Directory -Path $rawTestRoot)
+try {
+    function Get-LowerSha256 {
+        param([Parameter(Mandatory)][string] $Path)
+        (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+
+    function Get-LowerTextSha256 {
+        param([Parameter(Mandatory)][string] $Value)
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes($Value)
+        $algorithm = [Security.Cryptography.SHA256]::Create()
+        try {
+            $hash = $algorithm.ComputeHash($bytes)
+        }
+        finally {
+            $algorithm.Dispose()
+        }
+        ([BitConverter]::ToString($hash) -replace '-', '').ToLowerInvariant()
+    }
+
+    function Get-FullFileIdentity {
+        param([Parameter(Mandatory)][string] $Path)
+
+        $item = Get-Item -LiteralPath $Path -Force
+        $digest = Get-LowerTextSha256 -Value $item.FullName
+        [pscustomobject][ordered]@{
+            volume_serial = '0123456789abcdef'
+            file_id = $digest.Substring(0, 32)
+        }
+    }
+
+    $fixtureRoot = Join-Path $rawTestRoot 'fixture'
+    $privateRoot = Join-Path $rawTestRoot 'private'
+    $journalRoot = Join-Path $rawTestRoot 'journal'
+    [void](New-Item -ItemType Directory -Path $fixtureRoot)
+    [void](New-Item -ItemType Directory -Path $privateRoot)
+    [void](New-Item -ItemType Directory -Path $journalRoot)
+    [IO.File]::WriteAllText((Join-Path $fixtureRoot 'b.txt'), 'bravo')
+    [IO.File]::WriteAllText((Join-Path $fixtureRoot 'a.txt'), 'alpha')
+    $fixtureState = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
+    & {
+        $hashCalls = [Collections.Generic.List[string]]::new()
+        function Get-Item {
+            param([string] $LiteralPath, [switch] $Force)
+            [pscustomobject]@{ PSIsContainer = $true; Attributes = [IO.FileAttributes]::Directory; FullName = 'C:\bounded-fixture' }
+        }
+        function Get-ChildItem {
+            param([string] $LiteralPath, [switch] $Force)
+            foreach ($number in 1..9) {
+                [pscustomobject]@{
+                    PSIsContainer = $false; Attributes = [IO.FileAttributes]::Normal
+                    Name = "file-$number.txt"; FullName = "C:\bounded-fixture\file-$number.txt"; Length = [long]64MB
+                }
+            }
+        }
+        function Get-LowerSha256 {
+            param([string] $Path)
+            $hashCalls.Add($Path)
+            'a' * 64
+        }
+        function Get-FullFileIdentity {
+            param([string] $Path)
+            [pscustomobject]@{ volume_serial = '1' * 16; file_id = '2' * 32 }
+        }
+        Assert-Fails { Get-AcceptanceFixtureState -FixtureRoot 'C:\bounded-fixture' } 'aggregate byte limit'
+        if ($hashCalls.Count -ne 8 -or $hashCalls.Contains('C:\bounded-fixture\file-9.txt')) {
+            throw 'Over-limit fixture content was hashed before aggregate rejection.'
+        }
+    }
+    if ($fixtureState.Count -ne 2 -or
+        $fixtureState[0].name -cne 'a.txt' -or
+        $fixtureState[0].kind -cne 'file' -or
+        $fixtureState[0].bytes -ne 5 -or
+        $fixtureState[0].file_identity.file_id -cnotmatch '^[0-9a-f]{32}$') {
+        throw 'The raw fixture inventory omitted an exact ordinary-file field.'
+    }
+    [void](New-Item -ItemType Directory -Path (Join-Path $fixtureRoot 'child'))
+    Assert-Fails {
+        Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
+    } 'non-file, reparse, or oversized entry'
+    Remove-Item -LiteralPath (Join-Path $fixtureRoot 'child')
+
+    $rootIdentity = Get-FullFileIdentity -Path $fixtureRoot
+    $stateReference = Write-AcceptanceObservedStateEvidence `
+        -PrivateRoot $privateRoot -Leaf 'state-test' -Boundary 'test-state' `
+        -FixtureRoot $fixtureRoot -ExpectedRootIdentity $rootIdentity -State $fixtureState
+    $referenceNames = @($stateReference.PSObject.Properties.Name | Sort-Object)
+    if ([string]::Join(',', $referenceNames) -cne 'boundary,bytes,sha256') {
+        throw 'A public raw reference exposes a private path or an unknown field.'
+    }
+    $stateRaw = Get-Content -LiteralPath (Join-Path $privateRoot 'state-test.json') -Raw |
+        ConvertFrom-Json
+    if ($stateRaw.fixture_entries.Count -ne 2 -or
+        $stateRaw.root_identity.file_id -cne $rootIdentity.file_id -or
+        $stateRaw.fixture_root -cne $fixtureRoot) {
+        throw 'The private state evidence omitted its root identity, path, or full inventory.'
+    }
+    Assert-Fails {
+        Write-AcceptanceObservedStateEvidence `
+            -PrivateRoot $privateRoot -Leaf 'state-test' -Boundary 'duplicate' `
+            -FixtureRoot $fixtureRoot -ExpectedRootIdentity $rootIdentity -State $fixtureState
+    } 'already exists'
+
+    [IO.File]::WriteAllBytes((Join-Path $journalRoot 'active.drj'), $stream)
+    $journalReference = Write-AcceptanceJournalInventoryEvidence `
+        -PrivateRoot $privateRoot -Leaf 'journal-test' -Boundary 'test-journal' `
+        -JournalRoot $journalRoot
+    if ($journalReference.bytes -le 0 -or $journalReference.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'The journal inventory reference is not digest and size bound.'
+    }
+    $journalRaw = Get-Content -LiteralPath (Join-Path $privateRoot 'journal-test.json') -Raw |
+        ConvertFrom-Json
+    if ($journalRaw.journal_entries.Count -ne 1 -or
+        $journalRaw.journal_entries[0].name -cne 'active.drj' -or
+        $journalRaw.journal_entries[0].bytes -ne $stream.Length -or
+        $journalRaw.journal_entries[0].sha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'The post-process journal inventory omitted exact basename, bytes, or digest.'
+    }
+    [IO.File]::WriteAllText((Join-Path $journalRoot 'unexpected.txt'), 'unexpected')
+    Assert-Fails {
+        Write-AcceptanceJournalInventoryEvidence `
+            -PrivateRoot $privateRoot -Leaf 'journal-invalid' -Boundary 'invalid' `
+            -JournalRoot $journalRoot
+    } 'unexpected entry'
+    Remove-Item -LiteralPath (Join-Path $journalRoot 'unexpected.txt')
+
+    $workerWitness = [ordered]@{
+        candidate_pid = 101
+        candidate_session_id = 1
+        entries = @(
+            [ordered]@{
+                role = 'first-destination'
+                name = 'vm-recovered-item-00000.txt'
+                kind = 'file'
+                bytes = $fixtureState[0].bytes
+                content_sha256 = $fixtureState[0].content_sha256
+                file_identity = $fixtureState[0].file_identity
+                observed_utc_ticks = '638940000000000001'
+            },
+            [ordered]@{
+                role = 'last-original'
+                name = 'item-04095.txt'
+                kind = 'file'
+                bytes = $fixtureState[1].bytes
+                content_sha256 = $fixtureState[1].content_sha256
+                file_identity = $fixtureState[1].file_identity
+                observed_utc_ticks = '638940000000000002'
+            }
+        )
+    }
+    $witnessReference = Write-AcceptanceWorkerPartialWitnessEvidence `
+        -PrivateRoot $privateRoot -Leaf 'worker-partial-test' `
+        -FixtureRoot $fixtureRoot -ExpectedRootIdentity $rootIdentity `
+        -Witness $workerWitness
+    if ($witnessReference.boundary -cne 'worker-partial') {
+        throw 'The worker partial witness did not expose its typed raw boundary.'
+    }
+    $witnessRaw = Get-Content `
+        -LiteralPath (Join-Path $privateRoot 'worker-partial-test.json') -Raw |
+        ConvertFrom-Json
+    if ($witnessRaw.entries.Count -ne 2 -or
+        $witnessRaw.entries[0].name -cne 'vm-recovered-item-00000.txt' -or
+        $witnessRaw.entries[1].name -cne 'item-04095.txt' -or
+        $witnessRaw.candidate_pid -ne 101 -or
+        $witnessRaw.root_identity.file_id -cne $rootIdentity.file_id) {
+        throw 'The worker partial witness omitted actual names, process binding, or root identity.'
+    }
+
+    $actionTarget = [ordered]@{
+        pid = 101
+        session_id = 1
+        hwnd = 4097
+        root_hwnd = 4096
+        class = 'Button'
+        control_id = 2
+        automation_id = 'CommandButton_2'
+        control_type = 'ControlType.Button'
+        enabled = $true
+        visible = $true
+        focused = $true
+    }
+    $actionReference = Write-AcceptanceActionEvidence `
+        -PrivateRoot $privateRoot -Leaf 'action-test' `
+        -Boundary 'startup-default-cancel-action' -Phase 'startup-default-cancel' `
+        -Action 'cancel-startup-recovery' -Target $actionTarget `
+        -ObservedUtcTicks '638940000000000010' -CompletedUtcTicks '638940000000000011'
+    $actionRaw = Get-Content -LiteralPath (Join-Path $privateRoot 'action-test.json') -Raw |
+        ConvertFrom-Json
+    if ([string]::Join(',', @($actionRaw.PSObject.Properties.Name | Sort-Object)) -cne
+        'action,boundary,completed_utc_ticks,dispatch_method,observed_utc_ticks,phase,schema_version,target' -or
+        $actionRaw.dispatch_method -cne 'uia-invoke' -or
+        $actionRaw.target.control_id -ne 2 -or
+        $actionRaw.target.focused -ne $true -or
+        $actionReference.boundary -cne 'startup-default-cancel-action') {
+        throw 'Raw action evidence omitted its exact target, timestamps, or typed reference.'
+    }
+    Assert-Fails {
+        Write-AcceptanceActionEvidence `
+            -PrivateRoot $privateRoot -Leaf 'action-invalid-order' `
+            -Boundary 'startup-default-cancel-action' -Phase 'startup-default-cancel' `
+            -Action 'cancel-startup-recovery' -Target $actionTarget `
+            -ObservedUtcTicks '638940000000000012' -CompletedUtcTicks '638940000000000011'
+    } 'timestamp order'
+
+    $addFilesTarget = [ordered]@{}
+    foreach ($property in $actionTarget.GetEnumerator()) {
+        $addFilesTarget[$property.Key] = $property.Value
+    }
+    $addFilesTarget.hwnd = 4098
+    $addFilesTarget.control_id = 32791
+    $addFilesTarget.automation_id = '32791'
+    $addFilesTarget.enabled = $false
+    $addFilesTarget.visible = $false
+    $addFilesTarget.focused = $false
+    $applyTarget = [ordered]@{}
+    foreach ($property in $addFilesTarget.GetEnumerator()) {
+        $applyTarget[$property.Key] = $property.Value
+    }
+    $applyTarget.hwnd = 4099
+    $applyTarget.control_id = 32771
+    $applyTarget.automation_id = '32771'
+    $lockReference = Write-AcceptanceLockStateEvidence `
+        -PrivateRoot $privateRoot -Leaf 'lock-test' -Boundary 'intent-startup-lock' `
+        -Phase 'intent-startup' -CandidatePid 101 -SessionId 1 `
+        -Apply $applyTarget -AddFiles $addFilesTarget `
+        -ObservedUtcTicks '638940000000000020'
+    $lockRaw = Get-Content -LiteralPath (Join-Path $privateRoot 'lock-test.json') -Raw |
+        ConvertFrom-Json
+    if ([string]::Join(',', @($lockRaw.PSObject.Properties.Name | Sort-Object)) -cne
+        'boundary,controls,observed_utc_ticks,phase,process,schema_version' -or
+        $lockRaw.process.pid -ne 101 -or
+        $lockRaw.controls.apply.control_id -ne 32771 -or
+        $lockRaw.controls.add_files.control_id -ne 32791 -or
+        $lockReference.boundary -cne 'intent-startup-lock') {
+        throw 'Raw recovery lock evidence omitted exact process or control observations.'
+    }
+    $foreignAddFilesTarget = [ordered]@{}
+    foreach ($property in $addFilesTarget.GetEnumerator()) {
+        $foreignAddFilesTarget[$property.Key] = $property.Value
+    }
+    $foreignAddFilesTarget.pid = 202
+    Assert-Fails {
+        Write-AcceptanceLockStateEvidence `
+            -PrivateRoot $privateRoot -Leaf 'lock-foreign' -Boundary 'intent-startup-lock' `
+            -Phase 'intent-startup' -CandidatePid 101 -SessionId 1 `
+            -Apply $applyTarget -AddFiles $foreignAddFilesTarget `
+            -ObservedUtcTicks '638940000000000021'
+    } 'one process, session, and root'
+
+    $nestedRoot = Join-Path $privateRoot 'nested'
+    [void](New-Item -ItemType Directory -Path $nestedRoot)
+    $nestedPath = Join-Path $nestedRoot 'raw.bin'
+    [IO.File]::WriteAllBytes($nestedPath, [byte[]](1, 2, 3))
+    $nestedReference = New-AcceptancePrivateReference `
+        -Path $nestedPath -PrivateRoot $privateRoot -Boundary 'nested-test'
+    if ([string]::Join(',', @($nestedReference.PSObject.Properties.Name | Sort-Object)) -cne
+        'boundary,bytes,sha256') {
+        throw 'A nested private reference exposed its relative path.'
+    }
+
+    $indexReference = Write-AcceptancePrivateIndex -PrivateRoot $privateRoot
+    if ($indexReference.file_count -ne 6 -or
+        $indexReference.bytes -le 0 -or
+        $indexReference.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'The private index does not bind every pre-index raw file.'
+    }
+    $indexPath = Join-Path $privateRoot 'private-index.json'
+    $indexBytes = [IO.File]::ReadAllBytes($indexPath)
+    if ($indexBytes.Length -ge 3 -and
+        $indexBytes[0] -eq 0xEF -and $indexBytes[1] -eq 0xBB -and $indexBytes[2] -eq 0xBF) {
+        throw 'The private evidence index must be BOM-free UTF-8.'
+    }
+    $indexRaw = Get-Content -LiteralPath $indexPath -Raw | ConvertFrom-Json
+    if (@($indexRaw.files | Where-Object file -CEQ 'nested/raw.bin').Count -ne 1) {
+        throw 'The private evidence index did not canonicalize its nested relative path.'
+    }
+    foreach ($row in $indexRaw.files) {
+        $segments = @($row.file -split '/')
+        if ($row.file.Contains('\') -or $segments.Count -lt 1 -or
+            @($segments | Where-Object {
+                $_ -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+            }).Count -ne 0 -or
+            $row.bytes -le 0 -or $row.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'The private evidence index contains an unsafe or unbound row.'
+        }
+    }
+}
+finally {
+    if (Test-Path -LiteralPath $rawTestRoot -PathType Container) {
+        Remove-Item -LiteralPath $rawTestRoot -Recurse -Force
     }
 }
 
@@ -879,6 +1222,17 @@ if ($fixtureCountParameter.Count -ne 1 -or
     $fixtureCountParameter[0].DefaultValue.SafeGetValue() -ne 4096) {
     throw 'The recovery acceptance default fixture count must remain within the import bound.'
 }
+$privateRootParameter = @(
+    $fromFile.ParamBlock.Parameters |
+        Where-Object { $_.Name.VariablePath.UserPath -ceq 'PrivateEvidenceRoot' }
+)
+if ($privateRootParameter.Count -ne 1 -or
+    @($privateRootParameter[0].Attributes | Where-Object {
+        $_.TypeName.Name -ceq 'Parameter' -and
+        @($_.NamedArguments | Where-Object ArgumentName -CEQ 'Mandatory').Count -eq 1
+    }).Count -ne 1) {
+    throw 'PrivateEvidenceRoot must remain one mandatory observer parameter.'
+}
 foreach ($switchName in @('RecoveryExport', 'IntentOnlyCandidateDiscard')) {
     $switchParameter = @(
         $fromFile.ParamBlock.Parameters |
@@ -888,6 +1242,224 @@ foreach ($switchName in @('RecoveryExport', 'IntentOnlyCandidateDiscard')) {
         $switchParameter[0].StaticType.FullName -cne 'System.Management.Automation.SwitchParameter') {
         throw "The recovery acceptance observer is missing opt-in switch $switchName."
     }
+}
+$screenshotCalls = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq 'Save-WindowScreenshot'
+}, $true))
+if ($screenshotCalls.Count -ne 2) {
+    throw 'The recovery observer must retain exactly two bounded screenshot boundaries.'
+}
+foreach ($call in $screenshotCalls) {
+    $parameterNames = @($call.CommandElements | Where-Object {
+        $_ -is [Management.Automation.Language.CommandParameterAst]
+    } | ForEach-Object ParameterName)
+    if ($parameterNames -cnotcontains 'ForegroundObservations') {
+        throw 'Every recovery screenshot must persist the mandatory foreground observation.'
+    }
+}
+$fixtureStateFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Get-AcceptanceFixtureState'
+}, $true))
+if ($fixtureStateFunction.Count -ne 1 -or
+    $fixtureStateFunction[0].Extent.Text.IndexOf(
+        'Get-FullFileIdentity', [StringComparison]::Ordinal
+    ) -lt 0 -or
+    $fixtureStateFunction[0].Extent.Text.IndexOf(
+        '[DarkReNamerVmNative]::GetFileIdentity', [StringComparison]::Ordinal
+    ) -ge 0) {
+    throw 'Fixture inventories must use full FILE_ID_INFO identities only.'
+}
+$workerBoundaryFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Get-AcceptanceActiveWorkerBoundary'
+}, $true))
+foreach ($fragment in @(
+    "'item-00000.txt'",
+    '$firstRenamedName = $Prefix + $firstOriginalName',
+    "'first-destination'",
+    "'last-original'",
+    'observed_utc_ticks',
+    'file_identity'
+)) {
+    if ($workerBoundaryFunction.Count -ne 1 -or
+        $workerBoundaryFunction[0].Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+        throw "The active worker boundary is missing raw witness material: $fragment"
+    }
+}
+$processExitFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Write-AcceptanceProcessExitEvidence'
+}, $true))
+foreach ($fragment in @(
+    "ValidateSet('normal-close', 'forced-termination', 'worker-close')",
+    'start_time_utc_ticks',
+    'observed_utc_ticks',
+    'exit_observed',
+    'exit_method',
+    'exit_code'
+)) {
+    if ($processExitFunction.Count -ne 1 -or
+        $processExitFunction[0].Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+        throw "Raw process-exit evidence is missing lifecycle field or bound: $fragment"
+    }
+}
+$processStartFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Write-AcceptanceProcessStartEvidence'
+}, $true))
+if ($processStartFunction.Count -ne 1 -or
+    $processStartFunction[0].Extent.Text.IndexOf(
+        'observed_utc_ticks', [StringComparison]::Ordinal
+    ) -lt 0) {
+    throw 'Raw process-start evidence is missing its actual observation timestamp.'
+}
+$controlObservationFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Get-AcceptanceControlTargetObservation'
+}, $true))
+foreach ($fragment in @(
+    'Assert-AcceptanceProcessBinding',
+    'GetAncestor',
+    'GetWindowThreadProcessId',
+    'GetDlgCtrlID',
+    'FocusedElement',
+    'ControlType.Button'
+)) {
+    if ($controlObservationFunction.Count -ne 1 -or
+        $controlObservationFunction[0].Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+        throw "Raw control observations are missing an ownership or identity field: $fragment"
+    }
+}
+$sessionFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Invoke-AcceptanceSession'
+}, $true))
+foreach ($fragment in @(
+    'startup-before-default-cancel',
+    'default-cancel-normal-exit',
+    'recovery-relaunch',
+    'journal-final-recovered',
+    'actions = [ordered]@{',
+    'default_cancel = $defaultCancelAction',
+    'worker_cancel = $workerCancelAction',
+    "-Leaf 'worker-cancellation-action'",
+    "-ExitMethod 'forced-termination'"
+)) {
+    if ($sessionFunction.Count -ne 1 -or
+        $sessionFunction[0].Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+        throw "The recovery session is missing a raw lifecycle boundary: $fragment"
+    }
+}
+$sessionText = $sessionFunction[0].Extent.Text
+$workerObservedIndex = $sessionText.IndexOf('$workerCancelObservedUtcTicks', [StringComparison]::Ordinal)
+$workerInvokeIndex = $sessionText.IndexOf(
+    "-Element `$workerBoundary.cancel -Label 'active worker cancellation control'",
+    [StringComparison]::Ordinal
+)
+$workerCompletedIndex = $sessionText.IndexOf('$workerCancelCompletedUtcTicks', [StringComparison]::Ordinal)
+if ($workerObservedIndex -lt 0 -or $workerInvokeIndex -le $workerObservedIndex -or
+    $workerCompletedIndex -le $workerInvokeIndex) {
+    throw 'Worker cancellation raw evidence does not bracket the actual owned control invocation.'
+}
+$observerText = $fromFile.Extent.Text
+foreach ($fragment in @(
+    "`$result['raw_cleanup']",
+    'Get-VmAutomatedOwnedProcessInventory',
+    'Get-VmAutomatedJournalInventory',
+    'Get-VmAutomatedRuntimeRootObservation',
+    'owned_processes_after',
+    'runtime_root_after',
+    'journal_after'
+)) {
+    if ($observerText.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+        throw "The recovery observer is missing an actual raw cleanup observation: $fragment"
+    }
+}
+$intentScenarioFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Invoke-AcceptanceIntentOnlyCandidateDiscard'
+}, $true))
+foreach ($fragment in @(
+    'InterruptedJournalReference',
+    'source_active_journal',
+    'injected_candidate',
+    'intent-journal-final-exit',
+    'actions = [ordered]@{',
+    'cancel_discard = $cancelDiscardAction',
+    'confirm_discard = $confirmDiscardAction',
+    'lock_states = $lockStates'
+)) {
+    if ($intentScenarioFunction.Count -ne 1 -or
+        $intentScenarioFunction[0].Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+        throw "Intent-only evidence is missing an authenticated raw boundary: $fragment"
+    }
+}
+foreach ($fragment in @(
+    "-Leaf 'intent-startup-lock' -Boundary 'intent-startup-lock'",
+    "-Leaf 'intent-post-cancel-lock' -Boundary 'intent-post-cancel-lock'",
+    "-Leaf 'intent-relaunch-lock' -Boundary 'intent-relaunch-lock'",
+    "-Leaf 'intent-discard-startup-lock' -Boundary 'intent-discard-startup-lock'",
+    "-Leaf 'intent-post-discard-unlock' -Boundary 'intent-post-discard-unlock'",
+    '-ExpectLocked $false'
+)) {
+    if ($intentScenarioFunction[0].Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+        throw "Intent-only raw lock evidence is missing a required phase: $fragment"
+    }
+}
+$startupCancelFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Dismiss-AcceptanceStartupRecovery'
+}, $true))
+foreach ($fragment in @(
+    "-Leaf 'startup-default-cancel-action'",
+    "-ExpectedAutomationId 'CommandButton_2'",
+    '-ExpectedControlId 2',
+    "-Action 'cancel-startup-recovery'"
+)) {
+    if ($startupCancelFunction.Count -ne 1 -or
+        $startupCancelFunction[0].Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+        throw "Startup default-cancel action evidence differs from its fixed contract: $fragment"
+    }
+}
+$discardChoiceFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Invoke-AcceptanceDiscardChoice'
+}, $true))
+foreach ($fragment in @(
+    "'intent-discard-confirm-action'",
+    "'intent-discard-cancel-action'",
+    "'CommandLink_1201'",
+    "'CommandButton_2'",
+    "'confirm-candidate-discard'",
+    "'cancel-candidate-discard'"
+)) {
+    if ($discardChoiceFunction.Count -ne 1 -or
+        $discardChoiceFunction[0].Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+        throw "Intent discard action evidence differs from its fixed contract: $fragment"
+    }
+}
+$exportScenarioFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Invoke-AcceptanceRecoveryExport'
+}, $true))
+if ($exportScenarioFunction.Count -ne 1 -or
+    $exportScenarioFunction[0].Extent.Text.IndexOf(
+        'source_active_journal', [StringComparison]::Ordinal
+    ) -lt 0) {
+    throw 'Recovery export must retain the interrupted active-journal source reference.'
 }
 $dismissFunction = @($fromFile.FindAll({
     param($node)
@@ -900,6 +1472,21 @@ if ($dismissFunction.Count -ne 1) {
 foreach ($fragment in @('GetForegroundWindow', 'bounded deadline', 'SetForegroundWindow')) {
     if ($dismissFunction[0].Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
         throw "Recovery message dismissal does not enforce exact foreground handling: $fragment"
+    }
+}
+$sendKeys = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
+        $node.Member.Value -ceq 'SendWait'
+}, $true))
+if ($sendKeys.Count -ne 3) { throw 'Recovery input sites changed without an ownership audit.' }
+foreach ($inputCall in $sendKeys) {
+    $owner = $inputCall.Parent
+    while ($null -ne $owner -and $owner -isnot [Management.Automation.Language.FunctionDefinitionAst]) { $owner = $owner.Parent }
+    if ($null -eq $owner -or $owner.Name -cnotin @(
+            'Start-AcceptanceRecoveryMenuInvoke', 'Dismiss-AcceptanceMessage', 'Invoke-AcceptanceImportAndPrefix'
+        ) -or $owner.Extent.Text.IndexOf('GetForegroundWindow', [StringComparison]::Ordinal) -lt 0) {
+        throw 'Recovery input bypasses the audited exact-foreground helpers.'
     }
 }
 $intentFunction = @($fromFile.FindAll({
