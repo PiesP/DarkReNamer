@@ -8,6 +8,7 @@ before entering the returned object's importer context.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import _imp
 import hashlib
 import importlib
 import importlib.abc
@@ -18,6 +19,7 @@ from pathlib import Path
 import re
 import stat
 import sys
+import threading
 from types import CodeType, MappingProxyType, ModuleType
 from typing import Any, Sequence
 
@@ -31,7 +33,7 @@ TOOLING_NAMESPACE = "darkrenamer_tooling"
 # Roles are authorization identifiers, not user-extensible labels. A manifest may
 # use only the roles and implementation kinds declared here.
 SUPPORTED_ROLES = MappingProxyType({
-    "tooling-bootstrap": ("python", "darkrenamer_tooling.bootstrap"),
+    "tooling-loader": ("python", "darkrenamer_tooling.loader"),
     "package-root": ("python-package", "darkrenamer_tooling"),
     "package-campaign": ("python-package", "darkrenamer_tooling.campaign"),
     "campaign-planning": ("python", "darkrenamer_tooling.campaign.planning"),
@@ -57,6 +59,7 @@ SUPPORTED_ROLES = MappingProxyType({
     "evidence-gui": ("python", "darkrenamer_tooling.evidence.gui"),
     "evidence-cli": ("python", "darkrenamer_tooling.evidence.cli"),
     "powershell-common": ("powershell", None),
+    "powershell-loader": ("powershell", None),
     "powershell-guest": ("powershell", None),
     "powershell-ui-observer": ("powershell", None),
     "powershell-recovery-observer": ("powershell", None),
@@ -130,8 +133,9 @@ class VerifiedTooling:
 
 
 class _FrozenLoader(importlib.abc.Loader):
-    def __init__(self, frozen: _FrozenModule) -> None:
+    def __init__(self, frozen: _FrozenModule, owner: object) -> None:
         self._frozen = frozen
+        self._tooling_owner = owner
 
     def create_module(self, spec: Any) -> ModuleType | None:
         return None
@@ -166,10 +170,24 @@ class _FrozenFinder(importlib.abc.MetaPathFinder):
         origin = f"verified-{frozen.entry.source}"
         return importlib.util.spec_from_loader(
             fullname,
-            _FrozenLoader(frozen),
+            _FrozenLoader(frozen, self),
             origin=origin,
             is_package=is_package,
         )
+
+
+def _shared_import_state() -> dict[str, Any]:
+    # The import lock protects lazy initialization across separately loaded
+    # copies of this library. No process state changes when merely importing it.
+    _imp.acquire_lock()
+    try:
+        state = getattr(sys, "_darkrenamer_verified_tooling_state", None)
+        if state is None:
+            state = {"lock": threading.RLock(), "owner": None}
+            sys._darkrenamer_verified_tooling_state = state
+        return state
+    finally:
+        _imp.release_lock()
 
 
 class _ImportScope:
@@ -177,44 +195,64 @@ class _ImportScope:
         self._verified = verified
         self._finder = _FrozenFinder(verified._modules)
         self._active = False
+        self._state: dict[str, Any] | None = None
 
     def __enter__(self) -> _ImportScope:
-        if self._active:
-            raise ToolingBootstrapError("verified importer is already active")
-        if any(isinstance(finder, _FrozenFinder) for finder in sys.meta_path):
-            raise ToolingBootstrapError("another verified tooling importer is active")
-        shadowed = sorted(
-            name
-            for name in sys.modules
-            if name == TOOLING_NAMESPACE or name.startswith(TOOLING_NAMESPACE + ".")
-        )
-        if shadowed:
-            raise ToolingBootstrapError(
-                f"tooling namespace is already loaded: {', '.join(shadowed)}"
+        state = _shared_import_state()
+        with state["lock"]:
+            if self._active:
+                raise ToolingBootstrapError("verified importer is already active")
+            if state["owner"] is not None:
+                raise ToolingBootstrapError("another verified tooling importer is active")
+            shadowed = sorted(
+                name
+                for name in sys.modules
+                if name == TOOLING_NAMESPACE or name.startswith(TOOLING_NAMESPACE + ".")
             )
-        sys.meta_path.insert(0, self._finder)
-        self._active = True
+            if shadowed:
+                raise ToolingBootstrapError(
+                    f"tooling namespace is already loaded: {', '.join(shadowed)}"
+                )
+            sys.meta_path.insert(0, self._finder)
+            state["owner"] = self._finder
+            self._state = state
+            self._active = True
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         del exc_type, exc, traceback
-        if self._active:
-            sys.meta_path[:] = [finder for finder in sys.meta_path if finder is not self._finder]
-            for name in list(sys.modules):
-                if name == TOOLING_NAMESPACE or name.startswith(TOOLING_NAMESPACE + "."):
-                    del sys.modules[name]
-            self._active = False
+        if self._state is not None:
+            with self._state["lock"]:
+                if not self._active:
+                    return
+                if self._state["owner"] is not self._finder:
+                    raise ToolingBootstrapError("verified importer lost process ownership")
+                sys.meta_path[:] = [finder for finder in sys.meta_path if finder is not self._finder]
+                for name, module in list(sys.modules.items()):
+                    loader = getattr(module, "__loader__", None)
+                    if getattr(loader, "_tooling_owner", None) is self._finder:
+                        del sys.modules[name]
+                self._state["owner"] = None
+                self._active = False
 
     def import_role(self, role: str) -> ModuleType:
-        if not self._active:
+        if self._state is None:
             raise ToolingBootstrapError("verified importer context is not active")
-        matches = [entry for entry in self._verified.entries if entry.role == role]
-        if not matches:
-            raise ToolingBootstrapError(f"role is outside the verified closure: {role}")
-        entry = matches[0]
-        if entry.module is None:
-            raise ToolingBootstrapError(f"role is not a Python module: {role}")
-        return importlib.import_module(entry.module)
+        with self._state["lock"]:
+            if not self._active or self._state["owner"] is not self._finder:
+                raise ToolingBootstrapError("verified importer context is not active")
+            matches = [entry for entry in self._verified.entries if entry.role == role]
+            if not matches:
+                raise ToolingBootstrapError(f"role is outside the verified closure: {role}")
+            entry = matches[0]
+            if entry.module is None:
+                raise ToolingBootstrapError(f"role is not a Python module: {role}")
+            module = importlib.import_module(entry.module)
+            if (getattr(getattr(module, "__loader__", None), "_tooling_owner", None)
+                    is not self._finder or
+                    getattr(module, "__tooling_sha256__", None) != entry.sha256):
+                raise ToolingBootstrapError("imported module differs from its verified owner or digest")
+            return module
 
 
 def _sha256(data: bytes) -> str:
@@ -450,7 +488,7 @@ def _parse_manifest(manifest_bytes: bytes) -> tuple[ManifestEntry, ...]:
     package_entries = [entry for entry in entries if entry.kind == "python-package"]
     packages_by_module = {entry.module: entry for entry in package_entries}
     if any(
-        entry.kind in {"python", "python-package"} and entry.role != "tooling-bootstrap"
+        entry.kind in {"python", "python-package"}
         for entry in entries
     ):
         root_package = packages_by_module.get(TOOLING_NAMESPACE)
@@ -462,7 +500,7 @@ def _parse_manifest(manifest_bytes: bytes) -> tuple[ManifestEntry, ...]:
             raise ToolingBootstrapError(
                 f"role {entry.role} has unknown dependencies: {', '.join(unknown)}"
             )
-        if entry.kind in {"python", "python-package"} and entry.role != "tooling-bootstrap":
+        if entry.kind in {"python", "python-package"}:
             if entry.module is None:
                 raise ToolingBootstrapError(f"Python role {entry.role} has no module name")
             parts = entry.module.split(".")
