@@ -1825,3 +1825,23 @@ try {
 finally {
     Remove-Item -LiteralPath $temporaryRoot -Recurse -Force
 }
+
+# Every observer call must satisfy the shared capture contract, including modes
+# not exercised by portable execution. This caught a real pre-capture VM failure.
+$captureAst = [Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $PSScriptRoot 'windows-vm-acceptance.ps1'), [ref]$null, [ref]$null)
+$captureCalls = @($captureAst.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq 'Save-WindowScreenshot'
+}, $true))
+if ($captureCalls.Count -eq 0) { throw 'Expected real observer screenshot calls.' }
+foreach ($call in $captureCalls) {
+    $bindings = @($call.CommandElements | Where-Object {
+        $_ -is [Management.Automation.Language.CommandParameterAst] -and
+        $_.ParameterName -ceq 'ForegroundObservations'
+    })
+    if ($bindings.Count -ne 1) {
+        throw "Screenshot call omits foreground evidence at line $($call.Extent.StartLineNumber)."
+    }
+}
