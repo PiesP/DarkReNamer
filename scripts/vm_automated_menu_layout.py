@@ -278,6 +278,7 @@ def verify_native_menu_layout(layout: object, environment: dict) -> None:
                                "Native-menu layout observations")
     display = environment["target_display"]
     work = rectangle(display["work_rect"])
+    window = rectangle(display["window_rect"])
     controls = _controls(outer["controls"], display, work)
     require(type(outer["focus"]) is list and len(outer["focus"]) == 1,
             "Native-menu layout requires one final list focus observation.")
@@ -339,17 +340,25 @@ def verify_native_menu_layout(layout: object, environment: dict) -> None:
         item = require_exact_keys(highlighted, {"menu_path", "position", "command_id", "item_rect", "state_flags"},
                                   "Highlighted menu item")
         parent_raw = item["menu_path"]
-        require(type(parent_raw) is list and 1 <= len(parent_raw) <= 2,
+        require(type(parent_raw) is list and len(parent_raw) <= 2,
                 "Highlighted menu ancestor path is malformed.")
-        parent = _path(parent_raw, "Highlighted menu ancestor")
+        parent = () if not parent_raw else _path(parent_raw, "Highlighted menu ancestor")
         path = parent + (require_int(item["position"], 0, 31, "Highlighted menu position"),)
         flags = require_int(item["state_flags"], 0, 0xFF, "Highlighted menu flags")
-        require(bool(open_paths) and path in tree and path[:-1] == open_paths[-1] and path[:-1] in popup_by_path and
-                tree[path]["item_type"] != "separator" and
-                item["command_id"] == tree[path]["command_id"] and flags & 0x80 and
-                flags & ~0x80 == tree[path]["state_flags"] and
-                contains(popup_by_path[path[:-1]], rectangle(item["item_rect"])),
-                "Highlighted menu item is not bound to its actual candidate popup.")
+        require(path in tree and item["command_id"] == tree[path]["command_id"] and flags & 0x80 and
+                flags & ~0x80 == tree[path]["state_flags"],
+                "Highlighted menu item differs from its immutable native tree row.")
+        item_rect = rectangle(item["item_rect"])
+        if not parent:
+            require(not open_paths and not popups and len(path) == 1 and
+                    tree[path]["item_type"] == "submenu" and item["command_id"] is None and
+                    contains(window, item_rect),
+                    "Closed popup observation is not the exact candidate menu-bar highlight.")
+        else:
+            require(bool(open_paths) and path[:-1] == open_paths[-1] and path[:-1] in popup_by_path and
+                    tree[path]["item_type"] != "separator" and
+                    contains(popup_by_path[path[:-1]], item_rect),
+                    "Highlighted menu item is not bound to its actual candidate popup.")
         return open_paths, path
 
     initial_paths, _ = observation(row["initial"], endpoint=True)
@@ -394,11 +403,15 @@ def verify_native_menu_layout(layout: object, environment: dict) -> None:
             require(len(open_paths) == 2, "Left did not close a nested candidate submenu.")
             highlighted = open_paths.pop()
         else:
-            require(bool(open_paths), "Escape was sent without an open candidate menu.")
             if len(open_paths) == 2:
                 highlighted = open_paths.pop()
+            elif len(open_paths) == 1:
+                highlighted = open_paths.pop()
             else:
-                open_paths, highlighted = [], None
+                require(highlighted is not None and len(highlighted) == 1 and
+                        tree[highlighted]["item_type"] == "submenu",
+                        "Escape was sent without an active candidate menu bar.")
+                highlighted = None
         observed_paths, observed_highlight = observation(
             {key: event[key] for key in {"foreground", "open_menu_paths", "highlighted", "popups"}},
             endpoint=False, event=True)

@@ -988,6 +988,7 @@ try {
         'ConvertTo-VmAutomatedMenuPathKey',
         'Test-VmAutomatedMenuPathEqual',
         'Assert-VmAutomatedNativeMenuTree',
+        'ConvertTo-VmAutomatedMenuHighlight',
         'Assert-VmAutomatedMenuHighlightBinding'
     )) {
         $menuHelper = $acceptanceAst.Find({
@@ -1001,6 +1002,40 @@ try {
         . ([scriptblock]::Create($menuHelper.Extent.Text))
     }
     $nativeMenuFixtureParent = '한글-매우-긴-상위-경로-A-😀'
+    $menuBarRect = [pscustomobject]@{ Left = 0; Top = 0; Right = 800; Bottom = 600 }
+    $nativeBarHighlight = [pscustomobject]@{
+        MenuPath = [int[]]@(); Position = 0; CommandId = $null
+        StateFlags = 144; Left = 86; Top = 31; Right = 171; Bottom = 50
+    }
+    $barHighlight = ConvertTo-VmAutomatedMenuHighlight `
+        -NativeHighlights @($nativeBarHighlight) -OpenMenuPaths @() -Popups @() `
+        -MainRect $menuBarRect
+    if (@($barHighlight.menu_path).Count -ne 0 -or $barHighlight.position -ne 0 -or
+        $barHighlight.state_flags -ne 144 -or $null -ne $barHighlight.command_id) {
+        throw 'Closing a native popup must retain its observed menu-bar highlight.'
+    }
+    if ($null -ne (ConvertTo-VmAutomatedMenuHighlight `
+            -NativeHighlights @() -OpenMenuPaths @() -Popups @() -MainRect $menuBarRect)) {
+        throw 'Leaving the native menu bar must retain the observed absence of highlights.'
+    }
+    Assert-Fails {
+        ConvertTo-VmAutomatedMenuHighlight `
+            -NativeHighlights @($nativeBarHighlight, $nativeBarHighlight) `
+            -OpenMenuPaths @() -Popups @() -MainRect $menuBarRect
+    } 'ambiguous highlight'
+    $nativeBarHighlight.MenuPath = [int[]]@(0)
+    Assert-Fails {
+        ConvertTo-VmAutomatedMenuHighlight `
+            -NativeHighlights @($nativeBarHighlight) -OpenMenuPaths @() -Popups @() `
+            -MainRect $menuBarRect
+    } 'ambiguous highlight'
+    $nativeBarHighlight.MenuPath = [int[]]@()
+    $nativeBarHighlight.Right = 801
+    Assert-Fails {
+        ConvertTo-VmAutomatedMenuHighlight `
+            -NativeHighlights @($nativeBarHighlight) -OpenMenuPaths @() -Popups @() `
+            -MainRect $menuBarRect
+    } 'outside its exact owned window'
     $nativeMenuFixtureLeaf = '한글-😀-0001-final.txt'
     $nativeMenuRelativePath = ConvertTo-VmAutomatedNativeMenuRelativePath `
         -ParentSegments @($nativeMenuFixtureParent) -Leaf $nativeMenuFixtureLeaf

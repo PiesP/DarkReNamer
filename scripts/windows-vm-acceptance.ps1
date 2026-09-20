@@ -2207,34 +2207,59 @@ function Get-VmAutomatedMenuHighlight {
     )
 
     $native = @([DarkReNamerVmAcceptanceNative]::ReadHighlightedNativeMenuItems($MainWindowHandle))
+    $mainRect = [DarkReNamerVmNative+Rect]::new()
+    if (-not [DarkReNamerVmNative]::GetWindowRect($MainWindowHandle, [ref]$mainRect)) {
+        throw 'Native menu highlight could not bind the candidate window bounds.'
+    }
+    ConvertTo-VmAutomatedMenuHighlight `
+        -NativeHighlights $native -OpenMenuPaths $OpenMenuPaths -Popups $Popups `
+        -MainRect $mainRect
+}
+
+function ConvertTo-VmAutomatedMenuHighlight {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $NativeHighlights,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $OpenMenuPaths,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Popups,
+        [Parameter(Mandatory)][object] $MainRect
+    )
+
+    $native = @($NativeHighlights)
     if ($OpenMenuPaths.Count -eq 0) {
-        if ($native.Count -ne 0) {
+        if ($Popups.Count -ne 0) { throw 'Closed native menu paths retain popup windows.' }
+        if ($native.Count -eq 0) { return $null }
+        if ($native.Count -ne 1 -or @($native[0].MenuPath).Count -ne 0 -or
+            $null -ne $native[0].CommandId) {
             $observed = $native | ConvertTo-Json -Compress -Depth 4
-            throw "A closed native menu retained highlighted items: $observed"
+            throw "Closed native popups retained an ambiguous highlight: $observed"
         }
-        return $null
+        $matches = @($native)
+        $bounds = $MainRect
     }
-    $deepest = $OpenMenuPaths[0]
-    foreach ($path in $OpenMenuPaths) {
-        if (@($path).Count -gt @($deepest).Count) { $deepest = $path }
+    else {
+        $deepest = $OpenMenuPaths[0]
+        foreach ($path in $OpenMenuPaths) {
+            if (@($path).Count -gt @($deepest).Count) { $deepest = $path }
+        }
+        $matches = @($native | Where-Object {
+            Test-VmAutomatedMenuPathEqual -Left @($_.MenuPath) -Right @($deepest)
+        })
+        if ($matches.Count -eq 0) { return $null }
+        $popup = @($Popups | Where-Object {
+            Test-VmAutomatedMenuPathEqual -Left @($_.menu_path) -Right @($deepest)
+        })
+        if ($popup.Count -ne 1) { throw 'Native menu highlight has no exact owned popup.' }
+        $bounds = $popup[0].rect
     }
-    $matches = @($native | Where-Object {
-        Test-VmAutomatedMenuPathEqual -Left @($_.MenuPath) -Right @($deepest)
-    })
-    if ($matches.Count -eq 0) { return $null }
     if ($matches.Count -ne 1 -or (($matches[0].StateFlags -band 0x80) -eq 0) -or
         $matches[0].Right -le $matches[0].Left -or $matches[0].Bottom -le $matches[0].Top) {
         throw 'Native menu highlight is duplicated, unmarked, or has invalid bounds.'
     }
-    $popup = @($Popups | Where-Object {
-        Test-VmAutomatedMenuPathEqual -Left @($_.menu_path) -Right @($deepest)
-    })
-    if ($popup.Count -ne 1 -or
-        $matches[0].Left -lt $popup[0].rect.left -or
-        $matches[0].Top -lt $popup[0].rect.top -or
-        $matches[0].Right -gt $popup[0].rect.right -or
-        $matches[0].Bottom -gt $popup[0].rect.bottom) {
-        throw 'Native menu highlight is outside its exact owned popup.'
+    if ($matches[0].Left -lt $bounds.left -or
+        $matches[0].Top -lt $bounds.top -or
+        $matches[0].Right -gt $bounds.right -or
+        $matches[0].Bottom -gt $bounds.bottom) {
+        throw 'Native menu highlight is outside its exact owned window.'
     }
     [ordered]@{
         menu_path = [int[]]@($matches[0].MenuPath)
@@ -2478,7 +2503,17 @@ function Invoke-VmAutomatedNativeMenuOnlyReachability {
         }
         while ($paths.Count -gt 0) {
             $paths.RemoveAt($paths.Count - 1)
-            [void](& $addEvent 'escape' $paths.ToArray() $pathHandles)
+            $current = & $addEvent 'escape' $paths.ToArray() $pathHandles
+        }
+        if ($null -eq $current.highlighted -or
+            @($current.highlighted.menu_path).Count -ne 0 -or
+            $current.highlighted.position -ne $RootPosition -or
+            $null -ne $current.highlighted.command_id) {
+            throw 'Closing the root popup did not return to its exact menu-bar item.'
+        }
+        $current = & $addEvent 'escape' $paths.ToArray() $pathHandles
+        if ($null -ne $current.highlighted) {
+            throw 'The second Escape did not leave the candidate menu bar.'
         }
     }
 

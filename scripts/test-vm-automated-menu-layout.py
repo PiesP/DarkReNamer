@@ -26,7 +26,7 @@ def environment() -> dict:
     return {"fixture_volume": {"filesystem": "NTFS", "root_path": r"C:\fixture",
                                "root_identity": deepcopy(IDENTITY)},
             "target_display": {"hwnd": MAIN, "process_id": PID, "session_id": SESSION,
-                               "work_rect": deepcopy(RECT)}}
+                               "work_rect": deepcopy(RECT), "window_rect": deepcopy(RECT)}}
 
 
 def fixture_state() -> dict:
@@ -51,7 +51,7 @@ def fixture_state() -> dict:
 
 def tree_item(parent: tuple[int, ...], position: int, kind: str, command: int | None,
               *, enabled: bool = True) -> dict:
-    flags = 0 if enabled else 3
+    flags = (0x10 if kind == "submenu" else 0) if enabled else 3
     return {"menu_path": list(parent), "position": position, "item_type": kind,
             "command_id": command, "state_flags": flags, "enabled": enabled, "checked": False}
 
@@ -114,11 +114,15 @@ def layout(*, opener_highlights: bool = False) -> dict:
         highlight = None
         if highlighted is not None:
             item = by_path[highlighted]
-            depth = len(highlighted) - 2
+            if len(highlighted) == 1:
+                item_rect = {"left": 0, "top": 0, "right": 1, "bottom": 1}
+            else:
+                depth = len(highlighted) - 2
+                item_rect = {"left": 110 + 200 * depth, "top": 110,
+                             "right": 200 + 200 * depth, "bottom": 130}
             highlight = {"menu_path": list(highlighted[:-1]), "position": highlighted[-1],
                          "command_id": item["command_id"], "state_flags": item["state_flags"] | 0x80,
-                         "item_rect": {"left": 110 + 200 * depth, "top": 110,
-                                       "right": 200 + 200 * depth, "bottom": 130}}
+                         "item_rect": item_rect}
         return {"foreground": deepcopy(foreground), "open_menu_paths": [list(path) for path in open_paths],
                 "highlighted": highlight, "popups": popups}
 
@@ -135,10 +139,12 @@ def layout(*, opener_highlights: bool = False) -> dict:
         state_open, current = list(open_paths), highlighted
 
     emit("alt-f", [(0,)], (0, 0) if opener_highlights else None)
+    emit("escape", [], (0,))
     emit("escape", [], None)
     emit("alt-e", [(1,)], (1, 5) if opener_highlights else None)
     if not opener_highlights:
         emit("down", [(1,)], (1, 5))
+    emit("escape", [], (1,))
     emit("escape", [], None)
     groups = ((32772, 32773, 32774), (32775, 32776, 32777), (32778, 32779, 32780),
               (32788, 32789, 32790), (32785, 32786))
@@ -150,6 +156,7 @@ def layout(*, opener_highlights: bool = False) -> dict:
         for position in range(1, len(commands)):
             emit("down", [(3,), (3, group)], (3, group, position))
         emit("left", [(3,)], (3, group))
+        emit("escape", [], (3,))
         emit("escape", [], None)
 
     endpoint = {"foreground": deepcopy(foreground), "focused": deepcopy(list_binding),
@@ -198,7 +205,7 @@ class NativeMenuLayoutTests(unittest.TestCase):
             "wrong-command-path": lambda row: row["native_menu_only"]["menu_tree"][8].update(command_id=32772),
             "flags-lie": lambda row: row["native_menu_only"]["menu_tree"][8].update(enabled=True),
             "foreign-popup": lambda row: row["native_menu_only"]["events"][0]["popups"][0].update(pid=99),
-            "clipped-highlight": lambda row: row["native_menu_only"]["events"][3]["highlighted"]["item_rect"].update(right=700),
+            "clipped-highlight": lambda row: row["native_menu_only"]["events"][4]["highlighted"]["item_rect"].update(right=700),
             "fake-key": lambda row: row["native_menu_only"]["events"][0].update(input="enter", virtual_keys=[13]),
             "array-key": lambda row: row["native_menu_only"]["events"][0].update(input=[]),
             "object-key": lambda row: row["native_menu_only"]["events"][0].update(input={}),
@@ -208,6 +215,35 @@ class NativeMenuLayoutTests(unittest.TestCase):
             "foreign-foreground": lambda row: row["native_menu_only"]["events"][0]["foreground"].update(process_id=99),
             "fixture-mutation": lambda row: row["native_menu_only"]["state_after"]["fixture_entries"][2].update(bytes=24),
             "open-final-popup": lambda row: row["native_menu_only"]["final"].update(open_menu_paths=[[0]]),
+        }
+        for name, mutate in mutations.items():
+            changed = layout()
+            mutate(changed)
+            with self.subTest(name=name), self.assertRaises(EvidenceError):
+                verify_native_menu_layout(changed, environment())
+
+    def test_menu_bar_exit_requires_exact_second_escape(self):
+        def first_root_bar(row: dict) -> dict:
+            return next(event for event in row["native_menu_only"]["events"]
+                        if event["highlighted"] is not None and
+                        event["highlighted"]["menu_path"] == [])
+
+        def remove_second_escape(row: dict) -> None:
+            events = row["native_menu_only"]["events"]
+            first = events.index(first_root_bar(row))
+            del events[first + 1]
+            for sequence, event in enumerate(events, 1):
+                event["sequence"] = sequence
+
+        mutations = {
+            "missing-second-escape": remove_second_escape,
+            "wrong-root-path": lambda row: first_root_bar(row)["highlighted"].update(position=1),
+            "wrong-root-flags": lambda row: first_root_bar(row)["highlighted"].update(state_flags=0x80),
+            "root-command": lambda row: first_root_bar(row)["highlighted"].update(command_id=32791),
+            "closed-submenu-highlight": lambda row: first_root_bar(row)["highlighted"].update(
+                menu_path=[0], position=0, command_id=32791),
+            "outside-main-window": lambda row: first_root_bar(row)["highlighted"]["item_rect"].update(
+                right=RECT["right"] + 1),
         }
         for name, mutate in mutations.items():
             changed = layout()
