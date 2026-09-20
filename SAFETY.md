@@ -402,22 +402,22 @@ verdict inputs. The five required gate records bind separate properties:
 
 | Gate ID | Bound property |
 | --- | --- |
-| `locked-host-gate` | Authenticated successful exact-source protected CI jobs |
+| `locked-host-gate` | Authenticated successful exact-source CI jobs on master |
 | `windows-backend-source-bound` | Exact-source native test binaries, their complete actual transcripts, and controller cleanup |
 | `candidate-package-and-provenance` | Immutable candidate run, artifact, handoff, executable digest, and original GitHub provenance |
 | `profile-raw-evidence-verifier` | Frozen profile plus the complete indexed raw-evidence derivation |
-| `immutable-promotion-binding` | Exact candidate, private ingress, hosted validation run and attempt, and protected source tuple used by promotion |
+| `immutable-promotion-binding` | Exact candidate, private ingress, hosted validation run and attempt, and pinned master source tuple used by promotion |
 
-The product source, clean harness source, and protected hosted validator checkout
+The product source, clean harness source, and hosted validator checkout
 must be the same commit. Candidate bytes are never rebuilt for the VM campaign
 or promotion. An older candidate exercised by a newer harness remains a
 development diagnostic and cannot satisfy this release contract.
 
 | Previous requirement | Property checked by VM-Automated v1 | Evidence boundary |
 | --- | --- | --- |
-| Manual import, preview and Apply | Separate UIA and real keyboard flows; safe default Cancel; complete disk and journal invariance after cancellation; exact preview-to-disk change | Immutable candidate EXE, actual input/focus records and complete checkpoint inventories |
+| Manual import, preview and Apply | Separate UIA and real keyboard flows; safe default Cancel; complete disk and journal invariance after cancellation; exact source-to-destination disk change | Immutable candidate EXE, actual input/focus records and complete checkpoint inventories |
 | DPI, Forced Colors and small work areas | Every fixed display cell; actual HWND DPI, monitor/work-area bounds, exposed control geometry and focus reachability; setting restoration | Requested RDP values alone cannot pass a cell |
-| Visual and accessibility inspection | Bounded decoded captures, UIA names/states and defined keyboard navigation | No claim of human visual quality or comprehensive assistive-technology acceptance |
+| Visual and accessibility inspection | Bounded decoded captures, UIA automation IDs, control types, visible/enabled/focusable states, geometry and defined keyboard navigation | No claim of human visual quality or comprehensive assistive-technology acceptance |
 | Cancellation, close and process crash | Genuine partial mutation, complete original/restored file identities and contents, safe recovery default and journal locking | Process loss only; no VM reset, storage fault or power-loss claim |
 | Recovery export and candidate discard | Export bytes equal the retained interrupted journal; explicitly injected candidate equals its authentic first Intent frame; explicit discard preserves files | Injected Intent is identified as injected, not a naturally observed crash artifact |
 | Physical SSD/HDD benchmark matrix | Optional VM storage diagnostics only | Physical-device performance is outside the release claim |
@@ -454,7 +454,8 @@ The hosted validation and promotion boundary is described in
 [`DISTRIBUTION.md`](DISTRIBUTION.md#immutable-prerelease-promotion). An attestation
 binds the checked statement and workflow execution; it does not make a
 compromised VM or administrator a trustworthy hardware observer. The
-owner-authenticated raw producer remains trusted to report actual execution;
+owner-authenticated archive ingress still relies on the raw producer to report
+actual execution;
 raw consistency checking is not remote VM attestation. The hosted workflow
 removes its private scratch and extracted archive before it returns success;
 only then is the canonical path-free statement attested. Validation does not

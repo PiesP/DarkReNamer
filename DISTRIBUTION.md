@@ -48,7 +48,7 @@ are information only; the workflow does not apply release size or
 dependency-count thresholds.
 
 Verify the checksum before running the executable. Verify candidate provenance
-against the repository, signer workflow, protected source ref, and exact source
+against the repository, signer workflow, pinned master ref, and exact source
 digest recorded in `release-handoff.json`:
 
 ```text
@@ -105,8 +105,8 @@ artifact. The workflow independently downloads and verifies the immutable
 candidate, validates the bounded archive, re-derives the full profile from raw
 observations, and cleans up its private scratch and extracted archive before it
 can complete. The next workflow step attests only the canonical path-free
-statement. Product, clean harness checkout and protected hosted verifier must
-use the same protected source commit.
+statement. Product, clean harness checkout and hosted verifier must
+use the same pinned master source commit.
 
 The statement can report `passed` only after the verifier derives all 22 target
 verdicts from the fixed 20-cell matrix and 10 independent stability executions,
@@ -130,7 +130,7 @@ GitHub attestations.
 
 Promotion downloads the same pinned evidence and candidate and recomputes the
 same statement bytes. It verifies the statement attestation against the exact
-validation workflow, protected source ref and digest, and GitHub-hosted runner.
+validation workflow, pinned master ref and digest, and GitHub-hosted runner.
 The verified certificate must identify the selected run and attempt; that exact
 attempt must also report successful completion. A producer-supplied run field,
 a successful different retry, or a statement checksum alone cannot satisfy this

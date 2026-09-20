@@ -204,7 +204,7 @@ under the one-VM lock, and stops after the first failed attempt. It retains the
 partial ledger and diagnostics, but does not retry or replace a failed slot. A
 passing campaign must begin again with a new output root and complete plan.
 
-The product checkout, clean harness checkout and eventual protected hosted
+The product checkout, clean harness checkout and eventual hosted
 validator checkout must resolve to the same source commit. The campaign reuses
 the immutable candidate EXE and records its exact handoff identity. Its native
 backend preparation retains source-bound test binaries, the complete actual
