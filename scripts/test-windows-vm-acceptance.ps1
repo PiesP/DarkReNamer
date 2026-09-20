@@ -850,6 +850,15 @@ try {
         'function Get-VmAutomatedAppearance'
         '$result.raw_appearance = Get-VmAutomatedAppearance'
         'raw_appearance = Get-VmAutomatedAppearance'
+        'function Resolve-GuiRegressionLayoutVariant'
+        'function Get-VmAutomatedNativeMenuCommandSpec'
+        'function Assert-VmAutomatedNativeMenuTree'
+        'function Get-VmAutomatedHiddenRailControls'
+        'function Invoke-VmAutomatedNativeMenuOnlyReachability'
+        'IntPtr itemOwner = depth == 0 ? window : IntPtr.Zero;'
+        "variant = 'native-menu-only'"
+        'hidden_rail_controls = $hiddenRails'
+        'menu_tree = $menuTree'
         'function New-VmAutomatedFocusReachabilityControl'
         'function Invoke-VmAutomatedFocusReachability'
         'focus_reachability = $focusReachability'
@@ -968,6 +977,152 @@ try {
         if ($focusReachabilitySource.IndexOf($requiredFocusSource, [StringComparison]::Ordinal) -lt 0) {
             throw "Raw focus reachability is missing '$requiredFocusSource'."
         }
+    }
+    foreach ($menuHelperName in @(
+        'Get-VmAutomatedNativeMenuCommandSpec',
+        'ConvertTo-VmAutomatedMenuPathKey',
+        'Test-VmAutomatedMenuPathEqual',
+        'Assert-VmAutomatedNativeMenuTree',
+        'Assert-VmAutomatedMenuHighlightBinding'
+    )) {
+        $menuHelper = $acceptanceAst.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq $menuHelperName
+        }, $true)
+        if ($null -eq $menuHelper) {
+            throw "The acceptance script is missing native menu helper $menuHelperName."
+        }
+        . ([scriptblock]::Create($menuHelper.Extent.Text))
+    }
+    $menuTree = [Collections.Generic.List[object]]::new()
+    $addMenuRow = {
+        param(
+            [int[]] $Path,
+            [int] $Position,
+            [string] $Type,
+            [AllowNull()][object] $CommandId,
+            [bool] $Enabled
+        )
+        $flags = if ($Enabled) { 0 } else { 3 }
+        $menuTree.Add([ordered]@{
+            menu_path = $Path
+            position = $Position
+            item_type = $Type
+            command_id = if ($null -eq $CommandId) { $null } else { [int]$CommandId }
+            state_flags = [int]$flags
+            enabled = $Enabled
+            checked = $false
+        })
+    }
+    foreach ($position in 0..3) {
+        & $addMenuRow ([int[]]@()) $position 'submenu' $null $true
+    }
+    & $addMenuRow ([int[]]@(0)) 0 'command' 32791 $true
+    & $addMenuRow ([int[]]@(0)) 1 'separator' $null $false
+    & $addMenuRow ([int[]]@(0)) 2 'command' 32771 $false
+    & $addMenuRow ([int[]]@(1)) 0 'command' 32783 $false
+    & $addMenuRow ([int[]]@(1)) 1 'command' 65535 $false
+    & $addMenuRow ([int[]]@(1)) 2 'separator' $null $false
+    & $addMenuRow ([int[]]@(1)) 3 'command' 32798 $true
+    & $addMenuRow ([int[]]@(1)) 4 'command' 32799 $true
+    & $addMenuRow ([int[]]@(1)) 5 'command' 32784 $true
+    & $addMenuRow ([int[]]@(1)) 6 'separator' $null $false
+    & $addMenuRow ([int[]]@(1)) 7 'command' 32781 $false
+    & $addMenuRow ([int[]]@(2)) 0 'command' 32800 $true
+    foreach ($position in 0..4) {
+        & $addMenuRow ([int[]]@(3)) $position 'submenu' $null $true
+    }
+    $command = 32772
+    foreach ($branch in 0..3) {
+        foreach ($position in 0..2) {
+            & $addMenuRow ([int[]]@(3,$branch)) $position 'command' $command $true
+            $command++
+        }
+        if ($branch -eq 2) { $command = 32788 }
+        elseif ($branch -eq 3) { $command = 32785 }
+    }
+    foreach ($position in 0..1) {
+        & $addMenuRow ([int[]]@(3,4)) $position 'command' (32785 + $position) $true
+    }
+    $requiredMenuSpecs = @(Assert-VmAutomatedNativeMenuTree -MenuTree $menuTree.ToArray())
+    if ($requiredMenuSpecs.Count -ne 19 -or
+        @($requiredMenuSpecs | Where-Object expected_enabled).Count -ne 15 -or
+        @($requiredMenuSpecs | Where-Object { -not $_.expected_enabled }).Count -ne 4) {
+        throw 'Native menu fixture must retain the exact required enabled and disabled command sets.'
+    }
+    $prefixTreeRow = @($menuTree | Where-Object { $_.command_id -eq 32773 })
+    if ($prefixTreeRow.Count -ne 1 -or $prefixTreeRow[0].position -ne 1 -or
+        -not (Test-VmAutomatedMenuPathEqual -Left @($prefixTreeRow[0].menu_path) -Right @(3,0))) {
+        throw 'Native menu fixture must retain the exact positional path for Prefix.'
+    }
+    Assert-VmAutomatedMenuHighlightBinding `
+        -Highlight ([ordered]@{
+            menu_path = [int[]]@(3,0); position = 1; command_id = 32773
+            item_rect = [ordered]@{ left = 1; top = 2; right = 3; bottom = 4 }
+            state_flags = 0x80
+        }) `
+        -MenuTree $menuTree.ToArray()
+    Assert-Fails {
+        Assert-VmAutomatedMenuHighlightBinding `
+            -Highlight ([ordered]@{
+                menu_path = [int[]]@(3,0); position = 1; command_id = 32774
+                item_rect = [ordered]@{ left = 1; top = 2; right = 3; bottom = 4 }
+                state_flags = 0x80
+            }) `
+            -MenuTree $menuTree.ToArray()
+    } 'immutable menu tree row'
+    $copyMenuTree = {
+        @($menuTree | ForEach-Object {
+            [ordered]@{
+                menu_path = [int[]]@($_.menu_path); position = [int]$_.position
+                item_type = [string]$_.item_type
+                command_id = if ($null -eq $_.command_id) { $null } else { [int]$_.command_id }
+                state_flags = [int]$_.state_flags; enabled = [bool]$_.enabled; checked = [bool]$_.checked
+            }
+        })
+    }
+    $wrongMenuState = @(& $copyMenuTree)
+    $wrongApply = @($wrongMenuState | Where-Object command_id -EQ 32771)[0]
+    $wrongApply.state_flags = 0
+    $wrongApply.enabled = $true
+    Assert-Fails {
+        Assert-VmAutomatedNativeMenuTree -MenuTree $wrongMenuState
+    } 'fixed fixture'
+    $duplicateMenuCommand = @(& $copyMenuTree)
+    @($duplicateMenuCommand | Where-Object command_id -EQ 32791)[0].command_id = 32772
+    Assert-Fails {
+        Assert-VmAutomatedNativeMenuTree -MenuTree $duplicateMenuCommand
+    } 'duplicated'
+    $orphanedMenuPath = @(& $copyMenuTree)
+    @($orphanedMenuPath | Where-Object {
+        $_.menu_path.Count -eq 1 -and $_.menu_path[0] -eq 2
+    })[0].menu_path = [int[]]@(9)
+    $orphanedMenuPath += [ordered]@{
+        menu_path = [int[]]@(2); position = 0; item_type = 'separator'; command_id = $null
+        state_flags = 0; enabled = $true; checked = $false
+    }
+    Assert-Fails {
+        Assert-VmAutomatedNativeMenuTree -MenuTree $orphanedMenuPath
+    } 'parent submenu'
+    $unknownMenuField = @(& $copyMenuTree)
+    $unknownMenuField[0]['unexpected'] = $true
+    Assert-Fails {
+        Assert-VmAutomatedNativeMenuTree -MenuTree $unknownMenuField
+    } 'malformed'
+    $menuReachabilityFunction = $acceptanceAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Invoke-VmAutomatedNativeMenuOnlyReachability'
+    }, $true)
+    $menuReachabilitySource = $menuReachabilityFunction.Extent.Text
+    foreach ($requiredMenuInput in @("'alt-f'", "'alt-e'", "'alt-t'", "'down'", "'right'", "'escape'")) {
+        if ($menuReachabilitySource.IndexOf($requiredMenuInput, [StringComparison]::Ordinal) -lt 0) {
+            throw "Native menu reachability is missing actual input $requiredMenuInput."
+        }
+    }
+    if ($menuReachabilitySource.IndexOf('SendMenuCommand', [StringComparison]::Ordinal) -ge 0) {
+        throw 'Native menu reachability must not invoke a command programmatically.'
     }
     if (($acceptanceText | Select-String -Pattern "failure_reason = 'desktop_lock_release_failed'" -AllMatches).Matches.Count -ne 3) {
         throw 'Current-DPI, GUI regression, and rescue paths must preserve structured evidence after desktop-lock release failure.'
@@ -1252,7 +1407,10 @@ try {
         'GetClipboardSequenceNumber',
         'ReadClipboardSnapshot',
         'ClearClipboardIfOwned',
-        'SetHighContrastColors'
+        'SetHighContrastColors',
+        'ReadNativeMenuTree',
+        'ReadHighlightedNativeMenuItems',
+        'ReadVisibleNativeMenuPopups'
     )) {
         if ($null -eq [DarkReNamerVmAcceptanceNative].GetMethod($method)) {
             throw "The acceptance native probe is missing $method."
@@ -1508,6 +1666,7 @@ try {
         'IsMenuCommandChecked',
         'SendMenuCommand',
         'FindVisiblePopupMenu',
+        'ReadVisibleNativeMenuPopups',
         'SetWindowPos'
     )) {
         if ($null -eq [DarkReNamerVmAcceptanceNative].GetMethod($method)) {
@@ -1914,6 +2073,8 @@ try {
         }
         request = [pscustomobject]@{
             mode = 'text-scale'; appearance = 'light'; text_scale_percent = [long]150
+            layout_variant = 'native-menu-only'
+            desktop = [pscustomobject]@{ width = [long]800; height = [long]600; dpi = [long]96 }
         }
     }
     Assert-GuiRegressionInvocationBinding `
@@ -1923,6 +2084,49 @@ try {
         -Appearance light `
         -TextScalePercent 150 `
         -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    if ((Resolve-GuiRegressionLayoutVariant `
+        -ManifestInput $candidateRegressionInput `
+        -Verified $candidateRegressionResolved `
+        -RegressionMode text-scale `
+        -Appearance light `
+        -TextScalePercent 150) -cne 'native-menu-only') {
+        throw 'The authenticated text-150 request did not retain native-menu-only layout.'
+    }
+    $ordinaryRegressionInput = $candidateRegressionInput |
+        ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $ordinaryRegressionInput.request.PSObject.Properties.Remove('layout_variant')
+    if ((Resolve-GuiRegressionLayoutVariant `
+        -ManifestInput $ordinaryRegressionInput `
+        -Verified $candidateRegressionResolved `
+        -RegressionMode text-scale `
+        -Appearance light `
+        -TextScalePercent 150) -cne 'command-rails') {
+        throw 'A legacy request without a layout variant must retain command rails.'
+    }
+    foreach ($invalidVariant in @('adaptive', [long]1)) {
+        $invalidVariantInput = $candidateRegressionInput |
+            ConvertTo-Json -Depth 8 | ConvertFrom-Json
+        $invalidVariantInput.request.layout_variant = $invalidVariant
+        Assert-Fails {
+            Resolve-GuiRegressionLayoutVariant `
+                -ManifestInput $invalidVariantInput `
+                -Verified $candidateRegressionResolved `
+                -RegressionMode text-scale `
+                -Appearance light `
+                -TextScalePercent 150
+        } 'layout variant'
+    }
+    $wrongNativeGeometry = $candidateRegressionInput |
+        ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $wrongNativeGeometry.request.desktop.width = [long]801
+    Assert-Fails {
+        Resolve-GuiRegressionLayoutVariant `
+            -ManifestInput $wrongNativeGeometry `
+            -Verified $candidateRegressionResolved `
+            -RegressionMode text-scale `
+            -Appearance light `
+            -TextScalePercent 150
+    } 'fixed text-150 cell'
     $manifestGuestPreflight = [pscustomobject][ordered]@{
         architecture = 'x86_64'
         build = '26200'
