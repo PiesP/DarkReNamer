@@ -5578,6 +5578,7 @@ try {
             -ExpectedSession $ExpectedSessionId
 
         $observations.environment = [ordered]@{
+            main_window = Get-ObserverNativeWindowMetrics -Window $mainWindow
             os_version = [DarkReNamerVmAcceptanceNative]::OsVersion()
             dpi = $captureWindow.dpi
             appearance = $appearanceSpec.evidence_name
