@@ -268,6 +268,19 @@ class VmAutomatedCliTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(EvidenceError):
                 cli.validate(args)
 
+    def test_omitted_or_tampered_retained_tooling_fails_source_binding(self):
+        module = next(
+            path for path in self.fixture.campaign.files
+            if path.endswith("/tooling-vm-launcher.py")
+        )
+        for mode in ("omitted", "tampered"):
+            archive = self.fixture.scratch / (mode + "-tooling.zip")
+            options = ({"omitted": {module}} if mode == "omitted" else
+                       {"replacements": {module: b"TOOLING_EXECUTED = True\n"}})
+            self.fixture.write_archive(archive, **options)
+            with self.subTest(mode=mode), self.assertRaises(EvidenceError):
+                cli.validate(self.fixture.args(archive=archive))
+
     def test_incomplete_campaign_fails_and_main_removes_private_extraction(self):
         incomplete = deepcopy(self.fixture.campaign.campaign)
         incomplete["attempts"].pop()

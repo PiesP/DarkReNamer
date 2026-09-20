@@ -76,7 +76,7 @@
       "bundle": "tooling-campaign-verifier.py",
       "kind": "python",
       "module": "darkrenamer_tooling.campaign.verifier",
-      "sha256": "70fe9d56f6953d1b175143c8ea27019cd844e402973c08906d2b90a5c7007d44",
+      "sha256": "b5b9edff1951abbc3c1e9ebe2d81fa497555c4875d8e904f2088aef8c1df3c1d",
       "dependencies": [
         "package-root",
         "package-campaign",
@@ -357,7 +357,7 @@
       "bundle": "tooling-evidence-cli.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.cli",
-      "sha256": "8912b797b31a5b017f3c0f95e407928cf5c09b52af58704d12c645b58476a19f",
+      "sha256": "3a9be995c8aa346a7cc01cd63021c0628a216a0143cdedce73759a7a7303e21e",
       "dependencies": [
         "tooling-loader",
         "package-root",

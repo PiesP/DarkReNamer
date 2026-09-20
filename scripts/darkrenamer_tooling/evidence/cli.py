@@ -17,6 +17,7 @@ from darkrenamer_tooling.campaign.verifier import (
     verify_complete_campaign,
 )
 from darkrenamer_tooling.contracts.binding import Candidate, decimal, sha, trusted_component_hashes
+from darkrenamer_tooling.contracts.tooling import trusted_tooling_inventory
 from darkrenamer_tooling.evidence.archive import (
     EvidenceError, FileReference, MAX_ARCHIVE_BYTES, MAX_MEMBER_BYTES, MAX_JSON_BYTES,
     _open_absolute_regular,
@@ -43,6 +44,7 @@ def validate(args: argparse.Namespace) -> bytes:
     require_int(archive_size, 1, MAX_ARCHIVE_BYTES, 'Archive size')
     source = args.trusted_source_root.resolve(strict=True)
     components = trusted_component_hashes(source, source_sha)
+    tooling = trusted_tooling_inventory(source, source_sha, ("vm-launcher",))
     profile_path = 'config/vm-automated-v1.json'
     entry = subprocess.check_output(['git', 'ls-tree', source_sha, '--', profile_path], cwd=source, text=True).strip()
     require(entry.startswith('100644 blob ') and entry.endswith('\t' + profile_path),
@@ -79,7 +81,8 @@ def validate(args: argparse.Namespace) -> bytes:
     with open_indexed_evidence_archive(args.archive, FileReference(archive_digest, archive_size),
                                        args.archive.resolve(strict=True).parent) as extracted:
         verified = verify_complete_campaign(EvidenceReader(extracted), profile=profile,
-                    profile_sha256=profile_digest, candidate=candidate, component_hashes=components)
+                    profile_sha256=profile_digest, candidate=candidate, component_hashes=components,
+                    tooling_inventory=tooling)
     binding_digest = canonical_digest({'candidate': candidate.__dict__, 'ingress': ingress,
                                        'validation': validation, 'source_sha': source_sha})
     gate_digests = {
