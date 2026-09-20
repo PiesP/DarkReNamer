@@ -3,6 +3,30 @@ param([switch] $ParserOnly)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'windows-vm-test-module-loader.ps1')
+foreach ($definition in @(Get-DrTestDefinitionScriptBlocks -Kind recovery)) { . $definition }
+
+function Invoke-TestRecoveryAcceptance {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $EntryPointPath,
+        [Parameter(Mandatory)][string] $BundleRoot,
+        [Parameter(Mandatory)][int] $ExpectedSessionId,
+        [Parameter(Mandatory)][string] $OutputRoot,
+        [Parameter(Mandatory)][string] $PrivateEvidenceRoot,
+        [Parameter(Mandatory)][string] $ExpectedScriptSha256,
+        [ValidateSet('ProcessCrash', 'WorkerCancellation', 'WorkerClose')][string] $Mode = 'ProcessCrash',
+        [ValidateRange(128, 10000)][int] $FixtureCount = 4096,
+        [ValidateRange(10, 600)][int] $TimeoutSeconds = 300,
+        [switch] $RecoveryExport,
+        [switch] $IntentOnlyCandidateDiscard,
+        [switch] $ValidateOnly
+    )
+    $parameters = @{} + $PSBoundParameters
+    [void]$parameters.Remove('EntryPointPath')
+    Invoke-DrTestPowerShellEntrypoint `
+        -Kind recovery -EntryPointPath $EntryPointPath -Parameters $parameters
+}
 
 function Assert-Fails {
     param(
@@ -273,12 +297,6 @@ if ($recoveryStatusIndex -lt 0 -or $recoveryExportIndex -le $recoveryStatusIndex
     $recoveryDiscardIndex -le $recoverySeparatorIndex) {
     throw 'The recovery observer native menu positions drifted from production source.'
 }
-. $acceptance `
-    -BundleRoot $PSScriptRoot `
-    -ExpectedSessionId 1 `
-    -OutputRoot $PSScriptRoot `
-    -PrivateEvidenceRoot $PSScriptRoot `
-    -ExpectedScriptSha256 ('0' * 64)
 
 $validMenuInventory = [pscustomobject]@{
     TotalCount = 1
@@ -983,7 +1001,21 @@ try {
 
     $valid = New-TestBundle -Root (Join-Path $temporaryRoot 'valid')
     $observerHash = Get-TestSha256 -Path $acceptance
-    & $acceptance `
+    $actualFacadeRoot = Join-Path $temporaryRoot 'actual-recovery-facade'
+    [void](New-Item -ItemType Directory -Path $actualFacadeRoot)
+    $actualFacade = Join-Path $actualFacadeRoot 'windows-vm-recovery-acceptance.ps1'
+    Copy-Item -LiteralPath $acceptance -Destination $actualFacade
+    [void](New-DrTestFrozenToolingBundle `
+        -TaskRoot $actualFacadeRoot -Kind recovery -EntrypointPaths @($actualFacade))
+    & $actualFacade `
+        -BundleRoot $valid.root `
+        -ExpectedSessionId 1 `
+        -OutputRoot $temporaryRoot `
+        -PrivateEvidenceRoot $temporaryRoot `
+        -ExpectedScriptSha256 (Get-TestSha256 -Path $actualFacade) `
+        -Mode WorkerCancellation `
+        -ValidateOnly
+    Invoke-TestRecoveryAcceptance -EntryPointPath $acceptance `
         -BundleRoot $valid.root `
         -ExpectedSessionId 1 `
         -OutputRoot $temporaryRoot `
@@ -992,7 +1024,7 @@ try {
         -Mode WorkerCancellation `
         -ValidateOnly
 
-    & $acceptance `
+    Invoke-TestRecoveryAcceptance -EntryPointPath $acceptance `
         -BundleRoot $valid.root `
         -ExpectedSessionId 1 `
         -OutputRoot $temporaryRoot `
@@ -1005,7 +1037,7 @@ try {
 
     $candidateValid = New-CandidateTestBundle `
         -Root (Join-Path $temporaryRoot 'candidate-valid')
-    & $acceptance `
+    Invoke-TestRecoveryAcceptance -EntryPointPath $acceptance `
         -BundleRoot $candidateValid.root `
         -ExpectedSessionId 1 `
         -OutputRoot $temporaryRoot `
@@ -1024,7 +1056,7 @@ try {
         -Path (Join-Path $candidateSwappedObserver.root 'bundle.json') `
         -Value $candidateSwappedObserver.manifest
     Assert-Fails {
-        & $acceptance `
+        Invoke-TestRecoveryAcceptance -EntryPointPath $acceptance `
             -BundleRoot $candidateSwappedObserver.root `
             -ExpectedSessionId 1 `
             -OutputRoot $temporaryRoot `
@@ -1040,7 +1072,7 @@ try {
         -Path (Join-Path $candidateFalseAlias.root 'bundle.json') `
         -Value $candidateFalseAlias.manifest
     Assert-Fails {
-        & $acceptance `
+        Invoke-TestRecoveryAcceptance -EntryPointPath $acceptance `
             -BundleRoot $candidateFalseAlias.root `
             -ExpectedSessionId 1 `
             -OutputRoot $temporaryRoot `
@@ -1059,7 +1091,7 @@ try {
         [Text.UTF8Encoding]::new($false)
     )
     Assert-Fails {
-        & $acceptance `
+        Invoke-TestRecoveryAcceptance -EntryPointPath $acceptance `
             -BundleRoot $candidateDuplicate.root `
             -ExpectedSessionId 1 `
             -OutputRoot $temporaryRoot `
@@ -1069,7 +1101,7 @@ try {
     } 'duplicate field: schema_version'
 
     Assert-Fails {
-        & $acceptance `
+        Invoke-TestRecoveryAcceptance -EntryPointPath $acceptance `
             -BundleRoot $valid.root `
             -ExpectedSessionId 1 `
             -OutputRoot $temporaryRoot `
@@ -1082,7 +1114,7 @@ try {
 
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
         Assert-Fails {
-            & $acceptance `
+            Invoke-TestRecoveryAcceptance -EntryPointPath $acceptance `
                 -BundleRoot $valid.root `
                 -ExpectedSessionId 7 `
                 -OutputRoot $temporaryRoot `
@@ -1093,7 +1125,7 @@ try {
     }
 
     Assert-Fails {
-        & $acceptance `
+        Invoke-TestRecoveryAcceptance -EntryPointPath $acceptance `
             -BundleRoot $valid.root `
             -ExpectedSessionId 1 `
             -OutputRoot $temporaryRoot `
@@ -1105,7 +1137,7 @@ try {
     $changedRunner = New-TestBundle -Root (Join-Path $temporaryRoot 'changed-runner')
     [IO.File]::AppendAllText($changedRunner.runner, "`n# changed")
     Assert-Fails {
-        & $acceptance `
+        Invoke-TestRecoveryAcceptance -EntryPointPath $acceptance `
             -BundleRoot $changedRunner.root `
             -ExpectedSessionId 1 `
             -OutputRoot $temporaryRoot `
@@ -1127,7 +1159,6 @@ try {
             'Process'
         )
         $runnerText = [IO.File]::ReadAllText($maliciousRunner.runner)
-        $bootstrapBoundary = "if (`$MyInvocation.InvocationName -eq '.') {"
         $maliciousBody = @'
 function Resolve-VerifiedBundle {
     [IO.File]::WriteAllText($env:DARKRENAMER_BOOTSTRAP_MARKER, 'forged verifier executed')
@@ -1135,20 +1166,14 @@ function Resolve-VerifiedBundle {
 }
 [IO.File]::WriteAllText($env:DARKRENAMER_BOOTSTRAP_MARKER, 'malicious helper executed')
 '@
-        if ($runnerText.IndexOf($bootstrapBoundary, [StringComparison]::Ordinal) -lt 0) {
-            throw 'The malicious helper fixture could not find its execution boundary.'
-        }
-        $runnerText = $runnerText.Replace(
-            $bootstrapBoundary,
-            $maliciousBody + "`r`n" + $bootstrapBoundary
-        )
+        $runnerText += "`r`n" + $maliciousBody
         [IO.File]::WriteAllText(
             $maliciousRunner.runner,
             $runnerText,
             [Text.UTF8Encoding]::new($true)
         )
         Assert-Fails {
-            & $acceptance `
+            Invoke-TestRecoveryAcceptance -EntryPointPath $acceptance `
                 -BundleRoot $maliciousRunner.root `
                 -ExpectedSessionId 1 `
                 -OutputRoot $temporaryRoot `
@@ -1171,7 +1196,7 @@ function Resolve-VerifiedBundle {
     $valid.manifest.source_state = 'dirty'
     Write-TestJson -Path (Join-Path $valid.root 'bundle.json') -Value $valid.manifest
     Assert-Fails {
-        & $acceptance `
+        Invoke-TestRecoveryAcceptance -EntryPointPath $acceptance `
             -BundleRoot $valid.root `
             -ExpectedSessionId 1 `
             -OutputRoot $temporaryRoot `
@@ -1568,16 +1593,24 @@ finally {
 
 $tokens = $null
 $errors = $null
-$fromFile = [Management.Automation.Language.Parser]::ParseFile(
-    $acceptance,
+$recoveryModuleSource = Get-DrTestCombinedPowerShellSource -Kind recovery
+$fromFile = [Management.Automation.Language.Parser]::ParseInput(
+    $recoveryModuleSource,
     [ref]$tokens,
     [ref]$errors
 )
 if ($errors.Count -ne 0) {
     throw 'The recovery acceptance script has parser errors.'
 }
+$entryFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Invoke-DrWindowsVmRecoveryAcceptance'
+}, $true))
+if ($entryFunction.Count -ne 1) { throw 'The recovery module must expose one invocation boundary.' }
+$entryParameters = $entryFunction[0].Body.ParamBlock.Parameters
 $fixtureCountParameter = @(
-    $fromFile.ParamBlock.Parameters |
+    $entryParameters |
         Where-Object { $_.Name.VariablePath.UserPath -ceq 'FixtureCount' }
 )
 if ($fixtureCountParameter.Count -ne 1 -or
@@ -1585,7 +1618,7 @@ if ($fixtureCountParameter.Count -ne 1 -or
     throw 'The recovery acceptance default fixture count must remain within the import bound.'
 }
 $privateRootParameter = @(
-    $fromFile.ParamBlock.Parameters |
+    $entryParameters |
         Where-Object { $_.Name.VariablePath.UserPath -ceq 'PrivateEvidenceRoot' }
 )
 if ($privateRootParameter.Count -ne 1 -or
@@ -1597,7 +1630,7 @@ if ($privateRootParameter.Count -ne 1 -or
 }
 foreach ($switchName in @('RecoveryExport', 'IntentOnlyCandidateDiscard')) {
     $switchParameter = @(
-        $fromFile.ParamBlock.Parameters |
+        $entryParameters |
             Where-Object { $_.Name.VariablePath.UserPath -ceq $switchName }
     )
     if ($switchParameter.Count -ne 1 -or
@@ -1607,8 +1640,14 @@ foreach ($switchName in @('RecoveryExport', 'IntentOnlyCandidateDiscard')) {
 }
 $screenshotCalls = @($fromFile.FindAll({
     param($node)
-    $node -is [Management.Automation.Language.CommandAst] -and
-        $node.GetCommandName() -ceq 'Save-WindowScreenshot'
+    if ($node -isnot [Management.Automation.Language.CommandAst] -or
+        $node.GetCommandName() -cne 'Save-WindowScreenshot') { return $false }
+    $owner = $node.Parent
+    while ($null -ne $owner -and
+        $owner -isnot [Management.Automation.Language.FunctionDefinitionAst]) {
+        $owner = $owner.Parent
+    }
+    $null -ne $owner -and $owner.Name -in @('Invoke-AcceptanceRecovery', 'Invoke-AcceptanceSession')
 }, $true))
 if ($screenshotCalls.Count -ne 2) {
     throw 'The recovery observer must retain exactly two bounded screenshot boundaries.'
@@ -2282,8 +2321,16 @@ if ($converter.Count -ne 1) {
 }
 $remainingGenericWindowLookups = @($fromFile.FindAll({
     param($node)
-    $node -is [Management.Automation.Language.CommandAst] -and
-        $node.GetCommandName() -ceq 'Wait-UniqueAutomationWindow'
+    if ($node -isnot [Management.Automation.Language.CommandAst] -or
+        $node.GetCommandName() -cne 'Wait-UniqueAutomationWindow') { return $false }
+    $owner = $node.Parent
+    while ($null -ne $owner -and
+        $owner -isnot [Management.Automation.Language.FunctionDefinitionAst]) {
+        $owner = $owner.Parent
+    }
+    $null -ne $owner -and $owner.Name -in @(
+        'Invoke-AcceptanceImportAndPrefix', 'Invoke-AcceptanceApply'
+    )
 }, $true))
 if ($remainingGenericWindowLookups.Count -ne 3) {
     throw 'Only setup import, prefix, and Apply may retain generic UIA window lookup.'
@@ -2582,7 +2629,7 @@ if ($intentFunction.Count -ne 1 -or
     throw 'Leading Intent extraction must reuse the caller validated journal inspection.'
 }
 $fromUtf8 = [Management.Automation.Language.Parser]::ParseInput(
-    [IO.File]::ReadAllText($acceptance, [Text.Encoding]::UTF8),
+    $recoveryModuleSource,
     [ref]$tokens,
     [ref]$errors
 )

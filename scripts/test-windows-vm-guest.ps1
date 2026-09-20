@@ -1,8 +1,25 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param()
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'windows-vm-test-module-loader.ps1')
+foreach ($definition in @(Get-DrTestDefinitionScriptBlocks -Kind guest)) { . $definition }
+foreach ($definition in @(Get-DrTestDefinitionScriptBlocks -Kind controller)) { . $definition }
+
+function Invoke-TestGuest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $EntryPointPath,
+        [Parameter(Mandatory)][string] $BundleRoot,
+        [Parameter(Mandatory)][int] $ExpectedSessionId,
+        [int] $TestTimeoutSeconds = 300,
+        [switch] $ValidateOnly
+    )
+    $parameters = @{} + $PSBoundParameters
+    [void]$parameters.Remove('EntryPointPath')
+    & $EntryPointPath @parameters
+}
 
 function Assert-Fails {
     param(
@@ -40,6 +57,8 @@ function New-Fixture {
     [void](New-Item -ItemType Directory -Path $root)
     $runnerPath = Join-Path $root 'windows-vm-guest.ps1'
     Copy-Item -LiteralPath $script:runner -Destination $runnerPath
+    [void](New-DrTestFrozenToolingBundle `
+        -TaskRoot $root -Kind guest -EntrypointPaths @($runnerPath))
     [IO.File]::WriteAllText((Join-Path $root 'DarkReNamer.exe'), 'application fixture')
     [IO.File]::WriteAllText((Join-Path $root 'core-tests.exe'), 'test fixture')
     $manifest = [ordered]@{
@@ -149,10 +168,65 @@ $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-vm-guest-' +
 [void](New-Item -ItemType Directory -Path $temporaryRoot)
 try {
     $valid = New-Fixture -Name 'valid'
-    & $valid.runner -BundleRoot $valid.root -ExpectedSessionId 1 -ValidateOnly
+    Invoke-TestGuest -EntryPointPath $valid.runner -BundleRoot $valid.root -ExpectedSessionId 1 -ValidateOnly
+    $leakedCommand = Get-Command Get-DrToolingVerifiedBundle -ErrorAction SilentlyContinue
+    $leakedModules = @(Get-Module | Where-Object Name -Like 'DarkReNamer.*')
+    if ($null -ne $leakedCommand) { throw "The public guest facade leaked loader command from $($leakedCommand.ModuleName)." }
+    if ($leakedModules.Count -ne 0) { throw 'The public guest facade leaked its private modules.' }
+    $tamperedTooling = New-Fixture -Name 'tampered-tooling'
+    [IO.File]::AppendAllText(
+        (Join-Path $tamperedTooling.root 'guest-contracts.ps1'),
+        "`n# changed after manifest freeze"
+    )
+    Assert-Fails {
+        Invoke-TestGuest `
+            -EntryPointPath $tamperedTooling.runner `
+            -BundleRoot $tamperedTooling.root `
+            -ExpectedSessionId 1 `
+            -ValidateOnly
+    } 'mismatch'
+    $transferManifestText = '{"schema_version":1,"modules":[]}'
+    $transferModuleText = 'function Test-FrozenTransfer { $true }'
+    $transferStage = New-ControllerToolingTransferStage -VerifiedTooling ([pscustomobject]@{
+        ManifestBase64 = [Convert]::ToBase64String(
+            [Text.Encoding]::UTF8.GetBytes($transferManifestText)
+        )
+        ManifestSha256 = Get-LowerTextSha256 -Value $transferManifestText
+        Records = @([pscustomobject]@{
+            Role = 'powershell-controller-contracts'
+            Bundle = 'controller-contracts.ps1'
+            Sha256 = Get-LowerTextSha256 -Value $transferModuleText
+            FrozenBase64 = [Convert]::ToBase64String(
+                [Text.Encoding]::UTF8.GetBytes($transferModuleText)
+            )
+            Length = [Text.Encoding]::UTF8.GetByteCount($transferModuleText)
+        })
+    })
+    try {
+        if ((Get-Sha256 (Join-Path $transferStage.root 'tooling-bundle.json')) -cne
+                $transferStage.manifest_sha256 -or
+            (Get-Sha256 (Join-Path $transferStage.root 'controller-contracts.ps1')) -cne
+                $transferStage.records[0].sha256) {
+            throw 'The controller did not materialize its frozen tooling closure exactly.'
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $transferStage.root -Recurse -Force
+    }
+    $throwingTransfer = [pscustomobject]@{}
+    $throwingTransfer | Add-Member -MemberType ScriptProperty -Name root -Value {
+        throw 'cleanup fixture failure'
+    }
+    $cleanupContinuation = $false
+    $cleanupFailure = Remove-ControllerToolingTransferStage -Transfer $throwingTransfer
+    $cleanupContinuation = $true
+    if (-not $cleanupContinuation -or
+        $cleanupFailure -cne 'Local frozen-tooling transfer cleanup failed.') {
+        throw 'A local tooling cleanup failure escaped its best-effort boundary.'
+    }
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
         Assert-Fails {
-            & $valid.runner -BundleRoot $valid.root -ExpectedSessionId 1
+            Invoke-TestGuest -EntryPointPath $valid.runner -BundleRoot $valid.root -ExpectedSessionId 1
         } 'requires Windows'
         $failedResultText = [IO.File]::ReadAllText((Join-Path $valid.root 'result.json'))
         $failedResult = $failedResultText | ConvertFrom-Json
@@ -171,8 +245,8 @@ try {
     }
 
     $candidate = New-CandidateFixture -Name 'candidate-valid'
-    & $candidate.runner -BundleRoot $candidate.root -ExpectedSessionId 1 -ValidateOnly
-    . $candidate.runner -BundleRoot $candidate.root -ExpectedSessionId 1 -ValidateOnly
+    Invoke-TestGuest -EntryPointPath $candidate.runner -BundleRoot $candidate.root -ExpectedSessionId 1 -ValidateOnly
+    Invoke-TestGuest -EntryPointPath $candidate.runner -BundleRoot $candidate.root -ExpectedSessionId 1 -ValidateOnly
     $candidateContract = Resolve-VerifiedBundle `
         -Root $candidate.root `
         -InvokedScriptPath $candidate.runner
@@ -264,7 +338,7 @@ try {
     $candidateSwappedObserver.manifest.harness.observers.recovery = $uiObserver
     Save-Manifest $candidateSwappedObserver
     Assert-Fails {
-        & $candidateSwappedObserver.runner `
+        Invoke-TestGuest -EntryPointPath $candidateSwappedObserver.runner `
             -BundleRoot $candidateSwappedObserver.root `
             -ExpectedSessionId 1 `
             -ValidateOnly
@@ -274,7 +348,7 @@ try {
     $candidateObserverHashMismatch.manifest.harness.observers.ui.sha256 = 'f' * 64
     Save-Manifest $candidateObserverHashMismatch
     Assert-Fails {
-        & $candidateObserverHashMismatch.runner `
+        Invoke-TestGuest -EntryPointPath $candidateObserverHashMismatch.runner `
             -BundleRoot $candidateObserverHashMismatch.root `
             -ExpectedSessionId 1 `
             -ValidateOnly
@@ -284,7 +358,7 @@ try {
     $candidateMetadataMismatch.manifest.product.candidate.artifact_id = '21'
     Save-Manifest $candidateMetadataMismatch
     Assert-Fails {
-        & $candidateMetadataMismatch.runner `
+        Invoke-TestGuest -EntryPointPath $candidateMetadataMismatch.runner `
             -BundleRoot $candidateMetadataMismatch.root `
             -ExpectedSessionId 1 `
             -ValidateOnly
@@ -294,7 +368,7 @@ try {
     $candidateHashMismatch.manifest.product.application.sha256 = 'f' * 64
     Save-Manifest $candidateHashMismatch
     Assert-Fails {
-        & $candidateHashMismatch.runner `
+        Invoke-TestGuest -EntryPointPath $candidateHashMismatch.runner `
             -BundleRoot $candidateHashMismatch.root `
             -ExpectedSessionId 1 `
             -ValidateOnly
@@ -310,7 +384,7 @@ try {
         Get-Sha256 $duplicateRunPath
     Save-Manifest $candidateDuplicateMetadata
     Assert-Fails {
-        & $candidateDuplicateMetadata.runner `
+        Invoke-TestGuest -EntryPointPath $candidateDuplicateMetadata.runner `
             -BundleRoot $candidateDuplicateMetadata.root `
             -ExpectedSessionId 1 `
             -ValidateOnly
@@ -326,7 +400,7 @@ try {
         Get-Sha256 $duplicateArtifactPath
     Save-Manifest $candidateDuplicateArtifact
     Assert-Fails {
-        & $candidateDuplicateArtifact.runner `
+        Invoke-TestGuest -EntryPointPath $candidateDuplicateArtifact.runner `
             -BundleRoot $candidateDuplicateArtifact.root `
             -ExpectedSessionId 1 `
             -ValidateOnly
@@ -336,7 +410,7 @@ try {
     $emptyDefault.manifest.test_binaries = @()
     Save-Manifest $emptyDefault
     Assert-Fails {
-        & $emptyDefault.runner -BundleRoot $emptyDefault.root -ExpectedSessionId 1 -ValidateOnly
+        Invoke-TestGuest -EntryPointPath $emptyDefault.runner -BundleRoot $emptyDefault.root -ExpectedSessionId 1 -ValidateOnly
     } 'non-empty array'
 
     $duplicateManifest = New-Fixture -Name 'duplicate-manifest'
@@ -351,7 +425,7 @@ try {
         [Text.UTF8Encoding]::new($false)
     )
     Assert-Fails {
-        & $duplicateManifest.runner `
+        Invoke-TestGuest -EntryPointPath $duplicateManifest.runner `
             -BundleRoot $duplicateManifest.root `
             -ExpectedSessionId 1 `
             -ValidateOnly
@@ -361,21 +435,21 @@ try {
     $numericType.manifest.schema_version = [double]2.0
     Save-Manifest $numericType
     Assert-Fails {
-        & $numericType.runner -BundleRoot $numericType.root -ExpectedSessionId 1 -ValidateOnly
+        Invoke-TestGuest -EntryPointPath $numericType.runner -BundleRoot $numericType.root -ExpectedSessionId 1 -ValidateOnly
     } 'JSON integer 2'
 
     $badHash = New-Fixture -Name 'bad-hash'
     $badHash.manifest.test_binaries[0].sha256 = '2' * 64
     Save-Manifest $badHash
     Assert-Fails {
-        & $badHash.runner -BundleRoot $badHash.root -ExpectedSessionId 1 -ValidateOnly
+        Invoke-TestGuest -EntryPointPath $badHash.runner -BundleRoot $badHash.root -ExpectedSessionId 1 -ValidateOnly
     } 'test binary hash mismatch'
 
     $traversal = New-Fixture -Name 'traversal'
     $traversal.manifest.test_binaries[0].file = '..\outside.exe'
     Save-Manifest $traversal
     Assert-Fails {
-        & $traversal.runner -BundleRoot $traversal.root -ExpectedSessionId 1 -ValidateOnly
+        Invoke-TestGuest -EntryPointPath $traversal.runner -BundleRoot $traversal.root -ExpectedSessionId 1 -ValidateOnly
     } 'safe leaf filename'
 
     $duplicate = New-Fixture -Name 'duplicate'
@@ -386,27 +460,27 @@ try {
     }
     Save-Manifest $duplicate
     Assert-Fails {
-        & $duplicate.runner -BundleRoot $duplicate.root -ExpectedSessionId 1 -ValidateOnly
+        Invoke-TestGuest -EntryPointPath $duplicate.runner -BundleRoot $duplicate.root -ExpectedSessionId 1 -ValidateOnly
     } 'filenames must be unique'
 
     $extraField = New-Fixture -Name 'extra-field'
     $extraField.manifest.application.extra = 'untrusted'
     Save-Manifest $extraField
     Assert-Fails {
-        & $extraField.runner -BundleRoot $extraField.root -ExpectedSessionId 1 -ValidateOnly
+        Invoke-TestGuest -EntryPointPath $extraField.runner -BundleRoot $extraField.root -ExpectedSessionId 1 -ValidateOnly
     } 'unexpected fields'
 
     $wrongTarget = New-Fixture -Name 'wrong-target'
     $wrongTarget.manifest.target = 'x86_64-pc-windows-gnu'
     Save-Manifest $wrongTarget
     Assert-Fails {
-        & $wrongTarget.runner -BundleRoot $wrongTarget.root -ExpectedSessionId 1 -ValidateOnly
+        Invoke-TestGuest -EntryPointPath $wrongTarget.runner -BundleRoot $wrongTarget.root -ExpectedSessionId 1 -ValidateOnly
     } 'target is invalid'
 
     $changedRunner = New-Fixture -Name 'changed-runner'
     [IO.File]::AppendAllText($changedRunner.runner, "`n# changed")
     Assert-Fails {
-        & $changedRunner.runner -BundleRoot $changedRunner.root -ExpectedSessionId 1 -ValidateOnly
+        Invoke-TestGuest -EntryPointPath $changedRunner.runner -BundleRoot $changedRunner.root -ExpectedSessionId 1 -ValidateOnly
     } 'manifest artifact hash mismatch'
 
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
@@ -418,11 +492,11 @@ try {
         $reparse.manifest.test_binaries[0].sha256 = Get-Sha256 $targetPath
         Save-Manifest $reparse
         Assert-Fails {
-            & $reparse.runner -BundleRoot $reparse.root -ExpectedSessionId 1 -ValidateOnly
+            Invoke-TestGuest -EntryPointPath $reparse.runner -BundleRoot $reparse.root -ExpectedSessionId 1 -ValidateOnly
         } 'must not be a reparse point'
     }
 
-    . $valid.runner -BundleRoot $valid.root -ExpectedSessionId 1 -ValidateOnly
+    Invoke-TestGuest -EntryPointPath $valid.runner -BundleRoot $valid.root -ExpectedSessionId 1 -ValidateOnly
     # UI Automation providers may expose an empty Name for a valid focused control.
     if ((Get-LowerTextSha256 -Value '') -cne
         'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855') {
@@ -482,7 +556,7 @@ try {
     Assert-Fails {
         Get-VmAutomatedRuntimeRootObservation -Root $runtimeObservationRoot -MaximumEntries 8
     } 'contains a reparse point'
-    $runnerText = [IO.File]::ReadAllText($runner)
+    $runnerText = Get-DrTestCombinedPowerShellSource -Kind guest
     if ($runnerText.IndexOf(
         'journal_after = [ordered]@{ entries = @() }',
         [StringComparison]::Ordinal
@@ -565,14 +639,13 @@ try {
     } 'rename-journal residue'
     Remove-Item -LiteralPath (Join-Path $isolatedJournalRoot 'active.drj')
     $hostRunner = Join-Path $PSScriptRoot 'run-windows-vm-tests.ps1'
-    $hostRunnerText = [IO.File]::ReadAllText($hostRunner)
+    $hostRunnerText = Get-DrTestCombinedPowerShellSource -Kind controller
     if ($hostRunnerText.IndexOf('-ExecutionPolicy RemoteSigned', [StringComparison]::Ordinal) -ge 0 -or
         $hostRunnerText.IndexOf('Get-Command pwsh.exe', [StringComparison]::Ordinal) -lt 0 -or
         $hostRunnerText.IndexOf("edition -cne 'Core'", [StringComparison]::Ordinal) -lt 0 -or
         $hostRunnerText.IndexOf("effective_policy -cne 'RemoteSigned'", [StringComparison]::Ordinal) -lt 0) {
         throw 'The native scheduled task must use the inspected PowerShell 7.4+ Core RemoteSigned engine without a policy override.'
     }
-    . $hostRunner -BundleRoot $valid.root -SshHost 'darkrenamer-vm'
     Assert-Fails {
         Assert-SshPowerShellVersion -Version '7.3.9' -Context 'Fixture SSH endpoint'
     } '7.4 or newer'
@@ -610,7 +683,7 @@ try {
         throw 'The SSH PowerShell session did not enforce the required non-interactive host-key and agent options.'
     }
     Assert-Fails {
-        . $hostRunner -BundleRoot $valid.root -SshHost 'user@darkrenamer-vm'
+        Invoke-DrTestPowerShellEntrypoint -Kind controller -EntryPointPath $hostRunner -Parameters @{ BundleRoot = $valid.root; SshHost = 'user@darkrenamer-vm'; VerifiedTooling = [pscustomobject]@{} }
     } 'SshHost'
     $script:expectedVmGuid = [guid]'12345678-1234-5678-9abc-1234567890ab'
     $script:vmMatches = @([pscustomobject]@{ Id = $script:expectedVmGuid; Name = 'Exact VM'; State = 'Running' })
