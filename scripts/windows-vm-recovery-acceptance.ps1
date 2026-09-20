@@ -2229,7 +2229,7 @@ function Get-AcceptanceControlTargetObservation {
     if ($controlId -ne $ExpectedControlId -or
         $automationId -cne $ExpectedAutomationId -or
         $controlType -cne 'ControlType.Button') {
-        throw "$Label changed native or automation identity."
+        throw "$Label identity mismatch: control_id=$controlId expected_control_id=$ExpectedControlId automation_id=$automationId expected_automation_id=$ExpectedAutomationId control_type=$controlType."
     }
     $focused = $false
     $focusedElement = [Windows.Automation.AutomationElement]::FocusedElement
