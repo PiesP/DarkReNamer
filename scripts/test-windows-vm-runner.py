@@ -176,6 +176,210 @@ class VmRunnerTests(unittest.TestCase):
                 self.assertIn('$rescue.task_result -ne 0', function)
                 self.assertNotIn("$rescue.status -in @('passed', 'failed')", function)
 
+    def test_observer_poll_requires_new_terminal_task_generation(self):
+        function = self.powershell_function('Resolve-ObserverTaskPollState')
+        cases = [
+            {'result_status': None, 'task_state': 'Ready', 'task_result': 0,
+             'registered_ticks': 100, 'last_run_ticks': 100},
+            {'result_status': None, 'task_state': 'Running', 'task_result': 267009,
+             'registered_ticks': 100, 'last_run_ticks': 101},
+            {'result_status': 'passed', 'task_state': 'Ready', 'task_result': 0,
+             'registered_ticks': 100, 'last_run_ticks': 101},
+            {'result_status': 'failed', 'task_state': 'Ready',
+             'task_result': 3221225786,
+             'registered_ticks': 100, 'last_run_ticks': 101},
+        ]
+        script = function + r'''
+            $cases = $env:VM_RUNNER_CASES | ConvertFrom-Json
+            @($cases | ForEach-Object {
+                Resolve-ObserverTaskPollState `
+                    -ResultStatus $_.result_status `
+                    -TaskState $_.task_state `
+                    -TaskResult $_.task_result `
+                    -RegisteredLastRunTimeTicks $_.registered_ticks `
+                    -LastRunTimeTicks $_.last_run_ticks
+            }) | ConvertTo-Json -Compress -Depth 4
+        '''
+        completed = subprocess.run(
+            [shutil.which('pwsh'), '-NoLogo', '-NoProfile', '-NonInteractive',
+             '-Command', script], check=True, capture_output=True, text=True,
+            timeout=20, env={**os.environ, 'VM_RUNNER_CASES': json.dumps(
+                cases, separators=(',', ':'))})
+        observed = json.loads(completed.stdout)
+        self.assertEqual([row['terminal'] for row in observed],
+                         [False, False, True, True])
+        self.assertEqual([row['task_result'] for row in observed],
+                         [0, 267009, 0, 3221225786])
+
+    def test_ui_timeout_fails_before_stream_move_or_inventory(self):
+        controller = Path(__file__).with_name('run-windows-vm-tests.ps1').read_text()
+        acceptance = controller[controller.index(
+            "if ($acceptance) {\n        $guestBundleRoot"):]
+        acceptance = acceptance[:acceptance.index("\n    elseif ($recovery) {")]
+        registration = acceptance.index(
+            '$registered = Get-ScheduledTaskInfo -TaskName $name')
+        start = acceptance.index('Start-ScheduledTask -TaskName $name')
+        poll_info = acceptance.index(
+            '$info = Get-ScheduledTaskInfo -TaskName $name', start)
+        poll_task = acceptance.index(
+            '$task = Get-ScheduledTask -TaskName $name', poll_info)
+        terminal_info = acceptance.index(
+            '$terminalInfo = Get-ScheduledTaskInfo -TaskName $name', poll_task)
+        result = acceptance.index(
+            'Get-Content -LiteralPath $file', terminal_info)
+        poll_guard = acceptance.index('if ($null -ne $pollFailure) {', result)
+        original_failure = acceptance.index(
+            'Invoke-AcceptancePollFailureRescue', poll_guard)
+        first_move = acceptance.index('Move-Item -LiteralPath', poll_guard)
+        inventory = acceptance.index('$inventory = @(', poll_guard)
+        self.assertLess(registration, start)
+        self.assertLess(poll_info, poll_task)
+        self.assertLess(poll_task, terminal_info)
+        self.assertLess(terminal_info, result)
+        self.assertLess(poll_guard, original_failure)
+        self.assertLess(original_failure, first_move)
+        self.assertLess(original_failure, inventory)
+        self.assertIn(
+            '-RegisteredLastRunTimeTicks '
+            '$acceptanceEngine.registered_last_run_time_ticks', acceptance)
+        self.assertIn('if ($state.terminal) { break }', acceptance)
+        self.assertNotIn('exit_code = [int]$state.task_result', acceptance)
+
+    def test_observer_failure_rescue_quiesces_before_snapshot_and_rethrows_original(self):
+        function = self.powershell_function('Invoke-AcceptancePollFailureRescue')
+        script = r'''
+            $script:events = [Collections.Generic.List[string]]::new()
+            function Stop-AcceptanceObserverTaskForRescue {
+                $script:events.Add('stop')
+                if ($env:VM_RUNNER_CASE -ceq 'stop-failure') {
+                    throw 'stop-failure'
+                }
+            }
+            function Test-AcceptanceRestoreSnapshot {
+                param($Session, $GuestRoot, $Leaf)
+                $script:events.Add('snapshot:' + $Leaf)
+                return $env:VM_RUNNER_CASE -notin @('snapshot-absent', 'stop-failure')
+            }
+            function Invoke-AcceptanceTextScaleRescue {
+                $script:events.Add('text-rescue')
+                if ($env:VM_RUNNER_CASE -ceq 'rescue-failure') {
+                    throw 'text-rescue-failure'
+                }
+            }
+            function Invoke-AcceptanceHighContrastRescue {
+                $script:events.Add('high-contrast-rescue')
+            }
+        ''' + function + r'''
+            $output = $env:VM_RUNNER_OUTPUT
+            $errorPath = Join-Path $output 'observer-rescue-error.txt'
+            Remove-Item -LiteralPath $errorPath -Force -ErrorAction SilentlyContinue
+            $caught = $null
+            try {
+                Invoke-AcceptancePollFailureRescue `
+                    -Session ([pscustomobject]@{}) `
+                    -GuestRoot 'C:\owned-root' `
+                    -DesktopSid 'S-1-5-21-fixture' `
+                    -DesktopSessionId 7 `
+                    -TaskName 'DarkReNamerTests-00000000000000000000000000000000' `
+                    -TestTimeoutSeconds 60 `
+                    -SuiteTimeoutSeconds 120 `
+                    -ObserverSha256 ('a' * 64) `
+                    -AcceptanceMode $(if ($env:VM_RUNNER_CASE -ceq 'high-contrast') {
+                        'current-dpi'
+                    } else { 'text-scale' }) `
+                    -Appearance 'system' `
+                    -HighContrast ($env:VM_RUNNER_CASE -ceq 'high-contrast') `
+                    -HostOutputRoot $output `
+                    -OriginalFailure ([InvalidOperationException]::new('original-poll'))
+            } catch {
+                $caught = $_.Exception.Message
+            }
+            [ordered]@{
+                events = $script:events.ToArray()
+                caught = $caught
+                rescue_error = if (Test-Path -LiteralPath $errorPath) {
+                    Get-Content -LiteralPath $errorPath -Raw
+                } else { $null }
+            } | ConvertTo-Json -Compress
+        '''
+        cases = {}
+        for case in ('stop-failure', 'snapshot-absent', 'text-scale',
+                     'high-contrast', 'rescue-failure'):
+            with self.subTest(case=case):
+                completed = subprocess.run(
+                    [shutil.which('pwsh'), '-NoLogo', '-NoProfile', '-NonInteractive',
+                     '-Command', script], check=True, capture_output=True, text=True,
+                    timeout=20, env={**os.environ, 'VM_RUNNER_CASE': case,
+                                     'VM_RUNNER_OUTPUT': str(self.root)})
+                cases[case] = json.loads(completed.stdout)
+        self.assertEqual(cases['stop-failure']['events'], ['stop'])
+        self.assertIn('stop-failure', cases['stop-failure']['rescue_error'])
+        self.assertEqual(cases['snapshot-absent']['events'],
+                         ['stop', 'snapshot:text-scale-snapshot.json'])
+        self.assertIsNone(cases['snapshot-absent']['rescue_error'])
+        self.assertEqual(cases['text-scale']['events'],
+                         ['stop', 'snapshot:text-scale-snapshot.json', 'text-rescue'])
+        self.assertEqual(cases['high-contrast']['events'],
+                         ['stop', 'snapshot:high-contrast-restore.json',
+                          'high-contrast-rescue'])
+        self.assertEqual(cases['rescue-failure']['events'],
+                         ['stop', 'snapshot:text-scale-snapshot.json', 'text-rescue'])
+        self.assertIn('text-rescue-failure', cases['rescue-failure']['rescue_error'])
+        for row in cases.values():
+            self.assertEqual(row['caught'], 'original-poll')
+
+    def test_observer_failure_quiescence_is_exact_bounded_and_fail_closed(self):
+        function = self.powershell_function('Stop-AcceptanceObserverTaskForRescue')
+        stop = function.index('Stop-ScheduledTask -TaskName $name -ErrorAction Stop')
+        ready = function.index("$taskState -ceq 'Ready'", stop)
+        owned = function.index('$ownedObserverProcesses.Count -eq 0', ready)
+        timeout = function.index('timed out while stopping the original observer task', owned)
+        unregister = function.index(
+            'Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction Stop',
+            timeout)
+        absence = function.index('Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue',
+                                 unregister)
+        self.assertLess(stop, ready)
+        self.assertLess(ready, owned)
+        self.assertLess(owned, timeout)
+        self.assertLess(timeout, unregister)
+        self.assertLess(unregister, absence)
+        for fragment in (
+                "@('cmd.exe', 'pwsh.exe')", '$_.CommandLine.IndexOf($observerToken',
+                '$_.CommandLine.IndexOf($rootToken', '[Math]::Min(60, $timeout)'):
+            self.assertIn(fragment, function)
+        self.assertNotIn('-ErrorAction SilentlyContinue\n            Unregister-ScheduledTask',
+                         function)
+
+    def test_recovery_timeout_fails_before_stream_move_or_inventory(self):
+        controller = Path(__file__).with_name('run-windows-vm-tests.ps1').read_text()
+        recovery = controller[controller.index(
+            "elseif ($recovery) {\n        $guestBundleRoot"):]
+        recovery = recovery[:recovery.index("\n    else {", 1)]
+        registration = recovery.index(
+            '$registered = Get-ScheduledTaskInfo -TaskName $name')
+        start = recovery.index('Start-ScheduledTask -TaskName $name')
+        poll_info = recovery.index(
+            '$info = Get-ScheduledTaskInfo -TaskName $name', start)
+        poll_task = recovery.index('$task = Get-ScheduledTask -TaskName $name', poll_info)
+        terminal_info = recovery.index(
+            '$terminalInfo = Get-ScheduledTaskInfo -TaskName $name', poll_task)
+        poll_guard = recovery.index('if ($null -ne $pollFailure) {', terminal_info)
+        original_failure = recovery.index('throw $pollFailure', poll_guard)
+        first_move = recovery.index('Move-Item -LiteralPath', poll_guard)
+        inventory = recovery.index('$inventory = @(', poll_guard)
+        self.assertLess(registration, start)
+        self.assertLess(poll_info, poll_task)
+        self.assertLess(poll_task, terminal_info)
+        self.assertLess(poll_guard, original_failure)
+        self.assertLess(original_failure, first_move)
+        self.assertLess(original_failure, inventory)
+        self.assertIn(
+            '-RegisteredLastRunTimeTicks '
+            '$recoveryEngine.registered_last_run_time_ticks', recovery)
+        self.assertIn('if ($state.terminal) { break }', recovery)
+        self.assertNotIn('exit_code = [int]$state.task_result', recovery)
+
     def candidate_evidence(self):
         metadata = {
             'release_handoff': self.artifact('release-handoff.json', b'{"validated":true}'),
