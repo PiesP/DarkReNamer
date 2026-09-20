@@ -3,6 +3,35 @@ param()
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'windows-vm-test-module-loader.ps1')
+foreach ($definition in @(Get-DrTestDefinitionScriptBlocks -Kind ui)) { . $definition }
+foreach ($definition in @(Get-DrTestDefinitionScriptBlocks -Kind controller)) { . $definition }
+
+function Invoke-TestAcceptance {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $EntryPointPath,
+        [Parameter(Mandatory)][string] $BundleRoot,
+        [Parameter(Mandatory)][int] $ExpectedSessionId,
+        [Parameter(Mandatory)][string] $OutputRoot,
+        [Parameter(Mandatory)][string] $ExpectedScriptSha256,
+        [int] $TimeoutSeconds = 60,
+        [ValidateSet('system', 'light', 'dark')][string] $Appearance = 'system',
+        [switch] $CaptureNativeMenu,
+        [switch] $CaptureAdvancedAppearance,
+        [switch] $Clipboard,
+        [switch] $HighContrast,
+        [switch] $RestoreHighContrastOnly,
+        [ValidateSet('full-context', 'standard', 'text-scale', 'tooltip')][string] $RegressionMode,
+        [string] $InputManifestPath,
+        [ValidateSet(100, 150)][int] $TextScalePercent = 100,
+        [switch] $RestoreTextScaleOnly,
+        [switch] $ValidateOnly
+    )
+    $parameters = @{} + $PSBoundParameters
+    [void]$parameters.Remove('EntryPointPath')
+    & $EntryPointPath @parameters
+}
 
 function Assert-Fails {
     param(
@@ -48,6 +77,8 @@ function New-AcceptanceFixture {
     $acceptancePath = Join-Path $taskRoot 'windows-vm-acceptance.ps1'
     $runnerPath = Join-Path $bundleRoot 'windows-vm-guest.ps1'
     Copy-Item -LiteralPath $script:acceptance -Destination $acceptancePath
+    [void](New-DrTestFrozenToolingBundle `
+        -TaskRoot $taskRoot -Kind ui -EntrypointPaths @($acceptancePath))
     Copy-Item -LiteralPath $script:runner -Destination $runnerPath
     [IO.File]::WriteAllText((Join-Path $bundleRoot 'DarkReNamer.exe'), 'application fixture')
     [IO.File]::WriteAllText((Join-Path $bundleRoot 'fixture-tests.exe'), 'test fixture')
@@ -90,7 +121,7 @@ function New-CandidateAcceptanceFixture {
 
     $fixture = New-AcceptanceFixture -Name $Name
     Remove-Item -LiteralPath (Join-Path $fixture.bundle_root 'fixture-tests.exe')
-    Copy-Item -LiteralPath $script:acceptance `
+    Copy-Item -LiteralPath $fixture.acceptance `
         -Destination (Join-Path $fixture.bundle_root 'windows-vm-acceptance.ps1')
     foreach ($row in @(
         @{ name = 'test-windows-vm.py'; content = 'launcher fixture' }
@@ -157,7 +188,7 @@ function New-CandidateAcceptanceFixture {
 }
 
 function Invoke-ValidateOnly([object] $Fixture) {
-    & $Fixture.acceptance `
+    Invoke-TestAcceptance -EntryPointPath $Fixture.acceptance `
         -BundleRoot $Fixture.bundle_root `
         -ExpectedSessionId 1 `
         -OutputRoot $Fixture.output_root `
@@ -248,44 +279,39 @@ $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
 )
 [void](New-Item -ItemType Directory -Path $temporaryRoot)
 try {
-    $acceptanceAst = $null
-    foreach ($path in @($acceptance, $MyInvocation.MyCommand.Path)) {
+    $acceptanceSource = Get-DrTestCombinedPowerShellSource -Kind ui
+    $controllerText = Get-DrTestCombinedPowerShellSource -Kind controller
+    $runnerSource = Get-DrTestCombinedPowerShellSource -Kind guest
+    $recoverySource = Get-DrTestCombinedPowerShellSource -Kind recovery
+    $uiModuleSpec = Get-DrTestPowerShellModuleSpec -Kind ui
+    $bomPaths = @(
+        $acceptance,
+        $MyInvocation.MyCommand.Path
+    ) + @($uiModuleSpec.definitions) + @($uiModuleSpec.entry)
+    foreach ($path in $bomPaths) {
         $bytes = [IO.File]::ReadAllBytes($path)
         if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or
             $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
             throw "$([IO.Path]::GetFileName($path)) must retain its UTF-8 BOM for Windows PowerShell 5.1."
         }
-        $parseErrors = $null
-        $parseTokens = $null
-        $parsedAst = [Management.Automation.Language.Parser]::ParseFile(
-            $path,
-            [ref]$parseTokens,
-            [ref]$parseErrors
-        )
-        if ($path -ceq $acceptance) {
-            $acceptanceAst = $parsedAst
-        }
-        if ($parseErrors.Count -ne 0) {
-            throw "$([IO.Path]::GetFileName($path)) has PowerShell parser errors."
-        }
     }
+    $parseErrors = $null
+    $parseTokens = $null
+    $acceptanceAst = [Management.Automation.Language.Parser]::ParseInput(
+        $acceptanceSource, [ref]$parseTokens, [ref]$parseErrors
+    )
+    if ($parseErrors.Count -ne 0) { throw 'The combined UI module source has parser errors.' }
     $controllerParseErrors = $null
     $controllerParseTokens = $null
-    $controllerAst = [Management.Automation.Language.Parser]::ParseFile(
-        $controller,
-        [ref]$controllerParseTokens,
-        [ref]$controllerParseErrors
-    )
+    $controllerAst = [Management.Automation.Language.Parser]::ParseInput(
+        $controllerText, [ref]$controllerParseTokens, [ref]$controllerParseErrors)
     if ($controllerParseErrors.Count -ne 0) {
         throw 'run-windows-vm-tests.ps1 has PowerShell parser errors.'
     }
     $runnerParseErrors = $null
     $runnerParseTokens = $null
-    $runnerAst = [Management.Automation.Language.Parser]::ParseFile(
-        $runner,
-        [ref]$runnerParseTokens,
-        [ref]$runnerParseErrors
-    )
+    $runnerAst = [Management.Automation.Language.Parser]::ParseInput(
+        $runnerSource, [ref]$runnerParseTokens, [ref]$runnerParseErrors)
     if ($runnerParseErrors.Count -ne 0) {
         throw 'windows-vm-guest.ps1 has PowerShell parser errors.'
     }
@@ -299,15 +325,18 @@ try {
     }
     . ([scriptblock]::Create($mainWindowSelector[0].Extent.Text))
 
-    foreach ($observerPath in @($acceptance, $runner, $recovery)) {
-        $observerText = [IO.File]::ReadAllText($observerPath)
+    foreach ($observer in @(
+        @{ Name = 'UI observer'; Text = $acceptanceSource },
+        @{ Name = 'guest runner'; Text = $runnerSource },
+        @{ Name = 'recovery observer'; Text = $recoverySource }
+    )) {
+        $observerText = $observer.Text
         foreach ($heuristic in @('.MainWindowHandle', '.MainWindowTitle', '.CloseMainWindow(')) {
             if ($observerText.IndexOf($heuristic, [StringComparison]::Ordinal) -ge 0) {
-                throw "$([IO.Path]::GetFileName($observerPath)) must not use process main-window heuristics '$heuristic'."
+                throw "$($observer.Name) must not use process main-window heuristics '$heuristic'."
             }
         }
     }
-    $controllerText = [IO.File]::ReadAllText($controller)
     foreach ($functionName in @(
         'Assert-PlainFile',
         'Join-GuestWindowsPath',
@@ -561,10 +590,10 @@ try {
             throw 'New GUI acceptance and rescue commands must not override execution policy.'
         }
     }
-    if ([IO.File]::ReadAllText($acceptance).IndexOf('[ushort]', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+    if ($acceptanceSource.IndexOf('[ushort]', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
         throw 'The acceptance script must use Windows PowerShell 5.1-compatible integer type names.'
     }
-    $acceptanceText = [IO.File]::ReadAllText($acceptance)
+    $acceptanceText = $acceptanceSource
     if ($acceptanceText.IndexOf(
         'journal_after = [ordered]@{ entries = @() }',
         [StringComparison]::Ordinal
@@ -651,31 +680,19 @@ try {
         "if (-not [string]::IsNullOrEmpty(`$RegressionMode))",
         [StringComparison]::Ordinal
     )
-    $regressionSaveIndex = $acceptanceText.IndexOf(
-        '$regressionInvocation = [pscustomobject]@{',
-        $regressionModeIndex,
-        [StringComparison]::Ordinal
-    )
     $regressionGuestIndex = $acceptanceText.IndexOf(
-        '. $bootstrap.runner',
-        $regressionSaveIndex,
-        [StringComparison]::Ordinal
-    )
-    $regressionRestoreIndex = $acceptanceText.IndexOf(
-        '$ValidateOnly = $regressionInvocation.validate_only',
-        $regressionGuestIndex,
+        '$null = Resolve-VerifiedBundle -Root $bootstrap.root',
+        $regressionModeIndex,
         [StringComparison]::Ordinal
     )
     $regressionInvokeIndex = $acceptanceText.IndexOf(
         'Invoke-GuiRegressionAcceptance',
-        $regressionRestoreIndex,
+        $regressionGuestIndex,
         [StringComparison]::Ordinal
     )
-    if ($regressionModeIndex -lt 0 -or $regressionSaveIndex -le $regressionModeIndex -or
-        $regressionGuestIndex -le $regressionSaveIndex -or
-        $regressionRestoreIndex -le $regressionGuestIndex -or
-        $regressionInvokeIndex -le $regressionRestoreIndex) {
-        throw 'The regression entry must restore its caller ValidateOnly switch after importing the guest helper.'
+    if ($regressionModeIndex -lt 0 -or $regressionGuestIndex -le $regressionModeIndex -or
+        $regressionInvokeIndex -le $regressionGuestIndex) {
+        throw 'The regression entry must verify the shared guest contract before invoking its scenario.'
     }
     & {
         $regressionFunction = $acceptanceAst.Find({
@@ -893,17 +910,8 @@ try {
         }
         Remove-Variable closeProbe -Scope Script
     }
-    $probeValidateOnly = $false
-    & {
-        $BundleRoot = 'probe-bundle'
-        $ExpectedSessionId = 1
-        $ValidateOnly = $probeValidateOnly
-        . $runner -BundleRoot $BundleRoot -ExpectedSessionId $ExpectedSessionId -ValidateOnly
-        if (-not $ValidateOnly) {
-            throw 'The guest dot-source contamination probe no longer reproduces the caller-scope switch overwrite.'
-        }
-        $ValidateOnly = $probeValidateOnly
-        if ($ValidateOnly) { throw 'The caller-mode restoration probe failed.' }
+    if ($acceptanceSource.IndexOf('. $bootstrap.runner', [StringComparison]::Ordinal) -ge 0) {
+        throw 'The UI observer must not dot-source the guest executable.'
     }
     $clipboardAssignments = @($acceptanceAst.FindAll({
         param($node)
@@ -911,9 +919,7 @@ try {
             $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
             $node.Left.VariablePath.UserPath -ieq 'Clipboard'
     }, $true))
-    if ($clipboardAssignments.Count -ne 1 -or
-        $clipboardAssignments[0].Left.Extent.Text -cne '$Clipboard' -or
-        $clipboardAssignments[0].Right.Extent.Text -cne '$acceptanceInvocation.clipboard') {
+    if ($clipboardAssignments.Count -ne 0) {
         throw 'The Clipboard switch must not be shadowed by a case-insensitive result variable.'
     }
     if ($acceptanceText -match 'extern IntPtr LocalFree|LocalFree\(value\.scheme\)') {
@@ -1537,18 +1543,11 @@ try {
         throw 'The Copy Paths phase must identify its failure before the Ctrl+Shift+C action.'
     }
 
-    . $acceptance `
-        -BundleRoot 'unused' `
-        -ExpectedSessionId 1 `
-        -OutputRoot 'unused' `
-        -ExpectedScriptSha256 ('0' * 64) `
-        -ValidateOnly
     if ($acceptanceText.IndexOf('ContentType=WindowsRuntime', [StringComparison]::Ordinal) -ge 0 -or
-        ([IO.File]::ReadAllText($runner)).IndexOf('public static double ReadTextScaleFactor()', [StringComparison]::Ordinal) -lt 0) {
+        $runnerSource.IndexOf('public static double ReadTextScaleFactor()', [StringComparison]::Ordinal) -lt 0) {
         throw 'Text-scale reads must use the PowerShell Core-compatible native UISettings ABI helper.'
     }
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-        . $runner -BundleRoot 'unused' -ExpectedSessionId 1 -ValidateOnly
         Initialize-TextScaleNative
         $coreTextScale = [double][DarkReNamerTextScaleNative]::ReadTextScaleFactor()
         if ([double]::IsNaN($coreTextScale) -or $coreTextScale -lt 1.0 -or $coreTextScale -gt 2.25) {
@@ -2786,6 +2785,19 @@ try {
             desktop = [pscustomobject]@{ width = [long]800; height = [long]600; dpi = [long]96 }
         }
     }
+    $candidateRegressionInputPath = Join-Path $candidateValid.task_root 'input-manifest.json'
+    Write-Utf8Json -Path $candidateRegressionInputPath -Value $candidateRegressionInput
+    Invoke-TestAcceptance `
+        -EntryPointPath $candidateValid.acceptance `
+        -BundleRoot $candidateValid.bundle_root `
+        -ExpectedSessionId 1 `
+        -OutputRoot $candidateValid.output_root `
+        -ExpectedScriptSha256 $candidateValid.acceptance_sha256 `
+        -RegressionMode text-scale `
+        -InputManifestPath $candidateRegressionInputPath `
+        -Appearance light `
+        -TextScalePercent 150 `
+        -ValidateOnly
     Assert-GuiRegressionInvocationBinding `
         -ManifestInput $candidateRegressionInput `
         -Verified $candidateRegressionResolved `
@@ -3007,14 +3019,14 @@ try {
     if (Test-Path -LiteralPath $valid.output_root) {
         throw 'ValidateOnly must not create acceptance output.'
     }
-    & $valid.acceptance `
+    Invoke-TestAcceptance -EntryPointPath $valid.acceptance `
         -BundleRoot $valid.bundle_root `
         -ExpectedSessionId 1 `
         -OutputRoot $valid.output_root `
         -ExpectedScriptSha256 $valid.acceptance_sha256 `
         -HighContrast `
         -ValidateOnly
-    & $valid.acceptance `
+    Invoke-TestAcceptance -EntryPointPath $valid.acceptance `
         -BundleRoot $valid.bundle_root `
         -ExpectedSessionId 1 `
         -OutputRoot $valid.output_root `
@@ -3023,7 +3035,7 @@ try {
         -CaptureNativeMenu `
         -CaptureAdvancedAppearance `
         -ValidateOnly
-    & $valid.acceptance `
+    Invoke-TestAcceptance -EntryPointPath $valid.acceptance `
         -BundleRoot $valid.bundle_root `
         -ExpectedSessionId 1 `
         -OutputRoot $valid.output_root `
@@ -3031,7 +3043,7 @@ try {
         -Clipboard `
         -ValidateOnly
     Assert-Fails {
-        & $valid.acceptance `
+        Invoke-TestAcceptance -EntryPointPath $valid.acceptance `
             -BundleRoot $valid.bundle_root `
             -ExpectedSessionId 1 `
             -OutputRoot $valid.output_root `
@@ -3041,7 +3053,7 @@ try {
             -ValidateOnly
     } 'High Contrast acceptance uses Forced Colors'
     Assert-Fails {
-        & $valid.acceptance `
+        Invoke-TestAcceptance -EntryPointPath $valid.acceptance `
             -BundleRoot $valid.bundle_root `
             -ExpectedSessionId 1 `
             -OutputRoot $valid.output_root `
@@ -3055,7 +3067,7 @@ try {
     }
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
         Assert-Fails {
-            & $valid.acceptance `
+            Invoke-TestAcceptance -EntryPointPath $valid.acceptance `
                 -BundleRoot $valid.bundle_root `
                 -ExpectedSessionId 1 `
                 -OutputRoot $valid.output_root `
@@ -3067,7 +3079,7 @@ try {
     }
     Write-RestoreSnapshot -Fixture $valid
     Assert-Fails {
-        & $valid.acceptance `
+        Invoke-TestAcceptance -EntryPointPath $valid.acceptance `
             -BundleRoot $valid.bundle_root `
             -ExpectedSessionId 1 `
             -OutputRoot $valid.output_root `
@@ -3076,7 +3088,7 @@ try {
             -RestoreHighContrastOnly `
             -ValidateOnly
     } 'High Contrast rescue does not accept Clipboard acceptance'
-    & $valid.acceptance `
+    Invoke-TestAcceptance -EntryPointPath $valid.acceptance `
         -BundleRoot $valid.bundle_root `
         -ExpectedSessionId 1 `
         -OutputRoot $valid.output_root `
@@ -3127,7 +3139,7 @@ try {
     } 'restored state differs'
     Write-RestoreSnapshot -Fixture $valid -SourceSha ('f' * 40)
     Assert-Fails {
-        & $valid.acceptance `
+        Invoke-TestAcceptance -EntryPointPath $valid.acceptance `
             -BundleRoot $valid.bundle_root `
             -ExpectedSessionId 1 `
             -OutputRoot $valid.output_root `
@@ -3144,7 +3156,7 @@ try {
     } 'prohibited toggle option'
 
     Assert-Fails {
-        & $valid.acceptance `
+        Invoke-TestAcceptance -EntryPointPath $valid.acceptance `
             -BundleRoot $valid.bundle_root `
             -ExpectedSessionId 1 `
             -OutputRoot $valid.output_root `
@@ -3153,7 +3165,7 @@ try {
     } 'Acceptance script hash mismatch'
 
     Assert-Fails {
-        & $valid.acceptance `
+        Invoke-TestAcceptance -EntryPointPath $valid.acceptance `
             -BundleRoot $valid.bundle_root `
             -ExpectedSessionId 1 `
             -OutputRoot (Join-Path $valid.task_root 'different-output') `
@@ -3162,12 +3174,16 @@ try {
     } 'task bundle out directory'
 
     Assert-Fails {
-        & $acceptance `
-            -BundleRoot $valid.bundle_root `
-            -ExpectedSessionId 1 `
-            -OutputRoot $valid.output_root `
-            -ExpectedScriptSha256 (Get-Sha256 $acceptance) `
-            -ValidateOnly
+        Invoke-DrTestPowerShellEntrypoint `
+            -Kind ui `
+            -EntryPointPath $acceptance `
+            -Parameters @{
+                BundleRoot = $valid.bundle_root
+                ExpectedSessionId = 1
+                OutputRoot = $valid.output_root
+                ExpectedScriptSha256 = Get-Sha256 $acceptance
+                ValidateOnly = $true
+            }
     } 'task-bundled acceptance artifact'
 
     $dirty = New-AcceptanceFixture -Name 'dirty' -SourceState 'dirty'
@@ -3189,8 +3205,8 @@ finally {
 
 # Every observer call must satisfy the shared capture contract, including modes
 # not exercised by portable execution. This caught a real pre-capture VM failure.
-$captureAst = [Management.Automation.Language.Parser]::ParseFile(
-    (Join-Path $PSScriptRoot 'windows-vm-acceptance.ps1'), [ref]$null, [ref]$null)
+$captureAst = [Management.Automation.Language.Parser]::ParseInput(
+    (Get-DrTestCombinedPowerShellSource -Kind ui), [ref]$null, [ref]$null)
 $captureCalls = @($captureAst.FindAll({
     param($node)
     $node -is [Management.Automation.Language.CommandAst] -and
