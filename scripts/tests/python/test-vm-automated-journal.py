@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from tooling_test_paths import REPOSITORY_ROOT
 import struct
 import subprocess
 import unittest
@@ -13,7 +14,7 @@ import zlib
 from darkrenamer_tooling.evidence import journal
 
 
-REPOSITORY = Path(__file__).resolve().parent.parent
+REPOSITORY = REPOSITORY_ROOT
 
 
 def text_payload(units: tuple[int, ...]) -> bytes:

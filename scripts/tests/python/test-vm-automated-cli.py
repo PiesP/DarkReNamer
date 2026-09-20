@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+from tooling_test_paths import REPOSITORY_ROOT
 import subprocess
 import sys
 import tempfile
@@ -49,7 +50,7 @@ class CliFixture:
                      self.raw_root, self.output_root):
             path.mkdir()
 
-        source_profile = Path(__file__).resolve().parents[1] / "config/vm-automated-v1.json"
+        source_profile = REPOSITORY_ROOT / "config/vm-automated-v1.json"
         self.profile_bytes = source_profile.read_bytes()
         self.profile = json.loads(self.profile_bytes)
         component_bytes = self._create_trusted_checkout()
@@ -84,7 +85,7 @@ class CliFixture:
         self.gate_metadata.write_bytes(compact(self._gate_facts()))
 
     def _create_trusted_checkout(self) -> dict[str, bytes]:
-        repository = Path(__file__).resolve().parents[1]
+        repository = REPOSITORY_ROOT
         (self.trusted_root / "config").mkdir()
         (self.trusted_root / "scripts").mkdir()
         (self.trusted_root / "config/vm-automated-v1.json").write_bytes(self.profile_bytes)
@@ -231,7 +232,7 @@ class VmAutomatedCliTests(unittest.TestCase):
         for name, value in vars(args).items():
             argv.extend(["--" + name.replace("_", "-"), str(value)])
         with patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            return cli.main(Path(__file__).resolve().parent.parent)
+            return cli.main(REPOSITORY_ROOT)
 
     def test_validate_and_main_emit_one_canonical_path_free_statement(self):
         direct = cli.validate(self.fixture.args())

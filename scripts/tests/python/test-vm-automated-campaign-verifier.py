@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+from tooling_test_paths import REPOSITORY_ROOT
 import struct
 import tempfile
 import unittest
@@ -71,7 +72,7 @@ class CampaignFixture:
         self.root = root
         self.files: dict[str, FileReference] = {}
         self.profile = deepcopy(profile) if profile is not None else json.loads(
-            (Path(__file__).resolve().parents[1] / "config/vm-automated-v1.json").read_text())
+            (REPOSITORY_ROOT / "config/vm-automated-v1.json").read_text())
         self.profile_sha256 = profile_sha256
         self.candidate = candidate or Candidate(SOURCE_SHA, "12", "1", "34", EXE_SHA, HANDOFF_SHA)
         self.components = (dict(components) if components is not None else

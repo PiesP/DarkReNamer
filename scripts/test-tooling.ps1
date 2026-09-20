@@ -251,6 +251,15 @@ function Invoke-ToolingTest {
         }
     }
     else {
+        $pythonPaths = @(
+            (Join-Path $repositoryRoot 'scripts')
+            (Join-Path $repositoryRoot 'scripts/tests/support')
+        )
+        if ($startInfo.Environment.ContainsKey('PYTHONPATH') -and
+            -not [string]::IsNullOrEmpty($startInfo.Environment['PYTHONPATH'])) {
+            $pythonPaths += $startInfo.Environment['PYTHONPATH']
+        }
+        $startInfo.Environment['PYTHONPATH'] = [string]::Join([IO.Path]::PathSeparator, $pythonPaths)
         $startInfo.ArgumentList.Add($Test.fullPath)
     }
 

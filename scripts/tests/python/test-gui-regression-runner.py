@@ -613,14 +613,14 @@ class GuiRegressionRunnerTests(unittest.TestCase):
     def test_four_finalized_producer_fixtures_pass_independent_validator_cli(self):
         default = Path(__file__).with_name("test-gui-regression-evidence.py")
         fixture_script = Path(os.environ.get("GUI_REGRESSION_EVIDENCE_TEST", default))
-        validator = fixture_script.with_name("validate-gui-regression-evidence.py")
         self.assertTrue(fixture_script.is_file(), "independent evidence fixture script is required")
-        self.assertTrue(validator.is_file(), "independent evidence validator is required")
         spec = importlib.util.spec_from_file_location("gui_evidence_fixture", fixture_script)
         self.assertIsNotNone(spec)
         self.assertIsNotNone(spec.loader)
         evidence_fixture = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(evidence_fixture)
+        validator = evidence_fixture.SCRIPT
+        self.assertTrue(validator.is_file(), "independent evidence validator is required")
         runs_root = self.root / "runs"
         runs_root.mkdir()
         fixture = evidence_fixture.Fixture(runs_root)
@@ -686,7 +686,7 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         with mock.patch.object(
             runner, "source_identity", return_value=(evidence_fixture.SOURCE, evidence_fixture.TREE)
         ):
-            runner.validate_all(fixture_script.parent.parent, runs_root, self.root)
+            runner.validate_all(validator.parent.parent, runs_root, self.root)
         report = json.loads((self.root / "validation-result.json").read_text())
         self.assertEqual(report["status"], "passed")
         self.assertEqual(

@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+from tooling_test_paths import REPOSITORY_ROOT
 import subprocess
 import tempfile
 import types
@@ -16,7 +17,7 @@ from zipfile import ZIP_STORED, ZipFile
 
 from darkrenamer_tooling.campaign import runner
 
-REPOSITORY = Path(__file__).resolve().parent.parent
+REPOSITORY = REPOSITORY_ROOT
 
 
 CANDIDATE_SHA = "2" * 40

@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+from tooling_test_paths import SCRIPT_ROOT
 import py_compile
 import queue
 import subprocess
@@ -21,7 +22,7 @@ import unittest
 from unittest import mock
 
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = SCRIPT_ROOT
 SPEC = importlib.util.spec_from_file_location(
     "tooling_bootstrap", SCRIPT_DIR / "tooling_bootstrap.py"
 )

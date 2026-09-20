@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from tooling_test_paths import REPOSITORY_ROOT
 import shutil
 import subprocess
 import sys
@@ -18,7 +19,7 @@ from darkrenamer_tooling.contracts import tooling
 from darkrenamer_tooling.evidence.errors import EvidenceError
 
 
-REPOSITORY = Path(__file__).resolve().parent.parent
+REPOSITORY = REPOSITORY_ROOT
 MANIFEST = REPOSITORY / "config" / "tooling-bundle.json"
 ENTRYPOINTS = {
     "test-windows-vm.py": "vm-launcher",

@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+from tooling_test_paths import REPOSITORY_ROOT, SCRIPT_ROOT
 import shutil
 import subprocess
 import tempfile
@@ -69,7 +70,7 @@ class VmRunnerTests(unittest.TestCase):
         pwsh = shutil.which('pwsh')
         if pwsh is None:
             self.skipTest('PowerShell 7 is unavailable')
-        controller = Path(__file__).with_name('run-windows-vm-tests.ps1')
+        controller = (SCRIPT_ROOT / 'run-windows-vm-tests.ps1')
         command = r'''
             $tokens = $null
             $parseErrors = $null
@@ -209,7 +210,7 @@ class VmRunnerTests(unittest.TestCase):
                          [0, 267009, 0, 3221225786])
 
     def test_ui_timeout_fails_before_stream_move_or_inventory(self):
-        controller = Path(__file__).with_name('run-windows-vm-tests.ps1').read_text()
+        controller = (SCRIPT_ROOT / 'run-windows-vm-tests.ps1').read_text()
         acceptance = controller[controller.index(
             "if ($acceptance) {\n        $guestBundleRoot"):]
         acceptance = acceptance[:acceptance.index("\n    elseif ($recovery) {")]
@@ -349,7 +350,7 @@ class VmRunnerTests(unittest.TestCase):
                          function)
 
     def test_recovery_timeout_fails_before_stream_move_or_inventory(self):
-        controller = Path(__file__).with_name('run-windows-vm-tests.ps1').read_text()
+        controller = (SCRIPT_ROOT / 'run-windows-vm-tests.ps1').read_text()
         recovery = controller[controller.index(
             "elseif ($recovery) {\n        $guestBundleRoot"):]
         recovery = recovery[:recovery.index("\n    else {", 1)]
@@ -485,7 +486,7 @@ class VmRunnerTests(unittest.TestCase):
             vm.parse_arguments(arguments)
 
     def candidate_build_inputs(self, suffix=''):
-        repo = Path(__file__).resolve().parent.parent
+        repo = REPOSITORY_ROOT
         product_source = self.root / ('product-source' + suffix)
         handoff = self.root / ('handoff' + suffix)
         product_source.mkdir()

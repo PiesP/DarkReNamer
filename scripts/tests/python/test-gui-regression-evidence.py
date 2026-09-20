@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from tooling_test_paths import SCRIPT_ROOT
 import struct
 import subprocess
 import tempfile
@@ -14,7 +15,7 @@ import zlib
 
 from darkrenamer_tooling.evidence import gui as evidence
 
-SCRIPT = Path(__file__).with_name("validate-gui-regression-evidence.py")
+SCRIPT = (SCRIPT_ROOT / "validate-gui-regression-evidence.py")
 SOURCE = "a" * 40
 TREE = "b" * 40
 

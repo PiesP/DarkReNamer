@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+from tooling_test_paths import SCRIPT_ROOT
 import stat
 import struct
 import subprocess
@@ -593,7 +594,7 @@ for module in sys.argv[1:]:
 """
         subprocess.run(
             [sys.executable, "-B", "-c", program, *modules],
-            cwd=Path(__file__).parent,
+            cwd=SCRIPT_ROOT,
             check=True,
             capture_output=True,
             text=True,

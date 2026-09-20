@@ -5,6 +5,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+from tooling_test_paths import REPOSITORY_ROOT
 import unittest
 
 from darkrenamer_tooling.campaign.planning import (
@@ -16,7 +17,7 @@ from darkrenamer_tooling.evidence.archive import EvidenceError
 
 class CampaignTests(unittest.TestCase):
     def setUp(self):
-        self.profile = json.loads((Path(__file__).resolve().parents[1] / 'config/vm-automated-v1.json').read_text())
+        self.profile = json.loads((REPOSITORY_ROOT / 'config/vm-automated-v1.json').read_text())
         self.candidate = Candidate('a' * 40, '12', '1', '34', 'b' * 64, 'c' * 64)
         self.plan = new_plan(self.profile, profile_sha256='d' * 64, candidate=self.candidate,
                              harness_sha='a' * 40, campaign_id='test-campaign', created_at='2026-09-20T00:00:00Z')

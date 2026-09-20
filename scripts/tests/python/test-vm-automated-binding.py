@@ -4,6 +4,7 @@
 from copy import deepcopy
 import hashlib
 from pathlib import Path
+from tooling_test_paths import REPOSITORY_ROOT
 from unittest import TestCase, main
 from unittest.mock import patch
 
@@ -123,7 +124,7 @@ class BindingTests(TestCase):
             return argv[-1].encode()
 
         with patch("darkrenamer_tooling.contracts.binding.subprocess.check_output", side_effect=output):
-            hashes = trusted_component_hashes(Path(__file__).parent.parent, "a" * 40)
+            hashes = trusted_component_hashes(REPOSITORY_ROOT, "a" * 40)
         self.assertEqual(set(hashes), set(COMPONENTS))
         self.assertEqual({call[-1] for call in calls if call[1] == "show"},
                          {"a" * 40 + ":scripts/" + name for name in COMPONENTS.values()})
@@ -132,7 +133,7 @@ class BindingTests(TestCase):
         with patch("darkrenamer_tooling.contracts.binding.subprocess.check_output", side_effect=[
             "a" * 40 + "\n", "120000 blob " + "b" * 40 + "\tscripts/test-windows-vm.py\n",
         ]), self.assertRaises(EvidenceError):
-            trusted_component_hashes(Path(__file__).parent.parent, "a" * 40)
+            trusted_component_hashes(REPOSITORY_ROOT, "a" * 40)
 
 
 if __name__ == "__main__":
