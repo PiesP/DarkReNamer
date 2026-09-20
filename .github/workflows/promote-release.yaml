@@ -329,7 +329,7 @@ jobs:
             throw 'Release tag changed after candidate validation.'
           }
 
-      - name: Publish exact unsigned source-complete prerelease
+      - name: Publish exact unsigned VM-Automated prerelease
         shell: pwsh
         env:
           GH_REPO: ${{ github.repository }}
@@ -344,7 +344,7 @@ jobs:
           VALIDATION_RUN_ATTEMPT: ${{ inputs.validation_run_attempt }}
         run: |
           @(
-            'Source-complete Windows prerelease. The published files are the exact immutable candidate artifact; they were not rebuilt during promotion.'
+            'VM-Automated Windows prerelease. The published files are the exact immutable candidate artifact; they were not rebuilt during promotion.'
             ''
             'The automated VM profile passed its authenticated hosted validation gate. Human visual/accessibility review, physical-media performance, and physical-power-loss durability are outside that automated guarantee.'
             ''
@@ -352,7 +352,7 @@ jobs:
             ''
             'Portable means installer-free. Preferences are stored in %LOCALAPPDATA%\DarkReNamer, separately from the executable.'
             ''
-            'Validation is limited by the equipment available to this personal project. VM and automated results do not establish physical-storage performance, power-loss durability, or human accessibility and visual acceptance. The full acceptance gate remains separate.'
+            'Validation covers the fixed Windows 11 NTFS VM-Automated v1 profile. Actual IME and Explorer drag-and-drop, comprehensive assistive-technology acceptance, VM reset and storage faults remain outside this profile.'
             ''
             "Candidate source: $env:CANDIDATE_SOURCE_SHA"
             "Candidate workflow: $env:CANDIDATE_RUN_ID (attempt $env:CANDIDATE_RUN_ATTEMPT)"

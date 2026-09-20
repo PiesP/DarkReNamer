@@ -187,6 +187,46 @@ native Windows compilation or the complete native development gate. It does not
 establish the Windows 11 DPI and Forced Colors matrix, accessibility/IME,
 physical-media benchmarks, or VM power-loss acceptance in `SAFETY.md`.
 
+### VM-Automated campaign development
+
+[`config/vm-automated-v1.json`](config/vm-automated-v1.json) is the canonical
+fixed profile. It declares 22 derived targets and five required gates. The
+campaign runner converts those targets into 20 primary execution cells, because
+process crash, recovery export and Intent-only candidate discard share one
+execution group, then adds 10 independent core-UIA stability executions. The
+result is a predeclared 30-slot first-attempt plan.
+
+[`scripts/run-vm-automated-campaign.py`](scripts/run-vm-automated-campaign.py)
+uses the common [`scripts/test-windows-vm.py`](scripts/test-windows-vm.py) host
+controller for each VM cell. It requires a new absolute output directory outside
+the checkout, writes `plan.json` before VM access, runs workloads sequentially
+under the one-VM lock, and stops after the first failed attempt. It retains the
+partial ledger and diagnostics, but does not retry or replace a failed slot. A
+passing campaign must begin again with a new output root and complete plan.
+
+The product checkout, clean harness checkout and eventual protected hosted
+validator checkout must resolve to the same source commit. The campaign reuses
+the immutable candidate EXE and records its exact handoff identity. Its native
+backend preparation retains source-bound test binaries, the complete actual
+stdout/stderr transcripts, result and transport records, and cleanup evidence.
+
+The campaign ZIP is private raw input, not a release verdict. It contains the
+complete indexed observations and failed records without normalizing producer
+summaries into passes. The repository owner uploads it as the sole asset of the
+dedicated private draft ingress release. The hosted validation workflow pins
+that release, asset, digest and size; revalidates candidate, source, profile and
+all raw evidence; removes its private scratch; and then attests only the
+canonical path-free statement. Promotion separately recomputes the statement,
+verifies that exact hosted run and attestation, and publishes the unchanged
+candidate bytes.
+
+Local tooling checks, a packaged archive, or this documented profile do not
+show that the matrix has passed. The VM producer remains trusted to report its
+observations honestly; archive validation is not remote VM attestation. Human
+visual or comprehensive assistive-technology acceptance, actual IME and
+Explorer drag-and-drop, physical-media performance, physical power loss, and VM
+reset or storage-fault durability remain outside VM-Automated v1.
+
 ## Interactive acceptance observers
 
 The optional `scripts/windows-vm-acceptance.ps1` and

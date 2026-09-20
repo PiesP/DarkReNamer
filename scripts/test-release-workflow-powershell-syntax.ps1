@@ -1314,7 +1314,7 @@ Assert-OutputContract `
     -Blocks $workflowBlocks[$promotionPath] `
     -LiteralPath 'release-notes.md' `
     -RequiredText @(
-        'Source-complete Windows prerelease.'
+        'VM-Automated Windows prerelease.'
         'exact immutable candidate artifact'
         'not rebuilt during promotion'
         'automated VM profile passed its authenticated hosted validation gate'
@@ -1322,7 +1322,7 @@ Assert-OutputContract `
         'physical-media performance'
         'physical-power-loss durability'
     ) `
-    -Message 'Promotion must write the required source-complete and acceptance disclosure.'
+    -Message 'Promotion must write the required automated-profile and acceptance disclosure.'
 
 # The Rust policy test owns YAML structure, step conditions, permissions, and action pins.
 # These fixtures exercise the PowerShell AST boundary used for executable command semantics.
@@ -1494,7 +1494,7 @@ Assert-Fails -Action {
 } -ExpectedFragment 'Found 2'
 
 $disclosureFixture = @(New-FixtureBlocks -Script @'
-$sourceComplete = 'Source-complete Windows prerelease.'
+$sourceComplete = 'VM-Automated Windows prerelease.'
 $acceptance = 'Desktop acceptance is not complete.'
 Write-Host "$sourceComplete $acceptance"
 '@)
@@ -1503,7 +1503,7 @@ Assert-Fails -Action {
         -Blocks $disclosureFixture `
         -LiteralPath 'release-notes.md' `
         -RequiredText @(
-            'Source-complete Windows prerelease.'
+            'VM-Automated Windows prerelease.'
             'exact immutable candidate artifact'
             'Desktop acceptance is not complete.'
         ) `
