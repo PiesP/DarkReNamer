@@ -256,13 +256,24 @@ class CampaignFixture:
                 rail_group=group, expected_reachable=True, exclusion_reason=None,
             )
             reachability_controls.append(binding)
+        traversal = [("tab", FOCUS_ORDER[0], FOCUS_ORDER[1])]
+        traversal.extend(("down", before, after)
+                         for before, after in zip(FOCUS_ORDER[1:11], FOCUS_ORDER[2:11]))
+        traversal.append(("tab", FOCUS_ORDER[10], FOCUS_ORDER[11]))
+        traversal.extend(("down", before, after)
+                         for before, after in zip(FOCUS_ORDER[11:], FOCUS_ORDER[12:]))
+        traversal.append(("tab", FOCUS_ORDER[-1], FOCUS_ORDER[0]))
         transitions = [
-            {"sequence": sequence, "input": "f6", "from": deepcopy(bindings[before]),
+            {"sequence": sequence, "input": input_name, "from": deepcopy(bindings[before]),
              "to": deepcopy(bindings[after])}
-            for sequence, (before, after) in enumerate(zip(FOCUS_ORDER, FOCUS_ORDER[1:]), start=1)
+            for sequence, (input_name, before, after) in enumerate(traversal, start=1)
         ]
-        navigation_state = {"fixture_entries": [self.fixture("focus-sentinel.txt", 99)],
-                            "journal_entries": []}
+        navigation_state = {
+            "fixture_root": environment["fixture_volume"]["root_path"],
+            "root_identity": deepcopy(environment["fixture_volume"]["root_identity"]),
+            "fixture_entries": [self.fixture("focus-sentinel.txt", 99)],
+            "journal_entries": [],
+        }
         image = self.add_bytes(str(Path(path).parent / "workbench.png"), tiny_png())
         return {"controls": controls, "focus": [deepcopy(controls[2])],
                 "screenshots": [{"file": "workbench.png", "sha256": image.sha256,
@@ -270,7 +281,7 @@ class CampaignFixture:
                 "focus_reachability": {
                     "schema_version": 1, "input_method": "keyboard",
                     "initial": deepcopy(bindings[FOCUS_ORDER[0]]), "transitions": transitions,
-                    "final": deepcopy(bindings[FOCUS_ORDER[-1]]),
+                    "final": deepcopy(bindings[FOCUS_ORDER[0]]),
                     "controls": reachability_controls,
                     "state_before": deepcopy(navigation_state),
                     "state_after": deepcopy(navigation_state),
