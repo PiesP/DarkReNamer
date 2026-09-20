@@ -54,29 +54,9 @@ jobs:
             exit 1
           fi
 
-      - name: Test release and acceptance tooling
+      - name: Test tooling
         shell: pwsh
         run: ./scripts/test-tooling.ps1 -Platform Ubuntu
-
-      - name: Test the WSL VM bundle and evidence contract
-        run: |
-          python3 scripts/test-windows-vm-runner.py
-          python3 scripts/test-gui-regression-runner.py
-          python3 scripts/test-gui-regression-evidence.py
-          python3 scripts/test-vm-automated-authority.py
-          python3 scripts/test-vm-automated-evidence.py
-          python3 scripts/test-vm-automated-state.py
-          python3 scripts/test-vm-automated-journal.py
-          python3 scripts/test-vm-automated-binding.py
-          python3 scripts/test-vm-automated-recovery.py
-          python3 scripts/test-vm-automated-platform.py
-          python3 scripts/test-vm-automated-campaign.py
-          python3 scripts/test-vm-automated-recovery-profile.py
-          python3 scripts/test-vm-automated-verifier.py
-          python3 scripts/test-vm-automated-menu-layout.py
-          python3 scripts/test-vm-automated-campaign-runner.py
-          python3 scripts/test-vm-automated-campaign-verifier.py
-          python3 scripts/test-vm-automated-cli.py
 
       - name: Check formatting and lints
         run: |
@@ -159,7 +139,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Test release and acceptance tooling
+      - name: Test tooling
         shell: pwsh
         run: ./scripts/test-tooling.ps1 -Platform Windows
 

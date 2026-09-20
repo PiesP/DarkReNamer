@@ -40,23 +40,6 @@ cargo test --workspace --all-targets --all-features --locked
 RC="${RC:-/usr/bin/llvm-rc-19}" cargo check --workspace --all-targets --all-features \
   --target x86_64-pc-windows-msvc --locked
 pwsh -NoLogo -NoProfile -File ./scripts/test-tooling.ps1
-python3 scripts/test-windows-vm-runner.py
-python3 scripts/test-gui-regression-runner.py
-python3 scripts/test-gui-regression-evidence.py
-python3 scripts/test-vm-automated-authority.py
-python3 scripts/test-vm-automated-evidence.py
-python3 scripts/test-vm-automated-state.py
-python3 scripts/test-vm-automated-journal.py
-python3 scripts/test-vm-automated-binding.py
-python3 scripts/test-vm-automated-recovery.py
-python3 scripts/test-vm-automated-platform.py
-python3 scripts/test-vm-automated-campaign.py
-python3 scripts/test-vm-automated-recovery-profile.py
-python3 scripts/test-vm-automated-verifier.py
-python3 scripts/test-vm-automated-menu-layout.py
-python3 scripts/test-vm-automated-campaign-runner.py
-python3 scripts/test-vm-automated-campaign-verifier.py
-python3 scripts/test-vm-automated-cli.py
 ```
 
 ## Linux cross-build and visual diagnostics
@@ -332,8 +315,25 @@ packages. They are not counts of crates linked into `DarkReNamer.exe`.
 
 The scripts under `scripts/` form a tested release-validation subsystem. Run
 `scripts/test-tooling.ps1` on both Linux PowerShell and Windows before changing
-their shared invocation list. Keep independent validators independent unless a
-shared helper can fail without weakening both sides of a cross-check.
+their shared invocation list. [`config/tooling-tests.json`](config/tooling-tests.json)
+is the sole tooling-test registry. Each entry declares its stable ID, path,
+runner, supported platforms, category, VM requirement, and per-process timeout.
+The suite discovers `test-*.ps1` and `test-*.py` files only to fail when a test
+is not registered; its suite entrypoint, fixture helpers, and VM CLI exclusions
+are explicit. It never runs VM-backed entries.
+
+Use `-List` to inspect the selected tests without executing them. `-Id`,
+`-Category`, and `-Runner` narrow that selection and may be combined:
+
+```powershell
+./scripts/test-tooling.ps1 -Platform Ubuntu -List
+./scripts/test-tooling.ps1 -Platform Ubuntu -Category vm-automation -Runner Python
+./scripts/test-tooling.ps1 -Platform Windows -Id toolchain-consistency
+```
+
+Keep independent validators independent unless a shared helper can fail without
+weakening both sides of a cross-check. CI and the development gates invoke only
+`scripts/test-tooling.ps1`; add or change tooling coverage through the registry.
 
 Candidate creation, promotion, signing policy, checksums, SBOMs, and
 attestations are documented in `DISTRIBUTION.md`. Publishing or changing GitHub

@@ -679,29 +679,24 @@ function Assert-OutputContract {
     }
 }
 
-function Assert-CommonTestMembership {
+function Assert-ToolingRegistryMembership {
     param(
         [Parameter(Mandatory)]
-        [Management.Automation.Language.ScriptBlockAst] $Ast,
+        [object] $Registry,
         [Parameter(Mandatory)]
         [string[]] $Required
     )
 
-    $assignments = @($Ast.FindAll({
-        param($node)
-        $node -is [Management.Automation.Language.AssignmentStatementAst] -and
-        $node.Left.Extent.Text -ceq '$commonTests'
-    }, $true))
-    if ($assignments.Count -ne 1) {
-        throw 'The tooling script must define the common test set exactly once.'
-    }
-    $members = @($assignments[0].Right.FindAll({
-        param($node)
-        $node -is [Management.Automation.Language.StringConstantExpressionAst]
-    }, $true) | ForEach-Object { $_.Value })
     foreach ($requiredTest in $Required) {
-        if (@($members | Where-Object { $_ -ceq $requiredTest }).Count -ne 1) {
-            throw "The shared tooling suite must contain $requiredTest exactly once."
+        $members = @($Registry.tests | Where-Object { $_.path -ceq $requiredTest })
+        if ($members.Count -ne 1) {
+            throw "The tooling registry must contain $requiredTest exactly once."
+        }
+        $member = $members[0]
+        if ($member.runner -cne 'PowerShell' -or $member.requiresVm -ne $false -or
+            @($member.platforms | Where-Object { $_ -ceq 'Ubuntu' }).Count -ne 1 -or
+            @($member.platforms | Where-Object { $_ -ceq 'Windows' }).Count -ne 1) {
+            throw "The tooling registry mapping for $requiredTest must be a non-VM PowerShell test on Ubuntu and Windows."
         }
     }
 }
@@ -769,13 +764,27 @@ $toolingAst = [Management.Automation.Language.Parser]::ParseFile(
 if ($toolingErrors.Count -ne 0) {
     throw "test-tooling.ps1 is not valid PowerShell: $(($toolingErrors.Message) -join '; ')"
 }
+$toolingRegistry = Get-Content -LiteralPath (Join-Path $repositoryRoot 'config/tooling-tests.json') -Raw |
+    ConvertFrom-Json -Depth 20
 $requiredCommonTests = @(
-    'test-release-candidate-metadata-validator.ps1'
-    'test-prepare-release-cyclonedx.ps1'
-    'test-release-workflow-powershell-syntax.ps1'
-    'test-run-vm-automated-hosted.ps1'
+    'scripts/test-release-candidate-metadata-validator.ps1'
+    'scripts/test-prepare-release-cyclonedx.ps1'
+    'scripts/test-release-workflow-powershell-syntax.ps1'
+    'scripts/test-run-vm-automated-hosted.ps1'
 )
-Assert-CommonTestMembership -Ast $toolingAst -Required $requiredCommonTests
+Assert-ToolingRegistryMembership -Registry $toolingRegistry -Required $requiredCommonTests
+$ciSource = Get-Content -LiteralPath $ciPath -Raw
+foreach ($registeredTest in @($toolingRegistry.tests)) {
+    if ($ciSource.Contains($registeredTest.path, [StringComparison]::Ordinal)) {
+        throw "CI must invoke tooling through test-tooling.ps1, not directly: $($registeredTest.path)"
+    }
+}
+$developmentSource = Get-Content -LiteralPath (Join-Path $repositoryRoot 'DEVELOPMENT.md') -Raw
+foreach ($registeredTest in @($toolingRegistry.tests)) {
+    if ($developmentSource.Contains($registeredTest.path, [StringComparison]::Ordinal)) {
+        throw "Development gates must invoke tooling through test-tooling.ps1, not directly: $($registeredTest.path)"
+    }
+}
 
 $null = Assert-OneCommand `
     -Commands $ciCommands `
@@ -1510,15 +1519,23 @@ Assert-Fails -Action {
         -Message 'release disclosure fixture'
 } -ExpectedFragment 'Found 0'
 
-$toolingFixture = (New-FixtureBlocks -Script @'
-$commonTests = @(
-    'test-release-candidate-metadata-validator.ps1'
-    'test-prepare-release-cyclonedx.ps1'
-)
-'@)[0].ast
+$toolingFixture = [pscustomobject]@{ tests = @(
+    [pscustomobject]@{
+        path = 'scripts/test-release-candidate-metadata-validator.ps1'
+        runner = 'PowerShell'
+        platforms = @('Ubuntu', 'Windows')
+        requiresVm = $false
+    }
+    [pscustomobject]@{
+        path = 'scripts/test-prepare-release-cyclonedx.ps1'
+        runner = 'PowerShell'
+        platforms = @('Ubuntu', 'Windows')
+        requiresVm = $false
+    }
+) }
 Assert-Fails -Action {
-    Assert-CommonTestMembership -Ast $toolingFixture -Required $requiredCommonTests
-} -ExpectedFragment 'must contain test-release-workflow-powershell-syntax.ps1 exactly once'
+    Assert-ToolingRegistryMembership -Registry $toolingFixture -Required $requiredCommonTests
+} -ExpectedFragment 'must contain scripts/test-release-workflow-powershell-syntax.ps1 exactly once'
 
 $aboutConfigPath = Join-Path $repositoryRoot 'about.toml'
 if (-not (Test-Path -LiteralPath $aboutConfigPath -PathType Leaf)) {
