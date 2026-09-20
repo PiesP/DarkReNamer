@@ -1788,6 +1788,49 @@ try {
         -Appearance light `
         -TextScalePercent 150 `
         -ExpectedScriptSha256 $candidateManifest.harness.observers.ui.sha256
+    $manifestGuestPreflight = [pscustomobject][ordered]@{
+        architecture = 'x86_64'
+        build = '26200'
+        os_version = 'Microsoft Windows NT 10.0.26200.0'
+        product_caption = 'Microsoft Windows 11 Pro'
+        system = 'windows'
+        vm_identity_kind = 'hyper-v-guest-parameters-virtual-machine-id-v1'
+        vm_identity_sha256 = 'a' * 64
+    }
+    $observedGuestPreflight = [ordered]@{
+        system = 'windows'
+        product_caption = 'Microsoft Windows 11 Pro'
+        os_version = 'Microsoft Windows NT 10.0.26200.0'
+        build = '26200'
+        architecture = 'x86_64'
+        vm_identity_kind = 'hyper-v-guest-parameters-virtual-machine-id-v1'
+        vm_identity_sha256 = 'a' * 64
+    }
+    Assert-GuiRegressionGuestPreflightBinding `
+        -Expected $manifestGuestPreflight `
+        -Actual $observedGuestPreflight
+    foreach ($mutation in @('missing', 'extra', 'type', 'identity')) {
+        $changedGuestPreflight = $manifestGuestPreflight | Select-Object *
+        switch ($mutation) {
+            'missing' {
+                $changedGuestPreflight.PSObject.Properties.Remove('build')
+            }
+            'extra' {
+                $changedGuestPreflight | Add-Member -NotePropertyName unexpected -NotePropertyValue 'value'
+            }
+            'type' {
+                $changedGuestPreflight.build = [long]26200
+            }
+            'identity' {
+                $changedGuestPreflight.vm_identity_sha256 = 'b' * 64
+            }
+        }
+        Assert-Fails {
+            Assert-GuiRegressionGuestPreflightBinding `
+                -Expected $changedGuestPreflight `
+                -Actual $observedGuestPreflight
+        } 'Guest platform or VM identity differs from immutable preflight'
+    }
     $candidateRegressionResult = New-GuiRegressionResult `
         -Verified $candidateRegressionResolved `
         -Appearance light

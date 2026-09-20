@@ -5283,6 +5283,57 @@ function Assert-GuiRegressionInvocationBinding {
     }
 }
 
+function Assert-GuiRegressionGuestPreflightBinding {
+    param(
+        [Parameter(Mandatory)][object] $Expected,
+        [Parameter(Mandatory)][object] $Actual
+    )
+
+    $expectedNames = @(
+        'architecture', 'build', 'os_version', 'product_caption', 'system',
+        'vm_identity_kind', 'vm_identity_sha256'
+    )
+    $normalize = {
+        param([object] $Record)
+
+        $names = if ($Record -is [Collections.IDictionary]) {
+            @($Record.Keys | ForEach-Object { [string]$_ })
+        }
+        else {
+            @($Record.PSObject.Properties.Name)
+        }
+        if ($names.Count -ne $expectedNames.Count -or
+            @(Compare-Object -CaseSensitive $expectedNames $names).Count -ne 0) {
+            throw 'Guest platform or VM identity differs from immutable preflight.'
+        }
+        $normalized = [ordered]@{}
+        foreach ($name in $expectedNames) {
+            $value = if ($Record -is [Collections.IDictionary]) {
+                $Record[$name]
+            }
+            else {
+                $Record.PSObject.Properties[$name].Value
+            }
+            if ($value -isnot [string]) {
+                throw 'Guest platform or VM identity differs from immutable preflight.'
+            }
+            $normalized[$name] = $value
+        }
+        [pscustomobject]$normalized
+    }
+    $expectedRecord = & $normalize $Expected
+    $actualRecord = & $normalize $Actual
+    foreach ($name in $expectedNames) {
+        if (-not [string]::Equals(
+                $expectedRecord.$name,
+                $actualRecord.$name,
+                [StringComparison]::Ordinal
+            )) {
+            throw 'Guest platform or VM identity differs from immutable preflight.'
+        }
+    }
+}
+
 function New-GuiRegressionResult {
     param(
         [Parameter(Mandatory)][object] $Verified,
@@ -5404,10 +5455,9 @@ function Invoke-GuiRegressionAcceptance {
         vm_identity_kind = 'hyper-v-guest-parameters-virtual-machine-id-v1'
         vm_identity_sha256 = Get-LowerTextSha256 -Value $guestId
     }
-    if (($guest | ConvertTo-Json -Compress) -cne
-        ($input.guest_preflight | ConvertTo-Json -Compress)) {
-        throw 'Guest platform or VM identity differs from immutable preflight.'
-    }
+    Assert-GuiRegressionGuestPreflightBinding `
+        -Expected $input.guest_preflight `
+        -Actual $guest
     Write-JsonUtf8Bom `
         -Path (Join-Path $resolved.output_root 'platform-preflight.json') `
         -Value ([ordered]@{
