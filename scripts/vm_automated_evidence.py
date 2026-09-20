@@ -482,6 +482,56 @@ def _zip_entry_kind(info: ZipInfo) -> str:
     return "file"
 
 
+def _preflight_zip_directory(stream: BinaryIO) -> None:
+    """Bound central-directory allocation before Python constructs ZipInfo rows.
+
+    Evidence bounds are below classic ZIP limits; split and ZIP64 archives
+    have no supported use here. Scan the bounded directory ourselves because
+    ZipFile does not use the EOCD entry count to bound its allocations.
+    """
+    stream.seek(0, io.SEEK_END)
+    size = stream.tell()
+    tail_start = max(0, size - 65_557)
+    stream.seek(tail_start)
+    tail = stream.read(65_557)
+    offset = tail.rfind(b"PK\x05\x06")
+    _require(offset >= 0 and offset + 22 <= len(tail), "ZIP end record is unavailable.")
+    fields = struct.unpack_from("<4s4H2IH", tail, offset)
+    _, disk, directory_disk, disk_entries, entries, directory_size, directory_offset, comment = fields
+    end_offset = tail_start + offset
+    _require(offset + 22 + comment == len(tail), "ZIP end record has trailing or inconsistent bytes.")
+    _require(disk == directory_disk == 0 and disk_entries == entries,
+             "Split ZIP archives are unsupported.")
+    _require(entries != 0xFFFF and directory_size != 0xFFFFFFFF and directory_offset != 0xFFFFFFFF,
+             "ZIP64 evidence archives are unsupported.")
+    _require(0 < entries <= MAX_ARCHIVE_ENTRIES, "ZIP contains too many or no entries.")
+    _require(0 < directory_size <= 4 * 1024 * 1024,
+             "ZIP central directory exceeds its allocation bound.")
+    _require(directory_offset + directory_size == end_offset,
+             "ZIP central directory range is inconsistent or uses ZIP64.")
+    stream.seek(directory_offset)
+    consumed = 0
+    count = 0
+    while consumed < directory_size:
+        _require(count < MAX_ARCHIVE_ENTRIES, "ZIP contains too many entries.")
+        header = stream.read(46)
+        _require(len(header) == 46 and header[:4] == b"PK\x01\x02",
+                 "ZIP central directory entry is malformed.")
+        compressed, expanded = struct.unpack_from("<II", header, 20)
+        name_size, extra_size, comment_size, start_disk = struct.unpack_from("<4H", header, 28)
+        local_offset = struct.unpack_from("<I", header, 42)[0]
+        _require(start_disk == 0 and 0xFFFFFFFF not in (compressed, expanded, local_offset),
+                 "ZIP64 or split member is unsupported.")
+        row_size = 46 + name_size + extra_size + comment_size
+        _require(name_size > 0 and consumed + row_size <= directory_size,
+                 "ZIP central directory member range is inconsistent.")
+        stream.seek(row_size - 46, io.SEEK_CUR)
+        consumed += row_size
+        count += 1
+    _require(count == entries, "ZIP end record entry count differs from its directory.")
+    stream.seek(0)
+
+
 def _preflight_archive(
     archive: ZipFile,
     archive_stream: BinaryIO,
@@ -754,6 +804,7 @@ def open_verified_evidence_archive(
                                max_bytes=MAX_ARCHIVE_BYTES, capture=False,
                                label="evidence archive")
             archive_stream.seek(0)
+            _preflight_zip_directory(archive_stream)
             with ZipFile(archive_stream, "r") as archive:
                 plan = _preflight_archive(archive, archive_stream, inventory, limits)
                 root = Path(tempfile.mkdtemp(prefix=_EXTRACTION_PREFIX, dir=parent))
@@ -794,6 +845,72 @@ def open_verified_evidence_archive(
     finally:
         if root is not None and identity is not None:
             _cleanup_owned_root(root, identity)
+
+
+@contextmanager
+def open_indexed_evidence_archive(
+    archive_path: Path | str,
+    archive_reference: FileReference,
+    private_parent: Path | str,
+) -> Iterator[ExtractedEvidence]:
+    """Bootstrap the fixed evidence index from an independently pinned archive.
+
+    The index is untrusted inventory, never a verdict or an execution plan.
+    Only ``evidence-index.json`` is read before full archive verification; its
+    bytes and every indexed member are then checked by the normal extractor.
+    The index excludes itself to avoid a circular digest.  The caller must
+    semantically validate campaign.json and all of its references afterwards.
+    """
+    index_name = "evidence-index.json"
+    index_limit = 1024 * 1024
+    _require(type(archive_reference) is FileReference,
+             "Archive pin must be an independently established FileReference.")
+    try:
+        with _open_absolute_regular(Path(archive_path)) as stream:
+            _consume_reference(stream, archive_reference, max_bytes=MAX_ARCHIVE_BYTES,
+                               capture=False, label="indexed evidence archive")
+            stream.seek(0)
+            _preflight_zip_directory(stream)
+            with ZipFile(stream, "r") as archive:
+                infos = archive.infolist()
+                _require(len(infos) <= MAX_ARCHIVE_ENTRIES, "ZIP contains too many entries.")
+                matches = [info for info in infos if info.filename == index_name]
+                _require(len(matches) == 1, "ZIP needs one fixed evidence index.")
+                info = matches[0]
+                _require(info.orig_filename == index_name and _zip_entry_kind(info) == "file",
+                         "Evidence index is not an ordinary canonical member.")
+                _require(info.flag_bits & 1 == 0 and info.compress_type in _SUPPORTED_COMPRESSION,
+                         "Evidence index uses unsupported encryption or compression.")
+                _require(0 < info.file_size <= index_limit and info.compress_size > 0 and
+                         info.file_size <= info.compress_size * MAX_COMPRESSION_RATIO,
+                         "Evidence index exceeds its byte or compression bound.")
+                with archive.open(info) as member:
+                    index_bytes = member.read(index_limit + 1)
+                _require(len(index_bytes) == info.file_size and len(index_bytes) <= index_limit,
+                         "Evidence index size is inconsistent.")
+                index_reference = FileReference(hashlib.sha256(index_bytes).hexdigest(), len(index_bytes))
+                # Raw DEFLATE measurement rejects hidden bytes after a forged
+                # central-directory size before even parsing the bootstrap JSON.
+                _verify_raw_member(stream, archive, info, index_name, index_reference,
+                                   member_limit=index_limit, aggregate_remaining=index_limit)
+                index = require_exact_keys(parse_bounded_json_bytes(index_bytes),
+                                           {"schema", "files"}, "Evidence index")
+                _require(index["schema"] == "darkrenamer-vm-automated-index-v1",
+                         "Unsupported evidence index schema.")
+                inventory = _coerce_inventory(index["files"], ArchiveLimits())
+                _require(index_name not in inventory and "campaign.json" in inventory,
+                         "Evidence index must exclude itself and include campaign.json.")
+                inventory[index_name] = index_reference
+                _coerce_inventory(inventory, ArchiveLimits())
+        # Reopens and checks the exact external pin, rejecting substitution
+        # between bootstrap and extraction. Nothing from the archive executes.
+        with open_verified_evidence_archive(archive_path, archive_reference,
+                                            private_parent, inventory) as extracted:
+            yield extracted
+    except EvidenceError:
+        raise
+    except (BadZipFile, NotImplementedError, OSError, RuntimeError, zlib.error) as error:
+        raise EvidenceError(f"Indexed evidence archive is invalid: {error}") from error
 
 
 def _require_sha1(value: object, label: str) -> str:
