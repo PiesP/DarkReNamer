@@ -92,6 +92,7 @@ jobs:
               }
             }
           }
+          exit 0
   contents-write:
     needs: contents-read
     if: github.actor == 'PiesP' && github.ref == 'refs/heads/codex/vm-private-ingress-access-probe' && needs.contents-read.outputs.release_access == 'false'
@@ -135,3 +136,4 @@ jobs:
               }
             }
           }
+          exit 0
