@@ -8,9 +8,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from vm_automated_binding import Candidate
-from vm_automated_evidence import EvidenceError, ExtractedEvidence, FileReference
-from vm_automated_verifier import (
+from darkrenamer_tooling.campaign.verifier import (
     EvidenceReader,
     verify_authenticated_gate_metadata,
     verify_backend_execution,
@@ -23,6 +21,8 @@ from vm_automated_verifier import (
     verify_layout_controls,
     verify_setting_restoration,
 )
+from darkrenamer_tooling.contracts.binding import Candidate
+from darkrenamer_tooling.evidence.archive import EvidenceError, ExtractedEvidence, FileReference
 
 
 EXPECTED_RAIL_IDS = {

@@ -4,22 +4,16 @@
 from __future__ import annotations
 
 from dataclasses import replace
-import importlib.util
 from pathlib import Path
 import struct
 import subprocess
-import sys
 import unittest
 import zlib
 
+from darkrenamer_tooling.evidence import journal
 
-SCRIPT = Path(__file__).with_name("vm_automated_journal.py")
-REPOSITORY = SCRIPT.parent.parent
-SPEC = importlib.util.spec_from_file_location("vm_automated_journal", SCRIPT)
-assert SPEC is not None and SPEC.loader is not None
-journal = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = journal
-SPEC.loader.exec_module(journal)
+
+REPOSITORY = Path(__file__).resolve().parent.parent
 
 
 def text_payload(units: tuple[int, ...]) -> bytes:

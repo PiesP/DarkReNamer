@@ -16,8 +16,8 @@ import unittest
 from unittest.mock import patch
 from zipfile import ZIP_STORED, ZipFile
 
-from vm_automated_binding import COMPONENTS, Candidate
-from vm_automated_evidence import EvidenceError, parse_canonical_statement_bytes
+from darkrenamer_tooling.contracts.binding import COMPONENTS, Candidate
+from darkrenamer_tooling.evidence.archive import EvidenceError, parse_canonical_statement_bytes
 
 
 def load_script(filename: str, name: str):

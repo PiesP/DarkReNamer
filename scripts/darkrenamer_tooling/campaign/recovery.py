@@ -9,22 +9,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-import importlib.util
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 import re
 from typing import Protocol
 
-from vm_automated_binding import verify_result_binding
-from vm_automated_campaign import verify_process_lifecycle
-from vm_automated_evidence import EvidenceError, require_exact_keys, require_int
-from vm_automated_platform import require_fixture_root, verify_cleanup, verify_environment
-from vm_automated_recovery import (
+from darkrenamer_tooling.campaign.planning import verify_process_lifecycle
+from darkrenamer_tooling.contracts.binding import verify_result_binding
+from darkrenamer_tooling.contracts.platform import (
+    require_fixture_root, verify_cleanup, verify_environment,
+)
+from darkrenamer_tooling.contracts.state import (
+    Identity, clean_journal_inventory, fixture_inventory, restored_inventory,
+)
+from darkrenamer_tooling.evidence.archive import EvidenceError, require_exact_keys, require_int
+from darkrenamer_tooling.evidence.png import decode_png
+from darkrenamer_tooling.evidence.recovery import (
     verify_crash_prefix,
     verify_intent_candidate,
     verify_recovery_export,
     verify_recovery_invariance,
 )
-from vm_automated_state import Identity, clean_journal_inventory, fixture_inventory, restored_inventory
 
 
 MAX_MEMBER_BYTES = 64 * 1024 * 1024
@@ -469,12 +473,7 @@ def _recovery_screenshot(private: PrivateEvidence, result_path: str, reference: 
     expected_path = str(PurePosixPath(result_path).parent / image["file"])
     require(path == expected_path and path.startswith(private.run_prefix),
             "Recovery screenshot resolved outside its execution result directory.")
-    decoder_path = Path(__file__).with_name("validate-gui-regression-evidence.py")
-    spec = importlib.util.spec_from_file_location("trusted_recovery_png_decoder", decoder_path)
-    require(spec is not None and spec.loader is not None, "Trusted PNG decoder is unavailable.")
-    decoder = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(decoder)
-    actual_width, actual_height, pixels = decoder.decode_png(
+    actual_width, actual_height, pixels = decode_png(
         private.reader.bytes(path, MAX_MEMBER_BYTES), "recovery confirmation screenshot")
     require((actual_width, actual_height) == (width, height),
             "Recovery screenshot differs from its captured dialog dimensions.")

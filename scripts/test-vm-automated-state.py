@@ -4,11 +4,11 @@
 from copy import deepcopy
 import unittest
 
-from vm_automated_evidence import EvidenceError
-from vm_automated_state import (
+from darkrenamer_tooling.contracts.state import (
     Identity, clean_journal_inventory, core_rename_checkpoints, fixture_inventory,
     interrupted_inventory, restored_inventory,
 )
+from darkrenamer_tooling.evidence.archive import EvidenceError
 
 
 def file_row(name="source.txt", index=1, *, full=False):

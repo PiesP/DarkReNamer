@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
-from vm_automated_evidence import EvidenceError, require_exact_keys, require_int
+from darkrenamer_tooling.evidence.archive import EvidenceError, require_exact_keys, require_int
 
 
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")

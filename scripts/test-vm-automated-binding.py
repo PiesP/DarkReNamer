@@ -7,8 +7,11 @@ from pathlib import Path
 from unittest import TestCase, main
 from unittest.mock import patch
 
-from vm_automated_binding import Candidate, COMPONENTS, trusted_component_hashes, verify_candidate_bundle, verify_result_binding
-from vm_automated_evidence import EvidenceError
+from darkrenamer_tooling.contracts.binding import (
+    COMPONENTS, Candidate, trusted_component_hashes, verify_candidate_bundle,
+    verify_result_binding,
+)
+from darkrenamer_tooling.evidence.archive import EvidenceError
 
 
 class BindingTests(TestCase):
@@ -119,14 +122,14 @@ class BindingTests(TestCase):
                 return "100644 blob " + "b" * 40 + "\t" + argv[-1] + "\n"
             return argv[-1].encode()
 
-        with patch("vm_automated_binding.subprocess.check_output", side_effect=output):
+        with patch("darkrenamer_tooling.contracts.binding.subprocess.check_output", side_effect=output):
             hashes = trusted_component_hashes(Path(__file__).parent.parent, "a" * 40)
         self.assertEqual(set(hashes), set(COMPONENTS))
         self.assertEqual({call[-1] for call in calls if call[1] == "show"},
                          {"a" * 40 + ":scripts/" + name for name in COMPONENTS.values()})
 
     def test_symlink_git_blob_is_rejected(self):
-        with patch("vm_automated_binding.subprocess.check_output", side_effect=[
+        with patch("darkrenamer_tooling.contracts.binding.subprocess.check_output", side_effect=[
             "a" * 40 + "\n", "120000 blob " + "b" * 40 + "\tscripts/test-windows-vm.py\n",
         ]), self.assertRaises(EvidenceError):
             trusted_component_hashes(Path(__file__).parent.parent, "a" * 40)

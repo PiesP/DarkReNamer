@@ -11,8 +11,10 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import re
 
-from vm_automated_binding import Candidate
-from vm_automated_evidence import EvidenceError, REQUIRED_TARGET_IDS, require_exact_keys, require_int
+from darkrenamer_tooling.contracts.binding import Candidate
+from darkrenamer_tooling.evidence.archive import (
+    EvidenceError, REQUIRED_TARGET_IDS, require_exact_keys, require_int,
+)
 
 
 def require(condition: bool, message: str) -> None:
@@ -127,7 +129,7 @@ def verify_process_lifecycle(value: object, *, executable_sha256: str,
     ticks = row["start_time_utc_ticks"]
     require(type(ticks) is str and re.fullmatch(r"[1-9][0-9]{0,18}", ticks) is not None and
             int(ticks) <= 3_155_378_975_999_999_999, "Process creation ticks are invalid.")
-    from vm_automated_platform import require_fixture_root
+    from darkrenamer_tooling.contracts.platform import require_fixture_root
     require_fixture_root(row["executable_path"])
     require(row["executable_path"].endswith("\\DarkReNamer.exe") and
             row["executable_sha256"] == executable_sha256,

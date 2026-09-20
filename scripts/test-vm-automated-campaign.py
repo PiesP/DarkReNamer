@@ -7,9 +7,11 @@ import json
 from pathlib import Path
 import unittest
 
-from vm_automated_binding import Candidate
-from vm_automated_campaign import new_plan, validate_ledger, verify_process_lifecycle
-from vm_automated_evidence import EvidenceError
+from darkrenamer_tooling.campaign.planning import (
+    new_plan, validate_ledger, verify_process_lifecycle,
+)
+from darkrenamer_tooling.contracts.binding import Candidate
+from darkrenamer_tooling.evidence.archive import EvidenceError
 
 
 class CampaignTests(unittest.TestCase):

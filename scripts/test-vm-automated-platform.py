@@ -4,8 +4,10 @@
 from copy import deepcopy
 import unittest
 
-from vm_automated_evidence import EvidenceError
-from vm_automated_platform import verify_environment, verify_cleanup, verify_keyboard_events
+from darkrenamer_tooling.contracts.platform import (
+    verify_cleanup, verify_environment, verify_keyboard_events,
+)
+from darkrenamer_tooling.evidence.archive import EvidenceError
 
 
 class PlatformTests(unittest.TestCase):

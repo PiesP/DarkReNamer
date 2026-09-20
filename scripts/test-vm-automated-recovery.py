@@ -7,8 +7,8 @@ import struct
 import unittest
 import zlib
 
-from vm_automated_evidence import EvidenceError
-from vm_automated_recovery import (
+from darkrenamer_tooling.evidence.archive import EvidenceError
+from darkrenamer_tooling.evidence.recovery import (
     verify_crash_prefix, verify_recovery_invariance, verify_recovery_export,
     verify_intent_candidate,
 )

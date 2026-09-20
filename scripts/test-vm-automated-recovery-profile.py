@@ -10,8 +10,8 @@ import struct
 import unittest
 import zlib
 
-from vm_automated_evidence import EvidenceError
-from vm_automated_recovery_profile import verify_recovery_execution
+from darkrenamer_tooling.campaign.recovery import verify_recovery_execution
+from darkrenamer_tooling.evidence.archive import EvidenceError
 
 
 ROOT = r"C:\fixture"

@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 
-from vm_automated_evidence import EvidenceError, require_exact_keys, require_int
+from darkrenamer_tooling.evidence.archive import EvidenceError, require_exact_keys, require_int
 
 
 COMPONENTS = {

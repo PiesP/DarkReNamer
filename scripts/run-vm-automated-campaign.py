@@ -20,9 +20,9 @@ import time
 import uuid
 from zipfile import ZIP_STORED, ZipFile, ZipInfo
 
-from vm_automated_binding import Candidate
-from vm_automated_campaign import new_plan, validate_ledger
-from vm_automated_evidence import EvidenceError, load_bounded_json
+from darkrenamer_tooling.campaign.planning import new_plan, validate_ledger
+from darkrenamer_tooling.contracts.binding import Candidate
+from darkrenamer_tooling.evidence.archive import EvidenceError, load_bounded_json
 
 
 MAX_FILE_BYTES = 64 * 1024 * 1024
@@ -304,8 +304,8 @@ def prepare_backend(source: Path, destination: Path, profile: dict,
     # Native PowerShell records may contain one UTF-8 BOM. Freeze their exact
     # bytes before parsing and independently derive required test functions
     # from each binary's complete stdout transcript.
-    from vm_automated_evidence import ExtractedEvidence, FileReference
-    from vm_automated_verifier import EvidenceReader, verify_backend_execution
+    from darkrenamer_tooling.campaign.verifier import EvidenceReader, verify_backend_execution
+    from darkrenamer_tooling.evidence.archive import ExtractedEvidence, FileReference
     pins = {}
     for name in ("bundle.json", "result.json", "transport.json"):
         frozen = frozen_file(source / name)

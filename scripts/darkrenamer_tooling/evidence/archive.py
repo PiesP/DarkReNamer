@@ -26,6 +26,8 @@ from typing import BinaryIO, Iterator, Mapping
 import zlib
 from zipfile import BadZipFile, ZIP_DEFLATED, ZIP_STORED, ZipFile, ZipInfo
 
+from darkrenamer_tooling.evidence.errors import EvidenceError
+
 
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -88,10 +90,6 @@ REQUIRED_GATE_IDS = frozenset({
     "profile-raw-evidence-verifier",
     "immutable-promotion-binding",
 })
-
-
-class EvidenceError(ValueError):
-    """Raised when evidence transport or canonical encoding fails closed."""
 
 
 def _require(condition: bool, message: str) -> None:
