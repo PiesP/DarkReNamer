@@ -1492,6 +1492,67 @@ try {
                 -ExpectedAutomationId '32773'
         } 'Keyboard command activation target or foreground binding is invalid'
     }
+    $ownedPromptCandidate = [pscustomobject]@{
+        Handle = 300L
+        Owner = 100L
+        ProcessId = 200
+        ClassName = 'DarkReNamerInputWindow'
+        Title = '이름 앞에 문자열 붙이기'
+        Visible = $true
+        Left = 10
+        Top = 20
+        Right = 310
+        Bottom = 220
+    }
+    $unrelatedPromptWindow = [pscustomobject]@{
+        Handle = 301L
+        Owner = 100L
+        ProcessId = 200
+        ClassName = 'tooltips_class32'
+        Title = ''
+        Visible = $true
+        Left = 0
+        Top = 0
+        Right = 10
+        Bottom = 10
+    }
+    $selectedPromptCandidate = Resolve-AcceptanceOwnedInputWindowCandidate `
+        -Windows @($unrelatedPromptWindow, $ownedPromptCandidate) `
+        -ExpectedProcessId 200 `
+        -ExpectedOwnerHandle 100L `
+        -ExpectedName '이름 앞에 문자열 붙이기'
+    if ($selectedPromptCandidate.Handle -ne 300L) {
+        throw 'Exact owned input-window selection did not ignore unrelated process windows.'
+    }
+    foreach ($mutation in @('handle', 'owner', 'pid', 'class', 'title', 'hidden', 'geometry')) {
+        $changedPromptCandidate = $ownedPromptCandidate | ConvertTo-Json | ConvertFrom-Json
+        switch ($mutation) {
+            'handle' { $changedPromptCandidate.Handle = 0L }
+            'owner' { $changedPromptCandidate.Owner = 101L }
+            'pid' { $changedPromptCandidate.ProcessId = 201 }
+            'class' { $changedPromptCandidate.ClassName = '#32770' }
+            'title' { $changedPromptCandidate.Title = '다른 창' }
+            'hidden' { $changedPromptCandidate.Visible = $false }
+            'geometry' { $changedPromptCandidate.Right = $changedPromptCandidate.Left }
+        }
+        $rejectedPromptCandidate = Resolve-AcceptanceOwnedInputWindowCandidate `
+            -Windows @($changedPromptCandidate) `
+            -ExpectedProcessId 200 `
+            -ExpectedOwnerHandle 100L `
+            -ExpectedName '이름 앞에 문자열 붙이기'
+        if ($null -ne $rejectedPromptCandidate) {
+            throw "Owned input-window selection accepted a $mutation mismatch."
+        }
+    }
+    $duplicatePromptCandidate = $ownedPromptCandidate | ConvertTo-Json | ConvertFrom-Json
+    $duplicatePromptCandidate.Handle = 302L
+    Assert-Fails {
+        Resolve-AcceptanceOwnedInputWindowCandidate `
+            -Windows @($ownedPromptCandidate, $duplicatePromptCandidate) `
+            -ExpectedProcessId 200 `
+            -ExpectedOwnerHandle 100L `
+            -ExpectedName '이름 앞에 문자열 붙이기'
+    } 'matched more than one exact native window'
     $prefixMoveIndex = $acceptanceText.IndexOf(
         "Move-RailFocusToCommand -Process `$process -ExpectedSession `$ExpectedSessionId -AutomationId '32773'",
         [StringComparison]::Ordinal
@@ -1531,6 +1592,16 @@ try {
         $prefixTapIndex -le $prefixAssertIndex -or
         $prefixWaitIndex -le $prefixTapIndex -or $prefixRemoveIndex -le $prefixWaitIndex) {
         throw 'Prefix Space must bind and persist its exact target before input and retain diagnostics only on failure.'
+    }
+    if ([regex]::Matches(
+            $acceptanceText,
+            'Wait-AcceptanceOwnedInputWindow\s+`\s*\r?\n\s*-Process \$process'
+        ).Count -ne 2 -or
+        [regex]::Matches(
+            $acceptanceText,
+            '-Owner \$mainWindow\s+`\s*\r?\n\s*-Name ''이름 앞에 문자열 붙이기'''
+        ).Count -ne 2) {
+        throw 'Both current-DPI prefix prompts must use exact owner-bound native-to-UIA discovery.'
     }
     $windowInventoryFunction = $acceptanceAst.Find({
         param($node)
