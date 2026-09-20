@@ -260,6 +260,70 @@ foreach ($contract in @(
     -PrivateEvidenceRoot $PSScriptRoot `
     -ExpectedScriptSha256 ('0' * 64)
 
+$validMenuInventory = [pscustomobject]@{
+    TotalCount = 1
+    Entries = @([pscustomobject]@{
+        Handle = 4242L
+        ProcessId = [uint32]123
+        ClassName = '#32768'
+        Left = 10
+        Top = 20
+        Right = 210
+        Bottom = 120
+    })
+}
+$menuObservation = ConvertTo-AcceptanceRecoveryMenuObservation `
+    -Inventory $validMenuInventory `
+    -ExpectedProcessId 123 `
+    -ExpectedSession 7 `
+    -ActualSession 7
+if ($menuObservation.hwnd -ne 4242L -or
+    $menuObservation.process_id -ne 123 -or
+    $menuObservation.session_id -ne 7 -or
+    $menuObservation.window_class -cne '#32768' -or
+    -not $menuObservation.visible -or
+    $menuObservation.rect.left -ne 10 -or
+    $menuObservation.rect.bottom -ne 120) {
+    throw 'The native recovery-menu inventory did not retain its exact binding.'
+}
+foreach ($case in @(
+    @{ Inventory = [pscustomobject]@{ TotalCount = 2; Entries = $validMenuInventory.Entries };
+        Session = 7; Expected = 'more than one candidate popup' },
+    @{ Inventory = [pscustomobject]@{ TotalCount = -1; Entries = @() };
+        Session = 7; Expected = 'invalid count' },
+    @{ Inventory = $validMenuInventory; Session = 8; Expected = 'unexpected desktop session' },
+    @{ Inventory = [pscustomobject]@{ TotalCount = 1; Entries = @([pscustomobject]@{
+            Handle = 4242L; ProcessId = [uint32]124; ClassName = '#32768'
+            Left = 10; Top = 20; Right = 210; Bottom = 120
+        }) }; Session = 7; Expected = 'native identity or geometry' },
+    @{ Inventory = [pscustomobject]@{ TotalCount = 1; Entries = @([pscustomobject]@{
+            Handle = 4242L; ProcessId = [uint32]123; ClassName = 'OtherPopup'
+            Left = 10; Top = 20; Right = 210; Bottom = 120
+        }) }; Session = 7; Expected = 'native identity or geometry' },
+    @{ Inventory = [pscustomobject]@{ TotalCount = 1; Entries = @([pscustomobject]@{
+            Handle = 4242L; ProcessId = [uint32]123; ClassName = '#32768'
+            Left = 10; Top = 20; Right = 10; Bottom = 120
+        }) }; Session = 7; Expected = 'native identity or geometry' },
+    @{ Inventory = [pscustomobject]@{ TotalCount = 1; Entries = @() };
+        Session = 7; Expected = 'internally inconsistent' }
+)) {
+    Assert-Fails -Expected $case.Expected -Action {
+        ConvertTo-AcceptanceRecoveryMenuObservation `
+            -Inventory $case.Inventory `
+            -ExpectedProcessId 123 `
+            -ExpectedSession 7 `
+            -ActualSession $case.Session
+    }
+}
+$emptyMenuObservation = ConvertTo-AcceptanceRecoveryMenuObservation `
+    -Inventory ([pscustomobject]@{ TotalCount = 0; Entries = @() }) `
+    -ExpectedProcessId 123 `
+    -ExpectedSession 7 `
+    -ActualSession 7
+if ($null -ne $emptyMenuObservation) {
+    throw 'An empty native recovery-menu inventory produced a popup observation.'
+}
+
 if ('DarkReNamerAcceptanceCrc32' -as [type]) {
     throw 'The recovery observer initialized CRC support before its first checksum operation.'
 }
@@ -1551,6 +1615,10 @@ $discardChoiceFunction = @($fromFile.FindAll({
 foreach ($fragment in @(
     "'intent-discard-confirm-action'",
     "'intent-discard-cancel-action'",
+    '-PrivateRoot $PrivateRoot',
+    "'discard-confirm'",
+    "'discard-cancel'",
+    'Remove-AcceptanceRecoveryMenuProgress',
     "'CommandLink_1201'",
     "'CommandButton_2'",
     "'confirm-candidate-discard'",
@@ -1560,6 +1628,16 @@ foreach ($fragment in @(
         $discardChoiceFunction[0].Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
         throw "Intent discard action evidence differs from its fixed contract: $fragment"
     }
+}
+$discardText = $discardChoiceFunction[0].Extent.Text
+$discardActionEvidence = $discardText.IndexOf(
+    '$actionEvidence = Write-AcceptanceActionEvidence', [StringComparison]::Ordinal
+)
+$discardProgressRemoval = $discardText.IndexOf(
+    'Remove-AcceptanceRecoveryMenuProgress', [StringComparison]::Ordinal
+)
+if ($discardActionEvidence -lt 0 -or $discardProgressRemoval -le $discardActionEvidence) {
+    throw 'Intent discard menu progress is removed before its action evidence is verified.'
 }
 $exportScenarioFunction = @($fromFile.FindAll({
     param($node)
@@ -1574,21 +1652,30 @@ if ($exportScenarioFunction.Count -ne 1 -or
 }
 foreach ($contract in @(
     @{ Name = 'Wait-AcceptanceRecoveryMenuPopup'; Required = @(
-        '[Windows.Automation.TreeScope]::Children', 'ProcessIdProperty', 'ClassNameProperty',
-        "'#32768'", '[Windows.Automation.ControlType]::Menu', 'IsOffscreenProperty',
-        '$matches.Count -gt 1', '-RequireWindowHandle'
-    ); Forbidden = @('[Windows.Automation.TreeScope]::Descendants') },
+        'ReadVisiblePopups', 'ConvertTo-AcceptanceRecoveryMenuObservation',
+        '-ActualSession $Process.SessionId',
+        '[Math]::Min(30, $TimeoutSeconds)'
+    ); Forbidden = @('::RootElement', '.FindAll(', '[Windows.Automation.TreeScope]') },
+    @{ Name = 'ConvertTo-AcceptanceRecoveryMenuObservation'; Required = @(
+        '$ActualSession -ne $ExpectedSession', '$Inventory.TotalCount -gt 1',
+        '$row.ProcessId -ne $ExpectedProcessId', "'#32768'",
+        '$row.Right -le $row.Left', '$row.Bottom -le $row.Top'
+    ); Forbidden = @('::RootElement', '.FindAll(', '[Windows.Automation.TreeScope]') },
     @{ Name = 'Find-AcceptanceAutomationElementByName'; Required = @(
         '[Windows.Automation.TreeScope]::Children', 'ProcessIdProperty', 'NameProperty',
         '$matches.Count -gt 1', 'Assert-AutomationBinding'
     ); Forbidden = @('[Windows.Automation.TreeScope]::Descendants') },
     @{ Name = 'Start-AcceptanceRecoveryMenuInvoke'; Required = @(
-        '-Root $popup', 'Wait-AcceptanceRecoveryMenuPopup', "-Phase 'popup-found'",
+        'SendAltR', '[Windows.Automation.AutomationElement]::FromHandle', '-Root $popup',
+        '-Purpose $Purpose',
+        'Wait-AcceptanceRecoveryMenuPopup', "-Phase 'input-returned'",
+        "-Phase 'native-popup-found'", "-Phase 'uia-popup-started'",
+        "-Phase 'uia-popup-bound'", "-Phase 'popup-found'",
         "-Phase 'menu-item-found'", "-Phase 'invoke-started'"
-    ); Forbidden = @('::RootElement') },
+    ); Forbidden = @('::RootElement', 'SendWait') },
     @{ Name = 'Invoke-AcceptanceRecoveryExport'; Required = @(
         '-Owner $Application.main', "-Phase 'picker-found'", "-Phase 'picker-filled'",
-        'Remove-AcceptanceExportProgress'
+        "-Purpose 'export'", 'Remove-AcceptanceExportProgress'
     ); Forbidden = @() },
     @{ Name = 'Dismiss-AcceptanceStartupRecovery'; Required = @(
         '[Windows.Automation.AutomationElement] $Prompt', 'if ($null -eq $Prompt)',
@@ -1596,8 +1683,12 @@ foreach ($contract in @(
     ); Forbidden = @() },
     @{ Name = 'Write-AcceptanceExportProgress'; Required = @(
         'Assert-AcceptanceProcessBinding', 'Write-AcceptanceNewUtf8Json',
-        '$Application.raw_process_binding', 'ValidateSet('
-    ); Forbidden = @('WriteAllText') }
+        '$Application.raw_process_binding', "'export-progress-' + `$Purpose", 'ValidateSet('
+    ); Forbidden = @('WriteAllText') },
+    @{ Name = 'Write-AcceptanceRecoveryMenuProgress'; Required = @(
+        'Assert-AcceptanceProcessBinding', 'Write-AcceptanceNewUtf8Json',
+        '$Application.raw_process_binding', '$Observation', 'ValidateSet('
+    ); Forbidden = @('WriteAllText', 'window_title', '.Current.Name') }
 )) {
     $functions = @($fromFile.FindAll({
         param($node)
@@ -1616,6 +1707,30 @@ foreach ($contract in @(
             throw "Recovery lookup contract $($contract.Name) contains forbidden $fragment"
         }
     }
+}
+$menuInvokeFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Start-AcceptanceRecoveryMenuInvoke'
+}, $true))
+if ($menuInvokeFunction.Count -ne 1) {
+    throw 'The recovery menu invocation function is missing or ambiguous.'
+}
+$menuInvokeText = $menuInvokeFunction[0].Extent.Text
+$inputMarker = $menuInvokeText.IndexOf("-Phase 'input-returned'", [StringComparison]::Ordinal)
+$inputRejection = $menuInvokeText.IndexOf(
+    '$inputResult.RequestedCount -ne 4', [StringComparison]::Ordinal
+)
+$nativeMarker = $menuInvokeText.IndexOf("-Phase 'native-popup-found'", [StringComparison]::Ordinal)
+$uiaStartMarker = $menuInvokeText.IndexOf("-Phase 'uia-popup-started'", [StringComparison]::Ordinal)
+$fromHandle = $menuInvokeText.IndexOf(
+    '[Windows.Automation.AutomationElement]::FromHandle', [StringComparison]::Ordinal
+)
+$uiaBoundMarker = $menuInvokeText.IndexOf("-Phase 'uia-popup-bound'", [StringComparison]::Ordinal)
+if ($inputMarker -lt 0 -or $inputRejection -le $inputMarker -or
+    $nativeMarker -lt 0 -or $uiaStartMarker -le $nativeMarker -or
+    $fromHandle -le $uiaStartMarker -or $uiaBoundMarker -le $fromHandle) {
+    throw 'Recovery menu diagnostics do not bracket input, native discovery, and UIA conversion.'
 }
 if ($exportScenarioFunction[0].Extent.Text.IndexOf('Remove-AcceptanceExportProgress', [StringComparison]::Ordinal) -lt
     $exportScenarioFunction[0].Extent.Text.IndexOf('Get-AcceptanceRecoveryExportClassification', [StringComparison]::Ordinal)) {
@@ -1639,14 +1754,89 @@ $sendKeys = @($fromFile.FindAll({
     $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
         $node.Member.Value -ceq 'SendWait'
 }, $true))
-if ($sendKeys.Count -ne 3) { throw 'Recovery input sites changed without an ownership audit.' }
+if ($sendKeys.Count -ne 2) { throw 'Recovery input sites changed without an ownership audit.' }
 foreach ($inputCall in $sendKeys) {
     $owner = $inputCall.Parent
     while ($null -ne $owner -and $owner -isnot [Management.Automation.Language.FunctionDefinitionAst]) { $owner = $owner.Parent }
     if ($null -eq $owner -or $owner.Name -cnotin @(
-            'Start-AcceptanceRecoveryMenuInvoke', 'Dismiss-AcceptanceMessage', 'Invoke-AcceptanceImportAndPrefix'
+            'Dismiss-AcceptanceMessage', 'Invoke-AcceptanceImportAndPrefix'
         ) -or $owner.Extent.Text.IndexOf('GetForegroundWindow', [StringComparison]::Ordinal) -lt 0) {
         throw 'Recovery input bypasses the audited exact-foreground helpers.'
+    }
+}
+$nativeInitializer = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Initialize-AcceptanceRecoveryMenuNative'
+}, $true))
+if ($nativeInitializer.Count -ne 1) {
+    throw 'The bounded native recovery-menu initializer is missing or ambiguous.'
+}
+$nativeText = $nativeInitializer[0].Extent.Text
+foreach ($fragment in @(
+    'public static KeyboardResult SendAltR()',
+    'public static PopupInventory ReadVisiblePopups(uint expectedProcessId)',
+    'SendInput(4, inputs',
+    'Key(0x12, 0)',
+    'Key(0x52, 0)',
+    'Key(0x52, 2)',
+    'Key(0x12, 2)',
+    'EnumWindows',
+    'IsWindowVisible',
+    'processId != expectedProcessId',
+    'String.Equals(className.ToString(), "#32768", StringComparison.Ordinal)',
+    'if (totalCount <= 2)'
+)) {
+    if ($nativeText.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+        throw "Native recovery-menu helper omits its bounded contract: $fragment"
+    }
+}
+if ($nativeText.IndexOf('GetWindowText', [StringComparison]::Ordinal) -ge 0 -or
+    $nativeText.IndexOf('Title', [StringComparison]::Ordinal) -ge 0) {
+    throw 'Native recovery-menu diagnostics must not capture window titles.'
+}
+Initialize-AcceptanceRecoveryMenuNative
+$nativeType = 'DarkReNamerRecoveryMenuNative' -as [type]
+if ($null -eq $nativeType -or
+    $null -eq $nativeType.GetMethod('SendAltR') -or
+    $null -eq $nativeType.GetMethod('ReadVisiblePopups')) {
+    throw 'The native recovery-menu helper did not compile with its callable API.'
+}
+$keyboardProperties = @(
+    $nativeType.GetNestedType('KeyboardResult').GetProperties().Name | Sort-Object
+)
+if ([string]::Join(',', $keyboardProperties) -cne
+    'ErrorCode,ReleaseSentCount,RequestedCount,SentCount') {
+    throw 'The native recovery-menu keyboard result shape changed.'
+}
+$inventoryProperties = @(
+    $nativeType.GetNestedType('PopupInventory').GetProperties().Name | Sort-Object
+)
+if ([string]::Join(',', $inventoryProperties) -cne 'Entries,TotalCount') {
+    throw 'The native recovery-menu popup inventory shape changed.'
+}
+$removeProgressFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Remove-AcceptanceExportProgress'
+}, $true))
+if ($removeProgressFunction.Count -ne 1) {
+    throw 'The recovery progress cleanup function is missing or ambiguous.'
+}
+$removeMenuProgressFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Remove-AcceptanceRecoveryMenuProgress'
+}, $true))
+if ($removeMenuProgressFunction.Count -ne 1 -or
+    $removeProgressFunction[0].Extent.Text.IndexOf(
+        "-Purpose 'export'", [StringComparison]::Ordinal
+    ) -lt 0) {
+    throw 'Purpose-bound recovery menu progress cleanup is missing or ambiguous.'
+}
+foreach ($phase in @('input-returned', 'native-popup-found', 'uia-popup-started', 'uia-popup-bound')) {
+    if ($removeMenuProgressFunction[0].Extent.Text.IndexOf($phase, [StringComparison]::Ordinal) -lt 0) {
+        throw "Recovery menu progress cleanup omits $phase."
     }
 }
 $intentFunction = @($fromFile.FindAll({
