@@ -37,6 +37,20 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(len(self.verify()), 30)
         self.assertEqual(len([row for row in self.plan['slots'] if row['stability_index'] is not None]), 10)
 
+    def test_menu_only_variant_cannot_move_to_another_cell_or_be_implicit(self):
+        original = deepcopy(self.profile)
+        for target_id, variant in (("layout-small-text150-100", None),
+                                   ("layout-small-normal-100", "native-menu-only"),
+                                   ("layout-normal-200", "adaptive")):
+            self.profile = deepcopy(original)
+            target = next(row for row in self.profile["required_targets"] if row["id"] == target_id)
+            if variant is None:
+                target.pop("layout_variant")
+            else:
+                target["layout_variant"] = variant
+            with self.subTest(target=target_id), self.assertRaises(EvidenceError):
+                self.verify()
+
     def test_retry_missing_or_duplicate_attempt_cannot_hide_first_failure(self):
         original = deepcopy(self.campaign)
         for mutation in ('failed', 'retry', 'missing', 'extra', 'duplicate'):

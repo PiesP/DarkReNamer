@@ -330,6 +330,7 @@
     {
       "id": "layout-small-text150-100",
       "executor": "windows-vm-acceptance",
+      "layout_variant": "native-menu-only",
       "contrast": "normal",
       "appearance": "light",
       "scale_percent": 100,
@@ -342,8 +343,10 @@
         "actual_requested_monitor",
         "actual_text_scale",
         "work_area",
-        "controls",
-        "focus_reachability",
+        "visible_controls",
+        "hidden_command_rails",
+        "native_menu_commands",
+        "menu_keyboard_reachability",
         "captured_raster",
         "text_scale_restoration",
         "cleanup"

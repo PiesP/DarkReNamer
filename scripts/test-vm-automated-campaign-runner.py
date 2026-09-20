@@ -241,7 +241,13 @@ class CampaignRunnerTests(unittest.TestCase):
         self.assertEqual(text150[text150.index("--acceptance-mode") + 1], "text-scale")
         manifest = json.loads(Path(text150[text150.index("--acceptance-manifest") + 1]).read_text())
         self.assertEqual(manifest["request"]["desktop"], {"width": 800, "height": 600, "dpi": 96})
+        self.assertEqual(manifest["request"]["layout_variant"], "native-menu-only")
         self.assertEqual(manifest["guest_preflight"]["build"], "26100")
+        for call in calls:
+            if "--acceptance-manifest" not in call or call == text150:
+                continue
+            ordinary = json.loads(Path(call[call.index("--acceptance-manifest") + 1]).read_text())
+            self.assertEqual(ordinary["request"]["layout_variant"], "command-rails")
 
     def test_failed_first_attempt_is_retained_and_stops_without_retry(self) -> None:
         calls, command = self.fake_command([7])
