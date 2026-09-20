@@ -1995,6 +1995,133 @@ function Send-AcceptanceTap {
     [DarkReNamerVmAcceptanceNative]::Tap($VirtualKey)
 }
 
+function Assert-AcceptanceCommandActivationBinding {
+    param(
+        [Parameter(Mandatory)][object] $Attempt,
+        [Parameter(Mandatory)][int] $ExpectedProcessId,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][long] $ExpectedMainWindow,
+        [Parameter(Mandatory)][string] $ExpectedAutomationId
+    )
+
+    $focused = $Attempt.focused_before
+    $foreground = $Attempt.foreground_before
+    if ($Attempt.action -cne 'space' -or
+        $Attempt.input_method -cne 'keyboard' -or
+        $Attempt.virtual_key -ne 0x20 -or
+        $Attempt.expected_automation_id -cne $ExpectedAutomationId -or
+        $focused.automation_id -cne $ExpectedAutomationId -or
+        $focused.control_type -cne 'ControlType.Button' -or
+        $focused.class -cne 'Button' -or
+        $focused.visible -isnot [bool] -or -not $focused.visible -or
+        $focused.enabled -isnot [bool] -or -not $focused.enabled -or
+        $focused.keyboard_focusable -isnot [bool] -or -not $focused.keyboard_focusable -or
+        $Attempt.input_sent -isnot [bool] -or $Attempt.input_sent -or
+        $focused.hwnd -le 0 -or
+        $focused.pid -ne $ExpectedProcessId -or
+        $focused.session_id -ne $ExpectedSession -or
+        $focused.root_hwnd -ne $ExpectedMainWindow -or
+        $foreground.hwnd -ne $ExpectedMainWindow -or
+        $foreground.process_id -ne $ExpectedProcessId -or
+        $foreground.session_id -ne $ExpectedSession -or
+        $foreground.window_class -cne 'DarkReNamerWindow') {
+        throw 'Keyboard command activation target or foreground binding is invalid.'
+    }
+}
+
+function Get-AcceptanceCommandActivationAttempt {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][string] $ExpectedAutomationId
+    )
+
+    $focused = Get-FocusedAcceptanceElement `
+        -Process $Process `
+        -ExpectedSession $ExpectedSession `
+        -Label 'keyboard command activation'
+    $control = Get-VmAutomatedControlObservation `
+        -Element $focused `
+        -Process $Process `
+        -ExpectedSession $ExpectedSession `
+        -Label 'keyboard command activation'
+    $focusedHandle = [IntPtr]$focused.Current.NativeWindowHandle
+    $focusedProcessId = [uint32]0
+    if ($focusedHandle -ne [IntPtr]::Zero) {
+        [void][DarkReNamerVmNative]::GetWindowThreadProcessId(
+            $focusedHandle,
+            [ref]$focusedProcessId
+        )
+    }
+    $focusedClass = [Text.StringBuilder]::new(128)
+    if ($focusedHandle -ne [IntPtr]::Zero) {
+        [void][DarkReNamerVmNative]::GetClassName(
+            $focusedHandle,
+            $focusedClass,
+            $focusedClass.Capacity
+        )
+    }
+    $attempt = [ordered]@{
+        action = 'space'
+        input_method = 'keyboard'
+        virtual_key = 0x20
+        expected_automation_id = $ExpectedAutomationId
+        focused_before = [ordered]@{
+            hwnd = [long]$focusedHandle
+            pid = [int]$focusedProcessId
+            session_id = [int]$control.session_id
+            class = $focusedClass.ToString()
+            automation_id = [string]$control.automation_id
+            control_type = [string]$control.control_type
+            visible = [bool]$control.visible
+            enabled = [bool]$control.enabled
+            keyboard_focusable = [bool]$control.keyboard_focusable
+            root_hwnd = [long]$control.root_hwnd
+        }
+        foreground_before = Get-ForegroundObservation
+        input_sent = $false
+    }
+    $attempt
+}
+
+function Get-BoundedAcceptanceProcessWindowInventory {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession
+    )
+
+    if ($Process.SessionId -ne $ExpectedSession) {
+        throw 'Process window inventory belongs to an unexpected desktop session.'
+    }
+    $windows = @([DarkReNamerVmAcceptanceNative]::ReadProcessTopLevelWindows([uint32]$Process.Id) |
+        Sort-Object Handle)
+    $entries = @($windows | Select-Object -First 32 | ForEach-Object {
+        if ($_.ProcessId -ne $Process.Id) {
+            throw 'Process window inventory contains a foreign process.'
+        }
+        [ordered]@{
+            hwnd = [long]$_.Handle
+            owner_hwnd = [long]$_.Owner
+            pid = [int]$_.ProcessId
+            session_id = $ExpectedSession
+            window_class = [string]$_.ClassName
+            visible = [bool]$_.Visible
+            rect = [ordered]@{
+                left = [int]$_.Left
+                top = [int]$_.Top
+                right = [int]$_.Right
+                bottom = [int]$_.Bottom
+            }
+        }
+    })
+    [ordered]@{
+        maximum_entries = 32
+        total_count = $windows.Count
+        truncated = $windows.Count -gt 32
+        entries = $entries
+    }
+}
+
 function Send-AcceptanceChord {
     param(
         [Parameter(Mandatory)][Diagnostics.Process] $Process,
@@ -5394,6 +5521,7 @@ function Invoke-GuiRegressionAcceptance {
         output_root = $resolved.output_root
         manifest = $bundleManifest
         application = $resolved.application
+        lane = $resolved.lane
     }
     $inputItem = Get-Item -LiteralPath $InputManifestPath -Force -ErrorAction Stop
     $expectedInput = Join-Path (Split-Path -Parent $resolved.root) 'input-manifest.json'
@@ -6389,13 +6517,26 @@ try {
 
         $result.failure_reason = 'prefix_keyboard_failed'
         [void](Move-RailFocusToCommand -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '32773')
-        Send-AcceptanceTap -Process $process -ExpectedSession $ExpectedSessionId -VirtualKey 0x20 -Label 'prefix command Space'
+        $prefixActivationAttempt = Get-AcceptanceCommandActivationAttempt `
+            -Process $process `
+            -ExpectedSession $ExpectedSessionId `
+            -ExpectedAutomationId '32773'
+        $observations['prefix_activation_attempt'] = $prefixActivationAttempt
+        Assert-AcceptanceCommandActivationBinding `
+            -Attempt $prefixActivationAttempt `
+            -ExpectedProcessId $process.Id `
+            -ExpectedSession $ExpectedSessionId `
+            -ExpectedMainWindow ([long]$mainWindow.Current.NativeWindowHandle) `
+            -ExpectedAutomationId '32773'
+        [DarkReNamerVmAcceptanceNative]::Tap(0x20)
+        $prefixActivationAttempt.input_sent = $true
         $prompt = Wait-UniqueAutomationWindow `
             -Process $process `
             -ExpectedSession $ExpectedSessionId `
             -Name '이름 앞에 문자열 붙이기' `
             -TimeoutSeconds $TimeoutSeconds `
             -Label 'keyboard prefix prompt'
+        [void]$observations.Remove('prefix_activation_attempt')
         $promptHandle = [IntPtr]$prompt.Current.NativeWindowHandle
         $promptEdit = Find-UniqueAutomationElement -Root $prompt -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '1004' -ControlType ([Windows.Automation.ControlType]::Edit) -TimeoutSeconds $TimeoutSeconds -Label 'prefix prompt edit' -RequireWindowHandle
         $promptOk = Find-UniqueAutomationElement -Root $prompt -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '1' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $TimeoutSeconds -Label 'prefix prompt OK' -RequireWindowHandle
@@ -6786,7 +6927,34 @@ try {
     $result.failure_reason = $null
 }
 catch {
-    $_ | Out-String | Set-Content -LiteralPath $diagnosticPath -Encoding UTF8
+    $acceptanceFailure = $_
+    if ($rawCandidate -and $result.failure_reason -ceq 'prefix_keyboard_failed') {
+        if ($null -ne $rawFocusReachability) {
+            $observations['failure_focus_reachability'] = $rawFocusReachability
+        }
+        if ($null -ne $processState.process) {
+            try {
+                $failureProcess = $processState.process.process
+                $failureProcess.Refresh()
+                if (-not $failureProcess.HasExited) {
+                    $observations['prefix_failure_process_windows'] =
+                        Get-BoundedAcceptanceProcessWindowInventory `
+                            -Process $failureProcess `
+                            -ExpectedSession $ExpectedSessionId
+                }
+            }
+            catch {
+                $observations['prefix_failure_process_windows'] = [ordered]@{
+                    maximum_entries = 32
+                    total_count = $null
+                    truncated = $null
+                    entries = @()
+                    observation_status = 'failed'
+                }
+            }
+        }
+    }
+    $acceptanceFailure | Out-String | Set-Content -LiteralPath $diagnosticPath -Encoding UTF8
     $result.diagnostic = [ordered]@{
         file = 'acceptance-error.txt'
         sha256 = Get-LowerSha256 -Path $diagnosticPath

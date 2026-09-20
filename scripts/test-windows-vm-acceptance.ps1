@@ -645,6 +645,33 @@ try {
         throw 'The regression entry must restore its caller ValidateOnly switch after importing the guest helper.'
     }
     & {
+        $regressionFunction = $acceptanceAst.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Invoke-GuiRegressionAcceptance'
+        }, $true)
+        $verifiedAssignment = $regressionFunction.Find({
+            param($node)
+            $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -ceq '$verified'
+        }, $true)
+        $resolved = [pscustomobject]@{
+            root = 'bundle-root'
+            output_root = 'output-root'
+            manifest = [pscustomobject]@{ schema_version = 2 }
+            application = [pscustomobject]@{ file = 'DarkReNamer.exe'; sha256 = 'a' * 64 }
+            lane = 'candidate-gui-only'
+        }
+        $bundleManifest = $resolved.manifest
+        . ([scriptblock]::Create($verifiedAssignment.Extent.Text))
+        if ($verified.root -cne $resolved.root -or
+            $verified.output_root -cne $resolved.output_root -or
+            $verified.application.sha256 -cne $resolved.application.sha256 -or
+            $verified.lane -cne $resolved.lane) {
+            throw 'GUI regression scenario binding did not retain the authenticated candidate lane.'
+        }
+    }
+    & {
         $stateFunction = $acceptanceAst.Find({
             param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
@@ -1034,6 +1061,114 @@ try {
     )) {
         if ($null -eq (Get-Command $regressionFunction -CommandType Function -ErrorAction SilentlyContinue)) {
             throw "Dot-sourcing did not load GUI regression function $regressionFunction."
+        }
+    }
+    $commandActivation = [ordered]@{
+        action = 'space'
+        input_method = 'keyboard'
+        virtual_key = 32
+        expected_automation_id = '32773'
+        focused_before = [ordered]@{
+            hwnd = 200
+            pid = 300
+            session_id = 4
+            class = 'Button'
+            automation_id = '32773'
+            control_type = 'ControlType.Button'
+            visible = $true
+            enabled = $true
+            keyboard_focusable = $true
+            root_hwnd = 100
+        }
+        foreground_before = [ordered]@{
+            hwnd = 100
+            process_id = 300
+            session_id = 4
+            window_class = 'DarkReNamerWindow'
+        }
+        input_sent = $false
+    }
+    Assert-AcceptanceCommandActivationBinding `
+        -Attempt $commandActivation `
+        -ExpectedProcessId 300 `
+        -ExpectedSession 4 `
+        -ExpectedMainWindow 100 `
+        -ExpectedAutomationId '32773'
+    foreach ($mutation in @('target', 'disabled', 'root', 'pid', 'session', 'foreground')) {
+        $changedActivation = $commandActivation | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+        switch ($mutation) {
+            'target' { $changedActivation.focused_before.automation_id = '32774' }
+            'disabled' { $changedActivation.focused_before.enabled = $false }
+            'root' { $changedActivation.focused_before.root_hwnd = 101 }
+            'pid' { $changedActivation.focused_before.pid = 301 }
+            'session' { $changedActivation.focused_before.session_id = 5 }
+            'foreground' { $changedActivation.foreground_before.hwnd = 102 }
+        }
+        Assert-Fails {
+            Assert-AcceptanceCommandActivationBinding `
+                -Attempt $changedActivation `
+                -ExpectedProcessId 300 `
+                -ExpectedSession 4 `
+                -ExpectedMainWindow 100 `
+                -ExpectedAutomationId '32773'
+        } 'Keyboard command activation target or foreground binding is invalid'
+    }
+    $prefixMoveIndex = $acceptanceText.IndexOf(
+        "Move-RailFocusToCommand -Process `$process -ExpectedSession `$ExpectedSessionId -AutomationId '32773'",
+        [StringComparison]::Ordinal
+    )
+    $prefixBindingIndex = $acceptanceText.IndexOf(
+        '$prefixActivationAttempt = Get-AcceptanceCommandActivationAttempt',
+        $prefixMoveIndex,
+        [StringComparison]::Ordinal
+    )
+    $prefixPersistIndex = $acceptanceText.IndexOf(
+        "`$observations['prefix_activation_attempt'] = `$prefixActivationAttempt",
+        $prefixBindingIndex,
+        [StringComparison]::Ordinal
+    )
+    $prefixTapIndex = $acceptanceText.IndexOf(
+        '[DarkReNamerVmAcceptanceNative]::Tap(0x20)',
+        $prefixPersistIndex,
+        [StringComparison]::Ordinal
+    )
+    $prefixAssertIndex = $acceptanceText.IndexOf(
+        'Assert-AcceptanceCommandActivationBinding',
+        $prefixPersistIndex,
+        [StringComparison]::Ordinal
+    )
+    $prefixWaitIndex = $acceptanceText.IndexOf(
+        '-Label ''keyboard prefix prompt''',
+        $prefixTapIndex,
+        [StringComparison]::Ordinal
+    )
+    $prefixRemoveIndex = $acceptanceText.IndexOf(
+        "`$observations.Remove('prefix_activation_attempt')",
+        $prefixWaitIndex,
+        [StringComparison]::Ordinal
+    )
+    if ($prefixMoveIndex -lt 0 -or $prefixBindingIndex -le $prefixMoveIndex -or
+        $prefixPersistIndex -le $prefixBindingIndex -or $prefixAssertIndex -le $prefixPersistIndex -or
+        $prefixTapIndex -le $prefixAssertIndex -or
+        $prefixWaitIndex -le $prefixTapIndex -or $prefixRemoveIndex -le $prefixWaitIndex) {
+        throw 'Prefix Space must bind and persist its exact target before input and retain diagnostics only on failure.'
+    }
+    $windowInventoryFunction = $acceptanceAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Get-BoundedAcceptanceProcessWindowInventory'
+    }, $true)
+    $windowInventoryText = $windowInventoryFunction.Extent.Text
+    if ($windowInventoryText.IndexOf('Select-Object -First 32', [StringComparison]::Ordinal) -lt 0 -or
+        $windowInventoryText.IndexOf('$_.Title', [StringComparison]::Ordinal) -ge 0) {
+        throw 'Failure window diagnostics must remain bounded and omit window titles.'
+    }
+    foreach ($failureField in @(
+        'failure_focus_reachability',
+        'prefix_failure_process_windows'
+    )) {
+        if ($acceptanceText.IndexOf($failureField, [StringComparison]::Ordinal) -lt 0) {
+            throw "Prefix failure diagnostics omit $failureField."
         }
     }
     if ($acceptanceText.IndexOf('$Verified.manifest.application', [StringComparison]::Ordinal) -ge 0 -or
