@@ -477,8 +477,8 @@ identified only as a local build. Visual capture rows bind PNG filenames,
 dimensions, image digests, UI and optional scenario targets, appearance, and
 surface to that same executable digest. Image bytes remain external.
 
-For a historical formal-acceptance decision, validate the complete external evidence against the
-downloaded Actions handoff and matching checkout with
+For a historical formal-acceptance decision, validate the complete external
+evidence against the downloaded Actions handoff and matching checkout with
 [`scripts/validate-release-acceptance.ps1`](scripts/validate-release-acceptance.ps1).
 This cross-check requires the evidence to identify `actions-handoff` and match
 the handoff's source SHA, workflow run, executable filename, executable digest,

@@ -229,9 +229,11 @@ reset or storage-fault durability remain outside VM-Automated v1.
 
 ## Interactive acceptance observers
 
-The optional `scripts/windows-vm-acceptance.ps1` and
-`scripts/windows-vm-recovery-acceptance.ps1` observers reuse an existing VM test
-bundle. Stage the unchanged manifest, runner, and listed binaries in a private
+The campaign controller stages the UI and recovery observers automatically.
+For standalone diagnostics or historical formal acceptance,
+`scripts/windows-vm-acceptance.ps1` and
+`scripts/windows-vm-recovery-acceptance.ps1` reuse an existing VM test bundle.
+Stage the unchanged manifest, runner, and listed binaries in a private
 `bundle` directory, with the selected observer in its parent directory. Record
 the observer's SHA-256 separately from the bundle's source and executable
 digests. Run one observer at a time in the bundle account's unlocked,
@@ -242,7 +244,9 @@ Both observers verify those bindings and acquire the shared desktop lock.
 The UI observer requires a new output directory. It records the actual window
 DPI, UI Automation metadata, keyboard-only file import and prefix entry,
 Apply cancellation and confirmation, disk contents and identities, and normal
-close. Screenshots require operator review before a UI cell can be accepted.
+close. Historical formal UI acceptance requires operator review of screenshots.
+VM-Automated release validation derives its defined raster and geometry checks
+from the raw observations without treating operator review as a pass condition.
 `-HighContrast` temporarily enables Windows High Contrast and verifies restoration
 of the original flags, scheme, system colors, and active visual-style path, color,
 and size. The private rescue snapshot retains that complete identity while public
@@ -302,9 +306,9 @@ Historical ad-hoc results are external records and are not migrated or relabeled
 These hashes provide integrity bookkeeping, not independent rebuild proof or
 protection against coordinated changes to all evidence files.
 
-Inspect the original screenshots before accepting a visual result. Passing raw
-regression assertions does not establish human acceptance or satisfy the separate
-release acceptance validators in `SAFETY.md` and `DISTRIBUTION.md`.
+Inspect the original screenshots before making a human visual-acceptance claim.
+Passing this diagnostic suite does not establish human acceptance or replace the
+complete VM-Automated campaign required by `SAFETY.md` and `DISTRIBUTION.md`.
 
 ## Dependency policy
 
