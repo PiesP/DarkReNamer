@@ -1882,8 +1882,21 @@ function Get-VmAutomatedOwnedProcessInventory {
     })
 }
 
+function New-VmAutomatedJournalCleanupObservation {
+    param(
+        [Parameter(Mandatory)][bool] $Observed,
+        [AllowNull()][object[]] $Entries
+    )
+
+    if (-not $Observed) { return $null }
+    [ordered]@{ entries = @($Entries) }
+}
+
 function Get-VmAutomatedRuntimeRootObservation {
-    param([Parameter(Mandatory)][string] $Root)
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [ValidateRange(1, 16384)][int] $MaximumEntries = 16384
+    )
 
     if (-not (Test-Path -LiteralPath $Root)) {
         return [ordered]@{ exists = $false; entries = @() }
@@ -1893,16 +1906,32 @@ function Get-VmAutomatedRuntimeRootObservation {
         ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw 'The VM-Automated runtime root is unsafe.'
     }
-    $entries = @(Get-ChildItem -LiteralPath $rootItem.FullName -Force -Recurse | ForEach-Object {
-        if (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw 'The VM-Automated runtime root contains a reparse point.'
+    $entries = [Collections.Generic.List[object]]::new()
+    $pending = [Collections.Generic.Stack[string]]::new()
+    $pending.Push($rootItem.FullName)
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        foreach ($path in [IO.Directory]::EnumerateFileSystemEntries($directory)) {
+            $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'The VM-Automated runtime root contains a reparse point.'
+            }
+            if (-not $item.PSIsContainer -and $item -isnot [IO.FileInfo]) {
+                throw 'The VM-Automated runtime root contains a non-ordinary entry.'
+            }
+            if ($entries.Count -ge $MaximumEntries) {
+                throw 'The VM-Automated runtime root entry count exceeds its bound.'
+            }
+            $entries.Add([ordered]@{
+                path = $item.FullName.Substring($rootItem.FullName.Length + 1).Replace('\', '/')
+                kind = if ($item.PSIsContainer) { 'directory' } else { 'file' }
+            })
+            if ($item.PSIsContainer) {
+                $pending.Push($item.FullName)
+            }
         }
-        [ordered]@{
-            path = $_.FullName.Substring($rootItem.FullName.Length + 1).Replace('\', '/')
-            kind = if ($_.PSIsContainer) { 'directory' } else { 'file' }
-        }
-    })
-    [ordered]@{ exists = $true; entries = $entries }
+    }
+    [ordered]@{ exists = $true; entries = @($entries | Sort-Object path) }
 }
 
 function Invoke-ProductionRenameFlow {
@@ -2827,14 +2856,18 @@ finally {
             $result.failure_reason = 'execution_state_restore_failed'
         }
         if ($candidateLane -and $null -ne $runtimeRoot) {
+            $journalAfter = $null
+            $journalObserved = $false
+            $runtimeRootAfter = $null
             try {
-                $journalAfter = if ($null -ne $result.gui -and
+                $journalAfter = @(if ($null -ne $result.gui -and
                     $null -ne $result.gui.flow -and
                     @($result.gui.flow.raw_checkpoints).Count -gt 0) {
-                    @($result.gui.flow.raw_checkpoints)[-1].journal_entries
+                    @(@($result.gui.flow.raw_checkpoints)[-1].journal_entries)
                 } else {
                     @(Get-VmAutomatedJournalInventory -LocalAppData (Join-Path $runtimeRoot 'gui\localappdata'))
-                }
+                })
+                $journalObserved = $true
                 $ownedAfter = @(Get-VmAutomatedOwnedProcessInventory -Root $verified.root)
                 if ($ownedAfter.Count -ne 0) {
                     throw 'An owned candidate process remains after the GUI flow.'
@@ -2843,19 +2876,28 @@ finally {
                     [void](Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot)
                     Remove-Item -LiteralPath $runtimeRoot -Recurse -Force
                 }
+                $runtimeRootAfter = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
                 $result['raw_cleanup'] = [ordered]@{
                     owned_processes_after = $ownedAfter
-                    runtime_root_after = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
-                    journal_after = [ordered]@{ entries = @($journalAfter) }
+                    runtime_root_after = $runtimeRootAfter
+                    journal_after = (New-VmAutomatedJournalCleanupObservation `
+                        -Observed $journalObserved -Entries $journalAfter)
                 }
             }
             catch {
                 $result.status = 'failed'
                 $result.failure_reason = 'raw_cleanup_failed'
+                try {
+                    $runtimeRootAfter = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
+                }
+                catch {
+                    $runtimeRootAfter = $null
+                }
                 $result['raw_cleanup'] = [ordered]@{
                     owned_processes_after = @(Get-VmAutomatedOwnedProcessInventory -Root $verified.root)
-                    runtime_root_after = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
-                    journal_after = [ordered]@{ entries = @() }
+                    runtime_root_after = $runtimeRootAfter
+                    journal_after = (New-VmAutomatedJournalCleanupObservation `
+                        -Observed $journalObserved -Entries $journalAfter)
                 }
             }
         }

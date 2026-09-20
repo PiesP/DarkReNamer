@@ -2048,8 +2048,8 @@ function Dismiss-AcceptanceStartupRecovery {
             -Application $Application -Root $prompt -Element $cancel `
             -SessionId $SessionId -ExpectedAutomationId 'CommandButton_2' `
             -ExpectedControlId 2 -Label 'startup recovery cancellation button'
-        if (-not $target.enabled -or -not $target.visible) {
-            throw 'The startup recovery cancellation target is not enabled and visible.'
+        if (-not $target.enabled -or -not $target.visible -or -not $target.focused) {
+            throw 'The startup recovery cancellation target is not the enabled, visible default focus.'
         }
         $observedUtcTicks = [DateTime]::UtcNow.Ticks.ToString(
             [Globalization.CultureInfo]::InvariantCulture
@@ -2226,7 +2226,11 @@ function Get-AcceptanceControlTargetObservation {
     $controlId = [DarkReNamerRecoveryLockNative]::GetDlgCtrlID($handle)
     $automationId = $Element.Current.AutomationId
     $controlType = $Element.Current.ControlType.ProgrammaticName
-    if ($controlId -ne $ExpectedControlId -or
+    # TaskDialog exposes its logical command through UIA while the owned native
+    # Button can have control ID zero. Ordinary application controls keep their
+    # exact native ID requirement.
+    $taskDialogControl = $ExpectedAutomationId -cmatch '^(CommandButton|CommandLink)_[1-9][0-9]*$'
+    if (($controlId -ne $ExpectedControlId -and -not ($taskDialogControl -and $controlId -eq 0)) -or
         $automationId -cne $ExpectedAutomationId -or
         $controlType -cne 'ControlType.Button') {
         throw "$Label identity mismatch: control_id=$controlId expected_control_id=$ExpectedControlId automation_id=$automationId expected_automation_id=$ExpectedAutomationId control_type=$controlType."

@@ -282,6 +282,9 @@ def backend_files(result: dict) -> list[str]:
     names = []
     for row in result["tests"]:
         require(type(row) is dict, "Backend test row is invalid.")
+        binary = safe_segment(row.get("file"))
+        require(binary.endswith(".exe"), "Backend test artifact is not an executable leaf.")
+        names.append(binary)
         for channel in ("stdout", "stderr"):
             reference = row.get(channel)
             require(type(reference) is dict and set(reference) == {"file", "sha256"},

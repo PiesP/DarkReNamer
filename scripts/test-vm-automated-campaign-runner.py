@@ -106,11 +106,11 @@ class CampaignRunnerTests(unittest.TestCase):
             (self.backend / stderr).write_text("", encoding="utf-8")
             tests.append({
                 "name": f"native-binary-{index}", "file": f"test-{index}.exe",
-                "sha256": "c" * 64, "exit_code": 0, "passed": 1, "failed": 0, "ignored": 0,
+                "sha256": hashlib.sha256(b"large executable").hexdigest(), "exit_code": 0, "passed": 1, "failed": 0, "ignored": 0,
                 "stdout": {"file": stdout, "sha256": hashlib.sha256((self.backend / stdout).read_bytes()).hexdigest()},
                 "stderr": {"file": stderr, "sha256": hashlib.sha256(b"").hexdigest()},
             })
-            binaries.append({"name": name, "file": f"test-{index}.exe", "sha256": "c" * 64})
+            binaries.append({"name": name, "file": f"test-{index}.exe", "sha256": hashlib.sha256(b"large executable").hexdigest()})
             (self.backend / f"test-{index}.exe").write_bytes(b"large executable")
         write_json(self.backend / "bundle.json", {
             "schema_version": 1,
@@ -216,7 +216,7 @@ class CampaignRunnerTests(unittest.TestCase):
         self.assertEqual(len(campaign["attempts"]), 30)
         self.assertEqual([row["attempt"] for row in campaign["attempts"]], [1] * 30)
         self.assertEqual(len({row["desktop_lease"] for row in campaign["attempts"]}), 30)
-        self.assertFalse(any(path.suffix.lower() == ".exe"
+        self.assertTrue(any(path.suffix.lower() == ".exe"
                              for path in (self.output / "backend").iterdir()))
         with ZipFile(self.archive) as archive:
             self.assertTrue(all(row.compress_type == ZIP_STORED for row in archive.infolist()))

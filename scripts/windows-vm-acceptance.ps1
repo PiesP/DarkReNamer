@@ -1498,6 +1498,7 @@ function Get-VmAutomatedControlObservation {
         control_type = [string]$Element.Current.ControlType.ProgrammaticName
         visible = -not [bool]$Element.Current.IsOffscreen
         enabled = [bool]$Element.Current.IsEnabled
+        keyboard_focusable = [bool]$Element.Current.IsKeyboardFocusable
         bounds = [ordered]@{
             left = [int][Math]::Round($bounds.Left)
             top = [int][Math]::Round($bounds.Top)
@@ -1507,6 +1508,212 @@ function Get-VmAutomatedControlObservation {
         pid = [int]$Element.Current.ProcessId
         session_id = [int]$Process.SessionId
         root_hwnd = [long]$rootHandle
+    }
+}
+
+function New-VmAutomatedFocusReachabilityControl {
+    param(
+        [Parameter(Mandatory)][Collections.IDictionary] $Observation,
+        [Parameter(Mandatory)][ValidateSet('list', 'left', 'right')][string] $Rail,
+        [AllowNull()][object] $RailGroup
+    )
+
+    if (-not [bool]$Observation.visible) {
+        throw "Raw focus reachability control $($Observation.automation_id) is not visible."
+    }
+    $expectedReachable = [bool]$Observation.enabled
+    [ordered]@{
+        automation_id = [string]$Observation.automation_id
+        control_type = [string]$Observation.control_type
+        visible = [bool]$Observation.visible
+        enabled = [bool]$Observation.enabled
+        keyboard_focusable = [bool]$Observation.keyboard_focusable
+        bounds = $Observation.bounds
+        pid = [int]$Observation.pid
+        session_id = [int]$Observation.session_id
+        root_hwnd = [long]$Observation.root_hwnd
+        rail = $Rail
+        rail_group = if ($null -eq $RailGroup) { $null } else { [int]$RailGroup }
+        expected_reachable = $expectedReachable
+        exclusion_reason = if ($expectedReachable) { $null } else { 'disabled' }
+    }
+}
+
+function Get-VmAutomatedFocusBinding {
+    param(
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Element,
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    $binding = Get-VmAutomatedControlObservation `
+        -Element $Element -Process $Process -ExpectedSession $ExpectedSession -Label $Label
+    if (-not $binding.visible -or -not $binding.enabled -or -not $binding.keyboard_focusable) {
+        throw "$Label is not an enabled, visible, keyboard-focusable control."
+    }
+    $binding
+}
+
+function Get-VmAutomatedFocusState {
+    param(
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][string] $LocalAppData
+    )
+
+    [ordered]@{
+        fixture_entries = @(Get-VmAutomatedFixtureInventory -Root $FixtureRoot)
+        journal_entries = @(Get-VmAutomatedJournalInventory -LocalAppData $LocalAppData)
+    }
+}
+
+function Invoke-VmAutomatedFocusReachability {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $List,
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][int] $ExpectedSession,
+        [Parameter(Mandatory)][int] $TimeoutSeconds
+    )
+
+    $specs = @(
+        [ordered]@{ automation_id = '1000'; rail = 'list'; rail_group = $null }
+        [ordered]@{ automation_id = '32771'; rail = 'left'; rail_group = 0 }
+        [ordered]@{ automation_id = '32772'; rail = 'left'; rail_group = 1 }
+        [ordered]@{ automation_id = '32773'; rail = 'left'; rail_group = 1 }
+        [ordered]@{ automation_id = '32774'; rail = 'left'; rail_group = 1 }
+        [ordered]@{ automation_id = '32775'; rail = 'left'; rail_group = 2 }
+        [ordered]@{ automation_id = '32776'; rail = 'left'; rail_group = 2 }
+        [ordered]@{ automation_id = '32777'; rail = 'left'; rail_group = 2 }
+        [ordered]@{ automation_id = '32778'; rail = 'left'; rail_group = 3 }
+        [ordered]@{ automation_id = '32779'; rail = 'left'; rail_group = 3 }
+        [ordered]@{ automation_id = '32780'; rail = 'left'; rail_group = 3 }
+        [ordered]@{ automation_id = '32781'; rail = 'right'; rail_group = 0 }
+        [ordered]@{ automation_id = '32783'; rail = 'right'; rail_group = 1 }
+        [ordered]@{ automation_id = '65535'; rail = 'right'; rail_group = 1 }
+        [ordered]@{ automation_id = '32784'; rail = 'right'; rail_group = 1 }
+        [ordered]@{ automation_id = '32788'; rail = 'right'; rail_group = 2 }
+        [ordered]@{ automation_id = '32789'; rail = 'right'; rail_group = 2 }
+        [ordered]@{ automation_id = '32790'; rail = 'right'; rail_group = 2 }
+        [ordered]@{ automation_id = '32785'; rail = 'right'; rail_group = 3 }
+        [ordered]@{ automation_id = '32786'; rail = 'right'; rail_group = 3 }
+    )
+    $controls = [Collections.Generic.List[object]]::new()
+    foreach ($spec in $specs) {
+        $element = if ($spec.rail -ceq 'list') {
+            $List
+        }
+        else {
+            Find-UniqueAutomationElement `
+                -Root $Application.main -Process $Application.process `
+                -ExpectedSession $ExpectedSession -AutomationId $spec.automation_id `
+                -ControlType ([Windows.Automation.ControlType]::Button) `
+                -TimeoutSeconds $TimeoutSeconds `
+                -Label "raw focus reachability command $($spec.automation_id)" `
+                -RequireWindowHandle
+        }
+        $observation = Get-VmAutomatedControlObservation `
+            -Element $element -Process $Application.process -ExpectedSession $ExpectedSession `
+            -Label "raw focus reachability control $($spec.automation_id)"
+        $controls.Add((New-VmAutomatedFocusReachabilityControl `
+            -Observation $observation -Rail $spec.rail -RailGroup $spec.rail_group))
+    }
+
+    $stateBefore = Get-VmAutomatedFocusState `
+        -FixtureRoot $FixtureRoot -LocalAppData $env:LOCALAPPDATA
+    $focused = Get-FocusedAcceptanceElement `
+        -Process $Application.process -ExpectedSession $ExpectedSession `
+        -Label 'raw focus reachability initial control'
+    $initial = Get-VmAutomatedFocusBinding `
+        -Element $focused -Process $Application.process -ExpectedSession $ExpectedSession `
+        -Label 'raw focus reachability initial control'
+    $navigation = [ordered]@{ current = $focused }
+    $transitions = [Collections.Generic.List[object]]::new()
+    $step = {
+        param([string] $Input, [uint16] $VirtualKey)
+
+        if ($transitions.Count -ge 256) {
+            throw 'Raw focus reachability transition count exceeds its bound.'
+        }
+        $from = Get-VmAutomatedFocusBinding `
+            -Element $navigation.current -Process $Application.process `
+            -ExpectedSession $ExpectedSession -Label 'raw focus transition source'
+        $next = Invoke-AcceptanceNavigationStep `
+            -Process $Application.process -ExpectedSession $ExpectedSession `
+            -VirtualKey $VirtualKey -Label "raw focus $Input navigation"
+        $to = Get-VmAutomatedFocusBinding `
+            -Element $next -Process $Application.process `
+            -ExpectedSession $ExpectedSession -Label 'raw focus transition destination'
+        $transitions.Add([ordered]@{
+            sequence = [int]$transitions.Count + 1
+            input = $Input
+            from = $from
+            to = $to
+        })
+        $navigation.current = $next
+        $next
+    }
+    $moveToScope = {
+        param([string[]] $AutomationIds, [string] $Label)
+
+        for ($attempt = 0; $attempt -lt 32; $attempt++) {
+            if ($AutomationIds -ccontains [string]$navigation.current.Current.AutomationId) {
+                return
+            }
+            [void](& $step 'tab' 0x09)
+        }
+        throw "Raw keyboard focus did not reach the $Label scope."
+    }
+
+    $visited = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($scope in @('list', 'left', 'right')) {
+        $requiredIds = @($controls | Where-Object {
+            $_.rail -ceq $scope -and $_.expected_reachable
+        } | ForEach-Object automation_id)
+        if ($requiredIds.Count -eq 0) { continue }
+        & $moveToScope $requiredIds $scope
+        $currentId = [string]$navigation.current.Current.AutomationId
+        if (-not $visited.Add($currentId) -and $scope -cne 'list') {
+            throw "Raw keyboard focus revisited $currentId before traversing the $scope rail."
+        }
+        if ($scope -cne 'list') {
+            while (@($requiredIds | Where-Object { -not $visited.Contains($_) }).Count -gt 0) {
+                [void](& $step 'down' 0x28)
+                $currentId = [string]$navigation.current.Current.AutomationId
+                if ($requiredIds -cnotcontains $currentId) {
+                    throw "Raw keyboard focus left the $scope rail during arrow navigation."
+                }
+                if (-not $visited.Add($currentId)) {
+                    throw "Raw keyboard focus cycled before visiting every enabled $scope command."
+                }
+            }
+        }
+    }
+    & $moveToScope @('1000') 'list'
+
+    $requiredAll = @($controls | Where-Object expected_reachable | ForEach-Object automation_id)
+    $missing = @($requiredAll | Where-Object { -not $visited.Contains($_) })
+    if ($missing.Count -ne 0 -or $visited.Count -ne $requiredAll.Count) {
+        throw "Raw keyboard focus did not visit the exact required controls: $($missing -join ', ')."
+    }
+    $final = Get-VmAutomatedFocusBinding `
+        -Element $navigation.current -Process $Application.process -ExpectedSession $ExpectedSession `
+        -Label 'raw focus reachability final control'
+    $stateAfter = Get-VmAutomatedFocusState `
+        -FixtureRoot $FixtureRoot -LocalAppData $env:LOCALAPPDATA
+    if (($stateBefore | ConvertTo-Json -Compress -Depth 12) -cne
+        ($stateAfter | ConvertTo-Json -Compress -Depth 12)) {
+        throw 'Raw keyboard focus traversal changed the fixture or journal state.'
+    }
+    [ordered]@{
+        schema_version = 1
+        input_method = 'keyboard'
+        initial = $initial
+        transitions = $transitions.ToArray()
+        final = $final
+        controls = $controls.ToArray()
+        state_before = $stateBefore
+        state_after = $stateAfter
     }
 }
 
@@ -1601,6 +1808,32 @@ function Complete-VmAutomatedKeyboardEvent {
     throw 'Keyboard action did not return foreground ownership to the candidate workbench.'
 }
 
+function Get-VmAutomatedAppearance {
+    param(
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Window,
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSession
+    )
+
+    Assert-AutomationBinding -Element $Window -Process $Process `
+        -ExpectedSession $ExpectedSession -Label 'raw appearance menu' -RequireWindowHandle
+    $handle = [IntPtr]$Window.Current.NativeWindowHandle
+    $menu = @(
+        foreach ($command in @(0x9010, 0x9011, 0x9012)) {
+            [ordered]@{
+                command_id = [int]$command
+                checked = [bool][DarkReNamerVmAcceptanceNative]::IsMenuCommandChecked($handle, [uint32]$command)
+            }
+        }
+    )
+    [ordered]@{
+        hwnd = [long]$handle
+        pid = [int]$Process.Id
+        session_id = [int]$Process.SessionId
+        menu_checked = $menu
+    }
+}
+
 function New-VmAutomatedLayoutRun {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -1646,8 +1879,13 @@ function New-VmAutomatedLayoutRun {
         $focusObservation.root_hwnd -ne $mainHandle) {
         throw 'Raw layout control or focus ownership differs from the candidate workbench.'
     }
+    $focusReachability = Invoke-VmAutomatedFocusReachability `
+        -Application $Application -List $Grid.element -FixtureRoot $FixtureRoot `
+        -ExpectedSession $ExpectedSession -TimeoutSeconds $TimeoutSeconds
     $Application.process.Refresh()
     [ordered]@{
+        raw_appearance = Get-VmAutomatedAppearance -Window $Application.main `
+            -Process $Application.process -ExpectedSession $ExpectedSession
         raw_environment = Get-VmAutomatedEnvironment `
             -Process $Application.process `
             -WindowHandle ([IntPtr]$Application.main.Current.NativeWindowHandle) `
@@ -1668,6 +1906,7 @@ function New-VmAutomatedLayoutRun {
         layout_observations = [ordered]@{
             controls = $controls.ToArray()
             focus = @($focusObservation)
+            focus_reachability = $focusReachability
             screenshots = @()
         }
     }
@@ -5215,7 +5454,9 @@ function Invoke-GuiRegressionAcceptance {
     $executionState = $null
     $runtimeRoot = $null
     $runtimeCleaned = $false
-    $rawRegressionJournalAfter = @()
+    $rawRegressionJournalAfter = $null
+    $rawRegressionJournalObserved = $false
+    $rawRegressionRuntimeRootAfter = $null
     $cursor = $null
     $textOriginal = $null
     $textAcceptance = $null
@@ -5337,6 +5578,7 @@ function Invoke-GuiRegressionAcceptance {
             try {
                 $rawRegressionJournalAfter = @(Get-VmAutomatedJournalInventory `
                     -LocalAppData (Join-Path $runtimeRoot 'localappdata'))
+                $rawRegressionJournalObserved = $true
             }
             catch {
                 $result.status = 'failed'
@@ -5345,6 +5587,7 @@ function Invoke-GuiRegressionAcceptance {
         }
         if ($null -ne $runtimeRoot -and (Test-Path -LiteralPath $runtimeRoot)) {
             try {
+                [void](Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot)
                 Remove-Item -LiteralPath $runtimeRoot -Recurse -Force
                 $runtimeCleaned = -not (Test-Path -LiteralPath $runtimeRoot)
             }
@@ -5442,10 +5685,19 @@ function Invoke-GuiRegressionAcceptance {
         $result.guest_cleanup = $runtimeCleaned
         if ($rawRegression) {
             $ownedAfter = @(Get-VmAutomatedOwnedProcessInventory -Root $resolved.root)
+            try {
+                $rawRegressionRuntimeRootAfter = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
+            }
+            catch {
+                $result.status = 'failed'
+                $result.failure_reason = 'raw_cleanup_observation_failed'
+            }
             $result.raw_cleanup = [ordered]@{
                 owned_processes_after = $ownedAfter
-                runtime_root_after = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
-                journal_after = [ordered]@{ entries = @($rawRegressionJournalAfter) }
+                runtime_root_after = $rawRegressionRuntimeRootAfter
+                journal_after = (New-VmAutomatedJournalCleanupObservation `
+                    -Observed $rawRegressionJournalObserved `
+                    -Entries $rawRegressionJournalAfter)
             }
             if ($ownedAfter.Count -ne 0 -or -not $runtimeCleaned) {
                 $result.status = 'failed'
@@ -5615,6 +5867,7 @@ $rawCandidate = $verified.lane -ceq 'candidate-gui-only'
 $rawCheckpoints = [Collections.Generic.List[object]]::new()
 $keyboardEvents = [Collections.Generic.List[object]]::new()
 $rawControls = [Collections.Generic.List[object]]::new()
+$rawFocusReachability = $null
 $keyboard = [ordered]@{
     status = 'failed'
     reset_name_enabled_after_prefix = $false
@@ -5689,6 +5942,7 @@ if ($verified.lane -ceq 'candidate-gui-only') {
     $result['keyboard_events'] = @()
     $result['process_lifecycle'] = $null
     $result['raw_cleanup'] = $null
+    $result['raw_appearance'] = $null
     $result['layout_observations'] = $null
 }
 else {
@@ -5841,6 +6095,8 @@ try {
             -Process $process `
             -ExpectedSession $ExpectedSessionId
         if ($rawCandidate) {
+            $result.raw_appearance = Get-VmAutomatedAppearance -Window $mainWindow `
+                -Process $process -ExpectedSession $ExpectedSessionId
             $result.raw_environment = Get-VmAutomatedEnvironment `
                 -Process $process `
                 -WindowHandle ([IntPtr]$mainWindow.Current.NativeWindowHandle) `
@@ -6073,6 +6329,11 @@ try {
             -ExpectedSession $ExpectedSessionId `
             -ExpectedName $sourceName `
             -TimeoutSeconds $TimeoutSeconds
+        if ($rawCandidate) {
+            $rawFocusReachability = Invoke-VmAutomatedFocusReachability `
+                -Application $application -List $list -FixtureRoot $fixtureRoot `
+                -ExpectedSession $ExpectedSessionId -TimeoutSeconds $TimeoutSeconds
+        }
 
         $result.failure_reason = 'prefix_keyboard_failed'
         [void](Move-RailFocusToCommand -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '32773')
@@ -6460,6 +6721,7 @@ try {
             $result.layout_observations = [ordered]@{
                 controls = $rawControls.ToArray()
                 focus = @($keyboardEvents | ForEach-Object focused_before)
+                focus_reachability = $rawFocusReachability
                 screenshots = $captures.ToArray()
             }
         }
@@ -6590,6 +6852,9 @@ finally {
         $result.failure_reason = 'desktop_lock_release_failed'
         $_ | Out-String | Add-Content -LiteralPath $diagnosticPath -Encoding UTF8
     }
+    $rawJournalAfter = $null
+    $rawJournalObserved = $false
+    $rawRuntimeRootAfter = $null
     try {
         if (-not $lifecycle.process_terminated) {
             throw 'The owned application process is still running; runtime evidence was retained.'
@@ -6601,31 +6866,20 @@ finally {
             @(Get-VmAutomatedJournalInventory -LocalAppData (Join-Path $runtimeRoot 'localappdata'))
         }
         else { @() })
+        $rawJournalObserved = $rawCandidate
         if (Test-Path -LiteralPath $runtimeRoot) {
-            $runtimeItem = Get-Item -LiteralPath $runtimeRoot -Force
-            if (($runtimeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                throw 'Acceptance runtime root became a reparse point.'
-            }
-            $pending = [Collections.Generic.Stack[string]]::new()
-            $pending.Push($runtimeRoot)
-            while ($pending.Count -gt 0) {
-                $directory = $pending.Pop()
-                foreach ($item in Get-ChildItem -LiteralPath $directory -Force) {
-                    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                        throw 'Acceptance runtime contains a reparse point; evidence was retained.'
-                    }
-                    if ($item.PSIsContainer) { $pending.Push($item.FullName) }
-                }
-            }
+            [void](Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot)
             Remove-Item -LiteralPath $runtimeRoot -Recurse -Force
         }
         $runtimeCleanup = -not (Test-Path -LiteralPath $runtimeRoot)
         if ($rawCandidate) {
             $ownedAfter = @(Get-VmAutomatedOwnedProcessInventory -Root $verified.root)
+            $rawRuntimeRootAfter = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
             $result.raw_cleanup = [ordered]@{
                 owned_processes_after = $ownedAfter
-                runtime_root_after = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
-                journal_after = [ordered]@{ entries = @($rawJournalAfter) }
+                runtime_root_after = $rawRuntimeRootAfter
+                journal_after = (New-VmAutomatedJournalCleanupObservation `
+                    -Observed $rawJournalObserved -Entries $rawJournalAfter)
             }
             if ($ownedAfter.Count -ne 0 -or -not $runtimeCleanup) {
                 throw 'Current-DPI raw cleanup retained owned state.'
@@ -6636,10 +6890,17 @@ finally {
         $result.status = 'failed'
         $result.failure_reason = 'runtime_cleanup_failed'
         if ($rawCandidate) {
+            try {
+                $rawRuntimeRootAfter = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
+            }
+            catch {
+                $rawRuntimeRootAfter = $null
+            }
             $result.raw_cleanup = [ordered]@{
                 owned_processes_after = @(Get-VmAutomatedOwnedProcessInventory -Root $verified.root)
-                runtime_root_after = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
-                journal_after = [ordered]@{ entries = @() }
+                runtime_root_after = $rawRuntimeRootAfter
+                journal_after = (New-VmAutomatedJournalCleanupObservation `
+                    -Observed $rawJournalObserved -Entries $rawJournalAfter)
             }
         }
     }

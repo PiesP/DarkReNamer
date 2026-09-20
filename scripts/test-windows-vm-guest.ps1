@@ -367,13 +367,56 @@ try {
         'Get-VmAutomatedJournalInventory',
         'Get-VmAutomatedCheckpoint',
         'Get-VmAutomatedOwnedProcessInventory',
-        'Get-VmAutomatedRuntimeRootObservation'
+        'Get-VmAutomatedRuntimeRootObservation',
+        'New-VmAutomatedJournalCleanupObservation'
     )) {
         if ($null -eq (Get-Command $helper -CommandType Function -ErrorAction SilentlyContinue)) {
             throw "The shared VM-Automated helper $helper is unavailable after dot-sourcing."
         }
     }
+    $observedJournal = New-VmAutomatedJournalCleanupObservation `
+        -Observed $true `
+        -Entries @([ordered]@{ name = 'runtime.lock'; kind = 'file'; bytes = [long]0 })
+    if ($null -eq $observedJournal -or
+        @($observedJournal.entries).Count -ne 1 -or
+        $observedJournal.entries[0].name -cne 'runtime.lock' -or
+        $null -ne (New-VmAutomatedJournalCleanupObservation -Observed $false -Entries @())) {
+        throw 'Cleanup journal evidence must distinguish an observed inventory from an unobserved one.'
+    }
+    $runtimeObservationRoot = Join-Path $valid.root 'runtime-observation'
+    [void](New-Item -ItemType Directory -Path $runtimeObservationRoot)
+    [IO.File]::WriteAllText((Join-Path $runtimeObservationRoot 'first.txt'), 'first')
+    [IO.File]::WriteAllText((Join-Path $runtimeObservationRoot 'second.txt'), 'second')
+    $runtimeObservation = Get-VmAutomatedRuntimeRootObservation `
+        -Root $runtimeObservationRoot `
+        -MaximumEntries 2
+    if (-not $runtimeObservation.exists -or @($runtimeObservation.entries).Count -ne 2) {
+        throw 'The bounded runtime inventory did not enumerate its complete ordinary tree.'
+    }
+    [IO.File]::WriteAllText((Join-Path $runtimeObservationRoot 'third.txt'), 'third')
+    Assert-Fails {
+        Get-VmAutomatedRuntimeRootObservation -Root $runtimeObservationRoot -MaximumEntries 2
+    } 'entry count exceeds its bound'
+    $reparseTarget = Join-Path $valid.root 'runtime-reparse-target'
+    [void](New-Item -ItemType Directory -Path $reparseTarget)
+    $reparsePath = Join-Path $runtimeObservationRoot 'linked'
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        & "$env:SystemRoot\System32\cmd.exe" /d /c mklink /J $reparsePath $reparseTarget | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Could not create the runtime-observation junction fixture.' }
+    }
+    else {
+        [void](New-Item -ItemType SymbolicLink -Path $reparsePath -Target $reparseTarget)
+    }
+    Assert-Fails {
+        Get-VmAutomatedRuntimeRootObservation -Root $runtimeObservationRoot -MaximumEntries 8
+    } 'contains a reparse point'
     $runnerText = [IO.File]::ReadAllText($runner)
+    if ($runnerText.IndexOf(
+        'journal_after = [ordered]@{ entries = @() }',
+        [StringComparison]::Ordinal
+    ) -ge 0) {
+        throw 'Candidate cleanup must not serialize an unobserved journal as an empty inventory.'
+    }
     foreach ($requiredRawSource in @(
         'GetFileInformationByHandleEx(',
         'information.VolumeSerialNumber.ToString("x16")',

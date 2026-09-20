@@ -51,6 +51,9 @@ python3 scripts/test-vm-automated-binding.py
 python3 scripts/test-vm-automated-recovery.py
 python3 scripts/test-vm-automated-platform.py
 python3 scripts/test-vm-automated-campaign.py
+python3 scripts/test-vm-automated-recovery-profile.py
+python3 scripts/test-vm-automated-verifier.py
+python3 scripts/test-vm-automated-campaign-runner.py
 ```
 
 ## Linux cross-build and visual diagnostics

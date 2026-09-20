@@ -532,6 +532,12 @@ try {
         throw 'The acceptance script must use Windows PowerShell 5.1-compatible integer type names.'
     }
     $acceptanceText = [IO.File]::ReadAllText($acceptance)
+    if ($acceptanceText.IndexOf(
+        'journal_after = [ordered]@{ entries = @() }',
+        [StringComparison]::Ordinal
+    ) -ge 0) {
+        throw 'UI cleanup must not serialize an unobserved journal as an empty inventory.'
+    }
     $mixedTreeAssignments = @($acceptanceAst.FindAll({
         param($ast)
         $ast -is [Management.Automation.Language.AssignmentStatementAst] -and
@@ -721,9 +727,126 @@ try {
         '$result.raw_layout_runs = @($scenario.raw_layout_runs)'
         '$result.raw_text_scale = [ordered]@{'
         'active_winrt_percent = [int]$observations.scenario.environment.text_scale_factor_percent'
+        'function Get-VmAutomatedAppearance'
+        '$result.raw_appearance = Get-VmAutomatedAppearance'
+        'raw_appearance = Get-VmAutomatedAppearance'
+        'function New-VmAutomatedFocusReachabilityControl'
+        'function Invoke-VmAutomatedFocusReachability'
+        'focus_reachability = $focusReachability'
+        'focus_reachability = $rawFocusReachability'
+        "& `$step 'tab' 0x09"
+        "& `$step 'down' 0x28"
+        'Get-VmAutomatedFixtureInventory -Root $FixtureRoot'
+        'Get-VmAutomatedJournalInventory -LocalAppData $LocalAppData'
     )) {
         if ($acceptanceText.IndexOf($requiredRawObservation, [StringComparison]::Ordinal) -lt 0) {
             throw "The candidate UI raw observation contract is missing '$requiredRawObservation'."
+        }
+    }
+    $regressionCleanupValidation = $acceptanceText.IndexOf(
+        '[void](Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot)',
+        [StringComparison]::Ordinal
+    )
+    $regressionCleanupDelete = $acceptanceText.IndexOf(
+        'Remove-Item -LiteralPath $runtimeRoot -Recurse -Force',
+        $regressionCleanupValidation + 1,
+        [StringComparison]::Ordinal
+    )
+    if ($regressionCleanupValidation -lt 0 -or
+        $regressionCleanupDelete -le $regressionCleanupValidation) {
+        throw 'GUI regression cleanup must validate the bounded ordinary runtime tree before deletion.'
+    }
+    if ([regex]::Matches(
+        $acceptanceText,
+        [regex]::Escape('[void](Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot)')
+    ).Count -ne 2) {
+        throw 'Regression and current-DPI cleanup must both validate their runtime tree before deletion.'
+    }
+    $appearanceFunctions = @($acceptanceAst.FindAll({
+        param($ast)
+        $ast -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $ast.Name -ceq 'Get-VmAutomatedAppearance'
+    }, $true))
+    if ($appearanceFunctions.Count -ne 1) {
+        throw 'The acceptance script must define one Get-VmAutomatedAppearance helper.'
+    }
+    $appearanceDefinition = $appearanceFunctions[0].Extent.Text
+    foreach ($requiredAppearanceSource in @(
+        'Assert-AutomationBinding',
+        '-RequireWindowHandle',
+        '0x9010',
+        '0x9011',
+        '0x9012',
+        'menu_checked = $menu'
+    )) {
+        if ($appearanceDefinition.IndexOf($requiredAppearanceSource, [StringComparison]::Ordinal) -lt 0) {
+            throw "Raw appearance observation is missing '$requiredAppearanceSource'."
+        }
+    }
+    $focusControlFunctions = @($acceptanceAst.FindAll({
+        param($ast)
+        $ast -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $ast.Name -ceq 'New-VmAutomatedFocusReachabilityControl'
+    }, $true))
+    if ($focusControlFunctions.Count -ne 1) {
+        throw 'The acceptance script must define one focus reachability control classifier.'
+    }
+    . ([scriptblock]::Create($focusControlFunctions[0].Extent.Text))
+    $focusObservation = [ordered]@{
+        automation_id = '32772'
+        control_type = 'ControlType.Button'
+        visible = $true
+        enabled = $true
+        keyboard_focusable = $false
+        bounds = [ordered]@{ left = 1; top = 2; right = 3; bottom = 4 }
+        pid = 20
+        session_id = 3
+        root_hwnd = 40
+    }
+    $focusControl = New-VmAutomatedFocusReachabilityControl `
+        -Observation $focusObservation -Rail left -RailGroup 1
+    $expectedFocusKeys = @(
+        'automation_id','control_type','visible','enabled','keyboard_focusable','bounds',
+        'pid','session_id','root_hwnd','rail','rail_group','expected_reachable','exclusion_reason'
+    )
+    if (-not $focusControl.expected_reachable -or
+        $null -ne $focusControl.exclusion_reason -or
+        $focusControl.keyboard_focusable -or
+        $focusControl.rail_group -ne 1 -or
+        @($focusControl.Keys).Count -ne $expectedFocusKeys.Count -or
+        @(Compare-Object -CaseSensitive @($focusControl.Keys) $expectedFocusKeys -SyncWindow 0).Count -ne 0) {
+        throw 'Roving-tab-stop rail commands must remain required when initially non-focusable.'
+    }
+    $focusObservation.enabled = $false
+    $disabledFocusControl = New-VmAutomatedFocusReachabilityControl `
+        -Observation $focusObservation -Rail right -RailGroup 2
+    if ($disabledFocusControl.expected_reachable -or
+        $disabledFocusControl.exclusion_reason -cne 'disabled') {
+        throw 'Disabled rail commands must be explicitly excluded from focus reachability.'
+    }
+    $focusObservation.visible = $false
+    Assert-Fails {
+        New-VmAutomatedFocusReachabilityControl `
+            -Observation $focusObservation -Rail right -RailGroup 2
+    } 'is not visible'
+    $focusReachabilityFunctions = @($acceptanceAst.FindAll({
+        param($ast)
+        $ast -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $ast.Name -ceq 'Invoke-VmAutomatedFocusReachability'
+    }, $true))
+    if ($focusReachabilityFunctions.Count -ne 1) {
+        throw 'The acceptance script must define one bounded focus reachability traversal.'
+    }
+    $focusReachabilitySource = $focusReachabilityFunctions[0].Extent.Text
+    foreach ($requiredFocusSource in @(
+        'transition count exceeds its bound',
+        'sequence = [int]$transitions.Count + 1',
+        "foreach (`$scope in @('list', 'left', 'right'))",
+        'Raw keyboard focus cycled before visiting every enabled',
+        'Raw keyboard focus traversal changed the fixture or journal state.'
+    )) {
+        if ($focusReachabilitySource.IndexOf($requiredFocusSource, [StringComparison]::Ordinal) -lt 0) {
+            throw "Raw focus reachability is missing '$requiredFocusSource'."
         }
     }
     if (($acceptanceText | Select-String -Pattern "failure_reason = 'desktop_lock_release_failed'" -AllMatches).Matches.Count -ne 3) {
