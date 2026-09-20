@@ -1218,6 +1218,10 @@ public static class DarkReNamerVmAcceptanceNative {
     public static void KeyDown(ushort virtualKey) { Send(virtualKey, 0, 0); }
     public static void KeyUp(ushort virtualKey) { Send(virtualKey, 0, 2); }
     public static void Tap(ushort virtualKey) { KeyDown(virtualKey); KeyUp(virtualKey); }
+    public static void TapExtended(ushort virtualKey) {
+        Send(virtualKey, 0, 1);
+        Send(virtualKey, 0, 3);
+    }
 
     public static void TypeUnicode(string value) {
         foreach (char unit in value) {
@@ -3194,13 +3198,19 @@ function Send-AcceptanceChord {
         [Parameter(Mandatory)][int] $ExpectedSession,
         [Parameter(Mandatory)][uint16] $Modifier,
         [Parameter(Mandatory)][uint16] $VirtualKey,
-        [Parameter(Mandatory)][string] $Label
+        [Parameter(Mandatory)][string] $Label,
+        [switch] $ExtendedKey
     )
 
     [void](Get-FocusedAcceptanceElement -Process $Process -ExpectedSession $ExpectedSession -Label $Label)
     try {
         [DarkReNamerVmAcceptanceNative]::KeyDown($Modifier)
-        [DarkReNamerVmAcceptanceNative]::Tap($VirtualKey)
+        if ($ExtendedKey) {
+            [DarkReNamerVmAcceptanceNative]::TapExtended($VirtualKey)
+        }
+        else {
+            [DarkReNamerVmAcceptanceNative]::Tap($VirtualKey)
+        }
     }
     finally {
         [DarkReNamerVmAcceptanceNative]::KeyUp($Modifier)
@@ -3214,14 +3224,20 @@ function Send-AcceptanceTwoModifierChord {
         [Parameter(Mandatory)][uint16] $Modifier,
         [Parameter(Mandatory)][uint16] $SecondModifier,
         [Parameter(Mandatory)][uint16] $VirtualKey,
-        [Parameter(Mandatory)][string] $Label
+        [Parameter(Mandatory)][string] $Label,
+        [switch] $ExtendedKey
     )
 
     [void](Get-FocusedAcceptanceElement -Process $Process -ExpectedSession $ExpectedSession -Label $Label)
     try {
         [DarkReNamerVmAcceptanceNative]::KeyDown($Modifier)
         [DarkReNamerVmAcceptanceNative]::KeyDown($SecondModifier)
-        [DarkReNamerVmAcceptanceNative]::Tap($VirtualKey)
+        if ($ExtendedKey) {
+            [DarkReNamerVmAcceptanceNative]::TapExtended($VirtualKey)
+        }
+        else {
+            [DarkReNamerVmAcceptanceNative]::Tap($VirtualKey)
+        }
     }
     finally {
         [DarkReNamerVmAcceptanceNative]::KeyUp($SecondModifier)
@@ -4104,8 +4120,8 @@ function Copy-GuiRegressionDocument {
         if ([long]$focused.Current.NativeWindowHandle -ne $editHandle) {
             throw "$Label did not focus the exact read-only edit before selection."
         }
-        Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 -VirtualKey 0x24 -Label "$Label selection start"
-        Send-AcceptanceTwoModifierChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 -SecondModifier 0x10 -VirtualKey 0x23 -Label "$Label select to end"
+        Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 -VirtualKey 0x24 -Label "$Label selection start" -ExtendedKey
+        Send-AcceptanceTwoModifierChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 -SecondModifier 0x10 -VirtualKey 0x23 -Label "$Label select to end" -ExtendedKey
         $textObject = $null
         if (-not $Edit.TryGetCurrentPattern([Windows.Automation.TextPattern]::Pattern, [ref]$textObject)) {
             throw "$Label read-only edit no longer exposes TextPattern."
@@ -4633,7 +4649,7 @@ function Inspect-ObserverDiagnostic {
         $result.copy_selection = Copy-GuiRegressionDocument -Mode selection -Application $Application -Edit $details.edit -ExpectedText $details.evidence.value_text -SessionId $SessionId -WaitSeconds $WaitSeconds -Label "$Prefix native edit selection copy"
         $result.copy_all_mnemonic = Copy-GuiRegressionDocument -Mode mnemonic -Application $Application -ExpectedText $details.evidence.value_text -SessionId $SessionId -WaitSeconds $WaitSeconds -Label "$Prefix explicit copy all"
         $details.edit.SetFocus()
-        Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 -VirtualKey 0x23 -Label "$Prefix Ctrl+End"
+        Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 -VirtualKey 0x23 -Label "$Prefix Ctrl+End" -ExtendedKey
         Start-Sleep -Milliseconds 150
         $visible = Get-ObserverVisibleText -TextPattern $details.text_pattern
         $ending = '파일 시스템 검사와 실행 확인은 변경 적용 시 별도로 수행합니다.'
@@ -5514,7 +5530,7 @@ function Invoke-ObserverContextConfirmation {
     [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $detailsWindow -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-full-details.png') -Label 'context full details'))
     Assert-AutomationBinding -Element $details.edit -Process $Application.process -ExpectedSession $SessionId -Label 'context full-details edit before end scroll'
     $details.edit.SetFocus()
-    Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 -VirtualKey 0x23 -Label 'context full-details Ctrl+End'
+    Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 -VirtualKey 0x23 -Label 'context full-details Ctrl+End' -ExtendedKey
     Start-Sleep -Milliseconds 150
     $visibleEnd = Get-ObserverVisibleText -TextPattern $details.text_pattern
     $expectedEnding = (Normalize-ObserverText $ExpectedFullText).Split("`n")[-1]

@@ -1628,6 +1628,7 @@ try {
         'ReadClipboardSnapshot',
         'ReadOrInitializeEmptyClipboardSnapshot',
         'ClearClipboardIfOwned',
+        'TapExtended',
         'SetHighContrastColors',
         'ReadNativeMenuTree',
         'ReadHighlightedNativeMenuItems',
@@ -1635,6 +1636,25 @@ try {
     )) {
         if ($null -eq [DarkReNamerVmAcceptanceNative].GetMethod($method)) {
             throw "The acceptance native probe is missing $method."
+        }
+    }
+    foreach ($chordName in @('Send-AcceptanceChord', 'Send-AcceptanceTwoModifierChord')) {
+        $chordFunction = @($acceptanceAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq $chordName
+        }, $true))
+        if ($chordFunction.Count -ne 1 -or
+            $chordFunction[0].Extent.Text.IndexOf(
+                '[switch] $ExtendedKey', [StringComparison]::Ordinal
+            ) -lt 0 -or
+            $chordFunction[0].Extent.Text.IndexOf(
+                '::TapExtended($VirtualKey)', [StringComparison]::Ordinal
+            ) -lt 0 -or
+            $chordFunction[0].Extent.Text.IndexOf(
+                '::Tap($VirtualKey)', [StringComparison]::Ordinal
+            ) -lt 0) {
+            throw "$chordName does not distinguish extended navigation keys from ordinary keys."
         }
     }
     $clipboardInitializerStart = $acceptanceText.IndexOf(
@@ -1691,6 +1711,40 @@ try {
             [StringComparison]::Ordinal
         ) -ge 0) {
         throw 'GUI document copy must use only the guarded native empty Clipboard initializer.'
+    }
+    $clipboardCopyText = $clipboardCopyFunction[0].Extent.Text
+    foreach ($extendedChord in @(
+        '-Modifier 0x11 -VirtualKey 0x24 -Label "$Label selection start" -ExtendedKey',
+        '-SecondModifier 0x10 -VirtualKey 0x23 -Label "$Label select to end" -ExtendedKey'
+    )) {
+        if ($clipboardCopyText.IndexOf($extendedChord, [StringComparison]::Ordinal) -lt 0) {
+            throw "GUI document selection does not use an extended navigation key: $extendedChord"
+        }
+    }
+    foreach ($detailsScroll in @(
+        '-VirtualKey 0x23 -Label "$Prefix Ctrl+End" -ExtendedKey',
+        "-VirtualKey 0x23 -Label 'context full-details Ctrl+End' -ExtendedKey"
+    )) {
+        if ($acceptanceText.IndexOf($detailsScroll, [StringComparison]::Ordinal) -lt 0) {
+            throw "Read-only details scrolling does not use an extended End key: $detailsScroll"
+        }
+    }
+    if ($clipboardCopyText.IndexOf(
+            '-VirtualKey 0x43 -Label "$Label Ctrl+C" -ExtendedKey',
+            [StringComparison]::Ordinal
+        ) -ge 0) {
+        throw 'GUI document copy incorrectly marks the letter C as an extended key.'
+    }
+    $nativeTapExtended = $acceptanceText.IndexOf(
+        'public static void TapExtended(ushort virtualKey)',
+        [StringComparison]::Ordinal
+    )
+    if ($nativeTapExtended -lt 0 -or
+        $acceptanceText.IndexOf('Send(virtualKey, 0, 1);', $nativeTapExtended,
+            [StringComparison]::Ordinal) -lt 0 -or
+        $acceptanceText.IndexOf('Send(virtualKey, 0, 3);', $nativeTapExtended,
+            [StringComparison]::Ordinal) -lt 0) {
+        throw 'Extended navigation input does not emit KEYEVENTF_EXTENDEDKEY on key down and key up.'
     }
     $initializerClassifier = [DarkReNamerVmAcceptanceNative].GetMethod(
         'RequiresEmptyClipboardInitialization',
