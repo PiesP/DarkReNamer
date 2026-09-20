@@ -1,4 +1,4 @@
-name: Diagnose private VM ingress access
+name: Diagnose hosted private VM evidence pipeline
 
 on:
   workflow_dispatch:
@@ -40,100 +40,296 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
-  group: vm-acceptance-${{ inputs.ingress_asset_id }}
+  group: vm-private-ingress-diagnostic-577104129
   cancel-in-progress: false
 
 jobs:
-  contents-read:
-    outputs:
-      release_access: ${{ steps.probe.outputs.release_access }}
+  diagnostic:
     if: github.actor == 'PiesP' && github.ref == 'refs/heads/codex/vm-private-ingress-access-probe'
+    name: diagnostic-only/private-evidence-pipeline
     runs-on: windows-2025
-    timeout-minutes: 5
-    permissions:
-      actions: read
-      contents: read
-    steps:
-      - name: Diagnose metadata GET access only
-        id: probe
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $endpoints = [ordered]@{
-            repository = 'repos/PiesP/DarkReNamer'
-            release = 'repos/PiesP/DarkReNamer/releases/392487867'
-            asset = 'repos/PiesP/DarkReNamer/releases/assets/577104129'
-          }
-          foreach ($entry in $endpoints.GetEnumerator()) {
-            $stem = Join-Path $env:RUNNER_TEMP ('ingress-access-' + [guid]::NewGuid().ToString('N'))
-            $outputFile = $stem + '.json'
-            $errorFile = $stem + '.txt'
-            try {
-              & gh api $entry.Value 1> $outputFile 2> $errorFile
-              $code = $LASTEXITCODE
-              if ($entry.Key -eq "release") { "release_access=$((($code -eq 0).ToString()).ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append }
-              $httpStatus = $null
-              if ($code -ne 0) {
-                $text = Get-Content -LiteralPath $errorFile -Raw
-                $match = [regex]::Match($text, 'HTTP (\d{3})')
-                if ($match.Success) { $httpStatus = [int]$match.Groups[1].Value }
-              }
-              [ordered]@{ diagnostic_only = $true; endpoint = $entry.Key; accessible = ($code -eq 0); http_status = $httpStatus } | ConvertTo-Json -Compress
-            }
-            finally {
-              foreach ($file in @($outputFile, $errorFile)) {
-                if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force }
-              }
-            }
-          }
-          exit 0
-  contents-write:
-    needs: contents-read
-    if: github.actor == 'PiesP' && github.ref == 'refs/heads/codex/vm-private-ingress-access-probe' && needs.contents-read.outputs.release_access == 'false'
-    runs-on: windows-2025
-    timeout-minutes: 5
+    timeout-minutes: 30
     permissions:
       actions: read
       contents: write
+    env:
+      CANDIDATE_RUN_ID: '35517996477'
+      CANDIDATE_RUN_ATTEMPT: '1'
+      CANDIDATE_ARTIFACT_ID: '10607068734'
+      CANDIDATE_SOURCE_SHA: af8ee00a6f4930b38447b700002704ededd2163e
+      EXPECTED_EXE_SHA256: b63b759e6644ee217bfb10ca300ce19dfc52b0cf0b9a49b3cc918608854c9c5a
+      EXPECTED_HANDOFF_SHA256: e2ac008e30357a12199c236e0e4f1c9b568ebd474b0cb831df4ac02893cb6dc2
+      INGRESS_RELEASE_ID: '392487867'
+      INGRESS_ASSET_ID: '577104129'
+      INGRESS_ARCHIVE_SHA256: 30bf10b2d3f060d51a019986b5e4850a4c8dc6688d950bedfebc6ede327a277f
+      INGRESS_ARCHIVE_SIZE: '151683236'
     steps:
-      - name: Diagnose metadata GET access only
-        id: probe
+      - name: Checkout exact trusted validator source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: af8ee00a6f4930b38447b700002704ededd2163e
+          path: trusted-source
+          persist-credentials: false
+
+      - name: Initialize owned diagnostic scratch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          try {
+            $runnerRoot = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\', '/')
+            $root = Join-Path $runnerRoot "darkrenamer-vm-private-ingress-diagnostic-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+            if ([IO.Path]::GetDirectoryName($root).TrimEnd('\', '/') -cne $runnerRoot -or
+                [IO.Path]::GetFileName($root) -cnotmatch '^darkrenamer-vm-private-ingress-diagnostic-[1-9][0-9]*-[1-9][0-9]*$' -or
+                (Test-Path -LiteralPath $root)) {
+              throw 'invalid'
+            }
+            [void](New-Item -ItemType Directory -Path $root)
+            [IO.File]::WriteAllText(
+              (Join-Path $root '.diagnostic-owner'),
+              "diagnostic-only:$env:GITHUB_RUN_ID:$env:GITHUB_RUN_ATTEMPT",
+              [Text.UTF8Encoding]::new($false)
+            )
+          }
+          catch {
+            Write-Error 'diagnostic_only phase=scratch_initialization type=validation_failure'
+            exit 1
+          }
+
+      - name: Download exact immutable candidate artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: 10607068734
+          github-token: ${{ github.token }}
+          repository: PiesP/DarkReNamer
+          run-id: 35517996477
+          path: ${{ runner.temp }}/darkrenamer-vm-private-ingress-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}/candidate
+
+      - name: Validate acquisition and strict raw campaign on Windows
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
-          $endpoints = [ordered]@{
-            repository = 'repos/PiesP/DarkReNamer'
-            release = 'repos/PiesP/DarkReNamer/releases/392487867'
-            asset = 'repos/PiesP/DarkReNamer/releases/assets/577104129'
+          $ProgressPreference = 'SilentlyContinue'
+          $phase = 'trusted_source'
+          $failure = $null
+          $runnerRoot = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\', '/')
+          $root = Join-Path $runnerRoot "darkrenamer-vm-private-ingress-diagnostic-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $expectedOwner = "diagnostic-only:$env:GITHUB_RUN_ID:$env:GITHUB_RUN_ATTEMPT"
+
+          function Remove-DiagnosticScratch {
+            $item = Get-Item -LiteralPath $root -Force
+            if ($item.Parent.FullName.TrimEnd('\', '/') -cne $runnerRoot -or
+                $item.Name -cnotmatch '^darkrenamer-vm-private-ingress-diagnostic-[1-9][0-9]*-[1-9][0-9]*$' -or
+                ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw 'invalid'
+            }
+            $ownerPath = Join-Path $item.FullName '.diagnostic-owner'
+            $owner = Get-Item -LiteralPath $ownerPath -Force
+            if ($owner.PSIsContainer -or
+                ($owner.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                [IO.File]::ReadAllText($owner.FullName) -cne $expectedOwner) {
+              throw 'invalid'
+            }
+            foreach ($entry in @(Get-ChildItem -LiteralPath $item.FullName -Force -Recurse)) {
+              if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'invalid'
+              }
+            }
+            Remove-Item -LiteralPath $item.FullName -Recurse -Force
+            if (Test-Path -LiteralPath $item.FullName) { throw 'invalid' }
           }
-          foreach ($entry in $endpoints.GetEnumerator()) {
-            $stem = Join-Path $env:RUNNER_TEMP ('ingress-access-' + [guid]::NewGuid().ToString('N'))
-            $outputFile = $stem + '.json'
-            $errorFile = $stem + '.txt'
+
+          try {
+            $trusted = (Get-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'trusted-source') -Force).FullName
+            $candidate = Join-Path $root 'candidate'
+            $source = (& git -C $trusted rev-parse HEAD 2>$null).Trim()
+            $dirty = @(& git -C $trusted status --porcelain=v1 2>$null)
+            if ($LASTEXITCODE -ne 0 -or $source -cne $env:CANDIDATE_SOURCE_SHA -or $dirty.Count -ne 0) {
+              throw 'invalid'
+            }
+
+            $phase = 'candidate_identity'
+            . (Join-Path $trusted 'scripts/run-vm-automated-hosted.ps1') -LibraryOnly
+            $repositoryPath = Join-Path $root 'repository.json'
+            $releasePath = Join-Path $root 'release.json'
+            $assetPath = Join-Path $root 'asset.json'
+            $candidateRunPath = Join-Path $root 'candidate-run.json'
+            $candidateArtifactPath = Join-Path $root 'candidate-artifact.json'
+            Invoke-HostedGhJson `
+              -Endpoint "repos/PiesP/DarkReNamer/actions/runs/$env:CANDIDATE_RUN_ID/attempts/$env:CANDIDATE_RUN_ATTEMPT" `
+              -Destination $candidateRunPath
+            Invoke-HostedGhJson `
+              -Endpoint "repos/PiesP/DarkReNamer/actions/artifacts/$env:CANDIDATE_ARTIFACT_ID" `
+              -Destination $candidateArtifactPath
+            & (Join-Path $trusted 'scripts/validate-release-candidate-metadata.ps1') `
+              -RunMetadataPath $candidateRunPath `
+              -ArtifactMetadataPath $candidateArtifactPath `
+              -ExpectedRunId $env:CANDIDATE_RUN_ID `
+              -ExpectedRunAttempt $env:CANDIDATE_RUN_ATTEMPT `
+              -ExpectedArtifactId $env:CANDIDATE_ARTIFACT_ID `
+              -ExpectedSourceSha $env:CANDIDATE_SOURCE_SHA `
+              -ExpectedArtifactName "DarkReNamer-dry-run-$env:CANDIDATE_RUN_ID-$env:CANDIDATE_RUN_ATTEMPT-windows" `
+              *> $null
+            if ($LASTEXITCODE -ne 0) { throw 'invalid' }
+
+            $phase = 'candidate_handoff'
+            $handoff = @(& (Join-Path $trusted 'scripts/validate-release-handoff.ps1') `
+              -SourceRoot $trusted `
+              -HandoffRoot $candidate `
+              -PassThru `
+              2>$null 3>$null 4>$null 5>$null 6>$null)
+            $actualExe = (Get-FileHash -LiteralPath (Join-Path $candidate 'DarkReNamer.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+            $actualHandoff = (Get-FileHash -LiteralPath (Join-Path $candidate 'release-handoff.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($handoff.Count -ne 1 -or
+                $handoff[0].source_sha -cne $env:CANDIDATE_SOURCE_SHA -or
+                [string]$handoff[0].workflow_run -cne $env:CANDIDATE_RUN_ID -or
+                $handoff[0].executable.sha256 -cne $env:EXPECTED_EXE_SHA256 -or
+                $actualExe -cne $env:EXPECTED_EXE_SHA256 -or
+                $actualHandoff -cne $env:EXPECTED_HANDOFF_SHA256) {
+              throw 'invalid'
+            }
+
+            $phase = 'private_ingress_acquisition'
+            Invoke-HostedGhJson -Endpoint 'repos/PiesP/DarkReNamer' -Destination $repositoryPath
+            Invoke-HostedGhJson `
+              -Endpoint "repos/PiesP/DarkReNamer/releases/$env:INGRESS_RELEASE_ID" `
+              -Destination $releasePath
+            Invoke-HostedGhJson `
+              -Endpoint "repos/PiesP/DarkReNamer/releases/assets/$env:INGRESS_ASSET_ID" `
+              -Destination $assetPath
+            $archivePath = Join-Path $root 'raw-evidence.zip'
+            $headers = @{
+              Accept = 'application/octet-stream'
+              Authorization = "Bearer $env:GH_TOKEN"
+              'X-GitHub-Api-Version' = '2022-11-28'
+              'User-Agent' = 'DarkReNamer-private-ingress-diagnostic'
+            }
+            Invoke-WebRequest `
+              -Uri "https://api.github.com/repos/PiesP/DarkReNamer/releases/assets/$env:INGRESS_ASSET_ID" `
+              -Headers $headers `
+              -OutFile $archivePath `
+              -MaximumRedirection 5 `
+              -ErrorAction Stop | Out-Null
+
+            $phase = 'private_ingress_identity'
+            & python (Join-Path $trusted 'scripts/validate-vm-automated-authority.py') ingress `
+              --repository-metadata $repositoryPath `
+              --repository PiesP/DarkReNamer `
+              --source-sha $env:CANDIDATE_SOURCE_SHA `
+              --release-metadata $releasePath `
+              --asset-metadata $assetPath `
+              --release-id $env:INGRESS_RELEASE_ID `
+              --asset-id $env:INGRESS_ASSET_ID `
+              --asset-sha256 $env:INGRESS_ARCHIVE_SHA256 `
+              --asset-size $env:INGRESS_ARCHIVE_SIZE `
+              --archive $archivePath `
+              *> $null
+            if ($LASTEXITCODE -ne 0) { throw 'invalid' }
+
+            $phase = 'strict_raw_campaign'
+            $pythonScript = @'
+          import hashlib
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          from vm_automated_binding import Candidate, trusted_component_hashes
+          from vm_automated_evidence import FileReference, open_indexed_evidence_archive, parse_bounded_json_bytes
+          from vm_automated_verifier import EvidenceReader, verify_complete_campaign
+
+          trusted = Path(sys.argv[1]).resolve(strict=True)
+          archive = Path(sys.argv[2]).resolve(strict=True)
+          private_parent = Path(sys.argv[3]).resolve(strict=True)
+          source_sha, run_id, run_attempt, artifact_id = sys.argv[4:8]
+          exe_sha, handoff_sha, archive_sha, archive_size_text = sys.argv[8:12]
+          components = trusted_component_hashes(trusted, source_sha)
+          profile_path = "config/vm-automated-v1.json"
+          entry = subprocess.check_output(
+              ["git", "ls-tree", source_sha, "--", profile_path], cwd=trusted, text=True
+          ).strip()
+          if not entry.startswith("100644 blob ") or not entry.endswith("\t" + profile_path):
+              raise RuntimeError("invalid")
+          profile_bytes = subprocess.check_output(["git", "show", source_sha + ":" + profile_path], cwd=trusted)
+          profile = parse_bounded_json_bytes(profile_bytes, label="trusted profile")
+          candidate = Candidate(source_sha, run_id, run_attempt, artifact_id, exe_sha, handoff_sha)
+          with open_indexed_evidence_archive(
+              archive,
+              FileReference(archive_sha, int(archive_size_text)),
+              private_parent,
+          ) as extracted:
+              verified = verify_complete_campaign(
+                  EvidenceReader(extracted),
+                  profile=profile,
+                  profile_sha256=hashlib.sha256(profile_bytes).hexdigest(),
+                  candidate=candidate,
+                  component_hashes=components,
+              )
+          if set(verified) != {"backend_sha256", "profile_evidence_sha256"}:
+              raise RuntimeError("invalid")
+          '@
+            $env:PYTHONPATH = Join-Path $trusted 'scripts'
+            & python -c $pythonScript `
+              $trusted $archivePath $root `
+              $env:CANDIDATE_SOURCE_SHA $env:CANDIDATE_RUN_ID $env:CANDIDATE_RUN_ATTEMPT `
+              $env:CANDIDATE_ARTIFACT_ID $env:EXPECTED_EXE_SHA256 $env:EXPECTED_HANDOFF_SHA256 `
+              $env:INGRESS_ARCHIVE_SHA256 $env:INGRESS_ARCHIVE_SIZE `
+              *> $null
+            if ($LASTEXITCODE -ne 0) { throw 'invalid' }
+          }
+          catch {
+            $failure = "diagnostic_only phase=$phase type=validation_failure"
+          }
+          finally {
             try {
-              & gh api $entry.Value 1> $outputFile 2> $errorFile
-              $code = $LASTEXITCODE
-              if ($entry.Key -eq "release") { "release_access=$((($code -eq 0).ToString()).ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append }
-              $httpStatus = $null
-              if ($code -ne 0) {
-                $text = Get-Content -LiteralPath $errorFile -Raw
-                $match = [regex]::Match($text, 'HTTP (\d{3})')
-                if ($match.Success) { $httpStatus = [int]$match.Groups[1].Value }
-              }
-              [ordered]@{ diagnostic_only = $true; endpoint = $entry.Key; accessible = ($code -eq 0); http_status = $httpStatus } | ConvertTo-Json -Compress
+              if (Test-Path -LiteralPath $root) { Remove-DiagnosticScratch }
             }
-            finally {
-              foreach ($file in @($outputFile, $errorFile)) {
-                if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force }
-              }
+            catch {
+              $failure = 'diagnostic_only phase=scratch_cleanup type=validation_failure'
             }
           }
-          exit 0
+          if ($null -ne $failure) {
+            Write-Error $failure
+            exit 1
+          }
+
+      - name: Ensure diagnostic scratch is absent
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          try {
+            $runnerRoot = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\', '/')
+            $root = Join-Path $runnerRoot "darkrenamer-vm-private-ingress-diagnostic-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+            if ([IO.Path]::GetDirectoryName($root).TrimEnd('\', '/') -cne $runnerRoot -or
+                [IO.Path]::GetFileName($root) -cnotmatch '^darkrenamer-vm-private-ingress-diagnostic-[1-9][0-9]*-[1-9][0-9]*$') {
+              throw 'invalid'
+            }
+            if (Test-Path -LiteralPath $root) {
+              $item = Get-Item -LiteralPath $root -Force
+              $ownerPath = Join-Path $item.FullName '.diagnostic-owner'
+              if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                  -not (Test-Path -LiteralPath $ownerPath -PathType Leaf) -or
+                  [IO.File]::ReadAllText($ownerPath) -cne "diagnostic-only:$env:GITHUB_RUN_ID:$env:GITHUB_RUN_ATTEMPT") {
+                throw 'invalid'
+              }
+              foreach ($entry in @(Get-ChildItem -LiteralPath $item.FullName -Force -Recurse)) {
+                if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'invalid' }
+              }
+              Remove-Item -LiteralPath $item.FullName -Recurse -Force
+            }
+            if (Test-Path -LiteralPath $root) { throw 'invalid' }
+          }
+          catch {
+            Write-Error 'diagnostic_only phase=scratch_cleanup type=validation_failure'
+            exit 1
+          }
+
+      - name: Report diagnostic success
+        shell: pwsh
+        run: |
+          Write-Host 'diagnostic_only result=success checks=candidate_handoff,private_ingress,strict_raw_campaign cleanup=complete'
