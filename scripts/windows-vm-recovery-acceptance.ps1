@@ -11,6 +11,9 @@ param(
     [string] $OutputRoot,
 
     [Parameter(Mandatory)]
+    [string] $PrivateEvidenceRoot,
+
+    [Parameter(Mandatory)]
     [ValidatePattern('^[0-9a-f]{64}$')]
     [string] $ExpectedScriptSha256,
 
@@ -32,6 +35,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:AcceptanceProcessSequence = 0
 
 function Assert-RecoveryBootstrapUniqueJson {
     param(
@@ -275,6 +279,8 @@ function Get-AcceptanceIntentCandidateClassification {
         [Parameter(Mandatory)][bool] $StartupUnchanged,
         [Parameter(Mandatory)][bool] $CancelPreserved,
         [Parameter(Mandatory)][bool] $CancelUnchanged,
+        [Parameter(Mandatory)][bool] $CancelLocked,
+        [Parameter(Mandatory)][bool] $RelaunchPreserved,
         [Parameter(Mandatory)][bool] $CandidateRemoved,
         [Parameter(Mandatory)][bool] $ActiveAbsent,
         [Parameter(Mandatory)][bool] $DiscardUnlocked,
@@ -291,8 +297,11 @@ function Get-AcceptanceIntentCandidateClassification {
     if (-not $StartupLocked -or -not $StartupUnchanged) {
         throw 'Intent-only startup did not remain recovery-locked and mutation-free.'
     }
-    if (-not $CancelPreserved -or -not $CancelUnchanged) {
+    if (-not $CancelPreserved -or -not $CancelUnchanged -or -not $CancelLocked) {
         throw 'The cancelled discard did not preserve the candidate and fixture state.'
+    }
+    if (-not $RelaunchPreserved) {
+        throw 'The verification relaunch did not preserve the exact candidate.'
     }
     if (-not $CandidateRemoved -or -not $ActiveAbsent -or -not $DiscardUnlocked -or
         -not $DiscardUnchanged) {
@@ -579,6 +588,96 @@ function Write-AcceptanceUtf8Json {
     [IO.File]::WriteAllText($Path, $json, [Text.UTF8Encoding]::new($false))
 }
 
+function Write-AcceptanceNewBytes {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][byte[]] $Bytes
+    )
+
+    $stream = [IO.FileStream]::new(
+        $Path,
+        [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::None,
+        4096,
+        [IO.FileOptions]::WriteThrough
+    )
+    try {
+        $stream.Write($Bytes, 0, $Bytes.Length)
+        $stream.Flush($true)
+    }
+    finally {
+        $stream.Dispose()
+    }
+    $readback = [IO.File]::ReadAllBytes($Path)
+    if (-not (Test-AcceptanceBytesEqual -Expected $Bytes -Actual $readback)) {
+        throw 'A no-overwrite evidence write failed exact byte readback.'
+    }
+}
+
+function Write-AcceptanceNewUtf8Json {
+    param([Parameter(Mandatory)][string] $Path, [Parameter(Mandatory)][object] $Value)
+
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes(
+        ($Value | ConvertTo-Json -Depth 12)
+    )
+    Write-AcceptanceNewBytes -Path $Path -Bytes $bytes
+}
+
+function New-AcceptancePrivateEvidenceDirectory {
+    param([Parameter(Mandatory)][string] $Parent)
+
+    if (-not [IO.Path]::IsPathRooted($Parent) -or
+        -not (Test-Path -LiteralPath $Parent -PathType Container)) {
+        throw 'PrivateEvidenceRoot must be an existing absolute directory.'
+    }
+    $item = Get-Item -LiteralPath $Parent -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'PrivateEvidenceRoot must not be a reparse point.'
+    }
+    $path = Join-Path $item.FullName ('recovery-raw-' + [Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $path)
+    $path
+}
+
+function New-AcceptancePrivateReference {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][string] $PrivateRoot,
+        [Parameter(Mandatory)][string] $Boundary
+    )
+
+    if ($Boundary -cnotmatch '^[a-z0-9][a-z0-9-]{0,63}$') {
+        throw 'A private evidence reference has an invalid boundary token.'
+    }
+    $rootItem = Get-Item -LiteralPath $PrivateRoot -Force
+    if (-not $rootItem.PSIsContainer -or
+        ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The private evidence reference root is not one ordinary directory.'
+    }
+    $root = $rootItem.FullName.TrimEnd([char[]]'\/') +
+        [IO.Path]::DirectorySeparatorChar
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $item.Length -gt 64MB -or
+        -not $item.FullName.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'A private evidence reference escaped its owned ordinary-file root.'
+    }
+    $relative = $item.FullName.Substring($root.Length).Replace('\', '/')
+    $segments = @($relative -split '[\/]')
+    if ($segments.Count -lt 1 -or @($segments | Where-Object {
+            $_ -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+        }).Count -ne 0) {
+        throw 'A private evidence reference has an unsafe leaf.'
+    }
+    [pscustomobject][ordered]@{
+        bytes = [int64]$item.Length
+        sha256 = Get-LowerSha256 -Path $item.FullName
+        boundary = $Boundary
+    }
+}
+
 function Write-AcceptanceUtf16Paths {
     param([Parameter(Mandatory)][string] $Path, [Parameter(Mandatory)][string[]] $Paths)
 
@@ -600,19 +699,66 @@ function Write-AcceptanceUtf16Paths {
 function Get-AcceptanceFixtureState {
     param([Parameter(Mandatory)][string] $FixtureRoot)
 
+    $root = Get-Item -LiteralPath $FixtureRoot -Force
+    if (-not $root.PSIsContainer -or
+        ($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The acceptance fixture root is not one ordinary directory.'
+    }
+    $items = @(Get-ChildItem -LiteralPath $root.FullName -Force | Sort-Object Name)
+    if ($items.Count -lt 1 -or $items.Count -gt 10001) {
+        throw 'The acceptance fixture inventory is outside the bounded file count.'
+    }
     $rows = [Collections.Generic.List[object]]::new()
-    foreach ($file in @(Get-ChildItem -LiteralPath $FixtureRoot -File -Force | Sort-Object Name)) {
-        if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw 'The acceptance fixture contains a reparse point.'
+    $folded = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $totalBytes = [long]0
+    foreach ($file in $items) {
+        if ($file.PSIsContainer -or
+            ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $file.Length -gt 64MB) {
+            throw 'The acceptance fixture contains a non-file, reparse, or oversized entry.'
         }
-        $identity = [DarkReNamerVmNative]::GetFileIdentity($file.FullName)
-        $rows.Add([pscustomobject]@{
+        $totalBytes += [long]$file.Length
+        if ($totalBytes -gt 512MB) {
+            throw 'The acceptance fixture exceeds the aggregate byte limit.'
+        }
+        if (-not $folded.Add($file.Name)) {
+            throw 'The acceptance fixture contains a case-insensitive name collision.'
+        }
+        $rows.Add([pscustomobject][ordered]@{
             name = $file.Name
+            kind = 'file'
+            bytes = [int64]$file.Length
             content_sha256 = Get-LowerSha256 -Path $file.FullName
-            identity = $identity
+            file_identity = Get-FullFileIdentity -Path $file.FullName
         })
     }
     $rows.ToArray()
+}
+
+function Test-AcceptanceIdentityEqual {
+    param(
+        [Parameter(Mandatory)][object] $Expected,
+        [Parameter(Mandatory)][object] $Actual
+    )
+
+    $Expected.volume_serial -is [string] -and
+        $Actual.volume_serial -is [string] -and
+        $Expected.file_id -is [string] -and
+        $Actual.file_id -is [string] -and
+        $Expected.volume_serial -ceq $Actual.volume_serial -and
+        $Expected.file_id -ceq $Actual.file_id
+}
+
+function Get-AcceptanceIdentityKey {
+    param([Parameter(Mandatory)][object] $Identity)
+
+    if ($Identity.volume_serial -isnot [string] -or
+        $Identity.volume_serial -cnotmatch '^[0-9a-f]{16}$' -or
+        $Identity.file_id -isnot [string] -or
+        $Identity.file_id -cnotmatch '^[0-9a-f]{32}$') {
+        throw 'The observed FILE_ID_INFO value is malformed or truncated.'
+    }
+    "$($Identity.volume_serial):$($Identity.file_id)"
 }
 
 function Assert-AcceptanceStatesEqual {
@@ -627,8 +773,12 @@ function Assert-AcceptanceStatesEqual {
     }
     for ($index = 0; $index -lt $Expected.Count; $index++) {
         if ($Expected[$index].name -cne $Actual[$index].name -or
+            $Expected[$index].kind -cne $Actual[$index].kind -or
+            $Expected[$index].bytes -ne $Actual[$index].bytes -or
             $Expected[$index].content_sha256 -cne $Actual[$index].content_sha256 -or
-            $Expected[$index].identity -cne $Actual[$index].identity) {
+            -not (Test-AcceptanceIdentityEqual `
+                -Expected $Expected[$index].file_identity `
+                -Actual $Actual[$index].file_identity)) {
             throw "$Label changed a leaf, content digest, or NTFS identity."
         }
     }
@@ -647,20 +797,24 @@ function Assert-AcceptancePartialState {
     }
     $initialByIdentity = @{}
     foreach ($row in $Initial) {
-        if ($initialByIdentity.ContainsKey($row.identity)) {
+        $identityKey = Get-AcceptanceIdentityKey -Identity $row.file_identity
+        if ($initialByIdentity.ContainsKey($identityKey)) {
             throw 'The initial fixture contains a duplicate NTFS identity.'
         }
-        $initialByIdentity[$row.identity] = $row
+        $initialByIdentity[$identityKey] = $row
     }
     $original = 0
     $renamed = 0
     foreach ($row in $Partial) {
-        if (-not $initialByIdentity.ContainsKey($row.identity)) {
+        $identityKey = Get-AcceptanceIdentityKey -Identity $row.file_identity
+        if (-not $initialByIdentity.ContainsKey($identityKey)) {
             throw 'The partial state contains an unknown NTFS identity.'
         }
-        $before = $initialByIdentity[$row.identity]
-        if ($row.content_sha256 -cne $before.content_sha256) {
-            throw 'The partial state changed file contents.'
+        $before = $initialByIdentity[$identityKey]
+        if ($row.kind -cne 'file' -or
+            $row.bytes -ne $before.bytes -or
+            $row.content_sha256 -cne $before.content_sha256) {
+            throw 'The partial state changed file kind, size, or contents.'
         }
         if ($before.name -ceq 'sentinel.bin') {
             if ($row.name -cne $before.name) {
@@ -688,10 +842,311 @@ function Get-AcceptanceStateDigest {
     param([Parameter(Mandatory)][object[]] $State)
 
     $parts = foreach ($row in $State) {
-        $identityDigest = Get-LowerTextSha256 -Value $row.identity
-        "$($row.name)|$($row.content_sha256)|$identityDigest"
+        $identityKey = Get-AcceptanceIdentityKey -Identity $row.file_identity
+        "$($row.name)|$($row.kind)|$($row.bytes)|$($row.content_sha256)|$identityKey"
     }
     Get-LowerTextSha256 -Value ([string]::Join("`n", $parts))
+}
+
+function Write-AcceptanceStateEvidence {
+    param(
+        [Parameter(Mandatory)][string] $PrivateRoot,
+        [Parameter(Mandatory)][string] $Leaf,
+        [Parameter(Mandatory)][string] $Boundary,
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][object] $RootIdentity,
+        [Parameter(Mandatory)][object[]] $State
+    )
+
+    if ($Leaf -cnotmatch '^[a-z0-9][a-z0-9-]{0,63}$') {
+        throw 'The state-evidence leaf is invalid.'
+    }
+    $path = Join-Path $PrivateRoot ($Leaf + '.json')
+    Write-AcceptanceNewUtf8Json -Path $path -Value ([ordered]@{
+        schema_version = 1
+        boundary = $Boundary
+        fixture_root = $FixtureRoot
+        root_identity = $RootIdentity
+        fixture_entries = @($State)
+    })
+    New-AcceptancePrivateReference -Path $path -PrivateRoot $PrivateRoot -Boundary $Boundary
+}
+
+function Write-AcceptanceObservedStateEvidence {
+    param(
+        [Parameter(Mandatory)][string] $PrivateRoot,
+        [Parameter(Mandatory)][string] $Leaf,
+        [Parameter(Mandatory)][string] $Boundary,
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][object] $ExpectedRootIdentity,
+        [Parameter(Mandatory)][object[]] $State
+    )
+
+    $actualRootIdentity = Get-FullFileIdentity -Path $FixtureRoot
+    [void](Get-AcceptanceIdentityKey -Identity $ExpectedRootIdentity)
+    [void](Get-AcceptanceIdentityKey -Identity $actualRootIdentity)
+    if (-not (Test-AcceptanceIdentityEqual `
+            -Expected $ExpectedRootIdentity `
+            -Actual $actualRootIdentity)) {
+        throw "The fixture-root FILE_ID_INFO changed at $Boundary."
+    }
+    Write-AcceptanceStateEvidence `
+        -PrivateRoot $PrivateRoot `
+        -Leaf $Leaf `
+        -Boundary $Boundary `
+        -FixtureRoot $FixtureRoot `
+        -RootIdentity $actualRootIdentity `
+        -State $State
+}
+
+function Write-AcceptanceJournalBytesEvidence {
+    param(
+        [Parameter(Mandatory)][string] $PrivateRoot,
+        [Parameter(Mandatory)][string] $Leaf,
+        [Parameter(Mandatory)][string] $Boundary,
+        [Parameter(Mandatory)][byte[]] $Bytes
+    )
+
+    if ($Leaf -cnotmatch '^[a-z0-9][a-z0-9-]{0,63}\.drj$' -or
+        $Bytes.Length -lt 24 -or $Bytes.Length -gt 64MB) {
+        throw 'The raw journal evidence leaf or byte length is invalid.'
+    }
+    $path = Join-Path $PrivateRoot $Leaf
+    Write-AcceptanceNewBytes -Path $path -Bytes $Bytes
+    New-AcceptancePrivateReference -Path $path -PrivateRoot $PrivateRoot -Boundary $Boundary
+}
+
+function Write-AcceptanceJournalInventoryEvidence {
+    param(
+        [Parameter(Mandatory)][string] $PrivateRoot,
+        [Parameter(Mandatory)][string] $Leaf,
+        [Parameter(Mandatory)][string] $Boundary,
+        [Parameter(Mandatory)][string] $JournalRoot
+    )
+
+    if ($Leaf -cnotmatch '^[a-z0-9][a-z0-9-]{0,63}$') {
+        throw 'The journal-inventory leaf is invalid.'
+    }
+    $rows = [Collections.Generic.List[object]]::new()
+    if (Test-Path -LiteralPath $JournalRoot) {
+        $root = Get-Item -LiteralPath $JournalRoot -Force
+        if (-not $root.PSIsContainer -or
+            ($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The isolated journal root is not one ordinary directory.'
+        }
+        $items = @(Get-ChildItem -LiteralPath $root.FullName -Force | Sort-Object Name)
+        if ($items.Count -gt 3) {
+            throw 'The isolated journal inventory exceeds its bounded entry count.'
+        }
+        foreach ($item in $items) {
+            if ($item.PSIsContainer -or
+                ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                $item.Name -cnotin @('active.drj', 'candidate.drj', 'runtime.lock') -or
+                $item.Length -gt 64MB) {
+                throw 'The isolated journal root contains an unexpected entry.'
+            }
+            $rows.Add([pscustomobject][ordered]@{
+                name = $item.Name
+                kind = 'file'
+                bytes = [int64]$item.Length
+                sha256 = Get-LowerSha256 -Path $item.FullName
+            })
+        }
+    }
+    $path = Join-Path $PrivateRoot ($Leaf + '.json')
+    Write-AcceptanceNewUtf8Json -Path $path -Value ([ordered]@{
+        schema_version = 1
+        boundary = $Boundary
+        journal_entries = $rows.ToArray()
+    })
+    New-AcceptancePrivateReference -Path $path -PrivateRoot $PrivateRoot -Boundary $Boundary
+}
+
+function Assert-AcceptanceControlTargetRecord {
+    param([Parameter(Mandatory)][object] $Target)
+
+    $names = @($Target.PSObject.Properties.Name)
+    if ($Target -is [Collections.IDictionary]) {
+        $names = @($Target.Keys)
+    }
+    $expectedNames = @(
+        'pid', 'session_id', 'hwnd', 'root_hwnd', 'class', 'control_id',
+        'automation_id', 'control_type', 'enabled', 'visible', 'focused'
+    )
+    if ($names.Count -ne $expectedNames.Count -or
+        @($expectedNames | Where-Object { $names -cnotcontains $_ }).Count -ne 0 -or
+        [int]$Target.pid -le 0 -or [int]$Target.session_id -lt 0 -or
+        [int64]$Target.hwnd -le 0 -or [int64]$Target.root_hwnd -le 0 -or
+        [string]$Target.class -cne 'Button' -or [int]$Target.control_id -le 0 -or
+        [string]::IsNullOrWhiteSpace([string]$Target.automation_id) -or
+        [string]$Target.control_type -cne 'ControlType.Button' -or
+        $Target.enabled -isnot [bool] -or $Target.visible -isnot [bool] -or
+        $Target.focused -isnot [bool]) {
+        throw 'A control target observation is incomplete or invalid.'
+    }
+}
+
+function Copy-AcceptanceControlTargetRecord {
+    param([Parameter(Mandatory)][object] $Target)
+
+    Assert-AcceptanceControlTargetRecord -Target $Target
+    [ordered]@{
+        pid = [int]$Target.pid
+        session_id = [int]$Target.session_id
+        hwnd = [int64]$Target.hwnd
+        root_hwnd = [int64]$Target.root_hwnd
+        class = [string]$Target.class
+        control_id = [int]$Target.control_id
+        automation_id = [string]$Target.automation_id
+        control_type = [string]$Target.control_type
+        enabled = [bool]$Target.enabled
+        visible = [bool]$Target.visible
+        focused = [bool]$Target.focused
+    }
+}
+
+function Write-AcceptanceActionEvidence {
+    param(
+        [Parameter(Mandatory)][string] $PrivateRoot,
+        [Parameter(Mandatory)][string] $Leaf,
+        [Parameter(Mandatory)][string] $Boundary,
+        [Parameter(Mandatory)][string] $Phase,
+        [Parameter(Mandatory)][string] $Action,
+        [Parameter(Mandatory)][object] $Target,
+        [Parameter(Mandatory)][string] $ObservedUtcTicks,
+        [Parameter(Mandatory)][string] $CompletedUtcTicks
+    )
+
+    foreach ($token in @($Leaf, $Boundary, $Phase, $Action)) {
+        if ($token -cnotmatch '^[a-z0-9][a-z0-9-]{0,63}$') {
+            throw 'An action-evidence token is invalid.'
+        }
+    }
+    if ($ObservedUtcTicks -cnotmatch '^[0-9]+$' -or
+        $CompletedUtcTicks -cnotmatch '^[0-9]+$' -or
+        [decimal]$CompletedUtcTicks -lt [decimal]$ObservedUtcTicks) {
+        throw 'Action evidence has an invalid timestamp order.'
+    }
+    $path = Join-Path $PrivateRoot ($Leaf + '.json')
+    Write-AcceptanceNewUtf8Json -Path $path -Value ([ordered]@{
+        schema_version = 1
+        boundary = $Boundary
+        phase = $Phase
+        action = $Action
+        dispatch_method = 'uia-invoke'
+        target = Copy-AcceptanceControlTargetRecord -Target $Target
+        observed_utc_ticks = $ObservedUtcTicks
+        completed_utc_ticks = $CompletedUtcTicks
+    })
+    New-AcceptancePrivateReference -Path $path -PrivateRoot $PrivateRoot -Boundary $Boundary
+}
+
+function Write-AcceptanceLockStateEvidence {
+    param(
+        [Parameter(Mandatory)][string] $PrivateRoot,
+        [Parameter(Mandatory)][string] $Leaf,
+        [Parameter(Mandatory)][string] $Boundary,
+        [Parameter(Mandatory)][string] $Phase,
+        [Parameter(Mandatory)][int] $CandidatePid,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][object] $Apply,
+        [Parameter(Mandatory)][object] $AddFiles,
+        [Parameter(Mandatory)][string] $ObservedUtcTicks
+    )
+
+    foreach ($token in @($Leaf, $Boundary, $Phase)) {
+        if ($token -cnotmatch '^[a-z0-9][a-z0-9-]{0,63}$') {
+            throw 'A recovery-lock evidence token is invalid.'
+        }
+    }
+    if ($CandidatePid -le 0 -or $SessionId -lt 0 -or $ObservedUtcTicks -cnotmatch '^[0-9]+$') {
+        throw 'Recovery-lock evidence has an invalid process or timestamp.'
+    }
+    $applyRecord = Copy-AcceptanceControlTargetRecord -Target $Apply
+    $addFilesRecord = Copy-AcceptanceControlTargetRecord -Target $AddFiles
+    foreach ($control in @($applyRecord, $addFilesRecord)) {
+        if ($control.pid -ne $CandidatePid -or $control.session_id -ne $SessionId -or
+            $control.root_hwnd -ne $applyRecord.root_hwnd) {
+            throw 'Recovery-lock controls are not bound to one process, session, and root.'
+        }
+    }
+    $path = Join-Path $PrivateRoot ($Leaf + '.json')
+    Write-AcceptanceNewUtf8Json -Path $path -Value ([ordered]@{
+        schema_version = 1
+        boundary = $Boundary
+        phase = $Phase
+        observed_utc_ticks = $ObservedUtcTicks
+        process = [ordered]@{
+            pid = $CandidatePid
+            session_id = $SessionId
+        }
+        controls = [ordered]@{
+            apply = $applyRecord
+            add_files = $addFilesRecord
+        }
+    })
+    New-AcceptancePrivateReference -Path $path -PrivateRoot $PrivateRoot -Boundary $Boundary
+}
+
+function Write-AcceptancePrivateIndex {
+    param([Parameter(Mandatory)][string] $PrivateRoot)
+
+    $root = Get-Item -LiteralPath $PrivateRoot -Force
+    if (-not $root.PSIsContainer -or
+        ($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The private evidence root is not one owned ordinary directory.'
+    }
+    $rows = [Collections.Generic.List[object]]::new()
+    $relativeNames = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($directory in @(Get-ChildItem -LiteralPath $root.FullName -Directory -Recurse -Force)) {
+        if (($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The private evidence root contains a reparse directory.'
+        }
+    }
+    $prefix = $root.FullName.TrimEnd([char[]]'\/') + [IO.Path]::DirectorySeparatorChar
+    [int64]$aggregateBytes = 0
+    foreach ($item in @(Get-ChildItem -LiteralPath $root.FullName -File -Recurse -Force | Sort-Object FullName)) {
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $item.Name -ceq 'private-index.json' -or
+            $item.Length -gt 64MB) {
+            throw 'The private evidence root contains an unsafe, reserved, or oversized file.'
+        }
+        $relative = $item.FullName.Substring($prefix.Length).Replace('\', '/')
+        $segments = @($relative -split '[\/]')
+        if ($segments.Count -lt 1 -or @($segments | Where-Object {
+                $_ -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+            }).Count -ne 0) {
+            throw 'The private evidence root contains an unsafe relative path.'
+        }
+        if (-not $relativeNames.Add($relative)) {
+            throw 'The private evidence root contains a case-insensitive path collision.'
+        }
+        $rows.Add([ordered]@{
+            file = $relative
+            bytes = [int64]$item.Length
+            sha256 = Get-LowerSha256 -Path $item.FullName
+        })
+        $aggregateBytes += [int64]$item.Length
+        if ($aggregateBytes -gt 512MB) {
+            throw 'The private evidence root exceeds the aggregate collection bound.'
+        }
+    }
+    if ($rows.Count -eq 0 -or $rows.Count -gt 240) {
+        throw 'The private evidence index is empty or exceeds the controller file bound.'
+    }
+    $path = Join-Path $root.FullName 'private-index.json'
+    Write-AcceptanceNewUtf8Json -Path $path -Value ([ordered]@{
+        schema_version = 1
+        classification = 'private-path-bearing-raw-recovery-evidence'
+        files = $rows.ToArray()
+    })
+    [pscustomobject][ordered]@{
+        bytes = [int64](Get-Item -LiteralPath $path -Force).Length
+        sha256 = Get-LowerSha256 -Path $path
+        file_count = $rows.Count
+    }
 }
 
 function Stop-AndDisposeAcceptanceOwnedProcess {
@@ -773,6 +1228,210 @@ function Start-AcceptanceApplication {
         }
         throw $startupError
     }
+}
+
+function Write-AcceptanceProcessStartEvidence {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][object] $Inputs,
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][string] $PrivateRoot,
+        [Parameter(Mandatory)][string] $Role
+    )
+
+    if ($Role -cnotmatch '^[a-z0-9][a-z0-9-]{0,31}$') {
+        throw 'The process evidence role is invalid.'
+    }
+    $process = $Application.owned.process
+    $process.Refresh()
+    if ($process.HasExited) {
+        throw 'The candidate process exited before its raw start observation.'
+    }
+    $script:AcceptanceProcessSequence++
+    $sequence = $script:AcceptanceProcessSequence
+    $startUtc = $process.StartTime.ToUniversalTime()
+    $environment = Get-VmAutomatedEnvironment `
+        -Process $process `
+        -WindowHandle $process.MainWindowHandle `
+        -FixtureRoot $FixtureRoot
+    $binding = [pscustomobject][ordered]@{
+        sequence = $sequence
+        role = $Role
+        pid = [int]$process.Id
+        session_id = [int]$process.SessionId
+        start_time_utc_ticks = $startUtc.Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
+        executable_path = $process.MainModule.FileName
+        executable_sha256 = Get-LowerSha256 -Path $Inputs.application_path
+    }
+    $observedRootIdentity = Get-FullFileIdentity -Path $FixtureRoot
+    [void](Get-AcceptanceIdentityKey -Identity $observedRootIdentity)
+    [void](Get-AcceptanceIdentityKey -Identity $environment.fixture_volume.root_identity)
+    if (-not (Test-AcceptanceIdentityEqual `
+            -Expected $observedRootIdentity `
+            -Actual $environment.fixture_volume.root_identity)) {
+        throw 'The process environment fixture-root identity does not match FILE_ID_INFO.'
+    }
+    $observedUtcTicks = [DateTime]::UtcNow.Ticks.ToString(
+        [Globalization.CultureInfo]::InvariantCulture
+    )
+    $lifecycle = [pscustomobject][ordered]@{
+        pid = $binding.pid
+        session_id = $binding.session_id
+        start_time_utc_ticks = $binding.start_time_utc_ticks
+        executable_path = $binding.executable_path
+        executable_sha256 = $binding.executable_sha256
+        start_observed = $true
+        exit_observed = $false
+        exit_method = $null
+        exit_code = $null
+    }
+    $path = Join-Path $PrivateRoot ('process-{0:D2}-started.json' -f $sequence)
+    Write-AcceptanceNewUtf8Json -Path $path -Value ([ordered]@{
+        schema_version = 1
+        boundary = 'started'
+        observed_utc_ticks = $observedUtcTicks
+        binding = $binding
+        lifecycle = $lifecycle
+        environment = $environment
+    })
+    $Application | Add-Member -NotePropertyName raw_process_binding -NotePropertyValue $binding -Force
+    $Application | Add-Member -NotePropertyName raw_process_exit_recorded -NotePropertyValue $false -Force
+    $Application | Add-Member -NotePropertyName raw_process_start_reference `
+        -NotePropertyValue (New-AcceptancePrivateReference `
+            -Path $path -PrivateRoot $PrivateRoot -Boundary 'started') -Force
+    $Application.raw_process_start_reference
+}
+
+function Assert-AcceptanceProcessBinding {
+    param([Parameter(Mandatory)][object] $Application)
+
+    $process = $Application.owned.process
+    $binding = $Application.raw_process_binding
+    $process.Refresh()
+    if ($process.Id -ne $binding.pid -or
+        $process.SessionId -ne $binding.session_id -or
+        $process.StartTime.ToUniversalTime().Ticks.ToString(
+            [Globalization.CultureInfo]::InvariantCulture
+        ) -cne $binding.start_time_utc_ticks) {
+        throw 'The candidate process identity changed during raw observation.'
+    }
+}
+
+function Write-AcceptanceProcessExitEvidence {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][string] $PrivateRoot,
+        [Parameter(Mandatory)][ValidateSet('crash-stop', 'normal-exit', 'failure-cleanup')]
+        [string] $Boundary,
+        [Parameter(Mandatory)][ValidateSet('normal-close', 'forced-termination', 'worker-close')]
+        [string] $ExitMethod
+    )
+
+    if ($Application.raw_process_exit_recorded) {
+        throw 'The candidate process exit was already recorded.'
+    }
+    Assert-AcceptanceProcessBinding -Application $Application
+    $process = $Application.owned.process
+    if (-not $process.HasExited) {
+        throw 'The candidate process is still running at an exit-evidence boundary.'
+    }
+    $process.WaitForExit()
+    $observedUtcTicks = [DateTime]::UtcNow.Ticks.ToString(
+        [Globalization.CultureInfo]::InvariantCulture
+    )
+    $sequence = $Application.raw_process_binding.sequence
+    $path = Join-Path $PrivateRoot ('process-{0:D2}-{1}.json' -f $sequence, $Boundary)
+    Write-AcceptanceNewUtf8Json -Path $path -Value ([ordered]@{
+        schema_version = 1
+        boundary = $Boundary
+        observed_utc_ticks = $observedUtcTicks
+        binding = $Application.raw_process_binding
+        lifecycle = [ordered]@{
+            pid = $Application.raw_process_binding.pid
+            session_id = $Application.raw_process_binding.session_id
+            start_time_utc_ticks = $Application.raw_process_binding.start_time_utc_ticks
+            executable_path = $Application.raw_process_binding.executable_path
+            executable_sha256 = $Application.raw_process_binding.executable_sha256
+            start_observed = $true
+            exit_observed = $true
+            exit_method = $ExitMethod
+            exit_code = [int]$process.ExitCode
+        }
+    })
+    $Application.raw_process_exit_recorded = $true
+    New-AcceptancePrivateReference -Path $path -PrivateRoot $PrivateRoot -Boundary $Boundary
+}
+
+function Write-AcceptanceForegroundEvidence {
+    param(
+        [Parameter(Mandatory)][string] $PrivateRoot,
+        [Parameter(Mandatory)][AllowEmptyCollection()]
+        [Collections.Generic.List[object]] $Observations
+    )
+
+    if ($Observations.Count -lt 1 -or $Observations.Count -gt 8) {
+        throw 'Recovery screenshot foreground evidence is missing or unbounded.'
+    }
+    $path = Join-Path $PrivateRoot 'foreground-observations.json'
+    Write-AcceptanceNewUtf8Json -Path $path -Value ([ordered]@{
+        schema_version = 1
+        observations = $Observations.ToArray()
+    })
+    New-AcceptancePrivateReference `
+        -Path $path `
+        -PrivateRoot $PrivateRoot `
+        -Boundary 'screenshot-foreground-observations'
+}
+
+function Write-AcceptanceWorkerPartialWitnessEvidence {
+    param(
+        [Parameter(Mandatory)][string] $PrivateRoot,
+        [Parameter(Mandatory)][string] $Leaf,
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][object] $ExpectedRootIdentity,
+        [Parameter(Mandatory)][object] $Witness
+    )
+
+    if ($Leaf -cnotmatch '^[a-z0-9][a-z0-9-]{0,63}$' -or
+        @($Witness.entries).Count -ne 2 -or
+        $Witness.candidate_pid -le 0 -or
+        $Witness.candidate_session_id -lt 0) {
+        throw 'The worker partial witness is malformed or unbounded.'
+    }
+    $rootIdentity = Get-FullFileIdentity -Path $FixtureRoot
+    [void](Get-AcceptanceIdentityKey -Identity $rootIdentity)
+    if (-not (Test-AcceptanceIdentityEqual `
+            -Expected $ExpectedRootIdentity `
+            -Actual $rootIdentity)) {
+        throw 'The fixture-root identity changed at the worker partial witness.'
+    }
+    $roles = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($entry in @($Witness.entries)) {
+        if ($entry.role -cnotin @('first-destination', 'last-original') -or
+            $entry.name -isnot [string] -or
+            $entry.kind -cne 'file' -or
+            $entry.bytes -lt 0 -or $entry.bytes -gt 64MB -or
+            $entry.content_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+            $entry.observed_utc_ticks -cnotmatch '^[0-9]+$') {
+            throw 'The worker partial witness contains an invalid file observation.'
+        }
+        if (-not $roles.Add($entry.role)) {
+            throw 'The worker partial witness contains a duplicate role.'
+        }
+        [void](Get-AcceptanceIdentityKey -Identity $entry.file_identity)
+    }
+    $path = Join-Path $PrivateRoot ($Leaf + '.json')
+    Write-AcceptanceNewUtf8Json -Path $path -Value ([ordered]@{
+        schema_version = 1
+        boundary = 'worker-partial'
+        candidate_pid = [int]$Witness.candidate_pid
+        candidate_session_id = [int]$Witness.candidate_session_id
+        fixture_root = $FixtureRoot
+        root_identity = $rootIdentity
+        entries = @($Witness.entries)
+    })
+    New-AcceptancePrivateReference `
+        -Path $path -PrivateRoot $PrivateRoot -Boundary 'worker-partial'
 }
 
 function Get-AcceptanceUiDiagnostic {
@@ -1182,12 +1841,20 @@ function Get-AcceptanceActiveWorkerBoundary {
         ($lastItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw 'A worker boundary witness became a reparse point.'
     }
-    $firstIdentity = [DarkReNamerVmNative]::GetFileIdentity($firstItem.FullName)
-    $lastIdentity = [DarkReNamerVmNative]::GetFileIdentity($lastItem.FullName)
+    $firstIdentity = Get-FullFileIdentity -Path $firstItem.FullName
     $firstContent = Get-LowerSha256 -Path $firstItem.FullName
+    $firstObservedTicks = [DateTime]::UtcNow.Ticks.ToString(
+        [Globalization.CultureInfo]::InvariantCulture
+    )
+    $lastIdentity = Get-FullFileIdentity -Path $lastItem.FullName
     $lastContent = Get-LowerSha256 -Path $lastItem.FullName
-    if ($firstIdentity -cne $InitialFirst.identity -or
-        $lastIdentity -cne $InitialLast.identity -or
+    $lastObservedTicks = [DateTime]::UtcNow.Ticks.ToString(
+        [Globalization.CultureInfo]::InvariantCulture
+    )
+    if (-not (Test-AcceptanceIdentityEqual `
+            -Expected $InitialFirst.file_identity -Actual $firstIdentity) -or
+        -not (Test-AcceptanceIdentityEqual `
+            -Expected $InitialLast.file_identity -Actual $lastIdentity) -or
         $firstContent -cne $InitialFirst.content_sha256 -or
         $lastContent -cne $InitialLast.content_sha256) {
         throw 'A worker boundary witness changed content or NTFS identity.'
@@ -1214,8 +1881,34 @@ function Get-AcceptanceActiveWorkerBoundary {
         last_original_name_sha256 = Get-LowerTextSha256 -Value $lastOriginalName
         first_destination_content_sha256 = $firstContent
         last_original_content_sha256 = $lastContent
-        first_destination_identity_sha256 = Get-LowerTextSha256 -Value $firstIdentity
-        last_original_identity_sha256 = Get-LowerTextSha256 -Value $lastIdentity
+        first_destination_identity_sha256 = Get-LowerTextSha256 `
+            -Value (Get-AcceptanceIdentityKey -Identity $firstIdentity)
+        last_original_identity_sha256 = Get-LowerTextSha256 `
+            -Value (Get-AcceptanceIdentityKey -Identity $lastIdentity)
+        partial_witness = [ordered]@{
+            candidate_pid = [int]$process.Id
+            candidate_session_id = [int]$process.SessionId
+            entries = @(
+                [ordered]@{
+                    role = 'first-destination'
+                    name = $firstItem.Name
+                    kind = 'file'
+                    bytes = [int64]$firstItem.Length
+                    content_sha256 = $firstContent
+                    file_identity = $firstIdentity
+                    observed_utc_ticks = $firstObservedTicks
+                },
+                [ordered]@{
+                    role = 'last-original'
+                    name = $lastItem.Name
+                    kind = 'file'
+                    bytes = [int64]$lastItem.Length
+                    content_sha256 = $lastContent
+                    file_identity = $lastIdentity
+                    observed_utc_ticks = $lastObservedTicks
+                }
+            )
+        }
         cancel = $Cancel
     }
 }
@@ -1271,7 +1964,9 @@ function Invoke-AcceptanceRecovery {
         [Parameter(Mandatory)][object] $Application,
         [Parameter(Mandatory)][string] $EvidenceRoot,
         [Parameter(Mandatory)][int] $SessionId,
-        [Parameter(Mandatory)][int] $WaitSeconds
+        [Parameter(Mandatory)][int] $WaitSeconds,
+        [Parameter(Mandatory)][AllowEmptyCollection()]
+        [Collections.Generic.List[object]] $ForegroundObservations
     )
 
     $process = $Application.owned.process
@@ -1287,7 +1982,8 @@ function Invoke-AcceptanceRecovery {
         -ExpectedSession $SessionId `
         -Root $EvidenceRoot `
         -Leaf 'startup-recovery-confirmation.png' `
-        -Label 'startup recovery confirmation'
+        -Label 'startup recovery confirmation' `
+        -ForegroundObservations $ForegroundObservations
     $promptHandle = [IntPtr]$prompt.Current.NativeWindowHandle
     $confirm = Find-UniqueAutomationElement `
         -Root $prompt `
@@ -1301,15 +1997,12 @@ function Invoke-AcceptanceRecovery {
         -RequireWindowHandle
     $invoke = Start-AutomationControlInvoke -Element $confirm -Label 'exact recovery confirmation'
     Wait-WindowClosed -Handle $promptHandle -TimeoutSeconds $WaitSeconds -Label 'startup recovery confirmation'
-    $completed = Wait-UniqueAutomationWindow `
-        -Process $process `
-        -ExpectedSession $SessionId `
+    Dismiss-AcceptanceMessage `
+        -Application $Application `
+        -SessionId $SessionId `
+        -WaitSeconds $WaitSeconds `
         -Name 'DarkReNamer - 복구 완료' `
-        -TimeoutSeconds $WaitSeconds `
         -Label 'recovery completion message'
-    $completed.SetFocus()
-    [void][DarkReNamerVmNative]::SetForegroundWindow([IntPtr]$completed.Current.NativeWindowHandle)
-    [Windows.Forms.SendKeys]::SendWait('{ENTER}')
     Complete-AutomationControlInvoke -State $invoke -TimeoutSeconds $WaitSeconds
     $screenshot
 }
@@ -1318,7 +2011,8 @@ function Dismiss-AcceptanceStartupRecovery {
     param(
         [Parameter(Mandatory)][object] $Application,
         [Parameter(Mandatory)][int] $SessionId,
-        [Parameter(Mandatory)][int] $WaitSeconds
+        [Parameter(Mandatory)][int] $WaitSeconds,
+        [string] $PrivateRoot
     )
 
     $process = $Application.owned.process
@@ -1339,23 +2033,48 @@ function Dismiss-AcceptanceStartupRecovery {
         -Label 'startup recovery cancellation button' `
         -RequireEnabled `
         -RequireWindowHandle
+    $target = $null
+    $observedUtcTicks = $null
+    if (-not [string]::IsNullOrEmpty($PrivateRoot)) {
+        $target = Get-AcceptanceControlTargetObservation `
+            -Application $Application -Root $prompt -Element $cancel `
+            -SessionId $SessionId -ExpectedAutomationId 'CommandButton_2' `
+            -ExpectedControlId 2 -Label 'startup recovery cancellation button'
+        if (-not $target.enabled -or -not $target.visible) {
+            throw 'The startup recovery cancellation target is not enabled and visible.'
+        }
+        $observedUtcTicks = [DateTime]::UtcNow.Ticks.ToString(
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+    }
     Invoke-AutomationControl -Element $cancel -Label 'startup recovery cancellation button'
     Wait-WindowClosed `
         -Handle $promptHandle `
         -TimeoutSeconds $WaitSeconds `
         -Label 'startup recovery cancellation prompt'
+    if ($null -ne $target) {
+        $completedUtcTicks = [DateTime]::UtcNow.Ticks.ToString(
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        Write-AcceptanceActionEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'startup-default-cancel-action' `
+            -Boundary 'startup-default-cancel-action' -Phase 'startup-default-cancel' `
+            -Action 'cancel-startup-recovery' -Target $target `
+            -ObservedUtcTicks $observedUtcTicks -CompletedUtcTicks $completedUtcTicks
+    }
 }
 
 function Invoke-AcceptanceRecoveryExport {
     param(
         [Parameter(Mandatory)][object] $Application,
-        [Parameter(Mandatory)][string] $EvidenceRoot,
+        [Parameter(Mandatory)][string] $PrivateRoot,
         [Parameter(Mandatory)][byte[]] $ExpectedBytes,
+        [Parameter(Mandatory)][object] $SourceActiveJournalReference,
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds
     )
 
-    $exportRoot = New-PrivateDirectory -Parent $EvidenceRoot -Leaf 'recovery-export'
+    $exportRoot = New-PrivateDirectory -Parent $PrivateRoot -Leaf 'recovery-export'
     $invoke = Start-AcceptanceRecoveryMenuInvoke `
         -Application $Application `
         -SessionId $SessionId `
@@ -1416,12 +2135,15 @@ function Invoke-AcceptanceRecoveryExport {
     [pscustomobject]@{
         status = 'passed'
         classification = $classification
-        directory = 'recovery-export'
-        file = 'active.drj.retained'
         bytes = $exportedBytes.Length
         sha256 = Get-LowerSha256 -Path $exportPath
         captured_active_sha256 = Get-AcceptanceBootstrapBytesSha256 -Bytes $ExpectedBytes
         exact_bytes = $true
+        source_active_journal = $SourceActiveJournalReference
+        raw = New-AcceptancePrivateReference `
+            -Path $exportPath `
+            -PrivateRoot $PrivateRoot `
+            -Boundary 'recovery-export'
     }
 }
 
@@ -1440,6 +2162,9 @@ public static class DarkReNamerRecoveryLockNative
     public static extern IntPtr GetParent(IntPtr window);
 
     [DllImport("user32.dll")]
+    public static extern IntPtr GetAncestor(IntPtr window, uint flags);
+
+    [DllImport("user32.dll")]
     public static extern bool IsWindowEnabled(IntPtr window);
 
     [DllImport("user32.dll")]
@@ -1449,11 +2174,91 @@ public static class DarkReNamerRecoveryLockNative
     }
 }
 
+function Get-AcceptanceControlTargetObservation {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Root,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Element,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][string] $ExpectedAutomationId,
+        [Parameter(Mandatory)][int] $ExpectedControlId,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    Initialize-RecoveryLockNative
+    Assert-AcceptanceProcessBinding -Application $Application
+    $process = $Application.owned.process
+    Assert-AutomationBinding `
+        -Element $Root -Process $process -ExpectedSession $SessionId `
+        -Label "$Label root" -RequireWindowHandle
+    Assert-AutomationBinding `
+        -Element $Element -Process $process -ExpectedSession $SessionId `
+        -Label $Label -RequireWindowHandle
+    $handle = [IntPtr]$Element.Current.NativeWindowHandle
+    $expectedRootHandle = [IntPtr]$Root.Current.NativeWindowHandle
+    $rootHandle = [DarkReNamerRecoveryLockNative]::GetAncestor($handle, [uint32]2)
+    if ($handle -eq [IntPtr]::Zero -or $rootHandle -eq [IntPtr]::Zero -or
+        $rootHandle -ne $expectedRootHandle) {
+        throw "$Label is not rooted in the exact owned automation window."
+    }
+    $controlProcessId = [uint32]0
+    [void][DarkReNamerVmNative]::GetWindowThreadProcessId($handle, [ref]$controlProcessId)
+    $rootProcessId = [uint32]0
+    [void][DarkReNamerVmNative]::GetWindowThreadProcessId($rootHandle, [ref]$rootProcessId)
+    if ($controlProcessId -ne [uint32]$process.Id -or
+        $rootProcessId -ne [uint32]$process.Id -or
+        $process.SessionId -ne $SessionId) {
+        throw "$Label is not owned by the bound process and session."
+    }
+    $classText = [Text.StringBuilder]::new(64)
+    if ([DarkReNamerVmNative]::GetClassName($handle, $classText, $classText.Capacity) -le 0 -or
+        $classText.ToString() -cne 'Button') {
+        throw "$Label is not the expected native Button class."
+    }
+    $controlId = [DarkReNamerRecoveryLockNative]::GetDlgCtrlID($handle)
+    $automationId = $Element.Current.AutomationId
+    $controlType = $Element.Current.ControlType.ProgrammaticName
+    if ($controlId -ne $ExpectedControlId -or
+        $automationId -cne $ExpectedAutomationId -or
+        $controlType -cne 'ControlType.Button') {
+        throw "$Label changed native or automation identity."
+    }
+    $focused = $false
+    $focusedElement = [Windows.Automation.AutomationElement]::FocusedElement
+    if ($null -ne $focusedElement) {
+        try {
+            $focused = [IntPtr]$focusedElement.Current.NativeWindowHandle -eq $handle -and
+                $focusedElement.Current.ProcessId -eq $process.Id
+        }
+        catch [Windows.Automation.ElementNotAvailableException] {
+            throw "$Label focus ownership became unavailable during observation."
+        }
+    }
+    [ordered]@{
+        pid = [int]$process.Id
+        session_id = [int]$process.SessionId
+        hwnd = [int64]$handle.ToInt64()
+        root_hwnd = [int64]$rootHandle.ToInt64()
+        class = $classText.ToString()
+        control_id = [int]$controlId
+        automation_id = $automationId
+        control_type = $controlType
+        enabled = [bool][DarkReNamerRecoveryLockNative]::IsWindowEnabled($handle)
+        visible = [bool][DarkReNamerVmNative]::IsWindowVisible($handle)
+        focused = [bool]$focused
+    }
+}
+
 function Assert-AcceptanceRecoveryLockedControls {
     param(
         [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][string] $PrivateRoot,
+        [Parameter(Mandatory)][string] $Leaf,
+        [Parameter(Mandatory)][string] $Boundary,
+        [Parameter(Mandatory)][string] $Phase,
         [Parameter(Mandatory)][int] $SessionId,
-        [Parameter(Mandatory)][int] $WaitSeconds
+        [Parameter(Mandatory)][int] $WaitSeconds,
+        [Parameter(Mandatory)][bool] $ExpectLocked
     )
 
     $apply = Find-UniqueAutomationElement `
@@ -1465,7 +2270,7 @@ function Assert-AcceptanceRecoveryLockedControls {
         -TimeoutSeconds $WaitSeconds `
         -Label 'Apply while Intent-only recovery is locked' `
         -RequireWindowHandle
-    if ($apply.Current.IsEnabled) {
+    if ($ExpectLocked -and $apply.Current.IsEnabled) {
         throw 'Intent-only startup did not disable Apply under recovery lock.'
     }
 
@@ -1498,16 +2303,43 @@ function Assert-AcceptanceRecoveryLockedControls {
     if ([DarkReNamerRecoveryLockNative]::GetDlgCtrlID($addHandle) -ne 32791) {
         throw 'Intent-only recovery Add Files has the wrong native control ID.'
     }
-    if ([DarkReNamerRecoveryLockNative]::IsWindowEnabled($addHandle) -or
-        [DarkReNamerVmNative]::IsWindowVisible($addHandle)) {
+    $addEnabled = [DarkReNamerRecoveryLockNative]::IsWindowEnabled($addHandle)
+    $addVisible = [DarkReNamerVmNative]::IsWindowVisible($addHandle)
+    if ($ExpectLocked -and ($addEnabled -or $addVisible)) {
         throw 'Intent-only startup did not keep Add Files disabled and hidden under recovery lock.'
     }
-    $true
+    if (-not $ExpectLocked -and (-not $addEnabled -or -not $addVisible)) {
+        throw 'Intent-only discard did not restore enabled and visible Add Files.'
+    }
+    $add = [Windows.Automation.AutomationElement]::FromHandle($addHandle)
+    if ($null -eq $add) {
+        throw 'Intent-only recovery Add Files is unavailable through UI Automation.'
+    }
+    $applyTarget = Get-AcceptanceControlTargetObservation `
+        -Application $Application -Root $Application.main -Element $apply `
+        -SessionId $SessionId -ExpectedAutomationId '32771' -ExpectedControlId 32771 `
+        -Label 'Apply recovery-lock observation'
+    $addTarget = Get-AcceptanceControlTargetObservation `
+        -Application $Application -Root $Application.main -Element $add `
+        -SessionId $SessionId -ExpectedAutomationId '32791' -ExpectedControlId 32791 `
+        -Label 'Add Files recovery-lock observation'
+    $observedUtcTicks = [DateTime]::UtcNow.Ticks.ToString(
+        [Globalization.CultureInfo]::InvariantCulture
+    )
+    $reference = Write-AcceptanceLockStateEvidence `
+        -PrivateRoot $PrivateRoot -Leaf $Leaf -Boundary $Boundary -Phase $Phase `
+        -CandidatePid $process.Id -SessionId $SessionId -Apply $applyTarget -AddFiles $addTarget `
+        -ObservedUtcTicks $observedUtcTicks
+    [pscustomobject][ordered]@{
+        locked = [bool]$ExpectLocked
+        reference = $reference
+    }
 }
 
 function Invoke-AcceptanceDiscardChoice {
     param(
         [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][string] $PrivateRoot,
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
         [Parameter(Mandatory)][bool] $Confirm
@@ -1536,6 +2368,23 @@ function Invoke-AcceptanceDiscardChoice {
         -Label $(if ($Confirm) { 'exact candidate discard confirmation' } else { 'candidate discard cancellation' }) `
         -RequireEnabled `
         -RequireWindowHandle
+    $expectedAutomationId = if ($Confirm) { 'CommandLink_1201' } else { 'CommandButton_2' }
+    $expectedControlId = if ($Confirm) { 1201 } else { 2 }
+    $phase = if ($Confirm) { 'intent-discard-confirm' } else { 'intent-discard-cancel' }
+    $action = if ($Confirm) { 'confirm-candidate-discard' } else { 'cancel-candidate-discard' }
+    $boundary = if ($Confirm) { 'intent-discard-confirm-action' } else { 'intent-discard-cancel-action' }
+    $leaf = if ($Confirm) { 'intent-discard-confirm-action' } else { 'intent-discard-cancel-action' }
+    $target = Get-AcceptanceControlTargetObservation `
+        -Application $Application -Root $prompt -Element $button `
+        -SessionId $SessionId -ExpectedAutomationId $expectedAutomationId `
+        -ExpectedControlId $expectedControlId `
+        -Label $(if ($Confirm) { 'exact candidate discard confirmation' } else { 'candidate discard cancellation' })
+    if (-not $target.enabled -or -not $target.visible) {
+        throw 'The Intent-only discard action target is not enabled and visible.'
+    }
+    $observedUtcTicks = [DateTime]::UtcNow.Ticks.ToString(
+        [Globalization.CultureInfo]::InvariantCulture
+    )
     Invoke-AutomationControl `
         -Element $button `
         -Label $(if ($Confirm) { 'exact candidate discard confirmation' } else { 'candidate discard cancellation' })
@@ -1552,14 +2401,24 @@ function Invoke-AcceptanceDiscardChoice {
             -Label 'candidate discard completion message'
     }
     Complete-AutomationControlInvoke -State $invoke -TimeoutSeconds $WaitSeconds
+    $completedUtcTicks = [DateTime]::UtcNow.Ticks.ToString(
+        [Globalization.CultureInfo]::InvariantCulture
+    )
+    Write-AcceptanceActionEvidence `
+        -PrivateRoot $PrivateRoot -Leaf $leaf -Boundary $boundary -Phase $phase `
+        -Action $action -Target $target -ObservedUtcTicks $observedUtcTicks `
+        -CompletedUtcTicks $completedUtcTicks
 }
 
 function Invoke-AcceptanceIntentOnlyCandidateDiscard {
     param(
         [Parameter(Mandatory)][object] $Inputs,
         [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][object] $RootIdentity,
         [Parameter(Mandatory)][object[]] $Initial,
         [Parameter(Mandatory)][byte[]] $IntentBytes,
+        [Parameter(Mandatory)][object] $InterruptedJournalReference,
+        [Parameter(Mandatory)][string] $PrivateRoot,
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds
     )
@@ -1568,15 +2427,43 @@ function Invoke-AcceptanceIntentOnlyCandidateDiscard {
     $journalRoot = Join-Path (Join-Path $env:LOCALAPPDATA 'DarkReNamer') 'journal'
     $candidatePath = Join-Path $journalRoot 'candidate.drj'
     $activePath = Join-Path $journalRoot 'active.drj'
+    if (@(Get-Process -Name 'DarkReNamer' -ErrorAction SilentlyContinue).Count -ne 0) {
+        throw 'Intent-only staging requires the product process to be normally exited.'
+    }
     if ((Test-Path -LiteralPath $candidatePath) -or
         (Test-Path -LiteralPath $activePath)) {
         throw 'Intent-only staging requires a clean isolated journal profile.'
     }
-    [IO.File]::WriteAllBytes($candidatePath, $IntentBytes)
+    $states = [ordered]@{}
+    $journals = [ordered]@{}
+    $lockStates = [ordered]@{}
+    $processes = [Collections.Generic.List[object]]::new()
+    $states.pre_stage = Write-AcceptanceObservedStateEvidence `
+        -PrivateRoot $PrivateRoot -Leaf 'intent-state-pre-stage' -Boundary 'intent-pre-stage' `
+        -FixtureRoot $FixtureRoot -ExpectedRootIdentity $RootIdentity -State $Initial
+    $journals.pre_stage = Write-AcceptanceJournalInventoryEvidence `
+        -PrivateRoot $PrivateRoot -Leaf 'intent-journal-pre-stage' -Boundary 'intent-pre-stage' `
+        -JournalRoot $journalRoot
+    $candidateSource = Write-AcceptanceJournalBytesEvidence `
+        -PrivateRoot $PrivateRoot -Leaf 'intent-authentic-source.drj' `
+        -Boundary 'authentic-first-intent-frame' -Bytes $IntentBytes
+    Write-AcceptanceNewBytes -Path $candidatePath -Bytes $IntentBytes
+    if (-not (Test-AcceptanceBytesEqual `
+            -Expected $IntentBytes `
+            -Actual ([IO.File]::ReadAllBytes($candidatePath)))) {
+        throw 'The staged Intent-only candidate differs from the authentic first frame.'
+    }
     $stagedState = Get-AcceptanceFixtureState -FixtureRoot $FixtureRoot
     Assert-AcceptanceStatesEqual -Expected $Initial -Actual $stagedState -Label 'Intent-only staging fixture'
+    $states.staged = Write-AcceptanceObservedStateEvidence `
+        -PrivateRoot $PrivateRoot -Leaf 'intent-state-staged' -Boundary 'intent-staged' `
+        -FixtureRoot $FixtureRoot -ExpectedRootIdentity $RootIdentity -State $stagedState
+    $journals.staged = Write-AcceptanceJournalInventoryEvidence `
+        -PrivateRoot $PrivateRoot -Leaf 'intent-journal-staged' -Boundary 'intent-staged' `
+        -JournalRoot $journalRoot
 
     $cancelApplication = $null
+    $relaunchApplication = $null
     $discardApplication = $null
     $scenarioError = $null
     try {
@@ -1584,6 +2471,9 @@ function Invoke-AcceptanceIntentOnlyCandidateDiscard {
             -Inputs $Inputs `
             -SessionId $SessionId `
             -WaitSeconds $WaitSeconds
+        $processes.Add((Write-AcceptanceProcessStartEvidence `
+            -Application $cancelApplication -Inputs $Inputs -FixtureRoot $FixtureRoot `
+            -PrivateRoot $PrivateRoot -Role 'intent-cancel'))
         $startupNotice = Wait-UniqueAutomationWindow `
             -Process $cancelApplication.owned.process `
             -ExpectedSession $SessionId `
@@ -1596,6 +2486,9 @@ function Invoke-AcceptanceIntentOnlyCandidateDiscard {
             -Expected $Initial `
             -Actual $startupState `
             -Label 'Intent-only startup fixture'
+        $states.startup = Write-AcceptanceObservedStateEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'intent-state-startup' -Boundary 'intent-startup' `
+            -FixtureRoot $FixtureRoot -ExpectedRootIdentity $RootIdentity -State $startupState
         if (-not (Test-Path -LiteralPath $candidatePath -PathType Leaf) -or
             (Test-Path -LiteralPath $activePath)) {
             throw 'Intent-only startup did not preserve one candidate without an active journal.'
@@ -1606,13 +2499,16 @@ function Invoke-AcceptanceIntentOnlyCandidateDiscard {
             -WaitSeconds $WaitSeconds `
             -Name 'DarkReNamer - 복구 상태' `
             -Label 'Intent-only startup recovery-lock notice'
-        $startupLocked = Assert-AcceptanceRecoveryLockedControls `
-            -Application $cancelApplication `
-            -SessionId $SessionId `
-            -WaitSeconds $WaitSeconds
+        $startupLock = Assert-AcceptanceRecoveryLockedControls `
+            -Application $cancelApplication -PrivateRoot $PrivateRoot `
+            -Leaf 'intent-startup-lock' -Boundary 'intent-startup-lock' `
+            -Phase 'intent-startup' -SessionId $SessionId -WaitSeconds $WaitSeconds `
+            -ExpectLocked $true
+        $startupLocked = $startupLock.locked
+        $lockStates.startup = $startupLock.reference
 
-        Invoke-AcceptanceDiscardChoice `
-            -Application $cancelApplication `
+        $cancelDiscardAction = Invoke-AcceptanceDiscardChoice `
+            -Application $cancelApplication -PrivateRoot $PrivateRoot `
             -SessionId $SessionId `
             -WaitSeconds $WaitSeconds `
             -Confirm $false
@@ -1621,6 +2517,16 @@ function Invoke-AcceptanceIntentOnlyCandidateDiscard {
             -Expected $Initial `
             -Actual $cancelState `
             -Label 'Cancelled Intent-only discard fixture'
+        $postCancelLock = Assert-AcceptanceRecoveryLockedControls `
+            -Application $cancelApplication -PrivateRoot $PrivateRoot `
+            -Leaf 'intent-post-cancel-lock' -Boundary 'intent-post-cancel-lock' `
+            -Phase 'intent-post-cancel' -SessionId $SessionId -WaitSeconds $WaitSeconds `
+            -ExpectLocked $true
+        $cancelLocked = $postCancelLock.locked
+        $lockStates.post_cancel = $postCancelLock.reference
+        $states.post_cancel = Write-AcceptanceObservedStateEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'intent-state-post-cancel' -Boundary 'intent-post-cancel' `
+            -FixtureRoot $FixtureRoot -ExpectedRootIdentity $RootIdentity -State $cancelState
         $cancelPreserved = (Test-Path -LiteralPath $candidatePath -PathType Leaf) -and
             -not (Test-Path -LiteralPath $activePath)
         if (-not $cancelPreserved) {
@@ -1629,60 +2535,129 @@ function Invoke-AcceptanceIntentOnlyCandidateDiscard {
         [void](Close-AcceptanceApplicationNormally `
             -Application $cancelApplication `
             -WaitSeconds $WaitSeconds)
+        $processes.Add((Write-AcceptanceProcessExitEvidence `
+            -Application $cancelApplication -PrivateRoot $PrivateRoot `
+            -Boundary 'normal-exit' -ExitMethod 'normal-close'))
         $preservedBytes = [IO.File]::ReadAllBytes($candidatePath)
         if (-not (Test-AcceptanceBytesEqual -Expected $IntentBytes -Actual $preservedBytes)) {
             throw 'Cancelling Intent-only discard did not preserve the exact candidate bytes.'
         }
+        $candidateAfterCancel = Write-AcceptanceJournalBytesEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'intent-after-cancel.drj' `
+            -Boundary 'intent-post-cancel-normal-exit' -Bytes $preservedBytes
+        $postCancelExitState = Get-AcceptanceFixtureState -FixtureRoot $FixtureRoot
+        Assert-AcceptanceStatesEqual -Expected $Initial -Actual $postCancelExitState `
+            -Label 'Intent-only post-cancel normal-exit fixture'
+        $states.post_cancel_exit = Write-AcceptanceObservedStateEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'intent-state-post-cancel-exit' `
+            -Boundary 'intent-post-cancel-normal-exit' -FixtureRoot $FixtureRoot `
+            -ExpectedRootIdentity $RootIdentity -State $postCancelExitState
+        $journals.post_cancel_exit = Write-AcceptanceJournalInventoryEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'intent-journal-post-cancel-exit' `
+            -Boundary 'intent-post-cancel-normal-exit' -JournalRoot $journalRoot
 
-        $discardApplication = Start-AcceptanceApplication `
+        $relaunchApplication = Start-AcceptanceApplication `
             -Inputs $Inputs `
             -SessionId $SessionId `
             -WaitSeconds $WaitSeconds
+        $processes.Add((Write-AcceptanceProcessStartEvidence `
+            -Application $relaunchApplication -Inputs $Inputs -FixtureRoot $FixtureRoot `
+            -PrivateRoot $PrivateRoot -Role 'intent-relaunch'))
         Dismiss-AcceptanceMessage `
-            -Application $discardApplication `
+            -Application $relaunchApplication `
             -SessionId $SessionId `
             -WaitSeconds $WaitSeconds `
             -Name 'DarkReNamer - 복구 상태' `
-            -Label 'Intent-only discard relaunch recovery-lock notice'
-        [void](Assert-AcceptanceRecoveryLockedControls `
-            -Application $discardApplication `
-            -SessionId $SessionId `
-            -WaitSeconds $WaitSeconds)
-        $beforeConfirm = Get-AcceptanceFixtureState -FixtureRoot $FixtureRoot
+            -Label 'Intent-only verification relaunch recovery-lock notice'
+        $relaunchLock = Assert-AcceptanceRecoveryLockedControls `
+            -Application $relaunchApplication -PrivateRoot $PrivateRoot `
+            -Leaf 'intent-relaunch-lock' -Boundary 'intent-relaunch-lock' `
+            -Phase 'intent-relaunch' -SessionId $SessionId -WaitSeconds $WaitSeconds `
+            -ExpectLocked $true
+        $lockStates.relaunch = $relaunchLock.reference
+        $relaunchState = Get-AcceptanceFixtureState -FixtureRoot $FixtureRoot
         Assert-AcceptanceStatesEqual `
             -Expected $Initial `
-            -Actual $beforeConfirm `
-            -Label 'Intent-only discard relaunch fixture'
-        Invoke-AcceptanceDiscardChoice `
-            -Application $discardApplication `
+            -Actual $relaunchState `
+            -Label 'Intent-only verification relaunch fixture'
+        $states.relaunch = Write-AcceptanceObservedStateEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'intent-state-relaunch' -Boundary 'intent-relaunch' `
+            -FixtureRoot $FixtureRoot -ExpectedRootIdentity $RootIdentity -State $relaunchState
+        [void](Close-AcceptanceApplicationNormally `
+            -Application $relaunchApplication -WaitSeconds $WaitSeconds)
+        $processes.Add((Write-AcceptanceProcessExitEvidence `
+            -Application $relaunchApplication -PrivateRoot $PrivateRoot `
+            -Boundary 'normal-exit' -ExitMethod 'normal-close'))
+        $relaunchBytes = [IO.File]::ReadAllBytes($candidatePath)
+        if (-not (Test-AcceptanceBytesEqual -Expected $IntentBytes -Actual $relaunchBytes)) {
+            throw 'Intent-only verification relaunch did not preserve the exact candidate bytes.'
+        }
+        $candidateAfterRelaunch = Write-AcceptanceJournalBytesEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'intent-after-relaunch.drj' `
+            -Boundary 'intent-post-relaunch-normal-exit' -Bytes $relaunchBytes
+        $relaunchExitState = Get-AcceptanceFixtureState -FixtureRoot $FixtureRoot
+        Assert-AcceptanceStatesEqual -Expected $Initial -Actual $relaunchExitState `
+            -Label 'Intent-only verification relaunch normal-exit fixture'
+        $states.relaunch_exit = Write-AcceptanceObservedStateEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'intent-state-relaunch-exit' `
+            -Boundary 'intent-post-relaunch-normal-exit' -FixtureRoot $FixtureRoot `
+            -ExpectedRootIdentity $RootIdentity -State $relaunchExitState
+        $journals.relaunch_exit = Write-AcceptanceJournalInventoryEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'intent-journal-relaunch-exit' `
+            -Boundary 'intent-post-relaunch-normal-exit' -JournalRoot $journalRoot
+
+        $discardApplication = Start-AcceptanceApplication `
+            -Inputs $Inputs -SessionId $SessionId -WaitSeconds $WaitSeconds
+        $processes.Add((Write-AcceptanceProcessStartEvidence `
+            -Application $discardApplication -Inputs $Inputs -FixtureRoot $FixtureRoot `
+            -PrivateRoot $PrivateRoot -Role 'intent-discard'))
+        Dismiss-AcceptanceMessage `
+            -Application $discardApplication -SessionId $SessionId -WaitSeconds $WaitSeconds `
+            -Name 'DarkReNamer - 복구 상태' -Label 'Intent-only discard recovery-lock notice'
+        $discardStartupLock = Assert-AcceptanceRecoveryLockedControls `
+            -Application $discardApplication -PrivateRoot $PrivateRoot `
+            -Leaf 'intent-discard-startup-lock' -Boundary 'intent-discard-startup-lock' `
+            -Phase 'intent-discard-startup' -SessionId $SessionId -WaitSeconds $WaitSeconds `
+            -ExpectLocked $true
+        $lockStates.discard_startup = $discardStartupLock.reference
+        $discardStartupState = Get-AcceptanceFixtureState -FixtureRoot $FixtureRoot
+        Assert-AcceptanceStatesEqual -Expected $Initial -Actual $discardStartupState `
+            -Label 'Intent-only discard startup fixture'
+        $states.discard_startup = Write-AcceptanceObservedStateEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'intent-state-discard-startup' `
+            -Boundary 'intent-discard-startup' -FixtureRoot $FixtureRoot `
+            -ExpectedRootIdentity $RootIdentity -State $discardStartupState
+        $confirmDiscardAction = Invoke-AcceptanceDiscardChoice `
+            -Application $discardApplication -PrivateRoot $PrivateRoot `
             -SessionId $SessionId `
             -WaitSeconds $WaitSeconds `
             -Confirm $true
         $candidateRemoved = -not (Test-Path -LiteralPath $candidatePath)
         $activeAbsent = -not (Test-Path -LiteralPath $activePath)
         Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
-        $add = Find-UniqueAutomationElement `
-            -Root $discardApplication.main `
-            -Process $discardApplication.owned.process `
-            -ExpectedSession $SessionId `
-            -AutomationId '32791' `
-            -ControlType ([Windows.Automation.ControlType]::Button) `
-            -TimeoutSeconds $WaitSeconds `
-            -Label 'Add Files after Intent-only candidate discard' `
-            -RequireEnabled `
-            -RequireWindowHandle
-        $discardUnlocked = $add.Current.IsEnabled
+        $postDiscardLock = Assert-AcceptanceRecoveryLockedControls `
+            -Application $discardApplication -PrivateRoot $PrivateRoot `
+            -Leaf 'intent-post-discard-unlock' -Boundary 'intent-post-discard-unlock' `
+            -Phase 'intent-post-discard' -SessionId $SessionId -WaitSeconds $WaitSeconds `
+            -ExpectLocked $false
+        $discardUnlocked = -not $postDiscardLock.locked
+        $lockStates.post_discard = $postDiscardLock.reference
         $discardState = Get-AcceptanceFixtureState -FixtureRoot $FixtureRoot
         Assert-AcceptanceStatesEqual `
             -Expected $Initial `
             -Actual $discardState `
             -Label 'Confirmed Intent-only discard fixture'
+        $states.discarded = Write-AcceptanceObservedStateEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'intent-state-discarded' -Boundary 'intent-discarded' `
+            -FixtureRoot $FixtureRoot -ExpectedRootIdentity $RootIdentity -State $discardState
         $classification = Get-AcceptanceIntentCandidateClassification `
             -JournalInspection $inspection `
             -StartupLocked $startupLocked `
             -StartupUnchanged $true `
             -CancelPreserved $cancelPreserved `
             -CancelUnchanged $true `
+            -CancelLocked $cancelLocked `
+            -RelaunchPreserved $true `
             -CandidateRemoved $candidateRemoved `
             -ActiveAbsent $activeAbsent `
             -DiscardUnlocked $discardUnlocked `
@@ -1690,21 +2665,37 @@ function Invoke-AcceptanceIntentOnlyCandidateDiscard {
         $exitCode = Close-AcceptanceApplicationNormally `
             -Application $discardApplication `
             -WaitSeconds $WaitSeconds
+        $processes.Add((Write-AcceptanceProcessExitEvidence `
+            -Application $discardApplication -PrivateRoot $PrivateRoot `
+            -Boundary 'normal-exit' -ExitMethod 'normal-close'))
+        $finalState = Get-AcceptanceFixtureState -FixtureRoot $FixtureRoot
+        Assert-AcceptanceStatesEqual -Expected $Initial -Actual $finalState `
+            -Label 'Intent-only final normal-exit fixture'
+        $states.final_exit = Write-AcceptanceObservedStateEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'intent-state-final-exit' `
+            -Boundary 'intent-final-normal-exit' -FixtureRoot $FixtureRoot `
+            -ExpectedRootIdentity $RootIdentity -State $finalState
+        $journals.final_exit = Write-AcceptanceJournalInventoryEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'intent-journal-final-exit' `
+            -Boundary 'intent-final-normal-exit' -JournalRoot $journalRoot
         [pscustomobject]@{
             status = 'passed'
             classification = $classification
             candidate = [ordered]@{
-                source = 'interrupted-active.drj:first-intent-frame'
-                file = 'candidate.drj'
                 bytes = $IntentBytes.Length
                 sha256 = Get-AcceptanceBootstrapBytesSha256 -Bytes $IntentBytes
                 complete_frames = $inspection.complete_frames
                 last_kind = $inspection.last_kind
                 tail = $inspection.tail
+                source_active_journal = $InterruptedJournalReference
+                injected_candidate = $candidateSource
+                after_cancel = $candidateAfterCancel
+                after_relaunch = $candidateAfterRelaunch
             }
             startup_locked = $startupLocked
             startup_state_sha256 = Get-AcceptanceStateDigest -State $startupState
             cancel_preserved_exact_bytes = $true
+            relaunch_preserved_exact_bytes = $true
             cancel_state_sha256 = Get-AcceptanceStateDigest -State $cancelState
             candidate_removed = $candidateRemoved
             active_absent = $activeAbsent
@@ -1712,6 +2703,14 @@ function Invoke-AcceptanceIntentOnlyCandidateDiscard {
             fixture_name_content_identity_unchanged = $true
             discard_state_sha256 = Get-AcceptanceStateDigest -State $discardState
             normal_exit_code = $exitCode
+            states = $states
+            journals = $journals
+            actions = [ordered]@{
+                cancel_discard = $cancelDiscardAction
+                confirm_discard = $confirmDiscardAction
+            }
+            lock_states = $lockStates
+            processes = $processes.ToArray()
         }
     }
     catch {
@@ -1720,10 +2719,26 @@ function Invoke-AcceptanceIntentOnlyCandidateDiscard {
     }
     finally {
         $cleanupErrors = [Collections.Generic.List[string]]::new()
-        foreach ($application in @($cancelApplication, $discardApplication)) {
+        foreach ($application in @($cancelApplication, $relaunchApplication, $discardApplication)) {
             if ($null -eq $application) { continue }
             try {
-                Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned
+                $process = $application.owned.process
+                $process.Refresh()
+                if (-not $process.HasExited) {
+                    $process.Kill()
+                    if (-not $process.WaitForExit(10000)) {
+                        throw 'The exact Intent-only process did not terminate during cleanup.'
+                    }
+                }
+                $bindingProperty = $application.PSObject.Properties['raw_process_binding']
+                $exitProperty = $application.PSObject.Properties['raw_process_exit_recorded']
+                if ($null -ne $bindingProperty -and $null -ne $exitProperty -and
+                    -not [bool]$exitProperty.Value) {
+                    $processes.Add((Write-AcceptanceProcessExitEvidence `
+                        -Application $application -PrivateRoot $PrivateRoot `
+                        -Boundary 'failure-cleanup' -ExitMethod 'forced-termination'))
+                }
+                $process.Dispose()
             }
             catch {
                 $cleanupErrors.Add($_.Exception.Message)
@@ -1743,6 +2758,7 @@ function Invoke-AcceptanceSession {
     param(
         [Parameter(Mandatory)][object] $Inputs,
         [Parameter(Mandatory)][string] $EvidenceRoot,
+        [Parameter(Mandatory)][string] $PrivateRoot,
         [Parameter(Mandatory)][string] $RuntimeRoot,
         [Parameter(Mandatory)][int] $Count,
         [Parameter(Mandatory)][ValidateSet('ProcessCrash', 'WorkerCancellation', 'WorkerClose')]
@@ -1769,10 +2785,15 @@ function Invoke-AcceptanceSession {
     )
     $pathsFile = Join-Path $RuntimeRoot 'paths-utf16le.txt'
     $importBytes = Write-AcceptanceUtf16Paths -Path $pathsFile -Paths $paths.ToArray()
+    $rootIdentity = Get-FullFileIdentity -Path $fixtureRoot
+    [void](Get-AcceptanceIdentityKey -Identity $rootIdentity)
     $initial = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
     if ($initial.Count -ne $Count + 1) {
         throw 'The initial fixture count is incorrect.'
     }
+    $initialReference = Write-AcceptanceObservedStateEvidence `
+        -PrivateRoot $PrivateRoot -Leaf 'state-initial' -Boundary 'initial' `
+        -FixtureRoot $fixtureRoot -ExpectedRootIdentity $rootIdentity -State $initial
     $initialFirst = @($initial | Where-Object name -CEQ 'item-00000.txt')
     $initialLastName = 'item-{0:D5}.txt' -f ($Count - 1)
     $initialLast = @($initial | Where-Object name -CEQ $initialLastName)
@@ -1780,23 +2801,23 @@ function Invoke-AcceptanceSession {
         throw 'The initial fixture does not contain unique boundary witnesses.'
     }
 
+    $applications = [Collections.Generic.List[object]]::new()
+    $processes = [Collections.Generic.List[object]]::new()
+    $foregroundObservations = [Collections.Generic.List[object]]::new()
     $first = $null
-    $second = $null
-    $third = $null
     $sessionError = $null
     $recoveryExportResult = [ordered]@{ status = 'not-run'; reason = 'switch-not-selected' }
     $intentDiscardResult = [ordered]@{ status = 'not-run'; reason = 'switch-not-selected' }
     try {
         $first = Start-AcceptanceApplication `
-            -Inputs $Inputs `
-            -SessionId $SessionId `
-            -WaitSeconds $WaitSeconds
+            -Inputs $Inputs -SessionId $SessionId -WaitSeconds $WaitSeconds
+        $applications.Add($first)
+        $processes.Add((Write-AcceptanceProcessStartEvidence `
+            -Application $first -Inputs $Inputs -FixtureRoot $fixtureRoot `
+            -PrivateRoot $PrivateRoot -Role 'rename-worker'))
         Invoke-AcceptanceImportAndPrefix `
-            -Application $first `
-            -PathsFile $pathsFile `
-            -Prefix $prefix `
-            -SessionId $SessionId `
-            -WaitSeconds $WaitSeconds
+            -Application $first -PathsFile $pathsFile -Prefix $prefix `
+            -SessionId $SessionId -WaitSeconds $WaitSeconds
         Invoke-AcceptanceApply -Application $first -SessionId $SessionId -WaitSeconds $WaitSeconds
 
         $boundaryDeadline = (Get-Date).AddSeconds($WaitSeconds)
@@ -1807,9 +2828,7 @@ function Invoke-AcceptanceSession {
                 ($prefix + '*.txt'),
                 [IO.SearchOption]::TopDirectoryOnly
             ).Length
-            if ($renamedObserved -gt 0 -and $renamedObserved -lt $Count) {
-                break
-            }
+            if ($renamedObserved -gt 0 -and $renamedObserved -lt $Count) { break }
             if ($renamedObserved -ge $Count) {
                 throw 'The rename completed before a genuine partial boundary was captured.'
             }
@@ -1821,82 +2840,86 @@ function Invoke-AcceptanceSession {
 
         if ($Mode -ne 'ProcessCrash') {
             $workerCancel = Find-UniqueAutomationElement `
-                -Root $first.main `
-                -Process $first.owned.process `
-                -ExpectedSession $SessionId `
-                -AutomationId '1009' `
-                -ControlType ([Windows.Automation.ControlType]::Button) `
-                -TimeoutSeconds $WaitSeconds `
-                -Label 'visible worker cancellation control' `
-                -Scope ([Windows.Automation.TreeScope]::Children) `
-                -RequireEnabled `
-                -RequireWindowHandle
+                -Root $first.main -Process $first.owned.process -ExpectedSession $SessionId `
+                -AutomationId '1009' -ControlType ([Windows.Automation.ControlType]::Button) `
+                -TimeoutSeconds $WaitSeconds -Label 'visible worker cancellation control' `
+                -Scope ([Windows.Automation.TreeScope]::Children) -RequireEnabled -RequireWindowHandle
             $workerBoundary = Get-AcceptanceActiveWorkerBoundary `
-                -Application $first `
-                -Cancel $workerCancel `
+                -Application $first -Cancel $workerCancel -FixtureRoot $fixtureRoot -Prefix $prefix `
+                -LocalAppData $env:LOCALAPPDATA -InitialFirst $initialFirst[0] `
+                -InitialLast $initialLast[0] -ExpectedCount $Count -SessionId $SessionId
+            $partialWitnessReference = Write-AcceptanceWorkerPartialWitnessEvidence `
+                -PrivateRoot $PrivateRoot `
+                -Leaf ('worker-' + $Mode.ToLowerInvariant() + '-partial-witness') `
                 -FixtureRoot $fixtureRoot `
-                -Prefix $prefix `
-                -LocalAppData $env:LOCALAPPDATA `
-                -InitialFirst $initialFirst[0] `
-                -InitialLast $initialLast[0] `
-                -ExpectedCount $Count `
-                -SessionId $SessionId
+                -ExpectedRootIdentity $rootIdentity `
+                -Witness $workerBoundary.partial_witness
+            $screenshot = $null
+            $workerCancelAction = $null
             if ($Mode -eq 'WorkerCancellation') {
-                Invoke-AutomationControl `
-                    -Element $workerBoundary.cancel `
+                $workerCancelTarget = Get-AcceptanceControlTargetObservation `
+                    -Application $first -Root $first.main -Element $workerBoundary.cancel `
+                    -SessionId $SessionId -ExpectedAutomationId '1009' -ExpectedControlId 1009 `
                     -Label 'active worker cancellation control'
-                $restored = Wait-AcceptanceWorkerRollback `
-                    -FixtureRoot $fixtureRoot `
-                    -LocalAppData $env:LOCALAPPDATA `
-                    -Initial $initial `
-                    -WaitSeconds $WaitSeconds
-                $screenshot = Save-WindowScreenshot `
-                    -Window $first.main `
-                    -Process $first.owned.process `
-                    -ExpectedSession $SessionId `
-                    -Root $EvidenceRoot `
-                    -Leaf 'worker-cancellation-restored.png' `
-                    -Label 'worker cancellation restored state'
-                $exitCode = Close-AcceptanceApplicationNormally `
-                    -Application $first `
-                    -WaitSeconds $WaitSeconds
-                return [pscustomobject]@{
-                    mode_result = [pscustomobject]@{
-                        status = 'passed'
-                        mode = $Mode
-                        classification = $workerBoundary.classification
-                        fixture_count = $Count
-                        import_bytes = $importBytes
-                        observed_partial_rename = $workerBoundary.observed_partial_rename
-                        witnesses = [ordered]@{
-                            count = $workerBoundary.witness_count
-                            first_destination_name_sha256 = $workerBoundary.first_destination_name_sha256
-                            last_original_name_sha256 = $workerBoundary.last_original_name_sha256
-                            first_destination_content_sha256 = $workerBoundary.first_destination_content_sha256
-                            last_original_content_sha256 = $workerBoundary.last_original_content_sha256
-                            first_destination_identity_sha256 = $workerBoundary.first_destination_identity_sha256
-                            last_original_identity_sha256 = $workerBoundary.last_original_identity_sha256
-                        }
-                        initial_state_sha256 = Get-AcceptanceStateDigest -State $initial
-                        restored_state_sha256 = Get-AcceptanceStateDigest -State $restored
-                        journal_residue_count = 0
-                        screenshot = $screenshot
-                        normal_exit_code = $exitCode
-                    }
-                    recovery_export = $recoveryExportResult
-                    intent_only_candidate_discard = $intentDiscardResult
+                if (-not $workerCancelTarget.enabled -or -not $workerCancelTarget.visible) {
+                    throw 'The active worker cancellation target is not enabled and visible.'
                 }
+                $workerCancelObservedUtcTicks = [DateTime]::UtcNow.Ticks.ToString(
+                    [Globalization.CultureInfo]::InvariantCulture
+                )
+                Invoke-AutomationControl `
+                    -Element $workerBoundary.cancel -Label 'active worker cancellation control'
+                $restored = Wait-AcceptanceWorkerRollback `
+                    -FixtureRoot $fixtureRoot -LocalAppData $env:LOCALAPPDATA `
+                    -Initial $initial -WaitSeconds $WaitSeconds
+                $workerCancelCompletedUtcTicks = [DateTime]::UtcNow.Ticks.ToString(
+                    [Globalization.CultureInfo]::InvariantCulture
+                )
+                $workerCancelAction = Write-AcceptanceActionEvidence `
+                    -PrivateRoot $PrivateRoot -Leaf 'worker-cancellation-action' `
+                    -Boundary 'worker-cancellation-action' -Phase 'worker-cancellation' `
+                    -Action 'cancel-active-worker' -Target $workerCancelTarget `
+                    -ObservedUtcTicks $workerCancelObservedUtcTicks `
+                    -CompletedUtcTicks $workerCancelCompletedUtcTicks
+                $screenshot = Save-WindowScreenshot `
+                    -Window $first.main -Process $first.owned.process -ExpectedSession $SessionId `
+                    -Root $EvidenceRoot -Leaf 'worker-cancellation-restored.png' `
+                    -Label 'worker cancellation restored state' `
+                    -ForegroundObservations $foregroundObservations
             }
-
-            $exitCode = Close-AcceptanceApplicationNormally `
-                -Application $first `
-                -WaitSeconds $WaitSeconds
+            else {
+                [void](Close-AcceptanceApplicationNormally `
+                    -Application $first -WaitSeconds $WaitSeconds)
+                $restored = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
+                Assert-AcceptanceStatesEqual `
+                    -Expected $initial -Actual $restored -Label 'Worker-close rollback fixture'
+            }
+            if ($Mode -eq 'WorkerCancellation') {
+                $exitCode = Close-AcceptanceApplicationNormally `
+                    -Application $first -WaitSeconds $WaitSeconds
+            }
+            else {
+                $exitCode = $first.owned.process.ExitCode
+            }
+            $exitMethod = if ($Mode -ceq 'WorkerClose') { 'worker-close' } else { 'normal-close' }
+            $processes.Add((Write-AcceptanceProcessExitEvidence `
+                -Application $first -PrivateRoot $PrivateRoot `
+                -Boundary 'normal-exit' -ExitMethod $exitMethod))
             Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
-            $restored = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
-            Assert-AcceptanceStatesEqual `
-                -Expected $initial `
-                -Actual $restored `
-                -Label 'Worker-close rollback fixture'
+            $restoredReference = Write-AcceptanceObservedStateEvidence `
+                -PrivateRoot $PrivateRoot -Leaf ('state-' + $Mode.ToLowerInvariant() + '-restored') `
+                -Boundary ($Mode.ToLowerInvariant() + '-restored-normal-exit') `
+                -FixtureRoot $fixtureRoot -ExpectedRootIdentity $rootIdentity -State $restored
+            $journalRoot = Join-Path (Join-Path $env:LOCALAPPDATA 'DarkReNamer') 'journal'
+            $journalReference = Write-AcceptanceJournalInventoryEvidence `
+                -PrivateRoot $PrivateRoot -Leaf ('journal-' + $Mode.ToLowerInvariant() + '-post-rollback') `
+                -Boundary ($Mode.ToLowerInvariant() + '-post-rollback-normal-exit') `
+                -JournalRoot $journalRoot
+            $foregroundReference = $null
+            if ($foregroundObservations.Count -gt 0) {
+                $foregroundReference = Write-AcceptanceForegroundEvidence `
+                    -PrivateRoot $PrivateRoot -Observations $foregroundObservations
+            }
             return [pscustomobject]@{
                 mode_result = [pscustomobject]@{
                     status = 'passed'
@@ -1916,8 +2939,19 @@ function Invoke-AcceptanceSession {
                     }
                     initial_state_sha256 = Get-AcceptanceStateDigest -State $initial
                     restored_state_sha256 = Get-AcceptanceStateDigest -State $restored
+                    raw_states = [ordered]@{
+                        initial = $initialReference
+                        restored = $restoredReference
+                    }
+                    partial_witness = $partialWitnessReference
+                    journal_inventory = $journalReference
+                    actions = [ordered]@{
+                        worker_cancel = $workerCancelAction
+                    }
+                    processes = $processes.ToArray()
+                    foreground_observations = $foregroundReference
                     journal_residue_count = 0
-                    screenshot = $null
+                    screenshot = $screenshot
                     normal_exit_code = $exitCode
                 }
                 recovery_export = $recoveryExportResult
@@ -1926,21 +2960,21 @@ function Invoke-AcceptanceSession {
         }
 
         Stop-AcceptanceOwnedProcess -Application $first
-
+        $processes.Add((Write-AcceptanceProcessExitEvidence `
+            -Application $first -PrivateRoot $PrivateRoot `
+            -Boundary 'crash-stop' -ExitMethod 'forced-termination'))
         $partial = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
         $partialCounts = Assert-AcceptancePartialState `
-            -Initial $initial `
-            -Partial $partial `
-            -Prefix $prefix `
-            -ExpectedCount $Count
+            -Initial $initial -Partial $partial -Prefix $prefix -ExpectedCount $Count
+        $partialReference = Write-AcceptanceObservedStateEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'state-crash-partial' -Boundary 'crash-partial' `
+            -FixtureRoot $fixtureRoot -ExpectedRootIdentity $rootIdentity -State $partial
         $journalRoot = Join-Path (Join-Path $env:LOCALAPPDATA 'DarkReNamer') 'journal'
         $activePath = Join-Path $journalRoot 'active.drj'
         $candidatePath = Join-Path $journalRoot 'candidate.drj'
         $activeExists = Test-Path -LiteralPath $activePath -PathType Leaf
         $candidateExists = Test-Path -LiteralPath $candidatePath -PathType Leaf
-        if (-not $activeExists) {
-            throw 'The stopped partial transaction has no active journal.'
-        }
+        if (-not $activeExists) { throw 'The stopped partial transaction has no active journal.' }
         $activeItem = Get-Item -LiteralPath $activePath -Force
         if (($activeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
             $activeItem.Length -lt 24 -or $activeItem.Length -gt 64MB) {
@@ -1950,128 +2984,181 @@ function Invoke-AcceptanceSession {
         $inspection = Get-AcceptanceJournalInspection -Bytes $journalBytes
         $intentBytes = $null
         if ($RunIntentOnlyCandidateDiscard) {
-            $intentBytes = Get-AcceptanceLeadingIntentFrame `
-                -Bytes $journalBytes `
-                -Inspection $inspection
+            $intentBytes = Get-AcceptanceLeadingIntentFrame -Bytes $journalBytes -Inspection $inspection
         }
         $classification = Get-AcceptanceCrashClassification `
-            -OriginalCount $partialCounts.original `
-            -RenamedCount $partialCounts.renamed `
-            -ExpectedCount $Count `
-            -ActiveJournalExists $activeExists `
-            -CandidateJournalExists $candidateExists `
-            -JournalInspection $inspection
-        $rawJournalPath = Join-Path $EvidenceRoot 'interrupted-active.drj'
-        [IO.File]::WriteAllBytes($rawJournalPath, $journalBytes)
+            -OriginalCount $partialCounts.original -RenamedCount $partialCounts.renamed `
+            -ExpectedCount $Count -ActiveJournalExists $activeExists `
+            -CandidateJournalExists $candidateExists -JournalInspection $inspection
+        $interruptedJournalReference = Write-AcceptanceJournalBytesEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'interrupted-active.drj' `
+            -Boundary 'crash-stop-active-journal' -Bytes $journalBytes
+        $crashJournalInventory = Write-AcceptanceJournalInventoryEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'journal-crash-stop' -Boundary 'crash-stop' `
+            -JournalRoot $journalRoot
 
-        $beforeRestart = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
         $second = Start-AcceptanceApplication `
-            -Inputs $Inputs `
-            -SessionId $SessionId `
-            -WaitSeconds $WaitSeconds
+            -Inputs $Inputs -SessionId $SessionId -WaitSeconds $WaitSeconds
+        $applications.Add($second)
+        $processes.Add((Write-AcceptanceProcessStartEvidence `
+            -Application $second -Inputs $Inputs -FixtureRoot $fixtureRoot `
+            -PrivateRoot $PrivateRoot -Role 'startup-default-cancel'))
         $recoveryPrompt = Wait-UniqueAutomationWindow `
-            -Process $second.owned.process `
-            -ExpectedSession $SessionId `
-            -Name 'DarkReNamer - 이전 변경 복구 확인' `
-            -TimeoutSeconds $WaitSeconds `
-            -Label 'startup recovery confirmation before disk check'
+            -Process $second.owned.process -ExpectedSession $SessionId `
+            -Name 'DarkReNamer - 이전 변경 복구 확인' -TimeoutSeconds $WaitSeconds `
+            -Label 'startup recovery confirmation before default cancel'
         Assert-AutomationBinding `
-            -Element $recoveryPrompt `
-            -Process $second.owned.process `
-            -ExpectedSession $SessionId `
-            -Label 'startup recovery confirmation before disk check' `
-            -RequireWindowHandle
-        $afterRestart = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
+            -Element $recoveryPrompt -Process $second.owned.process -ExpectedSession $SessionId `
+            -Label 'startup recovery confirmation before default cancel' -RequireWindowHandle
+        $startupState = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
         Assert-AcceptanceStatesEqual `
-            -Expected $beforeRestart `
-            -Actual $afterRestart `
-            -Label 'Startup before explicit recovery confirmation'
+            -Expected $partial -Actual $startupState -Label 'Startup before default cancel'
+        $startupReference = Write-AcceptanceObservedStateEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'state-startup-before-cancel' `
+            -Boundary 'startup-before-default-cancel' -FixtureRoot $fixtureRoot `
+            -ExpectedRootIdentity $rootIdentity -State $startupState
+        $defaultCancelAction = Dismiss-AcceptanceStartupRecovery `
+            -Application $second -SessionId $SessionId -WaitSeconds $WaitSeconds `
+            -PrivateRoot $PrivateRoot
+        $cancelState = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
+        Assert-AcceptanceStatesEqual `
+            -Expected $partial -Actual $cancelState -Label 'Default-cancel fixture'
+        $cancelReference = Write-AcceptanceObservedStateEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'state-default-cancel' `
+            -Boundary 'default-cancel' -FixtureRoot $fixtureRoot `
+            -ExpectedRootIdentity $rootIdentity -State $cancelState
+        [void](Close-AcceptanceApplicationNormally -Application $second -WaitSeconds $WaitSeconds)
+        $processes.Add((Write-AcceptanceProcessExitEvidence `
+            -Application $second -PrivateRoot $PrivateRoot `
+            -Boundary 'normal-exit' -ExitMethod 'normal-close'))
+        $afterCancelBytes = [IO.File]::ReadAllBytes($activePath)
+        if (-not (Test-AcceptanceBytesEqual -Expected $journalBytes -Actual $afterCancelBytes)) {
+            throw 'Default cancellation and normal exit changed the active journal bytes.'
+        }
+        $afterCancelJournalReference = Write-AcceptanceJournalBytesEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'active-after-default-cancel.drj' `
+            -Boundary 'default-cancel-normal-exit' -Bytes $afterCancelBytes
+        $afterCancelInventory = Write-AcceptanceJournalInventoryEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'journal-after-default-cancel' `
+            -Boundary 'default-cancel-normal-exit' -JournalRoot $journalRoot
 
-        $recoveryApplication = $second
+        $third = Start-AcceptanceApplication `
+            -Inputs $Inputs -SessionId $SessionId -WaitSeconds $WaitSeconds
+        $applications.Add($third)
+        $processes.Add((Write-AcceptanceProcessStartEvidence `
+            -Application $third -Inputs $Inputs -FixtureRoot $fixtureRoot `
+            -PrivateRoot $PrivateRoot -Role 'recovery-relaunch'))
+        $relaunchPrompt = Wait-UniqueAutomationWindow `
+            -Process $third.owned.process -ExpectedSession $SessionId `
+            -Name 'DarkReNamer - 이전 변경 복구 확인' -TimeoutSeconds $WaitSeconds `
+            -Label 'startup recovery confirmation after default cancel'
+        Assert-AutomationBinding `
+            -Element $relaunchPrompt -Process $third.owned.process -ExpectedSession $SessionId `
+            -Label 'startup recovery confirmation after default cancel' -RequireWindowHandle
+        $relaunchState = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
+        Assert-AcceptanceStatesEqual `
+            -Expected $partial -Actual $relaunchState -Label 'Recovery relaunch fixture'
+        $relaunchReference = Write-AcceptanceObservedStateEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'state-relaunch' -Boundary 'recovery-relaunch' `
+            -FixtureRoot $fixtureRoot -ExpectedRootIdentity $rootIdentity -State $relaunchState
+
+        $recoveryApplication = $third
+        $afterExportJournalReference = $null
+        $afterExportInventory = $null
+        $afterExportStateReference = $null
+        $exportRelaunchStateReference = $null
         if ($RunRecoveryExport) {
             Dismiss-AcceptanceStartupRecovery `
-                -Application $second `
-                -SessionId $SessionId `
-                -WaitSeconds $WaitSeconds
+                -Application $third -SessionId $SessionId -WaitSeconds $WaitSeconds
             $recoveryExportResult = Invoke-AcceptanceRecoveryExport `
-                -Application $second `
-                -EvidenceRoot $EvidenceRoot `
-                -ExpectedBytes $journalBytes `
-                -SessionId $SessionId `
-                -WaitSeconds $WaitSeconds
+                -Application $third -PrivateRoot $PrivateRoot -ExpectedBytes $journalBytes `
+                -SourceActiveJournalReference $interruptedJournalReference `
+                -SessionId $SessionId -WaitSeconds $WaitSeconds
             $afterExport = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
             Assert-AcceptanceStatesEqual `
-                -Expected $beforeRestart `
-                -Actual $afterExport `
-                -Label 'Recovery export fixture'
+                -Expected $partial -Actual $afterExport -Label 'Recovery export fixture'
+            $afterExportStateReference = Write-AcceptanceObservedStateEvidence `
+                -PrivateRoot $PrivateRoot -Leaf 'state-after-export' -Boundary 'recovery-after-export' `
+                -FixtureRoot $fixtureRoot -ExpectedRootIdentity $rootIdentity -State $afterExport
             $recoveryExportResult | Add-Member `
-                -NotePropertyName fixture_name_content_identity_unchanged `
-                -NotePropertyValue $true
-            [void](Close-AcceptanceApplicationNormally `
-                -Application $second `
-                -WaitSeconds $WaitSeconds)
-            $third = Start-AcceptanceApplication `
-                -Inputs $Inputs `
-                -SessionId $SessionId `
-                -WaitSeconds $WaitSeconds
-            $recoveryPrompt = Wait-UniqueAutomationWindow `
-                -Process $third.owned.process `
-                -ExpectedSession $SessionId `
-                -Name 'DarkReNamer - 이전 변경 복구 확인' `
-                -TimeoutSeconds $WaitSeconds `
+                -NotePropertyName fixture_name_content_identity_unchanged -NotePropertyValue $true
+            [void](Close-AcceptanceApplicationNormally -Application $third -WaitSeconds $WaitSeconds)
+            $processes.Add((Write-AcceptanceProcessExitEvidence `
+                -Application $third -PrivateRoot $PrivateRoot `
+                -Boundary 'normal-exit' -ExitMethod 'normal-close'))
+            $afterExportBytes = [IO.File]::ReadAllBytes($activePath)
+            if (-not (Test-AcceptanceBytesEqual -Expected $journalBytes -Actual $afterExportBytes)) {
+                throw 'Recovery export and normal exit changed the active journal bytes.'
+            }
+            $afterExportJournalReference = Write-AcceptanceJournalBytesEvidence `
+                -PrivateRoot $PrivateRoot -Leaf 'active-after-export.drj' `
+                -Boundary 'recovery-export-normal-exit' -Bytes $afterExportBytes
+            $afterExportInventory = Write-AcceptanceJournalInventoryEvidence `
+                -PrivateRoot $PrivateRoot -Leaf 'journal-after-export' `
+                -Boundary 'recovery-export-normal-exit' -JournalRoot $journalRoot
+            $fourth = Start-AcceptanceApplication `
+                -Inputs $Inputs -SessionId $SessionId -WaitSeconds $WaitSeconds
+            $applications.Add($fourth)
+            $processes.Add((Write-AcceptanceProcessStartEvidence `
+                -Application $fourth -Inputs $Inputs -FixtureRoot $fixtureRoot `
+                -PrivateRoot $PrivateRoot -Role 'recovery-after-export'))
+            $exportRelaunchPrompt = Wait-UniqueAutomationWindow `
+                -Process $fourth.owned.process -ExpectedSession $SessionId `
+                -Name 'DarkReNamer - 이전 변경 복구 확인' -TimeoutSeconds $WaitSeconds `
                 -Label 'startup recovery confirmation after export'
             Assert-AutomationBinding `
-                -Element $recoveryPrompt `
-                -Process $third.owned.process `
-                -ExpectedSession $SessionId `
-                -Label 'startup recovery confirmation after export' `
+                -Element $exportRelaunchPrompt -Process $fourth.owned.process `
+                -ExpectedSession $SessionId -Label 'startup recovery confirmation after export' `
                 -RequireWindowHandle
-            $afterExportRestart = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
+            $exportRelaunchState = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
             Assert-AcceptanceStatesEqual `
-                -Expected $beforeRestart `
-                -Actual $afterExportRestart `
-                -Label 'Startup after recovery export'
-            $recoveryApplication = $third
+                -Expected $partial -Actual $exportRelaunchState -Label 'Startup after recovery export'
+            $exportRelaunchStateReference = Write-AcceptanceObservedStateEvidence `
+                -PrivateRoot $PrivateRoot -Leaf 'state-export-relaunch' -Boundary 'recovery-export-relaunch' `
+                -FixtureRoot $fixtureRoot -ExpectedRootIdentity $rootIdentity -State $exportRelaunchState
+            $recoveryApplication = $fourth
         }
-        $recoveryScreenshot = Invoke-AcceptanceRecovery `
-            -Application $recoveryApplication `
-            -EvidenceRoot $EvidenceRoot `
-            -SessionId $SessionId `
-            -WaitSeconds $WaitSeconds
 
+        $recoveryScreenshot = Invoke-AcceptanceRecovery `
+            -Application $recoveryApplication -EvidenceRoot $EvidenceRoot `
+            -SessionId $SessionId -WaitSeconds $WaitSeconds `
+            -ForegroundObservations $foregroundObservations
         $restoreDeadline = (Get-Date).AddSeconds($WaitSeconds)
         do {
             try {
                 Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
                 $restored = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
                 Assert-AcceptanceStatesEqual `
-                    -Expected $initial `
-                    -Actual $restored `
-                    -Label 'Recovered fixture'
+                    -Expected $initial -Actual $restored -Label 'Recovered fixture'
                 break
             }
-            catch {
-                Start-Sleep -Milliseconds 100
-            }
+            catch { Start-Sleep -Milliseconds 100 }
         } while ((Get-Date) -lt $restoreDeadline)
         Assert-NoJournalResidue -LocalAppData $env:LOCALAPPDATA
         $restored = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
         Assert-AcceptanceStatesEqual -Expected $initial -Actual $restored -Label 'Recovered fixture'
-
+        $restoredReference = Write-AcceptanceObservedStateEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'state-restored' -Boundary 'recovered' `
+            -FixtureRoot $fixtureRoot -ExpectedRootIdentity $rootIdentity -State $restored
         $recoveryExitCode = Close-AcceptanceApplicationNormally `
-            -Application $recoveryApplication `
-            -WaitSeconds $WaitSeconds
+            -Application $recoveryApplication -WaitSeconds $WaitSeconds
+        $processes.Add((Write-AcceptanceProcessExitEvidence `
+            -Application $recoveryApplication -PrivateRoot $PrivateRoot `
+            -Boundary 'normal-exit' -ExitMethod 'normal-close'))
+        $finalJournalInventory = Write-AcceptanceJournalInventoryEvidence `
+            -PrivateRoot $PrivateRoot -Leaf 'journal-final-recovered' `
+            -Boundary 'recovered-normal-exit' -JournalRoot $journalRoot
 
         if ($RunIntentOnlyCandidateDiscard) {
             $intentDiscardResult = Invoke-AcceptanceIntentOnlyCandidateDiscard `
-                -Inputs $Inputs `
-                -FixtureRoot $fixtureRoot `
-                -Initial $initial `
-                -IntentBytes $intentBytes `
-                -SessionId $SessionId `
-                -WaitSeconds $WaitSeconds
+                -Inputs $Inputs -FixtureRoot $fixtureRoot -RootIdentity $rootIdentity `
+                -Initial $initial -IntentBytes $intentBytes `
+                -InterruptedJournalReference $interruptedJournalReference `
+                -PrivateRoot $PrivateRoot `
+                -SessionId $SessionId -WaitSeconds $WaitSeconds
         }
-
+        $foregroundReference = Write-AcceptanceForegroundEvidence `
+            -PrivateRoot $PrivateRoot -Observations $foregroundObservations
         [pscustomobject]@{
             mode_result = [pscustomobject]@{
                 status = 'passed'
@@ -2084,16 +3171,41 @@ function Invoke-AcceptanceSession {
                 initial_state_sha256 = Get-AcceptanceStateDigest -State $initial
                 partial_state_sha256 = Get-AcceptanceStateDigest -State $partial
                 restored_state_sha256 = Get-AcceptanceStateDigest -State $restored
+                raw_states = [ordered]@{
+                    initial = $initialReference
+                    crash_partial = $partialReference
+                    startup_before_default_cancel = $startupReference
+                    default_cancel = $cancelReference
+                    relaunch = $relaunchReference
+                    after_export = $afterExportStateReference
+                    export_relaunch = $exportRelaunchStateReference
+                    restored = $restoredReference
+                }
                 journal = [ordered]@{
-                    file = 'interrupted-active.drj'
-                    sha256 = Get-LowerSha256 -Path $rawJournalPath
+                    bytes = $inspection.total_bytes
+                    sha256 = Get-AcceptanceBootstrapBytesSha256 -Bytes $journalBytes
                     complete_frames = $inspection.complete_frames
                     last_kind = $inspection.last_kind
                     terminal = $inspection.terminal
                     tail = $inspection.tail
-                    bytes = $inspection.total_bytes
+                    interrupted = $interruptedJournalReference
+                    after_default_cancel = $afterCancelJournalReference
+                    after_export = $afterExportJournalReference
+                }
+                journal_inventories = [ordered]@{
+                    crash_stop = $crashJournalInventory
+                    after_default_cancel = $afterCancelInventory
+                    after_export = $afterExportInventory
+                    final_recovered = $finalJournalInventory
+                }
+                actions = [ordered]@{
+                    default_cancel = $defaultCancelAction
                 }
                 startup_before_confirmation_unchanged = $true
+                default_cancel_unchanged = $true
+                relaunch_preserved = $true
+                processes = $processes.ToArray()
+                foreground_observations = $foregroundReference
                 recovery_screenshot = $recoveryScreenshot
                 normal_exit_code = $recoveryExitCode
             }
@@ -2105,9 +3217,8 @@ function Invoke-AcceptanceSession {
         $sessionError = $_
         try {
             $uiDiagnostic = Get-AcceptanceUiDiagnostic -Application $first
-            Write-AcceptanceUtf8Json `
-                -Path (Join-Path $EvidenceRoot 'session-ui-diagnostic.json') `
-                -Value $uiDiagnostic
+            Write-AcceptanceNewUtf8Json `
+                -Path (Join-Path $PrivateRoot 'session-ui-diagnostic.json') -Value $uiDiagnostic
         }
         catch {
         }
@@ -2115,10 +3226,25 @@ function Invoke-AcceptanceSession {
     }
     finally {
         $cleanupErrors = [Collections.Generic.List[string]]::new()
-        foreach ($application in @($first, $second, $third)) {
-            if ($null -eq $application) { continue }
+        foreach ($application in $applications) {
             try {
-                Stop-AndDisposeAcceptanceOwnedProcess -Owned $application.owned
+                $process = $application.owned.process
+                $process.Refresh()
+                if (-not $process.HasExited) {
+                    $process.Kill()
+                    if (-not $process.WaitForExit(10000)) {
+                        throw 'The exact acceptance process did not terminate during cleanup.'
+                    }
+                }
+                $bindingProperty = $application.PSObject.Properties['raw_process_binding']
+                $exitProperty = $application.PSObject.Properties['raw_process_exit_recorded']
+                if ($null -ne $bindingProperty -and $null -ne $exitProperty -and
+                    -not [bool]$exitProperty.Value) {
+                    $processes.Add((Write-AcceptanceProcessExitEvidence `
+                        -Application $application -PrivateRoot $PrivateRoot `
+                        -Boundary 'failure-cleanup' -ExitMethod 'forced-termination'))
+                }
+                $process.Dispose()
             }
             catch {
                 $cleanupErrors.Add($_.Exception.Message)
@@ -2133,13 +3259,13 @@ function Invoke-AcceptanceSession {
         }
     }
 }
-
 if ($MyInvocation.InvocationName -eq '.') {
     return
 }
 
 $requestedBundleRoot = $BundleRoot
 $requestedExpectedSessionId = $ExpectedSessionId
+$requestedPrivateEvidenceRoot = $PrivateEvidenceRoot
 $requestedValidateOnly = [bool]$ValidateOnly
 $requestedRecoveryExport = [bool]$RecoveryExport
 $requestedIntentOnlyCandidateDiscard = [bool]$IntentOnlyCandidateDiscard
@@ -2150,6 +3276,7 @@ $bootstrap = Resolve-AcceptanceBootstrap `
 . $bootstrap.runner_script -BundleRoot $requestedBundleRoot -ExpectedSessionId 1 -ValidateOnly
 $BundleRoot = $requestedBundleRoot
 $ExpectedSessionId = $requestedExpectedSessionId
+$PrivateEvidenceRoot = $requestedPrivateEvidenceRoot
 $ValidateOnly = $requestedValidateOnly
 $RecoveryExport = $requestedRecoveryExport
 $IntentOnlyCandidateDiscard = $requestedIntentOnlyCandidateDiscard
@@ -2183,6 +3310,7 @@ if ($currentSession -ne $ExpectedSessionId) {
 }
 
 $evidenceRoot = New-AcceptanceOutputDirectory -Parent $OutputRoot
+$privateRoot = New-AcceptancePrivateEvidenceDirectory -Parent $PrivateEvidenceRoot
 $runtimeRoot = New-PrivateDirectory -Parent $evidenceRoot -Leaf 'runtime'
 $result = [ordered]@{
     schema_version = if ($inputs.contract.lane -ceq 'candidate-gui-only') { 2 } else { 1 }
@@ -2217,9 +3345,10 @@ $result['intent_only_candidate_discard'] = [ordered]@{ status = 'not-run'; reaso
 $result['failure_reason'] = $null
 $result['diagnostic'] = $null
 $result['ui_diagnostic'] = $null
+$result['private_evidence'] = $null
+$result['raw_cleanup'] = $null
 $desktopLock = $null
 $previousExecutionState = $null
-$succeeded = $false
 try {
     Initialize-NativeCapture
     if (-not [DarkReNamerVmNative]::SetProcessDpiAwarenessContext([IntPtr](-4))) {
@@ -2234,6 +3363,7 @@ try {
         $sessionResult = Invoke-AcceptanceSession `
             -Inputs $inputs `
             -EvidenceRoot $evidenceRoot `
+            -PrivateRoot $privateRoot `
             -RuntimeRoot $runtimeRoot `
             -Count $FixtureCount `
             -Mode $Mode `
@@ -2250,7 +3380,6 @@ try {
         $result.intent_only_candidate_discard = $sessionResult.intent_only_candidate_discard
     }
     $result.status = 'passed'
-    $succeeded = $true
 }
 catch {
     $result.failure_reason = 'recovery_acceptance_error'
@@ -2269,23 +3398,18 @@ catch {
     if ($IntentOnlyCandidateDiscard) {
         $result.intent_only_candidate_discard = $modeFailure
     }
-    $uiDiagnosticPath = Join-Path $evidenceRoot 'session-ui-diagnostic.json'
+    $uiDiagnosticPath = Join-Path $privateRoot 'session-ui-diagnostic.json'
     if (Test-Path -LiteralPath $uiDiagnosticPath -PathType Leaf) {
-        $result.ui_diagnostic = [ordered]@{
-            file = 'session-ui-diagnostic.json'
-            sha256 = Get-LowerSha256 -Path $uiDiagnosticPath
-        }
+        $result.ui_diagnostic = New-AcceptancePrivateReference `
+            -Path $uiDiagnosticPath -PrivateRoot $privateRoot -Boundary 'failure-ui-diagnostic'
     }
-    $diagnosticPath = Join-Path $evidenceRoot 'diagnostic.txt'
-    [IO.File]::WriteAllText(
-        $diagnosticPath,
-        ($_ | Out-String -Width 4096),
-        [Text.UTF8Encoding]::new($true)
+    $diagnosticPath = Join-Path $privateRoot 'diagnostic.txt'
+    $diagnosticBytes = [Text.UTF8Encoding]::new($false).GetBytes(
+        ($_ | Out-String -Width 4096)
     )
-    $result.diagnostic = [ordered]@{
-        file = 'diagnostic.txt'
-        sha256 = Get-LowerSha256 -Path $diagnosticPath
-    }
+    Write-AcceptanceNewBytes -Path $diagnosticPath -Bytes $diagnosticBytes
+    $result.diagnostic = New-AcceptancePrivateReference `
+        -Path $diagnosticPath -PrivateRoot $privateRoot -Boundary 'failure-diagnostic'
 }
 finally {
     try {
@@ -2302,24 +3426,90 @@ finally {
         $result.status = 'failed'
         $result.failure_reason = 'desktop_lock_release_failed'
     }
-    Write-AcceptanceUtf8Json -Path (Join-Path $evidenceRoot 'summary.json') -Value $result
-    if ($succeeded -and (Test-Path -LiteralPath $runtimeRoot -PathType Container)) {
+    $ownedProcessesAfter = $null
+    $journalAfter = $null
+    $runtimeRootAfter = $null
+    try {
+        $ownedProcessesAfter = @(
+            Get-VmAutomatedOwnedProcessInventory -Root $inputs.verified.root
+        )
+    }
+    catch {
+        $result.status = 'failed'
+        $result.failure_reason = 'owned_process_cleanup_observation_failed'
+    }
+    try {
+        $journalAfter = @(
+            Get-VmAutomatedJournalInventory `
+                -LocalAppData (Join-Path $runtimeRoot 'localappdata')
+        )
+    }
+    catch {
+        $result.status = 'failed'
+        $result.failure_reason = 'journal_cleanup_observation_failed'
+    }
+    if (Test-Path -LiteralPath $runtimeRoot -PathType Container) {
         try {
             $runtimeItem = Get-Item -LiteralPath $runtimeRoot -Force
             if (($runtimeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                throw 'The successful runtime root became a reparse point.'
+                throw 'The owned runtime root became a reparse point.'
+            }
+            foreach ($entry in @(Get-ChildItem -LiteralPath $runtimeRoot -Recurse -Force)) {
+                if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw 'The owned runtime tree contains a reparse point.'
+                }
             }
             Remove-Item -LiteralPath $runtimeRoot -Recurse -Force
             if (Test-Path -LiteralPath $runtimeRoot) {
-                throw 'The successful runtime fixture cleanup was incomplete.'
+                throw 'The owned runtime fixture cleanup was incomplete.'
             }
         }
         catch {
             $result.status = 'failed'
             $result.failure_reason = 'runtime_cleanup_refused'
-            Write-AcceptanceUtf8Json -Path (Join-Path $evidenceRoot 'summary.json') -Value $result
         }
     }
+    try {
+        $runtimeRootAfter = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
+    }
+    catch {
+        $result.status = 'failed'
+        $result.failure_reason = 'runtime_cleanup_observation_failed'
+    }
+    $result.raw_cleanup = [ordered]@{
+        owned_processes_after = $ownedProcessesAfter
+        runtime_root_after = $runtimeRootAfter
+        journal_after = [ordered]@{ entries = $journalAfter }
+    }
+    if ($null -eq $ownedProcessesAfter -or $ownedProcessesAfter.Count -ne 0 -or
+        $null -eq $runtimeRootAfter -or $runtimeRootAfter.exists -or
+        @($runtimeRootAfter.entries).Count -ne 0) {
+        $result.status = 'failed'
+        if ($null -eq $result.failure_reason) {
+            $result.failure_reason = 'raw_cleanup_incomplete'
+        }
+    }
+    if ($null -ne $journalAfter) {
+        $unexpectedJournal = @($journalAfter | Where-Object {
+            $_.name -cne 'runtime.lock' -or $_.kind -cne 'file' -or $_.bytes -ne 0
+        })
+        if ($unexpectedJournal.Count -ne 0 -or $journalAfter.Count -gt 1) {
+            $result.status = 'failed'
+            if ($null -eq $result.failure_reason) {
+                $result.failure_reason = 'raw_journal_cleanup_incomplete'
+            }
+        }
+    }
+    try {
+        $result.private_evidence = Write-AcceptancePrivateIndex -PrivateRoot $privateRoot
+    }
+    catch {
+        $result.status = 'failed'
+        if ($null -eq $result.failure_reason) {
+            $result.failure_reason = 'private_evidence_index_failed'
+        }
+    }
+    Write-AcceptanceUtf8Json -Path (Join-Path $evidenceRoot 'summary.json') -Value $result
 }
 Write-Host "Recovery acceptance evidence: $evidenceRoot"
 if ($result.status -cne 'passed') {
