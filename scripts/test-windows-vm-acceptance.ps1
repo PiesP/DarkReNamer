@@ -1626,6 +1626,7 @@ try {
         'IsMenuCommandEnabled',
         'GetClipboardSequenceNumber',
         'ReadClipboardSnapshot',
+        'ReadOrInitializeEmptyClipboardSnapshot',
         'ClearClipboardIfOwned',
         'SetHighContrastColors',
         'ReadNativeMenuTree',
@@ -1634,6 +1635,107 @@ try {
     )) {
         if ($null -eq [DarkReNamerVmAcceptanceNative].GetMethod($method)) {
             throw "The acceptance native probe is missing $method."
+        }
+    }
+    $clipboardInitializerStart = $acceptanceText.IndexOf(
+        'public static ClipboardSnapshot ReadOrInitializeEmptyClipboardSnapshot()',
+        [StringComparison]::Ordinal
+    )
+    $clipboardInitializerEnd = $acceptanceText.IndexOf(
+        'public static string ClearClipboardIfOwned',
+        $clipboardInitializerStart,
+        [StringComparison]::Ordinal
+    )
+    if ($clipboardInitializerStart -lt 0 -or
+        $clipboardInitializerEnd -le $clipboardInitializerStart) {
+        throw 'The guarded empty Clipboard initializer is missing.'
+    }
+    $clipboardInitializerSource = $acceptanceText.Substring(
+        $clipboardInitializerStart,
+        $clipboardInitializerEnd - $clipboardInitializerStart
+    )
+    $initializerRead = $clipboardInitializerSource.IndexOf(
+        'ClipboardSnapshot snapshot = ReadOpenClipboardSnapshot();',
+        [StringComparison]::Ordinal
+    )
+    $initializerDecision = $clipboardInitializerSource.IndexOf(
+        'if (!RequiresEmptyClipboardInitialization(snapshot)) { return snapshot; }',
+        [StringComparison]::Ordinal
+    )
+    $initializerEmpty = $clipboardInitializerSource.IndexOf(
+        'if (!EmptyClipboard())',
+        [StringComparison]::Ordinal
+    )
+    $initializerReread = $clipboardInitializerSource.IndexOf(
+        'ClipboardSnapshot initialized = ReadOpenClipboardSnapshot();',
+        [StringComparison]::Ordinal
+    )
+    if ($clipboardInitializerSource.IndexOf('OpenClipboard(IntPtr.Zero)', [StringComparison]::Ordinal) -lt 0 -or
+        $initializerRead -lt 0 -or $initializerDecision -le $initializerRead -or
+        $initializerEmpty -le $initializerDecision -or $initializerReread -le $initializerEmpty -or
+        $clipboardInitializerSource.IndexOf('CloseClipboard()', [StringComparison]::Ordinal) -le $initializerReread) {
+        throw 'The empty Clipboard initializer is not one atomic read-check-empty-reread operation.'
+    }
+    $clipboardCopyFunction = @($acceptanceAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Copy-GuiRegressionDocument'
+    }, $true))
+    if ($clipboardCopyFunction.Count -ne 1 -or
+        $clipboardCopyFunction[0].Extent.Text.IndexOf(
+            'ReadOrInitializeEmptyClipboardSnapshot',
+            [StringComparison]::Ordinal
+        ) -lt 0 -or
+        $clipboardCopyFunction[0].Extent.Text.IndexOf(
+            '::EmptyClipboard(',
+            [StringComparison]::Ordinal
+        ) -ge 0) {
+        throw 'GUI document copy must use only the guarded native empty Clipboard initializer.'
+    }
+    $initializerClassifier = [DarkReNamerVmAcceptanceNative].GetMethod(
+        'RequiresEmptyClipboardInitialization',
+        ([Reflection.BindingFlags]::NonPublic -bor [Reflection.BindingFlags]::Static)
+    )
+    if ($null -eq $initializerClassifier) {
+        throw 'The empty Clipboard initializer classifier is missing.'
+    }
+    $zeroEmptyClipboard = [DarkReNamerVmAcceptanceNative+ClipboardSnapshot]::new()
+    $zeroEmptyClipboard.SequenceNumber = 0
+    $zeroEmptyClipboard.Formats = [uint32[]]@()
+    if (-not [bool]$initializerClassifier.Invoke($null, [object[]]@($zeroEmptyClipboard))) {
+        throw 'A verified zero-sequence empty Clipboard must request guarded initialization.'
+    }
+    $nonzeroEmptyClipboard = [DarkReNamerVmAcceptanceNative+ClipboardSnapshot]::new()
+    $nonzeroEmptyClipboard.SequenceNumber = 41
+    $nonzeroEmptyClipboard.Formats = [uint32[]]@()
+    if ([bool]$initializerClassifier.Invoke($null, [object[]]@($nonzeroEmptyClipboard))) {
+        throw 'A nonzero empty Clipboard must not request initialization.'
+    }
+    foreach ($foreignClipboard in @(
+        [DarkReNamerVmAcceptanceNative+ClipboardSnapshot]@{
+            SequenceNumber = 0
+            Formats = [uint32[]]@(13)
+            UnicodeText = $null
+        },
+        [DarkReNamerVmAcceptanceNative+ClipboardSnapshot]@{
+            SequenceNumber = 42
+            Formats = [uint32[]]@(13)
+            UnicodeText = 'foreign'
+        }
+    )) {
+        $foreignRejected = $false
+        try {
+            [void]$initializerClassifier.Invoke($null, [object[]]@($foreignClipboard))
+        }
+        catch {
+            $foreignRejected = $null -ne $_.Exception.InnerException -and
+                $_.Exception.InnerException.Message.IndexOf(
+                    'will not clear existing data',
+                    [StringComparison]::Ordinal
+                ) -ge 0
+        }
+        if (-not $foreignRejected) {
+            throw 'A nonempty Clipboard snapshot did not fail before guarded initialization.'
         }
     }
     $clipboardEvidence = Get-AcceptanceClipboardTextEvidence `

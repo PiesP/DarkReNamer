@@ -1132,6 +1132,40 @@ public static class DarkReNamerVmAcceptanceNative {
         }
     }
 
+    private static bool RequiresEmptyClipboardInitialization(ClipboardSnapshot snapshot) {
+        if (snapshot == null || snapshot.Formats == null) {
+            throw new InvalidOperationException("Clipboard preflight snapshot is incomplete.");
+        }
+        if (snapshot.Formats.Length != 0 || snapshot.UnicodeText != null) {
+            throw new InvalidOperationException(
+                "Clipboard acceptance requires an initially empty Clipboard and will not clear existing data.");
+        }
+        return snapshot.SequenceNumber == 0;
+    }
+
+    public static ClipboardSnapshot ReadOrInitializeEmptyClipboardSnapshot() {
+        if (!OpenClipboard(IntPtr.Zero)) {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        try {
+            ClipboardSnapshot snapshot = ReadOpenClipboardSnapshot();
+            if (!RequiresEmptyClipboardInitialization(snapshot)) { return snapshot; }
+            if (!EmptyClipboard()) {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            ClipboardSnapshot initialized = ReadOpenClipboardSnapshot();
+            if (initialized.SequenceNumber == 0 || initialized.Formats.Length != 0 ||
+                initialized.UnicodeText != null) {
+                throw new InvalidOperationException(
+                    "Empty Clipboard initialization did not establish a nonzero empty baseline.");
+            }
+            return initialized;
+        }
+        finally {
+            if (!CloseClipboard()) { throw new Win32Exception(Marshal.GetLastWin32Error()); }
+        }
+    }
+
     public static string ClearClipboardIfOwned(uint expectedSequence, string expectedText) {
         if (!OpenClipboard(IntPtr.Zero)) {
             throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -4049,7 +4083,7 @@ function Copy-GuiRegressionDocument {
         [Parameter(Mandatory)][string] $Label
     )
     $expectedClipboard = (Normalize-ObserverText $ExpectedText).Replace("`n", "`r`n")
-    $before = [DarkReNamerVmAcceptanceNative]::ReadClipboardSnapshot()
+    $before = [DarkReNamerVmAcceptanceNative]::ReadOrInitializeEmptyClipboardSnapshot()
     if ($before.SequenceNumber -eq 0 -or $before.Formats.Count -ne 0) {
         throw ("$Label requires an empty Clipboard with a nonzero sequence preflight; " +
             "observed sequence=$($before.SequenceNumber), formats=$($before.Formats -join ',').")
