@@ -7,7 +7,7 @@
       "bundle": "tooling-loader.py",
       "kind": "python",
       "module": "darkrenamer_tooling.loader",
-      "sha256": "3df749e355d4580b6fd6d772b987fa59215742d4a64728bbe4f0fa46ac97a0da",
+      "sha256": "cffb17faf73f0643b293dbe5c4a7cefe9475e8a19008b03f9ce45d8b3565497d",
       "dependencies": [
         "package-root"
       ]
