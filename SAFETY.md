@@ -503,7 +503,7 @@ process from replacing a file between metadata, dimension, and digest reads.
 Keep the external root immutable for the validation session and writable only
 by the acceptance operator.
 
-[`scripts/windows-acceptance-evidence.schema.json`](scripts/windows-acceptance-evidence.schema.json)
+[`config/schemas/windows-acceptance-evidence.schema.json`](config/schemas/windows-acceptance-evidence.schema.json)
 is the machine-readable field contract. Validate evidence with
 [`scripts/validate-windows-acceptance-evidence.ps1`](scripts/validate-windows-acceptance-evidence.ps1).
 The validator requires PowerShell 7.4 or newer and is invoked with `pwsh`.

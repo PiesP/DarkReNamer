@@ -292,7 +292,7 @@ jobs:
             gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:VALIDATION_RUN_ID/attempts/$env:VALIDATION_RUN_ATTEMPT" |
               Out-File -LiteralPath $run -Encoding utf8
             if ($LASTEXITCODE -ne 0) { throw 'Validation attempt metadata retrieval failed.' }
-            python ./scripts/validate-vm-automated-authority.py validation-run `
+            python -I ./scripts/validate-vm-automated-authority.py validation-run `
               --repository-metadata $repository `
               --repository $env:GITHUB_REPOSITORY `
               --source-sha $env:CANDIDATE_SOURCE_SHA `

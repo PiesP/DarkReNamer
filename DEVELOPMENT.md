@@ -40,24 +40,76 @@ cargo test --workspace --all-targets --all-features --locked
 RC="${RC:-/usr/bin/llvm-rc-19}" cargo check --workspace --all-targets --all-features \
   --target x86_64-pc-windows-msvc --locked
 pwsh -NoLogo -NoProfile -File ./scripts/test-tooling.ps1
-python3 scripts/test-windows-vm-runner.py
-python3 scripts/test-gui-regression-runner.py
-python3 scripts/test-gui-regression-evidence.py
-python3 scripts/test-vm-automated-authority.py
-python3 scripts/test-vm-automated-evidence.py
-python3 scripts/test-vm-automated-state.py
-python3 scripts/test-vm-automated-journal.py
-python3 scripts/test-vm-automated-binding.py
-python3 scripts/test-vm-automated-recovery.py
-python3 scripts/test-vm-automated-platform.py
-python3 scripts/test-vm-automated-campaign.py
-python3 scripts/test-vm-automated-recovery-profile.py
-python3 scripts/test-vm-automated-verifier.py
-python3 scripts/test-vm-automated-menu-layout.py
-python3 scripts/test-vm-automated-campaign-runner.py
-python3 scripts/test-vm-automated-campaign-verifier.py
-python3 scripts/test-vm-automated-cli.py
 ```
+
+## Tooling tests
+
+`scripts/test-tooling.ps1` is the tooling test entrypoint for local gates and CI.
+`config/tooling-tests.json` declares each test's path, runner, supported platforms,
+category, VM requirement and timeout. Discovery checks for missing registrations;
+it does not select executable tests. Fixture helpers and the VM CLI have explicit
+exclusions. Add or move a test by updating its registry record in the same change.
+
+List the current platform's selection or run a focused category:
+
+```powershell
+./scripts/test-tooling.ps1 -List
+./scripts/test-tooling.ps1 -Category release
+./scripts/test-tooling.ps1 -Id tooling-registry,tooling-bootstrap
+```
+
+The runner rejects a platform different from the current host and does not run
+VM workloads. It propagates child-process failures and enforces per-test deadlines.
+Tests live in `scripts/tests/powershell` and `scripts/tests/python`, with shared
+fixtures and path helpers in `scripts/tests/support`. The runner sets Python
+import paths only in each test subprocess. `Get-ToolingTestPaths` in `paths.ps1`
+and `tooling_test_paths.py` resolve production scripts and repository paths.
+Acceptance evidence uses `config/schemas/windows-acceptance-evidence.schema.json`.
+
+## Authenticated tooling modules
+
+Public VM and evidence commands remain in `scripts/`. Their fixed bootstraps
+verify pinned loader and manifest bytes before importing implementation modules.
+Repository callers start Python with `-I` so environment startup hooks and
+unregistered search paths cannot supply code. Direct CLI execution also enters
+isolated mode before file-based imports. When invoking a CLI manually, use
+`python3 -I scripts/<command>.py`; a script cannot undo interpreter startup hooks
+that already ran before its first statement.
+
+Python implementations live under `scripts/darkrenamer_tooling/`: `vm` launches
+workloads, `campaign` plans and coordinates runs, `contracts` binds inputs and
+source identity, and `evidence` parses and independently verifies observations.
+PowerShell definitions live under `scripts/modules/powershell/`, grouped by guest,
+UI observer, recovery observer and host controller. Each invocation creates its
+own module scope and removes that module after completion.
+
+`config/tooling-bundle.json` declares authorized roles, dependencies, source paths,
+flat bundle names and hashes. Checkout paths and retained bundle names are
+separate fields. A selected role loads its complete dependency closure from
+verified bytes; missing or changed members fail before implementation execution.
+Retained evidence is checked against the selected source commit's Git blobs.
+Producer summaries do not determine the independent verifier's verdict.
+
+Archive count bounds account for retaining the module closure in every campaign
+slot. The canonical limits are in `scripts/darkrenamer_tooling/evidence/archive.py`;
+producer packaging uses the same count caps and preserves the separate byte,
+compression, and index bounds.
+
+When changing a module, update the explicit inventory in
+`scripts/update-tooling-bundle.py` if its role, path or dependencies change. New
+roles also require authorization in both `scripts/tooling_bootstrap.py` and
+`scripts/tooling-bootstrap.ps1`. Refresh the manifest and public bootstrap pins,
+then check that generated files are current:
+
+```bash
+python3 scripts/update-tooling-bundle.py
+python3 scripts/update-tooling-bundle.py --check
+```
+
+The generator rejects unregistered implementation files; it does not discover
+new executable roles. Run the tooling gate after refreshing pins. Tooling checks
+exercise closure rejection and command compatibility; native execution and the
+source-bound VM campaign remain separate validation steps below.
 
 ## Linux cross-build and visual diagnostics
 
@@ -71,10 +123,11 @@ RC=/path/to/llvm-rc-19 cargo xwin build --release --locked \
   --package darknamer-app --bin DarkReNamer
 ```
 
-`scripts/capture-local-visual-gallery.sh` also requires Wine (`wine`,
+`scripts/diagnostics/capture-local-visual-gallery.sh` also requires Wine (`wine`,
 `wineboot`, `winepath`, and `wineserver`), Xvfb, ffmpeg, jq, GNU `timeout`, and
 `sha256sum`. It is a best-effort diagnostic path, not a CI or Windows acceptance
-gate.
+gate. The original `scripts/capture-local-visual-gallery.sh` command remains a
+compatibility entrypoint.
 
 ## Native tests in a local Hyper-V VM
 
@@ -82,7 +135,7 @@ Run the current checkout's Windows test binaries on a configured Windows x64
 Hyper-V VM through an OpenSSH configuration alias:
 
 ```bash
-python3 scripts/test-windows-vm.py --ssh-host darkrenamer-vm
+python3 -I scripts/test-windows-vm.py --ssh-host darkrenamer-vm
 ```
 
 The default `--desktop-mode rdp` starts a managed RDP desktop before the SSH
@@ -136,7 +189,7 @@ PowerShell Direct remains available from WSL when the Windows host process has
 Hyper-V administration rights:
 
 ```bash
-python3 scripts/test-windows-vm.py --vm-name "$DARKRENAMER_VM_NAME"
+python3 -I scripts/test-windows-vm.py --vm-name "$DARKRENAMER_VM_NAME"
 ```
 
 Automation can additionally pass `--expected-vm-id <GUID>` to require that exact
@@ -234,10 +287,19 @@ The campaign controller stages the UI and recovery observers automatically.
 For standalone diagnostics or historical formal acceptance,
 `scripts/windows-vm-acceptance.ps1` and
 `scripts/windows-vm-recovery-acceptance.ps1` reuse an existing VM test bundle.
-Stage the unchanged manifest, runner, and listed binaries in a private
-`bundle` directory, with the selected observer in its parent directory. Record
-the observer's SHA-256 separately from the bundle's source and executable
-digests. Run one observer at a time in the bundle account's unlocked,
+Stage the unchanged `bundle.json`, guest runner, and listed binaries in a
+private `bundle` directory, with the selected observer in its parent directory.
+The observer's directory must also retain `tooling-bundle.json` and every file
+in the selected observer role's dependency closure, using the manifest's flat
+`bundle` names (including `tooling-loader.ps1`). Preserve these files from the
+common controller's staging; copying only the observer and guest runner is
+insufficient. The observer verifies the guest runner in `bundle/` without
+executing it; running that guest entrypoint independently also requires its
+own declared tooling closure beside it. Check the source manifest and pins with
+`python3 scripts/update-tooling-bundle.py --check` before staging, and keep all
+files bound to the same source. Record the observer's SHA-256 separately from
+the bundle's source and executable digests. Run one observer at a time in the
+bundle account's unlocked,
 non-elevated Windows PowerShell desktop session, passing `-BundleRoot`,
 `-ExpectedSessionId`, `-OutputRoot`, and `-ExpectedScriptSha256` explicitly.
 Both observers verify those bindings and acquire the shared desktop lock.
@@ -285,7 +347,7 @@ The interactive tasks require the guest's installed PowerShell 7.4 or newer
 checks that policy and does not override it.
 
 ```bash
-python3 scripts/run-gui-regression.py \
+python3 -I scripts/run-gui-regression.py \
   --output-root /absolute/new/external-output \
   --connection-profile /absolute/private/connection.json
 ```
@@ -332,8 +394,25 @@ packages. They are not counts of crates linked into `DarkReNamer.exe`.
 
 The scripts under `scripts/` form a tested release-validation subsystem. Run
 `scripts/test-tooling.ps1` on both Linux PowerShell and Windows before changing
-their shared invocation list. Keep independent validators independent unless a
-shared helper can fail without weakening both sides of a cross-check.
+their shared invocation list. [`config/tooling-tests.json`](config/tooling-tests.json)
+is the sole tooling-test registry. Each entry declares its stable ID, path,
+runner, supported platforms, category, VM requirement, and per-process timeout.
+The suite discovers `test-*.ps1` and `test-*.py` files only to fail when a test
+is not registered; its suite entrypoint, fixture helpers, and VM CLI exclusions
+are explicit. It never runs VM-backed entries.
+
+Use `-List` to inspect the selected tests without executing them. `-Id`,
+`-Category`, and `-Runner` narrow that selection and may be combined:
+
+```powershell
+./scripts/test-tooling.ps1 -Platform Ubuntu -List
+./scripts/test-tooling.ps1 -Platform Ubuntu -Category vm-automation -Runner Python
+./scripts/test-tooling.ps1 -Platform Windows -Id toolchain-consistency
+```
+
+Keep independent validators independent unless a shared helper can fail without
+weakening both sides of a cross-check. CI and the development gates invoke only
+`scripts/test-tooling.ps1`; add or change tooling coverage through the registry.
 
 Candidate creation, promotion, signing policy, checksums, SBOMs, and
 attestations are documented in `DISTRIBUTION.md`. Publishing or changing GitHub

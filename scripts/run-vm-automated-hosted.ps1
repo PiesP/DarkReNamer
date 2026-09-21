@@ -410,7 +410,7 @@ try {
             -OutFile $archivePath `
             -MaximumRedirection 5 | Out-Null
 
-        & $PythonExecutable (Join-Path $trusted 'scripts/validate-vm-automated-authority.py') ingress `
+        & $PythonExecutable -I (Join-Path $trusted 'scripts/validate-vm-automated-authority.py') ingress `
             --repository-metadata $repositoryPath `
             --repository $Repository `
             --source-sha $CandidateSourceSha `
@@ -441,7 +441,7 @@ try {
             throw 'Candidate handoff differs from its explicit identity.'
         }
 
-        & $PythonExecutable (Join-Path $trusted 'scripts/validate-vm-automated-evidence.py') `
+        & $PythonExecutable -I (Join-Path $trusted 'scripts/validate-vm-automated-evidence.py') `
             --archive $archivePath `
             --archive-sha256 $IngressArchiveSha256 `
             --archive-size $IngressArchiveSize `
