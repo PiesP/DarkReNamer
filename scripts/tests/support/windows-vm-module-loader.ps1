@@ -294,11 +294,11 @@ Export-ModuleMember -Function Invoke-DrWindowsVmController
     }
 }
 
-function Invoke-DrTestPowerShellEntrypoint {
+function Invoke-DrTestPowerShellModuleScope {
     param(
         [Parameter(Mandatory)][ValidateSet('guest', 'ui', 'recovery', 'controller')][string] $Kind,
-        [Parameter(Mandatory)][string] $EntryPointPath,
-        [Parameter(Mandatory)][hashtable] $Parameters
+        [Parameter(Mandatory)][scriptblock] $Action,
+        [object[]] $ArgumentList = @()
     )
 
     $spec = Get-DrTestPowerShellModuleSpec -Kind $Kind
@@ -316,11 +316,28 @@ function Invoke-DrTestPowerShellEntrypoint {
         -ArgumentList (, $libraries)
     try {
         Import-Module $module -Scope Local -Force | Out-Null
-        $invokeParameters = @{} + $Parameters
-        $invokeParameters['EntryPointPath'] = $EntryPointPath
-        & $spec.command @invokeParameters
+        & $module $Action @ArgumentList
     }
     finally {
         Remove-Module -ModuleInfo $module -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Invoke-DrTestPowerShellEntrypoint {
+    param(
+        [Parameter(Mandatory)][ValidateSet('guest', 'ui', 'recovery', 'controller')][string] $Kind,
+        [Parameter(Mandatory)][string] $EntryPointPath,
+        [Parameter(Mandatory)][hashtable] $Parameters
+    )
+
+    $spec = Get-DrTestPowerShellModuleSpec -Kind $Kind
+    $invokeParameters = @{} + $Parameters
+    $invokeParameters['EntryPointPath'] = $EntryPointPath
+    Invoke-DrTestPowerShellModuleScope `
+        -Kind $Kind `
+        -Action {
+            param($CommandName, $InvocationParameters)
+            & $CommandName @InvocationParameters
+        } `
+        -ArgumentList @($spec.command, $invokeParameters)
 }
