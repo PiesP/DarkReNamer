@@ -135,6 +135,13 @@ function Initialize-DrVerifiedTooling {
         $loader.sha256 -cne $ToolingLoaderSha256 -or $relativeLoader -isnot [string]) {
         throw 'Authenticated PowerShell loader binding is invalid.'
     }
+    $expectedLoader = if ($Mode -ceq 'checkout') {
+        'scripts/tooling-bootstrap.ps1'
+    }
+    else { 'tooling-loader.ps1' }
+    if ($relativeLoader -cne $expectedLoader) {
+        throw 'Authenticated PowerShell loader binding does not match the selected layout.'
+    }
     $loaderPath = [IO.Path]::GetFullPath([IO.Path]::Combine($rootPath, $relativeLoader))
     $loaderItem = Assert-DrBootstrapOrdinaryPath `
         -Path $loaderPath -Root $rootPath -Label 'PowerShell loader'
@@ -185,12 +192,25 @@ function Initialize-DrVerifiedTooling {
     }
 }
 
-$toolingRoot = [IO.Directory]::GetParent([IO.Path]::GetDirectoryName($PSCommandPath)).FullName
-$manifestLocation = 'config/tooling-bundle.json'
+$scriptDirectory = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($PSCommandPath))
+$checkoutRootItem = [IO.Directory]::GetParent($scriptDirectory)
+$checkoutRoot = if ($null -ne $checkoutRootItem) { $checkoutRootItem.FullName } else { $null }
+$checkoutLayout = $null -ne $checkoutRoot -and
+    [IO.File]::Exists([IO.Path]::Combine($scriptDirectory, 'tooling-bootstrap.ps1')) -and
+    [IO.File]::Exists([IO.Path]::Combine($checkoutRoot, 'config', 'tooling-bundle.json'))
+$bundleLayout =
+    [IO.File]::Exists([IO.Path]::Combine($scriptDirectory, 'tooling-loader.ps1')) -and
+    [IO.File]::Exists([IO.Path]::Combine($scriptDirectory, 'tooling-bundle.json'))
+if ($checkoutLayout -eq $bundleLayout) {
+    throw 'PowerShell tooling layout is missing or ambiguous.'
+}
+$toolingRoot = if ($checkoutLayout) { $checkoutRoot } else { $scriptDirectory }
+$manifestLocation = if ($checkoutLayout) { 'config/tooling-bundle.json' } else { 'tooling-bundle.json' }
+$toolingMode = if ($checkoutLayout) { 'checkout' } else { 'bundle' }
 $loaderContext = Initialize-DrVerifiedTooling `
     -Root $toolingRoot `
     -ManifestLocation $manifestLocation `
-    -Mode 'checkout' `
+    -Mode $toolingMode `
     -RequiredRole 'powershell-controller-entry'
 $module = $null
 try {

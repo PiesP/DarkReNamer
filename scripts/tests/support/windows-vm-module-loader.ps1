@@ -90,6 +90,29 @@ function Get-DrTestFileSha256 {
         -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Set-DrTestEntrypointToolingPins {
+    param(
+        [Parameter(Mandatory)][string[]] $EntrypointPaths,
+        [Parameter(Mandatory)][string] $ManifestSha256,
+        [Parameter(Mandatory)][string] $LoaderSha256
+    )
+
+    foreach ($entrypointPath in $EntrypointPaths) {
+        $text = [IO.File]::ReadAllText($entrypointPath, [Text.Encoding]::UTF8)
+        foreach ($pin in @{
+            ToolingManifestSha256 = $ManifestSha256
+            ToolingLoaderSha256 = $LoaderSha256
+        }.GetEnumerator()) {
+            $pattern = '(?m)^\$' + $pin.Key + " = '[0-9a-f]{64}'$"
+            if ([regex]::Matches($text, $pattern).Count -ne 1) {
+                throw "Expected one generated fixture pin: $($pin.Key)"
+            }
+            $text = [regex]::Replace($text, $pattern, ('$' + $pin.Key + " = '" + $pin.Value + "'"))
+        }
+        [IO.File]::WriteAllText($entrypointPath, $text, [Text.UTF8Encoding]::new($true))
+    }
+}
+
 function New-DrTestFrozenToolingBundle {
     param(
         [Parameter(Mandatory)][string] $TaskRoot,
@@ -100,13 +123,13 @@ function New-DrTestFrozenToolingBundle {
     $spec = Get-DrTestPowerShellModuleSpec -Kind $Kind
     $records = [Collections.Generic.List[object]]::new()
     $loaderSource = Join-Path (Get-ToolingTestPaths).ScriptsRoot 'tooling-bootstrap.ps1'
-    $loaderDestination = Join-Path $TaskRoot 'tooling-bootstrap.ps1'
+    $loaderDestination = Join-Path $TaskRoot 'tooling-loader.ps1'
     Copy-Item -LiteralPath $loaderSource -Destination $loaderDestination
     $loaderHash = Get-DrTestFileSha256 -Path $loaderDestination
     $records.Add([ordered]@{
         role = 'powershell-loader'
         source = 'scripts/tooling-bootstrap.ps1'
-        bundle = 'tooling-bootstrap.ps1'
+        bundle = 'tooling-loader.ps1'
         kind = 'powershell'
         module = $null
         sha256 = $loaderHash
@@ -150,24 +173,124 @@ function New-DrTestFrozenToolingBundle {
         [Text.UTF8Encoding]::new($false)
     )
     $manifestHash = Get-DrTestFileSha256 -Path $manifestPath
-    foreach ($entrypointPath in $EntrypointPaths) {
-        $text = [IO.File]::ReadAllText($entrypointPath, [Text.Encoding]::UTF8)
-        foreach ($pin in @{
-            ToolingManifestSha256 = $manifestHash
-            ToolingLoaderSha256 = $loaderHash
-        }.GetEnumerator()) {
-            $pattern = '(?m)^\$' + $pin.Key + " = '[0-9a-f]{64}'$"
-            if ([regex]::Matches($text, $pattern).Count -ne 1) {
-                throw "Expected one generated fixture pin: $($pin.Key)"
-            }
-            $text = [regex]::Replace($text, $pattern, ('$' + $pin.Key + " = '" + $pin.Value + "'"))
-        }
-        [IO.File]::WriteAllText($entrypointPath, $text, [Text.UTF8Encoding]::new($true))
-    }
+    Set-DrTestEntrypointToolingPins `
+        -EntrypointPaths $EntrypointPaths `
+        -ManifestSha256 $manifestHash `
+        -LoaderSha256 $loaderHash
     [pscustomobject]@{
         manifest_sha256 = $manifestHash
         loader_sha256 = $loaderHash
         records = $records.ToArray()
+    }
+}
+
+function New-DrTestControllerFacadeFixture {
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][ValidateSet('checkout', 'bundle')][string] $Layout
+    )
+
+    $scriptsRoot = (Get-ToolingTestPaths).ScriptsRoot
+    $scriptDirectory = if ($Layout -ceq 'checkout') { Join-Path $Root 'scripts' } else { $Root }
+    $manifestDirectory = if ($Layout -ceq 'checkout') { Join-Path $Root 'config' } else { $Root }
+    [void](New-Item -ItemType Directory -Path $scriptDirectory -Force)
+    [void](New-Item -ItemType Directory -Path $manifestDirectory -Force)
+
+    $entrypointPath = Join-Path $scriptDirectory 'run-windows-vm-tests.ps1'
+    Copy-Item -LiteralPath (Join-Path $scriptsRoot 'run-windows-vm-tests.ps1') -Destination $entrypointPath
+    $loaderSource = Join-Path $scriptsRoot 'tooling-bootstrap.ps1'
+    $loaderLeaf = if ($Layout -ceq 'checkout') { 'tooling-bootstrap.ps1' } else { 'tooling-loader.ps1' }
+    $loaderPath = Join-Path $scriptDirectory $loaderLeaf
+    Copy-Item -LiteralPath $loaderSource -Destination $loaderPath
+
+    $moduleDirectory = if ($Layout -ceq 'checkout') {
+        Join-Path $scriptDirectory 'modules/powershell'
+    }
+    else { $Root }
+    [void](New-Item -ItemType Directory -Path $moduleDirectory -Force)
+    $records = [Collections.Generic.List[object]]::new()
+    $records.Add([ordered]@{
+        role = 'powershell-loader'
+        source = 'scripts/tooling-bootstrap.ps1'
+        bundle = 'tooling-loader.ps1'
+        kind = 'powershell'
+        module = $null
+        sha256 = Get-DrTestFileSha256 -Path $loaderPath
+        dependencies = @()
+    })
+    $definitionRoles = @(
+        'powershell-controller-contracts'
+        'powershell-controller-transport'
+        'powershell-controller-poll'
+        'powershell-controller-rescue'
+    )
+    foreach ($role in $definitionRoles) {
+        $leaf = $role.Substring('powershell-'.Length) + '.ps1'
+        $path = Join-Path $moduleDirectory $leaf
+        [IO.File]::WriteAllText(
+            $path,
+            "function Test-$($role.Substring('powershell-'.Length).Replace('-', '')) { `$true }",
+            [Text.UTF8Encoding]::new($false)
+        )
+        $records.Add([ordered]@{
+            role = $role
+            source = 'scripts/modules/powershell/' + $leaf
+            bundle = $leaf
+            kind = 'powershell'
+            module = $null
+            sha256 = Get-DrTestFileSha256 -Path $path
+            dependencies = @()
+        })
+    }
+    $stubEntry = @'
+param([hashtable] $Libraries)
+function Invoke-DrWindowsVmController {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $BundleRoot,
+        [Parameter(Mandatory)][string] $SshHost,
+        [Parameter(Mandatory)][string] $EntryPointPath,
+        [Parameter(Mandatory)][object] $VerifiedTooling
+    )
+    [pscustomobject]@{
+        bundle_root = $BundleRoot
+        ssh_host = $SshHost
+        entrypoint_path = $EntryPointPath
+        library_count = $Libraries.Count
+        record_count = @($VerifiedTooling.Records).Count
+    }
+}
+Export-ModuleMember -Function Invoke-DrWindowsVmController
+'@
+    $entryLeaf = 'controller-entry.psm1'
+    $controllerEntryPath = Join-Path $moduleDirectory $entryLeaf
+    [IO.File]::WriteAllText($controllerEntryPath, $stubEntry, [Text.UTF8Encoding]::new($false))
+    $records.Add([ordered]@{
+        role = 'powershell-controller-entry'
+        source = 'scripts/modules/powershell/controller-entry.psm1'
+        bundle = $entryLeaf
+        kind = 'powershell'
+        module = $null
+        sha256 = Get-DrTestFileSha256 -Path $controllerEntryPath
+        dependencies = @('powershell-loader') + $definitionRoles
+    })
+    $manifestPath = Join-Path $manifestDirectory 'tooling-bundle.json'
+    [IO.File]::WriteAllText(
+        $manifestPath,
+        ([ordered]@{ schema_version = 1; modules = $records.ToArray() } |
+            ConvertTo-Json -Depth 8),
+        [Text.UTF8Encoding]::new($false)
+    )
+    Set-DrTestEntrypointToolingPins `
+        -EntrypointPaths @($entrypointPath) `
+        -ManifestSha256 (Get-DrTestFileSha256 -Path $manifestPath) `
+        -LoaderSha256 (Get-DrTestFileSha256 -Path $loaderPath)
+    [pscustomobject]@{
+        root = $Root
+        entrypoint = $entrypointPath
+        manifest = $manifestPath
+        loader = $loaderPath
+        controller_entry = $controllerEntryPath
     }
 }
 
