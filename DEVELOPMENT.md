@@ -287,10 +287,19 @@ The campaign controller stages the UI and recovery observers automatically.
 For standalone diagnostics or historical formal acceptance,
 `scripts/windows-vm-acceptance.ps1` and
 `scripts/windows-vm-recovery-acceptance.ps1` reuse an existing VM test bundle.
-Stage the unchanged manifest, runner, and listed binaries in a private
-`bundle` directory, with the selected observer in its parent directory. Record
-the observer's SHA-256 separately from the bundle's source and executable
-digests. Run one observer at a time in the bundle account's unlocked,
+Stage the unchanged `bundle.json`, guest runner, and listed binaries in a
+private `bundle` directory, with the selected observer in its parent directory.
+The observer's directory must also retain `tooling-bundle.json` and every file
+in the selected observer role's dependency closure, using the manifest's flat
+`bundle` names (including `tooling-loader.ps1`). Preserve these files from the
+common controller's staging; copying only the observer and guest runner is
+insufficient. The observer verifies the guest runner in `bundle/` without
+executing it; running that guest entrypoint independently also requires its
+own declared tooling closure beside it. Check the source manifest and pins with
+`python3 scripts/update-tooling-bundle.py --check` before staging, and keep all
+files bound to the same source. Record the observer's SHA-256 separately from
+the bundle's source and executable digests. Run one observer at a time in the
+bundle account's unlocked,
 non-elevated Windows PowerShell desktop session, passing `-BundleRoot`,
 `-ExpectedSessionId`, `-OutputRoot`, and `-ExpectedScriptSha256` explicitly.
 Both observers verify those bindings and acquire the shared desktop lock.
