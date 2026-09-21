@@ -189,6 +189,50 @@ try {
             -ExpectedSessionId 1 `
             -ValidateOnly
     } 'mismatch'
+    foreach ($layout in @('checkout', 'bundle')) {
+        $controllerFixture = New-DrTestControllerFacadeFixture `
+            -Root (Join-Path $temporaryRoot "controller-$layout") `
+            -Layout $layout
+        $facadeResult = & $controllerFixture.entrypoint `
+            -BundleRoot $controllerFixture.root `
+            -SshHost fixture
+        if ($facadeResult.bundle_root -cne $controllerFixture.root -or
+            $facadeResult.ssh_host -cne 'fixture' -or
+            $facadeResult.entrypoint_path -cne $controllerFixture.entrypoint -or
+            $facadeResult.library_count -ne 4 -or
+            $facadeResult.record_count -ne 6) {
+            throw "The public controller facade did not execute its verified $layout fixture."
+        }
+        if ($null -ne (Get-Command Get-DrToolingVerifiedBundle -ErrorAction SilentlyContinue) -or
+            @(Get-Module | Where-Object Name -Like 'DarkReNamer.loader.*').Count -ne 0 -or
+            @(Get-Module | Where-Object Name -Like 'DarkReNamer.controller.*').Count -ne 0) {
+            throw "The public controller facade leaked private $layout tooling state."
+        }
+    }
+    $tamperedController = New-DrTestControllerFacadeFixture `
+        -Root (Join-Path $temporaryRoot 'controller-tampered') `
+        -Layout bundle
+    [IO.File]::AppendAllText($tamperedController.controller_entry, "`n# changed after manifest freeze")
+    Assert-Fails {
+        & $tamperedController.entrypoint -BundleRoot $tamperedController.root -SshHost fixture
+    } 'SHA-256 mismatch for tooling role'
+    $missingController = New-DrTestControllerFacadeFixture `
+        -Root (Join-Path $temporaryRoot 'controller-missing') `
+        -Layout bundle
+    Remove-Item -LiteralPath $missingController.loader
+    Assert-Fails {
+        & $missingController.entrypoint -BundleRoot $missingController.root -SshHost fixture
+    } 'layout is missing or ambiguous'
+    $ambiguousController = New-DrTestControllerFacadeFixture `
+        -Root (Join-Path $temporaryRoot 'controller-ambiguous') `
+        -Layout checkout
+    Copy-Item -LiteralPath $ambiguousController.manifest `
+        -Destination (Join-Path (Split-Path $ambiguousController.entrypoint -Parent) 'tooling-bundle.json')
+    Copy-Item -LiteralPath $ambiguousController.loader `
+        -Destination (Join-Path (Split-Path $ambiguousController.entrypoint -Parent) 'tooling-loader.ps1')
+    Assert-Fails {
+        & $ambiguousController.entrypoint -BundleRoot $ambiguousController.root -SshHost fixture
+    } 'layout is missing or ambiguous'
     $transferManifestText = '{"schema_version":1,"modules":[]}'
     $transferModuleText = 'function Test-FrozenTransfer { $true }'
     $transferStage = New-ControllerToolingTransferStage -VerifiedTooling ([pscustomobject]@{
