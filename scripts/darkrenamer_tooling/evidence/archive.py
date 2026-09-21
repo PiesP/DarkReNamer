@@ -39,13 +39,12 @@ MAX_JSON_BYTES = 8 * 1024 * 1024
 MAX_JSON_DEPTH = 64
 MAX_JSON_NODES = 250_000
 
-# The largest inspected DarkReNamer raw-evidence archive had 362 files,
-# a 7,752,704-byte largest member, and 190,211,655 decompressed bytes.  These
-# bounds leave room for the 22-target profile while staying finite.  The member
-# bound also matches the separately designed 64 MiB raw-journal ceiling.
+# The complete 30-slot fixture used to size these count caps had 1,561 files
+# with authenticated modules. Repeated source members fit without raising
+# the existing archive, member, decompressed-byte, JSON, or compression limits.
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
-MAX_ARCHIVE_ENTRIES = 2_048
-MAX_ARCHIVE_FILES = 1_024
+MAX_ARCHIVE_ENTRIES = 8_192
+MAX_ARCHIVE_FILES = 4_096
 MAX_MEMBER_BYTES = 64 * 1024 * 1024
 MAX_DECOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 200

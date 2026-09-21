@@ -201,6 +201,39 @@ class ToolingBundleTests(unittest.TestCase):
                 self.assertEqual(completed.returncode, 0, completed.stderr.decode())
                 self.assertFalse(marker.exists(), "Python startup hook executed.")
 
+    def test_vm_launcher_stages_the_complete_powershell_runtime(self) -> None:
+        verified = self.verified("vm-launcher")
+        powershell = {row["role"] for row in json.loads(MANIFEST.read_bytes())["modules"]
+                      if row["kind"] == "powershell"}
+        self.assertIn("powershell-controller-entry", powershell)
+        self.assertTrue(powershell.issubset({entry.role for entry in verified.entries}))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tooling.stage_verified_tooling(verified, root)
+            staged = set(tooling.staged_tooling_files(root))
+            for entry in verified.entries:
+                if entry.role in powershell:
+                    self.assertIn(entry.bundle, staged)
+                    self.assertEqual((root / entry.bundle).read_bytes(), verified.bytes_for_role(entry.role))
+
+    def test_generator_requires_complete_registered_powershell_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copytree(REPOSITORY / "scripts", root / "scripts",
+                            ignore=shutil.ignore_patterns("__pycache__"))
+            shutil.copytree(REPOSITORY / "config", root / "config")
+            powershell = root / "scripts/modules/powershell"
+            extra = powershell / "undeclared.ps1"
+            extra.write_text("throw 'Unregistered module must never execute.'")
+            command = [sys.executable, str(root / "scripts/update-tooling-bundle.py"), "--check"]
+            result = subprocess.run(command, capture_output=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(b"Unregistered tooling package module: scripts/modules/powershell/undeclared.ps1", result.stderr)
+            shutil.rmtree(powershell)
+            result = subprocess.run(command, capture_output=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(b"Missing registered tooling module: scripts/modules/powershell/guest-contracts.ps1", result.stderr)
+
     def test_generated_manifest_and_pins_are_current(self) -> None:
         subprocess.run(
             [sys.executable, str(REPOSITORY / "scripts" / "update-tooling-bundle.py"), "--check"],

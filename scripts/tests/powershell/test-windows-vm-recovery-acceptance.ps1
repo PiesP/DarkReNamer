@@ -1,9 +1,13 @@
 ﻿[CmdletBinding()]
 param([switch] $ParserOnly)
 
+. (Join-Path $PSScriptRoot '../support/paths.ps1')
+$toolingTestPaths = Get-ToolingTestPaths
+$toolingScriptsRoot = $toolingTestPaths.ScriptsRoot
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'windows-vm-test-module-loader.ps1')
+. (Join-Path $toolingScriptsRoot 'tests/support/windows-vm-module-loader.ps1')
 foreach ($definition in @(Get-DrTestDefinitionScriptBlocks -Kind recovery)) { . $definition }
 
 function Invoke-TestRecoveryAcceptance {
@@ -133,7 +137,7 @@ function New-TestBundle {
 
     [void](New-Item -ItemType Directory -Path $Root)
     $runnerPath = Join-Path $Root 'windows-vm-guest.ps1'
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'windows-vm-guest.ps1') -Destination $runnerPath
+    Copy-Item -LiteralPath (Join-Path $toolingScriptsRoot 'windows-vm-guest.ps1') -Destination $runnerPath
     [IO.File]::WriteAllText((Join-Path $Root 'DarkReNamer.exe'), 'application fixture')
     [IO.File]::WriteAllText((Join-Path $Root 'fixture-tests.exe'), 'test fixture')
     $manifest = [ordered]@{
@@ -233,8 +237,8 @@ function New-CandidateTestBundle {
     $fixture
 }
 
-$acceptance = Join-Path $PSScriptRoot 'windows-vm-recovery-acceptance.ps1'
-$repositoryRoot = Split-Path -Parent $PSScriptRoot
+$acceptance = Join-Path $toolingScriptsRoot 'windows-vm-recovery-acceptance.ps1'
+$repositoryRoot = Split-Path -Parent $toolingScriptsRoot
 $admissionSource = [IO.File]::ReadAllText(
     (Join-Path $repositoryRoot 'crates/darknamer-app/src/admission.rs')
 )

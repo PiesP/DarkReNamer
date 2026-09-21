@@ -21,14 +21,16 @@ from zipfile import ZIP_STORED, ZipFile, ZipInfo
 from darkrenamer_tooling.campaign.planning import new_plan, validate_ledger
 from darkrenamer_tooling.contracts.binding import Candidate
 from darkrenamer_tooling.contracts.tooling import staged_tooling_files
-from darkrenamer_tooling.evidence.archive import EvidenceError, load_bounded_json
+from darkrenamer_tooling.evidence.archive import (
+    EvidenceError, MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_FILES, load_bounded_json,
+)
 from darkrenamer_tooling.vm import gui, launcher
 
 
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_TOTAL_BYTES = 512 * 1024 * 1024
-MAX_FILES = 1024
-MAX_ENTRIES = 2048
+MAX_FILES = MAX_ARCHIVE_FILES
+MAX_ENTRIES = MAX_ARCHIVE_ENTRIES
 MAX_INDEX_BYTES = 1024 * 1024
 SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
 WINDOWS_RESERVED = {

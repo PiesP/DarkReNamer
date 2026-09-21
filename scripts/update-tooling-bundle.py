@@ -20,7 +20,7 @@ INVENTORY = (
     ("campaign-verifier", "scripts/darkrenamer_tooling/campaign/verifier.py", "tooling-campaign-verifier.py", "python", "darkrenamer_tooling.campaign.verifier", ("package-root", "package-campaign", "campaign-planning", "campaign-recovery", "package-contracts", "contracts-binding", "contracts-menu-layout", "contracts-platform", "contracts-state", "contracts-tooling", "package-evidence", "evidence-archive", "evidence-png")),
     ("campaign-runner", "scripts/darkrenamer_tooling/campaign/runner.py", "tooling-campaign-runner.py", "python", "darkrenamer_tooling.campaign.runner", ("tooling-loader", "package-root", "package-campaign", "campaign-planning", "campaign-verifier", "package-contracts", "contracts-binding", "contracts-tooling", "package-evidence", "evidence-archive", "package-vm", "vm-launcher", "vm-gui")),
     ("package-vm", "scripts/darkrenamer_tooling/vm/__init__.py", "tooling-package-vm.py", "python-package", "darkrenamer_tooling.vm", ("package-root",)),
-    ("vm-launcher", "scripts/darkrenamer_tooling/vm/launcher.py", "tooling-vm-launcher.py", "python", "darkrenamer_tooling.vm.launcher", ("tooling-loader", "package-root", "package-vm", "package-contracts", "contracts-tooling", "package-evidence", "evidence-errors")),
+    ("vm-launcher", "scripts/darkrenamer_tooling/vm/launcher.py", "tooling-vm-launcher.py", "python", "darkrenamer_tooling.vm.launcher", ("tooling-loader", "package-root", "package-vm", "package-contracts", "contracts-tooling", "package-evidence", "evidence-errors", "powershell-controller-entry")),
     ("vm-gui", "scripts/darkrenamer_tooling/vm/gui.py", "tooling-vm-gui.py", "python", "darkrenamer_tooling.vm.gui", ("tooling-loader", "package-root", "package-vm", "vm-launcher", "package-contracts", "contracts-tooling", "package-evidence", "evidence-errors")),
     ("package-contracts", "scripts/darkrenamer_tooling/contracts/__init__.py", "tooling-package-contracts.py", "python-package", "darkrenamer_tooling.contracts", ("package-root",)),
     ("contracts-binding", "scripts/darkrenamer_tooling/contracts/binding.py", "tooling-contracts-binding.py", "python", "darkrenamer_tooling.contracts.binding", ("package-root", "package-contracts", "package-evidence", "evidence-archive")),
@@ -146,9 +146,7 @@ def digest(data: bytes) -> str:
 
 
 def selected_inventory(root: Path):
-    if (root / "scripts" / "modules" / "powershell").exists():
-        return INVENTORY + POWERSHELL_INVENTORY
-    return INVENTORY
+    return INVENTORY + POWERSHELL_INVENTORY
 
 
 def manifest_bytes(root: Path) -> bytes:
@@ -210,6 +208,10 @@ def unregistered_modules(root: Path) -> list[str]:
         path.relative_to(root).as_posix()
         for path in (root / "scripts" / "darkrenamer_tooling").rglob("*.py")
     }
+    powershell_root = root / "scripts" / "modules" / "powershell"
+    for pattern in ("*.ps1", "*.psm1"):
+        actual.update(path.relative_to(root).as_posix()
+                      for path in powershell_root.rglob(pattern))
     return sorted(actual - registered)
 
 
@@ -237,14 +239,13 @@ def main(argv=None) -> int:
         expected[path] = updated_bootstrap(
             path.read_bytes(), manifest_sha256=manifest_sha256, loader_sha256=loader_sha256
         )
-    if inventory != INVENTORY:
-        powershell_loader_sha256 = digest((root / "scripts" / "tooling-bootstrap.ps1").read_bytes())
-        for relative in POWERSHELL_BOOTSTRAPS:
-            path = root / relative
-            expected[path] = updated_powershell_bootstrap(
-                path.read_bytes(), manifest_sha256=manifest_sha256,
-                loader_sha256=powershell_loader_sha256,
-            )
+    powershell_loader_sha256 = digest((root / "scripts" / "tooling-bootstrap.ps1").read_bytes())
+    for relative in POWERSHELL_BOOTSTRAPS:
+        path = root / relative
+        expected[path] = updated_powershell_bootstrap(
+            path.read_bytes(), manifest_sha256=manifest_sha256,
+            loader_sha256=powershell_loader_sha256,
+        )
     stale = [path for path, data in expected.items() if not path.is_file() or path.read_bytes() != data]
     if args.check:
         for path in stale:

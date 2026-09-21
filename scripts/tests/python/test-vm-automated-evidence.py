@@ -217,6 +217,12 @@ class ReferencedFileTests(unittest.TestCase):
 
 
 class ArchiveIngressTests(unittest.TestCase):
+    def test_archive_count_limits_remain_hard_caps(self) -> None:
+        for name, maximum in (("max_files", evidence.MAX_ARCHIVE_FILES),
+                              ("max_entries", evidence.MAX_ARCHIVE_ENTRIES)):
+            with self.subTest(limit=name), self.assertRaises(evidence.EvidenceError):
+                evidence.ArchiveLimits(**{name: maximum + 1})
+
     def test_success_is_private_nonexecutable_exact_and_always_cleaned(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             parent = Path(temporary)
@@ -525,7 +531,7 @@ class IndexedArchiveTests(unittest.TestCase):
             data = bytearray(original)
             end = data.rfind(b"PK\x05\x06")
             if mutation in ("count", "zip64", "hidden_entries"):
-                count = {"count": 2049, "zip64": 0xFFFF, "hidden_entries": 1}[mutation]
+                count = {"count": evidence.MAX_ARCHIVE_ENTRIES + 1, "zip64": 0xFFFF, "hidden_entries": 1}[mutation]
                 struct.pack_into("<HH", data, end + 8, count, count)
             else:
                 struct.pack_into("<I", data, end + 12, 4 * 1024 * 1024 + 1)
@@ -537,7 +543,7 @@ class IndexedArchiveTests(unittest.TestCase):
                 constructor.assert_not_called()
 
     def test_actual_over_entry_directory_rejected_before_constructor(self) -> None:
-        write_zip(self.archive, {f"f{number}": b"" for number in range(2049)})
+        write_zip(self.archive, {f"f{number}": b"" for number in range(evidence.MAX_ARCHIVE_ENTRIES + 1)})
         data = bytearray(self.archive.read_bytes())
         end = data.rfind(b"PK\x05\x06")
         struct.pack_into("<HH", data, end + 8, 1, 1)

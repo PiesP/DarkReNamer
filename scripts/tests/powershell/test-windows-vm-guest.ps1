@@ -1,9 +1,13 @@
 ﻿[CmdletBinding()]
 param()
 
+. (Join-Path $PSScriptRoot '../support/paths.ps1')
+$toolingTestPaths = Get-ToolingTestPaths
+$toolingScriptsRoot = $toolingTestPaths.ScriptsRoot
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'windows-vm-test-module-loader.ps1')
+. (Join-Path $toolingScriptsRoot 'tests/support/windows-vm-module-loader.ps1')
 foreach ($definition in @(Get-DrTestDefinitionScriptBlocks -Kind guest)) { . $definition }
 foreach ($definition in @(Get-DrTestDefinitionScriptBlocks -Kind controller)) { . $definition }
 
@@ -163,7 +167,7 @@ function Save-Manifest([object] $Fixture) {
     Write-Utf8Json -Path (Join-Path $Fixture.root 'bundle.json') -Value $Fixture.manifest
 }
 
-$runner = Join-Path $PSScriptRoot 'windows-vm-guest.ps1'
+$runner = Join-Path $toolingScriptsRoot 'windows-vm-guest.ps1'
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-vm-guest-' + [Guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $temporaryRoot)
 try {
@@ -638,7 +642,7 @@ try {
         Assert-NoJournalResidue -LocalAppData $isolatedLocalAppData
     } 'rename-journal residue'
     Remove-Item -LiteralPath (Join-Path $isolatedJournalRoot 'active.drj')
-    $hostRunner = Join-Path $PSScriptRoot 'run-windows-vm-tests.ps1'
+    $hostRunner = Join-Path $toolingScriptsRoot 'run-windows-vm-tests.ps1'
     $hostRunnerText = Get-DrTestCombinedPowerShellSource -Kind controller
     if ($hostRunnerText.IndexOf('-ExecutionPolicy RemoteSigned', [StringComparison]::Ordinal) -ge 0 -or
         $hostRunnerText.IndexOf('Get-Command pwsh.exe', [StringComparison]::Ordinal) -lt 0 -or

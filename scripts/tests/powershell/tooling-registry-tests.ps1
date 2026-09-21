@@ -131,9 +131,9 @@ $powerShellPaths = @($registry.tests | Where-Object runner -ceq 'PowerShell' | F
 $pythonPaths = @($registry.tests | Where-Object runner -ceq 'Python' | ForEach-Object path)
 $expectedPowerShell = @(
     'scripts/tests/powershell/test-release-handoff-validator.ps1'
-    'scripts/test-windows-vm-guest.ps1'
-    'scripts/test-windows-vm-acceptance.ps1'
-    'scripts/test-windows-vm-recovery-acceptance.ps1'
+    'scripts/tests/powershell/test-windows-vm-guest.ps1'
+    'scripts/tests/powershell/test-windows-vm-acceptance.ps1'
+    'scripts/tests/powershell/test-windows-vm-recovery-acceptance.ps1'
     'scripts/tests/powershell/test-toolchain-consistency.ps1'
     'scripts/tests/powershell/test-measure-windows-binary.ps1'
     'scripts/tests/powershell/test-get-git-blob-sha256.ps1'

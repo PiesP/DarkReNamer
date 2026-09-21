@@ -70,26 +70,35 @@ class VmRunnerTests(unittest.TestCase):
         pwsh = shutil.which('pwsh')
         if pwsh is None:
             self.skipTest('PowerShell 7 is unavailable')
-        controller = (SCRIPT_ROOT / 'run-windows-vm-tests.ps1')
+        manifest = json.loads((REPOSITORY_ROOT / 'config/tooling-bundle.json').read_bytes())
+        controller_roles = {
+            'powershell-controller-contracts', 'powershell-controller-transport',
+            'powershell-controller-poll', 'powershell-controller-rescue',
+        }
+        controllers = [str(REPOSITORY_ROOT / row['source']) for row in manifest['modules']
+                       if row['role'] in controller_roles]
+        self.assertEqual(len(controllers), len(controller_roles))
         command = r'''
-            $tokens = $null
-            $parseErrors = $null
-            $ast = [Management.Automation.Language.Parser]::ParseFile(
-                $env:VM_RUNNER_CONTROLLER, [ref]$tokens, [ref]$parseErrors)
-            if ($parseErrors.Count -ne 0) { throw 'Controller has PowerShell parse errors.' }
             $functionName = $env:VM_RUNNER_FUNCTION
-            $functions = @($ast.FindAll({
-                param($node)
-                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-                    $node.Name -ceq $functionName
-            }, $true))
+            $functions = @(foreach ($controller in ($env:VM_RUNNER_CONTROLLER | ConvertFrom-Json)) {
+                $tokens = $null
+                $parseErrors = $null
+                $ast = [Management.Automation.Language.Parser]::ParseFile(
+                    $controller, [ref]$tokens, [ref]$parseErrors)
+                if ($parseErrors.Count -ne 0) { throw 'Controller has PowerShell parse errors.' }
+                $ast.FindAll({
+                    param($node)
+                    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                        $node.Name -ceq $functionName
+                }, $true)
+            })
             if ($functions.Count -ne 1) { throw 'Expected exactly one matching function.' }
             $functions[0].Extent.Text
         '''
         completed = subprocess.run(
             [pwsh, '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
              command], check=True, capture_output=True, text=True, timeout=20,
-            env={**os.environ, 'VM_RUNNER_CONTROLLER': str(controller),
+            env={**os.environ, 'VM_RUNNER_CONTROLLER': json.dumps(controllers),
                  'VM_RUNNER_FUNCTION': name})
         return completed.stdout
 
@@ -210,7 +219,7 @@ class VmRunnerTests(unittest.TestCase):
                          [0, 267009, 0, 3221225786])
 
     def test_ui_timeout_fails_before_stream_move_or_inventory(self):
-        controller = (SCRIPT_ROOT / 'run-windows-vm-tests.ps1').read_text()
+        controller = (SCRIPT_ROOT / 'modules/powershell/controller-entry.psm1').read_text()
         acceptance = controller[controller.index(
             "if ($acceptance) {\n        $guestBundleRoot"):]
         acceptance = acceptance[:acceptance.index("\n    elseif ($recovery) {")]
@@ -350,7 +359,7 @@ class VmRunnerTests(unittest.TestCase):
                          function)
 
     def test_recovery_timeout_fails_before_stream_move_or_inventory(self):
-        controller = (SCRIPT_ROOT / 'run-windows-vm-tests.ps1').read_text()
+        controller = (SCRIPT_ROOT / 'modules/powershell/controller-entry.psm1').read_text()
         recovery = controller[controller.index(
             "elseif ($recovery) {\n        $guestBundleRoot"):]
         recovery = recovery[:recovery.index("\n    else {", 1)]

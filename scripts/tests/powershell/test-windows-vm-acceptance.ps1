@@ -1,9 +1,13 @@
 ﻿[CmdletBinding()]
 param()
 
+. (Join-Path $PSScriptRoot '../support/paths.ps1')
+$toolingTestPaths = Get-ToolingTestPaths
+$toolingScriptsRoot = $toolingTestPaths.ScriptsRoot
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'windows-vm-test-module-loader.ps1')
+. (Join-Path $toolingScriptsRoot 'tests/support/windows-vm-module-loader.ps1')
 foreach ($definition in @(Get-DrTestDefinitionScriptBlocks -Kind ui)) { . $definition }
 foreach ($definition in @(Get-DrTestDefinitionScriptBlocks -Kind controller)) { . $definition }
 
@@ -270,10 +274,10 @@ function Write-TextScaleSnapshot {
     })
 }
 
-$acceptance = Join-Path $PSScriptRoot 'windows-vm-acceptance.ps1'
-$controller = Join-Path $PSScriptRoot 'run-windows-vm-tests.ps1'
-$runner = Join-Path $PSScriptRoot 'windows-vm-guest.ps1'
-$recovery = Join-Path $PSScriptRoot 'windows-vm-recovery-acceptance.ps1'
+$acceptance = Join-Path $toolingScriptsRoot 'windows-vm-acceptance.ps1'
+$controller = Join-Path $toolingScriptsRoot 'run-windows-vm-tests.ps1'
+$runner = Join-Path $toolingScriptsRoot 'windows-vm-guest.ps1'
+$recovery = Join-Path $toolingScriptsRoot 'windows-vm-recovery-acceptance.ps1'
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
     'darkrenamer-vm-acceptance-' + [Guid]::NewGuid().ToString('N')
 )

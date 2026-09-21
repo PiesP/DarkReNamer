@@ -99,7 +99,7 @@
       "bundle": "tooling-campaign-runner.py",
       "kind": "python",
       "module": "darkrenamer_tooling.campaign.runner",
-      "sha256": "a45cba98892355ea4bd035c04a7d3213a7c9513ac3b68fb52d531bb959a49e63",
+      "sha256": "b48071ab86c1bcfe1f12f2cc25f267cf08c8c80bc0824ce3415288d398fc5215",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -141,7 +141,8 @@
         "package-contracts",
         "contracts-tooling",
         "package-evidence",
-        "evidence-errors"
+        "evidence-errors",
+        "powershell-controller-entry"
       ]
     },
     {
@@ -276,7 +277,7 @@
       "bundle": "tooling-evidence-archive.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.archive",
-      "sha256": "01290b7b8768552bb9b3f2b3bd3e780fb937db3ae1f74a59c78a12dac1a12481",
+      "sha256": "07641b44f7e5a055ebe5c3ebb62df9a73ecaae1bf55c485a9dcea738e1f8ac71",
       "dependencies": [
         "package-root",
         "package-evidence",
@@ -368,6 +369,368 @@
         "package-contracts",
         "contracts-binding",
         "contracts-tooling"
+      ]
+    },
+    {
+      "role": "powershell-loader",
+      "source": "scripts/tooling-bootstrap.ps1",
+      "bundle": "tooling-loader.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "6888561ff9a23becf279ec7d4e691b40d50d79dde2196d22c0d63e2252dd08a1",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-guest-contracts",
+      "source": "scripts/modules/powershell/guest-contracts.ps1",
+      "bundle": "guest-contracts.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "07cc0bdd0ec732c3fa2772e32119908c0bcb236c80429a5d80b8a7331bf3a92d",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-guest-process",
+      "source": "scripts/modules/powershell/guest-process.ps1",
+      "bundle": "guest-process.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "4685fa1281aff5ab569d5f1886cf4a18459a2172784763281fb2ba3b1cd7925e",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-guest-native",
+      "source": "scripts/modules/powershell/guest-native.ps1",
+      "bundle": "guest-native.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "e9db1e6383cf319973a87f541805e151228dfb4e91f588989295905c34666bdb",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-guest-platform",
+      "source": "scripts/modules/powershell/guest-platform.ps1",
+      "bundle": "guest-platform.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "df2e18a8f9c317f0bb135026ecde8930639175c7d551280e4eafebd921354b5c",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-guest-uia",
+      "source": "scripts/modules/powershell/guest-uia.ps1",
+      "bundle": "guest-uia.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "9db26b68e2a80c9d70560ff8e6e57a513910067a26e8888d686522d9c265a151",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-guest-state",
+      "source": "scripts/modules/powershell/guest-state.ps1",
+      "bundle": "guest-state.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "9259d0eb220e7150445a9e1c935a73fb4ca1f54153ba205ee51a5832db302e78",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-guest-scenario",
+      "source": "scripts/modules/powershell/guest-scenario.ps1",
+      "bundle": "guest-scenario.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "1cc74ee9520f76414049189dd95e0c414664577975aa7ba792cd51afff77a43b",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-guest-runtime",
+      "source": "scripts/modules/powershell/guest-runtime.ps1",
+      "bundle": "guest-runtime.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "a7a8e2ca256de7e8b11dcef84e68b56473f35fe00bb72c331778e19ef714fd16",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-guest-entry",
+      "source": "scripts/modules/powershell/guest-entry.psm1",
+      "bundle": "guest-entry.psm1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "bd94f5c27fdff097c492fbac90b2a2d3de66c28f32804c57c5f9f6ec2e68bc35",
+      "dependencies": [
+        "powershell-loader",
+        "powershell-guest-contracts",
+        "powershell-guest-process",
+        "powershell-guest-native",
+        "powershell-guest-platform",
+        "powershell-guest-uia",
+        "powershell-guest-state",
+        "powershell-guest-scenario",
+        "powershell-guest-runtime"
+      ]
+    },
+    {
+      "role": "powershell-ui-bootstrap",
+      "source": "scripts/modules/powershell/ui-bootstrap.ps1",
+      "bundle": "ui-bootstrap.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "6cbeebdeea40bcb78e7f0d0ddd7b9e072ba7f7bd2b3c68fb6e5c5aac40aab091",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-ui-appearance",
+      "source": "scripts/modules/powershell/ui-appearance.ps1",
+      "bundle": "ui-appearance.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "bf6eca58066e4be60bb6a1b7defbb7892a4e2c22b4b70806bcf7c2fd9f2462b1",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-ui-native",
+      "source": "scripts/modules/powershell/ui-native.ps1",
+      "bundle": "ui-native.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "46bce54e780b560dec61fec8c8802333b5d5e8e95b9f7cd6d559e72ece2811a0",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-ui-menu",
+      "source": "scripts/modules/powershell/ui-menu.ps1",
+      "bundle": "ui-menu.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "8563886a00acda863dabf70837bae8080c9b4186153081a0ec81aa4fc797d56d",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-ui-input",
+      "source": "scripts/modules/powershell/ui-input.ps1",
+      "bundle": "ui-input.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "c13338d105127b3bfa59daf1d6c21eb244488d45b8f9628247683724f26bb539",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-ui-application",
+      "source": "scripts/modules/powershell/ui-application.ps1",
+      "bundle": "ui-application.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "10114310af3ef2f74e704cce6472c98623be9009f7b05515d5d582f828da2903",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-ui-fixtures",
+      "source": "scripts/modules/powershell/ui-fixtures.ps1",
+      "bundle": "ui-fixtures.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "b59550aed4dbb4fe6c9ff877ca68df183d0dd6cf6da71463330449db61b5a5e4",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-ui-context-scenarios",
+      "source": "scripts/modules/powershell/ui-context-scenarios.ps1",
+      "bundle": "ui-context-scenarios.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "2cdb5ee798d9d8c7549f27fad62fb9557facb6b1b7a784c5b30664afc32a0efb",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-ui-regression",
+      "source": "scripts/modules/powershell/ui-regression.ps1",
+      "bundle": "ui-regression.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "c11a7212a3bcbff36322b1a297d6d7b2f8e0bbc4b07c102f049ab94c8362284a",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-ui-current-dpi",
+      "source": "scripts/modules/powershell/ui-current-dpi.ps1",
+      "bundle": "ui-current-dpi.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "b96155fe7b6385b6f5a8520ad3ebfdedba4a53eaec1399c55f4c7f83185ee9ae",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-ui-entry",
+      "source": "scripts/modules/powershell/ui-entry.psm1",
+      "bundle": "ui-entry.psm1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "a65df3f0bf6e164369bcb321ab01d2407e6f031af4155ee2bc157c61e43cd1f2",
+      "dependencies": [
+        "powershell-loader",
+        "powershell-ui-bootstrap",
+        "powershell-ui-appearance",
+        "powershell-ui-native",
+        "powershell-ui-menu",
+        "powershell-ui-input",
+        "powershell-ui-application",
+        "powershell-ui-fixtures",
+        "powershell-ui-context-scenarios",
+        "powershell-ui-regression",
+        "powershell-ui-current-dpi",
+        "powershell-guest-contracts",
+        "powershell-guest-process",
+        "powershell-guest-native",
+        "powershell-guest-platform",
+        "powershell-guest-uia",
+        "powershell-guest-state",
+        "powershell-guest-scenario",
+        "powershell-guest-runtime"
+      ]
+    },
+    {
+      "role": "powershell-recovery-bootstrap",
+      "source": "scripts/modules/powershell/recovery-bootstrap.ps1",
+      "bundle": "recovery-bootstrap.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "d79ee4d296719798eb4e5433ade49aedf3003460b5ae2f35090e8fe15081ce59",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-recovery-journal",
+      "source": "scripts/modules/powershell/recovery-journal.ps1",
+      "bundle": "recovery-journal.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "07743c86e76b4473eb27a630bbcee959c1e5eb0ea482ecdacd69b79682a4322c",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-recovery-evidence",
+      "source": "scripts/modules/powershell/recovery-evidence.ps1",
+      "bundle": "recovery-evidence.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "7d8f162ce239dd87cef9223a4ae82365dc9ec7bd8dd9e162b6e9611867eaf1db",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-recovery-process",
+      "source": "scripts/modules/powershell/recovery-process.ps1",
+      "bundle": "recovery-process.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "ba04c15ab75b0b0ea32d5f7bdbbcff8b8bbec93b2115d1b2aae7046af02234f0",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-recovery-native",
+      "source": "scripts/modules/powershell/recovery-native.ps1",
+      "bundle": "recovery-native.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "2846525df3a85a6ed27f4acd597fc1d673217ff1e9fa2276fe2ed8ed1c8061f3",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-recovery-worker",
+      "source": "scripts/modules/powershell/recovery-worker.ps1",
+      "bundle": "recovery-worker.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "542b208a7f8f9c484d41753d9803c4ffa7b5d06c7278809a38ce6754d2b80846",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-recovery-scenarios",
+      "source": "scripts/modules/powershell/recovery-scenarios.ps1",
+      "bundle": "recovery-scenarios.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "e23571744270f6c4859d458439087d3b63a32d846d492ce135e78392657eb1b3",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-recovery-entry",
+      "source": "scripts/modules/powershell/recovery-entry.psm1",
+      "bundle": "recovery-entry.psm1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "2c73fff14b0d8502f7de4c86d5d3c24772856300a0cb5e1771a257b04cc652df",
+      "dependencies": [
+        "powershell-loader",
+        "powershell-recovery-bootstrap",
+        "powershell-recovery-journal",
+        "powershell-recovery-evidence",
+        "powershell-recovery-process",
+        "powershell-recovery-native",
+        "powershell-recovery-worker",
+        "powershell-recovery-scenarios",
+        "powershell-guest-contracts",
+        "powershell-guest-process",
+        "powershell-guest-native",
+        "powershell-guest-platform",
+        "powershell-guest-uia",
+        "powershell-guest-state",
+        "powershell-guest-scenario",
+        "powershell-guest-runtime"
+      ]
+    },
+    {
+      "role": "powershell-controller-contracts",
+      "source": "scripts/modules/powershell/controller-contracts.ps1",
+      "bundle": "controller-contracts.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "b3d423aab0686dd365eefeb2bfb0d075136a2a3a08106c3171d0ac3fceed4558",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-controller-transport",
+      "source": "scripts/modules/powershell/controller-transport.ps1",
+      "bundle": "controller-transport.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "c8d219f547bab5ee5d99abc3a5586e59458b47eefabb2d233455a9e35ef0b0fd",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-controller-poll",
+      "source": "scripts/modules/powershell/controller-poll.ps1",
+      "bundle": "controller-poll.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "6e757518601049710373252bb394bad1768e67b6079c64703ce702e335c91a6a",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-controller-rescue",
+      "source": "scripts/modules/powershell/controller-rescue.ps1",
+      "bundle": "controller-rescue.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "3f7d72cfd41ddd8ccb268393d1cc4e8f1aaefafc43f92d8abc76f37d84a7ab42",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-controller-entry",
+      "source": "scripts/modules/powershell/controller-entry.psm1",
+      "bundle": "controller-entry.psm1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "1aae5354e6ae30a9275c612eb153a8e8c8836b002b85f7f307e5f554b958f4b8",
+      "dependencies": [
+        "powershell-loader",
+        "powershell-controller-contracts",
+        "powershell-controller-transport",
+        "powershell-controller-poll",
+        "powershell-controller-rescue",
+        "powershell-guest-entry",
+        "powershell-ui-entry",
+        "powershell-recovery-entry"
       ]
     }
   ]

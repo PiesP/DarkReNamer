@@ -1,4 +1,6 @@
-﻿Set-StrictMode -Version Latest
+﻿. (Join-Path $PSScriptRoot 'paths.ps1')
+
+Set-StrictMode -Version Latest
 
 function Get-DrTestPowerShellModuleSpec {
     param([Parameter(Mandatory)][ValidateSet('guest', 'ui', 'recovery', 'controller')][string] $Kind)
@@ -49,7 +51,7 @@ function Get-DrTestPowerShellModuleSpec {
             )
         }
     }
-    $moduleRoot = Join-Path $PSScriptRoot 'modules/powershell'
+    $moduleRoot = Join-Path (Get-ToolingTestPaths).ScriptsRoot 'modules/powershell'
     [pscustomobject]@{
         kind = $Kind
         definitions = @($definitions | ForEach-Object { Join-Path $moduleRoot $_ })
@@ -97,7 +99,7 @@ function New-DrTestFrozenToolingBundle {
 
     $spec = Get-DrTestPowerShellModuleSpec -Kind $Kind
     $records = [Collections.Generic.List[object]]::new()
-    $loaderSource = Join-Path $PSScriptRoot 'tooling-bootstrap.ps1'
+    $loaderSource = Join-Path (Get-ToolingTestPaths).ScriptsRoot 'tooling-bootstrap.ps1'
     $loaderDestination = Join-Path $TaskRoot 'tooling-bootstrap.ps1'
     Copy-Item -LiteralPath $loaderSource -Destination $loaderDestination
     $loaderHash = Get-DrTestFileSha256 -Path $loaderDestination
@@ -150,13 +152,16 @@ function New-DrTestFrozenToolingBundle {
     $manifestHash = Get-DrTestFileSha256 -Path $manifestPath
     foreach ($entrypointPath in $EntrypointPaths) {
         $text = [IO.File]::ReadAllText($entrypointPath, [Text.Encoding]::UTF8)
-        $text = $text.Replace(
-            "`$ToolingManifestSha256 = '" + ('0' * 64) + "'",
-            "`$ToolingManifestSha256 = '$manifestHash'"
-        ).Replace(
-            "`$ToolingLoaderSha256 = '" + ('0' * 64) + "'",
-            "`$ToolingLoaderSha256 = '$loaderHash'"
-        )
+        foreach ($pin in @{
+            ToolingManifestSha256 = $manifestHash
+            ToolingLoaderSha256 = $loaderHash
+        }.GetEnumerator()) {
+            $pattern = '(?m)^\$' + $pin.Key + " = '[0-9a-f]{64}'$"
+            if ([regex]::Matches($text, $pattern).Count -ne 1) {
+                throw "Expected one generated fixture pin: $($pin.Key)"
+            }
+            $text = [regex]::Replace($text, $pattern, ('$' + $pin.Key + " = '" + $pin.Value + "'"))
+        }
         [IO.File]::WriteAllText($entrypointPath, $text, [Text.UTF8Encoding]::new($true))
     }
     [pscustomobject]@{
