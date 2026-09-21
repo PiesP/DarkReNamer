@@ -963,7 +963,8 @@ try {
         $initScript = @'
 $ErrorActionPreference = 'Stop'
 $runnerPath = 'GUEST_RUNNER_PATH'
-. $runnerPath -BundleRoot 'GUEST_BUNDLE_PATH' -ExpectedSessionId 1 -ValidateOnly
+$moduleLoaderPath = 'MODULE_LOADER_PATH'
+& $runnerPath -BundleRoot 'GUEST_BUNDLE_PATH' -ExpectedSessionId 1 -ValidateOnly
 $tokens = $null
 $errors = $null
 $fromFile = [Management.Automation.Language.Parser]::ParseFile($runnerPath, [ref]$tokens, [ref]$errors)
@@ -975,9 +976,14 @@ if ($fileStrings.Count -ne $utf8Strings.Count) { throw 'Guest script string deco
 for ($index = 0; $index -lt $fileStrings.Count; $index++) {
     if ($fileStrings[$index] -cne $utf8Strings[$index]) { throw 'Guest script string decoding differs from UTF-8.' }
 }
-Initialize-NativeCapture
+. $moduleLoaderPath
+Invoke-DrTestPowerShellModuleScope -Kind guest -Action { Initialize-NativeCapture }
 '@
-        $initScript = $initScript.Replace('GUEST_RUNNER_PATH', $valid.runner.Replace("'", "''")).Replace('GUEST_BUNDLE_PATH', $valid.root.Replace("'", "''"))
+        $moduleLoaderPath = Join-Path $toolingScriptsRoot 'tests/support/windows-vm-module-loader.ps1'
+        $initScript = $initScript.Replace('GUEST_RUNNER_PATH', $valid.runner.Replace("'", "''")).Replace(
+            'GUEST_BUNDLE_PATH',
+            $valid.root.Replace("'", "''")
+        ).Replace('MODULE_LOADER_PATH', $moduleLoaderPath.Replace("'", "''"))
         $encodedInit = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($initScript))
         $initProcess = Start-OwnedProcess `
             -FilePath (Join-Path $PSHOME 'pwsh.exe') `
@@ -1008,7 +1014,7 @@ Initialize-NativeCapture
         Exit-TestExecutionState -Previous $previousExecutionState
 
         $lockProbe = Join-Path $valid.root 'desktop-lock-probe.ps1'
-        [IO.File]::WriteAllText($lockProbe, @'
+        $lockProbeText = @'
 if ($env:DARKRENAMER_LOCK_MODE -ceq 'runner') {
     try {
         & $env:DARKRENAMER_LOCK_RUNNER `
@@ -1026,19 +1032,27 @@ if ($env:DARKRENAMER_LOCK_MODE -ceq 'runner') {
     [IO.File]::WriteAllText($env:DARKRENAMER_LOCK_OUTPUT, $state)
     return
 }
-. $env:DARKRENAMER_LOCK_RUNNER `
-    -BundleRoot $env:DARKRENAMER_LOCK_BUNDLE `
-    -ExpectedSessionId ([int]$env:DARKRENAMER_LOCK_SESSION) `
-    -ValidateOnly
-$lock = Enter-DesktopTestLock -SessionId ([int]$env:DARKRENAMER_LOCK_SESSION)
-try {
-    $state = if ($null -eq $lock) { 'busy' } else { 'acquired' }
-    [IO.File]::WriteAllText($env:DARKRENAMER_LOCK_OUTPUT, $state)
-}
-finally {
-    Exit-DesktopTestLock -Lock $lock
-}
-'@)
+. 'MODULE_LOADER_PATH'
+Invoke-DrTestPowerShellModuleScope `
+    -Kind guest `
+    -Action {
+        param($SessionId, $OutputPath)
+        $lock = Enter-DesktopTestLock -SessionId $SessionId
+        try {
+            $state = if ($null -eq $lock) { 'busy' } else { 'acquired' }
+            [IO.File]::WriteAllText($OutputPath, $state)
+        }
+        finally {
+            Exit-DesktopTestLock -Lock $lock
+        }
+    } `
+    -ArgumentList @([int]$env:DARKRENAMER_LOCK_SESSION, $env:DARKRENAMER_LOCK_OUTPUT)
+'@
+        $lockProbeText = $lockProbeText.Replace(
+            'MODULE_LOADER_PATH',
+            $moduleLoaderPath.Replace("'", "''")
+        )
+        [IO.File]::WriteAllText($lockProbe, $lockProbeText)
         function Invoke-DesktopLockProbe {
             param(
                 [Parameter(Mandatory)][string] $OutputPath,
