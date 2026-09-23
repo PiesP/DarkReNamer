@@ -3733,6 +3733,8 @@ pub(crate) fn minimum_main_client_width(
 pub const PRODUCT_NAME: &str = "DarkReNamer";
 /// Upstream behavior version targeted by compatibility mode.
 pub const COMPATIBILITY_TARGET: &str = "DarkNamer 08.02.10";
+#[cfg(any(windows, test))]
+pub(crate) const ACTIVE_RECOVERY_STATUS_GUIDANCE: &str = "복구 확인을 다시 보려면 앱을 종료한 뒤 다시 실행하세요. 취소해도 파일은 변경되지 않고 복구 잠금을 유지합니다.";
 
 /// Returns the product identity shown by the native About command.
 #[must_use]
@@ -5015,6 +5017,14 @@ mod tests {
         assert!(text.contains(concat!("DarkReNamer ", env!("CARGO_PKG_VERSION"))));
         assert!(text.contains("호환 대상: DarkNamer 08.02.10"));
         assert!(text.contains("비공식"));
+    }
+
+    #[test]
+    fn active_recovery_status_guidance_explains_how_to_reopen_confirmation() {
+        assert!(ACTIVE_RECOVERY_STATUS_GUIDANCE.contains("다시 실행"));
+        assert!(ACTIVE_RECOVERY_STATUS_GUIDANCE.contains("취소"));
+        assert!(ACTIVE_RECOVERY_STATUS_GUIDANCE.contains("파일은 변경되지 않"));
+        assert!(ACTIVE_RECOVERY_STATUS_GUIDANCE.contains("복구 잠금"));
     }
 
     #[test]
