@@ -12,16 +12,6 @@ interrupted transaction. Paths selected through the UI, imported text, current
 filesystem occupancy, reparse points, parent identities, and concurrent changes
 by other processes are untrusted.
 
-Command-rail enabled-state changes queue a non-erasing repaint after the current
-AppState callback lease ends. They do not force synchronous painting or bypass
-the lease guard: native enable notifications can request owner drawing while
-that guard is active. Repainting changes presentation only, not command or
-filesystem authorization. A Windows regression test verifies that the
-production reset control is visible, clears its update region, and queries its
-enabled state and pending repaint across both transitions. Its four native API
-calls use three narrow unsafe blocks and account for the application module
-budget increase.
-
 The UI may display paths but does not authorize mutation by string alone.
 Planning freezes source, entry, and parent identities. The Windows backend
 reopens and verifies those identities and performs handle-relative,
@@ -82,126 +72,32 @@ does not create folders, replace an occupied destination, merge directories, or
 fall back to copy-and-delete.
 
 Path unification is a proposal-only UI operation until Apply. It operates on all
-rows and is unavailable when any row is a directory. The folder dialog releases
-the UI state lease and, after it closes, rechecks the owner session, model
-revision, close state, recovery lock, mutation lock, and workers before changing
-the model atomically. Cancellation, stale state, an invalid selected folder, or
-a bounded-allocation failure leaves every row and the revision unchanged. A
-successful change increments the revision once and fully rebuilds path,
-collision, status, and Apply-readiness previews. The separate path-reset command
-restores each source parent while retaining proposed names; the name-reset
-command independently restores proposed names without changing target folders.
+rows and is unavailable when any row is a directory. After the folder dialog
+closes, the application rechecks the owner session, model revision, close state,
+recovery and mutation locks, and workers before changing the model atomically.
+Cancellation, stale state, an invalid folder, or allocation failure leaves every
+row and the revision unchanged. A successful change increments the revision once
+and rebuilds path, collision, status, and Apply-readiness previews. Path reset
+restores original parents while retaining proposed names; name reset restores
+proposed names without changing target folders. Neither operation is filesystem
+Undo.
 
-Selected-row diagnostics copy only synchronized model-preview information.
-Their menu command requires one selected row and an idle, unlocked workbench.
-The prepared modal session snapshots one row after synchronized preview and
-displays it after the AppState callback lease ends. A native read-only, wrapping
-edit control exposes the complete explanation and paths; copying requires an
-explicit selection-copy or whole-text copy action. This session neither validates
-filesystem occupancy nor creates a rename plan or journal capability. Its modal
-lock prevents model edits until the session ends.
+Selected-row diagnostics and Apply details use owned snapshots of synchronized
+model or frozen-plan data. Diagnostics do not validate filesystem occupancy or
+create a rename plan or journal capability. Modal sessions prevent concurrent
+model edits. The final confirmation defaults to Cancel and rechecks the original
+session, revision, and plan fingerprint before execution; display expansion and
+clipboard operations cannot rewrite the model or frozen plan.
 
-Apply examples sample at most two rows of the already frozen plan. Short names
-retain visible change context; complete examples use the same read-only details
-control. Identical abbreviated comparisons explicitly disclose their comparison
-limit without changing the original names. Parent changes retain bounded path
-context; the prepared summary supplies a bounded common destination only for
-plans with moves, or an item-specific destination reminder when there is no
-common destination. Returning from details reopens the same prepared confirmation
-with Cancel as its default. Final confirmation still checks the original session,
-revision and fingerprint before execution. Technical expansion does not duplicate
-full paths, avoiding the native TaskDialog's path-elision behavior. Display-only
-Unicode conversion cannot rewrite the model or the frozen plan.
-Before a main-window prepared TaskDialog starts its nested modal loop, the
-ListView-owned infotip is explicitly deactivated and any displayed tip is
-removed. A main-window-only guard spans the complete TaskDialog/details loop and
-reactivates hover tips after normal, Cancel, and error returns. It copies the
-ListView HWND while AppState is leased, releases that lease before synchronous
-tooltip messages can reenter the owner, and restores only when the same live
-owner, direct-child ListView, and attached tooltip still match. This boundary
-never interprets a PromptState-backed dialog HWND as AppState. The application
-module's two production unsafe blocks cover the validated deactivate/remove and
-conditional restore messages; four test-only blocks install, observe, and remove
-the native tooltip message probe.
-The dialog module's seven additional narrow unsafe blocks cover the owner
-liveness query, read-only mode and owned-copy snapshots,
-the native edit text limit, and three test-only control/style/text probes. The
-read-only mode retains the existing prompt lifetime and owner restoration; default
-window processing receives no held state reference. Clipboard work receives an
-owned snapshot after the modal state borrow ends.
-Copy failure is reported directly with the details window as its owner, without
-closing the details or passing its PromptState pointer to the main-window
-AppState dispatcher. The user can retry the explicit copy operation.
-
-Appearance preferences are non-authorizing input. Theme, command-rail density,
-preview emphasis, separators, tint, and empty-state copy may change presentation
-only. They are stored separately from rename journals and cannot alter model
-revision, plan identity, Apply confirmation, mutation locks, recovery locks, or
-active and candidate journal capabilities. When the monitor work area can
-accommodate the requested minimum, the minimum window width reserves the widest
-measured rail eligible for the selected preference, so automatic density changes
-cannot overflow the default ListView columns. Preference load or write failure
-uses safe presentation defaults and does not relax or create filesystem mutation
-authority. Before first display, initial placement uses copied window and monitor
-rectangles to fit both the DPI-derived size and origin within the nearest work
-area.
-
-Appearance-dialog focus scrolling posts session-bound redraw work. Synchronous
-redraw starts after its state lease ends, and default `WM_PAINT` processing holds
-no state lease so a nested `WM_ERASEBKGND` can safely resolve the current palette.
-The appearance dialog uses the standard modal caption instead of a compact
-tool-window caption. Creation and DPI/work-area calculations share its extended
-style, retaining Windows-owned close-button painting, hit testing, and keyboard
-handling. Caption close still follows the existing Cancel path and restores the
-appearance draft without saving preferences or changing rename authority.
-Default caption dispatch releases the dialog state lease before entering
-`DefWindowProcW`, which can synchronously send `WM_CLOSE`. No state is accessed
-after that call. The native regression exercises `SC_CLOSE` while separately
-retaining the rejection of nested mutable state leases.
-
-Resolved Light and Dark themes use an app-owned menu palette while
-retaining keyboard mnemonics and native MSAA/UIA metadata. Native System, Forced
-Colors, and an unknown high-contrast query keep the standard Windows menu path.
-Menu replacements are prepared while state is leased, then attached and the old
-tree destroyed only from the pointer-free deferred redraw message after that
-lease ends. Accessibility metadata and referenced GDI brushes outlive the native
-menu tree that uses them.
-Palette-drawn separators retain the native separator flag and an empty label;
-they remain non-command items during keyboard and accessibility traversal.
-Owner-draw menu callbacks snapshot and restore the caller-provided drawing DC,
-including selected objects, colors, and background mode, on every handled path.
-Windows paints its own submenu marker after the owner-draw item callback. For
-Light and Dark palettes, a deferred pointer-free owner message therefore scopes
-the visible `#32768` popup to the current attached menu tree, process, UI thread,
-and public menu-item screen geometry before installing one Common Controls
-subclass. Product and test executables embed the same Common Controls v6
-activation manifest, so documented subclass imports never bind to the classic
-System32 implementation before process startup. The subclass copies only
-HWND/HMENU, COLORREF, DPI, and generation scalars before default `WM_PAINT`,
-then repaints only each visible submenu item's clipped trailing marker slot
-with one palette-colored triangle. Its DC state and locally owned GDI objects
-are restored and released in order. On
-`WM_NCDESTROY`, a successfully detached subclass releases its boxed context;
-if the documented removal reports failure, the tiny context remains allocated
-rather than leaving live subclass refdata dangling. Ambiguous, stale, foreign,
-invalid, or over-limit requests cannot select a popup or change menu mode;
-scoping or installation failure keeps the owner-draw palette and its visible
-fallback glyph. The native HMENU tree, command state, hit-testing, keyboard
-handling, and MSAA/UIA metadata are not replaced.
-`SetWindowTheme` changes a control's visual style association, including its
-body rendering. `NativeThemeTarget` in `windows/appearance.rs` separates the
-file list from the app-painted appearance viewport. The file list always
-restores the default association with null arguments, preserving native list
-rendering without Explorer-style dividers through blank body space. Only the
-viewport requests a dark association; Light, Native System, resource fallback,
-or a failed dark association restores its default. Windows copies the optional
-theme name during the call. Existing callback guards reject state reentry during
-the synchronous theme notification. List colors are restored after the call;
-theme changes do not replace controls or change rows, selection, scroll ranges,
-model revisions, or mutation authority. Native pixel regression tests capture
-the v6 ListView and compare full-width empty-body bands, including column
-boundaries, after column changes, scrolling, theme transitions, and row removal.
-The test-only capture resources retain their existing GDI ownership and cleanup.
+Appearance preferences and repaints are non-authorizing input. Theme,
+command-rail density and enabled-state painting, preview emphasis, separators,
+tint, and empty-state copy may change presentation only. Preferences are stored
+separately from rename journals and cannot alter model revision, plan identity,
+Apply confirmation, mutation or recovery locks, or journal capabilities. Load,
+write, theme, drawing, and layout failures use safe presentation fallbacks and
+do not create filesystem authority. Native System and Forced Colors retain
+Windows rendering; app-owned rendering must preserve command identity, keyboard
+behavior, and MSAA/UIA metadata.
 
 ## Preview resource boundary
 
@@ -351,6 +247,15 @@ exception still requires a local `SAFETY` justification and must pass the
 Windows Clippy gate while `undocumented_unsafe_blocks` and
 `unsafe_op_in_unsafe_fn` remain denied.
 
+The native UI exceptions exist where Win32 handle, message, drawing, theme, and
+subclass APIs cannot be expressed through the safe bindings. Those call sites
+must validate window and object ownership, use owned snapshots instead of live
+state references, release application state leases before reentrant Windows
+dispatch, and restore borrowed drawing state and locally owned GDI resources.
+Subclass state remains alive until confirmed detach or window destruction; an
+ambiguous removal leaks the bounded context instead of risking dangling native
+refdata. These presentation exceptions do not grant rename or journal authority.
+
 `normalized_final_leaf` keeps the source handle live for the synchronous
 `GetFinalPathNameByHandleW` call, passes either a null zero-length output or the
 exact checked writable slice, bounds each allocation by
@@ -470,325 +375,11 @@ removes its private scratch and extracted archive before it returns success;
 only then is the canonical path-free statement attested. Validation does not
 authorize publication: tagging and publishing still require owner authorization.
 
-## Windows acceptance evidence
+## Historical Windows acceptance
 
-This section preserves the historical formal desktop-acceptance contract and
-its validators. Its human review and physical-media requirements retain their
-original meaning for historical artifacts. The active release contract is
-[VM-Automated release validation](#vm-automated-release-validation); no old
-failure, `not-run`, or `review_required` record is upgraded by that transition.
-
-Windows acceptance is recorded as a local or external JSON artifact. Evidence
-files are not source files, must not be committed, and must not contain local
-paths, operator or machine identities, or volume serials. The JSON records a
-full source SHA and the tested executable's filename and SHA-256. An artifact
-from the Actions handoff also records its workflow run ID; a local build is
-identified only as a local build. Visual capture rows bind PNG filenames,
-dimensions, image digests, UI and optional scenario targets, appearance, and
-surface to that same executable digest. Image bytes remain external.
-
-For a historical formal-acceptance decision, validate the complete external
-evidence against the downloaded Actions handoff and matching checkout with
-[`scripts/validate-release-acceptance.ps1`](scripts/validate-release-acceptance.ps1).
-This cross-check requires the evidence to identify `actions-handoff` and match
-the handoff's source SHA, workflow run, executable filename, executable digest,
-and actual executable bytes. Supply the external screenshot directory through
-`-VisualEvidenceRoot`; the validator rejects reparse-point roots or images and
-checks each PNG's encoded-size bound, chunk order and CRCs, decoded scanlines,
-digest, and recorded dimensions. Packaging validation by itself does not
-satisfy the acceptance matrix below.
-
-The visual-root checks reject static aliases but do not prevent another local
-process from replacing a file between metadata, dimension, and digest reads.
-Keep the external root immutable for the validation session and writable only
-by the acceptance operator.
-
-[`config/schemas/windows-acceptance-evidence.schema.json`](config/schemas/windows-acceptance-evidence.schema.json)
-is the machine-readable field contract. Validate evidence with
-[`scripts/validate-windows-acceptance-evidence.ps1`](scripts/validate-windows-acceptance-evidence.ps1).
-The validator requires PowerShell 7.4 or newer and is invoked with `pwsh`.
-The default mode is the release gate. `-Draft` is for an intentionally
-incomplete session; it still validates structure, source and artifact binding,
-privacy, uniqueness, and references. Every omitted draft target and every
-`not-run` row must point to a reason in `unexecuted`. Draft validation never
-promotes missing work to release evidence.
-
-Create a path-free starting document with
-[`scripts/new-windows-acceptance-draft.ps1`](scripts/new-windows-acceptance-draft.ps1).
-Use `-ExecutablePath` for a local `DarkReNamer.exe`, or `-HandoffRoot` for a
-downloaded Actions handoff. The latter validates the complete handoff before it
-reads provenance. `-OutputPath` must be an absolute new file outside the source
-worktree whose parent directory already exists; the generator validates a
-same-directory temporary file in `-Draft` mode and never overwrites an existing
-destination. It rejects output-parent chains containing symbolic links,
-junctions, or other reparse points and rechecks that chain while publishing the
-validated draft.
-
-Those checks close static reparse-parent aliases but do not eliminate a
-malicious local process concurrently replacing or retargeting a directory
-between checks. The no-overwrite move still prevents replacement of an existing
-destination; generate into a parent directory that untrusted local users cannot
-modify.
-
-The schema remains the truth for target enumerations and allowed reason codes,
-and the validator remains the truth for draft and release-gate semantics. A new
-draft contains no operator context, visual captures, or observed results: every
-required UI, scenario, benchmark, and durability target starts as explicitly unexecuted.
-The generator does not inspect a Windows host, ingest benchmark output or
-medians, invent storage or tool details, or establish any acceptance coverage.
-
-The release gate requires Windows 11 evidence. Existing Windows 10 records may
-be retained as optional observations, but cannot replace Windows 11 coverage.
-
-Complete release-gate evidence requires all of the following:
-
-- one unique UI result for Windows 11 at 100%, 125%, 150%, 200%,
-  250%, and 300% DPI in both normal and high-contrast modes (12 cells total),
-  all passed;
-- one main-workbench PNG bound to every required Windows 11 UI cell; normal-mode captures
-  collectively cover System, Light, and Dark while high-contrast captures use
-  the Forced Colors appearance;
-- visual coverage of the native menu, advanced appearance window, input prompt,
-  common dialog, confirmation TaskDialog, and recovery window, with common and
-  recovery surfaces bound to their passed scenarios;
-- one passed Windows 11 result for keyboard-only operation,
-  accessibility inspection with tool and version, Explorer drag-and-drop,
-  common dialogs, clipboard, worker cancellation, worker close, startup
-  recovery, recovery export, and Intent-only candidate discard;
-- one same-parent benchmark each for 100, 1,000, and 10,000 entries on physical
-  SSD media using NTFS, with planning and execution durations, storage model and
-  connection, free-space bucket, power mode, and a clean cleanup observation;
-- either the same three clean NTFS benchmark rows on physical HDD media or no HDD
-  rows plus one target-bound `hardware-unavailable` reason for each count; and
-- a passed application-process crash trial plus at least one separately
-  authorized and passed VM hard-reset or storage-fault trial.
-
-The validator accepts at most 64 visual rows. Main-workbench images must be at
-least 640 by 360 pixels, other surfaces at least 240 by 120, and every image
-must contain at least four decoded colors. Canonical decoded-raster digests must
-be unique, so metadata-only changes cannot reuse one visual across targets.
-
-The HDD-unavailable form records a personal development hardware limitation; it
-does not claim or simulate HDD coverage. Partial HDD rows, mixed HDD rows and
-unexecuted reasons, or a non-hardware reason do not pass the release gate. SSD
-rows remain mandatory and cannot be replaced by an unexecuted reason.
-
-Draft evidence may record `ntfs`, `refs`, `exfat`, or `other` for each benchmark
-row. Complete release-gate evidence accepts only `ntfs`; the other values retain
-honest draft observations without promoting unsupported filesystems into the
-v0.1 release-validated scope.
-
-This form applies only when no physical HDD is present before any HDD run starts.
-A failed or residue-producing HDD attempt cannot be reclassified as unavailable;
-retain its source-bound external raw record as failed acceptance evidence.
-
-Physical power-loss evidence is an optional stronger trial. Process exit, VM
-hard reset, storage fault injection, and physical power loss remain distinct
-trial classes. Evidence from one class never establishes or substitutes for
-another. Every omitted durability class and every `not-run` durability row
-links to an explicit `unexecuted` reason, including optional and alternative
-classes. A failed recorded durability trial does not pass the release gate.
-An executed VM, storage-fault, or physical-power trial records only the
-`operator-authorized` scope marker, never the approver's identity.
-
-The JSON is deliberately path-free and has no generic note or narrative field.
-UI, visual, scenario, durability, and unexecuted results use enumerated targets,
-appearances, surfaces, observation codes, or reason codes. It stores artifact
-and image filenames, not their locations, and uses bounded free-space categories
-instead of volume details. Accessibility tool and storage model-family values
-accept only a restricted character set. The operator must record the public
-model family, not a device serial, asset tag, operator name, or hostname.
-
-Screenshot bytes, traces, detailed narratives, benchmark roots, user profiles,
-hostnames, and operator names remain outside the JSON. Screenshot filenames,
-digests, dimensions, targets, appearances, and surfaces are the bounded link to
-those external bytes. Name the JSON artifact
-`windows-acceptance-evidence-<source-sha>.json`; CI rejects a tracked file
-matching that evidence pattern. A release decision must cite the external JSON
-and screenshot root through the controlled handoff rather than add a current
-run's SHA, timestamp, measurements, or machine details to this document.
-
-### Local visual diagnostics
-
-`scripts/capture-local-visual-gallery.sh` can cross-build and run the production
-advanced-appearance window under Wine. Its external manifest records the source
-state, native-test executable digest, capture backend, geometry, color-diversity
-check, and whether custom colors were active. Wine cannot provide the audited
-journal handles required by the main application, and its theme APIs may fall
-back to system rendering. The gallery is diagnostic only: it does not establish
-Windows version, DPI, Forced Colors, main-workbench, or accessibility acceptance.
-
-### Durable workload benchmark
-
-The ignored Windows integration benchmark's `baseline` variant exercises the
-production planner, `FileJournal`, and handle-relative rename backend on a
-caller-selected physical volume. The estimate variant is the narrowly bounded
-planning-only exception described below. The root must already exist; the test
-creates and removes only its own uniquely named child directory. Use a dedicated
-root whose access is private to the benchmark operator and run it from a
-non-elevated PowerShell session. The private-root environment setting below is
-an explicit operator acknowledgment, not an ACL check.
-
-When the hardware is available, the authoritative physical matrix is SSD and
-HDD media crossed with counts 100, 1,000, and 10,000 and the `same-parent`,
-`unique-parent`, and `deep-parent` topologies. Run iteration 0 once as a warmup
-for every matrix cell, then record iterations 1 through 5. Select the correct
-dedicated root and media value for each physical device:
-
-```powershell
-$env:DARKRENAMER_BENCH_ROOT = 'D:\darkrenamer-benchmark-root'
-$env:DARKRENAMER_BENCH_MEDIA = 'hdd'
-$env:DARKRENAMER_BENCH_ROOT_PRIVATE = '1'
-$env:DARKRENAMER_BENCH_EVIDENCE_CLASS = 'physical'
-$env:DARKRENAMER_BENCH_VARIANT = 'baseline'
-$sourceSha = (git rev-parse HEAD).Trim()
-if ($LASTEXITCODE -ne 0 -or $sourceSha -cnotmatch '^[0-9a-f]{40}$') {
-  throw 'Could not resolve an exact lowercase source SHA.'
-}
-$env:DARKRENAMER_BENCH_SOURCE_SHA = $sourceSha
-$env:DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES = '1'
-foreach ($count in 100, 1000, 10000) {
-  foreach ($topology in 'same-parent', 'unique-parent', 'deep-parent') {
-    foreach ($iteration in 0..5) {
-      $env:DARKRENAMER_BENCH_COUNT = "$count"
-      $env:DARKRENAMER_BENCH_TOPOLOGY = $topology
-      $env:DARKRENAMER_BENCH_ITERATION = "$iteration"
-      cargo test --package darknamer-app --test rename_windows_backend `
-        benchmark_durable_production_path --locked --release -- `
-        --ignored --exact --nocapture --test-threads=1
-      if ($LASTEXITCODE -ne 0) { throw 'Benchmark failed.' }
-    }
-  }
-}
-```
-
-Use `ssd` and the SSD's dedicated root for the SSD pass. Up to six
-`same-parent` cells (two media classes by three counts) map to
-release-acceptance benchmark rows, and those rows must use `variant=baseline`
-on NTFS.
-The three SSD cells are mandatory. If no physical HDD is available, omit all
-three HDD rows and record the three exact `hardware-unavailable` reasons instead;
-the limitation stays visible in the evidence artifact. Do not relabel SSD,
-virtual, or ephemeral runner storage as an HDD result.
-Keep `unique-parent` and `deep-parent` results as separate, source-SHA-bound,
-path-free diagnostic evidence; they do not add or replace release rows. Record
-only iterations 1 through 5. Iteration 0 is warmup output and must not be
-promoted to evidence.
-
-For each recorded `same-parent` release row, record the median
-`planning_ms` and median `execution_ms` from the five recorded iterations.
-All five iterations must have emitted their result lines after clean fixture
-cleanup. Preserve all five raw path-free metric line sets in the external,
-source-SHA-bound performance record. Never select a single or best-performing
-iteration, and never include warmup iteration 0 in the median. The
-`unique-parent` and `deep-parent` samples remain diagnostic and are not
-aggregated into release-acceptance rows.
-
-For one release-row target, retain recorded iterations 1 through 5 as exactly
-five `.log` files in a private external directory. Add
-`benchmark-context.json` beside them with the tested Windows and physical
-storage context; do not include paths, hostnames, device serials, or narrative.
-Use the exact observed values with this object shape:
-
-```json
-{
-  "schema_version": 1,
-  "windows_product": "Windows 11",
-  "windows_build": "10.0.26100",
-  "architecture": "x64",
-  "filesystem": "ntfs",
-  "storage_model": "Example SSD Family",
-  "connection": "nvme",
-  "free_space_bucket": "50-percent-or-more",
-  "power_mode": "balanced"
-}
-```
-
-Import the target into a new draft rather than editing evidence in place:
-
-```powershell
-./scripts/add-windows-acceptance-benchmark.ps1 `
-  -SourceRoot $PWD `
-  -EvidencePath $draftPath `
-  -LogDirectory $recordedLogDirectory `
-  -OutputPath $nextDraftPath
-```
-
-The importer accepts only the source-bound, recorded physical `baseline`
-`same-parent` summaries used by release evidence, verifies all five successful
-logs, and calculates the two medians. Chain the next import from
-`$nextDraftPath`. Inputs and output parents must be external, private, and free
-of symbolic links or junctions. Reparse checks and a no-overwrite atomic move
-limit mistakes but cannot eliminate a malicious local directory-retarget race.
-
-The summary line reports the whole `planning` and `preflight` phases and, for
-physical evidence, the durable `execution` phase. Backend lines report
-`planning`, `preflight`, and `execution` call counts and observer timings;
-journal lines report the execution journal phases. The per-call observers add
-measurement overhead, so their microseconds are diagnostic attribution and do
-not sum exactly to wall-clock duration. The benchmark removes its fixture
-before emitting any result lines: missing output after work begins can indicate
-cleanup failure and is not a usable measurement. Every emitted summary,
-backend, and journal line carries the exact source SHA and instrumentation
-revision.
-
-Establish a fresh five-iteration baseline on the exact source SHA before an A/B
-run. The paired run must use that same source SHA,
-`instrumentation_revision=parent-validation-v1`, machine, volume, power mode,
-toolchain, count, topology, warmup, and five recorded iterations. A prior
-baseline is not reusable after any of those conditions or the instrumentation
-revision changes.
-
-`DARKRENAMER_BENCH_VARIANT` defaults to `baseline` and also accepts the
-benchmark-only `validation-skip-estimate`. The estimate skips repeated parent
-validation to provide a conservative directional comparison in a controlled,
-private, static fixture. Concurrent parent mutation invalidates that assumption, so matching
-plan rows and fingerprints in the fixture do not establish behavioral parity.
-The wrapper is consumed immediately after planning; preflight, execution,
-freeze validation, and mutation use the unwrapped production backend. The
-estimate retains no handle or snapshot and is not an implementation prototype
-or production candidate.
-
-Run `baseline` and `validation-skip-estimate` separately under the paired
-conditions above. Both variants use the same timing instrumentation, and the
-median rules remain unchanged. Estimate results are diagnostic even on physical
-SSD or HDD media and can never populate, substitute for, or approve a
-release-acceptance row. Baseline remains the only release evidence.
-
-Production validation/observation fusion remains no-go unless a typed atomic
-inspection seam can return a validated observation without carrying cached
-authority across the planning boundary. A production decision additionally
-requires separate paired physical evidence showing stable median improvement
-across SSD and HDD media at 100, 1,000, and 10,000 entries for all three
-topologies, plus safety and execution regression coverage. The skip estimate
-cannot satisfy or waive either requirement. An HDD-unavailable release artifact
-also does not waive the physical HDD evidence required for that production
-optimization decision.
-
-The media label is operator-supplied context, not an automatic hardware claim.
-The manual `Planning benchmark` Actions workflow uses ephemeral runner storage,
-`directional-hosted` evidence, `virtual` media, iteration 0 warmups, and one or
-three recorded repetitions. Its planning-only output is useful for directional
-regression checks, but is neither physical-media evidence nor release-acceptance
-evidence and does not replace the physical matrix above. Dispatch it separately
-for `baseline` and `validation-skip-estimate` when collecting a paired
-directional comparison. Both dispatches must use the exact same source SHA and
-`parent-validation-v1` instrumentation revision; do not combine variants in one
-run.
-
-### Preview path-key benchmark
-
-The ignored Windows-only preview benchmark measures the complete preview
-diagnostic pass at 100, 1,000, and 10,000 rows using the production
-`WindowsRenameBackend::path_key` implementation, including invariant Windows
-UTF-16 case folding. Run it in release mode on the source under acceptance:
-
-```powershell
-cargo test -p darknamer-app --lib `
-  windows::list_view::native_tests::measure_preview_validation_with_production_windows_path_keys `
-  --locked --release -- --ignored --exact --nocapture --test-threads=1
-```
-
-The emitted `validation_us` values measure validation and path-key generation;
-they do not measure native ListView repaint latency. Record interactive preview
-responsiveness separately in the source-bound Windows UI acceptance session.
+The former manual desktop, physical-media, durability, observer, and diagnostic
+procedures are retained in
+[Windows acceptance history](docs/history/WINDOWS-ACCEPTANCE.md). They remain
+valid for interpreting their source-bound historical artifacts, including every
+failure, `not-run`, and `review_required` result. They do not define the current
+release gate and are not evidence that any current VM-Automated campaign passed.
