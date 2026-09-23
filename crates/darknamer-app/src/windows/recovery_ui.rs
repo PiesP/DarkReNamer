@@ -605,6 +605,7 @@ pub(super) fn show_recovery_status(owner: HWND, state: &AppState) {
     }
     if state.can_confirm_active_recovery() {
         lines.push("시작 시 확인 가능: 이전 변경의 명시적 복구".to_owned());
+        lines.push(crate::ACTIVE_RECOVERY_STATUS_GUIDANCE.to_owned());
     }
     if state.can_discard_staged_intent() {
         lines.push("가능한 작업: 시작되지 않은 작업 기록 삭제".to_owned());
