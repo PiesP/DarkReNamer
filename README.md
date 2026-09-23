@@ -1,180 +1,107 @@
 # DarkReNamer
 
+[English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md)
+
 DarkReNamer is an unofficial, community-maintained Rust port and GitHub fork
-of [DarkNamer](https://github.com/nanpuhaha/DarkNamer). It is not an official
-release by `darkwalker`, Seo Jang-won, or the upstream repository maintainer.
+of [DarkNamer](https://github.com/nanpuhaha/DarkNamer). It targets DarkNamer
+08.02.10 transformation and command semantics, but uses its own safety model
+and interface. It is not an official release by `darkwalker`, Seo Jang-won, or
+the upstream repository maintainer.
 
-The port targets DarkNamer 08.02.10. The external 81,920-byte
-reference executable is byte-identical to upstream `DarkNamer v08.02.10.exe`
-at commit `3e5d6242e8c8eea60d94e73f8af8ddf9ab677203`, with SHA-256
-`ae93ca169d2b69a5cafe7bf835cabb9e45e42ecffa94f41e7cc88f4eec917e34`.
-That matched source defines the transformation and command-semantics compatibility
-target. DarkReNamer uses its own menu wording and information architecture so the
-safe rename and move model is explicit.
+The application has a native Korean-language Windows interface. This README is
+also available in Korean and Japanese; those translations do not indicate
+additional interface languages.
 
-## Current status
+## Download
 
-The Rust workspace provides a native Win32 Korean UI, stable command IDs, native
-command rails, a ListView with seven persisted data columns and a fixed status
-column, input dialogs, keyboard commands, bounded file and directory admission,
-sorting, and import/export. The UTF-16 name transformations retain DarkNamer
-08.02.10 compatibility, while the menu wording and Apply path describe and enforce
-the maintained safe execution model.
+Download the newest portable prerelease and its checksum from
+[GitHub Releases](https://github.com/PiesP/DarkReNamer/releases). The runnable
+product is one installer-free `DarkReNamer.exe`. Current builds are unsigned;
+read the [distribution policy](DISTRIBUTION.md#current-unsigned-handoff) before
+using a release and verify the supplied checksum and provenance.
 
-DarkReNamer officially supports Windows 11 and later on x64. Windows 10 may
-run the application, but is not tested or officially supported.
+Source is maintained in the
+[DarkReNamer repository](https://github.com/PiesP/DarkReNamer). To build it
+yourself, follow the [development guide](DEVELOPMENT.md).
 
-The v0.1 filesystem scope uses local NTFS storage from a non-elevated process
-for same-parent entries that do not traverse reparse points in case-insensitive
-directories. Other filesystems
-are unsupported and unvalidated for v0.1. The runtime enforces the same boundary
-by querying the filesystem from the retained final directory handle and failing
-closed unless it reports NTFS.
+## Supported environment
 
-Apply validates Windows leaf names, current file identities, and source and
-destination parents before showing confirmation. Safe v2 executes
-handle-relative, no-replace operations for same-parent renames and for regular
-files moved to an existing folder on the same local NTFS volume. The latter is
-prepared with **편집 > 대상 폴더 > 모든 파일의 대상 폴더 지정...** and can combine a move with a
-proposed name change. **편집 > 대상 폴더 > 대상 폴더 변경 취소** restores
-original destination parents without changing proposed names. **편집 > 모든 이름
-변경 취소** resets proposed names only; it is deliberately not presented as Undo.
+DarkReNamer officially supports Windows 11 and later on x64. Windows 10 may run
+the application, but is not tested or officially supported.
 
-A bounded write-ahead journal records intent before mutation, supports reverse
-rollback, and blocks further Apply operations when an interrupted state cannot
-be safely reconciled. Network and device paths, reparse traversal,
-case-sensitive directories, cross-volume moves, directory moves, replacement,
-folder merging, and destination-folder creation remain outside the Safe v2
-boundary. The confirmation separates rename-only, move-only, and combined
-changes and states that existing destinations are not overwritten.
+The v0.1 filesystem scope is a non-elevated process working on local NTFS in
+case-insensitive directories without reparse-point traversal. DarkReNamer
+supports:
 
-Release validation follows the
-[VM-Automated contract](SAFETY.md#vm-automated-release-validation): automated
-source/backend checks and a fixed Windows VM profile tied to the exact candidate
-EXE. VM-Automated v1 defines 22 derived targets and five required gates. Its
-fixed execution matrix contains 20 primary cells plus 10 independent stability
-executions. Only an authenticated canonical statement from a complete passing
-campaign identifies a verified candidate and profile; this repository text does
-not claim that the matrix has passed. The scope excludes physical-device
-performance, physical power loss, VM reset and storage faults, human visual or
-comprehensive assistive-technology acceptance, and actual IME or Explorer
-drag-and-drop validation. It does not claim manually verified runtime parity
-with DarkNamer.
+| Operation | Supported scope |
+| --- | --- |
+| Rename files and directories | Within the same parent directory |
+| Move files | Regular files only, to an existing directory on the same local NTFS volume |
 
-## Rename a file
+Network and device paths, filesystems other than NTFS, case-sensitive
+directories, elevated execution, reparse traversal, cross-volume moves,
+directory moves, destination-directory creation, replacement, and folder
+merging are unsupported. The runtime checks this boundary and fails closed.
 
-1. Start the app normally, without administrator elevation, and use
-   **파일 추가...** to add files within the supported scope above.
-2. Choose a name transformation and review the proposed names and Status column.
-   Select a blocked row and open **보기 > 선택 항목 진단...** for its explanation.
-3. Choose **변경 적용**, review the newly validated plan, and confirm it to change
-   the files. Cancelling that confirmation leaves the files unchanged.
-4. If execution is interrupted, follow the recovery window before applying
-   further changes. **편집 > 모든 이름 변경 취소** resets proposed names; it does not undo
-   changes already made on disk.
+## Quick start
 
-## Appearance and local settings
+1. Start `DarkReNamer.exe` normally, without administrator elevation.
+2. Select **파일 추가...** (Add files) and choose entries in the supported scope.
+3. Choose a transformation and review every proposed name and Status value. For
+   a blocked row, open **보기 > 선택 항목 진단...** (View > Selected item
+   diagnostics).
+4. Choose **변경 적용** (Apply), review the freshly validated plan, and confirm.
+   Cancelling the confirmation leaves the files unchanged.
 
-The **View** menu provides System, Light, and Dark appearance modes. System is
-the default and follows the Windows app color setting when it can be queried;
-otherwise DarkReNamer leaves native rendering under Windows control. Forced
-Colors and an unavailable high-contrast query always take precedence over the
-stored appearance and disable custom colors.
+To move regular files within the supported scope, first use **편집 > 대상 폴더 >
+모든 파일의 대상 폴더 지정...** (Edit > Target folder > Set the target folder
+for all files).
 
-DarkReNamer applies its Light and Dark palettes to the main workbench, command
-buttons and their Tooltips, list headers and information tips, status surfaces,
-the menu, and the advanced appearance window. The app-owned Light and Dark menu
-retains keyboard mnemonics and native MSAA/UIA names and states. App-owned input
-prompts use the same palette while retaining standard Windows edit, combo-box,
-and button controls. Native System, Forced Colors, file dialogs, and confirmation
-TaskDialogs continue to use Windows rendering. Forced Colors keeps system colors
-and native focus and selection precedence across every surface.
+## Safety and recovery
 
-App-owned fonts apply the Windows text-size preference in addition to monitor
-DPI, and their layouts use the resulting font measurements. If the preference
-cannot be queried, the normal system font size is retained. Windows-owned
-TaskDialogs keep the operating system's text-sizing behavior.
+- Safe v2 rechecks entry and parent identities before execution, records durable
+  intent before mutation, and performs no-replace operations. Existing
+  destinations are never overwritten.
+- The preview describes the current proposal. It does not validate the live
+  filesystem or authorize a change until Apply performs its checks.
+- **편집 > 모든 이름 변경 취소** resets proposed names. It does not undo changes
+  already made on disk. Resetting a target folder also changes only the proposal.
+- If an operation is interrupted or journal state is uncertain, DarkReNamer can
+  lock further Apply operations. Keep the journal evidence and follow the
+  startup recovery window; do not try to bypass the lock by moving or deleting
+  journal files.
 
-The file list uses the default Windows ListView style with the app's background
-and text palette. Its scrollbars retain system rendering and may appear light
-in Dark mode. The advanced appearance window's scrolling body separately
-requests a dark native theme in Dark mode, with system rendering as its fallback.
-Both controls retain native scrolling and accessibility behavior.
+The complete mutation and recovery contract is in the
+[safety model](SAFETY.md). Detailed appearance, settings, diagnostics, and
+recovery directions are in the [user guide](docs/USER-GUIDE.md).
 
-Planned names use blue emphasis; warnings use amber and blocked names use red.
-The Status column also describes the change or issue in text. Select one row
-and open **보기 > 선택 항목 진단...** with the keyboard or pointer to read its
-diagnosis and corrective action. This model-only preview does not certify the
-filesystem or authorize Apply.
+## Validation limits
 
-Advanced appearance controls are intentionally under **보기 > 모양 설정...**.
-They offer semantic density and emphasis presets plus separator, changed-name
-background highlight, and empty-state safety-copy visibility. The native dialog
-keeps Reset, OK, and Cancel in a fixed footer while its settings body scrolls at
-narrow work-area sizes, large system fonts, and high DPI. The fixed VM-Automated
-profile includes 250% and 300% targets. They count only when a source-bound
-campaign records their raw Windows observations and the hosted verifier derives
-a passing statement; listing them here is not a pass.
-Appearance settings do not affect the rename model, Apply authorization,
-journal, recovery state, or Undo data.
+Release validation is defined by the
+[VM-Automated contract](SAFETY.md#vm-automated-release-validation), which binds
+automated source checks and a fixed Windows VM profile to the exact candidate
+executable. The policy does not show that any particular campaign has passed,
+and this README makes no VM campaign pass claim.
 
-The runnable product remains one `DarkReNamer.exe`. Column and appearance
-preferences are stored below `%LOCALAPPDATA%\DarkReNamer`; no configuration
-sidecar is required beside the executable.
+VM-Automated v1 does not cover physical-device performance, physical power
+loss, VM reset or storage faults, human visual or comprehensive assistive
+technology acceptance, or actual IME and Explorer drag-and-drop interaction.
+It also does not establish manually verified runtime parity with DarkNamer.
+Historical manual and physical acceptance requirements are retained separately
+in [Windows acceptance history](docs/history/WINDOWS-ACCEPTANCE.md).
 
-## Workspace
+## Documentation
 
-- `darknamer-core`: portable UTF-16 list state and DarkNamer 08.02.10
-  transformation semantics.
-- `darknamer-app`: native Win32 application and `DarkReNamer.exe` binary.
-
-The current tree contains only the Rust implementation and its build metadata.
-Historical MFC source, screenshots, archives, and executables remain available
-through the fork history and upstream repository for provenance.
-
-The filesystem transaction and recovery contract is documented in
-[`SAFETY.md`](SAFETY.md). Tagged Windows prereleases, unsigned artifact status,
-checksums, SBOMs, attestations, and the future signing boundary are documented
-in [`DISTRIBUTION.md`](DISTRIBUTION.md).
-
-## Development
-
-This project is developed with assistance from AI tools.
-
-See [`DEVELOPMENT.md`](DEVELOPMENT.md) for native Windows prerequisites,
-Linux/WSL checks, cross-build tooling, visual diagnostics, and dependency
-policy.
-
-Choose the complete gate for your host, including its tooling checks:
-
-- [Native Windows development](DEVELOPMENT.md#native-windows-development).
-- [Portable Linux/WSL checks](DEVELOPMENT.md#portable-checks-on-linux-or-wsl).
-- [Prepared VM execution](DEVELOPMENT.md#native-tests-in-a-local-hyper-v-vm)
-  and [interactive observers](DEVELOPMENT.md#interactive-acceptance-observers).
-- [Release validation](SAFETY.md#vm-automated-release-validation) and
-  [candidate packaging](DISTRIBUTION.md#publish-free-packaging-validation).
-
-Cross-build the compatibility executable from Linux:
-
-```text
-RC=/usr/bin/llvm-rc-19 cargo xwin build --release --locked \
-  --target x86_64-pc-windows-msvc \
-  -p darknamer-app --bin DarkReNamer
-```
-
-Generate a local diagnostic gallery for the production advanced-appearance
-window from Linux with Wine and Xvfb:
-
-```text
-./scripts/capture-local-visual-gallery.sh
-```
-
-The script writes BMP and PNG captures, hashes, and `visual-gallery.json` to a
-new temporary directory unless an empty absolute output directory is supplied.
-The manifest reports whether custom colors were active and whether Wine needed
-the window-DC fallback because `PrintWindow` returned a blank image. This
-fixture does not initialize the journal runtime, exercise the main workbench,
-or count as Windows acceptance evidence.
+- [User guide](docs/USER-GUIDE.md): appearance, local settings, diagnostics,
+  proposal reset, and recovery.
+- [Safety model](SAFETY.md): filesystem authority, journal, cancellation, and
+  current release-validation contract.
+- [Distribution policy](DISTRIBUTION.md): unsigned artifacts, checksums,
+  provenance, packaging, and release promotion.
+- [Development guide](DEVELOPMENT.md): toolchains, commands, tooling registry,
+  native VM execution, and required gates.
+- [Windows acceptance history](docs/history/WINDOWS-ACCEPTANCE.md): legacy
+  manual, physical-media, and observer procedures.
 
 ## Attribution and license
 
@@ -183,9 +110,10 @@ DarkNamer was originally developed by
 carries `Copyright (c) 2018 Seo, Jang-won` under the MIT License. The Rust port
 adds `Copyright (c) 2026 PiesP` under the same terms.
 
-See `LICENSE`, `THIRD_PARTY_NOTICES.md`, and the package-level notices for the
-full attribution and embedded-resource provenance.
+See `LICENSE`, `THIRD_PARTY_NOTICES.md`, and the package-level notices for full
+attribution and embedded-resource provenance. Report DarkReNamer bugs in this
+repository rather than asking the original DarkNamer maintainers to support
+this fork. Compatibility reports should state whether the same behavior occurs
+in DarkNamer 08.02.10.
 
-Report DarkReNamer bugs in this repository rather than asking the original
-DarkNamer maintainers to support this fork. Compatibility reports should state
-whether the same behavior occurs in DarkNamer 08.02.10.
+This project is developed with assistance from AI tools.

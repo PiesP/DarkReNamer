@@ -111,7 +111,7 @@ new executable roles. Run the tooling gate after refreshing pins. Tooling checks
 exercise closure rejection and command compatibility; native execution and the
 source-bound VM campaign remain separate validation steps below.
 
-## Linux cross-build and visual diagnostics
+## Linux cross-build
 
 The cross-build path additionally requires `cargo-xwin` and an LLVM resource
 compiler compatible with `llvm-rc-19`. Set `RC` when it is not installed at
@@ -122,12 +122,6 @@ RC=/path/to/llvm-rc-19 cargo xwin build --release --locked \
   --target x86_64-pc-windows-msvc \
   --package darknamer-app --bin DarkReNamer
 ```
-
-`scripts/diagnostics/capture-local-visual-gallery.sh` also requires Wine (`wine`,
-`wineboot`, `winepath`, and `wineserver`), Xvfb, ffmpeg, jq, GNU `timeout`, and
-`sha256sum`. It is a best-effort diagnostic path, not a CI or Windows acceptance
-gate. The original `scripts/capture-local-visual-gallery.sh` command remains a
-compatibility entrypoint.
 
 ## Native tests in a local Hyper-V VM
 
@@ -281,97 +275,15 @@ visual or comprehensive assistive-technology acceptance, actual IME and
 Explorer drag-and-drop, physical-media performance, physical power loss, and VM
 reset or storage-fault durability remain outside VM-Automated v1.
 
-## Interactive acceptance observers
+## Historical acceptance and GUI diagnostics
 
-The campaign controller stages the UI and recovery observers automatically.
-For standalone diagnostics or historical formal acceptance,
-`scripts/windows-vm-acceptance.ps1` and
-`scripts/windows-vm-recovery-acceptance.ps1` reuse an existing VM test bundle.
-Stage the unchanged `bundle.json`, guest runner, and listed binaries in a
-private `bundle` directory, with the selected observer in its parent directory.
-The observer's directory must also retain `tooling-bundle.json` and every file
-in the selected observer role's dependency closure, using the manifest's flat
-`bundle` names (including `tooling-loader.ps1`). Preserve these files from the
-common controller's staging; copying only the observer and guest runner is
-insufficient. The observer verifies the guest runner in `bundle/` without
-executing it; running that guest entrypoint independently also requires its
-own declared tooling closure beside it. Check the source manifest and pins with
-`python3 scripts/update-tooling-bundle.py --check` before staging, and keep all
-files bound to the same source. Record the observer's SHA-256 separately from
-the bundle's source and executable digests. Run one observer at a time in the
-bundle account's unlocked,
-non-elevated Windows PowerShell desktop session, passing `-BundleRoot`,
-`-ExpectedSessionId`, `-OutputRoot`, and `-ExpectedScriptSha256` explicitly.
-Both observers verify those bindings and acquire the shared desktop lock.
-
-The UI observer requires a new output directory. It records the actual window
-DPI, UI Automation metadata, keyboard-only file import and prefix entry,
-Apply cancellation and confirmation, disk contents and identities, and normal
-close. Historical formal UI acceptance requires operator review of screenshots.
-VM-Automated release validation derives its defined raster and geometry checks
-from the raw observations without treating operator review as a pass condition.
-`-HighContrast` temporarily enables Windows High Contrast and verifies restoration
-of the original flags, scheme, system colors, and active visual-style path, color,
-and size. The private rescue snapshot retains that complete identity while public
-acceptance output exposes only its artifact hash. Arrange a separate interactive
-rescue invocation with `-RestoreHighContrastOnly` and the same arguments before
-starting that mode; retain the observer and snapshot until restoration is verified.
-
-The recovery observer requires an existing output directory and creates a unique
-child. `-Mode ProcessCrash` stops only its production application after observing
-a partial fixture rename, then relaunches it with the same journal and profile.
-It checks that startup leaves files unchanged before explicit recovery, and that
-recovery restores names, contents, identities, and clean journal state.
-`WorkerCancellation` and `WorkerClose` instead exercise the enabled cancel
-control or ordinary close during a partial transaction. A missed interruption
-boundary fails the run. `-FixtureCount` controls the workload; its encoded path
-list must fit the application's import limit.
-
-Collect and hash-check all external output before removing a successful session.
-Retain failed-session evidence for diagnosis. These observers do not reset the VM,
-provide storage-fault evidence, change DPI settings, or certify the full acceptance
-matrix. Transfer reviewed observations into a separate draft using `SAFETY.md`;
-do not merge observations from different Windows builds into one operator context.
-
-## Core GUI regression runs
-
-From a clean checkout, use the prerequisites and trusted managed desktop helper
-described in [Native tests in a local Hyper-V VM](#native-tests-in-a-local-hyper-v-vm).
-This lane requires a Windows 11 x64 guest and a helper that supports explicit
-display geometry. Supply an existing private
-connection profile with `schema_version: 1`, `ssh_host`, `desktop_helper` (an
-absolute Windows path), and `expected_vm_id`. Keep this profile and its private
-helper configuration outside the checkout and submitted evidence.
-The interactive tasks require the guest's installed PowerShell 7.4 or newer
-(Core edition) under its existing RemoteSigned execution policy. The runner
-checks that policy and does not override it.
-
-```bash
-python3 -I scripts/run-gui-regression.py \
-  --output-root /absolute/new/external-output \
-  --connection-profile /absolute/private/connection.json
-```
-
-The command builds a locked Windows bundle and runs four cells sequentially:
-800x600 at 96 DPI in light mode for full context, standard text at 100 percent,
-and standard text at 150 percent; then 1366x768 at 144 DPI in dark mode for
-tooltip behavior. The requested display settings must match the application's
-observed monitor geometry and DPI. Text scaling requires an actual comparison
-of the same rendered glyphs. Native TaskDialog text scaling remains a separate
-support limitation.
-
-Each run binds its input bytes before execution, collected logs and images,
-actual host and guest environments, and cleanup. The final command invokes
-`scripts/validate-gui-regression-evidence.py`; a shortened run can inherit only
-the explicitly checked full-context semantics from a direct reference with
-the same source SHA and application bytes. It retains its own visual evidence.
-Historical ad-hoc results are external records and are not migrated or relabeled.
-These hashes provide integrity bookkeeping, not independent rebuild proof or
-protection against coordinated changes to all evidence files.
-
-Inspect the original screenshots before making a human visual-acceptance claim.
-Passing this diagnostic suite does not establish human acceptance or replace the
-complete VM-Automated campaign required by `SAFETY.md` and `DISTRIBUTION.md`.
+Standalone UI and recovery observer staging, the former formal acceptance
+matrix, physical-media benchmarks, and the source-bound GUI regression runbook
+are retained in
+[Windows acceptance history](docs/history/WINDOWS-ACCEPTANCE.md). They remain
+available for interpreting historical evidence and targeted diagnostics; they
+do not replace the current VM-Automated campaign above or establish a release
+verdict.
 
 ## Dependency policy
 
