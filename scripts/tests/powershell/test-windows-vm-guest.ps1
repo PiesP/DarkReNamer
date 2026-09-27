@@ -1420,18 +1420,36 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
                 throw 'The process-DACL helper did not publish its process id.'
             }
             $protectedRunnerPid = [int][IO.File]::ReadAllText($securityHelperPidPath)
+            $probePrincipal = [Security.Principal.WindowsPrincipal]::new(
+                [Security.Principal.WindowsIdentity]::GetCurrent()
+            )
+            $probeIsAdministrator = $probePrincipal.IsInRole(
+                [Security.Principal.WindowsBuiltInRole]::Administrator
+            )
+            if ($probeIsAdministrator) {
+                Write-Host 'Administrator token detected; verifying BUILTIN\Administrators grants. Same-user denial is not tested in this context.'
+            }
             foreach ($requestedAccess in @(0x00000001, 0x00000010, 0x00040000)) {
                 $probeHandle = [DarkReNamerVmRunnerSecurityProbe]::OpenProcess(
                     [uint32]$requestedAccess, $false, [uint32]$protectedRunnerPid
                 )
+                if ($probeIsAdministrator) {
+                    if ($probeHandle -eq [IntPtr]::Zero) {
+                        $requestedAccessHex = '{0:x}' -f $requestedAccess
+                        throw "The enabled Administrator token was denied protected runner access 0x$requestedAccessHex granted to BUILTIN\Administrators."
+                    }
+                    [void][DarkReNamerVmRunnerSecurityProbe]::CloseHandle($probeHandle)
+                    continue
+                }
                 if ($probeHandle -ne [IntPtr]::Zero) {
                     [void][DarkReNamerVmRunnerSecurityProbe]::CloseHandle($probeHandle)
-                    throw ('The same-user process opened protected runner access 0x{0:x}.' -f
-                        $requestedAccess)
+                    $requestedAccessHex = '{0:x}' -f $requestedAccess
+                    throw "The non-administrator same-user process opened protected runner access 0x$requestedAccessHex."
                 }
-                if ([DarkReNamerVmRunnerSecurityProbe]::LastError -ne 5) {
+                $probeError = [DarkReNamerVmRunnerSecurityProbe]::LastError
+                if ($probeError -ne 5) {
                     throw ('The protected runner access check returned Win32 error {0}.' -f
-                        [DarkReNamerVmRunnerSecurityProbe]::LastError)
+                        $probeError)
                 }
             }
         }
