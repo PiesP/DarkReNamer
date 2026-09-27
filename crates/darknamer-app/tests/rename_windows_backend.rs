@@ -2111,12 +2111,14 @@ fn set_directory_case_sensitive(path: &std::path::Path, enabled: bool) -> std::i
 
 struct CaseSensitiveFixtureGuard {
     path: Option<std::path::PathBuf>,
+    remove_directory: bool,
 }
 
 impl CaseSensitiveFixtureGuard {
-    fn new(path: &std::path::Path) -> Self {
+    fn new(path: &std::path::Path, remove_directory: bool) -> Self {
         Self {
             path: Some(path.to_path_buf()),
+            remove_directory,
         }
     }
 
@@ -2125,7 +2127,9 @@ impl CaseSensitiveFixtureGuard {
             return Ok(());
         };
         empty_directory(path)?;
-        fs::remove_dir(path)?;
+        if self.remove_directory {
+            fs::remove_dir(path)?;
+        }
         self.path = None;
         Ok(())
     }
@@ -2135,7 +2139,9 @@ impl Drop for CaseSensitiveFixtureGuard {
     fn drop(&mut self) {
         if let Some(path) = self.path.as_deref() {
             let _ = empty_directory(path);
-            let _ = fs::remove_dir(path);
+            if self.remove_directory {
+                let _ = fs::remove_dir(path);
+            }
         }
     }
 }
@@ -2157,23 +2163,53 @@ fn empty_directory(path: &std::path::Path) -> std::io::Result<()> {
 fn case_sensitive_parent_is_explicitly_unsupported_when_platform_allows_fixture()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
-    let parent = directory.path().join("case-sensitive");
+    let configured_fixture = std::env::var_os("DARKRENAMER_CASE_SENSITIVE_FIXTURE_ROOT");
+    let (parent, remove_fixture_directory) = if let Some(configured_fixture) = configured_fixture {
+        let parent = PathBuf::from(configured_fixture);
+        let temporary = std::env::var_os("TEMP")
+            .map(PathBuf::from)
+            .ok_or_else(|| std::io::Error::other("isolated TEMP is unavailable"))?;
+        if parent.parent() != Some(temporary.as_path())
+            || parent.file_name() != Some(OsStr::new("case-sensitive-fixture"))
+        {
+            return Err(std::io::Error::other(
+                "case-sensitive fixture is outside the isolated temporary root",
+            )
+            .into());
+        }
+        let metadata = fs::symlink_metadata(&parent)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(std::io::Error::other(
+                "configured case-sensitive fixture is not an ordinary directory",
+            )
+            .into());
+        }
+        if fs::read_dir(&parent)?.next().is_some() {
+            return Err(
+                std::io::Error::other("configured case-sensitive fixture is not empty").into(),
+            );
+        }
+        (parent, false)
+    } else {
+        let parent = directory.path().join("case-sensitive");
+        fs::create_dir(&parent)?;
+        if let Err(error) = set_directory_case_sensitive(&parent, true) {
+            if matches!(error.raw_os_error(), Some(5 | 50 | 87)) {
+                windows_capabilities::unavailable(
+                    "case-sensitive-directory-fixture",
+                    error.raw_os_error(),
+                    "fixture-setup-failed",
+                )?;
+                return Ok(());
+            }
+            return Err(error.into());
+        }
+        (parent, true)
+    };
+    let mut fixture = CaseSensitiveFixtureGuard::new(&parent, remove_fixture_directory);
     let unrelated = directory.path().join("unrelated.txt");
-    fs::create_dir(&parent)?;
     fs::write(&unrelated, b"keep")?;
     let source = parent.join("a.txt");
-    if let Err(error) = set_directory_case_sensitive(&parent, true) {
-        if matches!(error.raw_os_error(), Some(5 | 50 | 87)) {
-            windows_capabilities::unavailable(
-                "case-sensitive-directory-fixture",
-                error.raw_os_error(),
-                "fixture-setup-failed",
-            )?;
-            return Ok(());
-        }
-        return Err(error.into());
-    }
-    let mut fixture = CaseSensitiveFixtureGuard::new(&parent);
     fs::write(&source, b"a")?;
 
     let backend = WindowsRenameBackend;
@@ -2198,7 +2234,12 @@ fn case_sensitive_parent_is_explicitly_unsupported_when_platform_allows_fixture(
     let root_error = JournalRoot::open(&parent).err();
     fixture.cleanup()?;
 
-    assert!(!parent.exists());
+    if remove_fixture_directory {
+        assert!(!parent.exists());
+    } else {
+        assert!(parent.is_dir());
+        assert!(fs::read_dir(&parent)?.next().is_none());
+    }
     assert_eq!(fs::read(&unrelated)?, b"keep");
     assert!(directory.path().is_dir());
 

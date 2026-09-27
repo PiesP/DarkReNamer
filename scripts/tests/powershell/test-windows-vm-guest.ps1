@@ -292,6 +292,23 @@ try {
         }
     }
 
+    $caseFixtureFailureRoot = Join-Path $valid.root 'case-fixture-cleanup-failure'
+    [void](New-Item -ItemType Directory -Path $caseFixtureFailureRoot)
+    [IO.File]::WriteAllText((Join-Path $caseFixtureFailureRoot 'unexpected.txt'), 'retained')
+    $caseFixtureFailureRow = [ordered]@{
+        status = 'passed'
+        failure_reason = $null
+    }
+    Assert-Fails {
+        Complete-JobBoundCaseSensitiveFixture `
+            -FixtureRoot $caseFixtureFailureRoot -Row $caseFixtureFailureRow
+    } 'was not emptied before cleanup'
+    if ($caseFixtureFailureRow.status -cne 'failed' -or
+        $caseFixtureFailureRow.failure_reason -cne 'process_error' -or
+        -not (Test-Path -LiteralPath $caseFixtureFailureRoot)) {
+        throw 'Case-sensitive fixture cleanup failure must fail the test row and preserve its evidence.'
+    }
+
     $candidate = New-CandidateFixture -Name 'candidate-valid'
     Invoke-TestGuest -EntryPointPath $candidate.runner -BundleRoot $candidate.root -ExpectedSessionId 1 -ValidateOnly
     Invoke-TestGuest -EntryPointPath $candidate.runner -BundleRoot $candidate.root -ExpectedSessionId 1 -ValidateOnly
@@ -625,6 +642,16 @@ try {
         'function Resolve-JobBoundCapturePaths',
         '$BoundParameters.Keys -contains ''StdoutPath''',
         'bool redirect = !String.IsNullOrEmpty(stdoutPath) || !String.IsNullOrEmpty(stderrPath);',
+        'public static class DarkReNamerVmFileSystem',
+        'public static string GetShortPathName(string longPath)',
+        'public static void SetCaseSensitiveDirectory(string path)',
+        'function Resolve-JobBoundShortPath',
+        '$temporaryRoot = Resolve-JobBoundShortPath -Path $temporaryRoot',
+        '[DarkReNamerVmFileSystem]::SetCaseSensitiveDirectory($caseSensitiveFixtureRoot)',
+        'DARKRENAMER_CASE_SENSITIVE_FIXTURE_ROOT',
+        '-CaseSensitiveFixtureRoot $caseSensitiveFixtureRoot',
+        'function Complete-JobBoundCaseSensitiveFixture',
+        '$Row.status = ''failed''',
         '$row[''process_lifecycle''] = [ordered]@{',
         'start_time_utc_ticks = $processStartTimeUtcTicks',
         '$capturePaths.stdout_path',

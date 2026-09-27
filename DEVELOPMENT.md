@@ -170,8 +170,9 @@ checking, and disabled agent forwarding; it never prompts for a password. Put
 the user, key, address, port, and any IPv6 syntax in the OpenSSH configuration,
 not in `--ssh-host`.
 
-The VM needs the PowerShell 7.4 or newer SSH subsystem and `sshd`, NTFS, the Microsoft
-Visual C++ x64 runtime, Developer Mode for symlink fixtures, and one unlocked
+The VM needs the PowerShell 7.4 or newer SSH subsystem and `sshd`, NTFS with 8.3
+short names available for the isolated ProgramData test path, the Microsoft Visual
+C++ x64 runtime, Developer Mode for symlink fixtures, and one unlocked
 desktop for the same local test account selected by the SSH alias. That account
 must be a local administrator, and UAC must provide its linked filtered token.
 The controller registers a protected `Interactive` task at `RunLevel Highest`.
@@ -220,6 +221,12 @@ through UI Automation. It first cancels Apply and proves the fixture is unchange
 then confirms the exact destructive action and proves the on-disk rename preserved
 the file contents and NTFS identity without journal residue. The lane retains
 source-bound preview and confirmation screenshots before closing normally.
+
+For the Windows backend target, the elevated observer provides its medium-integrity
+test process a short-path alias to the isolated `TEMP` root and prepares the empty
+case-sensitive fixture beneath it. The Rust test consumes that fixture with the
+linked filtered token; it does not receive elevation or permission to enumerate
+other task roots.
 
 The guest creates each Rust test and candidate GUI process suspended, assigns it
 to a non-breakaway Windows Job Object with kill-on-close before resuming it, and

@@ -55,6 +55,22 @@ function New-PrivateDirectory {
     }
     $path
 }
+function Resolve-JobBoundShortPath {
+    param([Parameter(Mandatory)][string] $Path)
+
+    Initialize-JobBoundProcessRuntime
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The isolated temporary root must be an ordinary directory.'
+    }
+    $shortPath = [DarkReNamerVmFileSystem]::GetShortPathName($item.FullName)
+    if (-not [IO.Path]::IsPathRooted($shortPath) -or
+        [string]::Equals($shortPath, $item.FullName, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The isolated temporary root has no usable short path for parent traversal.'
+    }
+    $shortPath
+}
 function New-ObserverFixtureDirectory {
     param(
         [Parameter(Mandatory)][string] $Parent,
@@ -1259,6 +1275,71 @@ public static class DarkReNamerVmRunnerSecurity {
         }
     }
 }
+public static class DarkReNamerVmFileSystem {
+    private const uint FILE_READ_ATTRIBUTES = 0x00000080;
+    private const uint FILE_WRITE_ATTRIBUTES = 0x00000100;
+    private const uint FILE_SHARE_READ = 0x00000001;
+    private const uint FILE_SHARE_WRITE = 0x00000002;
+    private const uint FILE_SHARE_DELETE = 0x00000004;
+    private const uint OPEN_EXISTING = 3;
+    private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+    private const int FileCaseSensitiveInfo = 23;
+    private const uint FILE_CS_FLAG_CASE_SENSITIVE_DIR = 0x00000001;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileCaseSensitiveInformation {
+        public uint Flags;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetShortPathNameW(string longPath, StringBuilder shortPath,
+        uint bufferLength);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileW(string fileName, uint desiredAccess,
+        uint shareMode, IntPtr securityAttributes, uint creationDisposition,
+        uint flagsAndAttributes, IntPtr templateFile);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetFileInformationByHandle(SafeFileHandle file,
+        int fileInformationClass, ref FileCaseSensitiveInformation fileInformation,
+        uint bufferSize);
+
+    public static string GetShortPathName(string longPath) {
+        if (String.IsNullOrWhiteSpace(longPath))
+            throw new ArgumentException("A private runtime directory is required.", "longPath");
+        uint required = GetShortPathNameW(longPath, null, 0);
+        if (required == 0)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "GetShortPathNameW failed.");
+        if (required > 32768)
+            throw new InvalidOperationException("The short runtime path exceeds its supported bound.");
+        StringBuilder shortPath = new StringBuilder(checked((int)required));
+        uint written = GetShortPathNameW(longPath, shortPath, required);
+        if (written == 0)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "GetShortPathNameW failed.");
+        if (written >= required)
+            throw new InvalidOperationException("GetShortPathNameW returned an invalid path length.");
+        return shortPath.ToString();
+    }
+
+    public static void SetCaseSensitiveDirectory(string path) {
+        if (String.IsNullOrWhiteSpace(path))
+            throw new ArgumentException("A case-sensitive fixture path is required.", "path");
+        using (SafeFileHandle directory = CreateFileW(path,
+                FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero)) {
+            if (directory == null || directory.IsInvalid)
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "Opening the case-sensitive fixture failed.");
+            FileCaseSensitiveInformation information = new FileCaseSensitiveInformation();
+            information.Flags = FILE_CS_FLAG_CASE_SENSITIVE_DIR;
+            if (!SetFileInformationByHandle(directory, FileCaseSensitiveInfo,
+                    ref information, (uint)Marshal.SizeOf(typeof(FileCaseSensitiveInformation))))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "SetFileInformationByHandle(FileCaseSensitiveInfo) failed.");
+        }
+    }
+}
 '@
 }
 
@@ -1881,12 +1962,39 @@ function Wait-JobBoundProcessWithOutputLimit {
 function Invoke-WithIsolatedEnvironment {
     param(
         [Parameter(Mandatory)][string] $RuntimeRoot,
-        [Parameter(Mandatory)][scriptblock] $Action
+        [Parameter(Mandatory)][scriptblock] $Action,
+        [string] $TemporaryRoot,
+        [string] $CaseSensitiveFixtureRoot
     )
 
-    $temporary = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'temp'
+    $temporary = if ([string]::IsNullOrWhiteSpace($TemporaryRoot)) {
+        New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'temp'
+    }
+    else {
+        $temporaryItem = Get-Item -LiteralPath $TemporaryRoot -Force -ErrorAction Stop
+        if (-not $temporaryItem.PSIsContainer -or
+            ($temporaryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The supplied isolated temporary root is not an ordinary directory.'
+        }
+        $TemporaryRoot
+    }
+    if (-not [string]::IsNullOrWhiteSpace($CaseSensitiveFixtureRoot)) {
+        $expectedFixtureRoot = Join-Path $temporary 'case-sensitive-fixture'
+        $fixtureItem = Get-Item -LiteralPath $CaseSensitiveFixtureRoot -Force -ErrorAction Stop
+        if (-not [string]::Equals(
+                [IO.Path]::GetFullPath($CaseSensitiveFixtureRoot),
+                [IO.Path]::GetFullPath($expectedFixtureRoot),
+                [StringComparison]::OrdinalIgnoreCase) -or
+            -not $fixtureItem.PSIsContainer -or
+            ($fixtureItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The case-sensitive fixture is outside the isolated temporary root.'
+        }
+    }
     $localAppData = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'localappdata'
-    $names = @('TEMP', 'TMP', 'LOCALAPPDATA', 'DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES')
+    $names = @(
+        'TEMP', 'TMP', 'LOCALAPPDATA', 'DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES',
+        'DARKRENAMER_CASE_SENSITIVE_FIXTURE_ROOT'
+    )
     $original = @{}
     foreach ($name in $names) {
         $original[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
@@ -1896,6 +2004,9 @@ function Invoke-WithIsolatedEnvironment {
         [Environment]::SetEnvironmentVariable('TMP', $temporary, 'Process')
         [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $localAppData, 'Process')
         [Environment]::SetEnvironmentVariable('DARKRENAMER_REQUIRE_WINDOWS_BACKEND_CAPABILITIES', '1', 'Process')
+        [Environment]::SetEnvironmentVariable(
+            'DARKRENAMER_CASE_SENSITIVE_FIXTURE_ROOT', $CaseSensitiveFixtureRoot, 'Process'
+        )
         & $Action
     }
     finally {
@@ -1919,6 +2030,28 @@ function Start-OwnedProcess {
         -Arguments $Arguments `
         -WorkingDirectory $WorkingDirectory `
         -SingleProcessOnly:$SingleProcessOnly
+}
+function Complete-JobBoundCaseSensitiveFixture {
+    param(
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][System.Collections.IDictionary] $Row
+    )
+
+    try {
+        Assert-OrdinaryDirectoryTree -Path $FixtureRoot
+        if (@(Get-ChildItem -LiteralPath $FixtureRoot -Force).Count -ne 0) {
+            throw 'The case-sensitive test fixture was not emptied before cleanup.'
+        }
+        Remove-Item -LiteralPath $FixtureRoot -Force
+        if (Test-Path -LiteralPath $FixtureRoot) {
+            throw 'The case-sensitive test fixture cleanup was incomplete.'
+        }
+    }
+    catch {
+        $Row.status = 'failed'
+        $Row.failure_reason = 'process_error'
+        throw
+    }
 }
 function Invoke-RustTestBinary {
     param(
@@ -1978,7 +2111,20 @@ function Invoke-RustTestBinary {
             return [pscustomobject]$row
         }
         $caseRoot = New-PrivateDirectory -Parent $RuntimeRoot -Leaf ('test-{0:D3}' -f $Index)
-        Invoke-WithIsolatedEnvironment -RuntimeRoot $caseRoot -Action {
+        $temporaryRoot = $null
+        $caseSensitiveFixtureRoot = $null
+        if ($Test.file -cmatch '^rename_windows_backend-[0-9a-f]{16}\.exe$') {
+            $temporaryRoot = New-PrivateDirectory -Parent $caseRoot -Leaf 'temp'
+            $temporaryRoot = Resolve-JobBoundShortPath -Path $temporaryRoot
+            $caseSensitiveFixtureRoot = New-PrivateDirectory `
+                -Parent $temporaryRoot -Leaf 'case-sensitive-fixture'
+            [DarkReNamerVmFileSystem]::SetCaseSensitiveDirectory($caseSensitiveFixtureRoot)
+        }
+        Invoke-WithIsolatedEnvironment `
+            -RuntimeRoot $caseRoot `
+            -TemporaryRoot $temporaryRoot `
+            -CaseSensitiveFixtureRoot $caseSensitiveFixtureRoot `
+            -Action {
             $ownedProcess = Start-JobBoundProcess `
                 -FilePath $binaryPath `
                 -Arguments '--nocapture --test-threads=1' `
@@ -2025,8 +2171,13 @@ function Invoke-RustTestBinary {
                 $row.failure_reason = 'invalid_test_summary'
             }
         }
+        if ($null -ne $caseSensitiveFixtureRoot -and $row.status -ceq 'passed') {
+            Complete-JobBoundCaseSensitiveFixture `
+                -FixtureRoot $caseSensitiveFixtureRoot -Row $row
+        }
     }
     catch {
+        $row.status = 'failed'
         $row.failure_reason = 'process_error'
         if ($null -ne $processState.process) {
             $row.active_processes_at_primary_exit =
@@ -2046,6 +2197,9 @@ function Invoke-RustTestBinary {
                 $row.status = 'failed'
                 Set-ProcessCleanupFailureReason -Row $row -Reason 'process_cleanup_failed'
             }
+        }
+        else {
+            $row.job_cleanup = $true
         }
         try {
             $stdoutBytes = Get-CapturedOutputBytes -Path $stdoutPath
