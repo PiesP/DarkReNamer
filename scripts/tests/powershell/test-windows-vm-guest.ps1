@@ -696,7 +696,7 @@ try {
         '$State.job_process_snapshot.query_error = [int]$State.owner.LastProcessListError',
         'process_job_snapshot = $State.job_process_snapshot',
         'function Set-ProcessCleanupFailureReason',
-        '$soleActiveProcessId -eq 0 -or',
+        'if ($soleActiveProcessId -lt 0)',
         '-not $State.job_had_survivors',
         '[System.IO.FileSystemAclExtensions]::CreateDirectory($security, $path)',
         'job_cleanup = $false',
@@ -1033,13 +1033,14 @@ try {
             LastProcessListListed = [uint32]1
             LastProcessListError = 0
             process_list_queries = 0
+            hold_active_processes = $false
             throw_on_process_list = $false
             OutputLimitExceeded = $false
         }
         Add-Member -InputObject $accountingOwner -MemberType ScriptProperty -Name ActiveProcessCount -Value { [int]$this.active_processes } -Force
         Add-Member -InputObject $accountingOwner -MemberType ScriptMethod -Name WaitForEmpty -Value {
             param([int] $Milliseconds)
-            if ($this.active_processes -gt 0) {
+            if ($this.active_processes -gt 0 -and -not $this.hold_active_processes) {
                 Start-Sleep -Milliseconds 25
                 $this.active_processes = 0
             }
@@ -1054,6 +1055,7 @@ try {
             return [long]$this.sole_active_process_id
         } -Force
         Add-Member -InputObject $accountingOwner -MemberType ScriptMethod -Name WaitForCapture -Value { param([int] $Milliseconds) } -Force
+        Add-Member -InputObject $accountingOwner -MemberType ScriptMethod -Name Terminate -Value { $this.active_processes = 0 } -Force
         Add-Member -InputObject $accountingOwner -MemberType ScriptMethod -Name CloseJob -Value { return $true } -Force
         $accountingState = [pscustomobject]@{
             process = $accountingProcess
@@ -1179,6 +1181,79 @@ try {
         }
         if (-not (Close-JobBoundProcess -State $zeroActiveAccountingState)) {
             throw 'The process job did not close cleanly after a zero active count.'
+        }
+        $accountingOwner.active_processes = 1
+        $accountingOwner.sole_active_process_id = [long]($accountingProcess.Id + 1000000)
+        $accountingOwner.LastProcessListAssigned = [uint32]1
+        $accountingOwner.LastProcessListListed = [uint32]1
+        $differentPidAccountingState = [pscustomobject]@{
+            process = $accountingProcess
+            owner = $accountingOwner
+            aggregate_output_limit_bytes = [long]4096
+            job_active_processes_at_primary_exit = $null
+            job_process_snapshot = $null
+            job_had_survivors = $false
+            job_active_processes_at_stop = $null
+            job_forced_termination = $false
+            job_active_processes_at_close = $null
+            job_empty = $false
+            job_closed = $false
+            job_capture_complete = $false
+        }
+        $differentPidAccountingResult = Wait-JobBoundProcessWithOutputLimit `
+            -State $differentPidAccountingState `
+            -StdoutPath $accountingStdoutPath `
+            -StderrPath $accountingStderrPath `
+            -TimeoutSeconds 10
+        if ($differentPidAccountingResult.failure_reason -or
+            $differentPidAccountingResult.active_processes_at_primary_exit -ne 1 -or
+            $accountingOwner.ActiveProcessCount -ne 0 -or
+            $differentPidAccountingState.job_had_survivors -or
+            $differentPidAccountingResult.process_job_snapshot.primary_pid -ne $accountingProcess.Id -or
+            $differentPidAccountingResult.process_job_snapshot.sole_pid -eq $accountingProcess.Id -or
+            $differentPidAccountingResult.process_job_snapshot.active_after_grace -ne 0) {
+            throw 'A different sole process PID that exits during accounting grace was classified as a survivor.'
+        }
+        if (-not (Close-JobBoundProcess -State $differentPidAccountingState)) {
+            throw 'The process job did not close after a different PID settled.'
+        }
+        $accountingOwner.active_processes = 1
+        $accountingOwner.hold_active_processes = $true
+        $accountingOwner.sole_active_process_id = [long]($accountingProcess.Id + 1000001)
+        $persistentPidAccountingState = [pscustomobject]@{
+            process = $accountingProcess
+            owner = $accountingOwner
+            aggregate_output_limit_bytes = [long]4096
+            job_active_processes_at_primary_exit = $null
+            job_process_snapshot = $null
+            job_had_survivors = $false
+            job_active_processes_at_stop = $null
+            job_forced_termination = $false
+            job_active_processes_at_close = $null
+            job_empty = $false
+            job_closed = $false
+            job_capture_complete = $false
+        }
+        $persistentPidAccountingResult = Wait-JobBoundProcessWithOutputLimit `
+            -State $persistentPidAccountingState `
+            -StdoutPath $accountingStdoutPath `
+            -StderrPath $accountingStderrPath `
+            -TimeoutSeconds 10
+        $accountingOwner.hold_active_processes = $false
+        if ($persistentPidAccountingResult.failure_reason -ne 'process_job_not_empty' -or
+            $persistentPidAccountingResult.process_job_snapshot.primary_pid -ne $accountingProcess.Id -or
+            $persistentPidAccountingResult.process_job_snapshot.sole_pid -eq $accountingProcess.Id -or
+            $persistentPidAccountingResult.process_job_snapshot.active_after_grace -ne 1 -or
+            -not $persistentPidAccountingState.job_had_survivors -or
+            -not $persistentPidAccountingState.job_forced_termination -or
+            $accountingOwner.ActiveProcessCount -ne 0) {
+            throw 'A different sole process PID that survives accounting grace was not terminated and reported.'
+        }
+        [void](Close-JobBoundProcess -State $persistentPidAccountingState)
+        if (-not $persistentPidAccountingState.job_closed -or
+            -not $persistentPidAccountingState.job_empty -or
+            $persistentPidAccountingState.job_active_processes_at_close -ne 0) {
+            throw 'The process job did not close after the persistent PID was terminated.'
         }
     }
     finally {

@@ -395,7 +395,7 @@
       "bundle": "guest-process.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "9e0dfdb6c9742ad7183f1b30559fbc076f265e9ba2e7097dd5b58efbb4e07f15",
+      "sha256": "edd59b7bb71abde0a4b96758635bde4e8e087d89118c62392f1f7ae8dfc6ffad",
       "dependencies": []
     },
     {

@@ -1805,9 +1805,7 @@ function Wait-JobBoundProcessWithOutputLimit {
             }
         }
         if ($State.job_active_processes_at_primary_exit -gt 0) {
-            $primaryAccountingLag = $soleActiveProcessId -eq 0 -or
-                $soleActiveProcessId -eq [long]$State.process.Id
-            if ($soleActiveProcessId -lt 0 -or -not $primaryAccountingLag) {
+            if ($soleActiveProcessId -lt 0) {
                 $State.job_had_survivors = $true
                 Stop-JobBoundProcess -State $State
                 $reason = 'process_job_not_empty'
