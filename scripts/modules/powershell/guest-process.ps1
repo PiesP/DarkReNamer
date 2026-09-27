@@ -222,16 +222,21 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
     private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
     private const uint JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008;
     private const uint WAIT_OBJECT_0 = 0;
+    private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
     private const uint TOKEN_ASSIGN_PRIMARY = 0x0001;
     private const uint TOKEN_DUPLICATE = 0x0002;
     private const uint TOKEN_QUERY = 0x0008;
     private const int TOKEN_TYPE = 8;
+    private const int TOKEN_STATISTICS = 10;
     private const int TOKEN_LINKED_TOKEN = 19;
+    private const int TOKEN_ELEVATION_TYPE = 18;
     private const int TOKEN_ELEVATION = 20;
     private const int TOKEN_SESSION_ID = 12;
     private const int TOKEN_USER = 1;
     private const int TOKEN_INTEGRITY_LEVEL = 25;
-    private const int SECURITY_IMPERSONATION = 2;
+    private const int TOKEN_UI_ACCESS = 26;
+    private const int TOKEN_ELEVATION_TYPE_FULL = 2;
+    private const int TOKEN_ELEVATION_TYPE_LIMITED = 3;
     private const int TOKEN_PRIMARY = 1;
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -258,6 +263,23 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
 
     [StructLayout(LayoutKind.Sequential)]
     private struct LinkedToken { public IntPtr Token; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Luid { public uint LowPart; public int HighPart; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TokenStatistics {
+        public Luid TokenId;
+        public Luid AuthenticationId;
+        public long ExpirationTime;
+        public int TokenType;
+        public int ImpersonationLevel;
+        public uint DynamicCharged;
+        public uint DynamicAvailable;
+        public uint GroupCount;
+        public uint PrivilegeCount;
+        public Luid ModifiedId;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct SidAndAttributes { public IntPtr Sid; public uint Attributes; }
@@ -329,14 +351,21 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
     private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
     [DllImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool DuplicateTokenEx(
-        IntPtr existingToken, uint desiredAccess, IntPtr tokenAttributes,
-        int impersonationLevel, int tokenType, out IntPtr newToken);
-    [DllImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetTokenInformation(
         IntPtr token, int informationClass, IntPtr information,
         uint informationLength, out uint returnLength);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, uint processId);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryFullProcessImageNameW(
+        IntPtr process, uint flags, StringBuilder imageName, ref uint size);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetWindowsDirectoryW(StringBuilder windowsDirectory, uint size);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetShellWindow();
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool ConvertSidToStringSidW(IntPtr sid, out IntPtr stringSid);
@@ -443,14 +472,26 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
         finally { Marshal.FreeHGlobal(buffer); }
     }
 
+    private static TokenStatistics ReadTokenStatistics(IntPtr token) {
+        IntPtr buffer = QueryTokenBuffer(token, TOKEN_STATISTICS);
+        try { return Marshal.PtrToStructure<TokenStatistics>(buffer); }
+        finally { Marshal.FreeHGlobal(buffer); }
+    }
+
+    private static bool SameLuid(Luid left, Luid right) {
+        return left.LowPart == right.LowPart && left.HighPart == right.HighPart;
+    }
+
     private static void RequireToken(
-        IntPtr token, uint expectedElevation, uint expectedSession,
-        string expectedIntegrity, string expectedUser) {
+        IntPtr token, uint expectedElevation, uint expectedElevationType,
+        uint expectedSession, string expectedIntegrity, string expectedUser) {
         if (TokenDword(token, TOKEN_ELEVATION) != expectedElevation ||
+            TokenDword(token, TOKEN_ELEVATION_TYPE) != expectedElevationType ||
             TokenDword(token, TOKEN_SESSION_ID) != expectedSession ||
+            TokenDword(token, TOKEN_UI_ACCESS) != 0 ||
             TokenSid(token, TOKEN_USER) != expectedUser ||
             TokenSid(token, TOKEN_INTEGRITY_LEVEL) != expectedIntegrity) {
-            throw new InvalidOperationException("Process token identity, elevation, integrity, or session differs from the VM observer contract.");
+            throw new InvalidOperationException("Process token identity, elevation type, UI access, integrity, or session differs from the VM observer contract.");
         }
     }
 
@@ -475,42 +516,110 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
             if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, out token))
                 throw Win32Failure("OpenProcessToken for the elevated observer");
             string userSid = TokenSid(token, TOKEN_USER);
-            RequireToken(token, 1, expectedSession, "S-1-16-12288", userSid);
+            RequireToken(
+                token, 1, TOKEN_ELEVATION_TYPE_FULL, expectedSession,
+                "S-1-16-12288", userSid);
         }
         finally { if (token != IntPtr.Zero) CloseHandle(token); }
     }
 
-    private static IntPtr OpenVerifiedLinkedPrimaryToken(out uint session, out string userSid) {
+    private static uint GetShellProcessId(IntPtr shellWindow) {
+        uint processId;
+        if (GetWindowThreadProcessId(shellWindow, out processId) == 0 || processId == 0)
+            throw new InvalidOperationException("The interactive shell window has no owning process.");
+        return processId;
+    }
+
+    private static string GetSystemExplorerPath() {
+        StringBuilder windowsDirectory = new StringBuilder(32768);
+        uint length = GetWindowsDirectoryW(windowsDirectory, (uint)windowsDirectory.Capacity);
+        if (length == 0) throw Win32Failure("GetWindowsDirectoryW");
+        if (length >= (uint)windowsDirectory.Capacity)
+            throw new InvalidOperationException("The Windows directory path exceeded its fixed buffer.");
+        return Path.GetFullPath(Path.Combine(windowsDirectory.ToString(), "explorer.exe"));
+    }
+
+    private static string GetProcessImagePath(IntPtr process) {
+        StringBuilder imagePath = new StringBuilder(32768);
+        uint length = (uint)imagePath.Capacity;
+        if (!QueryFullProcessImageNameW(process, 0, imagePath, ref length))
+            throw Win32Failure("QueryFullProcessImageNameW for the interactive shell");
+        if (length == 0 || length > (uint)imagePath.Capacity)
+            throw new InvalidOperationException("The interactive shell image path is invalid.");
+        return Path.GetFullPath(imagePath.ToString());
+    }
+
+    private static IntPtr OpenVerifiedShellPrimaryToken(
+        IntPtr linkedToken, uint expectedSession, string expectedUser) {
+        IntPtr shellWindow = GetShellWindow();
+        if (shellWindow == IntPtr.Zero)
+            throw new InvalidOperationException("The interactive desktop has no shell window.");
+        uint shellProcessId = GetShellProcessId(shellWindow);
+        IntPtr shellProcess = IntPtr.Zero, shellToken = IntPtr.Zero;
+        try {
+            shellProcess = OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, false, shellProcessId);
+            if (shellProcess == IntPtr.Zero)
+                throw Win32Failure("OpenProcess for the interactive shell");
+            string imagePath = GetProcessImagePath(shellProcess);
+            string expectedImagePath = GetSystemExplorerPath();
+            if (!String.Equals(imagePath, expectedImagePath, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("The interactive shell image is not the Windows Explorer binary.");
+            if (GetShellProcessId(shellWindow) != shellProcessId)
+                throw new InvalidOperationException("The interactive shell process changed during token acquisition.");
+            uint desiredAccess = TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY;
+            if (!OpenProcessToken(shellProcess, desiredAccess, out shellToken))
+                throw Win32Failure("OpenProcessToken for the verified interactive shell");
+            if (TokenDword(shellToken, TOKEN_TYPE) != TOKEN_PRIMARY)
+                throw new InvalidOperationException("The verified interactive shell token is not primary.");
+            RequireToken(
+                shellToken, 0, TOKEN_ELEVATION_TYPE_LIMITED, expectedSession,
+                "S-1-16-8192", expectedUser);
+            Luid linkedAuthenticationId = ReadTokenStatistics(linkedToken).AuthenticationId;
+            Luid shellAuthenticationId = ReadTokenStatistics(shellToken).AuthenticationId;
+            if (!SameLuid(linkedAuthenticationId, shellAuthenticationId))
+                throw new InvalidOperationException("The shell token belongs to a different interactive logon.");
+            IntPtr result = shellToken;
+            shellToken = IntPtr.Zero;
+            return result;
+        }
+        finally {
+            if (shellToken != IntPtr.Zero) CloseHandle(shellToken);
+            if (shellProcess != IntPtr.Zero) CloseHandle(shellProcess);
+        }
+    }
+
+    private static IntPtr OpenVerifiedLinkedShellPrimaryToken(out uint session, out string userSid) {
         string expectedSessionText = Environment.GetEnvironmentVariable(
             "DARKRENAMER_VM_EXPECTED_SESSION_ID");
         uint expectedSession;
         if (!UInt32.TryParse(expectedSessionText, out expectedSession) || expectedSession == 0)
             throw new InvalidOperationException("Elevated observer session binding is missing.");
-        IntPtr current = IntPtr.Zero, linked = IntPtr.Zero, primary = IntPtr.Zero;
+        IntPtr current = IntPtr.Zero, linked = IntPtr.Zero;
         try {
             if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, out current))
                 throw Win32Failure("OpenProcessToken for linked-token verification");
             uint currentSession = TokenDword(current, TOKEN_SESSION_ID);
             userSid = TokenSid(current, TOKEN_USER);
-            RequireToken(current, 1, expectedSession, "S-1-16-12288", userSid);
+            RequireToken(
+                current, 1, TOKEN_ELEVATION_TYPE_FULL, expectedSession,
+                "S-1-16-12288", userSid);
             linked = GetLinkedToken(current);
-            RequireToken(linked, 0, expectedSession, "S-1-16-8192", userSid);
-            uint desiredAccess = TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY;
-            if (!DuplicateTokenEx(linked, desiredAccess, IntPtr.Zero,
-                    SECURITY_IMPERSONATION, TOKEN_PRIMARY, out primary))
-                throw Win32Failure("DuplicateTokenEx for the linked medium observer token");
-            if (TokenDword(primary, TOKEN_TYPE) != TOKEN_PRIMARY)
-                throw new InvalidOperationException("The filtered observer token is not primary.");
-            RequireToken(primary, 0, expectedSession, "S-1-16-8192", userSid);
+            RequireToken(
+                linked, 0, TOKEN_ELEVATION_TYPE_LIMITED, expectedSession,
+                "S-1-16-8192", userSid);
+            Luid currentAuthenticationId = ReadTokenStatistics(current).AuthenticationId;
+            Luid linkedAuthenticationId = ReadTokenStatistics(linked).AuthenticationId;
+            if (!SameLuid(currentAuthenticationId, linkedAuthenticationId))
+                throw new InvalidOperationException("The elevated and linked tokens belong to different logon sessions.");
+            IntPtr shellToken = OpenVerifiedShellPrimaryToken(
+                linked, expectedSession, userSid);
             session = currentSession;
-            IntPtr result = primary;
-            primary = IntPtr.Zero;
-            return result;
+            return shellToken;
         }
         finally {
             if (current != IntPtr.Zero) CloseHandle(current);
             if (linked != IntPtr.Zero) CloseHandle(linked);
-            if (primary != IntPtr.Zero) CloseHandle(primary);
         }
     }
 
@@ -519,7 +628,13 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
         IntPtr token;
         if (!OpenProcessToken(process, TOKEN_QUERY, out token))
             throw Win32Failure("OpenProcessToken for the suspended observer child");
-        try { RequireToken(token, 0, expectedSession, "S-1-16-8192", expectedUser); }
+        try {
+            if (TokenDword(token, TOKEN_TYPE) != TOKEN_PRIMARY)
+                throw new InvalidOperationException("The suspended observer child token is not primary.");
+            RequireToken(
+                token, 0, TOKEN_ELEVATION_TYPE_LIMITED, expectedSession,
+                "S-1-16-8192", expectedUser);
+        }
         finally { CloseHandle(token); }
     }
 
@@ -646,7 +761,7 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
             uint observerSession = 0;
             string observerUserSid = null;
             if (elevatedObserver) {
-                observerToken = OpenVerifiedLinkedPrimaryToken(out observerSession, out observerUserSid);
+                observerToken = OpenVerifiedLinkedShellPrimaryToken(out observerSession, out observerUserSid);
                 startup.StartupInfo.lpDesktop = @"winsta0\default";
             }
             bool inheritHandles = false;
@@ -690,7 +805,7 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
                     ref startup, out created);
             if (!started) {
                 throw Win32Failure(elevatedObserver
-                    ? "CreateProcessAsUserW for the linked medium observer token"
+                    ? "CreateProcessAsUserW for the verified medium shell token"
                     : "CreateProcessW for the VM test child");
             }
             if (!AssignProcessToJobObject(job, created.hProcess)) {

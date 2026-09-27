@@ -35,7 +35,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$ToolingManifestSha256 = 'fc23df8fd2e50a7e0891712e520c1e2b350c76a95424d95a73b9a0f77f460410'
+$ToolingManifestSha256 = '0febad155a0b2473127b0e35d5fe30201a8edf18cb65f0d7a64dd11cf960e5a0'
 $ToolingLoaderSha256 = '6888561ff9a23becf279ec7d4e691b40d50d79dde2196d22c0d63e2252dd08a1'
 
 function Get-DrBootstrapSha256 {

@@ -612,19 +612,34 @@ try {
         'TOKEN_LINKED_TOKEN = 19',
         'TOKEN_ASSIGN_PRIMARY = 0x0001',
         'TOKEN_DUPLICATE = 0x0002',
-        'SECURITY_IMPERSONATION = 2',
         'TOKEN_PRIMARY = 1',
+        'TOKEN_ELEVATION_TYPE = 18',
+        'TOKEN_ELEVATION_TYPE_FULL = 2',
+        'TOKEN_ELEVATION_TYPE_LIMITED = 3',
+        'TOKEN_UI_ACCESS = 26',
         'GetTokenInformation(token, informationClass',
-        'OpenVerifiedLinkedPrimaryToken',
-        'DuplicateTokenEx(linked, desiredAccess, IntPtr.Zero',
-        'SECURITY_IMPERSONATION, TOKEN_PRIMARY, out primary',
-        'TokenDword(primary, TOKEN_TYPE) != TOKEN_PRIMARY',
+        'OpenVerifiedLinkedShellPrimaryToken',
+        'OpenVerifiedShellPrimaryToken',
+        'GetShellWindow()',
+        'GetWindowThreadProcessId(shellWindow, out processId)',
+        'PROCESS_QUERY_LIMITED_INFORMATION, false, shellProcessId)',
+        'QueryFullProcessImageNameW(process, 0, imagePath, ref length)',
+        'GetWindowsDirectoryW(windowsDirectory, (uint)windowsDirectory.Capacity)',
+        'TokenDword(shellToken, TOKEN_TYPE) != TOKEN_PRIMARY',
+        'ReadTokenStatistics(current).AuthenticationId',
+        'ReadTokenStatistics(linked).AuthenticationId',
+        'ReadTokenStatistics(linkedToken).AuthenticationId',
+        'ReadTokenStatistics(shellToken).AuthenticationId',
+        'SameLuid(linkedAuthenticationId, shellAuthenticationId)',
+        'token, 1, TOKEN_ELEVATION_TYPE_FULL, expectedSession,',
+        'linked, 0, TOKEN_ELEVATION_TYPE_LIMITED, expectedSession,',
+        'shellToken, 0, TOKEN_ELEVATION_TYPE_LIMITED, expectedSession,',
         'Win32Exception Win32Failure(string operation)',
         'GetTokenInformation for class ',
-        'DuplicateTokenEx for the linked medium observer token',
-        'CreateProcessAsUserW for the linked medium observer token',
-        'RequireToken(linked, 0, expectedSession, "S-1-16-8192", userSid)',
-        'RequireToken(primary, 0, expectedSession, "S-1-16-8192", userSid)',
+        'CreateProcessAsUserW for the verified medium shell token',
+        'The shell token belongs to a different interactive logon.',
+        'The interactive shell image is not the Windows Explorer binary.',
+        'The interactive shell process changed during token acquisition.',
         'CreateProcessAsUserW(observerToken, filePath',
         'RequireCreatedChild(created.hProcess, observerSession, observerUserSid)',
         'AssertHighObserverToken',
@@ -680,6 +695,33 @@ try {
             throw "The production flow fixture escaped the protected task parent: $flowFixtureContract"
         }
     }
+    $tokenStatisticsStartIndex = $runnerText.IndexOf(
+        'private struct TokenStatistics {',
+        [StringComparison]::Ordinal
+    )
+    if ($tokenStatisticsStartIndex -lt 0) {
+        throw 'The native TOKEN_STATISTICS structure declaration is missing.'
+    }
+    $tokenIdFieldIndex = $runnerText.IndexOf(
+        'public Luid TokenId;',
+        $tokenStatisticsStartIndex,
+        [StringComparison]::Ordinal
+    )
+    $authenticationIdFieldIndex = $runnerText.IndexOf(
+        'public Luid AuthenticationId;',
+        $tokenStatisticsStartIndex,
+        [StringComparison]::Ordinal
+    )
+    $expirationTimeFieldIndex = $runnerText.IndexOf(
+        'public long ExpirationTime;',
+        $tokenStatisticsStartIndex,
+        [StringComparison]::Ordinal
+    )
+    if ($tokenIdFieldIndex -le $tokenStatisticsStartIndex -or
+        $authenticationIdFieldIndex -le $tokenIdFieldIndex -or
+        $expirationTimeFieldIndex -le $authenticationIdFieldIndex) {
+        throw 'TOKEN_STATISTICS fields must match the native TokenId, AuthenticationId, ExpirationTime order.'
+    }
     if ($runnerText.IndexOf(
         '-Parent $OutputRoot -Leaf ''production-flow-fixture''',
         [StringComparison]::Ordinal
@@ -708,6 +750,32 @@ try {
         $runnerText.IndexOf('JOB_OBJECT_LIMIT_BREAKAWAY_OK', [StringComparison]::Ordinal) -ge 0 -or
         $runnerText.IndexOf('JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK', [StringComparison]::Ordinal) -ge 0) {
         throw 'The guest process must enter a non-breakaway kill-on-close job before its first instruction.'
+    }
+    $shellWindowIndex = $runnerText.IndexOf(
+        'IntPtr shellWindow = GetShellWindow();',
+        [StringComparison]::Ordinal
+    )
+    $shellProcessIndex = $runnerText.IndexOf(
+        'shellProcess = OpenProcess(',
+        [StringComparison]::Ordinal
+    )
+    $shellImageIndex = $runnerText.IndexOf(
+        'string imagePath = GetProcessImagePath(shellProcess);',
+        [StringComparison]::Ordinal
+    )
+    $shellTokenIndex = $runnerText.IndexOf(
+        'OpenProcessToken(shellProcess, desiredAccess, out shellToken)',
+        [StringComparison]::Ordinal
+    )
+    $shellAuthenticationIndex = $runnerText.IndexOf(
+        'SameLuid(linkedAuthenticationId, shellAuthenticationId)',
+        [StringComparison]::Ordinal
+    )
+    if ($shellWindowIndex -lt 0 -or $shellProcessIndex -le $shellWindowIndex -or
+        $shellImageIndex -le $shellProcessIndex -or $shellTokenIndex -le $shellImageIndex -or
+        $shellAuthenticationIndex -le $shellTokenIndex -or
+        $runnerText.IndexOf('DuplicateTokenEx', [StringComparison]::Ordinal) -ge 0) {
+        throw 'The medium observer must use the verified interactive shell primary token from the same logon.'
     }
     $suiteBudgetStartIndex = $runnerText.IndexOf(
         '$remainingSuiteOutputBytes = [long]$script:VmTestOutputSuiteLimitBytes',
