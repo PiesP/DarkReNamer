@@ -22,7 +22,6 @@ from darkrenamer_tooling.contracts.state import (
     Identity, clean_journal_inventory, fixture_inventory, restored_inventory,
 )
 from darkrenamer_tooling.evidence.archive import EvidenceError, require_exact_keys, require_int
-from darkrenamer_tooling.evidence.png import decode_png
 from darkrenamer_tooling.evidence.recovery import (
     verify_crash_prefix,
     verify_intent_candidate,
@@ -46,6 +45,7 @@ RECOVERY_TARGETS = {
 class EvidenceReader(Protocol):
     def json(self, path: str) -> object: ...
     def bytes(self, path: str, maximum: int = MAX_MEMBER_BYTES) -> bytes: ...
+    def decode_png(self, path: str, label: str, *, expected_dimensions: tuple[int, int]) -> tuple[int, int, bytes]: ...
     def digest_reference(self, reference: object, *, prefix: str) -> str: ...
     def sibling(self, document: str, reference: object) -> str: ...
 
@@ -473,8 +473,11 @@ def _recovery_screenshot(private: PrivateEvidence, result_path: str, reference: 
     expected_path = str(PurePosixPath(result_path).parent / image["file"])
     require(path == expected_path and path.startswith(private.run_prefix),
             "Recovery screenshot resolved outside its execution result directory.")
-    actual_width, actual_height, pixels = decode_png(
-        private.reader.bytes(path, MAX_MEMBER_BYTES), "recovery confirmation screenshot")
+    actual_width, actual_height, pixels = private.reader.decode_png(
+        path,
+        "recovery confirmation screenshot",
+        expected_dimensions=(width, height),
+    )
     require((actual_width, actual_height) == (width, height),
             "Recovery screenshot differs from its captured dialog dimensions.")
     require(pixels != pixels[:4] * (width * height),

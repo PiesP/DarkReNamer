@@ -1,20 +1,23 @@
 //! Audited Windows handle-relative filesystem primitives.
 
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
-use std::io;
+use std::io::{self, Write};
 use std::mem::{offset_of, size_of};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::ptr;
+use std::sync::Arc;
 
 use darknamer_core::{LegacyText, MAX_WINDOWS_LEAF_NAME_UTF16_UNITS};
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
-    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_ID_BOTH_DIR_INFORMATION, FILE_NON_DIRECTORY_FILE,
-    FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION, FILE_SYNCHRONOUS_IO_NONALERT,
-    FileIdBothDirectoryInformation, FileRenameInformation, NtCreateFile, NtQueryDirectoryFile,
+    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_ID_BOTH_DIR_INFORMATION, FILE_INTERNAL_INFORMATION,
+    FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION,
+    FILE_SYNCHRONOUS_IO_NONALERT, FileIdBothDirectoryInformation, FileInternalInformation,
+    FileRenameInformation, NtCreateFile, NtQueryDirectoryFile, NtQueryInformationFile,
     NtSetInformationFile, RtlNtStatusToDosErrorNoTeb,
 };
 use windows_sys::Win32::Foundation::{
@@ -25,12 +28,13 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_CASE_SENSITIVE_INFO, FILE_DISPOSITION_INFO,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_NAME_NORMALIZED,
-    FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_REMOTE_PROTOCOL_INFO, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_DATA, FileCaseSensitiveInfo,
-    FileDispositionInfo, FileIdInfo, FileRemoteProtocolInfo, GetDriveTypeW,
-    GetFileInformationByHandleEx, GetFinalPathNameByHandleW, GetVolumeInformationByHandleW,
-    SYNCHRONIZE, SetFileInformationByHandle, VOLUME_NAME_NONE,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_DESCRIPTOR, FILE_ID_INFO,
+    FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_REMOTE_PROTOCOL_INFO,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_TRAVERSE,
+    FILE_WRITE_DATA, FileCaseSensitiveInfo, FileDispositionInfo, FileIdInfo, FileIdType,
+    FileRemoteProtocolInfo, FileStandardInfo, GetDriveTypeW, GetFileInformationByHandleEx,
+    GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, OpenFileById, SYNCHRONIZE,
+    SetFileInformationByHandle, VOLUME_NAME_GUID, VOLUME_NAME_NONE,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::SystemServices::FILE_CS_FLAG_CASE_SENSITIVE_DIR;
@@ -54,6 +58,24 @@ pub(crate) struct NativeIdentity {
 pub(crate) struct NativeParent {
     file: File,
     pub identity: NativeIdentity,
+}
+
+#[derive(Debug)]
+pub(crate) struct TextExportTarget {
+    parents: Arc<Vec<NativeParent>>,
+    leaf: Vec<u16>,
+    accepted_leaf: TextExportLeaf,
+}
+
+#[derive(Debug)]
+enum TextExportLeaf {
+    Existing(File),
+    Missing,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TextExportParent {
+    directories: Arc<Vec<NativeParent>>,
 }
 
 pub(crate) fn validate_safe_local_root(path: &Path) -> io::Result<()> {
@@ -394,6 +416,415 @@ pub(crate) fn open_entry(
     )
 }
 
+/// Opens a user-selected text export destination without following or
+/// replacing a reparse point, and rejects multiply-linked files before the
+/// caller can truncate them.
+#[cfg(test)]
+pub(crate) fn open_text_export_file(path: &Path) -> io::Result<File> {
+    prepare_text_export_target(path)?.open_file()
+}
+
+/// Retains the selected parent directory while the save dialog is still
+/// active, so later writes cannot be redirected by replacing a path component
+/// after the dialog returns.
+#[cfg(test)]
+pub(crate) fn prepare_text_export_target(path: &Path) -> io::Result<TextExportTarget> {
+    let parent_path = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "text export destination must have a parent directory",
+        )
+    })?;
+    let leaf = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "text export destination must have a file name",
+        )
+    })?;
+    prepare_text_export_parent_from_path(parent_path)?.target_for_test_leaf(leaf)
+}
+
+pub(crate) fn prepare_text_export_parent(
+    path: &Path,
+    shell_volume_id: u128,
+    shell_file_reference: u64,
+) -> io::Result<TextExportParent> {
+    prepare_text_export_parent_impl(path, Some((shell_volume_id, shell_file_reference)))
+}
+
+#[cfg(test)]
+fn prepare_text_export_parent_from_path(path: &Path) -> io::Result<TextExportParent> {
+    prepare_text_export_parent_impl(path, None)
+}
+
+fn prepare_text_export_parent_impl(
+    path: &Path,
+    shell_identity: Option<(u128, u64)>,
+) -> io::Result<TextExportParent> {
+    reject_unsupported_drive_type(path)?;
+    let (root, components) = traversal_parts(path)?;
+    let capacity = components
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let mut directories = Vec::new();
+    directories
+        .try_reserve_exact(capacity)
+        .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+
+    let root_file = open_root_directory(&root, SHARE_READ_WRITE)?;
+    validate_directory_handle(&root_file)?;
+    reject_case_sensitive_directory(&root_file)?;
+    reject_remote_protocol_if_reported(&root_file)?;
+    reject_unsupported_filesystem(&root_file)?;
+    let root_identity = file_identity(&root_file)?;
+    let shell_directory = shell_identity
+        .map(|(volume_id, file_reference)| {
+            if ntfs_volume_id(&root_file)? != volume_id {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "the save folder volume no longer matches the selected shell volume",
+                ));
+            }
+            open_directory_by_file_reference(&root_file, file_reference)
+        })
+        .transpose()?;
+    let shell_identity = shell_directory.as_ref().map(file_identity).transpose()?;
+    directories.push(NativeParent {
+        file: root_file,
+        identity: root_identity,
+    });
+
+    for component in components {
+        let leaf = component.encode_wide().collect::<Vec<_>>();
+        let parent = directories
+            .last()
+            .ok_or_else(|| io::Error::other("text export directory chain is empty"))?;
+        let file = open_relative(
+            parent.file(),
+            &leaf,
+            FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            SHARE_READ_WRITE,
+            FILE_OPEN,
+            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+        )?;
+        validate_directory_handle(&file)?;
+        reject_case_sensitive_directory(&file)?;
+        reject_remote_protocol_if_reported(&file)?;
+        let identity = file_identity(&file)?;
+        directories.push(NativeParent { file, identity });
+    }
+    let final_directory = directories
+        .last()
+        .ok_or_else(|| io::Error::other("text export directory chain is empty"))?;
+    reject_unsupported_filesystem(final_directory.file())?;
+    if let Some(shell_identity) = shell_identity
+        && final_directory.identity != shell_identity
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the save folder path no longer identifies the selected shell folder",
+        ));
+    }
+    Ok(TextExportParent {
+        directories: Arc::new(directories),
+    })
+}
+
+impl TextExportParent {
+    pub(crate) fn ntfs_file_reference_number(&self) -> io::Result<u64> {
+        let final_directory = self
+            .directories
+            .last()
+            .ok_or_else(|| io::Error::other("text export directory chain is empty"))?;
+        ntfs_file_reference_number(final_directory.file())
+    }
+
+    pub(crate) fn target_for_leaf(
+        &self,
+        leaf: &OsStr,
+        shell_identity: Option<(u128, u64)>,
+    ) -> io::Result<TextExportTarget> {
+        self.target_for_leaf_impl(leaf, shell_identity, true)
+    }
+
+    #[cfg(test)]
+    fn target_for_test_leaf(&self, leaf: &OsStr) -> io::Result<TextExportTarget> {
+        self.target_for_leaf_impl(leaf, None, false)
+    }
+
+    fn target_for_leaf_impl(
+        &self,
+        leaf: &OsStr,
+        shell_identity: Option<(u128, u64)>,
+        require_shell_identity: bool,
+    ) -> io::Result<TextExportTarget> {
+        let leaf = leaf.encode_wide().collect::<Vec<_>>();
+        if leaf.is_empty()
+            || leaf.len() > MAX_WINDOWS_LEAF_NAME_UTF16_UNITS
+            || leaf
+                .iter()
+                .any(|unit| matches!(*unit, 0 | 0x2F | 0x5C | 0x3A))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "text export destination has an invalid file name",
+            ));
+        }
+        let parent = self
+            .directories
+            .last()
+            .ok_or_else(|| io::Error::other("text export directory chain is empty"))?;
+        let access = FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+        let options =
+            FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT;
+        let accepted_leaf = match open_relative(
+            parent.file(),
+            &leaf,
+            access,
+            FILE_SHARE_READ,
+            FILE_OPEN,
+            options,
+        ) {
+            Ok(file) => {
+                validate_text_export_file(&file)?;
+                if require_shell_identity {
+                    let expected = shell_identity.ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "the selected existing output file has no shell identity",
+                        )
+                    })?;
+                    let actual = (ntfs_volume_id(&file)?, ntfs_file_reference_number(&file)?);
+                    require_matching_text_export_leaf_identity(expected, actual)?;
+                }
+                TextExportLeaf::Existing(file)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if require_shell_identity && shell_identity.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "the selected output file disappeared before it was retained",
+                    ));
+                }
+                TextExportLeaf::Missing
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(TextExportTarget {
+            parents: Arc::clone(&self.directories),
+            leaf,
+            accepted_leaf,
+        })
+    }
+}
+
+fn require_matching_text_export_leaf_identity(
+    expected: (u128, u64),
+    actual: (u128, u64),
+) -> io::Result<()> {
+    if expected == actual {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the selected output file identity changed before it was retained",
+        ))
+    }
+}
+
+fn open_directory_by_file_reference(volume: &File, file_reference: u64) -> io::Result<File> {
+    let descriptor = FILE_ID_DESCRIPTOR {
+        dwSize: u32::try_from(size_of::<FILE_ID_DESCRIPTOR>())
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?,
+        Type: FileIdType,
+        Anonymous: windows_sys::Win32::Storage::FileSystem::FILE_ID_DESCRIPTOR_0 {
+            FileId: i64::from_ne_bytes(file_reference.to_ne_bytes()),
+        },
+    };
+    // SAFETY: volume is a retained handle on the selected NTFS volume;
+    // descriptor is a live, correctly sized 64-bit FileId descriptor; the
+    // returned handle is checked before its single ownership transfer.
+    let file = unsafe {
+        let handle = OpenFileById(
+            volume.as_raw_handle(),
+            ptr::from_ref(&descriptor),
+            FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            SHARE_READ_WRITE,
+            ptr::null(),
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        );
+        if handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        File::from_raw_handle(handle)
+    };
+    validate_directory_handle(&file)?;
+    reject_case_sensitive_directory(&file)?;
+    reject_remote_protocol_if_reported(&file)?;
+    reject_unsupported_filesystem(&file)?;
+    Ok(file)
+}
+
+fn ntfs_file_reference_number(file: &File) -> io::Result<u64> {
+    let mut status_block = IO_STATUS_BLOCK::default();
+    let mut information = FILE_INTERNAL_INFORMATION::default();
+    let length = u32::try_from(size_of::<FILE_INTERNAL_INFORMATION>())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: file is the retained final NTFS directory handle, and both
+    // output buffers are writable, correctly aligned, and exactly sized for
+    // this synchronous FileInternalInformation query.
+    let (status, error_code) = unsafe {
+        let status = NtQueryInformationFile(
+            file.as_raw_handle(),
+            ptr::from_mut(&mut status_block),
+            ptr::from_mut(&mut information).cast(),
+            length,
+            FileInternalInformation,
+        );
+        let error_code = (status < 0).then(|| RtlNtStatusToDosErrorNoTeb(status));
+        (status, error_code)
+    };
+    if status < 0 {
+        let code = error_code.ok_or_else(|| io::Error::other("missing native error code"))?;
+        return Err(io::Error::from_raw_os_error(
+            i32::try_from(code).unwrap_or(i32::MAX),
+        ));
+    }
+    Ok(file_reference_number_from_index_number(
+        information.IndexNumber,
+    ))
+}
+
+const fn file_reference_number_from_index_number(index_number: i64) -> u64 {
+    u64::from_ne_bytes(index_number.to_ne_bytes())
+}
+
+fn ntfs_volume_id(root: &File) -> io::Result<u128> {
+    let mut path = [0_u16; 64];
+    let written = query_final_path(root, &mut path, FILE_NAME_NORMALIZED | VOLUME_NAME_GUID);
+    if written == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let written =
+        usize::try_from(written).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    if written >= path.len() {
+        return Err(io::Error::from_raw_os_error(ERROR_FILENAME_EXCED_RANGE));
+    }
+    parse_volume_guid_path(&path[..written])
+}
+
+fn parse_volume_guid_path(path: &[u16]) -> io::Result<u128> {
+    const PREFIX: &[u8] = br"\\?\Volume{";
+    if path.len() < PREFIX.len() + 37
+        || !path
+            .iter()
+            .zip(PREFIX)
+            .all(|(unit, expected)| *unit == u16::from(*expected))
+    {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    let guid = &path[PREFIX.len()..PREFIX.len() + 36];
+    if path[PREFIX.len() + 36] != b'}' as u16 {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    let mut value = 0_u128;
+    for (index, unit) in guid.iter().copied().enumerate() {
+        if matches!(index, 8 | 13 | 18 | 23) {
+            if unit != b'-' as u16 {
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
+            }
+            continue;
+        }
+        let digit = match unit {
+            0x30..=0x39 => u128::from(unit - 0x30),
+            0x41..=0x46 => u128::from(unit - 0x41 + 10),
+            0x61..=0x66 => u128::from(unit - 0x61 + 10),
+            _ => return Err(io::Error::from(io::ErrorKind::InvalidData)),
+        };
+        value = value
+            .checked_mul(16)
+            .and_then(|value| value.checked_add(digit))
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+    }
+    Ok(value)
+}
+
+impl TextExportTarget {
+    pub(crate) fn open_file(self) -> io::Result<File> {
+        let file = match self.accepted_leaf {
+            TextExportLeaf::Existing(file) => file,
+            TextExportLeaf::Missing => {
+                let parent = self
+                    .parents
+                    .last()
+                    .ok_or_else(|| io::Error::other("text export directory chain is empty"))?;
+                open_relative(
+                    parent.file(),
+                    &self.leaf,
+                    FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                    FILE_SHARE_READ,
+                    FILE_CREATE,
+                    FILE_NON_DIRECTORY_FILE
+                        | FILE_OPEN_REPARSE_POINT
+                        | FILE_SYNCHRONOUS_IO_NONALERT,
+                )?
+            }
+        };
+        validate_text_export_file(&file)?;
+        Ok(file)
+    }
+}
+
+pub(crate) fn write_text_export_target(target: TextExportTarget, bytes: &[u8]) -> io::Result<()> {
+    let mut file = target.open_file()?;
+    file.set_len(0)?;
+    file.write_all(bytes)?;
+    file.flush()?;
+    file.sync_all()
+}
+
+/// Writes through one validated handle. Sharing permits readers while
+/// preventing a competing writer, link operation, or rename from changing the
+/// destination identity during truncation and output.
+#[cfg(test)]
+pub(crate) fn write_text_export(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_text_export_target(prepare_text_export_target(path)?, bytes)
+}
+
+fn validate_text_export_file(file: &File) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "text export destination must be a regular, unlinked file",
+        ));
+    }
+    let mut info = FILE_STANDARD_INFO::default();
+    let size = u32::try_from(size_of::<FILE_STANDARD_INFO>())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: file is the retained output handle and info is a writable,
+    // correctly aligned FILE_STANDARD_INFO buffer of its checked size.
+    let success = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileStandardInfo,
+            ptr::from_mut(&mut info).cast(),
+            size,
+        )
+    };
+    if success == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if info.Directory || info.DeletePending || info.NumberOfLinks != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "text export destination must be a regular, unlinked file",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn normalized_final_leaf(file: &File) -> io::Result<Vec<u16>> {
     let mut capacity = checked_final_path_capacity(query_normalized_final_path(file, &mut []))?;
     for _ in 0..2 {
@@ -420,6 +851,10 @@ pub(crate) fn normalized_final_leaf(file: &File) -> io::Result<Vec<u16>> {
 }
 
 fn query_normalized_final_path(file: &File, buffer: &mut [u16]) -> u32 {
+    query_final_path(file, buffer, FILE_NAME_NORMALIZED | VOLUME_NAME_NONE)
+}
+
+fn query_final_path(file: &File, buffer: &mut [u16], flags: u32) -> u32 {
     let capacity = u32::try_from(buffer.len()).unwrap_or(0);
     let output = if buffer.is_empty() {
         ptr::null_mut()
@@ -428,14 +863,7 @@ fn query_normalized_final_path(file: &File, buffer: &mut [u16]) -> u32 {
     };
     // SAFETY: file remains live for the synchronous query; output is either
     // null with zero capacity or writable for the exact checked slice length.
-    unsafe {
-        GetFinalPathNameByHandleW(
-            file.as_raw_handle(),
-            output,
-            capacity,
-            FILE_NAME_NORMALIZED | VOLUME_NAME_NONE,
-        )
-    }
+    unsafe { GetFinalPathNameByHandleW(file.as_raw_handle(), output, capacity, flags) }
 }
 
 fn checked_final_path_capacity(required: u32) -> io::Result<usize> {
@@ -824,6 +1252,44 @@ pub(crate) fn rename_noreplace(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ntfs_file_reference_preserves_the_64_bit_index_number_bit_pattern() {
+        assert_eq!(
+            file_reference_number_from_index_number(0x1234_5678_9abc_def0),
+            0x1234_5678_9abc_def0
+        );
+        assert_eq!(file_reference_number_from_index_number(-1), u64::MAX);
+    }
+
+    #[test]
+    fn text_export_leaf_identity_mismatch_fails_closed() {
+        let expected = (0x1234, 0x5678);
+
+        assert!(require_matching_text_export_leaf_identity(expected, expected).is_ok());
+        assert!(matches!(
+            require_matching_text_export_leaf_identity(expected, (0x9999, expected.1)),
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput
+        ));
+        assert!(matches!(
+            require_matching_text_export_leaf_identity(expected, (expected.0, 0xabcd)),
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput
+        ));
+    }
+
+    #[test]
+    fn volume_guid_parser_accepts_canonical_guid_paths_and_rejects_other_values() -> io::Result<()>
+    {
+        let path = r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\"
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            parse_volume_guid_path(&path)?,
+            0x01234567_89ab_cdef_0123_456789abcdef
+        );
+        assert!(parse_volume_guid_path(&"C:\\".encode_utf16().collect::<Vec<_>>()).is_err());
+        Ok(())
+    }
 
     #[test]
     fn normalized_final_path_capacity_is_bounded() -> Result<(), Box<dyn std::error::Error>> {

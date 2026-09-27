@@ -12,8 +12,10 @@ import subprocess
 import tempfile
 import unittest
 import zlib
+from unittest.mock import patch
 
 from darkrenamer_tooling.evidence import gui as evidence
+from darkrenamer_tooling.evidence import png as png_evidence
 
 SCRIPT = (SCRIPT_ROOT / "validate-gui-regression-evidence.py")
 SOURCE = "a" * 40
@@ -989,6 +991,37 @@ class GuiEvidenceTests(unittest.TestCase):
         with_trns = opaque[:idat] + png_chunk(b"tRNS", b"\x00\x00\x00\x00\x00\x00") + opaque[idat:]
         with self.assertRaisesRegex(evidence.EvidenceError, "unsupported PNG transparency"):
             evidence.decode_png(with_trns, "trns")
+
+    def test_png_decoder_checks_expected_dimensions_before_inflating(self):
+        header = struct.pack(">IIBBBBB", 8192, 4096, 8, 6, 0, 0, 0)
+        image = (b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", header) +
+                 png_chunk(b"IDAT", zlib.compress(b"unused")) +
+                 png_chunk(b"IEND", b""))
+        with patch("darkrenamer_tooling.evidence.png.zlib.decompressobj") as inflate:
+            with self.assertRaisesRegex(evidence.EvidenceError, "expected raster size"):
+                evidence.decode_png(image, "mismatched", expected_dimensions=(80, 30))
+            inflate.assert_not_called()
+
+    def test_png_decoder_enforces_one_campaign_pixel_budget(self):
+        budget = evidence.DecodedPixelBudget(maximum_pixels=64)
+        small = png(8, 8, 1, 1)
+        evidence.decode_png(small, "first", expected_dimensions=(8, 8), budget=budget)
+        self.assertEqual(budget.remaining_pixels, 0)
+        with patch("darkrenamer_tooling.evidence.png.zlib.decompressobj") as inflate:
+            with self.assertRaisesRegex(evidence.EvidenceError, "cumulative decoded-pixel budget"):
+                evidence.decode_png(small, "second", expected_dimensions=(8, 8), budget=budget)
+            inflate.assert_not_called()
+
+    def test_campaign_pixel_budget_covers_frozen_layout_targets_and_recovery_png(self):
+        profile = json.loads((SCRIPT_ROOT.parent / "config" / "vm-automated-v1.json").read_text())
+        layout_targets = [row for row in profile["required_targets"]
+                          if row["id"].startswith("layout-")]
+        maximum_profile_pixels = sum(row["desktop_width"] * row["desktop_height"]
+                                     for row in layout_targets) + png_evidence.MAX_PNG_PIXELS
+        self.assertLessEqual(maximum_profile_pixels,
+                             png_evidence.MAX_TOTAL_DECODED_PNG_PIXELS)
+        self.assertLessEqual(png_evidence.MAX_TOTAL_DECODED_PNG_PIXELS,
+                             maximum_profile_pixels + 16 * 1024 * 1024)
 
     def test_vm_identity_kind_and_independent_postlaunch_receipt_are_enforced(self):
         manifest = json.loads((self.standard / "input-manifest.json").read_text())

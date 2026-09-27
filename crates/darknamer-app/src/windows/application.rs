@@ -2494,7 +2494,7 @@ mod tests {
         let app = PublishedFileDialogTestApp::new()?;
         FILE_DIALOG_DRAWITEM_LEASED.store(false, Ordering::SeqCst);
         app.dispatch_with_selector(ADD_FILES, |owner, kind| {
-            assert!(matches!(kind, PreparedFileDialogKind::AddFiles));
+            assert!(matches!(kind, PreparedFileDialogKind::AddFiles { .. }));
             // SAFETY: owner is the live test window. The synchronous subclass
             // callback attempts the same AppState lease as production drawing.
             send_synthetic_drawitem(owner);
@@ -2504,7 +2504,7 @@ mod tests {
         app.assert_session_cleared()?;
 
         app.dispatch_with_selector(ADD_FILES, |_, kind| {
-            assert!(matches!(kind, PreparedFileDialogKind::AddFiles));
+            assert!(matches!(kind, PreparedFileDialogKind::AddFiles { .. }));
             PreparedFileDialogSelection::AddFiles(Vec::new())
         })?;
         app.assert_session_cleared()?;
@@ -2515,14 +2515,12 @@ mod tests {
             (SAVE_PATHS, false, "saved-paths.txt"),
         ] {
             let output = app._directory.path().join(leaf);
+            let target = crate::rename::windows_native::prepare_text_export_target(&output)?;
             app.dispatch_with_selector(command, |_, kind| match kind {
                 PreparedFileDialogKind::SaveText {
                     text,
                     names: actual,
-                } if actual == names => PreparedFileDialogSelection::SaveText {
-                    path: output.clone(),
-                    text,
-                },
+                } if actual == names => PreparedFileDialogSelection::SaveText { target, text },
                 _ => PreparedFileDialogSelection::Cancelled,
             })?;
             assert!(output.is_file());
@@ -2934,6 +2932,7 @@ mod tests {
         ] {
             let app = PublishedFileDialogTestApp::new()?;
             let output = app._directory.path().join("stale-modal-result.txt");
+            let target = crate::rename::windows_native::prepare_text_export_target(&output)?;
             let expected_kind = Cell::new(false);
             app.dispatch_with_selector(SAVE_PATHS, |_, kind| {
                 let text = match kind {
@@ -2957,10 +2956,7 @@ mod tests {
                     })
                     .is_ok()
                 );
-                PreparedFileDialogSelection::SaveText {
-                    path: output.clone(),
-                    text,
-                }
+                PreparedFileDialogSelection::SaveText { target, text }
             })?;
             assert!(expected_kind.get());
             assert!(!output.exists());

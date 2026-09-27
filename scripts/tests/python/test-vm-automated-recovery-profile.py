@@ -12,6 +12,7 @@ import zlib
 
 from darkrenamer_tooling.campaign.recovery import verify_recovery_execution
 from darkrenamer_tooling.evidence.archive import EvidenceError
+from darkrenamer_tooling.evidence.png import DecodedPixelBudget, decode_png
 
 
 ROOT = r"C:\fixture"
@@ -43,6 +44,7 @@ def png(uniform=False):
 class Reader:
     def __init__(self, files):
         self.files = files
+        self.decoded_pixel_budget = DecodedPixelBudget()
 
     def bytes(self, path, maximum=64 * 1024 * 1024):
         if path not in self.files or len(self.files[path]) > maximum:
@@ -51,6 +53,10 @@ class Reader:
 
     def json(self, path):
         return json.loads(self.bytes(path))
+
+    def decode_png(self, path, label, *, expected_dimensions):
+        return decode_png(self.bytes(path), label, expected_dimensions=expected_dimensions,
+                          budget=self.decoded_pixel_budget)
 
     def digest_reference(self, reference, *, prefix):
         matches = [path for path, data in self.files.items()

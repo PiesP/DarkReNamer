@@ -18,7 +18,7 @@ from darkrenamer_tooling.evidence.archive import (
     EvidenceError, ExtractedEvidence, MAX_JSON_BYTES, MAX_MEMBER_BYTES,
     parse_bounded_json_bytes, read_referenced_file, require_exact_keys, require_int,
 )
-from darkrenamer_tooling.evidence.png import decode_png
+from darkrenamer_tooling.evidence.png import DecodedPixelBudget, decode_png as decode_png_bytes
 
 
 def require(condition: bool, message: str) -> None:
@@ -36,6 +36,7 @@ class EvidenceReader:
 
     def __init__(self, extracted: ExtractedEvidence):
         self.evidence = extracted
+        self.decoded_pixel_budget = DecodedPixelBudget()
 
     def bytes(self, path: str, maximum: int = MAX_MEMBER_BYTES) -> bytes:
         require(type(path) is str and path in self.evidence.files, "Raw reference is absent from the exact archive index.")
@@ -55,6 +56,14 @@ class EvidenceReader:
         require(path in self.evidence.files and self.evidence.files[path].sha256 == reference.get("sha256"),
                 "Raw sibling digest differs from its indexed bytes.")
         return path
+
+    def decode_png(self, path: str, label: str, *, expected_dimensions: tuple[int, int]) -> tuple[int, int, bytes]:
+        return decode_png_bytes(
+            self.bytes(path),
+            label,
+            expected_dimensions=expected_dimensions,
+            budget=self.decoded_pixel_budget,
+        )
 
     def digest_reference(self, reference: object, *, prefix: str) -> str:
         row = require_exact_keys(reference, {"bytes", "sha256", "boundary"}, "Private recovery reference")
@@ -211,7 +220,8 @@ def verify_layout_raster(reader: EvidenceReader, document: str, layout: dict, en
     # One complete workbench raster is required per fixed cell. Other captures
     # remain individually hash-bound artifacts, without claiming human review.
     path, width, height = matching[0]
-    actual_width, actual_height, pixels = decode_png(reader.bytes(path), "workbench raster")
+    actual_width, actual_height, pixels = reader.decode_png(
+        path, "workbench raster", expected_dimensions=(width, height))
     require((actual_width, actual_height) == (width, height) and
             pixels != pixels[:4] * (width * height), "Workbench raster is empty, uniform or dimensionally inconsistent.")
 

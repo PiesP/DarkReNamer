@@ -46,13 +46,35 @@ pub(super) fn path_wide(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain([0]).collect()
 }
 
+#[cfg(test)]
 pub(super) fn write_legacy_text(path: &Path, text: &LegacyText) -> io::Result<()> {
-    let mut bytes = Vec::with_capacity(2 + text.len() * 2);
+    let bytes = encode_legacy_text(text)?;
+    crate::rename::windows_native::write_text_export(path, &bytes)
+}
+
+pub(super) fn write_legacy_text_to_target(
+    target: crate::rename::windows_native::TextExportTarget,
+    text: &LegacyText,
+) -> io::Result<()> {
+    let bytes = encode_legacy_text(text)?;
+    crate::rename::windows_native::write_text_export_target(target, &bytes)
+}
+
+fn encode_legacy_text(text: &LegacyText) -> io::Result<Vec<u8>> {
+    let payload_size = text
+        .len()
+        .checked_mul(2)
+        .and_then(|length| length.checked_add(2))
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(payload_size)
+        .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
     bytes.extend_from_slice(&[0xFF, 0xFE]);
     for unit in text.units() {
         bytes.extend_from_slice(&unit.to_le_bytes());
     }
-    fs::write(path, bytes)
+    Ok(bytes)
 }
 
 pub(super) fn read_legacy_text(path: &Path) -> io::Result<LegacyText> {
@@ -64,6 +86,12 @@ pub(super) fn read_legacy_text(path: &Path) -> io::Result<LegacyText> {
     }
     let bytes = read_bounded_import(fs::File::open(path)?)?;
     if bytes.starts_with(&[0xFF, 0xFE]) {
+        if (bytes.len() - 2) % 2 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "UTF-16LE text file has an incomplete code unit",
+            ));
+        }
         let units = bytes[2..]
             .chunks_exact(2)
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))

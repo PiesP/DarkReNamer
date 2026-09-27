@@ -1,5 +1,22 @@
 use super::*;
+use ::windows::Win32::Foundation::PROPERTYKEY;
+use ::windows::Win32::System::Com::StructuredStorage::{PropVariantToGUID, PropVariantToUInt64};
+use ::windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
+use ::windows::Win32::System::Ole::IOleWindow;
+use ::windows::Win32::System::Variant::{VARENUM, VT_CLSID, VT_UI8};
+use ::windows::Win32::UI::Shell::PropertiesSystem::{GPS_DEFAULT, IPropertyStore};
+use ::windows::Win32::UI::Shell::{
+    Common::COMDLG_FILTERSPEC, FDEOR_DEFAULT, FDESVR_DEFAULT, FOS_ALLOWMULTISELECT,
+    FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR, FOS_OVERWRITEPROMPT,
+    FOS_PATHMUSTEXIST, FileOpenDialog, FileSaveDialog, IFileDialog, IFileDialogEvents,
+    IFileDialogEvents_Impl, IFileOpenDialog, IFileSaveDialog, IShellItem, IShellItem2,
+    IShellItemArray, SIGDN_FILESYSPATH,
+};
+use ::windows::core::{Error as WindowsError, GUID, Interface, PCWSTR, implement};
+use std::cell::RefCell;
+use std::rc::Rc;
 use windows_sys::Win32::Foundation::{FreeLibrary, HMODULE};
+use windows_sys::Win32::Globalization::lstrlenW;
 use windows_sys::Win32::System::LibraryLoader::{
     GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
@@ -1592,9 +1609,15 @@ pub(super) fn copy_clipboard_or_report(owner: HWND, text: &LegacyText) {
 }
 
 pub(super) enum PreparedFileDialogKind {
-    AddFiles,
+    AddFiles {
+        remaining_count: usize,
+        remaining_path_bytes: usize,
+    },
     UnifyDestinationParent,
-    SaveText { text: LegacyText, names: bool },
+    SaveText {
+        text: LegacyText,
+        names: bool,
+    },
     ImportNames,
     ImportPaths,
     ExportRecoveryJournal,
@@ -1604,7 +1627,10 @@ pub(super) enum PreparedFileDialogSelection {
     Cancelled,
     AddFiles(Vec<PathBuf>),
     UnifyDestinationParent(PathBuf),
-    SaveText { path: PathBuf, text: LegacyText },
+    SaveText {
+        target: crate::rename::windows_native::TextExportTarget,
+        text: LegacyText,
+    },
     ImportNames(PathBuf),
     ImportPaths(PathBuf),
     RecoveryExportDirectory(PathBuf),
@@ -1615,11 +1641,11 @@ pub(super) fn select_prepared_file_dialog(
     kind: PreparedFileDialogKind,
 ) -> PreparedFileDialogSelection {
     match kind {
-        PreparedFileDialogKind::AddFiles => modal_native_dialog(owner, || {
-            native_file_dialog(owner)
-                .set_title("이름 붙일 파일 불러오기")
-                .add_filter("All Files", &["*"])
-                .pick_files()
+        PreparedFileDialogKind::AddFiles {
+            remaining_count,
+            remaining_path_bytes,
+        } => modal_native_dialog(owner, || {
+            pick_bounded_files(owner, remaining_count, remaining_path_bytes)
         })
         .map_or(PreparedFileDialogSelection::Cancelled, |paths| {
             PreparedFileDialogSelection::AddFiles(paths)
@@ -1639,17 +1665,20 @@ pub(super) fn select_prepared_file_dialog(
                 "경로명 저장"
             };
             let default_name = if names { "names.txt" } else { "paths.txt" };
-            modal_native_dialog(owner, || {
-                native_file_dialog(owner)
-                    .set_title(title)
-                    .add_filter("Text Files", &["txt"])
-                    .add_filter("All Files", &["*"])
-                    .set_file_name(default_name)
-                    .save_file()
-            })
-            .map_or(PreparedFileDialogSelection::Cancelled, |path| {
-                PreparedFileDialogSelection::SaveText { path, text }
-            })
+            match modal_native_dialog(owner, || {
+                show_secure_text_save_dialog(owner, title, default_name)
+            }) {
+                Ok(Some(target)) => PreparedFileDialogSelection::SaveText { target, text },
+                Ok(None) => PreparedFileDialogSelection::Cancelled,
+                Err(error) => {
+                    message(
+                        owner,
+                        &format!("저장 대화상자를 열지 못했습니다: {error}"),
+                        "DarkReNamer - 저장 실패",
+                    );
+                    PreparedFileDialogSelection::Cancelled
+                }
+            }
         }
         PreparedFileDialogKind::ImportNames => modal_native_dialog(owner, || {
             native_file_dialog(owner)
@@ -1682,6 +1711,451 @@ pub(super) fn select_prepared_file_dialog(
     }
 }
 
+#[implement(IFileDialogEvents)]
+struct SecureTextSaveDialogEvents {
+    owner: HWND,
+    target: Rc<RefCell<Option<crate::rename::windows_native::TextExportTarget>>>,
+    folder: Rc<RefCell<Option<SecureTextSaveFolder>>>,
+}
+
+struct SecureTextSaveFolder {
+    identity: ShellFolderIdentity,
+    parent: crate::rename::windows_native::TextExportParent,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ShellFolderIdentity {
+    volume_id: u128,
+    file_reference_number: u64,
+}
+
+// PKEY_FileFRN and PKEY_VolumeId from Propkey.h. Keep the documented keys local
+// because the generated constants require an unrelated EnhancedStorage feature.
+const PKEY_FILE_FRN: PROPERTYKEY = PROPERTYKEY {
+    fmtid: GUID::from_u128(0xb725f130_47ef_101a_a5f1_02608c9eebac),
+    pid: 21,
+};
+
+const PKEY_VOLUME_ID: PROPERTYKEY = PROPERTYKEY {
+    fmtid: GUID::from_u128(0x446d16b1_8dad_4870_a748_402ea43d788c),
+    pid: 104,
+};
+
+fn shell_item_identity(item: &IShellItem) -> io::Result<(IPropertyStore, ShellFolderIdentity)> {
+    let item = item.cast::<IShellItem2>().map_err(shell_dialog_error)?;
+    let keys = [PKEY_VOLUME_ID, PKEY_FILE_FRN];
+    // SAFETY: item is a live filesystem shell item on the initialized UI
+    // thread; keys remains valid through the synchronous property-store call.
+    // The returned store is live while both exact values are read, and the
+    // PROPVARIANT conversions finish before their owned storage is released.
+    let identity: ::windows::core::Result<(IPropertyStore, GUID, u64)> = unsafe {
+        (|| {
+            let store: IPropertyStore = item.GetPropertyStoreForKeys(&keys, GPS_DEFAULT)?;
+            let volume_id = store.GetValue(&PKEY_VOLUME_ID)?;
+            let file_reference_number = store.GetValue(&PKEY_FILE_FRN)?;
+            if !has_exact_shell_identity_property_types(
+                volume_id.Anonymous.Anonymous.vt,
+                file_reference_number.Anonymous.Anonymous.vt,
+            ) {
+                return Err(WindowsError::new(
+                    ::windows::core::HRESULT(0x8007_0057_u32 as i32),
+                    "the shell item has no exact NTFS volume and file-reference identity",
+                ));
+            }
+            Ok((
+                store,
+                PropVariantToGUID(&volume_id)?,
+                PropVariantToUInt64(&file_reference_number)?,
+            ))
+        })()
+    };
+    let (store, volume_id, file_reference_number) = identity.map_err(shell_dialog_error)?;
+    Ok((
+        store,
+        ShellFolderIdentity {
+            volume_id: volume_id.to_u128(),
+            file_reference_number,
+        },
+    ))
+}
+
+fn has_exact_shell_identity_property_types(volume_id: VARENUM, file_reference: VARENUM) -> bool {
+    volume_id == VT_CLSID && file_reference == VT_UI8
+}
+
+fn require_matching_folder_identity(
+    expected: ShellFolderIdentity,
+    actual: ShellFolderIdentity,
+) -> io::Result<()> {
+    if expected == actual {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the selected folder identity changed while the save dialog was open",
+        ))
+    }
+}
+
+impl IFileDialogEvents_Impl for SecureTextSaveDialogEvents_Impl {
+    fn OnFileOk(&self, dialog: ::windows::core::Ref<IFileDialog>) -> ::windows::core::Result<()> {
+        *self.target.borrow_mut() = None;
+        let mut error_owner = self.owner;
+        let target = dialog
+            .ok()
+            .map_err(shell_dialog_error)
+            .and_then(|dialog| {
+                error_owner = file_dialog_message_owner(dialog, self.owner);
+                // SAFETY: IFileDialogEvents::OnFileOk is called just before
+                // the modal dialog returns and explicitly permits GetResult.
+                unsafe { dialog.GetResult() }.map_err(shell_dialog_error)
+            })
+            .and_then(|item| {
+                // SAFETY: the selected filesystem item has a shell parent, and
+                // this COM call borrows both live shell interfaces.
+                let selected_parent = unsafe { item.GetParent() }.map_err(shell_dialog_error)?;
+                let (selected_parent_store, selected_parent_identity) =
+                    shell_item_identity(&selected_parent)?;
+                let selected_leaf_snapshot = shell_item_identity(&item).ok();
+                let selected_leaf_identity = selected_leaf_snapshot
+                    .as_ref()
+                    .map(|(_, identity)| *identity);
+                let path = dialog_path_for_item(&item)?;
+                let leaf = path.file_name().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "text export destination must have a file name",
+                    )
+                })?;
+                let folder = self.folder.borrow();
+                let folder = folder.as_ref().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "the current save folder was not retained; navigate to it again",
+                    )
+                })?;
+                require_matching_folder_identity(folder.identity, selected_parent_identity)?;
+                let target = folder.parent.target_for_leaf(
+                    leaf,
+                    selected_leaf_identity
+                        .map(|identity| (identity.volume_id, identity.file_reference_number)),
+                )?;
+                // Keep both property stores alive through the native leaf open
+                // so their file-object snapshots remain bound during comparison.
+                drop(selected_leaf_snapshot);
+                drop(selected_parent_store);
+                Ok(target)
+            });
+        match target {
+            Ok(target) => {
+                *self.target.borrow_mut() = Some(target);
+                Ok(())
+            }
+            Err(error) => {
+                report_text_save_target_error(error_owner, &error);
+                Err(WindowsError::from_hresult(::windows::core::HRESULT(1)))
+            }
+        }
+    }
+
+    fn OnFolderChanging(
+        &self,
+        _dialog: ::windows::core::Ref<IFileDialog>,
+        _folder: ::windows::core::Ref<IShellItem>,
+    ) -> ::windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn OnFolderChange(
+        &self,
+        dialog: ::windows::core::Ref<IFileDialog>,
+    ) -> ::windows::core::Result<()> {
+        let folder = dialog
+            .ok()
+            .ok()
+            .and_then(|dialog| {
+                // SAFETY: this callback is running for the live modal dialog
+                // on the initialized UI thread.
+                unsafe { dialog.GetFolder() }.ok()
+            })
+            .and_then(|item| {
+                let (shell_store, shell_identity) = shell_item_identity(&item).ok()?;
+                let path = dialog_path_for_item(&item).ok()?;
+                let parent = crate::rename::windows_native::prepare_text_export_parent(
+                    &path,
+                    shell_identity.volume_id,
+                    shell_identity.file_reference_number,
+                )
+                .ok()?;
+                let native_file_reference = parent.ntfs_file_reference_number().ok()?;
+                require_matching_folder_identity(
+                    shell_identity,
+                    ShellFolderIdentity {
+                        volume_id: shell_identity.volume_id,
+                        file_reference_number: native_file_reference,
+                    },
+                )
+                .ok()?;
+                // GetPropertyStoreForKeys retains the shell item while the
+                // native FRN and volume binding above is established.
+                drop(shell_store);
+                Some(SecureTextSaveFolder {
+                    identity: shell_identity,
+                    parent,
+                })
+            });
+        *self.folder.borrow_mut() = folder;
+        Ok(())
+    }
+
+    fn OnSelectionChange(
+        &self,
+        _dialog: ::windows::core::Ref<IFileDialog>,
+    ) -> ::windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn OnShareViolation(
+        &self,
+        _dialog: ::windows::core::Ref<IFileDialog>,
+        _item: ::windows::core::Ref<IShellItem>,
+    ) -> ::windows::core::Result<::windows::Win32::UI::Shell::FDE_SHAREVIOLATION_RESPONSE> {
+        Ok(FDESVR_DEFAULT)
+    }
+
+    fn OnTypeChange(
+        &self,
+        _dialog: ::windows::core::Ref<IFileDialog>,
+    ) -> ::windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn OnOverwrite(
+        &self,
+        _dialog: ::windows::core::Ref<IFileDialog>,
+        _item: ::windows::core::Ref<IShellItem>,
+    ) -> ::windows::core::Result<::windows::Win32::UI::Shell::FDE_OVERWRITE_RESPONSE> {
+        Ok(FDEOR_DEFAULT)
+    }
+}
+
+fn file_dialog_message_owner(dialog: &IFileDialog, fallback: HWND) -> HWND {
+    let Ok(ole_window) = dialog.cast::<IOleWindow>() else {
+        return fallback;
+    };
+    // SAFETY: dialog is the live modal IFileDialog and IOleWindow is queried
+    // from that same COM object while its OnFileOk callback is active.
+    unsafe { ole_window.GetWindow() }.map_or(fallback, |window| window.0)
+}
+
+fn show_secure_text_save_dialog(
+    owner: HWND,
+    title: &str,
+    default_name: &str,
+) -> io::Result<Option<crate::rename::windows_native::TextExportTarget>> {
+    // SAFETY: the native UI thread was initialized as STA by OleInitialize and
+    // keeps every returned COM interface on that same thread.
+    let dialog: IFileSaveDialog =
+        unsafe { CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER) }
+            .map_err(shell_dialog_error)?;
+    let title = wide(title);
+    let default_name = wide(default_name);
+    let default_extension = wide("txt");
+    let text_label = wide("Text Files");
+    let text_pattern = wide("*.txt");
+    let all_label = wide("All Files");
+    let all_pattern = wide("*");
+    let filters = [
+        COMDLG_FILTERSPEC {
+            pszName: PCWSTR(text_label.as_ptr()),
+            pszSpec: PCWSTR(text_pattern.as_ptr()),
+        },
+        COMDLG_FILTERSPEC {
+            pszName: PCWSTR(all_label.as_ptr()),
+            pszSpec: PCWSTR(all_pattern.as_ptr()),
+        },
+    ];
+    // SAFETY: the dialog is live on its initialized UI thread and GetOptions
+    // retrieves its default Save policy before applying the required flags.
+    let options = unsafe { dialog.GetOptions() }.map_err(shell_dialog_error)?;
+    // SAFETY: the dialog is live on its initialized UI thread and all string
+    // and filter buffers remain valid through each synchronous COM call.
+    unsafe {
+        dialog.SetOptions(secure_text_save_dialog_options(options))?;
+        dialog.SetTitle(PCWSTR(title.as_ptr()))?;
+        dialog.SetFileName(PCWSTR(default_name.as_ptr()))?;
+        dialog.SetDefaultExtension(PCWSTR(default_extension.as_ptr()))?;
+        dialog.SetFileTypes(&filters)?;
+        dialog.SetFileTypeIndex(1)?;
+    }
+
+    let target = Rc::new(RefCell::new(None));
+    let folder = Rc::new(RefCell::new(None));
+    let events: IFileDialogEvents = SecureTextSaveDialogEvents {
+        owner,
+        target: Rc::clone(&target),
+        folder,
+    }
+    .into();
+    // SAFETY: dialog and event sink stay live through Show; the dialog is
+    // unadvised before either local interface is dropped.
+    let cookie = unsafe { dialog.Advise(&events) }.map_err(shell_dialog_error)?;
+    // SAFETY: the dialog and owner belong to the initialized UI thread; Show
+    // is modal and OnFileOk retains the selected parent before it returns.
+    let shown = unsafe { dialog.Show(Some(::windows::Win32::Foundation::HWND(owner))) };
+    // SAFETY: cookie is the event registration returned by Advise above.
+    let unadvised = unsafe { dialog.Unadvise(cookie) };
+    unadvised.map_err(shell_dialog_error)?;
+
+    match shown {
+        Ok(()) => target
+            .borrow_mut()
+            .take()
+            .map(Some)
+            .ok_or_else(|| io::Error::other("save dialog returned without a retained target")),
+        Err(error) if error.code() == ::windows::core::HRESULT(0x8007_04C7_u32 as i32) => Ok(None),
+        Err(error) => Err(shell_dialog_error(error)),
+    }
+}
+
+fn secure_text_save_dialog_options(
+    defaults: ::windows::Win32::UI::Shell::FILEOPENDIALOGOPTIONS,
+) -> ::windows::Win32::UI::Shell::FILEOPENDIALOGOPTIONS {
+    defaults | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR | FOS_OVERWRITEPROMPT
+}
+
+fn report_text_save_target_error(owner: HWND, error: &io::Error) {
+    let text = wide(&format!(
+        "선택한 저장 위치를 안전하게 고정하지 못했습니다. 다른 위치를 선택해 주세요.\n{error}"
+    ));
+    let title = wide("DarkReNamer - 저장 위치 확인");
+    // SAFETY: both strings remain NUL-terminated for the synchronous call and
+    // owner is the live parent window for this modal file dialog.
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(
+            owner,
+            text.as_ptr(),
+            title.as_ptr(),
+            windows_sys::Win32::UI::WindowsAndMessaging::MB_OK
+                | windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
+        )
+    };
+}
+
+fn show_bounded_file_open_dialog(owner: HWND) -> ::windows::core::Result<IShellItemArray> {
+    // SAFETY: the native UI thread was initialized as STA by OleInitialize and
+    // keeps the returned COM interface on that same thread.
+    let dialog: IFileOpenDialog =
+        unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }?;
+    let title = wide("이름 붙일 파일 불러오기");
+    // SAFETY: the dialog and owner belong to the initialized UI thread; title
+    // remains NUL-terminated and alive through SetTitle, and Show is modal.
+    unsafe {
+        dialog.SetOptions(
+            FOS_ALLOWMULTISELECT
+                | FOS_FILEMUSTEXIST
+                | FOS_FORCEFILESYSTEM
+                | FOS_NOCHANGEDIR
+                | FOS_PATHMUSTEXIST,
+        )?;
+        dialog.SetTitle(PCWSTR(title.as_ptr()))?;
+        dialog.Show(Some(::windows::Win32::Foundation::HWND(owner)))?;
+        dialog.GetResults()
+    }
+}
+
+fn pick_bounded_files(
+    owner: HWND,
+    remaining_count: usize,
+    remaining_path_bytes: usize,
+) -> Option<Vec<PathBuf>> {
+    let results = show_bounded_file_open_dialog(owner).ok()?;
+    // SAFETY: results is a live IShellItemArray returned by the successful
+    // modal file-open dialog on the initialized UI thread.
+    let reported = usize::try_from(unsafe { results.GetCount() }.ok()?).ok()?;
+    collect_bounded_dialog_paths(
+        reported,
+        remaining_count,
+        PathBudget::from_remaining_bytes(remaining_path_bytes),
+        |index| {
+            let index =
+                u32::try_from(index).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+            dialog_path_at(&results, index)
+        },
+    )
+    .ok()
+}
+
+fn collect_bounded_dialog_paths(
+    reported: usize,
+    remaining_count: usize,
+    mut path_budget: PathBudget,
+    mut get_path: impl FnMut(usize) -> io::Result<PathBuf>,
+) -> io::Result<Vec<PathBuf>> {
+    let bounded = bounded_selection(reported, remaining_count);
+    let mut paths = Vec::new();
+    paths
+        .try_reserve_exact(bounded.take)
+        .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+    for index in 0..bounded.take {
+        let path = get_path(index)?;
+        let path_units = path.as_os_str().encode_wide().count();
+        let budget_exhausted =
+            path_budget.reserve_utf16_units(path_units) == PathBudgetReservation::Exhausted;
+        paths.push(path);
+        if budget_exhausted {
+            break;
+        }
+    }
+    Ok(paths)
+}
+
+struct CoTaskMemPath(::windows::core::PWSTR);
+
+impl Drop for CoTaskMemPath {
+    fn drop(&mut self) {
+        // SAFETY: GetDisplayName returns one CoTaskMem allocation, retained by
+        // this guard and released exactly once after its contents are copied.
+        unsafe {
+            CoTaskMemFree(Some(
+                self.0.0.cast::<std::ffi::c_void>() as *const std::ffi::c_void
+            ));
+        }
+    }
+}
+
+fn dialog_path_at(results: &IShellItemArray, index: u32) -> io::Result<PathBuf> {
+    // SAFETY: results remains live, and index is below the dialog's reported
+    // item count and the bounded extraction limit.
+    let item = unsafe { results.GetItemAt(index) }.map_err(shell_dialog_error)?;
+    dialog_path_for_item(&item)
+}
+
+fn dialog_path_for_item(item: &IShellItem) -> io::Result<PathBuf> {
+    // SAFETY: item is a live shell item from a dialog configured to return only
+    // filesystem objects; the returned CoTaskMem string is owned below.
+    let name = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH) }.map_err(shell_dialog_error)?;
+    if name.0.is_null() {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    let name = CoTaskMemPath(name);
+    // SAFETY: GetDisplayName returned a readable, NUL-terminated UTF-16 string
+    // allocated for this live CoTaskMemPath guard.
+    let length = usize::try_from(unsafe { lstrlenW(name.0.0) })
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    if length == 0 || length > MAX_PATH_UNITS {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    // SAFETY: lstrlenW measured the NUL-terminated allocation returned by
+    // GetDisplayName, and the checked length excludes the terminator.
+    let units = unsafe { std::slice::from_raw_parts(name.0.0, length) };
+    Ok(PathBuf::from(std::ffi::OsString::from_wide(units)))
+}
+
+fn shell_dialog_error(error: ::windows::core::Error) -> io::Error {
+    io::Error::other(format!("native file picker failed: {error}"))
+}
+
 pub(super) fn set_status(status: HWND, text: &str) {
     let text = wide(text);
     // SAFETY: status is a live UI-thread control and SetWindowTextW copies the
@@ -1698,6 +2172,83 @@ pub(super) fn modal_native_dialog<T>(owner: HWND, dialog: impl FnOnce() -> T) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn add_files_picker_extracts_only_capacity_plus_one_witness() -> io::Result<()> {
+        let mut calls = 0;
+        let paths = collect_bounded_dialog_paths(100_000, 2, PathBudget::new(), |index| {
+            calls += 1;
+            Ok(PathBuf::from(format!(r"C:\selected\{index}.txt")))
+        })?;
+
+        assert_eq!(calls, 3);
+        assert_eq!(paths.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn add_files_picker_stops_after_one_path_budget_witness() -> io::Result<()> {
+        let mut calls = 0;
+        let paths =
+            collect_bounded_dialog_paths(100, 100, PathBudget::from_remaining_bytes(1), |_| {
+                calls += 1;
+                Ok(PathBuf::from(r"C:\selected\first.txt"))
+            })?;
+
+        assert_eq!(calls, 1);
+        assert_eq!(paths.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn secure_save_dialog_keeps_default_read_only_protection() {
+        use ::windows::Win32::UI::Shell::FOS_NOREADONLYRETURN;
+
+        let options = secure_text_save_dialog_options(FOS_NOREADONLYRETURN);
+
+        assert!(options.contains(FOS_NOREADONLYRETURN));
+        assert!(options.contains(FOS_FORCEFILESYSTEM));
+        assert!(options.contains(FOS_PATHMUSTEXIST));
+        assert!(options.contains(FOS_NOCHANGEDIR));
+        assert!(options.contains(FOS_OVERWRITEPROMPT));
+    }
+
+    #[test]
+    fn secure_save_dialog_rejects_changed_folder_identity() {
+        let expected = ShellFolderIdentity {
+            volume_id: 1,
+            file_reference_number: 0x1234,
+        };
+        assert!(matches!(
+            require_matching_folder_identity(
+                expected,
+                ShellFolderIdentity {
+                    volume_id: 1,
+                    file_reference_number: 0x5678,
+                },
+            ),
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput
+        ));
+        assert!(
+            require_matching_folder_identity(
+                expected,
+                ShellFolderIdentity {
+                    volume_id: 2,
+                    file_reference_number: expected.file_reference_number,
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn secure_save_dialog_treats_empty_shell_file_identity_as_missing() {
+        use ::windows::Win32::System::Variant::VT_EMPTY;
+
+        assert!(has_exact_shell_identity_property_types(VT_CLSID, VT_UI8));
+        assert!(!has_exact_shell_identity_property_types(VT_CLSID, VT_EMPTY));
+        assert!(!has_exact_shell_identity_property_types(VT_EMPTY, VT_UI8));
+    }
 
     #[test]
     fn read_only_layout_grows_by_measured_lines_and_keeps_footer_inside_work_area() -> io::Result<()>

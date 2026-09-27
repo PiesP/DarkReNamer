@@ -13,7 +13,7 @@ import stat
 import sys
 
 from darkrenamer_tooling.evidence.errors import EvidenceError
-from darkrenamer_tooling.evidence.png import decode_png
+from darkrenamer_tooling.evidence.png import DecodedPixelBudget, decode_png
 
 
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
@@ -1029,6 +1029,7 @@ def validate_text_metrics(run_root: Path, input_hash: str, collection_files: dic
     targets = validate_observed_text_targets(run_root, collection_files, result)
     samples = document["samples"]
     require(isinstance(samples, list) and len(samples) == 2, "Exactly two text raster samples are required.")
+    decode_budget = DecodedPixelBudget()
     result: dict[str, dict] = {}
     for index, value in enumerate(samples):
         sample = exact_keys(
@@ -1048,10 +1049,13 @@ def validate_text_metrics(run_root: Path, input_hash: str, collection_files: dic
         require(image_name in collection_files and image_name.endswith(".png"),
                 "Text sample image is not a receipt-covered PNG.")
         image_data = read_bytes(run_root / "output", image_relative, MAX_ARTIFACT_BYTES, "text sample PNG")
-        width, height, rgba = decode_png(image_data, image_name)
         target_window = target["window"]["rect"]
-        require(width == target_window["width"] and height == target_window["height"],
-                "Text sample PNG dimensions differ from its observed capture window.")
+        width, height, rgba = decode_png(
+            image_data,
+            image_name,
+            expected_dimensions=(target_window["width"], target_window["height"]),
+            budget=decode_budget,
+        )
         crop = exact_keys(sample["crop"], {"x", "y", "width", "height"}, "text sample crop")
         x = checked_int(crop["x"], 0, width - 1, "text sample crop.x")
         y = checked_int(crop["y"], 0, height - 1, "text sample crop.y")

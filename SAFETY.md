@@ -62,6 +62,29 @@ and unvalidated for v0.1. That limitation belongs to the release evidence
 contract and the runtime boundary: DarkReNamer queries the filesystem from the
 retained final directory handle and fails closed unless it reports NTFS.
 
+Save Names and Save Paths treat the selected destination as untrusted. While
+the save dialog is open, the application reads the current shell folder's NTFS
+volume GUID and file reference number, opens that directory by ID, and verifies
+that it matches a no-reparse handle chain for the selected path. It retains the
+folder and every ancestor without delete sharing. At acceptance, it reads the
+selected item's parent volume GUID and file reference number and checks them
+against the retained folder. If the selected leaf exposes exact volume GUID
+and file reference properties, it opens the leaf immediately, compares those
+properties with the native handle, and retains the handle through session
+revalidation. An existing leaf without an exact identity is rejected. If the
+leaf is absent at acceptance, the application records that state and later
+allows only an exclusive create relative to the retained directory handle. It
+writes through the same output handle. Existing reparse points and files with
+more than one hard link are rejected before truncation. The output handle
+permits concurrent readers while denying competing write, link, and delete
+access until the write finishes; a create race fails closed rather than
+reopening an existing target.
+UTF-16LE imports reject an incomplete trailing code unit and retain complete
+UTF-16 code units, including unpaired surrogates, for legacy path handling.
+The multi-select file picker extracts only the remaining source capacity plus
+one overflow witness, and it stops after the aggregate UTF-16 path budget is
+exhausted before building additional path values.
+
 Safe v2 retains `SameParent` as the authority for ordinary name changes. A plan
 request selects `SameVolumeFilesOnly` only when the current model contains a
 destination-parent proposal. That scope accepts regular files only, requires
@@ -313,6 +336,13 @@ execution history.
 The independent verifier derives all 22 target verdicts from raw observations;
 producer summaries, `passed` flags, and legacy `review_required` values are not
 verdict inputs. The five required gate records bind separate properties:
+
+Evidence PNG dimensions are checked against the bound observation immediately
+after IHDR parsing and before any IDAT inflation. One verifier reader also
+accounts decoded pixels across the complete campaign, with a 144 Mi-pixel total
+limit sized for the frozen layout profile and one maximum-size recovery image;
+repeated layout captures therefore cannot each consume the full
+per-image decoder allowance.
 
 | Gate ID | Bound property |
 | --- | --- |
