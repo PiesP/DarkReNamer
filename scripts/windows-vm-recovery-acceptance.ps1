@@ -10,8 +10,12 @@ param(
     [Parameter(Mandatory)]
     [string] $OutputRoot,
 
+    [string] $EvidenceRoot,
+
     [Parameter(Mandatory)]
     [string] $PrivateEvidenceRoot,
+
+    [string] $RuntimeRoot,
 
     [Parameter(Mandatory)]
     [ValidatePattern('^[0-9a-f]{64}$')]
@@ -30,12 +34,32 @@ param(
 
     [switch] $IntentOnlyCandidateDiscard,
 
+    [switch] $ElevatedObserver,
+
+    [string] $TrustedResultPath,
+
     [switch] $ValidateOnly
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($ElevatedObserver) {
+    if ([string]::IsNullOrWhiteSpace($TrustedResultPath) -or
+        -not [IO.Path]::IsPathRooted($TrustedResultPath)) {
+        throw 'The elevated VM observer requires an absolute trusted result path.'
+    }
+    $env:DARKRENAMER_VM_ELEVATED_OBSERVER = '1'
+    $env:DARKRENAMER_VM_TRUSTED_RESULT_PATH = [IO.Path]::GetFullPath($TrustedResultPath)
+    $env:DARKRENAMER_VM_EXPECTED_SESSION_ID = $ExpectedSessionId.ToString(
+        [Globalization.CultureInfo]::InvariantCulture
+    )
+}
+else {
+    $env:DARKRENAMER_VM_ELEVATED_OBSERVER = $null
+    $env:DARKRENAMER_VM_TRUSTED_RESULT_PATH = $null
+    $env:DARKRENAMER_VM_EXPECTED_SESSION_ID = $null
+}
 
-$ToolingManifestSha256 = 'db608888620fa1f07ea96bd85bf52e2fb38710d7bd27e15c3fc5d065340ee0f0'
+$ToolingManifestSha256 = '85137f054369cf7ed930953a42d9ae0def0a915289bcad3b939d157e0753e7c0'
 $ToolingLoaderSha256 = '6888561ff9a23becf279ec7d4e691b40d50d79dde2196d22c0d63e2252dd08a1'
 
 function Get-DrBootstrapSha256 {
@@ -227,7 +251,11 @@ $moduleName = 'DarkReNamer.recovery.' + [guid]::NewGuid().ToString('N')
 $module = Microsoft.PowerShell.Core\New-Module -Name $moduleName -ScriptBlock $entry -ArgumentList (, $libraries)
     Microsoft.PowerShell.Core\Import-Module $module -Scope Local -Force | Microsoft.PowerShell.Core\Out-Null
     $invokeParameters = @{}
-    foreach ($key in $PSBoundParameters.Keys) { $invokeParameters[$key] = $PSBoundParameters[$key] }
+    foreach ($key in $PSBoundParameters.Keys) {
+        if ($key -notin @('ElevatedObserver', 'TrustedResultPath')) {
+            $invokeParameters[$key] = $PSBoundParameters[$key]
+        }
+    }
     $invokeParameters['EntryPointPath'] = $PSCommandPath
     & $module {
         param($CommandName,$Parameters)

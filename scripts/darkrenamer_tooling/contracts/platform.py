@@ -93,20 +93,53 @@ def verify_environment(value: object, target: dict, *, candidate_pid: int, sessi
             "Candidate window does not intersect its observed work area.")
 
 
-def verify_cleanup(guest: object, transport: object) -> None:
+def verify_cleanup(guest: object, transport: object, *, require_candidate_export: bool = False) -> None:
     """Require actual post-cleanup inventories, not only producer pass flags."""
-    guest = require_exact_keys(guest, {"owned_processes_after", "runtime_root_after", "journal_after"}, "Guest cleanup")
-    host = require_exact_keys(transport, {"scheduled_task_present", "guest_root_present", "owned_processes_after"},
-                              "Controller cleanup")
+    guest_fields = {"owned_processes_after", "runtime_root_after", "journal_after"}
+    if require_candidate_export:
+        guest_fields.add("candidate_export_root_after")
+    guest = require_exact_keys(guest, guest_fields, "Guest cleanup")
+    host = require_exact_keys(transport, {
+        "scheduled_task_present", "guest_root_present", "trusted_task_root_present",
+        "process_jobs_closed", "runner_process_inventory_complete",
+        "unexpected_runner_tasks", "unexpected_runner_processes",
+        "unexpected_runner_tasks_after_intervention",
+        "unexpected_runner_processes_after_intervention",
+        "unexpected_runner_tasks_after_delete",
+        "unexpected_runner_processes_after_delete",
+        "removed_runner_tasks", "terminated_runner_processes",
+        "resource_cleanup_errors", "owned_processes_after",
+    }, "Controller cleanup")
     for rows in (guest["owned_processes_after"], host["owned_processes_after"]):
         require(type(rows) is list and not rows, "Owned test processes remain after cleanup.")
     root = require_exact_keys(guest["runtime_root_after"], {"exists", "entries"}, "Runtime root cleanup")
     require(root["exists"] is False and type(root["entries"]) is list and not root["entries"],
             "Owned runtime root remains or its inventory is unavailable.")
+    if require_candidate_export:
+        export_root = require_exact_keys(
+            guest["candidate_export_root_after"],
+            {"exists", "ordinary_directory", "entries"},
+            "Candidate export root cleanup",
+        )
+        require(export_root["exists"] is False and export_root["ordinary_directory"] is True and
+                type(export_root["entries"]) is list and not export_root["entries"],
+                "Candidate export root remains or its inventory is unavailable.")
     journal = require_exact_keys(guest["journal_after"], {"entries"}, "Final journal inventory")
     clean_journal_inventory(journal["entries"])
-    require(host["scheduled_task_present"] is False and host["guest_root_present"] is False,
-            "Owned scheduled task or guest root remains after cleanup.")
+    for key in ("scheduled_task_present", "guest_root_present", "trusted_task_root_present"):
+        require(host[key] is False, f"Owned VM resource remains after cleanup: {key}.")
+    require(host["process_jobs_closed"] is True and
+            host["runner_process_inventory_complete"] is True,
+            "Controller did not confirm closed process jobs and a complete runner inventory.")
+    for key in ("unexpected_runner_tasks", "unexpected_runner_processes",
+                "unexpected_runner_tasks_after_intervention",
+                "unexpected_runner_processes_after_intervention",
+                "unexpected_runner_tasks_after_delete",
+                "unexpected_runner_processes_after_delete",
+                "removed_runner_tasks", "terminated_runner_processes",
+                "resource_cleanup_errors"):
+        require(type(host[key]) is list and not host[key],
+                f"Controller cleanup retained or changed unrelated runner resources: {key}.")
 
 
 def verify_keyboard_events(value: object, *, candidate_pid: int, session_id: int,

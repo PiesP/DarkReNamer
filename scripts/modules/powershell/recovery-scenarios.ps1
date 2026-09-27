@@ -601,11 +601,11 @@ function Invoke-AcceptanceIntentOnlyCandidateDiscard {
             try {
                 $process = $application.owned.process
                 $process.Refresh()
-                if (-not $process.HasExited) {
-                    $process.Kill()
-                    if (-not $process.WaitForExit(10000)) {
-                        throw 'The exact Intent-only process did not terminate during cleanup.'
-                    }
+                $jobCleanup = Complete-AcceptanceOwnedProcessJob `
+                    -Owned $application.owned -StopActive
+                $application | Add-Member -NotePropertyName job_cleanup -NotePropertyValue $jobCleanup -Force
+                if (-not $jobCleanup.job_empty -or -not $jobCleanup.job_closed) {
+                    throw 'The exact Intent-only process job did not close during cleanup.'
                 }
                 $bindingProperty = $application.PSObject.Properties['raw_process_binding']
                 $exitProperty = $application.PSObject.Properties['raw_process_exit_recorded']
@@ -636,6 +636,7 @@ function Invoke-AcceptanceSession {
         [Parameter(Mandatory)][string] $EvidenceRoot,
         [Parameter(Mandatory)][string] $PrivateRoot,
         [Parameter(Mandatory)][string] $RuntimeRoot,
+        [Parameter(Mandatory)][string] $CandidateOutputParentRoot,
         [Parameter(Mandatory)][int] $Count,
         [Parameter(Mandatory)][ValidateSet('ProcessCrash', 'WorkerCancellation', 'WorkerClose')]
         [string] $Mode,
@@ -954,7 +955,9 @@ function Invoke-AcceptanceSession {
                 -Prompt $relaunchPrompt
             Write-AcceptanceExportProgress -PrivateRoot $PrivateRoot -Application $third -Phase 'after-startup-cancel'
             $recoveryExportResult = Invoke-AcceptanceRecoveryExport `
-                -Application $third -PrivateRoot $PrivateRoot -ExpectedBytes $journalBytes `
+                -Application $third -PrivateRoot $PrivateRoot `
+                -CandidateOutputParentRoot $CandidateOutputParentRoot `
+                -ExpectedBytes $journalBytes `
                 -SourceActiveJournalReference $interruptedJournalReference `
                 -SessionId $SessionId -WaitSeconds $WaitSeconds
             $afterExport = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
@@ -969,6 +972,12 @@ function Invoke-AcceptanceSession {
             $processes.Add((Write-AcceptanceProcessExitEvidence `
                 -Application $third -PrivateRoot $PrivateRoot `
                 -Boundary 'normal-exit' -ExitMethod 'normal-close'))
+            $recoveryExportResult = Complete-AcceptanceRecoveryExport `
+                -ExportResult $recoveryExportResult `
+                -ExportRoot (Join-Path $CandidateOutputParentRoot 'recovery-export') `
+                -PrivateRoot $PrivateRoot `
+                -ExpectedBytes $journalBytes `
+                -Application $third
             $afterExportBytes = [IO.File]::ReadAllBytes($activePath)
             if (-not (Test-AcceptanceBytesEqual -Expected $journalBytes -Actual $afterExportBytes)) {
                 throw 'Recovery export and normal exit changed the active journal bytes.'
@@ -1118,11 +1127,11 @@ function Invoke-AcceptanceSession {
             try {
                 $process = $application.owned.process
                 $process.Refresh()
-                if (-not $process.HasExited) {
-                    $process.Kill()
-                    if (-not $process.WaitForExit(10000)) {
-                        throw 'The exact acceptance process did not terminate during cleanup.'
-                    }
+                $jobCleanup = Complete-AcceptanceOwnedProcessJob `
+                    -Owned $application.owned -StopActive
+                $application | Add-Member -NotePropertyName job_cleanup -NotePropertyValue $jobCleanup -Force
+                if (-not $jobCleanup.job_empty -or -not $jobCleanup.job_closed) {
+                    throw 'The exact acceptance process job did not close during cleanup.'
                 }
                 $bindingProperty = $application.PSObject.Properties['raw_process_binding']
                 $exitProperty = $application.PSObject.Properties['raw_process_exit_recorded']

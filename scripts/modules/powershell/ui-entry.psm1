@@ -37,6 +37,7 @@ function Invoke-DrWindowsVmAcceptance {
     [Parameter(Mandatory)][string] $BundleRoot,
     [Parameter(Mandatory)][ValidateRange(1, [int]::MaxValue)][int] $ExpectedSessionId,
     [Parameter(Mandatory)][string] $OutputRoot,
+    [string] $RuntimeRoot,
     [Parameter(Mandatory)][string] $ExpectedScriptSha256,
     [ValidateRange(10, 600)][int] $TimeoutSeconds = 60,
     [ValidateSet('system', 'light', 'dark')][string] $Appearance = 'system',
@@ -57,6 +58,7 @@ function Invoke-DrWindowsVmAcceptance {
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:acceptanceForegroundObservations = [Collections.Generic.List[object]]::new()
+$script:AcceptanceProcessJobCleanup = [Collections.Generic.List[object]]::new()
 
 
 

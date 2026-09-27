@@ -53,20 +53,19 @@ function Resolve-ObserverTaskPollState {
 function Stop-AcceptanceObserverTaskForRescue {
     param(
         [Parameter(Mandatory = $true)][object] $Session,
-        [Parameter(Mandatory = $true)][string] $GuestRoot,
         [Parameter(Mandatory = $true)][string] $TaskName,
         [Parameter(Mandatory = $true)][int] $TimeoutSeconds
     )
 
-    Invoke-Command -Session $Session -ArgumentList $GuestRoot,$TaskName,$TimeoutSeconds -ScriptBlock {
-        param($root,$name,$timeout)
+    Invoke-Command -Session $Session -ArgumentList $TaskName,$TimeoutSeconds -ScriptBlock {
+        param($name,$timeout)
+        $trustedRoot = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') ($name + '-trusted')
         $task = Get-ScheduledTask -TaskName $name -ErrorAction Stop
         if ($task.State.ToString() -cne 'Ready') {
             Stop-ScheduledTask -TaskName $name -ErrorAction Stop
         }
         $deadline = (Get-Date).AddSeconds([Math]::Max(5, [Math]::Min(60, $timeout)))
-        $observerToken = '"' + (Join-Path $root 'windows-vm-acceptance.ps1') + '"'
-        $rootToken = $root + '\'
+        $observerToken = '"' + (Join-Path $trustedRoot 'windows-vm-acceptance.ps1') + '"'
         do {
             $task = Get-ScheduledTask -TaskName $name -ErrorAction Stop
             $taskState = $task.State.ToString()
@@ -76,8 +75,7 @@ function Stop-AcceptanceObserverTaskForRescue {
             $ownedObserverProcesses = @(Get-CimInstance Win32_Process | Where-Object {
                 $_.Name -iin @('cmd.exe', 'pwsh.exe') -and
                 $_.CommandLine -and
-                $_.CommandLine.IndexOf($observerToken, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-                $_.CommandLine.IndexOf($rootToken, [StringComparison]::OrdinalIgnoreCase) -ge 0
+                $_.CommandLine.IndexOf($observerToken, [StringComparison]::OrdinalIgnoreCase) -ge 0
             })
             if ($taskState -ceq 'Ready' -and $ownedObserverProcesses.Count -eq 0) {
                 break
@@ -96,15 +94,16 @@ function Stop-AcceptanceObserverTaskForRescue {
 function Test-AcceptanceRestoreSnapshot {
     param(
         [Parameter(Mandatory = $true)][object] $Session,
-        [Parameter(Mandatory = $true)][string] $GuestRoot,
+        [Parameter(Mandatory = $true)][string] $TaskName,
         [Parameter(Mandatory = $true)]
         [ValidateSet('text-scale-snapshot.json', 'high-contrast-restore.json')]
         [string] $Leaf
     )
 
-    Invoke-Command -Session $Session -ArgumentList $GuestRoot,$Leaf -ScriptBlock {
-        param($root,$leaf)
-        $path = Join-Path (Join-Path $root 'out') $leaf
+    Invoke-Command -Session $Session -ArgumentList $TaskName,$Leaf -ScriptBlock {
+        param($name,$leaf)
+        $trustedRoot = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') ($name + '-trusted')
+        $path = Join-Path (Join-Path $trustedRoot 'out') $leaf
         if (-not (Test-Path -LiteralPath $path)) {
             return $false
         }
@@ -127,6 +126,8 @@ function Invoke-AcceptancePollFailureRescue {
         [Parameter(Mandatory = $true)][int] $TestTimeoutSeconds,
         [Parameter(Mandatory = $true)][int] $SuiteTimeoutSeconds,
         [Parameter(Mandatory = $true)][string] $ObserverSha256,
+        [Parameter(Mandatory = $true)][object[]] $BundleRecords,
+        [ValidatePattern('^[0-9a-f]{64}$')][string] $InputManifestSha256,
         [Parameter(Mandatory = $true)][string] $AcceptanceMode,
         [Parameter(Mandatory = $true)][string] $Appearance,
         [Parameter(Mandatory = $true)][bool] $HighContrast,
@@ -136,11 +137,11 @@ function Invoke-AcceptancePollFailureRescue {
 
     try {
         Stop-AcceptanceObserverTaskForRescue `
-            -Session $Session -GuestRoot $GuestRoot -TaskName $TaskName `
+            -Session $Session -TaskName $TaskName `
             -TimeoutSeconds $TestTimeoutSeconds
         if ($AcceptanceMode -ceq 'text-scale' -and
             (Test-AcceptanceRestoreSnapshot `
-                -Session $Session -GuestRoot $GuestRoot -Leaf 'text-scale-snapshot.json')) {
+                -Session $Session -TaskName $TaskName -Leaf 'text-scale-snapshot.json')) {
             Invoke-AcceptanceTextScaleRescue `
                 -Session $Session `
                 -GuestRoot $GuestRoot `
@@ -150,12 +151,14 @@ function Invoke-AcceptancePollFailureRescue {
                 -TestTimeoutSeconds $TestTimeoutSeconds `
                 -SuiteTimeoutSeconds $SuiteTimeoutSeconds `
                 -ObserverSha256 $ObserverSha256 `
+                -BundleRecords $BundleRecords `
+                -InputManifestSha256 $InputManifestSha256 `
                 -Appearance $Appearance `
                 -HostOutputRoot $HostOutputRoot
         }
         if ($HighContrast -and
             (Test-AcceptanceRestoreSnapshot `
-                -Session $Session -GuestRoot $GuestRoot -Leaf 'high-contrast-restore.json')) {
+                -Session $Session -TaskName $TaskName -Leaf 'high-contrast-restore.json')) {
             Invoke-AcceptanceHighContrastRescue `
                 -Session $Session `
                 -GuestRoot $GuestRoot `
@@ -165,6 +168,7 @@ function Invoke-AcceptancePollFailureRescue {
                 -TestTimeoutSeconds $TestTimeoutSeconds `
                 -SuiteTimeoutSeconds $SuiteTimeoutSeconds `
                 -ObserverSha256 $ObserverSha256 `
+                -BundleRecords $BundleRecords `
                 -HostOutputRoot $HostOutputRoot
         }
     }

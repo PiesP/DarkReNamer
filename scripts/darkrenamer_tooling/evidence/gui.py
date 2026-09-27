@@ -799,6 +799,13 @@ def validate_raw_result(run_root: Path, manifest: dict, result: dict, collection
     require(observation_receipt["bytes"] == len(observation_bytes) and
             observation_receipt["sha256"] == sha256_bytes(observation_bytes),
             "Raw acceptance observations differ from the collection receipt.")
+    observation_binding = exact_keys(raw_value.get("observations"), {"file", "sha256"},
+                                     "raw observer observations binding")
+    require(observation_binding["file"] == "acceptance-observations.json" and
+            observation_binding["sha256"] == sha256_bytes(observation_bytes),
+            "Protected observer result does not bind the raw observations file.")
+    require(typed_equal(raw_value.get("acceptance_observations"), observations),
+            "Raw observations differ from the observations embedded in the protected result.")
     require(isinstance(observations, dict) and
             int_equals(observations.get("schema_version"), 1) and
             typed_equal(observations.get("scenario"), nested(raw_value, "assertions", "scenario")),

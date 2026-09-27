@@ -204,14 +204,32 @@ function Invoke-AcceptanceApply {
 function Stop-AcceptanceOwnedProcess {
     param([Parameter(Mandatory)][object] $Application)
 
-    $process = $Application.owned.process
+    $owned = $Application.owned
+    $process = $owned.process
     $process.Refresh()
     if ($process.HasExited) {
         throw 'The application exited before the observer stopped it.'
     }
-    $process.Kill()
+    $cleanup = Complete-AcceptanceOwnedProcessJob `
+        -Owned $owned -StopActive -RequireSolePrimary
+    $Application | Add-Member -NotePropertyName job_cleanup -NotePropertyValue $cleanup -Force
+    if ($cleanup.status -cne 'clean' -or
+        $cleanup.forced_termination -ne $true -or
+        $cleanup.active_processes_at_stop -ne 1 -or
+        $cleanup.active_process_ids_at_stop.Count -ne 1 -or
+        $cleanup.active_process_ids_at_stop[0] -ne $process.Id -or
+        $cleanup.total_processes_at_stop -ne 1 -or
+        $cleanup.primary_process_active_at_stop -ne $true -or
+        $cleanup.termination_exit_code -lt 2 -or
+        $cleanup.had_survivors) {
+        throw 'The observer could not prove that it terminated exactly one live application process in its Job Object.'
+    }
+    $process.Refresh()
     if (-not $process.WaitForExit(10000)) {
-        throw 'The exact owned application process did not terminate.'
+        throw 'The exact owned application process did not terminate with its Job Object.'
+    }
+    if ($process.ExitCode -ne $cleanup.termination_exit_code) {
+        throw 'The application exit code does not match the observer Job Object termination receipt.'
     }
 }
 function Get-AcceptanceActiveWorkerBoundary {
@@ -381,6 +399,11 @@ function Close-AcceptanceApplicationNormally {
     if ($process.ExitCode -ne 0) {
         throw 'The acceptance application returned a nonzero exit code.'
     }
+    $jobCleanup = Complete-AcceptanceOwnedProcessJob -Owned $Application.owned
+    $Application | Add-Member -NotePropertyName job_cleanup -NotePropertyValue $jobCleanup -Force
+    if ($jobCleanup.status -cne 'clean') {
+        throw 'The recovery candidate process job had survivors or did not close cleanly.'
+    }
     $process.ExitCode
 }
 function Invoke-AcceptanceRecovery {
@@ -517,13 +540,18 @@ function Invoke-AcceptanceRecoveryExport {
     param(
         [Parameter(Mandatory)][object] $Application,
         [Parameter(Mandatory)][string] $PrivateRoot,
+        [Parameter(Mandatory)][string] $CandidateOutputParentRoot,
         [Parameter(Mandatory)][byte[]] $ExpectedBytes,
         [Parameter(Mandatory)][object] $SourceActiveJournalReference,
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds
     )
 
-    $exportRoot = New-PrivateDirectory -Parent $PrivateRoot -Leaf 'recovery-export'
+    $runnerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $exportRoot = New-ObserverCandidateWriteDirectory `
+        -Parent $CandidateOutputParentRoot `
+        -Leaf 'recovery-export' `
+        -RunnerSid $runnerSid
     $menuAction = Start-AcceptanceRecoveryMenuInvoke `
         -Application $Application `
         -SessionId $SessionId `
@@ -600,9 +628,47 @@ function Invoke-AcceptanceRecoveryExport {
         captured_active_sha256 = Get-AcceptanceBootstrapBytesSha256 -Bytes $ExpectedBytes
         exact_bytes = $true
         source_active_journal = $SourceActiveJournalReference
-        raw = New-AcceptancePrivateReference `
-            -Path $exportPath `
-            -PrivateRoot $PrivateRoot `
-            -Boundary 'recovery-export'
+        raw = $null
     }
+}
+function Complete-AcceptanceRecoveryExport {
+    param(
+        [Parameter(Mandatory)][object] $ExportResult,
+        [Parameter(Mandatory)][string] $ExportRoot,
+        [Parameter(Mandatory)][string] $PrivateRoot,
+        [Parameter(Mandatory)][byte[]] $ExpectedBytes,
+        [Parameter(Mandatory)][object] $Application
+    )
+
+    if ($null -eq $Application.job_cleanup -or
+        $Application.job_cleanup.status -cne 'clean' -or
+        -not $Application.job_cleanup.job_empty -or
+        -not $Application.job_cleanup.job_closed) {
+        throw 'Recovery export evidence cannot be copied before the candidate process job closes cleanly.'
+    }
+    $exportItem = Get-AcceptanceRecoveryExportFile -Root $ExportRoot
+    $exportedBytes = [IO.File]::ReadAllBytes($exportItem.FullName)
+    $classification = Get-AcceptanceRecoveryExportClassification `
+        -ExpectedBytes $ExpectedBytes `
+        -ExportedBytes $exportedBytes `
+        -ExportedLeaves @($exportItem.Name)
+    $finalSha256 = Get-LowerSha256 -Path $exportItem.FullName
+    if ($classification -cne $ExportResult.classification -or
+        $exportedBytes.Length -ne $ExportResult.bytes -or
+        $finalSha256 -cne $ExportResult.sha256) {
+        throw 'The candidate recovery export changed before the owned process job closed.'
+    }
+    $evidencePath = Join-Path $PrivateRoot 'recovery-export.drj'
+    Write-AcceptanceNewBytes -Path $evidencePath -Bytes $exportedBytes
+    $ExportResult.raw = New-AcceptancePrivateReference `
+        -Path $evidencePath `
+        -PrivateRoot $PrivateRoot `
+        -Boundary 'recovery-export'
+    $ExportResult.sha256 = $finalSha256
+    Assert-OrdinaryDirectoryTree -Path $ExportRoot
+    Remove-Item -LiteralPath $ExportRoot -Recurse -Force -ErrorAction Stop
+    if (Test-Path -LiteralPath $ExportRoot) {
+        throw 'Recovery export candidate directory cleanup was incomplete.'
+    }
+    $ExportResult
 }

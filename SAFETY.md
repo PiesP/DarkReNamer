@@ -221,6 +221,13 @@ valid active, valid candidate, and corrupt evidence from their retained handles
 into new files only. An unavailable path is not reopened and an existing
 destination is not overwritten.
 
+The recovery-export folder is bound while its native folder picker is open.
+The application retains the selected local NTFS directory chain and shell
+volume/file identity, then creates each fixed evidence leaf relative to that
+retained directory handle with exclusive, no-reparse creation. Replacing the
+selected path after acceptance therefore cannot redirect evidence into a
+different folder.
+
 A physically zero-byte candidate is removed automatically. A candidate that
 contains exactly one complete Intent and no torn tail represents a plan that was
 never activated and therefore never mutated selected files. With no active or

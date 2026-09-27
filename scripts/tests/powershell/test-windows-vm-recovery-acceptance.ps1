@@ -271,10 +271,15 @@ foreach ($contract in @(
     @{ Text = $menuSource; Value = 'recovery.item(EXPORT_RECOVERY_JOURNAL, "복구 데이터 내보내기...")?' },
     @{ Text = $menuSource; Value = 'recovery.separator()?' },
     @{ Text = $menuSource; Value = 'recovery.item(DISCARD_STAGED_JOURNAL, "시작되지 않은 작업 기록 삭제...")?' },
-    @{ Text = $dialogSource; Value = '.set_title("복구 저널 원본을 저장할 폴더 선택")' },
+    @{ Text = $dialogSource; Value = 'let title = wide("복구 저널 원본을 저장할 폴더 선택");' },
     @{ Text = $librarySource; Value = 'pub(crate) const DISCARD_CONFIRM_BUTTON_ID: i32 = 1_201;' },
     @{ Text = $librarySource; Value = 'pub(crate) const RECOVER_CONFIRM_BUTTON_ID: i32 = 1_202;' },
-    @{ Text = $recoveryUiSource; Value = '&directory.join("active.drj.retained")' },
+    @{ Text = $recoveryUiSource; Value = '.create_new_file(std::ffi::OsStr::new(leaf))' },
+    @{ Text = $recoveryUiSource; Value = '.and_then(|mut output| journal.copy_exact_to_file(&mut output))' },
+    @{ Text = $recoveryUiSource; Value = '"active.drj.retained"' },
+    @{ Text = $recoveryUiSource; Value = '"candidate.drj.retained"' },
+    @{ Text = $recoveryUiSource; Value = '"active.drj.evidence"' },
+    @{ Text = $recoveryUiSource; Value = '"candidate.drj.evidence"' },
     @{ Text = $recoveryUiSource; Value = 'if !state.can_discard_staged_intent() || !journal_matches {' },
     @{ Text = $recoveryUiSource; Value = '"DarkReNamer - 진단 내보내기 완료"' },
     @{ Text = $recoveryUiSource; Value = '"DarkReNamer - 활성화 전 계획 폐기".to_owned()' },
@@ -774,7 +779,12 @@ $fakeProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
 $fakeProcess | Add-Member -MemberType ScriptMethod -Name Dispose -Value {
     $this.disposed = $true
 }
-$script:fakeStartupOwned = [pscustomobject]@{ process = $fakeProcess }
+$script:fakeStartupOwned = [pscustomobject]@{
+    process = $fakeProcess
+    owner = [pscustomobject]@{}
+    stop_requested = $false
+    cleanup_failure = $false
+}
 function Get-LowerSha256 {
     param([string] $Path)
     $null = $Path
@@ -785,10 +795,29 @@ function Start-OwnedProcess {
         [string] $FilePath,
         [string] $Arguments,
         [string] $WorkingDirectory,
-        [switch] $RedirectOutput
+        [switch] $RedirectOutput,
+        [switch] $SingleProcessOnly
     )
-    $null = @($FilePath, $Arguments, $WorkingDirectory, $RedirectOutput)
+    if (-not $SingleProcessOnly) {
+        throw 'Recovery application must use a single-process Job Object.'
+    }
+    $null = @($FilePath, $Arguments, $WorkingDirectory, $RedirectOutput, $SingleProcessOnly)
     $script:fakeStartupOwned
+}
+function Complete-AcceptanceOwnedProcessJob {
+    param($Owned, [switch] $StopActive, [switch] $RequireSolePrimary)
+    if (-not [object]::ReferenceEquals($Owned, $script:fakeStartupOwned) -and
+        -not [object]::ReferenceEquals($Owned.process, $script:fakeTimeoutProcess)) {
+        throw 'Cleanup received a different acceptance process job.'
+    }
+    if ($StopActive) {
+        $Owned.stop_requested = $true
+        if ($Owned.cleanup_failure) {
+            throw 'The exact owned acceptance process did not terminate.'
+        }
+        $Owned.process.HasExited = $true
+    }
+    [pscustomobject]@{ status = 'clean'; job_empty = $true; job_closed = $true }
 }
 try {
     $startupInputs = [pscustomobject]@{
@@ -806,8 +835,8 @@ try {
     Assert-Fails {
         Start-AcceptanceApplication -Inputs $startupInputs -SessionId 1 -WaitSeconds 10
     } 'expected session'
-    if (-not $fakeProcess.killed -or -not $fakeProcess.disposed) {
-        throw 'A process rejected during startup validation was not killed and disposed.'
+    if (-not $script:fakeStartupOwned.stop_requested -or -not $fakeProcess.disposed) {
+        throw 'A process rejected during startup validation did not close its process job and dispose the handle.'
     }
 
     # A same-process auxiliary window must not replace the resolved main handle.
@@ -874,12 +903,19 @@ $timeoutProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
 $timeoutProcess | Add-Member -MemberType ScriptMethod -Name Dispose -Value {
     $this.disposed = $true
 }
+$script:fakeTimeoutProcess = $timeoutProcess
+$timeoutOwned = [pscustomobject]@{
+    process = $timeoutProcess
+    owner = [pscustomobject]@{}
+    stop_requested = $false
+    cleanup_failure = $true
+}
 Assert-Fails {
     Stop-AndDisposeAcceptanceOwnedProcess `
-        -Owned ([pscustomobject]@{ process = $timeoutProcess })
+        -Owned $timeoutOwned
 } 'exact owned acceptance process did not terminate'
-if (-not $timeoutProcess.killed -or -not $timeoutProcess.disposed) {
-    throw 'A timed-out owned-process cleanup did not attempt Kill and Dispose.'
+if (-not $timeoutOwned.stop_requested -or -not $timeoutProcess.disposed) {
+    throw 'A timed-out process-job cleanup did not request termination and dispose the process handle.'
 }
 
 $torn = Join-TestBytes -Parts @($stream, [byte[]](0x44, 0x52, 0x4A))
@@ -1696,6 +1732,23 @@ foreach ($fragment in @(
         throw "The active worker boundary is missing raw witness material: $fragment"
     }
 }
+$startApplicationFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Start-AcceptanceApplication'
+}, $true))
+$stopOwnedProcessFunction = @($fromFile.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Stop-AcceptanceOwnedProcess'
+}, $true))
+if ($startApplicationFunction.Count -ne 1 -or
+    $startApplicationFunction[0].Extent.Text.IndexOf('-SingleProcessOnly', [StringComparison]::Ordinal) -lt 0 -or
+    $stopOwnedProcessFunction.Count -ne 1 -or
+    $stopOwnedProcessFunction[0].Extent.Text.IndexOf('-RequireSolePrimary', [StringComparison]::Ordinal) -lt 0 -or
+    $stopOwnedProcessFunction[0].Extent.Text.IndexOf('termination_exit_code', [StringComparison]::Ordinal) -lt 0) {
+    throw 'The ProcessCrash lifecycle must launch in a one-process Job Object and verify the retained primary termination receipt.'
+}
 $processExitFunction = @($fromFile.FindAll({
     param($node)
     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
@@ -1713,6 +1766,11 @@ foreach ($fragment in @(
         $processExitFunction[0].Extent.Text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
         throw "Raw process-exit evidence is missing lifecycle field or bound: $fragment"
     }
+}
+$forcedExitEvidence = $processExitFunction[0].Extent.Text
+if ($forcedExitEvidence.IndexOf('job_cleanup', [StringComparison]::Ordinal) -lt 0 -or
+    $forcedExitEvidence.IndexOf('termination = $termination', [StringComparison]::Ordinal) -lt 0) {
+    throw 'Forced process exit evidence must retain the private Job Object termination receipt.'
 }
 $processStartFunction = @($fromFile.FindAll({
     param($node)
@@ -1961,6 +2019,18 @@ $sessionFunction = @($fromFile.FindAll({
 if ($sessionFunction.Count -ne 1) {
     throw 'The recovery session function is missing or ambiguous.'
 }
+$sessionText = $sessionFunction[0].Extent.Text
+$exportCloseIndex = $sessionText.IndexOf(
+    'Close-AcceptanceApplicationNormally -Application $third',
+    [StringComparison]::Ordinal
+)
+$exportEvidenceIndex = $sessionText.IndexOf(
+    'Complete-AcceptanceRecoveryExport',
+    [StringComparison]::Ordinal
+)
+if ($exportCloseIndex -lt 0 -or $exportEvidenceIndex -le $exportCloseIndex) {
+    throw 'Recovery export evidence must be copied only after the candidate application and process job close.'
+}
 $sessionStartupCancelCalls = @($sessionFunction[0].FindAll({
     param($node)
     $node -is [Management.Automation.Language.CommandAst] -and
@@ -2084,8 +2154,19 @@ foreach ($contract in @(
     @{ Name = 'Invoke-AcceptanceRecoveryExport'; Required = @(
         'Wait-AcceptanceRecoveryWindow', "-Purpose 'recovery-export-folder-picker'",
         "-Phase 'picker-found'", "-Phase 'picker-filled'",
-        "-Purpose 'export'", 'Remove-AcceptanceExportProgress'
+        "-Purpose 'export'", 'Remove-AcceptanceExportProgress',
+        'New-ObserverCandidateWriteDirectory', '$CandidateOutputParentRoot',
+        'raw = $null'
     ); Forbidden = @('Complete-AutomationControlInvoke -State $menuAction') },
+    @{ Name = 'Complete-AcceptanceRecoveryExport'; Required = @(
+        '$Application.job_cleanup.status -cne ''clean''',
+        'Get-AcceptanceRecoveryExportFile -Root $ExportRoot',
+        'Get-AcceptanceRecoveryExportClassification',
+        'Write-AcceptanceNewBytes -Path $evidencePath -Bytes $exportedBytes',
+        'New-AcceptancePrivateReference',
+        'Assert-OrdinaryDirectoryTree -Path $ExportRoot',
+        'Remove-Item -LiteralPath $ExportRoot -Recurse -Force'
+    ); Forbidden = @('New-PrivateDirectory -Parent $PrivateRoot') },
     @{ Name = 'Dismiss-AcceptanceStartupRecovery'; Required = @(
         '[Windows.Automation.AutomationElement] $Prompt', 'if ($null -eq $Prompt)',
         'Wait-AcceptanceRecoveryWindow', 'Assert-AutomationBinding'
@@ -2575,6 +2656,18 @@ while ($null -ne $cleanupAncestor) {
 $rawCleanupOffset = $fromFile.Extent.Text.LastIndexOf(
     '$result.raw_cleanup =', [StringComparison]::Ordinal
 )
+$runtimeDeleteOffset = $fromFile.Extent.Text.LastIndexOf(
+    'Remove-Item -LiteralPath $runtimeRoot -Recurse -Force', [StringComparison]::Ordinal
+)
+$processLedgerGateOffset = $fromFile.Extent.Text.LastIndexOf(
+    '[void](Assert-AcceptanceProcessJobLedgerClosed)',
+    $runtimeDeleteOffset,
+    [StringComparison]::Ordinal
+)
+if ($runtimeDeleteOffset -lt 0 -or $processLedgerGateOffset -lt 0 -or
+    $processLedgerGateOffset -ge $runtimeDeleteOffset) {
+    throw 'Recovery runtime evidence must be retained unless every candidate process job closed cleanly.'
+}
 if ($null -eq $windowCleanupGuard -or
     $windowCleanupGuard.Extent.Text.IndexOf(
         "`$result.status -ceq 'passed'", [StringComparison]::Ordinal

@@ -82,6 +82,7 @@ class RawBuilder:
         self.root = prefix + "private/recovery-raw-test"
         self.files = {}
         self.rows = []
+        self.process_jobs = []
 
     def add(self, relative, value, boundary):
         data = value if type(value) is bytes else encode(value)
@@ -91,6 +92,8 @@ class RawBuilder:
         return {"bytes": len(data), "sha256": digest, "boundary": boundary}
 
     def finish(self, result):
+        if "process_job_cleanup" not in result:
+            result["process_job_cleanup"] = deepcopy(self.process_jobs)
         index = {"schema_version": 1,
                  "classification": "private-path-bearing-raw-recovery-evidence",
                  "files": sorted(self.rows, key=lambda row: row["file"])}
@@ -135,6 +138,8 @@ def bundle_and_result(mode):
               "recovery_export": {}, "intent_only_candidate_discard": {},
               "raw_cleanup": {"owned_processes_after": [],
                               "runtime_root_after": {"exists": False, "entries": []},
+                              "candidate_export_root_after": {
+                                  "exists": False, "ordinary_directory": True, "entries": []},
                               "journal_after": {"entries": []}}}
     return bundle, result
 
@@ -189,10 +194,33 @@ def add_processes(builder, roles, methods, root_identity, first=1):
                  "environment": environment(pid, session, root_identity, 10000 + pid)}
         refs.append(builder.add(f"process-{sequence:02d}-started.json", start, "started"))
         exit_boundary = "crash-stop" if method == "forced-termination" else "normal-exit"
+        forced = method == "forced-termination"
+        termination_code = 123456 if forced else None
+        cleanup = {
+            "pid": pid,
+            "process_start_time_utc_ticks": str(creation),
+            "job_empty": True,
+            "job_closed": True,
+            "capture_complete": True,
+            "active_processes_at_primary_exit": None,
+            "had_survivors": False,
+            "forced_termination": forced,
+            "active_processes_at_close": 0,
+            "active_processes_at_stop": 1 if forced else None,
+            "active_process_ids_at_stop": [pid] if forced else [],
+            "total_processes_at_stop": 1 if forced else None,
+            "primary_process_active_at_stop": True if forced else None,
+            "termination_exit_code": termination_code,
+            "status": "clean",
+            "error": None,
+        }
+        builder.process_jobs.append(cleanup)
         lifecycle = {**start_lifecycle, "exit_observed": True, "exit_method": method,
-                     "exit_code": -1 if method == "forced-termination" else 0}
+                     "exit_code": termination_code if forced else 0}
         exit_row = {"schema_version": 1, "boundary": exit_boundary,
-                    "observed_utc_ticks": str(exited), "binding": binding, "lifecycle": lifecycle}
+                    "observed_utc_ticks": str(exited), "binding": binding,
+                    "termination": deepcopy(cleanup) if forced else None,
+                    "lifecycle": lifecycle}
         refs.append(builder.add(f"process-{sequence:02d}-{exit_boundary}.json", exit_row, exit_boundary))
         facts.append({"pid": pid, "session": session, "start": observed, "exit": exited,
                       "hwnd": 10000 + pid})
@@ -357,7 +385,15 @@ def build_crash():
     }
     reader, result = builder.finish(result)
     transport = {"raw_cleanup": {"scheduled_task_present": False, "guest_root_present": False,
-                                  "owned_processes_after": []}}
+                                  "trusted_task_root_present": False, "process_jobs_closed": True,
+                                  "runner_process_inventory_complete": True,
+                                  "unexpected_runner_tasks": [], "unexpected_runner_processes": [],
+                                  "unexpected_runner_tasks_after_intervention": [],
+                                  "unexpected_runner_processes_after_intervention": [],
+                                  "unexpected_runner_tasks_after_delete": [],
+                                  "unexpected_runner_processes_after_delete": [],
+                                  "removed_runner_tasks": [], "terminated_runner_processes": [],
+                                  "resource_cleanup_errors": [], "owned_processes_after": []}}
     return reader, result, bundle, transport
 
 
@@ -401,7 +437,15 @@ def build_worker(close):
     result["worker_close" if close else "worker_cancellation"] = mode
     reader, result = builder.finish(result)
     transport = {"raw_cleanup": {"scheduled_task_present": False, "guest_root_present": False,
-                                  "owned_processes_after": []}}
+                                  "trusted_task_root_present": False, "process_jobs_closed": True,
+                                  "runner_process_inventory_complete": True,
+                                  "unexpected_runner_tasks": [], "unexpected_runner_processes": [],
+                                  "unexpected_runner_tasks_after_intervention": [],
+                                  "unexpected_runner_processes_after_intervention": [],
+                                  "unexpected_runner_tasks_after_delete": [],
+                                  "unexpected_runner_processes_after_delete": [],
+                                  "removed_runner_tasks": [], "terminated_runner_processes": [],
+                                  "resource_cleanup_errors": [], "owned_processes_after": []}}
     return reader, result, bundle, transport, builder.prefix
 
 
@@ -439,6 +483,39 @@ class RecoveryProfileTests(unittest.TestCase):
                                                    run_prefix=RUN_PREFIX, result_path=RESULT_PATH),
                          {"process-crash", "recovery-export", "intent-only-discard"})
 
+    def test_crash_job_receipt_is_complete_private_and_lifecycle_bound(self):
+        for mutation in ("missing-row", "wrong-pid", "wrong-nonce", "uncaptured"):
+            reader, result, bundle, transport = self.crash_copy()
+            if mutation == "missing-row":
+                result["process_job_cleanup"].pop()
+            elif mutation == "wrong-pid":
+                result["process_job_cleanup"][0]["pid"] += 1
+            elif mutation == "wrong-nonce":
+                result["process_job_cleanup"][0]["termination_exit_code"] += 1
+            else:
+                result["process_job_cleanup"][0]["capture_complete"] = False
+            with self.subTest(mutation=mutation), self.assertRaises(EvidenceError):
+                verify_recovery_execution(reader, result, bundle, transport, target(),
+                                          run_prefix=RUN_PREFIX, result_path=RESULT_PATH)
+
+        reader, result, bundle, transport = self.crash_copy()
+        relative = "process-01-crash-stop.json"
+        path = PRIVATE_ROOT + "/" + relative
+        changed = json.loads(reader.files[path])
+        changed["termination"]["termination_exit_code"] += 1
+        resign(reader, result, relative, changed, [result["process_crash"]["processes"][1]])
+        with self.assertRaises(EvidenceError):
+            verify_recovery_execution(reader, result, bundle, transport, target(),
+                                      run_prefix=RUN_PREFIX, result_path=RESULT_PATH)
+
+    def test_worker_lifecycle_must_match_the_complete_job_ledger(self):
+        reader, result, bundle, transport, prefix = self.cancel
+        result = deepcopy(result)
+        result["process_job_cleanup"][0]["pid"] += 1
+        with self.assertRaises(EvidenceError):
+            verify_recovery_execution(Reader(dict(reader.files)), result, deepcopy(bundle),
+                                      deepcopy(transport), target(), run_prefix=prefix)
+
     def test_two_worker_modes_derive_only_their_own_targets(self):
         for fixture, expected in ((self.cancel, "worker-cancellation"), (self.close, "worker-close")):
             reader, result, bundle, transport, prefix = fixture
@@ -472,14 +549,16 @@ class RecoveryProfileTests(unittest.TestCase):
             verify_recovery_execution(reader, result, bundle, transport, target(), run_prefix=RUN_PREFIX, result_path=RESULT_PATH)
 
     def test_process_pair_role_and_exit_time_are_not_producer_flags(self):
-        for mutation in ("role", "time"):
+        for mutation in ("role", "time", "exit-code"):
             reader, result, bundle, transport = self.crash_copy()
             ref = result["process_crash"]["processes"][1]
             raw = reader.json(PRIVATE_ROOT + "/process-01-crash-stop.json")
             if mutation == "role":
                 raw["binding"]["role"] = "other"
-            else:
+            elif mutation == "time":
                 raw["observed_utc_ticks"] = "1"
+            else:
+                raw["lifecycle"]["exit_code"] = 0
             resign(reader, result, "process-01-crash-stop.json", raw, [ref])
             with self.subTest(mutation=mutation), self.assertRaises(EvidenceError):
                 verify_recovery_execution(reader, result, bundle, transport, target(), run_prefix=RUN_PREFIX, result_path=RESULT_PATH)

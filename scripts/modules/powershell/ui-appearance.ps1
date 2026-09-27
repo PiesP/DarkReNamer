@@ -421,6 +421,10 @@ function Invoke-HighContrastRescue {
         -SourceSha $Verified.source_sha `
         -ScriptSha256 $Verified.script_sha256
     $resultPath = Join-Path $Verified.output_root 'high-contrast-rescue-result.json'
+    Initialize-TrustedResultWriter `
+        -Root $Verified.root `
+        -ResultRoot $Verified.output_root `
+        -Path $resultPath
     $errorPath = Join-Path $Verified.output_root 'high-contrast-rescue-error.txt'
     $result = [ordered]@{
         schema_version = 1
@@ -494,7 +498,7 @@ function Invoke-HighContrastRescue {
                 sha256 = Get-LowerSha256 -Path $errorPath
             }
         }
-        Write-JsonUtf8Bom -Path $resultPath -Value $result
+        Write-ResultDocument -Root $Verified.root -Path $resultPath -Result $result
     }
     if ($result.status -cne 'passed') {
         throw 'High Contrast rescue failed; inspect its external result and diagnostic.'

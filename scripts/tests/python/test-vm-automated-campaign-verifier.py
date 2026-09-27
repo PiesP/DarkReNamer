@@ -137,7 +137,15 @@ class CampaignFixture:
                  "runtime_root_after": {"exists": False, "entries": []},
                  "journal_after": {"entries": []}},
                 {"scheduled_task_present": False, "guest_root_present": False,
-                 "owned_processes_after": []})
+                 "trusted_task_root_present": False, "process_jobs_closed": True,
+                 "runner_process_inventory_complete": True,
+                 "unexpected_runner_tasks": [], "unexpected_runner_processes": [],
+                 "unexpected_runner_tasks_after_intervention": [],
+                 "unexpected_runner_processes_after_intervention": [],
+                 "unexpected_runner_tasks_after_delete": [],
+                 "unexpected_runner_processes_after_delete": [],
+                 "removed_runner_tasks": [], "terminated_runner_processes": [],
+                 "resource_cleanup_errors": [], "owned_processes_after": []})
 
     def lifecycle(self, index: int, *, pid: int | None = None) -> dict:
         return {"pid": 10_000 + index if pid is None else pid, "session_id": 2,
@@ -146,6 +154,27 @@ class CampaignFixture:
                 "executable_sha256": self.candidate.executable_sha256,
                 "start_observed": True, "exit_observed": True, "exit_code": 0,
                 "exit_method": "normal-close"}
+
+    @staticmethod
+    def process_job_cleanup(lifecycle: dict) -> list[dict]:
+        return [{
+            "pid": lifecycle["pid"],
+            "process_start_time_utc_ticks": lifecycle["start_time_utc_ticks"],
+            "job_empty": True,
+            "job_closed": True,
+            "capture_complete": True,
+            "active_processes_at_primary_exit": None,
+            "had_survivors": False,
+            "forced_termination": False,
+            "active_processes_at_close": 0,
+            "active_processes_at_stop": None,
+            "active_process_ids_at_stop": [],
+            "total_processes_at_stop": None,
+            "primary_process_active_at_stop": None,
+            "termination_exit_code": None,
+            "status": "clean",
+            "error": None,
+        }]
 
     @staticmethod
     def environment(target: dict, lifecycle: dict) -> dict:
@@ -206,6 +235,7 @@ class CampaignFixture:
         guest, host = self.cleanup()
         raw = {"raw_environment": environment, "raw_checkpoints": self.checkpoints(keyboard)}
         result = self.result_base(self.bundle, "ui" if keyboard else "core")
+        result["process_job_cleanup"] = self.process_job_cleanup(lifecycle)
         if not keyboard:
             result.update(gui={"flow": raw, "process_lifecycle": lifecycle}, raw_cleanup=guest)
             return result, host
@@ -339,6 +369,7 @@ class CampaignFixture:
         environment = self.environment(target, lifecycle)
         guest, host = self.cleanup()
         result = self.result_base(self.bundle, "ui")
+        result["process_job_cleanup"] = self.process_job_cleanup(lifecycle)
         result.update(raw_layout_runs=[{
             "raw_environment": environment,
             "raw_appearance": {
@@ -434,6 +465,9 @@ class CampaignFixture:
         result["private_evidence"] = {"bytes": len(index_data),
                                       "sha256": hashlib.sha256(index_data).hexdigest(),
                                       "file_count": len(rows)}
+        result["process_job_cleanup"] = self._shift_ticks(
+            result["process_job_cleanup"], offset
+        )
         result.update(lane=self.bundle["lane"], product=deepcopy(self.bundle["product"]),
                       harness=deepcopy(self.bundle["harness"]), failure_reason=None,
                       runner_sha256=self.bundle["harness"]["runner"]["sha256"],

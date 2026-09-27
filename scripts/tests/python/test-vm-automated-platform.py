@@ -91,12 +91,21 @@ class PlatformTests(unittest.TestCase):
     def clean(self):
         return ({"owned_processes_after": [], "runtime_root_after": {"exists": False, "entries": []},
                  "journal_after": {"entries": []}},
-                {"scheduled_task_present": False, "guest_root_present": False, "owned_processes_after": []})
+                {"scheduled_task_present": False, "guest_root_present": False,
+                 "trusted_task_root_present": False, "process_jobs_closed": True,
+                 "runner_process_inventory_complete": True,
+                 "unexpected_runner_tasks": [], "unexpected_runner_processes": [],
+                 "unexpected_runner_tasks_after_intervention": [],
+                 "unexpected_runner_processes_after_intervention": [],
+                 "unexpected_runner_tasks_after_delete": [],
+                 "unexpected_runner_processes_after_delete": [],
+                 "removed_runner_tasks": [], "terminated_runner_processes": [],
+                 "resource_cleanup_errors": [], "owned_processes_after": []})
 
     def test_cleanup_requires_each_owned_resource_absent_and_clean_journal(self):
         verify_cleanup(*self.clean())
         guest, host = self.clean()
-        for field in ("scheduled_task_present", "guest_root_present"):
+        for field in ("scheduled_task_present", "guest_root_present", "trusted_task_root_present"):
             with self.assertRaises(EvidenceError):
                 verify_cleanup(guest, {**host, field: True})
         guest["owned_processes_after"] = [{"pid": 1234}]
@@ -110,6 +119,32 @@ class PlatformTests(unittest.TestCase):
         guest["journal_after"]["entries"] = [{"name": "active.drj", "kind": "file", "bytes": 42}]
         with self.assertRaises(EvidenceError):
             verify_cleanup(guest, host)
+
+    def test_recovery_cleanup_requires_candidate_export_root_absent(self):
+        guest, host = self.clean()
+        guest["candidate_export_root_after"] = {
+            "exists": False, "ordinary_directory": True, "entries": []}
+        verify_cleanup(guest, host, require_candidate_export=True)
+        for mutation in (
+                {"exists": True, "ordinary_directory": True, "entries": []},
+                {"exists": False, "ordinary_directory": False, "entries": []},
+                {"exists": False, "ordinary_directory": True, "entries": ["residue"]}):
+            with self.subTest(mutation=mutation), self.assertRaises(EvidenceError):
+                verify_cleanup({**guest, "candidate_export_root_after": mutation}, host,
+                               require_candidate_export=True)
+        guest, host = self.clean()
+        with self.assertRaises(EvidenceError):
+            verify_cleanup(guest, host, require_candidate_export=True)
+
+    def test_controller_cleanup_rejects_unexpected_after_intervention_or_delete(self):
+        for field in ("unexpected_runner_tasks_after_intervention",
+                      "unexpected_runner_processes_after_intervention",
+                      "unexpected_runner_tasks_after_delete",
+                      "unexpected_runner_processes_after_delete"):
+            guest, host = self.clean()
+            host[field] = [{"identity": "unexpected"}]
+            with self.subTest(field=field), self.assertRaises(EvidenceError):
+                verify_cleanup(guest, host)
 
     def events(self):
         return [{"action": action, "input_method": "keyboard",

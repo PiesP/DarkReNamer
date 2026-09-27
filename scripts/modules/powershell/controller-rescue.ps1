@@ -8,32 +8,33 @@
         [Parameter(Mandatory = $true)][int] $TestTimeoutSeconds,
         [Parameter(Mandatory = $true)][int] $SuiteTimeoutSeconds,
         [Parameter(Mandatory = $true)][string] $ObserverSha256,
+        [Parameter(Mandatory = $true)][object[]] $BundleRecords,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string] $InputManifestSha256,
         [Parameter(Mandatory = $true)][string] $Appearance,
         [Parameter(Mandatory = $true)][string] $HostOutputRoot
     )
 
     $rescueTimeout = [Math]::Max(120, [Math]::Min(600, $SuiteTimeoutSeconds))
-    $rescueGeneration = Invoke-Command -Session $Session -ArgumentList $GuestRoot,$DesktopSid,$DesktopSessionId,$TaskName,$TestTimeoutSeconds,$rescueTimeout,$ObserverSha256,$Appearance -ScriptBlock {
-        param($root,$sid,$desktopSession,$name,$testTimeout,$rescueSeconds,$observerHash,$appearance)
+    $rescueGeneration = Invoke-Command -Session $Session -ArgumentList $GuestRoot,$DesktopSid,$DesktopSessionId,$TaskName,$TestTimeoutSeconds,$rescueTimeout,$ObserverSha256,$Appearance,$BundleRecords,$InputManifestSha256 -ScriptBlock {
+        param($root,$sid,$desktopSession,$name,$testTimeout,$rescueSeconds,$observerHash,$appearance,$bundleRecords,$inputManifestHash)
         $existing = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
         if ($existing) {
             Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
             Unregister-ScheduledTask -TaskName $name -Confirm:$false
         }
-        $observerPath = Join-Path $root 'windows-vm-acceptance.ps1'
+        $trustedRoot = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') ($name + '-trusted')
+        $observerPath = Join-Path $trustedRoot 'windows-vm-acceptance.ps1'
         if ((Get-FileHash -LiteralPath $observerPath -Algorithm SHA256).Hash -ine $observerHash) {
             throw 'Transferred acceptance observer changed before text-scale rescue.'
         }
-        $bundle = Join-Path $root 'bundle'
-        $out = Join-Path $root 'out'
+        $bundle = Join-Path $trustedRoot 'bundle'
+        $out = Join-Path $trustedRoot 'out'
         $snapshot = Get-Item -LiteralPath (Join-Path $out 'text-scale-snapshot.json') -Force -ErrorAction Stop
         if ($snapshot.PSIsContainer -or ($snapshot.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw 'Text-scale rescue snapshot is not an ordinary file.'
         }
-        $inputManifest = Join-Path $root 'input-manifest.json'
-        $stdout = Join-Path $root 'text-scale-rescue.stdout.txt'
-        $stderr = Join-Path $root 'text-scale-rescue.stderr.txt'
-        $powerShell = (Get-Command pwsh.exe -CommandType Application -ErrorAction Stop).Source
+        $inputManifest = Join-Path $trustedRoot 'input-manifest.json'
+        $powerShell = Get-DrVmTrustedPowerShellPath
         $engineJson = & $powerShell -NoLogo -NoProfile -NonInteractive -Command `
             '[ordered]@{version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;effective_policy=(Get-ExecutionPolicy).ToString()} | ConvertTo-Json -Compress'
         if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the configured PowerShell rescue engine.' }
@@ -43,11 +44,22 @@
             throw 'Text-scale rescue requires the configured PowerShell 7.4+ Core engine under its existing RemoteSigned policy.'
         }
         $observerArguments = '-NoProfile -NonInteractive -WindowStyle Normal -File "' + $observerPath + '" -BundleRoot "' + $bundle + '" -ExpectedSessionId ' + $desktopSession + ' -OutputRoot "' + $out + '" -ExpectedScriptSha256 ' + $observerHash + ' -TimeoutSeconds ' + $testTimeout + ' -Appearance ' + $appearance + ' -RegressionMode text-scale -InputManifestPath "' + $inputManifest + '" -TextScalePercent 150 -RestoreTextScaleOnly'
-        $arguments = '/d /s /c ""' + $powerShell + '" ' + $observerArguments + ' 1>"' + $stdout + '" 2>"' + $stderr + '""'
-        $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\cmd.exe" -Argument $arguments -WorkingDirectory $root
-        $principal = New-ScheduledTaskPrincipal -UserId $sid -LogonType Interactive -RunLevel Limited
-        $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds ($rescueSeconds + 30))
-        Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Settings $settings | Out-Null
+        Register-DrVmTask `
+            -TaskName $name `
+            -UserSid $sid `
+            -SessionId $desktopSession `
+            -GuestRoot $root `
+            -ObserverPath $observerPath `
+            -ObserverSha256 $observerHash `
+            -BundleSourcePath $bundle `
+            -BundleRecords $bundleRecords `
+            -InputManifestPath $inputManifest `
+            -InputManifestSha256 $inputManifestHash `
+            -Execute $powerShell `
+            -Arguments $observerArguments `
+            -WorkingDirectory $root `
+            -TrustedResultLeaf 'text-scale-rescue-result.json' `
+            -ExecutionTimeLimitSeconds ($rescueSeconds + 30) | Out-Null
         $registered = Get-ScheduledTaskInfo -TaskName $name
         $registeredTicks = [long]$registered.LastRunTime.Ticks
         Start-ScheduledTask -TaskName $name | Out-Null
@@ -62,7 +74,7 @@
         Start-Sleep -Seconds 2
         $observed = Invoke-Command -Session $Session -ArgumentList $GuestRoot,$TaskName -ScriptBlock {
             param($root,$name)
-            $resultPath = Join-Path (Join-Path $root 'out') 'text-scale-rescue-result.json'
+            $resultPath = Join-Path (Join-Path (Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') ($name + '-trusted')) 'out') 'text-scale-rescue-result.json'
             $info = Get-ScheduledTaskInfo -TaskName $name
             $task = Get-ScheduledTask -TaskName $name
             $taskState = $task.State.ToString()
@@ -97,20 +109,15 @@
         throw 'Text-scale rescue timed out before the scheduled task reached its terminal state.'
     }
 
-    $rescueFiles = @(Invoke-Command -Session $Session -ArgumentList $GuestRoot -ScriptBlock {
-        param($root)
-        $out = Join-Path $root 'out'
-        foreach ($stream in @('text-scale-rescue.stdout.txt', 'text-scale-rescue.stderr.txt')) {
-            $source = Join-Path $root $stream
-            if (Test-Path -LiteralPath $source) { Move-Item -LiteralPath $source -Destination (Join-Path $out $stream) -Force }
-        }
+    $rescueFiles = @(Invoke-Command -Session $Session -ArgumentList $GuestRoot,$TaskName -ScriptBlock {
+        param($root,$name)
+        $trustedRoot = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') ($name + '-trusted')
+        $out = Join-Path $trustedRoot 'out'
         foreach ($leaf in @(
             'text-scale-snapshot.json',
             'text-scale-activation.json',
-            'text-scale-rescue-result.json',
             'text-scale-rescue-error.txt',
-            'text-scale-rescue.stdout.txt',
-            'text-scale-rescue.stderr.txt'
+            'text-scale-rescue-result.json'
         )) {
             $path = Join-Path $out $leaf
             if (Test-Path -LiteralPath $path -PathType Leaf) {
@@ -118,13 +125,13 @@
                 if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $item.Length -gt 4MB) {
                     throw 'Text-scale rescue evidence is not an ordinary bounded file.'
                 }
-                [pscustomobject]@{file=$leaf;bytes=$item.Length;sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()}
+                [pscustomobject]@{file=$leaf;guest_path=$path;bytes=$item.Length;sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()}
             }
         }
     })
     foreach ($file in $rescueFiles) {
         Assert-PlainFile $file.file
-        $guestPath = Join-GuestWindowsPath -Root (Join-GuestWindowsPath -Root $GuestRoot -Leaf 'out') -Leaf $file.file
+        $guestPath = [string]$file.guest_path
         $hostPath = Join-Path $HostOutputRoot $file.file
         Copy-Item -LiteralPath $guestPath -Destination $hostPath -FromSession $Session
         if ((Get-Item -LiteralPath $hostPath).Length -ne $file.bytes -or
@@ -146,30 +153,30 @@ function Invoke-AcceptanceHighContrastRescue {
         [Parameter(Mandatory = $true)][int] $TestTimeoutSeconds,
         [Parameter(Mandatory = $true)][int] $SuiteTimeoutSeconds,
         [Parameter(Mandatory = $true)][string] $ObserverSha256,
+        [Parameter(Mandatory = $true)][object[]] $BundleRecords,
         [Parameter(Mandatory = $true)][string] $HostOutputRoot
     )
 
     $rescueTimeout = [Math]::Max(120, [Math]::Min(600, $SuiteTimeoutSeconds))
-    $rescueGeneration = Invoke-Command -Session $Session -ArgumentList $GuestRoot,$DesktopSid,$DesktopSessionId,$TaskName,$TestTimeoutSeconds,$rescueTimeout,$ObserverSha256 -ScriptBlock {
-        param($root,$sid,$desktopSession,$name,$testTimeout,$rescueSeconds,$observerHash)
+    $rescueGeneration = Invoke-Command -Session $Session -ArgumentList $GuestRoot,$DesktopSid,$DesktopSessionId,$TaskName,$TestTimeoutSeconds,$rescueTimeout,$ObserverSha256,$BundleRecords -ScriptBlock {
+        param($root,$sid,$desktopSession,$name,$testTimeout,$rescueSeconds,$observerHash,$bundleRecords)
         $existing = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
         if ($existing) {
             Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
             Unregister-ScheduledTask -TaskName $name -Confirm:$false
         }
-        $observerPath = Join-Path $root 'windows-vm-acceptance.ps1'
+        $trustedRoot = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') ($name + '-trusted')
+        $observerPath = Join-Path $trustedRoot 'windows-vm-acceptance.ps1'
         if ((Get-FileHash -LiteralPath $observerPath -Algorithm SHA256).Hash -ine $observerHash) {
             throw 'Transferred acceptance observer changed before High Contrast rescue.'
         }
-        $bundle = Join-Path $root 'bundle'
-        $out = Join-Path $root 'out'
+        $bundle = Join-Path $trustedRoot 'bundle'
+        $out = Join-Path $trustedRoot 'out'
         $snapshot = Get-Item -LiteralPath (Join-Path $out 'high-contrast-restore.json') -Force -ErrorAction Stop
         if ($snapshot.PSIsContainer -or ($snapshot.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw 'High Contrast rescue snapshot is not an ordinary file.'
         }
-        $stdout = Join-Path $root 'high-contrast-rescue.stdout.txt'
-        $stderr = Join-Path $root 'high-contrast-rescue.stderr.txt'
-        $powerShell = (Get-Command pwsh.exe -CommandType Application -ErrorAction Stop).Source
+        $powerShell = Get-DrVmTrustedPowerShellPath
         $engineJson = & $powerShell -NoLogo -NoProfile -NonInteractive -Command `
             '[ordered]@{version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;effective_policy=(Get-ExecutionPolicy).ToString()} | ConvertTo-Json -Compress'
         if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the configured PowerShell rescue engine.' }
@@ -179,11 +186,20 @@ function Invoke-AcceptanceHighContrastRescue {
             throw 'High Contrast rescue requires the configured PowerShell 7.4+ Core engine under its existing RemoteSigned policy.'
         }
         $observerArguments = '-NoProfile -NonInteractive -WindowStyle Normal -File "' + $observerPath + '" -BundleRoot "' + $bundle + '" -ExpectedSessionId ' + $desktopSession + ' -OutputRoot "' + $out + '" -ExpectedScriptSha256 ' + $observerHash + ' -TimeoutSeconds ' + $testTimeout + ' -Appearance system -HighContrast -RestoreHighContrastOnly'
-        $arguments = '/d /s /c ""' + $powerShell + '" ' + $observerArguments + ' 1>"' + $stdout + '" 2>"' + $stderr + '""'
-        $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\cmd.exe" -Argument $arguments -WorkingDirectory $root
-        $principal = New-ScheduledTaskPrincipal -UserId $sid -LogonType Interactive -RunLevel Limited
-        $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds ($rescueSeconds + 30))
-        Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Settings $settings | Out-Null
+        Register-DrVmTask `
+            -TaskName $name `
+            -UserSid $sid `
+            -SessionId $desktopSession `
+            -GuestRoot $root `
+            -ObserverPath $observerPath `
+            -ObserverSha256 $observerHash `
+            -BundleSourcePath $bundle `
+            -BundleRecords $bundleRecords `
+            -Execute $powerShell `
+            -Arguments $observerArguments `
+            -WorkingDirectory $root `
+            -TrustedResultLeaf 'high-contrast-rescue-result.json' `
+            -ExecutionTimeLimitSeconds ($rescueSeconds + 30) | Out-Null
         $registered = Get-ScheduledTaskInfo -TaskName $name
         $registeredTicks = [long]$registered.LastRunTime.Ticks
         Start-ScheduledTask -TaskName $name | Out-Null
@@ -198,7 +214,7 @@ function Invoke-AcceptanceHighContrastRescue {
         Start-Sleep -Seconds 2
         $observed = Invoke-Command -Session $Session -ArgumentList $GuestRoot,$TaskName -ScriptBlock {
             param($root,$name)
-            $resultPath = Join-Path (Join-Path $root 'out') 'high-contrast-rescue-result.json'
+            $resultPath = Join-Path (Join-Path (Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') ($name + '-trusted')) 'out') 'high-contrast-rescue-result.json'
             $info = Get-ScheduledTaskInfo -TaskName $name
             $task = Get-ScheduledTask -TaskName $name
             $taskState = $task.State.ToString()
@@ -233,21 +249,14 @@ function Invoke-AcceptanceHighContrastRescue {
         throw 'High Contrast rescue timed out before the scheduled task reached its terminal state.'
     }
 
-    $rescueFiles = @(Invoke-Command -Session $Session -ArgumentList $GuestRoot -ScriptBlock {
-        param($root)
-        $out = Join-Path $root 'out'
-        foreach ($stream in @('high-contrast-rescue.stdout.txt', 'high-contrast-rescue.stderr.txt')) {
-            $source = Join-Path $root $stream
-            if (Test-Path -LiteralPath $source) {
-                Move-Item -LiteralPath $source -Destination (Join-Path $out $stream) -Force
-            }
-        }
+    $rescueFiles = @(Invoke-Command -Session $Session -ArgumentList $GuestRoot,$TaskName -ScriptBlock {
+        param($root,$name)
+        $trustedRoot = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') ($name + '-trusted')
+        $out = Join-Path $trustedRoot 'out'
         foreach ($leaf in @(
             'high-contrast-restore.json',
-            'high-contrast-rescue-result.json',
             'high-contrast-rescue-error.txt',
-            'high-contrast-rescue.stdout.txt',
-            'high-contrast-rescue.stderr.txt'
+            'high-contrast-rescue-result.json'
         )) {
             $path = Join-Path $out $leaf
             if (Test-Path -LiteralPath $path -PathType Leaf) {
@@ -258,6 +267,7 @@ function Invoke-AcceptanceHighContrastRescue {
                 }
                 [pscustomobject]@{
                     file = $leaf
+                    guest_path = $path
                     bytes = $item.Length
                     sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
                 }
@@ -266,7 +276,7 @@ function Invoke-AcceptanceHighContrastRescue {
     })
     foreach ($file in $rescueFiles) {
         Assert-PlainFile $file.file
-        $guestPath = Join-GuestWindowsPath -Root (Join-GuestWindowsPath -Root $GuestRoot -Leaf 'out') -Leaf $file.file
+        $guestPath = [string]$file.guest_path
         $hostPath = Join-Path $HostOutputRoot $file.file
         Copy-Item -LiteralPath $guestPath -Destination $hostPath -FromSession $Session
         if ((Get-Item -LiteralPath $hostPath).Length -ne $file.bytes -or

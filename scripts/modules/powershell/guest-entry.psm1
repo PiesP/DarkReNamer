@@ -20,6 +20,7 @@ foreach ($role in $expectedRoles) {
     }
     . $Libraries[$role]
 }
+$script:AcceptanceProcessJobCleanup = [Collections.Generic.List[object]]::new()
 
 function Invoke-DrWindowsVmGuest {
     [CmdletBinding()]
@@ -33,6 +34,10 @@ function Invoke-DrWindowsVmGuest {
 
     [ValidateRange(1, 3600)]
     [int] $TestTimeoutSeconds = 300,
+
+    [string] $OutputRoot,
+
+    [string] $RuntimeRoot,
 
     [switch] $ValidateOnly
 ,
@@ -52,7 +57,75 @@ if ($ValidateOnly) {
     Write-Host "Validated Windows VM bundle for source $validatedSource."
     return
 }
-
+if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
+    if ([Environment]::GetEnvironmentVariable('DARKRENAMER_VM_ELEVATED_OBSERVER') -ceq '1') {
+        throw 'The elevated VM observer requires a protected output directory.'
+    }
+    $OutputRoot = $verified.root
+}
+$OutputRoot = [IO.Path]::GetFullPath($OutputRoot)
+$elevatedObserver = [Environment]::GetEnvironmentVariable(
+    'DARKRENAMER_VM_ELEVATED_OBSERVER'
+) -ceq '1'
+$outputItem = Get-Item -LiteralPath $OutputRoot -Force -ErrorAction Stop
+if (-not $outputItem.PSIsContainer -or
+    ($outputItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw 'The VM result output root must be an ordinary directory.'
+}
+if ($elevatedObserver) {
+    $trustedResultPath = [Environment]::GetEnvironmentVariable(
+        'DARKRENAMER_VM_TRUSTED_RESULT_PATH'
+    )
+    if (-not $trustedResultPath -or
+        [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($trustedResultPath)) -cne $OutputRoot) {
+        throw 'The elevated VM output root must be the directory containing its controller-created result.'
+    }
+}
+$fixtureParentRoot = $null
+if ($elevatedObserver) {
+    $fixtureParentRoot = [IO.Path]::GetDirectoryName($OutputRoot)
+    $verifiedRootPath = [IO.Path]::GetFullPath($verified.root)
+    $taskRootPath = [IO.Path]::GetFullPath($fixtureParentRoot)
+    $verifiedRootParent = [IO.Path]::GetDirectoryName($verifiedRootPath)
+    $bundleRootLayout = [string]::Equals(
+        $verifiedRootParent,
+        $taskRootPath,
+        [StringComparison]::OrdinalIgnoreCase
+    ) -and [IO.Path]::GetFileName($verifiedRootPath) -ceq 'bundle'
+    if (-not [string]::Equals(
+        $verifiedRootPath,
+        $taskRootPath,
+        [StringComparison]::OrdinalIgnoreCase
+    ) -and -not $bundleRootLayout) {
+        throw 'The production fixture parent must be the protected task directory beside OutputRoot.'
+    }
+    $fixtureParentItem = Get-Item -LiteralPath $fixtureParentRoot -Force -ErrorAction Stop
+    if (-not $fixtureParentItem.PSIsContainer -or
+        ($fixtureParentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The production fixture parent must be an ordinary protected directory.'
+    }
+}
+if (-not $RuntimeRoot -and $elevatedObserver) {
+    throw 'The elevated VM observer requires a separate candidate runtime directory.'
+}
+if ($RuntimeRoot) {
+    if (-not [IO.Path]::IsPathRooted($RuntimeRoot)) {
+        throw 'The VM candidate runtime root must be absolute.'
+    }
+    $runtimeItem = Get-Item -LiteralPath $RuntimeRoot -Force -ErrorAction Stop
+    if (-not $runtimeItem.PSIsContainer -or
+        ($runtimeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The VM candidate runtime root must be an existing ordinary directory.'
+    }
+    $RuntimeRoot = $runtimeItem.FullName
+    $runtimeCursor = $runtimeItem
+    while ($null -ne $runtimeCursor) {
+        if (($runtimeCursor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The VM candidate runtime path traverses a reparse point.'
+        }
+        $runtimeCursor = $runtimeCursor.Parent
+    }
+}
 $candidateLane = $verified.manifest.schema_version -eq 2
 $result = if ($candidateLane) {
     [ordered]@{
@@ -80,20 +153,24 @@ $result = if ($candidateLane) {
 }
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     $result.failure_reason = 'unsupported_platform'
+    Initialize-TrustedResultWriter -Root $verified.root
     Write-ResultDocument -Root $verified.root -Result $result
     throw 'Windows VM guest execution requires Windows.'
 }
-$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-$principal = [Security.Principal.WindowsPrincipal]::new($identity)
-if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    $result.failure_reason = 'elevated_runner'
-    Write-ResultDocument -Root $verified.root -Result $result
-    throw 'Windows VM guest execution must be non-elevated.'
+$elevatedObserver = [Environment]::GetEnvironmentVariable(
+    'DARKRENAMER_VM_ELEVATED_OBSERVER'
+) -ceq '1'
+try {
+    Assert-VmObserverExecutionContext -ExpectedSessionId $ExpectedSessionId
+}
+catch {
+    if ($elevatedObserver) { $result.failure_reason = 'invalid_elevated_observer' }
+    else { $result.failure_reason = 'elevated_runner' }
+    throw
 }
 $currentSession = [Diagnostics.Process]::GetCurrentProcess().SessionId
 if ($currentSession -ne $ExpectedSessionId) {
     $result.failure_reason = 'unexpected_session'
-    Write-ResultDocument -Root $verified.root -Result $result
     throw 'Windows VM guest execution is in an unexpected session.'
 }
 
@@ -101,21 +178,45 @@ $desktopLock = $null
 $previousExecutionState = $null
 $runtimeRoot = $null
 try {
+    Protect-CurrentRunnerProcess
+    Initialize-TrustedResultWriter -Root $verified.root
     $desktopLock = Enter-DesktopTestLock -SessionId $currentSession
     if ($null -eq $desktopLock) {
         $result.failure_reason = 'desktop_busy'
         throw 'Another Windows VM test runner is using this interactive desktop.'
     }
     $previousExecutionState = Enter-TestExecutionState
-    $runtimeRoot = New-PrivateDirectory -Parent $verified.root -Leaf 'runtime'
+    $runtimeRoot = if ($RuntimeRoot) {
+        $RuntimeRoot
+    } else {
+        New-PrivateDirectory -Parent $verified.root -Leaf 'runtime'
+    }
     $testResults = [Collections.Generic.List[object]]::new()
+    $remainingSuiteOutputBytes = [long]$script:VmTestOutputSuiteLimitBytes
     for ($index = 0; $index -lt $verified.tests.Count; $index++) {
-        $testResults.Add((Invoke-RustTestBinary `
+        $testOutputBudgetBytes = [Math]::Min(
+            [long]$script:VmTestOutputAggregateLimitBytes,
+            $remainingSuiteOutputBytes
+        )
+        $testResult = Invoke-RustTestBinary `
             -Test $verified.tests[$index] `
             -Root $verified.root `
+            -OutputRoot $OutputRoot `
             -RuntimeRoot $runtimeRoot `
             -Index ($index + 1) `
-            -TimeoutSeconds $TestTimeoutSeconds))
+            -TimeoutSeconds $TestTimeoutSeconds `
+            -OutputBudgetBytes $testOutputBudgetBytes
+        $testOutputBytes = [long]0
+        foreach ($channel in @('stdout', 'stderr')) {
+            if ($testResult.$channel) {
+                $testOutputBytes += [long]$testResult.$channel.bytes
+            }
+        }
+        if ($testOutputBytes -gt $remainingSuiteOutputBytes) {
+            throw 'Guest test output exceeded the remaining suite budget.'
+        }
+        $remainingSuiteOutputBytes -= $testOutputBytes
+        $testResults.Add($testResult)
         $result.tests = $testResults.ToArray()
     }
     $applicationArtifact = if ($candidateLane) {
@@ -126,7 +227,9 @@ try {
     $result.gui = Invoke-GuiSmoke `
         -Application $applicationArtifact `
         -Root $verified.root `
+        -OutputRoot $OutputRoot `
         -RuntimeRoot $runtimeRoot `
+        -FixtureParentRoot $fixtureParentRoot `
         -ExpectedSession $ExpectedSessionId `
         -TimeoutSeconds $TestTimeoutSeconds `
         -RawEvidence:$candidateLane
@@ -169,6 +272,7 @@ finally {
                 if ($ownedAfter.Count -ne 0) {
                     throw 'An owned candidate process remains after the GUI flow.'
                 }
+                [void](Assert-AcceptanceProcessJobLedgerClosed)
                 if (Test-Path -LiteralPath $runtimeRoot) {
                     [void](Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot)
                     Remove-Item -LiteralPath $runtimeRoot -Recurse -Force

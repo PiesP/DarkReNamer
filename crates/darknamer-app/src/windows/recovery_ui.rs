@@ -300,13 +300,17 @@ pub(super) fn run_prepared_recovery_export(
     queue_deferred_message(owner, presentation.text, presentation.caption.to_owned());
 }
 
-fn perform_recovery_export(state: &mut AppState, directory: &Path) -> RecoveryExportPresentation {
+fn perform_recovery_export(
+    state: &mut AppState,
+    directory: &PreparedRecoveryExportDirectory,
+) -> RecoveryExportPresentation {
     let mut results = Vec::new();
     let mut failures = 0_usize;
     if let Some(journal) = state.active_journal.as_mut() {
         export_valid_journal(
             journal,
-            &directory.join("active.drj.retained"),
+            directory,
+            "active.drj.retained",
             &mut results,
             &mut failures,
         );
@@ -314,7 +318,8 @@ fn perform_recovery_export(state: &mut AppState, directory: &Path) -> RecoveryEx
     if let Some(journal) = state.staged_journal.as_mut() {
         export_valid_journal(
             journal,
-            &directory.join("candidate.drj.retained"),
+            directory,
+            "candidate.drj.retained",
             &mut results,
             &mut failures,
         );
@@ -332,8 +337,12 @@ fn perform_recovery_export(state: &mut AppState, directory: &Path) -> RecoveryEx
             JournalRole::Active => "active.drj.evidence",
             JournalRole::Candidate => "candidate.drj.evidence",
         };
-        let path = directory.join(name);
-        match evidence.copy_exact_to_new(&path) {
+        let path = directory.display_path.join(name);
+        let copy = directory
+            .parent
+            .create_new_file(std::ffi::OsStr::new(name))
+            .and_then(|mut output| evidence.copy_exact_to_file(&mut output));
+        match copy {
             Ok(bytes) => results.push(format!("{bytes} bytes: {}", path.display())),
             Err(error) => {
                 failures = failures.saturating_add(1);
@@ -354,11 +363,17 @@ fn perform_recovery_export(state: &mut AppState, directory: &Path) -> RecoveryEx
 
 pub(super) fn export_valid_journal(
     journal: &mut FileJournal,
-    path: &Path,
+    directory: &PreparedRecoveryExportDirectory,
+    leaf: &str,
     results: &mut Vec<String>,
     failures: &mut usize,
 ) {
-    match journal.copy_exact_to_new(path) {
+    let path = directory.display_path.join(leaf);
+    let copy = directory
+        .parent
+        .create_new_file(std::ffi::OsStr::new(leaf))
+        .and_then(|mut output| journal.copy_exact_to_file(&mut output));
+    match copy {
         Ok(bytes) => results.push(format!("{bytes} bytes: {}", path.display())),
         Err(error) => {
             *failures = failures.saturating_add(1);

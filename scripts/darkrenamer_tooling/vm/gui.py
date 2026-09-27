@@ -825,6 +825,13 @@ def normalize_run_result(run_root: Path, input_sha256: str) -> dict:
     output = run_root / "output"
     observer = read_json(output / "acceptance-result.json")
     observations = read_json(output / "acceptance-observations.json")
+    observation_binding = observer.get("observations")
+    require(isinstance(observation_binding, dict)
+            and observation_binding.get("file") == "acceptance-observations.json"
+            and observation_binding.get("sha256") == digest(output / "acceptance-observations.json"),
+            "Protected observer result does not bind the collected observations file.")
+    require(observer.get("acceptance_observations") == observations,
+            "Collected observations differ from the object embedded in the protected result.")
     preflight = read_json(output / "platform-preflight.json")
     cleanup = read_json(output / "cleanup.json")
     transport = read_json(output / "transport.json")

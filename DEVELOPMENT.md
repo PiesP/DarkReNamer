@@ -171,13 +171,17 @@ the user, key, address, port, and any IPv6 syntax in the OpenSSH configuration,
 not in `--ssh-host`.
 
 The VM needs the PowerShell 7.4 or newer SSH subsystem and `sshd`, NTFS, the Microsoft
-Visual C++ x64 runtime, Developer Mode for non-elevated symlink fixtures, and one
-unlocked desktop for the same local test account selected by the SSH alias. That
-VM account must be a local administrator because the controller registers and
-manages the scheduled task. The task itself uses `Interactive` logon and
-`RunLevel Limited`, and the guest runner rejects an elevated token. This SSH path
-does not require Hyper-V or administrator rights on the host. The runner does
-not change VM security settings, reset checkpoints, or install tools.
+Visual C++ x64 runtime, Developer Mode for symlink fixtures, and one unlocked
+desktop for the same local test account selected by the SSH alias. That account
+must be a local administrator, and UAC must provide its linked filtered token.
+The controller registers a protected `Interactive` task at `RunLevel Highest`.
+Its observer runs elevated in the selected desktop session, while each Rust test
+binary and candidate GUI process starts with that user's linked medium-integrity
+token. The observer verifies each child token before resuming it. Bundle inputs
+and result files are staged under an administrator-owned ProgramData directory;
+the user can read them but cannot replace the inputs or forge the trusted result.
+This SSH path does not require Hyper-V or administrator rights on the host. The
+runner does not change VM security settings, reset checkpoints, or install tools.
 
 PowerShell Direct remains available from WSL when the Windows host process has
 Hyper-V administration rights:
@@ -216,6 +220,23 @@ through UI Automation. It first cancels Apply and proves the fixture is unchange
 then confirms the exact destructive action and proves the on-disk rename preserved
 the file contents and NTFS identity without journal residue. The lane retains
 source-bound preview and confirmation screenshots before closing normally.
+
+The guest creates each Rust test and candidate GUI process suspended, assigns it
+to a non-breakaway Windows Job Object with kill-on-close before resuming it, and
+keeps that job alive through evidence capture. A passing result requires every
+job to be empty and closed. Before starting untrusted test or candidate code, the
+controller stages the observer, tooling, input manifest, and candidate bundle
+under an administrator-owned ProgramData directory whose DACL grants the runner
+account read access only. Each scheduled task has a protected DACL that grants
+full access only to SYSTEM and Administrators and read access to its exact runner
+SID. The elevated observer protects its process DACL and retains a write handle
+to a controller-created result file that the runner account can only read. Rust stdout and stderr are
+streamed to bounded files with a 4 MiB per-channel, 8 MiB per-test, and 64 MiB
+suite capture limit. The controller passes the remaining suite allowance to
+each next test, so captured Rust output cannot exceed 64 MiB across the suite;
+after it is exhausted, remaining tests are recorded as failed without launching.
+The controller checks result and evidence sizes and aggregate limits before
+copying or parsing them on the host.
 
 Bundles, logs, and screenshots are external. `--output` selects a new absolute
 external path. By default SSH uses the Linux host's temporary directory, while

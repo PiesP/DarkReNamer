@@ -206,23 +206,41 @@ if ($ValidateOnly) {
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     throw 'Current-DPI acceptance requires Windows.'
 }
-$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-$principal = [Security.Principal.WindowsPrincipal]::new($identity)
-if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw 'Current-DPI acceptance must run non-elevated.'
-}
+Assert-VmObserverExecutionContext -ExpectedSessionId $ExpectedSessionId
 $currentSession = [Diagnostics.Process]::GetCurrentProcess().SessionId
-if ($currentSession -ne $ExpectedSessionId) {
-    throw 'Current-DPI acceptance is running in an unexpected desktop session.'
-}
+Protect-CurrentRunnerProcess
 if ($RestoreHighContrastOnly) {
     Invoke-HighContrastRescue -Verified $verified -SessionId $ExpectedSessionId
     return
 }
 
-[void](New-Item -ItemType Directory -Path $verified.output_root)
-$runtimeRoot = New-PrivateDirectory -Parent $verified.output_root -Leaf 'runtime'
+$outputDirectory = Get-Item -LiteralPath $verified.output_root -Force -ErrorAction Stop
+if (-not $outputDirectory.PSIsContainer -or
+    ($outputDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw 'The controller-provisioned acceptance output directory is unsafe.'
+}
+if ([string]::IsNullOrWhiteSpace($RuntimeRoot) -or
+    -not [IO.Path]::IsPathRooted($RuntimeRoot)) {
+    throw 'Current-DPI acceptance requires the controller-provisioned candidate runtime directory.'
+}
+$runtimeItem = Get-Item -LiteralPath $RuntimeRoot -Force -ErrorAction Stop
+if (-not $runtimeItem.PSIsContainer -or
+    ($runtimeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw 'Current-DPI candidate runtime root is unsafe.'
+}
+$runtimeRoot = $runtimeItem.FullName
+$runtimeCursor = $runtimeItem
+while ($null -ne $runtimeCursor) {
+    if (($runtimeCursor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Current-DPI candidate runtime path traverses a reparse point.'
+    }
+    $runtimeCursor = $runtimeCursor.Parent
+}
 $resultPath = Join-Path $verified.output_root 'acceptance-result.json'
+Initialize-TrustedResultWriter `
+    -Root $verified.root `
+    -ResultRoot $verified.output_root `
+    -Path $resultPath
 $observationPath = Join-Path $verified.output_root 'acceptance-observations.json'
 $diagnosticPath = Join-Path $verified.output_root 'acceptance-error.txt'
 $processState = [pscustomobject]@{ process = $null }
@@ -1221,13 +1239,14 @@ finally {
         try {
             $process = $processState.process.process
             $process.Refresh()
-            if (-not $process.HasExited) {
-                Invoke-TaskkillTree -ProcessId $process.Id
-                if (-not $process.WaitForExit(10000)) {
-                    $result.status = 'failed'
-                    $result.failure_reason = 'process_cleanup_failed'
+            if (-not $processState.process.job_closed) {
+                $jobCleanup = Complete-AcceptanceOwnedProcessJob `
+                    -Owned $processState.process -StopActive
+                if (-not $jobCleanup.job_empty -or -not $jobCleanup.job_closed) {
+                    throw 'The current-DPI candidate process job did not close cleanly.'
                 }
-                elseif ($rawCandidate -and $null -ne $result.process_lifecycle) {
+                if ($rawCandidate -and $null -ne $result.process_lifecycle -and
+                    $jobCleanup.forced_termination -and -not $result.process_lifecycle.exit_observed) {
                     $result.process_lifecycle.exit_observed = $true
                     $result.process_lifecycle.exit_method = 'forced-termination'
                     $result.process_lifecycle.exit_code = [int]$process.ExitCode
@@ -1235,8 +1254,13 @@ finally {
             }
             $lifecycle.process_terminated = $process.HasExited
         }
+        catch {
+            $result.status = 'failed'
+            $result.failure_reason = 'process_cleanup_failed'
+            $_ | Out-String | Add-Content -LiteralPath $diagnosticPath -Encoding UTF8
+        }
         finally {
-            $processState.process.process.Dispose()
+            try { $processState.process.process.Dispose() } catch {}
         }
     }
     if ($HighContrast -and $null -ne $highContrastState.original) {
@@ -1308,6 +1332,7 @@ finally {
         }
         else { @() })
         $rawJournalObserved = $rawCandidate
+        [void](Assert-AcceptanceProcessJobLedgerClosed)
         if (Test-Path -LiteralPath $runtimeRoot) {
             [void](Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot)
             Remove-Item -LiteralPath $runtimeRoot -Recurse -Force
@@ -1354,11 +1379,12 @@ finally {
         }
     }
     Write-JsonUtf8Bom -Path $observationPath -Value $observations
+    $result['acceptance_observations'] = $observations
     $result.observations = [ordered]@{
         file = 'acceptance-observations.json'
         sha256 = Get-LowerSha256 -Path $observationPath
     }
-    Write-JsonUtf8Bom -Path $resultPath -Value $result
+    Write-ResultDocument -Root $verified.root -Path $resultPath -Result $result
 }
 
 if ($result.status -eq 'failed') {

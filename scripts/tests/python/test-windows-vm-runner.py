@@ -23,8 +23,8 @@ class VmRunnerTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.test = self.artifact('tests.exe', b'test executable')
         self.app = self.artifact('DarkReNamer.exe', b'app executable')
-        stdout = self.artifact('tests.stdout.log', b'test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s\n')
-        stderr = self.artifact('tests.stderr.log', b'')
+        stdout = self.output_artifact('tests.stdout.log', b'test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s\n')
+        stderr = self.output_artifact('tests.stderr.log', b'')
         screenshot = self.artifact('main-workbench.png', b'\x89PNG\r\n\x1a\nfixture')
         preview_screenshot = dict(self.artifact('rename-preview.png', b'\x89PNG\r\n\x1a\npreview'), width=900, height=700)
         confirmation_screenshot = dict(self.artifact('apply-confirmation.png', b'\x89PNG\r\n\x1a\nconfirmation'), width=500, height=300)
@@ -53,15 +53,19 @@ class VmRunnerTests(unittest.TestCase):
         gui = dict(
             self.app,
             status='passed',
+            job_cleanup=True,
             scope='launch-window-screenshot-normal-close',
             screenshot=screenshot,
             flow=flow,
         )
-        self.result.update(status='passed', tests=[dict(self.test, status='passed', exit_code=0, passed=3, failed=0, ignored=1, stdout=stdout, stderr=stderr)], gui=gui, transport={'kind': 'ssh', 'host_platform': 'Unix', 'guest_cleanup': True})
+        self.result.update(status='passed', tests=[dict(self.test, status='passed', job_cleanup=True, exit_code=0, passed=3, failed=0, ignored=1, stdout=stdout, stderr=stderr)], gui=gui, transport={'kind': 'ssh', 'host_platform': 'Unix', 'guest_cleanup': True})
 
     def artifact(self, name, data):
         (self.root / name).write_bytes(data)
         return {'file': name, 'sha256': hashlib.sha256(data).hexdigest()}
+
+    def output_artifact(self, name, data):
+        return dict(self.artifact(name, data), bytes=len(data))
 
     def verify(self):
         return vm.verify_result(self.root, self.manifest, self.result)
@@ -143,7 +147,7 @@ class VmRunnerTests(unittest.TestCase):
               row['last_run_ticks'])
              for row in cases[:-1]] + [('', 'Ready', 7, 101)])
 
-    def test_rescue_collectors_wait_for_terminal_task_before_moving_streams(self):
+    def test_rescue_collectors_wait_for_terminal_task_before_copying_streams(self):
         for name, label in (
                 ('Invoke-AcceptanceTextScaleRescue', 'Text-scale'),
                 ('Invoke-AcceptanceHighContrastRescue', 'High Contrast')):
@@ -178,7 +182,14 @@ class VmRunnerTests(unittest.TestCase):
                 timeout = function.index(
                     f"throw '{label} rescue timed out before the scheduled task "
                     "reached its terminal state.'")
-                self.assertLess(timeout, function.index('Move-Item -LiteralPath'))
+                collect = function.index('$rescueFiles = @(', timeout)
+                copy = function.index('Copy-Item -LiteralPath $guestPath', collect)
+                digest = function.index("Get-FileHash -LiteralPath $hostPath", copy)
+                self.assertLess(timeout, collect)
+                self.assertLess(collect, copy)
+                self.assertLess(copy, digest)
+                self.assertIn('-FromSession $Session', function[copy:digest])
+                self.assertIn('$file.sha256', function[digest:])
                 self.assertIn("$rescue.result_status -cne 'passed'", function)
                 self.assertIn('$rescue.task_result -ne 0', function)
                 self.assertNotIn("$rescue.status -in @('passed', 'failed')", function)
@@ -220,9 +231,10 @@ class VmRunnerTests(unittest.TestCase):
 
     def test_ui_timeout_fails_before_stream_move_or_inventory(self):
         controller = (SCRIPT_ROOT / 'modules/powershell/controller-entry.psm1').read_text()
-        acceptance = controller[controller.index(
-            "if ($acceptance) {\n        $guestBundleRoot"):]
-        acceptance = acceptance[:acceptance.index("\n    elseif ($recovery) {")]
+        branch_start = controller.index(
+            "if ($acceptance) {", controller.index("$transport.status = 'copying'"))
+        branch_end = controller.index("\n    elseif ($recovery) {", branch_start)
+        acceptance = controller[branch_start:branch_end]
         registration = acceptance.index(
             '$registered = Get-ScheduledTaskInfo -TaskName $name')
         start = acceptance.index('Start-ScheduledTask -TaskName $name')
@@ -237,14 +249,15 @@ class VmRunnerTests(unittest.TestCase):
         poll_guard = acceptance.index('if ($null -ne $pollFailure) {', result)
         original_failure = acceptance.index(
             'Invoke-AcceptancePollFailureRescue', poll_guard)
-        first_move = acceptance.index('Move-Item -LiteralPath', poll_guard)
+        first_copy = acceptance.index(
+            'Copy-Item -LiteralPath $guestOutputPath', poll_guard)
         inventory = acceptance.index('$inventory = @(', poll_guard)
         self.assertLess(registration, start)
         self.assertLess(poll_info, poll_task)
         self.assertLess(poll_task, terminal_info)
         self.assertLess(terminal_info, result)
         self.assertLess(poll_guard, original_failure)
-        self.assertLess(original_failure, first_move)
+        self.assertLess(original_failure, first_copy)
         self.assertLess(original_failure, inventory)
         self.assertIn(
             '-RegisteredLastRunTimeTicks '
@@ -291,6 +304,8 @@ class VmRunnerTests(unittest.TestCase):
                     -TestTimeoutSeconds 60 `
                     -SuiteTimeoutSeconds 120 `
                     -ObserverSha256 ('a' * 64) `
+                    -BundleRecords @([pscustomobject]@{file='bundle.json';sha256=('b' * 64)}) `
+                    -InputManifestSha256 ('c' * 64) `
                     -AcceptanceMode $(if ($env:VM_RUNNER_CASE -ceq 'high-contrast') {
                         'current-dpi'
                     } else { 'text-scale' }) `
@@ -353,16 +368,19 @@ class VmRunnerTests(unittest.TestCase):
         self.assertLess(unregister, absence)
         for fragment in (
                 "@('cmd.exe', 'pwsh.exe')", '$_.CommandLine.IndexOf($observerToken',
-                '$_.CommandLine.IndexOf($rootToken', '[Math]::Min(60, $timeout)'):
+                "Join-Path $trustedRoot 'windows-vm-acceptance.ps1'",
+                '[Math]::Min(60, $timeout)'):
             self.assertIn(fragment, function)
+        self.assertNotIn('$rootToken', function)
         self.assertNotIn('-ErrorAction SilentlyContinue\n            Unregister-ScheduledTask',
                          function)
 
     def test_recovery_timeout_fails_before_stream_move_or_inventory(self):
         controller = (SCRIPT_ROOT / 'modules/powershell/controller-entry.psm1').read_text()
-        recovery = controller[controller.index(
-            "elseif ($recovery) {\n        $guestBundleRoot"):]
-        recovery = recovery[:recovery.index("\n    else {", 1)]
+        branch_start = controller.index(
+            "elseif ($recovery) {", controller.index("$transport.status = 'copying'"))
+        branch_end = controller.index("\n    else {", branch_start)
+        recovery = controller[branch_start:branch_end]
         registration = recovery.index(
             '$registered = Get-ScheduledTaskInfo -TaskName $name')
         start = recovery.index('Start-ScheduledTask -TaskName $name')
@@ -373,13 +391,14 @@ class VmRunnerTests(unittest.TestCase):
             '$terminalInfo = Get-ScheduledTaskInfo -TaskName $name', poll_task)
         poll_guard = recovery.index('if ($null -ne $pollFailure) {', terminal_info)
         original_failure = recovery.index('throw $pollFailure', poll_guard)
-        first_move = recovery.index('Move-Item -LiteralPath', poll_guard)
+        first_copy = recovery.index(
+            'Copy-Item -LiteralPath $guestOutputPath', poll_guard)
         inventory = recovery.index('$inventory = @(', poll_guard)
         self.assertLess(registration, start)
         self.assertLess(poll_info, poll_task)
         self.assertLess(poll_task, terminal_info)
         self.assertLess(poll_guard, original_failure)
-        self.assertLess(original_failure, first_move)
+        self.assertLess(original_failure, first_copy)
         self.assertLess(original_failure, inventory)
         self.assertIn(
             '-RegisteredLastRunTimeTicks '
@@ -862,6 +881,12 @@ class VmRunnerTests(unittest.TestCase):
         boolean = self.artifact('boolean.json', b'{"bytes":true}')
         self.assertIs(vm.read_json_strict(self.root / boolean['file'])['bytes'], True)
 
+    def test_strict_json_rejects_input_over_its_bound_before_parsing(self):
+        oversized = self.root / 'oversized.json'
+        oversized.write_bytes(b'{} ')
+        with self.assertRaisesRegex(ValueError, 'size bound'):
+            vm.read_json_strict(oversized, maximum_bytes=2)
+
     def test_duplicate_binary_is_rejected(self):
         self.result['tests'] *= 2
         with self.assertRaises(ValueError):
@@ -874,6 +899,7 @@ class VmRunnerTests(unittest.TestCase):
 
     def test_changed_log_is_rejected(self):
         (self.root / 'tests.stdout.log').write_text('changed')
+        self.result['tests'][0]['stdout']['bytes'] = len(b'changed')
         with self.assertRaisesRegex(ValueError, 'digest'):
             self.verify()
 
@@ -883,8 +909,46 @@ class VmRunnerTests(unittest.TestCase):
             self.verify()
 
     def test_failed_libtest_outcome_is_not_a_pass(self):
-        self.result['tests'][0]['stdout'] = self.artifact('tests.stdout.log', b'test result: FAILED. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s\n')
+        self.result['tests'][0]['stdout'] = self.output_artifact('tests.stdout.log', b'test result: FAILED. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s\n')
         self.assertFalse(self.verify())
+
+    def test_suite_budget_skips_keep_a_valid_failed_result_row(self):
+        self.result['status'] = 'failed'
+        row = self.result['tests'][0]
+        row.update(
+            status='failed',
+            job_cleanup=True,
+            exit_code=None,
+            passed=None,
+            failed=None,
+            ignored=None,
+            failure_reason='suite_output_limit_exceeded',
+            stdout=self.output_artifact('tests.stdout.log', b''),
+            stderr=self.output_artifact('tests.stderr.log', b''),
+        )
+        self.assertFalse(self.verify())
+
+    def test_process_jobs_must_be_empty_and_closed_before_pass(self):
+        self.result['tests'][0]['job_cleanup'] = False
+        self.assertFalse(self.verify())
+        self.result['tests'][0]['job_cleanup'] = True
+        self.result['gui']['job_cleanup'] = False
+        self.assertFalse(self.verify())
+
+    def test_test_output_size_and_aggregate_bounds_are_verified(self):
+        stdout = self.result['tests'][0]['stdout']
+        stdout['bytes'] += 1
+        with self.assertRaisesRegex(ValueError, 'recorded byte count'):
+            self.verify()
+        stdout['bytes'] -= 1
+        with mock.patch.object(
+                vm, 'TEST_OUTPUT_CHANNEL_MAXIMUM_BYTES', stdout['bytes'] - 1):
+            with self.assertRaisesRegex(ValueError, 'size bound'):
+                self.verify()
+        with mock.patch.object(
+                vm, 'TEST_OUTPUT_AGGREGATE_MAXIMUM_BYTES', stdout['bytes'] - 1):
+            with self.assertRaisesRegex(ValueError, 'size bound'):
+                self.verify()
 
     def test_gui_artifact_binding_is_verified(self):
         self.result['gui']['sha256'] = 'b' * 64
@@ -953,7 +1017,7 @@ class VmRunnerTests(unittest.TestCase):
             vm.verify_result(self.root, self.manifest, self.result, 'ssh')
 
     def test_empty_success_output_is_rejected(self):
-        self.result['tests'][0]['stdout'] = self.artifact('tests.stdout.log', b'')
+        self.result['tests'][0]['stdout'] = self.output_artifact('tests.stdout.log', b'')
         with self.assertRaisesRegex(ValueError, 'summary'):
             self.verify()
 

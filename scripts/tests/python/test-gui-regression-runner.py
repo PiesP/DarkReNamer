@@ -431,6 +431,14 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         }
         self.write_json(run_root / "input-manifest.json", manifest)
         input_hash = runner.digest(run_root / "input-manifest.json")
+        observations = {
+            "environment": {
+                "hwnd_dpi": 96, "text_scale_factor_percent": 100,
+                "physical_screen": {"left": 0, "top": 0, "right": 800, "bottom": 600, "width": 800, "height": 600},
+                "work_area": {"left": 0, "top": 0, "right": 800, "bottom": 552, "width": 800, "height": 552},
+            },
+        }
+        self.write_json(output / "acceptance-observations.json", observations)
         self.write_json(output / "acceptance-result.json", {
             "status": "review_required",
             "assertions": {
@@ -443,12 +451,10 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                 },
             },
             "guest_cleanup": True,
-        })
-        self.write_json(output / "acceptance-observations.json", {
-            "environment": {
-                "hwnd_dpi": 96, "text_scale_factor_percent": 100,
-                "physical_screen": {"left": 0, "top": 0, "right": 800, "bottom": 600, "width": 800, "height": 600},
-                "work_area": {"left": 0, "top": 0, "right": 800, "bottom": 552, "width": 800, "height": 552},
+            "acceptance_observations": observations,
+            "observations": {
+                "file": "acceptance-observations.json",
+                "sha256": runner.digest(output / "acceptance-observations.json"),
             },
         })
         self.write_json(output / "platform-preflight.json", {
@@ -583,11 +589,17 @@ class GuiRegressionRunnerTests(unittest.TestCase):
             self.assertEqual(list(output.iterdir()), [])
             keywords["stdout"].write("controller stdout\n")
             keywords["stderr"].write("controller stderr\n")
+            observations = {
+                "environment": {"text_scale_factor_percent": 100},
+            }
+            self.write_json(output / "acceptance-observations.json", observations)
             self.write_json(output / "acceptance-result.json", {
                 "status": "review_required", "guest_cleanup": True,
-            })
-            self.write_json(output / "acceptance-observations.json", {
-                "environment": {"text_scale_factor_percent": 100},
+                "acceptance_observations": observations,
+                "observations": {
+                    "file": "acceptance-observations.json",
+                    "sha256": runner.digest(output / "acceptance-observations.json"),
+                },
             })
             self.write_json(output / "transport.json", {
                 "status": "collected", "guest_cleanup": True,
@@ -639,6 +651,14 @@ class GuiRegressionRunnerTests(unittest.TestCase):
             }
             observations["environment"] = environment
             self.write_json(output / "acceptance-observations.json", observations)
+            result_path = output / "acceptance-result.json"
+            protected_result = json.loads(result_path.read_text())
+            protected_result["acceptance_observations"] = observations
+            protected_result["observations"] = {
+                "file": "acceptance-observations.json",
+                "sha256": runner.digest(output / "acceptance-observations.json"),
+            }
+            self.write_json(result_path, protected_result)
             mode = json.loads((run_root / "input-manifest.json").read_text())["request"]["mode"]
             if mode in {"standard", "text-scale"}:
                 (output / "text-raster-metrics.json").unlink()

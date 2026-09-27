@@ -1,15 +1,48 @@
-﻿function Invoke-ProductionRenameFlow {
+﻿function Initialize-ProductionRenameFlowFixture {
     param(
-        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][string] $ApplicationRoot,
+        [Parameter(Mandatory)][string] $LocalAppData,
+        [switch] $RawEvidence
+    )
+
+    $sourcePath = Join-Path $FixtureRoot 'vm-flow-source.txt'
+    $fixtureBytes = [Text.UTF8Encoding]::new($false).GetBytes(
+        "DarkReNamer production VM flow`nidentity and content must survive`n"
+    )
+    [IO.File]::WriteAllBytes($sourcePath, $fixtureBytes)
+    $beforeFileIdentity = [DarkReNamerVmNative]::GetFileIdentity($sourcePath)
+    [pscustomobject]@{
+        application_sha256 = Get-LowerSha256 -Path (Join-Path $ApplicationRoot 'DarkReNamer.exe')
+        before_content_sha256 = Get-LowerSha256 -Path $sourcePath
+        before_file_identity = $beforeFileIdentity
+        checkpoints = @((Get-FlowCheckpoint `
+            -Phase initial `
+            -FixtureRoot $FixtureRoot `
+            -LocalAppData $LocalAppData))
+        raw_checkpoints = if ($RawEvidence) {
+            @((Get-VmAutomatedCheckpoint `
+                -Phase initial `
+                -FixtureRoot $FixtureRoot `
+                -LocalAppData $LocalAppData))
+        } else { @() }
+    }
+}
+
+function Invoke-ProductionRenameFlow {
+    param(
+        [Parameter(Mandatory)][object] $OwnedProcess,
+        [Parameter(Mandatory)][object] $InitialFixture,
         [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
         [Parameter(Mandatory)][IntPtr] $MainWindowHandle,
         [Parameter(Mandatory)][string] $FixtureRoot,
-        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string] $OutputRoot,
         [Parameter(Mandatory)][int] $ExpectedSession,
         [Parameter(Mandatory)][int] $TimeoutSeconds,
         [switch] $RawEvidence
     )
 
+    $Process = $OwnedProcess.process
     $sourceName = 'vm-flow-source.txt'
     $prefix = 'vm-confirmed-'
     $previewName = $prefix + $sourceName
@@ -41,27 +74,17 @@
         failure_reason = 'fixture_setup_failed'
     }
     try {
-        $flow.application_sha256 = Get-LowerSha256 -Path (Join-Path $Root 'DarkReNamer.exe')
-        $fixtureBytes = [Text.UTF8Encoding]::new($false).GetBytes(
-            "DarkReNamer production VM flow`nidentity and content must survive`n"
-        )
-        [IO.File]::WriteAllBytes($sourcePath, $fixtureBytes)
-        $flow.before_content_sha256 = Get-LowerSha256 -Path $sourcePath
-        $beforeFileIdentity = [DarkReNamerVmNative]::GetFileIdentity($sourcePath)
+        $flow.application_sha256 = $InitialFixture.application_sha256
+        $flow.before_content_sha256 = $InitialFixture.before_content_sha256
+        $beforeFileIdentity = [string]$InitialFixture.before_file_identity
         $flow.before_file_identity_sha256 = Get-LowerTextSha256 -Value $beforeFileIdentity
-        $flow.checkpoints = @((Get-FlowCheckpoint `
-            -Phase initial `
-            -FixtureRoot $FixtureRoot `
-            -LocalAppData $env:LOCALAPPDATA))
+        $flow.checkpoints = @($InitialFixture.checkpoints)
         if ($RawEvidence) {
             $flow['raw_environment'] = Get-VmAutomatedEnvironment `
                 -Process $Process `
                 -WindowHandle ([IntPtr]$MainWindow.Current.NativeWindowHandle) `
                 -FixtureRoot $FixtureRoot
-            $flow['raw_checkpoints'] = @((Get-VmAutomatedCheckpoint `
-                -Phase initial `
-                -FixtureRoot $FixtureRoot `
-                -LocalAppData $env:LOCALAPPDATA))
+            $flow['raw_checkpoints'] = @($InitialFixture.raw_checkpoints)
         }
 
         $flow.failure_reason = 'file_add_failed'
@@ -174,7 +197,7 @@
             -Window $MainWindow `
             -Process $Process `
             -ExpectedSession $ExpectedSession `
-            -Root $Root `
+            -Root $OutputRoot `
             -Leaf 'rename-preview.png' `
             -Label 'production rename preview' `
             -ForegroundObservations $foregroundObservations))
@@ -205,7 +228,7 @@
             -Window $confirmation `
             -Process $Process `
             -ExpectedSession $ExpectedSession `
-            -Root $Root `
+            -Root $OutputRoot `
             -Leaf 'apply-confirmation.png' `
             -Label 'apply confirmation task dialog' `
             -ForegroundObservations $foregroundObservations))
@@ -340,7 +363,7 @@
             $flow.failure_reason = 'production_flow_error'
         }
         $diagnosticLeaf = 'gui-flow-error.txt'
-        $diagnosticPath = Join-Path $Root $diagnosticLeaf
+        $diagnosticPath = Join-Path $OutputRoot $diagnosticLeaf
         $diagnosticText = $_ | Out-String -Width 4096
         foreach ($invocation in $pendingInvocations) {
             if ($invocation.completed) { continue }
@@ -356,8 +379,7 @@
     finally {
         $incomplete = @($pendingInvocations | Where-Object { -not $_.completed })
         if ($incomplete.Count -gt 0 -and -not $Process.HasExited) {
-            Invoke-TaskkillTree -ProcessId $Process.Id
-            [void]$Process.WaitForExit(10000)
+            Stop-JobBoundProcess -State $OwnedProcess
         }
         foreach ($invocation in $incomplete) {
             try {
@@ -411,7 +433,9 @@ function Invoke-GuiSmoke {
     param(
         [Parameter(Mandatory)][object] $Application,
         [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string] $OutputRoot,
         [Parameter(Mandatory)][string] $RuntimeRoot,
+        [string] $FixtureParentRoot,
         [Parameter(Mandatory)][int] $ExpectedSession,
         [Parameter(Mandatory)][int] $TimeoutSeconds,
         [switch] $RawEvidence
@@ -421,6 +445,7 @@ function Invoke-GuiSmoke {
         file = $Application.file
         sha256 = $Application.sha256
         status = 'failed'
+        job_cleanup = $false
         scope = 'launch-window-screenshot-normal-close'
         exit_code = $null
         window_class = $null
@@ -444,7 +469,7 @@ function Invoke-GuiSmoke {
     $captureState = [pscustomobject]@{ bitmap = $null; graphics = $null }
     $flowFixtureRoot = $null
     $screenshotLeaf = 'main-workbench.png'
-    $screenshotPath = Join-Path $Root $screenshotLeaf
+    $screenshotPath = Join-Path $OutputRoot $screenshotLeaf
     try {
         $applicationPath = Join-Path $Root $Application.file
         Assert-OrdinaryFile -Path $applicationPath -Label 'application'
@@ -458,8 +483,26 @@ function Invoke-GuiSmoke {
             return [pscustomobject]$row
         }
         $caseRoot = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'gui'
+        $flowFixturePath = Join-Path $caseRoot 'rename-flow'
+        if (Test-Path -LiteralPath $flowFixturePath) {
+            throw 'The production flow fixture already exists before application launch.'
+        }
+        $runnerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        if ($RawEvidence -and [string]::IsNullOrWhiteSpace($FixtureParentRoot)) {
+            throw 'Raw production flow evidence requires a protected task-directory fixture parent.'
+        }
+        $flowFixtureParent = if ($FixtureParentRoot) { $FixtureParentRoot } else { $caseRoot }
+        $flowFixtureRoot = New-ObserverFixtureDirectory `
+            -Parent $flowFixtureParent `
+            -Leaf 'production-flow-fixture' `
+            -RunnerSid $runnerSid
         Invoke-WithIsolatedEnvironment -RuntimeRoot $caseRoot -Action {
-            $processState.process = Start-OwnedProcess `
+            $initialFlowFixture = Initialize-ProductionRenameFlowFixture `
+                -FixtureRoot $flowFixtureRoot `
+                -ApplicationRoot $Root `
+                -LocalAppData $env:LOCALAPPDATA `
+                -RawEvidence:$RawEvidence
+            $processState.process = Start-JobBoundProcess `
                 -FilePath $applicationPath `
                 -Arguments '' `
                 -WorkingDirectory $Root
@@ -605,13 +648,13 @@ function Invoke-GuiSmoke {
                 -ExpectedClassName 'DarkReNamerWindow' `
                 -ExpectedTitle 'DarkReNamer' `
                 -Label 'production main window'
-            $flowFixtureRoot = New-PrivateDirectory -Parent $caseRoot -Leaf 'rename-flow'
             $row.flow = Invoke-ProductionRenameFlow `
-                -Process $processState.process.process `
+                -OwnedProcess $processState.process `
+                -InitialFixture $initialFlowFixture `
                 -MainWindow $mainAutomationWindow `
                 -MainWindowHandle $handle `
                 -FixtureRoot $flowFixtureRoot `
-                -Root $Root `
+                -OutputRoot $OutputRoot `
                 -ExpectedSession $ExpectedSession `
                 -TimeoutSeconds $TimeoutSeconds `
                 -RawEvidence:$RawEvidence
@@ -649,6 +692,12 @@ function Invoke-GuiSmoke {
                 $row.failure_reason = 'app_exit_failed'
                 return
             }
+            $jobCleanup = Complete-AcceptanceOwnedProcessJob -Owned $processState.process
+            $row.job_cleanup = $jobCleanup.status -ceq 'clean'
+            if (-not $row.job_cleanup) {
+                $row.failure_reason = 'process_job_cleanup_failed'
+                return
+            }
             $row.flow.checkpoints += (Get-FlowCheckpoint `
                 -Phase post_close `
                 -FixtureRoot $flowFixtureRoot `
@@ -672,15 +721,19 @@ function Invoke-GuiSmoke {
         if ($null -ne $processState.process) {
             try {
                 $processState.process.process.Refresh()
-                if (-not $processState.process.process.HasExited) {
-                    Invoke-TaskkillTree -ProcessId $processState.process.process.Id
-                    if (-not $processState.process.process.WaitForExit(10000)) {
-                        throw 'Owned application process did not terminate.'
+                if (-not $processState.process.job_closed) {
+                    $jobCleanup = Complete-AcceptanceOwnedProcessJob `
+                        -Owned $processState.process -StopActive
+                    $row.job_cleanup = $jobCleanup.status -ceq 'clean'
+                    if (-not $jobCleanup.job_empty -or -not $jobCleanup.job_closed) {
+                        throw 'The production GUI process job did not close cleanly.'
                     }
                     if ($RawEvidence -and $row.Contains('process_lifecycle')) {
-                        $row.process_lifecycle.exit_observed = $true
-                        $row.process_lifecycle.exit_method = 'forced-termination'
-                        $row.process_lifecycle.exit_code = [int]$processState.process.process.ExitCode
+                        if ($jobCleanup.forced_termination -and -not $row.process_lifecycle.exit_observed) {
+                            $row.process_lifecycle.exit_observed = $true
+                            $row.process_lifecycle.exit_method = 'forced-termination'
+                            $row.process_lifecycle.exit_code = [int]$processState.process.process.ExitCode
+                        }
                     }
                 }
             }
@@ -688,14 +741,19 @@ function Invoke-GuiSmoke {
                 $row.status = 'failed'
                 $row.failure_reason = 'process_cleanup_failed'
             }
-            $processState.process.process.Dispose()
+            try { $processState.process.process.Dispose() } catch {}
         }
         if ($null -ne $flowFixtureRoot -and (Test-Path -LiteralPath $flowFixtureRoot)) {
             try {
-                $fixtureItem = Get-Item -LiteralPath $flowFixtureRoot -Force
-                if (($fixtureItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                    throw 'Production flow fixture became a reparse point.'
+                if ($null -ne $processState.process -and -not $processState.process.job_closed) {
+                    throw 'The production flow fixture cannot be removed before its process job is closed.'
                 }
+                if ($null -ne $processState.process -and
+                    (-not $processState.process.job_cleanup_recorded -or
+                        $processState.process.job_cleanup_record.status -cne 'clean')) {
+                    throw 'The production flow fixture cannot be removed after unclean process job cleanup.'
+                }
+                Assert-OrdinaryDirectoryTree -Path $flowFixtureRoot
                 Remove-Item -LiteralPath $flowFixtureRoot -Recurse -Force
                 if (Test-Path -LiteralPath $flowFixtureRoot) {
                     throw 'Production flow fixture cleanup was incomplete.'

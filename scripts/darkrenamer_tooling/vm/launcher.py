@@ -40,6 +40,9 @@ CANDIDATE_HARNESS_FILES = (
     'validate-release-candidate-metadata.ps1',
     'measure-windows-binary.ps1',
 )
+CORE_RESULT_MAXIMUM_BYTES = 4 * 1024 * 1024
+TEST_OUTPUT_CHANNEL_MAXIMUM_BYTES = 4 * 1024 * 1024
+TEST_OUTPUT_AGGREGATE_MAXIMUM_BYTES = 64 * 1024 * 1024
 
 
 def sha256(path):
@@ -47,7 +50,7 @@ def sha256(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
-def read_json_strict(path):
+def read_json_strict(path, maximum_bytes=None):
     def unique_object(pairs):
         value = {}
         for key, item in pairs:
@@ -55,7 +58,15 @@ def read_json_strict(path):
                 raise ValueError('JSON contains a duplicate field: ' + key)
             value[key] = item
         return value
-    return json.loads(Path(path).read_text(encoding='utf-8-sig'), object_pairs_hook=unique_object)
+    path = Path(path)
+    with path.open('rb') as stream:
+        size = os.fstat(stream.fileno()).st_size
+        if maximum_bytes is not None and (size < 1 or size > maximum_bytes):
+            raise ValueError('JSON input exceeds its size bound.')
+        data = stream.read() if maximum_bytes is None else stream.read(maximum_bytes + 1)
+    if maximum_bytes is not None and len(data) != size:
+        raise ValueError('JSON input changed or exceeded its size bound while reading.')
+    return json.loads(data.decode('utf-8-sig'), object_pairs_hook=unique_object)
 
 
 def copy_frozen_file(source, destination, expected_sha256, label):
@@ -614,7 +625,8 @@ def run_controller(root, args, defaults=None, pwsh=None):
         cwd = root if args.ssh_host else Path('/mnt/c')
         subprocess.run(command, cwd=cwd, text=True, check=True)
         if desktop and args.task_kind == 'core':
-            result = read_json_strict(root / 'result.json')
+            result = read_json_strict(
+                root / 'result.json', maximum_bytes=CORE_RESULT_MAXIMUM_BYTES)
             if result.get('gui', {}).get('window_dpi') != desktop['expectedDpi']:
                 raise ValueError('Production window DPI differs from the requested RDP scale.')
 
@@ -935,13 +947,28 @@ def verify_result(root, manifest, result, expected_transport_kind=None, expected
         raise ValueError('VM result has missing, duplicate, or unexpected test binaries.')
     passed = result.get('status') == 'passed'
     total = 0
+    output_bytes = 0
     for row in rows:
+        if row.get('job_cleanup') is not True:
+            passed = False
         if row.get('sha256') != expected[row['file']]['sha256']:
             raise ValueError('VM test executable digest differs from the bundle.')
         checked_artifact(root, expected[row['file']])
         for channel in ('stdout', 'stderr'):
-            checked_artifact(root, row[channel])
-        output = (root / row['stdout']['file']).read_text(encoding='utf-8-sig', errors='replace')
+            record = row.get(channel)
+            if (not isinstance(record, dict) or
+                    type(record.get('bytes')) is not int or record['bytes'] < 0 or
+                    record['bytes'] > TEST_OUTPUT_CHANNEL_MAXIMUM_BYTES or
+                    output_bytes > TEST_OUTPUT_AGGREGATE_MAXIMUM_BYTES - record['bytes']):
+                raise ValueError('VM test output exceeds its size bound.')
+            artifact = root / leaf(record['file'])
+            if (artifact.is_symlink() or not artifact.is_file() or
+                    artifact.stat().st_size != record['bytes']):
+                raise ValueError('VM test output differs from its recorded byte count.')
+            checked_artifact(root, record)
+            output_bytes += record['bytes']
+        output = (root / row['stdout']['file']).read_bytes().decode(
+            'utf-8-sig', errors='replace')
         summaries = re.findall(r'^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored; \d+ measured; (\d+) filtered out;', output, re.MULTILINE)
         counts = [row.get(key) for key in ('passed', 'failed', 'ignored')]
         if summaries:
@@ -959,6 +986,8 @@ def verify_result(root, manifest, result, expected_transport_kind=None, expected
     application = application_record(manifest)
     checked_artifact(root, application)
     gui = result.get('gui', {})
+    if gui.get('job_cleanup') is not True:
+        passed = False
     if gui.get('file') != application['file'] or gui.get('sha256') != application['sha256']:
         raise ValueError('VM GUI result differs from the application artifact.')
     if gui.get('status') != 'passed':
@@ -1450,7 +1479,8 @@ def main(repo, argv=None, tooling=None):
         result_path = root / 'result.json'
         if not result_path.is_file():
             raise RuntimeError('The VM did not return a test result. Inspect the external transport result/logs.')
-        result = read_json_strict(result_path)
+        result = read_json_strict(
+            result_path, maximum_bytes=CORE_RESULT_MAXIMUM_BYTES)
         verified = verify_result(root, manifest, result, transport_kind, args.expected_vm_id)
         total = sum(row.get('passed') or 0 for row in result['tests'])
         print(('PASS' if transport_ok and verified else 'FAIL') + ': ' + str(total) +

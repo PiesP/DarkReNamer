@@ -472,6 +472,12 @@ class Fixture:
         if sync_observations:
             observations["scenario"] = raw["assertions"]["scenario"]
         write_json(observations_path, observations)
+        raw["acceptance_observations"] = observations
+        raw["observations"] = {
+            "file": "acceptance-observations.json",
+            "sha256": digest(observations_path.read_bytes()),
+        }
+        write_json(raw_path, raw)
         files = []
         for path in sorted(output.iterdir()):
             if path.name == "run-result.json":

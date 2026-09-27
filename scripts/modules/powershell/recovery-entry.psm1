@@ -41,8 +41,12 @@ function Invoke-DrWindowsVmRecoveryAcceptance {
     [Parameter(Mandatory)]
     [string] $OutputRoot,
 
+    [string] $EvidenceRoot,
+
     [Parameter(Mandatory)]
     [string] $PrivateEvidenceRoot,
+
+    [string] $RuntimeRoot,
 
     [Parameter(Mandatory)]
     [ValidatePattern('^[0-9a-f]{64}$')]
@@ -68,6 +72,7 @@ function Invoke-DrWindowsVmRecoveryAcceptance {
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:AcceptanceProcessSequence = 0
+$script:AcceptanceProcessJobCleanup = [Collections.Generic.List[object]]::new()
 
 
 $requestedBundleRoot = $BundleRoot
@@ -96,19 +101,62 @@ if ($ValidateOnly) {
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     throw 'Recovery acceptance execution requires Windows.'
 }
-$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-$principal = [Security.Principal.WindowsPrincipal]::new($identity)
-if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw 'Recovery acceptance must run with a non-elevated token.'
-}
+Assert-VmObserverExecutionContext -ExpectedSessionId $ExpectedSessionId
 $currentSession = [Diagnostics.Process]::GetCurrentProcess().SessionId
-if ($currentSession -ne $ExpectedSessionId) {
-    throw 'Recovery acceptance is in an unexpected desktop session.'
-}
+Protect-CurrentRunnerProcess
 
-$evidenceRoot = New-AcceptanceOutputDirectory -Parent $OutputRoot
+$evidenceParent = $OutputRoot
+if ($EvidenceRoot) {
+    $outputPath = [IO.Path]::GetFullPath($OutputRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    $evidencePath = [IO.Path]::GetFullPath($EvidenceRoot)
+    $evidenceItem = Get-Item -LiteralPath $evidencePath -Force -ErrorAction Stop
+    if (-not $evidencePath.StartsWith($outputPath, [StringComparison]::OrdinalIgnoreCase) -or
+        [IO.Path]::GetFullPath((Split-Path -Parent $evidencePath)) -cne
+            [IO.Path]::GetFullPath($OutputRoot) -or
+        (Split-Path -Leaf $evidencePath) -cnotmatch '^recovery-acceptance-[0-9a-f]{32}$' -or
+        -not $evidenceItem.PSIsContainer -or
+        ($evidenceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The controller-selected recovery evidence directory is unsafe.'
+    }
+    $evidenceParent = $evidencePath
+}
+$evidenceRoot = New-AcceptanceOutputDirectory -Parent $evidenceParent
 $privateRoot = New-AcceptancePrivateEvidenceDirectory -Parent $PrivateEvidenceRoot
-$runtimeRoot = New-PrivateDirectory -Parent $evidenceRoot -Leaf 'runtime'
+$summaryPath = Join-Path $evidenceRoot 'summary.json'
+Initialize-TrustedResultWriter `
+    -Root $inputs.verified.root `
+    -ResultRoot $evidenceRoot `
+    -Path $summaryPath
+if ([string]::IsNullOrWhiteSpace($RuntimeRoot) -or
+    -not [IO.Path]::IsPathRooted($RuntimeRoot)) {
+    throw 'Recovery acceptance requires the controller-provisioned candidate runtime directory.'
+}
+$runtimeItem = Get-Item -LiteralPath $RuntimeRoot -Force -ErrorAction Stop
+if (-not $runtimeItem.PSIsContainer -or
+    ($runtimeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw 'Recovery candidate runtime root is unsafe.'
+}
+$runtimeRoot = $runtimeItem.FullName
+$runtimeCursor = $runtimeItem
+while ($null -ne $runtimeCursor) {
+    if (($runtimeCursor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Recovery candidate runtime path traverses a reparse point.'
+    }
+    $runtimeCursor = $runtimeCursor.Parent
+}
+$candidateOutputParentRoot = [IO.Path]::GetDirectoryName(
+    [IO.Path]::GetFullPath($OutputRoot)
+)
+$verifiedBundleRoot = [IO.Path]::GetFullPath($inputs.verified.root)
+if ([IO.Path]::GetFileName($verifiedBundleRoot) -cne 'bundle' -or
+    [IO.Path]::GetFileName([IO.Path]::GetFullPath($OutputRoot)) -cne 'out' -or
+    -not [string]::Equals(
+        [IO.Path]::GetDirectoryName($verifiedBundleRoot),
+        $candidateOutputParentRoot,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+    throw 'Recovery acceptance requires a bundle and output directory under the same protected task root.'
+}
 $result = [ordered]@{
     schema_version = if ($inputs.contract.lane -ceq 'candidate-gui-only') { 2 } else { 1 }
     application = [ordered]@{
@@ -162,6 +210,7 @@ try {
             -EvidenceRoot $evidenceRoot `
             -PrivateRoot $privateRoot `
             -RuntimeRoot $runtimeRoot `
+            -CandidateOutputParentRoot $candidateOutputParentRoot `
             -Count $FixtureCount `
             -Mode $Mode `
             -SessionId $currentSession `
@@ -226,6 +275,7 @@ finally {
     $ownedProcessesAfter = $null
     $journalAfter = $null
     $runtimeRootAfter = $null
+    $candidateExportRootAfter = $null
     try {
         $ownedProcessesAfter = @(
             Get-VmAutomatedOwnedProcessInventory -Root $inputs.verified.root
@@ -245,8 +295,20 @@ finally {
         $result.status = 'failed'
         $result.failure_reason = 'journal_cleanup_observation_failed'
     }
+    $processJobsClosed = $false
+    try {
+        [void](Assert-AcceptanceProcessJobLedgerClosed)
+        $processJobsClosed = $true
+    }
+    catch {
+        $result.status = 'failed'
+        $result.failure_reason = 'process_job_cleanup_failed'
+    }
     if (Test-Path -LiteralPath $runtimeRoot -PathType Container) {
         try {
+            if (-not $processJobsClosed) {
+                throw 'Candidate process jobs are not proven closed; runtime evidence was retained.'
+            }
             $runtimeItem = Get-Item -LiteralPath $runtimeRoot -Force
             if (($runtimeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
                 throw 'The owned runtime root became a reparse point.'
@@ -273,14 +335,42 @@ finally {
         $result.status = 'failed'
         $result.failure_reason = 'runtime_cleanup_observation_failed'
     }
+    try {
+        $candidateExportRoot = Join-Path $candidateOutputParentRoot 'recovery-export'
+        if (Test-Path -LiteralPath $candidateExportRoot) {
+            $candidateExportItem = Get-Item -LiteralPath $candidateExportRoot -Force -ErrorAction Stop
+            $candidateExportRootAfter = [ordered]@{
+                exists = $true
+                ordinary_directory = [bool]($candidateExportItem.PSIsContainer -and
+                    ($candidateExportItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0)
+                entries = @(
+                    if ($candidateExportItem.PSIsContainer -and
+                        ($candidateExportItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+                        Get-ChildItem -LiteralPath $candidateExportRoot -Force -ErrorAction Stop |
+                            ForEach-Object { [string]$_.Name }
+                    }
+                )
+            }
+        }
+        else {
+            $candidateExportRootAfter = [ordered]@{ exists = $false; ordinary_directory = $true; entries = @() }
+        }
+    }
+    catch {
+        $result.status = 'failed'
+        $result.failure_reason = 'candidate_export_cleanup_observation_failed'
+    }
     $result.raw_cleanup = [ordered]@{
         owned_processes_after = $ownedProcessesAfter
         runtime_root_after = $runtimeRootAfter
+        candidate_export_root_after = $candidateExportRootAfter
         journal_after = [ordered]@{ entries = $journalAfter }
     }
     if ($null -eq $ownedProcessesAfter -or $ownedProcessesAfter.Count -ne 0 -or
         $null -eq $runtimeRootAfter -or $runtimeRootAfter.exists -or
-        @($runtimeRootAfter.entries).Count -ne 0) {
+        @($runtimeRootAfter.entries).Count -ne 0 -or
+        $null -eq $candidateExportRootAfter -or $candidateExportRootAfter.exists -or
+        @($candidateExportRootAfter.entries).Count -ne 0) {
         $result.status = 'failed'
         if ($null -eq $result.failure_reason) {
             $result.failure_reason = 'raw_cleanup_incomplete'
@@ -315,7 +405,7 @@ finally {
             $result.failure_reason = 'private_evidence_index_failed'
         }
     }
-    Write-AcceptanceUtf8Json -Path (Join-Path $evidenceRoot 'summary.json') -Value $result
+    Write-ResultDocument -Root $inputs.verified.root -Path $summaryPath -Result $result
 }
 Write-Host "Recovery acceptance evidence: $evidenceRoot"
 if ($result.status -cne 'passed') {

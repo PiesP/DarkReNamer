@@ -165,7 +165,15 @@ class PredicateTests(unittest.TestCase):
              'runtime_root_after': {'exists': False, 'entries': []},
              'journal_after': {'entries': []}},
             {'scheduled_task_present': False, 'guest_root_present': False,
-             'owned_processes_after': []},
+             'trusted_task_root_present': False, 'process_jobs_closed': True,
+             'runner_process_inventory_complete': True,
+             'unexpected_runner_tasks': [], 'unexpected_runner_processes': [],
+             'unexpected_runner_tasks_after_intervention': [],
+             'unexpected_runner_processes_after_intervention': [],
+             'unexpected_runner_tasks_after_delete': [],
+             'unexpected_runner_processes_after_delete': [],
+             'removed_runner_tasks': [], 'terminated_runner_processes': [],
+             'resource_cleanup_errors': [], 'owned_processes_after': []},
         )
 
     def lifecycle(self):
@@ -173,6 +181,17 @@ class PredicateTests(unittest.TestCase):
                 'executable_path': r'C:\bundle\DarkReNamer.exe',
                 'executable_sha256': self.exe_sha, 'start_observed': True,
                 'exit_observed': True, 'exit_code': 0, 'exit_method': 'normal-close'}
+
+    @staticmethod
+    def process_job_cleanup():
+        return [{'pid': 1234,
+                 'process_start_time_utc_ticks': '639000000000000000',
+                 'job_empty': True, 'job_closed': True, 'capture_complete': True,
+                 'active_processes_at_primary_exit': None, 'had_survivors': False,
+                 'forced_termination': False, 'active_processes_at_close': 0,
+                 'active_processes_at_stop': None, 'active_process_ids_at_stop': [],
+                 'total_processes_at_stop': None, 'primary_process_active_at_stop': None,
+                 'termination_exit_code': None, 'status': 'clean', 'error': None}]
 
     @staticmethod
     def fixture(name):
@@ -194,6 +213,7 @@ class PredicateTests(unittest.TestCase):
                   'product': deepcopy(self.bundle['product']),
                   'harness': deepcopy(self.bundle['harness']), 'target': self.bundle['target'],
                   'gui': {'flow': raw, 'process_lifecycle': self.lifecycle()},
+                  'process_job_cleanup': self.process_job_cleanup(),
                   'raw_cleanup': guest}
         return result, {'raw_cleanup': host}
 
@@ -201,7 +221,7 @@ class PredicateTests(unittest.TestCase):
         result, transport = self.core_records()
         verify_core_execution(result, self.bundle, transport, self.target, keyboard=False)
         mutations = ('boolean-pid', 'foreign-pid', 'missing-checkpoint', 'journal-residue',
-                     'host-residue')
+                     'host-residue', 'missing-process-job', 'open-process-job', 'foreign-job-pid')
         for mutation in mutations:
             changed_result, changed_transport = deepcopy(result), deepcopy(transport)
             changed_result['passed'] = True
@@ -214,6 +234,12 @@ class PredicateTests(unittest.TestCase):
             elif mutation == 'journal-residue':
                 changed_result['raw_cleanup']['journal_after']['entries'] = [
                     {'name': 'active.drj', 'kind': 'file', 'bytes': 1}]
+            elif mutation == 'missing-process-job':
+                changed_result.pop('process_job_cleanup')
+            elif mutation == 'open-process-job':
+                changed_result['process_job_cleanup'][0]['job_closed'] = False
+            elif mutation == 'foreign-job-pid':
+                changed_result['process_job_cleanup'][0]['pid'] = 99
             else:
                 changed_transport['raw_cleanup']['scheduled_task_present'] = True
             with self.subTest(mutation=mutation), self.assertRaises(EvidenceError):

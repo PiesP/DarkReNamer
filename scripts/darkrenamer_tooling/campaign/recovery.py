@@ -13,7 +13,9 @@ from pathlib import PurePosixPath
 import re
 from typing import Protocol
 
-from darkrenamer_tooling.campaign.planning import verify_process_lifecycle
+from darkrenamer_tooling.campaign.planning import (
+    verify_process_job_cleanup, verify_process_lifecycle,
+)
 from darkrenamer_tooling.contracts.binding import verify_result_binding
 from darkrenamer_tooling.contracts.platform import (
     require_fixture_root, verify_cleanup, verify_environment,
@@ -199,6 +201,8 @@ class Process:
     start_ticks: int
     start_observed: int
     exit_observed: int
+    exit_code: int
+    termination: dict | None
     environment: dict
 
 
@@ -291,7 +295,7 @@ def _processes(private: PrivateEvidence, references: object, *, roles: list[str]
         exit_row = require_exact_keys(private.json(references[offset * 2 + 1], exit_relative,
                                                     boundary=exit_boundary),
                                       {"schema_version", "boundary", "observed_utc_ticks", "binding",
-                                       "lifecycle"}, "Recovery process exit")
+                                       "termination", "lifecycle"}, "Recovery process exit")
         require_int(exit_row["schema_version"], 1, 1, "Process exit schema")
         require(exit_row["boundary"] == exit_boundary and exit_row["binding"] == binding,
                 "Process exit differs from its paired immutable start binding.")
@@ -302,8 +306,18 @@ def _processes(private: PrivateEvidence, references: object, *, roles: list[str]
                 "Process exit lifecycle belongs to another process.")
         exit_observed = _ticks(exit_row["observed_utc_ticks"], "Process exit observation")
         require(start_observed <= exit_observed, "Process exit was observed before its start observation.")
+        termination = exit_row["termination"]
+        if method == "forced-termination":
+            verify_process_job_cleanup(
+                [termination],
+                expected_process=(pid, creation),
+                expected_termination=(pid, creation, int(exit_row["lifecycle"]["exit_code"])),
+            )
+        else:
+            require(termination is None, "Normally closed process contains a termination receipt.")
         result.append(Process(sequence, role, pid, session, creation, start_observed,
-                              exit_observed, environment))
+                              exit_observed, int(exit_row["lifecycle"]["exit_code"]),
+                              termination, environment))
     return result
 
 
@@ -493,6 +507,10 @@ def _worker(private: PrivateEvidence, result: dict, bundle: dict, target: dict, 
     process = _processes(private, mode["processes"], roles=["rename-worker"], methods=[method],
                          executable_sha256=bundle["product"]["application"]["sha256"],
                          target=target, first_sequence=1)[0]
+    verify_process_job_cleanup(
+        result.get("process_job_cleanup"),
+        expected_processes=[(process.pid, process.start_ticks)],
+    )
     state_name = "workerclose" if close else "workercancellation"
     states = require_exact_keys(mode.get("raw_states"), {"initial", "restored"},
                                 "Worker state references")
@@ -651,6 +669,17 @@ def _process_crash(private: PrivateEvidence, result: dict, bundle: dict, target:
                                   methods=["normal-close", "normal-close", "normal-close"],
                                   executable_sha256=bundle["product"]["application"]["sha256"],
                                   target=target, first_sequence=5)
+    cleanup_rows = verify_process_job_cleanup(
+        result.get("process_job_cleanup"),
+        expected_process=(processes[0].pid, processes[0].start_ticks),
+        expected_termination=(processes[0].pid, processes[0].start_ticks,
+                              processes[0].exit_code),
+        expected_processes=[(process.pid, process.start_ticks)
+                            for process in processes + intent_processes],
+    )
+    require(processes[0].termination is not None and
+            processes[0].termination in cleanup_rows,
+            "Private crash-stop receipt differs from the protected result cleanup ledger.")
     require(processes[-1].exit_observed <= intent_processes[0].start_observed,
             "Intent-only processes did not follow the completed crash recovery sequence.")
     intent_specs = {
@@ -734,6 +763,7 @@ def verify_recovery_execution(reader: EvidenceReader, result: dict, bundle: dict
     require(type(result) is dict and type(bundle) is dict and type(transport) is dict and
             type(target) is dict, "Recovery execution inputs must be objects.")
     verify_result_binding(result, bundle, observer="recovery")
+    verify_process_job_cleanup(result.get("process_job_cleanup"))
     require(result.get("selected_mode") in {"ProcessCrash", "WorkerCancellation", "WorkerClose"},
             "Recovery execution mode is unsupported or unavailable.")
     private = PrivateEvidence(reader, result, run_prefix)
@@ -747,7 +777,8 @@ def verify_recovery_execution(reader: EvidenceReader, result: dict, bundle: dict
         targets = _worker(private, result, bundle, target, close=False)
     else:
         targets = _worker(private, result, bundle, target, close=True)
-    verify_cleanup(result.get("raw_cleanup"), transport.get("raw_cleanup"))
+    verify_cleanup(result.get("raw_cleanup"), transport.get("raw_cleanup"),
+                   require_candidate_export=True)
     private.finish()
     require(targets <= RECOVERY_TARGETS, "Recovery verifier derived an unknown target.")
     return targets
