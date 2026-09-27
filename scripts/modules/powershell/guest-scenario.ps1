@@ -429,6 +429,29 @@ function Get-ForegroundObservation {
         window_class = $windowClass
     }
 }
+function Set-GuiSmokeFailureDetail {
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary] $Row,
+        [Parameter(Mandatory)][System.Management.Automation.ErrorRecord] $ErrorRecord
+    )
+
+    $exception = $ErrorRecord.Exception
+    $message = [string]$exception.Message
+    if ($message.Length -gt 1024) {
+        $message = $message.Substring(0, 1024)
+    }
+    $nativeError = if ($exception -is [ComponentModel.Win32Exception]) {
+        [int]$exception.NativeErrorCode
+    }
+    else {
+        $null
+    }
+    $Row['error_detail'] = [ordered]@{
+        exception_type = [string]$exception.GetType().FullName
+        message = $message
+        native_error = $nativeError
+    }
+}
 function Invoke-GuiSmoke {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -463,6 +486,7 @@ function Invoke-GuiSmoke {
         }
         screenshot = $null
         flow = $null
+        error_detail = $null
         failure_reason = 'process_start_failed'
     }
     $processState = [pscustomobject]@{ process = $null }
@@ -714,6 +738,7 @@ function Invoke-GuiSmoke {
     }
     catch {
         $row.failure_reason = 'gui_error'
+        Set-GuiSmokeFailureDetail -Row $row -ErrorRecord $_
     }
     finally {
         if ($null -ne $captureState.graphics) { $captureState.graphics.Dispose() }
@@ -742,6 +767,9 @@ function Invoke-GuiSmoke {
                 $row.failure_reason = 'process_cleanup_failed'
             }
             try { $processState.process.process.Dispose() } catch {}
+        }
+        else {
+            $row.job_cleanup = $true
         }
         if ($null -ne $flowFixtureRoot -and (Test-Path -LiteralPath $flowFixtureRoot)) {
             try {

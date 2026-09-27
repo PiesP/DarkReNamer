@@ -681,6 +681,9 @@ try {
         'ResumeThread(created.hThread)',
         'output_limit_exceeded',
         'process_job_not_empty',
+        'function Set-GuiSmokeFailureDetail',
+        'error_detail = $null',
+        '$row.job_cleanup = $true',
         'job_active_processes_at_primary_exit',
         'WaitForEmpty(1000)',
         'GetSoleActiveProcessId()',
@@ -756,6 +759,24 @@ try {
         $primaryCleanupFailure.failure_reason -cne 'process_job_cleanup_failed' -or
         $primaryCleanupFailure.cleanup_failure_reason) {
         throw 'Cleanup failures must preserve an earlier process failure reason and retain cleanup failure separately.'
+    }
+    $guiFailureDetail = [ordered]@{ error_detail = $null }
+    try { throw [ComponentModel.Win32Exception]::new(5) }
+    catch {
+        Set-GuiSmokeFailureDetail -Row $guiFailureDetail -ErrorRecord $_
+    }
+    if ($guiFailureDetail.error_detail.exception_type -cne 'System.ComponentModel.Win32Exception' -or
+        $guiFailureDetail.error_detail.native_error -ne 5 -or
+        $guiFailureDetail.error_detail.message.Length -gt 1024) {
+        throw 'GUI smoke failure details must preserve exception type and native error in a bounded record.'
+    }
+    $longGuiFailureDetail = [ordered]@{ error_detail = $null }
+    try { throw [Exception]::new('x' * 2048) }
+    catch {
+        Set-GuiSmokeFailureDetail -Row $longGuiFailureDetail -ErrorRecord $_
+    }
+    if ($longGuiFailureDetail.error_detail.message.Length -ne 1024) {
+        throw 'GUI smoke failure messages must be capped at 1024 characters.'
     }
     if ($runnerText.Contains('maximumProcessIds') -or
         $runnerText.Contains('capacity = capacity * 2')) {
