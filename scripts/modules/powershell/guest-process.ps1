@@ -1119,13 +1119,20 @@ public static class DarkReNamerVmRunnerSecurity {
         IntPtr handle, int objectType, uint information, IntPtr owner,
         IntPtr group, IntPtr dacl, IntPtr sacl);
 
-    public static void ProtectCurrentProcess() {
+    public static void ProtectCurrentProcess(string runnerSid) {
+        if (String.IsNullOrWhiteSpace(runnerSid))
+            throw new ArgumentException("The VM runner SID is required.", "runnerSid");
+        string validatedRunnerSid =
+            new System.Security.Principal.SecurityIdentifier(runnerSid).Value;
         IntPtr process = OpenProcess(PROCESS_WRITE_DAC, false, GetCurrentProcessId());
         if (process == IntPtr.Zero)
             throw new Win32Exception(Marshal.GetLastWin32Error());
         try {
+            // The medium linked token is not the elevated process object's owner.
+            // Grant its verified SID query-only access while denying mutation rights.
             ApplyProtectedDacl(process, SE_KERNEL_OBJECT,
-                "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x00101000;;;OW)");
+                "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x00101000;;;" +
+                validatedRunnerSid + ")(A;;0x00101000;;;OW)");
         }
         finally {
             CloseHandle(process);
@@ -1218,7 +1225,8 @@ public static class DarkReNamerVmRunnerSecurity {
 
 function Protect-CurrentRunnerProcess {
     Initialize-JobBoundProcessRuntime
-    [DarkReNamerVmRunnerSecurity]::ProtectCurrentProcess()
+    $runnerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    [DarkReNamerVmRunnerSecurity]::ProtectCurrentProcess($runnerSid)
     if ([Environment]::GetEnvironmentVariable('DARKRENAMER_VM_ELEVATED_OBSERVER') -ceq '1') {
         Test-MediumObserverBoundary
     }
