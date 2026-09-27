@@ -382,7 +382,8 @@ function Invoke-ObserverContextScenario {
         [Parameter(Mandatory)][string] $Appearance,
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
-        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures,
+        [AllowNull()][Collections.Generic.List[object]] $ProcessLifecycleObservations
     )
     $applicationPath = Join-Path $Verified.root $Verified.application.file
     $rawLayoutCandidate = $Verified.lane -ceq 'candidate-gui-only'
@@ -401,7 +402,7 @@ function Invoke-ObserverContextScenario {
     $rawMixedRun = $null
     $rawCaptureStart = $Captures.Count
     try {
-        $repeatedApplication = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'repeated-name GUI regression application'
+        $repeatedApplication = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'repeated-name GUI regression application' -ProcessLifecycleObservations $ProcessLifecycleObservations
         $appearanceSpec = Set-AcceptanceAppearance -Process $repeatedApplication.process -ExpectedSession $SessionId -MainWindowHandle ([IntPtr]$repeatedApplication.main_handle) -Appearance $Appearance
         $minimum = Ensure-AcceptanceMainWindowCaptureSize -MainWindow $repeatedApplication.main -Process $repeatedApplication.process -ExpectedSession $SessionId
         $environment = Get-ObserverEnvironmentMetadata -Application $repeatedApplication
@@ -514,7 +515,7 @@ function Invoke-ObserverContextScenario {
 
         $moveFixture = New-ObserverMoveFixture -RuntimeRoot $RuntimeRoot
         $rawCaptureStart = $Captures.Count
-        $moveApplication = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'movement GUI regression application'
+        $moveApplication = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'movement GUI regression application' -ProcessLifecycleObservations $ProcessLifecycleObservations
         $moveAppearance = Set-AcceptanceAppearance -Process $moveApplication.process -ExpectedSession $SessionId -MainWindowHandle ([IntPtr]$moveApplication.main_handle) -Appearance $Appearance
         $moveMinimum = Ensure-AcceptanceMainWindowCaptureSize -MainWindow $moveApplication.main -Process $moveApplication.process -ExpectedSession $SessionId
         if ($moveMinimum.dpi -ne $script:contract.expected_dpi) { throw 'Move context HWND DPI differs from the staged contract.' }
@@ -615,7 +616,7 @@ function Invoke-ObserverContextScenario {
 
         $mixedFixture = New-ObserverMixedFixture -RuntimeRoot $RuntimeRoot
         $rawCaptureStart = $Captures.Count
-        $mixedApplication = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'mixed GUI regression application'
+        $mixedApplication = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'mixed GUI regression application' -ProcessLifecycleObservations $ProcessLifecycleObservations
         $mixedAppearance = Set-AcceptanceAppearance -Process $mixedApplication.process -ExpectedSession $SessionId -MainWindowHandle ([IntPtr]$mixedApplication.main_handle) -Appearance $Appearance
         $mixedMinimum = Ensure-AcceptanceMainWindowCaptureSize -MainWindow $mixedApplication.main -Process $mixedApplication.process -ExpectedSession $SessionId
         if ($mixedMinimum.dpi -ne $script:contract.expected_dpi) { throw 'Mixed context HWND DPI differs from the staged contract.' }
@@ -804,6 +805,15 @@ function Invoke-ObserverContextScenario {
         foreach ($application in @($repeatedApplication, $moveApplication, $mixedApplication)) {
             if ($null -ne $application) {
                 $jobCleanup = Complete-AcceptanceOwnedProcessJob -Owned $application.owned -StopActive
+                if ($jobCleanup.forced_termination -and
+                    ($jobCleanup.termination_exit_code -is [int] -or
+                        $jobCleanup.termination_exit_code -is [long]) -and
+                    -not $application.process_lifecycle.exit_observed) {
+                    Complete-AcceptanceProcessLifecycle `
+                        -Lifecycle $application.process_lifecycle `
+                        -ExitMethod forced-termination `
+                        -ExitCode ([int]$jobCleanup.termination_exit_code)
+                }
                 if (-not $jobCleanup.job_empty -or -not $jobCleanup.job_closed) {
                     throw 'A context-scenario candidate process job did not close cleanly.'
                 }
@@ -820,7 +830,8 @@ function Invoke-ObserverStandardScenario {
         [Parameter(Mandatory)][string] $Appearance,
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
-        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures,
+        [AllowNull()][Collections.Generic.List[object]] $ProcessLifecycleObservations
     )
     $fixture = New-ObserverStandardFixture -RuntimeRoot $RuntimeRoot
     $rawLayoutCandidate = $Verified.lane -ceq 'candidate-gui-only'
@@ -832,7 +843,7 @@ function Invoke-ObserverStandardScenario {
         if ((Get-LowerSha256 -Path $applicationPath) -cne $Verified.application.sha256) {
             throw 'Application changed after bundle verification.'
         }
-        $application = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'standard GUI regression application'
+        $application = Start-AcceptanceApplication -FilePath $applicationPath -WorkingDirectory $Verified.root -SessionId $SessionId -WaitSeconds $WaitSeconds -Label 'standard GUI regression application' -ProcessLifecycleObservations $ProcessLifecycleObservations
         $appearanceSpec = Set-AcceptanceAppearance -Process $application.process -ExpectedSession $SessionId -MainWindowHandle ([IntPtr]$application.main_handle) -Appearance $Appearance
         $minimum = Ensure-AcceptanceMainWindowCaptureSize -MainWindow $application.main -Process $application.process -ExpectedSession $SessionId
         $environment = Get-ObserverEnvironmentMetadata -Application $application
@@ -930,6 +941,15 @@ function Invoke-ObserverStandardScenario {
     finally {
         if ($null -ne $application) {
             $jobCleanup = Complete-AcceptanceOwnedProcessJob -Owned $application.owned -StopActive
+            if ($jobCleanup.forced_termination -and
+                ($jobCleanup.termination_exit_code -is [int] -or
+                    $jobCleanup.termination_exit_code -is [long]) -and
+                -not $application.process_lifecycle.exit_observed) {
+                Complete-AcceptanceProcessLifecycle `
+                    -Lifecycle $application.process_lifecycle `
+                    -ExitMethod forced-termination `
+                    -ExitCode ([int]$jobCleanup.termination_exit_code)
+            }
             if (-not $jobCleanup.job_empty -or -not $jobCleanup.job_closed) {
                 throw 'A standard-scenario candidate process job did not close cleanly.'
             }

@@ -115,6 +115,15 @@ function Stop-AndDisposeAcceptanceOwnedProcess {
             throw 'The acceptance candidate is not owned by a process job.'
         }
         $cleanup = Complete-AcceptanceOwnedProcessJob -Owned $Owned -StopActive
+        if ($cleanup.forced_termination -and
+            ($cleanup.termination_exit_code -is [int] -or
+                $cleanup.termination_exit_code -is [long]) -and
+            $Owned.PSObject.Properties.Name -ccontains 'process_lifecycle') {
+            Complete-AcceptanceProcessLifecycle `
+                -Lifecycle $Owned.process_lifecycle `
+                -ExitMethod forced-termination `
+                -ExitCode ([int]$cleanup.termination_exit_code)
+        }
         if (-not $cleanup.job_empty -or -not $cleanup.job_closed) {
             throw 'The acceptance candidate process job did not close cleanly.'
         }
@@ -125,18 +134,75 @@ function Stop-AndDisposeAcceptanceOwnedProcess {
         }
     }
 }
+function New-AcceptanceProcessLifecycle {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][string] $ApplicationPath,
+        [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{64}$')][string] $ExecutableSha256
+    )
+
+    $ticks = $Application.owned.process_start_time_utc_ticks
+    if ($ticks -isnot [string] -or $ticks -cnotmatch '^[1-9][0-9]{0,18}$' -or
+        [decimal]$ticks -gt 3155378975999999999) {
+        throw 'The acceptance application has an invalid captured creation time.'
+    }
+    [ordered]@{
+        pid = [int]$Application.process.Id
+        session_id = [int]$Application.process.SessionId
+        start_time_utc_ticks = $ticks
+        executable_path = $ApplicationPath
+        executable_sha256 = $ExecutableSha256
+        start_observed = $true
+        exit_observed = $false
+        exit_method = $null
+        exit_code = $null
+    }
+}
+function Complete-AcceptanceProcessLifecycle {
+    param(
+        [Parameter(Mandatory)][Collections.IDictionary] $Lifecycle,
+        [Parameter(Mandatory)][ValidateSet('normal-close','forced-termination')][string] $ExitMethod,
+        [Parameter(Mandatory)][int] $ExitCode
+    )
+
+    $Lifecycle.exit_observed = $true
+    $Lifecycle.exit_method = $ExitMethod
+    $Lifecycle.exit_code = $ExitCode
+}
 function Start-AcceptanceApplication {
     param(
         [Parameter(Mandatory)][string] $FilePath,
         [Parameter(Mandatory)][string] $WorkingDirectory,
         [Parameter(Mandatory)][int] $SessionId,
         [Parameter(Mandatory)][int] $WaitSeconds,
-        [Parameter(Mandatory)][string] $Label
+        [Parameter(Mandatory)][string] $Label,
+        [AllowNull()][Collections.Generic.List[object]] $ProcessLifecycleObservations
     )
     $owned = $null
     try {
+        $executableSha256 = Get-LowerSha256 -Path $FilePath
         $owned = Start-OwnedProcess -FilePath $FilePath -Arguments '' -WorkingDirectory $WorkingDirectory
         $process = $owned.process
+        $application = [pscustomobject]@{
+            owned = $owned
+            process = $process
+            main = $null
+            main_handle = [IntPtr]::Zero
+            process_lifecycle = $null
+        }
+        $application.process_lifecycle = New-AcceptanceProcessLifecycle `
+            -Application $application `
+            -ApplicationPath $FilePath `
+            -ExecutableSha256 $executableSha256
+        $owned | Add-Member `
+            -NotePropertyName process_lifecycle `
+            -NotePropertyValue $application.process_lifecycle `
+            -Force
+        if ($null -ne $ProcessLifecycleObservations) {
+            $ProcessLifecycleObservations.Add([ordered]@{
+                process_lifecycle = $application.process_lifecycle
+            })
+        }
         $binding = Wait-ExactApplicationMainWindow `
             -Process $process `
             -ExpectedSession $SessionId `
@@ -157,12 +223,9 @@ function Start-AcceptanceApplication {
             -ExpectedSession $SessionId `
             -MainWindowHandle $mainHandle `
             -RequireMainWindow
-        [pscustomobject]@{
-            owned = $owned
-            process = $process
-            main = $window
-            main_handle = $mainHandle
-        }
+        $application.main = $window
+        $application.main_handle = $mainHandle
+        $application
     }
     catch {
         $startupError = $_
@@ -1292,6 +1355,10 @@ function Close-AcceptanceApplication {
         throw 'The acceptance application did not close before the bounded deadline.'
     }
     if ($Application.process.ExitCode -ne 0) { throw 'The acceptance application returned a nonzero exit code.' }
+    Complete-AcceptanceProcessLifecycle `
+        -Lifecycle $Application.process_lifecycle `
+        -ExitMethod normal-close `
+        -ExitCode ([int]$Application.process.ExitCode)
     $jobCleanup = Complete-AcceptanceOwnedProcessJob -Owned $Application.owned
     $Application | Add-Member -NotePropertyName job_cleanup -NotePropertyValue $jobCleanup -Force
     if ($jobCleanup.status -cne 'clean') {

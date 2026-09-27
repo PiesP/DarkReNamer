@@ -1065,6 +1065,10 @@ try {
             param($FilePath, $Arguments, $WorkingDirectory)
             $script:startupOwned
         }
+        function Get-LowerSha256 {
+            param([string] $Path)
+            'd' * 64
+        }
         function Complete-AcceptanceOwnedProcessJob {
             param($Owned, [switch] $StopActive)
             if ($Owned -ne $script:startupOwned -or -not $StopActive) {
@@ -1074,7 +1078,12 @@ try {
             if ($Owned.cleanup_failure) {
                 throw 'The exact owned acceptance process did not terminate.'
             }
-            [pscustomobject]@{ job_empty = $true; job_closed = $true }
+            [pscustomobject]@{
+                job_empty = $true
+                job_closed = $true
+                forced_termination = $false
+                termination_exit_code = $null
+            }
         }
         function Wait-ExactApplicationMainWindow {
             param(
@@ -1087,6 +1096,8 @@ try {
             throw 'Pinned startup binding failed.'
         }
         $startupProcess = [pscustomobject]@{
+            Id = 4201
+            SessionId = 1
             HasExited = $false
             killed = $false
             disposed = $false
@@ -1103,22 +1114,30 @@ try {
         $script:startupOwned = [pscustomobject]@{
             process = $startupProcess
             owner = [pscustomobject]@{}
+            process_start_time_utc_ticks = '639000000000000201'
             stop_requested = $false
             cleanup_failure = $false
         }
+        $startupLifecycles = [Collections.Generic.List[object]]::new()
         Assert-Fails {
             Start-AcceptanceApplication `
                 -FilePath 'fixture.exe' `
                 -WorkingDirectory 'fixture-root' `
                 -SessionId 1 `
                 -WaitSeconds 10 `
-                -Label 'startup fixture'
+                -Label 'startup fixture' `
+                -ProcessLifecycleObservations $startupLifecycles
         } 'Pinned startup binding failed'
-        if (-not $script:startupOwned.stop_requested -or -not $startupProcess.disposed) {
-            throw 'Failed startup must stop and dispose the exact owned process job.'
+        if (-not $script:startupOwned.stop_requested -or -not $startupProcess.disposed -or
+            $startupLifecycles.Count -ne 1 -or
+            $startupLifecycles[0].process_lifecycle.pid -ne 4201 -or
+            $startupLifecycles[0].process_lifecycle.start_time_utc_ticks -cne '639000000000000201') {
+            throw 'Failed startup must retain its independent start identity before stopping and disposing the exact owned process job.'
         }
 
         $timeoutProcess = [pscustomobject]@{
+            Id = 4202
+            SessionId = 1
             HasExited = $false
             killed = $false
             disposed = $false
@@ -1130,6 +1149,7 @@ try {
         $script:startupOwned = [pscustomobject]@{
             process = $timeoutProcess
             owner = [pscustomobject]@{}
+            process_start_time_utc_ticks = '639000000000000202'
             stop_requested = $false
             cleanup_failure = $true
         }
@@ -1197,6 +1217,11 @@ try {
             owned = [pscustomobject]@{ process = $process; owner = [pscustomobject]@{} }
             main = $window
             main_handle = [IntPtr]5151
+            process_lifecycle = [ordered]@{
+                exit_observed = $false
+                exit_method = $null
+                exit_code = $null
+            }
         }
         [void](Close-AcceptanceApplication -Application $application -SessionId 1 -WaitSeconds 1 -CloseInput keyboard)
         if ($script:closeProbe.keyboard -ne 1 -or $script:closeProbe.ordinary -ne 0) {
@@ -1204,7 +1229,10 @@ try {
         }
         [void](Close-AcceptanceApplication -Application $application -SessionId 1 -WaitSeconds 1 -CloseInput ordinary)
         if ($script:closeProbe.keyboard -ne 1 -or $script:closeProbe.ordinary -ne 1 -or
-            $script:closeProbe.jobs -ne 2) {
+            $script:closeProbe.jobs -ne 2 -or
+            -not $application.process_lifecycle.exit_observed -or
+            $application.process_lifecycle.exit_method -cne 'normal-close' -or
+            $application.process_lifecycle.exit_code -ne 0) {
             throw 'Ordinary close must target the exact pinned main window.'
         }
         Remove-Variable closeProbe -Scope Script
@@ -3228,6 +3256,7 @@ try {
         $candidateRegressionResult.observer_role -cne 'ui' -or
         $candidateRegressionResult.product -ne $candidateManifest.product -or
         $candidateRegressionResult.harness -ne $candidateManifest.harness -or
+        $candidateRegressionResult.Contains('process_lifecycles') -or
         $candidateRegressionResult.PSObject.Properties.Name -ccontains 'source_sha') {
         throw 'Candidate GUI regression results must preserve v2 product and harness provenance.'
     }
@@ -3549,5 +3578,157 @@ foreach ($call in $captureCalls) {
     })
     if ($bindings.Count -ne 1) {
         throw "Screenshot call omits foreground evidence at line $($call.Extent.StartLineNumber)."
+    }
+}
+$applicationStartCalls = @($captureAst.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq 'Start-AcceptanceApplication'
+}, $true))
+if ($applicationStartCalls.Count -ne 5) {
+    throw 'Expected all five current-DPI and GUI regression application start sites.'
+}
+foreach ($call in $applicationStartCalls) {
+    $lifecycleBindings = @($call.CommandElements | Where-Object {
+        $_ -is [Management.Automation.Language.CommandParameterAst] -and
+            $_.ParameterName -ceq 'ProcessLifecycleObservations'
+    })
+    if ($lifecycleBindings.Count -ne 1) {
+        throw "Application start omits independent lifecycle recording at line $($call.Extent.StartLineNumber)."
+    }
+}
+
+& {
+    $controllerEntryPath = Join-Path $toolingScriptsRoot 'modules/powershell/controller-entry.psm1'
+    $controllerTokens = $null
+    $controllerErrors = $null
+    $controllerAst = [Management.Automation.Language.Parser]::ParseFile(
+        $controllerEntryPath, [ref]$controllerTokens, [ref]$controllerErrors
+    )
+    if ($controllerErrors.Count -ne 0) {
+        throw 'The controller entrypoint must parse before producer lifecycle binding is exercised.'
+    }
+    foreach ($functionName in @(
+        'Add-DrControllerLifecycleIdentity'
+        'Test-DrControllerProcessJobCleanupLedger'
+    )) {
+        $definitions = @($controllerAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq $functionName
+        }, $true))
+        if ($definitions.Count -ne 1) {
+            throw "Expected one controller lifecycle binding function: $functionName"
+        }
+        . ([scriptblock]::Create($definitions[0].Extent.Text))
+    }
+
+    function New-CleanProcessJobRow {
+        param(
+            [Parameter(Mandatory)][int] $ProcessId,
+            [Parameter(Mandatory)][string] $StartTimeUtcTicks
+        )
+
+        [pscustomobject][ordered]@{
+            pid = $ProcessId
+            process_start_time_utc_ticks = $StartTimeUtcTicks
+            job_empty = $true
+            job_closed = $true
+            capture_complete = $true
+            active_processes_at_primary_exit = $null
+            had_survivors = $false
+            forced_termination = $false
+            active_processes_at_close = 0
+            active_processes_at_stop = $null
+            active_process_ids_at_stop = @()
+            total_processes_at_stop = $null
+            primary_process_active_at_stop = $null
+            termination_exit_code = $null
+            status = 'clean'
+            error = $null
+        }
+    }
+    function Copy-ResultDocument([object] $Value) {
+        $Value | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+    }
+
+    $verified = [pscustomobject]@{
+        lane = 'source-built'
+        target = 'x86_64-pc-windows-msvc'
+        application = [pscustomobject]@{ file = 'DarkReNamer.exe'; sha256 = 'a' * 64 }
+        source_sha = '0123456789abcdef0123456789abcdef01234567'
+        runner_sha256 = 'b' * 64
+        script_sha256 = 'c' * 64
+    }
+    $producerResult = New-GuiRegressionResult -Verified $verified -Appearance system
+    $producerLifecycles = Get-GuiRegressionProcessLifecycleCollection `
+        -Result $producerResult `
+        -RawRegression $false
+    if (-not $producerResult.Contains('process_lifecycles') -or
+        $producerLifecycles -isnot [Collections.Generic.List[object]] -or
+        -not [object]::ReferenceEquals($producerLifecycles, $producerResult.process_lifecycles)) {
+        throw 'Source-built GUI regression results must own a mutable process lifecycle collection.'
+    }
+    if ($null -ne (Get-GuiRegressionProcessLifecycleCollection `
+            -Result $producerResult `
+            -RawRegression $true)) {
+        throw 'Candidate GUI regression results must continue using their existing raw lifecycle shape.'
+    }
+    $expectedIdentities = @(
+        [pscustomobject]@{ pid = 4101; ticks = '639000000000000101' }
+        [pscustomobject]@{ pid = 4102; ticks = '639000000000000102' }
+        [pscustomobject]@{ pid = 4103; ticks = '639000000000000103' }
+    )
+    foreach ($identity in $expectedIdentities) {
+        $application = [pscustomobject]@{
+            process = [pscustomobject]@{ Id = $identity.pid; SessionId = 7 }
+            owned = [pscustomobject]@{ process_start_time_utc_ticks = $identity.ticks }
+        }
+        $lifecycle = New-AcceptanceProcessLifecycle `
+            -Application $application `
+            -ApplicationPath 'C:\fixture\DarkReNamer.exe' `
+            -ExecutableSha256 ('d' * 64)
+        $producerLifecycles.Add([ordered]@{ process_lifecycle = $lifecycle })
+    }
+    $producerResult['process_job_cleanup'] = @(
+        foreach ($identity in $expectedIdentities) {
+            New-CleanProcessJobRow -ProcessId $identity.pid -StartTimeUtcTicks $identity.ticks
+        }
+    )
+    $publishedResult = Copy-ResultDocument $producerResult
+    if (-not (Test-DrControllerProcessJobCleanupLedger -Result $publishedResult)) {
+        throw 'The controller rejected a source-built producer result with three independently recorded start identities.'
+    }
+
+    $singleResult = Copy-ResultDocument $producerResult
+    $singleResult.process_lifecycles = @($singleResult.process_lifecycles[0])
+    $singleResult.process_job_cleanup = @($singleResult.process_job_cleanup[0])
+    if (-not (Test-DrControllerProcessJobCleanupLedger -Result $singleResult)) {
+        throw 'The controller rejected a source-built current-DPI-shaped result with one independent start identity.'
+    }
+
+    $missingCleanup = Copy-ResultDocument $publishedResult
+    $missingCleanup.process_job_cleanup = @($missingCleanup.process_job_cleanup | Select-Object -First 2)
+    if (Test-DrControllerProcessJobCleanupLedger -Result $missingCleanup) {
+        throw 'The controller accepted a producer lifecycle without its cleanup identity.'
+    }
+    $mismatchedCleanup = Copy-ResultDocument $publishedResult
+    $mismatchedCleanup.process_job_cleanup[1].process_start_time_utc_ticks = '639000000000009999'
+    if (Test-DrControllerProcessJobCleanupLedger -Result $mismatchedCleanup) {
+        throw 'The controller accepted a cleanup row with a mismatched creation time.'
+    }
+    $extraCleanup = Copy-ResultDocument $publishedResult
+    $extraCleanup.process_job_cleanup = @($extraCleanup.process_job_cleanup) + @(
+        New-CleanProcessJobRow -ProcessId 4104 -StartTimeUtcTicks '639000000000000104'
+    )
+    if (Test-DrControllerProcessJobCleanupLedger -Result $extraCleanup) {
+        throw 'The controller accepted an extra cleanup identity absent from producer lifecycles.'
+    }
+    $duplicateCleanup = Copy-ResultDocument $publishedResult
+    $duplicateCleanup.process_job_cleanup = @($duplicateCleanup.process_job_cleanup) + @(
+        New-CleanProcessJobRow -ProcessId 4103 -StartTimeUtcTicks '639000000000000103'
+    )
+    if (Test-DrControllerProcessJobCleanupLedger -Result $duplicateCleanup) {
+        throw 'The controller accepted a duplicated cleanup identity.'
     }
 }
