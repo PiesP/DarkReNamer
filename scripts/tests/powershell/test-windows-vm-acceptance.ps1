@@ -708,6 +708,7 @@ try {
                 )
             }
             $runtimeRoot = Join-Path $caseRoot 'absent-runtime'
+            $effectiveRuntimeRoot = $runtimeRoot
             $resultPath = Join-Path $caseRoot 'acceptance-result.json'
             $observationPath = Join-Path $caseRoot 'acceptance-observations.json'
             $verifiedRoot = Join-Path $caseRoot 'verified'
@@ -983,6 +984,153 @@ try {
             $verified.application.sha256 -cne $resolved.application.sha256 -or
             $verified.lane -cne $resolved.lane) {
             throw 'GUI regression scenario binding did not retain the authenticated candidate lane.'
+        }
+    }
+    & {
+        $regressionFunction = $acceptanceAst.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Invoke-GuiRegressionAcceptance'
+        }, $true)
+        $effectiveRuntimeAssignment = @($regressionFunction.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -ceq '$effectiveRuntimeRoot' -and
+                $node.Right.Extent.Text -ceq '$null'
+        }, $true))
+        if ($effectiveRuntimeAssignment.Count -ne 1) {
+            throw 'GUI regression must keep validated runtime state separate from its RuntimeRoot parameter.'
+        }
+        $runtimeParameterClears = @($regressionFunction.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+                $node.Left.VariablePath.UserPath -ieq 'RuntimeRoot' -and
+                $node.Right.Extent.Text -ieq '$null'
+        }, $true))
+        if ($runtimeParameterClears.Count -ne 0) {
+            throw 'GUI regression must not clear its case-insensitive RuntimeRoot parameter.'
+        }
+        $runtimeGuardTry = @($regressionFunction.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.TryStatementAst] -and
+                $node.Body.Extent.Text.IndexOf(
+                    'GUI regression requires the controller-provisioned candidate runtime directory.',
+                    [StringComparison]::Ordinal
+                ) -ge 0
+        }, $true))
+        if ($runtimeGuardTry.Count -ne 1) {
+            throw 'Expected one GUI regression runtime-root guard.'
+        }
+        $guardStatements = @($runtimeGuardTry[0].Body.Statements)
+        $guardStart = -1
+        $guardEnd = -1
+        for ($index = 0; $index -lt $guardStatements.Count; $index++) {
+            $statementText = $guardStatements[$index].Extent.Text
+            if ($guardStart -lt 0 -and $statementText.IndexOf(
+                    'GUI regression requires the controller-provisioned candidate runtime directory.',
+                    [StringComparison]::Ordinal
+                ) -ge 0) {
+                $guardStart = $index
+            }
+            if ($statementText.Trim() -ceq
+                '$effectiveRuntimeRoot = $runtimeItem.FullName') {
+                $guardEnd = $index
+                break
+            }
+        }
+        if ($guardStart -lt 0 -or $guardEnd -lt $guardStart) {
+            throw 'GUI regression runtime-root guard statements are incomplete.'
+        }
+        $initializeRuntimeState = [scriptblock]::Create(
+            $effectiveRuntimeAssignment[0].Extent.Text
+        )
+        $validateRuntimeRoot = [scriptblock]::Create(
+            [string]::Join(
+                [Environment]::NewLine,
+                @($guardStatements[$guardStart..$guardEnd] | ForEach-Object { $_.Extent.Text })
+            )
+        )
+        function Invoke-RuntimeRootGuardFixture {
+            param(
+                [AllowNull()][AllowEmptyString()][string] $RequestedRuntimeRoot,
+                [Parameter(Mandatory)][ValidateSet('source-built','candidate-gui-only')][string] $Lane,
+                [Parameter(Mandatory)][Collections.IDictionary] $Probe
+            )
+
+            & {
+                $RuntimeRoot = $RequestedRuntimeRoot
+                $verified = [pscustomobject]@{ lane = $Lane }
+                . $initializeRuntimeState
+                try {
+                    . $validateRuntimeRoot
+                    [pscustomobject]@{
+                        requested = $RuntimeRoot
+                        effective = $effectiveRuntimeRoot
+                        lane = $verified.lane
+                    }
+                }
+                finally {
+                    $Probe.effective = $effectiveRuntimeRoot
+                }
+            }
+        }
+
+        $validRuntimeRoot = Join-Path $temporaryRoot 'runtime-root-guard-valid'
+        [void](New-Item -ItemType Directory -Path $validRuntimeRoot)
+        foreach ($lane in @('source-built', 'candidate-gui-only')) {
+            $probe = [ordered]@{ effective = 'not-observed' }
+            $validated = Invoke-RuntimeRootGuardFixture `
+                -RequestedRuntimeRoot $validRuntimeRoot `
+                -Lane $lane `
+                -Probe $probe
+            if ($validated.requested -cne $validRuntimeRoot -or
+                $validated.effective -cne (Get-Item -LiteralPath $validRuntimeRoot).FullName -or
+                $probe.effective -cne $validated.effective -or
+                $validated.lane -cne $lane) {
+                throw ("GUI regression runtime-root validation lost the controller path for {0}: requested={1}; effective={2}; probe={3}; lane={4}." -f `
+                    $lane, $validated.requested, $validated.effective, $probe.effective, $validated.lane)
+            }
+        }
+        foreach ($invalidRoot in @($null, '', 'relative-runtime-root')) {
+            $probe = [ordered]@{ effective = 'not-observed' }
+            Assert-Fails {
+                Invoke-RuntimeRootGuardFixture `
+                    -RequestedRuntimeRoot $invalidRoot `
+                    -Lane source-built `
+                    -Probe $probe
+            } 'controller-provisioned candidate runtime directory'
+            if ($null -ne $probe.effective) {
+                throw 'Rejected runtime input became an effective cleanup path.'
+            }
+        }
+        $linkedRuntimeRoot = Join-Path $temporaryRoot 'runtime-root-guard-link'
+        [void](New-Item -ItemType SymbolicLink -Path $linkedRuntimeRoot -Target $validRuntimeRoot)
+        $probe = [ordered]@{ effective = 'not-observed' }
+        Assert-Fails {
+            Invoke-RuntimeRootGuardFixture `
+                -RequestedRuntimeRoot $linkedRuntimeRoot `
+                -Lane candidate-gui-only `
+                -Probe $probe
+        } 'candidate runtime root is unsafe'
+        if ($null -ne $probe.effective) {
+            throw 'A direct runtime reparse point became an effective cleanup path.'
+        }
+        $ancestorTarget = Join-Path $temporaryRoot 'runtime-root-guard-ancestor-target'
+        $ancestorChild = Join-Path $ancestorTarget 'child'
+        [void](New-Item -ItemType Directory -Path $ancestorChild)
+        $ancestorLink = Join-Path $temporaryRoot 'runtime-root-guard-ancestor-link'
+        [void](New-Item -ItemType SymbolicLink -Path $ancestorLink -Target $ancestorTarget)
+        $linkedChild = Join-Path $ancestorLink 'child'
+        $probe = [ordered]@{ effective = 'not-observed' }
+        Assert-Fails {
+            Invoke-RuntimeRootGuardFixture `
+                -RequestedRuntimeRoot $linkedChild `
+                -Lane source-built `
+                -Probe $probe
+        } 'candidate runtime path traverses a reparse point'
+        if ($null -ne $probe.effective) {
+            throw 'A runtime path below a reparse ancestor became an effective cleanup path.'
         }
     }
     & {
@@ -1354,11 +1502,11 @@ try {
         }
     }
     $regressionCleanupValidation = $acceptanceText.IndexOf(
-        '[void](Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot)',
+        '[void](Get-VmAutomatedRuntimeRootObservation -Root $effectiveRuntimeRoot)',
         [StringComparison]::Ordinal
     )
     $regressionCleanupDelete = $acceptanceText.IndexOf(
-        'Remove-Item -LiteralPath $runtimeRoot -Recurse -Force',
+        'Remove-Item -LiteralPath $effectiveRuntimeRoot -Recurse -Force',
         $regressionCleanupValidation + 1,
         [StringComparison]::Ordinal
     )
@@ -1367,14 +1515,24 @@ try {
         throw 'GUI regression cleanup must validate the bounded ordinary runtime tree before deletion.'
     }
     if ([regex]::Matches(
-        $acceptanceText,
-        [regex]::Escape('[void](Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot)')
-    ).Count -ne 2) {
+            $acceptanceText,
+            [regex]::Escape('[void](Get-VmAutomatedRuntimeRootObservation -Root $effectiveRuntimeRoot)')
+        ).Count -ne 1 -or
+        [regex]::Matches(
+            $acceptanceText,
+            [regex]::Escape('[void](Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot)')
+        ).Count -ne 1) {
         throw 'Regression and current-DPI cleanup must both validate their runtime tree before deletion.'
     }
-    $runtimeDeleteCalls = [regex]::Matches(
-        $acceptanceText,
-        [regex]::Escape('Remove-Item -LiteralPath $runtimeRoot -Recurse -Force')
+    $runtimeDeleteCalls = @(
+        [regex]::Matches(
+            $acceptanceText,
+            [regex]::Escape('Remove-Item -LiteralPath $effectiveRuntimeRoot -Recurse -Force')
+        )
+        [regex]::Matches(
+            $acceptanceText,
+            [regex]::Escape('Remove-Item -LiteralPath $runtimeRoot -Recurse -Force')
+        )
     )
     foreach ($runtimeDelete in $runtimeDeleteCalls) {
         $ledgerGate = $acceptanceText.LastIndexOf(
