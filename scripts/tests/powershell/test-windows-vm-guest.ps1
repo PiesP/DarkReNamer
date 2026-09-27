@@ -2766,24 +2766,33 @@ Invoke-DrTestPowerShellModuleScope -Kind guest -Action { Initialize-NativeCaptur
             $valid.root.Replace("'", "''")
         ).Replace('MODULE_LOADER_PATH', $moduleLoaderPath.Replace("'", "''"))
         $encodedInit = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($initScript))
-        $initProcess = Start-OwnedProcess `
+        $initStdoutPath = Join-Path $valid.root 'uia-core-init.stdout.txt'
+        $initStderrPath = Join-Path $valid.root 'uia-core-init.stderr.txt'
+        $initProcess = Start-JobBoundProcess `
             -FilePath (Join-Path $PSHOME 'pwsh.exe') `
             -Arguments "-NoLogo -NoProfile -NonInteractive -EncodedCommand $encodedInit" `
             -WorkingDirectory $valid.root `
-            -RedirectOutput
+            -StdoutPath $initStdoutPath `
+            -StderrPath $initStderrPath
         try {
-            if (-not $initProcess.process.WaitForExit(30000)) {
-                throw 'Fresh PowerShell Core UI Automation initialization timed out.'
-            }
-            $initProcess.process.WaitForExit()
-            if ($initProcess.process.ExitCode -ne 0) {
-                throw "Fresh PowerShell Core UI Automation initialization failed: $($initProcess.stderr_task.GetAwaiter().GetResult())"
+            $initResult = Wait-JobBoundProcessWithOutputLimit `
+                -State $initProcess `
+                -StdoutPath $initStdoutPath `
+                -StderrPath $initStderrPath `
+                -TimeoutSeconds 30
+            if ($initResult.failure_reason -or $initProcess.process.ExitCode -ne 0) {
+                $initError = [IO.File]::ReadAllText($initStderrPath, [Text.Encoding]::UTF8).Trim()
+                throw "Fresh PowerShell Core UI Automation initialization failed: $initError"
             }
         }
         finally {
-            if (-not $initProcess.process.HasExited) {
-                Invoke-TaskkillTree -ProcessId $initProcess.process.Id
-                [void]$initProcess.process.WaitForExit(10000)
+            if (-not $initProcess.job_closed) {
+                if ($initProcess.owner.ActiveProcessCount -gt 0) {
+                    Stop-JobBoundProcess -State $initProcess
+                }
+                if (-not (Close-JobBoundProcess -State $initProcess)) {
+                    throw 'Fresh PowerShell Core UI Automation initialization job did not close cleanly.'
+                }
             }
             $initProcess.process.Dispose()
         }
@@ -2903,20 +2912,21 @@ Invoke-DrTestPowerShellModuleScope `
         foreach ($expectedExitCode in @(0, 7)) {
             $nativeStdout = Join-Path $valid.root "native-exit-$expectedExitCode.stdout.txt"
             $nativeStderr = Join-Path $valid.root "native-exit-$expectedExitCode.stderr.txt"
-            $ownedProcess = Start-OwnedProcess `
+            $ownedProcess = Start-JobBoundProcess `
                 -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') `
                 -Arguments "/d /c `"echo synthetic-exit-$expectedExitCode & exit /b $expectedExitCode`"" `
                 -WorkingDirectory $valid.root `
-                -RedirectOutput
+                -StdoutPath $nativeStdout `
+                -StderrPath $nativeStderr
             try {
-                if (-not $ownedProcess.process.WaitForExit(10000)) {
-                    throw "Synthetic exit-$expectedExitCode child timed out."
-                }
-                $ownedProcess.process.WaitForExit()
-                Save-CapturedProcessOutput `
+                $ownedResult = Wait-JobBoundProcessWithOutputLimit `
                     -State $ownedProcess `
                     -StdoutPath $nativeStdout `
-                    -StderrPath $nativeStderr
+                    -StderrPath $nativeStderr `
+                    -TimeoutSeconds 10
+                if ($ownedResult.failure_reason) {
+                    throw "Synthetic exit-$expectedExitCode child timed out."
+                }
                 if ($ownedProcess.process.ExitCode -ne $expectedExitCode) {
                     throw "Synthetic child exit code was $($ownedProcess.process.ExitCode), expected $expectedExitCode."
                 }
@@ -2928,9 +2938,13 @@ Invoke-DrTestPowerShellModuleScope `
                 }
             }
             finally {
-                if (-not $ownedProcess.process.HasExited) {
-                    Invoke-TaskkillTree -ProcessId $ownedProcess.process.Id
-                    [void]$ownedProcess.process.WaitForExit(10000)
+                if (-not $ownedProcess.job_closed) {
+                    if ($ownedProcess.owner.ActiveProcessCount -gt 0) {
+                        Stop-JobBoundProcess -State $ownedProcess
+                    }
+                    if (-not (Close-JobBoundProcess -State $ownedProcess)) {
+                        throw 'Synthetic native exit child job did not close cleanly.'
+                    }
                 }
                 $ownedProcess.process.Dispose()
             }
