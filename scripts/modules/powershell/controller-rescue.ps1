@@ -29,6 +29,7 @@
         }
         $bundle = Join-Path $trustedRoot 'bundle'
         $out = Join-Path $trustedRoot 'out'
+        $runtime = [IO.Path]::GetFullPath((Join-Path $root 'runtime'))
         $snapshot = Get-Item -LiteralPath (Join-Path $out 'text-scale-snapshot.json') -Force -ErrorAction Stop
         if ($snapshot.PSIsContainer -or ($snapshot.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw 'Text-scale rescue snapshot is not an ordinary file.'
@@ -43,12 +44,13 @@
             $engine.effective_policy -cne 'RemoteSigned') {
             throw 'Text-scale rescue requires the configured PowerShell 7.4+ Core engine under its existing RemoteSigned policy.'
         }
-        $observerArguments = '-NoProfile -NonInteractive -WindowStyle Normal -File "' + $observerPath + '" -BundleRoot "' + $bundle + '" -ExpectedSessionId ' + $desktopSession + ' -OutputRoot "' + $out + '" -ExpectedScriptSha256 ' + $observerHash + ' -TimeoutSeconds ' + $testTimeout + ' -Appearance ' + $appearance + ' -RegressionMode text-scale -InputManifestPath "' + $inputManifest + '" -TextScalePercent 150 -RestoreTextScaleOnly'
+        $observerArguments = '-NoProfile -NonInteractive -WindowStyle Normal -File "' + $observerPath + '" -BundleRoot "' + $bundle + '" -ExpectedSessionId ' + $desktopSession + ' -OutputRoot "' + $out + '" -RuntimeRoot "' + $runtime + '" -ExpectedScriptSha256 ' + $observerHash + ' -TimeoutSeconds ' + $testTimeout + ' -Appearance ' + $appearance + ' -RegressionMode text-scale -InputManifestPath "' + $inputManifest + '" -TextScalePercent 150 -RestoreTextScaleOnly'
         Register-DrVmTask `
             -TaskName $name `
             -UserSid $sid `
             -SessionId $desktopSession `
             -GuestRoot $root `
+            -RuntimeRoot $runtime `
             -ObserverPath $observerPath `
             -ObserverSha256 $observerHash `
             -BundleSourcePath $bundle `
@@ -172,6 +174,7 @@ function Invoke-AcceptanceHighContrastRescue {
         }
         $bundle = Join-Path $trustedRoot 'bundle'
         $out = Join-Path $trustedRoot 'out'
+        $runtime = [IO.Path]::GetFullPath((Join-Path $root 'runtime'))
         $snapshot = Get-Item -LiteralPath (Join-Path $out 'high-contrast-restore.json') -Force -ErrorAction Stop
         if ($snapshot.PSIsContainer -or ($snapshot.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw 'High Contrast rescue snapshot is not an ordinary file.'
@@ -185,12 +188,13 @@ function Invoke-AcceptanceHighContrastRescue {
             $engine.effective_policy -cne 'RemoteSigned') {
             throw 'High Contrast rescue requires the configured PowerShell 7.4+ Core engine under its existing RemoteSigned policy.'
         }
-        $observerArguments = '-NoProfile -NonInteractive -WindowStyle Normal -File "' + $observerPath + '" -BundleRoot "' + $bundle + '" -ExpectedSessionId ' + $desktopSession + ' -OutputRoot "' + $out + '" -ExpectedScriptSha256 ' + $observerHash + ' -TimeoutSeconds ' + $testTimeout + ' -Appearance system -HighContrast -RestoreHighContrastOnly'
+        $observerArguments = '-NoProfile -NonInteractive -WindowStyle Normal -File "' + $observerPath + '" -BundleRoot "' + $bundle + '" -ExpectedSessionId ' + $desktopSession + ' -OutputRoot "' + $out + '" -RuntimeRoot "' + $runtime + '" -ExpectedScriptSha256 ' + $observerHash + ' -TimeoutSeconds ' + $testTimeout + ' -Appearance system -HighContrast -RestoreHighContrastOnly'
         Register-DrVmTask `
             -TaskName $name `
             -UserSid $sid `
             -SessionId $desktopSession `
             -GuestRoot $root `
+            -RuntimeRoot $runtime `
             -ObserverPath $observerPath `
             -ObserverSha256 $observerHash `
             -BundleSourcePath $bundle `

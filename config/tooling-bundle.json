@@ -712,7 +712,7 @@
       "bundle": "controller-rescue.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "15ef562491078fd8346943f572fff1436ffdf46650ea7734afa9b97c119ed0ad",
+      "sha256": "9763d54e0ad7428e0ea1cb90902d3733403599c72e61feae3c4e53da07dfe320",
       "dependencies": []
     },
     {
@@ -721,7 +721,7 @@
       "bundle": "controller-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "174a5b9d57565ae401c967695884a7274cd1c58320ca7ed1dfb7caf13a8810bb",
+      "sha256": "c3bd6adccfbc7c094f9f9e8e9a7052207b19bd33c15ae2378b4d567a4acbb183",
       "dependencies": [
         "powershell-loader",
         "powershell-controller-contracts",

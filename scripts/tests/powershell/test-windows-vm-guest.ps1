@@ -1334,6 +1334,21 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
         if ($nextStart -le $registration.Index) {
             throw 'Each atomically registered Windows VM task must be verified before task start.'
         }
+        $runtimeParameterIndex = $hostRunnerText.IndexOf(
+            '-RuntimeRoot $',
+            $registration.Index,
+            [StringComparison]::Ordinal
+        )
+        if ($runtimeParameterIndex -lt $registration.Index -or $runtimeParameterIndex -ge $nextStart) {
+            throw 'Each Windows VM task must register its protected guest runtime root.'
+        }
+    }
+    if ([regex]::Matches(
+            $hostRunnerText,
+            [regex]::Escape('-RuntimeRoot "'),
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        ).Count -ne 5) {
+        throw 'Each Windows VM observer command must include exactly one runtime-root argument.'
     }
     $guestEntryText = Get-Content -LiteralPath (Join-Path $toolingScriptsRoot 'modules/powershell/guest-entry.psm1') -Raw
     foreach ($requiredBootstrapDiagnostic in @(
@@ -1557,13 +1572,26 @@ $incomplete = Get-DrVmRunnerProcesses -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 
         '$bundleSourceFull = [IO.Path]::GetFullPath($BundleSourcePath).TrimEnd(',
         '# The core runner and its verified tooling files resolve from the same directory.',
         '$cursor = if ($cursor -is [IO.FileInfo]) {',
+        '$cursor = if ($pathItem -is [IO.FileInfo]) {',
+        '$pathItem.Directory',
+        '$pathItem.Parent',
         '$cursor.Directory',
         '$cursor.Parent',
         '$trustedOutputRoot = Join-Path $trustedTaskRoot ''out''',
         'Assert-ProtectedTaskDirectory -Path $trustedTaskRoot',
         'Assert-ProtectedTaskDirectory -Path $trustedOutputRoot',
         '$resultPath = Join-Path $trustedOutputRoot $TrustedResultLeaf',
+        '[Parameter(Mandatory)][string] $RuntimeRoot,',
+        '-not [IO.Path]::IsPathRooted($RuntimeRoot) -or',
+        '$expectedRuntimeRoot = [IO.Path]::GetFullPath((Join-Path $guestRootFull ''runtime''))',
+        'The VM runtime root must be the controller-created guest runtime directory.',
+        'function Assert-ProtectedRuntimeDirectory',
+        '0x001201bf',
+        '0x001301bf',
+        'Assert-ProtectedRuntimeDirectory -Path $runtimeRootFull',
         'function Set-QuotedVmTaskPath',
+        '-SourcePath $RuntimeRoot',
+        '-DestinationPath $expectedRuntimeRoot',
         '$trustedOutputArgument = ''"'' + [IO.Path]::GetFullPath($trustedOutputRoot) + ''"''',
         'FileSystemRights]::ReadAndExecute',
         'Copy-VerifiedTrustedInput',
@@ -1582,6 +1610,18 @@ $incomplete = Get-DrVmRunnerProcesses -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 
         if ($hostRunnerText.IndexOf($workspaceContract, [StringComparison]::Ordinal) -lt 0) {
             throw "The protected Windows VM workspace contract is missing '$workspaceContract'."
         }
+    }
+    if ([regex]::Matches(
+            $hostRunnerText,
+            [regex]::Escape('-RuntimeRoot $runtime '),
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        ).Count -ne 3 -or
+        [regex]::Matches(
+            $hostRunnerText,
+            [regex]::Escape('-RuntimeRoot $runtimeRoot '),
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        ).Count -ne 2) {
+        throw 'Acceptance, recovery, and core scheduled tasks must each bind the controller-created runtime root.'
     }
     $resultSizeIndex = $hostRunnerText.IndexOf(
         "throw 'Guest result exceeds its size bound.'",

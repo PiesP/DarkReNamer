@@ -790,6 +790,7 @@ public static class DarkReNamerVmControllerWorkspace {
                 [Parameter(Mandatory)][string] $UserSid,
                 [Parameter(Mandatory)][int] $SessionId,
                 [Parameter(Mandatory)][string] $GuestRoot,
+                [Parameter(Mandatory)][string] $RuntimeRoot,
                 [Parameter(Mandatory)][string] $ObserverPath,
                 [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{64}$')][string] $ObserverSha256,
                 [Parameter(Mandatory)][string] $BundleSourcePath,
@@ -810,6 +811,7 @@ public static class DarkReNamerVmControllerWorkspace {
                 -not [IO.Path]::IsPathRooted($Execute) -or
                 -not [IO.Path]::IsPathRooted($WorkingDirectory) -or
                 -not [IO.Path]::IsPathRooted($GuestRoot) -or
+                -not [IO.Path]::IsPathRooted($RuntimeRoot) -or
                 -not [IO.Path]::IsPathRooted($ObserverPath) -or
                 -not [IO.Path]::IsPathRooted($BundleSourcePath) -or
                 $SessionId -le 0 -or
@@ -1011,7 +1013,12 @@ public static class DarkReNamerVmControllerWorkspace {
                     throw 'A VM task source path is outside the ordinary guest workspace.'
                 }
                 if ($pathFull -ceq $rootFull) { return }
-                $cursor = $pathItem.Directory
+                $cursor = if ($pathItem -is [IO.FileInfo]) {
+                    $pathItem.Directory
+                }
+                else {
+                    $pathItem.Parent
+                }
                 while ($null -ne $cursor -and
                     -not [string]::Equals($cursor.FullName, $rootItem.FullName, [StringComparison]::OrdinalIgnoreCase)) {
                     if (($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -1033,7 +1040,13 @@ public static class DarkReNamerVmControllerWorkspace {
                     [StringComparison]::OrdinalIgnoreCase
                 )) {
                     Assert-GuestInputPath -Path $Path -Root $trustedTaskRoot
-                    $cursor = (Get-Item -LiteralPath $Path -Force -ErrorAction Stop).Directory
+                    $pathItem = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+                    $cursor = if ($pathItem -is [IO.FileInfo]) {
+                        $pathItem.Directory
+                    }
+                    else {
+                        $pathItem
+                    }
                     while ($null -ne $cursor) {
                         Assert-ProtectedTaskDirectory -Path $cursor.FullName
                         if ([string]::Equals(
@@ -1047,6 +1060,66 @@ public static class DarkReNamerVmControllerWorkspace {
                 }
                 Assert-GuestInputPath -Path $Path -Root $GuestRoot
             }
+
+            $expectedRuntimeRoot = [IO.Path]::GetFullPath((Join-Path $guestRootFull 'runtime'))
+            $runtimeRootFull = [IO.Path]::GetFullPath($RuntimeRoot)
+            if (-not [string]::Equals(
+                    $runtimeRootFull, $expectedRuntimeRoot,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw 'The VM runtime root must be the controller-created guest runtime directory.'
+            }
+            Assert-TaskInputPath -Path $runtimeRootFull
+            function Assert-ProtectedRuntimeDirectory {
+                param([Parameter(Mandatory)][string] $Path)
+                $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+                $acl = Get-Acl -LiteralPath $Path
+                $ownerSid = ([Security.Principal.NTAccount]$acl.Owner).Translate(
+                    [Security.Principal.SecurityIdentifier]
+                ).Value
+                $rules = @($acl.GetAccessRules(
+                    $true, $true, [Security.Principal.SecurityIdentifier]
+                ))
+                if (-not $item.PSIsContainer -or
+                    ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                    $ownerSid -cne $administratorSid.Value -or
+                    -not $acl.AreAccessRulesProtected -or $rules.Count -ne 4) {
+                    throw 'The controller-created VM runtime directory owner or DACL changed.'
+                }
+                foreach ($principalSid in @($administratorSid, $systemSid)) {
+                    $matches = @($rules | Where-Object {
+                        $_.IdentityReference.Value -ceq $principalSid.Value -and
+                        $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+                        [int]$_.FileSystemRights -eq 0x001f01ff -and
+                        $_.InheritanceFlags -eq $inheritance -and
+                        $_.PropagationFlags -eq [Security.AccessControl.PropagationFlags]::None -and
+                        -not $_.IsInherited
+                    })
+                    if ($matches.Count -ne 1) {
+                        throw 'The controller-created VM runtime administrative access changed.'
+                    }
+                }
+                $runnerLocalMatches = @($rules | Where-Object {
+                    $_.IdentityReference.Value -ceq $runnerSidObject.Value -and
+                    $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+                    [int]$_.FileSystemRights -eq 0x001201bf -and
+                    $_.InheritanceFlags -eq [Security.AccessControl.InheritanceFlags]::None -and
+                    $_.PropagationFlags -eq [Security.AccessControl.PropagationFlags]::None -and
+                    -not $_.IsInherited
+                })
+                $runnerChildMatches = @($rules | Where-Object {
+                    $_.IdentityReference.Value -ceq $runnerSidObject.Value -and
+                    $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+                    [int]$_.FileSystemRights -eq 0x001301bf -and
+                    $_.InheritanceFlags -eq $inheritance -and
+                    $_.PropagationFlags -eq [Security.AccessControl.PropagationFlags]::InheritOnly -and
+                    -not $_.IsInherited
+                })
+                if ($runnerLocalMatches.Count -ne 1 -or $runnerChildMatches.Count -ne 1) {
+                    throw 'The controller-created VM runtime user write access changed.'
+                }
+            }
+            Assert-ProtectedRuntimeDirectory -Path $runtimeRootFull
 
             $toolingManifestSource = Join-Path $GuestRoot 'tooling-bundle.json'
             Assert-GuestInputPath -Path $toolingManifestSource -Root $GuestRoot
@@ -1182,6 +1255,11 @@ public static class DarkReNamerVmControllerWorkspace {
                 -CurrentArguments $taskArguments `
                 -SourcePath $BundleSourcePath `
                 -DestinationPath $trustedBundleRoot
+            # This is the sole intentionally writable guest-workspace path; test processes create isolated temporary files beneath it.
+            $taskArguments = Set-QuotedVmTaskPath `
+                -CurrentArguments $taskArguments `
+                -SourcePath $RuntimeRoot `
+                -DestinationPath $expectedRuntimeRoot
             $guestOutputRoot = Join-Path $GuestRoot 'out'
             if ($InputManifestPath) {
                 $taskArguments = Set-QuotedVmTaskPath `
@@ -1638,6 +1716,7 @@ public static class DarkReNamerVmControllerWorkspace {
                 -UserSid $sid `
                 -SessionId $desktopSession `
                 -GuestRoot $root `
+                -RuntimeRoot $runtime `
                 -ObserverPath $observerPath `
                 -ObserverSha256 $observerHash `
                 -BundleSourcePath $bundle `
@@ -1951,6 +2030,7 @@ public static class DarkReNamerVmControllerWorkspace {
                 -UserSid $sid `
                 -SessionId $desktopSession `
                 -GuestRoot $root `
+                -RuntimeRoot $runtimeRoot `
                 -ObserverPath $observerPath `
                 -ObserverSha256 $observerHash `
                 -BundleSourcePath $bundle `
@@ -2229,6 +2309,14 @@ public static class DarkReNamerVmControllerWorkspace {
             $engine.effective_policy -cne 'RemoteSigned') {
             throw 'Native VM validation requires the configured PowerShell 7.4+ Core engine under its existing RemoteSigned policy.'
         }
+        $expectedRuntimeRoot = [IO.Path]::GetFullPath((Join-Path $root 'runtime'))
+        if (-not [string]::Equals(
+                [IO.Path]::GetFullPath($runtimeRoot), $expectedRuntimeRoot,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw 'The VM runtime root differs from the controller-created guest runtime directory.'
+        }
+        $runtimeRoot = $expectedRuntimeRoot
         $trustedRoot = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') ($name + '-trusted')
         $out = Join-Path $trustedRoot 'out'
         $arguments = '-NoProfile -NonInteractive -WindowStyle Normal -File "' + $runner + '" -BundleRoot "' + $root + '" -ExpectedSessionId ' + $desktopSession + ' -TestTimeoutSeconds ' + $testTimeout + ' -OutputRoot "' + $out + '" -RuntimeRoot "' + $runtimeRoot + '"'
@@ -2237,6 +2325,7 @@ public static class DarkReNamerVmControllerWorkspace {
             -UserSid $sid `
             -SessionId $desktopSession `
             -GuestRoot $root `
+            -RuntimeRoot $runtimeRoot `
             -ObserverPath $runner `
             -ObserverSha256 $runnerHash `
             -BundleSourcePath $root `
