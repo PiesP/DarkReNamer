@@ -1037,6 +1037,21 @@ function Start-JobBoundProcess {
 }
 
 function Test-MediumObserverBoundary {
+    $trustedResultPath = [Environment]::GetEnvironmentVariable('DARKRENAMER_VM_TRUSTED_RESULT_PATH')
+    if ([string]::IsNullOrWhiteSpace($trustedResultPath) -or
+        -not [IO.Path]::IsPathRooted($trustedResultPath) -or
+        -not (Test-Path -LiteralPath $trustedResultPath -PathType Leaf)) {
+        throw 'The medium boundary probe has no controller-created result file.'
+    }
+    $trustedOutputRoot = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($trustedResultPath))
+    $stdoutPath = Join-Path $trustedOutputRoot 'medium-boundary-probe.stdout.log'
+    $stderrPath = Join-Path $trustedOutputRoot 'medium-boundary-probe.stderr.log'
+    foreach ($path in @($stdoutPath, $stderrPath)) {
+        if (Test-Path -LiteralPath $path) {
+            throw 'The medium boundary probe output path already exists.'
+        }
+    }
+    $probeOutputLimitBytes = 32768
     $probe = @'
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @"
@@ -1156,18 +1171,43 @@ if (-not $resultWriteDenied) {
     $probe = $probe.Replace('__OBSERVER_PROCESS_ID__', $observerProcessId)
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probe))
     $powerShell = Join-Path $PSHOME 'pwsh.exe'
-    $state = Start-JobBoundProcess `
-        -FilePath $powerShell `
-        -Arguments ('-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $encoded) `
-        -WorkingDirectory $PSHOME
+    $state = $null
+    $probeSucceeded = $false
     try {
+        $state = Start-JobBoundProcess `
+            -FilePath $powerShell `
+            -Arguments ('-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $encoded) `
+            -WorkingDirectory $PSHOME `
+            -StdoutPath $stdoutPath `
+            -StderrPath $stderrPath `
+            -AggregateOutputLimitBytes $probeOutputLimitBytes
         if (-not $state.process.WaitForExit(30000)) {
             Stop-JobBoundProcess -State $state
             throw 'Medium integrity observer-boundary probe timed out.'
         }
+        $state.owner.WaitForCapture(10000)
         if ($state.process.ExitCode -ne 0) {
-            throw 'A medium integrity child could access or could not verify observer process/thread boundaries.'
+            $diagnosticParts = [Collections.Generic.List[string]]::new()
+            foreach ($channel in @(
+                [pscustomobject]@{ label = 'stdout'; path = $stdoutPath }
+                [pscustomobject]@{ label = 'stderr'; path = $stderrPath }
+            )) {
+                try {
+                    $bytes = Get-CapturedOutputBytes -Path $channel.path
+                    if ($bytes -gt $probeOutputLimitBytes) { continue }
+                    $text = [IO.File]::ReadAllText($channel.path, [Text.Encoding]::UTF8).Trim()
+                    if ($text.Length -gt 4096) { $text = $text.Substring(0, 4096) }
+                    if ($text) { $diagnosticParts.Add($channel.label + ': ' + $text) }
+                }
+                catch {}
+            }
+            $diagnostic = if ($diagnosticParts.Count -gt 0) {
+                ' ' + ($diagnosticParts -join ' | ')
+            }
+            else { '' }
+            throw ('A medium integrity child could access or could not verify observer process/thread boundaries.' + $diagnostic)
         }
+        $probeSucceeded = $true
     }
     finally {
         if ($null -ne $state) {
@@ -1176,6 +1216,9 @@ if (-not $resultWriteDenied) {
             }
             [void](Close-JobBoundProcess -State $state)
             $state.process.Dispose()
+        }
+        if ($probeSucceeded) {
+            Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
         }
     }
 }
