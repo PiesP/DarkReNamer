@@ -2638,17 +2638,67 @@ mod tests {
     }
 
     #[test]
-    fn text_export_handle_blocks_a_competing_hard_link_until_write_finishes()
+    fn text_export_atomic_replace_keeps_a_late_hard_link_on_original_contents()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let destination = directory.path().join("names.txt");
-        fs::write(&destination, b"original")?;
+        let original = b"original contents stay with the alias";
+        fs::write(&destination, original)?;
         let alias = directory.path().join("alias.txt");
+        let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
 
-        let handle = crate::rename::windows_native::open_text_export_file(&destination)?;
-        assert!(fs::hard_link(&destination, &alias).is_err());
-        drop(handle);
-        fs::hard_link(&destination, &alias)?;
+        crate::rename::windows_native::write_text_export_target_with_before_replace(
+            target,
+            b"accepted output",
+            || fs::hard_link(&destination, &alias).map(|_| ()),
+        )?;
+
+        assert_eq!(fs::read(&destination)?, b"accepted output");
+        assert_eq!(fs::read(&alias)?, original);
+        assert!(!directory.path().read_dir()?.any(|entry| {
+            entry.is_ok_and(|entry| entry.file_name().to_string_lossy().contains("backup"))
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn text_export_replace_preserves_existing_named_streams()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let destination = directory.path().join("names.txt");
+        let stream = std::path::PathBuf::from(format!("{}:metadata", destination.display()));
+        fs::write(&destination, b"old content")?;
+        fs::write(&stream, b"preserved stream")?;
+
+        write_legacy_text(&destination, &LegacyText::from("new output"))?;
+
+        assert_eq!(fs::read(&stream)?, b"preserved stream");
+        assert_eq!(
+            read_legacy_text(&destination)?,
+            LegacyText::from("new output")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn text_export_accepts_existing_targets_with_full_paths_over_64_units()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut parent = directory.path().to_path_buf();
+        for index in 0..8 {
+            parent.push(format!("segment-{index}"));
+        }
+        fs::create_dir_all(&parent)?;
+        let destination = parent.join("names.txt");
+        fs::write(&destination, b"old")?;
+        assert!(destination.to_string_lossy().encode_utf16().count() > 64);
+
+        write_legacy_text(&destination, &LegacyText::from("long path output"))?;
+
+        assert_eq!(
+            read_legacy_text(&destination)?,
+            LegacyText::from("long path output")
+        );
         Ok(())
     }
 

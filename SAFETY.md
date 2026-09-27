@@ -72,17 +72,17 @@ against the retained folder. If the selected leaf exposes exact volume GUID
 and file reference properties, it opens the leaf immediately, compares those
 properties with a native metadata handle, and retains a no-delete guard
 through session revalidation. An existing leaf without an exact identity is
-rejected. If the leaf is absent at acceptance, the application records that
-state and later allows only an exclusive create relative to the retained
-directory handle. It writes through the same output handle. Existing reparse
-points and files with more than one hard link are rejected before truncation.
-The output handle is
-opened without sharing, denying concurrent readers, writers, hard-link
-creation, and delete access until the write finishes. The exclusive writer
-opens after the save dialog releases its shell references, compares identity
-again, and rechecks the link count. An already-open reader or writer causes the
-export to fail closed. A create race fails closed rather than reopening an
-existing target.
+rejected. The export is written and flushed to a unique sibling file before
+the selected leaf is checked again. Existing reparse points and files with
+more than one hard link are rejected before commit. Existing files are
+replaced atomically with `ReplaceFileW`, which preserves supported file
+metadata and leaves hard-link aliases attached to the prior file contents. The
+no-delete leaf guard is released only for that final replace because Windows
+requires delete sharing for the replacement operation. The selected file
+identity and link count are rechecked immediately before that release; this
+does not provide a kernel compare-and-swap against a same-user process racing
+the final name-based call. A missing leaf is committed with an exclusive,
+handle-relative no-replace rename, so a later occupant is never overwritten.
 UTF-16LE imports reject an incomplete trailing code unit and retain complete
 UTF-16 code units, including unpaired surrogates, for legacy path handling.
 The multi-select file picker extracts only the remaining source capacity plus
