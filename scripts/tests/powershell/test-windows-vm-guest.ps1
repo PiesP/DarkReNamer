@@ -1126,6 +1126,35 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
         }
     }
     $guestEntryText = Get-Content -LiteralPath (Join-Path $toolingScriptsRoot 'modules/powershell/guest-entry.psm1') -Raw
+    foreach ($requiredBootstrapDiagnostic in @(
+        "Join-Path `$OutputRoot 'observer-bootstrap-failure.txt'",
+        'if (-not $elevatedObserver) { return }',
+        '$Message.Length -gt 4096',
+        'bundle-verification-failed',
+        'fixture-root-validation-failed',
+        'runtime-root-validation-failed',
+        'execution-context-check-failed',
+        'runner-protection-started',
+        'trusted-result-writer-initialization-started',
+        'if ($null -eq $script:VmTrustedResultWriter)',
+        'runner-bootstrap-failed',
+        'Remove-Item -LiteralPath $bootstrapDiagnosticPath -Force -ErrorAction Stop',
+        'The VM observer bootstrap diagnostic remained after result-writer initialization.'
+    )) {
+        if ($guestEntryText.IndexOf($requiredBootstrapDiagnostic, [StringComparison]::Ordinal) -lt 0) {
+            throw "The guest bootstrap diagnostic contract is missing '$requiredBootstrapDiagnostic'."
+        }
+    }
+    $bootstrapDiagnosticFactoryIndex = $guestEntryText.IndexOf(
+        '$writeBootstrapDiagnostic = {', [StringComparison]::Ordinal
+    )
+    $elevatedBundleVerificationIndex = $guestEntryText.IndexOf(
+        'if ($null -eq $verified)', [StringComparison]::Ordinal
+    )
+    if ($bootstrapDiagnosticFactoryIndex -lt 0 -or
+        $elevatedBundleVerificationIndex -le $bootstrapDiagnosticFactoryIndex) {
+        throw 'Elevated bundle verification must be covered by the trusted bootstrap diagnostic sink.'
+    }
     $runnerProtectionIndex = $guestEntryText.LastIndexOf(
         'Protect-CurrentRunnerProcess', [StringComparison]::Ordinal
     )

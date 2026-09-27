@@ -47,8 +47,12 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 
-$verified = Resolve-VerifiedBundle -Root $BundleRoot -InvokedScriptPath $EntryPointPath
+$elevatedObserver = [Environment]::GetEnvironmentVariable(
+    'DARKRENAMER_VM_ELEVATED_OBSERVER'
+) -ceq '1'
+$verified = $null
 if ($ValidateOnly) {
+    $verified = Resolve-VerifiedBundle -Root $BundleRoot -InvokedScriptPath $EntryPointPath
     $validatedSource = if ($verified.manifest.schema_version -eq 2) {
         $verified.manifest.product.source_sha
     } else {
@@ -58,15 +62,13 @@ if ($ValidateOnly) {
     return
 }
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
-    if ([Environment]::GetEnvironmentVariable('DARKRENAMER_VM_ELEVATED_OBSERVER') -ceq '1') {
+    if ($elevatedObserver) {
         throw 'The elevated VM observer requires a protected output directory.'
     }
+    $verified = Resolve-VerifiedBundle -Root $BundleRoot -InvokedScriptPath $EntryPointPath
     $OutputRoot = $verified.root
 }
 $OutputRoot = [IO.Path]::GetFullPath($OutputRoot)
-$elevatedObserver = [Environment]::GetEnvironmentVariable(
-    'DARKRENAMER_VM_ELEVATED_OBSERVER'
-) -ceq '1'
 $outputItem = Get-Item -LiteralPath $OutputRoot -Force -ErrorAction Stop
 if (-not $outputItem.PSIsContainer -or
     ($outputItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -81,49 +83,94 @@ if ($elevatedObserver) {
         throw 'The elevated VM output root must be the directory containing its controller-created result.'
     }
 }
+$bootstrapDiagnosticPath = Join-Path $OutputRoot 'observer-bootstrap-failure.txt'
+$writeBootstrapDiagnostic = {
+    param([string] $Stage, [string] $Message = '')
+    if (-not $elevatedObserver) { return }
+    try {
+        if ($Message.Length -gt 4096) { $Message = $Message.Substring(0, 4096) }
+        $content = "stage=$Stage`n"
+        if ($Message) { $content += "detail=$Message`n" }
+        [IO.File]::WriteAllText(
+            $bootstrapDiagnosticPath,
+            $content,
+            [Text.UTF8Encoding]::new($false)
+        )
+    }
+    catch {}
+}.GetNewClosure()
+if ($null -eq $verified) {
+    & $writeBootstrapDiagnostic 'bundle-verification'
+    try {
+        $verified = Resolve-VerifiedBundle -Root $BundleRoot -InvokedScriptPath $EntryPointPath
+    }
+    catch {
+        $message = '{0}: {1}' -f $_.Exception.GetType().FullName, $_.Exception.Message
+        & $writeBootstrapDiagnostic 'bundle-verification-failed' $message
+        throw
+    }
+}
 $fixtureParentRoot = $null
-if ($elevatedObserver) {
-    $fixtureParentRoot = [IO.Path]::GetDirectoryName($OutputRoot)
-    $verifiedRootPath = [IO.Path]::GetFullPath($verified.root)
-    $taskRootPath = [IO.Path]::GetFullPath($fixtureParentRoot)
-    $verifiedRootParent = [IO.Path]::GetDirectoryName($verifiedRootPath)
-    $bundleRootLayout = [string]::Equals(
-        $verifiedRootParent,
-        $taskRootPath,
-        [StringComparison]::OrdinalIgnoreCase
-    ) -and [IO.Path]::GetFileName($verifiedRootPath) -ceq 'bundle'
-    if (-not [string]::Equals(
-        $verifiedRootPath,
-        $taskRootPath,
-        [StringComparison]::OrdinalIgnoreCase
-    ) -and -not $bundleRootLayout) {
-        throw 'The production fixture parent must be the protected task directory beside OutputRoot.'
+& $writeBootstrapDiagnostic 'fixture-root-validation'
+try {
+    if ($elevatedObserver) {
+        $fixtureParentRoot = [IO.Path]::GetDirectoryName($OutputRoot)
+        $verifiedRootPath = [IO.Path]::GetFullPath($verified.root)
+        $taskRootPath = [IO.Path]::GetFullPath($fixtureParentRoot)
+        $verifiedRootParent = [IO.Path]::GetDirectoryName($verifiedRootPath)
+        $bundleRootLayout = [string]::Equals(
+            $verifiedRootParent,
+            $taskRootPath,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -and [IO.Path]::GetFileName($verifiedRootPath) -ceq 'bundle'
+        if (-not [string]::Equals(
+            $verifiedRootPath,
+            $taskRootPath,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -and -not $bundleRootLayout) {
+            throw 'The production fixture parent must be the protected task directory beside OutputRoot.'
+        }
+        $fixtureParentItem = Get-Item -LiteralPath $fixtureParentRoot -Force -ErrorAction Stop
+        if (-not $fixtureParentItem.PSIsContainer -or
+            ($fixtureParentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The production fixture parent must be an ordinary protected directory.'
+        }
     }
-    $fixtureParentItem = Get-Item -LiteralPath $fixtureParentRoot -Force -ErrorAction Stop
-    if (-not $fixtureParentItem.PSIsContainer -or
-        ($fixtureParentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw 'The production fixture parent must be an ordinary protected directory.'
-    }
+}
+catch {
+    $message = '{0}: {1}' -f $_.Exception.GetType().FullName, $_.Exception.Message
+    & $writeBootstrapDiagnostic 'fixture-root-validation-failed' $message
+    throw
 }
 if (-not $RuntimeRoot -and $elevatedObserver) {
-    throw 'The elevated VM observer requires a separate candidate runtime directory.'
+    $message = 'The elevated VM observer requires a separate candidate runtime directory.'
+    & $writeBootstrapDiagnostic 'runtime-root-validation-failed' $message
+    throw $message
 }
+& $writeBootstrapDiagnostic 'runtime-root-validation'
 if ($RuntimeRoot) {
-    if (-not [IO.Path]::IsPathRooted($RuntimeRoot)) {
-        throw 'The VM candidate runtime root must be absolute.'
-    }
-    $runtimeItem = Get-Item -LiteralPath $RuntimeRoot -Force -ErrorAction Stop
-    if (-not $runtimeItem.PSIsContainer -or
-        ($runtimeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw 'The VM candidate runtime root must be an existing ordinary directory.'
-    }
-    $RuntimeRoot = $runtimeItem.FullName
-    $runtimeCursor = $runtimeItem
-    while ($null -ne $runtimeCursor) {
-        if (($runtimeCursor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw 'The VM candidate runtime path traverses a reparse point.'
+    try {
+        if (-not [IO.Path]::IsPathRooted($RuntimeRoot)) {
+            throw 'The VM candidate runtime root must be absolute.'
         }
-        $runtimeCursor = $runtimeCursor.Parent
+        $runtimeItem = Get-Item -LiteralPath $RuntimeRoot -Force -ErrorAction Stop
+        if (-not $runtimeItem.PSIsContainer -or
+            ($runtimeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The VM candidate runtime root must be an existing ordinary directory.'
+        }
+        $RuntimeRoot = $runtimeItem.FullName
+        $runtimeCursor = $runtimeItem
+        while ($null -ne $runtimeCursor) {
+            if (($runtimeCursor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'The VM candidate runtime path traverses a reparse point.'
+            }
+            $runtimeCursor = $runtimeCursor.Parent
+        }
+    }
+    catch {
+        $message = '{0}: {1}' -f $_.Exception.GetType().FullName, $_.Exception.Message
+        & $writeBootstrapDiagnostic 'runtime-root-validation-failed' $message
+        throw
     }
 }
 $candidateLane = $verified.manifest.schema_version -eq 2
@@ -160,26 +207,43 @@ if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
 $elevatedObserver = [Environment]::GetEnvironmentVariable(
     'DARKRENAMER_VM_ELEVATED_OBSERVER'
 ) -ceq '1'
+& $writeBootstrapDiagnostic 'execution-context-check'
 try {
     Assert-VmObserverExecutionContext -ExpectedSessionId $ExpectedSessionId
 }
 catch {
+    $message = '{0}: {1}' -f $_.Exception.GetType().FullName, $_.Exception.Message
+    & $writeBootstrapDiagnostic 'execution-context-check-failed' $message
     if ($elevatedObserver) { $result.failure_reason = 'invalid_elevated_observer' }
     else { $result.failure_reason = 'elevated_runner' }
     throw
 }
+& $writeBootstrapDiagnostic 'execution-context-check-passed'
 $currentSession = [Diagnostics.Process]::GetCurrentProcess().SessionId
 if ($currentSession -ne $ExpectedSessionId) {
     $result.failure_reason = 'unexpected_session'
+    & $writeBootstrapDiagnostic 'desktop-session-check-failed' (
+        'actual={0}; expected={1}' -f $currentSession, $ExpectedSessionId
+    )
     throw 'Windows VM guest execution is in an unexpected session.'
 }
+& $writeBootstrapDiagnostic 'desktop-session-check-passed'
 
 $desktopLock = $null
 $previousExecutionState = $null
 $runtimeRoot = $null
 try {
+    & $writeBootstrapDiagnostic 'runner-protection-started'
     Protect-CurrentRunnerProcess
+    & $writeBootstrapDiagnostic 'runner-protection-passed'
+    & $writeBootstrapDiagnostic 'trusted-result-writer-initialization-started'
     Initialize-TrustedResultWriter -Root $verified.root
+    if (Test-Path -LiteralPath $bootstrapDiagnosticPath) {
+        Remove-Item -LiteralPath $bootstrapDiagnosticPath -Force -ErrorAction Stop
+    }
+    if (Test-Path -LiteralPath $bootstrapDiagnosticPath) {
+        throw 'The VM observer bootstrap diagnostic remained after result-writer initialization.'
+    }
     $desktopLock = Enter-DesktopTestLock -SessionId $currentSession
     if ($null -eq $desktopLock) {
         $result.failure_reason = 'desktop_busy'
@@ -241,6 +305,10 @@ try {
     }
 }
 catch {
+    if ($null -eq $script:VmTrustedResultWriter) {
+        $message = '{0}: {1}' -f $_.Exception.GetType().FullName, $_.Exception.Message
+        & $writeBootstrapDiagnostic 'runner-bootstrap-failed' $message
+    }
     $result.status = 'failed'
     if ($null -eq $result.failure_reason) {
         $result.failure_reason = 'runner_error'
