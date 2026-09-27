@@ -1144,6 +1144,13 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
         $hostRunnerText.IndexOf('-not $jobsClosed -or $taskPresentBeforeDelete', [StringComparison]::Ordinal) -lt 0) {
         throw 'The VM controller must bind process-job cleanup evidence before deleting guest and trusted roots.'
     }
+    if ($hostRunnerText.IndexOf('for ($attempt = 1; $attempt -le 3; $attempt++)', [StringComparison]::Ordinal) -lt 0 -or
+        $hostRunnerText.IndexOf('if ($attempt -lt 3) { Start-Sleep -Milliseconds 200 }', [StringComparison]::Ordinal) -lt 0 -or
+        $hostRunnerText.IndexOf('$trustedTaskRoot = $null', [StringComparison]::Ordinal) -lt 0 -or
+        $hostRunnerText.IndexOf('trusted_task_root = Join-Path $base ($name + ''-trusted'')', [StringComparison]::Ordinal) -lt 0 -or
+        $hostRunnerText.IndexOf('$trustedTaskRoot = [string]$workspaceRoots.trusted_task_root', [StringComparison]::Ordinal) -lt 0) {
+        throw 'The VM controller must retry transient process inventories and retain exact cleanup roots before baseline collection.'
+    }
     $controllerLifecycle = [pscustomobject]@{
         pid = 1234
         start_time_utc_ticks = '639000000000000000'
@@ -1200,6 +1207,77 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
     if (Test-DrControllerProcessJobCleanupLedger -Result $controllerResult) {
         throw 'The controller accepted a clean process-job row for a different candidate identity.'
     }
+    $runnerProcessDefinitions = @($controllerEntryAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'global:Get-DrVmRunnerProcesses'
+    }, $true))
+    if ($runnerProcessDefinitions.Count -ne 1) {
+        throw 'Expected one controller runner-process inventory function.'
+    }
+    $runnerProcessProbe = [scriptblock]::Create(@'
+param([string] $FunctionText)
+$script:runnerCimCalls = 0
+$script:runnerOwnerCalls = 0
+$script:failFirstOwner = $true
+$script:failAllOwners = $false
+function Get-CimInstance {
+    [CmdletBinding()]
+    param([Parameter(Position = 0)][string] $ClassName, [string] $Filter)
+    $script:runnerCimCalls++
+    [pscustomobject]@{
+        ProcessId = 4242
+        SessionId = 2
+        CreationDate = [datetime]::SpecifyKind([datetime]'2026-09-27T00:00:00', [DateTimeKind]::Utc)
+        ExecutablePath = 'C:\vm-test\runner.exe'
+    }
+}
+function Invoke-CimMethod {
+    [CmdletBinding()]
+    param([object] $InputObject, [string] $MethodName)
+    $script:runnerOwnerCalls++
+    if ($script:failFirstOwner) {
+        $script:failFirstOwner = $false
+        throw 'Simulated process exit during owner inventory.'
+    }
+    if ($script:failAllOwners) {
+        return [pscustomobject]@{ ReturnValue = 5; Sid = $null }
+    }
+    [pscustomobject]@{ ReturnValue = 0; Sid = 'S-1-5-21-1-2-3-1001' }
+}
+$localFunctionText = $FunctionText.Replace(
+    'function global:Get-DrVmRunnerProcesses',
+    'function Get-DrVmRunnerProcesses'
+)
+. ([scriptblock]::Create($localFunctionText))
+$transient = Get-DrVmRunnerProcesses -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2
+$transientCimCalls = $script:runnerCimCalls
+$script:runnerCimCalls = 0
+$script:runnerOwnerCalls = 0
+$script:failAllOwners = $true
+$incomplete = Get-DrVmRunnerProcesses -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2
+[pscustomobject]@{
+    transient_complete = $transient.complete
+    transient_attempts = $transient.attempts
+    transient_process_count = @($transient.processes).Count
+    transient_cim_calls = $transientCimCalls
+    incomplete_complete = $incomplete.complete
+    incomplete_attempts = $incomplete.attempts
+    incomplete_process_count = @($incomplete.processes).Count
+    incomplete_cim_calls = $script:runnerCimCalls
+}
+'@)
+    $runnerProcessProbeResult = & $runnerProcessProbe $runnerProcessDefinitions[0].Extent.Text
+    if (-not $runnerProcessProbeResult.transient_complete -or
+        $runnerProcessProbeResult.transient_attempts -ne 2 -or
+        $runnerProcessProbeResult.transient_process_count -ne 1 -or
+        $runnerProcessProbeResult.transient_cim_calls -ne 2 -or
+        $runnerProcessProbeResult.incomplete_complete -or
+        $runnerProcessProbeResult.incomplete_attempts -ne 3 -or
+        $runnerProcessProbeResult.incomplete_process_count -ne 0 -or
+        $runnerProcessProbeResult.incomplete_cim_calls -ne 3) {
+        throw 'The VM process inventory must recover from one transient owner query failure and remain incomplete after the bounded retries.'
+    }
     if ($hostRunnerText.IndexOf('Register-ScheduledTask', [StringComparison]::Ordinal) -ge 0 -or
         $hostRunnerText.IndexOf('SetSecurityDescriptor(', [StringComparison]::Ordinal) -ge 0) {
         throw 'Windows VM tasks must not expose a mutable registration before applying their protected DACL.'
@@ -1236,6 +1314,8 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
         'DiscretionaryAclProtected',
         'function global:Get-DrVmRunnerProcesses',
         'Get-DrVmRunnerProcesses -UserSid $sid -SessionId $sessionId',
+        '$guestRoot = [string]$workspaceRoots.guest_root',
+        '$trustedTaskRoot = [string]$workspaceRoots.trusted_task_root',
         '$transport[''runner_process_baseline''] = @($runnerProcessBaseline)',
         'runner_process_inventory_complete =',
         'unexpected_runner_processes =',

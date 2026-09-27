@@ -339,6 +339,7 @@ $transport = [ordered]@{
 $credential = $null
 $session = $null
 $guestRoot = $null
+$trustedTaskRoot = $null
 $taskName = 'DarkReNamerTests-' + [guid]::NewGuid().ToString('N')
 $runnerTaskBaseline = @()
 $runnerProcessBaseline = @()
@@ -567,7 +568,7 @@ public static class VmDesktopState {
         if (-not (Test-Path "$env:SystemRoot\System32\VCRUNTIME140.dll")) { throw 'Install the Microsoft x64 Visual C++ runtime in the VM before testing.' }
         [pscustomobject]@{sid = $sid; session_id = $unlocked[0]}
     }
-    $guestRoot = Invoke-Command -Session $session -ArgumentList $taskName,$desktop.sid -ScriptBlock {
+    $workspaceRoots = Invoke-Command -Session $session -ArgumentList $taskName,$desktop.sid -ScriptBlock {
         param($name,$runnerSid)
         if ($name -cnotmatch '^DarkReNamerTests-[0-9a-f]{32}$' -or
             $runnerSid -cnotmatch '^S-1-5-21-(\d+-){2}\d+-\d+$') {
@@ -1445,40 +1446,59 @@ public static class DarkReNamerVmControllerWorkspace {
                 [Parameter(Mandatory)][string] $UserSid,
                 [Parameter(Mandatory)][int] $SessionId
             )
-            $rows = [Collections.Generic.List[object]]::new()
-            $complete = $true
-            foreach ($process in @(Get-CimInstance Win32_Process -Filter "SessionId=$SessionId")) {
-                $owner = $null
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+                $rows = [Collections.Generic.List[object]]::new()
+                $complete = $true
+                $sessionProcesses = @()
                 try {
-                    $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction Stop
+                    $sessionProcesses = @(Get-CimInstance Win32_Process `
+                        -Filter "SessionId=$SessionId" -ErrorAction Stop)
                 }
                 catch {
                     $complete = $false
-                    continue
                 }
-                if ($owner.ReturnValue -ne 0) {
-                    $complete = $false
-                    continue
+                foreach ($process in $sessionProcesses) {
+                    $owner = $null
+                    try {
+                        $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction Stop
+                    }
+                    catch {
+                        $complete = $false
+                        continue
+                    }
+                    if ($owner.ReturnValue -ne 0) {
+                        $complete = $false
+                        continue
+                    }
+                    if ($owner.Sid -ceq $UserSid) {
+                        $created = ([datetime]$process.CreationDate).ToUniversalTime().ToString('o')
+                        $rows.Add([pscustomobject]@{
+                            identity = ([string]$process.ProcessId + '|' + $created)
+                            pid = [int]$process.ProcessId
+                            session_id = [int]$process.SessionId
+                            creation_time_utc = $created
+                            executable_path = [string]$process.ExecutablePath
+                        })
+                    }
                 }
-                if ($owner.Sid -ceq $UserSid) {
-                    $created = ([datetime]$process.CreationDate).ToUniversalTime().ToString('o')
-                    $rows.Add([pscustomobject]@{
-                        identity = ([string]$process.ProcessId + '|' + $created)
-                        pid = [int]$process.ProcessId
-                        session_id = [int]$process.SessionId
-                        creation_time_utc = $created
-                        executable_path = [string]$process.ExecutablePath
-                    })
+                $snapshot = [pscustomobject]@{
+                    complete = $complete
+                    processes = @($rows.ToArray() | Sort-Object identity)
+                    attempts = $attempt
                 }
+                if ($complete) { return $snapshot }
+                if ($attempt -lt 3) { Start-Sleep -Milliseconds 200 }
             }
-            [pscustomobject]@{
-                complete = $complete
-                processes = @($rows.ToArray() | Sort-Object identity)
-            }
+            $snapshot
         }
 
-        $path
+        [pscustomobject]@{
+            guest_root = $path
+            trusted_task_root = Join-Path $base ($name + '-trusted')
+        }
     }
+    $guestRoot = [string]$workspaceRoots.guest_root
+    $trustedTaskRoot = [string]$workspaceRoots.trusted_task_root
     $runnerTaskBaseline = @(Invoke-Command -Session $session -ArgumentList $desktop.sid -ScriptBlock {
         param($sid)
         @(Get-DrVmRunnerTasks -UserSid $sid | Sort-Object identity)
@@ -1561,10 +1581,6 @@ public static class DarkReNamerVmControllerWorkspace {
             }
         }
     )
-    $trustedTaskRoot = Invoke-Command -Session $session -ArgumentList $taskName -ScriptBlock {
-        param($name)
-        Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') ($name + '-trusted')
-    }
     $transport.status = 'copying'
     if ($acceptance) {
         $acceptanceStage = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid -ScriptBlock {
