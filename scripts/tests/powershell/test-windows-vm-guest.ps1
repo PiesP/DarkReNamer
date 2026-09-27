@@ -682,6 +682,10 @@ try {
         'output_limit_exceeded',
         'process_job_not_empty',
         'job_active_processes_at_primary_exit',
+        'WaitForEmpty(1000)',
+        'GetSoleActiveProcessId()',
+        '-not $State.job_had_survivors',
+        '[System.IO.FileSystemAclExtensions]::CreateDirectory($security, $path)',
         'job_cleanup = $false',
         'AggregateOutputLimitBytes =',
         '$script:VmTestOutputAggregateLimitBytes',
@@ -723,6 +727,17 @@ try {
         if ($runnerText.IndexOf($requiredJobSource, [StringComparison]::Ordinal) -lt 0) {
             throw "The guest process containment contract is missing '$requiredJobSource'."
         }
+    }
+    $aclAwareDirectoryCalls = [regex]::Matches(
+        $runnerText,
+        [regex]::Escape('[System.IO.FileSystemAclExtensions]::CreateDirectory($security, $path)')
+    ).Count
+    if ($aclAwareDirectoryCalls -ne 2 -or
+        $runnerText.IndexOf(
+            '[IO.Directory]::CreateDirectory($path, $security)',
+            [StringComparison]::Ordinal
+        ) -ge 0) {
+        throw 'Observer directories must use the .NET Core ACL-aware directory creation API.'
     }
     foreach ($flowFixtureContract in @(
         "if (`$RawEvidence -and [string]::IsNullOrWhiteSpace(`$FixtureParentRoot)) {",
@@ -954,6 +969,83 @@ try {
     )) {
         if ($runnerText.IndexOf($requiredRawSource, [StringComparison]::Ordinal) -lt 0) {
             throw "The shared VM-Automated raw contract is missing '$requiredRawSource'."
+        }
+    }
+    $accountingScript = Join-Path $valid.root 'accounting-grace.ps1'
+    $accountingStdoutPath = Join-Path $valid.root 'accounting-grace.stdout.log'
+    $accountingStderrPath = Join-Path $valid.root 'accounting-grace.stderr.log'
+    [IO.File]::WriteAllText(
+        $accountingScript,
+        'Start-Sleep -Milliseconds 75',
+        [Text.UTF8Encoding]::new($false)
+    )
+    [IO.File]::WriteAllBytes($accountingStdoutPath, [byte[]]@())
+    [IO.File]::WriteAllBytes($accountingStderrPath, [byte[]]@())
+    $accountingStartInfo = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+    $accountingStartInfo.UseShellExecute = $false
+    $accountingStartInfo.CreateNoWindow = $true
+    $accountingStartInfo.WorkingDirectory = $valid.root
+    [void]$accountingStartInfo.ArgumentList.Add('-NoLogo')
+    [void]$accountingStartInfo.ArgumentList.Add('-NoProfile')
+    [void]$accountingStartInfo.ArgumentList.Add('-NonInteractive')
+    [void]$accountingStartInfo.ArgumentList.Add('-File')
+    [void]$accountingStartInfo.ArgumentList.Add($accountingScript)
+    $accountingProcess = $null
+    try {
+        $accountingProcess = [Diagnostics.Process]::Start($accountingStartInfo)
+        $accountingOwner = [pscustomobject]@{
+            active_processes = 1
+            primary_process_id = [long]$accountingProcess.Id
+            OutputLimitExceeded = $false
+        }
+        Add-Member -InputObject $accountingOwner -MemberType ScriptProperty -Name ActiveProcessCount -Value { [int]$this.active_processes } -Force
+        Add-Member -InputObject $accountingOwner -MemberType ScriptMethod -Name WaitForEmpty -Value {
+            param([int] $Milliseconds)
+            if ($this.active_processes -gt 0) {
+                Start-Sleep -Milliseconds 25
+                $this.active_processes = 0
+            }
+            return $this.active_processes -eq 0
+        } -Force
+        Add-Member -InputObject $accountingOwner -MemberType ScriptMethod -Name GetSoleActiveProcessId -Value {
+            return [long]$this.primary_process_id
+        } -Force
+        Add-Member -InputObject $accountingOwner -MemberType ScriptMethod -Name WaitForCapture -Value { param([int] $Milliseconds) } -Force
+        Add-Member -InputObject $accountingOwner -MemberType ScriptMethod -Name CloseJob -Value { return $true } -Force
+        $accountingState = [pscustomobject]@{
+            process = $accountingProcess
+            owner = $accountingOwner
+            aggregate_output_limit_bytes = [long]4096
+            job_active_processes_at_primary_exit = $null
+            job_had_survivors = $false
+            job_forced_termination = $false
+            job_active_processes_at_close = $null
+            job_empty = $false
+            job_closed = $false
+            job_capture_complete = $false
+        }
+        $accountingResult = Wait-JobBoundProcessWithOutputLimit -State $accountingState -StdoutPath $accountingStdoutPath -StderrPath $accountingStderrPath -TimeoutSeconds 10
+        if ($accountingResult.failure_reason -or
+            $accountingResult.active_processes_at_primary_exit -ne 1 -or
+            $accountingOwner.ActiveProcessCount -ne 0 -or
+            $accountingState.job_had_survivors) {
+            throw 'A transient Job Object accounting delay was classified as a surviving process.'
+        }
+        if (-not (Close-JobBoundProcess -State $accountingState)) {
+            throw 'The process job did not close cleanly after accounting settled.'
+        }
+    }
+    finally {
+        if ($null -ne $accountingProcess) {
+            try {
+                $accountingProcess.Refresh()
+                if (-not $accountingProcess.HasExited) {
+                    $accountingProcess.Kill()
+                    [void]$accountingProcess.WaitForExit(5000)
+                }
+            }
+            catch {}
+            $accountingProcess.Dispose()
         }
     }
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {

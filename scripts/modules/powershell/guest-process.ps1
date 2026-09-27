@@ -104,7 +104,7 @@ function New-ObserverFixtureDirectory {
         [Security.AccessControl.PropagationFlags]::InheritOnly,
         [Security.AccessControl.AccessControlType]::Allow
     ))
-    [void][IO.Directory]::CreateDirectory($path, $security)
+    [void][System.IO.FileSystemAclExtensions]::CreateDirectory($security, $path)
     $created = Get-Item -LiteralPath $path -Force -ErrorAction Stop
     if (-not $created.PSIsContainer -or
         ($created.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -161,7 +161,7 @@ function New-ObserverCandidateWriteDirectory {
         [Security.AccessControl.PropagationFlags]::InheritOnly,
         [Security.AccessControl.AccessControlType]::Allow
     ))
-    [void][IO.Directory]::CreateDirectory($path, $security)
+    [void][System.IO.FileSystemAclExtensions]::CreateDirectory($security, $path)
     $created = Get-Item -LiteralPath $path -Force -ErrorAction Stop
     if (-not $created.PSIsContainer -or
         ($created.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -1052,6 +1052,34 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
         return ActiveProcessCount == 0;
     }
 
+    public long GetSoleActiveProcessId() {
+        if (job == IntPtr.Zero) return 0;
+        IntPtr processList = Marshal.AllocHGlobal(8 + IntPtr.Size);
+        uint returnedLength;
+        try {
+            if (!QueryInformationJobObjectBuffer(job, 3, processList,
+                    (uint)(8 + IntPtr.Size), out returnedLength)) {
+                int error = Marshal.GetLastWin32Error();
+                if (error == 122 || error == 234) return -1;
+                throw new Win32Exception(error);
+            }
+            if (returnedLength < 8)
+                throw new InvalidOperationException("The Job Object process list is truncated.");
+            uint assigned = unchecked((uint)Marshal.ReadInt32(processList, 0));
+            uint listed = unchecked((uint)Marshal.ReadInt32(processList, 4));
+            if (assigned == 0 && listed == 0) return 0;
+            if (assigned != 1 || listed != 1) return -1;
+            if (returnedLength < (uint)(8 + IntPtr.Size))
+                throw new InvalidOperationException("The sole Job Object process ID is truncated.");
+            ulong processId = IntPtr.Size == 8
+                ? unchecked((ulong)Marshal.ReadInt64(processList, 8))
+                : unchecked((uint)Marshal.ReadInt32(processList, 8));
+            if (processId > UInt32.MaxValue) return -1;
+            return (long)processId;
+        }
+        finally { Marshal.FreeHGlobal(processList); }
+    }
+
     public void Terminate(uint exitCode) {
         if (job != IntPtr.Zero && !TerminateJobObject(job, exitCode))
             throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -1609,7 +1637,8 @@ function Close-JobBoundProcess {
     $State.job_closed = $closed
     $State.job_capture_complete = $captureComplete
     $State.job_active_processes_at_close -eq 0 -and
-        $emptyOnWait -and $empty -and $closed -and $captureComplete
+        $emptyOnWait -and $empty -and $closed -and $captureComplete -and
+        -not $State.job_had_survivors
 }
 
 function Complete-AcceptanceOwnedProcessJob {
@@ -1720,7 +1749,17 @@ function Wait-JobBoundProcessWithOutputLimit {
     else {
         $State.process.WaitForExit()
         $State.job_active_processes_at_primary_exit = [int]$State.owner.ActiveProcessCount
+        $soleActiveProcessId = 0L
         if ($State.job_active_processes_at_primary_exit -gt 0) {
+            $soleActiveProcessId = [long]$State.owner.GetSoleActiveProcessId()
+        }
+        $primaryAccountingLag = $soleActiveProcessId -eq [long]$State.process.Id
+        if ($soleActiveProcessId -ne 0 -and -not $primaryAccountingLag) {
+            $State.job_had_survivors = $true
+            Stop-JobBoundProcess -State $State
+            $reason = 'process_job_not_empty'
+        }
+        elseif ($primaryAccountingLag -and -not $State.owner.WaitForEmpty(1000)) {
             $State.job_had_survivors = $true
             Stop-JobBoundProcess -State $State
             $reason = 'process_job_not_empty'
