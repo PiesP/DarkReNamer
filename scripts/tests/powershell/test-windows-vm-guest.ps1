@@ -626,8 +626,6 @@ try {
         'QueryFullProcessImageNameW(process, 0, imagePath, ref length)',
         'GetWindowsDirectoryW(windowsDirectory, (uint)windowsDirectory.Capacity)',
         'TokenDword(shellToken, TOKEN_TYPE) != TOKEN_PRIMARY',
-        'ReadTokenStatistics(current).AuthenticationId',
-        'ReadTokenStatistics(linked).AuthenticationId',
         'ReadTokenStatistics(linkedToken).AuthenticationId',
         'ReadTokenStatistics(shellToken).AuthenticationId',
         'SameLuid(linkedAuthenticationId, shellAuthenticationId)',
@@ -771,9 +769,20 @@ try {
         'SameLuid(linkedAuthenticationId, shellAuthenticationId)',
         [StringComparison]::Ordinal
     )
+    $linkedAuthenticationReadIndex = $runnerText.IndexOf(
+        'ReadTokenStatistics(linkedToken).AuthenticationId',
+        [StringComparison]::Ordinal
+    )
+    $shellAuthenticationReadIndex = $runnerText.IndexOf(
+        'ReadTokenStatistics(shellToken).AuthenticationId',
+        [StringComparison]::Ordinal
+    )
     if ($shellWindowIndex -lt 0 -or $shellProcessIndex -le $shellWindowIndex -or
         $shellImageIndex -le $shellProcessIndex -or $shellTokenIndex -le $shellImageIndex -or
-        $shellAuthenticationIndex -le $shellTokenIndex -or
+        $linkedAuthenticationReadIndex -le $shellTokenIndex -or
+        $shellAuthenticationReadIndex -le $linkedAuthenticationReadIndex -or
+        $shellAuthenticationIndex -le $shellAuthenticationReadIndex -or
+        $runnerText.IndexOf('ReadTokenStatistics(current).AuthenticationId', [StringComparison]::Ordinal) -ge 0 -or
         $runnerText.IndexOf('DuplicateTokenEx', [StringComparison]::Ordinal) -ge 0) {
         throw 'The medium observer must use the verified interactive shell primary token from the same logon.'
     }

@@ -608,10 +608,6 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
             RequireToken(
                 linked, 0, TOKEN_ELEVATION_TYPE_LIMITED, expectedSession,
                 "S-1-16-8192", userSid);
-            Luid currentAuthenticationId = ReadTokenStatistics(current).AuthenticationId;
-            Luid linkedAuthenticationId = ReadTokenStatistics(linked).AuthenticationId;
-            if (!SameLuid(currentAuthenticationId, linkedAuthenticationId))
-                throw new InvalidOperationException("The elevated and linked tokens belong to different logon sessions.");
             IntPtr shellToken = OpenVerifiedShellPrimaryToken(
                 linked, expectedSession, userSid);
             session = currentSession;
