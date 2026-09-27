@@ -95,7 +95,8 @@ function Initialize-TrustedResultWriter {
     try {
         if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
             Initialize-JobBoundProcessRuntime
-            $safeHandle = [DarkReNamerVmRunnerSecurity]::CreateTrustedResultFile($trustedPath)
+            $safeHandle = [DarkReNamerVmRunnerSecurity]::CreateTrustedResultFile(
+                $trustedPath, -not $elevatedObserver)
             $writer = [IO.FileStream]::new($safeHandle, [IO.FileAccess]::ReadWrite, 4096, $false)
             $safeHandle = $null
             $runnerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value

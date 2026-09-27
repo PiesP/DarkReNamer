@@ -1238,15 +1238,17 @@ public static class DarkReNamerVmRunnerSecurity {
             "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;" + validatedRunnerSid + ")(A;;FR;;;OW)");
     }
 
-    public static SafeFileHandle CreateTrustedResultFile(string path) {
+    public static SafeFileHandle CreateTrustedResultFile(string path, bool createNew) {
         const uint GENERIC_READ = 0x80000000;
         const uint GENERIC_WRITE = 0x40000000;
         const uint WRITE_DAC = 0x00040000;
         const uint SHARE_READ = 0x00000001;
+        const uint CREATE_NEW = 1;
         const uint OPEN_EXISTING = 3;
         const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
         IntPtr file = CreateFileW(path, GENERIC_READ | GENERIC_WRITE | WRITE_DAC,
-            SHARE_READ, IntPtr.Zero, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, IntPtr.Zero);
+            SHARE_READ, IntPtr.Zero, createNew ? CREATE_NEW : OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL, IntPtr.Zero);
         if (file == new IntPtr(-1))
             throw new Win32Exception(Marshal.GetLastWin32Error());
         return new SafeFileHandle(file, true);

@@ -143,10 +143,19 @@ function Get-VmAutomatedCheckpoint {
     }
 }
 function Get-VmAutomatedOwnedProcessInventory {
-    param([Parameter(Mandatory)][string] $Root)
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [scriptblock] $ProcessQuery
+    )
 
     $prefix = [IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
-    @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+    $processes = if ($null -ne $ProcessQuery) {
+        @(& $ProcessQuery)
+    }
+    else {
+        @(Get-CimInstance Win32_Process -ErrorAction Stop)
+    }
+    @($processes | Where-Object {
         $_.ExecutablePath -and
         $_.ExecutablePath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
     } | Sort-Object ProcessId | ForEach-Object {
@@ -156,6 +165,44 @@ function Get-VmAutomatedOwnedProcessInventory {
             executable_path = [string]$_.ExecutablePath
         }
     })
+}
+function Get-VmAutomatedOwnedProcessCleanupObservation {
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [scriptblock] $ProcessQuery
+    )
+
+    try {
+        $inventoryParameters = @{ Root = $Root }
+        if ($null -ne $ProcessQuery) {
+            $inventoryParameters['ProcessQuery'] = $ProcessQuery
+        }
+        [pscustomobject]@{
+            observed = $true
+            entries = @(Get-VmAutomatedOwnedProcessInventory @inventoryParameters)
+            error = $null
+            diagnostic = $null
+        }
+    }
+    catch {
+        $message = [string]$_.Exception.Message
+        if ($message.Length -gt 1024) {
+            $message = $message.Substring(0, 1024)
+        }
+        $diagnostic = $_ | Out-String -Width 4096
+        if ($diagnostic.Length -gt 8192) {
+            $diagnostic = $diagnostic.Substring(0, 8192)
+        }
+        [pscustomobject]@{
+            observed = $false
+            entries = $null
+            error = [ordered]@{
+                type = $_.Exception.GetType().FullName
+                message = $message
+            }
+            diagnostic = $diagnostic
+        }
+    }
 }
 function New-VmAutomatedJournalCleanupObservation {
     param(
