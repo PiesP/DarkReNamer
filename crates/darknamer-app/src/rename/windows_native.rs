@@ -33,8 +33,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_TRAVERSE,
     FILE_WRITE_DATA, FileCaseSensitiveInfo, FileDispositionInfo, FileIdInfo, FileIdType,
     FileRemoteProtocolInfo, FileStandardInfo, GetDriveTypeW, GetFileInformationByHandleEx,
-    GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, OpenFileById, SYNCHRONIZE,
-    SetFileInformationByHandle, VOLUME_NAME_GUID, VOLUME_NAME_NONE,
+    GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, OpenFileById, ReplaceFileW,
+    SYNCHRONIZE, SetFileInformationByHandle, VOLUME_NAME_GUID, VOLUME_NAME_NONE,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::SystemServices::FILE_CS_FLAG_CASE_SENSITIVE_DIR;
@@ -45,6 +45,7 @@ const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 const SHARE_READ_WRITE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
 const ERROR_UNRECOGNIZED_VOLUME: i32 = 1005;
 const ERROR_FILENAME_EXCED_RANGE: i32 = 206;
+const ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: i32 = 1177;
 const FILESYSTEM_NAME_CAPACITY: usize = 32;
 const MAX_NORMALIZED_FINAL_PATH_UTF16_UNITS: u32 = 32_768;
 
@@ -416,14 +417,6 @@ pub(crate) fn open_entry(
     )
 }
 
-/// Opens a user-selected text export destination without following or
-/// replacing a reparse point, and rejects multiply-linked files before the
-/// caller can truncate them.
-#[cfg(test)]
-pub(crate) fn open_text_export_file(path: &Path) -> io::Result<File> {
-    prepare_text_export_target(path)?.open_file()
-}
-
 /// Retains the selected parent directory while the save dialog is still
 /// active, so later writes cannot be redirected by replacing a path component
 /// after the dialog returns.
@@ -575,10 +568,9 @@ impl TextExportParent {
             .directories
             .last()
             .ok_or_else(|| io::Error::other("text export directory chain is empty"))?;
-        // Keep a metadata-only handle with no delete sharing while the Shell
-        // identity is live. Windows attribute access is exempt from share-mode
-        // conflicts, so this guard can remain open beside the later exclusive
-        // writer while still blocking rename and deletion.
+        // Retain the selected leaf handle and identity through the stage write.
+        // A same-user rename can still change the name while this handle is
+        // open, so the name is reopened and checked immediately before commit.
         let options = FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT;
         let accepted_leaf = match open_relative(
             parent.file(),
@@ -706,17 +698,10 @@ const fn file_reference_number_from_index_number(index_number: i64) -> u64 {
 }
 
 fn ntfs_volume_id(root: &File) -> io::Result<u128> {
-    let mut path = [0_u16; 64];
-    let written = query_final_path(root, &mut path, FILE_NAME_NORMALIZED | VOLUME_NAME_GUID);
-    if written == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let written =
-        usize::try_from(written).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
-    if written >= path.len() {
-        return Err(io::Error::from_raw_os_error(ERROR_FILENAME_EXCED_RANGE));
-    }
-    parse_volume_guid_path(&path[..written])
+    parse_volume_guid_path(&normalized_final_path(
+        root,
+        FILE_NAME_NORMALIZED | VOLUME_NAME_GUID,
+    )?)
 }
 
 fn parse_volume_guid_path(path: &[u16]) -> io::Result<u128> {
@@ -755,65 +740,287 @@ fn parse_volume_guid_path(path: &[u16]) -> io::Result<u128> {
     Ok(value)
 }
 
-impl TextExportTarget {
-    pub(crate) fn open_file(self) -> io::Result<File> {
-        let file = match self.accepted_leaf {
-            TextExportLeaf::Existing { guard, identity } => {
-                let parent = self
-                    .parents
-                    .last()
-                    .ok_or_else(|| io::Error::other("text export directory chain is empty"))?;
-                let file = open_relative(
-                    parent.file(),
-                    &self.leaf,
-                    FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-                    0,
-                    FILE_OPEN,
-                    FILE_NON_DIRECTORY_FILE
-                        | FILE_OPEN_REPARSE_POINT
-                        | FILE_SYNCHRONOUS_IO_NONALERT,
-                )?;
-                validate_text_export_file(&file)?;
-                let actual = (ntfs_volume_id(&file)?, ntfs_file_reference_number(&file)?);
-                require_matching_text_export_leaf_identity(identity, actual)?;
-                // The metadata-only guard remains live until the exclusive
-                // writer is open and its identity and link count are checked.
-                drop(guard);
-                file
-            }
-            TextExportLeaf::Missing => {
-                let parent = self
-                    .parents
-                    .last()
-                    .ok_or_else(|| io::Error::other("text export directory chain is empty"))?;
-                open_relative(
-                    parent.file(),
-                    &self.leaf,
-                    FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-                    0,
-                    FILE_CREATE,
-                    FILE_NON_DIRECTORY_FILE
-                        | FILE_OPEN_REPARSE_POINT
-                        | FILE_SYNCHRONOUS_IO_NONALERT,
-                )?
-            }
-        };
-        validate_text_export_file(&file)?;
-        Ok(file)
-    }
-}
-
 pub(crate) fn write_text_export_target(target: TextExportTarget, bytes: &[u8]) -> io::Result<()> {
-    let mut file = target.open_file()?;
-    file.set_len(0)?;
-    file.write_all(bytes)?;
-    file.flush()?;
-    file.sync_all()
+    write_text_export_target_inner(target, bytes, || Ok(()))
 }
 
-/// Writes through one validated handle with no sharing, preventing concurrent
-/// opens from changing the destination identity or creating another hard link
-/// during truncation and output.
+#[cfg(test)]
+pub(crate) fn write_text_export_target_with_before_replace<F>(
+    target: TextExportTarget,
+    bytes: &[u8],
+    before_replace: F,
+) -> io::Result<()>
+where
+    F: FnOnce() -> io::Result<()>,
+{
+    write_text_export_target_inner(target, bytes, before_replace)
+}
+
+fn write_text_export_target_inner<F>(
+    target: TextExportTarget,
+    bytes: &[u8],
+    before_replace: F,
+) -> io::Result<()>
+where
+    F: FnOnce() -> io::Result<()>,
+{
+    let parent = target
+        .parents
+        .last()
+        .ok_or_else(|| io::Error::other("text export directory chain is empty"))?;
+    let (stage_leaf, stage_file) = create_text_export_stage(parent.file())?;
+    let mut stage = Some(stage_file);
+    let stage_file_reference = match stage.as_ref() {
+        Some(file) => match ntfs_file_reference_number(file) {
+            Ok(file_reference) => file_reference,
+            Err(error) => {
+                if let Some(file) = stage.take() {
+                    let _ = mark_file_delete(&file);
+                }
+                return Err(error);
+            }
+        },
+        None => return Err(io::Error::other("text export staging handle is missing")),
+    };
+    let mut stage_committed = false;
+
+    let result = (|| {
+        let stage_file = stage
+            .as_mut()
+            .ok_or_else(|| io::Error::other("text export staging handle is missing"))?;
+        validate_text_export_file(stage_file)?;
+        stage_file.write_all(bytes)?;
+        stage_file.flush()?;
+        stage_file.sync_all()?;
+        validate_text_export_file(stage_file)?;
+
+        match target.accepted_leaf {
+            TextExportLeaf::Missing => {
+                rename_noreplace(stage_file, parent.file(), &target.leaf)?;
+                stage_committed = true;
+                Ok(())
+            }
+            TextExportLeaf::Existing { guard, identity } => {
+                validate_text_export_file(&guard)?;
+                let actual = (ntfs_volume_id(&guard)?, ntfs_file_reference_number(&guard)?);
+                require_matching_text_export_leaf_identity(identity, actual)?;
+
+                let target_path = absolute_path_for_leaf(parent.file(), &target.leaf)?;
+                let stage_path = absolute_path_for_leaf(parent.file(), &stage_leaf)?;
+                let backup_leaf = text_export_temporary_leaf("backup")?;
+                let backup_path = absolute_path_for_leaf(parent.file(), &backup_leaf)?;
+
+                // ReplaceFileW opens both names itself, so close our exclusive
+                // stage and no-delete leaf guard only after the staged bytes
+                // and selected identity have been checked.
+                drop(stage.take());
+                drop(guard);
+                before_replace()?;
+                let target_entry =
+                    open_text_export_target_for_replace(parent.file(), &target.leaf, identity)?;
+
+                // SAFETY: all three UTF-16 paths are NUL-terminated and remain
+                // live for this synchronous call; the names are siblings on
+                // the retained NTFS volume, and reserved arguments are null.
+                let replaced = unsafe {
+                    ReplaceFileW(
+                        target_path.as_ptr(),
+                        stage_path.as_ptr(),
+                        backup_path.as_ptr(),
+                        0,
+                        ptr::null(),
+                        ptr::null(),
+                    )
+                };
+                drop(target_entry);
+                if replaced == 0 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() == Some(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2) {
+                        restore_text_export_backup(
+                            parent.file(),
+                            &backup_leaf,
+                            &target.leaf,
+                            identity,
+                        )?;
+                    }
+                    return Err(error);
+                }
+
+                stage_committed = true;
+                remove_text_export_backup(parent.file(), &backup_leaf, identity)
+            }
+        }
+    })();
+
+    if !stage_committed {
+        if let Some(file) = stage.take() {
+            let _ = mark_file_delete(&file);
+            drop(file);
+        }
+        cleanup_text_export_stage(parent.file(), &stage_leaf, stage_file_reference)?;
+    }
+    result
+}
+
+fn create_text_export_stage(parent: &File) -> io::Result<(Vec<u16>, File)> {
+    for _ in 0..4 {
+        let leaf = text_export_temporary_leaf("stage")?;
+        match open_relative(
+            parent,
+            &leaf,
+            FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE,
+            0,
+            FILE_CREATE,
+            FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+        ) {
+            Ok(file) => return Ok((leaf, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not reserve a unique text export staging file",
+    ))
+}
+
+fn text_export_temporary_leaf(kind: &str) -> io::Result<Vec<u16>> {
+    let guid = windows_core::GUID::new().map_err(|error| io::Error::other(error.to_string()))?;
+    let leaf = format!(".darkrenamer-text-export-{kind}-{guid:?}.tmp");
+    let leaf = leaf.encode_utf16().collect::<Vec<_>>();
+    if leaf.len() > MAX_WINDOWS_LEAF_NAME_UTF16_UNITS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "text export temporary name exceeds the Windows leaf limit",
+        ));
+    }
+    Ok(leaf)
+}
+
+fn absolute_path_for_leaf(parent: &File, leaf: &[u16]) -> io::Result<Vec<u16>> {
+    let mut path = normalized_final_path(parent, FILE_NAME_NORMALIZED | VOLUME_NAME_GUID)?;
+    if path.last().copied() != Some(b'\\' as u16) {
+        path.push(b'\\' as u16);
+    }
+    path.extend_from_slice(leaf);
+    if path.len() >= usize::try_from(MAX_NORMALIZED_FINAL_PATH_UTF16_UNITS).unwrap_or(usize::MAX) {
+        return Err(io::Error::from_raw_os_error(ERROR_FILENAME_EXCED_RANGE));
+    }
+    path.push(0);
+    Ok(path)
+}
+
+fn cleanup_text_export_stage(
+    parent: &File,
+    leaf: &[u16],
+    expected_file_reference: u64,
+) -> io::Result<()> {
+    let file = match open_relative(
+        parent,
+        leaf,
+        DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        SHARE_ALL,
+        FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+    ) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if ntfs_file_reference_number(&file)? != expected_file_reference {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "text export staging name changed before cleanup",
+        ));
+    }
+    if !file.metadata()?.is_file()
+        || file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "text export staging name no longer identifies a regular file",
+        ));
+    }
+    mark_file_delete(&file)
+}
+
+fn remove_text_export_backup(
+    parent: &File,
+    leaf: &[u16],
+    expected_identity: (u128, u64),
+) -> io::Result<()> {
+    let file = open_relative(
+        parent,
+        leaf,
+        DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        SHARE_ALL,
+        FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+    )?;
+    if !file.metadata()?.is_file()
+        || file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "text export backup is not a regular file",
+        ));
+    }
+    let actual = (ntfs_volume_id(&file)?, ntfs_file_reference_number(&file)?);
+    require_matching_text_export_leaf_identity(expected_identity, actual)?;
+    mark_file_delete(&file)
+}
+
+fn open_text_export_target_for_replace(
+    parent: &File,
+    target_leaf: &[u16],
+    expected_identity: (u128, u64),
+) -> io::Result<File> {
+    let file = open_relative(
+        parent,
+        target_leaf,
+        FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        SHARE_ALL,
+        FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+    )?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "text export destination changed to a non-regular file before replacement",
+        ));
+    }
+    let actual = (ntfs_volume_id(&file)?, ntfs_file_reference_number(&file)?);
+    require_matching_text_export_leaf_identity(expected_identity, actual)?;
+    Ok(file)
+}
+
+fn restore_text_export_backup(
+    parent: &File,
+    backup_leaf: &[u16],
+    target_leaf: &[u16],
+    expected_identity: (u128, u64),
+) -> io::Result<()> {
+    let backup = open_relative(
+        parent,
+        backup_leaf,
+        DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        SHARE_ALL,
+        FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+    )?;
+    let actual = (
+        ntfs_volume_id(&backup)?,
+        ntfs_file_reference_number(&backup)?,
+    );
+    require_matching_text_export_leaf_identity(expected_identity, actual)?;
+    rename_noreplace(&backup, parent, target_leaf)
+}
+
+/// Writes complete output to a sibling file, then atomically replaces an
+/// existing destination or no-replace renames a new destination. Replacing
+/// the directory entry keeps any late hard-link alias attached to the old
+/// file contents.
 #[cfg(test)]
 pub(crate) fn write_text_export(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_text_export_target(prepare_text_export_target(path)?, bytes)
@@ -853,13 +1060,20 @@ fn validate_text_export_file(file: &File) -> io::Result<()> {
 }
 
 pub(crate) fn normalized_final_leaf(file: &File) -> io::Result<Vec<u16>> {
-    let mut capacity = checked_final_path_capacity(query_normalized_final_path(file, &mut []))?;
+    normalized_leaf_from_final_path(&normalized_final_path(
+        file,
+        FILE_NAME_NORMALIZED | VOLUME_NAME_NONE,
+    )?)
+}
+
+fn normalized_final_path(file: &File, flags: u32) -> io::Result<Vec<u16>> {
+    let mut capacity = checked_final_path_capacity(query_final_path(file, &mut [], flags))?;
     for _ in 0..2 {
         let mut path = Vec::new();
         path.try_reserve_exact(capacity)
             .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
         path.resize(capacity, 0);
-        let written = query_normalized_final_path(file, &mut path);
+        let written = query_final_path(file, &mut path, flags);
         if written == 0 {
             return Err(io::Error::last_os_error());
         }
@@ -867,7 +1081,7 @@ pub(crate) fn normalized_final_leaf(file: &File) -> io::Result<Vec<u16>> {
             .map_err(|_| io::Error::from_raw_os_error(ERROR_FILENAME_EXCED_RANGE))?;
         if written < capacity {
             path.truncate(written);
-            return normalized_leaf_from_final_path(&path);
+            return Ok(path);
         }
         capacity = checked_final_path_capacity(
             u32::try_from(written)
@@ -875,10 +1089,6 @@ pub(crate) fn normalized_final_leaf(file: &File) -> io::Result<Vec<u16>> {
         )?;
     }
     Err(io::Error::from_raw_os_error(ERROR_FILENAME_EXCED_RANGE))
-}
-
-fn query_normalized_final_path(file: &File, buffer: &mut [u16]) -> u32 {
-    query_final_path(file, buffer, FILE_NAME_NORMALIZED | VOLUME_NAME_NONE)
 }
 
 fn query_final_path(file: &File, buffer: &mut [u16], flags: u32) -> u32 {
@@ -1334,6 +1544,22 @@ mod tests {
     }
 
     #[test]
+    fn normalized_final_path_preserves_the_complete_path() -> io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let file_path = directory.path().join("normalized-path.txt");
+        let file = File::create(&file_path)?;
+
+        let normalized_path =
+            normalized_final_path(&file, FILE_NAME_NORMALIZED | VOLUME_NAME_GUID)?;
+        let normalized_path = String::from_utf16(&normalized_path)
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+
+        assert!(normalized_path.starts_with(r"\\?\Volume{"));
+        assert!(normalized_path.ends_with(r"\normalized-path.txt"));
+        Ok(())
+    }
+
+    #[test]
     fn normalized_final_path_extracts_one_bounded_leaf() -> Result<(), Box<dyn std::error::Error>> {
         let path = r"\parent\normalized-name.txt"
             .encode_utf16()
@@ -1540,21 +1766,6 @@ mod tests {
         drop(source);
         std::fs::rename(&source_path, &moved_path)?;
         assert_eq!(std::fs::read(&moved_path)?, b"source");
-        Ok(())
-    }
-
-    #[test]
-    fn missing_text_export_handle_blocks_a_competing_hard_link_until_write_finishes()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let directory = tempfile::tempdir()?;
-        let destination = directory.path().join("names.txt");
-        let alias = directory.path().join("alias.txt");
-        let target = prepare_text_export_target(&destination)?;
-
-        let handle = target.open_file()?;
-        assert!(std::fs::hard_link(&destination, &alias).is_err());
-        drop(handle);
-        std::fs::hard_link(&destination, &alias)?;
         Ok(())
     }
 }
