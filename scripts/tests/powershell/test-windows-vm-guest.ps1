@@ -684,6 +684,11 @@ try {
         'job_active_processes_at_primary_exit',
         'WaitForEmpty(1000)',
         'GetSoleActiveProcessId()',
+        'uint bufferLength = (uint)(8 + IntPtr.Size);',
+        'if (error == 122 || error == 234) return -1;',
+        'if (assigned > 1 || listed > 1) return -1;',
+        'if (listed == 0) return 0;',
+        '$soleActiveProcessId -eq 0 -or',
         '-not $State.job_had_survivors',
         '[System.IO.FileSystemAclExtensions]::CreateDirectory($security, $path)',
         'job_cleanup = $false',
@@ -727,6 +732,10 @@ try {
         if ($runnerText.IndexOf($requiredJobSource, [StringComparison]::Ordinal) -lt 0) {
             throw "The guest process containment contract is missing '$requiredJobSource'."
         }
+    }
+    if ($runnerText.Contains('maximumProcessIds') -or
+        $runnerText.Contains('capacity = capacity * 2')) {
+        throw 'The sole-process Job Object query must not retry a multi-PID snapshot with a larger buffer.'
     }
     $aclAwareDirectoryCalls = [regex]::Matches(
         $runnerText,
@@ -995,7 +1004,7 @@ try {
         $accountingProcess = [Diagnostics.Process]::Start($accountingStartInfo)
         $accountingOwner = [pscustomobject]@{
             active_processes = 1
-            primary_process_id = [long]$accountingProcess.Id
+            sole_active_process_id = [long]$accountingProcess.Id
             OutputLimitExceeded = $false
         }
         Add-Member -InputObject $accountingOwner -MemberType ScriptProperty -Name ActiveProcessCount -Value { [int]$this.active_processes } -Force
@@ -1008,7 +1017,7 @@ try {
             return $this.active_processes -eq 0
         } -Force
         Add-Member -InputObject $accountingOwner -MemberType ScriptMethod -Name GetSoleActiveProcessId -Value {
-            return [long]$this.primary_process_id
+            return [long]$this.sole_active_process_id
         } -Force
         Add-Member -InputObject $accountingOwner -MemberType ScriptMethod -Name WaitForCapture -Value { param([int] $Milliseconds) } -Force
         Add-Member -InputObject $accountingOwner -MemberType ScriptMethod -Name CloseJob -Value { return $true } -Force
@@ -1033,6 +1042,34 @@ try {
         }
         if (-not (Close-JobBoundProcess -State $accountingState)) {
             throw 'The process job did not close cleanly after accounting settled.'
+        }
+        $accountingOwner.active_processes = 1
+        $accountingOwner.sole_active_process_id = 0
+        $emptyListAccountingState = [pscustomobject]@{
+            process = $accountingProcess
+            owner = $accountingOwner
+            aggregate_output_limit_bytes = [long]4096
+            job_active_processes_at_primary_exit = $null
+            job_had_survivors = $false
+            job_forced_termination = $false
+            job_active_processes_at_close = $null
+            job_empty = $false
+            job_closed = $false
+            job_capture_complete = $false
+        }
+        $emptyListAccountingResult = Wait-JobBoundProcessWithOutputLimit `
+            -State $emptyListAccountingState `
+            -StdoutPath $accountingStdoutPath `
+            -StderrPath $accountingStderrPath `
+            -TimeoutSeconds 10
+        if ($emptyListAccountingResult.failure_reason -or
+            $emptyListAccountingResult.active_processes_at_primary_exit -ne 1 -or
+            $accountingOwner.ActiveProcessCount -ne 0 -or
+            $emptyListAccountingState.job_had_survivors) {
+            throw 'An empty live PID snapshot during Job Object accounting lag was classified as a survivor.'
+        }
+        if (-not (Close-JobBoundProcess -State $emptyListAccountingState)) {
+            throw 'The process job did not close cleanly after an empty accounting snapshot.'
         }
     }
     finally {

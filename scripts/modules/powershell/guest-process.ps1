@@ -1054,11 +1054,12 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
 
     public long GetSoleActiveProcessId() {
         if (job == IntPtr.Zero) return 0;
-        IntPtr processList = Marshal.AllocHGlobal(8 + IntPtr.Size);
+        uint bufferLength = (uint)(8 + IntPtr.Size);
+        IntPtr processList = Marshal.AllocHGlobal((int)bufferLength);
         uint returnedLength;
         try {
             if (!QueryInformationJobObjectBuffer(job, 3, processList,
-                    (uint)(8 + IntPtr.Size), out returnedLength)) {
+                    bufferLength, out returnedLength)) {
                 int error = Marshal.GetLastWin32Error();
                 if (error == 122 || error == 234) return -1;
                 throw new Win32Exception(error);
@@ -1067,14 +1068,15 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
                 throw new InvalidOperationException("The Job Object process list is truncated.");
             uint assigned = unchecked((uint)Marshal.ReadInt32(processList, 0));
             uint listed = unchecked((uint)Marshal.ReadInt32(processList, 4));
-            if (assigned == 0 && listed == 0) return 0;
+            if (assigned > 1 || listed > 1) return -1;
+            if (listed == 0) return 0;
             if (assigned != 1 || listed != 1) return -1;
-            if (returnedLength < (uint)(8 + IntPtr.Size))
+            if (returnedLength < bufferLength)
                 throw new InvalidOperationException("The sole Job Object process ID is truncated.");
             ulong processId = IntPtr.Size == 8
                 ? unchecked((ulong)Marshal.ReadInt64(processList, 8))
                 : unchecked((uint)Marshal.ReadInt32(processList, 8));
-            if (processId > UInt32.MaxValue) return -1;
+            if (processId == 0 || processId > UInt32.MaxValue) return -1;
             return (long)processId;
         }
         finally { Marshal.FreeHGlobal(processList); }
@@ -1753,8 +1755,9 @@ function Wait-JobBoundProcessWithOutputLimit {
         if ($State.job_active_processes_at_primary_exit -gt 0) {
             $soleActiveProcessId = [long]$State.owner.GetSoleActiveProcessId()
         }
-        $primaryAccountingLag = $soleActiveProcessId -eq [long]$State.process.Id
-        if ($soleActiveProcessId -ne 0 -and -not $primaryAccountingLag) {
+        $primaryAccountingLag = $soleActiveProcessId -eq 0 -or
+            $soleActiveProcessId -eq [long]$State.process.Id
+        if ($soleActiveProcessId -lt 0 -or -not $primaryAccountingLag) {
             $State.job_had_survivors = $true
             Stop-JobBoundProcess -State $State
             $reason = 'process_job_not_empty'
