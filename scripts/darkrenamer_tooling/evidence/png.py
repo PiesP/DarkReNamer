@@ -10,6 +10,9 @@ from darkrenamer_tooling.evidence.errors import EvidenceError
 
 MAX_COMPRESSED_BYTES = 128 * 1024 * 1024
 MAX_PNG_PIXELS = 32 * 1024 * 1024
+# Covers every frozen layout target at its declared desktop bounds plus one
+# individually bounded recovery screenshot, while stopping repeated large rasters.
+MAX_TOTAL_DECODED_PNG_PIXELS = 144 * 1024 * 1024
 
 
 def require(condition: bool, message: str) -> None:
@@ -29,7 +32,27 @@ def paeth(left: int, up: int, upper_left: int) -> int:
     return upper_left
 
 
-def decode_png(data: bytes, label: str) -> tuple[int, int, bytes]:
+class DecodedPixelBudget:
+    """Cumulative pixel work allowed for one evidence verification."""
+
+    def __init__(self, maximum_pixels: int = MAX_TOTAL_DECODED_PNG_PIXELS):
+        require(type(maximum_pixels) is int and maximum_pixels >= 0,
+                "PNG decoded-pixel budget is invalid.")
+        self.remaining_pixels = maximum_pixels
+
+    def reserve(self, pixels: int, label: str) -> None:
+        require(type(pixels) is int and pixels >= 0 and pixels <= self.remaining_pixels,
+                f"{label} exceeds the cumulative decoded-pixel budget.")
+        self.remaining_pixels -= pixels
+
+
+def decode_png(
+    data: bytes,
+    label: str,
+    *,
+    expected_dimensions: tuple[int, int] | None = None,
+    budget: DecodedPixelBudget | None = None,
+) -> tuple[int, int, bytes]:
     require(data.startswith(b"\x89PNG\r\n\x1a\n"), f"{label} has an invalid PNG signature.")
     offset = 8
     ihdr = None
@@ -53,6 +76,21 @@ def decode_png(data: bytes, label: str) -> tuple[int, int, bytes]:
             require(ihdr is None and length == 13 and offset == 8,
                     f"{label} has an invalid IHDR.")
             ihdr = payload
+            width, height, depth, color_type, compression, filtering, interlace = struct.unpack(
+                ">IIBBBBB", ihdr)
+            require(width > 0 and height > 0 and width * height <= MAX_PNG_PIXELS,
+                    f"{label} dimensions are invalid.")
+            if expected_dimensions is not None:
+                require(type(expected_dimensions) is tuple and len(expected_dimensions) == 2 and
+                        all(type(value) is int and value > 0 for value in expected_dimensions),
+                        f"{label} expected dimensions are invalid.")
+                require((width, height) == expected_dimensions,
+                        f"{label} dimensions differ from the expected raster size.")
+            require(depth == 8 and color_type in {0, 2, 4, 6} and compression == 0 and
+                    filtering == 0 and interlace == 0,
+                    f"{label} uses an unsupported PNG encoding.")
+            if budget is not None:
+                budget.reserve(width * height, label)
         elif kind == b"IDAT":
             require(ihdr is not None and not saw_iend,
                     f"{label} has IDAT in an invalid position.")

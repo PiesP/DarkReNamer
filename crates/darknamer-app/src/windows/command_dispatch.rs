@@ -1131,7 +1131,20 @@ fn prepare_file_dialog_command(
     command: u16,
 ) -> Option<PreparedFileDialog> {
     let kind = match command {
-        ADD_FILES => PreparedFileDialogKind::AddFiles,
+        ADD_FILES => {
+            let mut path_budget = PathBudget::new();
+            for item in state.model.items() {
+                if path_budget.reserve_utf16_units(item.source_path().units().len())
+                    == PathBudgetReservation::Exhausted
+                {
+                    break;
+                }
+            }
+            PreparedFileDialogKind::AddFiles {
+                remaining_count: MAX_ADMITTED_SOURCES.saturating_sub(state.model.len()),
+                remaining_path_bytes: path_budget.remaining_bytes(),
+            }
+        }
         SAVE_NAMES => PreparedFileDialogKind::SaveText {
             text: state.model.export_names(),
             names: true,
@@ -1318,10 +1331,10 @@ pub(super) fn run_prepared_file_dialog_with_destination_validation(
                 );
             }
         }
-        PreparedFileDialogSelection::SaveText { path, text } => {
+        PreparedFileDialogSelection::SaveText { target, text } => {
             if finish_file_dialog_session(window, session, FileDialogCompletion::Accept, |_| ())
                 .is_some()
-                && let Err(error) = write_legacy_text(&path, &text)
+                && let Err(error) = write_legacy_text_to_target(target, &text)
             {
                 message(
                     window,

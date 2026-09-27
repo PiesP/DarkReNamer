@@ -146,7 +146,11 @@ use safe_runtime::initialize_safe_runtime_at;
 use safe_runtime::{
     JournalRole, SafeRuntime, StartupJournalBlock, cleanup_file_journal, initialize_safe_runtime,
 };
-use text_io::{compare_windows, legacy_path, path_wide, read_legacy_text, wide, write_legacy_text};
+#[cfg(test)]
+use text_io::write_legacy_text;
+use text_io::{
+    compare_windows, legacy_path, path_wide, read_legacy_text, wide, write_legacy_text_to_target,
+};
 use windows_sys::Win32::Foundation::{
     E_FAIL, E_NOINTERFACE, E_POINTER, FILETIME, HWND, LPARAM, LRESULT, POINTL, RECT, S_OK,
     SYSTEMTIME, WPARAM,
@@ -2582,9 +2586,141 @@ mod tests {
         let path = directory.path().join("names.txt");
         let expected = LegacyText::from("첫째.txt\r\n둘째.txt\r\n");
         write_legacy_text(&path, &expected)?;
+        let shorter = LegacyText::from("이름.txt\r\n");
+        write_legacy_text(&path, &shorter)?;
         let bytes = fs::read(&path)?;
         assert!(bytes.starts_with(&[0xFF, 0xFE]));
-        assert_eq!(read_legacy_text(&path)?, expected);
+        assert_eq!(read_legacy_text(&path)?, shorter);
+        Ok(())
+    }
+
+    #[test]
+    fn text_export_rejects_hard_linked_destination_without_truncating_either_name()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let original = directory.path().join("original.txt");
+        let destination = directory.path().join("names.txt");
+        let sentinel = b"keep both hard-link names intact";
+        fs::write(&original, sentinel)?;
+        fs::hard_link(&original, &destination)?;
+
+        let Err(error) = write_legacy_text(&destination, &LegacyText::from("replacement")) else {
+            return Err(io::Error::other("multiply-linked destination was accepted").into());
+        };
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read(&original)?, sentinel);
+        assert_eq!(fs::read(&destination)?, sentinel);
+        Ok(())
+    }
+
+    #[test]
+    fn text_export_handle_blocks_a_competing_hard_link_until_write_finishes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let destination = directory.path().join("names.txt");
+        fs::write(&destination, b"original")?;
+        let alias = directory.path().join("alias.txt");
+
+        let handle = crate::rename::windows_native::open_text_export_file(&destination)?;
+        assert!(fs::hard_link(&destination, &alias).is_err());
+        drop(handle);
+        fs::hard_link(&destination, &alias)?;
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_text_export_target_pins_an_existing_leaf_until_write_finishes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let destination = directory.path().join("names.txt");
+        let replacement = directory.path().join("replacement.txt");
+        fs::write(&destination, b"original")?;
+        let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
+
+        assert!(fs::rename(&destination, &replacement).is_err());
+        assert!(fs::remove_file(&destination).is_err());
+        crate::rename::windows_native::write_text_export_target(target, b"accepted output")?;
+
+        assert_eq!(fs::read(&destination)?, b"accepted output");
+        assert!(!replacement.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_missing_text_export_target_does_not_replace_a_later_occupant()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let destination = directory.path().join("names.txt");
+        let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
+        let sentinel = b"later occupant remains intact";
+        fs::write(&destination, sentinel)?;
+
+        assert!(
+            crate::rename::windows_native::write_text_export_target(target, b"replacement")
+                .is_err()
+        );
+        assert_eq!(fs::read(&destination)?, sentinel);
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_text_export_target_pins_the_selected_parent_before_file_creation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let selected_parent = directory.path().join("selected");
+        let replacement_parent = directory.path().join("replacement");
+        let nested_parent = selected_parent.join("nested");
+        fs::create_dir_all(&nested_parent)?;
+        let destination = nested_parent.join("names.txt");
+        let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
+
+        assert!(fs::rename(&selected_parent, &replacement_parent).is_err());
+        crate::rename::windows_native::write_text_export_target(target, b"selected output")?;
+
+        assert_eq!(fs::read(&destination)?, b"selected output");
+        assert!(!replacement_parent.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn text_export_rejects_final_symlink_without_modifying_its_target()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::windows::fs::symlink_file;
+
+        let directory = tempfile::tempdir()?;
+        let target = directory.path().join("target.txt");
+        let destination = directory.path().join("names.txt");
+        let sentinel = b"symlink target remains intact";
+        fs::write(&target, sentinel)?;
+        symlink_file(&target, &destination)?;
+
+        let Err(error) = write_legacy_text(&destination, &LegacyText::from("replacement")) else {
+            return Err(io::Error::other("final reparse point was accepted").into());
+        };
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read(&target)?, sentinel);
+        Ok(())
+    }
+
+    #[test]
+    fn utf16le_import_rejects_an_incomplete_trailing_code_unit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("odd-utf16.txt");
+        fs::write(&path, [0xFF, 0xFE, b'A', 0, b'B'])?;
+
+        let Err(error) = read_legacy_text(&path) else {
+            return Err(io::Error::other("odd UTF-16LE payload was accepted").into());
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+
+        fs::write(&path, [0xFF, 0xFE, 0x00, 0xD8])?;
+        assert_eq!(
+            read_legacy_text(&path)?,
+            LegacyText::from_units(vec![0xD800])
+        );
         Ok(())
     }
 
