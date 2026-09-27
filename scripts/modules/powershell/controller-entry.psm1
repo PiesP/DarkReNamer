@@ -832,6 +832,8 @@ public static class DarkReNamerVmControllerWorkspace {
             $trustedTaskSecurity.SetOwner($administratorSid)
             $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
                 [Security.AccessControl.InheritanceFlags]::ObjectInherit
+            $runnerReadRights = [Security.AccessControl.FileSystemRights]::ReadAndExecute -bor
+                [Security.AccessControl.FileSystemRights]::Synchronize
             foreach ($principalSid in @($administratorSid, $systemSid)) {
                 $rule = [Security.AccessControl.FileSystemAccessRule]::new(
                     $principalSid,
@@ -845,7 +847,7 @@ public static class DarkReNamerVmControllerWorkspace {
             foreach ($principalSid in @($runnerSidObject, $ownerRightsSid)) {
                 $rule = [Security.AccessControl.FileSystemAccessRule]::new(
                     $principalSid,
-                    [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+                    $runnerReadRights,
                     $inheritance,
                     [Security.AccessControl.PropagationFlags]::None,
                     [Security.AccessControl.AccessControlType]::Allow
@@ -885,7 +887,7 @@ public static class DarkReNamerVmControllerWorkspace {
                     $matches = @($rules | Where-Object {
                         $_.IdentityReference.Value -ceq $principalSid.Value -and
                         $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
-                        [int]$_.FileSystemRights -eq [int][Security.AccessControl.FileSystemRights]::ReadAndExecute -and
+                        [int]$_.FileSystemRights -eq [int]$runnerReadRights -and
                         $_.InheritanceFlags -eq $inheritance -and
                         $_.PropagationFlags -eq [Security.AccessControl.PropagationFlags]::None -and
                         -not $_.IsInherited
