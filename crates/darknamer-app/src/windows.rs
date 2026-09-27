@@ -24,7 +24,7 @@ use crate::admission::{
     AdmissionAdapter, AdmissionMode, AdmissionReport, MAX_ADMITTED_SOURCES, PathBudget,
     PathBudgetReservation, WindowsAdmissionAdapter, bounded_import_lines, bounded_selection,
 };
-use crate::icon_cache::{IconCacheKey, icon_cache_key};
+use crate::icon_cache::{IconCacheKey, cache_icon_index, icon_cache_key};
 use crate::preferences::{
     AppearancePreferencesWriter, PreferenceWriteEvent, PreferencesWriter,
     appearance_path_for_journal_root, load_appearance_or_default,
