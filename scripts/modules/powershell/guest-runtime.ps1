@@ -1,24 +1,128 @@
 ﻿function Write-ResultDocument {
     param(
         [Parameter(Mandatory)][string] $Root,
-        [Parameter(Mandatory)][object] $Result
+        [Parameter(Mandatory)][object] $Result,
+        [string] $Path
     )
 
-    $resultPath = Join-Path $Root 'result.json'
-    $temporaryPath = Join-Path $Root 'result.json.tmp'
-    foreach ($path in @($resultPath, $temporaryPath)) {
-        if (Test-Path -LiteralPath $path) {
-            $item = Get-Item -LiteralPath $path -Force
-            if ($item.PSIsContainer -or
-                ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                throw 'The result output is unsafe.'
-            }
+    $writer = $script:VmTrustedResultWriter
+    if ($null -eq $writer -or
+        [IO.Path]::GetFullPath($Root) -cne $script:VmTrustedResultRoot) {
+        throw 'The trusted result writer is not initialized for this bundle.'
+    }
+    $expectedPath = if ($Path) { [IO.Path]::GetFullPath($Path) } else {
+        Join-Path $script:VmTrustedResultRoot 'result.json'
+    }
+    if ($expectedPath -cne $script:VmTrustedResultPath) {
+        throw 'The trusted result writer is not initialized for this result path.'
+    }
+    if ($null -ne $script:AcceptanceProcessJobCleanup) {
+        $jobCleanup = @($script:AcceptanceProcessJobCleanup.ToArray())
+        $Result['process_job_cleanup'] = $jobCleanup
+        if (@($jobCleanup | Where-Object { $_.status -cne 'clean' }).Count -ne 0 -and
+            $Result['status'] -cne 'failed') {
+            $Result['status'] = 'failed'
+            $Result['failure_reason'] = 'process_job_cleanup_failed'
         }
     }
-    $json = $Result | ConvertTo-Json -Depth 16
-    [IO.File]::WriteAllText($temporaryPath, $json, [Text.UTF8Encoding]::new($false))
-    Move-Item -LiteralPath $temporaryPath -Destination $resultPath -Force
+    try {
+        $json = $Result | ConvertTo-Json -Depth 16
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+        $writer.SetLength(0)
+        $writer.Position = 0
+        $writer.Write($bytes, 0, $bytes.Length)
+        $writer.Flush($true)
+    }
+    finally {
+        if ($writer) { $writer.Dispose() }
+        $script:VmTrustedResultWriter = $null
+        $script:VmTrustedResultRoot = $null
+        $script:VmTrustedResultPath = $null
+    }
 }
+
+$script:VmTrustedResultWriter = $null
+$script:VmTrustedResultRoot = $null
+$script:VmTrustedResultPath = $null
+$script:AcceptanceProcessJobCleanup = $null
+
+function Initialize-TrustedResultWriter {
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [string] $Path,
+        [string] $ResultRoot,
+        [string] $WriterPath
+    )
+
+    if ($null -ne $script:VmTrustedResultWriter) {
+        throw 'The trusted result writer is already initialized.'
+    }
+    $rootPath = [IO.Path]::GetFullPath($Root)
+    $resultPath = if ($Path) { [IO.Path]::GetFullPath($Path) } else {
+        Join-Path $rootPath 'result.json'
+    }
+    $resultRootPath = if ($ResultRoot) { [IO.Path]::GetFullPath($ResultRoot) } else { $rootPath }
+    $rootPrefix = $resultRootPath.TrimEnd([IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    if (-not $resultPath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The trusted result path must remain beneath its verified output root.'
+    }
+    $environmentPath = [Environment]::GetEnvironmentVariable(
+        'DARKRENAMER_VM_TRUSTED_RESULT_PATH'
+    )
+    $elevatedObserver = [Environment]::GetEnvironmentVariable(
+        'DARKRENAMER_VM_ELEVATED_OBSERVER'
+    ) -ceq '1'
+    $trustedPath = if ($WriterPath) {
+        [IO.Path]::GetFullPath($WriterPath)
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($environmentPath)) {
+        [IO.Path]::GetFullPath($environmentPath)
+    }
+    else {
+        $resultPath
+    }
+    if ($elevatedObserver -and
+        ([string]::IsNullOrWhiteSpace($environmentPath) -or
+         $environmentPath -cne $trustedPath)) {
+        throw 'The elevated observer trusted result path is missing or differs from its task contract.'
+    }
+    if (-not $elevatedObserver -and ($WriterPath -or $environmentPath)) {
+        throw 'A separate trusted result path is allowed only for an elevated VM observer.'
+    }
+    $writer = $null
+    $safeHandle = $null
+    try {
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            Initialize-JobBoundProcessRuntime
+            $safeHandle = [DarkReNamerVmRunnerSecurity]::CreateTrustedResultFile($trustedPath)
+            $writer = [IO.FileStream]::new($safeHandle, [IO.FileAccess]::ReadWrite, 4096, $false)
+            $safeHandle = $null
+            $runnerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            [DarkReNamerVmRunnerSecurity]::ProtectResultFile($writer.SafeFileHandle, $runnerSid)
+        }
+        else {
+            $writer = [IO.FileStream]::new(
+                $trustedPath,
+                [IO.FileMode]::CreateNew,
+                [IO.FileAccess]::ReadWrite,
+                [IO.FileShare]::Read,
+                4096,
+                [IO.FileOptions]::WriteThrough
+            )
+        }
+        $writer.SetLength(0)
+        $script:VmTrustedResultWriter = $writer
+        $script:VmTrustedResultRoot = $rootPath
+        $script:VmTrustedResultPath = $resultPath
+    }
+    catch {
+        if ($writer) { $writer.Dispose() }
+        if ($safeHandle) { $safeHandle.Dispose() }
+        throw
+    }
+}
+
 function Initialize-TestExecutionState {
     if (-not ('DarkReNamerVmExecutionState' -as [type])) {
         Add-Type @'

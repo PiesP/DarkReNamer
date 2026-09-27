@@ -7,12 +7,14 @@ import os
 from pathlib import Path
 from tooling_test_paths import REPOSITORY_ROOT, SCRIPT_ROOT
 import shutil
+import stat
 import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+from controller_cleanup_fixture import clean_controller_cleanup
 from darkrenamer_tooling.vm import launcher as vm
 
 
@@ -23,12 +25,13 @@ class VmRunnerTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.test = self.artifact('tests.exe', b'test executable')
         self.app = self.artifact('DarkReNamer.exe', b'app executable')
-        stdout = self.artifact('tests.stdout.log', b'test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s\n')
-        stderr = self.artifact('tests.stderr.log', b'')
+        stdout = self.output_artifact('tests.stdout.log', b'test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s\n')
+        stderr = self.output_artifact('tests.stderr.log', b'')
         screenshot = self.artifact('main-workbench.png', b'\x89PNG\r\n\x1a\nfixture')
         preview_screenshot = dict(self.artifact('rename-preview.png', b'\x89PNG\r\n\x1a\npreview'), width=900, height=700)
         confirmation_screenshot = dict(self.artifact('apply-confirmation.png', b'\x89PNG\r\n\x1a\nconfirmation'), width=500, height=300)
         self.manifest = {'schema_version': 1, 'source_sha': 'a' * 40, 'source_state': 'clean', 'target': vm.TARGET, 'test_binaries': [self.test], 'application': self.app}
+        (self.root / 'bundle.json').write_text(json.dumps(self.manifest))
         self.result = dict(self.manifest)
         flow = {
             'status': 'passed',
@@ -53,15 +56,19 @@ class VmRunnerTests(unittest.TestCase):
         gui = dict(
             self.app,
             status='passed',
+            job_cleanup=True,
             scope='launch-window-screenshot-normal-close',
             screenshot=screenshot,
             flow=flow,
         )
-        self.result.update(status='passed', tests=[dict(self.test, status='passed', exit_code=0, passed=3, failed=0, ignored=1, stdout=stdout, stderr=stderr)], gui=gui, transport={'kind': 'ssh', 'host_platform': 'Unix', 'guest_cleanup': True})
+        self.result.update(status='passed', tests=[dict(self.test, status='passed', job_cleanup=True, exit_code=0, passed=3, failed=0, ignored=1, stdout=stdout, stderr=stderr)], gui=gui, transport={'kind': 'ssh', 'host_platform': 'Unix', 'guest_cleanup': True, 'raw_cleanup': clean_controller_cleanup()})
 
     def artifact(self, name, data):
         (self.root / name).write_bytes(data)
         return {'file': name, 'sha256': hashlib.sha256(data).hexdigest()}
+
+    def output_artifact(self, name, data):
+        return dict(self.artifact(name, data), bytes=len(data))
 
     def verify(self):
         return vm.verify_result(self.root, self.manifest, self.result)
@@ -143,7 +150,7 @@ class VmRunnerTests(unittest.TestCase):
               row['last_run_ticks'])
              for row in cases[:-1]] + [('', 'Ready', 7, 101)])
 
-    def test_rescue_collectors_wait_for_terminal_task_before_moving_streams(self):
+    def test_rescue_collectors_wait_for_terminal_task_before_copying_streams(self):
         for name, label in (
                 ('Invoke-AcceptanceTextScaleRescue', 'Text-scale'),
                 ('Invoke-AcceptanceHighContrastRescue', 'High Contrast')):
@@ -178,7 +185,14 @@ class VmRunnerTests(unittest.TestCase):
                 timeout = function.index(
                     f"throw '{label} rescue timed out before the scheduled task "
                     "reached its terminal state.'")
-                self.assertLess(timeout, function.index('Move-Item -LiteralPath'))
+                collect = function.index('$rescueFiles = @(', timeout)
+                copy = function.index('Copy-Item -LiteralPath $guestPath', collect)
+                digest = function.index("Get-FileHash -LiteralPath $hostPath", copy)
+                self.assertLess(timeout, collect)
+                self.assertLess(collect, copy)
+                self.assertLess(copy, digest)
+                self.assertIn('-FromSession $Session', function[copy:digest])
+                self.assertIn('$file.sha256', function[digest:])
                 self.assertIn("$rescue.result_status -cne 'passed'", function)
                 self.assertIn('$rescue.task_result -ne 0', function)
                 self.assertNotIn("$rescue.status -in @('passed', 'failed')", function)
@@ -220,9 +234,10 @@ class VmRunnerTests(unittest.TestCase):
 
     def test_ui_timeout_fails_before_stream_move_or_inventory(self):
         controller = (SCRIPT_ROOT / 'modules/powershell/controller-entry.psm1').read_text()
-        acceptance = controller[controller.index(
-            "if ($acceptance) {\n        $guestBundleRoot"):]
-        acceptance = acceptance[:acceptance.index("\n    elseif ($recovery) {")]
+        branch_start = controller.index(
+            "if ($acceptance) {", controller.index("$transport.status = 'copying'"))
+        branch_end = controller.index("\n    elseif ($recovery) {", branch_start)
+        acceptance = controller[branch_start:branch_end]
         registration = acceptance.index(
             '$registered = Get-ScheduledTaskInfo -TaskName $name')
         start = acceptance.index('Start-ScheduledTask -TaskName $name')
@@ -237,14 +252,15 @@ class VmRunnerTests(unittest.TestCase):
         poll_guard = acceptance.index('if ($null -ne $pollFailure) {', result)
         original_failure = acceptance.index(
             'Invoke-AcceptancePollFailureRescue', poll_guard)
-        first_move = acceptance.index('Move-Item -LiteralPath', poll_guard)
+        first_copy = acceptance.index(
+            'Copy-Item -LiteralPath $guestOutputPath', poll_guard)
         inventory = acceptance.index('$inventory = @(', poll_guard)
         self.assertLess(registration, start)
         self.assertLess(poll_info, poll_task)
         self.assertLess(poll_task, terminal_info)
         self.assertLess(terminal_info, result)
         self.assertLess(poll_guard, original_failure)
-        self.assertLess(original_failure, first_move)
+        self.assertLess(original_failure, first_copy)
         self.assertLess(original_failure, inventory)
         self.assertIn(
             '-RegisteredLastRunTimeTicks '
@@ -291,6 +307,8 @@ class VmRunnerTests(unittest.TestCase):
                     -TestTimeoutSeconds 60 `
                     -SuiteTimeoutSeconds 120 `
                     -ObserverSha256 ('a' * 64) `
+                    -BundleRecords @([pscustomobject]@{file='bundle.json';sha256=('b' * 64)}) `
+                    -InputManifestSha256 ('c' * 64) `
                     -AcceptanceMode $(if ($env:VM_RUNNER_CASE -ceq 'high-contrast') {
                         'current-dpi'
                     } else { 'text-scale' }) `
@@ -353,16 +371,19 @@ class VmRunnerTests(unittest.TestCase):
         self.assertLess(unregister, absence)
         for fragment in (
                 "@('cmd.exe', 'pwsh.exe')", '$_.CommandLine.IndexOf($observerToken',
-                '$_.CommandLine.IndexOf($rootToken', '[Math]::Min(60, $timeout)'):
+                "Join-Path $trustedRoot 'windows-vm-acceptance.ps1'",
+                '[Math]::Min(60, $timeout)'):
             self.assertIn(fragment, function)
+        self.assertNotIn('$rootToken', function)
         self.assertNotIn('-ErrorAction SilentlyContinue\n            Unregister-ScheduledTask',
                          function)
 
     def test_recovery_timeout_fails_before_stream_move_or_inventory(self):
         controller = (SCRIPT_ROOT / 'modules/powershell/controller-entry.psm1').read_text()
-        recovery = controller[controller.index(
-            "elseif ($recovery) {\n        $guestBundleRoot"):]
-        recovery = recovery[:recovery.index("\n    else {", 1)]
+        branch_start = controller.index(
+            "elseif ($recovery) {", controller.index("$transport.status = 'copying'"))
+        branch_end = controller.index("\n    else {", branch_start)
+        recovery = controller[branch_start:branch_end]
         registration = recovery.index(
             '$registered = Get-ScheduledTaskInfo -TaskName $name')
         start = recovery.index('Start-ScheduledTask -TaskName $name')
@@ -373,13 +394,14 @@ class VmRunnerTests(unittest.TestCase):
             '$terminalInfo = Get-ScheduledTaskInfo -TaskName $name', poll_task)
         poll_guard = recovery.index('if ($null -ne $pollFailure) {', terminal_info)
         original_failure = recovery.index('throw $pollFailure', poll_guard)
-        first_move = recovery.index('Move-Item -LiteralPath', poll_guard)
+        first_copy = recovery.index(
+            'Copy-Item -LiteralPath $guestOutputPath', poll_guard)
         inventory = recovery.index('$inventory = @(', poll_guard)
         self.assertLess(registration, start)
         self.assertLess(poll_info, poll_task)
         self.assertLess(poll_task, terminal_info)
         self.assertLess(poll_guard, original_failure)
-        self.assertLess(original_failure, first_move)
+        self.assertLess(original_failure, first_copy)
         self.assertLess(original_failure, inventory)
         self.assertIn(
             '-RegisteredLastRunTimeTicks '
@@ -634,6 +656,7 @@ class VmRunnerTests(unittest.TestCase):
         (output / 'transport.json').write_text(json.dumps({
             'kind': 'ssh', 'task_kind': 'recovery', 'host_platform': 'Unix',
             'status': 'collected', 'guest_cleanup': True,
+            'raw_cleanup': clean_controller_cleanup(),
             'vm_id': identity,
             'vm_identity_kind': 'hyper-v-guest-parameters-virtual-machine-id-v1',
             'vm_identity_sha256': identity_hash,
@@ -862,6 +885,12 @@ class VmRunnerTests(unittest.TestCase):
         boolean = self.artifact('boolean.json', b'{"bytes":true}')
         self.assertIs(vm.read_json_strict(self.root / boolean['file'])['bytes'], True)
 
+    def test_strict_json_rejects_input_over_its_bound_before_parsing(self):
+        oversized = self.root / 'oversized.json'
+        oversized.write_bytes(b'{} ')
+        with self.assertRaisesRegex(ValueError, 'size bound'):
+            vm.read_json_strict(oversized, maximum_bytes=2)
+
     def test_duplicate_binary_is_rejected(self):
         self.result['tests'] *= 2
         with self.assertRaises(ValueError):
@@ -874,6 +903,7 @@ class VmRunnerTests(unittest.TestCase):
 
     def test_changed_log_is_rejected(self):
         (self.root / 'tests.stdout.log').write_text('changed')
+        self.result['tests'][0]['stdout']['bytes'] = len(b'changed')
         with self.assertRaisesRegex(ValueError, 'digest'):
             self.verify()
 
@@ -883,8 +913,46 @@ class VmRunnerTests(unittest.TestCase):
             self.verify()
 
     def test_failed_libtest_outcome_is_not_a_pass(self):
-        self.result['tests'][0]['stdout'] = self.artifact('tests.stdout.log', b'test result: FAILED. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s\n')
+        self.result['tests'][0]['stdout'] = self.output_artifact('tests.stdout.log', b'test result: FAILED. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s\n')
         self.assertFalse(self.verify())
+
+    def test_suite_budget_skips_keep_a_valid_failed_result_row(self):
+        self.result['status'] = 'failed'
+        row = self.result['tests'][0]
+        row.update(
+            status='failed',
+            job_cleanup=True,
+            exit_code=None,
+            passed=None,
+            failed=None,
+            ignored=None,
+            failure_reason='suite_output_limit_exceeded',
+            stdout=self.output_artifact('tests.stdout.log', b''),
+            stderr=self.output_artifact('tests.stderr.log', b''),
+        )
+        self.assertFalse(self.verify())
+
+    def test_process_jobs_must_be_empty_and_closed_before_pass(self):
+        self.result['tests'][0]['job_cleanup'] = False
+        self.assertFalse(self.verify())
+        self.result['tests'][0]['job_cleanup'] = True
+        self.result['gui']['job_cleanup'] = False
+        self.assertFalse(self.verify())
+
+    def test_test_output_size_and_aggregate_bounds_are_verified(self):
+        stdout = self.result['tests'][0]['stdout']
+        stdout['bytes'] += 1
+        with self.assertRaisesRegex(ValueError, 'recorded byte count'):
+            self.verify()
+        stdout['bytes'] -= 1
+        with mock.patch.object(
+                vm, 'TEST_OUTPUT_CHANNEL_MAXIMUM_BYTES', stdout['bytes'] - 1):
+            with self.assertRaisesRegex(ValueError, 'size bound'):
+                self.verify()
+        with mock.patch.object(
+                vm, 'TEST_OUTPUT_AGGREGATE_MAXIMUM_BYTES', stdout['bytes'] - 1):
+            with self.assertRaisesRegex(ValueError, 'size bound'):
+                self.verify()
 
     def test_gui_artifact_binding_is_verified(self):
         self.result['gui']['sha256'] = 'b' * 64
@@ -946,6 +1014,11 @@ class VmRunnerTests(unittest.TestCase):
         self.result['transport']['guest_cleanup'] = {'value': False}
         self.assertFalse(self.verify())
 
+    def test_controller_cleanup_evidence_is_required_when_cleanup_passes(self):
+        self.result['transport'].pop('raw_cleanup')
+        with self.assertRaises(ValueError):
+            self.verify()
+
     def test_transport_binding_is_verified(self):
         self.assertTrue(vm.verify_result(self.root, self.manifest, self.result, 'ssh'))
         self.result['transport']['host_platform'] = 'Win32NT'
@@ -953,7 +1026,7 @@ class VmRunnerTests(unittest.TestCase):
             vm.verify_result(self.root, self.manifest, self.result, 'ssh')
 
     def test_empty_success_output_is_rejected(self):
-        self.result['tests'][0]['stdout'] = self.artifact('tests.stdout.log', b'')
+        self.result['tests'][0]['stdout'] = self.output_artifact('tests.stdout.log', b'')
         with self.assertRaisesRegex(ValueError, 'summary'):
             self.verify()
 
@@ -976,6 +1049,186 @@ class VmRunnerTests(unittest.TestCase):
         self.assertEqual([row['file'] for row in rows], ['suite.exe'])
         with self.assertRaises(ValueError):
             vm.test_artifacts([json.dumps(non_test)])
+
+    def source_build_inputs(self, suffix=''):
+        repo = self.root / ('source-repo' + suffix)
+        (repo / 'scripts').mkdir(parents=True)
+        (repo / 'Cargo.lock').write_bytes(b'frozen lockfile')
+        script_names = (
+            'windows-vm-guest.ps1', 'run-windows-vm-tests.ps1',
+            'windows-vm-acceptance.ps1', 'windows-vm-recovery-acceptance.ps1')
+        for name in script_names:
+            (repo / 'scripts' / name).write_bytes(('source ' + name).encode())
+        target_directory = repo / 'target'
+        artifact = target_directory / vm.TARGET / 'debug' / 'deps' / 'suite.exe'
+        application = target_directory / vm.TARGET / 'release' / 'DarkReNamer.exe'
+        artifact.parent.mkdir(parents=True)
+        application.parent.mkdir(parents=True)
+        artifact.write_bytes(b'stale shared target test executable')
+        application.write_bytes(b'stale shared target application executable')
+        return repo, target_directory, artifact, application, script_names
+
+    def build_source_bundle(self, repo, target_directory, output, status_values=None,
+                            source_values=None, outputs=None, target_directories=None,
+                            target_permissions=None, reported_artifact_path=None,
+                            reported_metadata_target=None):
+        outputs = outputs if outputs is not None else {}
+        target_directories = target_directories if target_directories is not None else []
+        target_permissions = target_permissions if target_permissions is not None else []
+
+        def run(command, **kwargs):
+            target_root = Path(kwargs['env']['CARGO_TARGET_DIR'])
+            target_directories.append(target_root)
+            target_permissions.append(stat.S_IMODE(target_root.stat().st_mode))
+            if command[1:3] == ['xwin', 'test']:
+                artifact = target_root / vm.TARGET / 'debug' / 'deps' / 'suite.exe'
+                artifact.parent.mkdir(parents=True)
+                artifact.write_bytes(b'test executable bytes')
+                outputs['test'] = artifact
+                compiler_artifact = {
+                    'reason': 'compiler-artifact', 'profile': {'test': True},
+                    'target': {'name': 'suite'},
+                    'executable': str(reported_artifact_path or artifact),
+                }
+                kwargs['stdout'].write(json.dumps(compiler_artifact) + '\n')
+            elif command[1:3] == ['xwin', 'build']:
+                application = target_root / vm.TARGET / 'release' / 'DarkReNamer.exe'
+                application.parent.mkdir(parents=True)
+                application.write_bytes(b'application executable bytes')
+                outputs['application'] = application
+            return subprocess.CompletedProcess(command, 0)
+
+        statuses = iter(status_values or ['', '', ''])
+        revisions = iter(source_values or ['a' * 40, 'a' * 40, 'a' * 40])
+
+        def check_output(command, **kwargs):
+            if command[:2] == ['git', 'status']:
+                return next(statuses)
+            if command[:2] == ['git', 'rev-parse']:
+                return next(revisions)
+            if command[:2] == ['cargo', 'metadata']:
+                target_directories.append(Path(kwargs['env']['CARGO_TARGET_DIR']))
+                target = reported_metadata_target or kwargs['env']['CARGO_TARGET_DIR']
+                return json.dumps({'target_directory': str(target)})
+            raise AssertionError('unexpected subprocess command: ' + repr(command))
+
+        with mock.patch.object(vm.subprocess, 'run', side_effect=run), \
+             mock.patch.object(vm.subprocess, 'check_output', side_effect=check_output):
+            return vm.build_bundle(repo, output)
+
+    def test_source_bundle_manifest_uses_frozen_input_digests(self):
+        repo, target, artifact, application, script_names = self.source_build_inputs()
+        output = self.root / 'source-bundle'
+        outputs = {}
+        target_directories = []
+        target_permissions = []
+        with mock.patch.dict(os.environ, {'CARGO_TARGET_DIR': str(target)}):
+            manifest = self.build_source_bundle(
+                repo, target, output, outputs=outputs,
+                target_directories=target_directories,
+                target_permissions=target_permissions)
+        self.assertEqual(manifest['source_sha'], 'a' * 40)
+        self.assertEqual(manifest['cargo_lock_sha256'], hashlib.sha256(b'frozen lockfile').hexdigest())
+        self.assertEqual(manifest['application']['sha256'], hashlib.sha256(b'application executable bytes').hexdigest())
+        self.assertEqual(manifest['test_binaries'][0]['sha256'], hashlib.sha256(b'test executable bytes').hexdigest())
+        self.assertTrue(target_directories)
+        self.assertEqual(len(set(target_directories)), 1)
+        self.assertNotEqual(target_directories[0], target.resolve())
+        self.assertEqual(target_permissions, [0o700, 0o700])
+        self.assertFalse(target_directories[0].exists(), 'private build tree must be removed after staging')
+        for key in ('test', 'application'):
+            relative = outputs[key].resolve(strict=False).relative_to(target_directories[0])
+            self.assertTrue(relative.parts)
+        self.assertEqual(artifact.read_bytes(), b'stale shared target test executable')
+        self.assertEqual(application.read_bytes(), b'stale shared target application executable')
+        self.assertEqual((output / 'suite.exe').read_bytes(), b'test executable bytes')
+        self.assertEqual((output / 'DarkReNamer.exe').read_bytes(), b'application executable bytes')
+        for name in script_names:
+            self.assertEqual((output / name).read_bytes(), (repo / 'scripts' / name).read_bytes())
+
+    def test_source_bundle_rejects_shared_target_and_metadata_redirects(self):
+        repo, target, artifact, _, _ = self.source_build_inputs('-redirect')
+        for kind in ('artifact', 'metadata'):
+            output = self.root / ('source-bundle-redirect-' + kind)
+            kwargs = ({'reported_artifact_path': artifact} if kind == 'artifact' else
+                      {'reported_metadata_target': target})
+            with self.subTest(kind=kind), self.assertRaisesRegex(
+                    RuntimeError, 'outside the fresh Cargo target|metadata target directory'):
+                self.build_source_bundle(repo, target, output, **kwargs)
+            self.assertFalse((output / 'bundle.json').exists())
+
+    def test_source_bundle_rejects_input_mutation_after_clean_check(self):
+        inputs = ('test', 'application', 'script', 'Cargo.lock')
+        for kind in inputs:
+            with self.subTest(kind=kind):
+                repo, target, artifact, application, _ = self.source_build_inputs('-' + kind)
+                output = self.root / ('source-bundle-mutated-' + kind)
+                outputs = {}
+                source = repo / 'scripts' / 'windows-vm-guest.ps1' if kind == 'script' else (
+                    repo / 'Cargo.lock' if kind == 'Cargo.lock' else None)
+                real_copyfile = vm.shutil.copyfile
+                changed = False
+
+                if kind == 'Cargo.lock':
+                    real_verify = vm.verify_frozen_files
+
+                    def mutate_then_verify(sources, frozen, label):
+                        nonlocal changed
+                        if not changed:
+                            source.write_bytes(b'mutated after source digest freeze')
+                            changed = True
+                        return real_verify(sources, frozen, label)
+
+                    with mock.patch.object(vm, 'verify_frozen_files', side_effect=mutate_then_verify):
+                        with self.assertRaisesRegex(RuntimeError, 'changed during bundle creation'):
+                            self.build_source_bundle(repo, target, output)
+                    self.assertFalse((output / 'bundle.json').exists())
+                    continue
+
+                def mutate_then_copy(copy_source, destination):
+                    nonlocal changed
+                    expected = ({'test': outputs.get('test'),
+                                 'application': outputs.get('application'),
+                                 'script': source, 'Cargo.lock': source}[kind])
+                    if not changed and Path(copy_source) == expected:
+                        Path(copy_source).write_bytes(b'mutated after source digest freeze')
+                        changed = True
+                    return real_copyfile(copy_source, destination)
+
+                with mock.patch.object(vm.shutil, 'copyfile', side_effect=mutate_then_copy):
+                    with self.assertRaisesRegex(RuntimeError, 'frozen digest'):
+                        self.build_source_bundle(repo, target, output, outputs=outputs)
+                self.assertFalse((output / 'bundle.json').exists())
+
+    def test_source_bundle_rejects_destination_mutation_during_copy(self):
+        repo, target, _, _, _ = self.source_build_inputs('-destination')
+        output = self.root / 'source-bundle-mutated-destination'
+        real_copyfile = vm.shutil.copyfile
+
+        def copy_and_corrupt(source, destination):
+            real_copyfile(source, destination)
+            if Path(destination) == output / 'DarkReNamer.exe':
+                Path(destination).write_bytes(b'corrupt bundle destination')
+            return Path(destination)
+
+        with mock.patch.object(vm.shutil, 'copyfile', side_effect=copy_and_corrupt):
+            with self.assertRaisesRegex(RuntimeError, 'frozen digest'):
+                self.build_source_bundle(repo, target, output)
+        self.assertFalse((output / 'bundle.json').exists())
+
+    def test_source_bundle_rechecks_clean_checkout_after_all_copies(self):
+        repo, target, _, _, _ = self.source_build_inputs('-dirty')
+        output = self.root / 'source-bundle-dirty-after-copy'
+        with self.assertRaisesRegex(RuntimeError, 'Checkout changed during source-built bundle creation'):
+            self.build_source_bundle(repo, target, output, status_values=['', '', ' M scripts/windows-vm-guest.ps1'])
+        self.assertFalse((output / 'bundle.json').exists())
+
+    def test_source_bundle_rechecks_head_after_all_copies(self):
+        repo, target, _, _, _ = self.source_build_inputs('-changed-head')
+        output = self.root / 'source-bundle-changed-head'
+        with self.assertRaisesRegex(RuntimeError, 'Checkout changed during source-built bundle creation'):
+            self.build_source_bundle(repo, target, output, source_values=['a' * 40, 'a' * 40, 'b' * 40])
+        self.assertFalse((output / 'bundle.json').exists())
 
     def test_transport_selection_is_mutually_exclusive(self):
         self.assertEqual(vm.parse_arguments(['--vm-name', 'vm']).vm_name, 'vm')
@@ -1237,8 +1490,9 @@ class VmRunnerTests(unittest.TestCase):
         args = vm.parse_arguments(['--vm-name', 'VM', '--expected-vm-id', identity.upper()])
         self.assertEqual(args.expected_vm_id, identity)
         with mock.patch.object(vm, 'winpath', side_effect=lambda path: 'C:\\evidence\\' + Path(path).name):
-            command = vm.controller_invocation(Path('/external/evidence'), args, {'helper': 'C:\\helper.ps1'})
+            command = vm.controller_invocation(self.root, args, {'helper': 'C:\\helper.ps1'})
         self.assertIn("-ExpectedVmId '" + identity + "'", command[-1])
+        self.assertIn('-ExpectedBundleManifestSha256', command[-1])
         for value in ('not-a-guid', '00000000-0000-0000-0000-000000000000'):
             self.assert_arguments_rejected(['--vm-name', 'VM', '--expected-vm-id', value])
         self.assert_arguments_rejected(['--ssh-host', 'alias', '--expected-vm-id', identity])
@@ -1287,6 +1541,8 @@ class VmRunnerTests(unittest.TestCase):
              mock.patch.object(vm, 'winpath', side_effect=AssertionError('wslpath used')), \
              mock.patch.object(vm, 'require_pwsh74', return_value='/usr/bin/pwsh'):
             root, defaults, pwsh = vm.prepare_transport(Path('/repo'), args)
+            root.mkdir()
+            (root / 'bundle.json').write_text(json.dumps(self.manifest))
             command = vm.controller_invocation(root, args, pwsh=pwsh)
         self.assertEqual(root, output)
         self.assertIsNone(defaults)
@@ -1294,19 +1550,33 @@ class VmRunnerTests(unittest.TestCase):
         self.assertEqual(command[:6], ['/usr/bin/pwsh', '-NoLogo', '-NoProfile', '-NonInteractive', '-File', str(output / 'run-windows-vm-tests.ps1')])
         self.assertEqual(command[6:], [
             '-BundleRoot', str(output), '-SshHost', 'darkrenamer-vm',
-            '-TestTimeoutSeconds', '300', '-TaskKind', 'core'])
+            '-TestTimeoutSeconds', '300', '-ExpectedBundleManifestSha256',
+            hashlib.sha256((root / 'bundle.json').read_bytes()).hexdigest(),
+            '-TaskKind', 'core'])
 
     def test_both_transports_use_the_same_controller(self):
         ssh_args = vm.parse_arguments(['--ssh-host', 'darkrenamer-vm'])
         direct_args = vm.parse_arguments(['--vm-name', 'vm'])
-        root = Path('/external/evidence')
+        root = self.root
         ssh = vm.controller_invocation(root, ssh_args, pwsh='/usr/bin/pwsh')
         with mock.patch.object(vm, 'winpath', side_effect=lambda path: 'C:\\evidence\\' + Path(path).name):
             direct = vm.controller_invocation(root, direct_args, {'helper': 'C:\\helper.ps1'})
         self.assertIn('run-windows-vm-tests.ps1', ssh[5])
         self.assertIn('run-windows-vm-tests.ps1', direct[-1])
         self.assertIn('-SshHost', ssh)
+        self.assertIn('-ExpectedBundleManifestSha256', ssh)
         self.assertIn('-VmName', direct[-1])
+        self.assertIn('-ExpectedBundleManifestSha256', direct[-1])
+
+    def test_controller_uses_manifest_digest_frozen_before_observer_preparation(self):
+        args = vm.parse_arguments(['--ssh-host', 'darkrenamer-vm'])
+        args.expected_bundle_manifest_sha256 = 'a' * 64
+        (self.root / 'bundle.json').write_text('{"changed_after_freeze":true}')
+
+        command = vm.controller_invocation(self.root, args, pwsh='/usr/bin/pwsh')
+
+        digest_index = command.index('-ExpectedBundleManifestSha256') + 1
+        self.assertEqual(command[digest_index], 'a' * 64)
 
     def desktop_lease(self):
         return {'status': 'ready', 'leasePath': 'C:\\Temp\\owned', 'leaseId': 'a' * 32,

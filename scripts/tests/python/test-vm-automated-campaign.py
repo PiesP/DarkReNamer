@@ -9,7 +9,7 @@ from tooling_test_paths import REPOSITORY_ROOT
 import unittest
 
 from darkrenamer_tooling.campaign.planning import (
-    new_plan, validate_ledger, verify_process_lifecycle,
+    new_plan, validate_ledger, verify_process_job_cleanup, verify_process_lifecycle,
 )
 from darkrenamer_tooling.contracts.binding import Candidate
 from darkrenamer_tooling.evidence.archive import EvidenceError
@@ -94,6 +94,45 @@ class CampaignTests(unittest.TestCase):
                              ('executable_path', 'relative\\DarkReNamer.exe')):
             with self.subTest(field=field), self.assertRaises(EvidenceError):
                 verify_process_lifecycle({**lifecycle, field: value}, executable_sha256='b' * 64)
+
+    def test_forced_lifecycle_requires_random_job_nonce_receipt(self):
+        lifecycle = {'pid': 1234, 'session_id': 2, 'start_time_utc_ticks': '639255840000000000',
+                     'executable_path': 'C:\\owned\\DarkReNamer.exe', 'executable_sha256': 'b' * 64,
+                     'start_observed': True, 'exit_observed': True, 'exit_code': 123456,
+                     'exit_method': 'forced-termination'}
+        self.assertEqual(verify_process_lifecycle(lifecycle, executable_sha256='b' * 64,
+                                                  expected_exit_method='forced-termination'), (1234, 2))
+        for exit_code in (0, 1, 259, 0x80000000):
+            with self.subTest(exit_code=exit_code), self.assertRaises(EvidenceError):
+                verify_process_lifecycle({**lifecycle, 'exit_code': exit_code},
+                                         executable_sha256='b' * 64,
+                                         expected_exit_method='forced-termination')
+
+    def test_process_job_cleanup_requires_closed_unique_matching_identity(self):
+        normal = {'pid': 1234, 'process_start_time_utc_ticks': '639255840000000000',
+                  'job_empty': True, 'job_closed': True, 'capture_complete': True,
+                  'active_processes_at_primary_exit': None, 'had_survivors': False,
+                  'forced_termination': False, 'active_processes_at_close': 0,
+                  'active_processes_at_stop': None, 'active_process_ids_at_stop': [],
+                  'total_processes_at_stop': None, 'primary_process_active_at_stop': None,
+                  'termination_exit_code': None, 'status': 'clean', 'error': None}
+        self.assertEqual(verify_process_job_cleanup(
+            [normal], expected_processes=[(1234, 639255840000000000)]), [normal])
+        for change in ({'job_closed': False}, {'capture_complete': False}, {'had_survivors': True},
+                       {'pid': 99}, {'status': 'failed'}):
+            with self.subTest(change=change), self.assertRaises(EvidenceError):
+                verify_process_job_cleanup([{**normal, **change}],
+                                           expected_processes=[(1234, 639255840000000000)])
+        forced = {**normal, 'forced_termination': True, 'active_processes_at_stop': 1,
+                  'active_process_ids_at_stop': [1234], 'total_processes_at_stop': 1,
+                  'primary_process_active_at_stop': True, 'termination_exit_code': 123456}
+        self.assertEqual(verify_process_job_cleanup(
+            [forced], expected_termination=(1234, 639255840000000000, 123456)), [forced])
+        for code in (1, 259):
+            with self.subTest(code=code), self.assertRaises(EvidenceError):
+                verify_process_job_cleanup(
+                    [{**forced, 'termination_exit_code': code}],
+                    expected_termination=(1234, 639255840000000000, code))
 
 
 if __name__ == '__main__':

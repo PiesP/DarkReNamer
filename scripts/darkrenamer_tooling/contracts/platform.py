@@ -42,6 +42,212 @@ def require_fixture_root(value: object) -> str:
     return value
 
 
+SMART_SCREEN_NATURAL_EXIT_TIMEOUT_MS = 360_000
+SMART_SCREEN_MAXIMUM_POLLS = 362
+_WINDOWS_UTC_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$")
+_WINDOWS_RUNNER_SID = re.compile(r"^S-1-5-21-(?:\d+-){3}\d+$")
+_MICROSOFT_WINDOWS_SUBJECT = re.compile(
+    r"^CN=Microsoft Windows(?: Publisher)?, O=Microsoft Corporation(?:,|$)", re.IGNORECASE)
+
+
+def _process_identity(value: object, label: str) -> tuple[int, str]:
+    require(type(value) is str and len(value) <= 256,
+            f"{label} is unavailable or too long.")
+    match = re.fullmatch(
+        r"([1-9][0-9]{0,9})\|(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z)",
+        value)
+    require(match is not None, f"{label} is malformed.")
+    pid = int(match.group(1))
+    require(1 <= pid <= 0xFFFFFFFF, f"{label} PID is out of range.")
+    return pid, match.group(2)
+
+
+def _windows_system_path(directory: str, leaf: str) -> str:
+    return directory.rstrip("\\") + "\\System32\\" + leaf
+
+
+def verify_smart_screen_natural_exit(value: object, initial_processes: object) -> None:
+    """Validate the single-process exception to an otherwise empty cleanup delta."""
+    row = require_exact_keys(value, {
+        "schema_version", "status", "runner_sid", "runner_session_id",
+        "candidate_identity", "broker", "timeout_ms", "elapsed_ms", "polls",
+        "natural_exit_observed", "final_inventory_complete",
+        "final_runner_process_delta_identities", "final_runner_task_delta_identities",
+    }, "SmartScreen natural-exit evidence")
+    require_int(row["schema_version"], 1, 1, "SmartScreen evidence schema")
+    require(type(row["runner_sid"]) is str and len(row["runner_sid"]) <= 184 and
+            _WINDOWS_RUNNER_SID.fullmatch(row["runner_sid"]) is not None,
+            "SmartScreen runner SID is invalid.")
+    runner_session = require_int(row["runner_session_id"], 1, 0xFFFFFFFF,
+                                 "SmartScreen runner session")
+    require(type(initial_processes) is list and len(initial_processes) <= 1,
+            "Initial unexpected runner process inventory is malformed.")
+    require(type(row["polls"]) is list and len(row["polls"]) <= SMART_SCREEN_MAXIMUM_POLLS,
+            "SmartScreen poll inventory is unavailable or exceeds its bound.")
+    require(type(row["final_runner_process_delta_identities"]) is list and
+            type(row["final_runner_task_delta_identities"]) is list,
+            "SmartScreen final delta inventories are unavailable.")
+    require(type(row["natural_exit_observed"]) is bool and
+            type(row["final_inventory_complete"]) is bool,
+            "SmartScreen completion flags are not strict booleans.")
+    timeout = require_int(row["timeout_ms"], 0, SMART_SCREEN_NATURAL_EXIT_TIMEOUT_MS,
+                          "SmartScreen wait timeout")
+    elapsed = require_int(row["elapsed_ms"], 0, 2_147_483_647,
+                          "SmartScreen wait duration")
+    if row["status"] == "not-required":
+        require(not initial_processes and row["candidate_identity"] is None and
+                row["broker"] is None and timeout == 0 and elapsed == 0 and
+                row["polls"] == [] and row["natural_exit_observed"] is False and
+                row["final_inventory_complete"] is True and
+                row["final_runner_process_delta_identities"] == [] and
+                row["final_runner_task_delta_identities"] == [],
+                "Unneeded SmartScreen evidence contains a process or wait observation.")
+        return
+
+    require(row["status"] == "natural-exit",
+            "Controller cleanup has no verified SmartScreen natural-exit result.")
+    require(timeout == SMART_SCREEN_NATURAL_EXIT_TIMEOUT_MS and elapsed <= timeout and
+            row["natural_exit_observed"] is True and
+            row["final_inventory_complete"] is True,
+            "SmartScreen natural-exit wait exceeded its deadline or lacks a complete final inventory.")
+    require(type(row["candidate_identity"]) is str,
+            "SmartScreen candidate identity is unavailable.")
+    candidate_pid, candidate_created = _process_identity(
+        row["candidate_identity"], "SmartScreen candidate identity")
+    require(type(initial_processes) is list and len(initial_processes) == 1,
+            "SmartScreen must account for exactly one initial process delta.")
+    initial = require_exact_keys(initial_processes[0], {
+        "identity", "pid", "session_id", "creation_time_utc", "executable_path",
+    }, "Initial SmartScreen process delta")
+    require_int(initial["pid"], candidate_pid, candidate_pid, "Initial SmartScreen PID")
+    require_int(initial["session_id"], runner_session, runner_session,
+                "Initial SmartScreen session")
+    require(type(initial["creation_time_utc"]) is str and
+            _WINDOWS_UTC_TIMESTAMP.fullmatch(initial["creation_time_utc"]) is not None and
+            initial["creation_time_utc"] == candidate_created and
+            initial["identity"] == row["candidate_identity"] and
+            type(initial["executable_path"]) is str and
+            len(initial["executable_path"]) <= 32_767,
+            "Initial SmartScreen process lifetime or path is malformed.")
+
+    broker = require_exact_keys(row["broker"], {
+        "windows_directory", "process_identity", "process_pid", "process_creation_time_utc",
+        "process_session_id", "process_owner_sid", "process_executable_path",
+        "process_path_verified", "process_command_line_arguments",
+        "process_signature_status", "process_signer_subject", "process_signer_thumbprint",
+        "parent_identity", "parent_pid", "parent_creation_time_utc", "parent_session_id",
+        "parent_owner_sid", "parent_executable_path", "parent_path_verified",
+        "parent_command_line_arguments", "parent_signature_status", "parent_signer_subject",
+        "parent_signer_thumbprint", "service_name", "service_process_id", "service_state",
+    }, "SmartScreen broker identity")
+    directory = broker["windows_directory"]
+    require(type(directory) is str and len(directory) <= 260 and
+            re.fullmatch(r"[A-Za-z]:\\[^\\/:*?\"<>|]+(?:\\[^\\/:*?\"<>|]+)*", directory),
+            "SmartScreen Windows directory is not canonical drive-absolute syntax.")
+    directory_parts = directory[3:].split("\\")
+    require(all(part and part not in {".", ".."} and not part.endswith((".", " "))
+                for part in directory_parts),
+            "SmartScreen Windows directory contains an aliased component.")
+    process_path = _windows_system_path(directory, "smartscreen.exe")
+    parent_path = _windows_system_path(directory, "svchost.exe")
+    require(broker["process_identity"] == row["candidate_identity"] and
+            require_int(broker["process_pid"], candidate_pid, candidate_pid,
+                        "SmartScreen broker PID") == candidate_pid and
+            broker["process_creation_time_utc"] == candidate_created and
+            require_int(broker["process_session_id"], runner_session, runner_session,
+                        "SmartScreen broker session") == runner_session and
+            broker["process_owner_sid"] == row["runner_sid"] and
+            type(broker["process_path_verified"]) is bool and
+            broker["process_path_verified"] is True and
+            type(broker["process_executable_path"]) is str and
+            broker["process_executable_path"].casefold() == process_path.casefold() and
+            initial["executable_path"].casefold() == process_path.casefold(),
+            "SmartScreen candidate path, owner or lifetime differs from its initial delta.")
+    require(type(broker["process_creation_time_utc"]) is str and
+            _WINDOWS_UTC_TIMESTAMP.fullmatch(broker["process_creation_time_utc"]) is not None,
+            "SmartScreen process creation time is malformed.")
+    for prefix in ("process", "parent"):
+        require(broker[f"{prefix}_signature_status"] == "Valid" and
+                type(broker[f"{prefix}_signer_subject"]) is str and
+                len(broker[f"{prefix}_signer_subject"]) <= 512 and
+                _MICROSOFT_WINDOWS_SUBJECT.match(broker[f"{prefix}_signer_subject"]) is not None and
+                type(broker[f"{prefix}_signer_thumbprint"]) is str and
+                re.fullmatch(r"(?i:[0-9a-f]{40})", broker[f"{prefix}_signer_thumbprint"]) is not None,
+                f"SmartScreen {prefix} Authenticode evidence is invalid.")
+    process_arguments = broker["process_command_line_arguments"]
+    require(type(process_arguments) is list and len(process_arguments) == 2 and
+            all(type(argument) is str and len(argument) <= 4096 for argument in process_arguments) and
+            process_arguments[0].casefold() == process_path.casefold() and
+            process_arguments[1].casefold() == "-embedding",
+            "SmartScreen command-line arguments are not exact.")
+
+    parent_pid, parent_created = _process_identity(
+        broker["parent_identity"], "SmartScreen parent identity")
+    require_int(broker["parent_pid"], parent_pid, parent_pid, "SmartScreen parent PID")
+    require(type(broker["parent_creation_time_utc"]) is str and
+            broker["parent_creation_time_utc"] == parent_created and
+            _WINDOWS_UTC_TIMESTAMP.fullmatch(parent_created) is not None and
+            parent_created <= candidate_created and
+            require_int(broker["parent_session_id"], 0, 0xFFFFFFFF,
+                        "SmartScreen parent session") == 0 and
+            broker["parent_owner_sid"] == "S-1-5-18" and
+            type(broker["parent_path_verified"]) is bool and
+            broker["parent_path_verified"] is True and
+            type(broker["parent_executable_path"]) is str and
+            broker["parent_executable_path"].casefold() == parent_path.casefold(),
+            "SmartScreen parent is not the exact SYSTEM service-host process.")
+    parent_arguments = broker["parent_command_line_arguments"]
+    require(type(parent_arguments) is list and 3 <= len(parent_arguments) <= 6 and
+            all(type(argument) is str and len(argument) <= 4096 for argument in parent_arguments) and
+            parent_arguments[0].casefold() == parent_path.casefold() and
+            parent_arguments[1].casefold() == "-k" and
+            parent_arguments[2].casefold() == "dcomlaunch",
+            "SmartScreen parent command line is not an exact DcomLaunch invocation.")
+    parent_tail = tuple(argument.casefold() for argument in parent_arguments[3:])
+    require(parent_tail in ((), ("-p",), ("-s", "dcomlaunch"),
+                            ("-s", "dcomlaunch", "-p")),
+            "SmartScreen parent command line is not an exact DcomLaunch invocation.")
+    require(broker["service_name"] == "DcomLaunch" and
+            require_int(broker["service_process_id"], parent_pid, parent_pid,
+                        "DcomLaunch service PID") == parent_pid and
+            broker["service_state"] == "Running",
+            "DcomLaunch is not bound to the exact running parent process.")
+
+    polls = row["polls"]
+    require(type(polls) is list and 1 <= len(polls) <= SMART_SCREEN_MAXIMUM_POLLS,
+            "SmartScreen natural-exit poll series is incomplete or oversized.")
+    previous_elapsed = -1
+    for poll_index, raw_poll in enumerate(polls):
+        poll = require_exact_keys(raw_poll, {
+            "elapsed_ms", "inventory_complete", "process_delta_identities",
+            "task_delta_identities", "owned_root_process_count",
+        }, "SmartScreen natural-exit poll")
+        poll_elapsed = require_int(poll["elapsed_ms"], 0, timeout,
+                                   "SmartScreen poll duration")
+        require(poll_elapsed >= previous_elapsed and poll["inventory_complete"] is True,
+                "SmartScreen poll time regressed or inventory was incomplete.")
+        previous_elapsed = poll_elapsed
+        process_ids = poll["process_delta_identities"]
+        task_ids = poll["task_delta_identities"]
+        require(type(process_ids) is list and len(process_ids) <= 1 and
+                all(identity == row["candidate_identity"] for identity in process_ids) and
+                type(task_ids) is list and not task_ids and
+                require_int(poll["owned_root_process_count"], 0, 0,
+                            "Owned-root processes during SmartScreen wait") == 0,
+                "SmartScreen wait observed another process, task or owned-root process.")
+        if poll_index == 0:
+            require(process_ids == [row["candidate_identity"]],
+                    "SmartScreen poll series does not start with the classified process.")
+        elif poll_index < len(polls) - 1:
+            require(process_ids == [row["candidate_identity"]],
+                    "SmartScreen process disappeared before the final natural-exit poll.")
+    require(polls[-1]["process_delta_identities"] == [] and
+            polls[-1]["task_delta_identities"] == [] and
+            row["final_runner_process_delta_identities"] == [] and
+            row["final_runner_task_delta_identities"] == [],
+            "SmartScreen final inventory still contains a process or task delta.")
+
+
 def verify_environment(value: object, target: dict, *, candidate_pid: int, session_id: int) -> None:
     """Compare observed platform/display facts to a target from the trusted profile."""
     require_int(candidate_pid, 1, 0xFFFFFFFF, "Candidate PID")
@@ -93,20 +299,64 @@ def verify_environment(value: object, target: dict, *, candidate_pid: int, sessi
             "Candidate window does not intersect its observed work area.")
 
 
-def verify_cleanup(guest: object, transport: object) -> None:
+def verify_cleanup(guest: object, transport: object, *, require_candidate_export: bool = False) -> None:
     """Require actual post-cleanup inventories, not only producer pass flags."""
-    guest = require_exact_keys(guest, {"owned_processes_after", "runtime_root_after", "journal_after"}, "Guest cleanup")
-    host = require_exact_keys(transport, {"scheduled_task_present", "guest_root_present", "owned_processes_after"},
-                              "Controller cleanup")
+    guest_fields = {"owned_processes_after", "runtime_root_after", "journal_after"}
+    if require_candidate_export:
+        guest_fields.add("candidate_export_root_after")
+    guest = require_exact_keys(guest, guest_fields, "Guest cleanup")
+    host = verify_controller_cleanup(transport)
     for rows in (guest["owned_processes_after"], host["owned_processes_after"]):
         require(type(rows) is list and not rows, "Owned test processes remain after cleanup.")
     root = require_exact_keys(guest["runtime_root_after"], {"exists", "entries"}, "Runtime root cleanup")
     require(root["exists"] is False and type(root["entries"]) is list and not root["entries"],
             "Owned runtime root remains or its inventory is unavailable.")
+    if require_candidate_export:
+        export_root = require_exact_keys(
+            guest["candidate_export_root_after"],
+            {"exists", "ordinary_directory", "entries"},
+            "Candidate export root cleanup",
+        )
+        require(export_root["exists"] is False and export_root["ordinary_directory"] is True and
+                type(export_root["entries"]) is list and not export_root["entries"],
+                "Candidate export root remains or its inventory is unavailable.")
     journal = require_exact_keys(guest["journal_after"], {"entries"}, "Final journal inventory")
     clean_journal_inventory(journal["entries"])
-    require(host["scheduled_task_present"] is False and host["guest_root_present"] is False,
-            "Owned scheduled task or guest root remains after cleanup.")
+    for key in ("scheduled_task_present", "guest_root_present", "trusted_task_root_present"):
+        require(host[key] is False, f"Owned VM resource remains after cleanup: {key}.")
+
+
+def verify_controller_cleanup(transport: object) -> dict:
+    """Validate controller raw cleanup evidence before trusting its pass flag."""
+    host = require_exact_keys(transport, {
+        "scheduled_task_present", "guest_root_present", "trusted_task_root_present",
+        "process_jobs_closed", "runner_process_inventory_complete",
+        "unexpected_runner_tasks", "unexpected_runner_processes",
+        "unexpected_runner_tasks_after_intervention",
+        "unexpected_runner_processes_after_intervention",
+        "unexpected_runner_tasks_after_delete",
+        "unexpected_runner_processes_after_delete",
+        "removed_runner_tasks", "terminated_runner_processes",
+        "resource_cleanup_errors", "smart_screen_natural_exit", "owned_processes_after",
+    }, "Controller cleanup")
+    for key in ("scheduled_task_present", "guest_root_present", "trusted_task_root_present"):
+        require(host[key] is False, f"Owned VM resource remains after cleanup: {key}.")
+    require(host["process_jobs_closed"] is True and
+            host["runner_process_inventory_complete"] is True,
+            "Controller did not confirm closed process jobs and a complete runner inventory.")
+    for key in ("unexpected_runner_tasks", "unexpected_runner_tasks_after_intervention",
+                "unexpected_runner_processes_after_intervention",
+                "unexpected_runner_tasks_after_delete",
+                "unexpected_runner_processes_after_delete",
+                "removed_runner_tasks", "terminated_runner_processes",
+                "resource_cleanup_errors", "owned_processes_after"):
+        require(type(host[key]) is list and not host[key],
+                f"Controller cleanup retained or changed unrelated runner resources: {key}.")
+    require(type(host["unexpected_runner_processes"]) is list,
+            "Initial runner process inventory is unavailable.")
+    verify_smart_screen_natural_exit(
+        host["smart_screen_natural_exit"], host["unexpected_runner_processes"])
+    return host
 
 
 def verify_keyboard_events(value: object, *, candidate_pid: int, session_id: int,

@@ -316,6 +316,16 @@ impl RecoveryJournalEvidence {
     pub fn copy_exact_to_new(&mut self, destination: &Path) -> io::Result<u64> {
         copy_retained_bytes(&mut self.file, self.byte_len, destination)
     }
+
+    /// Copies the exact retained bytes to an already-created exclusive file.
+    ///
+    /// The caller owns creation of the output handle and is responsible for
+    /// binding it to the intended directory. This method flushes the bytes to
+    /// that handle before returning. An error can leave an empty or partial
+    /// destination, which the caller must identify as failed evidence.
+    pub fn copy_exact_to_file(&mut self, output: &mut File) -> io::Result<u64> {
+        copy_retained_bytes_to_file(&mut self.file, self.byte_len, output)
+    }
 }
 
 /// Existing-journal failure with retained evidence whenever open succeeded.
@@ -1211,7 +1221,24 @@ impl FileJournal {
             }
         };
         let byte_len = metadata.len();
-        if !metadata.is_file() || metadata_is_reparse(&metadata) {
+        // A retained journal is mutable recovery state. Reject pre-existing
+        // hard-link aliases so truncation, append, or disposition cannot alter
+        // an unrelated name that refers to the same file.
+        #[cfg(windows)]
+        let has_one_link = match super::windows_native::file_is_single_linked(&file) {
+            Ok(has_one_link) => has_one_link,
+            Err(error) => {
+                return Err(existing_evidence_error(
+                    path,
+                    file,
+                    byte_len,
+                    JournalOpenFailure::from_file_error(JournalOpenStage::Validate, error.into()),
+                ));
+            }
+        };
+        #[cfg(not(windows))]
+        let has_one_link = true;
+        if !metadata.is_file() || metadata_is_reparse(&metadata) || !has_one_link {
             return Err(existing_evidence_error(
                 path,
                 file,
@@ -1433,6 +1460,24 @@ impl FileJournal {
     /// destination exists or cannot be synced, or the append cursor cannot be
     /// restored.
     pub fn copy_exact_to_new(&mut self, destination: &Path) -> io::Result<u64> {
+        self.copy_exact_with(|file, byte_len| copy_retained_bytes(file, byte_len, destination))
+    }
+
+    /// Copies the exact retained bytes to an already-created exclusive file.
+    ///
+    /// The caller owns creation of the output handle and is responsible for
+    /// binding it to the intended directory. This method restores the append
+    /// cursor and syncs the output handle before returning. An error can leave
+    /// an empty or partial destination, which the caller must identify as
+    /// failed evidence.
+    pub fn copy_exact_to_file(&mut self, output: &mut File) -> io::Result<u64> {
+        self.copy_exact_with(|file, byte_len| copy_retained_bytes_to_file(file, byte_len, output))
+    }
+
+    fn copy_exact_with(
+        &mut self,
+        copy: impl FnOnce(&mut File, u64) -> io::Result<u64>,
+    ) -> io::Result<u64> {
         let original = self.file.stream_position()?;
         let expected = self.byte_length as u64;
         if original != expected {
@@ -1441,7 +1486,7 @@ impl FileJournal {
                 "journal append cursor was not at the retained end of file",
             ));
         }
-        let copy = copy_retained_bytes(&mut self.file, expected, destination);
+        let copy = copy(&mut self.file, expected);
         if let Err(error) = self.file.seek(SeekFrom::Start(original)) {
             self.poisoned = true;
             return Err(io::Error::other(format!(
@@ -1662,6 +1707,25 @@ fn unsafe_cleanup_error() -> FileJournalError {
 }
 
 fn copy_retained_bytes(file: &mut File, byte_len: u64, destination: &Path) -> io::Result<u64> {
+    let bytes = read_retained_bytes(file, byte_len)?;
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    let copy_result = output
+        .write_all(&bytes)
+        .and_then(|()| output.flush())
+        .and_then(|()| output.sync_all());
+    drop(output);
+    if let Err(error) = copy_result {
+        return Err(io::Error::other(format!(
+            "journal copy failed ({error}); partial destination was retained"
+        )));
+    }
+    Ok(byte_len)
+}
+
+fn read_retained_bytes(file: &mut File, byte_len: u64) -> io::Result<Vec<u8>> {
     if byte_len > MAX_JOURNAL_FILE_BYTES as u64 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1681,18 +1745,30 @@ fn copy_retained_bytes(file: &mut File, byte_len: u64, destination: &Path) -> io
             "retained journal changed length",
         ));
     }
-    let mut output = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(destination)?;
-    let copy_result = output
-        .write_all(&bytes)
-        .and_then(|()| output.flush())
-        .and_then(|()| output.sync_all());
-    drop(output);
+    Ok(bytes)
+}
+
+fn copy_retained_bytes_to_file(
+    file: &mut File,
+    byte_len: u64,
+    output: &mut File,
+) -> io::Result<u64> {
+    let output_position = output.stream_position()?;
+    if output_position != 0 || output.metadata()?.len() != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "journal export handle must refer to an empty file at offset zero",
+        ));
+    }
+    let copy_result = read_retained_bytes(file, byte_len).and_then(|bytes| {
+        output
+            .write_all(&bytes)
+            .and_then(|()| output.flush())
+            .and_then(|()| output.sync_all())
+    });
     if let Err(error) = copy_result {
         return Err(io::Error::other(format!(
-            "journal copy failed ({error}); partial destination was retained"
+            "journal copy failed ({error}); destination may be empty or partial and was retained"
         )));
     }
     Ok(byte_len)

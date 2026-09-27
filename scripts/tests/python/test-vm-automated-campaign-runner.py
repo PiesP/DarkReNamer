@@ -15,6 +15,7 @@ import unittest
 from unittest.mock import patch
 from zipfile import ZIP_STORED, ZipFile
 
+from controller_cleanup_fixture import clean_controller_cleanup
 from darkrenamer_tooling.campaign import runner
 
 REPOSITORY = REPOSITORY_ROOT
@@ -117,12 +118,15 @@ class CampaignRunnerTests(unittest.TestCase):
             "application": {"file": "DarkReNamer.exe", "sha256": "e" * 64},
             "runner": {"file": "windows-vm-guest.ps1", "sha256": "f" * 64},
         })
+        backend_cleanup = clean_controller_cleanup()
         write_json(self.backend / "result.json", {"schema_version": 1, "source_sha": HARNESS_SHA,
             "source_state": "clean", "target": "x86_64-pc-windows-msvc", "tests": tests,
-            "failure_reason": None, "transport": {"guest_cleanup": True}})
+            "failure_reason": None, "transport": {
+                "guest_cleanup": True, "raw_cleanup": backend_cleanup}})
         result_path = self.backend / "result.json"
         result_path.write_bytes(b"\xef\xbb\xbf" + result_path.read_bytes())
-        write_json(self.backend / "transport.json", {"guest_cleanup": True})
+        write_json(self.backend / "transport.json", {
+            "guest_cleanup": True, "raw_cleanup": backend_cleanup})
 
     def args(self) -> argparse.Namespace:
         return argparse.Namespace(
@@ -246,6 +250,18 @@ class CampaignRunnerTests(unittest.TestCase):
                 continue
             ordinary = json.loads(Path(call[call.index("--acceptance-manifest") + 1]).read_text())
             self.assertEqual(ordinary["request"]["layout_variant"], "command-rails")
+
+    def test_backend_external_cleanup_must_match_embedded_raw_observation(self) -> None:
+        transport_path = self.backend / "transport.json"
+        transport = json.loads(transport_path.read_text(encoding="utf-8"))
+        transport["raw_cleanup"]["smart_screen_natural_exit"]["runner_session_id"] = 3
+        write_json(transport_path, transport)
+        profile = json.loads((self.repo / "config" / "vm-automated-v1.json").read_text())
+        with patch.object(runner, "staged_tooling_files", return_value=[]), \
+                self.assertRaisesRegex(ValueError, "embedded and external"):
+            runner.prepare_backend(
+                self.backend, self.root / "prepared-backend", profile,
+                HARNESS_SHA, FakeNativeRunner)
 
     def test_failed_first_attempt_is_retained_and_stops_without_retry(self) -> None:
         calls, command = self.fake_command([7])

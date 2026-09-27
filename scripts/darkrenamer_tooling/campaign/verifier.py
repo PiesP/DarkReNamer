@@ -7,11 +7,14 @@ import json
 from pathlib import PurePosixPath
 import re
 
-from darkrenamer_tooling.campaign.planning import verify_process_lifecycle
+from darkrenamer_tooling.campaign.planning import (
+    verify_process_job_cleanup, verify_process_lifecycle,
+)
 from darkrenamer_tooling.contracts.binding import Candidate, verify_result_binding
 from darkrenamer_tooling.contracts.menu_layout import verify_native_menu_layout
 from darkrenamer_tooling.contracts.platform import (
-    contains, rectangle, verify_cleanup, verify_environment, verify_keyboard_events,
+    contains, rectangle, verify_cleanup, verify_controller_cleanup,
+    verify_environment, verify_keyboard_events,
 )
 from darkrenamer_tooling.contracts.state import Identity, core_rename_checkpoints
 from darkrenamer_tooling.evidence.archive import (
@@ -141,6 +144,10 @@ def verify_core_execution(result: dict, bundle: dict, transport: dict, target: d
     raw = result if keyboard else result["gui"]["flow"]
     lifecycle = result["process_lifecycle"] if keyboard else result["gui"]["process_lifecycle"]
     pid, session = verify_process_lifecycle(lifecycle, executable_sha256=bundle["product"]["application"]["sha256"])
+    verify_process_job_cleanup(
+        result.get("process_job_cleanup"),
+        expected_process=(pid, int(lifecycle["start_time_utc_ticks"])),
+    )
     environment = raw["raw_environment"]
     verify_environment(environment, target, candidate_pid=pid, session_id=session)
     source = "acceptance-source.txt" if keyboard else "vm-flow-source.txt"
@@ -273,8 +280,11 @@ def verify_backend_execution(reader: EvidenceReader, bundle_path: str, result_pa
         total_passed += passed
     require(total_passed > 0 and set(required_tests) <= executed_tests,
             "Required no-overwrite/recovery backend regressions were not executed successfully.")
-    require(result.get("failure_reason") is None and result.get("transport", {}).get("guest_cleanup") is True,
+    embedded_transport = result.get("transport")
+    require(type(embedded_transport) is dict and result.get("failure_reason") is None and
+            embedded_transport.get("guest_cleanup") is True,
             "Backend runtime cleanup failed or was not observed.")
+    verify_controller_cleanup(embedded_transport.get("raw_cleanup"))
     return canonical_digest({"bundle_sha256": reader.evidence.files[bundle_path].sha256,
                              "result_sha256": reader.evidence.files[result_path].sha256,
                              "binary_sha256": dict(sorted(expected.items())),
@@ -587,9 +597,11 @@ def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_s
             else:
                 runs = result.get("raw_layout_runs")
                 require(type(runs) is list and len(runs) == 1, "Fixed layout cell requires one complete workbench run.")
+            layout_processes = []
             for run in runs:
                 require_exact_keys(run, {"raw_environment", "raw_appearance", "process_lifecycle", "layout_observations"}, "Layout run")
                 pid, session = verify_process_lifecycle(run["process_lifecycle"], executable_sha256=candidate.executable_sha256)
+                layout_processes.append((pid, int(run["process_lifecycle"]["start_time_utc_ticks"])))
                 verify_environment(run["raw_environment"], target, candidate_pid=pid, session_id=session)
                 verify_appearance(run["raw_appearance"], run["raw_environment"], target)
                 layout_variant = target.get("layout_variant", "command-rails")
@@ -603,6 +615,10 @@ def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_s
                     verify_layout_controls(run["layout_observations"], run["raw_environment"], keyboard_focus=keyboard)
                     verify_focus_reachability(run["layout_observations"]["focus_reachability"], run["raw_environment"])
                 verify_layout_raster(reader, attempt["result"], run["layout_observations"], run["raw_environment"])
+            verify_process_job_cleanup(
+                result.get("process_job_cleanup"),
+                expected_processes=layout_processes,
+            )
             verify_setting_restoration(reader, attempt["result"], result, bundle, target)
             verify_cleanup(result["raw_cleanup"], transport["raw_cleanup"])
         else:
@@ -641,6 +657,13 @@ def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_s
             "Backend runner differs from the trusted source.")
     backend_transport = reader.json(backend["transport"])
     require(backend_transport.get("guest_cleanup") is True, "Backend controller did not finish guest cleanup.")
+    backend_result = reader.json(backend["result"])
+    require(type(backend_result) is dict and type(backend_result.get("transport")) is dict,
+            "Backend embedded controller transport is unavailable.")
+    external_cleanup = verify_controller_cleanup(backend_transport.get("raw_cleanup"))
+    embedded_cleanup = verify_controller_cleanup(backend_result["transport"].get("raw_cleanup"))
+    require(external_cleanup == embedded_cleanup,
+            "Backend embedded and external controller cleanup observations differ.")
     backend_digest = verify_backend_execution(reader, backend["bundle"], backend["result"],
                                               source_sha=candidate.source_sha,
                                               required_tests=profile["required_backend_test_names"])

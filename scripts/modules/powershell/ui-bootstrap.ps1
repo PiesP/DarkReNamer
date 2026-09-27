@@ -186,7 +186,28 @@ function Resolve-AcceptanceBundle {
         }
     }
     elseif ($outputExists) {
-        throw 'The acceptance output directory already exists; preserve it and use a new bundle.'
+        $outputItem = Get-Item -LiteralPath $outputRoot -Force
+        if (-not $outputItem.PSIsContainer -or
+            ($outputItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The precreated acceptance output must be an ordinary directory.'
+        }
+        $entries = [IO.Directory]::EnumerateFileSystemEntries($outputRoot).GetEnumerator()
+        try {
+            if (-not $entries.MoveNext()) {
+                throw 'The controller-created acceptance result file is missing.'
+            }
+            $resultPath = [string]$entries.Current
+            if ([IO.Path]::GetFileName($resultPath) -cne 'acceptance-result.json' -or
+                $entries.MoveNext()) {
+                throw 'An existing acceptance output directory may contain only its controller-created result file.'
+            }
+        }
+        finally { $entries.Dispose() }
+        $resultItem = Get-Item -LiteralPath $resultPath -Force
+        if ($resultItem.PSIsContainer -or
+            ($resultItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The controller-created acceptance result must be an ordinary file.'
+        }
     }
     [pscustomobject]@{
         root = $resolvedRoot

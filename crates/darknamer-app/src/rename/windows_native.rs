@@ -446,7 +446,7 @@ pub(crate) fn prepare_text_export_parent(
 }
 
 #[cfg(test)]
-fn prepare_text_export_parent_from_path(path: &Path) -> io::Result<TextExportParent> {
+pub(crate) fn prepare_text_export_parent_from_path(path: &Path) -> io::Result<TextExportParent> {
     prepare_text_export_parent_impl(path, None)
 }
 
@@ -533,6 +533,32 @@ impl TextExportParent {
         ntfs_file_reference_number(final_directory.file())
     }
 
+    /// Creates a new export file relative to the retained directory chain.
+    ///
+    /// The leaf must be a single Windows name. The open is exclusive and does
+    /// not follow a reparse point, so the selected directory cannot be
+    /// replaced through its former path while the file is created or written.
+    pub(crate) fn create_new_file(&self, leaf: &OsStr) -> io::Result<File> {
+        let leaf = validated_text_export_leaf(leaf)?;
+        let parent = self
+            .directories
+            .last()
+            .ok_or_else(|| io::Error::other("text export directory chain is empty"))?;
+        let file = open_relative(
+            parent.file(),
+            &leaf,
+            DELETE | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            0,
+            FILE_CREATE,
+            FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+        )?;
+        if let Err(error) = validate_text_export_file(&file) {
+            let _ = mark_file_delete(&file);
+            return Err(error);
+        }
+        Ok(file)
+    }
+
     pub(crate) fn target_for_leaf(
         &self,
         leaf: &OsStr,
@@ -552,18 +578,7 @@ impl TextExportParent {
         shell_identity: Option<(u128, u64)>,
         require_shell_identity: bool,
     ) -> io::Result<TextExportTarget> {
-        let leaf = leaf.encode_wide().collect::<Vec<_>>();
-        if leaf.is_empty()
-            || leaf.len() > MAX_WINDOWS_LEAF_NAME_UTF16_UNITS
-            || leaf
-                .iter()
-                .any(|unit| matches!(*unit, 0 | 0x2F | 0x5C | 0x3A))
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "text export destination has an invalid file name",
-            ));
-        }
+        let leaf = validated_text_export_leaf(leaf)?;
         let parent = self
             .directories
             .last()
@@ -614,6 +629,22 @@ impl TextExportParent {
             accepted_leaf,
         })
     }
+}
+
+fn validated_text_export_leaf(leaf: &OsStr) -> io::Result<Vec<u16>> {
+    let leaf = leaf.encode_wide().collect::<Vec<_>>();
+    if leaf.is_empty()
+        || leaf.len() > MAX_WINDOWS_LEAF_NAME_UTF16_UNITS
+        || leaf
+            .iter()
+            .any(|unit| matches!(*unit, 0 | 0x2F | 0x5C | 0x3A))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "text export destination has an invalid file name",
+        ));
+    }
+    Ok(leaf)
 }
 
 fn require_matching_text_export_leaf_identity(
@@ -1026,18 +1057,16 @@ pub(crate) fn write_text_export(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_text_export_target(prepare_text_export_target(path)?, bytes)
 }
 
-fn validate_text_export_file(file: &File) -> io::Result<()> {
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "text export destination must be a regular, unlinked file",
-        ));
-    }
+pub(crate) fn file_is_single_linked(file: &File) -> io::Result<bool> {
+    let info = file_standard_info(file)?;
+    Ok(!info.Directory && !info.DeletePending && info.NumberOfLinks == 1)
+}
+
+fn file_standard_info(file: &File) -> io::Result<FILE_STANDARD_INFO> {
     let mut info = FILE_STANDARD_INFO::default();
     let size = u32::try_from(size_of::<FILE_STANDARD_INFO>())
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    // SAFETY: file is the retained output handle and info is a writable,
+    // SAFETY: file is a retained handle and info is a writable,
     // correctly aligned FILE_STANDARD_INFO buffer of its checked size.
     let success = unsafe {
         GetFileInformationByHandleEx(
@@ -1050,7 +1079,18 @@ fn validate_text_export_file(file: &File) -> io::Result<()> {
     if success == 0 {
         return Err(io::Error::last_os_error());
     }
-    if info.Directory || info.DeletePending || info.NumberOfLinks != 1 {
+    Ok(info)
+}
+
+fn validate_text_export_file(file: &File) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "text export destination must be a regular, unlinked file",
+        ));
+    }
+    if !file_is_single_linked(file)? {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "text export destination must be a regular, unlinked file",
@@ -1512,6 +1552,38 @@ mod tests {
             require_matching_text_export_leaf_identity(expected, (expected.0, 0xabcd)),
             Err(error) if error.kind() == io::ErrorKind::InvalidInput
         ));
+    }
+
+    #[test]
+    fn retained_export_parent_creates_a_new_leaf_without_reopening_its_path()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let selected = temporary.path().join("selected");
+        let moved = temporary.path().join("moved");
+        std::fs::create_dir(&selected)?;
+        let parent = prepare_text_export_parent_from_path(&selected)?;
+
+        assert!(std::fs::rename(&selected, &moved).is_err());
+
+        let leaf = OsStr::new("active.drj.retained");
+        let mut output = parent.create_new_file(leaf)?;
+        output.write_all(b"retained journal bytes")?;
+        output.sync_all()?;
+        drop(output);
+
+        assert_eq!(
+            std::fs::read(selected.join(leaf))?,
+            b"retained journal bytes"
+        );
+        assert!(matches!(
+            parent.create_new_file(leaf),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists
+        ));
+        assert!(matches!(
+            parent.create_new_file(OsStr::new("../outside.drj")),
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput
+        ));
+        Ok(())
     }
 
     #[test]

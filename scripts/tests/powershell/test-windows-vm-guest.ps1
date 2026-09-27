@@ -292,6 +292,23 @@ try {
         }
     }
 
+    $caseFixtureFailureRoot = Join-Path $valid.root 'case-fixture-cleanup-failure'
+    [void](New-Item -ItemType Directory -Path $caseFixtureFailureRoot)
+    [IO.File]::WriteAllText((Join-Path $caseFixtureFailureRoot 'unexpected.txt'), 'retained')
+    $caseFixtureFailureRow = [ordered]@{
+        status = 'passed'
+        failure_reason = $null
+    }
+    Assert-Fails {
+        Complete-JobBoundCaseSensitiveFixture `
+            -FixtureRoot $caseFixtureFailureRoot -Row $caseFixtureFailureRow
+    } 'was not emptied before cleanup'
+    if ($caseFixtureFailureRow.status -cne 'failed' -or
+        $caseFixtureFailureRow.failure_reason -cne 'process_error' -or
+        -not (Test-Path -LiteralPath $caseFixtureFailureRoot)) {
+        throw 'Case-sensitive fixture cleanup failure must fail the test row and preserve its evidence.'
+    }
+
     $candidate = New-CandidateFixture -Name 'candidate-valid'
     Invoke-TestGuest -EntryPointPath $candidate.runner -BundleRoot $candidate.root -ExpectedSessionId 1 -ValidateOnly
     Invoke-TestGuest -EntryPointPath $candidate.runner -BundleRoot $candidate.root -ExpectedSessionId 1 -ValidateOnly
@@ -605,6 +622,464 @@ try {
         Get-VmAutomatedRuntimeRootObservation -Root $runtimeObservationRoot -MaximumEntries 8
     } 'contains a reparse point'
     $runnerText = Get-DrTestCombinedPowerShellSource -Kind guest
+    foreach ($requiredJobSource in @(
+        'JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE',
+        'CREATE_SUSPENDED = 0x00000004',
+        'EXTENDED_STARTUPINFO_PRESENT = 0x00080000',
+        'CREATE_UNICODE_ENVIRONMENT = 0x00000400',
+        'MAX_ENVIRONMENT_BLOCK_CHARS = 32767',
+        'UOI_NAME = 2',
+        'HANDLE_LIST_ATTRIBUTE',
+        'CopyCurrentEnvironmentBlock()',
+        'GetEnvironmentStringsW()',
+        'FreeEnvironmentStringsW(source)',
+        'consecutiveNulls == 2',
+        'flags |= CREATE_UNICODE_ENVIRONMENT;',
+        'Inherit the task desktop so CreateProcessWithTokenW grants the verified user access.',
+        'flags, environmentBlock,',
+        'commandLine.Length >= 1024',
+        'The CreateProcessWithTokenW command line exceeds its supported bound.',
+        'function Resolve-JobBoundCapturePaths',
+        '$BoundParameters.Keys -contains ''StdoutPath''',
+        'bool redirect = !String.IsNullOrEmpty(stdoutPath) || !String.IsNullOrEmpty(stderrPath);',
+        'public static class DarkReNamerVmFileSystem',
+        'public static string GetShortPathName(string longPath)',
+        'public static void SetCaseSensitiveDirectory(string path)',
+        'function Resolve-JobBoundShortPath',
+        '$temporaryRoot = Resolve-JobBoundShortPath -Path $temporaryRoot',
+        '[DarkReNamerVmFileSystem]::SetCaseSensitiveDirectory($caseSensitiveFixtureRoot)',
+        'DARKRENAMER_CASE_SENSITIVE_FIXTURE_ROOT',
+        '-CaseSensitiveFixtureRoot $caseSensitiveFixtureRoot',
+        'function Complete-JobBoundCaseSensitiveFixture',
+        '$Row.status = ''failed''',
+        '$row[''process_lifecycle''] = [ordered]@{',
+        'start_time_utc_ticks = $processStartTimeUtcTicks',
+        '$capturePaths.stdout_path',
+        '$capturePaths.stderr_path',
+        'AssertDefaultObserverDesktop();',
+        'GetProcessWindowStation()',
+        'GetThreadDesktop(GetCurrentThreadId())',
+        'GetUserObjectInformationW(handle, UOI_NAME, name,',
+        'The elevated observer is not attached to WinSta0\\Default.',
+        'ref StartupInfo startupInfo, out ProcessInformation processInformation);',
+        'ref startup.StartupInfo, out created)',
+        'TOKEN_LINKED_TOKEN = 19',
+        'TOKEN_ASSIGN_PRIMARY = 0x0001',
+        'TOKEN_DUPLICATE = 0x0002',
+        'TOKEN_ADJUST_DEFAULT = 0x0080',
+        'TOKEN_ADJUST_SESSIONID = 0x0100',
+        'SECURITY_IMPERSONATION = 2',
+        'uint desiredAccess = TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY |',
+        'TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID;',
+        'DuplicateTokenEx(shellToken, desiredAccess, IntPtr.Zero,',
+        'The duplicated shell token is not primary.',
+        'DuplicateTokenEx returned the existing shell token identity.',
+        'The duplicated shell token belongs to a different interactive logon.',
+        'TOKEN_PRIMARY = 1',
+        'TOKEN_ELEVATION_TYPE = 18',
+        'TOKEN_ELEVATION_TYPE_FULL = 2',
+        'TOKEN_ELEVATION_TYPE_LIMITED = 3',
+        'TOKEN_UI_ACCESS = 26',
+        'GetTokenInformation(token, informationClass',
+        'OpenVerifiedLinkedShellPrimaryToken',
+        'OpenVerifiedShellPrimaryToken',
+        'GetShellWindow()',
+        'GetWindowThreadProcessId(shellWindow, out processId)',
+        'PROCESS_QUERY_LIMITED_INFORMATION, false, shellProcessId)',
+        'QueryFullProcessImageNameW(process, 0, imagePath, ref length)',
+        'GetWindowsDirectoryW(windowsDirectory, (uint)windowsDirectory.Capacity)',
+        'TokenDword(shellToken, TOKEN_TYPE) != TOKEN_PRIMARY',
+        'ReadTokenStatistics(linkedToken).AuthenticationId',
+        'TokenStatistics shellStatistics = ReadTokenStatistics(shellToken);',
+        'Luid shellAuthenticationId = shellStatistics.AuthenticationId;',
+        'ReadTokenStatistics(observerToken).AuthenticationId',
+        'SameLuid(expectedAuthenticationId, ReadTokenStatistics(token).AuthenticationId)',
+        'SameLuid(linkedAuthenticationId, shellAuthenticationId)',
+        'token, 1, TOKEN_ELEVATION_TYPE_FULL, expectedSession,',
+        'linked, 0, TOKEN_ELEVATION_TYPE_LIMITED, expectedSession,',
+        'shellToken, 0, TOKEN_ELEVATION_TYPE_LIMITED, expectedSession,',
+        'Win32Exception Win32Failure(string operation)',
+        'GetTokenInformation for class ',
+        'CreateProcessWithTokenW for the verified medium shell token',
+        'The shell token belongs to a different interactive logon.',
+        'The suspended observer child belongs to a different logon session.',
+        'The interactive shell image is not the Windows Explorer binary.',
+        'The interactive shell process changed during token acquisition.',
+        'CreateProcessWithTokenW(observerToken, 0, filePath',
+        'RequireCreatedChild(created.hProcess, observerSession, observerUserSid,',
+        'AssertHighObserverToken',
+        'Assert-VmObserverExecutionContext',
+        'Test-MediumObserverBoundary',
+        'DARKRENAMER_VM_ELEVATED_OBSERVER',
+        'AssignProcessToJobObject(job, created.hProcess)',
+        'ResumeThread(created.hThread)',
+        'output_limit_exceeded',
+        'process_job_not_empty',
+        'function Set-GuiSmokeFailureDetail',
+        'error_detail = $null',
+        '$row.job_cleanup = $true',
+        'job_active_processes_at_primary_exit',
+        'WaitForEmpty(1000)',
+        'GetSoleActiveProcessId()',
+        'uint bufferLength = (uint)(8 + IntPtr.Size);',
+        'if (error == 122 || error == 234) return -1;',
+        'if (assigned > 1 || listed > 1) return -1;',
+        'if (listed == 0) return 0;',
+        'public uint LastProcessListAssigned;',
+        'public uint LastProcessListListed;',
+        'public int LastProcessListError;',
+        'sole_process_name = $null',
+        'Get-Process -Id ([int]$soleActiveProcessId) -ErrorAction Stop',
+        '$State.job_process_snapshot.query_error = [int]$State.owner.LastProcessListError',
+        'process_job_snapshot = $State.job_process_snapshot',
+        'function Set-ProcessCleanupFailureReason',
+        'if ($soleActiveProcessId -lt 0)',
+        '-not $State.job_had_survivors',
+        '[System.IO.FileSystemAclExtensions]::CreateDirectory($security, $path)',
+        'job_cleanup = $false',
+        'AggregateOutputLimitBytes =',
+        '$script:VmTestOutputAggregateLimitBytes',
+        'aggregate_output_limit_bytes = $AggregateOutputLimitBytes',
+        'Protect-CurrentRunnerProcess',
+        'medium-boundary-probe.stdout.log',
+        'medium-boundary-probe.stderr.log',
+        'BOUNDARY_PROBE_FAILURE type={0} native_error={1} message={2}',
+        '-AggregateOutputLimitBytes $probeOutputLimitBytes',
+        '$probeSucceeded = $false',
+        '$state.owner.WaitForCapture(10000)',
+        'Get-CapturedOutputBytes -Path $channel.path',
+        'medium integrity child could access or could not verify observer process/thread boundaries.',
+        '$probeSucceeded = $true',
+        'if ($probeSucceeded)',
+        'Remove-Item -LiteralPath $stdoutPath, $stderrPath, $probeScriptPath',
+        'PROCESS_WRITE_DAC',
+        'ProtectCurrentProcess(string runnerSid)',
+        'new System.Security.Principal.SecurityIdentifier(runnerSid).Value',
+        'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x00101000;;;',
+        'validatedRunnerSid + ',
+        ')(A;;0x00101000;;;OW)',
+        '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+        '[DarkReNamerVmRunnerSecurity]::ProtectCurrentProcess($runnerSid)',
+        'PROTECTED_DACL_SECURITY_INFORMATION',
+        'Initialize-TrustedResultWriter',
+        'CreateTrustedResultFile',
+        'ProtectResultFile($writer.SafeFileHandle, $runnerSid)',
+        'D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;',
+        'function New-ObserverFixtureDirectory',
+        'function New-ObserverCandidateWriteDirectory',
+        'FileSystemRights]::DeleteSubdirectoriesAndFiles',
+        'FileSystemRights]::Modify',
+        'ObjectInherit',
+        'InheritOnly',
+        '[IO.FileMode]::CreateNew',
+        '[IO.FileShare]::Read'
+    )) {
+        if ($runnerText.IndexOf($requiredJobSource, [StringComparison]::Ordinal) -lt 0) {
+            throw "The guest process containment contract is missing '$requiredJobSource'."
+        }
+    }
+    $guiProcessStartIndex = $runnerText.IndexOf(
+        '$processState.process = Start-JobBoundProcess',
+        [StringComparison]::Ordinal
+    )
+    $guiProcessLifecycleIndex = $runnerText.IndexOf(
+        '$row[''process_lifecycle''] = [ordered]@{',
+        $guiProcessStartIndex,
+        [StringComparison]::Ordinal
+    )
+    $guiRawEvidenceIndex = $runnerText.IndexOf(
+        'if ($RawEvidence) {',
+        $guiProcessStartIndex,
+        [StringComparison]::Ordinal
+    )
+    if ($guiProcessStartIndex -lt 0 -or
+        $guiProcessLifecycleIndex -le $guiProcessStartIndex -or
+        $guiRawEvidenceIndex -le $guiProcessLifecycleIndex) {
+        throw 'Every started GUI process must record its PID and creation time before optional raw-evidence enrichment.'
+    }
+    $preservedCleanupFailure = [ordered]@{
+        failure_reason = 'process_job_not_empty'
+        cleanup_failure_reason = $null
+    }
+    Set-ProcessCleanupFailureReason -Row $preservedCleanupFailure -Reason 'process_job_cleanup_failed'
+    $primaryCleanupFailure = [ordered]@{
+        failure_reason = $null
+        cleanup_failure_reason = $null
+    }
+    Set-ProcessCleanupFailureReason -Row $primaryCleanupFailure -Reason 'process_job_cleanup_failed'
+    if ($preservedCleanupFailure.failure_reason -cne 'process_job_not_empty' -or
+        $preservedCleanupFailure.cleanup_failure_reason -cne 'process_job_cleanup_failed' -or
+        $primaryCleanupFailure.failure_reason -cne 'process_job_cleanup_failed' -or
+        $primaryCleanupFailure.cleanup_failure_reason) {
+        throw 'Cleanup failures must preserve an earlier process failure reason and retain cleanup failure separately.'
+    }
+    $guiFailureDetail = [ordered]@{ error_detail = $null }
+    try { throw [ComponentModel.Win32Exception]::new(5) }
+    catch {
+        Set-GuiSmokeFailureDetail -Row $guiFailureDetail -ErrorRecord $_
+    }
+    if ($guiFailureDetail.error_detail.exception_type -cne 'System.ComponentModel.Win32Exception' -or
+        $guiFailureDetail.error_detail.native_error -ne 5 -or
+        $guiFailureDetail.error_detail.message.Length -gt 1024) {
+        throw 'GUI smoke failure details must preserve exception type and native error in a bounded record.'
+    }
+    $longGuiFailureDetail = [ordered]@{ error_detail = $null }
+    try { throw [Exception]::new('x' * 2048) }
+    catch {
+        Set-GuiSmokeFailureDetail -Row $longGuiFailureDetail -ErrorRecord $_
+    }
+    if ($longGuiFailureDetail.error_detail.message.Length -ne 1024) {
+        throw 'GUI smoke failure messages must be capped at 1024 characters.'
+    }
+    if ($runnerText.Contains('maximumProcessIds') -or
+        $runnerText.Contains('capacity = capacity * 2')) {
+        throw 'The sole-process Job Object query must not retry a multi-PID snapshot with a larger buffer.'
+    }
+    $noCapturePaths = Resolve-JobBoundCapturePaths -BoundParameters ([ordered]@{})
+    if ($null -ne $noCapturePaths.stdout_path -or $null -ne $noCapturePaths.stderr_path) {
+        throw 'An unredirected process must receive null capture paths.'
+    }
+    $capturePathParameters = [ordered]@{
+        StdoutPath = $true
+        StderrPath = $true
+    }
+    $capturePaths = Resolve-JobBoundCapturePaths `
+        -BoundParameters $capturePathParameters `
+        -StdoutPath 'stdout.log' `
+        -StderrPath 'stderr.log'
+    if ($capturePaths.stdout_path -cne 'stdout.log' -or
+        $capturePaths.stderr_path -cne 'stderr.log') {
+        throw 'Redirected process capture paths were not retained.'
+    }
+    Assert-Fails {
+        Resolve-JobBoundCapturePaths `
+            -BoundParameters ([ordered]@{ StdoutPath = $true }) `
+            -StdoutPath 'stdout.log'
+    } 'both output paths'
+    Assert-Fails {
+        Resolve-JobBoundCapturePaths `
+            -BoundParameters $capturePathParameters `
+            -StdoutPath ' ' `
+            -StderrPath 'stderr.log'
+    } 'both output paths'
+    $aclAwareDirectoryCalls = [regex]::Matches(
+        $runnerText,
+        [regex]::Escape('[System.IO.FileSystemAclExtensions]::CreateDirectory($security, $path)')
+    ).Count
+    if ($aclAwareDirectoryCalls -ne 2 -or
+        $runnerText.IndexOf(
+            '[IO.Directory]::CreateDirectory($path, $security)',
+            [StringComparison]::Ordinal
+        ) -ge 0) {
+        throw 'Observer directories must use the .NET Core ACL-aware directory creation API.'
+    }
+    foreach ($flowFixtureContract in @(
+        "if (`$RawEvidence -and [string]::IsNullOrWhiteSpace(`$FixtureParentRoot)) {",
+        '$flowFixtureParent = if ($FixtureParentRoot) { $FixtureParentRoot } else { $caseRoot }',
+        '-Parent $flowFixtureParent',
+        "-Leaf 'production-flow-fixture'"
+    )) {
+        if ($runnerText.IndexOf($flowFixtureContract, [StringComparison]::Ordinal) -lt 0) {
+            throw "The production flow fixture escaped the protected task parent: $flowFixtureContract"
+        }
+    }
+    $tokenStatisticsStartIndex = $runnerText.IndexOf(
+        'private struct TokenStatistics {',
+        [StringComparison]::Ordinal
+    )
+    if ($tokenStatisticsStartIndex -lt 0) {
+        throw 'The native TOKEN_STATISTICS structure declaration is missing.'
+    }
+    $tokenIdFieldIndex = $runnerText.IndexOf(
+        'public Luid TokenId;',
+        $tokenStatisticsStartIndex,
+        [StringComparison]::Ordinal
+    )
+    $authenticationIdFieldIndex = $runnerText.IndexOf(
+        'public Luid AuthenticationId;',
+        $tokenStatisticsStartIndex,
+        [StringComparison]::Ordinal
+    )
+    $expirationTimeFieldIndex = $runnerText.IndexOf(
+        'public long ExpirationTime;',
+        $tokenStatisticsStartIndex,
+        [StringComparison]::Ordinal
+    )
+    if ($tokenIdFieldIndex -le $tokenStatisticsStartIndex -or
+        $authenticationIdFieldIndex -le $tokenIdFieldIndex -or
+        $expirationTimeFieldIndex -le $authenticationIdFieldIndex) {
+        throw 'TOKEN_STATISTICS fields must match the native TokenId, AuthenticationId, ExpirationTime order.'
+    }
+    if ($runnerText.IndexOf(
+        '-Parent $OutputRoot -Leaf ''production-flow-fixture''',
+        [StringComparison]::Ordinal
+    ) -ge 0) {
+        throw 'The production flow fixture must remain outside the protected result directory.'
+    }
+    $assignIndex = $runnerText.IndexOf(
+        'AssignProcessToJobObject(job, created.hProcess)',
+        [StringComparison]::Ordinal
+    )
+    $createWithTokenIndex = $runnerText.IndexOf(
+        'CreateProcessWithTokenW(observerToken, 0, filePath',
+        [StringComparison]::Ordinal
+    )
+    $observerAuthenticationCaptureIndex = $runnerText.IndexOf(
+        'observerAuthenticationId = ReadTokenStatistics(observerToken).AuthenticationId;',
+        [StringComparison]::Ordinal
+    )
+    $observerDesktopCheckIndex = $runnerText.IndexOf(
+        'DarkReNamerVmRunnerSecurity.AssertDefaultObserverDesktop();',
+        [StringComparison]::Ordinal
+    )
+    $childTokenIndex = $runnerText.IndexOf(
+        'RequireCreatedChild(created.hProcess, observerSession, observerUserSid, observerAuthenticationId)',
+        [StringComparison]::Ordinal
+    )
+    $resumeIndex = $runnerText.IndexOf(
+        'ResumeThread(created.hThread)',
+        [StringComparison]::Ordinal
+    )
+    if ($observerDesktopCheckIndex -lt 0 -or
+        $observerDesktopCheckIndex -ge $createWithTokenIndex -or
+        $observerAuthenticationCaptureIndex -lt 0 -or
+        $createWithTokenIndex -le $observerAuthenticationCaptureIndex -or
+        $assignIndex -le $createWithTokenIndex -or
+        $childTokenIndex -le $assignIndex -or $resumeIndex -le $childTokenIndex -or
+        $runnerText.IndexOf('CREATE_BREAKAWAY_FROM_JOB', [StringComparison]::Ordinal) -ge 0 -or
+        $runnerText.IndexOf('JOB_OBJECT_LIMIT_BREAKAWAY_OK', [StringComparison]::Ordinal) -ge 0 -or
+        $runnerText.IndexOf('JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK', [StringComparison]::Ordinal) -ge 0) {
+        throw 'The verified desktop and token must be checked before the suspended child enters its job.'
+    }
+    if ($runnerText.IndexOf(
+        'startup.StartupInfo.lpDesktop =',
+        [StringComparison]::Ordinal
+    ) -ge 0) {
+        throw 'The verified medium child must inherit the interactive task desktop.'
+    }
+    $attributeListInitIndex = $runnerText.IndexOf(
+        'InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeSize);',
+        [StringComparison]::Ordinal
+    )
+    $attributeListGateIndex = $runnerText.LastIndexOf(
+        'if (!elevatedObserver) {',
+        $attributeListInitIndex,
+        [StringComparison]::Ordinal
+    )
+    $handleListUpdateIndex = $runnerText.IndexOf(
+        'new IntPtr(HANDLE_LIST_ATTRIBUTE), handleList,',
+        $attributeListInitIndex,
+        [StringComparison]::Ordinal
+    )
+    $mediumProbeStartIndex = $runnerText.IndexOf(
+        'function Test-MediumObserverBoundary {',
+        [StringComparison]::Ordinal
+    )
+    $mediumProbeEndIndex = $runnerText.IndexOf(
+        'function Stop-JobBoundProcess {',
+        $mediumProbeStartIndex,
+        [StringComparison]::Ordinal
+    )
+    if ($attributeListInitIndex -lt 0 -or $attributeListGateIndex -lt 0 -or
+        $attributeListInitIndex -le $attributeListGateIndex -or
+        $handleListUpdateIndex -le $attributeListInitIndex -or
+        $mediumProbeStartIndex -lt 0 -or $mediumProbeEndIndex -le $mediumProbeStartIndex) {
+        throw 'The elevated token launch must avoid the inherited-handle attribute list.'
+    }
+    $mediumProbeSource = $runnerText.Substring(
+        $mediumProbeStartIndex,
+        $mediumProbeEndIndex - $mediumProbeStartIndex
+    )
+    $probeStageIndex = $mediumProbeSource.IndexOf(
+        "[IO.FileMode]::CreateNew",
+        [StringComparison]::Ordinal
+    )
+    $probeLaunchIndex = $mediumProbeSource.IndexOf(
+        '-Arguments (''-NoLogo -NoProfile -NonInteractive -File "',
+        [StringComparison]::Ordinal
+    )
+    if ($mediumProbeSource.IndexOf('-EncodedCommand', [StringComparison]::Ordinal) -ge 0 -or
+        $mediumProbeSource.IndexOf("'.ps1'", [StringComparison]::Ordinal) -lt 0 -or
+        $probeStageIndex -lt 0 -or $probeLaunchIndex -le $probeStageIndex) {
+        throw 'The medium observer boundary script must be staged as a short -File launch.'
+    }
+    $shellWindowIndex = $runnerText.IndexOf(
+        'IntPtr shellWindow = GetShellWindow();',
+        [StringComparison]::Ordinal
+    )
+    $shellProcessIndex = $runnerText.IndexOf(
+        'shellProcess = OpenProcess(',
+        [StringComparison]::Ordinal
+    )
+    $shellImageIndex = $runnerText.IndexOf(
+        'string imagePath = GetProcessImagePath(shellProcess);',
+        [StringComparison]::Ordinal
+    )
+    $shellTokenIndex = $runnerText.IndexOf(
+        'OpenProcessToken(shellProcess, desiredAccess, out shellToken)',
+        [StringComparison]::Ordinal
+    )
+    $shellAuthenticationIndex = $runnerText.IndexOf(
+        'SameLuid(linkedAuthenticationId, shellAuthenticationId)',
+        [StringComparison]::Ordinal
+    )
+    $linkedAuthenticationReadIndex = $runnerText.IndexOf(
+        'ReadTokenStatistics(linkedToken).AuthenticationId',
+        [StringComparison]::Ordinal
+    )
+    $shellAuthenticationReadIndex = $runnerText.IndexOf(
+        'Luid shellAuthenticationId = shellStatistics.AuthenticationId;',
+        [StringComparison]::Ordinal
+    )
+    $duplicateShellTokenIndex = $runnerText.IndexOf(
+        'DuplicateTokenEx(shellToken, desiredAccess, IntPtr.Zero,',
+        [StringComparison]::Ordinal
+    )
+    $duplicateAuthenticationCheckIndex = $runnerText.IndexOf(
+        'SameLuid(linkedAuthenticationId,',
+        $duplicateShellTokenIndex,
+        [StringComparison]::Ordinal
+    )
+    $duplicateTokenIdentityCheckIndex = $runnerText.IndexOf(
+        'SameLuid(shellStatistics.TokenId, primaryStatistics.TokenId)',
+        $duplicateShellTokenIndex,
+        [StringComparison]::Ordinal
+    )
+    if ($shellWindowIndex -lt 0 -or $shellProcessIndex -le $shellWindowIndex -or
+        $shellImageIndex -le $shellProcessIndex -or $shellTokenIndex -le $shellImageIndex -or
+        $linkedAuthenticationReadIndex -le $shellTokenIndex -or
+        $shellAuthenticationReadIndex -le $linkedAuthenticationReadIndex -or
+        $shellAuthenticationIndex -le $shellAuthenticationReadIndex -or
+        $duplicateShellTokenIndex -le $shellAuthenticationIndex -or
+        $duplicateTokenIdentityCheckIndex -le $duplicateShellTokenIndex -or
+        $duplicateAuthenticationCheckIndex -le $duplicateShellTokenIndex -or
+        $runnerText.IndexOf('ReadTokenStatistics(current).AuthenticationId', [StringComparison]::Ordinal) -ge 0) {
+        throw 'The medium observer must duplicate the verified interactive shell token and retain its logon binding.'
+    }
+    $suiteBudgetStartIndex = $runnerText.IndexOf(
+        '$remainingSuiteOutputBytes = [long]$script:VmTestOutputSuiteLimitBytes',
+        [StringComparison]::Ordinal
+    )
+    $perTestBudgetIndex = $runnerText.IndexOf(
+        '$testOutputBudgetBytes = [Math]::Min(',
+        $suiteBudgetStartIndex,
+        [StringComparison]::Ordinal
+    )
+    $budgetedTestIndex = $runnerText.IndexOf(
+        '-OutputBudgetBytes $testOutputBudgetBytes',
+        $perTestBudgetIndex,
+        [StringComparison]::Ordinal
+    )
+    $suiteBudgetDecreaseIndex = $runnerText.IndexOf(
+        '$remainingSuiteOutputBytes -= $testOutputBytes',
+        $budgetedTestIndex,
+        [StringComparison]::Ordinal
+    )
+    if ($suiteBudgetStartIndex -lt 0 -or $perTestBudgetIndex -le $suiteBudgetStartIndex -or
+        $budgetedTestIndex -le $perTestBudgetIndex -or
+        $suiteBudgetDecreaseIndex -le $budgetedTestIndex) {
+        throw 'Each guest test must receive and consume the remaining suite output budget before another test starts.'
+    }
     if ($runnerText.IndexOf(
         'journal_after = [ordered]@{ entries = @() }',
         [StringComparison]::Ordinal
@@ -630,8 +1105,413 @@ try {
             throw "The shared VM-Automated raw contract is missing '$requiredRawSource'."
         }
     }
+    $accountingScript = Join-Path $valid.root 'accounting-grace.ps1'
+    $accountingStdoutPath = Join-Path $valid.root 'accounting-grace.stdout.log'
+    $accountingStderrPath = Join-Path $valid.root 'accounting-grace.stderr.log'
+    [IO.File]::WriteAllText(
+        $accountingScript,
+        'Start-Sleep -Milliseconds 75',
+        [Text.UTF8Encoding]::new($false)
+    )
+    [IO.File]::WriteAllBytes($accountingStdoutPath, [byte[]]@())
+    [IO.File]::WriteAllBytes($accountingStderrPath, [byte[]]@())
+    $accountingStartInfo = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+    $accountingStartInfo.UseShellExecute = $false
+    $accountingStartInfo.CreateNoWindow = $true
+    $accountingStartInfo.WorkingDirectory = $valid.root
+    [void]$accountingStartInfo.ArgumentList.Add('-NoLogo')
+    [void]$accountingStartInfo.ArgumentList.Add('-NoProfile')
+    [void]$accountingStartInfo.ArgumentList.Add('-NonInteractive')
+    [void]$accountingStartInfo.ArgumentList.Add('-File')
+    [void]$accountingStartInfo.ArgumentList.Add($accountingScript)
+    $accountingProcess = $null
+    try {
+        $accountingProcess = [Diagnostics.Process]::Start($accountingStartInfo)
+        $accountingOwner = [pscustomobject]@{
+            active_processes = 1
+            sole_active_process_id = [long]$accountingProcess.Id
+            LastProcessListAssigned = [uint32]1
+            LastProcessListListed = [uint32]1
+            LastProcessListError = 0
+            process_list_queries = 0
+            hold_active_processes = $false
+            throw_on_process_list = $false
+            OutputLimitExceeded = $false
+        }
+        Add-Member -InputObject $accountingOwner -MemberType ScriptProperty -Name ActiveProcessCount -Value { [int]$this.active_processes } -Force
+        Add-Member -InputObject $accountingOwner -MemberType ScriptMethod -Name WaitForEmpty -Value {
+            param([int] $Milliseconds)
+            if ($this.active_processes -gt 0 -and -not $this.hold_active_processes) {
+                Start-Sleep -Milliseconds 25
+                $this.active_processes = 0
+            }
+            return $this.active_processes -eq 0
+        } -Force
+        Add-Member -InputObject $accountingOwner -MemberType ScriptMethod -Name GetSoleActiveProcessId -Value {
+            $this.process_list_queries++
+            if ($this.throw_on_process_list) {
+                $this.LastProcessListError = 5
+                throw [ComponentModel.Win32Exception]::new(5)
+            }
+            return [long]$this.sole_active_process_id
+        } -Force
+        Add-Member -InputObject $accountingOwner -MemberType ScriptMethod -Name WaitForCapture -Value { param([int] $Milliseconds) } -Force
+        Add-Member -InputObject $accountingOwner -MemberType ScriptMethod -Name Terminate -Value { $this.active_processes = 0 } -Force
+        Add-Member -InputObject $accountingOwner -MemberType ScriptMethod -Name CloseJob -Value { return $true } -Force
+        $accountingState = [pscustomobject]@{
+            process = $accountingProcess
+            owner = $accountingOwner
+            aggregate_output_limit_bytes = [long]4096
+            job_active_processes_at_primary_exit = $null
+            job_process_snapshot = $null
+            job_had_survivors = $false
+            job_forced_termination = $false
+            job_active_processes_at_close = $null
+            job_empty = $false
+            job_closed = $false
+            job_capture_complete = $false
+        }
+        $accountingResult = Wait-JobBoundProcessWithOutputLimit -State $accountingState -StdoutPath $accountingStdoutPath -StderrPath $accountingStderrPath -TimeoutSeconds 10
+        if ($accountingResult.failure_reason -or
+            $accountingResult.active_processes_at_primary_exit -ne 1 -or
+            $accountingOwner.ActiveProcessCount -ne 0 -or
+            $accountingState.job_had_survivors -or
+            $accountingResult.process_job_snapshot.primary_pid -ne $accountingProcess.Id -or
+            $accountingResult.process_job_snapshot.sole_pid -ne $accountingProcess.Id -or
+            $accountingResult.process_job_snapshot.assigned -ne 1 -or
+            $accountingResult.process_job_snapshot.listed -ne 1 -or
+            $accountingResult.process_job_snapshot.active_after_grace -ne 0) {
+            throw 'A transient Job Object accounting delay was classified as a surviving process.'
+        }
+        if (-not (Close-JobBoundProcess -State $accountingState)) {
+            throw 'The process job did not close cleanly after accounting settled.'
+        }
+        $accountingOwner.active_processes = 1
+        $accountingOwner.sole_active_process_id = 0
+        $accountingOwner.LastProcessListListed = [uint32]0
+        $emptyListAccountingState = [pscustomobject]@{
+            process = $accountingProcess
+            owner = $accountingOwner
+            aggregate_output_limit_bytes = [long]4096
+            job_active_processes_at_primary_exit = $null
+            job_process_snapshot = $null
+            job_had_survivors = $false
+            job_forced_termination = $false
+            job_active_processes_at_close = $null
+            job_empty = $false
+            job_closed = $false
+            job_capture_complete = $false
+        }
+        $emptyListAccountingResult = Wait-JobBoundProcessWithOutputLimit `
+            -State $emptyListAccountingState `
+            -StdoutPath $accountingStdoutPath `
+            -StderrPath $accountingStderrPath `
+            -TimeoutSeconds 10
+        if ($emptyListAccountingResult.failure_reason -or
+            $emptyListAccountingResult.active_processes_at_primary_exit -ne 1 -or
+            $accountingOwner.ActiveProcessCount -ne 0 -or
+            $emptyListAccountingState.job_had_survivors -or
+            $emptyListAccountingResult.process_job_snapshot.sole_pid -ne 0 -or
+            $emptyListAccountingResult.process_job_snapshot.assigned -ne 1 -or
+            $emptyListAccountingResult.process_job_snapshot.listed -ne 0 -or
+            $emptyListAccountingResult.process_job_snapshot.active_after_grace -ne 0) {
+            throw 'An empty live PID snapshot during Job Object accounting lag was classified as a survivor.'
+        }
+        if (-not (Close-JobBoundProcess -State $emptyListAccountingState)) {
+            throw 'The process job did not close cleanly after an empty accounting snapshot.'
+        }
+        $accountingOwner.active_processes = 1
+        $accountingOwner.throw_on_process_list = $true
+        $queryErrorAccountingState = [pscustomobject]@{
+            process = $accountingProcess
+            owner = $accountingOwner
+            aggregate_output_limit_bytes = [long]4096
+            job_active_processes_at_primary_exit = $null
+            job_process_snapshot = $null
+            job_had_survivors = $false
+            job_forced_termination = $false
+            job_active_processes_at_close = $null
+            job_empty = $false
+            job_closed = $false
+            job_capture_complete = $false
+        }
+        $queryErrorMessage = $null
+        try {
+            [void](Wait-JobBoundProcessWithOutputLimit `
+                -State $queryErrorAccountingState `
+                -StdoutPath $accountingStdoutPath `
+                -StderrPath $accountingStderrPath `
+                -TimeoutSeconds 10)
+        }
+        catch { $queryErrorMessage = $_.Exception.Message }
+        $accountingOwner.active_processes = 0
+        $accountingOwner.throw_on_process_list = $false
+        if (-not $queryErrorMessage -or
+            $queryErrorAccountingState.job_process_snapshot.primary_pid -ne $accountingProcess.Id -or
+            $queryErrorAccountingState.job_process_snapshot.sole_pid -ne $null -or
+            $queryErrorAccountingState.job_process_snapshot.query_error -ne 5) {
+            throw 'An unexpected Job Object query error was not retained in the process snapshot.'
+        }
+        if (-not (Close-JobBoundProcess -State $queryErrorAccountingState)) {
+            throw 'The process job did not close after the query-error fixture settled.'
+        }
+        $zeroActiveAccountingState = [pscustomobject]@{
+            process = $accountingProcess
+            owner = $accountingOwner
+            aggregate_output_limit_bytes = [long]4096
+            job_active_processes_at_primary_exit = $null
+            job_process_snapshot = $null
+            job_had_survivors = $false
+            job_forced_termination = $false
+            job_active_processes_at_close = $null
+            job_empty = $false
+            job_closed = $false
+            job_capture_complete = $false
+        }
+        $zeroActiveAccountingResult = Wait-JobBoundProcessWithOutputLimit `
+            -State $zeroActiveAccountingState `
+            -StdoutPath $accountingStdoutPath `
+            -StderrPath $accountingStderrPath `
+            -TimeoutSeconds 10
+        if ($zeroActiveAccountingResult.failure_reason -or
+            $zeroActiveAccountingResult.active_processes_at_primary_exit -ne 0 -or
+            $null -ne $zeroActiveAccountingResult.process_job_snapshot -or
+            $accountingOwner.process_list_queries -ne 3 -or
+            $zeroActiveAccountingState.job_had_survivors) {
+            throw 'A zero Job Object active count must not be treated as a missing PID snapshot.'
+        }
+        if (-not (Close-JobBoundProcess -State $zeroActiveAccountingState)) {
+            throw 'The process job did not close cleanly after a zero active count.'
+        }
+        $accountingOwner.active_processes = 1
+        $accountingOwner.sole_active_process_id = [long]($accountingProcess.Id + 1000000)
+        $accountingOwner.LastProcessListAssigned = [uint32]1
+        $accountingOwner.LastProcessListListed = [uint32]1
+        $differentPidAccountingState = [pscustomobject]@{
+            process = $accountingProcess
+            owner = $accountingOwner
+            aggregate_output_limit_bytes = [long]4096
+            job_active_processes_at_primary_exit = $null
+            job_process_snapshot = $null
+            job_had_survivors = $false
+            job_active_processes_at_stop = $null
+            job_forced_termination = $false
+            job_active_processes_at_close = $null
+            job_empty = $false
+            job_closed = $false
+            job_capture_complete = $false
+        }
+        $differentPidAccountingResult = Wait-JobBoundProcessWithOutputLimit `
+            -State $differentPidAccountingState `
+            -StdoutPath $accountingStdoutPath `
+            -StderrPath $accountingStderrPath `
+            -TimeoutSeconds 10
+        if ($differentPidAccountingResult.failure_reason -or
+            $differentPidAccountingResult.active_processes_at_primary_exit -ne 1 -or
+            $accountingOwner.ActiveProcessCount -ne 0 -or
+            $differentPidAccountingState.job_had_survivors -or
+            $differentPidAccountingResult.process_job_snapshot.primary_pid -ne $accountingProcess.Id -or
+            $differentPidAccountingResult.process_job_snapshot.sole_pid -eq $accountingProcess.Id -or
+            $differentPidAccountingResult.process_job_snapshot.active_after_grace -ne 0) {
+            throw 'A different sole process PID that exits during accounting grace was classified as a survivor.'
+        }
+        if (-not (Close-JobBoundProcess -State $differentPidAccountingState)) {
+            throw 'The process job did not close after a different PID settled.'
+        }
+        $accountingOwner.active_processes = 1
+        $accountingOwner.hold_active_processes = $true
+        $accountingOwner.sole_active_process_id = [long]($accountingProcess.Id + 1000001)
+        $persistentPidAccountingState = [pscustomobject]@{
+            process = $accountingProcess
+            owner = $accountingOwner
+            aggregate_output_limit_bytes = [long]4096
+            job_active_processes_at_primary_exit = $null
+            job_process_snapshot = $null
+            job_had_survivors = $false
+            job_active_processes_at_stop = $null
+            job_forced_termination = $false
+            job_active_processes_at_close = $null
+            job_empty = $false
+            job_closed = $false
+            job_capture_complete = $false
+        }
+        $persistentPidAccountingResult = Wait-JobBoundProcessWithOutputLimit `
+            -State $persistentPidAccountingState `
+            -StdoutPath $accountingStdoutPath `
+            -StderrPath $accountingStderrPath `
+            -TimeoutSeconds 10
+        $accountingOwner.hold_active_processes = $false
+        if ($persistentPidAccountingResult.failure_reason -ne 'process_job_not_empty' -or
+            $persistentPidAccountingResult.process_job_snapshot.primary_pid -ne $accountingProcess.Id -or
+            $persistentPidAccountingResult.process_job_snapshot.sole_pid -eq $accountingProcess.Id -or
+            $persistentPidAccountingResult.process_job_snapshot.active_after_grace -ne 1 -or
+            -not $persistentPidAccountingState.job_had_survivors -or
+            -not $persistentPidAccountingState.job_forced_termination -or
+            $accountingOwner.ActiveProcessCount -ne 0) {
+            throw 'A different sole process PID that survives accounting grace was not terminated and reported.'
+        }
+        [void](Close-JobBoundProcess -State $persistentPidAccountingState)
+        if (-not $persistentPidAccountingState.job_closed -or
+            -not $persistentPidAccountingState.job_empty -or
+            $persistentPidAccountingState.job_active_processes_at_close -ne 0) {
+            throw 'The process job did not close after the persistent PID was terminated.'
+        }
+    }
+    finally {
+        if ($null -ne $accountingProcess) {
+            try {
+                $accountingProcess.Refresh()
+                if (-not $accountingProcess.HasExited) {
+                    $accountingProcess.Kill()
+                    [void]$accountingProcess.WaitForExit(5000)
+                }
+            }
+            catch {}
+            $accountingProcess.Dispose()
+        }
+    }
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
         Initialize-NativeCapture
+        if (-not ('DarkReNamerVmRunnerSecurityProbe' -as [type])) {
+            Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class DarkReNamerVmRunnerSecurityProbe {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr OpenProcess(uint access, bool inherit, uint processId);
+    [DllImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool CloseHandle(IntPtr handle);
+    public static int LastError { get { return Marshal.GetLastWin32Error(); } }
+}
+'@
+        }
+        $securityHelperScript = Join-Path $valid.root 'runner-security-helper.ps1'
+        $securityHelperPidPath = Join-Path $valid.root 'runner-security-helper.pid'
+        $securityHelperReleasePath = Join-Path $valid.root 'runner-security-helper.release'
+        $productionProcessModule = Join-Path $toolingScriptsRoot 'modules/powershell/guest-process.ps1'
+        [IO.File]::WriteAllText(
+            $securityHelperScript,
+            @'
+param([string] $PidPath, [string] $ReleasePath, [string] $ProcessModule)
+. $ProcessModule
+Protect-CurrentRunnerProcess
+[IO.File]::WriteAllText($PidPath, [string]$PID)
+while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
+'@,
+            [Text.UTF8Encoding]::new($false)
+        )
+        $securityHelperProcess = Start-Process `
+            -FilePath (Get-Process -Id $PID).Path `
+            -ArgumentList (
+                '-NoLogo -NoProfile -NonInteractive -File "' + $securityHelperScript +
+                '" "' + $securityHelperPidPath + '" "' + $securityHelperReleasePath +
+                '" "' + $productionProcessModule + '"'
+            ) `
+            -PassThru
+        try {
+            $pidWait = [Diagnostics.Stopwatch]::StartNew()
+            while (-not (Test-Path -LiteralPath $securityHelperPidPath) -and
+                $pidWait.Elapsed.TotalSeconds -lt 20) {
+                Start-Sleep -Milliseconds 50
+            }
+            if (-not (Test-Path -LiteralPath $securityHelperPidPath)) {
+                throw 'The process-DACL helper did not publish its process id.'
+            }
+            $protectedRunnerPid = [int][IO.File]::ReadAllText($securityHelperPidPath)
+            foreach ($requestedAccess in @(0x00000001, 0x00000010, 0x00040000)) {
+                $probeHandle = [DarkReNamerVmRunnerSecurityProbe]::OpenProcess(
+                    [uint32]$requestedAccess, $false, [uint32]$protectedRunnerPid
+                )
+                if ($probeHandle -ne [IntPtr]::Zero) {
+                    [void][DarkReNamerVmRunnerSecurityProbe]::CloseHandle($probeHandle)
+                    throw ('The same-user process opened protected runner access 0x{0:x}.' -f
+                        $requestedAccess)
+                }
+                if ([DarkReNamerVmRunnerSecurityProbe]::LastError -ne 5) {
+                    throw ('The protected runner access check returned Win32 error {0}.' -f
+                        [DarkReNamerVmRunnerSecurityProbe]::LastError)
+                }
+            }
+        }
+        finally {
+            [IO.File]::WriteAllText($securityHelperReleasePath, 'release')
+            if (-not $securityHelperProcess.WaitForExit(10000)) {
+                $securityHelperProcess.Kill()
+                [void]$securityHelperProcess.WaitForExit(10000)
+                throw 'The process-DACL helper did not exit after release.'
+            }
+            $securityHelperProcess.Dispose()
+        }
+
+        $trustedResultRoot = Join-Path $valid.root 'trusted-result'
+        $testSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $testRootSecurity = [Security.AccessControl.DirectorySecurity]::new()
+        $testRootSecurity.SetAccessRuleProtection($true, $false)
+        $testRootSecurity.SetOwner($testSid)
+        $testLocalRights = [Security.AccessControl.FileSystemRights]::ReadAndExecute -bor
+            [Security.AccessControl.FileSystemRights]::WriteData -bor
+            [Security.AccessControl.FileSystemRights]::AppendData -bor
+            [Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+            [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes
+        $testRootSecurity.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $testSid, $testLocalRights,
+            [Security.AccessControl.AccessControlType]::Allow
+        ))
+        $testRootSecurity.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $testSid,
+            [Security.AccessControl.FileSystemRights]::Modify,
+            [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+                [Security.AccessControl.InheritanceFlags]::ObjectInherit,
+            [Security.AccessControl.PropagationFlags]::InheritOnly,
+            [Security.AccessControl.AccessControlType]::Allow
+        ))
+        [void][System.IO.FileSystemAclExtensions]::CreateDirectory($testRootSecurity, $trustedResultRoot)
+        $trustedResultPath = Join-Path $trustedResultRoot 'result.json'
+        [IO.File]::WriteAllText($trustedResultPath, '{}', [Text.UTF8Encoding]::new($false))
+        Initialize-TrustedResultWriter -Root $trustedResultRoot
+        $writeBlockedByShare = $false
+        try {
+            [IO.File]::WriteAllText($trustedResultPath, '{"status":"forged"}')
+        }
+        catch [IO.IOException] {
+            $writeBlockedByShare = $true
+        }
+        if (-not $writeBlockedByShare) {
+            throw 'The retained result handle allowed another same-user writer.'
+        }
+        Write-ResultDocument -Root $trustedResultRoot -Result ([ordered]@{
+            schema_version = 1
+            status = 'failed'
+            failure_reason = 'security_test'
+        })
+        $trustedResult = [IO.File]::ReadAllText($trustedResultPath) | ConvertFrom-Json
+        if ($trustedResult.status -cne 'failed' -or
+            $trustedResult.failure_reason -cne 'security_test') {
+            throw 'The trusted result writer did not persist its own final document.'
+        }
+        $writeBlockedByDacl = $false
+        try {
+            [IO.File]::WriteAllText($trustedResultPath, '{"status":"forged"}')
+        }
+        catch [UnauthorizedAccessException] {
+            $writeBlockedByDacl = $true
+        }
+        if (-not $writeBlockedByDacl) {
+            throw 'The closed result file remained writable by the same user.'
+        }
+        $deleteBlockedByDacl = $false
+        try {
+            Remove-Item -LiteralPath $trustedResultPath -Force
+        }
+        catch [UnauthorizedAccessException] {
+            $deleteBlockedByDacl = $true
+        }
+        if (-not $deleteBlockedByDacl) {
+            throw 'The same user removed the trusted result through its bundle directory.'
+        }
+
         $numericFileId = [DarkReNamerVmNative]::FormatFileIdNumeric(
             [Convert]::ToUInt64('0706050403020100', 16),
             [Convert]::ToUInt64('0f0e0d0c0b0a0908', 16)
@@ -670,6 +1550,163 @@ try {
             @($rawCheckpoint.journal_entries).Count -ne 0) {
             throw 'The raw checkpoint did not preserve complete fixture identity and journal state.'
         }
+
+        $jobPowerShell = (Get-Process -Id $PID).Path
+        $outputCapScript = Join-Path $valid.root 'job-output-cap.ps1'
+        $outputCapStdout = Join-Path $valid.root 'job-output-cap.stdout.txt'
+        $outputCapStderr = Join-Path $valid.root 'job-output-cap.stderr.txt'
+        [IO.File]::WriteAllText(
+            $outputCapScript,
+            "[Console]::Out.Write(('x' * 4096))`nStart-Sleep -Seconds 30`n",
+            [Text.UTF8Encoding]::new($false)
+        )
+        $savedChannelLimit = $script:VmTestOutputChannelLimitBytes
+        $savedAggregateLimit = $script:VmTestOutputAggregateLimitBytes
+        $outputCapState = $null
+        try {
+            $script:VmTestOutputChannelLimitBytes = 1024
+            $script:VmTestOutputAggregateLimitBytes = 512
+            $outputCapState = Start-JobBoundProcess `
+                -FilePath $jobPowerShell `
+                -Arguments ('-NoLogo -NoProfile -NonInteractive -File "' + $outputCapScript + '"') `
+                -WorkingDirectory $valid.root `
+                -StdoutPath $outputCapStdout `
+                -StderrPath $outputCapStderr
+            $outputCapResult = Wait-JobBoundProcessWithOutputLimit `
+                -State $outputCapState `
+                -StdoutPath $outputCapStdout `
+                -StderrPath $outputCapStderr `
+                -TimeoutSeconds 20
+            if ($outputCapResult.failure_reason -cne 'output_limit_exceeded' -or
+                $outputCapResult.stdout_bytes -gt 1024 -or
+                $outputCapResult.stderr_bytes -gt 1024 -or
+                $outputCapResult.stdout_bytes -gt (512 - $outputCapResult.stderr_bytes)) {
+                throw 'The bounded process runtime did not terminate the job at its output cap.'
+            }
+        }
+        finally {
+            $script:VmTestOutputChannelLimitBytes = $savedChannelLimit
+            $script:VmTestOutputAggregateLimitBytes = $savedAggregateLimit
+            if ($null -ne $outputCapState -and -not $outputCapState.job_closed) {
+                if ($outputCapState.owner.ActiveProcessCount -ne 0) {
+                    Stop-JobBoundProcess -State $outputCapState
+                }
+                if (-not (Close-JobBoundProcess -State $outputCapState)) {
+                    throw 'The output-cap Job Object did not close cleanly.'
+                }
+            }
+        }
+
+        $suiteBudgetBytes = [long]1536
+        $remainingSuiteBytes = $suiteBudgetBytes
+        $suiteBytesCaptured = [long]0
+        $suiteRunCount = 0
+        while ($remainingSuiteBytes -gt 0) {
+            $testBudgetBytes = [Math]::Min([long]1024, $remainingSuiteBytes)
+            $suiteStdoutPath = Join-Path $valid.root "suite-$suiteRunCount.stdout.txt"
+            $suiteStderrPath = Join-Path $valid.root "suite-$suiteRunCount.stderr.txt"
+            $suiteProcess = $null
+            try {
+                $suiteProcess = Start-JobBoundProcess `
+                    -FilePath $jobPowerShell `
+                    -Arguments ('-NoLogo -NoProfile -NonInteractive -File "' + $outputCapScript + '"') `
+                    -WorkingDirectory $valid.root `
+                    -StdoutPath $suiteStdoutPath `
+                    -StderrPath $suiteStderrPath `
+                    -AggregateOutputLimitBytes $testBudgetBytes
+                $suiteResult = Wait-JobBoundProcessWithOutputLimit `
+                    -State $suiteProcess `
+                    -StdoutPath $suiteStdoutPath `
+                    -StderrPath $suiteStderrPath `
+                    -TimeoutSeconds 20
+                $capturedForTest = $suiteResult.stdout_bytes + $suiteResult.stderr_bytes
+                if ($suiteResult.failure_reason -cne 'output_limit_exceeded' -or
+                    $capturedForTest -le 0 -or $capturedForTest -gt $testBudgetBytes) {
+                    throw 'A test process exceeded its shrinking suite output allowance.'
+                }
+                $suiteBytesCaptured += $capturedForTest
+                $remainingSuiteBytes -= $capturedForTest
+                $suiteRunCount++
+            }
+            finally {
+                if ($null -ne $suiteProcess -and -not $suiteProcess.job_closed) {
+                    if ($suiteProcess.owner.ActiveProcessCount -ne 0) {
+                        Stop-JobBoundProcess -State $suiteProcess
+                    }
+                    if (-not (Close-JobBoundProcess -State $suiteProcess)) {
+                        throw 'A suite-budget Job Object did not close cleanly.'
+                    }
+                }
+            }
+        }
+        if ($suiteBytesCaptured -ne $suiteBudgetBytes -or $suiteRunCount -ne 2) {
+            throw 'The shrinking per-test output allowance did not cap the complete guest suite.'
+        }
+        $exhaustedSuiteRow = Invoke-RustTestBinary `
+            -Test $valid.manifest.test_binaries[0] `
+            -Root $valid.root `
+            -RuntimeRoot $runtimeObservationRoot `
+            -Index 99 `
+            -TimeoutSeconds 1 `
+            -OutputBudgetBytes 0
+        if ($exhaustedSuiteRow.status -cne 'failed' -or
+            $exhaustedSuiteRow.failure_reason -cne 'suite_output_limit_exceeded' -or
+            -not $exhaustedSuiteRow.job_cleanup -or
+            $exhaustedSuiteRow.stdout.bytes -ne 0 -or
+            $exhaustedSuiteRow.stderr.bytes -ne 0) {
+            throw 'An exhausted suite budget must record the remaining test without launching it.'
+        }
+
+        $descendantPidPath = Join-Path $valid.root 'job-descendant.pid'
+        $descendantScript = Join-Path $valid.root 'job-descendant.ps1'
+        $descendantStdoutPath = Join-Path $valid.root 'job-descendant.stdout.txt'
+        $descendantStderrPath = Join-Path $valid.root 'job-descendant.stderr.txt'
+        [IO.File]::WriteAllText(
+            $descendantScript,
+            ('$child = Start-Process -FilePath "$env:SystemRoot\System32\ping.exe" ' +
+                '-ArgumentList @("-n","60","127.0.0.1") -WindowStyle Hidden -PassThru' +
+                "`n[IO.File]::WriteAllText('" + $descendantPidPath.Replace("'", "''") +
+                "', [string]`$child.Id)`n"),
+            [Text.UTF8Encoding]::new($false)
+        )
+        $descendantState = Start-JobBoundProcess `
+            -FilePath $jobPowerShell `
+            -Arguments ('-NoLogo -NoProfile -NonInteractive -File "' + $descendantScript + '"') `
+            -WorkingDirectory $valid.root `
+            -StdoutPath $descendantStdoutPath `
+            -StderrPath $descendantStderrPath
+        try {
+            if (-not $descendantState.process.WaitForExit(20000)) {
+                throw 'The descendant-launching parent did not exit.'
+            }
+            $descendantPid = [int][IO.File]::ReadAllText($descendantPidPath)
+            if ($null -eq (Get-Process -Id $descendantPid -ErrorAction SilentlyContinue)) {
+                throw 'The outside-bundle descendant fixture did not remain active.'
+            }
+            $descendantWait = Wait-JobBoundProcessWithOutputLimit `
+                -State $descendantState `
+                -StdoutPath $descendantStdoutPath `
+                -StderrPath $descendantStderrPath `
+                -TimeoutSeconds 20
+            if ($descendantWait.failure_reason -cne 'process_job_not_empty' -or
+                $descendantWait.active_processes_at_primary_exit -le 0) {
+                throw 'The primary-exit check did not record and terminate its active descendant immediately.'
+            }
+            if (Close-JobBoundProcess -State $descendantState) {
+                throw 'Job cleanup reported success while an outside-bundle descendant remained.'
+            }
+            if ($null -ne (Get-Process -Id $descendantPid -ErrorAction SilentlyContinue)) {
+                throw 'Closing the Job Object did not terminate its outside-bundle descendant.'
+            }
+        }
+        finally {
+            if (-not $descendantState.job_closed) {
+                if ($descendantState.owner.ActiveProcessCount -ne 0) {
+                    Stop-JobBoundProcess -State $descendantState
+                }
+                [void](Close-JobBoundProcess -State $descendantState)
+            }
+        }
     }
     else {
         Assert-Fails {
@@ -688,8 +1725,725 @@ try {
     Remove-Item -LiteralPath (Join-Path $isolatedJournalRoot 'active.drj')
     $hostRunner = Join-Path $toolingScriptsRoot 'run-windows-vm-tests.ps1'
     $hostRunnerText = Get-DrTestCombinedPowerShellSource -Kind controller
+    $taskRegistrationMatches = [regex]::Matches(
+        $hostRunnerText,
+        '(?m)^\s+Register-DrVmTask\s+`\s*$'
+    )
+    if ($taskRegistrationMatches.Count -ne 5) {
+        throw 'Every Windows VM task registration must be enumerated by the controller contract test.'
+    }
+    $directPowerShellActions = [regex]::Matches(
+        $hostRunnerText,
+        '(?m)^\s+-Execute \$powerShell `\s*$'
+    )
+    if ($directPowerShellActions.Count -ne 5) {
+        throw 'Core, UI, recovery, and rescue tasks must launch their verified PowerShell entrypoint directly.'
+    }
+    foreach ($registration in $taskRegistrationMatches) {
+        $nextStart = $hostRunnerText.IndexOf(
+            'Start-ScheduledTask -TaskName $name',
+            $registration.Index,
+            [StringComparison]::Ordinal
+        )
+        if ($nextStart -le $registration.Index) {
+            throw 'Each atomically registered Windows VM task must be verified before task start.'
+        }
+        $runtimeParameterIndex = $hostRunnerText.IndexOf(
+            '-RuntimeRoot $',
+            $registration.Index,
+            [StringComparison]::Ordinal
+        )
+        if ($runtimeParameterIndex -lt $registration.Index -or $runtimeParameterIndex -ge $nextStart) {
+            throw 'Each Windows VM task must register its protected guest runtime root.'
+        }
+    }
+    if ([regex]::Matches(
+            $hostRunnerText,
+            [regex]::Escape('-RuntimeRoot "'),
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        ).Count -ne 5) {
+        throw 'Each Windows VM observer command must include exactly one runtime-root argument.'
+    }
+    $guestEntryText = Get-Content -LiteralPath (Join-Path $toolingScriptsRoot 'modules/powershell/guest-entry.psm1') -Raw
+    foreach ($requiredRuntimeRootContract in @(
+        '$effectiveRuntimeRoot = $null',
+        '$effectiveRuntimeRoot = if ($RuntimeRoot) {',
+        '-RuntimeRoot $effectiveRuntimeRoot',
+        'Join-Path $effectiveRuntimeRoot ''gui\localappdata''',
+        'if (Test-Path -LiteralPath $effectiveRuntimeRoot) {',
+        'Get-VmAutomatedRuntimeRootObservation -Root $effectiveRuntimeRoot',
+        'Remove-Item -LiteralPath $effectiveRuntimeRoot -Recurse -Force'
+    )) {
+        if ($guestEntryText.IndexOf($requiredRuntimeRootContract, [StringComparison]::Ordinal) -lt 0) {
+            throw "The guest runtime-root contract is missing '$requiredRuntimeRootContract'."
+        }
+    }
+    $shadowRuntimeRootPattern = '\$runtimeRoot\s*=\s*\$null\b'
+    foreach ($shadowRuntimeRootExample in @('$runtimeRoot = $null', '$RuntimeROOT=$NULL')) {
+        if (-not [regex]::IsMatch(
+                $shadowRuntimeRootExample,
+                $shadowRuntimeRootPattern,
+                [Text.RegularExpressions.RegexOptions]::IgnoreCase
+            )) {
+            throw 'The case-insensitive RuntimeRoot shadow-assignment pattern does not match its regression examples.'
+        }
+    }
+    $shadowRuntimeRootAssignments = [regex]::Matches(
+        $guestEntryText,
+        $shadowRuntimeRootPattern,
+        [Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+    if ($shadowRuntimeRootAssignments.Count -ne 0) {
+        throw 'The guest lifecycle sentinel must not clear the RuntimeRoot parameter.'
+    }
+    $runtimeRootArgumentCount = [regex]::Matches(
+        $guestEntryText,
+        [regex]::Escape('-RuntimeRoot $effectiveRuntimeRoot')
+    ).Count
+    $testInvocationIndex = $guestEntryText.IndexOf('Invoke-RustTestBinary `', [StringComparison]::Ordinal)
+    $testRuntimeArgumentIndex = if ($testInvocationIndex -ge 0) {
+        $guestEntryText.IndexOf(
+            '-RuntimeRoot $effectiveRuntimeRoot', $testInvocationIndex, [StringComparison]::Ordinal
+        )
+    } else { -1 }
+    $guiInvocationIndex = $guestEntryText.IndexOf('Invoke-GuiSmoke `', [StringComparison]::Ordinal)
+    $guiRuntimeArgumentIndex = if ($guiInvocationIndex -ge 0) {
+        $guestEntryText.IndexOf(
+            '-RuntimeRoot $effectiveRuntimeRoot', $guiInvocationIndex, [StringComparison]::Ordinal
+        )
+    } else { -1 }
+    if ($runtimeRootArgumentCount -ne 2 -or $testInvocationIndex -lt 0 -or
+        $testRuntimeArgumentIndex -le $testInvocationIndex -or
+        $testRuntimeArgumentIndex -ge $guiInvocationIndex -or
+        $guiRuntimeArgumentIndex -le $guiInvocationIndex) {
+        throw 'The verified runtime root must be passed separately to both the test binary and GUI smoke runner.'
+    }
+    foreach ($requiredBootstrapDiagnostic in @(
+        "Join-Path `$OutputRoot 'observer-bootstrap-failure.txt'",
+        'if (-not $elevatedObserver) { return }',
+        '$Message.Length -gt 4096',
+        'bundle-verification-failed',
+        'fixture-root-validation-failed',
+        'runtime-root-validation-failed',
+        'execution-context-check-failed',
+        'runner-protection-started',
+        'trusted-result-writer-initialization-started',
+        'if ($null -eq $script:VmTrustedResultWriter)',
+        '[ComponentModel.Win32Exception]',
+        '$exception.NativeErrorCode',
+        '$errorRecord.ScriptStackTrace',
+        'runner-bootstrap-failed',
+        'Remove-Item -LiteralPath $bootstrapDiagnosticPath -Force -ErrorAction Stop',
+        'The VM observer bootstrap diagnostic remained after result-writer initialization.'
+    )) {
+        if ($guestEntryText.IndexOf($requiredBootstrapDiagnostic, [StringComparison]::Ordinal) -lt 0) {
+            throw "The guest bootstrap diagnostic contract is missing '$requiredBootstrapDiagnostic'."
+        }
+    }
+    $bootstrapDiagnosticFactoryIndex = $guestEntryText.IndexOf(
+        '$writeBootstrapDiagnostic = {', [StringComparison]::Ordinal
+    )
+    $elevatedBundleVerificationIndex = $guestEntryText.IndexOf(
+        'if ($null -eq $verified)', [StringComparison]::Ordinal
+    )
+    if ($bootstrapDiagnosticFactoryIndex -lt 0 -or
+        $elevatedBundleVerificationIndex -le $bootstrapDiagnosticFactoryIndex) {
+        throw 'Elevated bundle verification must be covered by the trusted bootstrap diagnostic sink.'
+    }
+    $runnerProtectionIndex = $guestEntryText.LastIndexOf(
+        'Protect-CurrentRunnerProcess', [StringComparison]::Ordinal
+    )
+    $resultWriterIndex = $guestEntryText.LastIndexOf(
+        'Initialize-TrustedResultWriter -Root $verified.root', [StringComparison]::Ordinal
+    )
+    $processLedgerIndex = $guestEntryText.LastIndexOf(
+        '[void](Assert-AcceptanceProcessJobLedgerClosed)', [StringComparison]::Ordinal
+    )
+    $runtimeDeleteIndex = $guestEntryText.IndexOf(
+        'Remove-Item -LiteralPath $effectiveRuntimeRoot -Recurse -Force', [StringComparison]::Ordinal
+    )
+    if ($runnerProtectionIndex -lt 0 -or $resultWriterIndex -le $runnerProtectionIndex -or
+        $processLedgerIndex -lt 0 -or $runtimeDeleteIndex -le $processLedgerIndex) {
+        throw 'Core observer protection must precede the open result writer, and runtime deletion must follow closed process-job evidence.'
+    }
+    if ([regex]::Matches(
+            $hostRunnerText,
+            '\[System\.IO\.FileSystemAclExtensions\]::CreateDirectory\('
+        ).Count -ne 8 -or
+        $hostRunnerText.IndexOf('[IO.Directory]::CreateDirectory(', [StringComparison]::Ordinal) -ge 0) {
+        throw 'Every security-sensitive VM directory must be created with its explicit ACL in one operation.'
+    }
+    if ($hostRunnerText.IndexOf('Test-DrControllerProcessJobCleanupLedger', [StringComparison]::Ordinal) -lt 0 -or
+        $hostRunnerText.IndexOf('$requiredProcessJobsClosed = $processJobsClosed', [StringComparison]::Ordinal) -lt 0 -or
+        $hostRunnerText.IndexOf('-not $jobsClosed -or $taskPresentBeforeDelete', [StringComparison]::Ordinal) -lt 0) {
+        throw 'The VM controller must bind process-job cleanup evidence before deleting guest and trusted roots.'
+    }
+    if ($hostRunnerText.IndexOf('for ($attempt = 1; $attempt -le 3; $attempt++)', [StringComparison]::Ordinal) -lt 0 -or
+        $hostRunnerText.IndexOf('if ($attempt -lt 3) { Start-Sleep -Milliseconds 200 }', [StringComparison]::Ordinal) -lt 0 -or
+        $hostRunnerText.IndexOf('$trustedTaskRoot = $null', [StringComparison]::Ordinal) -lt 0 -or
+        $hostRunnerText.IndexOf('trusted_task_root = Join-Path $base ($name + ''-trusted'')', [StringComparison]::Ordinal) -lt 0 -or
+        $hostRunnerText.IndexOf('$trustedTaskRoot = [string]$workspaceRoots.trusted_task_root', [StringComparison]::Ordinal) -lt 0) {
+        throw 'The VM controller must retry transient process inventories and retain exact cleanup roots before baseline collection.'
+    }
+    $controllerLifecycle = [pscustomobject]@{
+        pid = 1234
+        start_time_utc_ticks = '639000000000000000'
+    }
+    $controllerJob = [pscustomobject][ordered]@{
+        pid = 1234
+        process_start_time_utc_ticks = '639000000000000000'
+        job_empty = $true
+        job_closed = $true
+        capture_complete = $true
+        active_processes_at_primary_exit = $null
+        had_survivors = $false
+        forced_termination = $false
+        active_processes_at_close = 0
+        active_processes_at_stop = $null
+        active_process_ids_at_stop = @()
+        total_processes_at_stop = $null
+        primary_process_active_at_stop = $null
+        termination_exit_code = $null
+        status = 'clean'
+        error = $null
+    }
+    $controllerResult = [pscustomobject]@{
+        process_job_cleanup = @($controllerJob)
+        gui = [pscustomobject]@{ process_lifecycle = $controllerLifecycle }
+    }
+    $controllerEntryPath = Join-Path $toolingScriptsRoot 'modules/powershell/controller-entry.psm1'
+    $controllerEntryTokens = $null
+    $controllerEntryErrors = $null
+    $controllerEntryAst = [Management.Automation.Language.Parser]::ParseFile(
+        $controllerEntryPath, [ref]$controllerEntryTokens, [ref]$controllerEntryErrors
+    )
+    if ($controllerEntryErrors.Count -ne 0) {
+        throw 'The controller entrypoint must parse before its cleanup contract is exercised.'
+    }
+    foreach ($functionName in @(
+        'Add-DrControllerLifecycleIdentity'
+        'Test-DrControllerProcessJobCleanupLedger'
+    )) {
+        $functionDefinitions = @($controllerEntryAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq $functionName
+        }, $true))
+        if ($functionDefinitions.Count -ne 1) {
+            throw "Expected one controller cleanup contract function: $functionName"
+        }
+        . ([scriptblock]::Create($functionDefinitions[0].Extent.Text))
+    }
+    if (-not (Test-DrControllerProcessJobCleanupLedger -Result $controllerResult)) {
+        throw 'The controller rejected a complete lifecycle-bound process-job ledger.'
+    }
+    $controllerJob.pid = 1235
+    if (Test-DrControllerProcessJobCleanupLedger -Result $controllerResult) {
+        throw 'The controller accepted a clean process-job row for a different candidate identity.'
+    }
+    $unstartedGuiResult = [pscustomobject]@{
+        process_job_cleanup = @()
+        gui = [pscustomobject]@{
+            status = 'failed'
+            job_cleanup = $true
+            process_id = $null
+            failure_reason = 'gui_error'
+            error_detail = [pscustomobject]@{
+                exception_type = 'System.Exception'
+                message = 'fixture initialization failed'
+                native_error = $null
+            }
+        }
+    }
+    if (Test-DrControllerProcessJobCleanupLedger -Result $unstartedGuiResult) {
+        throw 'An empty process-job ledger must remain invalid outside the core GUI no-start case.'
+    }
+    if (-not (Test-DrControllerProcessJobCleanupLedger -Result $unstartedGuiResult -AllowEmpty)) {
+        throw 'A GUI failure before process creation must allow an empty but complete process-job ledger.'
+    }
+    $unstartedGuiResult.gui.process_id = 1234
+    if (Test-DrControllerProcessJobCleanupLedger -Result $unstartedGuiResult -AllowEmpty) {
+        throw 'An empty process-job ledger must not be accepted when a GUI process identity exists.'
+    }
+    $runnerProcessDefinitions = @($controllerEntryAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'global:Get-DrVmRunnerProcesses'
+    }, $true))
+    if ($runnerProcessDefinitions.Count -ne 1) {
+        throw 'Expected one controller runner-process inventory function.'
+    }
+    $runnerProcessProbe = [scriptblock]::Create(@'
+param([string] $FunctionText)
+$script:runnerCimCalls = 0
+$script:runnerOwnerCalls = 0
+$script:failFirstOwner = $true
+$script:failAllOwners = $false
+function Get-CimInstance {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0)][string] $ClassName,
+        [string] $Filter,
+        [uint32] $OperationTimeoutSec
+    )
+    $script:runnerCimCalls++
+    [pscustomobject]@{
+        ProcessId = 4242
+        SessionId = 2
+        CreationDate = [datetime]::SpecifyKind([datetime]'2026-09-27T00:00:00', [DateTimeKind]::Utc)
+        ExecutablePath = 'C:\vm-test\runner.exe'
+    }
+}
+function Invoke-CimMethod {
+    [CmdletBinding()]
+    param(
+        [object] $InputObject,
+        [string] $MethodName,
+        [uint32] $OperationTimeoutSec
+    )
+    $script:runnerOwnerCalls++
+    if ($script:failFirstOwner) {
+        $script:failFirstOwner = $false
+        throw 'Simulated process exit during owner inventory.'
+    }
+    if ($script:failAllOwners) {
+        return [pscustomobject]@{ ReturnValue = 5; Sid = $null }
+    }
+    [pscustomobject]@{ ReturnValue = 0; Sid = 'S-1-5-21-1-2-3-1001' }
+}
+$localFunctionText = $FunctionText.Replace(
+    'function global:Get-DrVmRunnerProcesses',
+    'function Get-DrVmRunnerProcesses'
+)
+. ([scriptblock]::Create($localFunctionText))
+$transient = Get-DrVmRunnerProcesses -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2
+$transientCimCalls = $script:runnerCimCalls
+$script:runnerCimCalls = 0
+$script:runnerOwnerCalls = 0
+$script:failAllOwners = $true
+$incomplete = Get-DrVmRunnerProcesses -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2
+[pscustomobject]@{
+    transient_complete = $transient.complete
+    transient_attempts = $transient.attempts
+    transient_process_count = @($transient.processes).Count
+    transient_cim_calls = $transientCimCalls
+    incomplete_complete = $incomplete.complete
+    incomplete_attempts = $incomplete.attempts
+    incomplete_process_count = @($incomplete.processes).Count
+    incomplete_cim_calls = $script:runnerCimCalls
+}
+'@)
+    $runnerProcessProbeResult = & $runnerProcessProbe $runnerProcessDefinitions[0].Extent.Text
+    if (-not $runnerProcessProbeResult.transient_complete -or
+        $runnerProcessProbeResult.transient_attempts -ne 2 -or
+        $runnerProcessProbeResult.transient_process_count -ne 1 -or
+        $runnerProcessProbeResult.transient_cim_calls -ne 2 -or
+        $runnerProcessProbeResult.incomplete_complete -or
+        $runnerProcessProbeResult.incomplete_attempts -ne 3 -or
+        $runnerProcessProbeResult.incomplete_process_count -ne 0 -or
+        $runnerProcessProbeResult.incomplete_cim_calls -ne 3) {
+        throw 'The VM process inventory must recover from one transient owner query failure and remain incomplete after the bounded retries.'
+    }
+    $brokerFunctionDefinitions = @($controllerEntryAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'global:Test-DrVmSmartScreenBrokerEvidence'
+    }, $true))
+    $commandLineFunctionDefinitions = @($controllerEntryAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'global:Get-DrVmCommandLineArguments'
+    }, $true))
+    $waitFunctionDefinitions = @($controllerEntryAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'global:Wait-DrVmSmartScreenNaturalExit'
+    }, $true))
+    if ($brokerFunctionDefinitions.Count -ne 1 -or
+        $commandLineFunctionDefinitions.Count -ne 1 -or
+        $waitFunctionDefinitions.Count -ne 1) {
+        throw 'The controller must expose one pure broker contract and one bounded natural-exit wait.'
+    }
+    $commandLineProbe = [scriptblock]::Create(@'
+param([string] $FunctionText)
+$localFunctionText = $FunctionText.Replace(
+    'function global:Get-DrVmCommandLineArguments',
+    'function Get-DrVmCommandLineArguments'
+)
+. ([scriptblock]::Create($localFunctionText))
+try {
+    Get-DrVmCommandLineArguments -CommandLine 'C:\Windows\System32\smartscreen.exe -Embedding' | Out-Null
+}
+catch {
+    # The helper reaches its P/Invoke on the non-Windows tooling host; inspect the compiled declaration below.
+}
+$nativeType = 'DrVmCommandLineNative' -as [type]
+if ($null -eq $nativeType) { throw 'The command-line native declaration was not loaded.' }
+$method = $nativeType.GetMethod('CommandLineToArgvW')
+$import = $method.GetCustomAttributes([Runtime.InteropServices.DllImportAttribute], $false)[0]
+[pscustomobject]@{
+    unicode = $import.CharSet -eq [Runtime.InteropServices.CharSet]::Unicode
+    entry_point = $import.EntryPoint
+}
+'@)
+$commandLineProbeResult = & $commandLineProbe $commandLineFunctionDefinitions[0].Extent.Text
+if (-not $commandLineProbeResult.unicode -or
+    $commandLineProbeResult.entry_point -cne 'CommandLineToArgvW') {
+    throw 'The SmartScreen command-line parser must marshal the Windows wide-character API as Unicode.'
+}
+    $brokerProbe = [scriptblock]::Create(@'
+param([string] $FunctionText)
+$localFunctionText = $FunctionText.Replace(
+    'function global:Test-DrVmSmartScreenBrokerEvidence',
+    'function Test-DrVmSmartScreenBrokerEvidence'
+)
+. ([scriptblock]::Create($localFunctionText))
+$candidateIdentity = '4242|2026-09-27T18:34:27.0489960Z'
+$processPath = 'C:\Windows\System32\smartscreen.exe'
+$parentPath = 'C:\Windows\System32\svchost.exe'
+$evidence = [ordered]@{
+    windows_directory = 'C:\Windows'
+    process_identity = $candidateIdentity
+    process_pid = [int]4242
+    process_creation_time_utc = '2026-09-27T18:34:27.0489960Z'
+    process_session_id = [int]2
+    process_owner_sid = 'S-1-5-21-1-2-3-1001'
+    process_executable_path = $processPath
+    process_path_verified = $true
+    process_command_line_arguments = @($processPath, '-Embedding')
+    process_signature_status = 'Valid'
+    process_signer_subject = 'CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
+    process_signer_thumbprint = ('A' * 40)
+    parent_identity = '2000|2026-09-27T18:00:00.0000000Z'
+    parent_pid = [int]2000
+    parent_creation_time_utc = '2026-09-27T18:00:00.0000000Z'
+    parent_session_id = [int]0
+    parent_owner_sid = 'S-1-5-18'
+    parent_executable_path = $parentPath
+    parent_path_verified = $true
+    parent_command_line_arguments = @($parentPath, '-k', 'DcomLaunch', '-p')
+    parent_signature_status = 'Valid'
+    parent_signer_subject = 'CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
+    parent_signer_thumbprint = ('B' * 40)
+    service_name = 'DcomLaunch'
+    service_process_id = [int]2000
+    service_state = 'Running'
+}
+$valid = Test-DrVmSmartScreenBrokerEvidence -Evidence $evidence `
+    -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2 -CandidateIdentity $candidateIdentity
+$badOwner = [ordered]@{}; foreach ($key in $evidence.Keys) { $badOwner[$key] = $evidence[$key] }
+$badOwner.process_owner_sid = 'S-1-5-18'
+$ownerRejected = -not (Test-DrVmSmartScreenBrokerEvidence -Evidence $badOwner `
+    -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2 -CandidateIdentity $candidateIdentity)
+$badSignature = [ordered]@{}; foreach ($key in $evidence.Keys) { $badSignature[$key] = $evidence[$key] }
+$badSignature.process_signature_status = 'NotSigned'
+$signatureRejected = -not (Test-DrVmSmartScreenBrokerEvidence -Evidence $badSignature `
+    -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2 -CandidateIdentity $candidateIdentity)
+$badService = [ordered]@{}; foreach ($key in $evidence.Keys) { $badService[$key] = $evidence[$key] }
+$badService.service_process_id = [int]2001
+$serviceRejected = -not (Test-DrVmSmartScreenBrokerEvidence -Evidence $badService `
+    -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2 -CandidateIdentity $candidateIdentity)
+$badArguments = [ordered]@{}; foreach ($key in $evidence.Keys) { $badArguments[$key] = $evidence[$key] }
+$badArguments.process_command_line_arguments = @($processPath, '-Embedding', '-unsafe')
+$argumentsRejected = -not (Test-DrVmSmartScreenBrokerEvidence -Evidence $badArguments `
+    -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2 -CandidateIdentity $candidateIdentity)
+[pscustomobject]@{
+    valid = $valid
+    owner_rejected = $ownerRejected
+    signature_rejected = $signatureRejected
+    service_rejected = $serviceRejected
+    arguments_rejected = $argumentsRejected
+}
+'@)
+$brokerProbeResult = & $brokerProbe $brokerFunctionDefinitions[0].Extent.Text
+if (-not $brokerProbeResult.valid -or -not $brokerProbeResult.owner_rejected -or
+    -not $brokerProbeResult.signature_rejected -or -not $brokerProbeResult.service_rejected -or
+    -not $brokerProbeResult.arguments_rejected) {
+    throw 'The SmartScreen broker contract must reject an owner, signature, service, or command-line mismatch.'
+}
+    $waitProbe = [scriptblock]::Create(@'
+param([string] $FunctionText)
+$localFunctionText = $FunctionText.Replace(
+    'function global:Wait-DrVmSmartScreenNaturalExit',
+    'function Wait-DrVmSmartScreenNaturalExit'
+)
+. ([scriptblock]::Create($localFunctionText))
+$script:inventoryQueue = [Collections.Generic.Queue[object]]::new()
+$script:taskRows = @()
+$script:ownedPathPresent = $false
+function Get-DrVmRunnerProcesses {
+    param([string] $UserSid, [int] $SessionId)
+    if ($script:inventoryQueue.Count -gt 0) { return $script:inventoryQueue.Dequeue() }
+    throw 'Unexpected process inventory poll.'
+}
+function Get-DrVmRunnerTasks { return @($script:taskRows) }
+function Get-CimInstance {
+    [CmdletBinding()]
+    param([Parameter(Position = 0)][string] $ClassName, [uint32] $OperationTimeoutSec)
+    if ($script:ownedPathPresent) {
+        return @([pscustomobject]@{ ExecutablePath = 'C:\owned\candidate.exe' })
+    }
+    return @()
+}
+function Test-ProcessExecutableInOwnedRoots {
+    param([AllowNull()][string] $Path, [string[]] $Prefixes)
+    return $script:ownedPathPresent
+}
+function Start-Sleep { param([int] $Milliseconds) }
+$baseline = [pscustomobject]@{
+    identity = '1000|2026-09-27T18:00:00.0000000Z'
+    pid = [int]1000
+    session_id = [int]2
+    creation_time_utc = '2026-09-27T18:00:00.0000000Z'
+    executable_path = 'C:\Windows\explorer.exe'
+}
+$candidateIdentity = '4242|2026-09-27T18:34:27.0489960Z'
+$candidate = [pscustomobject]@{ identity = $candidateIdentity }
+$script:inventoryQueue.Enqueue([pscustomobject]@{ complete = $true; processes = @($baseline, $candidate) })
+$script:inventoryQueue.Enqueue([pscustomobject]@{ complete = $true; processes = @($baseline) })
+$natural = Wait-DrVmSmartScreenNaturalExit `
+    -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2 `
+    -BaselineProcessIdentities @($baseline.identity) -BaselineTasks @() `
+    -CandidateIdentity $candidateIdentity -OwnedRootPrefixes @('C:\owned\') `
+    -TimeoutMilliseconds 360000
+$script:inventoryQueue.Enqueue([pscustomobject]@{ complete = $true; processes = @($baseline, $candidate) })
+$script:inventoryQueue.Enqueue([pscustomobject]@{ complete = $true; processes = @($baseline, $candidate,
+    [pscustomobject]@{ identity = '4243|2026-09-27T18:34:28.0489960Z' }) })
+$secondProcess = Wait-DrVmSmartScreenNaturalExit `
+    -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2 `
+    -BaselineProcessIdentities @($baseline.identity) -BaselineTasks @() `
+    -CandidateIdentity $candidateIdentity -OwnedRootPrefixes @('C:\owned\') `
+    -TimeoutMilliseconds 360000
+$script:inventoryQueue.Enqueue([pscustomobject]@{ complete = $true; processes = @($baseline, $candidate) })
+$deadline = Wait-DrVmSmartScreenNaturalExit `
+    -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2 `
+    -BaselineProcessIdentities @($baseline.identity) -BaselineTasks @() `
+    -CandidateIdentity $candidateIdentity -OwnedRootPrefixes @('C:\owned\') `
+    -TimeoutMilliseconds 0
+$script:inventoryQueue.Enqueue([pscustomobject]@{ complete = $true; processes = @($baseline, $candidate) })
+$baselineTask = [pscustomobject]@{
+    identity = '\User\BaselineTask'
+    definition_sha256 = ('D' * 64)
+}
+$missingTask = Wait-DrVmSmartScreenNaturalExit `
+    -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2 `
+    -BaselineProcessIdentities @($baseline.identity) -BaselineTasks @($baselineTask) `
+    -CandidateIdentity $candidateIdentity -OwnedRootPrefixes @('C:\owned\') `
+    -TimeoutMilliseconds 360000
+[pscustomobject]@{
+    natural_status = $natural.status
+    natural_exit = $natural.natural_exit_observed
+    natural_first = $natural.polls[0].process_delta_identities[0]
+    natural_final_count = @($natural.final_runner_process_delta_identities).Count
+    second_process_status = $secondProcess.status
+    second_process_exit = $secondProcess.natural_exit_observed
+    deadline_status = $deadline.status
+    deadline_exit = $deadline.natural_exit_observed
+    missing_task_status = $missingTask.status
+    missing_task_delta = $missingTask.polls[1].task_delta_identities[0]
+}
+'@)
+$waitProbeResult = & $waitProbe $waitFunctionDefinitions[0].Extent.Text
+if ($waitProbeResult.natural_status -cne 'natural-exit' -or
+    -not $waitProbeResult.natural_exit -or
+    $waitProbeResult.natural_first -cne '4242|2026-09-27T18:34:27.0489960Z' -or
+    $waitProbeResult.natural_final_count -ne 0 -or
+    $waitProbeResult.second_process_status -cne 'rejected' -or
+    $waitProbeResult.second_process_exit -or
+    $waitProbeResult.deadline_status -cne 'timed-out' -or
+    $waitProbeResult.deadline_exit -or
+    $waitProbeResult.missing_task_status -cne 'rejected' -or
+    $waitProbeResult.missing_task_delta -cne '\User\BaselineTask') {
+    throw 'The SmartScreen wait must accept only natural exit, reject process/task changes, and enforce its monotonic deadline.'
+}
+    if ($hostRunnerText.IndexOf('Register-ScheduledTask', [StringComparison]::Ordinal) -ge 0 -or
+        $hostRunnerText.IndexOf('SetSecurityDescriptor(', [StringComparison]::Ordinal) -ge 0) {
+        throw 'Windows VM tasks must not expose a mutable registration before applying their protected DACL.'
+    }
+    foreach ($workspaceContract in @(
+        "Join-Path `$env:ProgramData 'DarkReNamerVmRuns'",
+        'SetAccessRuleProtection($true, $false)',
+        'FileSystemRights]::Traverse',
+        'PropagationFlags]::InheritOnly',
+        'CreateResultFile',
+        'D:P(A;;FA;;;SY)(A;;FA;;;BA)',
+        '$folder.RegisterTaskDefinition(',
+        '0x12,',
+        '$actualDefinition.Actions.Item(1)',
+        '[int]$actualPrincipal.LogonType -ne 3',
+        '$definition.Principal.RunLevel = 1',
+        '[int]$actualPrincipal.RunLevel -ne 1',
+        'D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x20089;;;',
+        '$trustedTaskRoot = Join-Path $base ($TaskName + ''-trusted'')',
+        '$runnerReadRights = [Security.AccessControl.FileSystemRights]::ReadAndExecute -bor',
+        '[Security.AccessControl.FileSystemRights]::Synchronize',
+        '[int]$_.FileSystemRights -eq [int]$runnerReadRights',
+        '$trustedObserverRoot = $trustedTaskRoot',
+        '$trustedBundleRoot = Join-Path $trustedTaskRoot ''bundle''',
+        '$bundleSourceFull = [IO.Path]::GetFullPath($BundleSourcePath).TrimEnd(',
+        '# The core runner and its verified tooling files resolve from the same directory.',
+        '$cursor = if ($cursor -is [IO.FileInfo]) {',
+        '$cursor = if ($pathItem -is [IO.FileInfo]) {',
+        '$pathItem.Directory',
+        '$pathItem.Parent',
+        '$cursor.Directory',
+        '$cursor.Parent',
+        '$trustedOutputRoot = Join-Path $trustedTaskRoot ''out''',
+        'Assert-ProtectedTaskDirectory -Path $trustedTaskRoot',
+        'Assert-ProtectedTaskDirectory -Path $trustedOutputRoot',
+        '$resultPath = Join-Path $trustedOutputRoot $TrustedResultLeaf',
+        '[Parameter(Mandatory)][string] $RuntimeRoot,',
+        '-not [IO.Path]::IsPathRooted($RuntimeRoot) -or',
+        '$expectedRuntimeRoot = [IO.Path]::GetFullPath((Join-Path $guestRootFull ''runtime''))',
+        'The VM runtime root must be the controller-created guest runtime directory.',
+        'function Assert-ProtectedRuntimeDirectory',
+        '0x001201bf',
+        '0x001301bf',
+        'Assert-ProtectedRuntimeDirectory -Path $runtimeRootFull',
+        'function Set-QuotedVmTaskPath',
+        '-SourcePath $RuntimeRoot',
+        '-DestinationPath $expectedRuntimeRoot',
+        '$trustedOutputArgument = ''"'' + [IO.Path]::GetFullPath($trustedOutputRoot) + ''"''',
+        'FileSystemRights]::ReadAndExecute',
+        'Copy-VerifiedTrustedInput',
+        '-TrustedResultPath "',
+        '$actualDefinition.Settings.ExecutionTimeLimit',
+        'DiscretionaryAclProtected',
+        'function global:Get-DrVmRunnerProcesses',
+        'Get-DrVmRunnerProcesses -UserSid $sid -SessionId $sessionId',
+        '$guestRoot = [string]$workspaceRoots.guest_root',
+        '$trustedTaskRoot = [string]$workspaceRoots.trusted_task_root',
+        '$transport[''runner_process_baseline''] = @($runnerProcessBaseline)',
+        'runner_process_inventory_complete =',
+        'unexpected_runner_processes =',
+        'terminated_runner_processes ='
+    )) {
+        if ($hostRunnerText.IndexOf($workspaceContract, [StringComparison]::Ordinal) -lt 0) {
+            throw "The protected Windows VM workspace contract is missing '$workspaceContract'."
+        }
+    }
+    if ([regex]::Matches(
+            $hostRunnerText,
+            [regex]::Escape('-RuntimeRoot $runtime '),
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        ).Count -ne 3 -or
+        [regex]::Matches(
+            $hostRunnerText,
+            [regex]::Escape('-RuntimeRoot $runtimeRoot '),
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        ).Count -ne 2) {
+        throw 'Acceptance, recovery, and core scheduled tasks must each bind the controller-created runtime root.'
+    }
+    $resultSizeIndex = $hostRunnerText.IndexOf(
+        "throw 'Guest result exceeds its size bound.'",
+        [StringComparison]::Ordinal
+    )
+    $resultCopyIndex = $hostRunnerText.IndexOf(
+        "Copy-Item -LiteralPath `$guestResultPath",
+        [StringComparison]::Ordinal
+    )
+    $outputInventoryIndex = $hostRunnerText.IndexOf(
+        '$remoteOutputSizes = @{}',
+        [StringComparison]::Ordinal
+    )
+    $outputBoundIndex = $hostRunnerText.IndexOf(
+        "throw 'Guest output exceeds its host collection bound.'",
+        $outputInventoryIndex,
+        [StringComparison]::Ordinal
+    )
+    $outputCopyIndex = $hostRunnerText.IndexOf(
+        'Copy-Item -LiteralPath $guestOutputPath',
+        $outputInventoryIndex,
+        [StringComparison]::Ordinal
+    )
+    $corePollParamIndex = $hostRunnerText.IndexOf(
+        'param($trustedRoot,$name,$maximumResultBytes,$registeredRunTicks)',
+        [StringComparison]::Ordinal
+    )
+    $taskCompletionIndex = $hostRunnerText.IndexOf(
+        '$taskCompleted = $taskState -ceq ''Ready'' -and',
+        $corePollParamIndex,
+        [StringComparison]::Ordinal
+    )
+    $resultReadIndex = $hostRunnerText.IndexOf(
+        '$data = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json',
+        $corePollParamIndex,
+        [StringComparison]::Ordinal
+    )
+    $registeredRunTimeIndex = $hostRunnerText.IndexOf(
+        '$registeredLastRunTimeTicks = [long]$registered.LastRunTime.Ticks',
+        [StringComparison]::Ordinal
+    )
+    $earlyResultReturnIndex = $hostRunnerText.IndexOf(
+        'if (-not $taskCompleted)',
+        $corePollParamIndex,
+        [StringComparison]::Ordinal
+    )
+    $coreResultPathIndex = $hostRunnerText.IndexOf(
+        '$file = Join-Path (Join-Path $trustedRoot ''out'') ''core-result.json''',
+        $corePollParamIndex,
+        [StringComparison]::Ordinal
+    )
+    $taskStateResolverIndex = $hostRunnerText.IndexOf(
+        '$pollState = Resolve-ObserverTaskPollState',
+        $resultReadIndex,
+        [StringComparison]::Ordinal
+    )
+    $terminalResultGuardIndex = $hostRunnerText.IndexOf(
+        'if ($pollState.terminal) {',
+        $taskStateResolverIndex,
+        [StringComparison]::Ordinal
+    )
+    $passTaskResultGuardIndex = $hostRunnerText.IndexOf(
+        'if ($pollState.result_status -ceq ''passed'' -and',
+        $terminalResultGuardIndex,
+        [StringComparison]::Ordinal
+    )
+    if ($resultSizeIndex -lt 0 -or $resultCopyIndex -le $resultSizeIndex -or
+        $outputInventoryIndex -lt 0 -or $outputBoundIndex -le $outputInventoryIndex -or
+        $outputCopyIndex -le $outputBoundIndex -or
+        $corePollParamIndex -lt 0 -or $taskCompletionIndex -le $corePollParamIndex -or
+        $resultReadIndex -le $coreResultPathIndex -or
+        $registeredRunTimeIndex -lt 0 -or $earlyResultReturnIndex -le $taskCompletionIndex -or
+        $coreResultPathIndex -le $earlyResultReturnIndex -or
+        $taskStateResolverIndex -le $resultReadIndex -or
+        $terminalResultGuardIndex -le $taskStateResolverIndex -or
+        $passTaskResultGuardIndex -le $terminalResultGuardIndex -or
+        $hostRunnerText.IndexOf('process_jobs_closed = [bool]$jobsClosed',
+            [StringComparison]::Ordinal) -lt 0) {
+        throw 'The controller must wait for the scheduled task to terminate before reading its result, bound evidence before copying, and require closed process jobs for cleanup.'
+    }
+    $forgedRunningResult = Resolve-ObserverTaskPollState `
+        -ResultStatus 'passed' `
+        -TaskState 'Running' `
+        -TaskResult 0 `
+        -RegisteredLastRunTimeTicks 100 `
+        -LastRunTimeTicks 200
+    $staleReadyResult = Resolve-ObserverTaskPollState `
+        -ResultStatus 'passed' `
+        -TaskState 'Ready' `
+        -TaskResult 0 `
+        -RegisteredLastRunTimeTicks 100 `
+        -LastRunTimeTicks 100
+    $completedPassResult = Resolve-ObserverTaskPollState `
+        -ResultStatus 'passed' `
+        -TaskState 'Ready' `
+        -TaskResult 0 `
+        -RegisteredLastRunTimeTicks 100 `
+        -LastRunTimeTicks 200
+    $completedFailureResult = Resolve-ObserverTaskPollState `
+        -ResultStatus 'failed' `
+        -TaskState 'Ready' `
+        -TaskResult 1 `
+        -RegisteredLastRunTimeTicks 100 `
+        -LastRunTimeTicks 200
+    if ($forgedRunningResult.terminal -or $staleReadyResult.terminal -or
+        -not $completedPassResult.terminal -or -not $completedFailureResult.terminal) {
+        throw 'Core result polling must ignore forged in-flight status and retain completed pass/failure results.'
+    }
     if ($hostRunnerText.IndexOf('-ExecutionPolicy RemoteSigned', [StringComparison]::Ordinal) -ge 0 -or
-        $hostRunnerText.IndexOf('Get-Command pwsh.exe', [StringComparison]::Ordinal) -lt 0 -or
+        $hostRunnerText.IndexOf('Get-DrVmTrustedPowerShellPath', [StringComparison]::Ordinal) -lt 0 -or
+        $hostRunnerText.IndexOf('Get-Command pwsh.exe', [StringComparison]::Ordinal) -ge 0 -or
         $hostRunnerText.IndexOf("edition -cne 'Core'", [StringComparison]::Ordinal) -lt 0 -or
         $hostRunnerText.IndexOf("effective_policy -cne 'RemoteSigned'", [StringComparison]::Ordinal) -lt 0) {
         throw 'The native scheduled task must use the inspected PowerShell 7.4+ Core RemoteSigned engine without a policy override.'

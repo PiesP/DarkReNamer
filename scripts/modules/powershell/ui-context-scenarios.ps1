@@ -390,7 +390,6 @@ function Invoke-ObserverContextScenario {
         throw 'Application changed after bundle verification.'
     }
     $repeatedFixture = New-ObserverRepeatedFixture -RuntimeRoot $RuntimeRoot
-    $script:ownedContextFixedRoot = $null
     $repeatedApplication = $null
     $moveFixture = $null
     $moveApplication = $null
@@ -465,6 +464,7 @@ function Invoke-ObserverContextScenario {
                     -Screenshots @($Captures.ToArray() | Select-Object -Skip $rawCaptureStart)
                 $rawLayoutRuns.Add($rawRepeatedRun)
             }
+            [void](Complete-AcceptanceOwnedProcessJob -Owned $repeatedApplication.owned)
             $repeatedApplication.owned.process.Dispose()
             $repeatedApplication = $null
             return [ordered]@{
@@ -508,6 +508,7 @@ function Invoke-ObserverContextScenario {
                 -Screenshots @($Captures.ToArray() | Select-Object -Skip $rawCaptureStart)
             $rawLayoutRuns.Add($rawRepeatedRun)
         }
+        [void](Complete-AcceptanceOwnedProcessJob -Owned $repeatedApplication.owned -StopActive)
         $repeatedApplication.owned.process.Dispose()
         $repeatedApplication = $null
 
@@ -608,6 +609,7 @@ function Invoke-ObserverContextScenario {
                 -Screenshots @($Captures.ToArray() | Select-Object -Skip $rawCaptureStart)
             $rawLayoutRuns.Add($rawMoveRun)
         }
+        [void](Complete-AcceptanceOwnedProcessJob -Owned $moveApplication.owned -StopActive)
         $moveApplication.owned.process.Dispose()
         $moveApplication = $null
 
@@ -719,6 +721,7 @@ function Invoke-ObserverContextScenario {
                 -Screenshots @($Captures.ToArray() | Select-Object -Skip $rawCaptureStart)
             $rawLayoutRuns.Add($rawMixedRun)
         }
+        [void](Complete-AcceptanceOwnedProcessJob -Owned $mixedApplication.owned)
         $mixedApplication.owned.process.Dispose()
         $mixedApplication = $null
 
@@ -800,22 +803,12 @@ function Invoke-ObserverContextScenario {
     finally {
         foreach ($application in @($repeatedApplication, $moveApplication, $mixedApplication)) {
             if ($null -ne $application) {
-                $application.process.Refresh()
-                if (-not $application.process.HasExited) {
-                    Invoke-TaskkillTree -ProcessId $application.process.Id
-                    [void]$application.process.WaitForExit(10000)
+                $jobCleanup = Complete-AcceptanceOwnedProcessJob -Owned $application.owned -StopActive
+                if (-not $jobCleanup.job_empty -or -not $jobCleanup.job_closed) {
+                    throw 'A context-scenario candidate process job did not close cleanly.'
                 }
                 $application.owned.process.Dispose()
             }
-        }
-        if ($null -ne $script:ownedContextFixedRoot -and (Test-Path -LiteralPath $script:ownedContextFixedRoot -PathType Container)) {
-            $ownedRoot = Get-Item -LiteralPath $script:ownedContextFixedRoot -Force
-            if ($ownedRoot.FullName -cne 'C:\fixture' -or ($ownedRoot.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                throw 'Owned fixed fixture root failed its cleanup identity check.'
-            }
-            Remove-Item -LiteralPath $ownedRoot.FullName -Recurse -Force
-            if (Test-Path -LiteralPath $ownedRoot.FullName) { throw 'Owned fixed fixture root cleanup failed.' }
-            $script:ownedContextFixedRoot = $null
         }
     }
 }
@@ -936,10 +929,9 @@ function Invoke-ObserverStandardScenario {
     }
     finally {
         if ($null -ne $application) {
-            $application.process.Refresh()
-            if (-not $application.process.HasExited) {
-                Invoke-TaskkillTree -ProcessId $application.process.Id
-                [void]$application.process.WaitForExit(10000)
+            $jobCleanup = Complete-AcceptanceOwnedProcessJob -Owned $application.owned -StopActive
+            if (-not $jobCleanup.job_empty -or -not $jobCleanup.job_closed) {
+                throw 'A standard-scenario candidate process job did not close cleanly.'
             }
             $application.owned.process.Dispose()
         }

@@ -1,4 +1,4 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
 
 use darknamer_app::rename::{
     AppendCertainty, EntryId, EntryIdentity, EntryKind, FileJournal, FileJournalErrorKind,
@@ -225,6 +225,7 @@ fn corrupt_existing_journal_retains_exact_handle_for_bounded_copy()
     };
     let path = directory.path().join("active.drj");
     let copied = directory.path().join("diagnostic-copy.drj");
+    let copied_from_handle = directory.path().join("diagnostic-handle-copy.drj");
     let mut corrupt = encode_journal_records(&complete_records())?;
     let last = corrupt.len() - 1;
     corrupt[last] ^= 0x80;
@@ -251,9 +252,57 @@ fn corrupt_existing_journal_retains_exact_handle_for_bounded_copy()
     }
     evidence.copy_exact_to_new(&copied)?;
 
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&copied_from_handle)?;
+    assert_eq!(
+        evidence.copy_exact_to_file(&mut output)?,
+        corrupt.len() as u64
+    );
+    drop(output);
+
     assert_eq!(fs::read(copied)?, corrupt);
+    assert_eq!(fs::read(copied_from_handle)?, corrupt);
     assert_eq!(evidence.byte_len(), corrupt.len() as u64);
     assert!(evidence.copy_exact_to_new(&path).is_err());
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn multiply_linked_existing_journal_is_retained_without_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let Some(root) = supported_journal_root(directory.path())? else {
+        return Ok(());
+    };
+    let bytes = encode_journal_records(&complete_records())?;
+    let active = directory.path().join("active.drj");
+    let alias = directory.path().join("unrelated-alias.drj");
+    let retained_copy = directory.path().join("retained-copy.drj");
+    fs::write(&active, &bytes)?;
+    fs::hard_link(&active, &alias)?;
+
+    let error = FileJournal::open_existing_retained(&root, "active.drj")
+        .err()
+        .ok_or_else(|| std::io::Error::other("multiply-linked journal was accepted"))?;
+    assert_eq!(error.failure().stage, JournalOpenStage::Validate);
+    assert_eq!(error.failure().kind, FileJournalErrorKind::InvalidFileType);
+    let mut evidence = error
+        .into_evidence()
+        .ok_or_else(|| std::io::Error::other("multiply-linked evidence handle was dropped"))?;
+    evidence.copy_exact_to_new(&retained_copy)?;
+    drop(evidence);
+
+    assert_eq!(fs::read(&active)?, bytes);
+    assert_eq!(fs::read(&alias)?, bytes);
+    assert_eq!(fs::read(&retained_copy)?, bytes);
+
+    let single_link = directory.path().join("single-link.drj");
+    fs::write(&single_link, &bytes)?;
+    let reopened = FileJournal::open_existing(&root, "single-link.drj")?;
+    assert_eq!(reopened.records(), complete_records());
     Ok(())
 }
 
@@ -266,6 +315,7 @@ fn valid_file_journal_exports_exact_bytes_and_restores_append_cursor()
     };
     let source = directory.path().join("active.drj");
     let copied = directory.path().join("active.drj.retained");
+    let copied_from_handle = directory.path().join("active.drj.handle-copy");
     let plan = PlanId::from_fingerprint(91);
     let steps = vec![step(
         0,
@@ -281,6 +331,24 @@ fn valid_file_journal_exports_exact_bytes_and_restores_append_cursor()
 
     assert_eq!(journal.copy_exact_to_new(&copied)?, expected.len() as u64);
     assert_eq!(fs::read(&copied)?, expected);
+
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&copied_from_handle)?;
+    assert_eq!(
+        journal.copy_exact_to_file(&mut output)?,
+        expected.len() as u64
+    );
+    drop(output);
+    assert_eq!(fs::read(&copied_from_handle)?, expected);
+
+    let nonempty_copy = directory.path().join("nonempty-handle-copy");
+    fs::write(&nonempty_copy, b"sentinel")?;
+    let mut output = OpenOptions::new().write(true).open(&nonempty_copy)?;
+    assert!(journal.copy_exact_to_file(&mut output).is_err());
+    drop(output);
+    assert_eq!(fs::read(&nonempty_copy)?, b"sentinel");
 
     journal.prepared(0, JournalDirection::Forward)?;
     drop(journal);

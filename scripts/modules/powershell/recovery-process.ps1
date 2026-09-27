@@ -1,18 +1,19 @@
 ﻿function Stop-AndDisposeAcceptanceOwnedProcess {
     param([Parameter(Mandatory)][object] $Owned)
 
-    $process = $Owned.process
     try {
-        $process.Refresh()
-        if (-not $process.HasExited) {
-            $process.Kill()
-            if (-not $process.WaitForExit(10000)) {
-                throw 'The exact owned acceptance process did not terminate.'
-            }
+        if ($null -eq $Owned.owner) {
+            throw 'The recovery candidate is not owned by a process job.'
+        }
+        $cleanup = Complete-AcceptanceOwnedProcessJob -Owned $Owned -StopActive
+        if (-not $cleanup.job_empty -or -not $cleanup.job_closed) {
+            throw 'The recovery candidate process job did not close cleanly.'
         }
     }
     finally {
-        $process.Dispose()
+        if ($null -ne $Owned.process) {
+            $Owned.process.Dispose()
+        }
     }
 }
 function Start-AcceptanceApplication {
@@ -31,7 +32,8 @@ function Start-AcceptanceApplication {
         $owned = Start-OwnedProcess `
             -FilePath $Inputs.application_path `
             -Arguments '' `
-            -WorkingDirectory $Inputs.verified.root
+            -WorkingDirectory $Inputs.verified.root `
+            -SingleProcessOnly
         $owned.process.Refresh()
         if ($owned.process.HasExited) {
             throw 'The source-bound application exited before creating its window.'
@@ -199,11 +201,26 @@ function Write-AcceptanceProcessExitEvidence {
     )
     $sequence = $Application.raw_process_binding.sequence
     $path = Join-Path $PrivateRoot ('process-{0:D2}-{1}.json' -f $sequence, $Boundary)
+    $termination = $null
+    if ($ExitMethod -ceq 'forced-termination') {
+        $terminationProperty = $Application.PSObject.Properties['job_cleanup']
+        if ($null -eq $terminationProperty -or
+            $null -eq $terminationProperty.Value -or
+            $terminationProperty.Value.status -cne 'clean' -or
+            $terminationProperty.Value.primary_process_active_at_stop -ne $true -or
+            $terminationProperty.Value.active_process_ids_at_stop.Count -ne 1 -or
+            $terminationProperty.Value.active_process_ids_at_stop[0] -ne
+                $Application.raw_process_binding.pid) {
+            throw 'Forced process exit evidence has no exact clean Job Object receipt.'
+        }
+        $termination = $terminationProperty.Value
+    }
     Write-AcceptanceNewUtf8Json -Path $path -Value ([ordered]@{
         schema_version = 1
         boundary = $Boundary
         observed_utc_ticks = $observedUtcTicks
         binding = $Application.raw_process_binding
+        termination = $termination
         lifecycle = [ordered]@{
             pid = $Application.raw_process_binding.pid
             session_id = $Application.raw_process_binding.session_id

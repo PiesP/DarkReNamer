@@ -35,7 +35,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$ToolingManifestSha256 = 'db608888620fa1f07ea96bd85bf52e2fb38710d7bd27e15c3fc5d065340ee0f0'
+$ToolingManifestSha256 = 'c74608ee8043d73cce0eef88a8a9c75c2f1d460734d180fc6ef5b79cc5e768b1'
 $ToolingLoaderSha256 = '6888561ff9a23becf279ec7d4e691b40d50d79dde2196d22c0d63e2252dd08a1'
 
 function Get-DrBootstrapSha256 {
@@ -105,7 +105,7 @@ function Initialize-DrVerifiedTooling {
         [Parameter(Mandatory)][string] $Root,
         [Parameter(Mandatory)][string] $ManifestLocation,
         [Parameter(Mandatory)][ValidateSet('checkout', 'bundle')][string] $Mode,
-        [Parameter(Mandatory)][string] $RequiredRole
+        [Parameter(Mandatory)][string[]] $RequiredRoles
     )
     $rootPath = [IO.Path]::GetFullPath($Root)
     $manifestPath = [IO.Path]::GetFullPath([IO.Path]::Combine($rootPath, $ManifestLocation))
@@ -173,14 +173,14 @@ function Initialize-DrVerifiedTooling {
             }
         Microsoft.PowerShell.Core\Import-Module $loaderModule -Scope Local -Force | Microsoft.PowerShell.Core\Out-Null
         $verified = & $loaderModule {
-            param($VerifiedRoot,$VerifiedManifest,$VerifiedManifestSha256,$VerifiedMode,$VerifiedRole)
+            param($VerifiedRoot,$VerifiedManifest,$VerifiedManifestSha256,$VerifiedMode,$VerifiedRoles)
             Get-DrToolingVerifiedBundle `
                 -Root $VerifiedRoot `
                 -ManifestLocation $VerifiedManifest `
                 -ExpectedManifestSha256 $VerifiedManifestSha256 `
                 -Mode $VerifiedMode `
-                -RequiredRoles @($VerifiedRole)
-        } $rootPath $ManifestLocation $ToolingManifestSha256 $Mode $RequiredRole
+                -RequiredRoles $VerifiedRoles
+        } $rootPath $ManifestLocation $ToolingManifestSha256 $Mode $RequiredRoles
         [pscustomobject]@{ module = $loaderModule; verified = $verified }
     }
     catch {
@@ -211,7 +211,7 @@ $loaderContext = Initialize-DrVerifiedTooling `
     -Root $toolingRoot `
     -ManifestLocation $manifestLocation `
     -Mode $toolingMode `
-    -RequiredRole 'powershell-controller-entry'
+    -RequiredRoles @('powershell-controller-entry')
 $module = $null
 try {
 $verified = $loaderContext.verified

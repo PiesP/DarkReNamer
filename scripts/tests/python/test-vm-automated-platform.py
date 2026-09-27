@@ -5,7 +5,8 @@ from copy import deepcopy
 import unittest
 
 from darkrenamer_tooling.contracts.platform import (
-    verify_cleanup, verify_environment, verify_keyboard_events,
+    verify_cleanup, verify_controller_cleanup, verify_environment,
+    verify_keyboard_events,
 )
 from darkrenamer_tooling.evidence.archive import EvidenceError
 
@@ -91,12 +92,84 @@ class PlatformTests(unittest.TestCase):
     def clean(self):
         return ({"owned_processes_after": [], "runtime_root_after": {"exists": False, "entries": []},
                  "journal_after": {"entries": []}},
-                {"scheduled_task_present": False, "guest_root_present": False, "owned_processes_after": []})
+                {"scheduled_task_present": False, "guest_root_present": False,
+                 "trusted_task_root_present": False, "process_jobs_closed": True,
+                 "runner_process_inventory_complete": True,
+                 "unexpected_runner_tasks": [], "unexpected_runner_processes": [],
+                 "unexpected_runner_tasks_after_intervention": [],
+                 "unexpected_runner_processes_after_intervention": [],
+                 "unexpected_runner_tasks_after_delete": [],
+                 "unexpected_runner_processes_after_delete": [],
+                 "removed_runner_tasks": [], "terminated_runner_processes": [],
+                 "resource_cleanup_errors": [], "smart_screen_natural_exit": self.not_required_smart_screen(),
+                 "owned_processes_after": []})
+
+    @staticmethod
+    def not_required_smart_screen():
+        return {"schema_version": 1, "status": "not-required",
+                "runner_sid": "S-1-5-21-1000-1000-1000-1001", "runner_session_id": 2,
+                "candidate_identity": None, "broker": None, "timeout_ms": 0,
+                "elapsed_ms": 0, "polls": [], "natural_exit_observed": False,
+                "final_inventory_complete": True,
+                "final_runner_process_delta_identities": [],
+                "final_runner_task_delta_identities": []}
+
+    @staticmethod
+    def natural_exit_smart_screen():
+        identity = "9008|2026-09-27T18:34:27.0489960Z"
+        directory = r"C:\Windows"
+        process_path = directory + r"\System32\smartscreen.exe"
+        parent_path = directory + r"\System32\svchost.exe"
+        broker = {
+            "windows_directory": directory,
+            "process_identity": identity,
+            "process_pid": 9008,
+            "process_creation_time_utc": "2026-09-27T18:34:27.0489960Z",
+            "process_session_id": 2,
+            "process_owner_sid": "S-1-5-21-1000-1000-1000-1001",
+            "process_executable_path": process_path,
+            "process_path_verified": True,
+            "process_command_line_arguments": [process_path, "-Embedding"],
+            "process_signature_status": "Valid",
+            "process_signer_subject": "CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US",
+            "process_signer_thumbprint": "A" * 40,
+            "parent_identity": "1000|2026-09-27T18:00:00.0000000Z",
+            "parent_pid": 1000,
+            "parent_creation_time_utc": "2026-09-27T18:00:00.0000000Z",
+            "parent_session_id": 0,
+            "parent_owner_sid": "S-1-5-18",
+            "parent_executable_path": parent_path,
+            "parent_path_verified": True,
+            "parent_command_line_arguments": [parent_path, "-k", "DcomLaunch", "-p"],
+            "parent_signature_status": "Valid",
+            "parent_signer_subject": "CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US",
+            "parent_signer_thumbprint": "B" * 40,
+            "service_name": "DcomLaunch",
+            "service_process_id": 1000,
+            "service_state": "Running",
+        }
+        return {
+            "schema_version": 1, "status": "natural-exit",
+            "runner_sid": "S-1-5-21-1000-1000-1000-1001", "runner_session_id": 2,
+            "candidate_identity": identity, "broker": broker,
+            "timeout_ms": 360000, "elapsed_ms": 81,
+            "polls": [
+                {"elapsed_ms": 0, "inventory_complete": True,
+                 "process_delta_identities": [identity], "task_delta_identities": [],
+                 "owned_root_process_count": 0},
+                {"elapsed_ms": 81, "inventory_complete": True,
+                 "process_delta_identities": [], "task_delta_identities": [],
+                 "owned_root_process_count": 0},
+            ],
+            "natural_exit_observed": True, "final_inventory_complete": True,
+            "final_runner_process_delta_identities": [],
+            "final_runner_task_delta_identities": [],
+        }
 
     def test_cleanup_requires_each_owned_resource_absent_and_clean_journal(self):
         verify_cleanup(*self.clean())
         guest, host = self.clean()
-        for field in ("scheduled_task_present", "guest_root_present"):
+        for field in ("scheduled_task_present", "guest_root_present", "trusted_task_root_present"):
             with self.assertRaises(EvidenceError):
                 verify_cleanup(guest, {**host, field: True})
         guest["owned_processes_after"] = [{"pid": 1234}]
@@ -108,6 +181,90 @@ class PlatformTests(unittest.TestCase):
             verify_cleanup(guest, host)
         guest, host = self.clean()
         guest["journal_after"]["entries"] = [{"name": "active.drj", "kind": "file", "bytes": 42}]
+        with self.assertRaises(EvidenceError):
+            verify_cleanup(guest, host)
+
+    def test_recovery_cleanup_requires_candidate_export_root_absent(self):
+        guest, host = self.clean()
+        guest["candidate_export_root_after"] = {
+            "exists": False, "ordinary_directory": True, "entries": []}
+        verify_cleanup(guest, host, require_candidate_export=True)
+        for mutation in (
+                {"exists": True, "ordinary_directory": True, "entries": []},
+                {"exists": False, "ordinary_directory": False, "entries": []},
+                {"exists": False, "ordinary_directory": True, "entries": ["residue"]}):
+            with self.subTest(mutation=mutation), self.assertRaises(EvidenceError):
+                verify_cleanup({**guest, "candidate_export_root_after": mutation}, host,
+                               require_candidate_export=True)
+        guest, host = self.clean()
+        with self.assertRaises(EvidenceError):
+            verify_cleanup(guest, host, require_candidate_export=True)
+
+    def test_controller_cleanup_rejects_unexpected_after_intervention_or_delete(self):
+        for field in ("unexpected_runner_tasks_after_intervention",
+                      "unexpected_runner_processes_after_intervention",
+                      "unexpected_runner_tasks_after_delete",
+                      "unexpected_runner_processes_after_delete",
+                      "removed_runner_tasks"):
+            guest, host = self.clean()
+            host[field] = [{"identity": "unexpected"}]
+            with self.subTest(field=field), self.assertRaises(EvidenceError):
+                verify_cleanup(guest, host)
+
+    def test_controller_cleanup_accepts_only_exact_natural_smartscreen_exit(self):
+        guest, host = self.clean()
+        proof = self.natural_exit_smart_screen()
+        host["unexpected_runner_processes"] = [{
+            "identity": proof["candidate_identity"], "pid": 9008, "session_id": 2,
+            "creation_time_utc": proof["broker"]["process_creation_time_utc"],
+            "executable_path": proof["broker"]["process_executable_path"],
+        }]
+        host["smart_screen_natural_exit"] = proof
+        verify_cleanup(guest, host)
+        verify_controller_cleanup(host)
+        case_variant = deepcopy(host)
+        case_variant["smart_screen_natural_exit"]["broker"]["parent_command_line_arguments"] = [
+            proof["broker"]["parent_command_line_arguments"][0],
+            "-K", "dcomlaunch", "-P",
+        ]
+        verify_controller_cleanup(case_variant)
+
+        mutations = (
+            ("runner owner", lambda row: row["broker"].update(process_owner_sid="S-1-5-18")),
+            ("signature", lambda row: row["broker"].update(process_signature_status="NotSigned")),
+            ("path proof", lambda row: row["broker"].update(parent_path_verified=False)),
+            ("command line", lambda row: row["broker"]["process_command_line_arguments"].append("-other")),
+            ("service pid", lambda row: row["broker"].update(service_process_id=1001)),
+            ("second process", lambda row: row["polls"][0]["process_delta_identities"].append("9010|2026-09-27T18:35:00.0000000Z")),
+            ("new task", lambda row: row["polls"][0]["task_delta_identities"].append(r"\User\NewTask")),
+            ("natural exit", lambda row: row.update(natural_exit_observed=False)),
+            ("deadline", lambda row: row.update(elapsed_ms=360001)),
+            ("initial poll", lambda row: row["polls"][0].update(process_delta_identities=[])),
+        )
+        for label, mutate in mutations:
+            changed_guest, changed_host = self.clean()
+            changed = self.natural_exit_smart_screen()
+            changed_host["unexpected_runner_processes"] = deepcopy(host["unexpected_runner_processes"])
+            mutate(changed)
+            changed_host["smart_screen_natural_exit"] = changed
+            with self.subTest(label=label), self.assertRaises(EvidenceError):
+                verify_cleanup(changed_guest, changed_host)
+
+    def test_controller_cleanup_requires_smart_screen_evidence_and_exact_after_deltas(self):
+        guest, host = self.clean()
+        del host["smart_screen_natural_exit"]
+        with self.assertRaises(EvidenceError):
+            verify_cleanup(guest, host)
+        guest, host = self.clean()
+        proof = self.natural_exit_smart_screen()
+        host["unexpected_runner_processes"] = [{
+            "identity": proof["candidate_identity"], "pid": 9008, "session_id": 2,
+            "creation_time_utc": proof["broker"]["process_creation_time_utc"],
+            "executable_path": proof["broker"]["process_executable_path"],
+        }]
+        host["smart_screen_natural_exit"] = proof
+        host["unexpected_runner_processes_after_delete"] = [
+            deepcopy(host["unexpected_runner_processes"][0])]
         with self.assertRaises(EvidenceError):
             verify_cleanup(guest, host)
 

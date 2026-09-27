@@ -115,6 +115,8 @@ create a rename plan or journal capability. Modal sessions prevent concurrent
 model edits. The final confirmation defaults to Cancel and rechecks the original
 session, revision, and plan fingerprint before execution; display expansion and
 clipboard operations cannot rewrite the model or frozen plan.
+Clipboard copy fully allocates, fills, and unlocks its data block before opening
+or emptying the clipboard, so preparation failures preserve the previous data.
 
 Appearance preferences and repaints are non-authorizing input. Theme,
 command-rail density and enabled-state painting, preview emphasis, separators,
@@ -220,6 +222,19 @@ kind, native code, codec frame, and observed size. Diagnostic export copies
 valid active, valid candidate, and corrupt evidence from their retained handles
 into new files only. An unavailable path is not reopened and an existing
 destination is not overwritten.
+
+On Windows, an existing journal is accepted only when its retained file handle
+reports exactly one hard link. This prevents recovery append, torn-tail
+truncation, and journal disposition from changing an unrelated alias. A file
+whose link count cannot be observed is retained as invalid evidence and remains
+recovery-locked.
+
+The recovery-export folder is bound while its native folder picker is open.
+The application retains the selected local NTFS directory chain and shell
+volume/file identity, then creates each fixed evidence leaf relative to that
+retained directory handle with exclusive, no-reparse creation. Replacing the
+selected path after acceptance therefore cannot redirect evidence into a
+different folder.
 
 A physically zero-byte candidate is removed automatically. A candidate that
 contains exactly one complete Intent and no torn tail represents a plan that was
@@ -336,6 +351,20 @@ subsequent VM workloads after the first failure. A diagnostic archive may retain
 that partial history, but a later retry cannot replace the failed attempt or
 fill its missing slots. Passing requires a new campaign with a new complete
 execution history.
+
+Controller cleanup requires complete process and scheduled-task inventories to
+show no runner delta after intervention and after resource removal. One initial
+same-user, same-session process delta may be accounted for only when it is the
+exact `System32\smartscreen.exe -Embedding` broker, owned by the runner and
+spawned by the SYSTEM `System32\svchost.exe` process hosting the running
+`DcomLaunch` service. The controller records its canonical paths, process
+lifetimes, command-line arguments, and valid Microsoft Authenticode signatures,
+then applies a six-minute monotonic deadline to process and scheduled-task
+polling. It accepts only natural exit followed by complete zero-delta inventories
+before the deadline; a late poll fails cleanup. A stalled inventory call may
+delay controller return, but cannot produce a passing late result. Any identity
+mismatch, second process, task delta, incomplete inventory, or timeout fails
+cleanup; the controller never terminates SmartScreen.
 
 The independent verifier derives all 22 target verdicts from raw observations;
 producer summaries, `passed` flags, and legacy `review_required` values are not

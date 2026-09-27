@@ -341,6 +341,12 @@ try {
             }
         }
     }
+    if ($acceptanceSource.IndexOf(
+        'finally { $entries.Dispose() }',
+        [StringComparison]::Ordinal
+    ) -lt 0) {
+        throw 'The UI bootstrap must dispose its bounded acceptance-output enumerator.'
+    }
     foreach ($functionName in @(
         'Assert-PlainFile',
         'Join-GuestWindowsPath',
@@ -467,16 +473,29 @@ try {
     ).Count -ne 2) {
         throw 'UI and recovery collection must reject the aggregate limit before hashing rows.'
     }
-    $guestOutputComposition = 'Join-GuestWindowsPath -Root (Join-GuestWindowsPath -Root'
-    if ([regex]::Matches($controllerText, [regex]::Escape($guestOutputComposition)).Count -ne 3) {
-        throw 'Acceptance, text-scale rescue, and High Contrast rescue collection must compose guest output paths without host Join-Path.'
+    foreach ($protectedOutputContract in @(
+        '$trustedOutputRoot = Join-Path $trustedTaskRoot ''out''',
+        'Assert-ProtectedTaskDirectory -Path $trustedOutputRoot',
+        '$requiresPrivateRoot = $Arguments.IndexOf(',
+        'if ($requiresPrivateRoot) {',
+        "elseif (Test-Path -LiteralPath `$trustedPrivateRoot) {",
+        'function Set-QuotedVmTaskPath',
+        '$trustedOutputArgument = ''"'' + [IO.Path]::GetFullPath($trustedOutputRoot) + ''"''',
+        '$out = Join-Path $trustedRoot ''out''',
+        '$trustedResult = Join-Path $out ''acceptance-result.json''',
+        "item = Get-Item -LiteralPath `$recoveryEvidenceRootPath -Force; prefix = `$evidenceLeaf + '/'"
+    )) {
+        if ($controllerText.IndexOf($protectedOutputContract, [StringComparison]::Ordinal) -lt 0) {
+            throw "VM observer outputs are not bound to the protected output root: $protectedOutputContract"
+        }
     }
     foreach ($requiredRescueSource in @(
         'function Invoke-AcceptanceTextScaleRescue',
         '-RestoreTextScaleOnly',
+        "-TrustedResultLeaf 'text-scale-rescue-result.json'",
         'text-scale-rescue-result.json',
-        'text-scale-rescue.stdout.txt',
-        'text-scale-rescue.stderr.txt'
+        'Get-DrVmTrustedPowerShellPath',
+        "Join-Path `$trustedRoot 'out'"
     )) {
         if ($controllerText.IndexOf($requiredRescueSource, [StringComparison]::Ordinal) -lt 0) {
             throw "The VM controller is missing the text-scale rescue contract '$requiredRescueSource'."
@@ -485,7 +504,12 @@ try {
     foreach ($requiredObserverSource in @(
         'function Invoke-AcceptanceHighContrastRescue',
         '-RestoreHighContrastOnly',
+        "-TrustedResultLeaf 'high-contrast-rescue-result.json'",
         'high-contrast-rescue-result.json',
+        "-TrustedResultLeaf 'acceptance-result.json'",
+        "-TrustedResultLeaf 'recovery-summary.json'",
+        '-EvidenceRoot "',
+        'New-DrVmGuestDirectory',
         'elseif ($recovery)',
         'Recovery output file count exceeds its bound.',
         'Recovery output contains a reparse entry.',
@@ -501,8 +525,29 @@ try {
         }
     }
     foreach ($requiredRawCleanupSource in @(
+        'runner_task_baseline',
+        'runner_process_baseline',
+        'Get-DrVmRunnerProcesses',
+        '-UserSid $taskContext.runner_sid',
+        '$unexpectedRunnerProcessesBeforeCleanup',
+        '$terminatedRunnerProcesses.Add',
         'scheduled_task_present =',
         'guest_root_present =',
+        'unexpected_runner_tasks =',
+        'unexpected_runner_processes =',
+        'runner_process_inventory_complete =',
+        '$ownedScheduledTasksBeforeDelete = @(Get-ScheduledTask -ErrorAction Stop |',
+        '$ownedScheduledTasksAfterDelete = @(Get-ScheduledTask -ErrorAction Stop |',
+        'foreach ($identity in $baselineTaskHashes.Keys)',
+        '$removedRunnerTasks.Add([string]$identity)',
+        'removed_runner_tasks = @($removedRunnerTasks | Sort-Object)',
+        'smart_screen_natural_exit =',
+        'Get-DrVmSmartScreenBrokerEvidence',
+        'Wait-DrVmSmartScreenNaturalExit',
+        'natural_exit_observed',
+        '$smartScreenInitialDeltaAccepted',
+        'terminated_runner_processes =',
+        'Get-DrVmRunnerTasks -UserSid $taskContext.runner_sid',
         'owned_processes_after =',
         "`$transport['raw_cleanup'] = `$cleanupResult.raw_cleanup",
         'Guest cleanup did not return its bound raw observation.'
@@ -534,23 +579,14 @@ try {
             throw "The VM controller is missing terminal observer-task evidence '$requiredTerminalSource'."
         }
     }
-    $streamCollectionIndex = $controllerText.IndexOf(
+    if ($controllerText.IndexOf(
         "foreach (`$leaf in @('observer.stdout.txt', 'observer.stderr.txt'))",
         [StringComparison]::Ordinal
-    )
-    $successPostlaunchIndex = $controllerText.IndexOf(
-        "if (`$state.result_status -ceq 'review_required' -and `$state.task_result -eq 0)",
-        $streamCollectionIndex,
+    ) -ge 0 -or $controllerText.IndexOf(
+        '$rows = @(',
         [StringComparison]::Ordinal
-    )
-    $inventoryIndex = $controllerText.IndexOf(
-        '$inventory = @(Invoke-Command',
-        $successPostlaunchIndex,
-        [StringComparison]::Ordinal
-    )
-    if ($streamCollectionIndex -lt 0 -or $successPostlaunchIndex -le $streamCollectionIndex -or
-        $inventoryIndex -le $successPostlaunchIndex) {
-        throw 'Observer streams must be moved before success-only postlaunch identity and bounded inventory collection.'
+    ) -lt 0) {
+        throw 'Observer output inventory must read the protected output tree directly without moving candidate-writable stream files.'
     }
     foreach ($requiredEngineSource in @(
         "executable = 'pwsh.exe'",
@@ -805,6 +841,17 @@ try {
             param($FilePath, $Arguments, $WorkingDirectory)
             $script:startupOwned
         }
+        function Complete-AcceptanceOwnedProcessJob {
+            param($Owned, [switch] $StopActive)
+            if ($Owned -ne $script:startupOwned -or -not $StopActive) {
+                throw 'Startup cleanup did not stop the exact owned process job.'
+            }
+            $Owned.stop_requested = $true
+            if ($Owned.cleanup_failure) {
+                throw 'The exact owned acceptance process did not terminate.'
+            }
+            [pscustomobject]@{ job_empty = $true; job_closed = $true }
+        }
         function Wait-ExactApplicationMainWindow {
             param(
                 $Process, $ExpectedSession, $ExpectedClassName,
@@ -829,7 +876,12 @@ try {
             $true
         }
         $startupProcess | Add-Member ScriptMethod Dispose { $this.disposed = $true }
-        $script:startupOwned = [pscustomobject]@{ process = $startupProcess }
+        $script:startupOwned = [pscustomobject]@{
+            process = $startupProcess
+            owner = [pscustomobject]@{}
+            stop_requested = $false
+            cleanup_failure = $false
+        }
         Assert-Fails {
             Start-AcceptanceApplication `
                 -FilePath 'fixture.exe' `
@@ -838,9 +890,8 @@ try {
                 -WaitSeconds 10 `
                 -Label 'startup fixture'
         } 'Pinned startup binding failed'
-        if (-not $startupProcess.killed -or -not $startupProcess.disposed -or
-            $startupProcess.waited_milliseconds -ne 10000) {
-            throw 'Failed startup must terminate and dispose the exact owned process within the fixed bound.'
+        if (-not $script:startupOwned.stop_requested -or -not $startupProcess.disposed) {
+            throw 'Failed startup must stop and dispose the exact owned process job.'
         }
 
         $timeoutProcess = [pscustomobject]@{
@@ -852,7 +903,12 @@ try {
         $timeoutProcess | Add-Member ScriptMethod Kill { $this.killed = $true }
         $timeoutProcess | Add-Member ScriptMethod WaitForExit { param([int] $Milliseconds) $false }
         $timeoutProcess | Add-Member ScriptMethod Dispose { $this.disposed = $true }
-        $script:startupOwned = [pscustomobject]@{ process = $timeoutProcess }
+        $script:startupOwned = [pscustomobject]@{
+            process = $timeoutProcess
+            owner = [pscustomobject]@{}
+            stop_requested = $false
+            cleanup_failure = $true
+        }
         Assert-Fails {
             Start-AcceptanceApplication `
                 -FilePath 'fixture.exe' `
@@ -861,8 +917,8 @@ try {
                 -WaitSeconds 10 `
                 -Label 'startup cleanup-timeout fixture'
         } 'Application startup validation and exact-process cleanup both failed: Pinned startup binding failed. Cleanup: The exact owned acceptance process did not terminate.'
-        if (-not $timeoutProcess.killed -or -not $timeoutProcess.disposed) {
-            throw 'Timed-out startup cleanup must still attempt exact process termination and disposal.'
+        if (-not $script:startupOwned.stop_requested -or -not $timeoutProcess.disposed) {
+            throw 'Timed-out startup cleanup must stop and dispose the exact owned process job.'
         }
         Remove-Variable startupOwned -Scope Script
     }
@@ -873,7 +929,15 @@ try {
                 $node.Name -ceq 'Close-AcceptanceApplication'
         }, $true)
         . ([scriptblock]::Create($closeFunction.Extent.Text))
-        $script:closeProbe = @{ keyboard = 0; ordinary = 0 }
+        $script:closeProbe = @{ keyboard = 0; ordinary = 0; jobs = 0 }
+        function Complete-AcceptanceOwnedProcessJob {
+            param($Owned)
+            if ($Owned.process -ne $script:closeProcess) {
+                throw 'Close cleanup received a different process job.'
+            }
+            $script:closeProbe.jobs++
+            [pscustomobject]@{ status = 'clean'; job_empty = $true; job_closed = $true }
+        }
         function Send-AcceptanceChord {
             param($Process, $ExpectedSession, $Modifier, $VirtualKey, $Label)
             if ($Modifier -ne 0x12 -or $VirtualKey -ne 0x73) { throw 'Expected Alt+F4.' }
@@ -903,16 +967,24 @@ try {
         $process | Add-Member ScriptMethod WaitForExit { param($Milliseconds) $true }
         $window = [pscustomobject]@{ }
         $window | Add-Member ScriptMethod SetFocus { }
-        $application = @{ process = $process; main = $window; main_handle = [IntPtr]5151 }
+        $script:closeProcess = $process
+        $application = @{
+            process = $process
+            owned = [pscustomobject]@{ process = $process; owner = [pscustomobject]@{} }
+            main = $window
+            main_handle = [IntPtr]5151
+        }
         [void](Close-AcceptanceApplication -Application $application -SessionId 1 -WaitSeconds 1 -CloseInput keyboard)
         if ($script:closeProbe.keyboard -ne 1 -or $script:closeProbe.ordinary -ne 0) {
             throw 'Keyboard close must deliver Alt+F4 through the actual close helper.'
         }
         [void](Close-AcceptanceApplication -Application $application -SessionId 1 -WaitSeconds 1 -CloseInput ordinary)
-        if ($script:closeProbe.keyboard -ne 1 -or $script:closeProbe.ordinary -ne 1) {
+        if ($script:closeProbe.keyboard -ne 1 -or $script:closeProbe.ordinary -ne 1 -or
+            $script:closeProbe.jobs -ne 2) {
             throw 'Ordinary close must target the exact pinned main window.'
         }
         Remove-Variable closeProbe -Scope Script
+        Remove-Variable closeProcess -Scope Script
     }
     if ($acceptanceSource.IndexOf('. $bootstrap.runner', [StringComparison]::Ordinal) -ge 0) {
         throw 'The UI observer must not dot-source the guest executable.'
@@ -926,8 +998,23 @@ try {
     if ($clipboardAssignments.Count -ne 0) {
         throw 'The Clipboard switch must not be shadowed by a case-insensitive result variable.'
     }
-    if ($acceptanceText -match 'extern IntPtr LocalFree|LocalFree\(value\.scheme\)') {
-        throw 'The acceptance observer must not free ambiguous High Contrast GET pointers.'
+    $highContrastMethodStart = $acceptanceText.IndexOf(
+        'public static HighContrastSnapshot GetHighContrastSnapshot()',
+        [StringComparison]::Ordinal
+    )
+    $highContrastMethodEnd = if ($highContrastMethodStart -ge 0) {
+        $acceptanceText.IndexOf(
+            'public static bool HighContrastEnabled()',
+            $highContrastMethodStart,
+            [StringComparison]::Ordinal
+        )
+    } else { -1 }
+    if ($highContrastMethodStart -lt 0 -or $highContrastMethodEnd -le $highContrastMethodStart -or
+        $acceptanceText.Substring(
+            $highContrastMethodStart,
+            $highContrastMethodEnd - $highContrastMethodStart
+        ) -match 'LocalFree|FreeHGlobal') {
+        throw 'The acceptance observer must retain, not free, borrowed High Contrast GET pointers.'
     }
     if ($acceptanceText.IndexOf(
         'private const int MaxHighContrastReads = 128;',
@@ -1032,6 +1119,20 @@ try {
         [regex]::Escape('[void](Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot)')
     ).Count -ne 2) {
         throw 'Regression and current-DPI cleanup must both validate their runtime tree before deletion.'
+    }
+    $runtimeDeleteCalls = [regex]::Matches(
+        $acceptanceText,
+        [regex]::Escape('Remove-Item -LiteralPath $runtimeRoot -Recurse -Force')
+    )
+    foreach ($runtimeDelete in $runtimeDeleteCalls) {
+        $ledgerGate = $acceptanceText.LastIndexOf(
+            '[void](Assert-AcceptanceProcessJobLedgerClosed)',
+            $runtimeDelete.Index,
+            [StringComparison]::Ordinal
+        )
+        if ($ledgerGate -lt 0 -or $runtimeDelete.Index -le $ledgerGate) {
+            throw 'Candidate UI runtime deletion must follow closed process-job ledger verification.'
+        }
     }
     $appearanceFunctions = @($acceptanceAst.FindAll({
         param($ast)
@@ -3199,7 +3300,7 @@ try {
 
     $occupiedOutput = New-AcceptanceFixture -Name 'occupied-output'
     [void](New-Item -ItemType Directory -Path $occupiedOutput.output_root)
-    Assert-Fails { Invoke-ValidateOnly $occupiedOutput } 'already exists'
+    Assert-Fails { Invoke-ValidateOnly $occupiedOutput } 'result file is missing'
 
     Write-Host 'Windows VM current-DPI acceptance contract tests passed.'
 }

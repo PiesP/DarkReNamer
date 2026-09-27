@@ -110,18 +110,19 @@ function Get-ObserverWindowTree {
 function Stop-AndDisposeAcceptanceOwnedProcess {
     param([Parameter(Mandatory)][object] $Owned)
 
-    $process = $Owned.process
     try {
-        $process.Refresh()
-        if (-not $process.HasExited) {
-            $process.Kill()
-            if (-not $process.WaitForExit(10000)) {
-                throw 'The exact owned acceptance process did not terminate.'
-            }
+        if ($null -eq $Owned.owner) {
+            throw 'The acceptance candidate is not owned by a process job.'
+        }
+        $cleanup = Complete-AcceptanceOwnedProcessJob -Owned $Owned -StopActive
+        if (-not $cleanup.job_empty -or -not $cleanup.job_closed) {
+            throw 'The acceptance candidate process job did not close cleanly.'
         }
     }
     finally {
-        $process.Dispose()
+        if ($null -ne $Owned.process) {
+            $Owned.process.Dispose()
+        }
     }
 }
 function Start-AcceptanceApplication {
@@ -1291,5 +1292,10 @@ function Close-AcceptanceApplication {
         throw 'The acceptance application did not close before the bounded deadline.'
     }
     if ($Application.process.ExitCode -ne 0) { throw 'The acceptance application returned a nonzero exit code.' }
+    $jobCleanup = Complete-AcceptanceOwnedProcessJob -Owned $Application.owned
+    $Application | Add-Member -NotePropertyName job_cleanup -NotePropertyValue $jobCleanup -Force
+    if ($jobCleanup.status -cne 'clean') {
+        throw 'The acceptance candidate process job had survivors or did not close cleanly.'
+    }
     $Application.process.ExitCode
 }

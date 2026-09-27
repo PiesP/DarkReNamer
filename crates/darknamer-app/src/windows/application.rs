@@ -1818,6 +1818,12 @@ mod tests {
     static APPEARANCE_WINDOW_DESTROYED: AtomicBool = AtomicBool::new(false);
     static APPEARANCE_TEST_SERIAL: Mutex<()> = Mutex::new(());
 
+    fn recovery_export_selection(path: &Path) -> io::Result<PreparedFileDialogSelection> {
+        Ok(PreparedFileDialogSelection::RecoveryExportDirectory(
+            prepare_recovery_export_directory_for_test(path)?,
+        ))
+    }
+
     #[derive(Clone, Copy, Default)]
     enum AppearanceTestMutation {
         #[default]
@@ -3123,7 +3129,7 @@ mod tests {
                 PreparedFileDialogKind::ExportRecoveryJournal
             ));
             send_synthetic_drawitem(owner);
-            PreparedFileDialogSelection::RecoveryExportDirectory(exported.clone())
+            recovery_export_selection(&exported).expect("selected recovery export directory")
         })?;
         assert!(FILE_DIALOG_DRAWITEM_LEASED.load(Ordering::SeqCst));
         app.assert_session_cleared()?;
@@ -3152,7 +3158,7 @@ mod tests {
         let mixed = app._directory.path().join("mixed-export");
         fs::create_dir(&mixed)?;
         app.dispatch_with_selector(EXPORT_RECOVERY_JOURNAL, |_, _| {
-            PreparedFileDialogSelection::RecoveryExportDirectory(mixed.clone())
+            recovery_export_selection(&mixed).expect("selected recovery export directory")
         })?;
         assert_eq!(
             fs::read(mixed.join("candidate.drj.retained"))?,
@@ -3170,7 +3176,7 @@ mod tests {
         fs::create_dir(&partial)?;
         fs::write(partial.join("candidate.drj.retained"), b"sentinel")?;
         app.dispatch_with_selector(EXPORT_RECOVERY_JOURNAL, |_, _| {
-            PreparedFileDialogSelection::RecoveryExportDirectory(partial.clone())
+            recovery_export_selection(&partial).expect("selected recovery export directory")
         })?;
         assert_eq!(
             fs::read(partial.join("candidate.drj.retained"))?,
@@ -3218,7 +3224,7 @@ mod tests {
                     })
                     .is_ok()
                 );
-                PreparedFileDialogSelection::RecoveryExportDirectory(destination.clone())
+                recovery_export_selection(&destination).expect("selected recovery export directory")
             })?;
             assert!(!destination.join("candidate.drj.retained").exists());
             app.with_state(|state| {
@@ -3247,7 +3253,7 @@ mod tests {
                     .with_state(|state| state.staged_journal = None)
                     .is_ok()
             );
-            PreparedFileDialogSelection::RecoveryExportDirectory(destination.clone())
+            recovery_export_selection(&destination).expect("selected recovery export directory")
         })?;
         identity_app.assert_session_cleared()?;
         assert!(!destination.join("candidate.drj.retained").exists());

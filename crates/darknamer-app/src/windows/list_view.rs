@@ -1154,7 +1154,7 @@ fn file_icon_index(cache: &mut HashMap<IconCacheKey, i32>, item: &LegacyListItem
             SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON,
         );
     }
-    cache.insert(key, info.iIcon);
+    cache_icon_index(cache, key, info.iIcon);
     info.iIcon
 }
 

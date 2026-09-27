@@ -194,6 +194,10 @@ function Invoke-TextScaleRescue {
     param([Parameter(Mandatory)][object] $Verified, [Parameter(Mandatory)][int] $SessionId)
     $restore = Resolve-TextScaleRestoreDocument -OutputDirectory $Verified.output_root -SourceSha $Verified.source_sha -ScriptSha256 $Verified.script_sha256
     $resultPath = Join-Path $Verified.output_root 'text-scale-rescue-result.json'
+    Initialize-TrustedResultWriter `
+        -Root $Verified.root `
+        -ResultRoot $Verified.output_root `
+        -Path $resultPath
     $errorPath = Join-Path $Verified.output_root 'text-scale-rescue-error.txt'
     $result = [ordered]@{ schema_version = 1; source_sha = $Verified.source_sha; acceptance_script_sha256 = $Verified.script_sha256; status = 'failed'; action = $null; restoration_verified = $false; snapshot_sha256 = Get-LowerSha256 -Path $restore.path; failure_reason = 'restore_failed'; diagnostic = $null }
     $lock = $null
@@ -219,7 +223,7 @@ function Invoke-TextScaleRescue {
     }
     finally {
         if ($null -ne $lock) { Exit-DesktopTestLock -Lock $lock }
-        Write-JsonUtf8Bom -Path $resultPath -Value $result
+        Write-ResultDocument -Root $Verified.root -Path $resultPath -Result $result
     }
 }
 function Assert-GuiRegressionInvocationBinding {
@@ -420,18 +424,13 @@ function Invoke-GuiRegressionAcceptance {
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
         throw 'GUI regression observation requires Windows.'
     }
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
-    if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        throw 'GUI regression observation must run non-elevated.'
-    }
+    Assert-VmObserverExecutionContext -ExpectedSessionId $ExpectedSessionId
     $session = [Diagnostics.Process]::GetCurrentProcess().SessionId
-    if ($session -ne $ExpectedSessionId) {
-        throw 'GUI regression observer is running in an unexpected desktop session.'
-    }
+    Protect-CurrentRunnerProcess
     if ($RestoreTextScaleOnly) {
         Invoke-TextScaleRescue `
             -Verified ([pscustomobject]@{
+                root = $resolved.root
                 output_root = $resolved.output_root
                 source_sha = $input.source_sha
                 script_sha256 = $ExpectedScriptSha256
@@ -440,7 +439,11 @@ function Invoke-GuiRegressionAcceptance {
         return
     }
 
-    [void](New-Item -ItemType Directory -Path $resolved.output_root)
+    $outputDirectory = Get-Item -LiteralPath $resolved.output_root -Force -ErrorAction Stop
+    if (-not $outputDirectory.PSIsContainer -or
+        ($outputDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The controller-provisioned regression output directory is unsafe.'
+    }
     $guestId = ([guid](Get-ItemProperty `
         -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Virtual Machine\Guest\Parameters' `
         -Name VirtualMachineId).VirtualMachineId).ToString('D').ToLowerInvariant()
@@ -518,6 +521,10 @@ function Invoke-GuiRegressionAcceptance {
     $textAcceptance = $null
     $textChanged = $false
     $resultPath = Join-Path $resolved.output_root 'acceptance-result.json'
+    Initialize-TrustedResultWriter `
+        -Root $resolved.root `
+        -ResultRoot $resolved.output_root `
+        -Path $resultPath
     $observationPath = Join-Path $resolved.output_root 'acceptance-observations.json'
     $diagnosticPath = Join-Path $resolved.output_root 'acceptance-error.txt'
     $result = New-GuiRegressionResult -Verified $resolved -Appearance $Appearance
@@ -564,9 +571,23 @@ function Invoke-GuiRegressionAcceptance {
                 -Accept { param($value) $value.UiPercent -eq 150 }
         }
         $cursor = [DarkReNamerVmAcceptanceNative]::ReadCursor()
-        $runtimeRoot = New-PrivateDirectory `
-            -Parent (Split-Path -Parent $resolved.output_root) `
-            -Leaf 'observer-runtime'
+        if ([string]::IsNullOrWhiteSpace($RuntimeRoot) -or
+            -not [IO.Path]::IsPathRooted($RuntimeRoot)) {
+            throw 'GUI regression requires the controller-provisioned candidate runtime directory.'
+        }
+        $runtimeItem = Get-Item -LiteralPath $RuntimeRoot -Force -ErrorAction Stop
+        if (-not $runtimeItem.PSIsContainer -or
+            ($runtimeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'GUI regression candidate runtime root is unsafe.'
+        }
+        $runtimeRoot = $runtimeItem.FullName
+        $runtimeCursor = $runtimeItem
+        while ($null -ne $runtimeCursor) {
+            if (($runtimeCursor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'GUI regression candidate runtime path traverses a reparse point.'
+            }
+            $runtimeCursor = $runtimeCursor.Parent
+        }
         Invoke-WithIsolatedEnvironment -RuntimeRoot $runtimeRoot -Action {
             if ($RegressionMode -in @('standard', 'text-scale')) {
                 $scenario = Invoke-ObserverStandardScenario `
@@ -643,6 +664,7 @@ function Invoke-GuiRegressionAcceptance {
         }
         if ($null -ne $runtimeRoot -and (Test-Path -LiteralPath $runtimeRoot)) {
             try {
+                [void](Assert-AcceptanceProcessJobLedgerClosed)
                 [void](Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot)
                 Remove-Item -LiteralPath $runtimeRoot -Recurse -Force
                 $runtimeCleaned = -not (Test-Path -LiteralPath $runtimeRoot)
@@ -762,7 +784,8 @@ function Invoke-GuiRegressionAcceptance {
         }
         $result.screenshots = $captures.ToArray()
         Write-JsonUtf8Bom -Path $observationPath -Value $observations
-        Write-JsonUtf8Bom -Path $resultPath -Value $result
+        $result['acceptance_observations'] = $observations
+        Write-ResultDocument -Root $resolved.root -Path $resultPath -Result $result
     }
     if ($result.status -ne 'review_required') {
         throw 'GUI regression observation failed; inspect output.'

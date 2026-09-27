@@ -139,6 +139,85 @@ def verify_process_lifecycle(value: object, *, executable_sha256: str,
             "Candidate process lifecycle is incomplete or exited by the wrong action.")
     if expected_exit_method == "normal-close":
         require_int(row["exit_code"], 0, 0, "Normal process exit code")
+    elif expected_exit_method == "forced-termination":
+        nonce = require_int(row["exit_code"], 2, 0x7FFFFFFF, "Job termination nonce")
+        require(nonce != 259, "Job termination nonce collides with STILL_ACTIVE.")
     else:
         require_int(row["exit_code"], -(1 << 31), (1 << 32) - 1, "Process exit code")
     return pid, session
+
+
+def verify_process_job_cleanup(value: object, *, expected_process: tuple[int, int] | None = None,
+                               expected_termination: tuple[int, int, int] | None = None,
+                               expected_processes: list[tuple[int, int]] | None = None) -> list[dict]:
+    """Consume every retained Job Object receipt and optionally bind a lifecycle."""
+    require(type(value) is list and 1 <= len(value) <= 64,
+            "Candidate process-job cleanup ledger is missing or unbounded.")
+    fields = {
+        "pid", "process_start_time_utc_ticks", "job_empty", "job_closed", "capture_complete",
+        "active_processes_at_primary_exit", "had_survivors", "forced_termination",
+        "active_processes_at_close", "active_processes_at_stop", "active_process_ids_at_stop",
+        "total_processes_at_stop", "primary_process_active_at_stop", "termination_exit_code",
+        "status", "error",
+    }
+    rows = []
+    identities = set()
+    for raw in value:
+        row = require_exact_keys(raw, fields, "Candidate process-job cleanup")
+        pid = require_int(row["pid"], 1, 0xFFFFFFFF, "Process-job PID")
+        ticks = row["process_start_time_utc_ticks"]
+        require(type(ticks) is str and re.fullmatch(r"[1-9][0-9]{0,18}", ticks) is not None and
+                int(ticks) <= 3_155_378_975_999_999_999,
+                "Process-job creation ticks are invalid.")
+        identity = (pid, int(ticks))
+        require(identity not in identities, "Candidate process-job ledger repeats a process identity.")
+        identities.add(identity)
+        require(row["job_empty"] is True and row["job_closed"] is True and
+                row["capture_complete"] is True and row["had_survivors"] is False and
+                row["status"] == "clean" and row["error"] is None,
+                "A candidate process job was not fully drained, captured, and closed.")
+        require_int(row["active_processes_at_close"], 0, 0, "Active processes at Job Object close")
+        primary_active = row["primary_process_active_at_stop"]
+        require(primary_active is None or type(primary_active) is bool,
+                "Primary-process stop state is invalid.")
+        if row["active_processes_at_primary_exit"] is not None:
+            require_int(row["active_processes_at_primary_exit"], 0, 0xFFFFFFFF,
+                        "Active processes at primary exit")
+        if row["active_processes_at_stop"] is not None:
+            require_int(row["active_processes_at_stop"], 0, 0xFFFFFFFF,
+                        "Active processes at stop")
+        if row["total_processes_at_stop"] is not None:
+            require_int(row["total_processes_at_stop"], 0, 0xFFFFFFFF,
+                        "Total assigned processes at stop")
+        ids = row["active_process_ids_at_stop"]
+        require(type(ids) is list and len(ids) <= 64,
+                "Active process PID inventory is missing or unbounded.")
+        for process_id in ids:
+            require_int(process_id, 1, 0xFFFFFFFF, "Active process PID")
+        if primary_active is True:
+            require(row["forced_termination"] is True and
+                    row["active_processes_at_stop"] == 1 and
+                    row["total_processes_at_stop"] == 1 and ids == [pid],
+                    "Forced termination did not identify only the retained primary process.")
+            nonce = require_int(row["termination_exit_code"], 2, 0x7FFFFFFF,
+                                "Job termination nonce")
+            require(nonce != 259, "Job termination nonce collides with STILL_ACTIVE.")
+        else:
+            require(row["forced_termination"] is False and
+                    row["termination_exit_code"] is None,
+                    "Normal process cleanup contains a forced-termination receipt.")
+            nonce = None
+        rows.append({"identity": identity, "row": row, "nonce": nonce})
+    if expected_process is not None:
+        require(expected_process in identities,
+                "Candidate process lifecycle has no matching Job Object cleanup record.")
+    if expected_processes is not None:
+        require(len(expected_processes) == len(set(expected_processes)) and
+                identities == set(expected_processes),
+                "Process lifecycle and Job Object cleanup ledgers do not contain the same identities.")
+    if expected_termination is not None:
+        pid, ticks, exit_code = expected_termination
+        matches = [item for item in rows if item["identity"] == (pid, ticks)]
+        require(len(matches) == 1 and matches[0]["nonce"] == exit_code,
+                "Forced process exit does not match its exact Job Object termination receipt.")
+    return [item["row"] for item in rows]

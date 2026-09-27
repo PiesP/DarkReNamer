@@ -61,16 +61,7 @@ function New-ObserverMoveFixture {
     param([Parameter(Mandatory)][string] $RuntimeRoot)
     $requestedRoot = 'C:\fixture'
     $fixedOccupied = Test-Path -LiteralPath $requestedRoot
-    if ($fixedOccupied) {
-        $root = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'fixture-equivalent'
-        $ownsFixedRoot = $false
-    }
-    else {
-        [void](New-Item -ItemType Directory -Path $requestedRoot)
-        $root = (Get-Item -LiteralPath $requestedRoot -Force).FullName
-        $ownsFixedRoot = $true
-        $script:ownedContextFixedRoot = $root
-    }
+    $root = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'fixture-equivalent'
     $rootItem = Get-Item -LiteralPath $root -Force
     if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
         @(Get-ChildItem -LiteralPath $root -Force).Count -ne 0) {
@@ -85,8 +76,8 @@ function New-ObserverMoveFixture {
         requested_root = $requestedRoot
         root = $root
         fixed_path_occupied = $fixedOccupied
-        isolated_equivalent = $fixedOccupied
-        owns_fixed_root = $ownsFixedRoot
+        isolated_equivalent = $true
+        owns_fixed_root = $false
         parent_a = $parentA
         parent_b = $parentB
         source = $source

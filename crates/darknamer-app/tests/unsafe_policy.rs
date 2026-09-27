@@ -105,7 +105,7 @@ const EXPECTED: &[(&str, UnsafeCounts)] = &[
         "src/windows/application.rs",
         UnsafeCounts::new(166, 0, 1, 0),
     ),
-    ("src/windows/clipboard.rs", UnsafeCounts::new(11, 0, 0, 0)),
+    ("src/windows/clipboard.rs", UnsafeCounts::new(12, 0, 0, 0)),
     (
         "src/windows/command_dispatch.rs",
         UnsafeCounts::new(9, 0, 0, 0),
@@ -114,7 +114,7 @@ const EXPECTED: &[(&str, UnsafeCounts)] = &[
         "src/windows/command_rail.rs",
         UnsafeCounts::new(20, 0, 0, 0),
     ),
-    ("src/windows/dialog.rs", UnsafeCounts::new(106, 0, 2, 0)),
+    ("src/windows/dialog.rs", UnsafeCounts::new(116, 0, 2, 0)),
     ("src/windows/drag_drop.rs", UnsafeCounts::new(103, 5, 38, 0)),
     ("src/windows/list_view.rs", UnsafeCounts::new(102, 1, 1, 0)),
     ("src/windows/menu.rs", UnsafeCounts::new(67, 0, 0, 0)),

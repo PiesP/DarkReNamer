@@ -1,6 +1,11 @@
 //! Stable cache keys for shell icons requested with use-file-attributes.
 
+use std::collections::HashMap;
+
 use darknamer_core::LegacyText;
+
+/// Maximum number of shell icon classes retained by the UI process.
+pub const MAX_ICON_CACHE_ENTRIES: usize = 256;
 
 /// Directory or case-folded extension icon class.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -54,4 +59,14 @@ impl IconCacheKey {
             }
         }
     }
+}
+
+/// Stores a shell image-list index without allowing extension churn to grow
+/// the process cache indefinitely. Evicted indices remain owned by the shared
+/// shell image list and can be looked up again when needed.
+pub fn cache_icon_index(cache: &mut HashMap<IconCacheKey, i32>, key: IconCacheKey, index: i32) {
+    if !cache.contains_key(&key) && cache.len() >= MAX_ICON_CACHE_ENTRIES {
+        cache.clear();
+    }
+    cache.insert(key, index);
 }

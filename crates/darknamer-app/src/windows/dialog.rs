@@ -8,9 +8,9 @@ use ::windows::Win32::UI::Shell::PropertiesSystem::{GPS_DEFAULT, IPropertyStore}
 use ::windows::Win32::UI::Shell::{
     Common::COMDLG_FILTERSPEC, FDEOR_DEFAULT, FDESVR_DEFAULT, FOS_ALLOWMULTISELECT,
     FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR, FOS_OVERWRITEPROMPT,
-    FOS_PATHMUSTEXIST, FileOpenDialog, FileSaveDialog, IFileDialog, IFileDialogEvents,
-    IFileDialogEvents_Impl, IFileOpenDialog, IFileSaveDialog, IShellItem, IShellItem2,
-    IShellItemArray, SIGDN_FILESYSPATH,
+    FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, FileSaveDialog, IFileDialog,
+    IFileDialogEvents, IFileDialogEvents_Impl, IFileOpenDialog, IFileSaveDialog, IShellItem,
+    IShellItem2, IShellItemArray, SIGDN_FILESYSPATH,
 };
 use ::windows::core::{Error as WindowsError, GUID, Interface, PCWSTR, implement};
 use std::cell::RefCell;
@@ -1633,7 +1633,22 @@ pub(super) enum PreparedFileDialogSelection {
     },
     ImportNames(PathBuf),
     ImportPaths(PathBuf),
-    RecoveryExportDirectory(PathBuf),
+    RecoveryExportDirectory(PreparedRecoveryExportDirectory),
+}
+
+pub(super) struct PreparedRecoveryExportDirectory {
+    pub(super) parent: crate::rename::windows_native::TextExportParent,
+    pub(super) display_path: PathBuf,
+}
+
+#[cfg(test)]
+pub(super) fn prepare_recovery_export_directory_for_test(
+    path: &Path,
+) -> io::Result<PreparedRecoveryExportDirectory> {
+    Ok(PreparedRecoveryExportDirectory {
+        parent: crate::rename::windows_native::prepare_text_export_parent_from_path(path)?,
+        display_path: path.to_owned(),
+    })
 }
 
 pub(super) fn select_prepared_file_dialog(
@@ -1644,12 +1659,22 @@ pub(super) fn select_prepared_file_dialog(
         PreparedFileDialogKind::AddFiles {
             remaining_count,
             remaining_path_bytes,
-        } => modal_native_dialog(owner, || {
+        } => match modal_native_dialog(owner, || {
             pick_bounded_files(owner, remaining_count, remaining_path_bytes)
-        })
-        .map_or(PreparedFileDialogSelection::Cancelled, |paths| {
-            PreparedFileDialogSelection::AddFiles(paths)
-        }),
+        }) {
+            Ok(Some(paths)) => PreparedFileDialogSelection::AddFiles(paths),
+            Ok(None) => PreparedFileDialogSelection::Cancelled,
+            Err(error) => {
+                message(
+                    owner,
+                    &format!(
+                        "파일 선택을 완료하지 못했습니다: {error}\n다시 파일을 선택해 주세요."
+                    ),
+                    "DarkReNamer - 파일 선택 실패",
+                );
+                PreparedFileDialogSelection::Cancelled
+            }
+        },
         PreparedFileDialogKind::UnifyDestinationParent => modal_native_dialog(owner, || {
             native_file_dialog(owner)
                 .set_title("모든 파일을 이동할 대상 폴더 선택")
@@ -1700,14 +1725,123 @@ pub(super) fn select_prepared_file_dialog(
         .map_or(PreparedFileDialogSelection::Cancelled, |path| {
             PreparedFileDialogSelection::ImportPaths(path)
         }),
-        PreparedFileDialogKind::ExportRecoveryJournal => modal_native_dialog(owner, || {
-            native_file_dialog(owner)
-                .set_title("복구 저널 원본을 저장할 폴더 선택")
-                .pick_folder()
-        })
-        .map_or(PreparedFileDialogSelection::Cancelled, |path| {
-            PreparedFileDialogSelection::RecoveryExportDirectory(path)
-        }),
+        PreparedFileDialogKind::ExportRecoveryJournal => {
+            match modal_native_dialog(owner, || show_secure_recovery_export_folder_dialog(owner)) {
+                Ok(Some(directory)) => {
+                    PreparedFileDialogSelection::RecoveryExportDirectory(directory)
+                }
+                Ok(None) => PreparedFileDialogSelection::Cancelled,
+                Err(error) => {
+                    message(
+                        owner,
+                        &format!("복구 저널 저장 폴더를 열지 못했습니다: {error}"),
+                        "DarkReNamer - 진단 내보내기 실패",
+                    );
+                    PreparedFileDialogSelection::Cancelled
+                }
+            }
+        }
+    }
+}
+
+#[implement(IFileDialogEvents)]
+struct SecureRecoveryExportFolderEvents {
+    owner: HWND,
+    directory: Rc<RefCell<Option<PreparedRecoveryExportDirectory>>>,
+}
+
+impl IFileDialogEvents_Impl for SecureRecoveryExportFolderEvents_Impl {
+    fn OnFileOk(&self, dialog: ::windows::core::Ref<IFileDialog>) -> ::windows::core::Result<()> {
+        *self.directory.borrow_mut() = None;
+        let mut error_owner = self.owner;
+        let directory = dialog
+            .ok()
+            .map_err(shell_dialog_error)
+            .and_then(|dialog| {
+                error_owner = file_dialog_message_owner(dialog, self.owner);
+                // SAFETY: IFileDialogEvents::OnFileOk is called just before
+                // the modal dialog returns and explicitly permits GetResult.
+                unsafe { dialog.GetResult() }.map_err(shell_dialog_error)
+            })
+            .and_then(|item| {
+                let (shell_store, shell_identity) = shell_item_identity(&item)?;
+                let display_path = dialog_path_for_item(&item)?;
+                let parent = crate::rename::windows_native::prepare_text_export_parent(
+                    &display_path,
+                    shell_identity.volume_id,
+                    shell_identity.file_reference_number,
+                )?;
+                let native_file_reference = parent.ntfs_file_reference_number()?;
+                require_matching_folder_identity(
+                    shell_identity,
+                    ShellFolderIdentity {
+                        volume_id: shell_identity.volume_id,
+                        file_reference_number: native_file_reference,
+                    },
+                )?;
+                // Keep the shell property store alive until the path traversal
+                // and retained native handle have both matched its exact ID.
+                drop(shell_store);
+                Ok(PreparedRecoveryExportDirectory {
+                    parent,
+                    display_path,
+                })
+            });
+        match directory {
+            Ok(directory) => {
+                *self.directory.borrow_mut() = Some(directory);
+                Ok(())
+            }
+            Err(error) => {
+                report_recovery_export_folder_error(error_owner, &error);
+                Err(WindowsError::from_hresult(::windows::core::HRESULT(1)))
+            }
+        }
+    }
+
+    fn OnFolderChanging(
+        &self,
+        _dialog: ::windows::core::Ref<IFileDialog>,
+        _folder: ::windows::core::Ref<IShellItem>,
+    ) -> ::windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn OnFolderChange(
+        &self,
+        _dialog: ::windows::core::Ref<IFileDialog>,
+    ) -> ::windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn OnSelectionChange(
+        &self,
+        _dialog: ::windows::core::Ref<IFileDialog>,
+    ) -> ::windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn OnShareViolation(
+        &self,
+        _dialog: ::windows::core::Ref<IFileDialog>,
+        _item: ::windows::core::Ref<IShellItem>,
+    ) -> ::windows::core::Result<::windows::Win32::UI::Shell::FDE_SHAREVIOLATION_RESPONSE> {
+        Ok(FDESVR_DEFAULT)
+    }
+
+    fn OnTypeChange(
+        &self,
+        _dialog: ::windows::core::Ref<IFileDialog>,
+    ) -> ::windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn OnOverwrite(
+        &self,
+        _dialog: ::windows::core::Ref<IFileDialog>,
+        _item: ::windows::core::Ref<IShellItem>,
+    ) -> ::windows::core::Result<::windows::Win32::UI::Shell::FDE_OVERWRITE_RESPONSE> {
+        Ok(FDEOR_DEFAULT)
     }
 }
 
@@ -2044,38 +2178,112 @@ fn report_text_save_target_error(owner: HWND, error: &io::Error) {
     };
 }
 
-fn show_bounded_file_open_dialog(owner: HWND) -> ::windows::core::Result<IShellItemArray> {
+fn show_secure_recovery_export_folder_dialog(
+    owner: HWND,
+) -> io::Result<Option<PreparedRecoveryExportDirectory>> {
+    // SAFETY: the native UI thread was initialized as STA by OleInitialize and
+    // keeps every returned COM interface on that same thread.
+    let dialog: IFileOpenDialog =
+        unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }
+            .map_err(shell_dialog_error)?;
+    let title = wide("복구 저널 원본을 저장할 폴더 선택");
+    // SAFETY: the dialog is live on its initialized UI thread and GetOptions
+    // retrieves its default Open policy before applying the required flags.
+    let options = unsafe { dialog.GetOptions() }.map_err(shell_dialog_error)?;
+    // SAFETY: the dialog is live on its initialized UI thread and the title
+    // buffer remains valid through this synchronous COM call.
+    unsafe {
+        dialog.SetOptions(
+            options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR,
+        )?;
+        dialog.SetTitle(PCWSTR(title.as_ptr()))?;
+    }
+
+    let directory = Rc::new(RefCell::new(None));
+    let events: IFileDialogEvents = SecureRecoveryExportFolderEvents {
+        owner,
+        directory: Rc::clone(&directory),
+    }
+    .into();
+    // SAFETY: dialog and event sink stay live through Show; the dialog is
+    // unadvised before either local interface is dropped.
+    let cookie = unsafe { dialog.Advise(&events) }.map_err(shell_dialog_error)?;
+    // SAFETY: dialog and owner belong to the initialized UI thread. Show is
+    // modal, and OnFileOk binds the selected shell identity to retained native
+    // directory handles before the dialog is allowed to return successfully.
+    let shown = unsafe { dialog.Show(Some(::windows::Win32::Foundation::HWND(owner))) };
+    // SAFETY: cookie is the event registration returned by Advise above.
+    let unadvised = unsafe { dialog.Unadvise(cookie) };
+    unadvised.map_err(shell_dialog_error)?;
+    drop(events);
+    drop(dialog);
+
+    match shown {
+        Ok(()) => directory.borrow_mut().take().map(Some).ok_or_else(|| {
+            io::Error::other("folder dialog returned without a retained export directory")
+        }),
+        Err(error) if error.code() == ::windows::core::HRESULT(0x8007_04C7_u32 as i32) => Ok(None),
+        Err(error) => Err(shell_dialog_error(error)),
+    }
+}
+
+fn report_recovery_export_folder_error(owner: HWND, error: &io::Error) {
+    let text = wide(&format!(
+        "선택한 저장 폴더를 안전하게 고정하지 못했습니다. 다른 폴더를 선택해 주세요.\n{error}"
+    ));
+    let title = wide("DarkReNamer - 진단 내보내기 위치 확인");
+    // SAFETY: both strings remain NUL-terminated for the synchronous call and
+    // owner is the live parent window for this modal folder dialog.
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(
+            owner,
+            text.as_ptr(),
+            title.as_ptr(),
+            windows_sys::Win32::UI::WindowsAndMessaging::MB_OK
+                | windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
+        )
+    };
+}
+
+fn show_bounded_file_open_dialog(owner: HWND) -> io::Result<Option<IShellItemArray>> {
     // SAFETY: the native UI thread was initialized as STA by OleInitialize and
     // keeps the returned COM interface on that same thread.
     let dialog: IFileOpenDialog =
-        unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }?;
+        unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }
+            .map_err(shell_dialog_error)?;
     let title = wide("이름 붙일 파일 불러오기");
     // SAFETY: the dialog and owner belong to the initialized UI thread; title
     // remains NUL-terminated and alive through SetTitle, and Show is modal.
     unsafe {
-        dialog.SetOptions(
-            FOS_ALLOWMULTISELECT
-                | FOS_FILEMUSTEXIST
-                | FOS_FORCEFILESYSTEM
-                | FOS_NOCHANGEDIR
-                | FOS_PATHMUSTEXIST,
-        )?;
-        dialog.SetTitle(PCWSTR(title.as_ptr()))?;
-        dialog.Show(Some(::windows::Win32::Foundation::HWND(owner)))?;
-        dialog.GetResults()
+        dialog
+            .SetOptions(
+                FOS_ALLOWMULTISELECT
+                    | FOS_FILEMUSTEXIST
+                    | FOS_FORCEFILESYSTEM
+                    | FOS_NOCHANGEDIR
+                    | FOS_PATHMUSTEXIST,
+            )
+            .map_err(shell_dialog_error)?;
+        dialog
+            .SetTitle(PCWSTR(title.as_ptr()))
+            .map_err(shell_dialog_error)?;
     }
+    let shown = unsafe { dialog.Show(Some(::windows::Win32::Foundation::HWND(owner))) };
+    complete_bounded_file_dialog(shown, || unsafe { dialog.GetResults() })
 }
 
 fn pick_bounded_files(
     owner: HWND,
     remaining_count: usize,
     remaining_path_bytes: usize,
-) -> Option<Vec<PathBuf>> {
-    let results = show_bounded_file_open_dialog(owner).ok()?;
+) -> io::Result<Option<Vec<PathBuf>>> {
+    let Some(results) = show_bounded_file_open_dialog(owner)? else {
+        return Ok(None);
+    };
     // SAFETY: results is a live IShellItemArray returned by the successful
     // modal file-open dialog on the initialized UI thread.
-    let reported = usize::try_from(unsafe { results.GetCount() }.ok()?).ok()?;
-    collect_bounded_dialog_paths(
+    let reported = dialog_item_count(unsafe { results.GetCount() })?;
+    let paths = collect_bounded_dialog_paths(
         reported,
         remaining_count,
         PathBudget::from_remaining_bytes(remaining_path_bytes),
@@ -2084,8 +2292,24 @@ fn pick_bounded_files(
                 u32::try_from(index).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
             dialog_path_at(&results, index)
         },
-    )
-    .ok()
+    )?;
+    Ok(Some(paths))
+}
+
+fn complete_bounded_file_dialog<T>(
+    shown: ::windows::core::Result<()>,
+    get_results: impl FnOnce() -> ::windows::core::Result<T>,
+) -> io::Result<Option<T>> {
+    match shown {
+        Ok(()) => get_results().map(Some).map_err(shell_dialog_error),
+        Err(error) if error.code() == ::windows::core::HRESULT(0x8007_04C7_u32 as i32) => Ok(None),
+        Err(error) => Err(shell_dialog_error(error)),
+    }
+}
+
+fn dialog_item_count(result: ::windows::core::Result<u32>) -> io::Result<usize> {
+    let reported = result.map_err(shell_dialog_error)?;
+    usize::try_from(reported).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))
 }
 
 fn collect_bounded_dialog_paths(
@@ -2200,6 +2424,59 @@ mod tests {
         assert_eq!(calls, 1);
         assert_eq!(paths.len(), 1);
         Ok(())
+    }
+
+    #[test]
+    fn add_files_picker_treats_only_shell_cancel_as_cancellation() -> io::Result<()> {
+        let cancelled =
+            ::windows::core::Error::from_hresult(::windows::core::HRESULT(0x8007_04C7_u32 as i32));
+        let mut get_results_calls = 0;
+        assert!(
+            complete_bounded_file_dialog(Err(cancelled), || {
+                get_results_calls += 1;
+                Ok(())
+            })?
+            .is_none()
+        );
+        assert_eq!(get_results_calls, 0);
+
+        let failure =
+            ::windows::core::Error::from_hresult(::windows::core::HRESULT(0x8000_4005_u32 as i32));
+        assert_eq!(
+            complete_bounded_file_dialog(Err(failure), || Ok(()))
+                .err()
+                .map(|error| error.kind()),
+            Some(io::ErrorKind::Other)
+        );
+
+        let get_results_failure =
+            ::windows::core::Error::from_hresult(::windows::core::HRESULT(0x8000_4005_u32 as i32));
+        assert_eq!(
+            complete_bounded_file_dialog(Ok(()), || Err::<(), _>(get_results_failure))
+                .err()
+                .map(|error| error.kind()),
+            Some(io::ErrorKind::Other)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn add_files_picker_preserves_item_count_and_path_errors() {
+        let count_error =
+            ::windows::core::Error::from_hresult(::windows::core::HRESULT(0x8000_4005_u32 as i32));
+        assert_eq!(
+            dialog_item_count(Err(count_error))
+                .err()
+                .map(|error| error.kind()),
+            Some(io::ErrorKind::Other)
+        );
+
+        let path_error = collect_bounded_dialog_paths(1, 1, PathBudget::new(), |_| {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        })
+        .expect_err("shell item path failures must propagate");
+        assert_eq!(path_error.kind(), io::ErrorKind::PermissionDenied);
     }
 
     #[test]

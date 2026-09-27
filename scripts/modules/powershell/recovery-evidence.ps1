@@ -86,6 +86,9 @@ function New-AcceptanceOutputDirectory {
     if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw 'OutputRoot must not be a reparse point.'
     }
+    if ($item.Name -cmatch '^recovery-acceptance-[0-9a-f]{32}$') {
+        return $item.FullName
+    }
     $leaf = 'recovery-acceptance-' + [Guid]::NewGuid().ToString('N')
     $path = Join-Path $item.FullName $leaf
     [void](New-Item -ItemType Directory -Path $path)
