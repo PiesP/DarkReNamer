@@ -354,6 +354,7 @@ finally {
             $journalAfter = $null
             $journalObserved = $false
             $runtimeRootAfter = $null
+            $ownedProcessObservation = $null
             try {
                 $journalAfter = @(if ($null -ne $result.gui -and
                     $null -ne $result.gui.flow -and
@@ -363,7 +364,12 @@ finally {
                     @(Get-VmAutomatedJournalInventory -LocalAppData (Join-Path $effectiveRuntimeRoot 'gui\localappdata'))
                 })
                 $journalObserved = $true
-                $ownedAfter = @(Get-VmAutomatedOwnedProcessInventory -Root $verified.root)
+                $ownedProcessObservation = Get-VmAutomatedOwnedProcessCleanupObservation `
+                    -Root $verified.root
+                $ownedAfter = $ownedProcessObservation.entries
+                if (-not $ownedProcessObservation.observed) {
+                    throw 'The owned candidate process inventory could not be observed.'
+                }
                 if ($ownedAfter.Count -ne 0) {
                     throw 'An owned candidate process remains after the GUI flow.'
                 }
@@ -382,18 +388,34 @@ finally {
             }
             catch {
                 $result.status = 'failed'
-                $result.failure_reason = 'raw_cleanup_failed'
+                if ([string]::IsNullOrEmpty($result.failure_reason)) {
+                    $result.failure_reason = if ($null -ne $ownedProcessObservation -and
+                        -not $ownedProcessObservation.observed) {
+                        'owned_process_cleanup_observation_failed'
+                    }
+                    else {
+                        'raw_cleanup_failed'
+                    }
+                }
                 try {
                     $runtimeRootAfter = Get-VmAutomatedRuntimeRootObservation -Root $effectiveRuntimeRoot
                 }
                 catch {
                     $runtimeRootAfter = $null
                 }
+                if ($null -eq $ownedProcessObservation) {
+                    $ownedProcessObservation = Get-VmAutomatedOwnedProcessCleanupObservation `
+                        -Root $verified.root
+                }
                 $result['raw_cleanup'] = [ordered]@{
-                    owned_processes_after = @(Get-VmAutomatedOwnedProcessInventory -Root $verified.root)
+                    owned_processes_after = $ownedProcessObservation.entries
                     runtime_root_after = $runtimeRootAfter
                     journal_after = (New-VmAutomatedJournalCleanupObservation `
                         -Observed $journalObserved -Entries $journalAfter)
+                }
+                if (-not $ownedProcessObservation.observed) {
+                    $result.raw_cleanup['owned_processes_observation_error'] =
+                        $ownedProcessObservation.error
                 }
             }
         }

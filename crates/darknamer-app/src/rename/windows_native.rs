@@ -69,6 +69,16 @@ pub(crate) struct TextExportTarget {
 }
 
 #[derive(Debug)]
+pub(crate) enum TextExportOutcome {
+    /// The destination contains the complete requested bytes and no cleanup
+    /// issue remains.
+    Committed,
+    /// The destination contains the complete requested bytes, but the
+    /// identity-checked backup could not be removed safely.
+    CommittedWithCleanupWarning(io::Error),
+}
+
+#[derive(Debug)]
 enum TextExportLeaf {
     Existing { guard: File, identity: (u128, u64) },
     Missing,
@@ -771,8 +781,11 @@ fn parse_volume_guid_path(path: &[u16]) -> io::Result<u128> {
     Ok(value)
 }
 
-pub(crate) fn write_text_export_target(target: TextExportTarget, bytes: &[u8]) -> io::Result<()> {
-    write_text_export_target_inner(target, bytes, || Ok(()))
+pub(crate) fn write_text_export_target(
+    target: TextExportTarget,
+    bytes: &[u8],
+) -> io::Result<TextExportOutcome> {
+    write_text_export_target_inner(target, bytes, || Ok(()), |_| Ok(()))
 }
 
 #[cfg(test)]
@@ -780,20 +793,34 @@ pub(crate) fn write_text_export_target_with_before_replace<F>(
     target: TextExportTarget,
     bytes: &[u8],
     before_replace: F,
-) -> io::Result<()>
+) -> io::Result<TextExportOutcome>
 where
     F: FnOnce() -> io::Result<()>,
 {
-    write_text_export_target_inner(target, bytes, before_replace)
+    write_text_export_target_inner(target, bytes, before_replace, |_| Ok(()))
 }
 
-fn write_text_export_target_inner<F>(
+#[cfg(test)]
+pub(crate) fn write_text_export_target_with_before_backup_cleanup<F>(
+    target: TextExportTarget,
+    bytes: &[u8],
+    before_backup_cleanup: F,
+) -> io::Result<TextExportOutcome>
+where
+    F: FnOnce(&Path) -> io::Result<()>,
+{
+    write_text_export_target_inner(target, bytes, || Ok(()), before_backup_cleanup)
+}
+
+fn write_text_export_target_inner<F, G>(
     target: TextExportTarget,
     bytes: &[u8],
     before_replace: F,
-) -> io::Result<()>
+    before_backup_cleanup: G,
+) -> io::Result<TextExportOutcome>
 where
     F: FnOnce() -> io::Result<()>,
+    G: FnOnce(&Path) -> io::Result<()>,
 {
     let parent = target
         .parents
@@ -829,7 +856,7 @@ where
             TextExportLeaf::Missing => {
                 rename_noreplace(stage_file, parent.file(), &target.leaf)?;
                 stage_committed = true;
-                Ok(())
+                Ok(TextExportOutcome::Committed)
             }
             TextExportLeaf::Existing { guard, identity } => {
                 validate_text_export_file(&guard)?;
@@ -878,7 +905,16 @@ where
                 }
 
                 stage_committed = true;
-                remove_text_export_backup(parent.file(), &backup_leaf, identity)
+                let backup_path = PathBuf::from(std::ffi::OsString::from_wide(
+                    &backup_path[..backup_path.len() - 1],
+                ));
+                let cleanup_result = before_backup_cleanup(&backup_path).and_then(|()| {
+                    remove_text_export_backup(parent.file(), &backup_leaf, identity)
+                });
+                Ok(match cleanup_result {
+                    Ok(()) => TextExportOutcome::Committed,
+                    Err(error) => TextExportOutcome::CommittedWithCleanupWarning(error),
+                })
             }
         }
     })();
@@ -1053,7 +1089,7 @@ fn restore_text_export_backup(
 /// the directory entry keeps any late hard-link alias attached to the old
 /// file contents.
 #[cfg(test)]
-pub(crate) fn write_text_export(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_text_export(path: &Path, bytes: &[u8]) -> io::Result<TextExportOutcome> {
     write_text_export_target(prepare_text_export_target(path)?, bytes)
 }
 
