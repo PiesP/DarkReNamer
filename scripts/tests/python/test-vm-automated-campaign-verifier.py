@@ -14,6 +14,7 @@ import tempfile
 import unittest
 import zlib
 
+from controller_cleanup_fixture import clean_controller_cleanup
 from darkrenamer_tooling.campaign.planning import execution_slots, new_plan
 from darkrenamer_tooling.campaign.verifier import EvidenceReader, verify_complete_campaign
 from darkrenamer_tooling.contracts.binding import COMPONENTS, Candidate
@@ -136,16 +137,7 @@ class CampaignFixture:
         return ({"owned_processes_after": [],
                  "runtime_root_after": {"exists": False, "entries": []},
                  "journal_after": {"entries": []}},
-                {"scheduled_task_present": False, "guest_root_present": False,
-                 "trusted_task_root_present": False, "process_jobs_closed": True,
-                 "runner_process_inventory_complete": True,
-                 "unexpected_runner_tasks": [], "unexpected_runner_processes": [],
-                 "unexpected_runner_tasks_after_intervention": [],
-                 "unexpected_runner_processes_after_intervention": [],
-                 "unexpected_runner_tasks_after_delete": [],
-                 "unexpected_runner_processes_after_delete": [],
-                 "removed_runner_tasks": [], "terminated_runner_processes": [],
-                 "resource_cleanup_errors": [], "owned_processes_after": []})
+                clean_controller_cleanup())
 
     def lifecycle(self, index: int, *, pid: int | None = None) -> dict:
         return {"pid": 10_000 + index if pid is None else pid, "session_id": 2,
@@ -542,17 +534,19 @@ class CampaignFixture:
                   "target": "x86_64-pc-windows-msvc",
                   "runner": deepcopy(self.bundle["harness"]["runner"]),
                   "test_binaries": [{"file": "required-tests.exe", "sha256": binary.sha256}]}
+        backend_cleanup = clean_controller_cleanup()
         result = {"schema_version": 1, "source_sha": self.candidate.source_sha,
                   "source_state": "clean",
                   "target": "x86_64-pc-windows-msvc", "failure_reason": None,
-                  "transport": {"guest_cleanup": True},
+                  "transport": {"guest_cleanup": True, "raw_cleanup": backend_cleanup},
                   "tests": [{"file": "required-tests.exe", "sha256": binary.sha256,
                              "exit_code": 0, "passed": 5, "failed": 0, "ignored": 0,
                              "stdout": {"file": "stdout.txt", "sha256": stdout.sha256},
                              "stderr": {"file": "stderr.txt", "sha256": stderr.sha256}}]}
         self.add_json("backend/bundle.json", bundle)
         self.add_json("backend/result.json", result)
-        self.add_json("backend/transport.json", {"guest_cleanup": True})
+        self.add_json("backend/transport.json", {
+            "guest_cleanup": True, "raw_cleanup": backend_cleanup})
         backend_paths = sorted(path for path in self.files if path.startswith("backend/"))
         self.campaign["backend"] = {
             "source_sha": self.candidate.source_sha, "bundle": "backend/bundle.json",
@@ -574,6 +568,30 @@ class CampaignFixture:
         finally:
             (self.root / path).write_bytes(original_data)
             self.files[path] = original_pin
+
+    @contextmanager
+    def change_backend_transport(self, mutation):
+        path = "backend/transport.json"
+        original_data = (self.root / path).read_bytes()
+        original_pin = self.files[path]
+        campaign_data = (self.root / "campaign.json").read_bytes()
+        campaign_pin = self.files["campaign.json"]
+        original_campaign = deepcopy(self.campaign)
+        value = json.loads(original_data)
+        mutation(value)
+        transport_pin = self.add_json(path, value)
+        row = next(row for row in self.campaign["backend"]["files"] if row["file"] == path)
+        row.update(sha256=transport_pin.sha256, size=transport_pin.size)
+        self.add_json("campaign.json", self.campaign)
+        try:
+            yield
+        finally:
+            self.campaign.clear()
+            self.campaign.update(original_campaign)
+            (self.root / path).write_bytes(original_data)
+            self.files[path] = original_pin
+            (self.root / "campaign.json").write_bytes(campaign_data)
+            self.files["campaign.json"] = campaign_pin
 
 
 class CompleteCampaignTests(unittest.TestCase):
@@ -625,6 +643,16 @@ class CompleteCampaignTests(unittest.TestCase):
                                       value["raw_cleanup"].update(scheduled_task_present=True)):
             with self.assertRaises(EvidenceError):
                 self.verify()
+
+    def test_backend_transport_cleanup_is_verified_and_cross_bound(self):
+        for label, mutation in (
+                ("invalid raw cleanup", lambda value: value["raw_cleanup"].update(
+                    scheduled_task_present=True)),
+                ("different valid raw cleanup", lambda value: value["raw_cleanup"]
+                    ["smart_screen_natural_exit"].update(runner_session_id=3))):
+            with self.subTest(label=label), self.fixture.change_backend_transport(mutation):
+                with self.assertRaises(EvidenceError):
+                    self.verify()
 
     def test_reused_process_lifetime_fails(self):
         source = json.loads((self.fixture.root / "runs/core-uia-flow/result.json").read_bytes())

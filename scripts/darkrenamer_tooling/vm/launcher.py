@@ -12,6 +12,7 @@ import sys
 import tempfile
 import uuid
 
+from darkrenamer_tooling.contracts.platform import verify_controller_cleanup
 from darkrenamer_tooling.contracts.tooling import stage_verified_tooling
 
 TARGET = 'x86_64-pc-windows-msvc'
@@ -1018,7 +1019,11 @@ def verify_result(root, manifest, result, expected_transport_kind=None, expected
                 raise ValueError('VM candidate GUI process exit code is invalid.')
             verify_foreground_evidence(gui)
     transport = result.get('transport', {})
-    if transport.get('guest_cleanup') is not True or (not candidate and total == 0):
+    if transport.get('guest_cleanup') is not True:
+        passed = False
+    else:
+        verify_controller_cleanup(transport.get('raw_cleanup'))
+    if not candidate and total == 0:
         passed = False
     if candidate:
         engine = transport.get('runner_engine')
@@ -1414,6 +1419,7 @@ def verify_observer_transport(root, role, expected_transport_kind, expected_vm_i
             not isinstance(engine, dict) or engine.get('edition') != 'Core' or
             engine.get('effective_policy') != 'RemoteSigned'):
         raise ValueError('Observer transport result is incomplete or invalid.')
+    verify_controller_cleanup(transport.get('raw_cleanup'))
     try:
         if tuple(int(part) for part in engine['version'].split('.')[:2]) < (7, 4):
             raise ValueError

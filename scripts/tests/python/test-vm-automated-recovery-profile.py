@@ -13,6 +13,7 @@ import zlib
 from darkrenamer_tooling.campaign.recovery import verify_recovery_execution
 from darkrenamer_tooling.evidence.archive import EvidenceError
 from darkrenamer_tooling.evidence.png import DecodedPixelBudget, decode_png
+from controller_cleanup_fixture import clean_controller_cleanup
 
 
 ROOT = r"C:\fixture"
@@ -384,16 +385,7 @@ def build_crash():
         "actions": intent_actions, "lock_states": locks,
     }
     reader, result = builder.finish(result)
-    transport = {"raw_cleanup": {"scheduled_task_present": False, "guest_root_present": False,
-                                  "trusted_task_root_present": False, "process_jobs_closed": True,
-                                  "runner_process_inventory_complete": True,
-                                  "unexpected_runner_tasks": [], "unexpected_runner_processes": [],
-                                  "unexpected_runner_tasks_after_intervention": [],
-                                  "unexpected_runner_processes_after_intervention": [],
-                                  "unexpected_runner_tasks_after_delete": [],
-                                  "unexpected_runner_processes_after_delete": [],
-                                  "removed_runner_tasks": [], "terminated_runner_processes": [],
-                                  "resource_cleanup_errors": [], "owned_processes_after": []}}
+    transport = {"raw_cleanup": clean_controller_cleanup()}
     return reader, result, bundle, transport
 
 
@@ -436,16 +428,7 @@ def build_worker(close):
                                                        "worker cancellation restored state")
     result["worker_close" if close else "worker_cancellation"] = mode
     reader, result = builder.finish(result)
-    transport = {"raw_cleanup": {"scheduled_task_present": False, "guest_root_present": False,
-                                  "trusted_task_root_present": False, "process_jobs_closed": True,
-                                  "runner_process_inventory_complete": True,
-                                  "unexpected_runner_tasks": [], "unexpected_runner_processes": [],
-                                  "unexpected_runner_tasks_after_intervention": [],
-                                  "unexpected_runner_processes_after_intervention": [],
-                                  "unexpected_runner_tasks_after_delete": [],
-                                  "unexpected_runner_processes_after_delete": [],
-                                  "removed_runner_tasks": [], "terminated_runner_processes": [],
-                                  "resource_cleanup_errors": [], "owned_processes_after": []}}
+    transport = {"raw_cleanup": clean_controller_cleanup()}
     return reader, result, bundle, transport, builder.prefix
 
 

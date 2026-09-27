@@ -76,7 +76,7 @@
       "bundle": "tooling-campaign-verifier.py",
       "kind": "python",
       "module": "darkrenamer_tooling.campaign.verifier",
-      "sha256": "9cc75704e98095f12dd56bfcc0da4daed71546503482698e28d5686621182dbf",
+      "sha256": "e44733c9323b9cbc02fee576d90235e905d5c939a792dbdb4a8cb17449feb351",
       "dependencies": [
         "package-root",
         "package-campaign",
@@ -99,7 +99,7 @@
       "bundle": "tooling-campaign-runner.py",
       "kind": "python",
       "module": "darkrenamer_tooling.campaign.runner",
-      "sha256": "b48071ab86c1bcfe1f12f2cc25f267cf08c8c80bc0824ce3415288d398fc5215",
+      "sha256": "afb0cbadbf61a171aab2e0a25f1d9319f06834d519226b4bfa16178658a88a48",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -133,12 +133,13 @@
       "bundle": "tooling-vm-launcher.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.launcher",
-      "sha256": "6ffef5362465ba1de9ef350286f923151c966a983786026fca3dbefcffa20f5c",
+      "sha256": "4166292af16bffe73878fcb665ed9ffac110fc8f13b44e3bfbc42b11fac5fbb2",
       "dependencies": [
         "tooling-loader",
         "package-root",
         "package-vm",
         "package-contracts",
+        "contracts-platform",
         "contracts-tooling",
         "package-evidence",
         "evidence-errors",
@@ -210,7 +211,7 @@
       "bundle": "tooling-contracts-platform.py",
       "kind": "python",
       "module": "darkrenamer_tooling.contracts.platform",
-      "sha256": "84fe3f0dd9b71ce792ff340e278617f196217f94f1995993b1451b73418f71a3",
+      "sha256": "397e42bcbd102e57a2a222aca2272eb52da0083f736416936143014c9939e7c3",
       "dependencies": [
         "package-root",
         "package-contracts",
@@ -721,7 +722,7 @@
       "bundle": "controller-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "e6c06c97b5b8f44aa522f19d030c1f2a016da5f7fc6f95fec01e3c84e9b48839",
+      "sha256": "e5f64f8fc6d23437d74cb09777f17fe69455259f3c5c8e5014b2ff0ef0445c7b",
       "dependencies": [
         "powershell-loader",
         "powershell-controller-contracts",

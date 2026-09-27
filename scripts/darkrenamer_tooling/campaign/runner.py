@@ -291,6 +291,7 @@ def prepare_backend(source: Path, destination: Path, profile: dict,
     # bytes before parsing and independently derive required test functions
     # from each binary's complete stdout transcript.
     from darkrenamer_tooling.campaign.verifier import EvidenceReader, verify_backend_execution
+    from darkrenamer_tooling.contracts.platform import verify_controller_cleanup
     from darkrenamer_tooling.evidence.archive import ExtractedEvidence, FileReference
     pins = {}
     for name in ("bundle.json", "result.json", "transport.json"):
@@ -308,6 +309,13 @@ def prepare_backend(source: Path, destination: Path, profile: dict,
     verify_backend_execution(reader, "bundle.json", "result.json", source_sha=harness_sha,
                              required_tests=profile["required_backend_test_names"])
     require(transport.get("guest_cleanup") is True, "Backend controller cleanup did not finish.")
+    external_cleanup = verify_controller_cleanup(transport.get("raw_cleanup"))
+    embedded_transport = result.get("transport")
+    require(type(embedded_transport) is dict,
+            "Backend result lacks its embedded controller transport.")
+    embedded_cleanup = verify_controller_cleanup(embedded_transport.get("raw_cleanup"))
+    require(external_cleanup == embedded_cleanup,
+            "Backend embedded and external controller cleanup observations differ.")
     require(native_runner.verify_result(source, manifest, result),
             "Backend native runner result did not pass its existing validator.")
     destination.mkdir()

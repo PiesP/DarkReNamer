@@ -352,6 +352,20 @@ that partial history, but a later retry cannot replace the failed attempt or
 fill its missing slots. Passing requires a new campaign with a new complete
 execution history.
 
+Controller cleanup requires complete process and scheduled-task inventories to
+show no runner delta after intervention and after resource removal. One initial
+same-user, same-session process delta may be accounted for only when it is the
+exact `System32\smartscreen.exe -Embedding` broker, owned by the runner and
+spawned by the SYSTEM `System32\svchost.exe` process hosting the running
+`DcomLaunch` service. The controller records its canonical paths, process
+lifetimes, command-line arguments, and valid Microsoft Authenticode signatures,
+then applies a six-minute monotonic deadline to process and scheduled-task
+polling. It accepts only natural exit followed by complete zero-delta inventories
+before the deadline; a late poll fails cleanup. A stalled inventory call may
+delay controller return, but cannot produce a passing late result. Any identity
+mismatch, second process, task delta, incomplete inventory, or timeout fails
+cleanup; the controller never terminates SmartScreen.
+
 The independent verifier derives all 22 target verdicts from raw observations;
 producer summaries, `passed` flags, and legacy `review_required` values are not
 verdict inputs. The five required gate records bind separate properties:

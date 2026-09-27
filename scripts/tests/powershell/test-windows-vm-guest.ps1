@@ -1981,7 +1981,11 @@ $script:failFirstOwner = $true
 $script:failAllOwners = $false
 function Get-CimInstance {
     [CmdletBinding()]
-    param([Parameter(Position = 0)][string] $ClassName, [string] $Filter)
+    param(
+        [Parameter(Position = 0)][string] $ClassName,
+        [string] $Filter,
+        [uint32] $OperationTimeoutSec
+    )
     $script:runnerCimCalls++
     [pscustomobject]@{
         ProcessId = 4242
@@ -1992,7 +1996,11 @@ function Get-CimInstance {
 }
 function Invoke-CimMethod {
     [CmdletBinding()]
-    param([object] $InputObject, [string] $MethodName)
+    param(
+        [object] $InputObject,
+        [string] $MethodName,
+        [uint32] $OperationTimeoutSec
+    )
     $script:runnerOwnerCalls++
     if ($script:failFirstOwner) {
         $script:failFirstOwner = $false
@@ -2036,6 +2044,184 @@ $incomplete = Get-DrVmRunnerProcesses -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 
         $runnerProcessProbeResult.incomplete_cim_calls -ne 3) {
         throw 'The VM process inventory must recover from one transient owner query failure and remain incomplete after the bounded retries.'
     }
+    $brokerFunctionDefinitions = @($controllerEntryAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'global:Test-DrVmSmartScreenBrokerEvidence'
+    }, $true))
+    $waitFunctionDefinitions = @($controllerEntryAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'global:Wait-DrVmSmartScreenNaturalExit'
+    }, $true))
+    if ($brokerFunctionDefinitions.Count -ne 1 -or $waitFunctionDefinitions.Count -ne 1) {
+        throw 'The controller must expose one pure broker contract and one bounded natural-exit wait.'
+    }
+    $brokerProbe = [scriptblock]::Create(@'
+param([string] $FunctionText)
+$localFunctionText = $FunctionText.Replace(
+    'function global:Test-DrVmSmartScreenBrokerEvidence',
+    'function Test-DrVmSmartScreenBrokerEvidence'
+)
+. ([scriptblock]::Create($localFunctionText))
+$candidateIdentity = '4242|2026-09-27T18:34:27.0489960Z'
+$processPath = 'C:\Windows\System32\smartscreen.exe'
+$parentPath = 'C:\Windows\System32\svchost.exe'
+$evidence = [ordered]@{
+    windows_directory = 'C:\Windows'
+    process_identity = $candidateIdentity
+    process_pid = [int]4242
+    process_creation_time_utc = '2026-09-27T18:34:27.0489960Z'
+    process_session_id = [int]2
+    process_owner_sid = 'S-1-5-21-1-2-3-1001'
+    process_executable_path = $processPath
+    process_path_verified = $true
+    process_command_line_arguments = @($processPath, '-Embedding')
+    process_signature_status = 'Valid'
+    process_signer_subject = 'CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
+    process_signer_thumbprint = ('A' * 40)
+    parent_identity = '2000|2026-09-27T18:00:00.0000000Z'
+    parent_pid = [int]2000
+    parent_creation_time_utc = '2026-09-27T18:00:00.0000000Z'
+    parent_session_id = [int]0
+    parent_owner_sid = 'S-1-5-18'
+    parent_executable_path = $parentPath
+    parent_path_verified = $true
+    parent_command_line_arguments = @($parentPath, '-k', 'DcomLaunch', '-p')
+    parent_signature_status = 'Valid'
+    parent_signer_subject = 'CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
+    parent_signer_thumbprint = ('B' * 40)
+    service_name = 'DcomLaunch'
+    service_process_id = [int]2000
+    service_state = 'Running'
+}
+$valid = Test-DrVmSmartScreenBrokerEvidence -Evidence $evidence `
+    -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2 -CandidateIdentity $candidateIdentity
+$badOwner = [ordered]@{}; foreach ($key in $evidence.Keys) { $badOwner[$key] = $evidence[$key] }
+$badOwner.process_owner_sid = 'S-1-5-18'
+$ownerRejected = -not (Test-DrVmSmartScreenBrokerEvidence -Evidence $badOwner `
+    -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2 -CandidateIdentity $candidateIdentity)
+$badSignature = [ordered]@{}; foreach ($key in $evidence.Keys) { $badSignature[$key] = $evidence[$key] }
+$badSignature.process_signature_status = 'NotSigned'
+$signatureRejected = -not (Test-DrVmSmartScreenBrokerEvidence -Evidence $badSignature `
+    -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2 -CandidateIdentity $candidateIdentity)
+$badService = [ordered]@{}; foreach ($key in $evidence.Keys) { $badService[$key] = $evidence[$key] }
+$badService.service_process_id = [int]2001
+$serviceRejected = -not (Test-DrVmSmartScreenBrokerEvidence -Evidence $badService `
+    -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2 -CandidateIdentity $candidateIdentity)
+$badArguments = [ordered]@{}; foreach ($key in $evidence.Keys) { $badArguments[$key] = $evidence[$key] }
+$badArguments.process_command_line_arguments = @($processPath, '-Embedding', '-unsafe')
+$argumentsRejected = -not (Test-DrVmSmartScreenBrokerEvidence -Evidence $badArguments `
+    -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2 -CandidateIdentity $candidateIdentity)
+[pscustomobject]@{
+    valid = $valid
+    owner_rejected = $ownerRejected
+    signature_rejected = $signatureRejected
+    service_rejected = $serviceRejected
+    arguments_rejected = $argumentsRejected
+}
+'@)
+$brokerProbeResult = & $brokerProbe $brokerFunctionDefinitions[0].Extent.Text
+if (-not $brokerProbeResult.valid -or -not $brokerProbeResult.owner_rejected -or
+    -not $brokerProbeResult.signature_rejected -or -not $brokerProbeResult.service_rejected -or
+    -not $brokerProbeResult.arguments_rejected) {
+    throw 'The SmartScreen broker contract must reject an owner, signature, service, or command-line mismatch.'
+}
+    $waitProbe = [scriptblock]::Create(@'
+param([string] $FunctionText)
+$localFunctionText = $FunctionText.Replace(
+    'function global:Wait-DrVmSmartScreenNaturalExit',
+    'function Wait-DrVmSmartScreenNaturalExit'
+)
+. ([scriptblock]::Create($localFunctionText))
+$script:inventoryQueue = [Collections.Generic.Queue[object]]::new()
+$script:taskRows = @()
+$script:ownedPathPresent = $false
+function Get-DrVmRunnerProcesses {
+    param([string] $UserSid, [int] $SessionId)
+    if ($script:inventoryQueue.Count -gt 0) { return $script:inventoryQueue.Dequeue() }
+    throw 'Unexpected process inventory poll.'
+}
+function Get-DrVmRunnerTasks { return @($script:taskRows) }
+function Get-CimInstance {
+    [CmdletBinding()]
+    param([Parameter(Position = 0)][string] $ClassName, [uint32] $OperationTimeoutSec)
+    if ($script:ownedPathPresent) {
+        return @([pscustomobject]@{ ExecutablePath = 'C:\owned\candidate.exe' })
+    }
+    return @()
+}
+function Test-ProcessExecutableInOwnedRoots {
+    param([AllowNull()][string] $Path, [string[]] $Prefixes)
+    return $script:ownedPathPresent
+}
+function Start-Sleep { param([int] $Milliseconds) }
+$baseline = [pscustomobject]@{
+    identity = '1000|2026-09-27T18:00:00.0000000Z'
+    pid = [int]1000
+    session_id = [int]2
+    creation_time_utc = '2026-09-27T18:00:00.0000000Z'
+    executable_path = 'C:\Windows\explorer.exe'
+}
+$candidateIdentity = '4242|2026-09-27T18:34:27.0489960Z'
+$candidate = [pscustomobject]@{ identity = $candidateIdentity }
+$script:inventoryQueue.Enqueue([pscustomobject]@{ complete = $true; processes = @($baseline, $candidate) })
+$script:inventoryQueue.Enqueue([pscustomobject]@{ complete = $true; processes = @($baseline) })
+$natural = Wait-DrVmSmartScreenNaturalExit `
+    -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2 `
+    -BaselineProcessIdentities @($baseline.identity) -BaselineTasks @() `
+    -CandidateIdentity $candidateIdentity -OwnedRootPrefixes @('C:\owned\') `
+    -TimeoutMilliseconds 360000
+$script:inventoryQueue.Enqueue([pscustomobject]@{ complete = $true; processes = @($baseline, $candidate) })
+$script:inventoryQueue.Enqueue([pscustomobject]@{ complete = $true; processes = @($baseline, $candidate,
+    [pscustomobject]@{ identity = '4243|2026-09-27T18:34:28.0489960Z' }) })
+$secondProcess = Wait-DrVmSmartScreenNaturalExit `
+    -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2 `
+    -BaselineProcessIdentities @($baseline.identity) -BaselineTasks @() `
+    -CandidateIdentity $candidateIdentity -OwnedRootPrefixes @('C:\owned\') `
+    -TimeoutMilliseconds 360000
+$script:inventoryQueue.Enqueue([pscustomobject]@{ complete = $true; processes = @($baseline, $candidate) })
+$deadline = Wait-DrVmSmartScreenNaturalExit `
+    -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2 `
+    -BaselineProcessIdentities @($baseline.identity) -BaselineTasks @() `
+    -CandidateIdentity $candidateIdentity -OwnedRootPrefixes @('C:\owned\') `
+    -TimeoutMilliseconds 0
+$script:inventoryQueue.Enqueue([pscustomobject]@{ complete = $true; processes = @($baseline, $candidate) })
+$baselineTask = [pscustomobject]@{
+    identity = '\User\BaselineTask'
+    definition_sha256 = ('D' * 64)
+}
+$missingTask = Wait-DrVmSmartScreenNaturalExit `
+    -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 2 `
+    -BaselineProcessIdentities @($baseline.identity) -BaselineTasks @($baselineTask) `
+    -CandidateIdentity $candidateIdentity -OwnedRootPrefixes @('C:\owned\') `
+    -TimeoutMilliseconds 360000
+[pscustomobject]@{
+    natural_status = $natural.status
+    natural_exit = $natural.natural_exit_observed
+    natural_first = $natural.polls[0].process_delta_identities[0]
+    natural_final_count = @($natural.final_runner_process_delta_identities).Count
+    second_process_status = $secondProcess.status
+    second_process_exit = $secondProcess.natural_exit_observed
+    deadline_status = $deadline.status
+    deadline_exit = $deadline.natural_exit_observed
+    missing_task_status = $missingTask.status
+    missing_task_delta = $missingTask.polls[1].task_delta_identities[0]
+}
+'@)
+$waitProbeResult = & $waitProbe $waitFunctionDefinitions[0].Extent.Text
+if ($waitProbeResult.natural_status -cne 'natural-exit' -or
+    -not $waitProbeResult.natural_exit -or
+    $waitProbeResult.natural_first -cne '4242|2026-09-27T18:34:27.0489960Z' -or
+    $waitProbeResult.natural_final_count -ne 0 -or
+    $waitProbeResult.second_process_status -cne 'rejected' -or
+    $waitProbeResult.second_process_exit -or
+    $waitProbeResult.deadline_status -cne 'timed-out' -or
+    $waitProbeResult.deadline_exit -or
+    $waitProbeResult.missing_task_status -cne 'rejected' -or
+    $waitProbeResult.missing_task_delta -cne '\User\BaselineTask') {
+    throw 'The SmartScreen wait must accept only natural exit, reject process/task changes, and enforce its monotonic deadline.'
+}
     if ($hostRunnerText.IndexOf('Register-ScheduledTask', [StringComparison]::Ordinal) -ge 0 -or
         $hostRunnerText.IndexOf('SetSecurityDescriptor(', [StringComparison]::Ordinal) -ge 0) {
         throw 'Windows VM tasks must not expose a mutable registration before applying their protected DACL.'

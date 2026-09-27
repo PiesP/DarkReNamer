@@ -13,7 +13,8 @@ from darkrenamer_tooling.campaign.planning import (
 from darkrenamer_tooling.contracts.binding import Candidate, verify_result_binding
 from darkrenamer_tooling.contracts.menu_layout import verify_native_menu_layout
 from darkrenamer_tooling.contracts.platform import (
-    contains, rectangle, verify_cleanup, verify_environment, verify_keyboard_events,
+    contains, rectangle, verify_cleanup, verify_controller_cleanup,
+    verify_environment, verify_keyboard_events,
 )
 from darkrenamer_tooling.contracts.state import Identity, core_rename_checkpoints
 from darkrenamer_tooling.evidence.archive import (
@@ -279,8 +280,11 @@ def verify_backend_execution(reader: EvidenceReader, bundle_path: str, result_pa
         total_passed += passed
     require(total_passed > 0 and set(required_tests) <= executed_tests,
             "Required no-overwrite/recovery backend regressions were not executed successfully.")
-    require(result.get("failure_reason") is None and result.get("transport", {}).get("guest_cleanup") is True,
+    embedded_transport = result.get("transport")
+    require(type(embedded_transport) is dict and result.get("failure_reason") is None and
+            embedded_transport.get("guest_cleanup") is True,
             "Backend runtime cleanup failed or was not observed.")
+    verify_controller_cleanup(embedded_transport.get("raw_cleanup"))
     return canonical_digest({"bundle_sha256": reader.evidence.files[bundle_path].sha256,
                              "result_sha256": reader.evidence.files[result_path].sha256,
                              "binary_sha256": dict(sorted(expected.items())),
@@ -653,6 +657,13 @@ def verify_complete_campaign(reader: EvidenceReader, *, profile: dict, profile_s
             "Backend runner differs from the trusted source.")
     backend_transport = reader.json(backend["transport"])
     require(backend_transport.get("guest_cleanup") is True, "Backend controller did not finish guest cleanup.")
+    backend_result = reader.json(backend["result"])
+    require(type(backend_result) is dict and type(backend_result.get("transport")) is dict,
+            "Backend embedded controller transport is unavailable.")
+    external_cleanup = verify_controller_cleanup(backend_transport.get("raw_cleanup"))
+    embedded_cleanup = verify_controller_cleanup(backend_result["transport"].get("raw_cleanup"))
+    require(external_cleanup == embedded_cleanup,
+            "Backend embedded and external controller cleanup observations differ.")
     backend_digest = verify_backend_execution(reader, backend["bundle"], backend["result"],
                                               source_sha=candidate.source_sha,
                                               required_tests=profile["required_backend_test_names"])

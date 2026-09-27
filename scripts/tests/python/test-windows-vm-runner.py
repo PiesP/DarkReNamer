@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+from controller_cleanup_fixture import clean_controller_cleanup
 from darkrenamer_tooling.vm import launcher as vm
 
 
@@ -60,7 +61,7 @@ class VmRunnerTests(unittest.TestCase):
             screenshot=screenshot,
             flow=flow,
         )
-        self.result.update(status='passed', tests=[dict(self.test, status='passed', job_cleanup=True, exit_code=0, passed=3, failed=0, ignored=1, stdout=stdout, stderr=stderr)], gui=gui, transport={'kind': 'ssh', 'host_platform': 'Unix', 'guest_cleanup': True})
+        self.result.update(status='passed', tests=[dict(self.test, status='passed', job_cleanup=True, exit_code=0, passed=3, failed=0, ignored=1, stdout=stdout, stderr=stderr)], gui=gui, transport={'kind': 'ssh', 'host_platform': 'Unix', 'guest_cleanup': True, 'raw_cleanup': clean_controller_cleanup()})
 
     def artifact(self, name, data):
         (self.root / name).write_bytes(data)
@@ -655,6 +656,7 @@ class VmRunnerTests(unittest.TestCase):
         (output / 'transport.json').write_text(json.dumps({
             'kind': 'ssh', 'task_kind': 'recovery', 'host_platform': 'Unix',
             'status': 'collected', 'guest_cleanup': True,
+            'raw_cleanup': clean_controller_cleanup(),
             'vm_id': identity,
             'vm_identity_kind': 'hyper-v-guest-parameters-virtual-machine-id-v1',
             'vm_identity_sha256': identity_hash,
@@ -1011,6 +1013,11 @@ class VmRunnerTests(unittest.TestCase):
     def test_cleanup_requires_a_boolean_success(self):
         self.result['transport']['guest_cleanup'] = {'value': False}
         self.assertFalse(self.verify())
+
+    def test_controller_cleanup_evidence_is_required_when_cleanup_passes(self):
+        self.result['transport'].pop('raw_cleanup')
+        with self.assertRaises(ValueError):
+            self.verify()
 
     def test_transport_binding_is_verified(self):
         self.assertTrue(vm.verify_result(self.root, self.manifest, self.result, 'ssh'))

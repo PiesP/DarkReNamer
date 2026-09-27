@@ -8,6 +8,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from controller_cleanup_fixture import clean_controller_cleanup
 from darkrenamer_tooling.campaign.verifier import (
     EvidenceReader,
     verify_authenticated_gate_metadata,
@@ -164,16 +165,7 @@ class PredicateTests(unittest.TestCase):
             {'owned_processes_after': [],
              'runtime_root_after': {'exists': False, 'entries': []},
              'journal_after': {'entries': []}},
-            {'scheduled_task_present': False, 'guest_root_present': False,
-             'trusted_task_root_present': False, 'process_jobs_closed': True,
-             'runner_process_inventory_complete': True,
-             'unexpected_runner_tasks': [], 'unexpected_runner_processes': [],
-             'unexpected_runner_tasks_after_intervention': [],
-             'unexpected_runner_processes_after_intervention': [],
-             'unexpected_runner_tasks_after_delete': [],
-             'unexpected_runner_processes_after_delete': [],
-             'removed_runner_tasks': [], 'terminated_runner_processes': [],
-             'resource_cleanup_errors': [], 'owned_processes_after': []},
+            clean_controller_cleanup(),
         )
 
     def lifecycle(self):
@@ -375,7 +367,8 @@ class PredicateTests(unittest.TestCase):
                   'test_binaries': [{'file': 'required-tests.exe', 'sha256': binary_sha}]}
         result = {'schema_version': 1, 'source_sha': self.source_sha, 'source_state': 'clean',
                   'target': 'x86_64-pc-windows-msvc', 'failure_reason': None,
-                  'transport': {'guest_cleanup': guest_cleanup},
+                  'transport': {'guest_cleanup': guest_cleanup,
+                                'raw_cleanup': clean_controller_cleanup()},
                   'tests': [{'file': 'required-tests.exe', 'sha256': binary_sha,
                              'exit_code': 0, 'passed': passed, 'failed': 0, 'ignored': 0,
                              'stdout': {'file': 'stdout.txt', 'sha256': stdout.sha256},
