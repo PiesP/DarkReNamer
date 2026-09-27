@@ -115,6 +115,8 @@ create a rename plan or journal capability. Modal sessions prevent concurrent
 model edits. The final confirmation defaults to Cancel and rechecks the original
 session, revision, and plan fingerprint before execution; display expansion and
 clipboard operations cannot rewrite the model or frozen plan.
+Clipboard copy fully allocates, fills, and unlocks its data block before opening
+or emptying the clipboard, so preparation failures preserve the previous data.
 
 Appearance preferences and repaints are non-authorizing input. Theme,
 command-rail density and enabled-state painting, preview emphasis, separators,
@@ -220,6 +222,12 @@ kind, native code, codec frame, and observed size. Diagnostic export copies
 valid active, valid candidate, and corrupt evidence from their retained handles
 into new files only. An unavailable path is not reopened and an existing
 destination is not overwritten.
+
+On Windows, an existing journal is accepted only when its retained file handle
+reports exactly one hard link. This prevents recovery append, torn-tail
+truncation, and journal disposition from changing an unrelated alias. A file
+whose link count cannot be observed is retained as invalid evidence and remains
+recovery-locked.
 
 The recovery-export folder is bound while its native folder picker is open.
 The application retains the selected local NTFS directory chain and shell

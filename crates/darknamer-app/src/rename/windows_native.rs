@@ -1057,18 +1057,16 @@ pub(crate) fn write_text_export(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_text_export_target(prepare_text_export_target(path)?, bytes)
 }
 
-fn validate_text_export_file(file: &File) -> io::Result<()> {
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "text export destination must be a regular, unlinked file",
-        ));
-    }
+pub(crate) fn file_is_single_linked(file: &File) -> io::Result<bool> {
+    let info = file_standard_info(file)?;
+    Ok(!info.Directory && !info.DeletePending && info.NumberOfLinks == 1)
+}
+
+fn file_standard_info(file: &File) -> io::Result<FILE_STANDARD_INFO> {
     let mut info = FILE_STANDARD_INFO::default();
     let size = u32::try_from(size_of::<FILE_STANDARD_INFO>())
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    // SAFETY: file is the retained output handle and info is a writable,
+    // SAFETY: file is a retained handle and info is a writable,
     // correctly aligned FILE_STANDARD_INFO buffer of its checked size.
     let success = unsafe {
         GetFileInformationByHandleEx(
@@ -1081,7 +1079,18 @@ fn validate_text_export_file(file: &File) -> io::Result<()> {
     if success == 0 {
         return Err(io::Error::last_os_error());
     }
-    if info.Directory || info.DeletePending || info.NumberOfLinks != 1 {
+    Ok(info)
+}
+
+fn validate_text_export_file(file: &File) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "text export destination must be a regular, unlinked file",
+        ));
+    }
+    if !file_is_single_linked(file)? {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "text export destination must be a regular, unlinked file",

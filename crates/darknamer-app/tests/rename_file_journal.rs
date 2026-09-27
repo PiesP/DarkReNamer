@@ -269,6 +269,43 @@ fn corrupt_existing_journal_retains_exact_handle_for_bounded_copy()
     Ok(())
 }
 
+#[cfg(windows)]
+#[test]
+fn multiply_linked_existing_journal_is_retained_without_mutation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let Some(root) = supported_journal_root(directory.path())? else {
+        return Ok(());
+    };
+    let bytes = encode_journal_records(&complete_records())?;
+    let active = directory.path().join("active.drj");
+    let alias = directory.path().join("unrelated-alias.drj");
+    let retained_copy = directory.path().join("retained-copy.drj");
+    fs::write(&active, &bytes)?;
+    fs::hard_link(&active, &alias)?;
+
+    let error = FileJournal::open_existing_retained(&root, "active.drj")
+        .err()
+        .ok_or_else(|| std::io::Error::other("multiply-linked journal was accepted"))?;
+    assert_eq!(error.failure().stage, JournalOpenStage::Validate);
+    assert_eq!(error.failure().kind, FileJournalErrorKind::InvalidFileType);
+    let mut evidence = error
+        .into_evidence()
+        .ok_or_else(|| std::io::Error::other("multiply-linked evidence handle was dropped"))?;
+    evidence.copy_exact_to_new(&retained_copy)?;
+    drop(evidence);
+
+    assert_eq!(fs::read(&active)?, bytes);
+    assert_eq!(fs::read(&alias)?, bytes);
+    assert_eq!(fs::read(&retained_copy)?, bytes);
+
+    let single_link = directory.path().join("single-link.drj");
+    fs::write(&single_link, &bytes)?;
+    let reopened = FileJournal::open_existing(&root, "single-link.drj")?;
+    assert_eq!(reopened.records(), complete_records());
+    Ok(())
+}
+
 #[test]
 fn valid_file_journal_exports_exact_bytes_and_restores_append_cursor()
 -> Result<(), Box<dyn std::error::Error>> {

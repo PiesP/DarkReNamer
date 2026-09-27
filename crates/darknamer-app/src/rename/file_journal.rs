@@ -1221,7 +1221,24 @@ impl FileJournal {
             }
         };
         let byte_len = metadata.len();
-        if !metadata.is_file() || metadata_is_reparse(&metadata) {
+        // A retained journal is mutable recovery state. Reject pre-existing
+        // hard-link aliases so truncation, append, or disposition cannot alter
+        // an unrelated name that refers to the same file.
+        #[cfg(windows)]
+        let has_one_link = match super::windows_native::file_is_single_linked(&file) {
+            Ok(has_one_link) => has_one_link,
+            Err(error) => {
+                return Err(existing_evidence_error(
+                    path,
+                    file,
+                    byte_len,
+                    JournalOpenFailure::from_file_error(JournalOpenStage::Validate, error.into()),
+                ));
+            }
+        };
+        #[cfg(not(windows))]
+        let has_one_link = true;
+        if !metadata.is_file() || metadata_is_reparse(&metadata) || !has_one_link {
             return Err(existing_evidence_error(
                 path,
                 file,
