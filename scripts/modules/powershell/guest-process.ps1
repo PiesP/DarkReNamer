@@ -230,6 +230,7 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
     private const uint TOKEN_QUERY = 0x0008;
     private const uint TOKEN_ADJUST_DEFAULT = 0x0080;
     private const uint TOKEN_ADJUST_SESSIONID = 0x0100;
+    private const int SECURITY_IMPERSONATION = 2;
     private const int TOKEN_TYPE = 8;
     private const int TOKEN_STATISTICS = 10;
     private const int TOKEN_LINKED_TOKEN = 19;
@@ -351,6 +352,11 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
     [DllImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DuplicateTokenEx(
+        IntPtr existingToken, uint desiredAccess, IntPtr tokenAttributes,
+        int impersonationLevel, int tokenType, out IntPtr newToken);
     [DllImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetTokenInformation(
@@ -609,8 +615,8 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
                 throw new InvalidOperationException("The interactive shell image is not the Windows Explorer binary.");
             if (GetShellProcessId(shellWindow) != shellProcessId)
                 throw new InvalidOperationException("The interactive shell process changed during token acquisition.");
-            // Retry 17 returned ERROR_ACCESS_DENIED with only the documented CPWT mask.
-            // Keep these additional rights on this short-lived handle; do not mutate the token.
+            // Retry 17 with the documented CPWT mask returned ERROR_ACCESS_DENIED; retry 18
+            // reached ERROR_TOKEN_ALREADY_IN_USE, so retain a tightly scoped probe mask.
             uint desiredAccess = TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY |
                 TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID;
             if (!OpenProcessToken(shellProcess, desiredAccess, out shellToken))
@@ -621,12 +627,32 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
                 shellToken, 0, TOKEN_ELEVATION_TYPE_LIMITED, expectedSession,
                 "S-1-16-8192", expectedUser);
             Luid linkedAuthenticationId = ReadTokenStatistics(linkedToken).AuthenticationId;
-            Luid shellAuthenticationId = ReadTokenStatistics(shellToken).AuthenticationId;
+            TokenStatistics shellStatistics = ReadTokenStatistics(shellToken);
+            Luid shellAuthenticationId = shellStatistics.AuthenticationId;
             if (!SameLuid(linkedAuthenticationId, shellAuthenticationId))
                 throw new InvalidOperationException("The shell token belongs to a different interactive logon.");
-            IntPtr result = shellToken;
-            shellToken = IntPtr.Zero;
-            return result;
+            IntPtr primaryToken = IntPtr.Zero;
+            try {
+                if (!DuplicateTokenEx(shellToken, desiredAccess, IntPtr.Zero,
+                        SECURITY_IMPERSONATION, TOKEN_PRIMARY, out primaryToken))
+                    throw Win32Failure("DuplicateTokenEx for the verified interactive shell token");
+                if (TokenDword(primaryToken, TOKEN_TYPE) != TOKEN_PRIMARY)
+                    throw new InvalidOperationException("The duplicated shell token is not primary.");
+                RequireToken(
+                    primaryToken, 0, TOKEN_ELEVATION_TYPE_LIMITED, expectedSession,
+                    "S-1-16-8192", expectedUser);
+                TokenStatistics primaryStatistics = ReadTokenStatistics(primaryToken);
+                if (SameLuid(shellStatistics.TokenId, primaryStatistics.TokenId))
+                    throw new InvalidOperationException("DuplicateTokenEx returned the existing shell token identity.");
+                if (!SameLuid(linkedAuthenticationId, primaryStatistics.AuthenticationId))
+                    throw new InvalidOperationException("The duplicated shell token belongs to a different interactive logon.");
+                IntPtr result = primaryToken;
+                primaryToken = IntPtr.Zero;
+                return result;
+            }
+            finally {
+                if (primaryToken != IntPtr.Zero) CloseHandle(primaryToken);
+            }
         }
         finally {
             if (shellToken != IntPtr.Zero) CloseHandle(shellToken);

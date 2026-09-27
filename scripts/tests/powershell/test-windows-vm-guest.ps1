@@ -634,8 +634,13 @@ try {
         'TOKEN_DUPLICATE = 0x0002',
         'TOKEN_ADJUST_DEFAULT = 0x0080',
         'TOKEN_ADJUST_SESSIONID = 0x0100',
+        'SECURITY_IMPERSONATION = 2',
         'uint desiredAccess = TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY |',
         'TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID;',
+        'DuplicateTokenEx(shellToken, desiredAccess, IntPtr.Zero,',
+        'The duplicated shell token is not primary.',
+        'DuplicateTokenEx returned the existing shell token identity.',
+        'The duplicated shell token belongs to a different interactive logon.',
         'TOKEN_PRIMARY = 1',
         'TOKEN_ELEVATION_TYPE = 18',
         'TOKEN_ELEVATION_TYPE_FULL = 2',
@@ -651,7 +656,8 @@ try {
         'GetWindowsDirectoryW(windowsDirectory, (uint)windowsDirectory.Capacity)',
         'TokenDword(shellToken, TOKEN_TYPE) != TOKEN_PRIMARY',
         'ReadTokenStatistics(linkedToken).AuthenticationId',
-        'ReadTokenStatistics(shellToken).AuthenticationId',
+        'TokenStatistics shellStatistics = ReadTokenStatistics(shellToken);',
+        'Luid shellAuthenticationId = shellStatistics.AuthenticationId;',
         'ReadTokenStatistics(observerToken).AuthenticationId',
         'SameLuid(expectedAuthenticationId, ReadTokenStatistics(token).AuthenticationId)',
         'SameLuid(linkedAuthenticationId, shellAuthenticationId)',
@@ -865,7 +871,21 @@ try {
         [StringComparison]::Ordinal
     )
     $shellAuthenticationReadIndex = $runnerText.IndexOf(
-        'ReadTokenStatistics(shellToken).AuthenticationId',
+        'Luid shellAuthenticationId = shellStatistics.AuthenticationId;',
+        [StringComparison]::Ordinal
+    )
+    $duplicateShellTokenIndex = $runnerText.IndexOf(
+        'DuplicateTokenEx(shellToken, desiredAccess, IntPtr.Zero,',
+        [StringComparison]::Ordinal
+    )
+    $duplicateAuthenticationCheckIndex = $runnerText.IndexOf(
+        'SameLuid(linkedAuthenticationId,',
+        $duplicateShellTokenIndex,
+        [StringComparison]::Ordinal
+    )
+    $duplicateTokenIdentityCheckIndex = $runnerText.IndexOf(
+        'SameLuid(shellStatistics.TokenId, primaryStatistics.TokenId)',
+        $duplicateShellTokenIndex,
         [StringComparison]::Ordinal
     )
     if ($shellWindowIndex -lt 0 -or $shellProcessIndex -le $shellWindowIndex -or
@@ -873,9 +893,11 @@ try {
         $linkedAuthenticationReadIndex -le $shellTokenIndex -or
         $shellAuthenticationReadIndex -le $linkedAuthenticationReadIndex -or
         $shellAuthenticationIndex -le $shellAuthenticationReadIndex -or
-        $runnerText.IndexOf('ReadTokenStatistics(current).AuthenticationId', [StringComparison]::Ordinal) -ge 0 -or
-        $runnerText.IndexOf('DuplicateTokenEx', [StringComparison]::Ordinal) -ge 0) {
-        throw 'The medium observer must use the verified interactive shell primary token from the same logon.'
+        $duplicateShellTokenIndex -le $shellAuthenticationIndex -or
+        $duplicateTokenIdentityCheckIndex -le $duplicateShellTokenIndex -or
+        $duplicateAuthenticationCheckIndex -le $duplicateShellTokenIndex -or
+        $runnerText.IndexOf('ReadTokenStatistics(current).AuthenticationId', [StringComparison]::Ordinal) -ge 0) {
+        throw 'The medium observer must duplicate the verified interactive shell token and retain its logon binding.'
     }
     $suiteBudgetStartIndex = $runnerText.IndexOf(
         '$remainingSuiteOutputBytes = [long]$script:VmTestOutputSuiteLimitBytes',
