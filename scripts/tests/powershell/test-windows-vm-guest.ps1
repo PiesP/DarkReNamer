@@ -1159,11 +1159,125 @@ try {
         "exit_method = 'normal-close'"
         "exit_method = 'forced-termination'"
         "`$result['raw_cleanup'] = [ordered]@{"
+        'Get-VmAutomatedOwnedProcessCleanupObservation'
+        'owned_processes_observation_error'
+        "'owned_process_cleanup_observation_failed'"
         '-RawEvidence:$candidateLane'
     )) {
         if ($runnerText.IndexOf($requiredRawSource, [StringComparison]::Ordinal) -lt 0) {
             throw "The shared VM-Automated raw contract is missing '$requiredRawSource'."
         }
+    }
+    $guestFinalizerAst = [Management.Automation.Language.Parser]::ParseInput(
+        $runnerText, [ref]$null, [ref]$null
+    )
+    $guestEntryFunction = $guestFinalizerAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Invoke-DrWindowsVmGuest'
+    }, $true)
+    $guestPublishingFinalizers = @($guestEntryFunction.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.TryStatementAst] -and
+            $null -ne $node.Finally -and
+            $node.Finally.Extent.Text.IndexOf(
+                'Write-ResultDocument', [StringComparison]::Ordinal
+            ) -ge 0
+    }, $true))
+    if ($guestPublishingFinalizers.Count -ne 1) {
+        throw 'Expected one publishing finalizer in the Windows VM guest entrypoint.'
+    }
+    $guestFinalizerText = $guestPublishingFinalizers[0].Finally.Extent.Text
+    $guestFinalizer = [scriptblock]::Create(
+        $guestFinalizerText.Substring(1, $guestFinalizerText.Length - 2)
+    )
+    function Invoke-CoreGuestFinalizerFixture {
+        param(
+            [Parameter(Mandatory)][scriptblock] $Finalizer,
+            [Parameter(Mandatory)][ValidateSet('passed', 'failed')][string] $InitialStatus,
+            [AllowNull()][string] $InitialFailureReason
+        )
+
+        & {
+            $caseRoot = Join-Path $temporaryRoot (
+                'core-finalizer-' + [Guid]::NewGuid().ToString('N')
+            )
+            [void](New-Item -ItemType Directory -Path $caseRoot)
+            $effectiveRuntimeRoot = Join-Path $caseRoot 'retained-runtime'
+            [void](New-Item -ItemType Directory -Path $effectiveRuntimeRoot)
+            $retainedPath = Join-Path $effectiveRuntimeRoot 'retained.txt'
+            [IO.File]::WriteAllText($retainedPath, 'retain on incomplete inventory')
+            $hasInitialFailure = -not [string]::IsNullOrEmpty($InitialFailureReason)
+            $result = [ordered]@{
+                status = $InitialStatus
+                failure_reason = if ($hasInitialFailure) { $InitialFailureReason } else { $null }
+                gui = $null
+                raw_cleanup = $null
+            }
+            $candidateLane = $true
+            $verified = [pscustomobject]@{ root = $caseRoot }
+            $previousExecutionState = $null
+            $desktopLock = $null
+            $ledgerProbe = [ordered]@{ called = $false }
+            $inventoryFailureMessage = 'injected core CIM cleanup failure'
+            function Get-CimInstance {
+                [CmdletBinding()]
+                param([Parameter(Position = 0)][string] $ClassName)
+                throw $inventoryFailureMessage
+            }
+            function Get-VmAutomatedJournalInventory { param($LocalAppData) @() }
+            function Assert-AcceptanceProcessJobLedgerClosed {
+                $ledgerProbe.called = $true
+            }
+            function Exit-TestExecutionState { param($Previous) }
+            function Exit-DesktopTestLock { param($Lock) }
+
+            $resultPath = Join-Path $caseRoot 'result.json'
+            Initialize-TrustedResultWriter -Root $verified.root
+            . $Finalizer
+            $publishedResult = [IO.File]::ReadAllText($resultPath) | ConvertFrom-Json
+
+            [pscustomobject]@{
+                result = $result
+                result_published = (Test-Path -LiteralPath $resultPath -PathType Leaf)
+                published_result = $publishedResult
+                ledger_called = $ledgerProbe.called
+                runtime_retained = (Test-Path -LiteralPath $effectiveRuntimeRoot -PathType Container)
+                sentinel_retained = (Test-Path -LiteralPath $retainedPath -PathType Leaf)
+                inventory_failure_message = $inventoryFailureMessage
+            }
+        }
+    }
+    $coreFailedResult = Invoke-CoreGuestFinalizerFixture `
+        -Finalizer $guestFinalizer `
+        -InitialStatus failed `
+        -InitialFailureReason original_core_failure
+    if (-not $coreFailedResult.result_published -or
+        $coreFailedResult.published_result.status -cne 'failed' -or
+        $coreFailedResult.published_result.failure_reason -cne 'original_core_failure' -or
+        $null -ne $coreFailedResult.published_result.raw_cleanup.owned_processes_after -or
+        $coreFailedResult.published_result.raw_cleanup.owned_processes_observation_error.message -cne
+            $coreFailedResult.inventory_failure_message -or
+        -not $coreFailedResult.runtime_retained -or
+        -not $coreFailedResult.sentinel_retained -or
+        $coreFailedResult.ledger_called) {
+        throw 'The core finalizer did not publish and retain evidence after an unobserved inventory.'
+    }
+    $corePassingResult = Invoke-CoreGuestFinalizerFixture `
+        -Finalizer $guestFinalizer `
+        -InitialStatus passed `
+        -InitialFailureReason $null
+    if (-not $corePassingResult.result_published -or
+        $corePassingResult.published_result.status -cne 'failed' -or
+        $corePassingResult.published_result.failure_reason -cne
+            'owned_process_cleanup_observation_failed' -or
+        $null -ne $corePassingResult.published_result.raw_cleanup.owned_processes_after -or
+        $corePassingResult.published_result.raw_cleanup.owned_processes_observation_error.message -cne
+            $corePassingResult.inventory_failure_message -or
+        -not $corePassingResult.runtime_retained -or
+        -not $corePassingResult.sentinel_retained -or
+        $corePassingResult.ledger_called) {
+        throw 'The core finalizer did not fail closed after an unobserved inventory.'
     }
     $accountingScript = Join-Path $valid.root 'accounting-grace.ps1'
     $accountingStdoutPath = Join-Path $valid.root 'accounting-grace.stdout.log'

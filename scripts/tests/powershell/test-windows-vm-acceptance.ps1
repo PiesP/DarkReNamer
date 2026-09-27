@@ -659,6 +659,211 @@ try {
     ).Count -ne 4) {
         throw 'Shared UI cleanup and every observer cleanup path must use the guarded owned-process observation.'
     }
+    function Get-UiObserverFinalizerBody {
+        param([Parameter(Mandatory)][string] $FunctionName)
+
+        $functionAst = $acceptanceAst.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq $FunctionName
+        }, $true)
+        $finalizers = @($functionAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.TryStatementAst] -and
+                $null -ne $node.Finally -and
+                $node.Finally.Extent.Text.IndexOf(
+                    'Write-ResultDocument', [StringComparison]::Ordinal
+                ) -ge 0
+        }, $true))
+        if ($finalizers.Count -ne 1) {
+            throw "Expected one publishing finalizer in $FunctionName."
+        }
+        $text = $finalizers[0].Finally.Extent.Text
+        [scriptblock]::Create($text.Substring(1, $text.Length - 2))
+    }
+    function Invoke-UiObserverFinalizerFixture {
+        param(
+            [Parameter(Mandatory)][scriptblock] $Finalizer,
+            [Parameter(Mandatory)][ValidateSet('current-dpi', 'regression')][string] $Mode,
+            [Parameter(Mandatory)][bool] $InventoryFailure,
+            [AllowNull()][string] $InitialFailureReason
+        )
+
+        & {
+            $caseRoot = Join-Path $temporaryRoot (
+                'finalizer-' + $Mode + '-' + [Guid]::NewGuid().ToString('N')
+            )
+            [void](New-Item -ItemType Directory -Path $caseRoot)
+            $diagnosticPath = Join-Path $caseRoot 'acceptance-error.txt'
+            $hasInitialFailure = -not [string]::IsNullOrEmpty($InitialFailureReason)
+            $originalDiagnostic = if ($hasInitialFailure) {
+                "original diagnostic: $InitialFailureReason"
+            }
+            else { $null }
+            if ($null -ne $originalDiagnostic) {
+                [IO.File]::WriteAllText(
+                    $diagnosticPath,
+                    $originalDiagnostic,
+                    [Text.UTF8Encoding]::new($false)
+                )
+            }
+            $runtimeRoot = Join-Path $caseRoot 'absent-runtime'
+            $resultPath = Join-Path $caseRoot 'acceptance-result.json'
+            $observationPath = Join-Path $caseRoot 'acceptance-observations.json'
+            $verifiedRoot = Join-Path $caseRoot 'verified'
+            $resolvedRoot = Join-Path $caseRoot 'resolved'
+            [void](New-Item -ItemType Directory -Path $verifiedRoot)
+            [void](New-Item -ItemType Directory -Path $resolvedRoot)
+            $result = [ordered]@{
+                status = if ($hasInitialFailure) { 'failed' } else { 'review_required' }
+                failure_reason = if ($hasInitialFailure) { $InitialFailureReason } else { $null }
+                raw_cleanup = $null
+                process_cleanup = $false
+                guest_cleanup = $false
+                screenshots = @()
+                diagnostic = $null
+                observations = $null
+            }
+            $writerProbe = [ordered]@{ observations_written = $false }
+            $inventoryFailureMessage = "injected $Mode CIM cleanup failure"
+            function Get-CimInstance {
+                [CmdletBinding()]
+                param([Parameter(Position = 0)][string] $ClassName)
+                if ($InventoryFailure) { throw $inventoryFailureMessage }
+                @()
+            }
+            function Get-VmAutomatedJournalInventory { param($LocalAppData) @() }
+            function Get-VmAutomatedRuntimeRootObservation {
+                param($Root)
+                [ordered]@{ exists = $false; entries = @() }
+            }
+            function Assert-AcceptanceProcessJobLedgerClosed { }
+            function Exit-TestExecutionState { param($Previous) }
+            function Exit-DesktopTestLock { param($Lock) }
+            function Write-JsonUtf8Bom {
+                param($Path, $Value)
+                $writerProbe.observations_written = $true
+                [IO.File]::WriteAllText(
+                    $Path,
+                    ($Value | ConvertTo-Json -Depth 8),
+                    [Text.UTF8Encoding]::new($true)
+                )
+            }
+            $rawCandidate = $Mode -ceq 'current-dpi'
+            $rawRegression = $Mode -ceq 'regression'
+            $verified = [pscustomobject]@{ root = $verifiedRoot }
+            $resolved = [pscustomobject]@{ root = $resolvedRoot }
+            $lifecycle = [pscustomobject]@{ process_terminated = $true }
+            $rawCheckpoints = [Collections.Generic.List[object]]::new()
+            $processState = [pscustomobject]@{ process = $null }
+            $Clipboard = $false
+            $clipboardState = [pscustomobject]@{ owned = $false }
+            $HighContrast = $false
+            $highContrastState = [pscustomobject]@{ requested = $false }
+            $previousExecutionState = $null
+            $executionState = $null
+            $desktopLock = $null
+            $runtimeCleanup = $true
+            $runtimeCleaned = $true
+            $rawRegressionJournalAfter = $null
+            $rawRegressionJournalObserved = $false
+            $rawRegressionRuntimeRootAfter = $null
+            $RegressionMode = 'standard'
+            $textOriginal = $null
+            $textChanged = $false
+            $cursor = $null
+            $captures = [Collections.Generic.List[object]]::new()
+            $observations = [ordered]@{ fixture = $Mode }
+
+            $writerRoot = if ($Mode -ceq 'current-dpi') { $verified.root } else { $resolved.root }
+            Initialize-TrustedResultWriter `
+                -Root $writerRoot `
+                -ResultRoot $caseRoot `
+                -Path $resultPath
+            . $Finalizer
+            $publishedResult = [IO.File]::ReadAllText($resultPath) | ConvertFrom-Json
+
+            [pscustomobject]@{
+                result = $result
+                writer = $writerProbe
+                result_published = (Test-Path -LiteralPath $resultPath -PathType Leaf)
+                published_result = $publishedResult
+                original_diagnostic = $originalDiagnostic
+                diagnostic = if (Test-Path -LiteralPath $diagnosticPath -PathType Leaf) {
+                    [IO.File]::ReadAllText($diagnosticPath)
+                }
+                else { $null }
+                diagnostic_sha256 = if (Test-Path -LiteralPath $diagnosticPath -PathType Leaf) {
+                    Get-Sha256 $diagnosticPath
+                }
+                else { $null }
+                inventory_failure_message = $inventoryFailureMessage
+            }
+        }
+    }
+    $currentDpiFinalizer = Get-UiObserverFinalizerBody `
+        -FunctionName 'Invoke-DrCurrentDpiAcceptanceScenario'
+    $regressionFinalizer = Get-UiObserverFinalizerBody `
+        -FunctionName 'Invoke-GuiRegressionAcceptance'
+    foreach ($fixture in @(
+        [pscustomobject]@{
+            mode = 'current-dpi'
+            finalizer = $currentDpiFinalizer
+            failure_reason = 'original_current_dpi_failure'
+        },
+        [pscustomobject]@{
+            mode = 'regression'
+            finalizer = $regressionFinalizer
+            failure_reason = 'original_regression_failure'
+        }
+    )) {
+        $published = Invoke-UiObserverFinalizerFixture `
+            -Finalizer $fixture.finalizer `
+            -Mode $fixture.mode `
+            -InventoryFailure $true `
+            -InitialFailureReason $fixture.failure_reason
+        if (-not $published.result_published -or
+            -not $published.writer.observations_written -or
+            $published.published_result.status -cne 'failed' -or
+            $published.published_result.failure_reason -cne $fixture.failure_reason -or
+            $null -ne $published.published_result.raw_cleanup.owned_processes_after -or
+            $published.published_result.raw_cleanup.owned_processes_observation_error.message -cne
+                $published.inventory_failure_message -or
+            $published.published_result.diagnostic.sha256 -cne $published.diagnostic_sha256 -or
+            -not $published.diagnostic.StartsWith(
+                $published.original_diagnostic, [StringComparison]::Ordinal
+            ) -or
+            $published.diagnostic.IndexOf(
+                $published.inventory_failure_message, [StringComparison]::Ordinal
+            ) -lt 0) {
+            throw "The $($fixture.mode) finalizer did not publish its retained failure and unobserved inventory."
+        }
+    }
+    $passingFinalizer = Invoke-UiObserverFinalizerFixture `
+        -Finalizer $regressionFinalizer `
+        -Mode regression `
+        -InventoryFailure $false `
+        -InitialFailureReason $null
+    $passingCleanupNames = @(
+        $passingFinalizer.published_result.raw_cleanup.PSObject.Properties.Name | Sort-Object
+    )
+    $expectedPassingCleanupNames = @(
+        'journal_after', 'owned_processes_after', 'runtime_root_after'
+    )
+    if (-not $passingFinalizer.result_published -or
+        $passingFinalizer.published_result.status -cne 'review_required' -or
+        $null -ne $passingFinalizer.published_result.failure_reason -or
+        @($passingFinalizer.published_result.raw_cleanup.owned_processes_after).Count -ne 0 -or
+        @(Compare-Object -CaseSensitive $expectedPassingCleanupNames $passingCleanupNames).Count -ne 0 -or
+        $null -ne $passingFinalizer.diagnostic) {
+        throw ('The observed-empty UI cleanup changed the passing raw cleanup contract: ' +
+            "published=$($passingFinalizer.result_published); " +
+            "status=$($passingFinalizer.published_result.status); " +
+            "reason=$($passingFinalizer.published_result.failure_reason); " +
+            "owned=$(@($passingFinalizer.published_result.raw_cleanup.owned_processes_after).Count); " +
+            "keys=$($passingCleanupNames -join ','); " +
+            "diagnostic=$($null -ne $passingFinalizer.diagnostic)")
+    }
     $mixedTreeAssignments = @($acceptanceAst.FindAll({
         param($ast)
         $ast -is [Management.Automation.Language.AssignmentStatementAst] -and
