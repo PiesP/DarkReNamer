@@ -611,15 +611,22 @@ try {
         'EXTENDED_STARTUPINFO_PRESENT = 0x00080000',
         'CREATE_UNICODE_ENVIRONMENT = 0x00000400',
         'MAX_ENVIRONMENT_BLOCK_CHARS = 32767',
+        'UOI_NAME = 2',
         'HANDLE_LIST_ATTRIBUTE',
         'CopyCurrentEnvironmentBlock()',
         'GetEnvironmentStringsW()',
         'FreeEnvironmentStringsW(source)',
         'consecutiveNulls == 2',
         'flags |= CREATE_UNICODE_ENVIRONMENT;',
+        'Inherit the task desktop so CreateProcessWithTokenW grants the verified user access.',
         'flags, environmentBlock,',
         'commandLine.Length >= 1024',
         'The CreateProcessWithTokenW command line exceeds its supported bound.',
+        'AssertDefaultObserverDesktop();',
+        'GetProcessWindowStation()',
+        'GetThreadDesktop(GetCurrentThreadId())',
+        'GetUserObjectInformationW(handle, UOI_NAME, name,',
+        'The elevated observer is not attached to WinSta0\\Default.',
         'ref StartupInfo startupInfo, out ProcessInformation processInformation);',
         'ref startup.StartupInfo, out created)',
         'TOKEN_LINKED_TOKEN = 19',
@@ -754,6 +761,10 @@ try {
         'observerAuthenticationId = ReadTokenStatistics(observerToken).AuthenticationId;',
         [StringComparison]::Ordinal
     )
+    $observerDesktopCheckIndex = $runnerText.IndexOf(
+        'DarkReNamerVmRunnerSecurity.AssertDefaultObserverDesktop();',
+        [StringComparison]::Ordinal
+    )
     $childTokenIndex = $runnerText.IndexOf(
         'RequireCreatedChild(created.hProcess, observerSession, observerUserSid, observerAuthenticationId)',
         [StringComparison]::Ordinal
@@ -762,14 +773,22 @@ try {
         'ResumeThread(created.hThread)',
         [StringComparison]::Ordinal
     )
-    if ($observerAuthenticationCaptureIndex -lt 0 -or
+    if ($observerDesktopCheckIndex -lt 0 -or
+        $observerDesktopCheckIndex -ge $createWithTokenIndex -or
+        $observerAuthenticationCaptureIndex -lt 0 -or
         $createWithTokenIndex -le $observerAuthenticationCaptureIndex -or
         $assignIndex -le $createWithTokenIndex -or
         $childTokenIndex -le $assignIndex -or $resumeIndex -le $childTokenIndex -or
         $runnerText.IndexOf('CREATE_BREAKAWAY_FROM_JOB', [StringComparison]::Ordinal) -ge 0 -or
         $runnerText.IndexOf('JOB_OBJECT_LIMIT_BREAKAWAY_OK', [StringComparison]::Ordinal) -ge 0 -or
         $runnerText.IndexOf('JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK', [StringComparison]::Ordinal) -ge 0) {
-        throw 'The guest process must enter a non-breakaway kill-on-close job before its first instruction.'
+        throw 'The verified desktop and token must be checked before the suspended child enters its job.'
+    }
+    if ($runnerText.IndexOf(
+        'startup.StartupInfo.lpDesktop =',
+        [StringComparison]::Ordinal
+    ) -ge 0) {
+        throw 'The verified medium child must inherit the interactive task desktop.'
     }
     $attributeListInitIndex = $runnerText.IndexOf(
         'InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeSize);',

@@ -804,11 +804,12 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
             string observerUserSid = null;
             Luid observerAuthenticationId = new Luid();
             if (elevatedObserver) {
+                DarkReNamerVmRunnerSecurity.AssertDefaultObserverDesktop();
                 observerToken = OpenVerifiedLinkedShellPrimaryToken(out observerSession, out observerUserSid);
                 observerAuthenticationId = ReadTokenStatistics(observerToken).AuthenticationId;
                 environmentBlock = CopyCurrentEnvironmentBlock();
                 flags |= CREATE_UNICODE_ENVIRONMENT;
-                startup.StartupInfo.lpDesktop = @"winsta0\default";
+                // Inherit the task desktop so CreateProcessWithTokenW grants the verified user access.
             }
             bool inheritHandles = false;
             if (redirect) {
@@ -1046,6 +1047,7 @@ public static class DarkReNamerVmRunnerSecurity {
     private const uint PROCESS_WRITE_DAC = 0x00040000;
     private const uint DACL_SECURITY_INFORMATION = 0x00000004;
     private const uint PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000;
+    private const int UOI_NAME = 2;
     private const int SE_FILE_OBJECT = 1;
     private const int SE_KERNEL_OBJECT = 6;
 
@@ -1057,6 +1059,16 @@ public static class DarkReNamerVmRunnerSecurity {
         uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
     [DllImport("kernel32.dll")]
     private static extern uint GetCurrentProcessId();
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr GetProcessWindowStation();
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr GetThreadDesktop(uint threadId);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetUserObjectInformationW(
+        IntPtr handle, int index, StringBuilder information, uint length, out uint requiredLength);
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(IntPtr handle);
@@ -1091,6 +1103,36 @@ public static class DarkReNamerVmRunnerSecurity {
 
     public static void AssertHighObserverToken(uint expectedSession) {
         DarkReNamerVmJobBoundProcess.AssertHighObserverToken(expectedSession);
+    }
+
+    private static string GetUserObjectName(IntPtr handle, string label) {
+        StringBuilder name = new StringBuilder(256);
+        uint requiredLength;
+        if (!GetUserObjectInformationW(handle, UOI_NAME, name,
+                (uint)(name.Capacity * sizeof(char)), out requiredLength))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), label + " failed.");
+        if (requiredLength == 0 || requiredLength > (uint)(name.Capacity * sizeof(char)))
+            throw new InvalidOperationException(label + " returned an invalid object name.");
+        return name.ToString();
+    }
+
+    public static void AssertDefaultObserverDesktop() {
+        IntPtr windowStation = GetProcessWindowStation();
+        if (windowStation == IntPtr.Zero)
+            throw new Win32Exception(Marshal.GetLastWin32Error(),
+                "GetProcessWindowStation for the elevated observer failed.");
+        IntPtr desktop = GetThreadDesktop(GetCurrentThreadId());
+        if (desktop == IntPtr.Zero)
+            throw new Win32Exception(Marshal.GetLastWin32Error(),
+                "GetThreadDesktop for the elevated observer failed.");
+        string windowStationName = GetUserObjectName(
+            windowStation, "GetUserObjectInformationW for the observer window station");
+        string desktopName = GetUserObjectName(
+            desktop, "GetUserObjectInformationW for the observer desktop");
+        if (!String.Equals(windowStationName, "WinSta0", StringComparison.OrdinalIgnoreCase) ||
+            !String.Equals(desktopName, "Default", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                "The elevated observer is not attached to WinSta0\\Default.");
     }
 
     public static void ProtectResultFile(SafeFileHandle file, string runnerSid) {
