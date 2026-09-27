@@ -19,10 +19,10 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::UI::Controls::{
     CDDS_PREPAINT, CDIS_DEFAULT, CDIS_DISABLED, CDIS_FOCUS, CDIS_HOT, CDIS_SELECTED,
-    CDRF_DODEFAULT, CDRF_SKIPDEFAULT, DRAWITEMSTRUCT, MEASUREITEMSTRUCT, NM_CUSTOMDRAW,
-    NMCUSTOMDRAW, ODS_CHECKED, ODS_DEFAULT, ODS_DISABLED, ODS_FOCUS, ODS_GRAYED, ODS_HOTLIGHT,
-    ODS_NOACCEL, ODS_SELECTED, ODT_BUTTON, ODT_MENU, ODT_STATIC, SetWindowTheme, TTM_SETTIPBKCOLOR,
-    TTM_SETTIPTEXTCOLOR,
+    CDIS_SHOWKEYBOARDCUES, CDRF_DODEFAULT, CDRF_SKIPDEFAULT, DRAWITEMSTRUCT, MEASUREITEMSTRUCT,
+    NM_CUSTOMDRAW, NMCUSTOMDRAW, ODS_CHECKED, ODS_DEFAULT, ODS_DISABLED, ODS_FOCUS, ODS_GRAYED,
+    ODS_HOTLIGHT, ODS_NOACCEL, ODS_SELECTED, ODT_BUTTON, ODT_MENU, ODT_STATIC, SetWindowTheme,
+    TTM_SETTIPBKCOLOR, TTM_SETTIPTEXTCOLOR,
 };
 use windows_sys::Win32::UI::Controls::{LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR, LVM_SETTEXTCOLOR};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -32,6 +32,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::*;
+use crate::{ButtonMnemonicRendering, button_mnemonic_rendering};
 
 /// Balances a successful WinRT initialization on the native UI thread.
 pub(super) struct WinRtGuard;
@@ -417,6 +418,7 @@ fn draw_owner_button_with_readiness(
             hot: draw.itemState & ODS_HOTLIGHT != 0,
             focused: draw.itemState & ODS_FOCUS != 0,
             default: draw.itemState & ODS_DEFAULT != 0,
+            show_keyboard_cues: draw.itemState & ODS_NOACCEL == 0,
         },
     );
     true
@@ -488,6 +490,7 @@ pub(super) fn draw_custom_button(
             hot: state & CDIS_HOT != 0,
             focused: state & CDIS_FOCUS != 0,
             default: state & CDIS_DEFAULT != 0,
+            show_keyboard_cues: state & CDIS_SHOWKEYBOARDCUES != 0,
         },
     );
     Some(CDRF_SKIPDEFAULT as LRESULT)
@@ -500,6 +503,7 @@ struct ButtonDrawState {
     hot: bool,
     focused: bool,
     default: bool,
+    show_keyboard_cues: bool,
 }
 
 fn paint_button(
@@ -517,6 +521,7 @@ fn paint_button(
         hot,
         focused,
         default,
+        show_keyboard_cues,
     } = state;
     let (background, border, text) = if let Some(resources) = resources {
         let palette = resources.palette;
@@ -615,9 +620,13 @@ fn paint_button(
                 text_rect.top = text_rect.top.saturating_add(1);
             }
             let copied_len = usize::try_from(copied).unwrap_or_default();
-            let multiline = label
-                .get(..copied_len)
-                .is_some_and(|units| units.contains(&(b'\n' as u16)));
+            let visible_units = label.get(..copied_len).unwrap_or_default();
+            let multiline = visible_units.contains(&u16::from(b'\n'));
+            let prefix = match button_mnemonic_rendering(visible_units, show_keyboard_cues) {
+                ButtonMnemonicRendering::Literal => DT_NOPREFIX,
+                ButtonMnemonicRendering::HiddenCue => DT_HIDEPREFIX,
+                ButtonMnemonicRendering::ShownCue => 0,
+            };
             if multiline {
                 let mut measured = windows_sys::Win32::Foundation::RECT {
                     left: text_rect.left,
@@ -632,7 +641,7 @@ fn paint_button(
                         label.as_ptr(),
                         copied,
                         &mut measured,
-                        DT_CALCRECT | DT_CENTER | DT_WORDBREAK | DT_NOPREFIX,
+                        DT_CALCRECT | DT_CENTER | DT_WORDBREAK | prefix,
                     )
                 };
                 let available = (text_rect.bottom - text_rect.top).max(0);
@@ -648,7 +657,7 @@ fn paint_button(
                         label.as_ptr(),
                         copied,
                         &mut text_rect,
-                        DT_CENTER | DT_WORDBREAK | DT_NOPREFIX,
+                        DT_CENTER | DT_WORDBREAK | prefix,
                     )
                 };
             } else {
@@ -659,7 +668,7 @@ fn paint_button(
                         label.as_ptr(),
                         copied,
                         &mut text_rect,
-                        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+                        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | prefix,
                     )
                 };
             }

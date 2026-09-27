@@ -67,6 +67,29 @@ pub(crate) const STATUS_CANCEL_LABEL: &str = "취소";
 
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ButtonMnemonicRendering {
+    Literal,
+    HiddenCue,
+    ShownCue,
+}
+
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn button_mnemonic_rendering(
+    label: &[u16],
+    show_keyboard_cues: bool,
+) -> ButtonMnemonicRendering {
+    if !label.contains(&u16::from(b'&')) {
+        ButtonMnemonicRendering::Literal
+    } else if show_keyboard_cues {
+        ButtonMnemonicRendering::ShownCue
+    } else {
+        ButtonMnemonicRendering::HiddenCue
+    }
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct HorizontalWindowPlacement {
     pub(crate) x: i32,
     pub(crate) width: i32,
@@ -4705,6 +4728,31 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn button_mnemonic_rendering_processes_prefixes_and_escaped_ampersands() {
+        for label in ["전체 복사(&C)", "Save && Close"] {
+            let label = label.encode_utf16().collect::<Vec<_>>();
+            assert_eq!(
+                button_mnemonic_rendering(&label, true),
+                ButtonMnemonicRendering::ShownCue
+            );
+            assert_eq!(
+                button_mnemonic_rendering(&label, false),
+                ButtonMnemonicRendering::HiddenCue
+            );
+        }
+
+        let plain = "닫기".encode_utf16().collect::<Vec<_>>();
+        assert_eq!(
+            button_mnemonic_rendering(&plain, true),
+            ButtonMnemonicRendering::Literal
+        );
+        assert_eq!(
+            button_mnemonic_rendering(&plain, false),
+            ButtonMnemonicRendering::Literal
+        );
+    }
 
     #[test]
     fn command_ids_are_exact_contiguous_resource_values() {
