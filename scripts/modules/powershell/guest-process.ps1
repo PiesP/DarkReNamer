@@ -1780,6 +1780,7 @@ function Wait-JobBoundProcessWithOutputLimit {
             $State.job_process_snapshot = [ordered]@{
                 primary_pid = [long]$State.process.Id
                 sole_pid = $null
+                sole_process_name = $null
                 assigned = [uint32]0
                 listed = [uint32]0
                 query_error = [int]0
@@ -1788,6 +1789,14 @@ function Wait-JobBoundProcessWithOutputLimit {
             try {
                 $soleActiveProcessId = [long]$State.owner.GetSoleActiveProcessId()
                 $State.job_process_snapshot.sole_pid = $soleActiveProcessId
+                if ($soleActiveProcessId -gt 0 -and
+                    $soleActiveProcessId -le [int]::MaxValue) {
+                    try {
+                        $State.job_process_snapshot.sole_process_name =
+                            (Get-Process -Id ([int]$soleActiveProcessId) -ErrorAction Stop).ProcessName
+                    }
+                    catch {}
+                }
             }
             finally {
                 $State.job_process_snapshot.assigned = [uint32]$State.owner.LastProcessListAssigned
@@ -1795,21 +1804,23 @@ function Wait-JobBoundProcessWithOutputLimit {
                 $State.job_process_snapshot.query_error = [int]$State.owner.LastProcessListError
             }
         }
-        $primaryAccountingLag = $soleActiveProcessId -eq 0 -or
-            $soleActiveProcessId -eq [long]$State.process.Id
-        if ($soleActiveProcessId -lt 0 -or -not $primaryAccountingLag) {
-            $State.job_had_survivors = $true
-            Stop-JobBoundProcess -State $State
-            $reason = 'process_job_not_empty'
-        }
-        elseif ($primaryAccountingLag) {
-            $emptyAfterAccountingGrace = $State.owner.WaitForEmpty(1000)
-            $activeProcessesAfterAccountingGrace = [int]$State.owner.ActiveProcessCount
-            $State.job_process_snapshot.active_after_grace = $activeProcessesAfterAccountingGrace
-            if (-not $emptyAfterAccountingGrace) {
+        if ($State.job_active_processes_at_primary_exit -gt 0) {
+            $primaryAccountingLag = $soleActiveProcessId -eq 0 -or
+                $soleActiveProcessId -eq [long]$State.process.Id
+            if ($soleActiveProcessId -lt 0 -or -not $primaryAccountingLag) {
                 $State.job_had_survivors = $true
                 Stop-JobBoundProcess -State $State
                 $reason = 'process_job_not_empty'
+            }
+            else {
+                $emptyAfterAccountingGrace = $State.owner.WaitForEmpty(1000)
+                $activeProcessesAfterAccountingGrace = [int]$State.owner.ActiveProcessCount
+                $State.job_process_snapshot.active_after_grace = $activeProcessesAfterAccountingGrace
+                if (-not $emptyAfterAccountingGrace) {
+                    $State.job_had_survivors = $true
+                    Stop-JobBoundProcess -State $State
+                    $reason = 'process_job_not_empty'
+                }
             }
         }
     }

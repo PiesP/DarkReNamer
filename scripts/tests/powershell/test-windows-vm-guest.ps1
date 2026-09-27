@@ -691,6 +691,8 @@ try {
         'public uint LastProcessListAssigned;',
         'public uint LastProcessListListed;',
         'public int LastProcessListError;',
+        'sole_process_name = $null',
+        'Get-Process -Id ([int]$soleActiveProcessId) -ErrorAction Stop',
         '$State.job_process_snapshot.query_error = [int]$State.owner.LastProcessListError',
         'process_job_snapshot = $State.job_process_snapshot',
         'function Set-ProcessCleanupFailureReason',
@@ -1030,6 +1032,7 @@ try {
             LastProcessListAssigned = [uint32]1
             LastProcessListListed = [uint32]1
             LastProcessListError = 0
+            process_list_queries = 0
             throw_on_process_list = $false
             OutputLimitExceeded = $false
         }
@@ -1043,6 +1046,7 @@ try {
             return $this.active_processes -eq 0
         } -Force
         Add-Member -InputObject $accountingOwner -MemberType ScriptMethod -Name GetSoleActiveProcessId -Value {
+            $this.process_list_queries++
             if ($this.throw_on_process_list) {
                 $this.LastProcessListError = 5
                 throw [ComponentModel.Win32Exception]::new(5)
@@ -1147,6 +1151,34 @@ try {
         }
         if (-not (Close-JobBoundProcess -State $queryErrorAccountingState)) {
             throw 'The process job did not close after the query-error fixture settled.'
+        }
+        $zeroActiveAccountingState = [pscustomobject]@{
+            process = $accountingProcess
+            owner = $accountingOwner
+            aggregate_output_limit_bytes = [long]4096
+            job_active_processes_at_primary_exit = $null
+            job_process_snapshot = $null
+            job_had_survivors = $false
+            job_forced_termination = $false
+            job_active_processes_at_close = $null
+            job_empty = $false
+            job_closed = $false
+            job_capture_complete = $false
+        }
+        $zeroActiveAccountingResult = Wait-JobBoundProcessWithOutputLimit `
+            -State $zeroActiveAccountingState `
+            -StdoutPath $accountingStdoutPath `
+            -StderrPath $accountingStderrPath `
+            -TimeoutSeconds 10
+        if ($zeroActiveAccountingResult.failure_reason -or
+            $zeroActiveAccountingResult.active_processes_at_primary_exit -ne 0 -or
+            $null -ne $zeroActiveAccountingResult.process_job_snapshot -or
+            $accountingOwner.process_list_queries -ne 3 -or
+            $zeroActiveAccountingState.job_had_survivors) {
+            throw 'A zero Job Object active count must not be treated as a missing PID snapshot.'
+        }
+        if (-not (Close-JobBoundProcess -State $zeroActiveAccountingState)) {
+            throw 'The process job did not close cleanly after a zero active count.'
         }
     }
     finally {
