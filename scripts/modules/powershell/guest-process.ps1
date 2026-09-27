@@ -1313,8 +1313,8 @@ function Resolve-JobBoundCapturePaths {
         [AllowNull()][string] $StderrPath
     )
 
-    $stdoutBound = $BoundParameters.Contains('StdoutPath')
-    $stderrBound = $BoundParameters.Contains('StderrPath')
+    $stdoutBound = $BoundParameters.Keys -contains 'StdoutPath'
+    $stderrBound = $BoundParameters.Keys -contains 'StderrPath'
     if (-not $stdoutBound -and -not $stderrBound) {
         return [pscustomobject]@{ stdout_path = $null; stderr_path = $null }
     }

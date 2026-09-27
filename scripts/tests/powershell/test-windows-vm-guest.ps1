@@ -623,7 +623,7 @@ try {
         'commandLine.Length >= 1024',
         'The CreateProcessWithTokenW command line exceeds its supported bound.',
         'function Resolve-JobBoundCapturePaths',
-        '$BoundParameters.Contains(''StdoutPath'')',
+        '$BoundParameters.Keys -contains ''StdoutPath''',
         '$capturePaths.stdout_path',
         '$capturePaths.stderr_path',
         'AssertDefaultObserverDesktop();',
