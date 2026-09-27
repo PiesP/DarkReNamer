@@ -2268,8 +2268,14 @@ fn show_bounded_file_open_dialog(owner: HWND) -> io::Result<Option<IShellItemArr
             .SetTitle(PCWSTR(title.as_ptr()))
             .map_err(shell_dialog_error)?;
     }
+    // SAFETY: `owner` is the live window supplied by the UI-thread caller;
+    // the dialog remains alive during this synchronous modal call.
     let shown = unsafe { dialog.Show(Some(::windows::Win32::Foundation::HWND(owner))) };
-    complete_bounded_file_dialog(shown, || unsafe { dialog.GetResults() })
+    complete_bounded_file_dialog(shown, || {
+        // SAFETY: this closure runs only after `Show` succeeds, while the
+        // dialog and its initialized COM apartment remain live on this thread.
+        unsafe { dialog.GetResults() }
+    })
 }
 
 fn pick_bounded_files(
@@ -2472,11 +2478,12 @@ mod tests {
             Some(io::ErrorKind::Other)
         );
 
-        let path_error = collect_bounded_dialog_paths(1, 1, PathBudget::new(), |_| {
-            Err(io::Error::from(io::ErrorKind::PermissionDenied))
-        })
-        .expect_err("shell item path failures must propagate");
-        assert_eq!(path_error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(matches!(
+            collect_bounded_dialog_paths(1, 1, PathBudget::new(), |_| {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            }),
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied
+        ));
     }
 
     #[test]

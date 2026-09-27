@@ -2072,6 +2072,28 @@ mod tests {
             Ok(())
         }
 
+        fn dispatch_with_fallible_selector(
+            &self,
+            command: u16,
+            selector: impl FnOnce(
+                HWND,
+                PreparedFileDialogKind,
+            ) -> io::Result<PreparedFileDialogSelection>,
+        ) -> io::Result<()> {
+            let selection_error = std::cell::RefCell::new(None);
+            self.dispatch_with_selector(command, |owner, kind| match selector(owner, kind) {
+                Ok(selection) => selection,
+                Err(error) => {
+                    *selection_error.borrow_mut() = Some(error);
+                    PreparedFileDialogSelection::Cancelled
+                }
+            })?;
+            match selection_error.into_inner() {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
+        }
+
         fn dispatch_task_with_selector(
             &self,
             command: u16,
@@ -3123,13 +3145,13 @@ mod tests {
         let exported = app._directory.path().join("successful-export");
         fs::create_dir(&exported)?;
         FILE_DIALOG_DRAWITEM_LEASED.store(false, Ordering::SeqCst);
-        app.dispatch_with_selector(EXPORT_RECOVERY_JOURNAL, |owner, kind| {
+        app.dispatch_with_fallible_selector(EXPORT_RECOVERY_JOURNAL, |owner, kind| {
             assert!(matches!(
                 kind,
                 PreparedFileDialogKind::ExportRecoveryJournal
             ));
             send_synthetic_drawitem(owner);
-            recovery_export_selection(&exported).expect("selected recovery export directory")
+            recovery_export_selection(&exported)
         })?;
         assert!(FILE_DIALOG_DRAWITEM_LEASED.load(Ordering::SeqCst));
         app.assert_session_cleared()?;
@@ -3157,8 +3179,8 @@ mod tests {
         })?;
         let mixed = app._directory.path().join("mixed-export");
         fs::create_dir(&mixed)?;
-        app.dispatch_with_selector(EXPORT_RECOVERY_JOURNAL, |_, _| {
-            recovery_export_selection(&mixed).expect("selected recovery export directory")
+        app.dispatch_with_fallible_selector(EXPORT_RECOVERY_JOURNAL, |_, _| {
+            recovery_export_selection(&mixed)
         })?;
         assert_eq!(
             fs::read(mixed.join("candidate.drj.retained"))?,
@@ -3175,8 +3197,8 @@ mod tests {
         let partial = app._directory.path().join("partial-export");
         fs::create_dir(&partial)?;
         fs::write(partial.join("candidate.drj.retained"), b"sentinel")?;
-        app.dispatch_with_selector(EXPORT_RECOVERY_JOURNAL, |_, _| {
-            recovery_export_selection(&partial).expect("selected recovery export directory")
+        app.dispatch_with_fallible_selector(EXPORT_RECOVERY_JOURNAL, |_, _| {
+            recovery_export_selection(&partial)
         })?;
         assert_eq!(
             fs::read(partial.join("candidate.drj.retained"))?,
@@ -3209,7 +3231,7 @@ mod tests {
         {
             let destination = app._directory.path().join(format!("stale-export-{index}"));
             fs::create_dir(&destination)?;
-            app.dispatch_with_selector(EXPORT_RECOVERY_JOURNAL, |_, _| {
+            app.dispatch_with_fallible_selector(EXPORT_RECOVERY_JOURNAL, |_, _| {
                 assert!(
                     app.with_state(|state| match change {
                         PostModalChange::Revision => state.model_revision += 1,
@@ -3224,7 +3246,7 @@ mod tests {
                     })
                     .is_ok()
                 );
-                recovery_export_selection(&destination).expect("selected recovery export directory")
+                recovery_export_selection(&destination)
             })?;
             assert!(!destination.join("candidate.drj.retained").exists());
             app.with_state(|state| {
@@ -3247,13 +3269,13 @@ mod tests {
         let (_candidate, _) = identity_app.install_staged_intent()?;
         let destination = identity_app._directory.path().join("identity-changed");
         fs::create_dir(&destination)?;
-        identity_app.dispatch_with_selector(EXPORT_RECOVERY_JOURNAL, |_, _| {
+        identity_app.dispatch_with_fallible_selector(EXPORT_RECOVERY_JOURNAL, |_, _| {
             assert!(
                 identity_app
                     .with_state(|state| state.staged_journal = None)
                     .is_ok()
             );
-            recovery_export_selection(&destination).expect("selected recovery export directory")
+            recovery_export_selection(&destination)
         })?;
         identity_app.assert_session_cleared()?;
         assert!(!destination.join("candidate.drj.retained").exists());
