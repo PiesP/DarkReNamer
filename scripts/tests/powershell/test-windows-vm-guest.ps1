@@ -1666,9 +1666,12 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
         if ($suiteBytesCaptured -ne $suiteBudgetBytes -or $suiteRunCount -ne 2) {
             throw 'The shrinking per-test output allowance did not cap the complete guest suite.'
         }
+        $exhaustedOutputRoot = Join-Path $valid.root 'exhausted-output'
+        [void](New-Item -ItemType Directory -Path $exhaustedOutputRoot)
         $exhaustedSuiteRow = Invoke-RustTestBinary `
             -Test $valid.manifest.test_binaries[0] `
             -Root $valid.root `
+            -OutputRoot $exhaustedOutputRoot `
             -RuntimeRoot $runtimeObservationRoot `
             -Index 99 `
             -TimeoutSeconds 1 `
