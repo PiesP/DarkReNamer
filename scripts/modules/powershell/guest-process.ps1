@@ -397,16 +397,22 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
     [DllImport("kernel32.dll")]
     private static extern void DeleteProcThreadAttributeList(IntPtr attributeList);
 
+    private static Win32Exception Win32Failure(string operation) {
+        int error = Marshal.GetLastWin32Error();
+        return new Win32Exception(error, operation + " failed.");
+    }
+
     private static IntPtr QueryTokenBuffer(IntPtr token, int informationClass) {
         uint required = 0;
         GetTokenInformation(token, informationClass, IntPtr.Zero, 0, out required);
-        if (required == 0) throw new Win32Exception(Marshal.GetLastWin32Error());
+        if (required == 0) {
+            throw Win32Failure("GetTokenInformation size query for class " + informationClass);
+        }
         IntPtr buffer = Marshal.AllocHGlobal((int)required);
         uint returned;
         if (!GetTokenInformation(token, informationClass, buffer, required, out returned)) {
-            int error = Marshal.GetLastWin32Error();
             Marshal.FreeHGlobal(buffer);
-            throw new Win32Exception(error);
+            throw Win32Failure("GetTokenInformation for class " + informationClass);
         }
         return buffer;
     }
@@ -415,7 +421,7 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
         IntPtr text = IntPtr.Zero;
         try {
             if (!ConvertSidToStringSidW(sid, out text))
-                throw new Win32Exception(Marshal.GetLastWin32Error());
+                throw Win32Failure("ConvertSidToStringSidW");
             return Marshal.PtrToStringUni(text);
         }
         finally { if (text != IntPtr.Zero) LocalFree(text); }
@@ -467,7 +473,7 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
         IntPtr token = IntPtr.Zero;
         try {
             if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, out token))
-                throw new Win32Exception(Marshal.GetLastWin32Error());
+                throw Win32Failure("OpenProcessToken for the elevated observer");
             string userSid = TokenSid(token, TOKEN_USER);
             RequireToken(token, 1, expectedSession, "S-1-16-12288", userSid);
         }
@@ -483,7 +489,7 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
         IntPtr current = IntPtr.Zero, linked = IntPtr.Zero, primary = IntPtr.Zero;
         try {
             if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, out current))
-                throw new Win32Exception(Marshal.GetLastWin32Error());
+                throw Win32Failure("OpenProcessToken for linked-token verification");
             uint currentSession = TokenDword(current, TOKEN_SESSION_ID);
             userSid = TokenSid(current, TOKEN_USER);
             RequireToken(current, 1, expectedSession, "S-1-16-12288", userSid);
@@ -492,7 +498,7 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
             uint desiredAccess = TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY;
             if (!DuplicateTokenEx(linked, desiredAccess, IntPtr.Zero,
                     SECURITY_IMPERSONATION, TOKEN_PRIMARY, out primary))
-                throw new Win32Exception(Marshal.GetLastWin32Error());
+                throw Win32Failure("DuplicateTokenEx for the linked medium observer token");
             if (TokenDword(primary, TOKEN_TYPE) != TOKEN_PRIMARY)
                 throw new InvalidOperationException("The filtered observer token is not primary.");
             RequireToken(primary, 0, expectedSession, "S-1-16-8192", userSid);
@@ -512,7 +518,7 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
         IntPtr process, uint expectedSession, string expectedUser) {
         IntPtr token;
         if (!OpenProcessToken(process, TOKEN_QUERY, out token))
-            throw new Win32Exception(Marshal.GetLastWin32Error());
+            throw Win32Failure("OpenProcessToken for the suspended observer child");
         try { RequireToken(token, 0, expectedSession, "S-1-16-8192", expectedUser); }
         finally { CloseHandle(token); }
     }
@@ -682,7 +688,11 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
                 : CreateProcessW(filePath, commandLine, IntPtr.Zero, IntPtr.Zero,
                     inheritHandles, flags, IntPtr.Zero, workingDirectory,
                     ref startup, out created);
-            if (!started) throw new Win32Exception(Marshal.GetLastWin32Error());
+            if (!started) {
+                throw Win32Failure(elevatedObserver
+                    ? "CreateProcessAsUserW for the linked medium observer token"
+                    : "CreateProcessW for the VM test child");
+            }
             if (!AssignProcessToJobObject(job, created.hProcess)) {
                 int error = Marshal.GetLastWin32Error();
                 if (!TerminateProcess(created.hProcess, 1)) {
