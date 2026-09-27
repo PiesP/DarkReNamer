@@ -625,6 +625,8 @@ try {
         'function Resolve-JobBoundCapturePaths',
         '$BoundParameters.Keys -contains ''StdoutPath''',
         'bool redirect = !String.IsNullOrEmpty(stdoutPath) || !String.IsNullOrEmpty(stderrPath);',
+        '$row[''process_lifecycle''] = [ordered]@{',
+        'start_time_utc_ticks = $processStartTimeUtcTicks',
         '$capturePaths.stdout_path',
         '$capturePaths.stderr_path',
         'AssertDefaultObserverDesktop();',
@@ -748,6 +750,25 @@ try {
         if ($runnerText.IndexOf($requiredJobSource, [StringComparison]::Ordinal) -lt 0) {
             throw "The guest process containment contract is missing '$requiredJobSource'."
         }
+    }
+    $guiProcessStartIndex = $runnerText.IndexOf(
+        '$processState.process = Start-JobBoundProcess',
+        [StringComparison]::Ordinal
+    )
+    $guiProcessLifecycleIndex = $runnerText.IndexOf(
+        '$row[''process_lifecycle''] = [ordered]@{',
+        $guiProcessStartIndex,
+        [StringComparison]::Ordinal
+    )
+    $guiRawEvidenceIndex = $runnerText.IndexOf(
+        'if ($RawEvidence) {',
+        $guiProcessStartIndex,
+        [StringComparison]::Ordinal
+    )
+    if ($guiProcessStartIndex -lt 0 -or
+        $guiProcessLifecycleIndex -le $guiProcessStartIndex -or
+        $guiRawEvidenceIndex -le $guiProcessLifecycleIndex) {
+        throw 'Every started GUI process must record its PID and creation time before optional raw-evidence enrichment.'
     }
     $preservedCleanupFailure = [ordered]@{
         failure_reason = 'process_job_not_empty'

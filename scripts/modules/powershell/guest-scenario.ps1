@@ -530,14 +530,19 @@ function Invoke-GuiSmoke {
                 -FilePath $applicationPath `
                 -Arguments '' `
                 -WorkingDirectory $Root
+            $processState.process.process.Refresh()
+            $processStartTimeUtcTicks = $processState.process.process.StartTime.ToUniversalTime().Ticks.ToString(
+                [Globalization.CultureInfo]::InvariantCulture
+            )
+            $row['process_lifecycle'] = [ordered]@{
+                pid = [int]$processState.process.process.Id
+                start_time_utc_ticks = $processStartTimeUtcTicks
+            }
             if ($RawEvidence) {
-                $processState.process.process.Refresh()
                 $row['process_lifecycle'] = [ordered]@{
                     pid = [int]$processState.process.process.Id
                     session_id = [int]$processState.process.process.SessionId
-                    start_time_utc_ticks = $processState.process.process.StartTime.ToUniversalTime().Ticks.ToString(
-                        [Globalization.CultureInfo]::InvariantCulture
-                    )
+                    start_time_utc_ticks = $processStartTimeUtcTicks
                     executable_path = $applicationPath
                     executable_sha256 = Get-LowerSha256 -Path $applicationPath
                     start_observed = $true

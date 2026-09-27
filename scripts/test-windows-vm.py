@@ -15,7 +15,7 @@ from pathlib import Path
 import stat
 import types
 
-TOOLING_MANIFEST_SHA256 = "3af01a29ba9903b5f723a13792770c8d1c9db675ade6a2ac1dfcf64e1c37faca"
+TOOLING_MANIFEST_SHA256 = "bd8968bfd2ba790d85928c61a48d5dcd5cc25c09fcc96fd631d1d13e1fbe38df"
 TOOLING_LOADER_SHA256 = "cffb17faf73f0643b293dbe5c4a7cefe9475e8a19008b03f9ce45d8b3565497d"
 IMPLEMENTATION_ROLE = "vm-launcher"
 
