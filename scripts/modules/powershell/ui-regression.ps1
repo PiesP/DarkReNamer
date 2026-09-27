@@ -361,6 +361,7 @@ function New-GuiRegressionResult {
     }
     else {
         $result['source_sha'] = $Verified.source_sha
+        $result['process_lifecycles'] = [Collections.Generic.List[object]]::new()
     }
     $result['runner_sha256'] = $Verified.runner_sha256
     $result['acceptance_script_sha256'] = $Verified.script_sha256
@@ -378,6 +379,19 @@ function New-GuiRegressionResult {
     $result['failure_reason'] = 'setup_failed'
     $result['diagnostic'] = $null
     $result
+}
+function Get-GuiRegressionProcessLifecycleCollection {
+    param(
+        [Parameter(Mandatory)][Collections.IDictionary] $Result,
+        [Parameter(Mandatory)][bool] $RawRegression
+    )
+
+    if ($RawRegression) { return $null }
+    if (-not $Result.Contains('process_lifecycles') -or
+        $Result.process_lifecycles -isnot [Collections.Generic.List[object]]) {
+        throw 'Source-built GUI regression lifecycle collection is unavailable.'
+    }
+    return ,$Result.process_lifecycles
 }
 function Invoke-GuiRegressionAcceptance {
     $resolved = Resolve-AcceptanceBundle `
@@ -589,6 +603,9 @@ function Invoke-GuiRegressionAcceptance {
             $runtimeCursor = $runtimeCursor.Parent
         }
         Invoke-WithIsolatedEnvironment -RuntimeRoot $runtimeRoot -Action {
+            $processLifecycleObservations = Get-GuiRegressionProcessLifecycleCollection `
+                -Result $result `
+                -RawRegression $rawRegression
             if ($RegressionMode -in @('standard', 'text-scale')) {
                 $scenario = Invoke-ObserverStandardScenario `
                     -Verified $verified `
@@ -597,7 +614,8 @@ function Invoke-GuiRegressionAcceptance {
                     -Appearance $Appearance `
                     -SessionId $session `
                     -WaitSeconds $TimeoutSeconds `
-                    -Captures $captures
+                    -Captures $captures `
+                    -ProcessLifecycleObservations $processLifecycleObservations
             }
             else {
                 $scenario = Invoke-ObserverContextScenario `
@@ -607,7 +625,8 @@ function Invoke-GuiRegressionAcceptance {
                     -Appearance $Appearance `
                     -SessionId $session `
                     -WaitSeconds $TimeoutSeconds `
-                    -Captures $captures
+                    -Captures $captures `
+                    -ProcessLifecycleObservations $processLifecycleObservations
             }
             if ($RegressionMode -eq 'text-scale') {
                 $scenario['limitations'] = @('native-taskdialog-text-scale-not-observed')

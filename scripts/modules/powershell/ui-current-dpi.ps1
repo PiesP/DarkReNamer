@@ -136,19 +136,7 @@ function New-VmAutomatedLayoutRun {
             -Process $Application.process `
             -WindowHandle ([IntPtr]$Application.main.Current.NativeWindowHandle) `
             -FixtureRoot $FixtureRoot
-        process_lifecycle = [ordered]@{
-            pid = [int]$Application.process.Id
-            session_id = [int]$Application.process.SessionId
-            start_time_utc_ticks = $Application.process.StartTime.ToUniversalTime().Ticks.ToString(
-                [Globalization.CultureInfo]::InvariantCulture
-            )
-            executable_path = $ApplicationPath
-            executable_sha256 = Get-LowerSha256 -Path $ApplicationPath
-            start_observed = $true
-            exit_observed = $false
-            exit_method = $null
-            exit_code = $null
-        }
+        process_lifecycle = $Application.process_lifecycle
         layout_observations = $layoutObservations
     }
 }
@@ -268,6 +256,7 @@ $rawCandidate = $verified.lane -ceq 'candidate-gui-only'
 $rawCheckpoints = [Collections.Generic.List[object]]::new()
 $keyboardEvents = [Collections.Generic.List[object]]::new()
 $rawControls = [Collections.Generic.List[object]]::new()
+$processLifecycles = [Collections.Generic.List[object]]::new()
 $rawFocusReachability = $null
 $keyboard = [ordered]@{
     status = 'failed'
@@ -348,6 +337,7 @@ if ($verified.lane -ceq 'candidate-gui-only') {
 }
 else {
     $result['source_sha'] = $verified.source_sha
+    $result['process_lifecycles'] = $processLifecycles
 }
 $result['runner_sha256'] = $verified.runner_sha256
 $result['acceptance_script_sha256'] = $verified.script_sha256
@@ -459,27 +449,15 @@ try {
             -WorkingDirectory $verified.root `
             -SessionId $ExpectedSessionId `
             -WaitSeconds $TimeoutSeconds `
-            -Label 'current-DPI acceptance application'
+            -Label 'current-DPI acceptance application' `
+            -ProcessLifecycleObservations $processLifecycles
         $processState.process = $application.owned
         $lifecycle.process_terminated = $false
         $process = $application.process
         $mainWindow = $application.main
         $mainHandle = [IntPtr]$application.main_handle
         if ($rawCandidate) {
-            $process.Refresh()
-            $result.process_lifecycle = [ordered]@{
-                pid = [int]$process.Id
-                session_id = [int]$process.SessionId
-                start_time_utc_ticks = $process.StartTime.ToUniversalTime().Ticks.ToString(
-                    [Globalization.CultureInfo]::InvariantCulture
-                )
-                executable_path = $applicationPath
-                executable_sha256 = Get-LowerSha256 -Path $applicationPath
-                start_observed = $true
-                exit_observed = $false
-                exit_method = $null
-                exit_code = $null
-            }
+            $result.process_lifecycle = $application.process_lifecycle
         }
 
         $appearanceSpec = if ($HighContrast) {
@@ -1245,11 +1223,15 @@ finally {
                 if (-not $jobCleanup.job_empty -or -not $jobCleanup.job_closed) {
                     throw 'The current-DPI candidate process job did not close cleanly.'
                 }
-                if ($rawCandidate -and $null -ne $result.process_lifecycle -and
-                    $jobCleanup.forced_termination -and -not $result.process_lifecycle.exit_observed) {
-                    $result.process_lifecycle.exit_observed = $true
-                    $result.process_lifecycle.exit_method = 'forced-termination'
-                    $result.process_lifecycle.exit_code = [int]$process.ExitCode
+                if ($jobCleanup.forced_termination -and
+                    ($jobCleanup.termination_exit_code -is [int] -or
+                        $jobCleanup.termination_exit_code -is [long]) -and
+                    $processState.process.PSObject.Properties.Name -ccontains 'process_lifecycle' -and
+                    -not $processState.process.process_lifecycle.exit_observed) {
+                    Complete-AcceptanceProcessLifecycle `
+                        -Lifecycle $processState.process.process_lifecycle `
+                        -ExitMethod forced-termination `
+                        -ExitCode ([int]$jobCleanup.termination_exit_code)
                 }
             }
             $lifecycle.process_terminated = $process.HasExited
