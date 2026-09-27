@@ -767,7 +767,12 @@ public static class DarkReNamerVmControllerWorkspace {
                     $programFilesRoot,
                     [StringComparison]::OrdinalIgnoreCase
                 )) { break }
-                $cursor = $cursor.Parent
+                $cursor = if ($cursor -is [IO.FileInfo]) {
+                    $cursor.Directory
+                }
+                else {
+                    $cursor.Parent
+                }
             }
             if ($null -eq $cursor) {
                 throw 'The protected PowerShell executable is outside Program Files.'
