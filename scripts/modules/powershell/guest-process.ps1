@@ -1342,12 +1342,15 @@ public static class DarkReNamerVmBoundaryProbe {
         }
         int error = Marshal.GetLastWin32Error();
         if (error == 87) return false;
-        if (error != 5) throw new Win32Exception(error, label + " failed for an unexpected reason.");
+        if (error != 5)
+            throw new InvalidOperationException(label + " failed with native error " + error + ".");
         return true;
     }
     public static int Check(uint observerProcessId) {
         IntPtr query = OpenProcess(0x1000, false, observerProcessId);
-        if (query == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        if (query == IntPtr.Zero)
+            throw new InvalidOperationException("observer process query-limited access failed with native error " +
+                Marshal.GetLastWin32Error() + ".");
         CloseHandle(query);
         foreach (uint right in new uint[] { 0x0001, 0x0002, 0x0008, 0x0020, 0x00040000 }) {
             uint requested = right;
@@ -1362,9 +1365,11 @@ public static class DarkReNamerVmBoundaryProbe {
             if (queryThread == IntPtr.Zero) {
                 int queryError = Marshal.GetLastWin32Error();
                 if (queryError == 87) continue;
-                throw new Win32Exception(queryError);
+                if (queryError != 5)
+                    throw new InvalidOperationException(
+                        "observer thread query-limited access failed with native error " + queryError + ".");
             }
-            CloseHandle(queryThread);
+            else CloseHandle(queryThread);
             bool stable = true;
             foreach (uint right in new uint[] { 0x0001, 0x0010, 0x0020, 0x00040000 }) {
                 uint requested = right;
