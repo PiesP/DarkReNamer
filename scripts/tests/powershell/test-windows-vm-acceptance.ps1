@@ -686,12 +686,15 @@ try {
             [Parameter(Mandatory)][scriptblock] $Finalizer,
             [Parameter(Mandatory)][ValidateSet('current-dpi', 'regression')][string] $Mode,
             [Parameter(Mandatory)][bool] $InventoryFailure,
-            [AllowNull()][string] $InitialFailureReason
+            [AllowNull()][string] $InitialFailureReason,
+            [ValidateSet('source-built','candidate-gui-only')][string] $RegressionLane =
+                'candidate-gui-only'
         )
 
         & {
             $caseRoot = Join-Path $temporaryRoot (
-                'finalizer-' + $Mode + '-' + [Guid]::NewGuid().ToString('N')
+                'finalizer-' + $Mode + '-' + $RegressionLane + '-' +
+                    [Guid]::NewGuid().ToString('N')
             )
             [void](New-Item -ItemType Directory -Path $caseRoot)
             $diagnosticPath = Join-Path $caseRoot 'acceptance-error.txt'
@@ -715,16 +718,35 @@ try {
             $resolvedRoot = Join-Path $caseRoot 'resolved'
             [void](New-Item -ItemType Directory -Path $verifiedRoot)
             [void](New-Item -ItemType Directory -Path $resolvedRoot)
-            $result = [ordered]@{
-                status = if ($hasInitialFailure) { 'failed' } else { 'review_required' }
-                failure_reason = if ($hasInitialFailure) { $InitialFailureReason } else { $null }
-                raw_cleanup = $null
-                process_cleanup = $false
-                guest_cleanup = $false
-                screenshots = @()
-                diagnostic = $null
-                observations = $null
+            $resolved = [pscustomobject]@{
+                root = $resolvedRoot
+                lane = $RegressionLane
+                target = 'x86_64-pc-windows-msvc'
+                application = [pscustomobject]@{
+                    file = 'DarkReNamer.exe'
+                    sha256 = 'a' * 64
+                }
+                source_sha = '0123456789abcdef0123456789abcdef01234567'
+                runner_sha256 = 'b' * 64
+                script_sha256 = 'c' * 64
+                product = [pscustomobject]@{ fixture = 'product' }
+                harness = [pscustomobject]@{ fixture = 'harness' }
             }
+            $result = if ($Mode -ceq 'regression') {
+                New-GuiRegressionResult -Verified $resolved -Appearance system
+            }
+            else {
+                [ordered]@{
+                    raw_cleanup = $null
+                    process_cleanup = $false
+                    guest_cleanup = $false
+                    screenshots = @()
+                    diagnostic = $null
+                    observations = $null
+                }
+            }
+            $result.status = if ($hasInitialFailure) { 'failed' } else { 'review_required' }
+            $result.failure_reason = if ($hasInitialFailure) { $InitialFailureReason } else { $null }
             $writerProbe = [ordered]@{ observations_written = $false }
             $inventoryFailureMessage = "injected $Mode CIM cleanup failure"
             function Get-CimInstance {
@@ -751,9 +773,9 @@ try {
                 )
             }
             $rawCandidate = $Mode -ceq 'current-dpi'
-            $rawRegression = $Mode -ceq 'regression'
+            $rawRegression = $Mode -ceq 'regression' -and
+                $RegressionLane -ceq 'candidate-gui-only'
             $verified = [pscustomobject]@{ root = $verifiedRoot }
-            $resolved = [pscustomobject]@{ root = $resolvedRoot }
             $lifecycle = [pscustomobject]@{ process_terminated = $true }
             $rawCheckpoints = [Collections.Generic.List[object]]::new()
             $processState = [pscustomobject]@{ process = $null }
@@ -799,7 +821,26 @@ try {
                 }
                 else { $null }
                 inventory_failure_message = $inventoryFailureMessage
+                observation_sha256 = Get-Sha256 $observationPath
+                observations = [IO.File]::ReadAllText($observationPath) | ConvertFrom-Json
             }
+        }
+    }
+    function Assert-UiObserverObservationBinding {
+        param(
+            [Parameter(Mandatory)][object] $Published,
+            [Parameter(Mandatory)][string] $Label
+        )
+
+        $embedded = $Published.published_result.acceptance_observations |
+            ConvertTo-Json -Depth 12 -Compress
+        $separate = $Published.observations | ConvertTo-Json -Depth 12 -Compress
+        if ($Published.published_result.observations.file -cne
+                'acceptance-observations.json' -or
+            $Published.published_result.observations.sha256 -cne
+                $Published.observation_sha256 -or
+            $embedded -cne $separate) {
+            throw "$Label did not bind its exact published observations file and embedded object."
         }
     }
     $currentDpiFinalizer = Get-UiObserverFinalizerBody `
@@ -839,6 +880,9 @@ try {
             ) -lt 0) {
             throw "The $($fixture.mode) finalizer did not publish its retained failure and unobserved inventory."
         }
+        Assert-UiObserverObservationBinding `
+            -Published $published `
+            -Label "$($fixture.mode) cleanup-failure result"
     }
     $passingFinalizer = Invoke-UiObserverFinalizerFixture `
         -Finalizer $regressionFinalizer `
@@ -865,6 +909,24 @@ try {
             "keys=$($passingCleanupNames -join ','); " +
             "diagnostic=$($null -ne $passingFinalizer.diagnostic)")
     }
+    Assert-UiObserverObservationBinding `
+        -Published $passingFinalizer `
+        -Label 'candidate GUI regression result'
+    $sourceFinalizer = Invoke-UiObserverFinalizerFixture `
+        -Finalizer $regressionFinalizer `
+        -Mode regression `
+        -InventoryFailure $false `
+        -InitialFailureReason $null `
+        -RegressionLane source-built
+    if (-not $sourceFinalizer.result_published -or
+        $sourceFinalizer.published_result.schema_version -ne 1 -or
+        $sourceFinalizer.published_result.status -cne 'review_required' -or
+        $sourceFinalizer.published_result.PSObject.Properties.Name -ccontains 'raw_cleanup') {
+        throw 'The source-built GUI regression finalizer changed its result contract.'
+    }
+    Assert-UiObserverObservationBinding `
+        -Published $sourceFinalizer `
+        -Label 'source-built GUI regression result'
     $mixedTreeAssignments = @($acceptanceAst.FindAll({
         param($ast)
         $ast -is [Management.Automation.Language.AssignmentStatementAst] -and

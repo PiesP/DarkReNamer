@@ -378,6 +378,7 @@ function New-GuiRegressionResult {
     $result['screenshots'] = @()
     $result['failure_reason'] = 'setup_failed'
     $result['diagnostic'] = $null
+    $result['observations'] = $null
     $result
 }
 function Get-GuiRegressionProcessLifecycleCollection {
@@ -830,6 +831,10 @@ function Invoke-GuiRegressionAcceptance {
         }
         Write-JsonUtf8Bom -Path $observationPath -Value $observations
         $result['acceptance_observations'] = $observations
+        $result.observations = [ordered]@{
+            file = 'acceptance-observations.json'
+            sha256 = Get-LowerSha256 -Path $observationPath
+        }
         Write-ResultDocument -Root $resolved.root -Path $resultPath -Result $result
     }
     if ($result.status -ne 'review_required') {
