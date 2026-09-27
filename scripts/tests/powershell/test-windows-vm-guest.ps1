@@ -689,6 +689,7 @@ try {
         'Protect-CurrentRunnerProcess',
         'medium-boundary-probe.stdout.log',
         'medium-boundary-probe.stderr.log',
+        'BOUNDARY_PROBE_FAILURE type={0} native_error={1} message={2}',
         '-AggregateOutputLimitBytes $probeOutputLimitBytes',
         '$probeSucceeded = $false',
         '$state.owner.WaitForCapture(10000)',

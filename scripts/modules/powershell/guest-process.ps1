@@ -1381,7 +1381,23 @@ public static class DarkReNamerVmBoundaryProbe {
     }
 }
 "@
-[DarkReNamerVmBoundaryProbe]::Check([uint32]__OBSERVER_PROCESS_ID__) | Out-Null
+try {
+    [DarkReNamerVmBoundaryProbe]::Check([uint32]__OBSERVER_PROCESS_ID__) | Out-Null
+}
+catch {
+    $exception = $_.Exception.GetBaseException()
+    $nativeError = if ($exception -is [System.ComponentModel.Win32Exception]) {
+        $exception.NativeErrorCode
+    }
+    else { -1 }
+    $line = 'BOUNDARY_PROBE_FAILURE type={0} native_error={1} message={2}' -f `
+        $exception.GetType().FullName, $nativeError, $exception.Message
+    $bytes = [Text.Encoding]::UTF8.GetBytes($line + [Environment]::NewLine)
+    $stream = [Console]::OpenStandardError()
+    $stream.Write($bytes, 0, $bytes.Length)
+    $stream.Flush()
+    throw
+}
 $trustedResultPath = [Environment]::GetEnvironmentVariable('DARKRENAMER_VM_TRUSTED_RESULT_PATH')
 if ([string]::IsNullOrWhiteSpace($trustedResultPath) -or
     -not [IO.Path]::IsPathRooted($trustedResultPath) -or
