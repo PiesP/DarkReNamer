@@ -228,6 +228,8 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
     private const uint TOKEN_ASSIGN_PRIMARY = 0x0001;
     private const uint TOKEN_DUPLICATE = 0x0002;
     private const uint TOKEN_QUERY = 0x0008;
+    private const uint TOKEN_ADJUST_DEFAULT = 0x0080;
+    private const uint TOKEN_ADJUST_SESSIONID = 0x0100;
     private const int TOKEN_TYPE = 8;
     private const int TOKEN_STATISTICS = 10;
     private const int TOKEN_LINKED_TOKEN = 19;
@@ -607,7 +609,10 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
                 throw new InvalidOperationException("The interactive shell image is not the Windows Explorer binary.");
             if (GetShellProcessId(shellWindow) != shellProcessId)
                 throw new InvalidOperationException("The interactive shell process changed during token acquisition.");
-            uint desiredAccess = TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY;
+            // Retry 17 returned ERROR_ACCESS_DENIED with only the documented CPWT mask.
+            // Keep these additional rights on this short-lived handle; do not mutate the token.
+            uint desiredAccess = TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY |
+                TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID;
             if (!OpenProcessToken(shellProcess, desiredAccess, out shellToken))
                 throw Win32Failure("OpenProcessToken for the verified interactive shell");
             if (TokenDword(shellToken, TOKEN_TYPE) != TOKEN_PRIMARY)
