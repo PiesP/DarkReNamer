@@ -70,15 +70,19 @@ folder and every ancestor without delete sharing. At acceptance, it reads the
 selected item's parent volume GUID and file reference number and checks them
 against the retained folder. If the selected leaf exposes exact volume GUID
 and file reference properties, it opens the leaf immediately, compares those
-properties with the native handle, and retains the handle through session
-revalidation. An existing leaf without an exact identity is rejected. If the
-leaf is absent at acceptance, the application records that state and later
-allows only an exclusive create relative to the retained directory handle. It
-writes through the same output handle. Existing reparse points and files with
-more than one hard link are rejected before truncation. The output handle
-permits concurrent readers while denying competing write, link, and delete
-access until the write finishes; a create race fails closed rather than
-reopening an existing target.
+properties with a native metadata handle, and retains a no-delete guard
+through session revalidation. An existing leaf without an exact identity is
+rejected. If the leaf is absent at acceptance, the application records that
+state and later allows only an exclusive create relative to the retained
+directory handle. It writes through the same output handle. Existing reparse
+points and files with more than one hard link are rejected before truncation.
+The output handle is
+opened without sharing, denying concurrent readers, writers, hard-link
+creation, and delete access until the write finishes. The exclusive writer
+opens after the save dialog releases its shell references, compares identity
+again, and rechecks the link count. An already-open reader or writer causes the
+export to fail closed. A create race fails closed rather than reopening an
+existing target.
 UTF-16LE imports reject an incomplete trailing code unit and retain complete
 UTF-16 code units, including unpaired surrogates, for legacy path handling.
 The multi-select file picker extracts only the remaining source capacity plus

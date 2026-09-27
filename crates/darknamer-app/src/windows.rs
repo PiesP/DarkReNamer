@@ -2615,6 +2615,29 @@ mod tests {
     }
 
     #[test]
+    fn prepared_text_export_target_rejects_a_hard_link_added_before_write()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let destination = directory.path().join("names.txt");
+        let alias = directory.path().join("alias.txt");
+        let sentinel = b"both names stay unchanged";
+        fs::write(&destination, sentinel)?;
+        let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
+
+        fs::hard_link(&destination, &alias)?;
+        let Err(error) =
+            crate::rename::windows_native::write_text_export_target(target, b"replacement")
+        else {
+            return Err(io::Error::other("a late hard link was not detected").into());
+        };
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read(&destination)?, sentinel);
+        assert_eq!(fs::read(&alias)?, sentinel);
+        Ok(())
+    }
+
+    #[test]
     fn text_export_handle_blocks_a_competing_hard_link_until_write_finishes()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
