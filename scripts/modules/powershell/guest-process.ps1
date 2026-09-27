@@ -717,6 +717,9 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
     private volatile bool outputLimitExceeded;
     public Process Process { get; private set; }
     public bool OutputLimitExceeded { get { return outputLimitExceeded; } }
+    public uint LastProcessListAssigned;
+    public uint LastProcessListListed;
+    public int LastProcessListError;
 
     private DarkReNamerVmJobBoundProcess(IntPtr job, Process process) {
         this.job = job;
@@ -1053,6 +1056,9 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
     }
 
     public long GetSoleActiveProcessId() {
+        LastProcessListAssigned = 0;
+        LastProcessListListed = 0;
+        LastProcessListError = 0;
         if (job == IntPtr.Zero) return 0;
         uint bufferLength = (uint)(8 + IntPtr.Size);
         IntPtr processList = Marshal.AllocHGlobal((int)bufferLength);
@@ -1061,6 +1067,7 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
             if (!QueryInformationJobObjectBuffer(job, 3, processList,
                     bufferLength, out returnedLength)) {
                 int error = Marshal.GetLastWin32Error();
+                LastProcessListError = error;
                 if (error == 122 || error == 234) return -1;
                 throw new Win32Exception(error);
             }
@@ -1068,6 +1075,8 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
                 throw new InvalidOperationException("The Job Object process list is truncated.");
             uint assigned = unchecked((uint)Marshal.ReadInt32(processList, 0));
             uint listed = unchecked((uint)Marshal.ReadInt32(processList, 4));
+            LastProcessListAssigned = assigned;
+            LastProcessListListed = listed;
             if (assigned > 1 || listed > 1) return -1;
             if (listed == 0) return 0;
             if (assigned != 1 || listed != 1) return -1;
@@ -1329,6 +1338,7 @@ function Start-JobBoundProcess {
         job_had_survivors = $false
         job_forced_termination = $false
         job_active_processes_at_primary_exit = $null
+        job_process_snapshot = $null
         job_active_processes_at_close = $null
         job_active_processes_at_stop = $null
         job_active_process_ids_at_stop = @()
@@ -1725,6 +1735,19 @@ function Get-CapturedOutputBytes {
     [long]$item.Length
 }
 
+function Set-ProcessCleanupFailureReason {
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary] $Row,
+        [Parameter(Mandatory)][string] $Reason
+    )
+    if ($null -eq $Row['failure_reason']) {
+        $Row['failure_reason'] = $Reason
+    }
+    else {
+        $Row['cleanup_failure_reason'] = $Reason
+    }
+}
+
 function Wait-JobBoundProcessWithOutputLimit {
     param(
         [Parameter(Mandatory)][object] $State,
@@ -1735,6 +1758,8 @@ function Wait-JobBoundProcessWithOutputLimit {
 
     $deadline = [Diagnostics.Stopwatch]::StartNew()
     $reason = $null
+    $soleActiveProcessId = $null
+    $activeProcessesAfterAccountingGrace = $null
     while (-not $State.process.WaitForExit(100)) {
         if ($State.owner.OutputLimitExceeded) {
             $reason = 'output_limit_exceeded'
@@ -1751,9 +1776,24 @@ function Wait-JobBoundProcessWithOutputLimit {
     else {
         $State.process.WaitForExit()
         $State.job_active_processes_at_primary_exit = [int]$State.owner.ActiveProcessCount
-        $soleActiveProcessId = 0L
         if ($State.job_active_processes_at_primary_exit -gt 0) {
-            $soleActiveProcessId = [long]$State.owner.GetSoleActiveProcessId()
+            $State.job_process_snapshot = [ordered]@{
+                primary_pid = [long]$State.process.Id
+                sole_pid = $null
+                assigned = [uint32]0
+                listed = [uint32]0
+                query_error = [int]0
+                active_after_grace = $null
+            }
+            try {
+                $soleActiveProcessId = [long]$State.owner.GetSoleActiveProcessId()
+                $State.job_process_snapshot.sole_pid = $soleActiveProcessId
+            }
+            finally {
+                $State.job_process_snapshot.assigned = [uint32]$State.owner.LastProcessListAssigned
+                $State.job_process_snapshot.listed = [uint32]$State.owner.LastProcessListListed
+                $State.job_process_snapshot.query_error = [int]$State.owner.LastProcessListError
+            }
         }
         $primaryAccountingLag = $soleActiveProcessId -eq 0 -or
             $soleActiveProcessId -eq [long]$State.process.Id
@@ -1762,10 +1802,15 @@ function Wait-JobBoundProcessWithOutputLimit {
             Stop-JobBoundProcess -State $State
             $reason = 'process_job_not_empty'
         }
-        elseif ($primaryAccountingLag -and -not $State.owner.WaitForEmpty(1000)) {
-            $State.job_had_survivors = $true
-            Stop-JobBoundProcess -State $State
-            $reason = 'process_job_not_empty'
+        elseif ($primaryAccountingLag) {
+            $emptyAfterAccountingGrace = $State.owner.WaitForEmpty(1000)
+            $activeProcessesAfterAccountingGrace = [int]$State.owner.ActiveProcessCount
+            $State.job_process_snapshot.active_after_grace = $activeProcessesAfterAccountingGrace
+            if (-not $emptyAfterAccountingGrace) {
+                $State.job_had_survivors = $true
+                Stop-JobBoundProcess -State $State
+                $reason = 'process_job_not_empty'
+            }
         }
     }
     try {
@@ -1794,6 +1839,7 @@ function Wait-JobBoundProcessWithOutputLimit {
     [pscustomobject]@{
         failure_reason = $reason
         active_processes_at_primary_exit = $State.job_active_processes_at_primary_exit
+        process_job_snapshot = $State.job_process_snapshot
         stdout_bytes = $stdoutBytes
         stderr_bytes = $stderrBytes
     }
@@ -1871,7 +1917,9 @@ function Invoke-RustTestBinary {
         stdout = $null
         stderr = $null
         failure_reason = 'process_start_failed'
+        cleanup_failure_reason = $null
         active_processes_at_primary_exit = $null
+        process_job_snapshot = $null
     }
     $processState = [pscustomobject]@{ process = $null }
     try {
@@ -1913,9 +1961,11 @@ function Invoke-RustTestBinary {
             if ($null -ne $wait.failure_reason) {
                 $row.failure_reason = $wait.failure_reason
                 $row.active_processes_at_primary_exit = $wait.active_processes_at_primary_exit
+                $row.process_job_snapshot = $wait.process_job_snapshot
                 return
             }
             $row.active_processes_at_primary_exit = $wait.active_processes_at_primary_exit
+            $row.process_job_snapshot = $wait.process_job_snapshot
             $row.exit_code = $processState.process.process.ExitCode
             $stdoutText = [IO.File]::ReadAllText($stdoutPath, [Text.Encoding]::UTF8)
             $stderrText = [IO.File]::ReadAllText($stderrPath, [Text.Encoding]::UTF8)
@@ -1944,6 +1994,11 @@ function Invoke-RustTestBinary {
     }
     catch {
         $row.failure_reason = 'process_error'
+        if ($null -ne $processState.process) {
+            $row.active_processes_at_primary_exit =
+                $processState.process.job_active_processes_at_primary_exit
+            $row.process_job_snapshot = $processState.process.job_process_snapshot
+        }
     }
     finally {
         if ($null -ne $processState.process) {
@@ -1955,7 +2010,7 @@ function Invoke-RustTestBinary {
             }
             catch {
                 $row.status = 'failed'
-                $row.failure_reason = 'process_cleanup_failed'
+                Set-ProcessCleanupFailureReason -Row $row -Reason 'process_cleanup_failed'
             }
         }
         try {
@@ -1983,12 +2038,12 @@ function Invoke-RustTestBinary {
                     $processState.process.process.Dispose()
                     if (-not $row.job_cleanup) {
                         $row.status = 'failed'
-                        $row.failure_reason = 'process_job_cleanup_failed'
+                        Set-ProcessCleanupFailureReason -Row $row -Reason 'process_job_cleanup_failed'
                     }
                 }
                 catch {
                     $row.status = 'failed'
-                    $row.failure_reason = 'process_job_cleanup_failed'
+                    Set-ProcessCleanupFailureReason -Row $row -Reason 'process_job_cleanup_failed'
                     try { $processState.process.owner.Dispose() } catch {}
                     try { $processState.process.process.Dispose() } catch {}
                 }

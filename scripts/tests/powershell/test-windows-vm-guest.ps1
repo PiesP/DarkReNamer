@@ -688,6 +688,12 @@ try {
         'if (error == 122 || error == 234) return -1;',
         'if (assigned > 1 || listed > 1) return -1;',
         'if (listed == 0) return 0;',
+        'public uint LastProcessListAssigned;',
+        'public uint LastProcessListListed;',
+        'public int LastProcessListError;',
+        '$State.job_process_snapshot.query_error = [int]$State.owner.LastProcessListError',
+        'process_job_snapshot = $State.job_process_snapshot',
+        'function Set-ProcessCleanupFailureReason',
         '$soleActiveProcessId -eq 0 -or',
         '-not $State.job_had_survivors',
         '[System.IO.FileSystemAclExtensions]::CreateDirectory($security, $path)',
@@ -732,6 +738,22 @@ try {
         if ($runnerText.IndexOf($requiredJobSource, [StringComparison]::Ordinal) -lt 0) {
             throw "The guest process containment contract is missing '$requiredJobSource'."
         }
+    }
+    $preservedCleanupFailure = [ordered]@{
+        failure_reason = 'process_job_not_empty'
+        cleanup_failure_reason = $null
+    }
+    Set-ProcessCleanupFailureReason -Row $preservedCleanupFailure -Reason 'process_job_cleanup_failed'
+    $primaryCleanupFailure = [ordered]@{
+        failure_reason = $null
+        cleanup_failure_reason = $null
+    }
+    Set-ProcessCleanupFailureReason -Row $primaryCleanupFailure -Reason 'process_job_cleanup_failed'
+    if ($preservedCleanupFailure.failure_reason -cne 'process_job_not_empty' -or
+        $preservedCleanupFailure.cleanup_failure_reason -cne 'process_job_cleanup_failed' -or
+        $primaryCleanupFailure.failure_reason -cne 'process_job_cleanup_failed' -or
+        $primaryCleanupFailure.cleanup_failure_reason) {
+        throw 'Cleanup failures must preserve an earlier process failure reason and retain cleanup failure separately.'
     }
     if ($runnerText.Contains('maximumProcessIds') -or
         $runnerText.Contains('capacity = capacity * 2')) {
@@ -1005,6 +1027,10 @@ try {
         $accountingOwner = [pscustomobject]@{
             active_processes = 1
             sole_active_process_id = [long]$accountingProcess.Id
+            LastProcessListAssigned = [uint32]1
+            LastProcessListListed = [uint32]1
+            LastProcessListError = 0
+            throw_on_process_list = $false
             OutputLimitExceeded = $false
         }
         Add-Member -InputObject $accountingOwner -MemberType ScriptProperty -Name ActiveProcessCount -Value { [int]$this.active_processes } -Force
@@ -1017,6 +1043,10 @@ try {
             return $this.active_processes -eq 0
         } -Force
         Add-Member -InputObject $accountingOwner -MemberType ScriptMethod -Name GetSoleActiveProcessId -Value {
+            if ($this.throw_on_process_list) {
+                $this.LastProcessListError = 5
+                throw [ComponentModel.Win32Exception]::new(5)
+            }
             return [long]$this.sole_active_process_id
         } -Force
         Add-Member -InputObject $accountingOwner -MemberType ScriptMethod -Name WaitForCapture -Value { param([int] $Milliseconds) } -Force
@@ -1026,6 +1056,7 @@ try {
             owner = $accountingOwner
             aggregate_output_limit_bytes = [long]4096
             job_active_processes_at_primary_exit = $null
+            job_process_snapshot = $null
             job_had_survivors = $false
             job_forced_termination = $false
             job_active_processes_at_close = $null
@@ -1037,7 +1068,12 @@ try {
         if ($accountingResult.failure_reason -or
             $accountingResult.active_processes_at_primary_exit -ne 1 -or
             $accountingOwner.ActiveProcessCount -ne 0 -or
-            $accountingState.job_had_survivors) {
+            $accountingState.job_had_survivors -or
+            $accountingResult.process_job_snapshot.primary_pid -ne $accountingProcess.Id -or
+            $accountingResult.process_job_snapshot.sole_pid -ne $accountingProcess.Id -or
+            $accountingResult.process_job_snapshot.assigned -ne 1 -or
+            $accountingResult.process_job_snapshot.listed -ne 1 -or
+            $accountingResult.process_job_snapshot.active_after_grace -ne 0) {
             throw 'A transient Job Object accounting delay was classified as a surviving process.'
         }
         if (-not (Close-JobBoundProcess -State $accountingState)) {
@@ -1045,11 +1081,13 @@ try {
         }
         $accountingOwner.active_processes = 1
         $accountingOwner.sole_active_process_id = 0
+        $accountingOwner.LastProcessListListed = [uint32]0
         $emptyListAccountingState = [pscustomobject]@{
             process = $accountingProcess
             owner = $accountingOwner
             aggregate_output_limit_bytes = [long]4096
             job_active_processes_at_primary_exit = $null
+            job_process_snapshot = $null
             job_had_survivors = $false
             job_forced_termination = $false
             job_active_processes_at_close = $null
@@ -1065,11 +1103,50 @@ try {
         if ($emptyListAccountingResult.failure_reason -or
             $emptyListAccountingResult.active_processes_at_primary_exit -ne 1 -or
             $accountingOwner.ActiveProcessCount -ne 0 -or
-            $emptyListAccountingState.job_had_survivors) {
+            $emptyListAccountingState.job_had_survivors -or
+            $emptyListAccountingResult.process_job_snapshot.sole_pid -ne 0 -or
+            $emptyListAccountingResult.process_job_snapshot.assigned -ne 1 -or
+            $emptyListAccountingResult.process_job_snapshot.listed -ne 0 -or
+            $emptyListAccountingResult.process_job_snapshot.active_after_grace -ne 0) {
             throw 'An empty live PID snapshot during Job Object accounting lag was classified as a survivor.'
         }
         if (-not (Close-JobBoundProcess -State $emptyListAccountingState)) {
             throw 'The process job did not close cleanly after an empty accounting snapshot.'
+        }
+        $accountingOwner.active_processes = 1
+        $accountingOwner.throw_on_process_list = $true
+        $queryErrorAccountingState = [pscustomobject]@{
+            process = $accountingProcess
+            owner = $accountingOwner
+            aggregate_output_limit_bytes = [long]4096
+            job_active_processes_at_primary_exit = $null
+            job_process_snapshot = $null
+            job_had_survivors = $false
+            job_forced_termination = $false
+            job_active_processes_at_close = $null
+            job_empty = $false
+            job_closed = $false
+            job_capture_complete = $false
+        }
+        $queryErrorMessage = $null
+        try {
+            [void](Wait-JobBoundProcessWithOutputLimit `
+                -State $queryErrorAccountingState `
+                -StdoutPath $accountingStdoutPath `
+                -StderrPath $accountingStderrPath `
+                -TimeoutSeconds 10)
+        }
+        catch { $queryErrorMessage = $_.Exception.Message }
+        $accountingOwner.active_processes = 0
+        $accountingOwner.throw_on_process_list = $false
+        if (-not $queryErrorMessage -or
+            $queryErrorAccountingState.job_process_snapshot.primary_pid -ne $accountingProcess.Id -or
+            $queryErrorAccountingState.job_process_snapshot.sole_pid -ne $null -or
+            $queryErrorAccountingState.job_process_snapshot.query_error -ne 5) {
+            throw 'An unexpected Job Object query error was not retained in the process snapshot.'
+        }
+        if (-not (Close-JobBoundProcess -State $queryErrorAccountingState)) {
+            throw 'The process job did not close after the query-error fixture settled.'
         }
     }
     finally {
