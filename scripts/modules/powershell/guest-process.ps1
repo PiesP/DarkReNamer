@@ -1306,6 +1306,26 @@ function Assert-VmObserverExecutionContext {
     }
 }
 
+function Resolve-JobBoundCapturePaths {
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary] $BoundParameters,
+        [AllowNull()][string] $StdoutPath,
+        [AllowNull()][string] $StderrPath
+    )
+
+    $stdoutBound = $BoundParameters.Contains('StdoutPath')
+    $stderrBound = $BoundParameters.Contains('StderrPath')
+    if (-not $stdoutBound -and -not $stderrBound) {
+        return [pscustomobject]@{ stdout_path = $null; stderr_path = $null }
+    }
+    if (-not $stdoutBound -or -not $stderrBound -or
+        [string]::IsNullOrWhiteSpace($StdoutPath) -or
+        [string]::IsNullOrWhiteSpace($StderrPath)) {
+        throw 'Bounded process output configuration must include both output paths.'
+    }
+    [pscustomobject]@{ stdout_path = $StdoutPath; stderr_path = $StderrPath }
+}
+
 function Start-JobBoundProcess {
     param(
         [Parameter(Mandatory)][string] $FilePath,
@@ -1319,8 +1339,13 @@ function Start-JobBoundProcess {
     )
 
     Initialize-JobBoundProcessRuntime
+    $capturePaths = Resolve-JobBoundCapturePaths `
+        -BoundParameters $PSBoundParameters `
+        -StdoutPath $StdoutPath `
+        -StderrPath $StderrPath
     $owner = [DarkReNamerVmJobBoundProcess]::Start(
-        $FilePath, $Arguments, $WorkingDirectory, $StdoutPath, $StderrPath,
+        $FilePath, $Arguments, $WorkingDirectory,
+        $capturePaths.stdout_path, $capturePaths.stderr_path,
         $script:VmTestOutputChannelLimitBytes, $AggregateOutputLimitBytes,
         [bool]$SingleProcessOnly
     )

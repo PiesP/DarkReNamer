@@ -622,6 +622,10 @@ try {
         'flags, environmentBlock,',
         'commandLine.Length >= 1024',
         'The CreateProcessWithTokenW command line exceeds its supported bound.',
+        'function Resolve-JobBoundCapturePaths',
+        '$BoundParameters.Contains(''StdoutPath'')',
+        '$capturePaths.stdout_path',
+        '$capturePaths.stderr_path',
         'AssertDefaultObserverDesktop();',
         'GetProcessWindowStation()',
         'GetThreadDesktop(GetCurrentThreadId())',
@@ -782,6 +786,33 @@ try {
         $runnerText.Contains('capacity = capacity * 2')) {
         throw 'The sole-process Job Object query must not retry a multi-PID snapshot with a larger buffer.'
     }
+    $noCapturePaths = Resolve-JobBoundCapturePaths -BoundParameters ([ordered]@{})
+    if ($null -ne $noCapturePaths.stdout_path -or $null -ne $noCapturePaths.stderr_path) {
+        throw 'An unredirected process must receive null capture paths.'
+    }
+    $capturePathParameters = [ordered]@{
+        StdoutPath = $true
+        StderrPath = $true
+    }
+    $capturePaths = Resolve-JobBoundCapturePaths `
+        -BoundParameters $capturePathParameters `
+        -StdoutPath 'stdout.log' `
+        -StderrPath 'stderr.log'
+    if ($capturePaths.stdout_path -cne 'stdout.log' -or
+        $capturePaths.stderr_path -cne 'stderr.log') {
+        throw 'Redirected process capture paths were not retained.'
+    }
+    Assert-Fails {
+        Resolve-JobBoundCapturePaths `
+            -BoundParameters ([ordered]@{ StdoutPath = $true }) `
+            -StdoutPath 'stdout.log'
+    } 'both output paths'
+    Assert-Fails {
+        Resolve-JobBoundCapturePaths `
+            -BoundParameters $capturePathParameters `
+            -StdoutPath ' ' `
+            -StderrPath 'stderr.log'
+    } 'both output paths'
     $aclAwareDirectoryCalls = [regex]::Matches(
         $runnerText,
         [regex]::Escape('[System.IO.FileSystemAclExtensions]::CreateDirectory($security, $path)')
