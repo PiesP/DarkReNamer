@@ -620,13 +620,16 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
     }
 
     private static void RequireCreatedChild(
-        IntPtr process, uint expectedSession, string expectedUser) {
+        IntPtr process, uint expectedSession, string expectedUser,
+        Luid expectedAuthenticationId) {
         IntPtr token;
         if (!OpenProcessToken(process, TOKEN_QUERY, out token))
             throw Win32Failure("OpenProcessToken for the suspended observer child");
         try {
             if (TokenDword(token, TOKEN_TYPE) != TOKEN_PRIMARY)
                 throw new InvalidOperationException("The suspended observer child token is not primary.");
+            if (!SameLuid(expectedAuthenticationId, ReadTokenStatistics(token).AuthenticationId))
+                throw new InvalidOperationException("The suspended observer child belongs to a different logon session.");
             RequireToken(
                 token, 0, TOKEN_ELEVATION_TYPE_LIMITED, expectedSession,
                 "S-1-16-8192", expectedUser);
@@ -756,8 +759,10 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
             bool elevatedObserver = IsElevatedObserver();
             uint observerSession = 0;
             string observerUserSid = null;
+            Luid observerAuthenticationId = new Luid();
             if (elevatedObserver) {
                 observerToken = OpenVerifiedLinkedShellPrimaryToken(out observerSession, out observerUserSid);
+                observerAuthenticationId = ReadTokenStatistics(observerToken).AuthenticationId;
                 startup.StartupInfo.lpDesktop = @"winsta0\default";
             }
             bool inheritHandles = false;
@@ -824,7 +829,7 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
             }
             if (elevatedObserver) {
                 try {
-                    RequireCreatedChild(created.hProcess, observerSession, observerUserSid);
+                    RequireCreatedChild(created.hProcess, observerSession, observerUserSid, observerAuthenticationId);
                 }
                 catch {
                     if (!TerminateProcess(created.hProcess, 1)) {

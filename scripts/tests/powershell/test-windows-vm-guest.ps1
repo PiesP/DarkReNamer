@@ -628,6 +628,8 @@ try {
         'TokenDword(shellToken, TOKEN_TYPE) != TOKEN_PRIMARY',
         'ReadTokenStatistics(linkedToken).AuthenticationId',
         'ReadTokenStatistics(shellToken).AuthenticationId',
+        'ReadTokenStatistics(observerToken).AuthenticationId',
+        'SameLuid(expectedAuthenticationId, ReadTokenStatistics(token).AuthenticationId)',
         'SameLuid(linkedAuthenticationId, shellAuthenticationId)',
         'token, 1, TOKEN_ELEVATION_TYPE_FULL, expectedSession,',
         'linked, 0, TOKEN_ELEVATION_TYPE_LIMITED, expectedSession,',
@@ -636,10 +638,11 @@ try {
         'GetTokenInformation for class ',
         'CreateProcessAsUserW for the verified medium shell token',
         'The shell token belongs to a different interactive logon.',
+        'The suspended observer child belongs to a different logon session.',
         'The interactive shell image is not the Windows Explorer binary.',
         'The interactive shell process changed during token acquisition.',
         'CreateProcessAsUserW(observerToken, filePath',
-        'RequireCreatedChild(created.hProcess, observerSession, observerUserSid)',
+        'RequireCreatedChild(created.hProcess, observerSession, observerUserSid,',
         'AssertHighObserverToken',
         'Assert-VmObserverExecutionContext',
         'Test-MediumObserverBoundary',
@@ -734,15 +737,21 @@ try {
         'CreateProcessAsUserW(observerToken, filePath',
         [StringComparison]::Ordinal
     )
+    $observerAuthenticationCaptureIndex = $runnerText.IndexOf(
+        'observerAuthenticationId = ReadTokenStatistics(observerToken).AuthenticationId;',
+        [StringComparison]::Ordinal
+    )
     $childTokenIndex = $runnerText.IndexOf(
-        'RequireCreatedChild(created.hProcess, observerSession, observerUserSid)',
+        'RequireCreatedChild(created.hProcess, observerSession, observerUserSid, observerAuthenticationId)',
         [StringComparison]::Ordinal
     )
     $resumeIndex = $runnerText.IndexOf(
         'ResumeThread(created.hThread)',
         [StringComparison]::Ordinal
     )
-    if ($createAsUserIndex -lt 0 -or $assignIndex -le $createAsUserIndex -or
+    if ($observerAuthenticationCaptureIndex -lt 0 -or
+        $createAsUserIndex -le $observerAuthenticationCaptureIndex -or
+        $assignIndex -le $createAsUserIndex -or
         $childTokenIndex -le $assignIndex -or $resumeIndex -le $childTokenIndex -or
         $runnerText.IndexOf('CREATE_BREAKAWAY_FROM_JOB', [StringComparison]::Ordinal) -ge 0 -or
         $runnerText.IndexOf('JOB_OBJECT_LIMIT_BREAKAWAY_OK', [StringComparison]::Ordinal) -ge 0 -or
