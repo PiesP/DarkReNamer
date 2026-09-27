@@ -550,7 +550,7 @@
       "bundle": "ui-regression.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "a20e7a151a9c37e502a900aea7659c02d4d70337ae07bd7df5debe943a71471e",
+      "sha256": "685851e0a5aa7b9f53c04da42705fea412af3bcfc7f2349d6ebd5e8f8410006a",
       "dependencies": []
     },
     {

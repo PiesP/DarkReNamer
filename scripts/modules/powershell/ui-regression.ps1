@@ -378,6 +378,7 @@ function New-GuiRegressionResult {
     $result['screenshots'] = @()
     $result['failure_reason'] = 'setup_failed'
     $result['diagnostic'] = $null
+    $result['observations'] = $null
     $result
 }
 function Get-GuiRegressionProcessLifecycleCollection {
@@ -525,7 +526,7 @@ function Invoke-GuiRegressionAcceptance {
     $captures = [Collections.Generic.List[object]]::new()
     $desktopLock = $null
     $executionState = $null
-    $runtimeRoot = $null
+    $effectiveRuntimeRoot = $null
     $runtimeCleaned = $false
     $rawRegressionJournalAfter = $null
     $rawRegressionJournalObserved = $false
@@ -594,7 +595,6 @@ function Invoke-GuiRegressionAcceptance {
             ($runtimeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw 'GUI regression candidate runtime root is unsafe.'
         }
-        $runtimeRoot = $runtimeItem.FullName
         $runtimeCursor = $runtimeItem
         while ($null -ne $runtimeCursor) {
             if (($runtimeCursor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -602,14 +602,15 @@ function Invoke-GuiRegressionAcceptance {
             }
             $runtimeCursor = $runtimeCursor.Parent
         }
-        Invoke-WithIsolatedEnvironment -RuntimeRoot $runtimeRoot -Action {
+        $effectiveRuntimeRoot = $runtimeItem.FullName
+        Invoke-WithIsolatedEnvironment -RuntimeRoot $effectiveRuntimeRoot -Action {
             $processLifecycleObservations = Get-GuiRegressionProcessLifecycleCollection `
                 -Result $result `
                 -RawRegression $rawRegression
             if ($RegressionMode -in @('standard', 'text-scale')) {
                 $scenario = Invoke-ObserverStandardScenario `
                     -Verified $verified `
-                    -RuntimeRoot $runtimeRoot `
+                    -RuntimeRoot $effectiveRuntimeRoot `
                     -EvidenceRoot $resolved.output_root `
                     -Appearance $Appearance `
                     -SessionId $session `
@@ -620,7 +621,7 @@ function Invoke-GuiRegressionAcceptance {
             else {
                 $scenario = Invoke-ObserverContextScenario `
                     -Verified $verified `
-                    -RuntimeRoot $runtimeRoot `
+                    -RuntimeRoot $effectiveRuntimeRoot `
                     -EvidenceRoot $resolved.output_root `
                     -Appearance $Appearance `
                     -SessionId $session `
@@ -670,10 +671,10 @@ function Invoke-GuiRegressionAcceptance {
         if ($null -ne $cursor) {
             try { [DarkReNamerVmAcceptanceNative]::MoveCursor($cursor.X, $cursor.Y) } catch {}
         }
-        if ($rawRegression -and $null -ne $runtimeRoot) {
+        if ($rawRegression -and $null -ne $effectiveRuntimeRoot) {
             try {
                 $rawRegressionJournalAfter = @(Get-VmAutomatedJournalInventory `
-                    -LocalAppData (Join-Path $runtimeRoot 'localappdata'))
+                    -LocalAppData (Join-Path $effectiveRuntimeRoot 'localappdata'))
                 $rawRegressionJournalObserved = $true
             }
             catch {
@@ -681,12 +682,13 @@ function Invoke-GuiRegressionAcceptance {
                 $result.failure_reason = 'raw_journal_observation_failed'
             }
         }
-        if ($null -ne $runtimeRoot -and (Test-Path -LiteralPath $runtimeRoot)) {
+        if ($null -ne $effectiveRuntimeRoot -and
+            (Test-Path -LiteralPath $effectiveRuntimeRoot)) {
             try {
                 [void](Assert-AcceptanceProcessJobLedgerClosed)
-                [void](Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot)
-                Remove-Item -LiteralPath $runtimeRoot -Recurse -Force
-                $runtimeCleaned = -not (Test-Path -LiteralPath $runtimeRoot)
+                [void](Get-VmAutomatedRuntimeRootObservation -Root $effectiveRuntimeRoot)
+                Remove-Item -LiteralPath $effectiveRuntimeRoot -Recurse -Force
+                $runtimeCleaned = -not (Test-Path -LiteralPath $effectiveRuntimeRoot)
             }
             catch {
                 $result.status = 'failed'
@@ -785,7 +787,8 @@ function Invoke-GuiRegressionAcceptance {
                 -Root $resolved.root
             $ownedAfter = $ownedProcessObservation.entries
             try {
-                $rawRegressionRuntimeRootAfter = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
+                $rawRegressionRuntimeRootAfter = Get-VmAutomatedRuntimeRootObservation `
+                    -Root $effectiveRuntimeRoot
             }
             catch {
                 $result.status = 'failed'
@@ -828,6 +831,10 @@ function Invoke-GuiRegressionAcceptance {
         }
         Write-JsonUtf8Bom -Path $observationPath -Value $observations
         $result['acceptance_observations'] = $observations
+        $result.observations = [ordered]@{
+            file = 'acceptance-observations.json'
+            sha256 = Get-LowerSha256 -Path $observationPath
+        }
         Write-ResultDocument -Root $resolved.root -Path $resultPath -Result $result
     }
     if ($result.status -ne 'review_required') {
