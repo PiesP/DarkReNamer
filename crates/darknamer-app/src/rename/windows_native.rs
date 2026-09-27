@@ -568,10 +568,9 @@ impl TextExportParent {
             .directories
             .last()
             .ok_or_else(|| io::Error::other("text export directory chain is empty"))?;
-        // Keep the selected leaf pinned with no delete sharing through the
-        // complete stage write and final identity check. ReplaceFileW requires
-        // delete sharing, so the guard is released only after staged bytes are
-        // durable and immediately before the atomic path replacement.
+        // Retain the selected leaf handle and identity through the stage write.
+        // A same-user rename can still change the name while this handle is
+        // open, so the name is reopened and checked immediately before commit.
         let options = FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT;
         let accepted_leaf = match open_relative(
             parent.file(),
@@ -817,6 +816,8 @@ where
                 drop(stage.take());
                 drop(guard);
                 before_replace()?;
+                let target_entry =
+                    open_text_export_target_for_replace(parent.file(), &target.leaf, identity)?;
 
                 // SAFETY: all three UTF-16 paths are NUL-terminated and remain
                 // live for this synchronous call; the names are siblings on
@@ -831,6 +832,7 @@ where
                         ptr::null(),
                     )
                 };
+                drop(target_entry);
                 if replaced == 0 {
                     let error = io::Error::last_os_error();
                     if error.raw_os_error() == Some(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2) {
@@ -966,6 +968,31 @@ fn remove_text_export_backup(
     let actual = (ntfs_volume_id(&file)?, ntfs_file_reference_number(&file)?);
     require_matching_text_export_leaf_identity(expected_identity, actual)?;
     mark_file_delete(&file)
+}
+
+fn open_text_export_target_for_replace(
+    parent: &File,
+    target_leaf: &[u16],
+    expected_identity: (u128, u64),
+) -> io::Result<File> {
+    let file = open_relative(
+        parent,
+        target_leaf,
+        FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        SHARE_ALL,
+        FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+    )?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "text export destination changed to a non-regular file before replacement",
+        ));
+    }
+    let actual = (ntfs_volume_id(&file)?, ntfs_file_reference_number(&file)?);
+    require_matching_text_export_leaf_identity(expected_identity, actual)?;
+    Ok(file)
 }
 
 fn restore_text_export_backup(

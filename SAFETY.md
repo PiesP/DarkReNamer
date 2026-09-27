@@ -77,12 +77,12 @@ the selected leaf is checked again. Existing reparse points and files with
 more than one hard link are rejected before commit. Existing files are
 replaced atomically with `ReplaceFileW`, which preserves supported file
 metadata and leaves hard-link aliases attached to the prior file contents. The
-no-delete leaf guard is released only for that final replace because Windows
-requires delete sharing for the replacement operation. The selected file
-identity and link count are rechecked immediately before that release; this
-does not provide a kernel compare-and-swap against a same-user process racing
-the final name-based call. A missing leaf is committed with an exclusive,
-handle-relative no-replace rename, so a later occupant is never overwritten.
+selected file identity and link count are checked after staging. Since Windows
+permits a same-user rename while the retained leaf handle is open, the final
+path is reopened and checked against the selected identity immediately before
+`ReplaceFileW`; that name-based call still has a narrow same-user race after
+the recheck. A missing leaf is committed with an exclusive, handle-relative
+no-replace rename, so a later occupant is never overwritten.
 UTF-16LE imports reject an incomplete trailing code unit and retain complete
 UTF-16 code units, including unpaired surrogates, for legacy path handling.
 The multi-select file picker extracts only the remaining source capacity plus

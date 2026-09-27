@@ -2703,20 +2703,33 @@ mod tests {
     }
 
     #[test]
-    fn prepared_text_export_target_pins_an_existing_leaf_until_write_finishes()
+    fn prepared_text_export_target_rejects_a_replaced_existing_leaf()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let destination = directory.path().join("names.txt");
         let replacement = directory.path().join("replacement.txt");
-        fs::write(&destination, b"original")?;
+        let original = b"original";
+        let replacement_occupant = b"replacement occupant";
+        fs::write(&destination, original)?;
         let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
 
-        assert!(fs::rename(&destination, &replacement).is_err());
-        assert!(fs::remove_file(&destination).is_err());
-        crate::rename::windows_native::write_text_export_target(target, b"accepted output")?;
+        let Err(error) =
+            crate::rename::windows_native::write_text_export_target_with_before_replace(
+                target,
+                b"accepted output",
+                || {
+                    fs::rename(&destination, &replacement)?;
+                    fs::write(&destination, replacement_occupant)
+                },
+            )
+        else {
+            return Err(io::Error::other("a replaced destination was accepted").into());
+        };
 
-        assert_eq!(fs::read(&destination)?, b"accepted output");
-        assert!(!replacement.exists());
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read(&destination)?, replacement_occupant);
+        assert_eq!(fs::read(&replacement)?, original);
+        assert_eq!(directory.path().read_dir()?.count(), 2);
         Ok(())
     }
 
