@@ -762,7 +762,9 @@ function Invoke-GuiRegressionAcceptance {
         $result.process_cleanup = $runtimeCleaned
         $result.guest_cleanup = $runtimeCleaned
         if ($rawRegression) {
-            $ownedAfter = @(Get-VmAutomatedOwnedProcessInventory -Root $resolved.root)
+            $ownedProcessObservation = Get-VmAutomatedOwnedProcessCleanupObservation `
+                -Root $resolved.root
+            $ownedAfter = $ownedProcessObservation.entries
             try {
                 $rawRegressionRuntimeRootAfter = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
             }
@@ -777,12 +779,34 @@ function Invoke-GuiRegressionAcceptance {
                     -Observed $rawRegressionJournalObserved `
                     -Entries $rawRegressionJournalAfter)
             }
-            if ($ownedAfter.Count -ne 0 -or -not $runtimeCleaned) {
+            if (-not $ownedProcessObservation.observed) {
+                $result.raw_cleanup['owned_processes_observation_error'] =
+                    $ownedProcessObservation.error
+                $result.status = 'failed'
+                if ([string]::IsNullOrEmpty($result.failure_reason)) {
+                    $result.failure_reason = 'owned_process_cleanup_observation_failed'
+                }
+                try {
+                    Add-Content `
+                        -LiteralPath $diagnosticPath `
+                        -Value ('Owned process cleanup observation failed:' +
+                            [Environment]::NewLine + $ownedProcessObservation.diagnostic) `
+                        -Encoding UTF8
+                }
+                catch {}
+            }
+            elseif ($ownedAfter.Count -ne 0 -or -not $runtimeCleaned) {
                 $result.status = 'failed'
                 $result.failure_reason = 'raw_cleanup_failed'
             }
         }
         $result.screenshots = $captures.ToArray()
+        if (Test-Path -LiteralPath $diagnosticPath -PathType Leaf) {
+            $result.diagnostic = [ordered]@{
+                file = 'acceptance-error.txt'
+                sha256 = Get-LowerSha256 -Path $diagnosticPath
+            }
+        }
         Write-JsonUtf8Bom -Path $observationPath -Value $observations
         $result['acceptance_observations'] = $observations
         Write-ResultDocument -Root $resolved.root -Path $resultPath -Result $result

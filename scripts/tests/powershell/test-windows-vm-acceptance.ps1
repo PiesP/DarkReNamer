@@ -640,6 +640,25 @@ try {
     ) -ge 0) {
         throw 'UI cleanup must not serialize an unobserved journal as an empty inventory.'
     }
+    foreach ($requiredCleanupObservationSource in @(
+        'Get-VmAutomatedOwnedProcessCleanupObservation',
+        'owned_processes_observation_error',
+        "'owned_process_cleanup_observation_failed'",
+        "'Owned process cleanup observation failed:'"
+    )) {
+        if ($acceptanceText.IndexOf(
+            $requiredCleanupObservationSource,
+            [StringComparison]::Ordinal
+        ) -lt 0) {
+            throw "UI cleanup failure publication is missing '$requiredCleanupObservationSource'."
+        }
+    }
+    if ([regex]::Matches(
+        $acceptanceText,
+        [regex]::Escape('Get-VmAutomatedOwnedProcessCleanupObservation')
+    ).Count -ne 4) {
+        throw 'Shared UI cleanup and every observer cleanup path must use the guarded owned-process observation.'
+    }
     $mixedTreeAssignments = @($acceptanceAst.FindAll({
         param($ast)
         $ast -is [Management.Automation.Language.AssignmentStatementAst] -and

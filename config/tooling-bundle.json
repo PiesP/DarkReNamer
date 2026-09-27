@@ -396,7 +396,7 @@
       "bundle": "guest-process.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "7c8578d7c8093bf4bbdc1d0be618f241fc1d9854db3288d51b526339805b57ed",
+      "sha256": "71bed2648b783df9c00329319185b3ee752256f5775b6fd56f05b497232eddf6",
       "dependencies": []
     },
     {
@@ -432,7 +432,7 @@
       "bundle": "guest-state.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "9259d0eb220e7150445a9e1c935a73fb4ca1f54153ba205ee51a5832db302e78",
+      "sha256": "810230e5be529bf33376715c50cad2de101dc03e6461b5cd23d8c4cc5df0e42c",
       "dependencies": []
     },
     {
@@ -450,7 +450,7 @@
       "bundle": "guest-runtime.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "cb6b6400003e9a25eb67e3885f1339177592341ccc53dc8eed1d40fe9d3ea9bc",
+      "sha256": "6595c74aa4d78b65b4e2fc0dfd33fcb3fedb46b1e665a187325f5189ca98985b",
       "dependencies": []
     },
     {
@@ -550,7 +550,7 @@
       "bundle": "ui-regression.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "b804d6319e5d34ed3491fa6ca54a1b8487b530476d0946fdb92ac9850dbc70e7",
+      "sha256": "d030d6975c0bb771da04d4fd782e597d86985930ccd23aa7a0444e24796b7f7b",
       "dependencies": []
     },
     {
@@ -559,7 +559,7 @@
       "bundle": "ui-current-dpi.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "77d566277f7319c16185d3bc5f86d92dbc586bacfe1c7c1a0a84757a30c68670",
+      "sha256": "19bac3582fe5bfa000c5dabe15730846e4daae91bcf0463029a846f9c164fa77",
       "dependencies": []
     },
     {

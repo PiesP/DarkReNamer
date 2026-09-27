@@ -1320,6 +1320,7 @@ finally {
     $rawJournalAfter = $null
     $rawJournalObserved = $false
     $rawRuntimeRootAfter = $null
+    $ownedProcessObservation = $null
     try {
         if (-not $lifecycle.process_terminated) {
             throw 'The owned application process is still running; runtime evidence was retained.'
@@ -1339,7 +1340,9 @@ finally {
         }
         $runtimeCleanup = -not (Test-Path -LiteralPath $runtimeRoot)
         if ($rawCandidate) {
-            $ownedAfter = @(Get-VmAutomatedOwnedProcessInventory -Root $verified.root)
+            $ownedProcessObservation = Get-VmAutomatedOwnedProcessCleanupObservation `
+                -Root $verified.root
+            $ownedAfter = $ownedProcessObservation.entries
             $rawRuntimeRootAfter = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
             $result.raw_cleanup = [ordered]@{
                 owned_processes_after = $ownedAfter
@@ -1347,7 +1350,23 @@ finally {
                 journal_after = (New-VmAutomatedJournalCleanupObservation `
                     -Observed $rawJournalObserved -Entries $rawJournalAfter)
             }
-            if ($ownedAfter.Count -ne 0 -or -not $runtimeCleanup) {
+            if (-not $ownedProcessObservation.observed) {
+                $result.raw_cleanup['owned_processes_observation_error'] =
+                    $ownedProcessObservation.error
+                $result.status = 'failed'
+                if ([string]::IsNullOrEmpty($result.failure_reason)) {
+                    $result.failure_reason = 'owned_process_cleanup_observation_failed'
+                }
+                try {
+                    Add-Content `
+                        -LiteralPath $diagnosticPath `
+                        -Value ('Owned process cleanup observation failed:' +
+                            [Environment]::NewLine + $ownedProcessObservation.diagnostic) `
+                        -Encoding UTF8
+                }
+                catch {}
+            }
+            elseif ($ownedAfter.Count -ne 0 -or -not $runtimeCleanup) {
                 throw 'Current-DPI raw cleanup retained owned state.'
             }
         }
@@ -1362,11 +1381,27 @@ finally {
             catch {
                 $rawRuntimeRootAfter = $null
             }
+            if ($null -eq $ownedProcessObservation) {
+                $ownedProcessObservation = Get-VmAutomatedOwnedProcessCleanupObservation `
+                    -Root $verified.root
+            }
             $result.raw_cleanup = [ordered]@{
-                owned_processes_after = @(Get-VmAutomatedOwnedProcessInventory -Root $verified.root)
+                owned_processes_after = $ownedProcessObservation.entries
                 runtime_root_after = $rawRuntimeRootAfter
                 journal_after = (New-VmAutomatedJournalCleanupObservation `
                     -Observed $rawJournalObserved -Entries $rawJournalAfter)
+            }
+            if (-not $ownedProcessObservation.observed) {
+                $result.raw_cleanup['owned_processes_observation_error'] =
+                    $ownedProcessObservation.error
+                try {
+                    Add-Content `
+                        -LiteralPath $diagnosticPath `
+                        -Value ('Owned process cleanup observation failed:' +
+                            [Environment]::NewLine + $ownedProcessObservation.diagnostic) `
+                        -Encoding UTF8
+                }
+                catch {}
             }
         }
     }

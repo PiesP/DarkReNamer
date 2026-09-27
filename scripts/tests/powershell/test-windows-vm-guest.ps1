@@ -43,6 +43,30 @@ function Assert-Fails {
     throw "Expected failure containing '$Expected'."
 }
 
+function Assert-Win32Failure {
+    param(
+        [Parameter(Mandatory)][scriptblock] $Action,
+        [Parameter(Mandatory)][int] $NativeErrorCode,
+        [Parameter(Mandatory)][string] $Label
+    )
+
+    try {
+        & $Action
+    }
+    catch {
+        $exception = $_.Exception
+        while ($null -ne $exception -and
+            $exception -isnot [ComponentModel.Win32Exception]) {
+            $exception = $exception.InnerException
+        }
+        if ($null -eq $exception -or $exception.NativeErrorCode -ne $NativeErrorCode) {
+            throw "$Label returned an unexpected exception: $($_.Exception.Message)"
+        }
+        return
+    }
+    throw "$Label did not fail."
+}
+
 function Get-Sha256([string] $Path) {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
@@ -578,6 +602,7 @@ try {
         'Get-VmAutomatedJournalInventory',
         'Get-VmAutomatedCheckpoint',
         'Get-VmAutomatedOwnedProcessInventory',
+        'Get-VmAutomatedOwnedProcessCleanupObservation',
         'Get-VmAutomatedRuntimeRootObservation',
         'New-VmAutomatedJournalCleanupObservation'
     )) {
@@ -593,6 +618,38 @@ try {
         $observedJournal.entries[0].name -cne 'runtime.lock' -or
         $null -ne (New-VmAutomatedJournalCleanupObservation -Observed $false -Entries @())) {
         throw 'Cleanup journal evidence must distinguish an observed inventory from an unobserved one.'
+    }
+    $injectedOwnedPath = [IO.Path]::GetFullPath($valid.root).TrimEnd('\\') +
+        '\\injected-owned.exe'
+    $observedOwned = Get-VmAutomatedOwnedProcessCleanupObservation `
+        -Root $valid.root `
+        -ProcessQuery {
+            [pscustomobject]@{
+                ProcessId = 42
+                SessionId = 7
+                ExecutablePath = $injectedOwnedPath
+            }
+        }
+    if (-not $observedOwned.observed -or
+        $null -ne $observedOwned.error -or
+        @($observedOwned.entries).Count -ne 1 -or
+        $observedOwned.entries[0].pid -ne 42 -or
+        $observedOwned.entries[0].session_id -ne 7 -or
+        $observedOwned.entries[0].executable_path -cne $injectedOwnedPath) {
+        throw 'Injected CIM cleanup inventory did not retain its observed process identity.'
+    }
+    $unobservedOwned = Get-VmAutomatedOwnedProcessCleanupObservation `
+        -Root $valid.root `
+        -ProcessQuery { throw 'injected CIM cleanup failure' }
+    if ($unobservedOwned.observed -or
+        $null -ne $unobservedOwned.entries -or
+        $null -eq $unobservedOwned.error -or
+        $unobservedOwned.error.type -cne 'System.Management.Automation.RuntimeException' -or
+        $unobservedOwned.error.message -cne 'injected CIM cleanup failure' -or
+        $unobservedOwned.diagnostic.IndexOf(
+            'injected CIM cleanup failure', [StringComparison]::Ordinal
+        ) -lt 0) {
+        throw 'Cleanup inventory failure must remain explicit and distinguishable from an empty inventory.'
     }
     $runtimeObservationRoot = Join-Path $valid.root 'runtime-observation'
     [void](New-Item -ItemType Directory -Path $runtimeObservationRoot)
@@ -762,7 +819,10 @@ try {
         '[DarkReNamerVmRunnerSecurity]::ProtectCurrentProcess($runnerSid)',
         'PROTECTED_DACL_SECURITY_INFORMATION',
         'Initialize-TrustedResultWriter',
-        'CreateTrustedResultFile',
+        'CreateTrustedResultFile(string path, bool createNew)',
+        'const uint CREATE_NEW = 1;',
+        'createNew ? CREATE_NEW : OPEN_EXISTING',
+        '$trustedPath, -not $elevatedObserver)',
         'ProtectResultFile($writer.SafeFileHandle, $runnerSid)',
         'D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;',
         'function New-ObserverFixtureDirectory',
@@ -1487,8 +1547,13 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
         ))
         [void][System.IO.FileSystemAclExtensions]::CreateDirectory($testRootSecurity, $trustedResultRoot)
         $trustedResultPath = Join-Path $trustedResultRoot 'result.json'
-        [IO.File]::WriteAllText($trustedResultPath, '{}', [Text.UTF8Encoding]::new($false))
+        if (Test-Path -LiteralPath $trustedResultPath) {
+            throw 'The direct trusted result fixture must begin without a result file.'
+        }
         Initialize-TrustedResultWriter -Root $trustedResultRoot
+        if (-not (Test-Path -LiteralPath $trustedResultPath -PathType Leaf)) {
+            throw 'The direct trusted result writer did not atomically create its missing destination.'
+        }
         $writeBlockedByShare = $false
         try {
             [IO.File]::WriteAllText($trustedResultPath, '{"status":"forged"}')
@@ -1534,6 +1599,68 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
         }
         if (-not $probeIsAdministrator -and -not $deleteBlockedByDacl) {
             throw 'The same user removed the trusted result through its bundle directory.'
+        }
+
+        $directExistingRoot = Join-Path $valid.root 'trusted-result-direct-existing'
+        [void](New-Item -ItemType Directory -Path $directExistingRoot)
+        $directExistingPath = Join-Path $directExistingRoot 'result.json'
+        [IO.File]::WriteAllText($directExistingPath, '{}', [Text.UTF8Encoding]::new($false))
+        Assert-Win32Failure -NativeErrorCode 80 `
+            -Label 'Direct existing trusted result creation' `
+            -Action {
+            Initialize-TrustedResultWriter -Root $directExistingRoot
+        }
+
+        $managedResultRoot = Join-Path $valid.root 'trusted-result-managed'
+        [void](New-Item -ItemType Directory -Path $managedResultRoot)
+        $managedResultPath = Join-Path $managedResultRoot 'result.json'
+        [IO.File]::WriteAllText($managedResultPath, '{}', [Text.UTF8Encoding]::new($false))
+        $managedIdentityBefore = Get-FullFileIdentity -Path $managedResultPath
+        $missingManagedResultPath = Join-Path $managedResultRoot 'missing-result.json'
+        $previousElevatedObserver = [Environment]::GetEnvironmentVariable(
+            'DARKRENAMER_VM_ELEVATED_OBSERVER'
+        )
+        $previousTrustedResultPath = [Environment]::GetEnvironmentVariable(
+            'DARKRENAMER_VM_TRUSTED_RESULT_PATH'
+        )
+        try {
+            [Environment]::SetEnvironmentVariable('DARKRENAMER_VM_ELEVATED_OBSERVER', '1')
+            [Environment]::SetEnvironmentVariable(
+                'DARKRENAMER_VM_TRUSTED_RESULT_PATH', $missingManagedResultPath
+            )
+            Assert-Win32Failure -NativeErrorCode 2 `
+                -Label 'Managed missing trusted result open' `
+                -Action {
+                    Initialize-TrustedResultWriter `
+                        -Root $managedResultRoot `
+                        -Path $missingManagedResultPath
+            }
+            [Environment]::SetEnvironmentVariable(
+                'DARKRENAMER_VM_TRUSTED_RESULT_PATH', $managedResultPath
+            )
+            Initialize-TrustedResultWriter -Root $managedResultRoot
+            Write-ResultDocument -Root $managedResultRoot -Result ([ordered]@{
+                schema_version = 1
+                status = 'failed'
+                failure_reason = 'managed_security_test'
+            })
+            $managedResult = [IO.File]::ReadAllText($managedResultPath) | ConvertFrom-Json
+            if ($managedResult.failure_reason -cne 'managed_security_test') {
+                throw 'The managed trusted result writer did not use its controller-created destination.'
+            }
+            $managedIdentityAfter = Get-FullFileIdentity -Path $managedResultPath
+            if ($managedIdentityAfter.volume_serial -cne $managedIdentityBefore.volume_serial -or
+                $managedIdentityAfter.file_id -cne $managedIdentityBefore.file_id) {
+                throw 'The managed trusted result writer replaced its controller-created file identity.'
+            }
+        }
+        finally {
+            [Environment]::SetEnvironmentVariable(
+                'DARKRENAMER_VM_TRUSTED_RESULT_PATH', $previousTrustedResultPath
+            )
+            [Environment]::SetEnvironmentVariable(
+                'DARKRENAMER_VM_ELEVATED_OBSERVER', $previousElevatedObserver
+            )
         }
 
         $numericFileId = [DarkReNamerVmNative]::FormatFileIdNumeric(
