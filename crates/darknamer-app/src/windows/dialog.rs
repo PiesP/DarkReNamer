@@ -1659,12 +1659,22 @@ pub(super) fn select_prepared_file_dialog(
         PreparedFileDialogKind::AddFiles {
             remaining_count,
             remaining_path_bytes,
-        } => modal_native_dialog(owner, || {
+        } => match modal_native_dialog(owner, || {
             pick_bounded_files(owner, remaining_count, remaining_path_bytes)
-        })
-        .map_or(PreparedFileDialogSelection::Cancelled, |paths| {
-            PreparedFileDialogSelection::AddFiles(paths)
-        }),
+        }) {
+            Ok(Some(paths)) => PreparedFileDialogSelection::AddFiles(paths),
+            Ok(None) => PreparedFileDialogSelection::Cancelled,
+            Err(error) => {
+                message(
+                    owner,
+                    &format!(
+                        "파일 선택을 완료하지 못했습니다: {error}\n다시 파일을 선택해 주세요."
+                    ),
+                    "DarkReNamer - 파일 선택 실패",
+                );
+                PreparedFileDialogSelection::Cancelled
+            }
+        },
         PreparedFileDialogKind::UnifyDestinationParent => modal_native_dialog(owner, || {
             native_file_dialog(owner)
                 .set_title("모든 파일을 이동할 대상 폴더 선택")
@@ -2235,38 +2245,45 @@ fn report_recovery_export_folder_error(owner: HWND, error: &io::Error) {
     };
 }
 
-fn show_bounded_file_open_dialog(owner: HWND) -> ::windows::core::Result<IShellItemArray> {
+fn show_bounded_file_open_dialog(owner: HWND) -> io::Result<Option<IShellItemArray>> {
     // SAFETY: the native UI thread was initialized as STA by OleInitialize and
     // keeps the returned COM interface on that same thread.
     let dialog: IFileOpenDialog =
-        unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }?;
+        unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }
+            .map_err(shell_dialog_error)?;
     let title = wide("이름 붙일 파일 불러오기");
     // SAFETY: the dialog and owner belong to the initialized UI thread; title
     // remains NUL-terminated and alive through SetTitle, and Show is modal.
     unsafe {
-        dialog.SetOptions(
-            FOS_ALLOWMULTISELECT
-                | FOS_FILEMUSTEXIST
-                | FOS_FORCEFILESYSTEM
-                | FOS_NOCHANGEDIR
-                | FOS_PATHMUSTEXIST,
-        )?;
-        dialog.SetTitle(PCWSTR(title.as_ptr()))?;
-        dialog.Show(Some(::windows::Win32::Foundation::HWND(owner)))?;
-        dialog.GetResults()
+        dialog
+            .SetOptions(
+                FOS_ALLOWMULTISELECT
+                    | FOS_FILEMUSTEXIST
+                    | FOS_FORCEFILESYSTEM
+                    | FOS_NOCHANGEDIR
+                    | FOS_PATHMUSTEXIST,
+            )
+            .map_err(shell_dialog_error)?;
+        dialog
+            .SetTitle(PCWSTR(title.as_ptr()))
+            .map_err(shell_dialog_error)?;
     }
+    let shown = unsafe { dialog.Show(Some(::windows::Win32::Foundation::HWND(owner))) };
+    complete_bounded_file_dialog(shown, || unsafe { dialog.GetResults() })
 }
 
 fn pick_bounded_files(
     owner: HWND,
     remaining_count: usize,
     remaining_path_bytes: usize,
-) -> Option<Vec<PathBuf>> {
-    let results = show_bounded_file_open_dialog(owner).ok()?;
+) -> io::Result<Option<Vec<PathBuf>>> {
+    let Some(results) = show_bounded_file_open_dialog(owner)? else {
+        return Ok(None);
+    };
     // SAFETY: results is a live IShellItemArray returned by the successful
     // modal file-open dialog on the initialized UI thread.
-    let reported = usize::try_from(unsafe { results.GetCount() }.ok()?).ok()?;
-    collect_bounded_dialog_paths(
+    let reported = dialog_item_count(unsafe { results.GetCount() })?;
+    let paths = collect_bounded_dialog_paths(
         reported,
         remaining_count,
         PathBudget::from_remaining_bytes(remaining_path_bytes),
@@ -2275,8 +2292,24 @@ fn pick_bounded_files(
                 u32::try_from(index).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
             dialog_path_at(&results, index)
         },
-    )
-    .ok()
+    )?;
+    Ok(Some(paths))
+}
+
+fn complete_bounded_file_dialog<T>(
+    shown: ::windows::core::Result<()>,
+    get_results: impl FnOnce() -> ::windows::core::Result<T>,
+) -> io::Result<Option<T>> {
+    match shown {
+        Ok(()) => get_results().map(Some).map_err(shell_dialog_error),
+        Err(error) if error.code() == ::windows::core::HRESULT(0x8007_04C7_u32 as i32) => Ok(None),
+        Err(error) => Err(shell_dialog_error(error)),
+    }
+}
+
+fn dialog_item_count(result: ::windows::core::Result<u32>) -> io::Result<usize> {
+    let reported = result.map_err(shell_dialog_error)?;
+    usize::try_from(reported).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))
 }
 
 fn collect_bounded_dialog_paths(
@@ -2391,6 +2424,59 @@ mod tests {
         assert_eq!(calls, 1);
         assert_eq!(paths.len(), 1);
         Ok(())
+    }
+
+    #[test]
+    fn add_files_picker_treats_only_shell_cancel_as_cancellation() -> io::Result<()> {
+        let cancelled =
+            ::windows::core::Error::from_hresult(::windows::core::HRESULT(0x8007_04C7_u32 as i32));
+        let mut get_results_calls = 0;
+        assert!(
+            complete_bounded_file_dialog(Err(cancelled), || {
+                get_results_calls += 1;
+                Ok(())
+            })?
+            .is_none()
+        );
+        assert_eq!(get_results_calls, 0);
+
+        let failure =
+            ::windows::core::Error::from_hresult(::windows::core::HRESULT(0x8000_4005_u32 as i32));
+        assert_eq!(
+            complete_bounded_file_dialog(Err(failure), || Ok(()))
+                .err()
+                .map(|error| error.kind()),
+            Some(io::ErrorKind::Other)
+        );
+
+        let get_results_failure =
+            ::windows::core::Error::from_hresult(::windows::core::HRESULT(0x8000_4005_u32 as i32));
+        assert_eq!(
+            complete_bounded_file_dialog(Ok(()), || Err::<(), _>(get_results_failure))
+                .err()
+                .map(|error| error.kind()),
+            Some(io::ErrorKind::Other)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn add_files_picker_preserves_item_count_and_path_errors() {
+        let count_error =
+            ::windows::core::Error::from_hresult(::windows::core::HRESULT(0x8000_4005_u32 as i32));
+        assert_eq!(
+            dialog_item_count(Err(count_error))
+                .err()
+                .map(|error| error.kind()),
+            Some(io::ErrorKind::Other)
+        );
+
+        let path_error = collect_bounded_dialog_paths(1, 1, PathBudget::new(), |_| {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        })
+        .expect_err("shell item path failures must propagate");
+        assert_eq!(path_error.kind(), io::ErrorKind::PermissionDenied);
     }
 
     #[test]
