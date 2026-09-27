@@ -69,7 +69,7 @@ pub(crate) struct TextExportTarget {
 
 #[derive(Debug)]
 enum TextExportLeaf {
-    Existing(File),
+    Existing { guard: File, identity: (u128, u64) },
     Missing,
 }
 
@@ -575,19 +575,22 @@ impl TextExportParent {
             .directories
             .last()
             .ok_or_else(|| io::Error::other("text export directory chain is empty"))?;
-        let access = FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
-        let options =
-            FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT;
+        // Keep a metadata-only handle with no delete sharing while the Shell
+        // identity is live. Windows attribute access is exempt from share-mode
+        // conflicts, so this guard can remain open beside the later exclusive
+        // writer while still blocking rename and deletion.
+        let options = FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT;
         let accepted_leaf = match open_relative(
             parent.file(),
             &leaf,
-            access,
-            FILE_SHARE_READ,
+            FILE_READ_ATTRIBUTES,
+            SHARE_READ_WRITE,
             FILE_OPEN,
             options,
         ) {
             Ok(file) => {
                 validate_text_export_file(&file)?;
+                let actual = (ntfs_volume_id(&file)?, ntfs_file_reference_number(&file)?);
                 if require_shell_identity {
                     let expected = shell_identity.ok_or_else(|| {
                         io::Error::new(
@@ -595,10 +598,12 @@ impl TextExportParent {
                             "the selected existing output file has no shell identity",
                         )
                     })?;
-                    let actual = (ntfs_volume_id(&file)?, ntfs_file_reference_number(&file)?);
                     require_matching_text_export_leaf_identity(expected, actual)?;
                 }
-                TextExportLeaf::Existing(file)
+                TextExportLeaf::Existing {
+                    guard: file,
+                    identity: actual,
+                }
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 if require_shell_identity && shell_identity.is_some() {
@@ -753,7 +758,29 @@ fn parse_volume_guid_path(path: &[u16]) -> io::Result<u128> {
 impl TextExportTarget {
     pub(crate) fn open_file(self) -> io::Result<File> {
         let file = match self.accepted_leaf {
-            TextExportLeaf::Existing(file) => file,
+            TextExportLeaf::Existing { guard, identity } => {
+                let parent = self
+                    .parents
+                    .last()
+                    .ok_or_else(|| io::Error::other("text export directory chain is empty"))?;
+                let file = open_relative(
+                    parent.file(),
+                    &self.leaf,
+                    FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                    0,
+                    FILE_OPEN,
+                    FILE_NON_DIRECTORY_FILE
+                        | FILE_OPEN_REPARSE_POINT
+                        | FILE_SYNCHRONOUS_IO_NONALERT,
+                )?;
+                validate_text_export_file(&file)?;
+                let actual = (ntfs_volume_id(&file)?, ntfs_file_reference_number(&file)?);
+                require_matching_text_export_leaf_identity(identity, actual)?;
+                // The metadata-only guard remains live until the exclusive
+                // writer is open and its identity and link count are checked.
+                drop(guard);
+                file
+            }
             TextExportLeaf::Missing => {
                 let parent = self
                     .parents
@@ -763,7 +790,7 @@ impl TextExportTarget {
                     parent.file(),
                     &self.leaf,
                     FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-                    FILE_SHARE_READ,
+                    0,
                     FILE_CREATE,
                     FILE_NON_DIRECTORY_FILE
                         | FILE_OPEN_REPARSE_POINT
@@ -784,9 +811,9 @@ pub(crate) fn write_text_export_target(target: TextExportTarget, bytes: &[u8]) -
     file.sync_all()
 }
 
-/// Writes through one validated handle. Sharing permits readers while
-/// preventing a competing writer, link operation, or rename from changing the
-/// destination identity during truncation and output.
+/// Writes through one validated handle with no sharing, preventing concurrent
+/// opens from changing the destination identity or creating another hard link
+/// during truncation and output.
 #[cfg(test)]
 pub(crate) fn write_text_export(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_text_export_target(prepare_text_export_target(path)?, bytes)
@@ -1513,6 +1540,21 @@ mod tests {
         drop(source);
         std::fs::rename(&source_path, &moved_path)?;
         assert_eq!(std::fs::read(&moved_path)?, b"source");
+        Ok(())
+    }
+
+    #[test]
+    fn missing_text_export_handle_blocks_a_competing_hard_link_until_write_finishes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let destination = directory.path().join("names.txt");
+        let alias = directory.path().join("alias.txt");
+        let target = prepare_text_export_target(&destination)?;
+
+        let handle = target.open_file()?;
+        assert!(std::fs::hard_link(&destination, &alias).is_err());
+        drop(handle);
+        std::fs::hard_link(&destination, &alias)?;
         Ok(())
     }
 }

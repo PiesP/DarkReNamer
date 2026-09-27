@@ -1840,8 +1840,6 @@ impl IFileDialogEvents_Impl for SecureTextSaveDialogEvents_Impl {
                     selected_leaf_identity
                         .map(|identity| (identity.volume_id, identity.file_reference_number)),
                 )?;
-                // Keep both property stores alive through the native leaf open
-                // so their file-object snapshots remain bound during comparison.
                 drop(selected_leaf_snapshot);
                 drop(selected_parent_store);
                 Ok(target)
@@ -2001,11 +1999,15 @@ fn show_secure_text_save_dialog(
     // unadvised before either local interface is dropped.
     let cookie = unsafe { dialog.Advise(&events) }.map_err(shell_dialog_error)?;
     // SAFETY: the dialog and owner belong to the initialized UI thread; Show
-    // is modal and OnFileOk retains the selected parent before it returns.
+    // is modal and OnFileOk retains the selected leaf's metadata guard while
+    // the shell identity is live. The exclusive writer opens later, after the
+    // dialog releases its shell references.
     let shown = unsafe { dialog.Show(Some(::windows::Win32::Foundation::HWND(owner))) };
     // SAFETY: cookie is the event registration returned by Advise above.
     let unadvised = unsafe { dialog.Unadvise(cookie) };
     unadvised.map_err(shell_dialog_error)?;
+    drop(events);
+    drop(dialog);
 
     match shown {
         Ok(()) => target
