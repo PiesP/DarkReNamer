@@ -1054,7 +1054,7 @@ fn normalized_final_path(file: &File, flags: u32) -> io::Result<Vec<u16>> {
             .map_err(|_| io::Error::from_raw_os_error(ERROR_FILENAME_EXCED_RANGE))?;
         if written < capacity {
             path.truncate(written);
-            return normalized_leaf_from_final_path(&path);
+            return Ok(path);
         }
         capacity = checked_final_path_capacity(
             u32::try_from(written)
@@ -1513,6 +1513,22 @@ mod tests {
             return Err(io::Error::other("oversized normalized path was accepted").into());
         };
         assert_eq!(error.raw_os_error(), Some(ERROR_FILENAME_EXCED_RANGE));
+        Ok(())
+    }
+
+    #[test]
+    fn normalized_final_path_preserves_the_complete_path() -> io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let file_path = directory.path().join("normalized-path.txt");
+        let file = File::create(&file_path)?;
+
+        let normalized_path =
+            normalized_final_path(&file, FILE_NAME_NORMALIZED | VOLUME_NAME_GUID)?;
+        let normalized_path = String::from_utf16(&normalized_path)
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+
+        assert!(normalized_path.starts_with(r"\\?\Volume{"));
+        assert!(normalized_path.ends_with(r"\normalized-path.txt"));
         Ok(())
     }
 
