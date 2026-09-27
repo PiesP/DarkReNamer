@@ -1516,7 +1516,10 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
         catch [UnauthorizedAccessException] {
             $writeBlockedByDacl = $true
         }
-        if (-not $writeBlockedByDacl) {
+        if ($probeIsAdministrator -and $writeBlockedByDacl) {
+            throw 'The enabled Administrator token was denied the trusted result file access granted to BUILTIN\Administrators.'
+        }
+        if (-not $probeIsAdministrator -and -not $writeBlockedByDacl) {
             throw 'The closed result file remained writable by the same user.'
         }
         $deleteBlockedByDacl = $false
@@ -1526,7 +1529,10 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
         catch [UnauthorizedAccessException] {
             $deleteBlockedByDacl = $true
         }
-        if (-not $deleteBlockedByDacl) {
+        if ($probeIsAdministrator -and $deleteBlockedByDacl) {
+            throw 'The enabled Administrator token could not remove the trusted result file granted to BUILTIN\Administrators.'
+        }
+        if (-not $probeIsAdministrator -and -not $deleteBlockedByDacl) {
             throw 'The same user removed the trusted result through its bundle directory.'
         }
 
