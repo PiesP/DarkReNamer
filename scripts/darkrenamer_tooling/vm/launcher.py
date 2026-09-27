@@ -79,7 +79,7 @@ def copy_frozen_file(source, destination, expected_sha256, label):
 
 def verify_frozen_files(sources, frozen, label):
     if any(sha256(source) != frozen[name] for name, source in sources.items()):
-        raise RuntimeError(label + ' changed during candidate bundle creation.')
+        raise RuntimeError(label + ' changed during bundle creation.')
 
 
 def require_positive_json_integer(value, label):
@@ -495,16 +495,17 @@ def controller_task_arguments(root, args, path_converter=str):
 
 def controller_invocation(root, args, defaults=None, pwsh=None, desktop_sid=None):
     script = root / 'run-windows-vm-tests.ps1'
+    expected_bundle_manifest_sha256 = getattr(
+        args, 'expected_bundle_manifest_sha256', None) or sha256(root / 'bundle.json')
     common = [
         '-TestTimeoutSeconds', str(args.test_timeout_seconds),
+        '-ExpectedBundleManifestSha256', expected_bundle_manifest_sha256,
         *controller_task_arguments(root, args),
     ]
     if desktop_sid:
         common += ['-ExpectedDesktopSid', desktop_sid]
     if args.expected_vm_id and (args.candidate_mode or args.task_kind != 'core'):
         common += ['-ExpectedGuestVmId', args.expected_vm_id]
-    if args.candidate_mode and args.expected_vm_id:
-        common += ['-ExpectedBundleManifestSha256', sha256(root / 'bundle.json')]
     if args.ssh_host:
         executable = pwsh or require_pwsh74()
         return [
@@ -528,8 +529,7 @@ def controller_invocation(root, args, defaults=None, pwsh=None, desktop_sid=None
         + (' -ExpectedDesktopSid ' + psquote(desktop_sid) if desktop_sid else '')
         + (' -ExpectedGuestVmId ' + psquote(args.expected_vm_id)
            if args.expected_vm_id and (args.candidate_mode or args.task_kind != 'core') else '')
-        + (' -ExpectedBundleManifestSha256 ' + psquote(sha256(root / 'bundle.json'))
-           if args.candidate_mode and args.expected_vm_id else '')
+        + ' -ExpectedBundleManifestSha256 ' + psquote(expected_bundle_manifest_sha256)
     )
     prelude = '$ErrorActionPreference="Stop"; $env:PSModulePath="$PSHOME\\Modules;C:\\Program Files\\WindowsPowerShell\\Modules"; '
     return [
@@ -647,6 +647,18 @@ def test_artifacts(messages):
     if not artifacts:
         raise ValueError('Cargo did not report any Windows test executables.')
     return [artifacts[key] for key in sorted(artifacts)]
+
+
+def build_output_file(target_root, path, label):
+    target_root = Path(target_root).resolve(strict=True)
+    resolved = Path(path).resolve(strict=True)
+    try:
+        relative = resolved.relative_to(target_root)
+    except ValueError as error:
+        raise RuntimeError(label + ' is outside the fresh Cargo target directory.') from error
+    if not relative.parts or not resolved.is_file():
+        raise RuntimeError(label + ' is not a regular file in the fresh Cargo target directory.')
+    return resolved
 
 
 def checked_artifact(root, record):
@@ -1266,30 +1278,77 @@ def build_bundle(repo, root, tooling=None):
     print('Building Windows tests for source ' + source_sha, flush=True)
     env = dict(os.environ)
     env.setdefault('RC', '/usr/bin/llvm-rc-19')
-    command = ['cargo', 'xwin', 'test', '--workspace', '--all-targets', '--all-features', '--locked', '--target', TARGET, '--no-run', '--message-format=json']
-    messages_path = root / 'cargo-build.jsonl'
-    with messages_path.open('w') as stream:
-        subprocess.run(command, cwd=repo, env=env, stdout=stream, check=True)
-    with messages_path.open() as stream:
-        artifacts = test_artifacts(stream)
-    subprocess.run(['cargo', 'xwin', 'build', '--release', '--locked', '--target', TARGET, '--package', 'darknamer-app', '--bin', 'DarkReNamer'], cwd=repo, env=env, check=True)
-    metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--no-deps', '--format-version=1', '--locked'], cwd=repo, env=env, text=True))
-    application = Path(metadata['target_directory']) / TARGET / 'release' / 'DarkReNamer.exe'
-    if subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip() != source_sha or subprocess.check_output(['git', 'status', '--porcelain'], cwd=repo, text=True).strip():
-        raise RuntimeError('Checkout changed during the build; refusing to label the bundle with a stale source SHA.')
-    for row in artifacts:
-        shutil.copyfile(row.pop('path'), root / row['file'])
-        row['sha256'] = sha256(root / row['file'])
-    shutil.copyfile(application, root / 'DarkReNamer.exe')
-    for name in (
-            'windows-vm-guest.ps1', 'run-windows-vm-tests.ps1',
-            'windows-vm-acceptance.ps1', 'windows-vm-recovery-acceptance.ps1'):
-        shutil.copyfile(repo / 'scripts' / name, root / name)
+    script_names = (
+        'windows-vm-guest.ps1', 'run-windows-vm-tests.ps1',
+        'windows-vm-acceptance.ps1', 'windows-vm-recovery-acceptance.ps1')
+    # Never reuse ignored project `target/` output for exact-source evidence.
+    # tempfile creates a new private directory, and the environment is set
+    # unconditionally so inherited Cargo configuration cannot redirect builds.
+    with tempfile.TemporaryDirectory(prefix='.cargo-target-', dir=root) as target_directory:
+        target_root = Path(target_directory).resolve(strict=True)
+        env['CARGO_TARGET_DIR'] = str(target_root)
+        command = ['cargo', 'xwin', 'test', '--workspace', '--all-targets', '--all-features', '--locked', '--target', TARGET, '--no-run', '--message-format=json']
+        messages_path = root / 'cargo-build.jsonl'
+        with messages_path.open('w') as stream:
+            subprocess.run(command, cwd=repo, env=env, stdout=stream, check=True)
+        with messages_path.open() as stream:
+            artifacts = test_artifacts(stream)
+        for row in artifacts:
+            row['path'] = str(build_output_file(
+                target_root, row['path'], 'Windows test executable ' + row['file']))
+
+        subprocess.run(['cargo', 'xwin', 'build', '--release', '--locked', '--target', TARGET, '--package', 'darknamer-app', '--bin', 'DarkReNamer'], cwd=repo, env=env, check=True)
+        metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--no-deps', '--format-version=1', '--locked'], cwd=repo, env=env, text=True))
+        metadata_target = Path(metadata['target_directory']).resolve(strict=True)
+        if metadata_target != target_root:
+            raise RuntimeError('Cargo metadata target directory differs from the fresh private build directory.')
+        application = build_output_file(
+            target_root, metadata_target / TARGET / 'release' / 'DarkReNamer.exe',
+            'Windows application')
+        if subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip() != source_sha or subprocess.check_output(['git', 'status', '--porcelain'], cwd=repo, text=True).strip():
+            raise RuntimeError('Checkout changed during the build; refusing to label the bundle with a stale source SHA.')
+
+        sources = {
+            'cargo_lock': repo / 'Cargo.lock',
+            'application': application,
+            **{'test:' + row['file']: row['path'] for row in artifacts},
+            **{'script:' + name: repo / 'scripts' / name for name in script_names},
+        }
+        frozen = {name: sha256(path) for name, path in sources.items()}
+        bundle_files = {}
+        for row in artifacts:
+            key = 'test:' + row['file']
+            destination = root / row['file']
+            copy_frozen_file(sources[key], destination, frozen[key], 'Windows test executable')
+            bundle_files[key] = destination
+            row.pop('path')
+            row['sha256'] = frozen[key]
+        application_path = root / 'DarkReNamer.exe'
+        copy_frozen_file(application, application_path, frozen['application'], 'Windows application')
+        bundle_files['application'] = application_path
+        for name in script_names:
+            key = 'script:' + name
+            destination = root / name
+            copy_frozen_file(sources[key], destination, frozen[key], 'Windows VM harness ' + name)
+            bundle_files[key] = destination
+
+        verify_frozen_files(sources, frozen, 'Source-built bundle inputs')
+        verify_frozen_files(bundle_files, frozen, 'Source-built bundle copies')
+
+    verify_frozen_files(bundle_files, frozen, 'Source-built bundle copies')
+    final_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip()
+    final_status = subprocess.check_output(
+        ['git', 'status', '--porcelain'], cwd=repo, text=True).strip()
+    if final_sha != source_sha or final_status:
+        raise RuntimeError('Checkout changed during source-built bundle creation; refusing a stale source SHA.')
     manifest = {
         'schema_version': 1, 'source_sha': source_sha, 'source_state': 'clean', 'target': TARGET,
-        'cargo_lock_sha256': sha256(repo / 'Cargo.lock'), 'test_binaries': artifacts,
-        'application': {'file': 'DarkReNamer.exe', 'sha256': sha256(root / 'DarkReNamer.exe')},
-        'runner': {'file': 'windows-vm-guest.ps1', 'sha256': sha256(root / 'windows-vm-guest.ps1')},
+        'cargo_lock_sha256': frozen['cargo_lock'], 'test_binaries': artifacts,
+        'application': {'file': 'DarkReNamer.exe', 'sha256': frozen['application']},
+        'runner': {
+            'file': 'windows-vm-guest.ps1',
+            'sha256': frozen['script:windows-vm-guest.ps1'],
+        },
     }
     (root / 'bundle.json').write_text(json.dumps(manifest, indent=2))
     if tooling is not None:
@@ -1463,6 +1522,7 @@ def main(repo, argv=None, tooling=None):
     root, defaults, pwsh = prepare_transport(repo, args)
     manifest = (build_candidate_bundle(repo, root, args, tooling) if args.candidate_mode
                 else build_bundle(repo, root, tooling))
+    args.expected_bundle_manifest_sha256 = sha256(root / 'bundle.json')
     observer_inputs = prepare_observer_inputs(root, manifest, args)
     if args.candidate_mode:
         print('Executing exact-candidate ' + args.task_kind + ' validation in the VM.', flush=True)
