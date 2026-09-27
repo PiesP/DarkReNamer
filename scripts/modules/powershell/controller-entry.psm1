@@ -1634,7 +1634,7 @@ public static class DarkReNamerVmControllerWorkspace {
 using System;
 using System.Runtime.InteropServices;
 public static class DrVmCommandLineNative {
-    [DllImport("shell32.dll", EntryPoint = "CommandLineToArgvW", SetLastError = true)]
+    [DllImport("shell32.dll", EntryPoint = "CommandLineToArgvW", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern IntPtr CommandLineToArgvW(string commandLine, out int argumentCount);
 
     [DllImport("kernel32.dll", EntryPoint = "LocalFree", SetLastError = true)]

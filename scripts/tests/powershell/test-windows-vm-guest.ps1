@@ -2049,14 +2049,48 @@ $incomplete = Get-DrVmRunnerProcesses -UserSid 'S-1-5-21-1-2-3-1001' -SessionId 
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
             $node.Name -ceq 'global:Test-DrVmSmartScreenBrokerEvidence'
     }, $true))
+    $commandLineFunctionDefinitions = @($controllerEntryAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'global:Get-DrVmCommandLineArguments'
+    }, $true))
     $waitFunctionDefinitions = @($controllerEntryAst.FindAll({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
             $node.Name -ceq 'global:Wait-DrVmSmartScreenNaturalExit'
     }, $true))
-    if ($brokerFunctionDefinitions.Count -ne 1 -or $waitFunctionDefinitions.Count -ne 1) {
+    if ($brokerFunctionDefinitions.Count -ne 1 -or
+        $commandLineFunctionDefinitions.Count -ne 1 -or
+        $waitFunctionDefinitions.Count -ne 1) {
         throw 'The controller must expose one pure broker contract and one bounded natural-exit wait.'
     }
+    $commandLineProbe = [scriptblock]::Create(@'
+param([string] $FunctionText)
+$localFunctionText = $FunctionText.Replace(
+    'function global:Get-DrVmCommandLineArguments',
+    'function Get-DrVmCommandLineArguments'
+)
+. ([scriptblock]::Create($localFunctionText))
+try {
+    Get-DrVmCommandLineArguments -CommandLine 'C:\Windows\System32\smartscreen.exe -Embedding' | Out-Null
+}
+catch {
+    # The helper reaches its P/Invoke on the non-Windows tooling host; inspect the compiled declaration below.
+}
+$nativeType = 'DrVmCommandLineNative' -as [type]
+if ($null -eq $nativeType) { throw 'The command-line native declaration was not loaded.' }
+$method = $nativeType.GetMethod('CommandLineToArgvW')
+$import = $method.GetCustomAttributes([Runtime.InteropServices.DllImportAttribute], $false)[0]
+[pscustomobject]@{
+    unicode = $import.CharSet -eq [Runtime.InteropServices.CharSet]::Unicode
+    entry_point = $import.EntryPoint
+}
+'@)
+$commandLineProbeResult = & $commandLineProbe $commandLineFunctionDefinitions[0].Extent.Text
+if (-not $commandLineProbeResult.unicode -or
+    $commandLineProbeResult.entry_point -cne 'CommandLineToArgvW') {
+    throw 'The SmartScreen command-line parser must marshal the Windows wide-character API as Unicode.'
+}
     $brokerProbe = [scriptblock]::Create(@'
 param([string] $FunctionText)
 $localFunctionText = $FunctionText.Replace(
