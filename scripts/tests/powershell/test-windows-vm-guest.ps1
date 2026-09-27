@@ -1351,6 +1351,59 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
         throw 'Each Windows VM observer command must include exactly one runtime-root argument.'
     }
     $guestEntryText = Get-Content -LiteralPath (Join-Path $toolingScriptsRoot 'modules/powershell/guest-entry.psm1') -Raw
+    foreach ($requiredRuntimeRootContract in @(
+        '$effectiveRuntimeRoot = $null',
+        '$effectiveRuntimeRoot = if ($RuntimeRoot) {',
+        '-RuntimeRoot $effectiveRuntimeRoot',
+        'Join-Path $effectiveRuntimeRoot ''gui\localappdata''',
+        'if (Test-Path -LiteralPath $effectiveRuntimeRoot) {',
+        'Get-VmAutomatedRuntimeRootObservation -Root $effectiveRuntimeRoot',
+        'Remove-Item -LiteralPath $effectiveRuntimeRoot -Recurse -Force'
+    )) {
+        if ($guestEntryText.IndexOf($requiredRuntimeRootContract, [StringComparison]::Ordinal) -lt 0) {
+            throw "The guest runtime-root contract is missing '$requiredRuntimeRootContract'."
+        }
+    }
+    $shadowRuntimeRootPattern = '\$runtimeRoot\s*=\s*\$null\b'
+    foreach ($shadowRuntimeRootExample in @('$runtimeRoot = $null', '$RuntimeROOT=$NULL')) {
+        if (-not [regex]::IsMatch(
+                $shadowRuntimeRootExample,
+                $shadowRuntimeRootPattern,
+                [Text.RegularExpressions.RegexOptions]::IgnoreCase
+            )) {
+            throw 'The case-insensitive RuntimeRoot shadow-assignment pattern does not match its regression examples.'
+        }
+    }
+    $shadowRuntimeRootAssignments = [regex]::Matches(
+        $guestEntryText,
+        $shadowRuntimeRootPattern,
+        [Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+    if ($shadowRuntimeRootAssignments.Count -ne 0) {
+        throw 'The guest lifecycle sentinel must not clear the RuntimeRoot parameter.'
+    }
+    $runtimeRootArgumentCount = [regex]::Matches(
+        $guestEntryText,
+        [regex]::Escape('-RuntimeRoot $effectiveRuntimeRoot')
+    ).Count
+    $testInvocationIndex = $guestEntryText.IndexOf('Invoke-RustTestBinary `', [StringComparison]::Ordinal)
+    $testRuntimeArgumentIndex = if ($testInvocationIndex -ge 0) {
+        $guestEntryText.IndexOf(
+            '-RuntimeRoot $effectiveRuntimeRoot', $testInvocationIndex, [StringComparison]::Ordinal
+        )
+    } else { -1 }
+    $guiInvocationIndex = $guestEntryText.IndexOf('Invoke-GuiSmoke `', [StringComparison]::Ordinal)
+    $guiRuntimeArgumentIndex = if ($guiInvocationIndex -ge 0) {
+        $guestEntryText.IndexOf(
+            '-RuntimeRoot $effectiveRuntimeRoot', $guiInvocationIndex, [StringComparison]::Ordinal
+        )
+    } else { -1 }
+    if ($runtimeRootArgumentCount -ne 2 -or $testInvocationIndex -lt 0 -or
+        $testRuntimeArgumentIndex -le $testInvocationIndex -or
+        $testRuntimeArgumentIndex -ge $guiInvocationIndex -or
+        $guiRuntimeArgumentIndex -le $guiInvocationIndex) {
+        throw 'The verified runtime root must be passed separately to both the test binary and GUI smoke runner.'
+    }
     foreach ($requiredBootstrapDiagnostic in @(
         "Join-Path `$OutputRoot 'observer-bootstrap-failure.txt'",
         'if (-not $elevatedObserver) { return }',
@@ -1393,7 +1446,7 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
         '[void](Assert-AcceptanceProcessJobLedgerClosed)', [StringComparison]::Ordinal
     )
     $runtimeDeleteIndex = $guestEntryText.IndexOf(
-        'Remove-Item -LiteralPath $runtimeRoot -Recurse -Force', [StringComparison]::Ordinal
+        'Remove-Item -LiteralPath $effectiveRuntimeRoot -Recurse -Force', [StringComparison]::Ordinal
     )
     if ($runnerProtectionIndex -lt 0 -or $resultWriterIndex -le $runnerProtectionIndex -or
         $processLedgerIndex -lt 0 -or $runtimeDeleteIndex -le $processLedgerIndex) {

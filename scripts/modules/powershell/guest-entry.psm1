@@ -231,7 +231,7 @@ if ($currentSession -ne $ExpectedSessionId) {
 
 $desktopLock = $null
 $previousExecutionState = $null
-$runtimeRoot = $null
+$effectiveRuntimeRoot = $null
 try {
     & $writeBootstrapDiagnostic 'runner-protection-started'
     Protect-CurrentRunnerProcess
@@ -250,7 +250,7 @@ try {
         throw 'Another Windows VM test runner is using this interactive desktop.'
     }
     $previousExecutionState = Enter-TestExecutionState
-    $runtimeRoot = if ($RuntimeRoot) {
+    $effectiveRuntimeRoot = if ($RuntimeRoot) {
         $RuntimeRoot
     } else {
         New-PrivateDirectory -Parent $verified.root -Leaf 'runtime'
@@ -266,7 +266,7 @@ try {
             -Test $verified.tests[$index] `
             -Root $verified.root `
             -OutputRoot $OutputRoot `
-            -RuntimeRoot $runtimeRoot `
+            -RuntimeRoot $effectiveRuntimeRoot `
             -Index ($index + 1) `
             -TimeoutSeconds $TestTimeoutSeconds `
             -OutputBudgetBytes $testOutputBudgetBytes
@@ -292,7 +292,7 @@ try {
         -Application $applicationArtifact `
         -Root $verified.root `
         -OutputRoot $OutputRoot `
-        -RuntimeRoot $runtimeRoot `
+        -RuntimeRoot $effectiveRuntimeRoot `
         -FixtureParentRoot $fixtureParentRoot `
         -ExpectedSession $ExpectedSessionId `
         -TimeoutSeconds $TestTimeoutSeconds `
@@ -350,7 +350,7 @@ finally {
             $result.status = 'failed'
             $result.failure_reason = 'execution_state_restore_failed'
         }
-        if ($candidateLane -and $null -ne $runtimeRoot) {
+        if ($candidateLane -and $null -ne $effectiveRuntimeRoot) {
             $journalAfter = $null
             $journalObserved = $false
             $runtimeRootAfter = $null
@@ -360,7 +360,7 @@ finally {
                     @($result.gui.flow.raw_checkpoints).Count -gt 0) {
                     @(@($result.gui.flow.raw_checkpoints)[-1].journal_entries)
                 } else {
-                    @(Get-VmAutomatedJournalInventory -LocalAppData (Join-Path $runtimeRoot 'gui\localappdata'))
+                    @(Get-VmAutomatedJournalInventory -LocalAppData (Join-Path $effectiveRuntimeRoot 'gui\localappdata'))
                 })
                 $journalObserved = $true
                 $ownedAfter = @(Get-VmAutomatedOwnedProcessInventory -Root $verified.root)
@@ -368,11 +368,11 @@ finally {
                     throw 'An owned candidate process remains after the GUI flow.'
                 }
                 [void](Assert-AcceptanceProcessJobLedgerClosed)
-                if (Test-Path -LiteralPath $runtimeRoot) {
-                    [void](Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot)
-                    Remove-Item -LiteralPath $runtimeRoot -Recurse -Force
+                if (Test-Path -LiteralPath $effectiveRuntimeRoot) {
+                    [void](Get-VmAutomatedRuntimeRootObservation -Root $effectiveRuntimeRoot)
+                    Remove-Item -LiteralPath $effectiveRuntimeRoot -Recurse -Force
                 }
-                $runtimeRootAfter = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
+                $runtimeRootAfter = Get-VmAutomatedRuntimeRootObservation -Root $effectiveRuntimeRoot
                 $result['raw_cleanup'] = [ordered]@{
                     owned_processes_after = $ownedAfter
                     runtime_root_after = $runtimeRootAfter
@@ -384,7 +384,7 @@ finally {
                 $result.status = 'failed'
                 $result.failure_reason = 'raw_cleanup_failed'
                 try {
-                    $runtimeRootAfter = Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot
+                    $runtimeRootAfter = Get-VmAutomatedRuntimeRootObservation -Root $effectiveRuntimeRoot
                 }
                 catch {
                     $runtimeRootAfter = $null

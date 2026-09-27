@@ -39,7 +39,7 @@ else {
     $env:DARKRENAMER_VM_EXPECTED_SESSION_ID = $null
 }
 
-$ToolingManifestSha256 = 'cb49533956dbad415e5824f0439cfffc15dfca8aa6e5ec05a674d63c6ed47bae'
+$ToolingManifestSha256 = '13210a1068e3174e31a048caa26c33b96eb7b9a0dadadc4eee23344e8cd895f6'
 $ToolingLoaderSha256 = '6888561ff9a23becf279ec7d4e691b40d50d79dde2196d22c0d63e2252dd08a1'
 
 function Get-DrBootstrapSha256 {
