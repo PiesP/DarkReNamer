@@ -833,7 +833,7 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
             [Security.AccessControl.PropagationFlags]::InheritOnly,
             [Security.AccessControl.AccessControlType]::Allow
         ))
-        [void][IO.Directory]::CreateDirectory($trustedResultRoot, $testRootSecurity)
+        [void][System.IO.FileSystemAclExtensions]::CreateDirectory($testRootSecurity, $trustedResultRoot)
         $trustedResultPath = Join-Path $trustedResultRoot 'result.json'
         [IO.File]::WriteAllText($trustedResultPath, '{}', [Text.UTF8Encoding]::new($false))
         Initialize-TrustedResultWriter -Root $trustedResultRoot
@@ -1131,6 +1131,13 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
     if ($runnerProtectionIndex -lt 0 -or $resultWriterIndex -le $runnerProtectionIndex -or
         $processLedgerIndex -lt 0 -or $runtimeDeleteIndex -le $processLedgerIndex) {
         throw 'Core observer protection must precede the open result writer, and runtime deletion must follow closed process-job evidence.'
+    }
+    if ([regex]::Matches(
+            $hostRunnerText,
+            '\[System\.IO\.FileSystemAclExtensions\]::CreateDirectory\('
+        ).Count -ne 8 -or
+        $hostRunnerText.IndexOf('[IO.Directory]::CreateDirectory(', [StringComparison]::Ordinal) -ge 0) {
+        throw 'Every security-sensitive VM directory must be created with its explicit ACL in one operation.'
     }
     if ($hostRunnerText.IndexOf('Test-DrControllerProcessJobCleanupLedger', [StringComparison]::Ordinal) -lt 0 -or
         $hostRunnerText.IndexOf('$requiredProcessJobsClosed = $processJobsClosed', [StringComparison]::Ordinal) -lt 0 -or

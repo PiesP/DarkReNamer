@@ -698,14 +698,14 @@ public static class DarkReNamerVmControllerWorkspace {
             Set-Acl -LiteralPath $base -AclObject $baseSecurity
         }
         else {
-            [void][IO.Directory]::CreateDirectory($base, $baseSecurity)
+            [void][System.IO.FileSystemAclExtensions]::CreateDirectory($baseSecurity, $base)
         }
         $path = Join-Path $base $name
         if (Test-Path -LiteralPath $path) {
             throw 'The unique VM workspace path already exists.'
         }
         $rootSecurity = New-WorkspaceDirectorySecurity -ForGuestRoot
-        [void][IO.Directory]::CreateDirectory($path, $rootSecurity)
+        [void][System.IO.FileSystemAclExtensions]::CreateDirectory($rootSecurity, $path)
         function global:Get-DrVmTrustedPowerShellPath {
             $programFiles = [Environment]::GetFolderPath(
                 [Environment+SpecialFolder]::ProgramFiles
@@ -890,7 +890,7 @@ public static class DarkReNamerVmControllerWorkspace {
                 }
             }
             if (-not (Test-Path -LiteralPath $trustedTaskRoot)) {
-                [void][IO.Directory]::CreateDirectory($trustedTaskRoot, $trustedTaskSecurity)
+                [void][System.IO.FileSystemAclExtensions]::CreateDirectory($trustedTaskSecurity, $trustedTaskRoot)
             }
             Assert-ProtectedTaskDirectory -Path $trustedTaskRoot
             $taskRootItem = Get-Item -LiteralPath $trustedTaskRoot -Force -ErrorAction Stop
@@ -912,7 +912,7 @@ public static class DarkReNamerVmControllerWorkspace {
             }
             foreach ($directoryPath in @($trustedObserverRoot, $trustedBundleRoot)) {
                 if (-not (Test-Path -LiteralPath $directoryPath)) {
-                    [void][IO.Directory]::CreateDirectory($directoryPath, $trustedTaskSecurity)
+                    [void][System.IO.FileSystemAclExtensions]::CreateDirectory($trustedTaskSecurity, $directoryPath)
                 }
                 $directoryItem = Get-Item -LiteralPath $directoryPath -Force -ErrorAction Stop
                 if (-not $directoryItem.PSIsContainer -or
@@ -923,7 +923,7 @@ public static class DarkReNamerVmControllerWorkspace {
             }
             $trustedOutputRoot = Join-Path $trustedTaskRoot 'out'
             if (-not (Test-Path -LiteralPath $trustedOutputRoot)) {
-                [void][IO.Directory]::CreateDirectory($trustedOutputRoot, $trustedTaskSecurity)
+                [void][System.IO.FileSystemAclExtensions]::CreateDirectory($trustedTaskSecurity, $trustedOutputRoot)
             }
             Assert-ProtectedTaskDirectory -Path $trustedOutputRoot
             $guestPrivateRoot = Join-Path $GuestRoot 'private'
@@ -935,7 +935,7 @@ public static class DarkReNamerVmControllerWorkspace {
             ) -ge 0
             if ($requiresPrivateRoot) {
                 if (-not (Test-Path -LiteralPath $trustedPrivateRoot)) {
-                    [void][IO.Directory]::CreateDirectory($trustedPrivateRoot, $trustedTaskSecurity)
+                    [void][System.IO.FileSystemAclExtensions]::CreateDirectory($trustedTaskSecurity, $trustedPrivateRoot)
                 }
                 Assert-ProtectedTaskDirectory -Path $trustedPrivateRoot
             }
@@ -948,7 +948,7 @@ public static class DarkReNamerVmControllerWorkspace {
                 }
                 $outputDirectory = Join-Path $trustedOutputRoot $outputLeaf
                 if (-not (Test-Path -LiteralPath $outputDirectory)) {
-                    [void][IO.Directory]::CreateDirectory($outputDirectory, $trustedTaskSecurity)
+                    [void][System.IO.FileSystemAclExtensions]::CreateDirectory($trustedTaskSecurity, $outputDirectory)
                 }
                 Assert-ProtectedTaskDirectory -Path $outputDirectory
             }
@@ -1396,7 +1396,7 @@ public static class DarkReNamerVmControllerWorkspace {
                     [Security.AccessControl.AccessControlType]::Allow
                 )
             )
-            [void][IO.Directory]::CreateDirectory($path, $security)
+            [void][System.IO.FileSystemAclExtensions]::CreateDirectory($security, $path)
             $path
         }
         function global:Get-DrVmRunnerTasks {
