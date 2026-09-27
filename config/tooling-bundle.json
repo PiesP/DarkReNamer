@@ -395,7 +395,7 @@
       "bundle": "guest-process.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "6e8a15ffbaaf15b2110ab60b00c9f8ced101aae2c0ee5e7a4454e8537ac90de1",
+      "sha256": "b1a68b8e65d61c5c5bbcf954bfa99fb7730725ea461b32b2de179c496ffae106",
       "dependencies": []
     },
     {
@@ -458,7 +458,7 @@
       "bundle": "guest-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "832bd73aa198abe72675d9d7ee71f2bf9a2f3eca843791929284c48d168763bd",
+      "sha256": "48b64956238d7921024d5bdd7328e11f3a56472a09bc54bf314091519ba0ed94",
       "dependencies": [
         "powershell-loader",
         "powershell-guest-contracts",

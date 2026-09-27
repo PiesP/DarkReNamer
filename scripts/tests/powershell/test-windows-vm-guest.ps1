@@ -610,10 +610,18 @@ try {
         'CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT',
         'HANDLE_LIST_ATTRIBUTE',
         'TOKEN_LINKED_TOKEN = 19',
+        'TOKEN_ASSIGN_PRIMARY = 0x0001',
+        'TOKEN_DUPLICATE = 0x0002',
+        'SECURITY_IMPERSONATION = 2',
+        'TOKEN_PRIMARY = 1',
         'GetTokenInformation(token, informationClass',
-        'OpenVerifiedLinkedToken',
+        'OpenVerifiedLinkedPrimaryToken',
+        'DuplicateTokenEx(linked, desiredAccess, IntPtr.Zero',
+        'SECURITY_IMPERSONATION, TOKEN_PRIMARY, out primary',
+        'TokenDword(primary, TOKEN_TYPE) != TOKEN_PRIMARY',
         'RequireToken(linked, 0, expectedSession, "S-1-16-8192", userSid)',
-        'CreateProcessAsUserW(linkedToken, filePath',
+        'RequireToken(primary, 0, expectedSession, "S-1-16-8192", userSid)',
+        'CreateProcessAsUserW(observerToken, filePath',
         'RequireCreatedChild(created.hProcess, observerSession, observerUserSid)',
         'AssertHighObserverToken',
         'Assert-VmObserverExecutionContext',
@@ -679,7 +687,7 @@ try {
         [StringComparison]::Ordinal
     )
     $createAsUserIndex = $runnerText.IndexOf(
-        'CreateProcessAsUserW(linkedToken, filePath',
+        'CreateProcessAsUserW(observerToken, filePath',
         [StringComparison]::Ordinal
     )
     $childTokenIndex = $runnerText.IndexOf(
@@ -1137,6 +1145,9 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
         'runner-protection-started',
         'trusted-result-writer-initialization-started',
         'if ($null -eq $script:VmTrustedResultWriter)',
+        '[ComponentModel.Win32Exception]',
+        '$exception.NativeErrorCode',
+        '$errorRecord.ScriptStackTrace',
         'runner-bootstrap-failed',
         'Remove-Item -LiteralPath $bootstrapDiagnosticPath -Force -ErrorAction Stop',
         'The VM observer bootstrap diagnostic remained after result-writer initialization.'

@@ -222,12 +222,17 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
     private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
     private const uint JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008;
     private const uint WAIT_OBJECT_0 = 0;
+    private const uint TOKEN_ASSIGN_PRIMARY = 0x0001;
+    private const uint TOKEN_DUPLICATE = 0x0002;
     private const uint TOKEN_QUERY = 0x0008;
+    private const int TOKEN_TYPE = 8;
     private const int TOKEN_LINKED_TOKEN = 19;
     private const int TOKEN_ELEVATION = 20;
     private const int TOKEN_SESSION_ID = 12;
     private const int TOKEN_USER = 1;
     private const int TOKEN_INTEGRITY_LEVEL = 25;
+    private const int SECURITY_IMPERSONATION = 2;
+    private const int TOKEN_PRIMARY = 1;
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct StartupInfo {
@@ -322,6 +327,11 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
     [DllImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DuplicateTokenEx(
+        IntPtr existingToken, uint desiredAccess, IntPtr tokenAttributes,
+        int impersonationLevel, int tokenType, out IntPtr newToken);
     [DllImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetTokenInformation(
@@ -464,14 +474,13 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
         finally { if (token != IntPtr.Zero) CloseHandle(token); }
     }
 
-    private static IntPtr OpenVerifiedLinkedToken(out uint session, out string userSid) {
+    private static IntPtr OpenVerifiedLinkedPrimaryToken(out uint session, out string userSid) {
         string expectedSessionText = Environment.GetEnvironmentVariable(
             "DARKRENAMER_VM_EXPECTED_SESSION_ID");
         uint expectedSession;
         if (!UInt32.TryParse(expectedSessionText, out expectedSession) || expectedSession == 0)
             throw new InvalidOperationException("Elevated observer session binding is missing.");
-        IntPtr current = IntPtr.Zero;
-        IntPtr linked = IntPtr.Zero;
+        IntPtr current = IntPtr.Zero, linked = IntPtr.Zero, primary = IntPtr.Zero;
         try {
             if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, out current))
                 throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -480,14 +489,22 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
             RequireToken(current, 1, expectedSession, "S-1-16-12288", userSid);
             linked = GetLinkedToken(current);
             RequireToken(linked, 0, expectedSession, "S-1-16-8192", userSid);
+            uint desiredAccess = TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY;
+            if (!DuplicateTokenEx(linked, desiredAccess, IntPtr.Zero,
+                    SECURITY_IMPERSONATION, TOKEN_PRIMARY, out primary))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            if (TokenDword(primary, TOKEN_TYPE) != TOKEN_PRIMARY)
+                throw new InvalidOperationException("The filtered observer token is not primary.");
+            RequireToken(primary, 0, expectedSession, "S-1-16-8192", userSid);
             session = currentSession;
-            IntPtr result = linked;
-            linked = IntPtr.Zero;
+            IntPtr result = primary;
+            primary = IntPtr.Zero;
             return result;
         }
         finally {
             if (current != IntPtr.Zero) CloseHandle(current);
             if (linked != IntPtr.Zero) CloseHandle(linked);
+            if (primary != IntPtr.Zero) CloseHandle(primary);
         }
     }
 
@@ -594,7 +611,7 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
         IntPtr stderrRead = IntPtr.Zero, stderrWrite = IntPtr.Zero;
         IntPtr stdinRead = IntPtr.Zero, stdinWrite = IntPtr.Zero;
         IntPtr attributeList = IntPtr.Zero, handleList = IntPtr.Zero;
-        IntPtr linkedToken = IntPtr.Zero;
+        IntPtr observerToken = IntPtr.Zero;
         ProcessInformation created = new ProcessInformation();
         Process process = null;
         DarkReNamerVmJobBoundProcess result = null;
@@ -623,7 +640,7 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
             uint observerSession = 0;
             string observerUserSid = null;
             if (elevatedObserver) {
-                linkedToken = OpenVerifiedLinkedToken(out observerSession, out observerUserSid);
+                observerToken = OpenVerifiedLinkedPrimaryToken(out observerSession, out observerUserSid);
                 startup.StartupInfo.lpDesktop = @"winsta0\default";
             }
             bool inheritHandles = false;
@@ -659,7 +676,7 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
             StringBuilder commandLine = new StringBuilder("\"" + filePath + "\"");
             if (!String.IsNullOrEmpty(arguments)) commandLine.Append(' ').Append(arguments);
             bool started = elevatedObserver
-                ? CreateProcessAsUserW(linkedToken, filePath, commandLine,
+                ? CreateProcessAsUserW(observerToken, filePath, commandLine,
                     IntPtr.Zero, IntPtr.Zero, inheritHandles, flags, IntPtr.Zero,
                     workingDirectory, ref startup, out created)
                 : CreateProcessW(filePath, commandLine, IntPtr.Zero, IntPtr.Zero,
@@ -732,7 +749,7 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
         finally {
             if (created.hThread != IntPtr.Zero) CloseHandle(created.hThread);
             if (created.hProcess != IntPtr.Zero) CloseHandle(created.hProcess);
-            if (linkedToken != IntPtr.Zero) CloseHandle(linkedToken);
+            if (observerToken != IntPtr.Zero) CloseHandle(observerToken);
             if (attributeList != IntPtr.Zero) DeleteProcThreadAttributeList(attributeList);
             if (handleList != IntPtr.Zero) Marshal.FreeHGlobal(handleList);
             if (attributeList != IntPtr.Zero) Marshal.FreeHGlobal(attributeList);

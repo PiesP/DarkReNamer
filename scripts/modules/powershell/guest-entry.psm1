@@ -306,7 +306,34 @@ try {
 }
 catch {
     if ($null -eq $script:VmTrustedResultWriter) {
-        $message = '{0}: {1}' -f $_.Exception.GetType().FullName, $_.Exception.Message
+        $errorRecord = $_
+        $messageParts = [Collections.Generic.List[string]]::new()
+        $exception = $errorRecord.Exception
+        for ($depth = 0; $null -ne $exception -and $depth -lt 4; $depth++) {
+            $nativeError = if ($exception -is [ComponentModel.Win32Exception]) {
+                '; native_error=' + $exception.NativeErrorCode
+            }
+            else { '' }
+            $exceptionMessage = [string]$exception.Message
+            if ($exceptionMessage.Length -gt 1024) {
+                $exceptionMessage = $exceptionMessage.Substring(0, 1024)
+            }
+            $messageParts.Add((
+                '{0}; HRESULT=0x{1:X8}{2}; message={3}' -f
+                    $exception.GetType().FullName,
+                    $exception.HResult,
+                    $nativeError,
+                    $exceptionMessage
+            ))
+            $exception = $exception.InnerException
+        }
+        $scriptStackTrace = [string]$errorRecord.ScriptStackTrace
+        if ($scriptStackTrace.Length -gt 2048) {
+            $scriptStackTrace = $scriptStackTrace.Substring(0, 2048)
+        }
+        if ($scriptStackTrace) { $messageParts.Add('script_stack=' + $scriptStackTrace) }
+        $message = $messageParts -join ' | '
+        if ($message.Length -gt 4096) { $message = $message.Substring(0, 4096) }
         & $writeBootstrapDiagnostic 'runner-bootstrap-failed' $message
     }
     $result.status = 'failed'
