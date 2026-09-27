@@ -1334,13 +1334,24 @@ pub(super) fn run_prepared_file_dialog_with_destination_validation(
         PreparedFileDialogSelection::SaveText { target, text } => {
             if finish_file_dialog_session(window, session, FileDialogCompletion::Accept, |_| ())
                 .is_some()
-                && let Err(error) = write_legacy_text_to_target(target, &text)
             {
-                message(
-                    window,
-                    &format!("파일을 저장하지 못했습니다: {error}"),
-                    "DarkReNamer - 저장 실패",
-                );
+                match write_legacy_text_to_target(target, &text) {
+                    Ok(crate::rename::windows_native::TextExportOutcome::Committed) => {}
+                    Ok(
+                        crate::rename::windows_native::TextExportOutcome::CommittedWithCleanupWarning(
+                            error,
+                        ),
+                    ) => message(
+                        window,
+                        &text_export_cleanup_warning_korean(&error),
+                        TEXT_EXPORT_CLEANUP_WARNING_TITLE,
+                    ),
+                    Err(error) => message(
+                        window,
+                        &format!("파일을 저장하지 못했습니다: {error}"),
+                        "DarkReNamer - 저장 실패",
+                    ),
+                }
             }
         }
         PreparedFileDialogSelection::ImportNames(path) => {

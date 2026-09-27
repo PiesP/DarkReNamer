@@ -12,6 +12,8 @@ use windows_sys::Win32::Globalization::{
 
 use crate::admission::{MAX_IMPORT_BYTES, read_bounded_import};
 
+pub(super) const TEXT_EXPORT_CLEANUP_WARNING_TITLE: &str = "DarkReNamer - 저장 후 정리 필요";
+
 pub(super) fn legacy_path(path: &Path) -> LegacyText {
     LegacyText::from_units(path.as_os_str().encode_wide().collect::<Vec<_>>())
 }
@@ -47,7 +49,10 @@ pub(super) fn path_wide(path: &Path) -> Vec<u16> {
 }
 
 #[cfg(test)]
-pub(super) fn write_legacy_text(path: &Path, text: &LegacyText) -> io::Result<()> {
+pub(super) fn write_legacy_text(
+    path: &Path,
+    text: &LegacyText,
+) -> io::Result<crate::rename::windows_native::TextExportOutcome> {
     let bytes = encode_legacy_text(text)?;
     crate::rename::windows_native::write_text_export(path, &bytes)
 }
@@ -55,9 +60,15 @@ pub(super) fn write_legacy_text(path: &Path, text: &LegacyText) -> io::Result<()
 pub(super) fn write_legacy_text_to_target(
     target: crate::rename::windows_native::TextExportTarget,
     text: &LegacyText,
-) -> io::Result<()> {
+) -> io::Result<crate::rename::windows_native::TextExportOutcome> {
     let bytes = encode_legacy_text(text)?;
     crate::rename::windows_native::write_text_export_target(target, &bytes)
+}
+
+pub(super) fn text_export_cleanup_warning_korean(error: &io::Error) -> String {
+    format!(
+        "파일은 저장했습니다. 다만 저장 폴더의 임시 백업을 안전하게 확인하고 삭제하지 못했습니다: {error}\n\n저장 폴더에서 이름이 '.darkrenamer-text-export-backup-'로 시작하는 '.tmp' 파일을 확인해 주세요. 필요 여부를 확인한 뒤 직접 삭제할 수 있습니다."
+    )
 }
 
 fn encode_legacy_text(text: &LegacyText) -> io::Result<Vec<u8>> {

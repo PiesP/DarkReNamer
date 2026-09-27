@@ -149,7 +149,8 @@ use safe_runtime::{
 #[cfg(test)]
 use text_io::write_legacy_text;
 use text_io::{
-    compare_windows, legacy_path, path_wide, read_legacy_text, wide, write_legacy_text_to_target,
+    TEXT_EXPORT_CLEANUP_WARNING_TITLE, compare_windows, legacy_path, path_wide, read_legacy_text,
+    text_export_cleanup_warning_korean, wide, write_legacy_text_to_target,
 };
 use windows_sys::Win32::Foundation::{
     E_FAIL, E_NOINTERFACE, E_POINTER, FILETIME, HWND, LPARAM, LRESULT, POINTL, RECT, S_OK,
@@ -2659,6 +2660,76 @@ mod tests {
             entry.is_ok_and(|entry| entry.file_name().to_string_lossy().contains("backup"))
         }));
         Ok(())
+    }
+
+    #[test]
+    fn text_export_reports_committed_content_when_backup_cleanup_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        let directory = tempfile::tempdir()?;
+        let destination = directory.path().join("names.txt");
+        let original = b"original contents remain in the backup";
+        fs::write(&destination, original)?;
+        let target = crate::rename::windows_native::prepare_text_export_target(&destination)?;
+        let mut backup_guard = None;
+
+        let outcome =
+            crate::rename::windows_native::write_text_export_target_with_before_backup_cleanup(
+                target,
+                b"accepted output",
+                |backup_path| {
+                    backup_guard = Some(
+                        std::fs::OpenOptions::new()
+                            .read(true)
+                            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                            .open(backup_path)?,
+                    );
+                    Ok(())
+                },
+            )?;
+
+        let crate::rename::windows_native::TextExportOutcome::CommittedWithCleanupWarning(warning) =
+            outcome
+        else {
+            return Err(io::Error::other("cleanup failure was not reported as committed").into());
+        };
+        assert_eq!(warning.raw_os_error(), Some(32));
+        assert_eq!(fs::read(&destination)?, b"accepted output");
+        let retained_backups = directory
+            .path()
+            .read_dir()?
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with(".darkrenamer-text-export-backup-") && name.ends_with(".tmp")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(retained_backups.len(), 1);
+        assert_eq!(fs::read(retained_backups[0].path())?, original);
+        assert!(!directory.path().read_dir()?.any(|entry| {
+            entry.is_ok_and(|entry| entry.file_name().to_string_lossy().contains("stage"))
+        }));
+        drop(backup_guard);
+        Ok(())
+    }
+
+    #[test]
+    fn text_export_cleanup_warning_says_the_file_was_saved() {
+        let warning = io::Error::new(io::ErrorKind::PermissionDenied, "backup is in use");
+        let message = text_io::text_export_cleanup_warning_korean(&warning);
+
+        assert!(message.starts_with("파일은 저장했습니다."));
+        assert!(message.contains("임시 백업"));
+        assert!(message.contains(".darkrenamer-text-export-backup-"));
+        assert!(!message.contains("파일을 저장하지 못했습니다"));
+        assert_eq!(
+            text_io::TEXT_EXPORT_CLEANUP_WARNING_TITLE,
+            "DarkReNamer - 저장 후 정리 필요"
+        );
     }
 
     #[test]
