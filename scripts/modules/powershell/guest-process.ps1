@@ -793,7 +793,7 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
             filePath.IndexOf('"') >= 0 || String.IsNullOrWhiteSpace(workingDirectory)) {
             throw new ArgumentException("The process launch path is invalid.");
         }
-        bool redirect = stdoutPath != null || stderrPath != null;
+        bool redirect = !String.IsNullOrEmpty(stdoutPath) || !String.IsNullOrEmpty(stderrPath);
         if (redirect && (String.IsNullOrWhiteSpace(stdoutPath) ||
                 String.IsNullOrWhiteSpace(stderrPath) || channelLimit <= 0 ||
                 aggregateLimit <= 0)) {

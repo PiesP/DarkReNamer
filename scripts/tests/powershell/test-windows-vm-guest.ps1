@@ -624,6 +624,7 @@ try {
         'The CreateProcessWithTokenW command line exceeds its supported bound.',
         'function Resolve-JobBoundCapturePaths',
         '$BoundParameters.Keys -contains ''StdoutPath''',
+        'bool redirect = !String.IsNullOrEmpty(stdoutPath) || !String.IsNullOrEmpty(stderrPath);',
         '$capturePaths.stdout_path',
         '$capturePaths.stderr_path',
         'AssertDefaultObserverDesktop();',
@@ -1891,6 +1892,30 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
     $controllerJob.pid = 1235
     if (Test-DrControllerProcessJobCleanupLedger -Result $controllerResult) {
         throw 'The controller accepted a clean process-job row for a different candidate identity.'
+    }
+    $unstartedGuiResult = [pscustomobject]@{
+        process_job_cleanup = @()
+        gui = [pscustomobject]@{
+            status = 'failed'
+            job_cleanup = $true
+            process_id = $null
+            failure_reason = 'gui_error'
+            error_detail = [pscustomobject]@{
+                exception_type = 'System.Exception'
+                message = 'fixture initialization failed'
+                native_error = $null
+            }
+        }
+    }
+    if (Test-DrControllerProcessJobCleanupLedger -Result $unstartedGuiResult) {
+        throw 'An empty process-job ledger must remain invalid outside the core GUI no-start case.'
+    }
+    if (-not (Test-DrControllerProcessJobCleanupLedger -Result $unstartedGuiResult -AllowEmpty)) {
+        throw 'A GUI failure before process creation must allow an empty but complete process-job ledger.'
+    }
+    $unstartedGuiResult.gui.process_id = 1234
+    if (Test-DrControllerProcessJobCleanupLedger -Result $unstartedGuiResult -AllowEmpty) {
+        throw 'An empty process-job ledger must not be accepted when a GUI process identity exists.'
     }
     $runnerProcessDefinitions = @($controllerEntryAst.FindAll({
         param($node)

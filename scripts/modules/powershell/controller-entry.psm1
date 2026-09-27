@@ -140,14 +140,43 @@ function Get-DrControllerRecoveryProcessIdentities {
 function Test-DrControllerProcessJobCleanupLedger {
     param(
         [Parameter(Mandatory)][object] $Result,
-        [string] $RecoveryEvidenceRoot
+        [string] $RecoveryEvidenceRoot,
+        [switch] $AllowEmpty
     )
 
     try {
     $ledgerProperty = $Result.PSObject.Properties['process_job_cleanup']
     if ($null -eq $ledgerProperty) { return $false }
     $rows = @($ledgerProperty.Value)
-    if ($rows.Count -lt 1 -or $rows.Count -gt 64) { return $false }
+    if ($rows.Count -gt 64) { return $false }
+    if ($rows.Count -eq 0) {
+        if (-not $AllowEmpty) { return $false }
+        $guiProperty = $Result.PSObject.Properties['gui']
+        if ($null -eq $guiProperty -or $null -eq $guiProperty.Value) { return $false }
+        $gui = $guiProperty.Value
+        $errorDetailProperty = $gui.PSObject.Properties['error_detail']
+        if ($gui.status -cne 'failed' -or
+            $gui.job_cleanup -isnot [bool] -or -not $gui.job_cleanup -or
+            $null -ne $gui.process_id -or
+            $gui.PSObject.Properties.Name -ccontains 'process_lifecycle' -or
+            $gui.failure_reason -cne 'gui_error' -or
+            $null -eq $errorDetailProperty -or $null -eq $errorDetailProperty.Value) {
+            return $false
+        }
+        $errorDetail = $errorDetailProperty.Value
+        $errorFields = @($errorDetail.PSObject.Properties.Name | Sort-Object -CaseSensitive)
+        $expectedErrorFields = @('exception_type', 'message', 'native_error') | Sort-Object -CaseSensitive
+        if (($errorFields -join "`n") -cne ($expectedErrorFields -join "`n") -or
+            $errorDetail.exception_type -isnot [string] -or
+            [string]::IsNullOrWhiteSpace($errorDetail.exception_type) -or
+            $errorDetail.exception_type.Length -gt 256 -or
+            $errorDetail.message -isnot [string] -or $errorDetail.message.Length -gt 1024 -or
+            ($null -ne $errorDetail.native_error -and
+                ($errorDetail.native_error -isnot [int] -and $errorDetail.native_error -isnot [long]))) {
+            return $false
+        }
+        return $true
+    }
     $expectedFields = @(
         'active_process_ids_at_stop', 'active_processes_at_close',
         'active_processes_at_primary_exit', 'active_processes_at_stop',
@@ -2451,7 +2480,7 @@ public static class DarkReNamerVmControllerWorkspace {
         throw 'Collected guest result size mismatch.'
     }
     $result = Get-Content -LiteralPath (Join-Path $BundleRoot 'result.json') -Raw | ConvertFrom-Json
-    if (-not (Test-DrControllerProcessJobCleanupLedger -Result $result) -or
+    if (-not (Test-DrControllerProcessJobCleanupLedger -Result $result -AllowEmpty) -or
         @($result.tests | Where-Object { $_.job_cleanup -isnot [bool] -or -not $_.job_cleanup }).Count -ne 0 -or
         $result.gui.job_cleanup -isnot [bool] -or -not $result.gui.job_cleanup) {
         throw 'Guest process jobs were not empty and closed before result collection.'
