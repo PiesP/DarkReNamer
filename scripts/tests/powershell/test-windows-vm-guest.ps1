@@ -1420,18 +1420,36 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
                 throw 'The process-DACL helper did not publish its process id.'
             }
             $protectedRunnerPid = [int][IO.File]::ReadAllText($securityHelperPidPath)
+            $probePrincipal = [Security.Principal.WindowsPrincipal]::new(
+                [Security.Principal.WindowsIdentity]::GetCurrent()
+            )
+            $probeIsAdministrator = $probePrincipal.IsInRole(
+                [Security.Principal.WindowsBuiltInRole]::Administrator
+            )
+            if ($probeIsAdministrator) {
+                Write-Host 'Administrator token detected; verifying BUILTIN\Administrators grants. Same-user denial is not tested in this context.'
+            }
             foreach ($requestedAccess in @(0x00000001, 0x00000010, 0x00040000)) {
                 $probeHandle = [DarkReNamerVmRunnerSecurityProbe]::OpenProcess(
                     [uint32]$requestedAccess, $false, [uint32]$protectedRunnerPid
                 )
+                if ($probeIsAdministrator) {
+                    if ($probeHandle -eq [IntPtr]::Zero) {
+                        $requestedAccessHex = '{0:x}' -f $requestedAccess
+                        throw "The enabled Administrator token was denied protected runner access 0x$requestedAccessHex granted to BUILTIN\Administrators."
+                    }
+                    [void][DarkReNamerVmRunnerSecurityProbe]::CloseHandle($probeHandle)
+                    continue
+                }
                 if ($probeHandle -ne [IntPtr]::Zero) {
                     [void][DarkReNamerVmRunnerSecurityProbe]::CloseHandle($probeHandle)
-                    throw ('The same-user process opened protected runner access 0x{0:x}.' -f
-                        $requestedAccess)
+                    $requestedAccessHex = '{0:x}' -f $requestedAccess
+                    throw "The non-administrator same-user process opened protected runner access 0x$requestedAccessHex."
                 }
-                if ([DarkReNamerVmRunnerSecurityProbe]::LastError -ne 5) {
+                $probeError = [DarkReNamerVmRunnerSecurityProbe]::LastError
+                if ($probeError -ne 5) {
                     throw ('The protected runner access check returned Win32 error {0}.' -f
-                        [DarkReNamerVmRunnerSecurityProbe]::LastError)
+                        $probeError)
                 }
             }
         }
@@ -1498,7 +1516,10 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
         catch [UnauthorizedAccessException] {
             $writeBlockedByDacl = $true
         }
-        if (-not $writeBlockedByDacl) {
+        if ($probeIsAdministrator -and $writeBlockedByDacl) {
+            throw 'The enabled Administrator token was denied the trusted result file access granted to BUILTIN\Administrators.'
+        }
+        if (-not $probeIsAdministrator -and -not $writeBlockedByDacl) {
             throw 'The closed result file remained writable by the same user.'
         }
         $deleteBlockedByDacl = $false
@@ -1508,7 +1529,10 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
         catch [UnauthorizedAccessException] {
             $deleteBlockedByDacl = $true
         }
-        if (-not $deleteBlockedByDacl) {
+        if ($probeIsAdministrator -and $deleteBlockedByDacl) {
+            throw 'The enabled Administrator token could not remove the trusted result file granted to BUILTIN\Administrators.'
+        }
+        if (-not $probeIsAdministrator -and -not $deleteBlockedByDacl) {
             throw 'The same user removed the trusted result through its bundle directory.'
         }
 
@@ -1642,9 +1666,12 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
         if ($suiteBytesCaptured -ne $suiteBudgetBytes -or $suiteRunCount -ne 2) {
             throw 'The shrinking per-test output allowance did not cap the complete guest suite.'
         }
+        $exhaustedOutputRoot = Join-Path $valid.root 'exhausted-output'
+        [void](New-Item -ItemType Directory -Path $exhaustedOutputRoot)
         $exhaustedSuiteRow = Invoke-RustTestBinary `
             -Test $valid.manifest.test_binaries[0] `
             -Root $valid.root `
+            -OutputRoot $exhaustedOutputRoot `
             -RuntimeRoot $runtimeObservationRoot `
             -Index 99 `
             -TimeoutSeconds 1 `
@@ -2739,24 +2766,33 @@ Invoke-DrTestPowerShellModuleScope -Kind guest -Action { Initialize-NativeCaptur
             $valid.root.Replace("'", "''")
         ).Replace('MODULE_LOADER_PATH', $moduleLoaderPath.Replace("'", "''"))
         $encodedInit = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($initScript))
-        $initProcess = Start-OwnedProcess `
+        $initStdoutPath = Join-Path $valid.root 'uia-core-init.stdout.txt'
+        $initStderrPath = Join-Path $valid.root 'uia-core-init.stderr.txt'
+        $initProcess = Start-JobBoundProcess `
             -FilePath (Join-Path $PSHOME 'pwsh.exe') `
             -Arguments "-NoLogo -NoProfile -NonInteractive -EncodedCommand $encodedInit" `
             -WorkingDirectory $valid.root `
-            -RedirectOutput
+            -StdoutPath $initStdoutPath `
+            -StderrPath $initStderrPath
         try {
-            if (-not $initProcess.process.WaitForExit(30000)) {
-                throw 'Fresh PowerShell Core UI Automation initialization timed out.'
-            }
-            $initProcess.process.WaitForExit()
-            if ($initProcess.process.ExitCode -ne 0) {
-                throw "Fresh PowerShell Core UI Automation initialization failed: $($initProcess.stderr_task.GetAwaiter().GetResult())"
+            $initResult = Wait-JobBoundProcessWithOutputLimit `
+                -State $initProcess `
+                -StdoutPath $initStdoutPath `
+                -StderrPath $initStderrPath `
+                -TimeoutSeconds 30
+            if ($initResult.failure_reason -or $initProcess.process.ExitCode -ne 0) {
+                $initError = [IO.File]::ReadAllText($initStderrPath, [Text.Encoding]::UTF8).Trim()
+                throw "Fresh PowerShell Core UI Automation initialization failed: $initError"
             }
         }
         finally {
-            if (-not $initProcess.process.HasExited) {
-                Invoke-TaskkillTree -ProcessId $initProcess.process.Id
-                [void]$initProcess.process.WaitForExit(10000)
+            if (-not $initProcess.job_closed) {
+                if ($initProcess.owner.ActiveProcessCount -gt 0) {
+                    Stop-JobBoundProcess -State $initProcess
+                }
+                if (-not (Close-JobBoundProcess -State $initProcess)) {
+                    throw 'Fresh PowerShell Core UI Automation initialization job did not close cleanly.'
+                }
             }
             $initProcess.process.Dispose()
         }
@@ -2876,20 +2912,21 @@ Invoke-DrTestPowerShellModuleScope `
         foreach ($expectedExitCode in @(0, 7)) {
             $nativeStdout = Join-Path $valid.root "native-exit-$expectedExitCode.stdout.txt"
             $nativeStderr = Join-Path $valid.root "native-exit-$expectedExitCode.stderr.txt"
-            $ownedProcess = Start-OwnedProcess `
+            $ownedProcess = Start-JobBoundProcess `
                 -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') `
                 -Arguments "/d /c `"echo synthetic-exit-$expectedExitCode & exit /b $expectedExitCode`"" `
                 -WorkingDirectory $valid.root `
-                -RedirectOutput
+                -StdoutPath $nativeStdout `
+                -StderrPath $nativeStderr
             try {
-                if (-not $ownedProcess.process.WaitForExit(10000)) {
-                    throw "Synthetic exit-$expectedExitCode child timed out."
-                }
-                $ownedProcess.process.WaitForExit()
-                Save-CapturedProcessOutput `
+                $ownedResult = Wait-JobBoundProcessWithOutputLimit `
                     -State $ownedProcess `
                     -StdoutPath $nativeStdout `
-                    -StderrPath $nativeStderr
+                    -StderrPath $nativeStderr `
+                    -TimeoutSeconds 10
+                if ($ownedResult.failure_reason) {
+                    throw "Synthetic exit-$expectedExitCode child timed out."
+                }
                 if ($ownedProcess.process.ExitCode -ne $expectedExitCode) {
                     throw "Synthetic child exit code was $($ownedProcess.process.ExitCode), expected $expectedExitCode."
                 }
@@ -2901,9 +2938,13 @@ Invoke-DrTestPowerShellModuleScope `
                 }
             }
             finally {
-                if (-not $ownedProcess.process.HasExited) {
-                    Invoke-TaskkillTree -ProcessId $ownedProcess.process.Id
-                    [void]$ownedProcess.process.WaitForExit(10000)
+                if (-not $ownedProcess.job_closed) {
+                    if ($ownedProcess.owner.ActiveProcessCount -gt 0) {
+                        Stop-JobBoundProcess -State $ownedProcess
+                    }
+                    if (-not (Close-JobBoundProcess -State $ownedProcess)) {
+                        throw 'Synthetic native exit child job did not close cleanly.'
+                    }
                 }
                 $ownedProcess.process.Dispose()
             }
