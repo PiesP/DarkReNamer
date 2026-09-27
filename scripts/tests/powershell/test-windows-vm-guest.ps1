@@ -607,8 +607,21 @@ try {
     $runnerText = Get-DrTestCombinedPowerShellSource -Kind guest
     foreach ($requiredJobSource in @(
         'JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE',
-        'CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT',
+        'CREATE_SUSPENDED = 0x00000004',
+        'EXTENDED_STARTUPINFO_PRESENT = 0x00080000',
+        'CREATE_UNICODE_ENVIRONMENT = 0x00000400',
+        'MAX_ENVIRONMENT_BLOCK_CHARS = 32767',
         'HANDLE_LIST_ATTRIBUTE',
+        'CopyCurrentEnvironmentBlock()',
+        'GetEnvironmentStringsW()',
+        'FreeEnvironmentStringsW(source)',
+        'consecutiveNulls == 2',
+        'flags |= CREATE_UNICODE_ENVIRONMENT;',
+        'flags, environmentBlock,',
+        'commandLine.Length >= 1024',
+        'The CreateProcessWithTokenW command line exceeds its supported bound.',
+        'ref StartupInfo startupInfo, out ProcessInformation processInformation);',
+        'ref startup.StartupInfo, out created)',
         'TOKEN_LINKED_TOKEN = 19',
         'TOKEN_ASSIGN_PRIMARY = 0x0001',
         'TOKEN_DUPLICATE = 0x0002',
@@ -636,12 +649,12 @@ try {
         'shellToken, 0, TOKEN_ELEVATION_TYPE_LIMITED, expectedSession,',
         'Win32Exception Win32Failure(string operation)',
         'GetTokenInformation for class ',
-        'CreateProcessAsUserW for the verified medium shell token',
+        'CreateProcessWithTokenW for the verified medium shell token',
         'The shell token belongs to a different interactive logon.',
         'The suspended observer child belongs to a different logon session.',
         'The interactive shell image is not the Windows Explorer binary.',
         'The interactive shell process changed during token acquisition.',
-        'CreateProcessAsUserW(observerToken, filePath',
+        'CreateProcessWithTokenW(observerToken, 0, filePath',
         'RequireCreatedChild(created.hProcess, observerSession, observerUserSid,',
         'AssertHighObserverToken',
         'Assert-VmObserverExecutionContext',
@@ -666,7 +679,7 @@ try {
         'medium integrity child could access or could not verify observer process/thread boundaries.',
         '$probeSucceeded = $true',
         'if ($probeSucceeded)',
-        'Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue',
+        'Remove-Item -LiteralPath $stdoutPath, $stderrPath, $probeScriptPath',
         'PROCESS_WRITE_DAC',
         'PROTECTED_DACL_SECURITY_INFORMATION',
         'Initialize-TrustedResultWriter',
@@ -733,8 +746,8 @@ try {
         'AssignProcessToJobObject(job, created.hProcess)',
         [StringComparison]::Ordinal
     )
-    $createAsUserIndex = $runnerText.IndexOf(
-        'CreateProcessAsUserW(observerToken, filePath',
+    $createWithTokenIndex = $runnerText.IndexOf(
+        'CreateProcessWithTokenW(observerToken, 0, filePath',
         [StringComparison]::Ordinal
     )
     $observerAuthenticationCaptureIndex = $runnerText.IndexOf(
@@ -750,13 +763,59 @@ try {
         [StringComparison]::Ordinal
     )
     if ($observerAuthenticationCaptureIndex -lt 0 -or
-        $createAsUserIndex -le $observerAuthenticationCaptureIndex -or
-        $assignIndex -le $createAsUserIndex -or
+        $createWithTokenIndex -le $observerAuthenticationCaptureIndex -or
+        $assignIndex -le $createWithTokenIndex -or
         $childTokenIndex -le $assignIndex -or $resumeIndex -le $childTokenIndex -or
         $runnerText.IndexOf('CREATE_BREAKAWAY_FROM_JOB', [StringComparison]::Ordinal) -ge 0 -or
         $runnerText.IndexOf('JOB_OBJECT_LIMIT_BREAKAWAY_OK', [StringComparison]::Ordinal) -ge 0 -or
         $runnerText.IndexOf('JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK', [StringComparison]::Ordinal) -ge 0) {
         throw 'The guest process must enter a non-breakaway kill-on-close job before its first instruction.'
+    }
+    $attributeListInitIndex = $runnerText.IndexOf(
+        'InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeSize);',
+        [StringComparison]::Ordinal
+    )
+    $attributeListGateIndex = $runnerText.LastIndexOf(
+        'if (!elevatedObserver) {',
+        $attributeListInitIndex,
+        [StringComparison]::Ordinal
+    )
+    $handleListUpdateIndex = $runnerText.IndexOf(
+        'new IntPtr(HANDLE_LIST_ATTRIBUTE), handleList,',
+        $attributeListInitIndex,
+        [StringComparison]::Ordinal
+    )
+    $mediumProbeStartIndex = $runnerText.IndexOf(
+        'function Test-MediumObserverBoundary {',
+        [StringComparison]::Ordinal
+    )
+    $mediumProbeEndIndex = $runnerText.IndexOf(
+        'function Stop-JobBoundProcess {',
+        $mediumProbeStartIndex,
+        [StringComparison]::Ordinal
+    )
+    if ($attributeListInitIndex -lt 0 -or $attributeListGateIndex -lt 0 -or
+        $attributeListInitIndex -le $attributeListGateIndex -or
+        $handleListUpdateIndex -le $attributeListInitIndex -or
+        $mediumProbeStartIndex -lt 0 -or $mediumProbeEndIndex -le $mediumProbeStartIndex) {
+        throw 'The elevated token launch must avoid the inherited-handle attribute list.'
+    }
+    $mediumProbeSource = $runnerText.Substring(
+        $mediumProbeStartIndex,
+        $mediumProbeEndIndex - $mediumProbeStartIndex
+    )
+    $probeStageIndex = $mediumProbeSource.IndexOf(
+        "[IO.FileMode]::CreateNew",
+        [StringComparison]::Ordinal
+    )
+    $probeLaunchIndex = $mediumProbeSource.IndexOf(
+        '-Arguments (''-NoLogo -NoProfile -NonInteractive -File "',
+        [StringComparison]::Ordinal
+    )
+    if ($mediumProbeSource.IndexOf('-EncodedCommand', [StringComparison]::Ordinal) -ge 0 -or
+        $mediumProbeSource.IndexOf("'.ps1'", [StringComparison]::Ordinal) -lt 0 -or
+        $probeStageIndex -lt 0 -or $probeLaunchIndex -le $probeStageIndex) {
+        throw 'The medium observer boundary script must be staged as a short -File launch.'
     }
     $shellWindowIndex = $runnerText.IndexOf(
         'IntPtr shellWindow = GetShellWindow();',

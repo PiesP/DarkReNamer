@@ -215,6 +215,7 @@ using System.Threading.Tasks;
 public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
     private const uint CREATE_SUSPENDED = 0x00000004;
     private const uint CREATE_NO_WINDOW = 0x08000000;
+    private const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
     private const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
     private const uint STARTF_USESTDHANDLES = 0x00000100;
     private const uint HANDLE_FLAG_INHERIT = 0x00000001;
@@ -223,6 +224,7 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
     private const uint JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008;
     private const uint WAIT_OBJECT_0 = 0;
     private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+    private const int MAX_ENVIRONMENT_BLOCK_CHARS = 32767;
     private const uint TOKEN_ASSIGN_PRIMARY = 0x0001;
     private const uint TOKEN_DUPLICATE = 0x0002;
     private const uint TOKEN_QUERY = 0x0008;
@@ -338,12 +340,10 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
         ref StartupInfoEx startupInfo, out ProcessInformation processInformation);
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CreateProcessAsUserW(
-        IntPtr token, string applicationName, StringBuilder commandLine,
-        IntPtr processAttributes, IntPtr threadAttributes,
-        [MarshalAs(UnmanagedType.Bool)] bool inheritHandles,
+    private static extern bool CreateProcessWithTokenW(
+        IntPtr token, uint logonFlags, string applicationName, StringBuilder commandLine,
         uint creationFlags, IntPtr environment, string currentDirectory,
-        ref StartupInfoEx startupInfo, out ProcessInformation processInformation);
+        ref StartupInfo startupInfo, out ProcessInformation processInformation);
     [DllImport("kernel32.dll")]
     private static extern IntPtr GetCurrentProcess();
     [DllImport("advapi32.dll", SetLastError = true)]
@@ -362,6 +362,11 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
         IntPtr process, uint flags, StringBuilder imageName, ref uint size);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern uint GetWindowsDirectoryW(StringBuilder windowsDirectory, uint size);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr GetEnvironmentStringsW();
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool FreeEnvironmentStringsW(IntPtr environment);
     [DllImport("user32.dll")]
     private static extern IntPtr GetShellWindow();
     [DllImport("user32.dll", SetLastError = true)]
@@ -429,6 +434,41 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
     private static Win32Exception Win32Failure(string operation) {
         int error = Marshal.GetLastWin32Error();
         return new Win32Exception(error, operation + " failed.");
+    }
+
+    private static IntPtr CopyCurrentEnvironmentBlock() {
+        IntPtr source = GetEnvironmentStringsW();
+        if (source == IntPtr.Zero) throw Win32Failure("GetEnvironmentStringsW");
+        try {
+            char[] environment = new char[MAX_ENVIRONMENT_BLOCK_CHARS];
+            int length = 0;
+            int consecutiveNulls = 0;
+            while (length < environment.Length) {
+                char value = unchecked((char)(ushort)Marshal.ReadInt16(
+                    source, length * sizeof(char)));
+                environment[length++] = value;
+                if (value == '\0') {
+                    consecutiveNulls++;
+                    if (consecutiveNulls == 2) {
+                        IntPtr copy = Marshal.AllocHGlobal(length * sizeof(char));
+                        try {
+                            Marshal.Copy(environment, 0, copy, length);
+                            return copy;
+                        }
+                        catch {
+                            Marshal.FreeHGlobal(copy);
+                            throw;
+                        }
+                    }
+                }
+                else {
+                    consecutiveNulls = 0;
+                }
+            }
+            throw new InvalidOperationException(
+                "The current process environment block exceeds its supported bound.");
+        }
+        finally { FreeEnvironmentStringsW(source); }
     }
 
     private static IntPtr QueryTokenBuffer(IntPtr token, int informationClass) {
@@ -732,6 +772,7 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
         IntPtr stdinRead = IntPtr.Zero, stdinWrite = IntPtr.Zero;
         IntPtr attributeList = IntPtr.Zero, handleList = IntPtr.Zero;
         IntPtr observerToken = IntPtr.Zero;
+        IntPtr environmentBlock = IntPtr.Zero;
         ProcessInformation created = new ProcessInformation();
         Process process = null;
         DarkReNamerVmJobBoundProcess result = null;
@@ -753,16 +794,20 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
             }
             finally { Marshal.FreeHGlobal(limitBuffer); }
 
-            StartupInfoEx startup = new StartupInfoEx();
-            startup.StartupInfo.cb = Marshal.SizeOf(typeof(StartupInfoEx));
-            uint flags = CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT;
             bool elevatedObserver = IsElevatedObserver();
+            StartupInfoEx startup = new StartupInfoEx();
+            startup.StartupInfo.cb = Marshal.SizeOf(elevatedObserver
+                ? typeof(StartupInfo) : typeof(StartupInfoEx));
+            uint flags = CREATE_SUSPENDED;
+            if (!elevatedObserver) flags |= EXTENDED_STARTUPINFO_PRESENT;
             uint observerSession = 0;
             string observerUserSid = null;
             Luid observerAuthenticationId = new Luid();
             if (elevatedObserver) {
                 observerToken = OpenVerifiedLinkedShellPrimaryToken(out observerSession, out observerUserSid);
                 observerAuthenticationId = ReadTokenStatistics(observerToken).AuthenticationId;
+                environmentBlock = CopyCurrentEnvironmentBlock();
+                flags |= CREATE_UNICODE_ENVIRONMENT;
                 startup.StartupInfo.lpDesktop = @"winsta0\default";
             }
             bool inheritHandles = false;
@@ -777,36 +822,41 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
                 startup.StartupInfo.hStdInput = stdinRead;
                 startup.StartupInfo.hStdOutput = stdoutWrite;
                 startup.StartupInfo.hStdError = stderrWrite;
-                IntPtr attributeSize = IntPtr.Zero;
-                InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeSize);
-                attributeList = Marshal.AllocHGlobal(attributeSize);
-                if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref attributeSize))
-                    throw new Win32Exception(Marshal.GetLastWin32Error());
-                handleList = Marshal.AllocHGlobal(IntPtr.Size * 3);
-                Marshal.WriteIntPtr(handleList, 0, stdinRead);
-                Marshal.WriteIntPtr(handleList, IntPtr.Size, stdoutWrite);
-                Marshal.WriteIntPtr(handleList, IntPtr.Size * 2, stderrWrite);
-                if (!UpdateProcThreadAttribute(attributeList, 0,
-                        new IntPtr(HANDLE_LIST_ATTRIBUTE), handleList,
-                        new IntPtr(IntPtr.Size * 3), IntPtr.Zero, IntPtr.Zero))
-                    throw new Win32Exception(Marshal.GetLastWin32Error());
-                startup.lpAttributeList = attributeList;
-                inheritHandles = true;
+                if (!elevatedObserver) {
+                    IntPtr attributeSize = IntPtr.Zero;
+                    InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeSize);
+                    attributeList = Marshal.AllocHGlobal(attributeSize);
+                    if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref attributeSize))
+                        throw new Win32Exception(Marshal.GetLastWin32Error());
+                    handleList = Marshal.AllocHGlobal(IntPtr.Size * 3);
+                    Marshal.WriteIntPtr(handleList, 0, stdinRead);
+                    Marshal.WriteIntPtr(handleList, IntPtr.Size, stdoutWrite);
+                    Marshal.WriteIntPtr(handleList, IntPtr.Size * 2, stderrWrite);
+                    if (!UpdateProcThreadAttribute(attributeList, 0,
+                            new IntPtr(HANDLE_LIST_ATTRIBUTE), handleList,
+                            new IntPtr(IntPtr.Size * 3), IntPtr.Zero, IntPtr.Zero))
+                        throw new Win32Exception(Marshal.GetLastWin32Error());
+                    startup.lpAttributeList = attributeList;
+                    inheritHandles = true;
+                }
                 flags |= CREATE_NO_WINDOW;
             }
 
             StringBuilder commandLine = new StringBuilder("\"" + filePath + "\"");
             if (!String.IsNullOrEmpty(arguments)) commandLine.Append(' ').Append(arguments);
+            if (elevatedObserver && commandLine.Length >= 1024)
+                throw new InvalidOperationException(
+                    "The CreateProcessWithTokenW command line exceeds its supported bound.");
             bool started = elevatedObserver
-                ? CreateProcessAsUserW(observerToken, filePath, commandLine,
-                    IntPtr.Zero, IntPtr.Zero, inheritHandles, flags, IntPtr.Zero,
-                    workingDirectory, ref startup, out created)
+                ? CreateProcessWithTokenW(observerToken, 0, filePath, commandLine,
+                    flags, environmentBlock,
+                    workingDirectory, ref startup.StartupInfo, out created)
                 : CreateProcessW(filePath, commandLine, IntPtr.Zero, IntPtr.Zero,
                     inheritHandles, flags, IntPtr.Zero, workingDirectory,
                     ref startup, out created);
             if (!started) {
                 throw Win32Failure(elevatedObserver
-                    ? "CreateProcessAsUserW for the verified medium shell token"
+                    ? "CreateProcessWithTokenW for the verified medium shell token"
                     : "CreateProcessW for the VM test child");
             }
             if (!AssignProcessToJobObject(job, created.hProcess)) {
@@ -876,6 +926,7 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
             if (created.hThread != IntPtr.Zero) CloseHandle(created.hThread);
             if (created.hProcess != IntPtr.Zero) CloseHandle(created.hProcess);
             if (observerToken != IntPtr.Zero) CloseHandle(observerToken);
+            if (environmentBlock != IntPtr.Zero) Marshal.FreeHGlobal(environmentBlock);
             if (attributeList != IntPtr.Zero) DeleteProcThreadAttributeList(attributeList);
             if (handleList != IntPtr.Zero) Marshal.FreeHGlobal(handleList);
             if (attributeList != IntPtr.Zero) Marshal.FreeHGlobal(attributeList);
@@ -1312,14 +1363,30 @@ if (-not $resultWriteDenied) {
         [Globalization.CultureInfo]::InvariantCulture
     )
     $probe = $probe.Replace('__OBSERVER_PROCESS_ID__', $observerProcessId)
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probe))
+    $probeScriptPath = Join-Path $trustedOutputRoot (
+        'medium-boundary-probe-' + [Guid]::NewGuid().ToString('N') + '.ps1'
+    )
+    $probeBytes = [Text.UTF8Encoding]::new($false).GetBytes($probe)
+    $probeStream = [IO.FileStream]::new(
+        $probeScriptPath,
+        [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::Read
+    )
+    try {
+        $probeStream.Write($probeBytes, 0, $probeBytes.Length)
+        $probeStream.Flush($true)
+    }
+    finally {
+        $probeStream.Dispose()
+    }
     $powerShell = Join-Path $PSHOME 'pwsh.exe'
     $state = $null
     $probeSucceeded = $false
     try {
         $state = Start-JobBoundProcess `
             -FilePath $powerShell `
-            -Arguments ('-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $encoded) `
+            -Arguments ('-NoLogo -NoProfile -NonInteractive -File "' + $probeScriptPath + '"') `
             -WorkingDirectory $PSHOME `
             -StdoutPath $stdoutPath `
             -StderrPath $stderrPath `
@@ -1361,7 +1428,8 @@ if (-not $resultWriteDenied) {
             $state.process.Dispose()
         }
         if ($probeSucceeded) {
-            Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $stdoutPath, $stderrPath, $probeScriptPath `
+                -Force -ErrorAction SilentlyContinue
         }
     }
 }
