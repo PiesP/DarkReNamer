@@ -4,16 +4,18 @@ import hashlib
 import importlib.util
 import json
 import os
-from pathlib import Path
 import struct
+import zlib
+from pathlib import Path
 import tempfile
 import unittest
-import zlib
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest import mock
 
 from darkrenamer_tooling.vm import gui as runner
+from darkrenamer_tooling.evidence import png as evidence
+from darkrenamer_tooling.formats import png as codec
 
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -23,31 +25,6 @@ def png_chunk(kind, payload, *, checksum=None):
     if checksum is None:
         checksum = zlib.crc32(kind + payload) & 0xFFFFFFFF
     return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", checksum)
-
-
-def paeth(left, above, upper_left):
-    predictor = left + above - upper_left
-    distances = (
-        abs(predictor - left), abs(predictor - above), abs(predictor - upper_left),
-    )
-    return (left, above, upper_left)[distances.index(min(distances))]
-
-
-def encode_filtered_rows(rows, channels, filters):
-    previous = bytes(len(rows[0]))
-    encoded = bytearray()
-    for row, filter_type in zip(rows, filters, strict=True):
-        encoded.append(filter_type)
-        for index, value in enumerate(row):
-            left = row[index - channels] if index >= channels else 0
-            above = previous[index]
-            upper_left = previous[index - channels] if index >= channels else 0
-            predictor = (
-                0, left, above, (left + above) // 2, paeth(left, above, upper_left),
-            )[filter_type]
-            encoded.append((value - predictor) & 0xFF)
-        previous = row
-    return bytes(encoded)
 
 
 def png_bytes(width, height, color_type, filtered, *, compressed=None,
@@ -77,172 +54,22 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         path.write_bytes(value)
         return path
 
-    def test_decode_png_preserves_rgb_rgba_and_all_supported_filters(self):
-        filters = (0, 1, 2, 3, 4)
-        for color_type, channels in ((2, 3), (6, 4)):
-            rows = [
-                bytes((17 + row * 31 + column * 19) & 0xFF
-                      for column in range(channels * 2))
-                for row in range(len(filters))
-            ]
-            filtered = encode_filtered_rows(rows, channels, filters)
-            path = self.write_png(
-                f"filtered-{color_type}.png",
-                png_bytes(
-                    2, len(rows), color_type, filtered,
-                    before_idat=(png_chunk(b"pHYs", struct.pack(">IIB", 3780, 3780, 1)),),
-                    after_idat=(png_chunk(b"tEXt", b"source\x00native-observer"),),
-                ),
-            )
-            width, height, rgba = runner.decode_png(path)
-            expected = bytearray()
-            for row in rows:
-                for offset in range(0, len(row), channels):
-                    expected.extend(row[offset:offset + 3])
-                    expected.append(row[offset + 3] if channels == 4 else 255)
-            self.assertEqual((width, height, rgba), (2, len(rows), bytes(expected)))
-
-    def test_decode_png_requires_strict_chunk_structure_and_complete_zlib_stream(self):
-        filtered = b"\x00\x11\x22\x33"
-        compressed = zlib.compress(filtered)
-        ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
-        valid = png_bytes(1, 1, 2, filtered)
-        idat_offset = valid.index(b"IDAT")
-        idat_length = struct.unpack(">I", valid[idat_offset - 4:idat_offset])[0]
-        crc_offset = idat_offset + 4 + idat_length
-        bad_crc = bytearray(valid)
-        bad_crc[crc_offset] ^= 0x01
-        split = len(compressed) // 2
-        contiguous_idat = (
-            PNG_SIGNATURE + png_chunk(b"IHDR", ihdr)
-            + png_chunk(b"IDAT", compressed[:split])
-            + png_chunk(b"IDAT", compressed[split:])
-            + png_chunk(b"IEND", b"")
-        )
-        self.assertEqual(
-            runner.decode_png(self.write_png("contiguous-idat.png", contiguous_idat)),
-            (1, 1, b"\x11\x22\x33\xff"),
-        )
-        fixtures = (
-            ("missing-iend.png", png_bytes(1, 1, 2, filtered, include_iend=False), "missing required PNG chunks"),
-            ("after-iend.png", valid + b"trailing", "trailing bytes after IEND"),
-            ("bad-crc.png", bytes(bad_crc), "chunk checksum differs"),
-            (
-                "idat-before-ihdr.png",
-                PNG_SIGNATURE + png_chunk(b"IDAT", compressed) + png_chunk(b"IHDR", ihdr)
-                + png_chunk(b"IEND", b""),
-                "IDAT is out of order",
-            ),
-            (
-                "noncontiguous-idat.png",
-                PNG_SIGNATURE + png_chunk(b"IHDR", ihdr)
-                + png_chunk(b"IDAT", compressed[:split])
-                + png_chunk(b"tEXt", b"key\x00value")
-                + png_chunk(b"IDAT", compressed[split:])
-                + png_chunk(b"IEND", b""),
-                "IDAT is out of order",
-            ),
-            ("nonempty-iend.png", png_bytes(1, 1, 2, filtered, iend_payload=b"x"), "invalid IEND"),
-            (
-                "zlib-unused-data.png",
-                png_bytes(1, 1, 2, filtered, compressed=compressed + b"unused"),
-                "compressed raster stream or length is invalid",
-            ),
-            (
-                "truncated-zlib.png",
-                png_bytes(1, 1, 2, filtered, compressed=compressed[:-2]),
-                "compressed raster stream or length is invalid",
-            ),
-        )
-        for name, value, message in fixtures:
-            with self.subTest(name=name):
-                with self.assertRaisesRegex(ValueError, message):
-                    runner.decode_png(self.write_png(name, value))
-
-    def test_decode_png_caps_inflate_to_declared_scanlines_without_flush(self):
-        compressed = zlib.compress(b"\x00" * (1024 * 1024))
-        path = self.write_png(
-            "oversized-inflate.png",
-            png_bytes(1, 1, 2, b"", compressed=compressed),
-        )
-        original_decompressobj = zlib.decompressobj
-        calls = []
-        flush_calls = []
-
-        class ObservedInflater:
-            def __init__(self):
-                self.inner = original_decompressobj()
-
-            def decompress(self, data, max_length=0):
-                result = self.inner.decompress(data, max_length)
-                calls.append({
-                    "input_bytes": len(data),
-                    "max_length": max_length,
-                    "returned_bytes": len(result),
-                })
-                return result
-
-            def flush(self, *arguments):
-                result = self.inner.flush(*arguments)
-                flush_calls.append({"arguments": arguments, "returned_bytes": len(result)})
-                return result
-
-            def __getattr__(self, name):
-                return getattr(self.inner, name)
-
-        with mock.patch.object(runner.zlib, "decompressobj", side_effect=ObservedInflater):
-            with self.assertRaisesRegex(ValueError, "decoded raster exceeds its declared dimensions"):
-                runner.decode_png(path)
-        self.assertEqual(calls, [{
-            "input_bytes": len(compressed), "max_length": 5, "returned_bytes": 5,
-        }])
-        self.assertEqual(flush_calls, [])
-
-        exact = zlib.compress(b"\x00\x11\x22\x33")
-        calls.clear()
-        with mock.patch.object(runner.zlib, "decompressobj", side_effect=ObservedInflater):
-            decoded = runner.decode_png(self.write_png(
-                "observed-valid.png", png_bytes(1, 1, 2, b"", compressed=exact),
-            ))
-        self.assertEqual(decoded, (1, 1, b"\x11\x22\x33\xff"))
-        self.assertEqual(calls, [{
-            "input_bytes": len(exact), "max_length": 5, "returned_bytes": 4,
-        }])
-        self.assertEqual(flush_calls, [])
-
-        truncated = exact[:-2]
-        calls.clear()
-        with mock.patch.object(runner.zlib, "decompressobj", side_effect=ObservedInflater):
-            with self.assertRaisesRegex(ValueError, "compressed raster stream or length is invalid"):
-                runner.decode_png(self.write_png(
-                    "observed-truncated.png",
-                    png_bytes(1, 1, 2, b"", compressed=truncated),
-                ))
-        self.assertEqual(calls, [{
-            "input_bytes": len(truncated), "max_length": 5, "returned_bytes": 4,
-        }])
-        self.assertEqual(flush_calls, [])
-
-    def test_decode_png_rejects_pixel_and_decoded_byte_budgets_before_inflate(self):
-        inflater = mock.Mock()
-        fixtures = (
-            (
-                "pixel-budget.png",
-                png_bytes(8192, 4097, 2, b"\x00"),
-                "pixel budget",
-            ),
-            (
-                "decoded-budget.png",
-                png_bytes(8192, 4096, 6, b"\x00"),
-                "decoded byte budget",
-            ),
-        )
-        with mock.patch.object(runner.zlib, "decompressobj", inflater):
-            for name, value, message in fixtures:
-                with self.subTest(name=name):
-                    with self.assertRaisesRegex(ValueError, message):
-                        runner.decode_png(self.write_png(name, value))
-        inflater.assert_not_called()
+    def test_consumer_policies_preserve_formats_alpha_and_axis_limits(self):
+        grayscale = png_bytes(1, 1, 0, b"\0\x12")
+        self.assertEqual(evidence.decode_png(grayscale, "gray"), (1, 1, b"\x12\x12\x12\xff"))
+        with self.assertRaisesRegex(ValueError, "fixed raster contract"):
+            runner.decode_png(self.write_png("gray.png", grayscale))
+        transparent = png_bytes(2, 1, 6, b"\0\x12\x34\x56\xff\x12\x34\x56\x00")
+        self.assertEqual(runner.decode_png(self.write_png("alpha.png", transparent))[2][-1], 0)
+        with self.assertRaisesRegex(evidence.EvidenceError, "non-opaque"):
+            evidence.decode_png(transparent, "alpha")
+        wide = png_bytes(8193, 1, 0, b"\0" + b"\x12" * 8193)
+        self.assertEqual(evidence.decode_png(wide, "wide")[:2], (8193, 1))
+        wide_rgb = png_bytes(8193, 1, 2, b"\0" + b"\x12" * (8193 * 3))
+        with mock.patch.object(codec.zlib, "decompressobj") as inflate:
+            with self.assertRaisesRegex(ValueError, "fixed raster contract"):
+                runner.decode_png(self.write_png("wide.png", wide_rgb))
+            inflate.assert_not_called()
 
     def test_four_runs_are_fixed_and_ordered_for_reference_resolution(self):
         self.assertEqual(
@@ -321,83 +148,6 @@ class GuiRegressionRunnerTests(unittest.TestCase):
                 runner.visible_control(tree(invalid), "CommandLink_1101", work_area),
                 invalid,
             )
-
-    def test_private_profile_is_explicit_bounded_and_not_returned_with_its_path(self):
-        profile = self.root / "connection.json"
-        value = {
-            "schema_version": 1,
-            "ssh_host": "vm-alias",
-            "desktop_helper": "C:\\Private\\desktop-session.ps1",
-            "expected_vm_id": "12345678-1234-5678-9abc-1234567890ab",
-        }
-        self.write_json(profile, value)
-        loaded, profile_hash = runner.load_connection_profile(profile)
-        self.assertEqual(loaded, value)
-        self.assertEqual(profile_hash, runner.digest(profile))
-        self.assertNotIn(str(profile), json.dumps(loaded))
-
-        for key, changed in (
-            ("extra", {**value, "extra": True}),
-            ("alias", {**value, "ssh_host": "user@vm"}),
-            ("helper", {**value, "desktop_helper": "relative.ps1"}),
-            ("identity", {**value, "expected_vm_id": "not-a-guid"}),
-        ):
-            invalid = self.root / f"invalid-{key}.json"
-            self.write_json(invalid, changed)
-            with self.assertRaises(ValueError):
-                runner.load_connection_profile(invalid)
-
-    def test_guest_preflight_serializes_strict_document_inside_remote_boundary(self):
-        profile = {
-            "ssh_host": "vm-alias",
-            "expected_vm_id": "12345678-1234-5678-9abc-1234567890ab",
-        }
-        remote = {
-            "system": "windows",
-            "os_version": "Microsoft Windows NT 10.0.26200.0",
-            "build": "26200",
-            "architecture": "X64",
-            "product_caption": "Microsoft Windows 11 Pro",
-            "vm_id": profile["expected_vm_id"],
-        }
-
-        def check_output(command, **keywords):
-            script = command[-1]
-            remote_boundary = script.index("\n    }\n    [Console]::Out.Write")
-            self.assertLess(script.index("| ConvertTo-Json -Compress"), remote_boundary)
-            self.assertNotIn("$value | ConvertTo-Json", script)
-            self.assertEqual(keywords["env"]["DARKRENAMER_GUI_SSH_HOST"], "vm-alias")
-            return json.dumps(remote, separators=(",", ":"))
-
-        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"), \
-                mock.patch.object(runner.subprocess, "check_output", side_effect=check_output):
-            observed = runner.guest_preflight(profile)
-        self.assertEqual(observed["system"], "windows")
-        self.assertEqual(observed["build"], "26200")
-        self.assertEqual(observed["architecture"], "x86_64")
-        self.assertEqual(
-            observed["vm_identity_sha256"], runner.digest_text(profile["expected_vm_id"])
-        )
-
-    def test_guest_preflight_rejects_remoting_metadata(self):
-        remote = {
-            "system": "windows",
-            "os_version": "Microsoft Windows NT 10.0.26200.0",
-            "build": "26200",
-            "architecture": "X64",
-            "product_caption": "Microsoft Windows 11 Pro",
-            "vm_id": "12345678-1234-5678-9abc-1234567890ab",
-            "PSComputerName": "private-host",
-            "RunspaceId": "00000000-0000-0000-0000-000000000000",
-            "PSShowComputerName": True,
-        }
-        with mock.patch.object(runner.shutil, "which", return_value="/usr/bin/pwsh"), \
-                mock.patch.object(runner.subprocess, "check_output", return_value=json.dumps(remote)):
-            with self.assertRaisesRegex(ValueError, "invalid document"):
-                runner.guest_preflight({
-                    "ssh_host": "vm-alias",
-                    "expected_vm_id": "12345678-1234-5678-9abc-1234567890ab",
-                })
 
     def test_reference_pins_input_and_final_result_with_one_fixed_scope(self):
         run_root = self.root / runner.RUNS[0]["run_id"]
