@@ -220,7 +220,11 @@ pub struct FileJournalError {
 
 impl fmt::Display for FileJournalError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "file journal error: {:?}", self.kind)
+        write!(formatter, "file journal error: {:?}", self.kind)?;
+        if let Some(os_code) = self.os_code {
+            write!(formatter, " (OS error {os_code})")?;
+        }
+        Ok(())
     }
 }
 

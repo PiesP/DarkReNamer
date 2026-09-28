@@ -1,18 +1,47 @@
 use std::fs::{self, OpenOptions};
 
 use darknamer_app::rename::{
-    AppendCertainty, EntryId, EntryIdentity, EntryKind, FileJournal, FileJournalErrorKind,
-    JournalCodecErrorKind, JournalDirection, JournalOpenStage, JournalRecord, JournalRoot,
-    JournalStep, JournalStore, JournalTailIssue, JournalTerminal, MAX_JOURNAL_FRAME_BYTES,
-    MAX_JOURNAL_STEPS, MAX_PATH_UNITS, MemoryBackend, MemoryJournal, ModelRevision, PlanId,
-    PlanRequest, RecoveryOutcome, RenameExecutor, RenameIntent, RenamePlanner, RenameRecovery,
-    TemporaryPhase, decode_journal_records, encode_journal_records, inspect_journal_records,
+    AppendCertainty, EntryId, EntryIdentity, EntryKind, FileJournal, FileJournalError,
+    FileJournalErrorKind, JournalCodecErrorKind, JournalDirection, JournalOpenStage, JournalRecord,
+    JournalRoot, JournalStep, JournalStore, JournalTailIssue, JournalTerminal,
+    MAX_JOURNAL_FRAME_BYTES, MAX_JOURNAL_STEPS, MAX_PATH_UNITS, MemoryBackend, MemoryJournal,
+    ModelRevision, PlanId, PlanRequest, RecoveryOutcome, RenameExecutor, RenameIntent,
+    RenamePlanner, RenameRecovery, TemporaryPhase, decode_journal_records, encode_journal_records,
+    inspect_journal_records,
 };
 use darknamer_core::LegacyText;
 
 #[cfg(windows)]
 #[path = "support/windows_capabilities.rs"]
 mod windows_capabilities;
+
+#[test]
+fn journal_error_display_preserves_distinct_native_codes() {
+    let messages = [5, 32, -1].map(|os_code| {
+        FileJournalError {
+            kind: FileJournalErrorKind::Io,
+            os_code: Some(os_code),
+        }
+        .to_string()
+    });
+    assert_eq!(
+        messages,
+        [
+            "file journal error: Io (OS error 5)",
+            "file journal error: Io (OS error 32)",
+            "file journal error: Io (OS error -1)",
+        ]
+    );
+}
+
+#[test]
+fn journal_error_display_without_native_code_preserves_failure_kind() {
+    let error = FileJournalError {
+        kind: FileJournalErrorKind::UnsafeCleanupState,
+        os_code: None,
+    };
+    assert_eq!(error.to_string(), "file journal error: UnsafeCleanupState");
+}
 
 fn step(entry: u32, source: LegacyText, destination: LegacyText) -> JournalStep {
     step_with_phase(entry, source, destination, TemporaryPhase::None)
