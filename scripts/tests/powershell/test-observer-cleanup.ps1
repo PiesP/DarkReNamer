@@ -18,9 +18,445 @@ function Assert-Fails {
     throw "Expected failure: $Expected"
 }
 
+# Test the same completion predicate serialized into the guest cleanup command.
+Invoke-DrTestPowerShellModuleScope -Kind controller -Action {
+    function New-CleanObservation {
+        [pscustomobject]@{
+            scheduled_task_present = $false; guest_root_present = $false; trusted_task_root_present = $false
+            process_jobs_closed = $true; runner_process_inventory_complete = $true
+            unexpected_runner_tasks = @(); unexpected_runner_processes = @()
+            unexpected_runner_tasks_after_intervention = @(); unexpected_runner_processes_after_intervention = @()
+            unexpected_runner_tasks_after_delete = @(); unexpected_runner_processes_after_delete = @()
+            removed_runner_tasks = @(); terminated_runner_processes = @(); resource_cleanup_errors = @()
+            owned_processes_after = @(); smart_screen_natural_exit = $null
+        }
+    }
+    $completion = [scriptblock]::Create(${function:Test-DrControllerCleanupObservation}.ToString())
+    $clean = New-CleanObservation
+    if (-not (& $completion -Observation $clean)) { throw 'Observed-empty cleanup did not pass.' }
+    if (& $completion -Observation $null) { throw 'Missing cleanup evidence passed.' }
+    foreach ($field in $clean.PSObject.Properties.Name) {
+        if ($field -ceq 'smart_screen_natural_exit') { continue }
+        foreach ($mutation in @('missing', 'null', 'residue', 'wrong-type')) {
+            $raw = New-CleanObservation
+            switch ($mutation) {
+                'missing' { $raw.PSObject.Properties.Remove($field) }
+                'null' { $raw.$field = $null }
+                'wrong-type' { $raw.$field = 'false' }
+                'residue' {
+                    $raw.$field = if ($field -in @('process_jobs_closed', 'runner_process_inventory_complete')) { $false } `
+                        elseif ($field -like '*present') { $true } else { @([pscustomobject]@{ identity = 'residue' }) }
+                }
+            }
+            if (& $completion -Observation $raw) { throw "Cleanup accepted $mutation evidence for $field." }
+        }
+    }
+    $raw = New-CleanObservation
+    $raw.unexpected_runner_processes = @([pscustomobject]@{ identity = 'broker' })
+    $raw.smart_screen_natural_exit = [pscustomobject]@{
+        status = 'natural-exit'; candidate_identity = 'broker'; natural_exit_observed = $true
+        final_inventory_complete = $true; final_runner_process_delta_identities = @()
+        final_runner_task_delta_identities = @()
+    }
+    if (-not (& $completion -Observation $raw)) { throw 'The observed SmartScreen natural exit lost its existing exception.' }
+    foreach ($field in $raw.smart_screen_natural_exit.PSObject.Properties.Name) {
+        $changed = New-CleanObservation
+        $changed.unexpected_runner_processes = $raw.unexpected_runner_processes
+        $changed.smart_screen_natural_exit = $raw.smart_screen_natural_exit.PSObject.Copy()
+        $changed.smart_screen_natural_exit.PSObject.Properties.Remove($field)
+        if (& $completion -Observation $changed) { throw "Incomplete SmartScreen $field evidence passed." }
+    }
+    $raw.smart_screen_natural_exit.candidate_identity = 'foreign'
+    if (& $completion -Observation $raw) { throw 'Another process inherited the SmartScreen exception.' }
+}
+
+& {
+    $events = [Collections.Generic.List[string]]::new()
+    $failure = ''
+    function Invoke-AcceptanceTextScaleRescue {
+        param($Session, $GuestRoot, $DesktopSid, $DesktopSessionId, $TaskName, $TestTimeoutSeconds,
+            $SuiteTimeoutSeconds, $ObserverSha256, $BundleRecords, $InputManifestSha256, $Appearance, $HostOutputRoot)
+        $events.Add('text-scale')
+        if ($failure -ceq 'text-scale') { throw 'injected text-scale rescue failure' }
+        if ($InputManifestSha256 -cne ('c' * 64) -or $Appearance -cne 'system') { throw 'Text-scale rescue lost its input binding.' }
+    }
+    function Invoke-AcceptanceHighContrastRescue {
+        param($Session, $GuestRoot, $DesktopSid, $DesktopSessionId, $TaskName, $TestTimeoutSeconds,
+            $SuiteTimeoutSeconds, $ObserverSha256, $BundleRecords, $HostOutputRoot)
+        $events.Add('high-contrast')
+        if ($failure -ceq 'high-contrast') { throw 'injected high-contrast rescue failure' }
+    }
+    $parameters = @{
+        Session = [pscustomobject]@{}; GuestRoot = 'owned'; DesktopSid = 'runner'; DesktopSessionId = 7
+        TaskName = 'owned'; TestTimeoutSeconds = 60; SuiteTimeoutSeconds = 120; ObserverSha256 = 'a' * 64
+        BundleRecords = @([pscustomobject]@{file='fixture'}); InputManifestSha256 = 'c' * 64
+        Appearance = 'system'; HostOutputRoot = 'output'
+    }
+    foreach ($mode in @('current-dpi', 'text-scale')) {
+        foreach ($hc in @($false, $true)) {
+            foreach ($status in @('review_required', 'failed', 'environment_blocked', 'unsupported', 'not_run')) {
+                foreach ($exitCode in @(0, 1)) {
+                    $events.Clear()
+                    $state = [pscustomobject]@{ terminal = $true; result_status = $status; task_result = $exitCode }
+                    Invoke-AcceptanceTerminalFailureRescue -State $state -AcceptanceMode $mode -HighContrast $hc -RescueParameters $parameters
+                    $expected = @()
+                    if ($status -cne 'review_required' -or $exitCode -ne 0) {
+                        if ($mode -ceq 'text-scale') { $expected += 'text-scale' }
+                        if ($hc) { $expected += 'high-contrast' }
+                    }
+                    if (($events -join ',') -cne ($expected -join ',')) { throw "Incorrect terminal rescue dispatch for $mode/$hc/$status/$exitCode." }
+                }
+            }
+        }
+    }
+    foreach ($failure in @('text-scale', 'high-contrast')) {
+        $events.Clear()
+        $state = [pscustomobject]@{ terminal = $true; result_status = 'failed'; task_result = 0 }
+        Assert-Fails {
+            Invoke-AcceptanceTerminalFailureRescue -State $state -AcceptanceMode 'text-scale' -HighContrast $true -RescueParameters $parameters
+        } "injected $failure rescue failure"
+        $expected = if ($failure -ceq 'text-scale') { 'text-scale' } else { 'text-scale,high-contrast' }
+        if (($events -join ',') -cne $expected) { throw 'A failed rescue was swallowed or dispatched again.' }
+    }
+    $state.terminal = $false
+    $events.Clear()
+    Assert-Fails {
+        Invoke-AcceptanceTerminalFailureRescue -State $state -AcceptanceMode 'text-scale' -HighContrast $true -RescueParameters $parameters
+    } 'requires a terminal task observation'
+    if ($events.Count -ne 0) { throw 'Rescue started before terminal observation.' }
+    if ($parameters.Count -ne 12) { throw 'High Contrast dispatch mutated the shared rescue parameters.' }
+}
+
 $root = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-observer-cleanup-' + [guid]::NewGuid().ToString('N'))
 try {
     $null = New-Item -ItemType Directory -Path $root
+    Invoke-DrTestPowerShellModuleScope -Kind controller -ArgumentList @($root) -Action {
+        param($FixtureRoot)
+        $hashed = [Collections.Generic.List[string]]::new()
+        $copied = [Collections.Generic.List[string]]::new()
+        function Get-FileHash {
+            param($LiteralPath, $Algorithm)
+            $hashed.Add($LiteralPath)
+            [pscustomobject]@{ Hash = 'a' * 64 }
+        }
+        function Copy-Item { param($LiteralPath); $copied.Add($LiteralPath); throw 'Unexpected copy during inventory.' }
+        function Assert-RejectedInventory {
+            param([scriptblock] $Action, [string] $Expected)
+            $hashed.Clear(); $copied.Clear()
+            try { & $Action; throw 'Invalid output inventory passed.' }
+            catch {
+                if ($_.Exception.Message -notlike "*$Expected*") { throw }
+            }
+            if ($hashed.Count -ne 0 -or $copied.Count -ne 0) {
+                throw 'An invalid complete output inventory began hashing or copying.'
+            }
+        }
+        function Write-SparseFile {
+            param([string] $Path, [long] $Bytes)
+            $stream = [IO.File]::Create($Path)
+            try { $stream.SetLength($Bytes) } finally { $stream.Dispose() }
+        }
+        foreach ($kind in @('ui', 'recovery')) {
+            foreach ($case in @('valid', 'per-file', 'aggregate', 'private-per-file', 'private-aggregate', 'file-count', 'reparse', 'summary-reparse', 'summary-directory', 'directory', 'directory-count')) {
+                if ($kind -ceq 'ui' -and $case -in @('directory-count', 'private-per-file', 'private-aggregate')) { continue }
+                $caseRoot = Join-Path $FixtureRoot ("inventory-$kind-$case")
+                $trustedRoot = Join-Path $caseRoot 'trusted'
+                $out = Join-Path $trustedRoot 'out'
+                $private = Join-Path $out 'private'
+                $evidence = Join-Path $out 'recovery-fixture'
+                [void](New-Item -ItemType Directory -Path $out -Force)
+                if ($kind -ceq 'recovery') {
+                    [void](New-Item -ItemType Directory -Path $private,$evidence)
+                }
+                $filesRoot = if ($kind -ceq 'ui') { $out } else { $evidence }
+                $summary = Join-Path $out $(if ($kind -ceq 'ui') { 'acceptance-result.json' } else { 'recovery-summary.json' })
+                Write-SparseFile -Path $summary -Bytes 0
+                Write-SparseFile -Path (Join-Path $filesRoot 'a.bin') -Bytes 0
+                $read = if ($kind -ceq 'ui') {
+                    { Get-DrControllerUiOutputInventory -root $caseRoot -trustedRoot $trustedRoot }
+                } else {
+                    { Get-DrControllerRecoveryOutputInventory -root $caseRoot -trustedRoot $trustedRoot -recoveryEvidenceRootPath $evidence }
+                }
+                $expected = 'unsafe file'
+                switch ($case) {
+                    'per-file' { Write-SparseFile -Path (Join-Path $filesRoot 'z.bin') -Bytes (128MB + 1) }
+                    'aggregate' {
+                        foreach ($index in 1..5) { Write-SparseFile -Path (Join-Path $filesRoot "$index.bin") -Bytes 128MB }
+                        $expected = 'aggregate size bound'
+                    }
+                    'private-per-file' { Write-SparseFile -Path (Join-Path $private 'z.bin') -Bytes (128MB + 1) }
+                    'private-aggregate' {
+                        foreach ($index in 1..4) { Write-SparseFile -Path (Join-Path $filesRoot "$index.bin") -Bytes 128MB }
+                        Write-SparseFile -Path (Join-Path $private 'z.bin') -Bytes 1
+                        $expected = 'aggregate size bound'
+                    }
+                    'file-count' {
+                        $limit = if ($kind -ceq 'ui') { 128 } else { 256 }
+                        # Exactly the file cap before appending the protected summary.
+                        foreach ($index in 1..($limit - 1)) { Write-SparseFile -Path (Join-Path $filesRoot "$index.bin") -Bytes 0 }
+                        $expected = 'file count exceeds its bound'
+                    }
+                    'reparse' {
+                        [void](New-Item -ItemType SymbolicLink -Path (Join-Path $filesRoot 'z-link.bin') -Target (Join-Path $filesRoot 'a.bin'))
+                        if ($kind -ceq 'recovery') { $expected = 'reparse entry' }
+                    }
+                    'summary-reparse' {
+                        Remove-Item -LiteralPath $summary
+                        [void](New-Item -ItemType SymbolicLink -Path $summary -Target (Join-Path $filesRoot 'a.bin'))
+                    }
+                    'summary-directory' {
+                        Remove-Item -LiteralPath $summary
+                        [void](New-Item -ItemType Directory -Path $summary)
+                    }
+                    'directory' {
+                        [void](New-Item -ItemType Directory -Path (Join-Path $filesRoot 'z-directory'))
+                        if ($kind -ceq 'recovery') {
+                            [void](New-Item -ItemType SymbolicLink -Path (Join-Path $private 'z-link') -Target (Join-Path $filesRoot 'z-directory'))
+                            $expected = 'reparse entry'
+                        }
+                    }
+                    'directory-count' {
+                        foreach ($index in 1..33) { [void](New-Item -ItemType Directory -Path (Join-Path $filesRoot "$index-dir")) }
+                        $expected = 'directory count exceeds its bound'
+                    }
+                }
+                if ($case -ceq 'valid') {
+                    # Candidate-writable output/private data must never enter the protected inventory.
+                    $mutable = Join-Path $caseRoot 'out'
+                    [void](New-Item -ItemType Directory -Path $mutable)
+                    Write-SparseFile -Path (Join-Path $mutable 'mutable.bin') -Bytes (128MB + 1)
+                    if ($kind -ceq 'recovery') {
+                        Write-SparseFile -Path (Join-Path $private 'index.json') -Bytes 1
+                        Write-SparseFile -Path (Join-Path $evidence 'summary.json') -Bytes 1
+                    }
+                    $hashed.Clear(); $copied.Clear()
+                    $rows = @(& $read)
+                    $expectedNames = if ($kind -ceq 'ui') { @('a.bin', 'acceptance-result.json') } `
+                        else { @('recovery-fixture/a.bin', 'recovery-fixture/summary.json', 'private/index.json') }
+                    if ((($rows.file | Sort-Object) -join ',') -cne (($expectedNames | Sort-Object) -join ',') -or
+                        $hashed.Count -ne $expectedNames.Count -or $copied.Count -ne 0) {
+                        throw "The $kind inventory lost its protected files or summary mapping."
+                    }
+                    foreach ($row in $rows) {
+                        if ($row.sha256 -cne ('a' * 64) -or $row.guest_path -notlike "$trustedRoot*" -or
+                            (($row.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'bytes,file,guest_path,sha256') {
+                            throw 'The bounded inventory changed its source-bound record contract.'
+                        }
+                    }
+                }
+                else { Assert-RejectedInventory -Action $read -Expected $expected }
+                Remove-Item -LiteralPath $caseRoot -Recurse -Force
+            }
+        }
+    }
+    & {
+        # Construct a typed, unopened session; Invoke-Command is intercepted below.
+        # No connection, desktop, task, or privilege mutation is performed.
+        $connection = [Management.Automation.Runspaces.SSHConnectionInfo]::new('fixture', 'unused.invalid', 'fixture')
+        $runspace = [Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace($connection)
+        $constructor = [Management.Automation.Runspaces.PSSession].GetConstructors([Reflection.BindingFlags]'Instance,NonPublic')[0]
+        $session = $constructor.Invoke(@($runspace))
+        $oldProgramData = $env:ProgramData
+        $env:ProgramData = Join-Path $root 'rescue-programdata'
+        try {
+            function Invoke-Command {
+                param($Session, $ArgumentList, $ScriptBlock)
+                & $ScriptBlock @ArgumentList
+            }
+            function Get-DrVmTrustedPowerShellPath { 'Get-FixtureRescueEngine' }
+            function Get-FixtureRescueEngine {
+                $global:LASTEXITCODE = 0
+                '{"version":"7.4.0","edition":"Core","effective_policy":"RemoteSigned"}'
+            }
+            function Get-ScheduledTask {
+                param($TaskName, $ErrorAction)
+                if (-not $probe.registered) { return $null }
+                [pscustomobject]@{ State = $(if ($probe.polls -le 1) { 'Running' } else { 'Ready' }) }
+            }
+            function Get-ScheduledTaskInfo {
+                param($TaskName)
+                if (-not $probe.started) { return [pscustomobject]@{ LastRunTime = [datetime]::new(10); LastTaskResult = 0 } }
+                $probe.polls++
+                [pscustomobject]@{
+                    LastRunTime = [datetime]::new(11)
+                    LastTaskResult = $(if ($probe.mode -ceq 'nonzero' -and $probe.polls -ge 3) { 7 } else { 0 })
+                }
+            }
+            function Register-DrVmTask {
+                param($TaskName, $UserSid, $SessionId, $GuestRoot, $RuntimeRoot, $ObserverPath, $ObserverSha256,
+                    $BundleSourcePath, $BundleRecords, $InputManifestPath, $InputManifestSha256, $Execute,
+                    $Arguments, $WorkingDirectory, $TrustedResultLeaf, $ExecutionTimeLimitSeconds)
+                $probe.registered = $true
+                $probe.arguments = $Arguments
+                $probe.result_leaf = $TrustedResultLeaf
+                $probe.observer_path = $ObserverPath
+                $probe.bundle_path = $BundleSourcePath
+                $probe.input_sha256 = $InputManifestSha256
+            }
+            function Start-ScheduledTask {
+                param($TaskName)
+                $probe.started = $true
+                [IO.File]::WriteAllText((Join-Path $out $probe.result_leaf),
+                    $(if ($probe.mode -ceq 'failed-result') { '{"status":"failed"}' } else { '{"status":"passed"}' }))
+            }
+            function Start-Sleep { param($Seconds); $probe.sleeps++ }
+            function Get-Date {
+                if ($probe.mode -cne 'timeout') { return Microsoft.PowerShell.Utility\Get-Date }
+                $probe.clock_reads++
+                [datetime]::new(2000, 1, 1).AddSeconds($(if ($probe.clock_reads -eq 1) { 0 } else { 121 }))
+            }
+            function Copy-Item {
+                param($LiteralPath, $Destination, $FromSession)
+                if ($probe.polls -lt 3) { throw 'Rescue evidence copy preceded terminal task confirmation.' }
+                if (-not $LiteralPath.StartsWith($out + [IO.Path]::DirectorySeparatorChar, [StringComparison]::Ordinal)) {
+                    throw 'Rescue evidence escaped its protected output root.'
+                }
+                $probe.copies++
+                [IO.File]::Copy($LiteralPath, $Destination)
+            }
+            foreach ($kind in @('text-scale', 'high-contrast')) {
+                foreach ($mode in @('passed', 'failed-result', 'nonzero', 'timeout')) {
+                    $probe = [pscustomobject]@{
+                        registered = $false; started = $false; polls = 0; copies = 0; sleeps = 0; clock_reads = 0
+                        mode = $mode; arguments = ''; result_leaf = ''; observer_path = ''; bundle_path = ''; input_sha256 = ''
+                    }
+                    $name = "rescue-$kind-$mode"
+                    $trusted = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') ($name + '-trusted')
+                    $out = Join-Path $trusted 'out'
+                    [void](New-Item -ItemType Directory -Path $out -Force)
+                    $observer = Join-Path $trusted 'windows-vm-acceptance.ps1'
+                    [IO.File]::WriteAllText($observer, 'source-bound observer fixture')
+                    $hostOut = Join-Path $root ("rescue-host-$kind-$mode")
+                    [void](New-Item -ItemType Directory -Path $hostOut)
+                    $snapshotLeaf = if ($kind -ceq 'text-scale') { 'text-scale-snapshot.json' } else { 'high-contrast-restore.json' }
+                    [IO.File]::WriteAllText((Join-Path $out $snapshotLeaf), '{}')
+                    $arguments = @{
+                        Session = $session; GuestRoot = (Join-Path $root 'rescue-guest'); DesktopSid = 'fixture-sid'
+                        DesktopSessionId = 7; TaskName = $name; TestTimeoutSeconds = 60; SuiteTimeoutSeconds = 120
+                        ObserverSha256 = Get-LowerSha256 -Path $observer
+                        BundleRecords = @([pscustomobject]@{file='fixture';sha256=('a' * 64)})
+                        HostOutputRoot = $hostOut
+                    }
+                    $command = if ($kind -ceq 'text-scale') { 'Invoke-AcceptanceTextScaleRescue' } else { 'Invoke-AcceptanceHighContrastRescue' }
+                    if ($kind -ceq 'text-scale') {
+                        $arguments.InputManifestSha256 = 'c' * 64
+                        $arguments.Appearance = 'system'
+                    }
+                    if ($mode -ceq 'passed') { & $command @arguments }
+                    elseif ($mode -ceq 'timeout') {
+                        Assert-Fails { & $command @arguments } 'timed out before the scheduled task reached its terminal state'
+                        if ($probe.copies -ne 0 -or $probe.polls -ne 1) { throw 'A nonterminal rescue copied evidence or lost its timeout.' }
+                        continue
+                    }
+                    else { Assert-Fails { & $command @arguments } 'did not verify exact restoration' }
+                    $switch = if ($kind -ceq 'text-scale') { '-RestoreTextScaleOnly' } else { '-RestoreHighContrastOnly' }
+                    if ($probe.copies -ne 2 -or $probe.sleeps -ne 2 -or $probe.polls -ne 3 -or
+                        $probe.result_leaf -cne ($kind + '-rescue-result.json') -or
+                        $probe.observer_path -cne $observer -or $probe.bundle_path -cne (Join-Path $trusted 'bundle') -or
+                        $probe.arguments -notlike "*$switch*" -or
+                        $probe.arguments -notlike ('*-OutputRoot "' + $out + '"*')) {
+                        throw 'The real rescue lost its restore-only, protected-output, terminal, or evidence collection contract.'
+                    }
+                    if ($kind -ceq 'text-scale' -and $probe.input_sha256 -cne ('c' * 64)) {
+                        throw 'Text-scale rescue lost the input manifest source binding.'
+                    }
+                }
+            }
+            if ($runspace.RunspaceStateInfo.State -ne [Management.Automation.Runspaces.RunspaceState]::BeforeOpen) {
+                throw 'The rescue fixture unexpectedly opened a remote session.'
+            }
+        }
+        finally {
+            $env:ProgramData = $oldProgramData
+            $runspace.Dispose()
+        }
+    }
+    Invoke-DrTestPowerShellModuleScope -Kind controller -ArgumentList @($root) -Action {
+        param($FixtureRoot)
+        $tokens = $null; $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path (Get-ToolingTestPaths).ScriptsRoot 'modules/powershell/controller-entry.psm1'), [ref]$tokens, [ref]$errors)
+        if ($errors.Count -ne 0) { throw 'Controller cleanup source did not parse.' }
+        $assignment = @($ast.FindAll({ param($node)
+            $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$cleanupResult'
+        }, $true))
+        if ($assignment.Count -ne 1) { throw 'The controller cleanup command is ambiguous.' }
+        $remoteBody = $assignment[0].Find({ param($node)
+            $node -is [Management.Automation.Language.ScriptBlockExpressionAst]
+        }, $true).ScriptBlock.GetScriptBlock()
+        $completionDefinition = ${function:Test-DrControllerCleanupObservation}.ToString()
+        $oldProgramData = $env:ProgramData
+        $env:ProgramData = Join-Path $FixtureRoot 'cleanup-programdata'
+        try {
+            function Get-ScheduledTask {
+                param($ErrorAction)
+                $probe.task_reads++
+                if ($probe.task_reads -eq 2 -and $probe.mode -ceq 'task') {
+                    [pscustomobject]@{ TaskName = $taskName; TaskPath = '\' }
+                }
+            }
+            function Get-DrVmRunnerTasks {
+                param($UserSid)
+                if ($UserSid -cne 'runner-sid') { throw 'Runner task observation escaped its identity.' }
+                $probe.runner_task_reads++
+                if ($probe.runner_task_reads -eq 3 -and $probe.mode -ceq 'removed-baseline-task') { return }
+                $hash = if ($probe.runner_task_reads -eq 3 -and $probe.mode -ceq 'changed-baseline-task') { 'b' * 64 } else { 'a' * 64 }
+                [pscustomobject]@{ identity = 'baseline-task'; definition_sha256 = $hash }
+            }
+            function Get-DrVmRunnerProcesses {
+                param($UserSid, $SessionId)
+                if ($UserSid -cne 'runner-sid' -or $SessionId -ne 7) { throw 'Runner process observation escaped its identity.' }
+                $probe.process_reads++
+                [pscustomobject]@{
+                    complete = -not ($probe.process_reads -eq 3 -and $probe.mode -ceq 'incomplete')
+                    processes = @($(if ($probe.process_reads -eq 3 -and $probe.mode -ceq 'runner-process') {
+                        [pscustomobject]@{ identity = 'foreign-process'; pid = 99 }
+                    }))
+                }
+            }
+            function Get-CimInstance {
+                param($ClassName, $OperationTimeoutSec, $ErrorAction)
+                if ($probe.deletes -eq 2 -and $probe.mode -ceq 'owned-process') {
+                    [pscustomobject]@{ ExecutablePath = $guestRoot + '\fixture.exe'; ProcessId = 99; SessionId = 7 }
+                }
+            }
+            function Remove-Item {
+                param($LiteralPath, [switch] $Recurse, [switch] $Force)
+                $probe.deletes++
+                if (($probe.mode -ceq 'guest-root' -and $LiteralPath -ceq $guestRoot) -or
+                    ($probe.mode -ceq 'trusted-root' -and $LiteralPath -ceq $trustedRoot)) { return }
+                Microsoft.PowerShell.Management\Remove-Item -LiteralPath $LiteralPath -Recurse -Force
+            }
+            foreach ($mode in @('clean', 'task', 'guest-root', 'trusted-root', 'runner-process', 'owned-process', 'incomplete', 'removed-baseline-task', 'changed-baseline-task')) {
+                $probe = [pscustomobject]@{ mode = $mode; task_reads = 0; runner_task_reads = 0; process_reads = 0; deletes = 0 }
+                $taskName = 'DarkReNamerTests-' + [guid]::NewGuid().ToString('N')
+                $base = Join-Path $env:ProgramData 'DarkReNamerVmRuns'
+                $guestRoot = Join-Path $base $taskName
+                $trustedRoot = Join-Path $base ($taskName + '-trusted')
+                [void](New-Item -ItemType Directory -Path $guestRoot,$trustedRoot -Force)
+                $context = [pscustomobject]@{
+                    runner_sid = 'runner-sid'; runner_session_id = 7
+                    baseline_tasks = @([pscustomobject]@{ identity = 'baseline-task'; definition_sha256 = 'a' * 64 })
+                    baseline_process_identities = @()
+                }
+                $observed = & $remoteBody $guestRoot $trustedRoot $taskName $true $true $context $completionDefinition
+                if ($observed.guest_cleanup -isnot [bool] -or $observed.guest_cleanup -ne ($mode -ceq 'clean') -or
+                    $probe.deletes -ne 2 -or $probe.process_reads -ne 3 -or $probe.runner_task_reads -ne 3 -or
+                    $null -eq $observed.raw_cleanup.unexpected_runner_tasks_after_delete -or
+                    $null -eq $observed.raw_cleanup.unexpected_runner_processes_after_delete) {
+                    throw ("The actual cleanup producer misclassified or lost final $mode observations: " + ($observed | ConvertTo-Json -Depth 5 -Compress) + "; probe=" + ($probe | ConvertTo-Json -Compress))
+                }
+                if ($mode -ceq 'task' -and -not $observed.raw_cleanup.scheduled_task_present) { throw 'Task residue was fabricated as absent.' }
+                if ($mode -ceq 'guest-root' -and -not $observed.raw_cleanup.guest_root_present) { throw 'Guest directory residue was fabricated as absent.' }
+                if ($mode -ceq 'trusted-root' -and -not $observed.raw_cleanup.trusted_task_root_present) { throw 'Trusted directory residue was fabricated as absent.' }
+                if ($mode -ceq 'incomplete' -and $observed.raw_cleanup.runner_process_inventory_complete) { throw 'Incomplete process observation was fabricated as complete.' }
+                foreach ($ownedRoot in @($guestRoot, $trustedRoot)) {
+                    if (Test-Path -LiteralPath $ownedRoot) { Microsoft.PowerShell.Management\Remove-Item -LiteralPath $ownedRoot -Recurse -Force }
+                }
+            }
+        }
+        finally { $env:ProgramData = $oldProgramData }
+    }
     $binaryPath = Join-Path $root 'fixture.exe'
     [IO.File]::WriteAllText($binaryPath, 'not an executable')
     $changedArtifact = [pscustomobject]@{ file = 'fixture.exe'; sha256 = '0' * 64 }

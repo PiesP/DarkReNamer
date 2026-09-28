@@ -332,24 +332,6 @@ try {
     }
     . ([scriptblock]::Create($mainWindowSelector[0].Extent.Text))
 
-    foreach ($observer in @(
-        @{ Name = 'UI observer'; Text = $acceptanceSource },
-        @{ Name = 'guest runner'; Text = $runnerSource },
-        @{ Name = 'recovery observer'; Text = $recoverySource }
-    )) {
-        $observerText = $observer.Text
-        foreach ($heuristic in @('.MainWindowHandle', '.MainWindowTitle', '.CloseMainWindow(')) {
-            if ($observerText.IndexOf($heuristic, [StringComparison]::Ordinal) -ge 0) {
-                throw "$($observer.Name) must not use process main-window heuristics '$heuristic'."
-            }
-        }
-    }
-    if ($acceptanceSource.IndexOf(
-        'finally { $entries.Dispose() }',
-        [StringComparison]::Ordinal
-    ) -lt 0) {
-        throw 'The UI bootstrap must dispose its bounded acceptance-output enumerator.'
-    }
     foreach ($functionName in @(
         'Assert-PlainFile',
         'Join-GuestWindowsPath',
@@ -369,6 +351,29 @@ try {
             throw "The VM controller must define one $functionName helper."
         }
         . ([scriptblock]::Create($pathFunctions[0].Extent.Text))
+    }
+    $pathRewriter = @($controllerAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Set-QuotedVmTaskPath'
+    }, $true))
+    if ($pathRewriter.Count -ne 1) { throw 'The protected task path rewriter is ambiguous.' }
+    . ([scriptblock]::Create($pathRewriter[0].Extent.Text))
+    $mutablePath = Join-Path $temporaryRoot 'candidate-writable/out'
+    $protectedPath = Join-Path $temporaryRoot 'trusted/out'
+    $mutableArgument = '"' + [IO.Path]::GetFullPath($mutablePath) + '"'
+    $protectedArgument = '"' + [IO.Path]::GetFullPath($protectedPath) + '"'
+    $taskArguments = '-OutputRoot ' + $mutableArgument + ' -Other "sentinel"'
+    $rewritten = Set-QuotedVmTaskPath -CurrentArguments $taskArguments -SourcePath $mutablePath -DestinationPath $protectedPath
+    if ($rewritten -cne ('-OutputRoot ' + $protectedArgument + ' -Other "sentinel"')) {
+        throw 'Protected task staging did not replace only its exact quoted output path.'
+    }
+    foreach ($invalidArguments in @('-Other "sentinel"', ($taskArguments + ' ' + $mutableArgument))) {
+        Assert-Fails {
+            Set-QuotedVmTaskPath -CurrentArguments $invalidArguments -SourcePath $mutablePath -DestinationPath $protectedPath
+        } 'missing or ambiguous'
+    }
+    if ((Set-QuotedVmTaskPath -CurrentArguments '-Other "sentinel"' -SourcePath $mutablePath -DestinationPath $protectedPath -Optional) -cne '-Other "sentinel"') {
+        throw 'An absent optional task output argument changed unrelated arguments.'
     }
     $selectionDefaults = @{
         RequestedKind = ''
@@ -466,58 +471,27 @@ try {
     Assert-Fails {
         Get-SafeEvidencePathSegments 'fixture/trailing.'
     } 'Invalid Windows ordinary file name'
-    $earlyAggregatePattern = '\$total\s*\+=\s*\$row(?:\.item)?\.Length\s*' +
-        'if\s*\(\$total\s*-gt\s*512MB\)\s*\{\s*throw\s*' +
-        "'[^']+aggregate size bound[^']*'\s*\}\s*\[pscustomobject\]@\{"
-    if ([regex]::Matches(
-        $controllerText,
-        $earlyAggregatePattern,
-        [Text.RegularExpressions.RegexOptions]::IgnoreCase
-    ).Count -ne 2) {
-        throw 'UI and recovery collection must reject the aggregate limit before hashing rows.'
-    }
+    # Retain static privilege policy; executable inventory, rescue, cleanup and
+    # window-selection contracts are exercised by behavior tests.
     foreach ($protectedOutputContract in @(
         '$trustedOutputRoot = Join-Path $trustedTaskRoot ''out''',
         'Assert-ProtectedTaskDirectory -Path $trustedOutputRoot',
         '$requiresPrivateRoot = $Arguments.IndexOf(',
         'if ($requiresPrivateRoot) {',
         "elseif (Test-Path -LiteralPath `$trustedPrivateRoot) {",
-        'function Set-QuotedVmTaskPath',
-        '$trustedOutputArgument = ''"'' + [IO.Path]::GetFullPath($trustedOutputRoot) + ''"''',
-        '$out = Join-Path $trustedRoot ''out''',
-        '$trustedResult = Join-Path $out ''acceptance-result.json''',
-        "item = Get-Item -LiteralPath `$recoveryEvidenceRootPath -Force; prefix = `$evidenceLeaf + '/'"
+        '$trustedOutputArgument = ''"'' + [IO.Path]::GetFullPath($trustedOutputRoot) + ''"'''
     )) {
         if ($controllerText.IndexOf($protectedOutputContract, [StringComparison]::Ordinal) -lt 0) {
             throw "VM observer outputs are not bound to the protected output root: $protectedOutputContract"
         }
     }
-    foreach ($requiredRescueSource in @(
-        'function Invoke-AcceptanceTextScaleRescue',
-        '-RestoreTextScaleOnly',
-        "-TrustedResultLeaf 'text-scale-rescue-result.json'",
-        'text-scale-rescue-result.json',
-        'Get-DrVmTrustedPowerShellPath',
-        "Join-Path `$trustedRoot 'out'"
-    )) {
-        if ($controllerText.IndexOf($requiredRescueSource, [StringComparison]::Ordinal) -lt 0) {
-            throw "The VM controller is missing the text-scale rescue contract '$requiredRescueSource'."
-        }
-    }
     foreach ($requiredObserverSource in @(
-        'function Invoke-AcceptanceHighContrastRescue',
-        '-RestoreHighContrastOnly',
-        "-TrustedResultLeaf 'high-contrast-rescue-result.json'",
-        'high-contrast-rescue-result.json',
         "-TrustedResultLeaf 'acceptance-result.json'",
         "-TrustedResultLeaf 'recovery-summary.json'",
         '-EvidenceRoot "',
         'New-DrVmGuestDirectory',
         'elseif ($recovery)',
-        'Recovery output file count exceeds its bound.',
-        'Recovery output contains a reparse entry.',
         '-PrivateEvidenceRoot "'' + $private + ''"',
-        "prefix = 'private/'",
         'recovery-inventory.json',
         '-Role recovery',
         'Assert-ObserverResultBinding',
@@ -527,69 +501,16 @@ try {
             throw "The shared controller is missing observer contract '$requiredObserverSource'."
         }
     }
-    foreach ($requiredRawCleanupSource in @(
-        'runner_task_baseline',
-        'runner_process_baseline',
-        'Get-DrVmRunnerProcesses',
+    # The cleanup boundary may inspect the exact runner identity and may only
+    # terminate processes in the current run's owned roots. This is source policy,
+    # separate from the observed residue and incomplete-evidence behavior tests.
+    foreach ($scopePolicy in @(
         '-UserSid $taskContext.runner_sid',
-        '$unexpectedRunnerProcessesBeforeCleanup',
-        '$terminatedRunnerProcesses.Add',
-        'scheduled_task_present =',
-        'guest_root_present =',
-        'unexpected_runner_tasks =',
-        'unexpected_runner_processes =',
-        'runner_process_inventory_complete =',
-        '$ownedScheduledTasksBeforeDelete = @(Get-ScheduledTask -ErrorAction Stop |',
-        '$ownedScheduledTasksAfterDelete = @(Get-ScheduledTask -ErrorAction Stop |',
-        'foreach ($identity in $baselineTaskHashes.Keys)',
-        '$removedRunnerTasks.Add([string]$identity)',
-        'removed_runner_tasks = @($removedRunnerTasks | Sort-Object)',
-        'smart_screen_natural_exit =',
-        'Get-DrVmSmartScreenBrokerEvidence',
-        'Wait-DrVmSmartScreenNaturalExit',
-        'natural_exit_observed',
-        '$smartScreenInitialDeltaAccepted',
-        'terminated_runner_processes =',
-        'Get-DrVmRunnerTasks -UserSid $taskContext.runner_sid',
-        'owned_processes_after =',
-        "`$transport['raw_cleanup'] = `$cleanupResult.raw_cleanup",
-        'Guest cleanup did not return its bound raw observation.'
+        'Test-ProcessExecutableInOwnedRoots -Path $actualPath -Prefixes $prefixes'
     )) {
-        if ($controllerText.IndexOf($requiredRawCleanupSource, [StringComparison]::Ordinal) -lt 0) {
-            throw "The shared controller is missing raw cleanup evidence '$requiredRawCleanupSource'."
+        if ($controllerText.IndexOf($scopePolicy, [StringComparison]::Ordinal) -lt 0) {
+            throw "The controller cleanup changed its authorized process scope: $scopePolicy"
         }
-    }
-    if ($controllerText.IndexOf(
-        "(`$state.result_status -cne 'review_required' -or `$state.task_result -ne 0)",
-        [StringComparison]::Ordinal
-    ) -lt 0) {
-        throw 'The VM controller must run its text-scale rescue after every unsuccessful acceptance task.'
-    }
-    foreach ($requiredTerminalSource in @(
-        'result_status = $resultStatus',
-        'task_state = $taskState',
-        'task_result = $taskResult',
-        'last_run_time_ticks = [long]$info.LastRunTime.Ticks',
-        '$taskResult = [long]$terminalInfo.LastTaskResult',
-        'Resolve-ObserverTaskPollState',
-        '-RegisteredLastRunTimeTicks $acceptanceEngine.registered_last_run_time_ticks',
-        'if ($state.terminal) { break }',
-        '$transport.observer_process = $observerProcess',
-        'exit_code = [long]$state.task_result',
-        '$observerProcess.exit_code -eq 0'
-    )) {
-        if ($controllerText.IndexOf($requiredTerminalSource, [StringComparison]::Ordinal) -lt 0) {
-            throw "The VM controller is missing terminal observer-task evidence '$requiredTerminalSource'."
-        }
-    }
-    if ($controllerText.IndexOf(
-        "foreach (`$leaf in @('observer.stdout.txt', 'observer.stderr.txt'))",
-        [StringComparison]::Ordinal
-    ) -ge 0 -or $controllerText.IndexOf(
-        '$rows = @(',
-        [StringComparison]::Ordinal
-    ) -lt 0) {
-        throw 'Observer output inventory must read the protected output tree directly without moving candidate-writable stream files.'
     }
     foreach ($requiredEngineSource in @(
         "executable = 'pwsh.exe'",
@@ -642,25 +563,6 @@ try {
         [StringComparison]::Ordinal
     ) -ge 0) {
         throw 'UI cleanup must not serialize an unobserved journal as an empty inventory.'
-    }
-    foreach ($requiredCleanupObservationSource in @(
-        'Get-VmAutomatedOwnedProcessCleanupObservation',
-        'owned_processes_observation_error',
-        "'owned_process_cleanup_observation_failed'",
-        "'Owned process cleanup observation failed:'"
-    )) {
-        if ($acceptanceText.IndexOf(
-            $requiredCleanupObservationSource,
-            [StringComparison]::Ordinal
-        ) -lt 0) {
-            throw "UI cleanup failure publication is missing '$requiredCleanupObservationSource'."
-        }
-    }
-    if ([regex]::Matches(
-        $acceptanceText,
-        [regex]::Escape('Get-VmAutomatedOwnedProcessCleanupObservation')
-    ).Count -ne 4) {
-        throw 'Shared UI cleanup and every observer cleanup path must use the guarded owned-process observation.'
     }
     function Get-UiObserverFinalizerBody {
         param([Parameter(Mandatory)][string] $FunctionName)
@@ -1532,7 +1434,6 @@ try {
         '$result.raw_environment = Get-VmAutomatedEnvironment',
         "exit_method = 'normal-close'",
         "exit_method = 'forced-termination'",
-        '$result.raw_cleanup = [ordered]@{',
         '$result.layout_observations = [ordered]@{'
         'function New-VmAutomatedLayoutRun'
         'function Complete-VmAutomatedLayoutRun'
@@ -1542,19 +1443,12 @@ try {
         'function Get-VmAutomatedAppearance'
         '$result.raw_appearance = Get-VmAutomatedAppearance'
         'raw_appearance = Get-VmAutomatedAppearance'
-        'function Resolve-GuiRegressionLayoutVariant'
-        'function Get-VmAutomatedNativeMenuCommandSpec'
-        'function Assert-ObserverFixturePathSegment'
-        'function ConvertTo-ObserverFixtureRelativePath'
-        'function Get-VmAutomatedNativeMenuState'
-        'function Assert-VmAutomatedNativeMenuTree'
         'function Get-VmAutomatedHiddenRailControls'
         'function Invoke-VmAutomatedNativeMenuOnlyReachability'
         'IntPtr itemOwner = depth == 0 ? window : IntPtr.Zero;'
         "variant = 'native-menu-only'"
         'hidden_rail_controls = $hiddenRails'
         'menu_tree = $menuTree'
-        'function New-VmAutomatedFocusReachabilityControl'
         'function Invoke-VmAutomatedFocusReachability'
         'focus_reachability = $focusReachability'
         'focus_reachability = $rawFocusReachability'
@@ -1779,19 +1673,6 @@ try {
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
             $node.Name -ceq 'Get-ObserverFixtureEntries'
     }, $true).Extent.Text
-    foreach ($requiredStateSource in @(
-        'The observer fixture inventory exceeds sixteen entries.',
-        '[IO.FileAttributes]::ReparsePoint',
-        'The observer fixture inventory contains an oversized file.',
-        'The observer fixture inventory exceeds its aggregate size bound.',
-        '[StringComparer]::Ordinal.Compare',
-        'relative_path = $entry.relative_path',
-        'file_identity = Get-FullFileIdentity -Path $item.FullName'
-    )) {
-        if ($nativeMenuStateSource.IndexOf($requiredStateSource, [StringComparison]::Ordinal) -lt 0) {
-            throw "Native menu recursive fixture state is missing '$requiredStateSource'."
-        }
-    }
     & {
         . ([scriptblock]::Create($nativeMenuStateFunction.Extent.Text))
         function Get-VmAutomatedCanonicalRootPath {
