@@ -51,8 +51,7 @@ function Invoke-DrWindowsVmAcceptance {
     [string] $InputManifestPath,
     [ValidateSet(100, 150)][int] $TextScalePercent = 100,
     [switch] $RestoreTextScaleOnly,
-    [switch] $ValidateOnly
-,
+    [switch] $ValidateOnly,
     [Parameter(Mandatory)][string] $EntryPointPath
 )
 Set-StrictMode -Version Latest

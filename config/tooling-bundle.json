@@ -423,7 +423,7 @@
       "bundle": "guest-uia.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "0216aa04c64c168bc1c5e4174a5572b7ea033673b825a63d28660384f509907a",
+      "sha256": "b338ff129fb5c214429240142a6b6c3365480e7b06261ff2c072f8ab9fc881b5",
       "dependencies": []
     },
     {
@@ -459,7 +459,7 @@
       "bundle": "guest-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "0c3f92166098b9bdefaccb2b700f151f138de556e6ee25705baf56b2637723f2",
+      "sha256": "04622b3954d43b6c710d55f1104f05f2fa6f7f64e64dbbd2a8e393650ca4f9b3",
       "dependencies": [
         "powershell-loader",
         "powershell-guest-contracts",
@@ -568,7 +568,7 @@
       "bundle": "ui-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "6cc41eddd3aee90b8c28620fafc65211c14e75138ef2ff2a13b1fc8b382af3ea",
+      "sha256": "24a01ec1b9a12a154f11cda4635d5e5ec9579adce272c02ee5ddccba52d9f675",
       "dependencies": [
         "powershell-loader",
         "powershell-ui-bootstrap",
@@ -660,7 +660,7 @@
       "bundle": "recovery-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "acab191b054d7b2b139645698004567308e14115fdb9f20c234d078a30cda365",
+      "sha256": "191cf30077e985adbd5a124df22fc8dc788495c3081d0ecf56f5340f7e66bd5e",
       "dependencies": [
         "powershell-loader",
         "powershell-recovery-bootstrap",
@@ -722,7 +722,7 @@
       "bundle": "controller-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "db8267dec209c9133f3431a680f7ef27fdb13478deca8414e27ac8293b4aeac1",
+      "sha256": "f1fc88fbca532f85777973dfbf3cb2ed4d73aab8a20f72515556276619457166",
       "dependencies": [
         "powershell-loader",
         "powershell-controller-contracts",

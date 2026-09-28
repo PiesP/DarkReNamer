@@ -138,9 +138,11 @@ namespace InvocationFixture {
     }
     $ownerA.job_empty = $true
     $ownerA.job_closed = $true
+    $states[0].powershell.Streams.Error = @('pending provider diagnostic')
     $elapsed = [Diagnostics.Stopwatch]::StartNew()
     $pendingErrors = @(Complete-OwnedAutomationControlInvocations -Owned $ownerA -TimeoutMilliseconds 30)
     if ($pendingErrors.Count -ne 2 -or
+        $pendingErrors[0] -notlike '*pending provider diagnostic*' -or
         $states[0].async_result.AsyncWaitHandle.WaitTotal + $states[1].async_result.AsyncWaitHandle.WaitTotal -gt 30 -or
         $elapsed.ElapsedMilliseconds -gt 500 -or
         $states[2].async_result.AsyncWaitHandle.WaitCalls -ne 0 -or (Get-AutomationInvocationLedger).Count -ne 3) {

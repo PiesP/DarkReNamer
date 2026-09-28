@@ -40,8 +40,7 @@ function Invoke-DrWindowsVmGuest {
 
     [string] $RuntimeRoot,
 
-    [switch] $ValidateOnly
-,
+    [switch] $ValidateOnly,
     [Parameter(Mandatory)][string] $EntryPointPath
 )
 Set-StrictMode -Version Latest

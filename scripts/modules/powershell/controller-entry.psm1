@@ -304,8 +304,7 @@ function Invoke-DrWindowsVmController {
     [switch] $RecoveryExport,
     [switch] $RecoveryIntentOnlyCandidateDiscard,
     [guid] $ExpectedGuestVmId = [guid]::Empty,
-    [ValidatePattern('^[0-9a-f]{64}\z')][string] $ExpectedBundleManifestSha256
-,
+    [ValidatePattern('^[0-9a-f]{64}\z')][string] $ExpectedBundleManifestSha256,
     [Parameter(Mandatory)][string] $EntryPointPath,
     [Parameter(Mandatory)][object] $VerifiedTooling
 )

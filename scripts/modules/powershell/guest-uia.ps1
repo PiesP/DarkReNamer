@@ -487,6 +487,7 @@ function Receive-AutomationControlInvocation {
     if ($State.completed) { return $true }
     if ($null -ne $State.async_result -and -not $State.end_invoked) {
         try {
+            # A modal UIA provider can block Stop/Dispose too; retain ownership until it signals.
             if (-not $State.async_result.AsyncWaitHandle.WaitOne($WaitMilliseconds)) { return $false }
         }
         catch {
@@ -527,6 +528,7 @@ function Complete-OwnedAutomationControlInvocations {
     $pending = @((Get-AutomationInvocationLedger).ToArray() | Where-Object {
         [object]::ReferenceEquals($_.owned_process, $Owned)
     })
+    # All invocations for this candidate share one deadline after its job closes.
     $deadline = [Environment]::TickCount64 + $TimeoutMilliseconds
     foreach ($state in $pending) {
         if (-not $Owned.job_empty -or -not $Owned.job_closed) {
@@ -535,7 +537,13 @@ function Complete-OwnedAutomationControlInvocations {
         }
         $remaining = [int][Math]::Max(0, $deadline - [Environment]::TickCount64)
         if (-not (Receive-AutomationControlInvocation -State $state -WaitMilliseconds $remaining)) {
-            "$($state.label) UI Automation invocation remained incomplete after process-job closure."
+            $detail = ''
+            try {
+                $detail = $state.powershell.Streams.Error | Select-Object -First 8 | Out-String -Width 1024
+                if ($detail.Length -gt 4096) { $detail = $detail.Substring(0, 4096) }
+            }
+            catch { $detail = 'Error stream unavailable: ' + $_.Exception.Message }
+            "$($state.label) UI Automation invocation remained incomplete after process-job closure. $detail"
         }
         $state.errors.ToArray()
     }
