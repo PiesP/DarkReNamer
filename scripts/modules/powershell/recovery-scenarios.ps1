@@ -20,6 +20,54 @@ public static class DarkReNamerRecoveryLockNative
 
     [DllImport("user32.dll")]
     public static extern int GetDlgCtrlID(IntPtr window);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    public static extern int GetWindowTextW(IntPtr window, System.Text.StringBuilder text, int count);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    private static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message,
+        UIntPtr count, System.Text.StringBuilder text, uint flags, uint timeout, out UIntPtr result);
+
+    public static string ReadButtonText(IntPtr window, uint expectedProcessId) {
+        uint processId;
+        if (GetWindowThreadProcessId(window, out processId) == 0 || processId != expectedProcessId)
+            throw new InvalidOperationException("Worker text target is not owned by the retained process.");
+        var text = new System.Text.StringBuilder(64);
+        UIntPtr length;
+        // Cross-process control text needs WM_GETTEXT; never wait for a hung worker UI.
+        if (SendMessageTimeoutW(window, 0x000D, (UIntPtr)text.Capacity, text, 0x3, 100, out length) == IntPtr.Zero)
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "Worker control text read failed or timed out.");
+        if (length.ToUInt64() >= (ulong)(text.Capacity - 1) || length.ToUInt64() != (ulong)text.Length)
+            throw new InvalidOperationException("Worker control text is truncated or inconsistent.");
+        return text.ToString();
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Rect { public int Left, Top, Right, Bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GuiThreadInfo {
+        public uint Size, Flags;
+        public IntPtr Active, Focus, Capture, MenuOwner, MoveSize, Caret;
+        public Rect CaretRect;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetGUIThreadInfo(uint threadId, ref GuiThreadInfo info);
+
+    public static bool IsWindowFocused(IntPtr window, uint threadId) {
+        var info = new GuiThreadInfo();
+        info.Size = (uint)Marshal.SizeOf(typeof(GuiThreadInfo));
+        if (threadId == 0 || !GetGUIThreadInfo(threadId, ref info))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        return info.Focus == window && GetForegroundWindow() == GetAncestor(window, 2);
+    }
 }
 '@
     }
@@ -599,22 +647,8 @@ function Invoke-AcceptanceIntentOnlyCandidateDiscard {
         foreach ($application in @($cancelApplication, $relaunchApplication, $discardApplication)) {
             if ($null -eq $application) { continue }
             try {
-                $process = $application.owned.process
-                $process.Refresh()
-                $jobCleanup = Complete-AcceptanceOwnedProcessJob `
-                    -Owned $application.owned -StopActive
-                $application | Add-Member -NotePropertyName job_cleanup -NotePropertyValue $jobCleanup -Force
-                if ($jobCleanup.status -cne 'clean' -or -not $jobCleanup.job_empty -or -not $jobCleanup.job_closed) {
-                    throw 'The exact Intent-only process job did not close during cleanup.'
-                }
-                $bindingProperty = $application.PSObject.Properties['raw_process_binding']
-                $exitProperty = $application.PSObject.Properties['raw_process_exit_recorded']
-                if ($null -ne $bindingProperty -and $null -ne $exitProperty -and
-                    -not [bool]$exitProperty.Value) {
-                    $processes.Add((Write-AcceptanceProcessExitEvidence `
-                        -Application $application -PrivateRoot $PrivateRoot `
-                        -Boundary 'failure-cleanup' -ExitMethod 'forced-termination'))
-                }
+                Complete-AcceptanceFailureProcessCleanup `
+                    -Application $application -PrivateRoot $PrivateRoot -Processes $processes
             }
             catch {
                 $cleanupErrors.Add($_.Exception.Message)
@@ -698,6 +732,14 @@ function Invoke-AcceptanceSession {
         Invoke-AcceptanceImportAndPrefix `
             -Application $first -PathsFile $pathsFile -Prefix $prefix `
             -SessionId $SessionId -WaitSeconds $WaitSeconds
+        $workerCancel = $null
+        if ($Mode -ne 'ProcessCrash') {
+            # The persistent child starts hidden/disabled; resolve UIA before
+            # mutation, then revalidate its native state at the live boundary.
+            $workerCancel = New-AcceptanceWorkerCancelBinding `
+                -Application $first -SessionId $SessionId -WaitSeconds $WaitSeconds
+            [void](Get-AcceptanceWorkerCancelTarget -Application $first -Binding $workerCancel)
+        }
         Invoke-AcceptanceApply -Application $first -SessionId $SessionId -WaitSeconds $WaitSeconds
 
         $boundaryDeadline = (Get-Date).AddSeconds($WaitSeconds)
@@ -719,11 +761,6 @@ function Invoke-AcceptanceSession {
         }
 
         if ($Mode -ne 'ProcessCrash') {
-            $workerCancel = Find-UniqueAutomationElement `
-                -Root $first.main -Process $first.owned.process -ExpectedSession $SessionId `
-                -AutomationId '1009' -ControlType ([Windows.Automation.ControlType]::Button) `
-                -TimeoutSeconds $WaitSeconds -Label 'visible worker cancellation control' `
-                -Scope ([Windows.Automation.TreeScope]::Children) -RequireEnabled -RequireWindowHandle
             $workerBoundary = Get-AcceptanceActiveWorkerBoundary `
                 -Application $first -Cancel $workerCancel -FixtureRoot $fixtureRoot -Prefix $prefix `
                 -LocalAppData $env:LOCALAPPDATA -InitialFirst $initialFirst[0] `
@@ -737,18 +774,11 @@ function Invoke-AcceptanceSession {
             $screenshot = $null
             $workerCancelAction = $null
             if ($Mode -eq 'WorkerCancellation') {
-                $workerCancelTarget = Get-AcceptanceControlTargetObservation `
-                    -Application $first -Root $first.main -Element $workerBoundary.cancel `
-                    -SessionId $SessionId -ExpectedAutomationId '1009' -ExpectedControlId 1009 `
-                    -Label 'active worker cancellation control'
-                if (-not $workerCancelTarget.enabled -or -not $workerCancelTarget.visible) {
-                    throw 'The active worker cancellation target is not enabled and visible.'
-                }
-                $workerCancelObservedUtcTicks = [DateTime]::UtcNow.Ticks.ToString(
-                    [Globalization.CultureInfo]::InvariantCulture
-                )
-                Invoke-AutomationControl `
-                    -Element $workerBoundary.cancel -Label 'active worker cancellation control'
+                $interruption = Invoke-AcceptanceWorkerInterruption `
+                    -Application $first -Binding $workerCancel -Boundary $workerBoundary `
+                    -FixtureRoot $fixtureRoot -LocalAppData $env:LOCALAPPDATA -Mode $Mode
+                $workerCancelTarget = $interruption.target
+                $workerCancelObservedUtcTicks = $interruption.observed_utc_ticks
                 $restored = Wait-AcceptanceWorkerRollback `
                     -FixtureRoot $fixtureRoot -LocalAppData $env:LOCALAPPDATA `
                     -Initial $initial -WaitSeconds $WaitSeconds
@@ -769,7 +799,9 @@ function Invoke-AcceptanceSession {
             }
             else {
                 [void](Close-AcceptanceApplicationNormally `
-                    -Application $first -WaitSeconds $WaitSeconds)
+                    -Application $first -WaitSeconds $WaitSeconds `
+                    -WorkerBinding $workerCancel -WorkerBoundary $workerBoundary `
+                    -FixtureRoot $fixtureRoot -LocalAppData $env:LOCALAPPDATA)
                 $restored = Get-AcceptanceFixtureState -FixtureRoot $fixtureRoot
                 Assert-AcceptanceStatesEqual `
                     -Expected $initial -Actual $restored -Label 'Worker-close rollback fixture'
@@ -1128,22 +1160,8 @@ function Invoke-AcceptanceSession {
         $cleanupErrors = [Collections.Generic.List[string]]::new()
         foreach ($application in $applications) {
             try {
-                $process = $application.owned.process
-                $process.Refresh()
-                $jobCleanup = Complete-AcceptanceOwnedProcessJob `
-                    -Owned $application.owned -StopActive
-                $application | Add-Member -NotePropertyName job_cleanup -NotePropertyValue $jobCleanup -Force
-                if ($jobCleanup.status -cne 'clean' -or -not $jobCleanup.job_empty -or -not $jobCleanup.job_closed) {
-                    throw 'The exact acceptance process job did not close during cleanup.'
-                }
-                $bindingProperty = $application.PSObject.Properties['raw_process_binding']
-                $exitProperty = $application.PSObject.Properties['raw_process_exit_recorded']
-                if ($null -ne $bindingProperty -and $null -ne $exitProperty -and
-                    -not [bool]$exitProperty.Value) {
-                    $processes.Add((Write-AcceptanceProcessExitEvidence `
-                        -Application $application -PrivateRoot $PrivateRoot `
-                        -Boundary 'failure-cleanup' -ExitMethod 'forced-termination'))
-                }
+                Complete-AcceptanceFailureProcessCleanup `
+                    -Application $application -PrivateRoot $PrivateRoot -Processes $processes
             }
             catch {
                 $cleanupErrors.Add($_.Exception.Message)

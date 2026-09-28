@@ -1527,8 +1527,10 @@ def main(repo, argv=None, tooling=None):
     observer_inputs = prepare_observer_inputs(root, manifest, args)
     if args.candidate_mode:
         print('Executing exact-candidate ' + args.task_kind + ' validation in the VM.', flush=True)
-    else:
+    elif args.task_kind == 'core':
         print('Executing ' + str(len(manifest['test_binaries'])) + ' Windows test binaries in the VM.', flush=True)
+    else:
+        print('Executing source-built ' + args.task_kind + ' observer in the VM.', flush=True)
     print('Evidence: ' + str(root), flush=True)
     transport_ok = True
     try:

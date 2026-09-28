@@ -1755,7 +1755,7 @@ $processExitFunction = @($fromFile.FindAll({
         $node.Name -ceq 'Write-AcceptanceProcessExitEvidence'
 }, $true))
 foreach ($fragment in @(
-    "ValidateSet('normal-close', 'forced-termination', 'worker-close')",
+    "ValidateSet('normal-close', 'forced-termination', 'worker-close', 'observed-exit')",
     'start_time_utc_ticks',
     'observed_utc_ticks',
     'exit_observed',
@@ -1927,15 +1927,19 @@ foreach ($fragment in @(
     }
 }
 $sessionText = $sessionFunction[0].Extent.Text
-$workerObservedIndex = $sessionText.IndexOf('$workerCancelObservedUtcTicks', [StringComparison]::Ordinal)
-$workerInvokeIndex = $sessionText.IndexOf(
-    "-Element `$workerBoundary.cancel -Label 'active worker cancellation control'",
-    [StringComparison]::Ordinal
-)
-$workerCompletedIndex = $sessionText.IndexOf('$workerCancelCompletedUtcTicks', [StringComparison]::Ordinal)
+$interruptionFunction = $fromFile.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Invoke-AcceptanceWorkerInterruption'
+}, $true)
+$interruptionText = $interruptionFunction.Extent.Text
+$workerObservedIndex = $interruptionText.IndexOf('$observed =', [StringComparison]::Ordinal)
+$workerInvokeIndex = $interruptionText.IndexOf('$Binding.pattern.Invoke()', [StringComparison]::Ordinal)
 if ($workerObservedIndex -lt 0 -or $workerInvokeIndex -le $workerObservedIndex -or
-    $workerCompletedIndex -le $workerInvokeIndex) {
-    throw 'Worker cancellation raw evidence does not bracket the actual owned control invocation.'
+    $sessionText.IndexOf('$workerCancelCompletedUtcTicks', [StringComparison]::Ordinal) -lt 0 -or
+    $sessionText.IndexOf('New-AcceptanceWorkerCancelBinding', [StringComparison]::Ordinal) -ge
+        $sessionText.IndexOf('Invoke-AcceptanceApply', [StringComparison]::Ordinal)) {
+    throw 'Worker cancellation must prebind its real InvokePattern and bracket the actual invocation.'
 }
 $observerText = $fromFile.Extent.Text
 foreach ($fragment in @(

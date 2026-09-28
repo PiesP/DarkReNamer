@@ -133,7 +133,7 @@
       "bundle": "tooling-vm-launcher.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.launcher",
-      "sha256": "9271a189afc65bf503732607d4a56df536a4121607136746f7e85c2d2871d6c4",
+      "sha256": "03c737b1144ef97530b231d9490849dd4c1eb2af7402ca6e4311589fba38c5cf",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -624,7 +624,7 @@
       "bundle": "recovery-process.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "9796c7ce503a58d99decc539e5c1a93f2be8a987ce1b259441d988abb832031a",
+      "sha256": "3412b47bdc4edd83a93b345ecf9030b7fd09c2e91fc6250fe33d3f2d7e284b18",
       "dependencies": []
     },
     {
@@ -642,7 +642,7 @@
       "bundle": "recovery-worker.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "e8c1b6074324cc3ecc005d786903825e6e838381c53640d184603a52b7ab1944",
+      "sha256": "b724880ed2a0ff984cc42bab70e0776aebacb6b4574febed70c4f57773e9ab0f",
       "dependencies": []
     },
     {
@@ -651,7 +651,7 @@
       "bundle": "recovery-scenarios.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "3508a19248a5150af199f22bd774f4cad69fbab009decbece0a69a66bb4a257e",
+      "sha256": "eeec1fbc76c23c207d5ef1289c3bd70653656f4390c01e98f69ef24e51047ab1",
       "dependencies": []
     },
     {

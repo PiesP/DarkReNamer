@@ -129,6 +129,220 @@ try {
             -Prefix 'new-' -ExpectedCount 2
     } 'unknown NTFS identity'
 
+    & {
+        function New-TestRecoveryApplication {
+            param([int] $Sequence, [string] $Mode)
+            $safe = [pscustomobject]@{ IsClosed = $false; IsInvalid = $false }
+            $safe | Add-Member ScriptMethod DangerousGetHandle { [IntPtr]42 }
+            $process = [pscustomobject]@{
+                Id = 100 + $Sequence; SessionId = 2; StartTime = [DateTime]::UtcNow
+                SafeHandle = $safe; HasExited = $Mode -in @('exited', 'recorded')
+                ExitCode = if ($Mode -ceq 'exited') { 37 } else { 0 }; disposed = 0
+                mode = $Mode; refresh_calls = 0
+            }
+            $process | Add-Member ScriptMethod Refresh {
+                $this.refresh_calls++
+                if ($this.mode -ceq 'race' -and $this.refresh_calls -eq 2) {
+                    $this.HasExited = $true; $this.ExitCode = 37
+                }
+            }
+            $process | Add-Member ScriptMethod WaitForExit { param($timeout); return $this.HasExited }
+            $process | Add-Member ScriptMethod Dispose { $this.disposed++ }
+            $binding = [pscustomobject]@{
+                sequence = $Sequence; role = 'rename-worker'; pid = $process.Id; session_id = 2
+                start_time_utc_ticks = $process.StartTime.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
+                executable_path = 'fixture.exe'; executable_sha256 = 'a' * 64
+            }
+            [pscustomobject]@{
+                owned = [pscustomobject]@{ process = $process; mode = $Mode; receipt = $null; stop_calls = 0; close_calls = 0 }
+                main_handle = [IntPtr]4096; session_id = 2
+                raw_process_object = $process; raw_process_handle = [IntPtr]42
+                raw_process_binding = $binding; raw_process_exit_recorded = $Mode -ceq 'recorded'
+            }
+        }
+        function Complete-AcceptanceOwnedProcessJob {
+            param($Owned, [switch] $StopActive, [switch] $RequireSolePrimary)
+            if ($null -ne $Owned.receipt) { return $Owned.receipt }
+            $Owned.close_calls++
+            if ($StopActive) {
+                $Owned.stop_calls++
+                if (-not $RequireSolePrimary) { throw 'Failure cleanup omitted exact primary termination.' }
+                $Owned.process.HasExited = $true
+                $Owned.process.ExitCode = 12345
+            }
+            $failed = $Owned.mode -in @('survivors', 'close-failure')
+            $exact = $StopActive -and -not $failed
+            $Owned.receipt = [pscustomobject]@{
+                status = if ($failed) { 'failed' } else { 'clean' }
+                job_empty = $true; job_closed = $Owned.mode -cne 'close-failure'
+                forced_termination = [bool]$exact; active_processes_at_stop = if ($exact) { 1 } else { 0 }
+                active_process_ids_at_stop = [int[]]@(if ($exact) { $Owned.process.Id })
+                total_processes_at_stop = if ($exact) { 1 } else { 0 }
+                primary_process_active_at_stop = [bool]$exact
+                termination_exit_code = if ($exact) { 12345 } else { $null }
+                had_survivors = $Owned.mode -ceq 'survivors'
+            }
+            $Owned.receipt
+        }
+        $private = Join-Path $root 'failure-processes'
+        $null = New-Item -ItemType Directory -Path $private
+        $sequence = 0
+        foreach ($mode in @('live', 'exited', 'recorded', 'race', 'survivors', 'close-failure')) {
+            $sequence++
+            $application = New-TestRecoveryApplication -Sequence $sequence -Mode $mode
+            $references = [Collections.Generic.List[object]]::new()
+            if ($mode -in @('race', 'survivors', 'close-failure')) {
+                Assert-Fails {
+                    Complete-AcceptanceFailureProcessCleanup -Application $application -PrivateRoot $private -Processes $references
+                } $(if ($mode -ceq 'race') { 'exited before' } else { 'Job Object' })
+            }
+            else {
+                Complete-AcceptanceFailureProcessCleanup -Application $application -PrivateRoot $private -Processes $references
+            }
+            if ($application.owned.close_calls -ne 1 -or
+                $application.owned.stop_calls -ne [int]($mode -notin @('exited', 'recorded', 'race'))) {
+                throw 'Failure cleanup selected the wrong live/exited job dispatch.'
+            }
+            if ($mode -ceq 'recorded') {
+                if ($references.Count -ne 0) { throw 'Failure cleanup duplicated recorded process exit.' }
+                continue
+            }
+            $exit = Get-Content -LiteralPath (Join-Path $private ('process-{0:D2}-failure-cleanup.json' -f $sequence)) -Raw | ConvertFrom-Json
+            $method = if ($mode -ceq 'live') { 'forced-termination' } else { 'observed-exit' }
+            if ($references.Count -ne 1 -or $exit.lifecycle.exit_method -cne $method -or
+                $exit.lifecycle.exit_code -ne $application.owned.process.ExitCode -or
+                ($method -ceq 'observed-exit' -and $null -ne $exit.termination)) {
+                throw 'Failure cleanup fabricated an exit method, code or termination receipt.'
+            }
+        }
+        $application = New-TestRecoveryApplication -Sequence 20 -Mode exited
+        Assert-Fails {
+            Write-AcceptanceProcessExitEvidence -Application $application -PrivateRoot $private `
+                -Boundary normal-exit -ExitMethod observed-exit
+        } 'restricted to failure cleanup'
+
+        $source = Get-DrTestCombinedPowerShellSource -Kind recovery
+        $tokens = $null; $parseErrors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$parseErrors)
+        foreach ($name in @('Invoke-AcceptanceSession', 'Invoke-AcceptanceIntentOnlyCandidateDiscard')) {
+            $function = $ast.Find({ param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
+            }, $true)
+            $finally = @($function.Body.FindAll({ param($node)
+                $node -is [Management.Automation.Language.TryStatementAst] -and
+                    $null -ne $node.Finally -and $node.Finally.Extent.Text.Contains('Complete-AcceptanceFailureProcessCleanup')
+            }, $true))[0].Finally.Extent.Text
+            $cleanupBlock = [scriptblock]::Create($finally.Substring(1, $finally.Length - 2))
+            $cancelApplication = New-TestRecoveryApplication -Sequence 30 -Mode survivors
+            $relaunchApplication = New-TestRecoveryApplication -Sequence 31 -Mode live
+            $discardApplication = $null
+            $applications = @($cancelApplication, $relaunchApplication)
+            $processes = [Collections.Generic.List[object]]::new()
+            $PrivateRoot = $private
+            $sessionError = $null; $scenarioError = $null
+            Assert-Fails {
+                try { throw 'original scenario failure' }
+                catch { $sessionError = $_; $scenarioError = $_; throw }
+                finally { . $cleanupBlock }
+            } 'original scenario failure'
+            if ($cancelApplication.owned.process.disposed -ne 1 -or
+                $relaunchApplication.owned.process.disposed -ne 1 -or
+                $relaunchApplication.owned.stop_calls -ne 1) {
+                throw 'A scenario cleanup failure skipped another owned application or its disposal.'
+            }
+            Remove-Item -LiteralPath (Join-Path $private 'process-30-failure-cleanup.json'), (Join-Path $private 'process-31-failure-cleanup.json')
+        }
+
+        $application = New-TestRecoveryApplication -Sequence 40 -Mode live
+        $pattern = [pscustomobject]@{ calls = 0 }
+        $pattern | Add-Member ScriptMethod Invoke { $this.calls++ }
+        $element = [pscustomobject]@{}
+        $element | Add-Member ScriptProperty Current { throw 'No late UIA property lookup is allowed at the worker boundary.' }
+        $binding = [pscustomobject]@{
+            hwnd = [IntPtr]4097; main_handle = $application.main_handle
+            pid = $application.raw_process_binding.pid; session_id = 2
+            start_time_utc_ticks = $application.raw_process_binding.start_time_utc_ticks
+            pattern = $pattern; element = $element
+        }
+        $native = [pscustomobject]@{
+            live = $true; child = [IntPtr]4097; parent = [IntPtr]4096; root = [IntPtr]4096
+            pid = $binding.pid; root_pid = $binding.pid; class = 'Button'; name = '취소'
+            root_class = 'DarkReNamerWindow'; root_name = 'DarkReNamer'; control_id = 1009
+            enabled = $true; visible = $true; main_enabled = $true; focused = $false
+        }
+        function Read-AcceptanceWorkerControlState { param($Binding); $native }
+        function Find-UniqueAutomationElement { throw 'No late UIA discovery is allowed at the worker boundary.' }
+        $fixture = Join-Path $root 'worker-boundary'
+        $localData = Join-Path $root 'worker-local'
+        $journal = Join-Path $localData 'DarkReNamer/journal'
+        $null = New-Item -ItemType Directory -Path $fixture, $journal -Force
+        $first = Join-Path $fixture 'new-item-00000.txt'
+        $last = Join-Path $fixture 'item-00127.txt'
+        $active = Join-Path $journal 'active.drj'
+        foreach ($path in @($first, $last, $active)) { [IO.File]::WriteAllText($path, 'fixture') }
+        function Get-FullFileIdentity { param($Path); [pscustomobject]@{ volume_serial = '1' * 16; file_id = '2' * 32 } }
+        $initialFirst = [pscustomobject]@{
+            name = 'item-00000.txt'; file_identity = Get-FullFileIdentity -Path $first; content_sha256 = Get-LowerSha256 -Path $first
+        }
+        $initialLast = [pscustomobject]@{
+            name = 'item-00127.txt'; file_identity = Get-FullFileIdentity -Path $last; content_sha256 = Get-LowerSha256 -Path $last
+        }
+        $boundary = Get-AcceptanceActiveWorkerBoundary -Application $application -Cancel $binding `
+            -FixtureRoot $fixture -Prefix 'new-' -LocalAppData $localData -InitialFirst $initialFirst `
+            -InitialLast $initialLast -ExpectedCount 128 -SessionId 2
+        $interruption = Invoke-AcceptanceWorkerInterruption -Application $application -Binding $binding -Boundary $boundary `
+            -FixtureRoot $fixture -LocalAppData $localData -Mode WorkerCancellation
+        if ($pattern.calls -ne 1 -or $interruption.target.control_id -ne 1009) {
+            throw 'The live partial worker did not use its retained real invocation path.'
+        }
+        foreach ($invalid in @(
+            @{ name = 'live'; value = $false }, @{ name = 'child'; value = [IntPtr]99 }
+            @{ name = 'parent'; value = [IntPtr]99 }, @{ name = 'root'; value = [IntPtr]99 }
+            @{ name = 'pid'; value = 99 }, @{ name = 'root_pid'; value = 99 }
+            @{ name = 'class'; value = 'Edit' }, @{ name = 'name'; value = 'wrong' }
+            @{ name = 'root_class'; value = 'OtherWindow' }, @{ name = 'root_name'; value = 'wrong' }
+            @{ name = 'control_id'; value = 1010 }, @{ name = 'main_enabled'; value = $false }
+            @{ name = 'enabled'; value = $false }, @{ name = 'visible'; value = $false }
+        )) {
+            $saved = $native.($invalid.name)
+            $native.($invalid.name) = $invalid.value
+            Assert-Fails {
+                Invoke-AcceptanceWorkerInterruption -Application $application -Binding $binding -Boundary $boundary `
+                    -FixtureRoot $fixture -LocalAppData $localData -Mode WorkerCancellation
+            } 'cancellation'
+            $native.($invalid.name) = $saved
+        }
+        foreach ($path in @($first, $last, $active)) {
+            Remove-Item -LiteralPath $path
+            Assert-Fails {
+                Invoke-AcceptanceWorkerInterruption -Application $application -Binding $binding -Boundary $boundary `
+                    -FixtureRoot $fixture -LocalAppData $localData -Mode WorkerCancellation
+            } 'witnesses or active journal'
+            [IO.File]::WriteAllText($path, 'fixture')
+        }
+        $candidate = Join-Path $journal 'candidate.drj'
+        [IO.File]::WriteAllText($candidate, 'fixture')
+        Assert-Fails {
+            Invoke-AcceptanceWorkerInterruption -Application $application -Binding $binding -Boundary $boundary `
+                -FixtureRoot $fixture -LocalAppData $localData -Mode WorkerCancellation
+        } 'witnesses or active journal'
+        Remove-Item -LiteralPath $candidate
+        foreach ($field in @('pid', 'session_id', 'start_time_utc_ticks', 'main_handle')) {
+            $saved = $binding.$field
+            $binding.$field = if ($field -ceq 'start_time_utc_ticks') { '0' } else { 99 }
+            Assert-Fails { Get-AcceptanceWorkerCancelTarget -Application $application -Binding $binding -RequireActive } 'binding changed'
+            $binding.$field = $saved
+        }
+        if ($pattern.calls -ne 1) { throw 'A stale native binding or lost witness still invoked cancellation.' }
+        $closeCalls = [Collections.Generic.List[long]]::new()
+        function Request-AcceptanceWorkerWindowClose { param($Handle); $closeCalls.Add([long]$Handle) }
+        [void](Invoke-AcceptanceWorkerInterruption -Application $application -Binding $binding -Boundary $boundary `
+            -FixtureRoot $fixture -LocalAppData $localData -Mode WorkerClose)
+        if ($closeCalls.Count -ne 1 -or $closeCalls[0] -ne 4096 -or $pattern.calls -ne 1) {
+            throw 'Worker close did not dispatch ordinary close to the exact retained native main window.'
+        }
+    }
+
     $controllerPath = Join-Path (Get-ToolingTestPaths).ScriptsRoot 'modules/powershell/controller-entry.psm1'
     $tokens = $null
     $errors = $null
