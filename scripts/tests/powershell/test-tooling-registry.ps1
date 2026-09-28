@@ -22,13 +22,14 @@ function New-TestEntry {
         [string[]] $Platforms = @($actualPlatform),
         [string] $Category = 'fixture',
         [string] $Scope = 'current',
+        [string] $Runner = 'PowerShell',
         [bool] $RequiresVm = $false,
         [int] $Timeout = 10
     )
     [ordered]@{
         id = $Id
         path = $Path
-        runner = 'PowerShell'
+        runner = $Runner
         platforms = $Platforms
         scope = $Scope
         category = $Category
@@ -302,6 +303,68 @@ try {
     $timedOutResult = $timeoutReport.results[0]
     Assert-True ($timedOutResult.status -eq 'timed-out' -and $timedOutResult.elapsedSeconds -ge 1) 'Timeout report must retain timeout status and elapsed time.'
     Assert-True ($timedOutResult.error.Contains('timed out after 1 seconds')) 'Timeout report must retain its error.'
+
+    $pythonRoot = New-RegistryFixture `
+        -Entries @((New-TestEntry -Id 'python' -Path 'scripts/test-python.py' -Runner 'Python')) `
+        -Files @{
+            'scripts/test-python.py' = @'
+from pathlib import Path
+Path(__file__).with_suffix('.marker').write_text('ran', encoding='utf-8')
+print('Python subprocess ran')
+'@
+        }
+    $roots.Add($pythonRoot)
+    $pythonReportPath = Join-Path $pythonRoot 'python-results.json'
+    $python = Invoke-RegistryFixture -Root $pythonRoot -Arguments @('-Runner', 'Python', '-ResultPath', $pythonReportPath)
+    Assert-True ($python.exitCode -eq 0) "Actual platform Python invocation failed: $($python.stderr)"
+    Assert-True (Test-Path (Join-Path $pythonRoot 'scripts/test-python.marker')) 'Python selection must execute a real interpreter on each supported platform.'
+    Assert-True ($python.stdout.Contains('Python subprocess ran')) 'Python runner must propagate child output.'
+    $pythonReport = Get-Content -LiteralPath $pythonReportPath -Raw | ConvertFrom-Json
+    Assert-True ($pythonReport.status -eq 'passed' -and $pythonReport.results.Count -eq 1 -and
+        $pythonReport.results[0].runner -eq 'Python' -and $pythonReport.results[0].exitCode -eq 0) 'Python report must preserve successful child execution.'
+
+    $cancelledRoot = New-RegistryFixture `
+        -Entries @(
+            (New-TestEntry -Id 'before-cancel' -Path 'scripts/test-before-cancel.ps1')
+            (New-TestEntry -Id 'cancel' -Path 'scripts/test-cancel.ps1')
+            (New-TestEntry -Id 'after-cancel' -Path 'scripts/test-after-cancel.ps1')
+        ) `
+        -Files @{
+            'scripts/test-before-cancel.ps1' = '# completes before cancellation'
+            'scripts/test-cancel.ps1' = "Set-Content -LiteralPath (Join-Path `$PSScriptRoot 'cancel.marker') -Value running; Start-Sleep -Seconds 3"
+            'scripts/test-after-cancel.ps1' = "Set-Content -LiteralPath (Join-Path `$PSScriptRoot 'after-cancel.marker') -Value ran"
+        }
+    $roots.Add($cancelledRoot)
+    $cancelledReportPath = Join-Path $cancelledRoot 'cancelled-results.json'
+    $pipeline = [PowerShell]::Create()
+    try {
+        $null = $pipeline.AddCommand((Join-Path $cancelledRoot 'scripts/test-tooling.ps1')).
+            AddParameter('Platform', $actualPlatform).AddParameter('ResultPath', $cancelledReportPath)
+        $invocation = $pipeline.BeginInvoke()
+        $markerPath = Join-Path $cancelledRoot 'scripts/cancel.marker'
+        $deadline = [Diagnostics.Stopwatch]::StartNew()
+        while (-not (Test-Path -LiteralPath $markerPath) -and
+            -not $invocation.IsCompleted -and $deadline.Elapsed.TotalSeconds -lt 15) {
+            [Threading.Thread]::Sleep(50)
+        }
+        Assert-True (Test-Path -LiteralPath $markerPath) 'Cancellation fixture must reach its running child before stopping.'
+        $pipeline.Stop()
+        try {
+            $null = $pipeline.EndInvoke($invocation)
+        }
+        catch [Management.Automation.PipelineStoppedException] {
+            # Cancellation deliberately bypasses ordinary script catch blocks.
+        }
+        Assert-True ($pipeline.InvocationStateInfo.State -eq [Management.Automation.PSInvocationState]::Stopped) 'Fixture must exercise an actual stopped PowerShell pipeline.'
+    }
+    finally {
+        $pipeline.Dispose()
+    }
+    $cancelledReport = Get-Content -LiteralPath $cancelledReportPath -Raw | ConvertFrom-Json
+    Assert-True ($cancelledReport.status -eq 'failed') 'Incomplete execution must never produce a passed report.'
+    Assert-True ($cancelledReport.results.Count -eq 1 -and $cancelledReport.results[0].id -eq 'before-cancel' -and
+        $cancelledReport.results[0].status -eq 'passed') 'Cancelled execution must retain the completed test without inventing success for interrupted tests.'
+    Assert-True (-not (Test-Path (Join-Path $cancelledRoot 'scripts/after-cancel.marker'))) 'Cancellation must not execute later tests.'
 
     $missingRoot = New-RegistryFixture `
         -Entries @((New-TestEntry -Id 'registered' -Path 'scripts/test-registered.ps1')) `
