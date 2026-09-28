@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.util
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from tooling_test_paths import REPOSITORY_ROOT
 import struct
 import tempfile
@@ -263,7 +263,7 @@ class CampaignFixture:
     def layout_observations(self, path: str, environment: dict, target: dict) -> dict:
         if target.get("layout_variant", "command-rails") == "native-menu-only":
             result = MENU_FIXTURE.layout_for_environment(environment)
-            image = self.add_bytes(str(Path(path).parent / "workbench.png"), tiny_png())
+            image = self.add_bytes(str(PurePosixPath(path).parent / "workbench.png"), tiny_png())
             result["screenshots"] = [{"file": "workbench.png", "sha256": image.sha256,
                                       "width": 2, "height": 2}]
             return result
@@ -306,7 +306,7 @@ class CampaignFixture:
             "fixture_entries": [self.fixture("focus-sentinel.txt", 99)],
             "journal_entries": [],
         }
-        image = self.add_bytes(str(Path(path).parent / "workbench.png"), tiny_png())
+        image = self.add_bytes(str(PurePosixPath(path).parent / "workbench.png"), tiny_png())
         return {"controls": controls, "focus": [deepcopy(controls[2])],
                 "screenshots": [{"file": "workbench.png", "sha256": image.sha256,
                                  "width": 2, "height": 2}],
@@ -320,7 +320,7 @@ class CampaignFixture:
                 }}
 
     def restoration(self, path: str, result: dict, target: dict) -> None:
-        prefix = str(Path(path).parent)
+        prefix = str(PurePosixPath(path).parent)
         observer_sha = self.bundle["harness"]["observers"]["ui"]["sha256"]
         if target["contrast"] == "high-contrast":
             colors = {key: index for index, key in enumerate(
@@ -443,7 +443,7 @@ class CampaignFixture:
                     len(new_data), hashlib.sha256(new_data).hexdigest())
                 raw_files[path] = new_data
         self._replace_references(result, pins)
-        private_root = str(Path(private_index_path).parent)
+        private_root = str(PurePosixPath(private_index_path).parent)
         rows = []
         for path, data in sorted(raw_files.items()):
             if path == private_index_path or not path.startswith(private_root + "/"):
