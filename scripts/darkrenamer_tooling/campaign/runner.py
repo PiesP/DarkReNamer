@@ -25,6 +25,9 @@ from darkrenamer_tooling.evidence.archive import (
     EvidenceError, MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_FILES, load_bounded_json,
 )
 from darkrenamer_tooling.vm import gui, launcher
+from darkrenamer_tooling.vm.launcher import (
+    TEST_OUTPUT_AGGREGATE_MAXIMUM_BYTES, TEST_OUTPUT_CHANNEL_MAXIMUM_BYTES,
+)
 
 
 MAX_FILE_BYTES = 64 * 1024 * 1024
@@ -266,6 +269,7 @@ def backend_files(result: dict) -> list[str]:
     require(type(result) is dict and type(result.get("tests")) is list,
             "Backend result lacks its native test rows.")
     names = []
+    output_bytes = 0
     for row in result["tests"]:
         require(type(row) is dict, "Backend test row is invalid.")
         binary = safe_segment(row.get("file"))
@@ -273,11 +277,17 @@ def backend_files(result: dict) -> list[str]:
         names.append(binary)
         for channel in ("stdout", "stderr"):
             reference = row.get(channel)
-            require(type(reference) is dict and set(reference) == {"file", "sha256"},
+            require(type(reference) is dict and set(reference) == {"file", "sha256", "bytes"},
                     "Backend test output reference is invalid.")
             name = safe_segment(reference["file"])
-            require(re.fullmatch(r"[0-9a-f]{64}", reference["sha256"]) is not None,
+            require(type(reference["sha256"]) is str and
+                    re.fullmatch(r"[0-9a-f]{64}", reference["sha256"]) is not None,
                     "Backend test output digest is invalid.")
+            require(type(reference["bytes"]) is int and 0 <= reference["bytes"] <=
+                    TEST_OUTPUT_CHANNEL_MAXIMUM_BYTES and output_bytes <=
+                    TEST_OUTPUT_AGGREGATE_MAXIMUM_BYTES - reference["bytes"],
+                    "Backend test output exceeds its size bound.")
+            output_bytes += reference["bytes"]
             names.append(name)
     require(len(names) == len(set(name.casefold() for name in names)),
             "Backend test output names collide.")

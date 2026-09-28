@@ -298,6 +298,16 @@ Subclass state remains alive until confirmed detach or window destruction; an
 ambiguous removal leaks the bounded context instead of risking dangling native
 refdata. These presentation exceptions do not grant rename or journal authority.
 
+Modal input/details prompts keep one caller-owned `CallbackState<PromptState>`
+allocation until all synchronous callbacks return. Each state-reading callback
+must acquire its exclusive lease; nested color/draw callbacks use native fallback
+while it is busy. Font, layout, and appearance refreshes release that lease before
+an immediate palette repaint, focus assignment, clipboard work, or destruction.
+`WM_NCDESTROY` clears publication without touching a possibly leased value. The
+modal loop checks completion and exact publication before waiting for each
+message, so it recognizes destruction that did not set the completion flag. The modal owner destroys
+any still-published window before dropping state/fonts on every return path.
+
 `normalized_final_leaf` keeps the source handle live for the synchronous
 `GetFinalPathNameByHandleW` call, passes either a null zero-length output or the
 exact checked writable slice, bounds each allocation by

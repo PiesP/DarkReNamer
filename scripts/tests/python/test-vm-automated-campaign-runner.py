@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
@@ -17,6 +18,7 @@ from zipfile import ZIP_STORED, ZipFile
 
 from controller_cleanup_fixture import clean_controller_cleanup
 from darkrenamer_tooling.campaign import runner
+from darkrenamer_tooling.vm import launcher
 
 REPOSITORY = REPOSITORY_ROOT
 
@@ -103,8 +105,9 @@ class CampaignRunnerTests(unittest.TestCase):
             tests.append({
                 "name": f"native-binary-{index}", "file": f"test-{index}.exe",
                 "sha256": hashlib.sha256(b"large executable").hexdigest(), "exit_code": 0, "passed": 1, "failed": 0, "ignored": 0,
-                "stdout": {"file": stdout, "sha256": hashlib.sha256((self.backend / stdout).read_bytes()).hexdigest()},
-                "stderr": {"file": stderr, "sha256": hashlib.sha256(b"").hexdigest()},
+                "stdout": {"file": stdout, "sha256": hashlib.sha256((self.backend / stdout).read_bytes()).hexdigest(),
+                           "bytes": (self.backend / stdout).stat().st_size},
+                "stderr": {"file": stderr, "sha256": hashlib.sha256(b"").hexdigest(), "bytes": 0},
             })
             binaries.append({"name": name, "file": f"test-{index}.exe", "sha256": hashlib.sha256(b"large executable").hexdigest()})
             (self.backend / f"test-{index}.exe").write_bytes(b"large executable")
@@ -250,6 +253,58 @@ class CampaignRunnerTests(unittest.TestCase):
                 continue
             ordinary = json.loads(Path(call[call.index("--acceptance-manifest") + 1]).read_text())
             self.assertEqual(ordinary["request"]["layout_variant"], "command-rails")
+
+    def test_backend_files_accept_current_output_contract_and_empty_stderr(self) -> None:
+        result = json.loads((self.backend / "result.json").read_text(encoding="utf-8-sig"))
+        self.assertEqual(runner.backend_files(result), [
+            name for row in result["tests"]
+            for name in (row["file"], row["stdout"]["file"], row["stderr"]["file"])
+        ])
+        self.assertTrue(all(row["stderr"]["bytes"] == 0 for row in result["tests"]))
+
+    def test_backend_files_reject_invalid_output_contract(self) -> None:
+        original = json.loads((self.backend / "result.json").read_text(encoding="utf-8-sig"))
+        mutations = [
+            ("missing-bytes", lambda ref: ref.pop("bytes")),
+            ("extra-field", lambda ref: ref.update(extra=True)),
+            ("invalid-digest", lambda ref: ref.update(sha256="invalid")),
+            ("non-string-digest", lambda ref: ref.update(sha256=None)),
+            ("non-leaf-name", lambda ref: ref.update(file="../stdout.txt")),
+        ] + [(str(value), lambda ref, value=value: ref.update(bytes=value))
+             for value in (True, None, "0", 0.5, -1,
+                           launcher.TEST_OUTPUT_CHANNEL_MAXIMUM_BYTES + 1)]
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                result = deepcopy(original)
+                mutate(result["tests"][0]["stdout"])
+                with self.assertRaises(ValueError):
+                    runner.backend_files(result)
+
+    def test_backend_files_enforce_aggregate_output_bound(self) -> None:
+        maximum = launcher.TEST_OUTPUT_CHANNEL_MAXIMUM_BYTES
+        rows = launcher.TEST_OUTPUT_AGGREGATE_MAXIMUM_BYTES // (2 * maximum)
+        result = {"tests": [{
+            "file": f"test-{index}.exe",
+            **{channel: {"file": f"test-{index}.{channel}.txt", "sha256": "a" * 64,
+                         "bytes": maximum} for channel in ("stdout", "stderr")},
+        } for index in range(rows)]}
+        self.assertEqual(len(runner.backend_files(result)), rows * 3)
+        result["tests"].append({"file": "overflow.exe",
+                                "stdout": {"file": "overflow.txt", "sha256": "a" * 64, "bytes": 1},
+                                "stderr": {"file": "empty.txt", "sha256": "a" * 64, "bytes": 0}})
+        with self.assertRaisesRegex(ValueError, "size bound"):
+            runner.backend_files(result)
+
+    def test_prepare_backend_rejects_byte_mismatch_with_real_native_validator(self) -> None:
+        result_path = self.backend / "result.json"
+        result = json.loads(result_path.read_text(encoding="utf-8-sig"))
+        result["tests"][0]["stdout"]["bytes"] += 1
+        write_json(result_path, result)
+        profile = json.loads((self.repo / "config" / "vm-automated-v1.json").read_text())
+        with self.assertRaisesRegex(ValueError, "recorded byte count"):
+            runner.prepare_backend(self.backend, self.root / "prepared-backend", profile,
+                                   HARNESS_SHA, launcher)
+        self.assertFalse((self.root / "prepared-backend").exists())
 
     def test_backend_external_cleanup_must_match_embedded_raw_observation(self) -> None:
         transport_path = self.backend / "transport.json"

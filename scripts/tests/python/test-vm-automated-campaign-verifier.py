@@ -541,8 +541,8 @@ class CampaignFixture:
                   "transport": {"guest_cleanup": True, "raw_cleanup": backend_cleanup},
                   "tests": [{"file": "required-tests.exe", "sha256": binary.sha256,
                              "exit_code": 0, "passed": 5, "failed": 0, "ignored": 0,
-                             "stdout": {"file": "stdout.txt", "sha256": stdout.sha256},
-                             "stderr": {"file": "stderr.txt", "sha256": stderr.sha256}}]}
+                             "stdout": {"file": "stdout.txt", "sha256": stdout.sha256, "bytes": stdout.size},
+                             "stderr": {"file": "stderr.txt", "sha256": stderr.sha256, "bytes": stderr.size}}]}
         self.add_json("backend/bundle.json", bundle)
         self.add_json("backend/result.json", result)
         self.add_json("backend/transport.json", {

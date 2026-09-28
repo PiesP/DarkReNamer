@@ -99,7 +99,7 @@
       "bundle": "tooling-campaign-runner.py",
       "kind": "python",
       "module": "darkrenamer_tooling.campaign.runner",
-      "sha256": "afb0cbadbf61a171aab2e0a25f1d9319f06834d519226b4bfa16178658a88a48",
+      "sha256": "3e59e575aa856ba184be0daa35dab6b04483a62907f18dbb9519f69fc8542683",
       "dependencies": [
         "tooling-loader",
         "package-root",
