@@ -949,11 +949,6 @@ def execute_run(repo: Path, bundle: Path, run_root: Path, run: dict, profile: di
             "schema_version": 1,
             "run_id": run["run_id"],
             "input_manifest_sha256": input_sha256,
-            "status": "passed" if (
-                observer.get("guest_cleanup") is True
-                and desktop_restored
-                and text_scale_restored
-            ) else "failed",
             "fixture": observer.get("guest_cleanup") is True,
             "process": observer.get("process_cleanup", observer.get("guest_cleanup")) is True,
             "guest": (output / "transport.json").is_file()
@@ -962,6 +957,10 @@ def execute_run(repo: Path, bundle: Path, run_root: Path, run: dict, profile: di
             "text_scale_restore": text_scale_restored,
             "controller_exit_code": controller_exit,
         }
+        cleanup["status"] = "passed" if all(
+            cleanup[name] is True
+            for name in ("fixture", "process", "guest", "desktop_restore", "text_scale_restore")
+        ) else "failed"
         write_json(output / "cleanup.json", cleanup, exclusive=True)
     require(controller_exit == 0, "GUI regression transport failed; preserve and inspect the run output.")
     require(controller_logs_bounded, "GUI regression controller stream exceeds the raw size bound.")
