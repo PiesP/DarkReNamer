@@ -518,7 +518,7 @@
       "bundle": "ui-bootstrap.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "8d50693db31f42505039b1a060ffbcd3db2e35b6a5585602ca0654eca4fdd731",
+      "sha256": "663d92b3e35fb94ada9e73f20ce55abf9d141d8e09dcd8f61fc54719541c0ba7",
       "dependencies": []
     },
     {
@@ -744,7 +744,7 @@
       "bundle": "controller-poll.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "ba11d12869b33197e538a69f220ba42296fe9b153fc69cec3019c6cff0fab62b",
+      "sha256": "6ef471d2beec8a9db524db485386946d140f189af097d3bd5289d49cfc051a7d",
       "dependencies": []
     },
     {
@@ -762,7 +762,7 @@
       "bundle": "controller-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "f1fc88fbca532f85777973dfbf3cb2ed4d73aab8a20f72515556276619457166",
+      "sha256": "3515c52bf1974c073b0e598e4d4819f98eab7222512d34d1159101a31fb82783",
       "dependencies": [
         "powershell-loader",
         "powershell-controller-contracts",
