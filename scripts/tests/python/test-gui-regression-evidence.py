@@ -1025,6 +1025,10 @@ class GuiEvidenceTests(unittest.TestCase):
             with self.subTest(kind=kind), self.assertRaisesRegex(evidence.EvidenceError, "invalid PNG chunk type"):
                 evidence.decode_png(prefix + png_chunk(kind, b"") + first + second + end, "invalid")
 
+    def test_deep_json_reports_a_validation_error(self):
+        with self.assertRaisesRegex(evidence.EvidenceError, "not strict UTF-8 JSON"):
+            evidence.parse_json_bytes(b"[" * 20000 + b"0" + b"]" * 20000, "deep")
+
     def test_png_decoder_preserves_supported_opaque_color_formats(self):
         for color_type, pixel, rgba in (
             (0, b"\x12", b"\x12\x12\x12\xff"),

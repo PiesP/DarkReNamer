@@ -196,6 +196,19 @@ try {
         -OutputPath (Join-Path $testRoot 'different-pdb.json')
 
     $oversizedPdb = Join-Path $testRoot 'oversized.pdb'
+    $expandedSymbols = Join-Path $testRoot 'expanded-symbols.zip'
+    Write-SymbolArchiveFixture -Path $expandedSymbols -Bytes ([byte[]]::new(64 * 1024))
+    Assert-MeasurerFails -ExpectedFragment 'archive PDB length does not match PdbPath' `
+        -ExecutablePath $executable -PdbPath $pdb -SymbolsPath $expandedSymbols `
+        -OutputPath (Join-Path $testRoot 'expanded.json')
+    foreach ($length in @(128, 64 * 1024)) {
+        Write-SymbolArchiveFixture -Path $expandedSymbols -Bytes ([byte[]]::new($length)) `
+            -DeclaredLength (Get-Item -LiteralPath $pdb).Length
+        Assert-MeasurerFails -ExpectedFragment 'archive expanded PDB' `
+            -ExecutablePath $executable -PdbPath $pdb -SymbolsPath $expandedSymbols `
+            -OutputPath (Join-Path $testRoot 'forged-length.json')
+    }
+
     $oversizedPdbStream = [IO.File]::Open(
         $oversizedPdb,
         [IO.FileMode]::CreateNew,

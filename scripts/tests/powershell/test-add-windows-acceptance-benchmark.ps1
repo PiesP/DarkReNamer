@@ -67,7 +67,7 @@ function New-Case([string]$Name, [string]$Media='ssd', [int]$Count=100) {
 
 function Assert-NoTemp([string]$Output) {
     $parent = Split-Path -Parent $Output; $leaf = [IO.Path]::GetFileName($Output)
-    if ((Test-Path $parent) -and @(Get-ChildItem -LiteralPath $parent -File | Where-Object Name -Like ".$leaf.*.tmp").Count) { throw 'Augmenter left an owned temporary file.' }
+    if ((Test-Path $parent) -and @(Get-ChildItem -LiteralPath $parent -File -Force | Where-Object Name -Like ".$leaf.*.tmp").Count) { throw 'Augmenter left an owned temporary file.' }
 }
 
 function Assert-Fails([scriptblock]$Command, [string]$Fragment, [string]$Output, [string]$Forbidden='') {
@@ -101,6 +101,17 @@ $insideOutput = $null
 $insideOutputCleanupOwned = $false
 try {
     New-Item -ItemType Directory -Path $testRoot | Out-Null
+    $cleanupProbe = Join-Path $testRoot 'cleanup-probe.json'
+    $hiddenTemporary = Join-Path $testRoot '.cleanup-probe.json.fixture.tmp'
+    [IO.File]::WriteAllText($hiddenTemporary, 'leftover')
+    $detectedTemporary = $false
+    try { Assert-NoTemp $cleanupProbe }
+    catch {
+        if ($_.Exception.Message -cne 'Augmenter left an owned temporary file.') { throw }
+        $detectedTemporary = $true
+    }
+    finally { Remove-Item -LiteralPath $hiddenTemporary -Force }
+    if (-not $detectedTemporary) { throw 'Cleanup assertion missed a hidden temporary file.' }
     $exe = Join-Path $testRoot 'DarkReNamer.exe'; [IO.File]::WriteAllBytes($exe, [byte[]](0x4d,0x5a,1,2))
     $baseEvidence = Join-Path $testRoot 'base.json'
     & $draftGenerator -SourceRoot $sourceRoot -OutputPath $baseEvidence -ExecutablePath $exe | Out-Null

@@ -233,7 +233,7 @@ def parse_json_bytes(data: bytes, label: str) -> object:
             object_pairs_hook=strict_object,
             parse_constant=reject_constant,
         )
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
         raise EvidenceError(f"{label} is not strict UTF-8 JSON: {error}") from error
 
 

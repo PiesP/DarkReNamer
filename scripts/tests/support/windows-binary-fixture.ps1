@@ -95,6 +95,35 @@ function Write-Bytes {
     [IO.File]::WriteAllBytes($Path, $Bytes)
 }
 
+function Write-SymbolArchiveFixture {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][byte[]] $Bytes,
+        [long] $DeclaredLength = -1
+    )
+
+    $memory = [IO.MemoryStream]::new()
+    try {
+        $archive = [IO.Compression.ZipArchive]::new($memory, [IO.Compression.ZipArchiveMode]::Create, $true)
+        try {
+            $entry = $archive.CreateEntry('DarkReNamer.pdb')
+            $stream = $entry.Open()
+            try { $stream.Write($Bytes, 0, $Bytes.Length) }
+            finally { $stream.Dispose() }
+        }
+        finally { $archive.Dispose() }
+        $zipBytes = $memory.ToArray()
+    }
+    finally { $memory.Dispose() }
+    if ($DeclaredLength -ge 0) {
+        # This one-entry fixture has no archive comment or ZIP64 records.
+        $centralDirectory = [BitConverter]::ToUInt32($zipBytes, $zipBytes.Length - 6)
+        Set-UInt32LittleEndian -Bytes $zipBytes -Offset 22 -Value $DeclaredLength
+        Set-UInt32LittleEndian -Bytes $zipBytes -Offset ($centralDirectory + 24) -Value $DeclaredLength
+    }
+    Write-Bytes -Path $Path -Bytes $zipBytes
+}
+
 function Write-WindowsBinaryFixture {
     param(
         [Parameter(Mandatory)]

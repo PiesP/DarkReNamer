@@ -42,24 +42,7 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-if ($ElevatedObserver) {
-    if ([string]::IsNullOrWhiteSpace($TrustedResultPath) -or
-        -not [IO.Path]::IsPathRooted($TrustedResultPath)) {
-        throw 'The elevated VM observer requires an absolute trusted result path.'
-    }
-    $env:DARKRENAMER_VM_ELEVATED_OBSERVER = '1'
-    $env:DARKRENAMER_VM_TRUSTED_RESULT_PATH = [IO.Path]::GetFullPath($TrustedResultPath)
-    $env:DARKRENAMER_VM_EXPECTED_SESSION_ID = $ExpectedSessionId.ToString(
-        [Globalization.CultureInfo]::InvariantCulture
-    )
-}
-else {
-    $env:DARKRENAMER_VM_ELEVATED_OBSERVER = $null
-    $env:DARKRENAMER_VM_TRUSTED_RESULT_PATH = $null
-    $env:DARKRENAMER_VM_EXPECTED_SESSION_ID = $null
-}
-
-$ToolingManifestSha256 = '2913402ac6b609c5aaea51dbf618f2ea7fcab5f81f972070fff0ebfaaec918e6'
+$ToolingManifestSha256 = '96786b6a7c21894ee38c89c3756193453525087a867825a8c07af7c9989fd49a'
 $ToolingLoaderSha256 = '6888561ff9a23becf279ec7d4e691b40d50d79dde2196d22c0d63e2252dd08a1'
 
 function Get-DrBootstrapSha256 {
@@ -217,7 +200,31 @@ $loaderContext = Initialize-DrVerifiedTooling `
     -Mode 'bundle' `
     -RequiredRole 'powershell-recovery-entry'
 $module = $null
+$observerEnvironment = @{}
+foreach ($name in @(
+    'DARKRENAMER_VM_ELEVATED_OBSERVER'
+    'DARKRENAMER_VM_TRUSTED_RESULT_PATH'
+    'DARKRENAMER_VM_EXPECTED_SESSION_ID'
+)) {
+    $observerEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+}
 try {
+    if ($ElevatedObserver) {
+        if ([string]::IsNullOrWhiteSpace($TrustedResultPath) -or
+            -not [IO.Path]::IsPathRooted($TrustedResultPath)) {
+            throw 'The elevated VM observer requires an absolute trusted result path.'
+        }
+        $env:DARKRENAMER_VM_ELEVATED_OBSERVER = '1'
+        $env:DARKRENAMER_VM_TRUSTED_RESULT_PATH = [IO.Path]::GetFullPath($TrustedResultPath)
+        $env:DARKRENAMER_VM_EXPECTED_SESSION_ID = $ExpectedSessionId.ToString(
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+    }
+    else {
+        $env:DARKRENAMER_VM_ELEVATED_OBSERVER = $null
+        $env:DARKRENAMER_VM_TRUSTED_RESULT_PATH = $null
+        $env:DARKRENAMER_VM_EXPECTED_SESSION_ID = $null
+    }
 $verified = $loaderContext.verified
 $definitionRoles = @(
     'powershell-guest-contracts'
@@ -263,6 +270,14 @@ $module = Microsoft.PowerShell.Core\New-Module -Name $moduleName -ScriptBlock $e
     } 'Invoke-DrWindowsVmRecoveryAcceptance' $invokeParameters
 }
 finally {
+    foreach ($name in $observerEnvironment.Keys) {
+        if ($null -eq $observerEnvironment[$name]) {
+            [Environment]::SetEnvironmentVariable($name, [NullString]::Value, 'Process')
+        }
+        else {
+            [Environment]::SetEnvironmentVariable($name, $observerEnvironment[$name], 'Process')
+        }
+    }
     if ($null -ne $module) {
         Microsoft.PowerShell.Core\Remove-Module `
             -Name $module.Name -Force -ErrorAction SilentlyContinue

@@ -598,11 +598,32 @@ try {
         -HandoffRoot $handoffRoot
 
     Write-Checksums -HandoffRoot $handoffRoot
-    Write-Utf8NoBom -Path (Join-Path $handoffRoot 'unexpected.txt') -Content "unexpected`n"
-    Assert-ValidatorFails `
-        -ExpectedFragment 'Release handoff layout mismatch' `
-        -SourceRoot $sourceRoot `
-        -HandoffRoot $handoffRoot
+    foreach ($entry in @(
+        @{ Name = 'unexpected.txt'; Kind = 'File' }
+        @{ Name = '.hidden-file'; Kind = 'File' }
+        @{ Name = '.hidden-directory'; Kind = 'Directory' }
+    )) {
+        $extraPath = Join-Path $handoffRoot $entry.Name
+        $null = New-Item -Path $extraPath -ItemType $entry.Kind
+        try {
+            Assert-ValidatorFails -ExpectedFragment 'Release handoff layout mismatch' `
+                -SourceRoot $sourceRoot -HandoffRoot $handoffRoot
+        }
+        finally { Remove-Item -LiteralPath $extraPath -Force }
+    }
+
+    $checksums = Get-Content -LiteralPath $checksumPath -Raw
+    Write-Utf8NoBom -Path $checksumPath -Content ($checksums.Replace('*LICENSE', '*license'))
+    Assert-ValidatorFails -ExpectedFragment 'canonical sorted order' `
+        -SourceRoot $sourceRoot -HandoffRoot $handoffRoot
+    Write-Checksums -HandoffRoot $handoffRoot
+
+    Write-SymbolArchiveFixture -Path (Join-Path $handoffRoot 'DarkReNamer-debug-symbols.zip') `
+        -Bytes ([byte[]]::new(64 * 1024))
+    Write-Metrics -HandoffRoot $handoffRoot -SourceSha $sourceSha
+    Write-Checksums -HandoffRoot $handoffRoot
+    Assert-ValidatorFails -ExpectedFragment 'archive PDB length does not match PdbPath' `
+        -SourceRoot $sourceRoot -HandoffRoot $handoffRoot
 
     Write-Host 'Release handoff validator tests passed.'
 }
