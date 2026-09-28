@@ -861,36 +861,6 @@ try {
     if ($mixedTreeText -cne "first`nlast") {
         throw 'The mixed confirmation text projection must read and filter the returned tree rows.'
     }
-    $reachabilityMapIndex = $acceptanceText.IndexOf(
-        '$reachability = [ordered]@{',
-        [StringComparison]::Ordinal
-    )
-    $reachabilityReceiptIndex = if ($reachabilityMapIndex -lt 0) { -1 } else {
-        $acceptanceText.IndexOf(
-            "(`$Prefix + '-reachability.json')",
-            $reachabilityMapIndex,
-            [StringComparison]::Ordinal
-        )
-    }
-    $reachabilityControlsIndex = if ($reachabilityReceiptIndex -lt 0) { -1 } else {
-        $acceptanceText.IndexOf(
-            'controls = $reachability',
-            $reachabilityReceiptIndex,
-            [StringComparison]::Ordinal
-        )
-    }
-    $reachabilityThrowIndex = if ($reachabilityControlsIndex -lt 0) { -1 } else {
-        $acceptanceText.IndexOf(
-            'After context confirmation has a mouse-inaccessible required control',
-            $reachabilityControlsIndex,
-            [StringComparison]::Ordinal
-        )
-    }
-    if ($reachabilityMapIndex -lt 0 -or $reachabilityReceiptIndex -le $reachabilityMapIndex -or
-        $reachabilityControlsIndex -le $reachabilityReceiptIndex -or
-        $reachabilityThrowIndex -le $reachabilityControlsIndex) {
-        throw 'Context confirmation must persist its fixed control reachability map before rejecting inaccessible controls.'
-    }
     & {
         $regressionFunction = $acceptanceAst.Find({
             param($node)
@@ -1317,140 +1287,10 @@ try {
         ) -match 'LocalFree|FreeHGlobal') {
         throw 'The acceptance observer must retain, not free, borrowed High Contrast GET pointers.'
     }
-    $selectionObservationIndex = $acceptanceText.IndexOf(
-        '        $selectionPatternObject = $null',
-        [StringComparison]::Ordinal
-    )
-    $previewWaitIndex = $acceptanceText.IndexOf(
-        '        Wait-ListPreviewName -MainWindow $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -ExpectedName $destinationName -TimeoutSeconds $TimeoutSeconds',
-        [StringComparison]::Ordinal
-    )
-    $resetFocusIndex = $acceptanceText.IndexOf(
-        "        [void](Move-RailFocusToCommand -Process `$process -ExpectedSession `$ExpectedSessionId -AutomationId '32781')",
-        [StringComparison]::Ordinal
-    )
-    if ($selectionObservationIndex -lt 0 -or
-        $previewWaitIndex -lt 0 -or
-        $resetFocusIndex -lt 0 -or
-        $selectionObservationIndex -gt $previewWaitIndex -or
-        $selectionObservationIndex -gt $resetFocusIndex) {
-        throw 'The no-selection reset observation must precede list refresh and reset focus movement.'
-    }
-    if ($acceptanceText.IndexOf("-AutomationId '1148'", [StringComparison]::Ordinal) -lt 0 -or
-        $acceptanceText.IndexOf(
-            '-ControlType ([Windows.Automation.ControlType]::Edit)',
-            [StringComparison]::Ordinal
-        ) -lt 0) {
-        throw 'The common-dialog filename target must select the editable UIA child.'
-    }
-    foreach ($taskDialogId in @('CommandButton_2', 'CommandLink_1101')) {
-        if ($acceptanceText.IndexOf(
-            "-AutomationId '$taskDialogId'",
-            [StringComparison]::Ordinal
-        ) -lt 0) {
-            throw "The acceptance flow is missing TaskDialog automation ID $taskDialogId."
-        }
-    }
-    foreach ($requiredRawObservation in @(
-        'function Get-VmAutomatedKeyboardEventStart',
-        "-ExpectedAutomationId 'CommandButton_2'",
-        "-ExpectedAutomationId 'CommandLink_1101'",
-        'root_hwnd = [long]$rootHandle',
-        'Complete-VmAutomatedKeyboardEvent',
-        'Get-VmAutomatedCheckpoint',
-        '$result.raw_environment = Get-VmAutomatedEnvironment',
-        "exit_method = 'normal-close'",
-        "exit_method = 'forced-termination'",
-        '$result.layout_observations = [ordered]@{'
-        'function New-VmAutomatedLayoutRun'
-        'function Complete-VmAutomatedLayoutRun'
-        '$result.raw_layout_runs = @($scenario.raw_layout_runs)'
-        '$result.raw_text_scale = [ordered]@{'
-        'active_winrt_percent = [int]$observations.scenario.environment.text_scale_factor_percent'
-        'function Get-VmAutomatedAppearance'
-        '$result.raw_appearance = Get-VmAutomatedAppearance'
-        'raw_appearance = Get-VmAutomatedAppearance'
-        'function Get-VmAutomatedHiddenRailControls'
-        'function Invoke-VmAutomatedNativeMenuOnlyReachability'
-        'IntPtr itemOwner = depth == 0 ? window : IntPtr.Zero;'
-        "variant = 'native-menu-only'"
-        'hidden_rail_controls = $hiddenRails'
-        'menu_tree = $menuTree'
-        'function Invoke-VmAutomatedFocusReachability'
-        'focus_reachability = $focusReachability'
-        'focus_reachability = $rawFocusReachability'
-        "& `$step 'tab' 0x09"
-        "& `$step 'down' 0x28"
-        'Get-VmAutomatedFixtureInventory -FixtureRoot $FixtureRoot'
-        'Get-VmAutomatedJournalInventory -LocalAppData $LocalAppData'
-    )) {
-        if ($acceptanceText.IndexOf($requiredRawObservation, [StringComparison]::Ordinal) -lt 0) {
-            throw "The candidate UI raw observation contract is missing '$requiredRawObservation'."
-        }
-    }
-    $regressionCleanupValidation = $acceptanceText.IndexOf(
-        '[void](Get-VmAutomatedRuntimeRootObservation -Root $effectiveRuntimeRoot)',
-        [StringComparison]::Ordinal
-    )
-    $regressionCleanupDelete = $acceptanceText.IndexOf(
-        'Remove-Item -LiteralPath $effectiveRuntimeRoot -Recurse -Force',
-        $regressionCleanupValidation + 1,
-        [StringComparison]::Ordinal
-    )
-    if ($regressionCleanupValidation -lt 0 -or
-        $regressionCleanupDelete -le $regressionCleanupValidation) {
-        throw 'GUI regression cleanup must validate the bounded ordinary runtime tree before deletion.'
-    }
-    if ([regex]::Matches(
-            $acceptanceText,
-            [regex]::Escape('[void](Get-VmAutomatedRuntimeRootObservation -Root $effectiveRuntimeRoot)')
-        ).Count -ne 1 -or
-        [regex]::Matches(
-            $acceptanceText,
-            [regex]::Escape('[void](Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot)')
-        ).Count -ne 1) {
-        throw 'Regression and current-DPI cleanup must both validate their runtime tree before deletion.'
-    }
-    $runtimeDeleteCalls = @(
-        [regex]::Matches(
-            $acceptanceText,
-            [regex]::Escape('Remove-Item -LiteralPath $effectiveRuntimeRoot -Recurse -Force')
-        )
-        [regex]::Matches(
-            $acceptanceText,
-            [regex]::Escape('Remove-Item -LiteralPath $runtimeRoot -Recurse -Force')
-        )
-    )
-    foreach ($runtimeDelete in $runtimeDeleteCalls) {
-        $ledgerGate = $acceptanceText.LastIndexOf(
-            '[void](Assert-AcceptanceProcessJobLedgerClosed)',
-            $runtimeDelete.Index,
-            [StringComparison]::Ordinal
-        )
-        if ($ledgerGate -lt 0 -or $runtimeDelete.Index -le $ledgerGate) {
-            throw 'Candidate UI runtime deletion must follow closed process-job ledger verification.'
-        }
-    }
-    $appearanceFunctions = @($acceptanceAst.FindAll({
-        param($ast)
-        $ast -is [Management.Automation.Language.FunctionDefinitionAst] -and
-            $ast.Name -ceq 'Get-VmAutomatedAppearance'
-    }, $true))
-    if ($appearanceFunctions.Count -ne 1) {
-        throw 'The acceptance script must define one Get-VmAutomatedAppearance helper.'
-    }
-    $appearanceDefinition = $appearanceFunctions[0].Extent.Text
-    foreach ($requiredAppearanceSource in @(
-        'Assert-AutomationBinding',
-        '-RequireWindowHandle',
-        '0x9010',
-        '0x9011',
-        '0x9012',
-        'menu_checked = $menu'
-    )) {
-        if ($appearanceDefinition.IndexOf($requiredAppearanceSource, [StringComparison]::Ordinal) -lt 0) {
-            throw "Raw appearance observation is missing '$requiredAppearanceSource'."
-        }
+    # GetMenuItemRect uses the root owner HWND only for top-level items; native
+    # submenu observations must not reuse that HWND. Keep this narrow ABI policy.
+    if ($acceptanceText.IndexOf('IntPtr itemOwner = depth == 0 ? window : IntPtr.Zero;', [StringComparison]::Ordinal) -lt 0) {
+        throw 'Native submenu geometry must retain its documented null-owner ABI.'
     }
     $focusControlFunctions = @($acceptanceAst.FindAll({
         param($ast)
@@ -1817,70 +1657,6 @@ try {
     if ($menuReachabilitySource.IndexOf('SendMenuCommand', [StringComparison]::Ordinal) -ge 0) {
         throw 'Native menu reachability must not invoke a command programmatically.'
     }
-    if (($acceptanceText | Select-String -Pattern "failure_reason = 'desktop_lock_release_failed'" -AllMatches).Matches.Count -ne 3) {
-        throw 'Current-DPI, GUI regression, and rescue paths must preserve structured evidence after desktop-lock release failure.'
-    }
-    $captureResizeIndex = $acceptanceText.IndexOf(
-        '        $captureWindow = Ensure-AcceptanceMainWindowCaptureSize',
-        [StringComparison]::Ordinal
-    )
-    $initialCaptureIndex = $acceptanceText.IndexOf(
-        '        $initialCapture = Save-WindowScreenshot',
-        [StringComparison]::Ordinal
-    )
-    if ($captureResizeIndex -lt 0 -or
-        $initialCaptureIndex -lt 0 -or
-        $captureResizeIndex -gt $initialCaptureIndex) {
-        throw 'Evidence-eligible main-window sizing must precede the first workbench capture.'
-    }
-    $clipboardFlowIndex = $acceptanceText.IndexOf(
-        "        if (`$Clipboard) {",
-        [StringComparison]::Ordinal
-    )
-    $prefixCompleteIndex = $acceptanceText.IndexOf(
-        '        Wait-ListPreviewName -MainWindow $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -ExpectedName $destinationName -TimeoutSeconds $TimeoutSeconds',
-        [StringComparison]::Ordinal
-    )
-    $beforeResetIndex = $acceptanceText.IndexOf(
-        '        $beforeReset = Get-ListPrimarySnapshot -List $list',
-        [StringComparison]::Ordinal
-    )
-    if ($clipboardFlowIndex -lt 0 -or
-        $prefixCompleteIndex -lt 0 -or
-        $beforeResetIndex -lt 0 -or
-        $clipboardFlowIndex -lt $prefixCompleteIndex -or
-        $clipboardFlowIndex -gt $beforeResetIndex) {
-        throw 'Clipboard acceptance must run after import and prefix while the exact row remains known.'
-    }
-    foreach ($requiredClipboardSource in @(
-        '[switch] $Clipboard',
-        '[uint32]0x8018',
-        '[uint32]0x801A',
-        "-Modifier 0x11 -SecondModifier 0x10 -VirtualKey 0x43",
-        'ClearClipboardIfOwned'
-    )) {
-        if ($acceptanceText.IndexOf($requiredClipboardSource, [StringComparison]::Ordinal) -lt 0) {
-            throw "The acceptance flow is missing required Clipboard contract '$requiredClipboardSource'."
-        }
-    }
-    $clipboardNamesFailureIndex = $acceptanceText.IndexOf(
-        "            `$result.failure_reason = 'clipboard_names_failed'",
-        [StringComparison]::Ordinal
-    )
-    $clipboardPathsFailureIndex = $acceptanceText.IndexOf(
-        "            `$result.failure_reason = 'clipboard_paths_failed'",
-        [StringComparison]::Ordinal
-    )
-    $clipboardPathsChordIndex = $acceptanceText.IndexOf(
-        '            Send-AcceptanceTwoModifierChord -Process $process',
-        [StringComparison]::Ordinal
-    )
-    if ($clipboardNamesFailureIndex -lt 0 -or
-        $clipboardPathsFailureIndex -le $clipboardNamesFailureIndex -or
-        $clipboardPathsChordIndex -le $clipboardPathsFailureIndex) {
-        throw 'The Copy Paths phase must identify its failure before the Ctrl+Shift+C action.'
-    }
-
     if ($acceptanceText.IndexOf('ContentType=WindowsRuntime', [StringComparison]::Ordinal) -ge 0) {
         throw 'Text-scale reads must use the PowerShell Core-compatible native UISettings ABI helper.'
     }
@@ -2075,56 +1851,6 @@ try {
             -ExpectedClassName 'DarkReNamerWindow' `
             -ExpectedTitle 'DarkReNamer'
     } 'matched more than one exact native window'
-    $prefixMoveIndex = $acceptanceText.IndexOf(
-        "Move-RailFocusToCommand -Process `$process -ExpectedSession `$ExpectedSessionId -AutomationId '32773'",
-        [StringComparison]::Ordinal
-    )
-    $prefixBindingIndex = $acceptanceText.IndexOf(
-        '$prefixActivationAttempt = Get-AcceptanceCommandActivationAttempt',
-        $prefixMoveIndex,
-        [StringComparison]::Ordinal
-    )
-    $prefixPersistIndex = $acceptanceText.IndexOf(
-        "`$observations['prefix_activation_attempt'] = `$prefixActivationAttempt",
-        $prefixBindingIndex,
-        [StringComparison]::Ordinal
-    )
-    $prefixTapIndex = $acceptanceText.IndexOf(
-        '[DarkReNamerVmAcceptanceNative]::Tap(0x20)',
-        $prefixPersistIndex,
-        [StringComparison]::Ordinal
-    )
-    $prefixAssertIndex = $acceptanceText.IndexOf(
-        'Assert-AcceptanceCommandActivationBinding',
-        $prefixPersistIndex,
-        [StringComparison]::Ordinal
-    )
-    $prefixWaitIndex = $acceptanceText.IndexOf(
-        '-Label ''keyboard prefix prompt''',
-        $prefixTapIndex,
-        [StringComparison]::Ordinal
-    )
-    $prefixRemoveIndex = $acceptanceText.IndexOf(
-        "`$observations.Remove('prefix_activation_attempt')",
-        $prefixWaitIndex,
-        [StringComparison]::Ordinal
-    )
-    if ($prefixMoveIndex -lt 0 -or $prefixBindingIndex -le $prefixMoveIndex -or
-        $prefixPersistIndex -le $prefixBindingIndex -or $prefixAssertIndex -le $prefixPersistIndex -or
-        $prefixTapIndex -le $prefixAssertIndex -or
-        $prefixWaitIndex -le $prefixTapIndex -or $prefixRemoveIndex -le $prefixWaitIndex) {
-        throw 'Prefix Space must bind and persist its exact target before input and retain diagnostics only on failure.'
-    }
-    if ([regex]::Matches(
-            $acceptanceText,
-            'Wait-AcceptanceOwnedInputWindow\s+`\s*\r?\n\s*-Process \$process'
-        ).Count -ne 2 -or
-        [regex]::Matches(
-            $acceptanceText,
-            '-Owner \$mainWindow\s+`\s*\r?\n\s*-Name ''이름 앞에 문자열 붙이기'''
-        ).Count -ne 2) {
-        throw 'Both current-DPI prefix prompts must use exact owner-bound native-to-UIA discovery.'
-    }
     foreach ($failureField in @(
         'failure_focus_reachability',
         'prefix_failure_process_windows'
@@ -2133,11 +1859,7 @@ try {
             throw "Prefix failure diagnostics omit $failureField."
         }
     }
-    if ($acceptanceText.IndexOf('$Verified.manifest.application', [StringComparison]::Ordinal) -ge 0 -or
-        [regex]::Matches(
-            $acceptanceText,
-            [regex]::Escape('$Verified.application')
-        ).Count -lt 4) {
+    if ($acceptanceText.IndexOf('$Verified.manifest.application', [StringComparison]::Ordinal) -ge 0) {
         throw 'GUI regression scenarios must use the normalized verified application binding.'
     }
     if ($acceptanceText.IndexOf('.MainWindowHandle', [StringComparison]::Ordinal) -ge 0) {

@@ -1,4 +1,42 @@
-﻿function Invoke-ObserverContextConfirmation {
+﻿function Get-ObserverContextConfirmationReachability {
+    param(
+        [Parameter(Mandatory)][object] $Confirmation,
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][int] $WaitSeconds,
+        [Parameter(Mandatory)][IntPtr] $ConfirmationHandle,
+        [Parameter(Mandatory)][object] $WorkArea,
+        [Parameter(Mandatory)][string] $OutputRoot,
+        [Parameter(Mandatory)][string] $Prefix
+    )
+
+    $cancel = Find-UniqueAutomationElement -Root $confirmation -Process $Application.process -ExpectedSession $SessionId -AutomationId 'CommandButton_2' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'context Cancel button' -RequireEnabled -RequireWindowHandle
+    $confirm = Find-UniqueAutomationElement -Root $confirmation -Process $Application.process -ExpectedSession $SessionId -AutomationId 'CommandLink_1101' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'context confirmation Apply link' -RequireEnabled -RequireWindowHandle
+    $detailsButton = Find-UniqueAutomationElement -Root $confirmation -Process $Application.process -ExpectedSession $SessionId -AutomationId 'CommandLink_1102' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'context full-details command link' -RequireEnabled
+    if ($detailsButton.Current.Name -cne '예시 전체 정보 · 복사') { throw 'Context full-details command text differs.' }
+    $buttonCondition = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty, [Windows.Automation.ControlType]::Button)
+    $expanders = @($confirmation.FindAll([Windows.Automation.TreeScope]::Descendants, $buttonCondition) | Where-Object { $_.Current.Name -cin @('진단 정보 표시', '상세 정보 표시') })
+    if ($expanders.Count -ne 1) { throw 'Context detail expander was not uniquely available.' }
+    $reachability = [ordered]@{
+        cancel = Get-ObserverControlReachability -Element $cancel -Application $Application -SessionId $SessionId -ExpectedRoot $confirmationHandle -WorkArea $WorkArea -Label 'context Cancel'
+        apply = Get-ObserverControlReachability -Element $confirm -Application $Application -SessionId $SessionId -ExpectedRoot $confirmationHandle -WorkArea $WorkArea -Label 'context Apply'
+        full_details = Get-ObserverControlReachability -Element $detailsButton -Application $Application -SessionId $SessionId -ExpectedRoot $confirmationHandle -WorkArea $WorkArea -Label 'context full details'
+        expander = Get-ObserverControlReachability -Element $expanders[0] -Application $Application -SessionId $SessionId -ExpectedRoot $confirmationHandle -WorkArea $WorkArea -Label 'context expander'
+    }
+    Write-JsonUtf8Bom -Path (Join-Path $OutputRoot ($Prefix + '-reachability.json')) -Value ([ordered]@{
+        schema_version = 1
+        controls = $reachability
+    })
+    $inaccessible = @($reachability.Values | Where-Object { $_.status -cne 'reachable' })
+    if ($inaccessible.Count -ne 0) {
+        $failedLabels = @($inaccessible | ForEach-Object { [string]$_.label })
+        throw ('After context confirmation has a mouse-inaccessible required control: ' +
+            [string]::Join(', ', $failedLabels) + '.')
+    }
+    [ordered]@{ cancel = $cancel; confirm = $confirm; details_button = $detailsButton; expanders = $expanders; reachability = $reachability; button_condition = $buttonCondition }
+}
+
+function Invoke-ObserverContextConfirmation {
     param(
         [Parameter(Mandatory)][object] $Application,
         [Parameter(Mandatory)][string] $ExpectedScope,
@@ -158,29 +196,15 @@
     }
     $defaultFocus = Get-ObserverConfirmationDefaultFocus -Application $Application -SessionId $SessionId
 
-    $cancel = Find-UniqueAutomationElement -Root $confirmation -Process $Application.process -ExpectedSession $SessionId -AutomationId 'CommandButton_2' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'context Cancel button' -RequireEnabled -RequireWindowHandle
-    $confirm = Find-UniqueAutomationElement -Root $confirmation -Process $Application.process -ExpectedSession $SessionId -AutomationId 'CommandLink_1101' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'context confirmation Apply link' -RequireEnabled -RequireWindowHandle
-    $detailsButton = Find-UniqueAutomationElement -Root $confirmation -Process $Application.process -ExpectedSession $SessionId -AutomationId 'CommandLink_1102' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'context full-details command link' -RequireEnabled
-    if ($detailsButton.Current.Name -cne '예시 전체 정보 · 복사') { throw 'Context full-details command text differs.' }
-    $buttonCondition = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty, [Windows.Automation.ControlType]::Button)
-    $expanders = @($confirmation.FindAll([Windows.Automation.TreeScope]::Descendants, $buttonCondition) | Where-Object { $_.Current.Name -cin @('진단 정보 표시', '상세 정보 표시') })
-    if ($expanders.Count -ne 1) { throw 'Context detail expander was not uniquely available.' }
-    $reachability = [ordered]@{
-        cancel = Get-ObserverControlReachability -Element $cancel -Application $Application -SessionId $SessionId -ExpectedRoot $confirmationHandle -WorkArea $WorkArea -Label 'context Cancel'
-        apply = Get-ObserverControlReachability -Element $confirm -Application $Application -SessionId $SessionId -ExpectedRoot $confirmationHandle -WorkArea $WorkArea -Label 'context Apply'
-        full_details = Get-ObserverControlReachability -Element $detailsButton -Application $Application -SessionId $SessionId -ExpectedRoot $confirmationHandle -WorkArea $WorkArea -Label 'context full details'
-        expander = Get-ObserverControlReachability -Element $expanders[0] -Application $Application -SessionId $SessionId -ExpectedRoot $confirmationHandle -WorkArea $WorkArea -Label 'context expander'
-    }
-    Write-JsonUtf8Bom -Path (Join-Path $OutputRoot ($Prefix + '-reachability.json')) -Value ([ordered]@{
-        schema_version = 1
-        controls = $reachability
-    })
-    $inaccessible = @($reachability.Values | Where-Object { $_.status -cne 'reachable' })
-    if ($inaccessible.Count -ne 0) {
-        $failedLabels = @($inaccessible | ForEach-Object { [string]$_.label })
-        throw ('After context confirmation has a mouse-inaccessible required control: ' +
-            [string]::Join(', ', $failedLabels) + '.')
-    }
+    $contextControls = Get-ObserverContextConfirmationReachability -Confirmation $confirmation `
+        -Application $Application -SessionId $SessionId -WaitSeconds $WaitSeconds `
+        -ConfirmationHandle $confirmationHandle -WorkArea $WorkArea -OutputRoot $OutputRoot -Prefix $Prefix
+    $cancel = $contextControls.cancel
+    $confirm = $contextControls.confirm
+    $detailsButton = $contextControls.details_button
+    $expanders = $contextControls.expanders
+    $reachability = $contextControls.reachability
+    $buttonCondition = $contextControls.button_condition
     $cancel = Find-UniqueAutomationElement -Root $confirmation -Process $Application.process -ExpectedSession $SessionId -AutomationId 'CommandButton_2' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'context Cancel after default scroll' -RequireEnabled -RequireWindowHandle
     $cancel.SetFocus()
 
@@ -202,14 +226,10 @@
     }
     [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $detailsWindow -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-full-details.png') -Label 'context full details'))
     Assert-AutomationBinding -Element $details.edit -Process $Application.process -ExpectedSession $SessionId -Label 'context full-details edit before end scroll'
-    $details.edit.SetFocus()
-    Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 -VirtualKey 0x23 -Label 'context full-details Ctrl+End' -ExtendedKey
-    Start-Sleep -Milliseconds 150
-    $visibleEnd = Get-ObserverVisibleText -TextPattern $details.text_pattern
     $expectedEnding = (Normalize-ObserverText $ExpectedFullText).Split("`n")[-1]
-    if (-not $visibleEnd.EndsWith($expectedEnding, [StringComparison]::Ordinal)) {
-        throw 'Context full details did not expose the canonical ending after native scrolling.'
-    }
+    $endObservation = Get-ObserverDetailsEndObservation -Application $Application -Details $details `
+        -SessionId $SessionId -Label 'context full-details Ctrl+End' -ExpectedEnding $expectedEnding
+    $visibleEnd = $endObservation.visible_text
     [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $detailsWindow -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-full-details-end.png') -Label 'context full details ending'))
     Send-AcceptanceTap -Process $Application.process -ExpectedSession $SessionId -VirtualKey 0x1B -Label 'confirmation full-details Escape close'
     $detailsCloseTarget = $null

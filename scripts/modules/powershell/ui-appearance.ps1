@@ -495,7 +495,9 @@ function Invoke-HighContrastRescue {
         }
         catch {
             $result.status = 'failed'
-            $result.failure_reason = 'desktop_lock_release_failed'
+            if ([string]::IsNullOrEmpty($result.failure_reason)) {
+                $result.failure_reason = 'desktop_lock_release_failed'
+            }
             $_ | Out-String | Add-Content -LiteralPath $errorPath -Encoding UTF8
             $result.diagnostic = [ordered]@{
                 file = 'high-contrast-rescue-error.txt'

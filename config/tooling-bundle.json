@@ -527,7 +527,7 @@
       "bundle": "ui-appearance.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "764be5d49754ea93d480e1c4808e76e7d7976271f946ff376ba6984a43ab3302",
+      "sha256": "52dc5bbba7f8942d8f410040f350234cbf765984c3a1a7b19c835caaf6f9537e",
       "dependencies": []
     },
     {
@@ -581,7 +581,7 @@
       "bundle": "ui-context-scenarios.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "fd0dd619d4ae8a688626fc75c5d5ed0046e46d165a24c1f5cbfb31f5282d5830",
+      "sha256": "851df6e5d14b94482bdb09a6f74b70cd4f7820824f94b8542658cfeae9442f09",
       "dependencies": []
     },
     {
@@ -590,7 +590,7 @@
       "bundle": "ui-regression.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "685851e0a5aa7b9f53c04da42705fea412af3bcfc7f2349d6ebd5e8f8410006a",
+      "sha256": "1827303de1308b82e7e07ce4542d93df7f5822a16810a4a49965f1f728b088a1",
       "dependencies": []
     },
     {
@@ -599,7 +599,7 @@
       "bundle": "ui-current-dpi.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "90318d9f4c6654d784f1d97fd48c2ab3c6b0a25a1cadcf2062eaebb548de3a39",
+      "sha256": "dd93fb0c8a3348a0438753d6d5a695e20098f91df65589fa39687e4b2adb47f5",
       "dependencies": []
     },
     {
