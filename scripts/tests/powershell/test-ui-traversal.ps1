@@ -216,6 +216,10 @@ function Invoke-MenuEndpointInput {
         'right' {
             $menu.child = $menu.position; $menu.position = 0; $menu.childDowns = 0
         }
+        'left' {
+            if ($null -eq $menu.child) { throw 'Fixture Left requires an open submenu.' }
+            $menu.position = $menu.child; $menu.child = $null
+        }
         'escape' {
             if ($null -ne $menu.child) { $menu.position = $menu.child; $menu.child = $null }
             elseif ($menu.root -ne -1) {
@@ -264,7 +268,7 @@ function Send-AcceptanceChord {
 function Send-AcceptanceTap {
     param($Process, $ExpectedSession, $VirtualKey, $Label)
     $menu.keys.Add([int[]]@($VirtualKey))
-    $action = switch ($VirtualKey) { 0x28 { 'down' } 0x27 { 'right' } 0x1B { 'escape' } default { throw 'Unexpected native navigation key.' } }
+    $action = switch ($VirtualKey) { 0x28 { 'down' } 0x27 { 'right' } 0x25 { 'left' } 0x1B { 'escape' } default { throw 'Unexpected native navigation key.' } }
     Invoke-MenuEndpointInput $action
 }
 function Get-VmAutomatedVisibleMenuPopups {
@@ -299,6 +303,20 @@ for ($index = 0; $index -lt $result.events.Count; $index++) {
 }
 Assert-Equal @($result.events | Where-Object { $_.input -like 'alt-*' } | ForEach-Object { ,($_.virtual_keys) }) @([int[]]@(18,70),[int[]]@(18,69),[int[]]@(18,84),[int[]]@(18,84),[int[]]@(18,84),[int[]]@(18,84),[int[]]@(18,84)) 'Native accelerator keys'
 Assert-Equal $menu.states 2 'Menu state observations'
+# Left is a supported low-level input even though the complete coverage flow
+# closes submenus with Escape. Execute that remaining native key branch too.
+Reset-MenuFixture
+$rootPaths = [object[]]@(,([int[]]@(3)))
+$childPaths = [object[]]@(,([int[]]@(3)); ,([int[]]@(3,0)))
+$handles = @{}
+$opened = Invoke-VmAutomatedMenuKey -Application $application -ExpectedSession $process.SessionId `
+    -KeyAction 'alt-t' -OpenMenuPaths $rootPaths -PathHandles $handles -Sequence 1
+$childOpened = Invoke-VmAutomatedMenuKey -Application $application -ExpectedSession $process.SessionId `
+    -KeyAction 'right' -OpenMenuPaths $childPaths -PathHandles $handles -PreviousHighlight $opened.highlighted -Sequence 2
+$leftClosed = Invoke-VmAutomatedMenuKey -Application $application -ExpectedSession $process.SessionId `
+    -KeyAction 'left' -OpenMenuPaths $rootPaths -PathHandles $handles -PreviousHighlight $childOpened.highlighted -Sequence 3
+Assert-Equal $leftClosed.virtual_keys @(0x25) 'Native Left key'
+Assert-Equal $leftClosed.highlighted.menu_path @(3) 'Left returns to parent menu'
 foreach ($case in @(
     @{ mode = 'missing-command'; message = 'missed enabled commands' },
     @{ mode = 'submenu-bound'; message = 'not reached by bounded Down' },
