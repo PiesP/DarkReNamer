@@ -12,10 +12,8 @@ import subprocess
 import tempfile
 import unittest
 import zlib
-from unittest.mock import patch
 
 from darkrenamer_tooling.evidence import gui as evidence
-from darkrenamer_tooling.evidence import png as png_evidence
 
 SCRIPT = (SCRIPT_ROOT / "validate-gui-regression-evidence.py")
 SOURCE = "a" * 40
@@ -983,85 +981,9 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "symlink ancestor"):
             evidence.checked_root(alias / "evidence")
 
-    def test_png_decoder_rejects_bomb_transparency_and_unsupported_transparency_chunk(self):
-        header = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
-        bomb = (b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", header) +
-                png_chunk(b"IDAT", zlib.compress(b"\0" + b"\0" * 1_000_000)) +
-                png_chunk(b"IEND", b""))
-        with self.assertRaisesRegex(evidence.EvidenceError, "exceeds its declared dimensions"):
-            evidence.decode_png(bomb, "bomb")
-        with self.assertRaisesRegex(evidence.EvidenceError, "non-opaque"):
-            evidence.decode_png(png(transparent=True), "alpha")
-        opaque = png()
-        idat = opaque.index(b"IDAT") - 4
-        with_trns = opaque[:idat] + png_chunk(b"tRNS", b"\x00\x00\x00\x00\x00\x00") + opaque[idat:]
-        with self.assertRaisesRegex(evidence.EvidenceError, "unsupported PNG transparency"):
-            evidence.decode_png(with_trns, "trns")
-
-    def test_png_decoder_checks_expected_dimensions_before_inflating(self):
-        header = struct.pack(">IIBBBBB", 8192, 4096, 8, 6, 0, 0, 0)
-        image = (b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", header) +
-                 png_chunk(b"IDAT", zlib.compress(b"unused")) +
-                 png_chunk(b"IEND", b""))
-        with patch("darkrenamer_tooling.evidence.png.zlib.decompressobj") as inflate:
-            with self.assertRaisesRegex(evidence.EvidenceError, "expected raster size"):
-                evidence.decode_png(image, "mismatched", expected_dimensions=(80, 30))
-            inflate.assert_not_called()
-
-    def test_png_decoder_requires_valid_chunk_types_and_consecutive_idat(self):
-        prefix = b"\x89PNG\r\n\x1a\n" + png_chunk(
-            b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0))
-        compressed = zlib.compress(b"\0\x12\x34\x56\xff")
-        first = png_chunk(b"IDAT", compressed[:3])
-        second = png_chunk(b"IDAT", compressed[3:])
-        end = png_chunk(b"IEND", b"")
-        ancillary = png_chunk(b"tEXt", b"key\0value")
-        expected = (1, 1, b"\x12\x34\x56\xff")
-        self.assertEqual(evidence.decode_png(prefix + ancillary + first + second + end, "valid"), expected)
-        self.assertEqual(evidence.decode_png(prefix + first + second + ancillary + end, "valid"), expected)
-        with self.assertRaisesRegex(evidence.EvidenceError, "IDAT in an invalid position"):
-            evidence.decode_png(prefix + first + ancillary + second + end, "split")
-        for kind in (b"abcd", b"tE1t", b"\xffEXt"):
-            with self.subTest(kind=kind), self.assertRaisesRegex(evidence.EvidenceError, "invalid PNG chunk type"):
-                evidence.decode_png(prefix + png_chunk(kind, b"") + first + second + end, "invalid")
-
     def test_deep_json_reports_a_validation_error(self):
         with self.assertRaisesRegex(evidence.EvidenceError, "not strict UTF-8 JSON"):
             evidence.parse_json_bytes(b"[" * 20000 + b"0" + b"]" * 20000, "deep")
-
-    def test_png_decoder_preserves_supported_opaque_color_formats(self):
-        for color_type, pixel, rgba in (
-            (0, b"\x12", b"\x12\x12\x12\xff"),
-            (2, b"\x12\x34\x56", b"\x12\x34\x56\xff"),
-            (4, b"\x12\xff", b"\x12\x12\x12\xff"),
-            (6, b"\x12\x34\x56\xff", b"\x12\x34\x56\xff"),
-        ):
-            image = (b"\x89PNG\r\n\x1a\n" + png_chunk(
-                b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, color_type, 0, 0, 0)) +
-                png_chunk(b"IDAT", zlib.compress(b"\0" + pixel)) + png_chunk(b"IEND", b""))
-            with self.subTest(color_type=color_type):
-                self.assertEqual(evidence.decode_png(image, "opaque"), (1, 1, rgba))
-
-    def test_png_decoder_enforces_one_campaign_pixel_budget(self):
-        budget = evidence.DecodedPixelBudget(maximum_pixels=64)
-        small = png(8, 8, 1, 1)
-        evidence.decode_png(small, "first", expected_dimensions=(8, 8), budget=budget)
-        self.assertEqual(budget.remaining_pixels, 0)
-        with patch("darkrenamer_tooling.evidence.png.zlib.decompressobj") as inflate:
-            with self.assertRaisesRegex(evidence.EvidenceError, "cumulative decoded-pixel budget"):
-                evidence.decode_png(small, "second", expected_dimensions=(8, 8), budget=budget)
-            inflate.assert_not_called()
-
-    def test_campaign_pixel_budget_covers_frozen_layout_targets_and_recovery_png(self):
-        profile = json.loads((SCRIPT_ROOT.parent / "config" / "vm-automated-v1.json").read_text())
-        layout_targets = [row for row in profile["required_targets"]
-                          if row["id"].startswith("layout-")]
-        maximum_profile_pixels = sum(row["desktop_width"] * row["desktop_height"]
-                                     for row in layout_targets) + png_evidence.MAX_PNG_PIXELS
-        self.assertLessEqual(maximum_profile_pixels,
-                             png_evidence.MAX_TOTAL_DECODED_PNG_PIXELS)
-        self.assertLessEqual(png_evidence.MAX_TOTAL_DECODED_PNG_PIXELS,
-                             maximum_profile_pixels + 16 * 1024 * 1024)
 
     def test_vm_identity_kind_and_independent_postlaunch_receipt_are_enforced(self):
         manifest = json.loads((self.standard / "input-manifest.json").read_text())

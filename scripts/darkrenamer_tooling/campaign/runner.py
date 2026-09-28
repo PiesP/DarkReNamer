@@ -24,7 +24,7 @@ from darkrenamer_tooling.contracts.tooling import staged_tooling_files
 from darkrenamer_tooling.evidence.archive import (
     EvidenceError, MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_FILES, load_bounded_json,
 )
-from darkrenamer_tooling.vm import gui, launcher
+from darkrenamer_tooling.vm import connection as vm_connection, launcher
 from darkrenamer_tooling.vm.launcher import (
     TEST_OUTPUT_AGGREGATE_MAXIMUM_BYTES, TEST_OUTPUT_CHANNEL_MAXIMUM_BYTES,
 )
@@ -487,7 +487,7 @@ def result_references(output: Path, slot: dict, runtime: dict) -> tuple[str, str
 
 
 def execute_attempt(repo: Path, output: Path, slot: dict, runtime: dict, args,
-                    connection: dict, gui_runner, previous_end: datetime) -> tuple[dict, datetime]:
+                    connection: dict, connection_helpers, previous_end: datetime) -> tuple[dict, datetime]:
     run_root = output / "runs" / slot["id"]
     run_root.mkdir(parents=True)
     stdout_path = run_root / "controller.stdout.txt"
@@ -501,7 +501,7 @@ def execute_attempt(repo: Path, output: Path, slot: dict, runtime: dict, args,
             stderr_path.open("x", encoding="utf-8") as stderr:
         try:
             if runtime["kind"] == "ui":
-                guest = gui_runner.guest_preflight(connection)
+                guest = connection_helpers.guest_preflight(connection)
                 document = acceptance_manifest(slot, runtime, args, connection, guest, repo)
                 input_path = run_root / "acceptance-input.json"
                 write_json(input_path, document)
@@ -685,7 +685,7 @@ def execute(args, *, repo: Path, connection_loaded=None) -> int:
     connection_frozen = frozen_file(connection_path)
     load_bounded_json(connection_path, max_bytes=16 * 1024, label="Private connection profile")
     if connection_loaded is None:
-        connection, connection_sha = gui.load_connection_profile(connection_path)
+        connection, connection_sha = vm_connection.load_connection_profile(connection_path)
     else:
         connection, connection_sha = connection_loaded
     require(connection_sha == connection_frozen["sha256"],
@@ -709,7 +709,7 @@ def execute(args, *, repo: Path, connection_loaded=None) -> int:
     for slot in plan["slots"]:
         runtime = slot_runtime(slot, profile)
         attempt, previous_end = execute_attempt(
-            repo, output, slot, runtime, args, connection, gui, previous_end
+            repo, output, slot, runtime, args, connection, vm_connection, previous_end
         )
         attempts.append(attempt)
         if attempt["exit_code"] != 0:
@@ -784,7 +784,7 @@ def parse_arguments(repo: Path, argv=None):
 def main(repo: Path, argv=None) -> int:
     repo = Path(repo)
     args = parse_arguments(repo, argv)
-    connection = gui.load_connection_profile(Path(args.connection_profile))
+    connection = vm_connection.load_connection_profile(Path(args.connection_profile))
     with campaign_lock(connection[0]["expected_vm_id"]):
         return execute(args, repo=repo, connection_loaded=connection)
 

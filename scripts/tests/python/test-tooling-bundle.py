@@ -78,6 +78,38 @@ class ToolingBundleTests(unittest.TestCase):
                 self.assertIn("tooling-bundle.json", tooling.staged_tooling_files(root))
                 self.assertIn("tooling-loader.py", tooling.staged_tooling_files(root))
 
+    def test_campaign_closure_loads_shared_helpers_without_diagnostic_gui(self) -> None:
+        verified = self.verified("campaign-runner")
+        roles = {entry.role for entry in verified.entries}
+        self.assertIn("vm-connection", roles)
+        self.assertIn("formats-png", roles)
+        self.assertNotIn("vm-gui", roles)
+        code = """
+import hashlib
+from pathlib import Path
+import sys
+sys.path.insert(0, sys.argv[1])
+import tooling_bootstrap
+root = Path(sys.argv[1]).parent
+manifest = root / 'config/tooling-bundle.json'
+verified = tooling_bootstrap.verify_tooling(
+    root=root, manifest_location='config/tooling-bundle.json',
+    expected_manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(),
+    mode='checkout', required_roles=('campaign-runner',),
+)
+with verified.importer() as imports:
+    campaign = imports.import_role('campaign-runner')
+    assert campaign.vm_connection.__name__ == 'darkrenamer_tooling.vm.connection'
+    assert 'darkrenamer_tooling.vm.gui' not in sys.modules
+"""
+        subprocess.run([sys.executable, "-I", "-c", code, str(REPOSITORY / "scripts")],
+                       check=True, capture_output=True)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.stage(root, "run-vm-automated-campaign.py", "campaign-runner")
+            self.assertTrue((root / "tooling-vm-connection.py").is_file())
+            self.assertFalse((root / "tooling-vm-gui.py").exists())
+
     def test_public_cli_rejects_tampered_manifest_and_loader_before_import(self) -> None:
         for target in ("tooling-bundle.json", "tooling-loader.py"):
             with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
