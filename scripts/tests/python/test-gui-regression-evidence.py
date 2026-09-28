@@ -345,8 +345,8 @@ class Fixture:
             })
         write_json(output / "acceptance-result.json", raw_result)
         observations = {"schema_version": 1, "run_id": run_id, "scenario": raw_scenario}
-        (output / "observer.stdout.txt").write_text("observer completed\n", encoding="utf-8")
-        (output / "observer.stderr.txt").write_bytes(b"")
+        (output / "controller.stdout.txt").write_bytes(b"controller completed\n")
+        (output / "controller.stderr.txt").write_bytes(b"")
         write_json(output / "transport.json", {
             "kind": "ssh",
             "status": "collected",
@@ -565,6 +565,18 @@ class GuiEvidenceTests(unittest.TestCase):
     def validate(self, run: Path):
         return evidence.validate_run(self.root, run.name, SOURCE)
 
+    def assert_rejected_by_module_and_cli(self, run: Path, diagnostic: str):
+        with self.assertRaisesRegex(evidence.EvidenceError, diagnostic):
+            self.validate(run)
+        completed = subprocess.run(
+            ["python3", str(SCRIPT), "--result-root", str(self.root),
+             "--expected-source-sha", SOURCE, "--run", run.name],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        self.assertRegex(completed.stderr, diagnostic)
+        self.assertEqual(completed.stdout, "")
+
     def test_complete_representative_set_and_direct_reference_pass(self):
         runs = [self.validate(path) for path in (self.full, self.standard, self.text, self.tooltip)]
         evidence.validate_text_pair(runs)
@@ -619,7 +631,7 @@ class GuiEvidenceTests(unittest.TestCase):
             self.validate(self.tooltip)
 
     def test_missing_or_tampered_log_capture_and_observer_are_rejected(self):
-        (self.standard / "output/observer.stdout.txt").unlink()
+        (self.standard / "output/controller.stdout.txt").unlink()
         with self.assertRaisesRegex(evidence.EvidenceError, "missing"):
             self.validate(self.standard)
 
@@ -634,6 +646,47 @@ class GuiEvidenceTests(unittest.TestCase):
         observer.write_bytes(b"tampered observer")
         with self.assertRaisesRegex(evidence.EvidenceError, "input manifest"):
             self.validate(self.standard)
+
+    def test_each_controller_stream_is_required_with_a_matching_collection(self):
+        for stream in ("stdout", "stderr"):
+            with self.subTest(stream=stream):
+                run = self.fixture.build(f"missing-controller-{stream}", "standard")
+                (run / "output" / f"controller.{stream}.txt").unlink()
+                self.fixture.refresh(run)
+                self.assert_rejected_by_module_and_cli(
+                    run, rf"missing required raw evidence:.*controller\.{stream}\.txt"
+                )
+
+    def test_each_controller_stream_receipt_detects_tampering(self):
+        for stream in ("stdout", "stderr"):
+            with self.subTest(stream=stream):
+                run = self.fixture.build(f"tampered-controller-{stream}", "standard")
+                (run / "output" / f"controller.{stream}.txt").write_bytes(b"tampered stream")
+                self.assert_rejected_by_module_and_cli(
+                    run, rf"does not match its receipt: controller\.{stream}\.txt"
+                )
+
+    def test_observer_streams_cannot_replace_controller_streams(self):
+        run = self.fixture.build("observer-only-streams", "standard")
+        for stream in ("stdout", "stderr"):
+            (run / "output" / f"controller.{stream}.txt").rename(
+                run / "output" / f"observer.{stream}.txt"
+            )
+        self.fixture.refresh(run)
+        self.assert_rejected_by_module_and_cli(
+            run, r"missing required raw evidence:.*controller\.stderr\.txt.*controller\.stdout\.txt"
+        )
+
+    def test_each_controller_stream_rejects_symlinks_even_with_matching_bytes(self):
+        for stream in ("stdout", "stderr"):
+            with self.subTest(stream=stream):
+                run = self.fixture.build(f"linked-controller-{stream}", "standard")
+                target = run / "output" / f"controller.{stream}.txt"
+                outside = self.root / f"outside-{stream}.txt"
+                outside.write_bytes(target.read_bytes())
+                target.unlink()
+                target.symlink_to(outside)
+                self.assert_rejected_by_module_and_cli(run, "symlink")
 
     def test_cleanup_and_prelaunch_identity_fail_closed(self):
         cleanup = json.loads((self.standard / "output/cleanup.json").read_text())
@@ -692,7 +745,7 @@ class GuiEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(evidence.EvidenceError, "duplicate field"):
             self.validate(self.standard)
 
-    def test_traversal_self_reference_cycle_and_symlink_are_rejected(self):
+    def test_traversal_self_reference_and_cycle_are_rejected(self):
         manifest = json.loads((self.standard / "input-manifest.json").read_text())
         manifest["artifacts"]["observer"]["file"] = "../observer.ps1"
         write_json(self.standard / "input-manifest.json", manifest)
@@ -712,15 +765,6 @@ class GuiEvidenceTests(unittest.TestCase):
         write_json(self.full / "input-manifest.json", manifest)
         with self.assertRaisesRegex(evidence.EvidenceError, "Only the tooltip"):
             self.validate(self.full)
-
-        self.setUp()
-        target = self.standard / "output/observer.stdout.txt"
-        outside = self.root / "outside.txt"
-        outside.write_text("observer completed\n")
-        target.unlink()
-        target.symlink_to(outside)
-        with self.assertRaisesRegex(evidence.EvidenceError, "symlink"):
-            self.validate(self.standard)
 
     def test_reference_manifest_and_result_digests_are_enforced(self):
         manifest = json.loads((self.tooltip / "input-manifest.json").read_text())
