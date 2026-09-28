@@ -68,7 +68,14 @@ function Get-DrControllerRecoveryProcessIdentities {
             $crash = $Result.PSObject.Properties['process_crash']
             $intent = $Result.PSObject.Properties['intent_only_candidate_discard']
             if ($null -eq $crash -or $null -eq $intent) { throw 'Recovery process references are missing.' }
-            $references = @($crash.Value.processes) + @($intent.Value.processes)
+            $references = @($crash.Value.processes)
+            if ($intent.Value.status -ceq 'passed') {
+                $references += @($intent.Value.processes)
+            }
+            elseif ($intent.Value.status -cne 'not-run' -or
+                $intent.Value.reason -cne 'switch-not-selected') {
+                throw 'Optional recovery intent evidence has an invalid status.'
+            }
         }
         'WorkerCancellation' { $references = @($Result.worker_cancellation.processes) }
         'WorkerClose' { $references = @($Result.worker_close.processes) }
@@ -3037,445 +3044,442 @@ public static class DrVmCommandLineNative {
         $transport.status = 'failed'
         $transport['tooling_cleanup_error'] = $toolingCleanupError
     }
-    if ($session) {
-        try {
-            Invoke-Command -Session $session -ArgumentList $taskName -ScriptBlock {
-                param($name)
-                $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-                if ($task) { Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName $name -Confirm:$false }
-            }
-            if ($guestRoot) {
-                $cleanupAuthorized = $transport.status -eq 'collected' -and
-                    (-not $observerTask -or $acceptancePassed)
-                $requiredProcessJobsClosed = $processJobsClosed
-                $cleanupTaskContext = [pscustomobject]@{
-                    runner_sid = [string]$desktop.sid
-                    baseline_tasks = @($runnerTaskBaseline)
-                    runner_session_id = [int]$desktop.session_id
-                    baseline_process_identities = @(
-                        $runnerProcessBaseline | ForEach-Object identity
-                    )
+    try {
+        if ($session) {
+            try {
+                Invoke-Command -Session $session -ArgumentList $taskName -ScriptBlock {
+                    param($name)
+                    $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+                    if ($task) { Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName $name -Confirm:$false }
                 }
-                $cleanupResult = Invoke-Command -Session $session -ArgumentList $guestRoot,$trustedTaskRoot,$taskName,$cleanupAuthorized,$requiredProcessJobsClosed,$cleanupTaskContext -ScriptBlock {
-                    param($root,$trustedRoot,$name,$mayDelete,$jobsClosed,$taskContext)
-                    $expectedRoot = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') $name
-                    $expectedTrustedRoot = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') ($name + '-trusted')
-                    if ($name -cnotmatch '^DarkReNamerTests-[0-9a-f]{32}$' -or
-                        $root -cne $expectedRoot -or $trustedRoot -cne $expectedTrustedRoot) {
-                        throw 'Unexpected VM cleanup root.'
+                if ($guestRoot) {
+                    $cleanupAuthorized = $transport.status -eq 'collected' -and
+                        (-not $observerTask -or $acceptancePassed)
+                    $requiredProcessJobsClosed = $processJobsClosed
+                    $cleanupTaskContext = [pscustomobject]@{
+                        runner_sid = [string]$desktop.sid
+                        baseline_tasks = @($runnerTaskBaseline)
+                        runner_session_id = [int]$desktop.session_id
+                        baseline_process_identities = @(
+                            $runnerProcessBaseline | ForEach-Object identity
+                        )
                     }
-                    $prefixes = @($root.TrimEnd('\') + '\', $trustedRoot.TrimEnd('\') + '\')
-                    function Test-ProcessExecutableInOwnedRoots {
-                        param([AllowNull()][string] $Path,[Parameter(Mandatory)][string[]] $Prefixes)
-                        if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
-                        foreach ($candidatePrefix in $Prefixes) {
-                            if ($Path.StartsWith($candidatePrefix,[StringComparison]::OrdinalIgnoreCase)) {
-                                return $true
-                            }
+                    $cleanupResult = Invoke-Command -Session $session -ArgumentList $guestRoot,$trustedTaskRoot,$taskName,$cleanupAuthorized,$requiredProcessJobsClosed,$cleanupTaskContext -ScriptBlock {
+                        param($root,$trustedRoot,$name,$mayDelete,$jobsClosed,$taskContext)
+                        $expectedRoot = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') $name
+                        $expectedTrustedRoot = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') ($name + '-trusted')
+                        if ($name -cnotmatch '^DarkReNamerTests-[0-9a-f]{32}$' -or
+                            $root -cne $expectedRoot -or $trustedRoot -cne $expectedTrustedRoot) {
+                            throw 'Unexpected VM cleanup root.'
                         }
-                        return $false
-                    }
-                    $baselineTasks = [Collections.Generic.HashSet[string]]::new(
-                        [StringComparer]::OrdinalIgnoreCase
-                    )
-                    $baselineTaskHashes = @{}
-                    foreach ($task in @($taskContext.baseline_tasks)) {
-                        if (-not [string]::IsNullOrWhiteSpace([string]$task.identity)) {
-                            [void]$baselineTasks.Add([string]$task.identity)
-                            $baselineTaskHashes[[string]$task.identity] = [string]$task.definition_sha256
-                        }
-                    }
-                    $baselineProcesses = [Collections.Generic.HashSet[string]]::new(
-                        [StringComparer]::OrdinalIgnoreCase
-                    )
-                    foreach ($identity in @($taskContext.baseline_process_identities)) {
-                        if (-not [string]::IsNullOrWhiteSpace([string]$identity)) {
-                            [void]$baselineProcesses.Add([string]$identity)
-                        }
-                    }
-                    $removedRunnerTasks = [Collections.Generic.HashSet[string]]::new(
-                        [StringComparer]::OrdinalIgnoreCase)
-                    $runnerTasksBeforeCleanup = @(Get-DrVmRunnerTasks -UserSid $taskContext.runner_sid)
-                    $unexpectedRunnerTasksBeforeCleanup = @($runnerTasksBeforeCleanup |
-                        Where-Object {
-                            -not $baselineTasks.Contains([string]$_.identity) -or
-                            [string]$_.definition_sha256 -cne [string]$baselineTaskHashes[[string]$_.identity]
-                        } |
-                        Sort-Object identity)
-                    $runnerTaskIdentitiesBeforeCleanup = [Collections.Generic.HashSet[string]]::new(
-                        [StringComparer]::OrdinalIgnoreCase)
-                    foreach ($task in $runnerTasksBeforeCleanup) {
-                        [void]$runnerTaskIdentitiesBeforeCleanup.Add([string]$task.identity)
-                    }
-                    foreach ($identity in $baselineTasks) {
-                        if (-not $runnerTaskIdentitiesBeforeCleanup.Contains([string]$identity)) {
-                            [void]$removedRunnerTasks.Add([string]$identity)
-                        }
-                    }
-                    $processSnapshotBeforeCleanup = Get-DrVmRunnerProcesses `
-                        -UserSid $taskContext.runner_sid `
-                        -SessionId $taskContext.runner_session_id
-                    $unexpectedRunnerProcessesBeforeCleanup = @($processSnapshotBeforeCleanup.processes |
-                        Where-Object { -not $baselineProcesses.Contains([string]$_.identity) } |
-                        Sort-Object identity)
-                    $terminatedRunnerProcesses = [Collections.Generic.List[object]]::new()
-                    $cleanupResourceErrors = [Collections.Generic.List[string]]::new()
-                    $ownedRootProcessCandidates = @(Get-CimInstance Win32_Process `
-                        -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object {
-                        Test-ProcessExecutableInOwnedRoots -Path $_.ExecutablePath -Prefixes $prefixes
-                    } | Sort-Object ProcessId)
-                    $smartScreenNaturalExit = [ordered]@{
-                        schema_version = 1
-                        status = 'rejected'
-                        runner_sid = [string]$taskContext.runner_sid
-                        runner_session_id = [int]$taskContext.runner_session_id
-                        candidate_identity = $null
-                        broker = $null
-                        timeout_ms = 0
-                        elapsed_ms = 0
-                        polls = @()
-                        natural_exit_observed = $false
-                        final_inventory_complete = $false
-                        final_runner_process_delta_identities = @()
-                        final_runner_task_delta_identities = @()
-                    }
-                    if ($processSnapshotBeforeCleanup.complete -and
-                        $unexpectedRunnerTasksBeforeCleanup.Count -eq 0 -and
-                        $removedRunnerTasks.Count -eq 0 -and
-                        $unexpectedRunnerProcessesBeforeCleanup.Count -eq 0) {
-                        $smartScreenNaturalExit.status = 'not-required'
-                        $smartScreenNaturalExit.final_inventory_complete = $true
-                    }
-                    elseif ($mayDelete -and $jobsClosed -and
-                        $processSnapshotBeforeCleanup.complete -and
-                        $unexpectedRunnerTasksBeforeCleanup.Count -eq 0 -and
-                        $removedRunnerTasks.Count -eq 0 -and
-                        $unexpectedRunnerProcessesBeforeCleanup.Count -eq 1 -and
-                        $ownedRootProcessCandidates.Count -eq 0) {
-                        $candidate = $unexpectedRunnerProcessesBeforeCleanup[0]
-                        $smartScreenNaturalExit.candidate_identity = [string]$candidate.identity
-                        try {
-                            $smartScreenNaturalExit.broker = Get-DrVmSmartScreenBrokerEvidence `
-                                -Candidate $candidate `
-                                -UserSid $taskContext.runner_sid `
-                                -SessionId $taskContext.runner_session_id
-                            $smartScreenNaturalExit.status = 'pending'
-                            $smartScreenNaturalExit.timeout_ms = 360000
-                        }
-                        catch {
-                            $smartScreenNaturalExit.status = 'classification-failed'
-                        }
-                    }
-                    if ($smartScreenNaturalExit.status -ceq 'rejected') {
-                        $smartScreenNaturalExit.final_runner_process_delta_identities = @(
-                            $unexpectedRunnerProcessesBeforeCleanup | ForEach-Object { [string]$_.identity })
-                        $smartScreenNaturalExit.final_runner_task_delta_identities = @(
-                            $unexpectedRunnerTasksBeforeCleanup | ForEach-Object { [string]$_.identity })
-                    }
-                    foreach ($candidateProcess in $ownedRootProcessCandidates) {
-                        $owned = $null
-                        $terminationRecord = $null
-                        try {
-                            $owned = Get-Process -Id $candidateProcess.ProcessId -ErrorAction SilentlyContinue
-                            if (-not $owned) { continue }
-                            $actualPath = [string]$owned.MainModule.FileName
-                            if (-not (Test-ProcessExecutableInOwnedRoots -Path $actualPath -Prefixes $prefixes)) {
-                                continue
-                            }
-                            $createdUtc = ([datetime]$candidateProcess.CreationDate).ToUniversalTime().ToString('o')
-                            $identity = [string]$candidateProcess.ProcessId + '|' + $createdUtc
-                            $terminationRecord = [ordered]@{
-                                identity = $identity
-                                pid = [int]$candidateProcess.ProcessId
-                                session_id = [int]$candidateProcess.SessionId
-                                executable_path = $actualPath
-                                termination_requested = $false
-                                exit_observed = $false
-                                error = $null
-                            }
-                            $terminatedRunnerProcesses.Add($terminationRecord)
-                            $owned.Kill()
-                            $terminationRecord.termination_requested = $true
-                            $exited = $owned.WaitForExit(10000)
-                            $terminationRecord.exit_observed = [bool]$exited
-                            if (-not $exited) {
-                                $cleanupResourceErrors.Add('An owned test process did not exit after termination.')
-                            }
-                        }
-                        catch {
-                            if ($null -ne $terminationRecord) {
-                                $terminationRecord.error = 'An owned test process could not be recorded or terminated.'
-                            }
-                            $cleanupResourceErrors.Add('An owned test process could not be recorded or terminated.')
-                        }
-                        finally {
-                            if ($null -ne $owned) { $owned.Dispose() }
-                        }
-                    }
-                    # Same-user process and task deltas can include unrelated desktop
-                    # work. Detect them and retain the VM root for inspection; only
-                    # terminate processes whose executable is inside this exact run root.
-                    $processSnapshotAfterIntervention = Get-DrVmRunnerProcesses `
-                        -UserSid $taskContext.runner_sid `
-                        -SessionId $taskContext.runner_session_id
-                    $unexpectedRunnerProcessesAfterIntervention = @($processSnapshotAfterIntervention.processes |
-                        Where-Object { -not $baselineProcesses.Contains([string]$_.identity) } |
-                        Sort-Object identity)
-                    $runnerTasksAfterIntervention = @(Get-DrVmRunnerTasks -UserSid $taskContext.runner_sid)
-                    $unexpectedRunnerTasksAfterIntervention = @($runnerTasksAfterIntervention |
-                        Where-Object {
-                            -not $baselineTasks.Contains([string]$_.identity) -or
-                            [string]$_.definition_sha256 -cne [string]$baselineTaskHashes[[string]$_.identity]
-                        } |
-                        Sort-Object identity)
-                    $runnerTaskIdentitiesAfterIntervention = [Collections.Generic.HashSet[string]]::new(
-                        [StringComparer]::OrdinalIgnoreCase)
-                    foreach ($task in $runnerTasksAfterIntervention) {
-                        [void]$runnerTaskIdentitiesAfterIntervention.Add([string]$task.identity)
-                    }
-                    foreach ($identity in $baselineTasks) {
-                        if (-not $runnerTaskIdentitiesAfterIntervention.Contains([string]$identity)) {
-                            [void]$removedRunnerTasks.Add([string]$identity)
-                        }
-                    }
-                    $ownedScheduledTasksBeforeDelete = @(Get-ScheduledTask -ErrorAction Stop |
-                        Where-Object {
-                            [string]$_.TaskName -ceq $name -and [string]$_.TaskPath -ceq '\'
-                        })
-                    $taskPresentBeforeDelete = $ownedScheduledTasksBeforeDelete.Count -gt 0
-                    if ($smartScreenNaturalExit.status -ceq 'pending') {
-                        if ($mayDelete -and $jobsClosed -and -not $taskPresentBeforeDelete -and
-                            $processSnapshotAfterIntervention.complete -and
-                            $unexpectedRunnerTasksAfterIntervention.Count -eq 0 -and
-                            $unexpectedRunnerProcessesAfterIntervention.Count -le 1 -and
-                            ($unexpectedRunnerProcessesAfterIntervention.Count -eq 0 -or
-                                [string]$unexpectedRunnerProcessesAfterIntervention[0].identity -ceq
-                                    [string]$smartScreenNaturalExit.candidate_identity) -and
-                            $ownedRootProcessCandidates.Count -eq 0 -and
-                            $removedRunnerTasks.Count -eq 0 -and
-                            $terminatedRunnerProcesses.Count -eq 0 -and
-                            $cleanupResourceErrors.Count -eq 0) {
-                            $waitResult = Wait-DrVmSmartScreenNaturalExit `
-                                -UserSid $taskContext.runner_sid `
-                                -SessionId $taskContext.runner_session_id `
-                                -BaselineProcessIdentities @($taskContext.baseline_process_identities) `
-                                -BaselineTasks @($taskContext.baseline_tasks) `
-                                -CandidateIdentity ([string]$smartScreenNaturalExit.candidate_identity) `
-                                -OwnedRootPrefixes $prefixes `
-                                -TimeoutMilliseconds 360000
-                            $smartScreenNaturalExit.status = [string]$waitResult.status
-                            $smartScreenNaturalExit.elapsed_ms = [int]$waitResult.elapsed_ms
-                            $smartScreenNaturalExit.polls = @($waitResult.polls)
-                            $smartScreenNaturalExit.natural_exit_observed = [bool]$waitResult.natural_exit_observed
-                            $smartScreenNaturalExit.final_inventory_complete = [bool]$waitResult.final_inventory_complete
-                            $smartScreenNaturalExit.final_runner_process_delta_identities = @(
-                                $waitResult.final_runner_process_delta_identities)
-                            $smartScreenNaturalExit.final_runner_task_delta_identities = @(
-                                $waitResult.final_runner_task_delta_identities)
-                            if ($waitResult.final_inventory_complete -and
-                                $null -ne $waitResult.final_process_snapshot) {
-                                $processSnapshotAfterIntervention = $waitResult.final_process_snapshot
-                                $unexpectedRunnerProcessesAfterIntervention = @(
-                                    $processSnapshotAfterIntervention.processes |
-                                        Where-Object { -not $baselineProcesses.Contains([string]$_.identity) } |
-                                        Sort-Object identity)
-                                $finalTaskRows = @($waitResult.final_task_rows)
-                                $unexpectedRunnerTasksAfterIntervention = @($finalTaskRows | Where-Object {
-                                    -not $baselineTasks.Contains([string]$_.identity) -or
-                                    [string]$_.definition_sha256 -cne
-                                        [string]$baselineTaskHashes[[string]$_.identity]
-                                } | Sort-Object identity)
-                                $runnerTaskIdentitiesAfterWait = [Collections.Generic.HashSet[string]]::new(
-                                    [StringComparer]::OrdinalIgnoreCase)
-                                foreach ($task in $finalTaskRows) {
-                                    [void]$runnerTaskIdentitiesAfterWait.Add([string]$task.identity)
+                        $prefixes = @($root.TrimEnd('\') + '\', $trustedRoot.TrimEnd('\') + '\')
+                        function Test-ProcessExecutableInOwnedRoots {
+                            param([AllowNull()][string] $Path,[Parameter(Mandatory)][string[]] $Prefixes)
+                            if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+                            foreach ($candidatePrefix in $Prefixes) {
+                                if ($Path.StartsWith($candidatePrefix,[StringComparison]::OrdinalIgnoreCase)) {
+                                    return $true
                                 }
-                                foreach ($identity in $baselineTasks) {
-                                    if (-not $runnerTaskIdentitiesAfterWait.Contains([string]$identity)) {
-                                        [void]$removedRunnerTasks.Add([string]$identity)
+                            }
+                            return $false
+                        }
+                        $baselineTasks = [Collections.Generic.HashSet[string]]::new(
+                            [StringComparer]::OrdinalIgnoreCase
+                        )
+                        $baselineTaskHashes = @{}
+                        foreach ($task in @($taskContext.baseline_tasks)) {
+                            if (-not [string]::IsNullOrWhiteSpace([string]$task.identity)) {
+                                [void]$baselineTasks.Add([string]$task.identity)
+                                $baselineTaskHashes[[string]$task.identity] = [string]$task.definition_sha256
+                            }
+                        }
+                        $baselineProcesses = [Collections.Generic.HashSet[string]]::new(
+                            [StringComparer]::OrdinalIgnoreCase
+                        )
+                        foreach ($identity in @($taskContext.baseline_process_identities)) {
+                            if (-not [string]::IsNullOrWhiteSpace([string]$identity)) {
+                                [void]$baselineProcesses.Add([string]$identity)
+                            }
+                        }
+                        $removedRunnerTasks = [Collections.Generic.HashSet[string]]::new(
+                            [StringComparer]::OrdinalIgnoreCase)
+                        $runnerTasksBeforeCleanup = @(Get-DrVmRunnerTasks -UserSid $taskContext.runner_sid)
+                        $unexpectedRunnerTasksBeforeCleanup = @($runnerTasksBeforeCleanup |
+                            Where-Object {
+                                -not $baselineTasks.Contains([string]$_.identity) -or
+                                [string]$_.definition_sha256 -cne [string]$baselineTaskHashes[[string]$_.identity]
+                            } |
+                            Sort-Object identity)
+                        $runnerTaskIdentitiesBeforeCleanup = [Collections.Generic.HashSet[string]]::new(
+                            [StringComparer]::OrdinalIgnoreCase)
+                        foreach ($task in $runnerTasksBeforeCleanup) {
+                            [void]$runnerTaskIdentitiesBeforeCleanup.Add([string]$task.identity)
+                        }
+                        foreach ($identity in $baselineTasks) {
+                            if (-not $runnerTaskIdentitiesBeforeCleanup.Contains([string]$identity)) {
+                                [void]$removedRunnerTasks.Add([string]$identity)
+                            }
+                        }
+                        $processSnapshotBeforeCleanup = Get-DrVmRunnerProcesses `
+                            -UserSid $taskContext.runner_sid `
+                            -SessionId $taskContext.runner_session_id
+                        $unexpectedRunnerProcessesBeforeCleanup = @($processSnapshotBeforeCleanup.processes |
+                            Where-Object { -not $baselineProcesses.Contains([string]$_.identity) } |
+                            Sort-Object identity)
+                        $terminatedRunnerProcesses = [Collections.Generic.List[object]]::new()
+                        $cleanupResourceErrors = [Collections.Generic.List[string]]::new()
+                        $ownedRootProcessCandidates = @(Get-CimInstance Win32_Process `
+                            -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object {
+                            Test-ProcessExecutableInOwnedRoots -Path $_.ExecutablePath -Prefixes $prefixes
+                        } | Sort-Object ProcessId)
+                        $smartScreenNaturalExit = [ordered]@{
+                            schema_version = 1
+                            status = 'rejected'
+                            runner_sid = [string]$taskContext.runner_sid
+                            runner_session_id = [int]$taskContext.runner_session_id
+                            candidate_identity = $null
+                            broker = $null
+                            timeout_ms = 0
+                            elapsed_ms = 0
+                            polls = @()
+                            natural_exit_observed = $false
+                            final_inventory_complete = $false
+                            final_runner_process_delta_identities = @()
+                            final_runner_task_delta_identities = @()
+                        }
+                        if ($processSnapshotBeforeCleanup.complete -and
+                            $unexpectedRunnerTasksBeforeCleanup.Count -eq 0 -and
+                            $removedRunnerTasks.Count -eq 0 -and
+                            $unexpectedRunnerProcessesBeforeCleanup.Count -eq 0) {
+                            $smartScreenNaturalExit.status = 'not-required'
+                            $smartScreenNaturalExit.final_inventory_complete = $true
+                        }
+                        elseif ($mayDelete -and $jobsClosed -and
+                            $processSnapshotBeforeCleanup.complete -and
+                            $unexpectedRunnerTasksBeforeCleanup.Count -eq 0 -and
+                            $removedRunnerTasks.Count -eq 0 -and
+                            $unexpectedRunnerProcessesBeforeCleanup.Count -eq 1 -and
+                            $ownedRootProcessCandidates.Count -eq 0) {
+                            $candidate = $unexpectedRunnerProcessesBeforeCleanup[0]
+                            $smartScreenNaturalExit.candidate_identity = [string]$candidate.identity
+                            try {
+                                $smartScreenNaturalExit.broker = Get-DrVmSmartScreenBrokerEvidence `
+                                    -Candidate $candidate `
+                                    -UserSid $taskContext.runner_sid `
+                                    -SessionId $taskContext.runner_session_id
+                                $smartScreenNaturalExit.status = 'pending'
+                                $smartScreenNaturalExit.timeout_ms = 360000
+                            }
+                            catch {
+                                $smartScreenNaturalExit.status = 'classification-failed'
+                            }
+                        }
+                        if ($smartScreenNaturalExit.status -ceq 'rejected') {
+                            $smartScreenNaturalExit.final_runner_process_delta_identities = @(
+                                $unexpectedRunnerProcessesBeforeCleanup | ForEach-Object { [string]$_.identity })
+                            $smartScreenNaturalExit.final_runner_task_delta_identities = @(
+                                $unexpectedRunnerTasksBeforeCleanup | ForEach-Object { [string]$_.identity })
+                        }
+                        foreach ($candidateProcess in $ownedRootProcessCandidates) {
+                            $owned = $null
+                            $terminationRecord = $null
+                            try {
+                                $owned = Get-Process -Id $candidateProcess.ProcessId -ErrorAction SilentlyContinue
+                                if (-not $owned) { continue }
+                                $actualPath = [string]$owned.MainModule.FileName
+                                if (-not (Test-ProcessExecutableInOwnedRoots -Path $actualPath -Prefixes $prefixes)) {
+                                    continue
+                                }
+                                $createdUtc = ([datetime]$candidateProcess.CreationDate).ToUniversalTime().ToString('o')
+                                $identity = [string]$candidateProcess.ProcessId + '|' + $createdUtc
+                                $terminationRecord = [ordered]@{
+                                    identity = $identity
+                                    pid = [int]$candidateProcess.ProcessId
+                                    session_id = [int]$candidateProcess.SessionId
+                                    executable_path = $actualPath
+                                    termination_requested = $false
+                                    exit_observed = $false
+                                    error = $null
+                                }
+                                $terminatedRunnerProcesses.Add($terminationRecord)
+                                $owned.Kill()
+                                $terminationRecord.termination_requested = $true
+                                $exited = $owned.WaitForExit(10000)
+                                $terminationRecord.exit_observed = [bool]$exited
+                                if (-not $exited) {
+                                    $cleanupResourceErrors.Add('An owned test process did not exit after termination.')
+                                }
+                            }
+                            catch {
+                                if ($null -ne $terminationRecord) {
+                                    $terminationRecord.error = 'An owned test process could not be recorded or terminated.'
+                                }
+                                $cleanupResourceErrors.Add('An owned test process could not be recorded or terminated.')
+                            }
+                            finally {
+                                if ($null -ne $owned) { $owned.Dispose() }
+                            }
+                        }
+                        # Same-user process and task deltas can include unrelated desktop
+                        # work. Detect them and retain the VM root for inspection; only
+                        # terminate processes whose executable is inside this exact run root.
+                        $processSnapshotAfterIntervention = Get-DrVmRunnerProcesses `
+                            -UserSid $taskContext.runner_sid `
+                            -SessionId $taskContext.runner_session_id
+                        $unexpectedRunnerProcessesAfterIntervention = @($processSnapshotAfterIntervention.processes |
+                            Where-Object { -not $baselineProcesses.Contains([string]$_.identity) } |
+                            Sort-Object identity)
+                        $runnerTasksAfterIntervention = @(Get-DrVmRunnerTasks -UserSid $taskContext.runner_sid)
+                        $unexpectedRunnerTasksAfterIntervention = @($runnerTasksAfterIntervention |
+                            Where-Object {
+                                -not $baselineTasks.Contains([string]$_.identity) -or
+                                [string]$_.definition_sha256 -cne [string]$baselineTaskHashes[[string]$_.identity]
+                            } |
+                            Sort-Object identity)
+                        $runnerTaskIdentitiesAfterIntervention = [Collections.Generic.HashSet[string]]::new(
+                            [StringComparer]::OrdinalIgnoreCase)
+                        foreach ($task in $runnerTasksAfterIntervention) {
+                            [void]$runnerTaskIdentitiesAfterIntervention.Add([string]$task.identity)
+                        }
+                        foreach ($identity in $baselineTasks) {
+                            if (-not $runnerTaskIdentitiesAfterIntervention.Contains([string]$identity)) {
+                                [void]$removedRunnerTasks.Add([string]$identity)
+                            }
+                        }
+                        $ownedScheduledTasksBeforeDelete = @(Get-ScheduledTask -ErrorAction Stop |
+                            Where-Object {
+                                [string]$_.TaskName -ceq $name -and [string]$_.TaskPath -ceq '\'
+                            })
+                        $taskPresentBeforeDelete = $ownedScheduledTasksBeforeDelete.Count -gt 0
+                        if ($smartScreenNaturalExit.status -ceq 'pending') {
+                            if ($mayDelete -and $jobsClosed -and -not $taskPresentBeforeDelete -and
+                                $processSnapshotAfterIntervention.complete -and
+                                $unexpectedRunnerTasksAfterIntervention.Count -eq 0 -and
+                                $unexpectedRunnerProcessesAfterIntervention.Count -le 1 -and
+                                ($unexpectedRunnerProcessesAfterIntervention.Count -eq 0 -or
+                                    [string]$unexpectedRunnerProcessesAfterIntervention[0].identity -ceq
+                                        [string]$smartScreenNaturalExit.candidate_identity) -and
+                                $ownedRootProcessCandidates.Count -eq 0 -and
+                                $removedRunnerTasks.Count -eq 0 -and
+                                $terminatedRunnerProcesses.Count -eq 0 -and
+                                $cleanupResourceErrors.Count -eq 0) {
+                                $waitResult = Wait-DrVmSmartScreenNaturalExit `
+                                    -UserSid $taskContext.runner_sid `
+                                    -SessionId $taskContext.runner_session_id `
+                                    -BaselineProcessIdentities @($taskContext.baseline_process_identities) `
+                                    -BaselineTasks @($taskContext.baseline_tasks) `
+                                    -CandidateIdentity ([string]$smartScreenNaturalExit.candidate_identity) `
+                                    -OwnedRootPrefixes $prefixes `
+                                    -TimeoutMilliseconds 360000
+                                $smartScreenNaturalExit.status = [string]$waitResult.status
+                                $smartScreenNaturalExit.elapsed_ms = [int]$waitResult.elapsed_ms
+                                $smartScreenNaturalExit.polls = @($waitResult.polls)
+                                $smartScreenNaturalExit.natural_exit_observed = [bool]$waitResult.natural_exit_observed
+                                $smartScreenNaturalExit.final_inventory_complete = [bool]$waitResult.final_inventory_complete
+                                $smartScreenNaturalExit.final_runner_process_delta_identities = @(
+                                    $waitResult.final_runner_process_delta_identities)
+                                $smartScreenNaturalExit.final_runner_task_delta_identities = @(
+                                    $waitResult.final_runner_task_delta_identities)
+                                if ($waitResult.final_inventory_complete -and
+                                    $null -ne $waitResult.final_process_snapshot) {
+                                    $processSnapshotAfterIntervention = $waitResult.final_process_snapshot
+                                    $unexpectedRunnerProcessesAfterIntervention = @(
+                                        $processSnapshotAfterIntervention.processes |
+                                            Where-Object { -not $baselineProcesses.Contains([string]$_.identity) } |
+                                            Sort-Object identity)
+                                    $finalTaskRows = @($waitResult.final_task_rows)
+                                    $unexpectedRunnerTasksAfterIntervention = @($finalTaskRows | Where-Object {
+                                        -not $baselineTasks.Contains([string]$_.identity) -or
+                                        [string]$_.definition_sha256 -cne
+                                            [string]$baselineTaskHashes[[string]$_.identity]
+                                    } | Sort-Object identity)
+                                    $runnerTaskIdentitiesAfterWait = [Collections.Generic.HashSet[string]]::new(
+                                        [StringComparer]::OrdinalIgnoreCase)
+                                    foreach ($task in $finalTaskRows) {
+                                        [void]$runnerTaskIdentitiesAfterWait.Add([string]$task.identity)
+                                    }
+                                    foreach ($identity in $baselineTasks) {
+                                        if (-not $runnerTaskIdentitiesAfterWait.Contains([string]$identity)) {
+                                            [void]$removedRunnerTasks.Add([string]$identity)
+                                        }
+                                    }
+                                }
+                            }
+                            else {
+                                $smartScreenNaturalExit.status = 'rejected'
+                                $smartScreenNaturalExit.final_runner_process_delta_identities = @(
+                                    $unexpectedRunnerProcessesAfterIntervention | ForEach-Object { [string]$_.identity })
+                                $smartScreenNaturalExit.final_runner_task_delta_identities = @(
+                                    $unexpectedRunnerTasksAfterIntervention | ForEach-Object { [string]$_.identity })
+                            }
+                        }
+                        $guestRootPresentBeforeDelete = [bool](Test-Path -LiteralPath $root)
+                        $trustedRootPresentBeforeDelete = [bool](Test-Path -LiteralPath $trustedRoot)
+                        $smartScreenInitialDeltaAccepted =
+                            $smartScreenNaturalExit.status -ceq 'natural-exit' -and
+                            $unexpectedRunnerProcessesBeforeCleanup.Count -eq 1 -and
+                            [string]$unexpectedRunnerProcessesBeforeCleanup[0].identity -ceq
+                                [string]$smartScreenNaturalExit.candidate_identity -and
+                            $smartScreenNaturalExit.natural_exit_observed -and
+                            $smartScreenNaturalExit.final_inventory_complete -and
+                            $smartScreenNaturalExit.final_runner_process_delta_identities.Count -eq 0 -and
+                            $smartScreenNaturalExit.final_runner_task_delta_identities.Count -eq 0
+                        if (-not $mayDelete -or -not $jobsClosed -or $taskPresentBeforeDelete -or
+                            -not $processSnapshotBeforeCleanup.complete -or
+                            $unexpectedRunnerTasksBeforeCleanup.Count -ne 0 -or
+                            ($unexpectedRunnerProcessesBeforeCleanup.Count -ne 0 -and
+                                -not $smartScreenInitialDeltaAccepted) -or
+                            -not $processSnapshotAfterIntervention.complete -or
+                            $unexpectedRunnerTasksAfterIntervention.Count -ne 0 -or
+                            $unexpectedRunnerProcessesAfterIntervention.Count -ne 0 -or
+                            $removedRunnerTasks.Count -ne 0 -or
+                            $terminatedRunnerProcesses.Count -ne 0 -or
+                            $cleanupResourceErrors.Count -ne 0) {
+                            return [pscustomobject]@{
+                                guest_cleanup = $false
+                                raw_cleanup = [ordered]@{
+                                    scheduled_task_present = $taskPresentBeforeDelete
+                                    guest_root_present = $guestRootPresentBeforeDelete
+                                    trusted_task_root_present = $trustedRootPresentBeforeDelete
+                                    process_jobs_closed = [bool]$jobsClosed
+                                    runner_process_inventory_complete = [bool]($processSnapshotBeforeCleanup.complete -and
+                                        $processSnapshotAfterIntervention.complete)
+                                    unexpected_runner_tasks = $unexpectedRunnerTasksBeforeCleanup
+                                    unexpected_runner_processes = $unexpectedRunnerProcessesBeforeCleanup
+                                    unexpected_runner_tasks_after_intervention = $unexpectedRunnerTasksAfterIntervention
+                                    unexpected_runner_processes_after_intervention = $unexpectedRunnerProcessesAfterIntervention
+                                    unexpected_runner_tasks_after_delete = $null
+                                    unexpected_runner_processes_after_delete = $null
+                                    removed_runner_tasks = @($removedRunnerTasks | Sort-Object)
+                                    terminated_runner_processes = @($terminatedRunnerProcesses)
+                                    resource_cleanup_errors = @($cleanupResourceErrors)
+                                    smart_screen_natural_exit = $smartScreenNaturalExit
+                                    owned_processes_after = @(Get-CimInstance Win32_Process | Where-Object {
+                                        Test-ProcessExecutableInOwnedRoots -Path $_.ExecutablePath -Prefixes $prefixes
+                                    } | Sort-Object ProcessId | ForEach-Object {
+                                        [ordered]@{ pid = [int]$_.ProcessId; session_id = [int]$_.SessionId; executable_path = [string]$_.ExecutablePath }
+                                    })
+                                }
+                            }
+                        }
+                        foreach ($ownedRoot in @($root,$trustedRoot)) {
+                            if (Test-Path -LiteralPath $ownedRoot) {
+                                $pending = New-Object 'Collections.Generic.Stack[string]'
+                                $pending.Push($ownedRoot)
+                                while ($pending.Count -gt 0) {
+                                    $directory = $pending.Pop()
+                                    if ((Get-Item -LiteralPath $directory -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse entry remains; VM directory retained.' }
+                                    foreach ($item in Get-ChildItem -LiteralPath $directory -Force) {
+                                        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse entry remains; VM directory retained.' }
+                                        if ($item.PSIsContainer) { $pending.Push($item.FullName) }
                                     }
                                 }
                             }
                         }
-                        else {
-                            $smartScreenNaturalExit.status = 'rejected'
-                            $smartScreenNaturalExit.final_runner_process_delta_identities = @(
-                                $unexpectedRunnerProcessesAfterIntervention | ForEach-Object { [string]$_.identity })
-                            $smartScreenNaturalExit.final_runner_task_delta_identities = @(
-                                $unexpectedRunnerTasksAfterIntervention | ForEach-Object { [string]$_.identity })
+                        if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+                        if (Test-Path -LiteralPath $trustedRoot) { Remove-Item -LiteralPath $trustedRoot -Recurse -Force }
+                        $rootPresent = [bool](Test-Path -LiteralPath $root)
+                        $trustedRootPresent = [bool](Test-Path -LiteralPath $trustedRoot)
+                        $ownedAfter = @(Get-CimInstance Win32_Process `
+                            -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object {
+                            Test-ProcessExecutableInOwnedRoots -Path $_.ExecutablePath -Prefixes $prefixes
+                        } | Sort-Object ProcessId | ForEach-Object {
+                            [ordered]@{ pid = [int]$_.ProcessId; session_id = [int]$_.SessionId; executable_path = [string]$_.ExecutablePath }
+                        })
+                        $ownedScheduledTasksAfterDelete = @(Get-ScheduledTask -ErrorAction Stop |
+                            Where-Object {
+                                [string]$_.TaskName -ceq $name -and [string]$_.TaskPath -ceq '\'
+                            })
+                        $taskPresent = $ownedScheduledTasksAfterDelete.Count -gt 0
+                        $runnerTasksAfterDelete = @(Get-DrVmRunnerTasks -UserSid $taskContext.runner_sid)
+                        $unexpectedRunnerTasksAfterDelete = @($runnerTasksAfterDelete |
+                            Where-Object {
+                                -not $baselineTasks.Contains([string]$_.identity) -or
+                                [string]$_.definition_sha256 -cne [string]$baselineTaskHashes[[string]$_.identity]
+                            } |
+                            Sort-Object identity)
+                        $runnerTaskIdentitiesAfterDelete = [Collections.Generic.HashSet[string]]::new(
+                            [StringComparer]::OrdinalIgnoreCase)
+                        foreach ($task in $runnerTasksAfterDelete) {
+                            [void]$runnerTaskIdentitiesAfterDelete.Add([string]$task.identity)
                         }
-                    }
-                    $guestRootPresentBeforeDelete = [bool](Test-Path -LiteralPath $root)
-                    $trustedRootPresentBeforeDelete = [bool](Test-Path -LiteralPath $trustedRoot)
-                    $smartScreenInitialDeltaAccepted =
-                        $smartScreenNaturalExit.status -ceq 'natural-exit' -and
-                        $unexpectedRunnerProcessesBeforeCleanup.Count -eq 1 -and
-                        [string]$unexpectedRunnerProcessesBeforeCleanup[0].identity -ceq
-                            [string]$smartScreenNaturalExit.candidate_identity -and
-                        $smartScreenNaturalExit.natural_exit_observed -and
-                        $smartScreenNaturalExit.final_inventory_complete -and
-                        $smartScreenNaturalExit.final_runner_process_delta_identities.Count -eq 0 -and
-                        $smartScreenNaturalExit.final_runner_task_delta_identities.Count -eq 0
-                    if (-not $mayDelete -or -not $jobsClosed -or $taskPresentBeforeDelete -or
-                        -not $processSnapshotBeforeCleanup.complete -or
-                        $unexpectedRunnerTasksBeforeCleanup.Count -ne 0 -or
-                        ($unexpectedRunnerProcessesBeforeCleanup.Count -ne 0 -and
-                            -not $smartScreenInitialDeltaAccepted) -or
-                        -not $processSnapshotAfterIntervention.complete -or
-                        $unexpectedRunnerTasksAfterIntervention.Count -ne 0 -or
-                        $unexpectedRunnerProcessesAfterIntervention.Count -ne 0 -or
-                        $removedRunnerTasks.Count -ne 0 -or
-                        $terminatedRunnerProcesses.Count -ne 0 -or
-                        $cleanupResourceErrors.Count -ne 0) {
-                        return [pscustomobject]@{
-                            guest_cleanup = $false
+                        foreach ($identity in $baselineTasks) {
+                            if (-not $runnerTaskIdentitiesAfterDelete.Contains([string]$identity)) {
+                                [void]$removedRunnerTasks.Add([string]$identity)
+                            }
+                        }
+                        $processSnapshotAfterDelete = Get-DrVmRunnerProcesses `
+                            -UserSid $taskContext.runner_sid `
+                            -SessionId $taskContext.runner_session_id
+                        $unexpectedRunnerProcessesAfterDelete = @($processSnapshotAfterDelete.processes |
+                            Where-Object { -not $baselineProcesses.Contains([string]$_.identity) } |
+                            Sort-Object identity)
+                        [pscustomobject]@{
+                            guest_cleanup = ($jobsClosed -and -not $rootPresent -and
+                                -not $trustedRootPresent -and
+                                -not $taskPresent -and
+                                $processSnapshotBeforeCleanup.complete -and
+                                $processSnapshotAfterIntervention.complete -and
+                                $processSnapshotAfterDelete.complete -and
+                                $unexpectedRunnerTasksBeforeCleanup.Count -eq 0 -and
+                                ($unexpectedRunnerProcessesBeforeCleanup.Count -eq 0 -or
+                                    $smartScreenInitialDeltaAccepted) -and
+                                $unexpectedRunnerTasksAfterIntervention.Count -eq 0 -and
+                                $unexpectedRunnerProcessesAfterIntervention.Count -eq 0 -and
+                                $unexpectedRunnerTasksAfterDelete.Count -eq 0 -and
+                                $unexpectedRunnerProcessesAfterDelete.Count -eq 0 -and
+                                $removedRunnerTasks.Count -eq 0 -and
+                                $terminatedRunnerProcesses.Count -eq 0 -and
+                                $cleanupResourceErrors.Count -eq 0 -and
+                                $ownedAfter.Count -eq 0)
                             raw_cleanup = [ordered]@{
-                                scheduled_task_present = $taskPresentBeforeDelete
-                                guest_root_present = $guestRootPresentBeforeDelete
-                                trusted_task_root_present = $trustedRootPresentBeforeDelete
+                                scheduled_task_present = $taskPresent
+                                guest_root_present = $rootPresent
+                                trusted_task_root_present = $trustedRootPresent
                                 process_jobs_closed = [bool]$jobsClosed
                                 runner_process_inventory_complete = [bool]($processSnapshotBeforeCleanup.complete -and
-                                    $processSnapshotAfterIntervention.complete)
+                                    $processSnapshotAfterIntervention.complete -and
+                                    $processSnapshotAfterDelete.complete)
                                 unexpected_runner_tasks = $unexpectedRunnerTasksBeforeCleanup
                                 unexpected_runner_processes = $unexpectedRunnerProcessesBeforeCleanup
                                 unexpected_runner_tasks_after_intervention = $unexpectedRunnerTasksAfterIntervention
                                 unexpected_runner_processes_after_intervention = $unexpectedRunnerProcessesAfterIntervention
-                                unexpected_runner_tasks_after_delete = $null
-                                unexpected_runner_processes_after_delete = $null
+                                unexpected_runner_tasks_after_delete = $unexpectedRunnerTasksAfterDelete
+                                unexpected_runner_processes_after_delete = $unexpectedRunnerProcessesAfterDelete
                                 removed_runner_tasks = @($removedRunnerTasks | Sort-Object)
                                 terminated_runner_processes = @($terminatedRunnerProcesses)
                                 resource_cleanup_errors = @($cleanupResourceErrors)
                                 smart_screen_natural_exit = $smartScreenNaturalExit
-                                owned_processes_after = @(Get-CimInstance Win32_Process | Where-Object {
-                                    Test-ProcessExecutableInOwnedRoots -Path $_.ExecutablePath -Prefixes $prefixes
-                                } | Sort-Object ProcessId | ForEach-Object {
-                                    [ordered]@{ pid = [int]$_.ProcessId; session_id = [int]$_.SessionId; executable_path = [string]$_.ExecutablePath }
-                                })
+                                owned_processes_after = $ownedAfter
                             }
                         }
                     }
-                    $pending = New-Object 'Collections.Generic.Stack[string]'
-                    $pending.Push($root)
-                    while ($pending.Count -gt 0) {
-                        $directory = $pending.Pop()
-                        if ((Get-Item -LiteralPath $directory).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse fixture remains; VM directory retained.' }
-                        foreach ($item in Get-ChildItem -LiteralPath $directory -Force) {
-                            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse fixture remains; VM directory retained.' }
-                            if ($item.PSIsContainer) { $pending.Push($item.FullName) }
-                        }
+                    if ($null -eq $cleanupResult -or $cleanupResult.guest_cleanup -isnot [bool] -or
+                        $null -eq $cleanupResult.raw_cleanup) {
+                        throw 'Guest cleanup did not return its bound raw observation.'
                     }
-                    foreach ($ownedRoot in @($root,$trustedRoot)) {
-                        if (Test-Path -LiteralPath $ownedRoot) {
-                            $pending = New-Object 'Collections.Generic.Stack[string]'
-                            $pending.Push($ownedRoot)
-                            while ($pending.Count -gt 0) {
-                                $directory = $pending.Pop()
-                                if ((Get-Item -LiteralPath $directory -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse entry remains; VM directory retained.' }
-                                foreach ($item in Get-ChildItem -LiteralPath $directory -Force) {
-                                    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse entry remains; VM directory retained.' }
-                                    if ($item.PSIsContainer) { $pending.Push($item.FullName) }
-                                }
-                            }
-                        }
-                    }
-                    if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
-                    if (Test-Path -LiteralPath $trustedRoot) { Remove-Item -LiteralPath $trustedRoot -Recurse -Force }
-                    $rootPresent = [bool](Test-Path -LiteralPath $root)
-                    $trustedRootPresent = [bool](Test-Path -LiteralPath $trustedRoot)
-                    $ownedAfter = @(Get-CimInstance Win32_Process `
-                        -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object {
-                        Test-ProcessExecutableInOwnedRoots -Path $_.ExecutablePath -Prefixes $prefixes
-                    } | Sort-Object ProcessId | ForEach-Object {
-                        [ordered]@{ pid = [int]$_.ProcessId; session_id = [int]$_.SessionId; executable_path = [string]$_.ExecutablePath }
-                    })
-                    $ownedScheduledTasksAfterDelete = @(Get-ScheduledTask -ErrorAction Stop |
-                        Where-Object {
-                            [string]$_.TaskName -ceq $name -and [string]$_.TaskPath -ceq '\'
-                        })
-                    $taskPresent = $ownedScheduledTasksAfterDelete.Count -gt 0
-                    $runnerTasksAfterDelete = @(Get-DrVmRunnerTasks -UserSid $taskContext.runner_sid)
-                    $unexpectedRunnerTasksAfterDelete = @($runnerTasksAfterDelete |
-                        Where-Object {
-                            -not $baselineTasks.Contains([string]$_.identity) -or
-                            [string]$_.definition_sha256 -cne [string]$baselineTaskHashes[[string]$_.identity]
-                        } |
-                        Sort-Object identity)
-                    $runnerTaskIdentitiesAfterDelete = [Collections.Generic.HashSet[string]]::new(
-                        [StringComparer]::OrdinalIgnoreCase)
-                    foreach ($task in $runnerTasksAfterDelete) {
-                        [void]$runnerTaskIdentitiesAfterDelete.Add([string]$task.identity)
-                    }
-                    foreach ($identity in $baselineTasks) {
-                        if (-not $runnerTaskIdentitiesAfterDelete.Contains([string]$identity)) {
-                            [void]$removedRunnerTasks.Add([string]$identity)
-                        }
-                    }
-                    $processSnapshotAfterDelete = Get-DrVmRunnerProcesses `
-                        -UserSid $taskContext.runner_sid `
-                        -SessionId $taskContext.runner_session_id
-                    $unexpectedRunnerProcessesAfterDelete = @($processSnapshotAfterDelete.processes |
-                        Where-Object { -not $baselineProcesses.Contains([string]$_.identity) } |
-                        Sort-Object identity)
-                    [pscustomobject]@{
-                        guest_cleanup = ($jobsClosed -and -not $rootPresent -and
-                            -not $trustedRootPresent -and
-                            -not $taskPresent -and
-                            $processSnapshotBeforeCleanup.complete -and
-                            $processSnapshotAfterIntervention.complete -and
-                            $processSnapshotAfterDelete.complete -and
-                            $unexpectedRunnerTasksBeforeCleanup.Count -eq 0 -and
-                            ($unexpectedRunnerProcessesBeforeCleanup.Count -eq 0 -or
-                                $smartScreenInitialDeltaAccepted) -and
-                            $unexpectedRunnerTasksAfterIntervention.Count -eq 0 -and
-                            $unexpectedRunnerProcessesAfterIntervention.Count -eq 0 -and
-                            $unexpectedRunnerTasksAfterDelete.Count -eq 0 -and
-                            $unexpectedRunnerProcessesAfterDelete.Count -eq 0 -and
-                            $removedRunnerTasks.Count -eq 0 -and
-                            $terminatedRunnerProcesses.Count -eq 0 -and
-                            $cleanupResourceErrors.Count -eq 0 -and
-                            $ownedAfter.Count -eq 0)
-                        raw_cleanup = [ordered]@{
-                            scheduled_task_present = $taskPresent
-                            guest_root_present = $rootPresent
-                            trusted_task_root_present = $trustedRootPresent
-                            process_jobs_closed = [bool]$jobsClosed
-                            runner_process_inventory_complete = [bool]($processSnapshotBeforeCleanup.complete -and
-                                $processSnapshotAfterIntervention.complete -and
-                                $processSnapshotAfterDelete.complete)
-                            unexpected_runner_tasks = $unexpectedRunnerTasksBeforeCleanup
-                            unexpected_runner_processes = $unexpectedRunnerProcessesBeforeCleanup
-                            unexpected_runner_tasks_after_intervention = $unexpectedRunnerTasksAfterIntervention
-                            unexpected_runner_processes_after_intervention = $unexpectedRunnerProcessesAfterIntervention
-                            unexpected_runner_tasks_after_delete = $unexpectedRunnerTasksAfterDelete
-                            unexpected_runner_processes_after_delete = $unexpectedRunnerProcessesAfterDelete
-                            removed_runner_tasks = @($removedRunnerTasks | Sort-Object)
-                            terminated_runner_processes = @($terminatedRunnerProcesses)
-                            resource_cleanup_errors = @($cleanupResourceErrors)
-                            smart_screen_natural_exit = $smartScreenNaturalExit
-                            owned_processes_after = $ownedAfter
-                        }
-                    }
+                    $transport.guest_cleanup = [bool]$cleanupResult.guest_cleanup
+                    $transport['raw_cleanup'] = $cleanupResult.raw_cleanup
                 }
-                if ($null -eq $cleanupResult -or $cleanupResult.guest_cleanup -isnot [bool] -or
-                    $null -eq $cleanupResult.raw_cleanup) {
-                    throw 'Guest cleanup did not return its bound raw observation.'
-                }
-                $transport.guest_cleanup = [bool]$cleanupResult.guest_cleanup
-                $transport['raw_cleanup'] = $cleanupResult.raw_cleanup
+            } catch {
+                $transport.status='failed'; $transport.cleanup_error='Guest cleanup failed; inspect cleanup-error.txt.'; $transport.guest_cleanup=$false
+                $_ | Out-String | Set-Content -LiteralPath (Join-Path $transportOutputRoot 'cleanup-error.txt') -Encoding UTF8
             }
-        } catch {
-            $transport.status='failed'; $transport.cleanup_error='Guest cleanup failed; inspect cleanup-error.txt.'; $transport.guest_cleanup=$false
-            $_ | Out-String | Set-Content -LiteralPath (Join-Path $transportOutputRoot 'cleanup-error.txt') -Encoding UTF8
+            if ($guestRoot -and -not $transport.guest_cleanup) { [IO.File]::WriteAllText((Join-Path $transportOutputRoot 'retained-guest-directory.txt'), $guestRoot) }
         }
-        if ($guestRoot -and -not $transport.guest_cleanup) { [IO.File]::WriteAllText((Join-Path $transportOutputRoot 'retained-guest-directory.txt'), $guestRoot) }
-        Remove-PSSession $session
     }
-    if ($credential) { $credential.Password.Dispose() }
-    if ($mutexHeld) { $mutex.ReleaseMutex() }; if ($mutex) { $mutex.Dispose() }
-    $transport | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $transportOutputRoot 'transport.json') -Encoding UTF8
-    if ($result -and $taskSelection.kind -ceq 'core') {
-        $result | Add-Member -NotePropertyName transport -NotePropertyValue $transport -Force
-        $result | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $BundleRoot 'result.json') -Encoding UTF8
+    finally {
+        $controllerCleanupErrors = @(Close-DrControllerResources `
+            -Session $session -Credential $credential -Mutex $mutex -MutexHeld $mutexHeld)
+        if ($controllerCleanupErrors.Count -gt 0) {
+            $transport.status = 'failed'
+            $transport['controller_cleanup_errors'] = $controllerCleanupErrors
+        }
+        $transport | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $transportOutputRoot 'transport.json') -Encoding UTF8
+        if ($result -and $taskSelection.kind -ceq 'core') {
+            $result | Add-Member -NotePropertyName transport -NotePropertyValue $transport -Force
+            $result | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $BundleRoot 'result.json') -Encoding UTF8
+        }
     }
 }
 if ($transport.status -ne 'collected' -or -not $transport.guest_cleanup -or

@@ -1,45 +1,20 @@
-﻿function Resolve-AcceptanceRescuePollState {
+﻿function Resolve-ObserverTaskPollState {
     param(
         [AllowNull()][string] $ResultStatus,
         [Parameter(Mandatory = $true)][string] $TaskState,
         [Parameter(Mandatory = $true)][object] $TaskResult,
         [Parameter(Mandatory = $true)][long] $RegisteredLastRunTimeTicks,
-        [Parameter(Mandatory = $true)][long] $LastRunTimeTicks
+        [Parameter(Mandatory = $true)][long] $LastRunTimeTicks,
+        [ValidateSet('Observer', 'Rescue')][string] $Label = 'Observer'
     )
 
     if (($TaskResult -isnot [int] -and $TaskResult -isnot [long] -and
             $TaskResult -isnot [uint32]) -or
         [decimal]$TaskResult -lt 0 -or [decimal]$TaskResult -gt [uint32]::MaxValue) {
-        throw 'Rescue task polling returned an invalid LastTaskResult.'
+        throw "$Label task polling returned an invalid LastTaskResult."
     }
     if ($RegisteredLastRunTimeTicks -lt 0 -or $LastRunTimeTicks -lt 0) {
-        throw 'Rescue task polling returned an invalid LastRunTime.'
-    }
-    [pscustomobject][ordered]@{
-        result_status = $ResultStatus
-        task_state = $TaskState
-        task_result = [long]$TaskResult
-        last_run_time_ticks = $LastRunTimeTicks
-        terminal = $TaskState -ceq 'Ready' -and
-            $LastRunTimeTicks -gt $RegisteredLastRunTimeTicks
-    }
-}
-function Resolve-ObserverTaskPollState {
-    param(
-        [AllowNull()][string] $ResultStatus,
-        [Parameter(Mandatory = $true)][string] $TaskState,
-        [Parameter(Mandatory = $true)][object] $TaskResult,
-        [Parameter(Mandatory = $true)][long] $RegisteredLastRunTimeTicks,
-        [Parameter(Mandatory = $true)][long] $LastRunTimeTicks
-    )
-
-    if (($TaskResult -isnot [int] -and $TaskResult -isnot [long] -and
-            $TaskResult -isnot [uint32]) -or
-        [decimal]$TaskResult -lt 0 -or [decimal]$TaskResult -gt [uint32]::MaxValue) {
-        throw 'Observer task polling returned an invalid LastTaskResult.'
-    }
-    if ($RegisteredLastRunTimeTicks -lt 0 -or $LastRunTimeTicks -lt 0) {
-        throw 'Observer task polling returned an invalid LastRunTime.'
+        throw "$Label task polling returned an invalid LastRunTime."
     }
     [pscustomobject][ordered]@{
         result_status = $ResultStatus

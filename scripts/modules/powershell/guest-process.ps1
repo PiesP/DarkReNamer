@@ -188,22 +188,9 @@ function New-ObserverCandidateWriteDirectory {
 function Assert-OrdinaryDirectoryTree {
     param([Parameter(Mandatory)][string] $Path)
 
-    $root = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-    if (-not $root.PSIsContainer -or
-        ($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw 'A runtime cleanup root is not an ordinary directory.'
-    }
-    $pending = [Collections.Generic.Stack[string]]::new()
-    $pending.Push($root.FullName)
-    while ($pending.Count -gt 0) {
-        $directory = $pending.Pop()
-        foreach ($entry in @(Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop)) {
-            if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                ($entry.Attributes -band [IO.FileAttributes]::Device) -ne 0) {
-                throw 'A runtime cleanup tree contains a reparse point or device.'
-            }
-            if ($entry.PSIsContainer) { $pending.Push($entry.FullName) }
-        }
+    $observation = Get-VmAutomatedRuntimeRootObservation -Root $Path
+    if (-not $observation.exists) {
+        throw 'The runtime cleanup root does not exist.'
     }
 }
 function Invoke-TaskkillTree {
@@ -1727,35 +1714,49 @@ function Stop-JobBoundProcess {
 function Close-JobBoundProcess {
     param([Parameter(Mandatory)][object] $State)
 
-    $State.job_active_processes_at_close = [int]$State.owner.ActiveProcessCount
-    $emptyOnWait = $true
-    if ($State.job_active_processes_at_close -gt 0) {
-        $State.job_had_survivors = $true
-        $State.job_forced_termination = $true
-        $State.owner.Terminate(1)
-        $emptyOnWait = $false
-        $empty = $State.owner.WaitForEmpty(10000)
-    }
-    else {
-        $emptyOnWait = $State.owner.WaitForEmpty(10000)
-        $empty = $emptyOnWait
-        if (-not $emptyOnWait) {
+    $errors = [Collections.Generic.List[string]]::new()
+    $empty = $false
+    $emptyOnWait = $false
+    $closed = $false
+    $captureComplete = $false
+    try {
+        $activeProcesses = $State.owner.ActiveProcessCount
+        if ($null -eq $activeProcesses) {
+            throw 'The process job active-process count could not be observed.'
+        }
+        $State.job_active_processes_at_close = [int]$activeProcesses
+        if ($State.job_active_processes_at_close -gt 0) {
             $State.job_had_survivors = $true
             $State.job_forced_termination = $true
             $State.owner.Terminate(1)
             $empty = $State.owner.WaitForEmpty(10000)
         }
+        else {
+            $emptyOnWait = $State.owner.WaitForEmpty(10000)
+            $empty = $emptyOnWait
+            if (-not $emptyOnWait) {
+                $State.job_had_survivors = $true
+                $State.job_forced_termination = $true
+                $State.owner.Terminate(1)
+                $empty = $State.owner.WaitForEmpty(10000)
+            }
+        }
     }
-    $closed = $State.owner.CloseJob()
-    $captureComplete = $true
-    try { $State.owner.WaitForCapture(10000) }
-    catch {
-        $captureComplete = $false
-        $State.job_cleanup_error = $_.Exception.Message
+    catch { $errors.Add($_.Exception.Message) }
+    finally {
+        try { $closed = $State.owner.CloseJob() }
+        catch { $errors.Add($_.Exception.Message) }
+        try {
+            $State.owner.WaitForCapture(10000)
+            $captureComplete = $true
+        }
+        catch { $errors.Add($_.Exception.Message) }
+        $State.job_empty = $empty
+        $State.job_closed = $closed
+        $State.job_capture_complete = $captureComplete
+        if ($errors.Count -gt 0) { $State.job_cleanup_error = $errors -join '; ' }
     }
-    $State.job_empty = $empty
-    $State.job_closed = $closed
-    $State.job_capture_complete = $captureComplete
+    if ($errors.Count -gt 0) { throw $State.job_cleanup_error }
     $State.job_active_processes_at_close -eq 0 -and
         $emptyOnWait -and $empty -and $closed -and $captureComplete -and
         -not $State.job_had_survivors
@@ -2092,91 +2093,82 @@ function Invoke-RustTestBinary {
     }
     $processState = [pscustomobject]@{ process = $null }
     try {
-    if ($OutputBudgetBytes -eq 0) {
-        $row.failure_reason = 'suite_output_limit_exceeded'
-        $row.job_cleanup = $true
-        $row.stdout = [ordered]@{
-            file = $stdoutLeaf
-            sha256 = Get-LowerSha256 -Path $stdoutPath
-            bytes = Get-CapturedOutputBytes -Path $stdoutPath
-        }
-        $row.stderr = [ordered]@{
-            file = $stderrLeaf
-            sha256 = Get-LowerSha256 -Path $stderrPath
-            bytes = Get-CapturedOutputBytes -Path $stderrPath
-        }
-        return [pscustomobject]$row
-    }
-        Assert-OrdinaryFile -Path $binaryPath -Label 'test binary'
-        if ((Get-LowerSha256 -Path $binaryPath) -cne $Test.sha256) {
-            $row.failure_reason = 'artifact_changed_after_preflight'
-            return [pscustomobject]$row
-        }
-        $caseRoot = New-PrivateDirectory -Parent $RuntimeRoot -Leaf ('test-{0:D3}' -f $Index)
-        $temporaryRoot = $null
-        $caseSensitiveFixtureRoot = $null
-        if ($Test.file -cmatch '^rename_windows_backend-[0-9a-f]{16}\.exe$') {
-            $temporaryRoot = New-PrivateDirectory -Parent $caseRoot -Leaf 'temp'
-            $temporaryRoot = Resolve-JobBoundShortPath -Path $temporaryRoot
-            $caseSensitiveFixtureRoot = New-PrivateDirectory `
-                -Parent $temporaryRoot -Leaf 'case-sensitive-fixture'
-            [DarkReNamerVmFileSystem]::SetCaseSensitiveDirectory($caseSensitiveFixtureRoot)
-        }
-        Invoke-WithIsolatedEnvironment `
-            -RuntimeRoot $caseRoot `
-            -TemporaryRoot $temporaryRoot `
-            -CaseSensitiveFixtureRoot $caseSensitiveFixtureRoot `
-            -Action {
-            $ownedProcess = Start-JobBoundProcess `
-                -FilePath $binaryPath `
-                -Arguments '--nocapture --test-threads=1' `
-                -WorkingDirectory $Root `
-                -StdoutPath $stdoutPath `
-                -StderrPath $stderrPath `
-                -AggregateOutputLimitBytes $OutputBudgetBytes
-            $processState.process = $ownedProcess
-            $wait = Wait-JobBoundProcessWithOutputLimit `
-                -State $processState.process `
-                -StdoutPath $stdoutPath `
-                -StderrPath $stderrPath `
-                -TimeoutSeconds $TimeoutSeconds
-            if ($null -ne $wait.failure_reason) {
-                $row.failure_reason = $wait.failure_reason
+        do {
+            if ($OutputBudgetBytes -eq 0) {
+                $row.failure_reason = 'suite_output_limit_exceeded'
+                break
+            }
+            Assert-OrdinaryFile -Path $binaryPath -Label 'test binary'
+            if ((Get-LowerSha256 -Path $binaryPath) -cne $Test.sha256) {
+                $row.failure_reason = 'artifact_changed_after_preflight'
+                break
+            }
+            $caseRoot = New-PrivateDirectory -Parent $RuntimeRoot -Leaf ('test-{0:D3}' -f $Index)
+            $temporaryRoot = $null
+            $caseSensitiveFixtureRoot = $null
+            if ($Test.file -cmatch '^rename_windows_backend-[0-9a-f]{16}\.exe$') {
+                $temporaryRoot = New-PrivateDirectory -Parent $caseRoot -Leaf 'temp'
+                $temporaryRoot = Resolve-JobBoundShortPath -Path $temporaryRoot
+                $caseSensitiveFixtureRoot = New-PrivateDirectory `
+                    -Parent $temporaryRoot -Leaf 'case-sensitive-fixture'
+                [DarkReNamerVmFileSystem]::SetCaseSensitiveDirectory($caseSensitiveFixtureRoot)
+            }
+            Invoke-WithIsolatedEnvironment `
+                -RuntimeRoot $caseRoot `
+                -TemporaryRoot $temporaryRoot `
+                -CaseSensitiveFixtureRoot $caseSensitiveFixtureRoot `
+                -Action {
+                $ownedProcess = Start-JobBoundProcess `
+                    -FilePath $binaryPath `
+                    -Arguments '--nocapture --test-threads=1' `
+                    -WorkingDirectory $Root `
+                    -StdoutPath $stdoutPath `
+                    -StderrPath $stderrPath `
+                    -AggregateOutputLimitBytes $OutputBudgetBytes
+                $processState.process = $ownedProcess
+                $wait = Wait-JobBoundProcessWithOutputLimit `
+                    -State $processState.process `
+                    -StdoutPath $stdoutPath `
+                    -StderrPath $stderrPath `
+                    -TimeoutSeconds $TimeoutSeconds
+                if ($null -ne $wait.failure_reason) {
+                    $row.failure_reason = $wait.failure_reason
+                    $row.active_processes_at_primary_exit = $wait.active_processes_at_primary_exit
+                    $row.process_job_snapshot = $wait.process_job_snapshot
+                    return
+                }
                 $row.active_processes_at_primary_exit = $wait.active_processes_at_primary_exit
                 $row.process_job_snapshot = $wait.process_job_snapshot
-                return
-            }
-            $row.active_processes_at_primary_exit = $wait.active_processes_at_primary_exit
-            $row.process_job_snapshot = $wait.process_job_snapshot
-            $row.exit_code = $processState.process.process.ExitCode
-            $stdoutText = [IO.File]::ReadAllText($stdoutPath, [Text.Encoding]::UTF8)
-            $stderrText = [IO.File]::ReadAllText($stderrPath, [Text.Encoding]::UTF8)
-            try {
-                $summary = Read-RustTestSummary `
-                    -Stdout $stdoutText `
-                    -Stderr $stderrText `
-                    -AllowZeroTests:($Test.name -ceq 'DarkReNamer')
-                $row.passed = $summary.passed
-                $row.failed = $summary.failed
-                $row.ignored = $summary.ignored
-                if ($processState.process.process.ExitCode -eq 0 -and
-                    $summary.outcome -ceq 'ok' -and
-                    $summary.failed -eq 0) {
-                    $row.status = 'passed'
-                    $row.failure_reason = $null
+                $row.exit_code = $processState.process.process.ExitCode
+                $stdoutText = [IO.File]::ReadAllText($stdoutPath, [Text.Encoding]::UTF8)
+                $stderrText = [IO.File]::ReadAllText($stderrPath, [Text.Encoding]::UTF8)
+                try {
+                    $summary = Read-RustTestSummary `
+                        -Stdout $stdoutText `
+                        -Stderr $stderrText `
+                        -AllowZeroTests:($Test.name -ceq 'DarkReNamer')
+                    $row.passed = $summary.passed
+                    $row.failed = $summary.failed
+                    $row.ignored = $summary.ignored
+                    if ($processState.process.process.ExitCode -eq 0 -and
+                        $summary.outcome -ceq 'ok' -and
+                        $summary.failed -eq 0) {
+                        $row.status = 'passed'
+                        $row.failure_reason = $null
+                    }
+                    else {
+                        $row.failure_reason = 'test_failed'
+                    }
                 }
-                else {
-                    $row.failure_reason = 'test_failed'
+                catch {
+                    $row.failure_reason = 'invalid_test_summary'
                 }
             }
-            catch {
-                $row.failure_reason = 'invalid_test_summary'
+            if ($null -ne $caseSensitiveFixtureRoot -and $row.status -ceq 'passed') {
+                Complete-JobBoundCaseSensitiveFixture `
+                    -FixtureRoot $caseSensitiveFixtureRoot -Row $row
             }
-        }
-        if ($null -ne $caseSensitiveFixtureRoot -and $row.status -ceq 'passed') {
-            Complete-JobBoundCaseSensitiveFixture `
-                -FixtureRoot $caseSensitiveFixtureRoot -Row $row
-        }
+        } while ($false)
     }
     catch {
         $row.status = 'failed'

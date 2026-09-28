@@ -99,7 +99,7 @@
                 last_run_time_ticks = [long]$info.LastRunTime.Ticks
             }
         }
-        $rescue = Resolve-AcceptanceRescuePollState `
+        $rescue = Resolve-ObserverTaskPollState -Label Rescue `
             -ResultStatus $observed.result_status `
             -TaskState $observed.task_state `
             -TaskResult $observed.task_result `
@@ -241,7 +241,7 @@ function Invoke-AcceptanceHighContrastRescue {
                 last_run_time_ticks = [long]$info.LastRunTime.Ticks
             }
         }
-        $rescue = Resolve-AcceptanceRescuePollState `
+        $rescue = Resolve-ObserverTaskPollState -Label Rescue `
             -ResultStatus $observed.result_status `
             -TaskState $observed.task_state `
             -TaskResult $observed.task_result `

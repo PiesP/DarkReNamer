@@ -309,15 +309,7 @@ finally {
             if (-not $processJobsClosed) {
                 throw 'Candidate process jobs are not proven closed; runtime evidence was retained.'
             }
-            $runtimeItem = Get-Item -LiteralPath $runtimeRoot -Force
-            if (($runtimeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                throw 'The owned runtime root became a reparse point.'
-            }
-            foreach ($entry in @(Get-ChildItem -LiteralPath $runtimeRoot -Recurse -Force)) {
-                if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                    throw 'The owned runtime tree contains a reparse point.'
-                }
-            }
+            Assert-OrdinaryDirectoryTree -Path $runtimeRoot
             Remove-Item -LiteralPath $runtimeRoot -Recurse -Force
             if (Test-Path -LiteralPath $runtimeRoot) {
                 throw 'The owned runtime fixture cleanup was incomplete.'

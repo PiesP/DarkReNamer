@@ -495,251 +495,253 @@ function Invoke-GuiSmoke {
     $screenshotLeaf = 'main-workbench.png'
     $screenshotPath = Join-Path $OutputRoot $screenshotLeaf
     try {
-        $applicationPath = Join-Path $Root $Application.file
-        Assert-OrdinaryFile -Path $applicationPath -Label 'application'
-        if ((Get-LowerSha256 -Path $applicationPath) -cne $Application.sha256) {
-            $row.failure_reason = 'artifact_changed_after_preflight'
-            return [pscustomobject]$row
-        }
-        Initialize-NativeCapture
-        if (-not [DarkReNamerVmNative]::SetProcessDpiAwarenessContext([IntPtr](-4))) {
-            $row.failure_reason = 'dpi_awareness_failed'
-            return [pscustomobject]$row
-        }
-        $caseRoot = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'gui'
-        $flowFixturePath = Join-Path $caseRoot 'rename-flow'
-        if (Test-Path -LiteralPath $flowFixturePath) {
-            throw 'The production flow fixture already exists before application launch.'
-        }
-        $runnerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-        if ($RawEvidence -and [string]::IsNullOrWhiteSpace($FixtureParentRoot)) {
-            throw 'Raw production flow evidence requires a protected task-directory fixture parent.'
-        }
-        $flowFixtureParent = if ($FixtureParentRoot) { $FixtureParentRoot } else { $caseRoot }
-        $flowFixtureRoot = New-ObserverFixtureDirectory `
-            -Parent $flowFixtureParent `
-            -Leaf 'production-flow-fixture' `
-            -RunnerSid $runnerSid
-        Invoke-WithIsolatedEnvironment -RuntimeRoot $caseRoot -Action {
-            $initialFlowFixture = Initialize-ProductionRenameFlowFixture `
-                -FixtureRoot $flowFixtureRoot `
-                -ApplicationRoot $Root `
-                -LocalAppData $env:LOCALAPPDATA `
-                -RawEvidence:$RawEvidence
-            $processState.process = Start-JobBoundProcess `
-                -FilePath $applicationPath `
-                -Arguments '' `
-                -WorkingDirectory $Root
-            $processState.process.process.Refresh()
-            $processStartTimeUtcTicks = $processState.process.process.StartTime.ToUniversalTime().Ticks.ToString(
-                [Globalization.CultureInfo]::InvariantCulture
-            )
-            $row['process_lifecycle'] = [ordered]@{
-                pid = [int]$processState.process.process.Id
-                start_time_utc_ticks = $processStartTimeUtcTicks
+        do {
+            $applicationPath = Join-Path $Root $Application.file
+            Assert-OrdinaryFile -Path $applicationPath -Label 'application'
+            if ((Get-LowerSha256 -Path $applicationPath) -cne $Application.sha256) {
+                $row.failure_reason = 'artifact_changed_after_preflight'
+                break
             }
-            if ($RawEvidence) {
+            Initialize-NativeCapture
+            if (-not [DarkReNamerVmNative]::SetProcessDpiAwarenessContext([IntPtr](-4))) {
+                $row.failure_reason = 'dpi_awareness_failed'
+                break
+            }
+            $caseRoot = New-PrivateDirectory -Parent $RuntimeRoot -Leaf 'gui'
+            $flowFixturePath = Join-Path $caseRoot 'rename-flow'
+            if (Test-Path -LiteralPath $flowFixturePath) {
+                throw 'The production flow fixture already exists before application launch.'
+            }
+            $runnerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            if ($RawEvidence -and [string]::IsNullOrWhiteSpace($FixtureParentRoot)) {
+                throw 'Raw production flow evidence requires a protected task-directory fixture parent.'
+            }
+            $flowFixtureParent = if ($FixtureParentRoot) { $FixtureParentRoot } else { $caseRoot }
+            $flowFixtureRoot = New-ObserverFixtureDirectory `
+                -Parent $flowFixtureParent `
+                -Leaf 'production-flow-fixture' `
+                -RunnerSid $runnerSid
+            Invoke-WithIsolatedEnvironment -RuntimeRoot $caseRoot -Action {
+                $initialFlowFixture = Initialize-ProductionRenameFlowFixture `
+                    -FixtureRoot $flowFixtureRoot `
+                    -ApplicationRoot $Root `
+                    -LocalAppData $env:LOCALAPPDATA `
+                    -RawEvidence:$RawEvidence
+                $processState.process = Start-JobBoundProcess `
+                    -FilePath $applicationPath `
+                    -Arguments '' `
+                    -WorkingDirectory $Root
+                $processState.process.process.Refresh()
+                $processStartTimeUtcTicks = $processState.process.process.StartTime.ToUniversalTime().Ticks.ToString(
+                    [Globalization.CultureInfo]::InvariantCulture
+                )
                 $row['process_lifecycle'] = [ordered]@{
                     pid = [int]$processState.process.process.Id
-                    session_id = [int]$processState.process.process.SessionId
                     start_time_utc_ticks = $processStartTimeUtcTicks
-                    executable_path = $applicationPath
-                    executable_sha256 = Get-LowerSha256 -Path $applicationPath
-                    start_observed = $true
-                    exit_observed = $false
-                    exit_method = $null
-                    exit_code = $null
                 }
-            }
-            try {
-                $mainBinding = Wait-ExactApplicationMainWindow `
-                    -Process $processState.process.process `
-                    -ExpectedSession $ExpectedSession `
-                    -ExpectedClassName 'DarkReNamerWindow' `
-                    -ExpectedTitle 'DarkReNamer' `
-                    -TimeoutSeconds $TimeoutSeconds `
-                    -Label 'production application'
-            }
-            catch {
-                $processState.process.process.Refresh()
-                if ($processState.process.process.HasExited) {
-                    $row.exit_code = $processState.process.process.ExitCode
-                    $row.failure_reason = 'app_exited_before_window'
+                if ($RawEvidence) {
+                    $row['process_lifecycle'] = [ordered]@{
+                        pid = [int]$processState.process.process.Id
+                        session_id = [int]$processState.process.process.SessionId
+                        start_time_utc_ticks = $processStartTimeUtcTicks
+                        executable_path = $applicationPath
+                        executable_sha256 = Get-LowerSha256 -Path $applicationPath
+                        start_observed = $true
+                        exit_observed = $false
+                        exit_method = $null
+                        exit_code = $null
+                    }
                 }
-                elseif ($_.Exception.Message.IndexOf(
-                    'exact native window was not found',
-                    [StringComparison]::Ordinal
-                ) -ge 0) {
-                    $row.failure_reason = 'window_timeout'
-                }
-                else {
-                    $row.failure_reason = 'unexpected_window'
-                }
-                return
-            }
-            $handle = [IntPtr]$mainBinding.handle
-            $mainAutomationWindow = $mainBinding.element
-            $boundProcessId = [uint32]0
-            [void][DarkReNamerVmNative]::GetWindowThreadProcessId($handle, [ref]$boundProcessId)
-            $row.window_class = 'DarkReNamerWindow'
-            $row.window_title = 'DarkReNamer'
-            $row.window_handle = [long]$handle
-            $row.process_id = [int]$boundProcessId
-            $row.session_id = [int]$processState.process.process.SessionId
-            $row.window_dpi = [int][DarkReNamerVmNative]::GetDpiForWindow($handle)
-
-            $row.foreground_activation.initial = Get-ForegroundObservation
-            if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
                 try {
-                    $automationElement = [Windows.Automation.AutomationElement]::FromHandle($handle)
-                    if ($null -ne $automationElement) {
-                        $automationElement.SetFocus()
-                        $row.foreground_activation.uia_set_focus = 'succeeded'
-                    }
-                    else {
-                        $row.foreground_activation.uia_set_focus = 'element_unavailable'
-                    }
+                    $mainBinding = Wait-ExactApplicationMainWindow `
+                        -Process $processState.process.process `
+                        -ExpectedSession $ExpectedSession `
+                        -ExpectedClassName 'DarkReNamerWindow' `
+                        -ExpectedTitle 'DarkReNamer' `
+                        -TimeoutSeconds $TimeoutSeconds `
+                        -Label 'production application'
                 }
                 catch {
-                    $row.foreground_activation.uia_set_focus = 'failed'
+                    $processState.process.process.Refresh()
+                    if ($processState.process.process.HasExited) {
+                        $row.exit_code = $processState.process.process.ExitCode
+                        $row.failure_reason = 'app_exited_before_window'
+                    }
+                    elseif ($_.Exception.Message.IndexOf(
+                        'exact native window was not found',
+                        [StringComparison]::Ordinal
+                    ) -ge 0) {
+                        $row.failure_reason = 'window_timeout'
+                    }
+                    else {
+                        $row.failure_reason = 'unexpected_window'
+                    }
+                    return
                 }
-                $row.foreground_activation.set_foreground_window = [bool][DarkReNamerVmNative]::SetForegroundWindow($handle)
-                $foregroundDeadline = (Get-Date).AddSeconds(5)
-                while ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle -and
-                    (Get-Date) -lt $foregroundDeadline) {
-                    Start-Sleep -Milliseconds 100
-                }
-            }
-            $row.foreground_activation.final = Get-ForegroundObservation
-            if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
-                $row.failure_reason = 'window_not_foreground'
-                return
-            }
+                $handle = [IntPtr]$mainBinding.handle
+                $mainAutomationWindow = $mainBinding.element
+                $boundProcessId = [uint32]0
+                [void][DarkReNamerVmNative]::GetWindowThreadProcessId($handle, [ref]$boundProcessId)
+                $row.window_class = 'DarkReNamerWindow'
+                $row.window_title = 'DarkReNamer'
+                $row.window_handle = [long]$handle
+                $row.process_id = [int]$boundProcessId
+                $row.session_id = [int]$processState.process.process.SessionId
+                $row.window_dpi = [int][DarkReNamerVmNative]::GetDpiForWindow($handle)
 
-            $rect = [DarkReNamerVmNative+Rect]::new()
-            if (-not [DarkReNamerVmNative]::GetWindowRect($handle, [ref]$rect)) {
-                $row.failure_reason = 'window_bounds_failed'
-                return
-            }
-            $width = $rect.Right - $rect.Left
-            $height = $rect.Bottom - $rect.Top
-            if ($width -le 0 -or $height -le 0 -or
-                $width -gt 16384 -or $height -gt 16384 -or
-                ([long]$width * [long]$height) -gt 100000000) {
-                $row.failure_reason = 'window_bounds_invalid'
-                return
-            }
-            $captureState.bitmap = [Drawing.Bitmap]::new($width, $height, [Drawing.Imaging.PixelFormat]::Format32bppArgb)
-            $captureState.graphics = [Drawing.Graphics]::FromImage($captureState.bitmap)
-            $captureState.graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $captureState.bitmap.Size, [Drawing.CopyPixelOperation]::SourceCopy)
-            if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
-                $row.foreground_activation.capture_change = Get-ForegroundObservation
-                $row.failure_reason = 'foreground_changed_during_capture'
-                return
-            }
-            $firstColor = $captureState.bitmap.GetPixel(0, 0).ToArgb()
-            $hasDifferentColor = $false
-            $stepX = [Math]::Max(1, [int]($width / 64))
-            $stepY = [Math]::Max(1, [int]($height / 64))
-            for ($y = 0; $y -lt $height -and -not $hasDifferentColor; $y += $stepY) {
-                for ($x = 0; $x -lt $width; $x += $stepX) {
-                    if ($captureState.bitmap.GetPixel($x, $y).ToArgb() -ne $firstColor) {
-                        $hasDifferentColor = $true
-                        break
+                $row.foreground_activation.initial = Get-ForegroundObservation
+                if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
+                    try {
+                        $automationElement = [Windows.Automation.AutomationElement]::FromHandle($handle)
+                        if ($null -ne $automationElement) {
+                            $automationElement.SetFocus()
+                            $row.foreground_activation.uia_set_focus = 'succeeded'
+                        }
+                        else {
+                            $row.foreground_activation.uia_set_focus = 'element_unavailable'
+                        }
+                    }
+                    catch {
+                        $row.foreground_activation.uia_set_focus = 'failed'
+                    }
+                    $row.foreground_activation.set_foreground_window = [bool][DarkReNamerVmNative]::SetForegroundWindow($handle)
+                    $foregroundDeadline = (Get-Date).AddSeconds(5)
+                    while ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle -and
+                        (Get-Date) -lt $foregroundDeadline) {
+                        Start-Sleep -Milliseconds 100
                     }
                 }
-            }
-            if (-not $hasDifferentColor) {
-                $row.failure_reason = 'screenshot_solid'
-                return
-            }
-            $captureState.graphics.Dispose()
-            $captureState.graphics = $null
-            $captureState.bitmap.Save($screenshotPath, [Drawing.Imaging.ImageFormat]::Png)
-            $captureState.bitmap.Dispose()
-            $captureState.bitmap = $null
-            if ((Get-Item -LiteralPath $screenshotPath).Length -le 0) {
-                $row.failure_reason = 'screenshot_empty'
-                return
-            }
-            $row.screenshot = [ordered]@{
-                file = $screenshotLeaf
-                sha256 = Get-LowerSha256 -Path $screenshotPath
-                width = $width
-                height = $height
-            }
+                $row.foreground_activation.final = Get-ForegroundObservation
+                if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
+                    $row.failure_reason = 'window_not_foreground'
+                    return
+                }
 
-            Assert-ExactApplicationMainWindowBinding `
-                -Process $processState.process.process `
-                -ExpectedSession $ExpectedSession `
-                -MainWindowHandle $handle `
-                -MainWindow $mainAutomationWindow `
-                -ExpectedClassName 'DarkReNamerWindow' `
-                -ExpectedTitle 'DarkReNamer' `
-                -Label 'production main window'
-            $row.flow = Invoke-ProductionRenameFlow `
-                -OwnedProcess $processState.process `
-                -InitialFixture $initialFlowFixture `
-                -MainWindow $mainAutomationWindow `
-                -MainWindowHandle $handle `
-                -FixtureRoot $flowFixtureRoot `
-                -OutputRoot $OutputRoot `
-                -ExpectedSession $ExpectedSession `
-                -TimeoutSeconds $TimeoutSeconds `
-                -RawEvidence:$RawEvidence
-            if ($row.flow.status -cne 'passed') {
-                $row.failure_reason = 'production_rename_flow_failed'
-                return
-            }
+                $rect = [DarkReNamerVmNative+Rect]::new()
+                if (-not [DarkReNamerVmNative]::GetWindowRect($handle, [ref]$rect)) {
+                    $row.failure_reason = 'window_bounds_failed'
+                    return
+                }
+                $width = $rect.Right - $rect.Left
+                $height = $rect.Bottom - $rect.Top
+                if ($width -le 0 -or $height -le 0 -or
+                    $width -gt 16384 -or $height -gt 16384 -or
+                    ([long]$width * [long]$height) -gt 100000000) {
+                    $row.failure_reason = 'window_bounds_invalid'
+                    return
+                }
+                $captureState.bitmap = [Drawing.Bitmap]::new($width, $height, [Drawing.Imaging.PixelFormat]::Format32bppArgb)
+                $captureState.graphics = [Drawing.Graphics]::FromImage($captureState.bitmap)
+                $captureState.graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $captureState.bitmap.Size, [Drawing.CopyPixelOperation]::SourceCopy)
+                if ([DarkReNamerVmNative]::GetForegroundWindow() -ne $handle) {
+                    $row.foreground_activation.capture_change = Get-ForegroundObservation
+                    $row.failure_reason = 'foreground_changed_during_capture'
+                    return
+                }
+                $firstColor = $captureState.bitmap.GetPixel(0, 0).ToArgb()
+                $hasDifferentColor = $false
+                $stepX = [Math]::Max(1, [int]($width / 64))
+                $stepY = [Math]::Max(1, [int]($height / 64))
+                for ($y = 0; $y -lt $height -and -not $hasDifferentColor; $y += $stepY) {
+                    for ($x = 0; $x -lt $width; $x += $stepX) {
+                        if ($captureState.bitmap.GetPixel($x, $y).ToArgb() -ne $firstColor) {
+                            $hasDifferentColor = $true
+                            break
+                        }
+                    }
+                }
+                if (-not $hasDifferentColor) {
+                    $row.failure_reason = 'screenshot_solid'
+                    return
+                }
+                $captureState.graphics.Dispose()
+                $captureState.graphics = $null
+                $captureState.bitmap.Save($screenshotPath, [Drawing.Imaging.ImageFormat]::Png)
+                $captureState.bitmap.Dispose()
+                $captureState.bitmap = $null
+                if ((Get-Item -LiteralPath $screenshotPath).Length -le 0) {
+                    $row.failure_reason = 'screenshot_empty'
+                    return
+                }
+                $row.screenshot = [ordered]@{
+                    file = $screenshotLeaf
+                    sha256 = Get-LowerSha256 -Path $screenshotPath
+                    width = $width
+                    height = $height
+                }
 
-            try {
-                Close-ExactApplicationMainWindow `
+                Assert-ExactApplicationMainWindowBinding `
                     -Process $processState.process.process `
                     -ExpectedSession $ExpectedSession `
                     -MainWindowHandle $handle `
                     -MainWindow $mainAutomationWindow `
                     -ExpectedClassName 'DarkReNamerWindow' `
                     -ExpectedTitle 'DarkReNamer' `
-                    -Label 'production application ordinary close'
-            }
-            catch {
-                $row.failure_reason = 'normal_close_rejected'
-                return
-            }
-            if (-not $processState.process.process.WaitForExit(10000)) {
-                $row.failure_reason = 'normal_close_timeout'
-                return
-            }
-            $processState.process.process.WaitForExit()
-            $row.exit_code = $processState.process.process.ExitCode
-            if ($RawEvidence) {
-                $row.process_lifecycle.exit_observed = $true
-                $row.process_lifecycle.exit_method = 'normal-close'
-                $row.process_lifecycle.exit_code = [int]$row.exit_code
-            }
-            if ($processState.process.process.ExitCode -ne 0) {
-                $row.failure_reason = 'app_exit_failed'
-                return
-            }
-            $jobCleanup = Complete-AcceptanceOwnedProcessJob -Owned $processState.process
-            $row.job_cleanup = $jobCleanup.status -ceq 'clean'
-            if (-not $row.job_cleanup) {
-                $row.failure_reason = 'process_job_cleanup_failed'
-                return
-            }
-            $row.flow.checkpoints += (Get-FlowCheckpoint `
-                -Phase post_close `
-                -FixtureRoot $flowFixtureRoot `
-                -LocalAppData $env:LOCALAPPDATA)
-            if ($RawEvidence) {
-                $row.flow.raw_checkpoints += (Get-VmAutomatedCheckpoint `
+                    -Label 'production main window'
+                $row.flow = Invoke-ProductionRenameFlow `
+                    -OwnedProcess $processState.process `
+                    -InitialFixture $initialFlowFixture `
+                    -MainWindow $mainAutomationWindow `
+                    -MainWindowHandle $handle `
+                    -FixtureRoot $flowFixtureRoot `
+                    -OutputRoot $OutputRoot `
+                    -ExpectedSession $ExpectedSession `
+                    -TimeoutSeconds $TimeoutSeconds `
+                    -RawEvidence:$RawEvidence
+                if ($row.flow.status -cne 'passed') {
+                    $row.failure_reason = 'production_rename_flow_failed'
+                    return
+                }
+
+                try {
+                    Close-ExactApplicationMainWindow `
+                        -Process $processState.process.process `
+                        -ExpectedSession $ExpectedSession `
+                        -MainWindowHandle $handle `
+                        -MainWindow $mainAutomationWindow `
+                        -ExpectedClassName 'DarkReNamerWindow' `
+                        -ExpectedTitle 'DarkReNamer' `
+                        -Label 'production application ordinary close'
+                }
+                catch {
+                    $row.failure_reason = 'normal_close_rejected'
+                    return
+                }
+                if (-not $processState.process.process.WaitForExit(10000)) {
+                    $row.failure_reason = 'normal_close_timeout'
+                    return
+                }
+                $processState.process.process.WaitForExit()
+                $row.exit_code = $processState.process.process.ExitCode
+                if ($RawEvidence) {
+                    $row.process_lifecycle.exit_observed = $true
+                    $row.process_lifecycle.exit_method = 'normal-close'
+                    $row.process_lifecycle.exit_code = [int]$row.exit_code
+                }
+                if ($processState.process.process.ExitCode -ne 0) {
+                    $row.failure_reason = 'app_exit_failed'
+                    return
+                }
+                $jobCleanup = Complete-AcceptanceOwnedProcessJob -Owned $processState.process
+                $row.job_cleanup = $jobCleanup.status -ceq 'clean'
+                if (-not $row.job_cleanup) {
+                    $row.failure_reason = 'process_job_cleanup_failed'
+                    return
+                }
+                $row.flow.checkpoints += (Get-FlowCheckpoint `
                     -Phase post_close `
                     -FixtureRoot $flowFixtureRoot `
                     -LocalAppData $env:LOCALAPPDATA)
+                if ($RawEvidence) {
+                    $row.flow.raw_checkpoints += (Get-VmAutomatedCheckpoint `
+                        -Phase post_close `
+                        -FixtureRoot $flowFixtureRoot `
+                        -LocalAppData $env:LOCALAPPDATA)
+                }
+                $row.status = 'passed'
+                $row.failure_reason = $null
             }
-            $row.status = 'passed'
-            $row.failure_reason = $null
-        }
+        } while ($false)
     }
     catch {
         $row.failure_reason = 'gui_error'

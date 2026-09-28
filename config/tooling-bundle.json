@@ -396,7 +396,7 @@
       "bundle": "guest-process.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "71bed2648b783df9c00329319185b3ee752256f5775b6fd56f05b497232eddf6",
+      "sha256": "b4df714b1578319711182849ec42c1b670de69a7f24b1060fc64508a9051463c",
       "dependencies": []
     },
     {
@@ -432,7 +432,7 @@
       "bundle": "guest-state.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "810230e5be529bf33376715c50cad2de101dc03e6461b5cd23d8c4cc5df0e42c",
+      "sha256": "04d26d7914ee342677d653c6af859326cfd61ceb02b4bdfc8e3b840ca4410977",
       "dependencies": []
     },
     {
@@ -441,7 +441,7 @@
       "bundle": "guest-scenario.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "8d148c52bbb94ac6739acb891dfd12272b5a7ad159c539f9567091b12307a297",
+      "sha256": "19a488285e3756ebf29c67137cd867aa57fc4dc9de3854a190732bc9d4d67de1",
       "dependencies": []
     },
     {
@@ -615,7 +615,7 @@
       "bundle": "recovery-evidence.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "c71991e90a6c99e95c62ec6a023b5695d081a216eda193e4f99e8ff2a1914058",
+      "sha256": "b430f66719b80e9b370630545ab66338933886431aef472df44aea5cdaa102b3",
       "dependencies": []
     },
     {
@@ -660,7 +660,7 @@
       "bundle": "recovery-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "5ba9a76943d87e33d70fcca3bbeef6234d9b95e2f69a37f73e6653b1e440825a",
+      "sha256": "80faafdb8cd3d1758a4d6e3c3571a4a1e88c0c029ea92873e3514d81fc93e133",
       "dependencies": [
         "powershell-loader",
         "powershell-recovery-bootstrap",
@@ -695,7 +695,7 @@
       "bundle": "controller-transport.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "c8d219f547bab5ee5d99abc3a5586e59458b47eefabb2d233455a9e35ef0b0fd",
+      "sha256": "e192a96aef3cbbba640162eca77824c30d00f1ed7f47a20cad96b0afe37d2f57",
       "dependencies": []
     },
     {
@@ -704,7 +704,7 @@
       "bundle": "controller-poll.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "25116385c3c0c00a1f1e3bf5a60249188af033673e592ca2c6f59e0ff8d002e5",
+      "sha256": "ba11d12869b33197e538a69f220ba42296fe9b153fc69cec3019c6cff0fab62b",
       "dependencies": []
     },
     {
@@ -713,7 +713,7 @@
       "bundle": "controller-rescue.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "9763d54e0ad7428e0ea1cb90902d3733403599c72e61feae3c4e53da07dfe320",
+      "sha256": "79f6e8e852d8c45e2065234271eff457b98bb9deacdc190534881127330e714e",
       "dependencies": []
     },
     {
@@ -722,7 +722,7 @@
       "bundle": "controller-entry.psm1",
       "kind": "powershell",
       "module": null,
-      "sha256": "a69da5e69dee7db23d273b40f49ceb3496025a5d14f642f17cd1d2cb10b0a600",
+      "sha256": "db8267dec209c9133f3431a680f7ef27fdb13478deca8414e27ac8293b4aeac1",
       "dependencies": [
         "powershell-loader",
         "powershell-controller-contracts",

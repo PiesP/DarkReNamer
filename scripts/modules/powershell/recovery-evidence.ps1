@@ -308,8 +308,12 @@ function Assert-AcceptancePartialState {
     }
     $original = 0
     $renamed = 0
+    $partialIdentities = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($row in $Partial) {
         $identityKey = Get-AcceptanceIdentityKey -Identity $row.file_identity
+        if (-not $partialIdentities.Add($identityKey)) {
+            throw 'The partial state contains a duplicate NTFS identity.'
+        }
         if (-not $initialByIdentity.ContainsKey($identityKey)) {
             throw 'The partial state contains an unknown NTFS identity.'
         }
