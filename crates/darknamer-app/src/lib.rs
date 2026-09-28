@@ -4,6 +4,8 @@
 
 /// Bounded filesystem admission for native picker, drop, and path import.
 pub mod admission;
+#[cfg(any(windows, test))]
+mod apply_progress;
 /// Bounded shell-icon cache key derivation.
 pub mod icon_cache;
 #[cfg(any(windows, test))]
