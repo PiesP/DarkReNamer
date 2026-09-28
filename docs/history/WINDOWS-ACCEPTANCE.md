@@ -34,6 +34,13 @@ The historical tools remain available for interpreting existing evidence:
   cross-checks historical formal evidence and external PNGs against an exact
   downloaded Actions handoff.
 
+Their tests run through `scripts/test-tooling.ps1 -Scope Historical`. GUI
+regression and Wine gallery tests use `-Scope Diagnostics`. Both are explicit
+selections outside the default current tooling gate; see
+[Tooling tests](../../DEVELOPMENT.md#tooling-tests) for filters and result reports.
+Use each historical evidence artifact's recorded source commit to interpret
+the tool and schema contract that produced it.
+
 Evidence files, screenshots, traces, benchmark roots, operator or machine
 identities, local paths, volume serials, and detailed narratives remain outside
 Git. An external visual root must be immutable for validation and writable only

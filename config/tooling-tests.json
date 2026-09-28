@@ -50,6 +50,8 @@
     { "id": "vm-automated-campaign-runner", "path": "scripts/tests/python/test-vm-automated-campaign-runner.py", "runner": "Python", "platforms": ["Ubuntu"], "scope": "current", "category": "vm-automation", "requiresVm": false, "timeout": 300 },
     { "id": "vm-automated-campaign-verifier", "path": "scripts/tests/python/test-vm-automated-campaign-verifier.py", "runner": "Python", "platforms": ["Ubuntu"], "scope": "current", "category": "vm-automation", "requiresVm": false, "timeout": 300 },
     { "id": "vm-automated-cli", "path": "scripts/tests/python/test-vm-automated-cli.py", "runner": "Python", "platforms": ["Ubuntu"], "scope": "current", "category": "vm-automation", "requiresVm": false, "timeout": 300 },
-    { "id": "vm-evidence-cli-smoke", "path": "scripts/tests/python/test-vm-evidence-cli-smoke.py", "runner": "Python", "platforms": ["Ubuntu", "Windows"], "scope": "current", "category": "vm-automation", "requiresVm": false, "timeout": 300 }
+    { "id": "vm-evidence-cli-smoke", "path": "scripts/tests/python/test-vm-evidence-cli-smoke.py", "runner": "Python", "platforms": ["Ubuntu", "Windows"], "scope": "current", "category": "vm-automation", "requiresVm": false, "timeout": 300 },
+    { "id": "png-codec", "path": "scripts/tests/python/test-png-codec.py", "runner": "Python", "platforms": ["Ubuntu"], "scope": "current", "category": "vm-contract", "requiresVm": false, "timeout": 300 },
+    { "id": "vm-connection", "path": "scripts/tests/python/test-vm-connection.py", "runner": "Python", "platforms": ["Ubuntu"], "scope": "current", "category": "vm-contract", "requiresVm": false, "timeout": 300 }
   ]
 }

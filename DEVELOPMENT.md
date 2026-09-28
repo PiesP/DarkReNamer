@@ -46,27 +46,48 @@ pwsh -NoLogo -NoProfile -File ./scripts/test-tooling.ps1
 
 `scripts/test-tooling.ps1` is the tooling test entrypoint for local gates and CI.
 `config/tooling-tests.json` declares each test's path, runner, supported platforms,
-category, VM requirement and timeout. Discovery checks for missing registrations;
-it does not select executable tests. Registered tests use `test-*` filenames;
+scope, category, VM requirement and timeout. Discovery validates every entry and
+checks for missing registrations before applying selection, including tests in
+scopes excluded from the run. Registered tests use `test-*` filenames;
 fixture helpers use descriptive names without that prefix. The suite and VM CLI
 are the only discovery exclusions. Add or move a test by updating its registry
 record in the same change.
 
-List the current platform's selection or run a focused category:
+The default `Current` scope covers current runtime, release and evidence contracts.
+`Diagnostics` contains targeted GUI regression and Wine gallery tooling;
+`Historical` contains the former Windows acceptance tool chain. The latter scopes
+are opt-in and remain registered. Use `All` when changing the runner or shared
+code that affects every scope. List the current platform's selection or run a
+focused scope/category:
 
 ```powershell
 ./scripts/test-tooling.ps1 -List
 ./scripts/test-tooling.ps1 -Category release
 ./scripts/test-tooling.ps1 -Id tooling-registry,tooling-bootstrap
+./scripts/test-tooling.ps1 -Scope Diagnostics
+./scripts/test-tooling.ps1 -Scope Historical
+./scripts/test-tooling.ps1 -Scope All -ResultPath /absolute/external/tooling-results.json
 ```
+
+`-Category` and `-Runner` narrow the selected scope. An explicit `-Id` selects
+those tests across scopes when `-Scope` is omitted; specifying both intersects
+the filters. `-List` applies the same selection without executing tests.
 
 The runner rejects a platform different from the current host and does not run
 VM workloads. It propagates child-process failures and enforces per-test deadlines.
+It reports each attempted script's elapsed time and result and stops at the first
+failure. `-ResultPath` writes those results to a new JSON file; choose an absolute
+path outside the checkout. Failed and timed-out attempts remain in that report.
 Tests live in `scripts/tests/powershell` and `scripts/tests/python`, with shared
 fixtures and path helpers in `scripts/tests/support`. The runner sets Python
 import paths only in each test subprocess. `Get-ToolingTestPaths` in `paths.ps1`
 and `tooling_test_paths.py` resolve production scripts and repository paths.
-Acceptance evidence uses `config/schemas/windows-acceptance-evidence.schema.json`.
+The current scope includes shared PNG/connection tests and a real evidence CLI
+subprocess smoke test on Ubuntu and Windows. The smoke test uses synthetic
+archives to check successful canonical output, incomplete-campaign rejection,
+exit codes and private extraction cleanup; it does not execute a VM campaign.
+Historical acceptance evidence uses
+`config/schemas/windows-acceptance-evidence.schema.json`.
 
 ## Authenticated tooling modules
 
@@ -80,7 +101,12 @@ that already ran before its first statement.
 
 Python implementations live under `scripts/darkrenamer_tooling/`: `vm` launches
 workloads, `campaign` plans and coordinates runs, `contracts` binds inputs and
-source identity, and `evidence` parses and independently verifies observations.
+source identity, `formats` decodes shared file formats, and `evidence` independently
+verifies observations. The campaign and diagnostic GUI use `vm.connection` for
+connection profiles and guest preflight. PNG consumers supply separate format,
+opacity and resource policies; evidence verification retains expected dimensions
+and its cumulative decoded-pixel budget. Sharing format mechanics does not share
+producer verdicts with the independent verifier.
 PowerShell definitions live under `scripts/modules/powershell/`, grouped by guest,
 UI observer, recovery observer and host controller. Each invocation creates its
 own module scope and removes that module after completion.
@@ -315,6 +341,15 @@ available for interpreting historical evidence and targeted diagnostics; they
 do not replace the current VM-Automated campaign above or establish a release
 verdict.
 
+The historical acceptance and GUI/Wine tooling tests use the explicit scopes
+described in [Tooling tests](#tooling-tests). Keep the Wine gallery as a diagnostic
+fallback only when the prepared VM cannot perform the required check.
+
+The planning benchmark and binary/profile matrix workflows are manually dispatched
+experiments. Use the representative planning measurement when investigating the
+current settings, and run optimization matrices only when reconsidering those
+choices. Their results do not replace source-bound Windows or release validation.
+
 ## Dependency policy
 
 `Cargo.lock` and `--locked` define reproducible application resolution. Exact
@@ -335,22 +370,8 @@ packages. They are not counts of crates linked into `DarkReNamer.exe`.
 ## Release tooling
 
 The scripts under `scripts/` form a tested release-validation subsystem. Run
-`scripts/test-tooling.ps1` on both Linux PowerShell and Windows before changing
-their shared invocation list. [`config/tooling-tests.json`](config/tooling-tests.json)
-is the sole tooling-test registry. Each entry declares its stable ID, path,
-runner, supported platforms, category, VM requirement, and per-process timeout.
-The suite discovers `test-*.ps1` and `test-*.py` files only to fail when a test
-is not registered; its suite entrypoint and VM CLI exclusions are explicit.
-Helpers cannot be registered as tests, and it never runs VM-backed entries.
-
-Use `-List` to inspect the selected tests without executing them. `-Id`,
-`-Category`, and `-Runner` narrow that selection and may be combined:
-
-```powershell
-./scripts/test-tooling.ps1 -Platform Ubuntu -List
-./scripts/test-tooling.ps1 -Platform Ubuntu -Category vm-automation -Runner Python
-./scripts/test-tooling.ps1 -Platform Windows -Id toolchain-consistency
-```
+the applicable [tooling scopes](#tooling-tests) on both Linux PowerShell and
+Windows when changing shared invocation or platform-sensitive behavior.
 
 Keep independent validators independent unless a shared helper can fail without
 weakening both sides of a cross-check. CI and the development gates invoke only

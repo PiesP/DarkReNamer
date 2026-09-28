@@ -7,7 +7,7 @@
       "bundle": "tooling-loader.py",
       "kind": "python",
       "module": "darkrenamer_tooling.loader",
-      "sha256": "cffb17faf73f0643b293dbe5c4a7cefe9475e8a19008b03f9ce45d8b3565497d",
+      "sha256": "8e793d4a56a1775adf329f56ca9dd432432faed5a5453b07775168713193fac3",
       "dependencies": [
         "package-root"
       ]
@@ -99,7 +99,7 @@
       "bundle": "tooling-campaign-runner.py",
       "kind": "python",
       "module": "darkrenamer_tooling.campaign.runner",
-      "sha256": "3e59e575aa856ba184be0daa35dab6b04483a62907f18dbb9519f69fc8542683",
+      "sha256": "919b36b4279342cbc3c6f98b3b52215bb99679f83eb3855ac712926b64a9784e",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -113,7 +113,42 @@
         "evidence-archive",
         "package-vm",
         "vm-launcher",
-        "vm-gui"
+        "vm-connection"
+      ]
+    },
+    {
+      "role": "package-formats",
+      "source": "scripts/darkrenamer_tooling/formats/__init__.py",
+      "bundle": "tooling-package-formats.py",
+      "kind": "python-package",
+      "module": "darkrenamer_tooling.formats",
+      "sha256": "8ae490821f758d4db6b7f7a58c758d0401b81ddf5ac2b19d37c23edd22d660b4",
+      "dependencies": [
+        "package-root"
+      ]
+    },
+    {
+      "role": "formats-png",
+      "source": "scripts/darkrenamer_tooling/formats/png.py",
+      "bundle": "tooling-formats-png.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.formats.png",
+      "sha256": "4e47bb02872c0a60a78ee45808273d2dcd4af5d5d8ea2b3529cf09e50d676d25",
+      "dependencies": [
+        "package-root",
+        "package-formats"
+      ]
+    },
+    {
+      "role": "vm-connection",
+      "source": "scripts/darkrenamer_tooling/vm/connection.py",
+      "bundle": "tooling-vm-connection.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.vm.connection",
+      "sha256": "14e33bef1aa710b988b75545a2f96fe0d32ef36c4a7afbe6a5aeeffc421e0ac3",
+      "dependencies": [
+        "package-root",
+        "package-vm"
       ]
     },
     {
@@ -152,7 +187,7 @@
       "bundle": "tooling-vm-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.gui",
-      "sha256": "28f577e31905bad76767be2e7d853f8eb7e15d30ee45cb78a7a8ca01a1e2c6c0",
+      "sha256": "2457adff34b0f26ccb6013c865453cb557b78f6f945eceb13bb943d438f8a044",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -161,7 +196,10 @@
         "package-contracts",
         "contracts-tooling",
         "package-evidence",
-        "evidence-errors"
+        "evidence-errors",
+        "vm-connection",
+        "package-formats",
+        "formats-png"
       ]
     },
     {
@@ -303,11 +341,13 @@
       "bundle": "tooling-evidence-png.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.png",
-      "sha256": "036910f8c74c0bdac7f80ef1691e8c757acdefb44484e0925d87ccf5b459eb38",
+      "sha256": "760deaa743fe35e3278feccab42e4a5ce36b1b6123670b5b7a77be61a078675b",
       "dependencies": [
         "package-root",
         "package-evidence",
-        "evidence-errors"
+        "evidence-errors",
+        "package-formats",
+        "formats-png"
       ]
     },
     {
@@ -378,7 +418,7 @@
       "bundle": "tooling-loader.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "6888561ff9a23becf279ec7d4e691b40d50d79dde2196d22c0d63e2252dd08a1",
+      "sha256": "46e30d634bd4e01645397438b611ad6323f78fd0427508c87b5f190b331f17d3",
       "dependencies": []
     },
     {
