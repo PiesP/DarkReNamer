@@ -308,6 +308,10 @@ modal loop checks completion and exact publication before waiting for each
 message, so it recognizes destruction that did not set the completion flag. The modal owner destroys
 any still-published window before dropping state/fonts on every return path.
 
+Editable prompts seed their controls with the original bounded UTF-16 units,
+including unpaired surrogates. Accepting an unchanged value therefore preserves
+the exact command input instead of feeding lossy display text back into it.
+
 `normalized_final_leaf` keeps the source handle live for the synchronous
 `GetFinalPathNameByHandleW` call, passes either a null zero-length output or the
 exact checked writable slice, bounds each allocation by

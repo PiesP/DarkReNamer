@@ -1538,20 +1538,32 @@ fn create_prompt_edit(parent: HWND, value: &LegacyText, id: u16) -> io::Result<H
     let edit = child(
         parent,
         "EDIT",
-        &value.to_string_lossy(),
+        "",
         id,
         WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
     )?;
-    // SAFETY: edit is the live standard EDIT just created above. The message
-    // copies no pointer payload and the UTF-16-unit bound excludes the null.
-    unsafe {
+    let mut terminated = value.units().to_vec();
+    terminated.push(0);
+    // SAFETY: edit is the live standard EDIT just created. The first message
+    // carries no pointer, and the second copies the retained terminated UTF-16
+    // synchronously. The validated unit bound excludes the terminator.
+    let displayed = unsafe {
         SendMessageW(
             edit,
             windows_sys::Win32::UI::Controls::EM_SETLIMITTEXT,
             MAX_PROMPT_CONTROL_UTF16_UNITS,
             0,
+        );
+        SendMessageW(
+            edit,
+            windows_sys::Win32::UI::WindowsAndMessaging::WM_SETTEXT,
+            0,
+            terminated.as_ptr() as isize,
         )
     };
+    if displayed == 0 {
+        return Err(io::Error::last_os_error());
+    }
     Ok(edit)
 }
 
@@ -3228,11 +3240,18 @@ mod tests {
         }
 
         let result = (|| -> io::Result<()> {
-            let maximum_value = LegacyText::from_units(vec![
-                u16::from(b'a');
-                darknamer_core::MAX_PROPOSED_NAME_UTF16_UNITS
+            let mut maximum_units =
+                vec![u16::from(b'a'); darknamer_core::MAX_PROPOSED_NAME_UTF16_UNITS];
+            maximum_units[..5].copy_from_slice(&[0xd800, u16::from(b'a'), 0xdc00, 0xd83d, 0xde00]);
+            let maximum_value = LegacyText::from_units(maximum_units);
+            let exact_second_value = LegacyText::from_units(vec![
+                0xdc00,
+                u16::from(b'-'),
+                0xd800,
+                0xd83d,
+                0xde00,
+                0xac12,
             ]);
-            let ordinary_second_value = LegacyText::from("둘째 값");
             let mut state = PromptState {
                 spec: PromptSpec {
                     caption: "테스트 입력".to_owned(),
@@ -3240,7 +3259,7 @@ mod tests {
                     label_one: "첫째".to_owned(),
                     label_two: "둘째".to_owned(),
                     value_one: maximum_value.clone(),
-                    value_two: ordinary_second_value.clone(),
+                    value_two: exact_second_value.clone(),
                     choices: Vec::new(),
                 },
                 read_only: false,
@@ -3284,7 +3303,10 @@ mod tests {
                 );
             }
             assert_eq!(prompt_window_text(state.edit_one)?, maximum_value);
-            assert_eq!(prompt_window_text(state.edit_two)?, ordinary_second_value);
+            assert_eq!(prompt_window_text(state.edit_two)?, exact_second_value);
+            let accepted_without_edit = prompt_result(&state)?;
+            assert_eq!(accepted_without_edit.value_one, maximum_value);
+            assert_eq!(accepted_without_edit.value_two, exact_second_value);
 
             let oversized = wide(&"x".repeat(darknamer_core::MAX_PROPOSED_NAME_UTF16_UNITS + 1));
             assert_ne!(
