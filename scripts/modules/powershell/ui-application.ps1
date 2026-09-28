@@ -1075,6 +1075,25 @@ function Invoke-ObserverClipboardContention {
         clipboard_released_in_finally = $true
     }
 }
+function Get-ObserverDetailsEndObservation {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][object] $Details,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][string] $Label,
+        [Parameter(Mandatory)][string] $ExpectedEnding
+    )
+
+    $Details.edit.SetFocus()
+    Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId `
+        -Modifier 0x11 -VirtualKey 0x23 -Label "$Label Ctrl+End" -ExtendedKey
+    Start-Sleep -Milliseconds 150
+    $visible = Get-ObserverVisibleText -TextPattern $Details.text_pattern
+    if (-not $visible.EndsWith($ExpectedEnding, [StringComparison]::Ordinal)) {
+        throw "$Label did not expose the canonical ending after native scrolling."
+    }
+    [ordered]@{ input = 'native-edit-ctrl-end'; visible_text = $visible; ending_visible = $true }
+}
 function Inspect-ObserverDiagnostic {
     param(
         [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Window,
@@ -1107,16 +1126,10 @@ function Inspect-ObserverDiagnostic {
         $result.canonical_text = $details.evidence
         $result.copy_selection = Copy-GuiRegressionDocument -Mode selection -Application $Application -Edit $details.edit -ExpectedText $details.evidence.value_text -SessionId $SessionId -WaitSeconds $WaitSeconds -Label "$Prefix native edit selection copy"
         $result.copy_all_mnemonic = Copy-GuiRegressionDocument -Mode mnemonic -Application $Application -ExpectedText $details.evidence.value_text -SessionId $SessionId -WaitSeconds $WaitSeconds -Label "$Prefix explicit copy all"
-        $details.edit.SetFocus()
-        Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 -VirtualKey 0x23 -Label "$Prefix Ctrl+End" -ExtendedKey
-        Start-Sleep -Milliseconds 150
-        $visible = Get-ObserverVisibleText -TextPattern $details.text_pattern
-        $ending = '파일 시스템 검사와 실행 확인은 변경 적용 시 별도로 수행합니다.'
-        if (-not $visible.EndsWith($ending, [StringComparison]::Ordinal)) {
-            throw "$Prefix did not expose the canonical ending after native scrolling."
-        }
+        $result.native_end_scroll = Get-ObserverDetailsEndObservation `
+            -Application $Application -Details $details -SessionId $SessionId -Label $Prefix `
+            -ExpectedEnding '파일 시스템 검사와 실행 확인은 변경 적용 시 별도로 수행합니다.'
         [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $Window -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-diagnostic-end.png') -Label "$Prefix diagnostic end scroll"))
-        $result.native_end_scroll = [ordered]@{ input = 'native-edit-ctrl-end'; visible_text = $visible; ending_visible = $true }
     switch ($CloseMethod) {
         'escape' {
             Send-AcceptanceTap -Process $Application.process -ExpectedSession $SessionId -VirtualKey 0x1B -Label "$Prefix diagnostic Escape"

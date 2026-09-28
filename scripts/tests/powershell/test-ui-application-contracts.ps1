@@ -145,18 +145,19 @@ public static class DarkReNamerVmAcceptanceNative {
 & {
     function Assert-AutomationBinding { param($Element, $Process, $ExpectedSession, $Label) }
     $element = [Windows.Automation.AutomationElement]::new()
-    $application = @{ process = @{ Id = 42 }; main_handle = 10 }
+    $application = @{ process = @{ Id = 42 }; main_handle = 11 }
     $arguments = @{ Element = $element; Application = $application; SessionId = 1; ExpectedRoot = [IntPtr]10; Label = 'physical fixture' }
     $target = Get-GuiRegressionPhysicalTarget @arguments -Click
     if ($target.x -ne 20 -or $target.y -ne 40 -or $target.hit_window -ne 21 -or
         [DarkReNamerVmAcceptanceNative]::Clicks -ne 1) { throw 'Physical target lost its observed center/binding.' }
-    foreach ($case in @('foreign-pid', 'foreign-root', 'zero-hit', 'zero-thread', 'foreign-foreground')) {
+    foreach ($case in @('foreign-pid', 'foreign-root', 'main-instead-of-modal', 'zero-hit', 'zero-thread', 'foreign-foreground')) {
         [DarkReNamerVmNative]::HitProcess = 42; [DarkReNamerVmNative]::HitThread = 1
         [DarkReNamerVmNative]::Foreground = [IntPtr]10
         [DarkReNamerVmAcceptanceNative]::Hit = [IntPtr]21; [DarkReNamerVmAcceptanceNative]::Root = [IntPtr]10
         switch ($case) {
             'foreign-pid' { [DarkReNamerVmNative]::HitProcess = 99 }
             'foreign-root' { [DarkReNamerVmAcceptanceNative]::Root = [IntPtr]99 }
+            'main-instead-of-modal' { [DarkReNamerVmAcceptanceNative]::Root = [IntPtr]11 }
             'zero-hit' { [DarkReNamerVmAcceptanceNative]::Hit = [IntPtr]::Zero }
             'zero-thread' { [DarkReNamerVmNative]::HitThread = 0 }
             'foreign-foreground' { [DarkReNamerVmNative]::Foreground = [IntPtr]99 }
@@ -314,15 +315,64 @@ public static class DarkReNamerVmAcceptanceNative {
 }
 
 & {
+    $ending = '파일 시스템 검사와 실행 확인은 변경 적용 시 별도로 수행합니다.'
+    $window = [Windows.Automation.AutomationElement]::new()
+    $edit = [Windows.Automation.AutomationElement]::new()
+    $detailsFixture = @{ edit = $edit; text_pattern = 'text-provider'; evidence = @{ value_text = "document`n$ending" } }
+    $probe = @{ inputs = [Collections.Generic.List[string]]::new(); visible = $ending }
+    function Get-ObserverWindowTree { param($Window, $Process, $SessionId, $Label) @{ automation_id = '1004' } }
+    function Save-WindowScreenshot { param($ForegroundObservations, $Window, $Process, $ExpectedSession, $Root, $Leaf, $Label) $Leaf }
+    function Write-JsonUtf8Bom { param($Path, $Value) }
+    function Get-ObserverReadOnlyDetails { param($Window, $Application, $SessionId, $WaitSeconds, $ExpectedText, $Label) $detailsFixture }
+    function Copy-GuiRegressionDocument { param($Mode, $Application, $Edit, $ExpectedText, $SessionId, $WaitSeconds, $Label) @{ mode = $Mode } }
+    function Send-AcceptanceChord { param($Process, $ExpectedSession, $Modifier, $VirtualKey, $Label, [switch]$ExtendedKey)
+        if ($edit.FocusCalls -eq 0 -or $Modifier -ne 0x11 -or $VirtualKey -ne 0x23 -or -not $ExtendedKey) { throw 'Details end scrolling did not focus and send extended Ctrl+End.' }
+        $probe.inputs.Add('ctrl-end')
+    }
+    function Get-ObserverVisibleText { param($TextPattern)
+        if ($TextPattern -cne 'text-provider' -or $probe.inputs.Count -eq 0) { throw 'Details end observation preceded input.' }
+        $probe.visible
+    }
+    function Start-Sleep { param($Milliseconds) }
+    function Send-AcceptanceTap { param($Process, $ExpectedSession, $VirtualKey, $Label)
+        if ($VirtualKey -ne 0x1B) { throw 'Unexpected diagnostic close input.' }
+        $probe.inputs.Add('escape')
+    }
+    function Wait-WindowClosed { param($Handle, $TimeoutSeconds, $Label) $probe.inputs.Add('closed') }
+    function Wait-AcceptanceMainWindowForeground { param($Application, $WaitSeconds, $Label) $probe.inputs.Add('main-foreground') }
+    $captures = [Collections.Generic.List[object]]::new()
+    $arguments = @{ Window = $window; Application = @{ process = $null }; SessionId = 1; WaitSeconds = 1;
+        ExpectedText = $detailsFixture.evidence.value_text; OutputRoot = 'fixture'; Prefix = 'details'; CloseMethod = 'escape'; Captures = $captures }
+    $result = Inspect-ObserverDiagnostic @arguments
+    if (($probe.inputs -join ',') -cne 'ctrl-end,escape,closed,main-foreground' -or
+        ($captures -join ',') -cne 'details-diagnostic.png,details-diagnostic-end.png' -or
+        -not $result.native_end_scroll.ending_visible -or $result.native_end_scroll.visible_text -cne $ending -or
+        $result.native_end_scroll.input -cne 'native-edit-ctrl-end') { throw 'Complete diagnostic observation lost its end-scroll evidence.' }
+    $probe.inputs.Clear(); $probe.visible = 'partial content'; $captures.Clear()
+    Assert-Fails { Inspect-ObserverDiagnostic @arguments } 'did not expose the canonical ending'
+    if (($probe.inputs -join ',') -cne 'ctrl-end' -or ($captures -join ',') -cne 'details-diagnostic.png') { throw 'Failed details scrolling published a successful end capture or continued input.' }
+}
+
+& {
     $process = [Diagnostics.Process]::GetCurrentProcess()
     try {
+        foreach ($count in @(0, 32)) {
+            $boundaryWindows = @(for ($index = 1; $index -le $count; $index++) {
+                $row = [DarkReNamerVmAcceptanceNative+WindowMeasurement]::new()
+                $row.Handle = $index; $row.ProcessId = $process.Id; $row
+            })
+            [DarkReNamerVmAcceptanceNative]::Windows = $boundaryWindows
+            $boundary = Get-BoundedAcceptanceProcessWindowInventory -Process $process -ExpectedSession $process.SessionId
+            if ($boundary.truncated -or $boundary.maximum_entries -ne 32 -or $boundary.total_count -ne $count -or
+                $boundary.entries.Count -ne $count) { throw 'An untruncated process diagnostic inventory changed its boundary contract.' }
+        }
         $windows = @(1..33 | ForEach-Object {
             $row = [DarkReNamerVmAcceptanceNative+WindowMeasurement]::new()
             $row.Handle = 34 - $_; $row.ProcessId = $process.Id; $row
         })
         [DarkReNamerVmAcceptanceNative]::Windows = $windows
         $inventory = Get-BoundedAcceptanceProcessWindowInventory -Process $process -ExpectedSession $process.SessionId
-        if (-not $inventory.truncated -or $inventory.total_count -ne 33 -or $inventory.entries.Count -ne 32 -or
+        if (-not $inventory.truncated -or $inventory.maximum_entries -ne 32 -or $inventory.total_count -ne 33 -or $inventory.entries.Count -ne 32 -or
             $inventory.entries[0].hwnd -ne 1 -or $inventory.entries[31].hwnd -ne 32) { throw 'Process diagnostics lost their sorted 32-window bound.' }
         $fields = @('hwnd', 'owner_hwnd', 'pid', 'session_id', 'window_class', 'visible', 'rect') | Sort-Object
         foreach ($entry in $inventory.entries) {
