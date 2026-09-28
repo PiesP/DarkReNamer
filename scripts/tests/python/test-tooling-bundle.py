@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 from tooling_test_paths import REPOSITORY_ROOT
+import runpy
 import shutil
 import subprocess
 import sys
@@ -239,6 +240,29 @@ class ToolingBundleTests(unittest.TestCase):
             [sys.executable, str(REPOSITORY / "scripts" / "update-tooling-bundle.py"), "--check"],
             cwd=REPOSITORY, check=True,
         )
+
+    def test_generator_requires_each_pin_once_and_preserves_encoding(self) -> None:
+        generator = runpy.run_path(str(REPOSITORY / "scripts/update-tooling-bundle.py"))
+        for function, names, quote, prefixes in (
+            ("updated_bootstrap", ("TOOLING_MANIFEST_SHA256", "TOOLING_LOADER_SHA256"), '"', (b"",)),
+            ("updated_powershell_bootstrap", ("$ToolingManifestSha256", "$ToolingLoaderSha256"), "'",
+             (b"", b"\xef\xbb\xbf")),
+        ):
+            transform = generator[function]
+            lines = [f"{name} = {quote}{'0' * 64}{quote}\n" for name in names]
+            for prefix in prefixes:
+                with self.subTest(function=function, prefix=prefix):
+                    original = prefix + "".join(lines).encode()
+                    changed = transform(original, manifest_sha256="1" * 64, loader_sha256="2" * 64)
+                    expected = prefix + "".join(
+                        f"{name} = {quote}{digit * 64}{quote}\n"
+                        for name, digit in zip(names, ("1", "2"))
+                    ).encode()
+                    self.assertEqual(changed, expected)
+                    for invalid in (lines[:1], lines[1:], lines[:1] * 2, lines[1:] * 2, lines + lines[:1]):
+                        with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "each.*exactly once"):
+                            transform(prefix + "".join(invalid).encode(),
+                                      manifest_sha256="1" * 64, loader_sha256="2" * 64)
 
 
 if __name__ == "__main__":

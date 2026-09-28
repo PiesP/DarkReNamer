@@ -47,8 +47,10 @@ pwsh -NoLogo -NoProfile -File ./scripts/test-tooling.ps1
 `scripts/test-tooling.ps1` is the tooling test entrypoint for local gates and CI.
 `config/tooling-tests.json` declares each test's path, runner, supported platforms,
 category, VM requirement and timeout. Discovery checks for missing registrations;
-it does not select executable tests. Fixture helpers and the VM CLI have explicit
-exclusions. Add or move a test by updating its registry record in the same change.
+it does not select executable tests. Registered tests use `test-*` filenames;
+fixture helpers use descriptive names without that prefix. The suite and VM CLI
+are the only discovery exclusions. Add or move a test by updating its registry
+record in the same change.
 
 List the current platform's selection or run a focused category:
 
@@ -338,8 +340,8 @@ their shared invocation list. [`config/tooling-tests.json`](config/tooling-tests
 is the sole tooling-test registry. Each entry declares its stable ID, path,
 runner, supported platforms, category, VM requirement, and per-process timeout.
 The suite discovers `test-*.ps1` and `test-*.py` files only to fail when a test
-is not registered; its suite entrypoint, fixture helpers, and VM CLI exclusions
-are explicit. It never runs VM-backed entries.
+is not registered; its suite entrypoint and VM CLI exclusions are explicit.
+Helpers cannot be registered as tests, and it never runs VM-backed entries.
 
 Use `-List` to inspect the selected tests without executing them. `-Id`,
 `-Category`, and `-Runner` narrow that selection and may be combined:
