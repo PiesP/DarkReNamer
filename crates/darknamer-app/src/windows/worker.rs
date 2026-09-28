@@ -1,4 +1,5 @@
 use super::*;
+use crate::apply_progress::ApplyProgress;
 
 pub(super) struct ApplyWorker {
     cancellation: Arc<CancellationToken>,
@@ -23,10 +24,7 @@ pub(super) struct AdmissionWorker {
 
 impl ApplyWorker {
     pub(super) fn is_finishing(&self) -> bool {
-        let phase = self.progress.phase.load(Ordering::Acquire);
-        phase == execution_phase_code(ExecutionPhase::Rollback)
-            || phase == execution_phase_code(ExecutionPhase::Terminal)
-            || phase == execution_phase_code(ExecutionPhase::Finalizing)
+        self.progress.updates.is_finishing()
     }
 
     pub(super) fn cancellation_requested(&self) -> bool {
@@ -299,30 +297,20 @@ pub(super) enum ApplyWorkerResult {
 }
 
 pub(super) struct WorkerProgress {
-    phase: AtomicU8,
-    completed: AtomicUsize,
-    total: AtomicUsize,
-    wake_pending: AtomicBool,
+    updates: ApplyProgress,
     window: usize,
 }
 
 impl WorkerProgress {
     fn new(window: HWND) -> Self {
         Self {
-            phase: AtomicU8::new(execution_phase_code(ExecutionPhase::Ready)),
-            completed: AtomicUsize::new(0),
-            total: AtomicUsize::new(0),
-            wake_pending: AtomicBool::new(false),
+            updates: ApplyProgress::new(),
             window: window as usize,
         }
     }
 
     fn publish(&self, progress: ExecutionProgress) {
-        self.phase
-            .store(execution_phase_code(progress.phase), Ordering::Release);
-        self.completed.store(progress.completed, Ordering::Release);
-        self.total.store(progress.total, Ordering::Release);
-        if !self.wake_pending.swap(true, Ordering::AcqRel) {
+        if self.updates.publish(progress) {
             self.post(WM_APP_APPLY_PROGRESS);
         }
     }
@@ -373,16 +361,6 @@ impl ExecutionControl for WorkerExecutionControl {
 
     fn progress(&self, progress: ExecutionProgress) {
         self.progress.publish(progress);
-    }
-}
-
-pub(super) const fn execution_phase_code(phase: ExecutionPhase) -> u8 {
-    match phase {
-        ExecutionPhase::Ready => 0,
-        ExecutionPhase::Forward => 1,
-        ExecutionPhase::Rollback => 2,
-        ExecutionPhase::Terminal => 3,
-        ExecutionPhase::Finalizing => 4,
     }
 }
 
@@ -875,10 +853,7 @@ pub(super) fn start_apply_worker(
             state.recovery_locked = true;
             message(
                 window,
-                &format!(
-                    "저널 루트 권한을 worker로 전달하지 못했습니다. {:?}, OS {:?}",
-                    error.kind, error.os_code
-                ),
+                &format!("저널 루트 권한을 worker로 전달하지 못했습니다. {error}"),
                 "DarkReNamer - 적용 잠김",
             );
             update_controls(state);
@@ -960,26 +935,31 @@ pub(super) fn handle_apply_progress(state: &mut AppState) {
     let Some(worker) = state.apply_worker.as_ref() else {
         return;
     };
-    let phase = worker.progress.phase.load(Ordering::Acquire);
-    let completed = worker.progress.completed.load(Ordering::Acquire);
-    let total = worker.progress.total.load(Ordering::Acquire);
-    worker.progress.wake_pending.store(false, Ordering::Release);
+    let ExecutionProgress {
+        phase,
+        completed,
+        total,
+    } = worker.progress.updates.take_update();
     let cancellation_requested = worker.cancellation.is_requested();
     let text = match (phase, cancellation_requested) {
-        (0 | 1, true) => {
+        (ExecutionPhase::Ready | ExecutionPhase::Forward, true) => {
             format!("취소 요청됨 · 처리 결과를 기다려 주세요 ({completed}/{total} 단계)")
         }
-        (0, _) => format!("실행 준비 완료: {total} 단계"),
-        (1, _) => format!("파일 변경 중: {completed}/{total} 단계"),
-        (2, _) => {
+        (ExecutionPhase::Ready, _) => format!("실행 준비 완료: {total} 단계"),
+        (ExecutionPhase::Forward, _) => format!("파일 변경 중: {completed}/{total} 단계"),
+        (ExecutionPhase::Rollback, _) => {
             format!("원래 상태로 복원 중: {completed}/{total} 단계 · 복원은 중단할 수 없습니다")
         }
-        (3, _) => "파일 처리 결과를 목록에 반영하고 있습니다...".to_owned(),
-        (4, _) => "변경 결과 확정 중 · 이 단계는 취소할 수 없습니다".to_owned(),
-        _ => "파일 변경 상태를 확인하고 있습니다...".to_owned(),
+        (ExecutionPhase::Terminal, _) => "파일 처리 결과를 목록에 반영하고 있습니다...".to_owned(),
+        (ExecutionPhase::Finalizing, _) => {
+            "변경 결과 확정 중 · 이 단계는 취소할 수 없습니다".to_owned()
+        }
     };
     state.set_progress_status(text);
-    if matches!(phase, 2..=4) {
+    if matches!(
+        phase,
+        ExecutionPhase::Rollback | ExecutionPhase::Terminal | ExecutionPhase::Finalizing
+    ) {
         apply_cancel_control_state(state);
     }
 }
@@ -1021,10 +1001,7 @@ pub(super) fn finalize_apply_worker(window: HWND, state: &mut AppState, worker: 
                 state.recovery_locked = true;
                 message(
                     window,
-                    &format!(
-                        "활성 저널을 만들지 못했습니다. {:?}, OS {:?}",
-                        error.kind, error.os_code
-                    ),
+                    &format!("활성 저널을 만들지 못했습니다. {error}"),
                     "DarkReNamer - 적용 잠김",
                 );
             }
