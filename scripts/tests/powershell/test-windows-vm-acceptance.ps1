@@ -8,6 +8,7 @@ $toolingScriptsRoot = $toolingTestPaths.ScriptsRoot
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $toolingScriptsRoot 'tests/support/windows-vm-module-loader.ps1')
+. (Join-Path $toolingScriptsRoot 'tests/support/protected-result-fixture-cleanup.ps1')
 foreach ($definition in @(Get-DrTestDefinitionScriptBlocks -Kind ui)) { . $definition }
 foreach ($definition in @(Get-DrTestDefinitionScriptBlocks -Kind controller)) { . $definition }
 
@@ -281,6 +282,8 @@ $recovery = Join-Path $toolingScriptsRoot 'windows-vm-recovery-acceptance.ps1'
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
     'darkrenamer-vm-acceptance-' + [Guid]::NewGuid().ToString('N')
 )
+$script:protectedResultFixturePaths = [Collections.Generic.List[string]]::new()
+$testFailure = $null
 [void](New-Item -ItemType Directory -Path $temporaryRoot)
 try {
     $acceptanceSource = Get-DrTestCombinedPowerShellSource -Kind ui
@@ -799,6 +802,7 @@ try {
             $observations = [ordered]@{ fixture = $Mode }
 
             $writerRoot = if ($Mode -ceq 'current-dpi') { $verified.root } else { $resolved.root }
+            $script:protectedResultFixturePaths.Add($resultPath)
             Initialize-TrustedResultWriter `
                 -Root $writerRoot `
                 -ResultRoot $caseRoot `
@@ -3777,8 +3781,30 @@ try {
 
     Write-Host 'Windows VM current-DPI acceptance contract tests passed.'
 }
+catch {
+    $testFailure = $_
+    throw
+}
 finally {
-    Remove-Item -LiteralPath $temporaryRoot -Recurse -Force
+    try {
+        if ($null -ne $script:VmTrustedResultWriter) {
+            $script:VmTrustedResultWriter.Dispose()
+            $script:VmTrustedResultWriter = $null
+        }
+        if (Test-Path -LiteralPath $temporaryRoot) {
+            Remove-ProtectedResultFixtures `
+                -Root $temporaryRoot -Paths $script:protectedResultFixturePaths.ToArray()
+            # PowerShell removes reparse links themselves without recursing into targets.
+            Remove-Item -LiteralPath $temporaryRoot -Recurse -Force
+        }
+        if (Test-Path -LiteralPath $temporaryRoot) {
+            throw 'The Windows VM acceptance test did not remove its owned fixture root.'
+        }
+    }
+    catch {
+        if ($null -eq $testFailure) { throw }
+        Write-Warning "Fixture cleanup also failed: $($_.Exception.Message)"
+    }
 }
 
 # Every observer call must satisfy the shared capture contract, including modes
