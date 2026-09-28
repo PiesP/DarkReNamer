@@ -76,6 +76,10 @@ public static class DarkReNamerVmAcceptanceNative {
 }
 public static class DarkReNamerVmNative {
     public static string GetFileIdentity(string path) { return path; }
+    public static IntPtr FocusRoot = new IntPtr(10), Foreground = new IntPtr(10), LostWindow;
+    public static IntPtr GetAncestor(IntPtr window, uint flags) { return FocusRoot; }
+    public static IntPtr GetForegroundWindow() { return Foreground; }
+    public static bool IsWindow(IntPtr window) { return window != IntPtr.Zero && window != LostWindow; }
 }
 '@
 Add-Type -TypeDefinition $mock
@@ -125,6 +129,128 @@ if (([DarkReNamerVmAcceptanceNative]::Releases -join ',') -cne '16,17,18') {
         }
     }
     finally { $process.Dispose() }
+}
+
+& {
+    function New-FocusFixture {
+        $process = [pscustomobject]@{ Id = 42; SessionId = 2; HasExited = $false }
+        $process | Add-Member ScriptMethod Refresh {}
+        $edit = [pscustomobject]@{
+            Current = [pscustomobject]@{
+                ProcessId = 42; NativeWindowHandle = 101; AutomationId = '1004'; ClassName = 'Edit'
+                ControlType = [pscustomobject]@{ ProgrammaticName = 'ControlType.Edit' }
+                IsEnabled = $true; IsOffscreen = $false
+            }
+            focus_calls = 0
+        }
+        $edit | Add-Member ScriptMethod SetFocus { $this.focus_calls++ }
+        [pscustomobject]@{
+            application = [pscustomobject]@{ process = $process }; edit = $edit
+            reads = [Collections.Generic.List[long]]::new(); inputs = [Collections.Generic.List[string]]::new()
+            mode = 'delayed'; last_hwnd = 0
+        }
+    }
+    function Assert-AutomationBinding {
+        param($Element, $Process, $ExpectedSession, $Label, [switch] $RequireWindowHandle)
+        if ($Element.Current.ProcessId -ne $Process.Id -or $Process.SessionId -ne $ExpectedSession) {
+            throw 'Unexpected process or desktop session.'
+        }
+        if ($RequireWindowHandle -and -not [DarkReNamerVmNative]::IsWindow([IntPtr]$Element.Current.NativeWindowHandle)) {
+            throw 'The bound edit is no longer one live native control.'
+        }
+    }
+    function Get-FocusedAcceptanceElement {
+        param($Process, $ExpectedSession, $Label)
+        if ($fixture.inputs.Count -ne 0) { throw 'Keyboard input preceded settled edit focus.' }
+        $hwnd = if ($fixture.mode -ceq 'delayed' -and $fixture.reads.Count -eq 0) { 202 } `
+            elseif ($fixture.mode -ceq 'persistent') { 202 } else { 101 }
+        $current = [pscustomobject]@{
+            ProcessId = 42; NativeWindowHandle = $hwnd
+            AutomationId = if ($hwnd -eq 101) { '1004' } else { '2' }
+            ClassName = if ($hwnd -eq 101) { 'Edit' } else { 'Button' }
+            ControlType = [pscustomobject]@{ ProgrammaticName = if ($hwnd -eq 101) { 'ControlType.Edit' } else { 'ControlType.Button' } }
+        }
+        switch ($fixture.mode) {
+            'foreign-pid' { $current.ProcessId = 99 }
+            'foreign-session' { $fixture.application.process.SessionId = 3 }
+            'lost' { [DarkReNamerVmNative]::LostWindow = [IntPtr]101 }
+            'rebound' { $fixture.edit.Current.NativeWindowHandle = 99 }
+            'wrong-root' { [DarkReNamerVmNative]::FocusRoot = [IntPtr]99 }
+            'foreground' { [DarkReNamerVmNative]::Foreground = [IntPtr]99 }
+            'disabled' { $fixture.edit.Current.IsEnabled = $false }
+            'hidden' { $fixture.edit.Current.IsOffscreen = $true }
+            'persistent' {
+                $current | Add-Member ScriptProperty ClassName { throw 'metadata read exploded' } -Force
+            }
+        }
+        $fixture.last_hwnd = $hwnd
+        $fixture.reads.Add($hwnd)
+        [pscustomobject]@{ Current = $current }
+    }
+    function Send-AcceptanceChord {
+        param($Process, $ExpectedSession, $Modifier, $VirtualKey, $Label, [switch] $ExtendedKey)
+        if ($fixture.last_hwnd -ne 101) { throw 'Keyboard input preceded exact Edit HWND equality.' }
+        $fixture.inputs.Add($Label)
+    }
+    function Send-AcceptanceTwoModifierChord {
+        param($Process, $ExpectedSession, $Modifier, $SecondModifier, $VirtualKey, $Label, [switch] $ExtendedKey)
+        if ($fixture.last_hwnd -ne 101) { throw 'Keyboard input preceded exact Edit HWND equality.' }
+        $fixture.inputs.Add($Label)
+    }
+    $tokens = $null; $parseErrors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path (Get-ToolingTestPaths).ScriptsRoot 'modules/powershell/ui-application.ps1'),
+        [ref]$tokens, [ref]$parseErrors
+    )
+    $copy = $ast.Find({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Copy-GuiRegressionDocument'
+    }, $true)
+    $selection = $copy.Body.Find({ param($node)
+        $node -is [Management.Automation.Language.IfStatementAst] -and
+            $node.Clauses[0].Item1.Extent.Text -ceq "`$Mode -ceq 'selection'"
+    }, $true)
+    # Execute the production selection prefix through the first two keyboard
+    # inputs, before the platform TextPattern/Clipboard APIs begin.
+    $prefix = [Collections.Generic.List[string]]::new()
+    foreach ($statement in $selection.Clauses[0].Item2.Statements) {
+        if ($statement -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $statement.Left.Extent.Text -ceq '$textObject') { break }
+        $prefix.Add($statement.Extent.Text)
+    }
+    $fixture = New-FocusFixture
+    $Application = $fixture.application; $Edit = $fixture.edit; $SessionId = 2; $WaitSeconds = 3; $Label = 'focus regression'
+    & ([scriptblock]::Create([string]::Join("`n", $prefix)))
+    if ($fixture.edit.focus_calls -ne 1 -or ($fixture.reads -join ',') -cne '202,101' -or $fixture.inputs.Count -ne 2) {
+        throw 'Delayed same-process focus did not settle once before the real selection input prefix.'
+    }
+
+    $fixture = New-FocusFixture; $fixture.mode = 'persistent'
+    try {
+        Set-ObserverExactEditFocus -Application $fixture.application -Edit $fixture.edit `
+            -SessionId 2 -Label 'persistent focus' -TimeoutMilliseconds 500
+        throw 'Persistent focus mismatch did not time out.'
+    }
+    catch {
+        foreach ($expected in @('did not focus the exact', 'expected_hwnd=101', 'actual_hwnd=202', 'actual_id=2', 'expected_type=ControlType.Edit', 'foreground_hwnd=10', 'actual_class=<unavailable:')) {
+            if ($_.Exception.Message -notlike "*$expected*") { throw "Missing focus timeout diagnostic $expected : $($_.Exception.Message)" }
+        }
+        if ($_.Exception.Message.Contains('metadata read exploded')) { throw 'A diagnostic error replaced the focus timeout.' }
+    }
+    if ($fixture.edit.focus_calls -ne 1 -or $fixture.inputs.Count -ne 0) { throw 'A persistent mismatch retried focus or sent input.' }
+
+    foreach ($mode in @('foreign-pid', 'foreign-session', 'lost', 'rebound', 'wrong-root', 'foreground', 'disabled', 'hidden')) {
+        $fixture = New-FocusFixture; $fixture.mode = $mode
+        Assert-Fails {
+            Set-ObserverExactEditFocus -Application $fixture.application -Edit $fixture.edit `
+                -SessionId 2 -Label $mode -TimeoutMilliseconds 500
+        } $(if ($mode -like 'foreign-*') { 'expected application and desktop session' } elseif ($mode -ceq 'lost') { 'live native control' } else { 'lost or changed' })
+        if ($fixture.reads.Count -ne 1 -or $fixture.edit.focus_calls -ne 1 -or $fixture.inputs.Count -ne 0) {
+            throw "Unsafe $mode focus was retried or allowed keyboard input."
+        }
+        [DarkReNamerVmNative]::FocusRoot = [IntPtr]10
+        [DarkReNamerVmNative]::Foreground = [IntPtr]10
+        [DarkReNamerVmNative]::LostWindow = [IntPtr]::Zero
+    }
 }
 
 $root = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-ui-observation-' + [guid]::NewGuid().ToString('N'))

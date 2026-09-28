@@ -523,7 +523,7 @@
       "bundle": "ui-application.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "e7e5a388193c29a2551dbe9cff89bd8be400beb7f54829994c92d3a2b9c32a89",
+      "sha256": "450ca391e4926eeb91abbe4ee373bbaa91850e35855e7527b15c66406988ed5b",
       "dependencies": []
     },
     {

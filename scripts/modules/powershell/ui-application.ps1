@@ -371,6 +371,87 @@ function Set-ObserverManualName {
     } while ((Get-Date) -lt $deadline)
     throw "Manual row $Row preview did not expose the exact requested name."
 }
+function Set-ObserverExactEditFocus {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][object] $Edit,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][string] $Label,
+        [ValidateRange(1, 3000)][int] $TimeoutMilliseconds = 3000
+    )
+
+    Assert-AutomationBinding -Element $Edit -Process $Application.process `
+        -ExpectedSession $SessionId -Label "$Label exact edit" -RequireWindowHandle
+    $initial = $Edit.Current
+    $expectedProcessId = [int]$Application.process.Id
+    $handle = [long]$initial.NativeWindowHandle
+    $automationId = $initial.AutomationId
+    $class = $initial.ClassName
+    $controlType = $initial.ControlType.ProgrammaticName
+    $root = [DarkReNamerVmNative]::GetAncestor([IntPtr]$handle, 2)
+    $assertTarget = {
+        $Application.process.Refresh()
+        Assert-AutomationBinding -Element $Edit -Process $Application.process `
+            -ExpectedSession $SessionId -Label "$Label exact edit" -RequireWindowHandle
+        $current = $Edit.Current
+        if ($Application.process.HasExited -or
+            [long]$current.NativeWindowHandle -ne $handle -or
+            $current.AutomationId -cne $automationId -or $current.ClassName -cne $class -or
+            $current.ControlType.ProgrammaticName -cne $controlType -or
+            -not $current.IsEnabled -or $current.IsOffscreen -or
+            $root -eq [IntPtr]::Zero -or -not [DarkReNamerVmNative]::IsWindow($root) -or
+            [DarkReNamerVmNative]::GetAncestor([IntPtr]$handle, 2) -ne $root -or
+            [DarkReNamerVmNative]::GetForegroundWindow() -ne $root) {
+            throw "$Label lost or changed the bound read-only edit before selection."
+        }
+    }
+    & $assertTarget
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $actualHandle = '<not-observed>'
+    $focused = $null
+    $Edit.SetFocus()
+    do {
+        if ($watch.ElapsedMilliseconds -ge $TimeoutMilliseconds) { break }
+        & $assertTarget
+        $focused = Get-FocusedAcceptanceElement `
+            -Process $Application.process -ExpectedSession $SessionId -Label "$Label edit focus"
+        if ($null -eq $focused -or $focused.Current.ProcessId -ne $expectedProcessId -or
+            $Application.process.SessionId -ne $SessionId) {
+            throw "$Label edit focus is not in the expected application and desktop session."
+        }
+        $actualHandle = [long]$focused.Current.NativeWindowHandle
+        if ($actualHandle -eq $handle) {
+            & $assertTarget
+            if ($watch.ElapsedMilliseconds -ge $TimeoutMilliseconds) { break }
+            return $handle
+        }
+        $remaining = $TimeoutMilliseconds - $watch.ElapsedMilliseconds
+        if ($remaining -le 0) { break }
+        Start-Sleep -Milliseconds ([Math]::Min(50, $remaining))
+    } while ($watch.ElapsedMilliseconds -lt $TimeoutMilliseconds)
+    # Control names can contain the whole document; retain only bounded identity
+    # metadata, and never let a diagnostic read replace the focus mismatch.
+    $details = [Collections.Generic.List[string]]::new()
+    foreach ($field in ([ordered]@{
+        actual_pid = { $focused.Current.ProcessId }
+        actual_id = { $focused.Current.AutomationId }
+        actual_class = { $focused.Current.ClassName }
+        actual_type = { $focused.Current.ControlType.ProgrammaticName }
+        foreground_hwnd = { [DarkReNamerVmNative]::GetForegroundWindow() }
+    }).GetEnumerator()) {
+        try {
+            $rawValue = & $field.Value
+            $value = if ($null -eq $rawValue) { '<unavailable:null>' } else { [string]$rawValue }
+            if ($value.Length -gt 128) { $value = $value.Substring(0, 128) + '...' }
+        }
+        catch { $value = '<unavailable:' + $_.Exception.GetType().Name + '>' }
+        $details.Add($field.Key + '=' + $value)
+    }
+    throw ("$Label did not focus the exact read-only edit before selection within ${TimeoutMilliseconds}ms; " +
+        "expected_hwnd=$handle, actual_hwnd=$actualHandle, expected_pid=$expectedProcessId, expected_root_hwnd=$root, " +
+        "session=$SessionId, expected_id=$automationId, expected_class=$class, expected_type=$controlType, " +
+        ([string]::Join(', ', $details)) + ", elapsed_ms=$($watch.ElapsedMilliseconds).")
+}
 function Copy-GuiRegressionDocument {
     param(
         [Parameter(Mandatory)][ValidateSet('selection', 'mnemonic')][string] $Mode,
@@ -389,15 +470,9 @@ function Copy-GuiRegressionDocument {
     }
     if ($Mode -ceq 'selection') {
         if ($null -eq $Edit) { throw 'Selection copy requires the bound read-only Edit.' }
-        Assert-AutomationBinding -Element $Edit -Process $Application.process `
-            -ExpectedSession $SessionId -Label "$Label exact edit" -RequireWindowHandle
-        $editHandle = [long]$Edit.Current.NativeWindowHandle
-        $Edit.SetFocus()
-        $focused = Get-FocusedAcceptanceElement `
-            -Process $Application.process -ExpectedSession $SessionId -Label "$Label edit focus"
-        if ([long]$focused.Current.NativeWindowHandle -ne $editHandle) {
-            throw "$Label did not focus the exact read-only edit before selection."
-        }
+        $editHandle = Set-ObserverExactEditFocus -Application $Application -Edit $Edit `
+            -SessionId $SessionId -Label $Label `
+            -TimeoutMilliseconds ([Math]::Min(3000, [int64]$WaitSeconds * 1000))
         Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 -VirtualKey 0x24 -Label "$Label selection start" -ExtendedKey
         Send-AcceptanceTwoModifierChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 -SecondModifier 0x10 -VirtualKey 0x23 -Label "$Label select to end" -ExtendedKey
         $textObject = $null
