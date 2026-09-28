@@ -55,7 +55,7 @@
       "bundle": "tooling-campaign-recovery.py",
       "kind": "python",
       "module": "darkrenamer_tooling.campaign.recovery",
-      "sha256": "f8a01cadec55935389ceae6e9466e1a30113d3c7d05e378a38a1621b1323109f",
+      "sha256": "4f133858c3e0fe77b925a6ebe3e4337f04abf1d48b1ffce11a8ac5ddb6efb7f7",
       "dependencies": [
         "package-root",
         "package-campaign",
@@ -133,7 +133,7 @@
       "bundle": "tooling-vm-launcher.py",
       "kind": "python",
       "module": "darkrenamer_tooling.vm.launcher",
-      "sha256": "4166292af16bffe73878fcb665ed9ffac110fc8f13b44e3bfbc42b11fac5fbb2",
+      "sha256": "9271a189afc65bf503732607d4a56df536a4121607136746f7e85c2d2871d6c4",
       "dependencies": [
         "tooling-loader",
         "package-root",
@@ -303,7 +303,7 @@
       "bundle": "tooling-evidence-png.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.png",
-      "sha256": "222ec3dc486d180fc1771c4f7c1b76ed3ea6c12b0ab9fe5d75ea1e3c78f7eaa2",
+      "sha256": "036910f8c74c0bdac7f80ef1691e8c757acdefb44484e0925d87ccf5b459eb38",
       "dependencies": [
         "package-root",
         "package-evidence",

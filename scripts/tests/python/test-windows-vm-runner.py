@@ -671,6 +671,12 @@ class VmRunnerTests(unittest.TestCase):
             'passed')
         transport_path = output / 'transport.json'
         valid_transport = json.loads(transport_path.read_text())
+        for version in ('7.3.9', '8', '7.4.malformed', '7.4-preview.1', '', None, 7.4):
+            invalid_transport = json.loads(json.dumps(valid_transport))
+            invalid_transport['recovery_engine']['version'] = version
+            transport_path.write_text(json.dumps(invalid_transport))
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, 'engine version'):
+                vm.verify_recovery_inventory(output, manifest, 'ssh', identity)
         for field, value in (
                 ('vm_id', 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'),
                 ('vm_id', None),
@@ -1528,11 +1534,27 @@ class VmRunnerTests(unittest.TestCase):
     def test_ssh_local_pwsh_rejects_older_or_malformed_versions(self):
         with mock.patch.object(vm.shutil, 'which', return_value='/usr/bin/pwsh'), \
              mock.patch.object(vm.subprocess, 'check_output') as check_output:
-            for version in ('7.3.9', '7', '7.4-preview.1', 'not-a-version', ''):
+            for version in ('7.3.9', '7', '8', '7.4.malformed', '7.4-preview.1', 'not-a-version', ''):
                 with self.subTest(version=version):
                     check_output.return_value = version + '\n'
                     with self.assertRaisesRegex(RuntimeError, '7.4 or newer'):
                         vm.require_pwsh74()
+
+    def test_windows_pwsh_checks_the_complete_engine_version(self):
+        with mock.patch.object(vm.Path, 'is_file', return_value=True), \
+             mock.patch.object(vm.subprocess, 'check_output') as output:
+            for version in ('7.4', '7.4.0', '8.0.0'):
+                output.return_value = json.dumps({
+                    'version': version, 'edition': 'Core', 'effective_policy': 'RemoteSigned'})
+                with self.subTest(version=version):
+                    self.assertEqual(vm.require_windows_pwsh74(), vm.WINDOWS_PWSH)
+            for engine in (None, [], '7.4', {}, *(
+                {'version': version, 'edition': 'Core', 'effective_policy': 'RemoteSigned'}
+                for version in ('7.3.9', '8', '7.4.malformed', None, 7.4)
+            )):
+                output.return_value = json.dumps(engine)
+                with self.subTest(engine=engine), self.assertRaisesRegex(RuntimeError, 'Windows PowerShell 7.4'):
+                    vm.require_windows_pwsh74()
 
     def test_ssh_plan_uses_local_pwsh_without_windows_host_calls(self):
         output = self.root / 'ssh-output'
@@ -1663,6 +1685,20 @@ class VmRunnerTests(unittest.TestCase):
                 with vm.managed_desktop(args):
                     raise RuntimeError('controller failed')
             self.assertEqual(host.call_count, 2)
+
+    def test_desktop_stops_when_initial_lease_evidence_cannot_be_written(self):
+        args = vm.parse_arguments(['--ssh-host', 'vm'])
+        with mock.patch.object(vm.Path, 'is_file', return_value=True), \
+             mock.patch.object(vm, 'windows_host_command', side_effect=[
+                 json.dumps(self.desktop_lease()), '{"status":"stopped"}']) as host, \
+             mock.patch.object(vm, 'write_desktop_lease_document',
+                               side_effect=[OSError('lease write failed'), None]) as write:
+            with self.assertRaisesRegex(OSError, 'lease write failed'):
+                with vm.managed_desktop(args):
+                    self.fail('Failed evidence write reached the controller')
+            self.assertEqual(host.call_count, 2)
+            self.assertIn('-Action Stop', host.call_args_list[-1].args[0])
+            self.assertTrue(write.call_args.args[1]['cleanup_observed'])
 
     def test_invalid_desktop_identity_is_stopped_before_controller(self):
         args = vm.parse_arguments(['--ssh-host', 'vm'])

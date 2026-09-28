@@ -1008,6 +1008,36 @@ class GuiEvidenceTests(unittest.TestCase):
                 evidence.decode_png(image, "mismatched", expected_dimensions=(80, 30))
             inflate.assert_not_called()
 
+    def test_png_decoder_requires_valid_chunk_types_and_consecutive_idat(self):
+        prefix = b"\x89PNG\r\n\x1a\n" + png_chunk(
+            b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0))
+        compressed = zlib.compress(b"\0\x12\x34\x56\xff")
+        first = png_chunk(b"IDAT", compressed[:3])
+        second = png_chunk(b"IDAT", compressed[3:])
+        end = png_chunk(b"IEND", b"")
+        ancillary = png_chunk(b"tEXt", b"key\0value")
+        expected = (1, 1, b"\x12\x34\x56\xff")
+        self.assertEqual(evidence.decode_png(prefix + ancillary + first + second + end, "valid"), expected)
+        self.assertEqual(evidence.decode_png(prefix + first + second + ancillary + end, "valid"), expected)
+        with self.assertRaisesRegex(evidence.EvidenceError, "IDAT in an invalid position"):
+            evidence.decode_png(prefix + first + ancillary + second + end, "split")
+        for kind in (b"abcd", b"tE1t", b"\xffEXt"):
+            with self.subTest(kind=kind), self.assertRaisesRegex(evidence.EvidenceError, "invalid PNG chunk type"):
+                evidence.decode_png(prefix + png_chunk(kind, b"") + first + second + end, "invalid")
+
+    def test_png_decoder_preserves_supported_opaque_color_formats(self):
+        for color_type, pixel, rgba in (
+            (0, b"\x12", b"\x12\x12\x12\xff"),
+            (2, b"\x12\x34\x56", b"\x12\x34\x56\xff"),
+            (4, b"\x12\xff", b"\x12\x12\x12\xff"),
+            (6, b"\x12\x34\x56\xff", b"\x12\x34\x56\xff"),
+        ):
+            image = (b"\x89PNG\r\n\x1a\n" + png_chunk(
+                b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, color_type, 0, 0, 0)) +
+                png_chunk(b"IDAT", zlib.compress(b"\0" + pixel)) + png_chunk(b"IEND", b""))
+            with self.subTest(color_type=color_type):
+                self.assertEqual(evidence.decode_png(image, "opaque"), (1, 1, rgba))
+
     def test_png_decoder_enforces_one_campaign_pixel_budget(self):
         budget = evidence.DecodedPixelBudget(maximum_pixels=64)
         small = png(8, 8, 1, 1)

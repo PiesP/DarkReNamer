@@ -254,12 +254,17 @@ def _binding(value: object, expected_sequence: int, expected_role: str,
     return row
 
 
+def _lifecycle_binding(row: dict, binding: dict) -> None:
+    for field in ("pid", "session_id", "start_time_utc_ticks", "executable_path", "executable_sha256"):
+        require(type(row[field]) is type(binding[field]) and row[field] == binding[field],
+                "Process lifecycle differs from its immutable binding.")
+
+
 def _start_lifecycle(value: object, binding: dict) -> None:
     row = require_exact_keys(value, {"pid", "session_id", "start_time_utc_ticks", "executable_path",
                                      "executable_sha256", "start_observed", "exit_observed",
                                      "exit_method", "exit_code"}, "Recovery process start lifecycle")
-    for field in ("pid", "session_id", "start_time_utc_ticks", "executable_path", "executable_sha256"):
-        require(row[field] == binding[field], "Process start lifecycle differs from its immutable binding.")
+    _lifecycle_binding(row, binding)
     require(row["start_observed"] is True and row["exit_observed"] is False and
             row["exit_method"] is None and row["exit_code"] is None,
             "Process start lifecycle falsely asserts an exit.")
@@ -297,13 +302,13 @@ def _processes(private: PrivateEvidence, references: object, *, roles: list[str]
                                       {"schema_version", "boundary", "observed_utc_ticks", "binding",
                                        "termination", "lifecycle"}, "Recovery process exit")
         require_int(exit_row["schema_version"], 1, 1, "Process exit schema")
-        require(exit_row["boundary"] == exit_boundary and exit_row["binding"] == binding,
+        exit_binding = _binding(exit_row["binding"], sequence, role, executable_sha256)
+        require(exit_row["boundary"] == exit_boundary and exit_binding == binding,
                 "Process exit differs from its paired immutable start binding.")
         pid, session = verify_process_lifecycle(exit_row["lifecycle"],
                                                 executable_sha256=executable_sha256,
                                                 expected_exit_method=method)
-        require((pid, session) == (binding["pid"], binding["session_id"]),
-                "Process exit lifecycle belongs to another process.")
+        _lifecycle_binding(exit_row["lifecycle"], binding)
         exit_observed = _ticks(exit_row["observed_utc_ticks"], "Process exit observation")
         require(start_observed <= exit_observed, "Process exit was observed before its start observation.")
         termination = exit_row["termination"]

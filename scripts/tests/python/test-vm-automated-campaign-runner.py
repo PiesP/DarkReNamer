@@ -11,7 +11,6 @@ from pathlib import Path
 from tooling_test_paths import REPOSITORY_ROOT
 import subprocess
 import tempfile
-import types
 import unittest
 from unittest.mock import patch
 from zipfile import ZIP_STORED, ZipFile

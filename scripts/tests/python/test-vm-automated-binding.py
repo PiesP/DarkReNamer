@@ -3,7 +3,6 @@
 
 from copy import deepcopy
 import hashlib
-from pathlib import Path
 from tooling_test_paths import REPOSITORY_ROOT
 from unittest import TestCase, main
 from unittest.mock import patch

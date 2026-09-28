@@ -157,6 +157,12 @@ def windows_host_command(script, capture=True, timeout=120):
     ).stdout
 
 
+def is_supported_powershell_version(version):
+    return (isinstance(version, str) and
+            re.fullmatch(r'[0-9]+\.[0-9]+(?:\.[0-9]+){0,2}', version) is not None and
+            tuple(int(part) for part in version.split('.')[:2]) >= (7, 4))
+
+
 def require_pwsh74():
     executable = shutil.which('pwsh')
     if not executable:
@@ -170,10 +176,7 @@ def require_pwsh74():
         ).strip()
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         raise RuntimeError('Unable to verify that pwsh is PowerShell 7.4 or newer.') from error
-    if not re.fullmatch(r'[0-9]+\.[0-9]+(?:\.[0-9]+){0,2}', version):
-        raise RuntimeError('SSH transport requires PowerShell 7.4 or newer as pwsh on PATH.')
-    major, minor = (int(part) for part in version.split('.')[:2])
-    if (major, minor) < (7, 4):
+    if not is_supported_powershell_version(version):
         raise RuntimeError('SSH transport requires PowerShell 7.4 or newer as pwsh on PATH.')
     return executable
 
@@ -589,8 +592,8 @@ def managed_desktop(args, evidence_root=None):
         'stop_status': 'failed',
         'cleanup_observed': False,
     }
-    write_desktop_lease_document(evidence_root, lease_document)
     try:
+        write_desktop_lease_document(evidence_root, lease_document)
         if (not isinstance(lease.get('expectedGuestSid'), str) or
                 not re.fullmatch(r'S-1-5-21-(?:\d+-){2}\d+-\d+', lease['expectedGuestSid']) or
                 type(lease.get('expectedDpi')) is not int or
@@ -1031,9 +1034,7 @@ def verify_result(root, manifest, result, expected_transport_kind=None, expected
                 'executable', 'version', 'edition', 'effective_policy'} or
                 not isinstance(engine['executable'], str) or
                 not engine['executable'].lower().endswith('\\pwsh.exe') or
-                not isinstance(engine['version'], str) or
-                not re.fullmatch(r'[0-9]+\.[0-9]+(?:\.[0-9]+){0,2}', engine['version']) or
-                tuple(int(part) for part in engine['version'].split('.')[:2]) < (7, 4) or
+                not is_supported_powershell_version(engine['version']) or
                 engine['edition'] != 'Core' or engine['effective_policy'] != 'RemoteSigned'):
             raise ValueError('VM candidate runner engine binding is invalid.')
     verify_transport_binding(
@@ -1079,11 +1080,8 @@ def require_windows_pwsh74():
         '[ordered]@{version=$PSVersionTable.PSVersion.ToString();edition=$PSVersionTable.PSEdition;'
         'effective_policy=(Get-ExecutionPolicy).ToString()} | ConvertTo-Json -Compress',
     ], text=True, timeout=30))
-    try:
-        version = tuple(int(part) for part in engine['version'].split('.')[:2])
-    except (KeyError, AttributeError, ValueError):
-        version = (0, 0)
-    if (version < (7, 4) or engine.get('edition') != 'Core' or
+    if (not isinstance(engine, dict) or
+            not is_supported_powershell_version(engine.get('version')) or engine.get('edition') != 'Core' or
             engine.get('effective_policy') != 'RemoteSigned'):
         raise RuntimeError('Candidate validation requires Windows PowerShell 7.4+ Core under its existing RemoteSigned policy.')
     return WINDOWS_PWSH
@@ -1420,11 +1418,8 @@ def verify_observer_transport(root, role, expected_transport_kind, expected_vm_i
             engine.get('effective_policy') != 'RemoteSigned'):
         raise ValueError('Observer transport result is incomplete or invalid.')
     verify_controller_cleanup(transport.get('raw_cleanup'))
-    try:
-        if tuple(int(part) for part in engine['version'].split('.')[:2]) < (7, 4):
-            raise ValueError
-    except (AttributeError, KeyError, ValueError):
-        raise ValueError('Observer transport engine version is invalid.') from None
+    if not is_supported_powershell_version(engine.get('version')):
+        raise ValueError('Observer transport engine version is invalid.')
     verify_transport_binding(
         transport, expected_transport_kind, expected_vm_id,
         require_identity_proof=True)

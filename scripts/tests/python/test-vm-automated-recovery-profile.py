@@ -499,6 +499,37 @@ class RecoveryProfileTests(unittest.TestCase):
             verify_recovery_execution(Reader(dict(reader.files)), result, deepcopy(bundle),
                                       deepcopy(transport), target(), run_prefix=prefix)
 
+    def test_process_lifecycle_matches_every_immutable_field_and_type(self):
+        mutations = {
+            "pid": 9999,
+            "session_id": 9999,
+            "start_time_utc_ticks": "1",
+            "executable_path": r"C:\other\DarkReNamer.exe",
+            "executable_sha256": "0" * 64,
+        }
+        for boundary, reference_index in (("started", 0), ("crash-stop", 1)):
+            for field, value in mutations.items():
+                reader, result, bundle, transport = self.crash_copy()
+                relative = f"process-01-{boundary}.json"
+                raw = reader.json(PRIVATE_ROOT + "/" + relative)
+                raw["lifecycle"][field] = value
+                resign(reader, result, relative, raw, [result["process_crash"]["processes"][reference_index]])
+                with self.subTest(boundary=boundary, field=field), self.assertRaises(EvidenceError):
+                    verify_recovery_execution(reader, result, bundle, transport, target(),
+                                              run_prefix=RUN_PREFIX, result_path=RESULT_PATH)
+
+        for boundary, section, reference_index in (
+            ("started", "lifecycle", 0), ("crash-stop", "binding", 1),
+        ):
+            reader, result, bundle, transport = self.crash_copy()
+            relative = f"process-01-{boundary}.json"
+            raw = reader.json(PRIVATE_ROOT + "/" + relative)
+            raw[section]["pid"] = float(raw[section]["pid"])
+            resign(reader, result, relative, raw, [result["process_crash"]["processes"][reference_index]])
+            with self.subTest(boundary=boundary, section=section), self.assertRaises(EvidenceError):
+                verify_recovery_execution(reader, result, bundle, transport, target(),
+                                          run_prefix=RUN_PREFIX, result_path=RESULT_PATH)
+
     def test_two_worker_modes_derive_only_their_own_targets(self):
         for fixture, expected in ((self.cancel, "worker-cancellation"), (self.close, "worker-close")):
             reader, result, bundle, transport, prefix = fixture
