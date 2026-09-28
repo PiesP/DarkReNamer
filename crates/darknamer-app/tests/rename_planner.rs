@@ -1352,7 +1352,8 @@ impl RenameBackend for CountingBackend {
 }
 
 #[test]
-fn nested_overlap_detection_has_bounded_calls_and_one_issue_per_row() {
+fn nested_overlap_detection_has_bounded_calls_and_one_issue_per_row()
+-> Result<(), Box<dyn std::error::Error>> {
     let count = 128_usize;
     let mut inner = MemoryBackend::new();
     let mut intents = Vec::with_capacity(count);
@@ -1378,15 +1379,21 @@ fn nested_overlap_detection_has_bounded_calls_and_one_issue_per_row() {
         relationship_calls: Cell::new(0),
     };
 
-    let error = RenamePlanner::new(&backend)
-        .plan(PlanRequest::new(ModelRevision::new(1), intents))
-        .err();
-    let Some(error) = error else {
-        return;
+    let Err(error) =
+        RenamePlanner::new(&backend).plan(PlanRequest::new(ModelRevision::new(1), intents))
+    else {
+        return Err(std::io::Error::other("nested source overlap was accepted").into());
     };
-    assert!(error.issues().len() <= count);
+    assert_eq!(error.issues().len(), count);
+    assert!(
+        error
+            .issues()
+            .iter()
+            .all(|issue| issue.kind == PlanIssueKind::SourceOverlap)
+    );
     assert_eq!(backend.relationship_calls.get(), 0);
     assert!(backend.key_calls.get() <= count * (MAX_PLAN_PATH_DEPTH + 8));
+    Ok(())
 }
 
 #[test]
