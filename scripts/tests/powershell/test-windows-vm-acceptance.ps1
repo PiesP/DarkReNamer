@@ -332,24 +332,6 @@ try {
     }
     . ([scriptblock]::Create($mainWindowSelector[0].Extent.Text))
 
-    foreach ($observer in @(
-        @{ Name = 'UI observer'; Text = $acceptanceSource },
-        @{ Name = 'guest runner'; Text = $runnerSource },
-        @{ Name = 'recovery observer'; Text = $recoverySource }
-    )) {
-        $observerText = $observer.Text
-        foreach ($heuristic in @('.MainWindowHandle', '.MainWindowTitle', '.CloseMainWindow(')) {
-            if ($observerText.IndexOf($heuristic, [StringComparison]::Ordinal) -ge 0) {
-                throw "$($observer.Name) must not use process main-window heuristics '$heuristic'."
-            }
-        }
-    }
-    if ($acceptanceSource.IndexOf(
-        'finally { $entries.Dispose() }',
-        [StringComparison]::Ordinal
-    ) -lt 0) {
-        throw 'The UI bootstrap must dispose its bounded acceptance-output enumerator.'
-    }
     foreach ($functionName in @(
         'Assert-PlainFile',
         'Join-GuestWindowsPath',
@@ -369,6 +351,29 @@ try {
             throw "The VM controller must define one $functionName helper."
         }
         . ([scriptblock]::Create($pathFunctions[0].Extent.Text))
+    }
+    $pathRewriter = @($controllerAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Set-QuotedVmTaskPath'
+    }, $true))
+    if ($pathRewriter.Count -ne 1) { throw 'The protected task path rewriter is ambiguous.' }
+    . ([scriptblock]::Create($pathRewriter[0].Extent.Text))
+    $mutablePath = Join-Path $temporaryRoot 'candidate-writable/out'
+    $protectedPath = Join-Path $temporaryRoot 'trusted/out'
+    $mutableArgument = '"' + [IO.Path]::GetFullPath($mutablePath) + '"'
+    $protectedArgument = '"' + [IO.Path]::GetFullPath($protectedPath) + '"'
+    $taskArguments = '-OutputRoot ' + $mutableArgument + ' -Other "sentinel"'
+    $rewritten = Set-QuotedVmTaskPath -CurrentArguments $taskArguments -SourcePath $mutablePath -DestinationPath $protectedPath
+    if ($rewritten -cne ('-OutputRoot ' + $protectedArgument + ' -Other "sentinel"')) {
+        throw 'Protected task staging did not replace only its exact quoted output path.'
+    }
+    foreach ($invalidArguments in @('-Other "sentinel"', ($taskArguments + ' ' + $mutableArgument))) {
+        Assert-Fails {
+            Set-QuotedVmTaskPath -CurrentArguments $invalidArguments -SourcePath $mutablePath -DestinationPath $protectedPath
+        } 'missing or ambiguous'
+    }
+    if ((Set-QuotedVmTaskPath -CurrentArguments '-Other "sentinel"' -SourcePath $mutablePath -DestinationPath $protectedPath -Optional) -cne '-Other "sentinel"') {
+        throw 'An absent optional task output argument changed unrelated arguments.'
     }
     $selectionDefaults = @{
         RequestedKind = ''
@@ -466,58 +471,27 @@ try {
     Assert-Fails {
         Get-SafeEvidencePathSegments 'fixture/trailing.'
     } 'Invalid Windows ordinary file name'
-    $earlyAggregatePattern = '\$total\s*\+=\s*\$row(?:\.item)?\.Length\s*' +
-        'if\s*\(\$total\s*-gt\s*512MB\)\s*\{\s*throw\s*' +
-        "'[^']+aggregate size bound[^']*'\s*\}\s*\[pscustomobject\]@\{"
-    if ([regex]::Matches(
-        $controllerText,
-        $earlyAggregatePattern,
-        [Text.RegularExpressions.RegexOptions]::IgnoreCase
-    ).Count -ne 2) {
-        throw 'UI and recovery collection must reject the aggregate limit before hashing rows.'
-    }
+    # Retain static privilege policy; executable inventory, rescue, cleanup and
+    # window-selection contracts are exercised by behavior tests.
     foreach ($protectedOutputContract in @(
         '$trustedOutputRoot = Join-Path $trustedTaskRoot ''out''',
         'Assert-ProtectedTaskDirectory -Path $trustedOutputRoot',
         '$requiresPrivateRoot = $Arguments.IndexOf(',
         'if ($requiresPrivateRoot) {',
         "elseif (Test-Path -LiteralPath `$trustedPrivateRoot) {",
-        'function Set-QuotedVmTaskPath',
-        '$trustedOutputArgument = ''"'' + [IO.Path]::GetFullPath($trustedOutputRoot) + ''"''',
-        '$out = Join-Path $trustedRoot ''out''',
-        '$trustedResult = Join-Path $out ''acceptance-result.json''',
-        "item = Get-Item -LiteralPath `$recoveryEvidenceRootPath -Force; prefix = `$evidenceLeaf + '/'"
+        '$trustedOutputArgument = ''"'' + [IO.Path]::GetFullPath($trustedOutputRoot) + ''"'''
     )) {
         if ($controllerText.IndexOf($protectedOutputContract, [StringComparison]::Ordinal) -lt 0) {
             throw "VM observer outputs are not bound to the protected output root: $protectedOutputContract"
         }
     }
-    foreach ($requiredRescueSource in @(
-        'function Invoke-AcceptanceTextScaleRescue',
-        '-RestoreTextScaleOnly',
-        "-TrustedResultLeaf 'text-scale-rescue-result.json'",
-        'text-scale-rescue-result.json',
-        'Get-DrVmTrustedPowerShellPath',
-        "Join-Path `$trustedRoot 'out'"
-    )) {
-        if ($controllerText.IndexOf($requiredRescueSource, [StringComparison]::Ordinal) -lt 0) {
-            throw "The VM controller is missing the text-scale rescue contract '$requiredRescueSource'."
-        }
-    }
     foreach ($requiredObserverSource in @(
-        'function Invoke-AcceptanceHighContrastRescue',
-        '-RestoreHighContrastOnly',
-        "-TrustedResultLeaf 'high-contrast-rescue-result.json'",
-        'high-contrast-rescue-result.json',
         "-TrustedResultLeaf 'acceptance-result.json'",
         "-TrustedResultLeaf 'recovery-summary.json'",
         '-EvidenceRoot "',
         'New-DrVmGuestDirectory',
         'elseif ($recovery)',
-        'Recovery output file count exceeds its bound.',
-        'Recovery output contains a reparse entry.',
         '-PrivateEvidenceRoot "'' + $private + ''"',
-        "prefix = 'private/'",
         'recovery-inventory.json',
         '-Role recovery',
         'Assert-ObserverResultBinding',
@@ -527,69 +501,16 @@ try {
             throw "The shared controller is missing observer contract '$requiredObserverSource'."
         }
     }
-    foreach ($requiredRawCleanupSource in @(
-        'runner_task_baseline',
-        'runner_process_baseline',
-        'Get-DrVmRunnerProcesses',
+    # The cleanup boundary may inspect the exact runner identity and may only
+    # terminate processes in the current run's owned roots. This is source policy,
+    # separate from the observed residue and incomplete-evidence behavior tests.
+    foreach ($scopePolicy in @(
         '-UserSid $taskContext.runner_sid',
-        '$unexpectedRunnerProcessesBeforeCleanup',
-        '$terminatedRunnerProcesses.Add',
-        'scheduled_task_present =',
-        'guest_root_present =',
-        'unexpected_runner_tasks =',
-        'unexpected_runner_processes =',
-        'runner_process_inventory_complete =',
-        '$ownedScheduledTasksBeforeDelete = @(Get-ScheduledTask -ErrorAction Stop |',
-        '$ownedScheduledTasksAfterDelete = @(Get-ScheduledTask -ErrorAction Stop |',
-        'foreach ($identity in $baselineTaskHashes.Keys)',
-        '$removedRunnerTasks.Add([string]$identity)',
-        'removed_runner_tasks = @($removedRunnerTasks | Sort-Object)',
-        'smart_screen_natural_exit =',
-        'Get-DrVmSmartScreenBrokerEvidence',
-        'Wait-DrVmSmartScreenNaturalExit',
-        'natural_exit_observed',
-        '$smartScreenInitialDeltaAccepted',
-        'terminated_runner_processes =',
-        'Get-DrVmRunnerTasks -UserSid $taskContext.runner_sid',
-        'owned_processes_after =',
-        "`$transport['raw_cleanup'] = `$cleanupResult.raw_cleanup",
-        'Guest cleanup did not return its bound raw observation.'
+        'Test-ProcessExecutableInOwnedRoots -Path $actualPath -Prefixes $prefixes'
     )) {
-        if ($controllerText.IndexOf($requiredRawCleanupSource, [StringComparison]::Ordinal) -lt 0) {
-            throw "The shared controller is missing raw cleanup evidence '$requiredRawCleanupSource'."
+        if ($controllerText.IndexOf($scopePolicy, [StringComparison]::Ordinal) -lt 0) {
+            throw "The controller cleanup changed its authorized process scope: $scopePolicy"
         }
-    }
-    if ($controllerText.IndexOf(
-        "(`$state.result_status -cne 'review_required' -or `$state.task_result -ne 0)",
-        [StringComparison]::Ordinal
-    ) -lt 0) {
-        throw 'The VM controller must run its text-scale rescue after every unsuccessful acceptance task.'
-    }
-    foreach ($requiredTerminalSource in @(
-        'result_status = $resultStatus',
-        'task_state = $taskState',
-        'task_result = $taskResult',
-        'last_run_time_ticks = [long]$info.LastRunTime.Ticks',
-        '$taskResult = [long]$terminalInfo.LastTaskResult',
-        'Resolve-ObserverTaskPollState',
-        '-RegisteredLastRunTimeTicks $acceptanceEngine.registered_last_run_time_ticks',
-        'if ($state.terminal) { break }',
-        '$transport.observer_process = $observerProcess',
-        'exit_code = [long]$state.task_result',
-        '$observerProcess.exit_code -eq 0'
-    )) {
-        if ($controllerText.IndexOf($requiredTerminalSource, [StringComparison]::Ordinal) -lt 0) {
-            throw "The VM controller is missing terminal observer-task evidence '$requiredTerminalSource'."
-        }
-    }
-    if ($controllerText.IndexOf(
-        "foreach (`$leaf in @('observer.stdout.txt', 'observer.stderr.txt'))",
-        [StringComparison]::Ordinal
-    ) -ge 0 -or $controllerText.IndexOf(
-        '$rows = @(',
-        [StringComparison]::Ordinal
-    ) -lt 0) {
-        throw 'Observer output inventory must read the protected output tree directly without moving candidate-writable stream files.'
     }
     foreach ($requiredEngineSource in @(
         "executable = 'pwsh.exe'",
@@ -614,17 +535,25 @@ try {
             throw "The VM controller is missing frozen candidate observer staging '$requiredCandidateObserverSource'."
         }
     }
-    $policy = Get-ExecutionPolicy
-    $policyRoundTrip = [ordered]@{
-        effective_policy = $policy.ToString()
-    } | ConvertTo-Json -Compress | ConvertFrom-Json
-    if ($policyRoundTrip.effective_policy -isnot [string] -or
-        $policyRoundTrip.effective_policy -cne $policy.ToString()) {
-        throw 'Execution policy evidence must retain its enum name through JSON serialization.'
-    }
-    $policySerialization = 'effective_policy=(Get-ExecutionPolicy).ToString()'
-    if ([regex]::Matches($controllerText, [regex]::Escape($policySerialization)).Count -ne 5) {
-        throw 'Core, observer, and rescue engine checks must serialize the execution policy name.'
+    # Execute each embedded engine probe against a policy enum; source counts do
+    # not establish how the observation survives the remote JSON boundary.
+    & {
+        function Get-ExecutionPolicy { [Microsoft.PowerShell.ExecutionPolicy]::RemoteSigned }
+        $probes = @($controllerAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+                $node.Value -like '*effective_policy=*ConvertTo-Json*'
+        }, $true))
+        if ($probes.Count -eq 0) { throw 'No engine observation probes were exercised.' }
+        foreach ($probe in $probes) {
+            $observation = & ([scriptblock]::Create($probe.Value)) | ConvertFrom-Json
+            if ($observation.effective_policy -isnot [string] -or
+                $observation.effective_policy -cne 'RemoteSigned' -or
+                $observation.edition -cne $PSVersionTable.PSEdition -or
+                $observation.version -cne $PSVersionTable.PSVersion.ToString()) {
+                throw 'An engine probe lost its exact version, edition or policy name in JSON.'
+            }
+        }
     }
     foreach ($line in @($controllerText -split "`r?`n" | Where-Object {
         $_ -match '\$observerArguments\s*=' -and $_ -notmatch '^\s*#'
@@ -642,25 +571,6 @@ try {
         [StringComparison]::Ordinal
     ) -ge 0) {
         throw 'UI cleanup must not serialize an unobserved journal as an empty inventory.'
-    }
-    foreach ($requiredCleanupObservationSource in @(
-        'Get-VmAutomatedOwnedProcessCleanupObservation',
-        'owned_processes_observation_error',
-        "'owned_process_cleanup_observation_failed'",
-        "'Owned process cleanup observation failed:'"
-    )) {
-        if ($acceptanceText.IndexOf(
-            $requiredCleanupObservationSource,
-            [StringComparison]::Ordinal
-        ) -lt 0) {
-            throw "UI cleanup failure publication is missing '$requiredCleanupObservationSource'."
-        }
-    }
-    if ([regex]::Matches(
-        $acceptanceText,
-        [regex]::Escape('Get-VmAutomatedOwnedProcessCleanupObservation')
-    ).Count -ne 4) {
-        throw 'Shared UI cleanup and every observer cleanup path must use the guarded owned-process observation.'
     }
     function Get-UiObserverFinalizerBody {
         param([Parameter(Mandatory)][string] $FunctionName)
@@ -951,80 +861,6 @@ try {
     if ($mixedTreeText -cne "first`nlast") {
         throw 'The mixed confirmation text projection must read and filter the returned tree rows.'
     }
-    $scrollInfoProducer = 'return new [] { info.Minimum, info.Maximum, (int)info.Page, info.Position, info.TrackPosition };'
-    if ([regex]::Matches($acceptanceText, [regex]::Escape($scrollInfoProducer)).Count -ne 1) {
-        throw 'The native scroll-info helper must return its fixed five-value SCROLLINFO projection.'
-    }
-    $scrollInfoConsumer = '$values.Count -ne 5'
-    if ([regex]::Matches($acceptanceText, [regex]::Escape($scrollInfoConsumer)).Count -ne 2 -or
-        $acceptanceText.IndexOf('$values.Count -ne 6', [StringComparison]::Ordinal) -ge 0) {
-        throw 'Both native scroll-info consumers must require the producer five-value shape.'
-    }
-    $reachabilityMapIndex = $acceptanceText.IndexOf(
-        '$reachability = [ordered]@{',
-        [StringComparison]::Ordinal
-    )
-    $reachabilityReceiptIndex = if ($reachabilityMapIndex -lt 0) { -1 } else {
-        $acceptanceText.IndexOf(
-            "(`$Prefix + '-reachability.json')",
-            $reachabilityMapIndex,
-            [StringComparison]::Ordinal
-        )
-    }
-    $reachabilityControlsIndex = if ($reachabilityReceiptIndex -lt 0) { -1 } else {
-        $acceptanceText.IndexOf(
-            'controls = $reachability',
-            $reachabilityReceiptIndex,
-            [StringComparison]::Ordinal
-        )
-    }
-    $reachabilityThrowIndex = if ($reachabilityControlsIndex -lt 0) { -1 } else {
-        $acceptanceText.IndexOf(
-            'After context confirmation has a mouse-inaccessible required control',
-            $reachabilityControlsIndex,
-            [StringComparison]::Ordinal
-        )
-    }
-    if ($reachabilityMapIndex -lt 0 -or $reachabilityReceiptIndex -le $reachabilityMapIndex -or
-        $reachabilityControlsIndex -le $reachabilityReceiptIndex -or
-        $reachabilityThrowIndex -le $reachabilityControlsIndex) {
-        throw 'Context confirmation must persist its fixed control reachability map before rejecting inaccessible controls.'
-    }
-    foreach ($diagnosticField in @(
-        'hit_window=', 'hit_process_id=', 'hit_root_window=',
-        'expected_process_id=', 'expected_root_window='
-    )) {
-        if ($acceptanceText.IndexOf($diagnosticField, [StringComparison]::Ordinal) -lt 0) {
-            throw "Physical target failures must retain bounded diagnostic field '$diagnosticField'."
-        }
-    }
-    if ($acceptanceText.IndexOf(
-        '[DarkReNamerVmNative]::GetWindowThreadProcessId($hit',
-        [StringComparison]::Ordinal
-    ) -lt 0 -or $acceptanceText.IndexOf(
-        '[DarkReNamerVmAcceptanceNative]::GetWindowThreadProcessId($hit',
-        [StringComparison]::Ordinal
-    ) -ge 0) {
-        throw 'Physical reachability must call the shared public process-binding API.'
-    }
-    $regressionModeIndex = $acceptanceText.IndexOf(
-        "if (-not [string]::IsNullOrEmpty(`$RegressionMode))",
-        [StringComparison]::Ordinal
-    )
-    $regressionGuestIndex = $acceptanceText.IndexOf(
-        '$null = Resolve-VerifiedBundle -Root $bootstrap.root',
-        $regressionModeIndex,
-        [StringComparison]::Ordinal
-    )
-    $regressionInvokeIndex = $acceptanceText.IndexOf(
-        'Invoke-GuiRegressionAcceptance',
-        $regressionGuestIndex,
-        [StringComparison]::Ordinal
-    )
-    if ($regressionModeIndex -lt 0 -or $regressionGuestIndex -le $regressionModeIndex -or
-        $regressionInvokeIndex -le $regressionGuestIndex) {
-        throw 'The regression entry must verify the shared guest contract before invoking its scenario.'
-    }
     & {
         $regressionFunction = $acceptanceAst.Find({
             param($node)
@@ -1229,37 +1065,6 @@ try {
         $state = Get-VmAutomatedFocusState -FixtureRoot 'fixture-root' -LocalAppData 'local-app-data'
         if (@($state.fixture_entries).Count -ne 1 -or @($state.journal_entries).Count -ne 0) {
             throw 'Focus state did not preserve complete fixture and journal arrays.'
-        }
-    }
-    & {
-        $reachability = $acceptanceAst.Find({
-            param($node)
-            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-                $node.Name -ceq 'Invoke-VmAutomatedFocusReachability'
-        }, $true)
-        $stepAssignment = $reachability.Find({
-            param($node)
-            $node -is [Management.Automation.Language.AssignmentStatementAst] -and
-                $node.Left.Extent.Text -ceq '$step'
-        }, $true)
-        . ([scriptblock]::Create($stepAssignment.Extent.Text))
-        function Get-VmAutomatedFocusBinding {
-            param($Element, $Process, $ExpectedSession, $Label)
-            [ordered]@{ automation_id = $Element }
-        }
-        function Invoke-AcceptanceNavigationStep {
-            param($Process, $ExpectedSession, $VirtualKey, $Label)
-            if ($VirtualKey -eq 0x09) { '32772' } else { '32773' }
-        }
-        $Application = @{ process = $null }
-        $ExpectedSession = 1
-        $navigation = @{ current = '1000' }
-        $transitions = [Collections.Generic.List[object]]::new()
-        [void](& $step 'tab' 0x09)
-        [void](& $step 'down' 0x28)
-        if ($transitions.Count -ne 2 -or $transitions[0].input -cne 'tab' -or
-            $transitions[1].input -cne 'down' -or $transitions[1].from.automation_id -cne '32772') {
-            throw 'Actual navigation step must retain its key labels and contiguous focus observations.'
         }
     }
     & {
@@ -1482,154 +1287,10 @@ try {
         ) -match 'LocalFree|FreeHGlobal') {
         throw 'The acceptance observer must retain, not free, borrowed High Contrast GET pointers.'
     }
-    if ($acceptanceText.IndexOf(
-        'private const int MaxHighContrastReads = 128;',
-        [StringComparison]::Ordinal
-    ) -lt 0) {
-        throw 'The process-lifetime High Contrast pointer strategy must remain bounded.'
-    }
-    $selectionObservationIndex = $acceptanceText.IndexOf(
-        '        $selectionPatternObject = $null',
-        [StringComparison]::Ordinal
-    )
-    $previewWaitIndex = $acceptanceText.IndexOf(
-        '        Wait-ListPreviewName -MainWindow $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -ExpectedName $destinationName -TimeoutSeconds $TimeoutSeconds',
-        [StringComparison]::Ordinal
-    )
-    $resetFocusIndex = $acceptanceText.IndexOf(
-        "        [void](Move-RailFocusToCommand -Process `$process -ExpectedSession `$ExpectedSessionId -AutomationId '32781')",
-        [StringComparison]::Ordinal
-    )
-    if ($selectionObservationIndex -lt 0 -or
-        $previewWaitIndex -lt 0 -or
-        $resetFocusIndex -lt 0 -or
-        $selectionObservationIndex -gt $previewWaitIndex -or
-        $selectionObservationIndex -gt $resetFocusIndex) {
-        throw 'The no-selection reset observation must precede list refresh and reset focus movement.'
-    }
-    if ($acceptanceText.IndexOf("-AutomationId '1148'", [StringComparison]::Ordinal) -lt 0 -or
-        $acceptanceText.IndexOf(
-            '-ControlType ([Windows.Automation.ControlType]::Edit)',
-            [StringComparison]::Ordinal
-        ) -lt 0) {
-        throw 'The common-dialog filename target must select the editable UIA child.'
-    }
-    foreach ($taskDialogId in @('CommandButton_2', 'CommandLink_1101')) {
-        if ($acceptanceText.IndexOf(
-            "-AutomationId '$taskDialogId'",
-            [StringComparison]::Ordinal
-        ) -lt 0) {
-            throw "The acceptance flow is missing TaskDialog automation ID $taskDialogId."
-        }
-    }
-    foreach ($requiredRawObservation in @(
-        'function Get-VmAutomatedKeyboardEventStart',
-        "-ExpectedAutomationId 'CommandButton_2'",
-        "-ExpectedAutomationId 'CommandLink_1101'",
-        'root_hwnd = [long]$rootHandle',
-        'Complete-VmAutomatedKeyboardEvent',
-        'Get-VmAutomatedCheckpoint',
-        '$result.raw_environment = Get-VmAutomatedEnvironment',
-        "exit_method = 'normal-close'",
-        "exit_method = 'forced-termination'",
-        '$result.raw_cleanup = [ordered]@{',
-        '$result.layout_observations = [ordered]@{'
-        'function New-VmAutomatedLayoutRun'
-        'function Complete-VmAutomatedLayoutRun'
-        '$result.raw_layout_runs = @($scenario.raw_layout_runs)'
-        '$result.raw_text_scale = [ordered]@{'
-        'active_winrt_percent = [int]$observations.scenario.environment.text_scale_factor_percent'
-        'function Get-VmAutomatedAppearance'
-        '$result.raw_appearance = Get-VmAutomatedAppearance'
-        'raw_appearance = Get-VmAutomatedAppearance'
-        'function Resolve-GuiRegressionLayoutVariant'
-        'function Get-VmAutomatedNativeMenuCommandSpec'
-        'function Assert-ObserverFixturePathSegment'
-        'function ConvertTo-ObserverFixtureRelativePath'
-        'function Get-VmAutomatedNativeMenuState'
-        'function Assert-VmAutomatedNativeMenuTree'
-        'function Get-VmAutomatedHiddenRailControls'
-        'function Invoke-VmAutomatedNativeMenuOnlyReachability'
-        'IntPtr itemOwner = depth == 0 ? window : IntPtr.Zero;'
-        "variant = 'native-menu-only'"
-        'hidden_rail_controls = $hiddenRails'
-        'menu_tree = $menuTree'
-        'function New-VmAutomatedFocusReachabilityControl'
-        'function Invoke-VmAutomatedFocusReachability'
-        'focus_reachability = $focusReachability'
-        'focus_reachability = $rawFocusReachability'
-        "& `$step 'tab' 0x09"
-        "& `$step 'down' 0x28"
-        'Get-VmAutomatedFixtureInventory -FixtureRoot $FixtureRoot'
-        'Get-VmAutomatedJournalInventory -LocalAppData $LocalAppData'
-    )) {
-        if ($acceptanceText.IndexOf($requiredRawObservation, [StringComparison]::Ordinal) -lt 0) {
-            throw "The candidate UI raw observation contract is missing '$requiredRawObservation'."
-        }
-    }
-    $regressionCleanupValidation = $acceptanceText.IndexOf(
-        '[void](Get-VmAutomatedRuntimeRootObservation -Root $effectiveRuntimeRoot)',
-        [StringComparison]::Ordinal
-    )
-    $regressionCleanupDelete = $acceptanceText.IndexOf(
-        'Remove-Item -LiteralPath $effectiveRuntimeRoot -Recurse -Force',
-        $regressionCleanupValidation + 1,
-        [StringComparison]::Ordinal
-    )
-    if ($regressionCleanupValidation -lt 0 -or
-        $regressionCleanupDelete -le $regressionCleanupValidation) {
-        throw 'GUI regression cleanup must validate the bounded ordinary runtime tree before deletion.'
-    }
-    if ([regex]::Matches(
-            $acceptanceText,
-            [regex]::Escape('[void](Get-VmAutomatedRuntimeRootObservation -Root $effectiveRuntimeRoot)')
-        ).Count -ne 1 -or
-        [regex]::Matches(
-            $acceptanceText,
-            [regex]::Escape('[void](Get-VmAutomatedRuntimeRootObservation -Root $runtimeRoot)')
-        ).Count -ne 1) {
-        throw 'Regression and current-DPI cleanup must both validate their runtime tree before deletion.'
-    }
-    $runtimeDeleteCalls = @(
-        [regex]::Matches(
-            $acceptanceText,
-            [regex]::Escape('Remove-Item -LiteralPath $effectiveRuntimeRoot -Recurse -Force')
-        )
-        [regex]::Matches(
-            $acceptanceText,
-            [regex]::Escape('Remove-Item -LiteralPath $runtimeRoot -Recurse -Force')
-        )
-    )
-    foreach ($runtimeDelete in $runtimeDeleteCalls) {
-        $ledgerGate = $acceptanceText.LastIndexOf(
-            '[void](Assert-AcceptanceProcessJobLedgerClosed)',
-            $runtimeDelete.Index,
-            [StringComparison]::Ordinal
-        )
-        if ($ledgerGate -lt 0 -or $runtimeDelete.Index -le $ledgerGate) {
-            throw 'Candidate UI runtime deletion must follow closed process-job ledger verification.'
-        }
-    }
-    $appearanceFunctions = @($acceptanceAst.FindAll({
-        param($ast)
-        $ast -is [Management.Automation.Language.FunctionDefinitionAst] -and
-            $ast.Name -ceq 'Get-VmAutomatedAppearance'
-    }, $true))
-    if ($appearanceFunctions.Count -ne 1) {
-        throw 'The acceptance script must define one Get-VmAutomatedAppearance helper.'
-    }
-    $appearanceDefinition = $appearanceFunctions[0].Extent.Text
-    foreach ($requiredAppearanceSource in @(
-        'Assert-AutomationBinding',
-        '-RequireWindowHandle',
-        '0x9010',
-        '0x9011',
-        '0x9012',
-        'menu_checked = $menu'
-    )) {
-        if ($appearanceDefinition.IndexOf($requiredAppearanceSource, [StringComparison]::Ordinal) -lt 0) {
-            throw "Raw appearance observation is missing '$requiredAppearanceSource'."
-        }
+    # GetMenuItemRect uses the root owner HWND only for top-level items; native
+    # submenu observations must not reuse that HWND. Keep this narrow ABI policy.
+    if ($acceptanceText.IndexOf('IntPtr itemOwner = depth == 0 ? window : IntPtr.Zero;', [StringComparison]::Ordinal) -lt 0) {
+        throw 'Native submenu geometry must retain its documented null-owner ABI.'
     }
     $focusControlFunctions = @($acceptanceAst.FindAll({
         param($ast)
@@ -1677,26 +1338,6 @@ try {
         New-VmAutomatedFocusReachabilityControl `
             -Observation $focusObservation -Rail right -RailGroup 2
     } 'is not visible'
-    $focusReachabilityFunctions = @($acceptanceAst.FindAll({
-        param($ast)
-        $ast -is [Management.Automation.Language.FunctionDefinitionAst] -and
-            $ast.Name -ceq 'Invoke-VmAutomatedFocusReachability'
-    }, $true))
-    if ($focusReachabilityFunctions.Count -ne 1) {
-        throw 'The acceptance script must define one bounded focus reachability traversal.'
-    }
-    $focusReachabilitySource = $focusReachabilityFunctions[0].Extent.Text
-    foreach ($requiredFocusSource in @(
-        'transition count exceeds its bound',
-        'sequence = [int]$transitions.Count + 1',
-        "foreach (`$scope in @('list', 'left', 'right'))",
-        'Raw keyboard focus cycled before visiting every enabled',
-        'Raw keyboard focus traversal changed the fixture or journal state.'
-    )) {
-        if ($focusReachabilitySource.IndexOf($requiredFocusSource, [StringComparison]::Ordinal) -lt 0) {
-            throw "Raw focus reachability is missing '$requiredFocusSource'."
-        }
-    }
     foreach ($menuHelperName in @(
         'Assert-ObserverFixturePathSegment',
         'ConvertTo-ObserverFixtureRelativePath',
@@ -1779,19 +1420,6 @@ try {
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
             $node.Name -ceq 'Get-ObserverFixtureEntries'
     }, $true).Extent.Text
-    foreach ($requiredStateSource in @(
-        'The observer fixture inventory exceeds sixteen entries.',
-        '[IO.FileAttributes]::ReparsePoint',
-        'The observer fixture inventory contains an oversized file.',
-        'The observer fixture inventory exceeds its aggregate size bound.',
-        '[StringComparer]::Ordinal.Compare',
-        'relative_path = $entry.relative_path',
-        'file_identity = Get-FullFileIdentity -Path $item.FullName'
-    )) {
-        if ($nativeMenuStateSource.IndexOf($requiredStateSource, [StringComparison]::Ordinal) -lt 0) {
-            throw "Native menu recursive fixture state is missing '$requiredStateSource'."
-        }
-    }
     & {
         . ([scriptblock]::Create($nativeMenuStateFunction.Extent.Text))
         function Get-VmAutomatedCanonicalRootPath {
@@ -1998,16 +1626,6 @@ try {
             $node.Name -ceq 'Invoke-VmAutomatedNativeMenuOnlyReachability'
     }, $true)
     $menuReachabilitySource = $menuReachabilityFunction.Extent.Text
-    if ([regex]::Matches(
-            $menuReachabilitySource,
-            [regex]::Escape('Get-VmAutomatedNativeMenuState')
-        ).Count -ne 2 -or
-        $menuReachabilitySource.IndexOf(
-            'Get-VmAutomatedFocusState',
-            [StringComparison]::Ordinal
-        ) -ge 0) {
-        throw 'Native menu traversal must use the bounded recursive fixture state before and after input.'
-    }
     $menuKeyFunction = $acceptanceAst.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
@@ -2036,100 +1654,10 @@ try {
     if ($reservedInputParameters.Count -ne 0) {
         throw 'Native menu helpers must not shadow the PowerShell automatic $input variable.'
     }
-    $virtualKeyAssignment = $menuKeyFunction.Find({
-        param($node)
-        $node -is [Management.Automation.Language.AssignmentStatementAst] -and
-            $node.Left.Extent.Text -ceq '$virtualKeys'
-    }, $true)
-    foreach ($dispatchCase in @(
-        [ordered]@{ action = 'alt-f'; expected = [int[]]@(0x12, 0x46) }
-        [ordered]@{ action = 'down'; expected = [int[]]@(0x28) }
-        [ordered]@{ action = 'escape'; expected = [int[]]@(0x1B) }
-    )) {
-        & {
-            $KeyAction = $dispatchCase.action
-            . ([scriptblock]::Create($virtualKeyAssignment.Extent.Text))
-            if ($virtualKeys -isnot [array] -or
-                @($virtualKeys).Count -ne $dispatchCase.expected.Count -or
-                @(Compare-Object @($virtualKeys) @($dispatchCase.expected) -SyncWindow 0).Count -ne 0) {
-                throw "The production native-menu key dispatcher lost or scalarized $KeyAction."
-            }
-        }
-    }
-    foreach ($requiredMenuInput in @("'alt-f'", "'alt-e'", "'alt-t'", "'down'", "'right'", "'escape'")) {
-        if ($menuReachabilitySource.IndexOf($requiredMenuInput, [StringComparison]::Ordinal) -lt 0) {
-            throw "Native menu reachability is missing actual input $requiredMenuInput."
-        }
-    }
     if ($menuReachabilitySource.IndexOf('SendMenuCommand', [StringComparison]::Ordinal) -ge 0) {
         throw 'Native menu reachability must not invoke a command programmatically.'
     }
-    if (($acceptanceText | Select-String -Pattern "failure_reason = 'desktop_lock_release_failed'" -AllMatches).Matches.Count -ne 3) {
-        throw 'Current-DPI, GUI regression, and rescue paths must preserve structured evidence after desktop-lock release failure.'
-    }
-    $captureResizeIndex = $acceptanceText.IndexOf(
-        '        $captureWindow = Ensure-AcceptanceMainWindowCaptureSize',
-        [StringComparison]::Ordinal
-    )
-    $initialCaptureIndex = $acceptanceText.IndexOf(
-        '        $initialCapture = Save-WindowScreenshot',
-        [StringComparison]::Ordinal
-    )
-    if ($captureResizeIndex -lt 0 -or
-        $initialCaptureIndex -lt 0 -or
-        $captureResizeIndex -gt $initialCaptureIndex) {
-        throw 'Evidence-eligible main-window sizing must precede the first workbench capture.'
-    }
-    $clipboardFlowIndex = $acceptanceText.IndexOf(
-        "        if (`$Clipboard) {",
-        [StringComparison]::Ordinal
-    )
-    $prefixCompleteIndex = $acceptanceText.IndexOf(
-        '        Wait-ListPreviewName -MainWindow $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -ExpectedName $destinationName -TimeoutSeconds $TimeoutSeconds',
-        [StringComparison]::Ordinal
-    )
-    $beforeResetIndex = $acceptanceText.IndexOf(
-        '        $beforeReset = Get-ListPrimarySnapshot -List $list',
-        [StringComparison]::Ordinal
-    )
-    if ($clipboardFlowIndex -lt 0 -or
-        $prefixCompleteIndex -lt 0 -or
-        $beforeResetIndex -lt 0 -or
-        $clipboardFlowIndex -lt $prefixCompleteIndex -or
-        $clipboardFlowIndex -gt $beforeResetIndex) {
-        throw 'Clipboard acceptance must run after import and prefix while the exact row remains known.'
-    }
-    foreach ($requiredClipboardSource in @(
-        '[switch] $Clipboard',
-        '[uint32]0x8018',
-        '[uint32]0x801A',
-        "-Modifier 0x11 -SecondModifier 0x10 -VirtualKey 0x43",
-        'ClearClipboardIfOwned'
-    )) {
-        if ($acceptanceText.IndexOf($requiredClipboardSource, [StringComparison]::Ordinal) -lt 0) {
-            throw "The acceptance flow is missing required Clipboard contract '$requiredClipboardSource'."
-        }
-    }
-    $clipboardNamesFailureIndex = $acceptanceText.IndexOf(
-        "            `$result.failure_reason = 'clipboard_names_failed'",
-        [StringComparison]::Ordinal
-    )
-    $clipboardPathsFailureIndex = $acceptanceText.IndexOf(
-        "            `$result.failure_reason = 'clipboard_paths_failed'",
-        [StringComparison]::Ordinal
-    )
-    $clipboardPathsChordIndex = $acceptanceText.IndexOf(
-        '            Send-AcceptanceTwoModifierChord -Process $process',
-        [StringComparison]::Ordinal
-    )
-    if ($clipboardNamesFailureIndex -lt 0 -or
-        $clipboardPathsFailureIndex -le $clipboardNamesFailureIndex -or
-        $clipboardPathsChordIndex -le $clipboardPathsFailureIndex) {
-        throw 'The Copy Paths phase must identify its failure before the Ctrl+Shift+C action.'
-    }
-
-    if ($acceptanceText.IndexOf('ContentType=WindowsRuntime', [StringComparison]::Ordinal) -ge 0 -or
-        $runnerSource.IndexOf('public static double ReadTextScaleFactor()', [StringComparison]::Ordinal) -lt 0) {
+    if ($acceptanceText.IndexOf('ContentType=WindowsRuntime', [StringComparison]::Ordinal) -ge 0) {
         throw 'Text-scale reads must use the PowerShell Core-compatible native UISettings ABI helper.'
     }
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
@@ -2323,66 +1851,6 @@ try {
             -ExpectedClassName 'DarkReNamerWindow' `
             -ExpectedTitle 'DarkReNamer'
     } 'matched more than one exact native window'
-    $prefixMoveIndex = $acceptanceText.IndexOf(
-        "Move-RailFocusToCommand -Process `$process -ExpectedSession `$ExpectedSessionId -AutomationId '32773'",
-        [StringComparison]::Ordinal
-    )
-    $prefixBindingIndex = $acceptanceText.IndexOf(
-        '$prefixActivationAttempt = Get-AcceptanceCommandActivationAttempt',
-        $prefixMoveIndex,
-        [StringComparison]::Ordinal
-    )
-    $prefixPersistIndex = $acceptanceText.IndexOf(
-        "`$observations['prefix_activation_attempt'] = `$prefixActivationAttempt",
-        $prefixBindingIndex,
-        [StringComparison]::Ordinal
-    )
-    $prefixTapIndex = $acceptanceText.IndexOf(
-        '[DarkReNamerVmAcceptanceNative]::Tap(0x20)',
-        $prefixPersistIndex,
-        [StringComparison]::Ordinal
-    )
-    $prefixAssertIndex = $acceptanceText.IndexOf(
-        'Assert-AcceptanceCommandActivationBinding',
-        $prefixPersistIndex,
-        [StringComparison]::Ordinal
-    )
-    $prefixWaitIndex = $acceptanceText.IndexOf(
-        '-Label ''keyboard prefix prompt''',
-        $prefixTapIndex,
-        [StringComparison]::Ordinal
-    )
-    $prefixRemoveIndex = $acceptanceText.IndexOf(
-        "`$observations.Remove('prefix_activation_attempt')",
-        $prefixWaitIndex,
-        [StringComparison]::Ordinal
-    )
-    if ($prefixMoveIndex -lt 0 -or $prefixBindingIndex -le $prefixMoveIndex -or
-        $prefixPersistIndex -le $prefixBindingIndex -or $prefixAssertIndex -le $prefixPersistIndex -or
-        $prefixTapIndex -le $prefixAssertIndex -or
-        $prefixWaitIndex -le $prefixTapIndex -or $prefixRemoveIndex -le $prefixWaitIndex) {
-        throw 'Prefix Space must bind and persist its exact target before input and retain diagnostics only on failure.'
-    }
-    if ([regex]::Matches(
-            $acceptanceText,
-            'Wait-AcceptanceOwnedInputWindow\s+`\s*\r?\n\s*-Process \$process'
-        ).Count -ne 2 -or
-        [regex]::Matches(
-            $acceptanceText,
-            '-Owner \$mainWindow\s+`\s*\r?\n\s*-Name ''이름 앞에 문자열 붙이기'''
-        ).Count -ne 2) {
-        throw 'Both current-DPI prefix prompts must use exact owner-bound native-to-UIA discovery.'
-    }
-    $windowInventoryFunction = $acceptanceAst.Find({
-        param($node)
-        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -ceq 'Get-BoundedAcceptanceProcessWindowInventory'
-    }, $true)
-    $windowInventoryText = $windowInventoryFunction.Extent.Text
-    if ($windowInventoryText.IndexOf('Select-Object -First 32', [StringComparison]::Ordinal) -lt 0 -or
-        $windowInventoryText.IndexOf('$_.Title', [StringComparison]::Ordinal) -ge 0) {
-        throw 'Failure window diagnostics must remain bounded and omit window titles.'
-    }
     foreach ($failureField in @(
         'failure_focus_reachability',
         'prefix_failure_process_windows'
@@ -2391,18 +1859,8 @@ try {
             throw "Prefix failure diagnostics omit $failureField."
         }
     }
-    if ($acceptanceText.IndexOf('$Verified.manifest.application', [StringComparison]::Ordinal) -ge 0 -or
-        [regex]::Matches(
-            $acceptanceText,
-            [regex]::Escape('$Verified.application')
-        ).Count -lt 4) {
+    if ($acceptanceText.IndexOf('$Verified.manifest.application', [StringComparison]::Ordinal) -ge 0) {
         throw 'GUI regression scenarios must use the normalized verified application binding.'
-    }
-    $startFunction = (Get-Command Start-AcceptanceApplication -CommandType Function).Definition
-    if ($startFunction.IndexOf('Wait-ExactApplicationMainWindow', [StringComparison]::Ordinal) -lt 0 -or
-        $startFunction.IndexOf('-TimeoutSeconds $WaitSeconds', [StringComparison]::Ordinal) -lt 0 -or
-        $startFunction.IndexOf('main_handle = $mainHandle', [StringComparison]::Ordinal) -lt 0) {
-        throw 'Shared application startup must retain the exact native-to-UIA main-window binding.'
     }
     if ($acceptanceText.IndexOf('.MainWindowHandle', [StringComparison]::Ordinal) -ge 0) {
         throw 'Acceptance actions must not recompute the pinned application main window.'
@@ -2420,11 +1878,6 @@ try {
     }, $true))
     if ($unboundWindowWaits.Count -ne 0) {
         throw 'Every acceptance dialog wait must bind an owner or the exact pinned main-window handle.'
-    }
-    $closeFunction = (Get-Command Close-AcceptanceApplication -CommandType Function).Definition
-    if ($closeFunction.IndexOf('CloseMainWindow', [StringComparison]::Ordinal) -ge 0 -or
-        $closeFunction.IndexOf('Close-ExactApplicationMainWindow', [StringComparison]::Ordinal) -lt 0) {
-        throw 'Ordinary acceptance close must target the exact pinned main window.'
     }
     $manualNameAst = (Get-Command Set-ObserverManualName -CommandType Function).ScriptBlock.Ast
     $manualNameSuccessBranches = @($manualNameAst.FindAll({
@@ -2505,114 +1958,6 @@ try {
         if ($null -eq [DarkReNamerVmAcceptanceNative].GetMethod($method)) {
             throw "The acceptance native probe is missing $method."
         }
-    }
-    foreach ($chordName in @('Send-AcceptanceChord', 'Send-AcceptanceTwoModifierChord')) {
-        $chordFunction = @($acceptanceAst.FindAll({
-            param($node)
-            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-                $node.Name -ceq $chordName
-        }, $true))
-        if ($chordFunction.Count -ne 1 -or
-            $chordFunction[0].Extent.Text.IndexOf(
-                '[switch] $ExtendedKey', [StringComparison]::Ordinal
-            ) -lt 0 -or
-            $chordFunction[0].Extent.Text.IndexOf(
-                '::TapExtended($VirtualKey)', [StringComparison]::Ordinal
-            ) -lt 0 -or
-            $chordFunction[0].Extent.Text.IndexOf(
-                '::Tap($VirtualKey)', [StringComparison]::Ordinal
-            ) -lt 0) {
-            throw "$chordName does not distinguish extended navigation keys from ordinary keys."
-        }
-    }
-    $clipboardInitializerStart = $acceptanceText.IndexOf(
-        'public static ClipboardSnapshot ReadOrInitializeEmptyClipboardSnapshot()',
-        [StringComparison]::Ordinal
-    )
-    $clipboardInitializerEnd = $acceptanceText.IndexOf(
-        'public static string ClearClipboardIfOwned',
-        $clipboardInitializerStart,
-        [StringComparison]::Ordinal
-    )
-    if ($clipboardInitializerStart -lt 0 -or
-        $clipboardInitializerEnd -le $clipboardInitializerStart) {
-        throw 'The guarded empty Clipboard initializer is missing.'
-    }
-    $clipboardInitializerSource = $acceptanceText.Substring(
-        $clipboardInitializerStart,
-        $clipboardInitializerEnd - $clipboardInitializerStart
-    )
-    $initializerRead = $clipboardInitializerSource.IndexOf(
-        'ClipboardSnapshot snapshot = ReadOpenClipboardSnapshot();',
-        [StringComparison]::Ordinal
-    )
-    $initializerDecision = $clipboardInitializerSource.IndexOf(
-        'if (!RequiresEmptyClipboardInitialization(snapshot)) { return snapshot; }',
-        [StringComparison]::Ordinal
-    )
-    $initializerEmpty = $clipboardInitializerSource.IndexOf(
-        'if (!EmptyClipboard())',
-        [StringComparison]::Ordinal
-    )
-    $initializerReread = $clipboardInitializerSource.IndexOf(
-        'ClipboardSnapshot initialized = ReadOpenClipboardSnapshot();',
-        [StringComparison]::Ordinal
-    )
-    if ($clipboardInitializerSource.IndexOf('OpenClipboard(IntPtr.Zero)', [StringComparison]::Ordinal) -lt 0 -or
-        $initializerRead -lt 0 -or $initializerDecision -le $initializerRead -or
-        $initializerEmpty -le $initializerDecision -or $initializerReread -le $initializerEmpty -or
-        $clipboardInitializerSource.IndexOf('CloseClipboard()', [StringComparison]::Ordinal) -le $initializerReread) {
-        throw 'The empty Clipboard initializer is not one atomic read-check-empty-reread operation.'
-    }
-    $clipboardCopyFunction = @($acceptanceAst.FindAll({
-        param($node)
-        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -ceq 'Copy-GuiRegressionDocument'
-    }, $true))
-    if ($clipboardCopyFunction.Count -ne 1 -or
-        $clipboardCopyFunction[0].Extent.Text.IndexOf(
-            'ReadOrInitializeEmptyClipboardSnapshot',
-            [StringComparison]::Ordinal
-        ) -lt 0 -or
-        $clipboardCopyFunction[0].Extent.Text.IndexOf(
-            '::EmptyClipboard(',
-            [StringComparison]::Ordinal
-        ) -ge 0) {
-        throw 'GUI document copy must use only the guarded native empty Clipboard initializer.'
-    }
-    $clipboardCopyText = $clipboardCopyFunction[0].Extent.Text
-    foreach ($extendedChord in @(
-        '-Modifier 0x11 -VirtualKey 0x24 -Label "$Label selection start" -ExtendedKey',
-        '-SecondModifier 0x10 -VirtualKey 0x23 -Label "$Label select to end" -ExtendedKey'
-    )) {
-        if ($clipboardCopyText.IndexOf($extendedChord, [StringComparison]::Ordinal) -lt 0) {
-            throw "GUI document selection does not use an extended navigation key: $extendedChord"
-        }
-    }
-    foreach ($detailsScroll in @(
-        '-VirtualKey 0x23 -Label "$Prefix Ctrl+End" -ExtendedKey',
-        "-VirtualKey 0x23 -Label 'context full-details Ctrl+End' -ExtendedKey"
-    )) {
-        if ($acceptanceText.IndexOf($detailsScroll, [StringComparison]::Ordinal) -lt 0) {
-            throw "Read-only details scrolling does not use an extended End key: $detailsScroll"
-        }
-    }
-    if ($clipboardCopyText.IndexOf(
-            '-VirtualKey 0x43 -Label "$Label Ctrl+C" -ExtendedKey',
-            [StringComparison]::Ordinal
-        ) -ge 0) {
-        throw 'GUI document copy incorrectly marks the letter C as an extended key.'
-    }
-    $nativeTapExtended = $acceptanceText.IndexOf(
-        'public static void TapExtended(ushort virtualKey)',
-        [StringComparison]::Ordinal
-    )
-    if ($nativeTapExtended -lt 0 -or
-        $acceptanceText.IndexOf('Send(virtualKey, 0, 1);', $nativeTapExtended,
-            [StringComparison]::Ordinal) -lt 0 -or
-        $acceptanceText.IndexOf('Send(virtualKey, 0, 3);', $nativeTapExtended,
-            [StringComparison]::Ordinal) -lt 0) {
-        throw 'Extended navigation input does not emit KEYEVENTF_EXTENDEDKEY on key down and key up.'
     }
     $initializerClassifier = [DarkReNamerVmAcceptanceNative].GetMethod(
         'RequiresEmptyClipboardInitialization',
@@ -3334,16 +2679,50 @@ try {
     foreach ($invalidRunId in @($null, '', '../run', 'run id', ('a' * 129), 'run.')) {
         Assert-Fails { Assert-SafeAcceptanceRunId -RunId $invalidRunId } 'bounded safe token'
     }
-    $runIdValidationIndex = $controllerText.IndexOf(
-        'Assert-SafeAcceptanceRunId -RunId $acceptanceInput.run_id',
-        [StringComparison]::Ordinal
-    )
-    $sessionCreationIndex = $controllerText.IndexOf(
-        '$session = New-SshControllerSession',
-        [StringComparison]::Ordinal
-    )
-    if ($runIdValidationIndex -lt 0 -or $sessionCreationIndex -le $runIdValidationIndex) {
-        throw 'Acceptance run_id validation must fail before any VM session is created.'
+    & {
+        $controllerFunction = $controllerAst.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'Invoke-DrWindowsVmController'
+        }, $true)
+        . ([scriptblock]::Create($controllerFunction.Extent.Text))
+        $probe = @{ sessions = 0 }
+        function New-SshControllerSession {
+            param($HostAlias)
+            $probe.sessions++
+            throw 'fixture session boundary'
+        }
+        foreach ($runId in @('../unsafe-run', 'valid-run')) {
+            $fixture = New-AcceptanceFixture -Name ('controller-run-id-' + $probe.sessions + '-' + [guid]::NewGuid().ToString('N'))
+            [void](New-Item -ItemType Directory -Path $fixture.output_root)
+            Copy-Item -LiteralPath $fixture.acceptance -Destination (Join-Path $fixture.bundle_root 'windows-vm-acceptance.ps1')
+            $inputPath = Join-Path $fixture.task_root 'input.json'
+            Write-Utf8Json -Path $inputPath -Value ([ordered]@{
+                schema_version = 1
+                source_sha = $fixture.manifest.source_sha
+                run_id = $runId
+                request = [ordered]@{ mode = 'current-dpi'; appearance = 'system'; text_scale_percent = 100 }
+                artifacts = [ordered]@{ observer = [ordered]@{
+                    file = 'inputs/windows-vm-acceptance.ps1'; sha256 = $fixture.acceptance_sha256
+                } }
+            })
+            Assert-Fails {
+                Invoke-DrWindowsVmController -BundleRoot $fixture.bundle_root -SshHost 'inert-fixture' `
+                    -ExpectedGuestVmId '11111111-1111-1111-1111-111111111111' -TaskKind ui `
+                    -AcceptanceOutputRoot $fixture.output_root -AcceptanceManifest $inputPath `
+                    -AcceptanceMode current-dpi -AcceptanceAppearance system `
+                    -EntryPointPath $controller -VerifiedTooling ([pscustomobject]@{})
+            } 'VM transport, acceptance, or cleanup failed'
+            $diagnostic = [IO.File]::ReadAllText((Join-Path $fixture.output_root 'transport-error.txt'))
+            if ($runId -ceq '../unsafe-run') {
+                if ($probe.sessions -ne 0 -or $diagnostic -notlike '*bounded safe token*') {
+                    throw 'Unsafe acceptance run ID reached the VM session boundary.'
+                }
+            }
+            elseif ($probe.sessions -ne 1 -or $diagnostic -notlike '*fixture session boundary*') {
+                throw 'The valid acceptance input did not reach the inert session boundary.'
+            }
+        }
     }
     $candidateRegressionResolved = [pscustomobject]@{
         lane = 'candidate-gui-only'

@@ -17,6 +17,164 @@ foreach ($role in $expectedRoles) {
     . $Libraries[$role]
 }
 
+function Get-DrControllerUiOutputInventory {
+    param($root, $trustedRoot)
+    $out = Join-Path $trustedRoot 'out'
+    $rows = @(
+        Get-ChildItem -LiteralPath $out -Force |
+            Where-Object { $_.Name -notin @('acceptance-result.json','platform-postlaunch.json') }
+    )
+    $trustedResult = Join-Path $out 'acceptance-result.json'
+    if (Test-Path -LiteralPath $trustedResult) {
+        $rows += Get-Item -LiteralPath $trustedResult -Force
+    }
+    if ($rows.Count -gt 128) { throw 'Acceptance output file count exceeds its bound.' }
+    $total = [long]0
+    foreach ($row in $rows) {
+        if ($row.PSIsContainer -or
+            ($row.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $row.Length -gt 128MB) {
+            throw 'Acceptance output contains an unsafe file.'
+        }
+        $total += $row.Length
+        if ($total -gt 512MB) {
+            throw 'Acceptance output exceeds its aggregate size bound.'
+        }
+    }
+    # Validate the complete inventory before hashing any of its files.
+    foreach ($row in $rows) {
+        [pscustomobject]@{
+            file = $row.Name; guest_path = $row.FullName; bytes = $row.Length
+            sha256 = (Get-FileHash -LiteralPath $row.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+}
+function Get-DrControllerRecoveryOutputInventory {
+    param($root, $trustedRoot, $recoveryEvidenceRootPath)
+    $out = Join-Path $trustedRoot 'out'
+    $evidenceLeaf = Split-Path -Leaf $recoveryEvidenceRootPath
+    $trustedSummary = Join-Path $out 'recovery-summary.json'
+    $evidenceRoots = @(
+        [pscustomobject]@{ item = Get-Item -LiteralPath $recoveryEvidenceRootPath -Force; prefix = $evidenceLeaf + '/' },
+        [pscustomobject]@{ item = Get-Item -LiteralPath (Join-Path $out 'private') -Force; prefix = 'private/' }
+    )
+    $pending = [Collections.Generic.Stack[IO.DirectoryInfo]]::new()
+    $rows = [Collections.Generic.List[object]]::new()
+    $directoryCount = 0
+    foreach ($rootRecord in $evidenceRoots) {
+        if (($rootRecord.item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Recovery evidence root became a reparse point.'
+        }
+        $pending.Push($rootRecord.item)
+        while ($pending.Count -gt 0) {
+            $directory = $pending.Pop()
+            foreach ($item in @(Get-ChildItem -LiteralPath $directory.FullName -Force)) {
+                if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw 'Recovery output contains a reparse entry.'
+                }
+                if ($item.PSIsContainer) {
+                    $directoryCount++
+                    if ($directoryCount -gt 32) {
+                        throw 'Recovery output directory count exceeds its bound.'
+                    }
+                    $pending.Push($item)
+                }
+                else {
+                    $relative = $item.FullName.Substring($rootRecord.item.FullName.Length + 1).Replace('\', '/')
+                    $file = $rootRecord.prefix + $relative
+                    if ($file -cne ($evidenceLeaf + '/summary.json')) {
+                        $rows.Add([pscustomobject]@{
+                            item = $item
+                            file = $file
+                            guest_path = $item.FullName
+                        })
+                    }
+                    if ($rows.Count -gt 256) {
+                        throw 'Recovery output file count exceeds its bound.'
+                    }
+                }
+            }
+        }
+    }
+    if (Test-Path -LiteralPath $trustedSummary) {
+        $summaryItem = Get-Item -LiteralPath $trustedSummary -Force
+        $rows.Add([pscustomobject]@{
+            item = $summaryItem
+            file = $evidenceLeaf + '/summary.json'
+            guest_path = $trustedSummary
+        })
+    }
+    if ($rows.Count -gt 256) { throw 'Recovery output file count exceeds its bound.' }
+    $total = [long]0
+    foreach ($row in $rows) {
+        if ($row.item.PSIsContainer -or ($row.item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $row.item.Length -gt 128MB) {
+            throw 'Recovery output contains an unsafe file.'
+        }
+        $total += $row.item.Length
+        if ($total -gt 512MB) {
+            throw 'Recovery output exceeds its aggregate size bound.'
+        }
+    }
+    # Validate the complete inventory before hashing any of its files.
+    foreach ($row in $rows) {
+        [pscustomobject]@{
+            file = $row.file
+            guest_path = $row.guest_path
+            bytes = $row.item.Length
+            sha256 = (Get-FileHash -LiteralPath $row.item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+}
+
+function Test-DrControllerCleanupObservation {
+    param([AllowNull()][object] $Observation)
+
+    if ($null -eq $Observation) { return $false }
+    $raw = [pscustomobject]$Observation
+    foreach ($field in @('scheduled_task_present', 'guest_root_present', 'trusted_task_root_present')) {
+        $property = $raw.PSObject.Properties[$field]
+        if ($null -eq $property -or $property.Value -isnot [bool] -or $property.Value) { return $false }
+    }
+    foreach ($field in @('process_jobs_closed', 'runner_process_inventory_complete')) {
+        $property = $raw.PSObject.Properties[$field]
+        if ($null -eq $property -or $property.Value -isnot [bool] -or -not $property.Value) { return $false }
+    }
+    foreach ($field in @(
+        'unexpected_runner_tasks', 'unexpected_runner_tasks_after_intervention',
+        'unexpected_runner_processes_after_intervention', 'unexpected_runner_tasks_after_delete',
+        'unexpected_runner_processes_after_delete', 'removed_runner_tasks',
+        'terminated_runner_processes', 'resource_cleanup_errors', 'owned_processes_after'
+    )) {
+        $property = $raw.PSObject.Properties[$field]
+        if ($null -eq $property -or $null -eq $property.Value -or
+            $property.Value -isnot [array] -or $property.Value.Count -ne 0) { return $false }
+    }
+    $processes = $raw.PSObject.Properties['unexpected_runner_processes']
+    if ($null -eq $processes -or $null -eq $processes.Value -or
+        $processes.Value -isnot [array]) { return $false }
+    if ($processes.Value.Count -eq 0) { return $true }
+    # The existing narrow SmartScreen exception requires an observed natural exit.
+    $screen = $raw.PSObject.Properties['smart_screen_natural_exit']
+    if ($null -eq $screen -or $null -eq $screen.Value) { return $false }
+    $receipt = [pscustomobject]$screen.Value
+    foreach ($field in @('status', 'candidate_identity', 'natural_exit_observed',
+        'final_inventory_complete', 'final_runner_process_delta_identities',
+        'final_runner_task_delta_identities')) {
+        if ($null -eq $receipt.PSObject.Properties[$field]) { return $false }
+    }
+    $processIdentity = $processes.Value[0].PSObject.Properties['identity']
+    $processes.Value.Count -eq 1 -and $null -ne $processIdentity -and
+        $processIdentity.Value -is [string] -and -not [string]::IsNullOrEmpty($processIdentity.Value) -and
+        $receipt.status -ceq 'natural-exit' -and
+        $processIdentity.Value -ceq $receipt.candidate_identity -and
+        $receipt.natural_exit_observed -is [bool] -and $receipt.natural_exit_observed -and
+        $receipt.final_inventory_complete -is [bool] -and $receipt.final_inventory_complete -and
+        $receipt.final_runner_process_delta_identities -is [array] -and
+        $receipt.final_runner_process_delta_identities.Count -eq 0 -and
+        $receipt.final_runner_task_delta_identities -is [array] -and
+        $receipt.final_runner_task_delta_identities.Count -eq 0
+}
+
 function Add-DrControllerLifecycleIdentity {
     param(
         [AllowNull()][object] $Value,
@@ -2279,58 +2437,17 @@ public static class DrVmCommandLineNative {
                 -HostOutputRoot $AcceptanceOutputRoot `
                 -OriginalFailure $pollFailure
         }
-        if ($AcceptanceMode -ceq 'text-scale' -and
-            ($state.result_status -cne 'review_required' -or $state.task_result -ne 0)) {
-            Invoke-AcceptanceTextScaleRescue `
-                -Session $session `
-                -GuestRoot $guestRoot `
-                -DesktopSid $desktop.sid `
-                -DesktopSessionId $desktop.session_id `
-                -TaskName $taskName `
-                -TestTimeoutSeconds $TestTimeoutSeconds `
-                -SuiteTimeoutSeconds $SuiteTimeoutSeconds `
-                -ObserverSha256 $observer.sha256 `
-                -BundleRecords $trustedBundleRecords `
-                -InputManifestSha256 $inputManifestSha256 `
-                -Appearance $AcceptanceAppearance `
-                -HostOutputRoot $AcceptanceOutputRoot
-        }
-        if ($AcceptanceHighContrast -and
-            ($state.result_status -cne 'review_required' -or $state.task_result -ne 0)) {
-            Invoke-AcceptanceHighContrastRescue `
-                -Session $session `
-                -GuestRoot $guestRoot `
-                -DesktopSid $desktop.sid `
-                -DesktopSessionId $desktop.session_id `
-                -TaskName $taskName `
-                -TestTimeoutSeconds $TestTimeoutSeconds `
-                -SuiteTimeoutSeconds $SuiteTimeoutSeconds `
-                -ObserverSha256 $observer.sha256 `
-                -BundleRecords $trustedBundleRecords `
-                -HostOutputRoot $AcceptanceOutputRoot
-        }
-        $inventory = @(Invoke-Command -Session $session -ArgumentList $guestRoot,$trustedTaskRoot -ScriptBlock {
-            param($root,$trustedRoot)
-            $out = Join-Path $trustedRoot 'out'
-            $rows = @(
-                Get-ChildItem -LiteralPath $out -File -Force |
-                    Where-Object { $_.Name -notin @('acceptance-result.json','platform-postlaunch.json') }
-            )
-            $trustedResult = Join-Path $out 'acceptance-result.json'
-            if (Test-Path -LiteralPath $trustedResult -PathType Leaf) {
-                $rows += Get-Item -LiteralPath $trustedResult -Force
+        Invoke-AcceptanceTerminalFailureRescue -State $state `
+            -AcceptanceMode $AcceptanceMode -HighContrast ([bool]$AcceptanceHighContrast) `
+            -RescueParameters @{
+                Session = $session; GuestRoot = $guestRoot; DesktopSid = $desktop.sid
+                DesktopSessionId = $desktop.session_id; TaskName = $taskName
+                TestTimeoutSeconds = $TestTimeoutSeconds; SuiteTimeoutSeconds = $SuiteTimeoutSeconds
+                ObserverSha256 = $observer.sha256; BundleRecords = $trustedBundleRecords
+                InputManifestSha256 = $inputManifestSha256; Appearance = $AcceptanceAppearance
+                HostOutputRoot = $AcceptanceOutputRoot
             }
-            if ($rows.Count -gt 128) { throw 'Acceptance output file count exceeds its bound.' }
-            $total = [long]0
-            foreach ($row in $rows) {
-                if (($row.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $row.Length -gt 128MB) { throw 'Acceptance output contains an unsafe file.' }
-                $total += $row.Length
-                if ($total -gt 512MB) {
-                    throw 'Acceptance output exceeds its aggregate size bound.'
-                }
-                [pscustomobject]@{file=$row.Name;guest_path=$row.FullName;bytes=$row.Length;sha256=(Get-FileHash -LiteralPath $row.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}
-            }
-        })
+        $inventory = @(Invoke-Command -Session $session -ArgumentList $guestRoot,$trustedTaskRoot -ScriptBlock ${function:Get-DrControllerUiOutputInventory})
         foreach ($output in $inventory) {
             Assert-PlainFile $output.file
             $guestOutputPath = [string]$output.guest_path
@@ -2584,79 +2701,7 @@ public static class DrVmCommandLineNative {
             $transport.observer_error = 'The recovery observer did not return a valid terminal result; inspect transport-error.txt.'
             throw $pollFailure
         }
-        $inventory = @(Invoke-Command -Session $session -ArgumentList $guestRoot,$trustedTaskRoot,$recoveryEvidenceRoot -ScriptBlock {
-            param($root,$trustedRoot,$recoveryEvidenceRootPath)
-            $out = Join-Path $trustedRoot 'out'
-            $evidenceLeaf = Split-Path -Leaf $recoveryEvidenceRootPath
-            $trustedSummary = Join-Path $out 'recovery-summary.json'
-            $evidenceRoots = @(
-                [pscustomobject]@{ item = Get-Item -LiteralPath $recoveryEvidenceRootPath -Force; prefix = $evidenceLeaf + '/' },
-                [pscustomobject]@{ item = Get-Item -LiteralPath (Join-Path $out 'private') -Force; prefix = 'private/' }
-            )
-            $pending = [Collections.Generic.Stack[IO.DirectoryInfo]]::new()
-            $rows = [Collections.Generic.List[object]]::new()
-            $directoryCount = 0
-            foreach ($rootRecord in $evidenceRoots) {
-                if (($rootRecord.item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                    throw 'Recovery evidence root became a reparse point.'
-                }
-                $pending.Push($rootRecord.item)
-                while ($pending.Count -gt 0) {
-                    $directory = $pending.Pop()
-                    foreach ($item in @(Get-ChildItem -LiteralPath $directory.FullName -Force)) {
-                        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                            throw 'Recovery output contains a reparse entry.'
-                        }
-                        if ($item.PSIsContainer) {
-                            $directoryCount++
-                            if ($directoryCount -gt 32) {
-                                throw 'Recovery output directory count exceeds its bound.'
-                            }
-                            $pending.Push($item)
-                        }
-                        else {
-                            $relative = $item.FullName.Substring($rootRecord.item.FullName.Length + 1).Replace('\', '/')
-                            $file = $rootRecord.prefix + $relative
-                            if ($file -cne ($evidenceLeaf + '/summary.json')) {
-                                $rows.Add([pscustomobject]@{
-                                    item = $item
-                                    file = $file
-                                    guest_path = $item.FullName
-                                })
-                            }
-                            if ($rows.Count -gt 256) {
-                                throw 'Recovery output file count exceeds its bound.'
-                            }
-                        }
-                    }
-                }
-            }
-            if (Test-Path -LiteralPath $trustedSummary -PathType Leaf) {
-                $summaryItem = Get-Item -LiteralPath $trustedSummary -Force
-                $rows.Add([pscustomobject]@{
-                    item = $summaryItem
-                    file = $evidenceLeaf + '/summary.json'
-                    guest_path = $trustedSummary
-                })
-            }
-            $total = [long]0
-            foreach ($row in $rows) {
-                if (($row.item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                    $row.item.Length -gt 128MB) {
-                    throw 'Recovery output contains an unsafe file.'
-                }
-                $total += $row.item.Length
-                if ($total -gt 512MB) {
-                    throw 'Recovery output exceeds its aggregate size bound.'
-                }
-                [pscustomobject]@{
-                    file = $row.file
-                    guest_path = $row.guest_path
-                    bytes = $row.item.Length
-                    sha256 = (Get-FileHash -LiteralPath $row.item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-                }
-            }
-        })
+        $inventory = @(Invoke-Command -Session $session -ArgumentList $guestRoot,$trustedTaskRoot,$recoveryEvidenceRoot -ScriptBlock ${function:Get-DrControllerRecoveryOutputInventory})
         $summaryRows = @($inventory | Where-Object { $_.file -cmatch '(^|/)summary\.json$' })
         if ($summaryRows.Count -ne 1 -or
             $summaryRows[0].file -cnotmatch '^[^/]+/summary\.json$') {
@@ -3063,15 +3108,15 @@ public static class DrVmCommandLineNative {
                             $runnerProcessBaseline | ForEach-Object identity
                         )
                     }
-                    $cleanupResult = Invoke-Command -Session $session -ArgumentList $guestRoot,$trustedTaskRoot,$taskName,$cleanupAuthorized,$requiredProcessJobsClosed,$cleanupTaskContext -ScriptBlock {
-                        param($root,$trustedRoot,$name,$mayDelete,$jobsClosed,$taskContext)
+                    $cleanupResult = Invoke-Command -Session $session -ArgumentList $guestRoot,$trustedTaskRoot,$taskName,$cleanupAuthorized,$requiredProcessJobsClosed,$cleanupTaskContext,(${function:Test-DrControllerCleanupObservation}.ToString()) -ScriptBlock {
+                        param($root,$trustedRoot,$name,$mayDelete,$jobsClosed,$taskContext,$completionDefinition)
                         $expectedRoot = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') $name
                         $expectedTrustedRoot = Join-Path (Join-Path $env:ProgramData 'DarkReNamerVmRuns') ($name + '-trusted')
                         if ($name -cnotmatch '^DarkReNamerTests-[0-9a-f]{32}$' -or
                             $root -cne $expectedRoot -or $trustedRoot -cne $expectedTrustedRoot) {
                             throw 'Unexpected VM cleanup root.'
                         }
-                        $prefixes = @($root.TrimEnd('\') + '\', $trustedRoot.TrimEnd('\') + '\')
+                        $prefixes = @(($root.TrimEnd('\') + '\'), ($trustedRoot.TrimEnd('\') + '\'))
                         function Test-ProcessExecutableInOwnedRoots {
                             param([AllowNull()][string] $Path,[Parameter(Mandatory)][string[]] $Prefixes)
                             if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
@@ -3413,44 +3458,29 @@ public static class DrVmCommandLineNative {
                         $unexpectedRunnerProcessesAfterDelete = @($processSnapshotAfterDelete.processes |
                             Where-Object { -not $baselineProcesses.Contains([string]$_.identity) } |
                             Sort-Object identity)
-                        [pscustomobject]@{
-                            guest_cleanup = ($jobsClosed -and -not $rootPresent -and
-                                -not $trustedRootPresent -and
-                                -not $taskPresent -and
-                                $processSnapshotBeforeCleanup.complete -and
+                        $rawCleanup = [ordered]@{
+                            scheduled_task_present = $taskPresent
+                            guest_root_present = $rootPresent
+                            trusted_task_root_present = $trustedRootPresent
+                            process_jobs_closed = [bool]$jobsClosed
+                            runner_process_inventory_complete = [bool]($processSnapshotBeforeCleanup.complete -and
                                 $processSnapshotAfterIntervention.complete -and
-                                $processSnapshotAfterDelete.complete -and
-                                $unexpectedRunnerTasksBeforeCleanup.Count -eq 0 -and
-                                ($unexpectedRunnerProcessesBeforeCleanup.Count -eq 0 -or
-                                    $smartScreenInitialDeltaAccepted) -and
-                                $unexpectedRunnerTasksAfterIntervention.Count -eq 0 -and
-                                $unexpectedRunnerProcessesAfterIntervention.Count -eq 0 -and
-                                $unexpectedRunnerTasksAfterDelete.Count -eq 0 -and
-                                $unexpectedRunnerProcessesAfterDelete.Count -eq 0 -and
-                                $removedRunnerTasks.Count -eq 0 -and
-                                $terminatedRunnerProcesses.Count -eq 0 -and
-                                $cleanupResourceErrors.Count -eq 0 -and
-                                $ownedAfter.Count -eq 0)
-                            raw_cleanup = [ordered]@{
-                                scheduled_task_present = $taskPresent
-                                guest_root_present = $rootPresent
-                                trusted_task_root_present = $trustedRootPresent
-                                process_jobs_closed = [bool]$jobsClosed
-                                runner_process_inventory_complete = [bool]($processSnapshotBeforeCleanup.complete -and
-                                    $processSnapshotAfterIntervention.complete -and
-                                    $processSnapshotAfterDelete.complete)
-                                unexpected_runner_tasks = $unexpectedRunnerTasksBeforeCleanup
-                                unexpected_runner_processes = $unexpectedRunnerProcessesBeforeCleanup
-                                unexpected_runner_tasks_after_intervention = $unexpectedRunnerTasksAfterIntervention
-                                unexpected_runner_processes_after_intervention = $unexpectedRunnerProcessesAfterIntervention
-                                unexpected_runner_tasks_after_delete = $unexpectedRunnerTasksAfterDelete
-                                unexpected_runner_processes_after_delete = $unexpectedRunnerProcessesAfterDelete
-                                removed_runner_tasks = @($removedRunnerTasks | Sort-Object)
-                                terminated_runner_processes = @($terminatedRunnerProcesses)
-                                resource_cleanup_errors = @($cleanupResourceErrors)
-                                smart_screen_natural_exit = $smartScreenNaturalExit
-                                owned_processes_after = $ownedAfter
-                            }
+                                $processSnapshotAfterDelete.complete)
+                            unexpected_runner_tasks = $unexpectedRunnerTasksBeforeCleanup
+                            unexpected_runner_processes = $unexpectedRunnerProcessesBeforeCleanup
+                            unexpected_runner_tasks_after_intervention = $unexpectedRunnerTasksAfterIntervention
+                            unexpected_runner_processes_after_intervention = $unexpectedRunnerProcessesAfterIntervention
+                            unexpected_runner_tasks_after_delete = $unexpectedRunnerTasksAfterDelete
+                            unexpected_runner_processes_after_delete = $unexpectedRunnerProcessesAfterDelete
+                            removed_runner_tasks = @($removedRunnerTasks | Sort-Object)
+                            terminated_runner_processes = @($terminatedRunnerProcesses)
+                            resource_cleanup_errors = @($cleanupResourceErrors)
+                            smart_screen_natural_exit = $smartScreenNaturalExit
+                            owned_processes_after = $ownedAfter
+                        }
+                        [pscustomobject]@{
+                            guest_cleanup = & ([scriptblock]::Create($completionDefinition)) -Observation $rawCleanup
+                            raw_cleanup = $rawCleanup
                         }
                     }
                     if ($null -eq $cleanupResult -or $cleanupResult.guest_cleanup -isnot [bool] -or

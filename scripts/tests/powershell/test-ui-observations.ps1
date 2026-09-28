@@ -15,6 +15,34 @@ function Assert-Fails {
     throw "Expected failure: $Expected"
 }
 
+# Run the production enumerator boundary with owned resource probes.
+foreach ($case in @('normal', 'empty', 'multiple', 'wrong-name', 'first-move-error', 'second-move-error')) {
+    $entries = [pscustomobject]@{ mode = $case; moves = 0; disposals = 0 }
+    $entries | Add-Member ScriptMethod MoveNext {
+        $this.moves++
+        if (($this.mode -ceq 'first-move-error' -and $this.moves -eq 1) -or
+            ($this.mode -ceq 'second-move-error' -and $this.moves -eq 2)) { throw 'injected enumeration failure' }
+        if ($this.mode -ceq 'empty') { return $false }
+        $this.moves -eq 1 -or $this.mode -ceq 'multiple'
+    }
+    $entries | Add-Member ScriptProperty Current {
+        if ($this.mode -ceq 'wrong-name') { return '/out/foreign.json' }
+        '/out/acceptance-result.json'
+    }
+    $entries | Add-Member ScriptMethod Dispose { $this.disposals++ }
+    if ($case -ceq 'normal') {
+        if ((Resolve-AcceptanceResultEntry -Entries $entries) -cne '/out/acceptance-result.json') {
+            throw 'The enumerator boundary lost the exact controller-created result path.'
+        }
+    }
+    else {
+        $expected = if ($case -ceq 'empty') { 'result file is missing' } `
+            elseif ($case -like '*error') { 'injected * failure' } else { 'may contain only' }
+        Assert-Fails { Resolve-AcceptanceResultEntry -Entries $entries } $expected
+    }
+    if ($entries.disposals -ne 1) { throw "The $case enumerator was not disposed exactly once." }
+}
+
 $nativeSource = [IO.File]::ReadAllText((Join-Path (Get-ToolingTestPaths).ScriptsRoot 'modules/powershell/ui-native.ps1'))
 function Get-NativeFixtureMember {
     param([string] $Signature)

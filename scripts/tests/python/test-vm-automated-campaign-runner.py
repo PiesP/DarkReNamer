@@ -199,7 +199,7 @@ class CampaignRunnerTests(unittest.TestCase):
         FakeGuiRunner.plan_path = self.output / "plan.json"
         try:
             with patch.object(runner, "launcher", FakeNativeRunner), \
-                    patch.object(runner, "gui", FakeGuiRunner), \
+                    patch.object(runner, "vm_connection", FakeGuiRunner), \
                     patch.object(runner, "staged_tooling_files", return_value=[]), \
                     patch.object(runner, "clean_source_sha", side_effect=source_sha), \
                     patch.object(runner.subprocess, "run", side_effect=command):
@@ -372,7 +372,7 @@ class CampaignRunnerTests(unittest.TestCase):
             return CANDIDATE_SHA if Path(path) == self.source else "1" * 40
 
         with patch.object(runner, "launcher", FakeNativeRunner), \
-                patch.object(runner, "gui", FakeGuiRunner), \
+                patch.object(runner, "vm_connection", FakeGuiRunner), \
                 patch.object(runner, "staged_tooling_files", return_value=[]), \
                 patch.object(runner, "clean_source_sha", side_effect=source_sha), \
                 patch.object(FakeGuiRunner, "load_connection_profile",

@@ -213,7 +213,9 @@ class PredicateTests(unittest.TestCase):
         result, transport = self.core_records()
         verify_core_execution(result, self.bundle, transport, self.target, keyboard=False)
         mutations = ('boolean-pid', 'foreign-pid', 'missing-checkpoint', 'journal-residue',
-                     'host-residue', 'missing-process-job', 'open-process-job', 'foreign-job-pid')
+                     'host-residue', 'guest-root-residue', 'trusted-root-residue',
+                     'owned-process-residue', 'runner-process-residue', 'incomplete-inventory',
+                     'missing-inventory', 'missing-process-job', 'open-process-job', 'foreign-job-pid')
         for mutation in mutations:
             changed_result, changed_transport = deepcopy(result), deepcopy(transport)
             changed_result['passed'] = True
@@ -226,6 +228,18 @@ class PredicateTests(unittest.TestCase):
             elif mutation == 'journal-residue':
                 changed_result['raw_cleanup']['journal_after']['entries'] = [
                     {'name': 'active.drj', 'kind': 'file', 'bytes': 1}]
+            elif mutation == 'guest-root-residue':
+                changed_transport['raw_cleanup']['guest_root_present'] = True
+            elif mutation == 'trusted-root-residue':
+                changed_transport['raw_cleanup']['trusted_task_root_present'] = True
+            elif mutation == 'owned-process-residue':
+                changed_transport['raw_cleanup']['owned_processes_after'] = [{'pid': 99}]
+            elif mutation == 'runner-process-residue':
+                changed_transport['raw_cleanup']['unexpected_runner_processes_after_delete'] = [{'identity': 'foreign'}]
+            elif mutation == 'incomplete-inventory':
+                changed_transport['raw_cleanup']['runner_process_inventory_complete'] = False
+            elif mutation == 'missing-inventory':
+                changed_transport['raw_cleanup'].pop('runner_process_inventory_complete')
             elif mutation == 'missing-process-job':
                 changed_result.pop('process_job_cleanup')
             elif mutation == 'open-process-job':

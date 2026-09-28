@@ -1,4 +1,324 @@
-﻿function Get-VmAutomatedAppearance {
+﻿function Invoke-CurrentDpiPrefixActivation {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][int] $ExpectedSessionId,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][System.Collections.IDictionary] $Observations
+    )
+
+    [void](Move-RailFocusToCommand -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '32773')
+    $prefixActivationAttempt = Get-AcceptanceCommandActivationAttempt `
+        -Process $process `
+        -ExpectedSession $ExpectedSessionId `
+        -ExpectedAutomationId '32773'
+    $observations['prefix_activation_attempt'] = $prefixActivationAttempt
+    Assert-AcceptanceCommandActivationBinding `
+        -Attempt $prefixActivationAttempt `
+        -ExpectedProcessId $process.Id `
+        -ExpectedSession $ExpectedSessionId `
+        -ExpectedMainWindow ([long]$mainWindow.Current.NativeWindowHandle) `
+        -ExpectedAutomationId '32773'
+    [DarkReNamerVmAcceptanceNative]::Tap(0x20)
+    $prefixActivationAttempt.input_sent = $true
+    $prompt = Wait-AcceptanceOwnedInputWindow `
+        -Process $process `
+        -ExpectedSession $ExpectedSessionId `
+        -Owner $mainWindow `
+        -Name '이름 앞에 문자열 붙이기' `
+        -TimeoutSeconds $TimeoutSeconds `
+        -Label 'keyboard prefix prompt'
+    [void]$observations.Remove('prefix_activation_attempt')
+    $prompt
+}
+
+function Wait-CurrentDpiPrefixPreview {
+    param(
+        [Parameter(Mandatory)][object] $List,
+        [Parameter(Mandatory)][System.Collections.IDictionary] $Keyboard,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSessionId,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][string] $DestinationName
+    )
+
+    $selectionPatternObject = $null
+    if ($list.TryGetCurrentPattern(
+        [Windows.Automation.SelectionPattern]::Pattern,
+        [ref]$selectionPatternObject
+    )) {
+        $keyboard.reset_name_selection_pattern_available = $true
+        $selectionPattern = [Windows.Automation.SelectionPattern]$selectionPatternObject
+        $keyboard.reset_name_selection_count_after_prefix =
+            @($selectionPattern.Current.GetSelection()).Count
+        if ($keyboard.reset_name_selection_count_after_prefix -ne 0) {
+            throw 'The no-selection name reset scenario acquired a list selection after prefix.'
+        }
+    }
+    else {
+        throw 'The production file list does not expose SelectionPattern for the no-selection reset observation.'
+    }
+    Wait-ListPreviewName -MainWindow $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -ExpectedName $destinationName -TimeoutSeconds $TimeoutSeconds
+}
+
+function Invoke-CurrentDpiClipboardAcceptance {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][IntPtr] $MainHandle,
+        [Parameter(Mandatory)][int] $ExpectedSessionId,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][string] $DestinationName,
+        [Parameter(Mandatory)][string] $SourcePath,
+        [Parameter(Mandatory)][System.Collections.IDictionary] $Result,
+        [Parameter(Mandatory)][System.Collections.IDictionary] $ClipboardResult,
+        [Parameter(Mandatory)][object] $ClipboardState
+    )
+
+    $result.failure_reason = 'clipboard_preflight_failed'
+    $clipboardPreflight = [DarkReNamerVmAcceptanceNative]::ReadClipboardSnapshot()
+    if (@($clipboardPreflight.Formats).Count -ne 0 -or
+        $null -ne $clipboardPreflight.UnicodeText) {
+        throw 'Clipboard acceptance requires an initially empty Clipboard and will not clear existing data.'
+    }
+    $clipboardResult.preflight_empty = $true
+    $expectedNames = $destinationName + "`r`n"
+    $expectedPaths = $sourcePath + "`r`n"
+
+    $result.failure_reason = 'clipboard_names_failed'
+    Assert-AcceptanceForegroundBinding `
+        -Process $process `
+        -ExpectedSession $ExpectedSessionId `
+        -MainWindowHandle $mainHandle `
+        -RequireMainWindow
+    if (-not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
+        $mainHandle,
+        [uint32]0x8018
+    )) {
+        throw 'The native Copy Names menu command is not enabled for the known row.'
+    }
+    Send-AcceptanceChord `
+        -Process $process `
+        -ExpectedSession $ExpectedSessionId `
+        -Modifier 0x12 `
+        -VirtualKey 0x46 `
+        -Label 'Clipboard native File menu accelerator'
+    [void](Wait-AcceptancePopupMenu `
+        -Process $process `
+        -ExpectedSession $ExpectedSessionId `
+        -Label 'Clipboard native File menu')
+    Send-AcceptanceTap `
+        -Process $process `
+        -ExpectedSession $ExpectedSessionId `
+        -VirtualKey 0x58 `
+        -Label 'Clipboard Export submenu mnemonic'
+    $copyNamesItem = Find-AcceptanceMenuItem `
+        -Process $process `
+        -ExpectedSession $ExpectedSessionId `
+        -Name '변경 후 이름 목록 복사' `
+        -TimeoutSeconds $TimeoutSeconds
+    Assert-AcceptanceForegroundBinding `
+        -Process $process `
+        -ExpectedSession $ExpectedSessionId `
+        -MainWindowHandle $mainHandle
+    $clipboardBeforeNames = [DarkReNamerVmAcceptanceNative]::ReadClipboardSnapshot()
+    if ($clipboardBeforeNames.SequenceNumber -ne $clipboardPreflight.SequenceNumber -or
+        @($clipboardBeforeNames.Formats).Count -ne 0 -or
+        $null -ne $clipboardBeforeNames.UnicodeText) {
+        throw 'Clipboard changed before Copy Names; preserving it without invoking the menu item.'
+    }
+    $invokePatternObject = $null
+    if (-not $copyNamesItem.TryGetCurrentPattern(
+        [Windows.Automation.InvokePattern]::Pattern,
+        [ref]$invokePatternObject
+    )) {
+        throw 'The native Copy Names menu item does not expose InvokePattern.'
+    }
+    ([Windows.Automation.InvokePattern]$invokePatternObject).Invoke()
+    Wait-AcceptancePopupMenuClosed -Process $process -Label 'Clipboard native File menu'
+    $namesSnapshot = Wait-AcceptanceClipboardText `
+        -PreviousSequence $clipboardPreflight.SequenceNumber `
+        -ExpectedText $expectedNames `
+        -TimeoutSeconds $TimeoutSeconds `
+        -Label 'Copy Names menu command'
+    $clipboardState.owned = $true
+    $clipboardState.expected_sequence = $namesSnapshot.SequenceNumber
+    $clipboardState.expected_text = $expectedNames
+    $clipboardResult.names = Get-AcceptanceClipboardTextEvidence -Text $namesSnapshot.UnicodeText
+
+    $result.failure_reason = 'clipboard_paths_failed'
+    $mainWindow.SetFocus()
+    [void][DarkReNamerVmNative]::SetForegroundWindow($mainHandle)
+    $clipboardForegroundDeadline = (Get-Date).AddSeconds(2)
+    while ([DarkReNamerVmNative]::GetForegroundWindow() -ne $mainHandle -and
+        (Get-Date) -lt $clipboardForegroundDeadline) {
+        Start-Sleep -Milliseconds 50
+    }
+    Assert-AcceptanceForegroundBinding `
+        -Process $process `
+        -ExpectedSession $ExpectedSessionId `
+        -MainWindowHandle $mainHandle `
+        -RequireMainWindow
+    if (-not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
+        $mainHandle,
+        [uint32]0x801A
+    )) {
+        throw 'The native Copy Paths menu command is not enabled for the known row.'
+    }
+    $beforePaths = [DarkReNamerVmAcceptanceNative]::ReadClipboardSnapshot()
+    if (-not (Test-AcceptanceClipboardSnapshotOwned `
+        -Snapshot $beforePaths `
+        -ExpectedSequence $clipboardState.expected_sequence `
+        -ExpectedText $clipboardState.expected_text)) {
+        throw 'Clipboard changed before Copy Paths; preserving it without invoking the shortcut.'
+    }
+    Send-AcceptanceTwoModifierChord -Process $process -ExpectedSession $ExpectedSessionId -Modifier 0x11 -SecondModifier 0x10 -VirtualKey 0x43 -Label 'Ctrl+Shift+C Copy Paths shortcut'
+    $pathsSnapshot = Wait-AcceptanceClipboardText `
+        -PreviousSequence $namesSnapshot.SequenceNumber `
+        -ExpectedText $expectedPaths `
+        -TimeoutSeconds $TimeoutSeconds `
+        -Label 'Ctrl+Shift+C Copy Paths shortcut'
+    $clipboardState.expected_sequence = $pathsSnapshot.SequenceNumber
+    $clipboardState.expected_text = $expectedPaths
+    $clipboardState.checks_complete = $true
+    $clipboardResult.paths = Get-AcceptanceClipboardTextEvidence -Text $pathsSnapshot.UnicodeText
+    $clipboardResult.status = 'pending_cleanup'
+    $clipboardResult.reason = $null
+    $clipboardResult.cleanup = 'pending'
+}
+
+function Get-CurrentDpiFileNameField {
+    param(
+        [Parameter(Mandatory)][object] $FileDialog,
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSessionId,
+        [Parameter(Mandatory)][int] $TimeoutSeconds
+    )
+
+    Find-UniqueAutomationElement `
+        -Root $fileDialog `
+        -Process $process `
+        -ExpectedSession $ExpectedSessionId `
+        -AutomationId '1148' `
+        -ControlType ([Windows.Automation.ControlType]::Edit) `
+        -TimeoutSeconds $TimeoutSeconds `
+        -Label 'keyboard filename field'
+}
+
+function Get-CurrentDpiWorkbenchObservation {
+    param(
+        [Parameter(Mandatory)][Windows.Automation.AutomationElement] $MainWindow,
+        [Parameter(Mandatory)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][int] $ExpectedSessionId,
+        [Parameter(Mandatory)][int] $TimeoutSeconds,
+        [Parameter(Mandatory)][bool] $RawCandidate,
+        [Parameter(Mandatory)][object] $Verified,
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][object] $AppearanceSpec,
+        [Parameter(Mandatory)][object] $HighContrastState,
+        [Parameter(Mandatory)][System.Collections.IDictionary] $Result,
+        [Parameter(Mandatory)][System.Collections.IDictionary] $Observations,
+        [Parameter(Mandatory)][System.Collections.IDictionary] $Accessibility,
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $RawControls,
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Captures,
+        [Parameter(Mandatory)][string] $CapturePrefix
+    )
+
+    $captureWindow = Ensure-AcceptanceMainWindowCaptureSize `
+        -MainWindow $mainWindow `
+        -Process $process `
+        -ExpectedSession $ExpectedSessionId
+    if ($rawCandidate) {
+        $result.raw_appearance = Get-VmAutomatedAppearance -Window $mainWindow `
+            -Process $process -ExpectedSession $ExpectedSessionId
+        $result.raw_environment = Get-VmAutomatedEnvironment `
+            -Process $process `
+            -WindowHandle ([IntPtr]$mainWindow.Current.NativeWindowHandle) `
+            -FixtureRoot $fixtureRoot
+        $rawControls.Add((Get-VmAutomatedControlObservation `
+            -Element $mainWindow -Process $process -ExpectedSession $ExpectedSessionId `
+            -Label 'raw main workbench'))
+    }
+
+    $observations.environment = [ordered]@{
+        main_window = Get-ObserverNativeWindowMetrics -Window $mainWindow
+        os_version = [DarkReNamerVmAcceptanceNative]::OsVersion()
+        dpi = $captureWindow.dpi
+        appearance = $appearanceSpec.evidence_name
+        capture_window = $captureWindow
+        high_contrast = ($highContrastState.acceptance.Flags -band 1) -ne 0
+        high_contrast_flags = $highContrastState.acceptance.Flags
+        high_contrast_scheme = $highContrastState.acceptance.Scheme
+        high_contrast_colors = [ordered]@{
+            window = $highContrastState.acceptance.Window
+            window_text = $highContrastState.acceptance.WindowText
+            button_face = $highContrastState.acceptance.ButtonFace
+            button_text = $highContrastState.acceptance.ButtonText
+            highlight = $highContrastState.acceptance.Highlight
+            highlight_text = $highContrastState.acceptance.HighlightText
+            gray_text = $highContrastState.acceptance.GrayText
+            hot_light = $highContrastState.acceptance.HotLight
+        }
+        ui_automation_client = [Windows.Automation.AutomationElement].Assembly.FullName
+        ui_automation_types = [Windows.Automation.AutomationProperty].Assembly.FullName
+        ui_automation_providers = [UIAutomationClientsideProviders.UIAutomationClientSideProviders].Assembly.FullName
+    }
+    $observations.main_window = Get-ElementObservation -Element $mainWindow
+    $observations.rail_buttons = Get-RailAccessibilitySnapshot `
+        -MainWindow $mainWindow `
+        -Process $process `
+        -ExpectedSession $ExpectedSessionId `
+        -TimeoutSeconds $TimeoutSeconds
+    $accessibility.rail_button_count = @($observations.rail_buttons).Count
+    $list = Find-UniqueAutomationElement `
+        -Root $mainWindow `
+        -Process $process `
+        -ExpectedSession $ExpectedSessionId `
+        -AutomationId '1000' `
+        -ControlType ([Windows.Automation.ControlType]::DataGrid) `
+        -TimeoutSeconds $TimeoutSeconds `
+        -Label 'acceptance file list' `
+        -RequireWindowHandle
+    $gridPattern = $null
+    if (-not $list.TryGetCurrentPattern([Windows.Automation.GridPattern]::Pattern, [ref]$gridPattern)) {
+        throw 'The production file list does not expose GridPattern.'
+    }
+    $observations.list = Get-ElementObservation -Element $list
+    if ($rawCandidate) {
+        $rawControls.Add((Get-VmAutomatedControlObservation `
+            -Element $list -Process $process -ExpectedSession $ExpectedSessionId `
+            -Label 'raw file list'))
+        foreach ($railId in @(
+            '32771','32772','32773','32774','32775','32776','32777','32778','32779','32780',
+            '32781','32783','65535','32784','32788','32789','32790','32785','32786'
+        )) {
+            $rawRail = Find-UniqueAutomationElement `
+                -Root $mainWindow -Process $process -ExpectedSession $ExpectedSessionId `
+                -AutomationId $railId -ControlType ([Windows.Automation.ControlType]::Button) `
+                -TimeoutSeconds $TimeoutSeconds -Label "raw command rail button $railId" `
+                -RequireWindowHandle
+            $rawControls.Add((Get-VmAutomatedControlObservation `
+                -Element $rawRail -Process $process -ExpectedSession $ExpectedSessionId `
+                -Label "raw command rail button $railId"))
+        }
+    }
+    $accessibility.status = 'passed'
+    $initialCapture = Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations `
+        -Window $mainWindow `
+        -Process $process `
+        -ExpectedSession $ExpectedSessionId `
+        -Root $verified.output_root `
+        -Leaf ($capturePrefix + '-initial.png') `
+        -Label 'current-DPI initial workbench'
+    $captures.Add((Add-AcceptanceScreenshotContext `
+        -Screenshot $initialCapture `
+        -Appearance $appearanceSpec.evidence_name `
+        -Surface 'main-workbench'))
+    [ordered]@{ list = $list; grid_pattern = $gridPattern; capture_window = $captureWindow }
+}
+
+function Get-VmAutomatedAppearance {
     param(
         [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Window,
         [Parameter(Mandatory)][Diagnostics.Process] $Process,
@@ -471,96 +791,13 @@ try {
                 -Appearance $Appearance
         }
         $result.appearance.observed = $appearanceSpec.evidence_name
-        $captureWindow = Ensure-AcceptanceMainWindowCaptureSize `
-            -MainWindow $mainWindow `
-            -Process $process `
-            -ExpectedSession $ExpectedSessionId
-        if ($rawCandidate) {
-            $result.raw_appearance = Get-VmAutomatedAppearance -Window $mainWindow `
-                -Process $process -ExpectedSession $ExpectedSessionId
-            $result.raw_environment = Get-VmAutomatedEnvironment `
-                -Process $process `
-                -WindowHandle ([IntPtr]$mainWindow.Current.NativeWindowHandle) `
-                -FixtureRoot $fixtureRoot
-            $rawControls.Add((Get-VmAutomatedControlObservation `
-                -Element $mainWindow -Process $process -ExpectedSession $ExpectedSessionId `
-                -Label 'raw main workbench'))
-        }
-
-        $observations.environment = [ordered]@{
-            main_window = Get-ObserverNativeWindowMetrics -Window $mainWindow
-            os_version = [DarkReNamerVmAcceptanceNative]::OsVersion()
-            dpi = $captureWindow.dpi
-            appearance = $appearanceSpec.evidence_name
-            capture_window = $captureWindow
-            high_contrast = ($highContrastState.acceptance.Flags -band 1) -ne 0
-            high_contrast_flags = $highContrastState.acceptance.Flags
-            high_contrast_scheme = $highContrastState.acceptance.Scheme
-            high_contrast_colors = [ordered]@{
-                window = $highContrastState.acceptance.Window
-                window_text = $highContrastState.acceptance.WindowText
-                button_face = $highContrastState.acceptance.ButtonFace
-                button_text = $highContrastState.acceptance.ButtonText
-                highlight = $highContrastState.acceptance.Highlight
-                highlight_text = $highContrastState.acceptance.HighlightText
-                gray_text = $highContrastState.acceptance.GrayText
-                hot_light = $highContrastState.acceptance.HotLight
-            }
-            ui_automation_client = [Windows.Automation.AutomationElement].Assembly.FullName
-            ui_automation_types = [Windows.Automation.AutomationProperty].Assembly.FullName
-            ui_automation_providers = [UIAutomationClientsideProviders.UIAutomationClientSideProviders].Assembly.FullName
-        }
-        $observations.main_window = Get-ElementObservation -Element $mainWindow
-        $observations.rail_buttons = Get-RailAccessibilitySnapshot `
-            -MainWindow $mainWindow `
-            -Process $process `
-            -ExpectedSession $ExpectedSessionId `
-            -TimeoutSeconds $TimeoutSeconds
-        $accessibility.rail_button_count = @($observations.rail_buttons).Count
-        $list = Find-UniqueAutomationElement `
-            -Root $mainWindow `
-            -Process $process `
-            -ExpectedSession $ExpectedSessionId `
-            -AutomationId '1000' `
-            -ControlType ([Windows.Automation.ControlType]::DataGrid) `
-            -TimeoutSeconds $TimeoutSeconds `
-            -Label 'acceptance file list' `
-            -RequireWindowHandle
-        $gridPattern = $null
-        if (-not $list.TryGetCurrentPattern([Windows.Automation.GridPattern]::Pattern, [ref]$gridPattern)) {
-            throw 'The production file list does not expose GridPattern.'
-        }
-        $observations.list = Get-ElementObservation -Element $list
-        if ($rawCandidate) {
-            $rawControls.Add((Get-VmAutomatedControlObservation `
-                -Element $list -Process $process -ExpectedSession $ExpectedSessionId `
-                -Label 'raw file list'))
-            foreach ($railId in @(
-                '32771','32772','32773','32774','32775','32776','32777','32778','32779','32780',
-                '32781','32783','65535','32784','32788','32789','32790','32785','32786'
-            )) {
-                $rawRail = Find-UniqueAutomationElement `
-                    -Root $mainWindow -Process $process -ExpectedSession $ExpectedSessionId `
-                    -AutomationId $railId -ControlType ([Windows.Automation.ControlType]::Button) `
-                    -TimeoutSeconds $TimeoutSeconds -Label "raw command rail button $railId" `
-                    -RequireWindowHandle
-                $rawControls.Add((Get-VmAutomatedControlObservation `
-                    -Element $rawRail -Process $process -ExpectedSession $ExpectedSessionId `
-                    -Label "raw command rail button $railId"))
-            }
-        }
-        $accessibility.status = 'passed'
-        $initialCapture = Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations `
-            -Window $mainWindow `
-            -Process $process `
-            -ExpectedSession $ExpectedSessionId `
-            -Root $verified.output_root `
-            -Leaf ($capturePrefix + '-initial.png') `
-            -Label 'current-DPI initial workbench'
-        $captures.Add((Add-AcceptanceScreenshotContext `
-            -Screenshot $initialCapture `
-            -Appearance $appearanceSpec.evidence_name `
-            -Surface 'main-workbench'))
+        $workbench = Get-CurrentDpiWorkbenchObservation -MainWindow $mainWindow -Process $process `
+            -ExpectedSessionId $ExpectedSessionId -TimeoutSeconds $TimeoutSeconds -RawCandidate $rawCandidate `
+            -Verified $verified -FixtureRoot $fixtureRoot -AppearanceSpec $appearanceSpec `
+            -HighContrastState $highContrastState -Result $result -Observations $observations `
+            -Accessibility $accessibility -RawControls $rawControls -Captures $captures -CapturePrefix $capturePrefix
+        $list = $workbench.list
+        $gridPattern = $workbench.grid_pattern
 
         if ($CaptureNativeMenu) {
             $result.failure_reason = 'native_menu_capture_failed'
@@ -664,14 +901,8 @@ try {
             -Name '이름 붙일 파일 불러오기' `
             -TimeoutSeconds $TimeoutSeconds `
             -Label 'keyboard file dialog'
-        $fileName = Find-UniqueAutomationElement `
-            -Root $fileDialog `
-            -Process $process `
-            -ExpectedSession $ExpectedSessionId `
-            -AutomationId '1148' `
-            -ControlType ([Windows.Automation.ControlType]::Edit) `
-            -TimeoutSeconds $TimeoutSeconds `
-            -Label 'keyboard filename field'
+        $fileName = Get-CurrentDpiFileNameField -FileDialog $fileDialog -Process $process `
+            -ExpectedSessionId $ExpectedSessionId -TimeoutSeconds $TimeoutSeconds
         $nativeOpen = Resolve-AcceptanceNativeOpen `
             -Dialog $fileDialog `
             -Process $process `
@@ -719,28 +950,8 @@ try {
         }
 
         $result.failure_reason = 'prefix_keyboard_failed'
-        [void](Move-RailFocusToCommand -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '32773')
-        $prefixActivationAttempt = Get-AcceptanceCommandActivationAttempt `
-            -Process $process `
-            -ExpectedSession $ExpectedSessionId `
-            -ExpectedAutomationId '32773'
-        $observations['prefix_activation_attempt'] = $prefixActivationAttempt
-        Assert-AcceptanceCommandActivationBinding `
-            -Attempt $prefixActivationAttempt `
-            -ExpectedProcessId $process.Id `
-            -ExpectedSession $ExpectedSessionId `
-            -ExpectedMainWindow ([long]$mainWindow.Current.NativeWindowHandle) `
-            -ExpectedAutomationId '32773'
-        [DarkReNamerVmAcceptanceNative]::Tap(0x20)
-        $prefixActivationAttempt.input_sent = $true
-        $prompt = Wait-AcceptanceOwnedInputWindow `
-            -Process $process `
-            -ExpectedSession $ExpectedSessionId `
-            -Owner $mainWindow `
-            -Name '이름 앞에 문자열 붙이기' `
-            -TimeoutSeconds $TimeoutSeconds `
-            -Label 'keyboard prefix prompt'
-        [void]$observations.Remove('prefix_activation_attempt')
+        $prompt = Invoke-CurrentDpiPrefixActivation -Process $process -MainWindow $mainWindow `
+            -ExpectedSessionId $ExpectedSessionId -TimeoutSeconds $TimeoutSeconds -Observations $observations
         $promptHandle = [IntPtr]$prompt.Current.NativeWindowHandle
         $promptEdit = Find-UniqueAutomationElement -Root $prompt -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '1004' -ControlType ([Windows.Automation.ControlType]::Edit) -TimeoutSeconds $TimeoutSeconds -Label 'prefix prompt edit' -RequireWindowHandle
         $promptOk = Find-UniqueAutomationElement -Root $prompt -Process $process -ExpectedSession $ExpectedSessionId -AutomationId '1' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $TimeoutSeconds -Label 'prefix prompt OK' -RequireWindowHandle
@@ -771,139 +982,19 @@ try {
             -Handle $promptHandle `
             -TimeoutSeconds $TimeoutSeconds `
             -Label 'prefix prompt'
-        $selectionPatternObject = $null
-        if ($list.TryGetCurrentPattern(
-            [Windows.Automation.SelectionPattern]::Pattern,
-            [ref]$selectionPatternObject
-        )) {
-            $keyboard.reset_name_selection_pattern_available = $true
-            $selectionPattern = [Windows.Automation.SelectionPattern]$selectionPatternObject
-            $keyboard.reset_name_selection_count_after_prefix =
-                @($selectionPattern.Current.GetSelection()).Count
-            if ($keyboard.reset_name_selection_count_after_prefix -ne 0) {
-                throw 'The no-selection name reset scenario acquired a list selection after prefix.'
-            }
-        }
-        else {
-            throw 'The production file list does not expose SelectionPattern for the no-selection reset observation.'
-        }
-        Wait-ListPreviewName -MainWindow $mainWindow -Process $process -ExpectedSession $ExpectedSessionId -ExpectedName $destinationName -TimeoutSeconds $TimeoutSeconds
+        Wait-CurrentDpiPrefixPreview -List $list -Keyboard $keyboard -MainWindow $mainWindow `
+            -Process $process -ExpectedSessionId $ExpectedSessionId -TimeoutSeconds $TimeoutSeconds `
+            -DestinationName $destinationName
 
         if ($rawCandidate) {
             $rawCheckpoints.Add((Get-VmAutomatedCheckpoint `
                 -Phase initial -FixtureRoot $fixtureRoot -LocalAppData $env:LOCALAPPDATA))
         }
         if ($Clipboard) {
-            $result.failure_reason = 'clipboard_preflight_failed'
-            $clipboardPreflight = [DarkReNamerVmAcceptanceNative]::ReadClipboardSnapshot()
-            if (@($clipboardPreflight.Formats).Count -ne 0 -or
-                $null -ne $clipboardPreflight.UnicodeText) {
-                throw 'Clipboard acceptance requires an initially empty Clipboard and will not clear existing data.'
-            }
-            $clipboardResult.preflight_empty = $true
-            $expectedNames = $destinationName + "`r`n"
-            $expectedPaths = $sourcePath + "`r`n"
-
-            $result.failure_reason = 'clipboard_names_failed'
-            Assert-AcceptanceForegroundBinding `
-                -Process $process `
-                -ExpectedSession $ExpectedSessionId `
-                -MainWindowHandle $mainHandle `
-                -RequireMainWindow
-            if (-not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
-                $mainHandle,
-                [uint32]0x8018
-            )) {
-                throw 'The native Copy Names menu command is not enabled for the known row.'
-            }
-            Send-AcceptanceChord `
-                -Process $process `
-                -ExpectedSession $ExpectedSessionId `
-                -Modifier 0x12 `
-                -VirtualKey 0x46 `
-                -Label 'Clipboard native File menu accelerator'
-            [void](Wait-AcceptancePopupMenu `
-                -Process $process `
-                -ExpectedSession $ExpectedSessionId `
-                -Label 'Clipboard native File menu')
-            Send-AcceptanceTap `
-                -Process $process `
-                -ExpectedSession $ExpectedSessionId `
-                -VirtualKey 0x58 `
-                -Label 'Clipboard Export submenu mnemonic'
-            $copyNamesItem = Find-AcceptanceMenuItem `
-                -Process $process `
-                -ExpectedSession $ExpectedSessionId `
-                -Name '변경 후 이름 목록 복사' `
-                -TimeoutSeconds $TimeoutSeconds
-            Assert-AcceptanceForegroundBinding `
-                -Process $process `
-                -ExpectedSession $ExpectedSessionId `
-                -MainWindowHandle $mainHandle
-            $clipboardBeforeNames = [DarkReNamerVmAcceptanceNative]::ReadClipboardSnapshot()
-            if ($clipboardBeforeNames.SequenceNumber -ne $clipboardPreflight.SequenceNumber -or
-                @($clipboardBeforeNames.Formats).Count -ne 0 -or
-                $null -ne $clipboardBeforeNames.UnicodeText) {
-                throw 'Clipboard changed before Copy Names; preserving it without invoking the menu item.'
-            }
-            $invokePatternObject = $null
-            if (-not $copyNamesItem.TryGetCurrentPattern(
-                [Windows.Automation.InvokePattern]::Pattern,
-                [ref]$invokePatternObject
-            )) {
-                throw 'The native Copy Names menu item does not expose InvokePattern.'
-            }
-            ([Windows.Automation.InvokePattern]$invokePatternObject).Invoke()
-            Wait-AcceptancePopupMenuClosed -Process $process -Label 'Clipboard native File menu'
-            $namesSnapshot = Wait-AcceptanceClipboardText `
-                -PreviousSequence $clipboardPreflight.SequenceNumber `
-                -ExpectedText $expectedNames `
-                -TimeoutSeconds $TimeoutSeconds `
-                -Label 'Copy Names menu command'
-            $clipboardState.owned = $true
-            $clipboardState.expected_sequence = $namesSnapshot.SequenceNumber
-            $clipboardState.expected_text = $expectedNames
-            $clipboardResult.names = Get-AcceptanceClipboardTextEvidence -Text $namesSnapshot.UnicodeText
-
-            $result.failure_reason = 'clipboard_paths_failed'
-            $mainWindow.SetFocus()
-            [void][DarkReNamerVmNative]::SetForegroundWindow($mainHandle)
-            $clipboardForegroundDeadline = (Get-Date).AddSeconds(2)
-            while ([DarkReNamerVmNative]::GetForegroundWindow() -ne $mainHandle -and
-                (Get-Date) -lt $clipboardForegroundDeadline) {
-                Start-Sleep -Milliseconds 50
-            }
-            Assert-AcceptanceForegroundBinding `
-                -Process $process `
-                -ExpectedSession $ExpectedSessionId `
-                -MainWindowHandle $mainHandle `
-                -RequireMainWindow
-            if (-not [DarkReNamerVmAcceptanceNative]::IsMenuCommandEnabled(
-                $mainHandle,
-                [uint32]0x801A
-            )) {
-                throw 'The native Copy Paths menu command is not enabled for the known row.'
-            }
-            $beforePaths = [DarkReNamerVmAcceptanceNative]::ReadClipboardSnapshot()
-            if (-not (Test-AcceptanceClipboardSnapshotOwned `
-                -Snapshot $beforePaths `
-                -ExpectedSequence $clipboardState.expected_sequence `
-                -ExpectedText $clipboardState.expected_text)) {
-                throw 'Clipboard changed before Copy Paths; preserving it without invoking the shortcut.'
-            }
-            Send-AcceptanceTwoModifierChord -Process $process -ExpectedSession $ExpectedSessionId -Modifier 0x11 -SecondModifier 0x10 -VirtualKey 0x43 -Label 'Ctrl+Shift+C Copy Paths shortcut'
-            $pathsSnapshot = Wait-AcceptanceClipboardText `
-                -PreviousSequence $namesSnapshot.SequenceNumber `
-                -ExpectedText $expectedPaths `
-                -TimeoutSeconds $TimeoutSeconds `
-                -Label 'Ctrl+Shift+C Copy Paths shortcut'
-            $clipboardState.expected_sequence = $pathsSnapshot.SequenceNumber
-            $clipboardState.expected_text = $expectedPaths
-            $clipboardState.checks_complete = $true
-            $clipboardResult.paths = Get-AcceptanceClipboardTextEvidence -Text $pathsSnapshot.UnicodeText
-            $clipboardResult.status = 'pending_cleanup'
-            $clipboardResult.reason = $null
-            $clipboardResult.cleanup = 'pending'
+            Invoke-CurrentDpiClipboardAcceptance -Process $process -MainWindow $mainWindow `
+                -MainHandle $mainHandle -ExpectedSessionId $ExpectedSessionId -TimeoutSeconds $TimeoutSeconds `
+                -DestinationName $destinationName -SourcePath $sourcePath -Result $result `
+                -ClipboardResult $clipboardResult -ClipboardState $clipboardState
         }
         $beforeReset = Get-ListPrimarySnapshot -List $list
         $reset = Find-UniqueAutomationElement `
@@ -1296,7 +1387,9 @@ finally {
     }
     catch {
         $result.status = 'failed'
-        $result.failure_reason = 'desktop_lock_release_failed'
+        if ([string]::IsNullOrEmpty($result.failure_reason)) {
+            $result.failure_reason = 'desktop_lock_release_failed'
+        }
         $_ | Out-String | Add-Content -LiteralPath $diagnosticPath -Encoding UTF8
     }
     $rawJournalAfter = $null

@@ -778,7 +778,10 @@ function Invoke-GuiRegressionAcceptance {
         try { Exit-DesktopTestLock -Lock $desktopLock }
         catch {
             $result.status = 'failed'
-            $result.failure_reason = 'desktop_lock_release_failed'
+            if ([string]::IsNullOrEmpty($result.failure_reason)) {
+                $result.failure_reason = 'desktop_lock_release_failed'
+            }
+            $_ | Out-String | Add-Content -LiteralPath $diagnosticPath -Encoding UTF8
         }
         $result.process_cleanup = $runtimeCleaned
         $result.guest_cleanup = $runtimeCleaned

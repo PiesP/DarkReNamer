@@ -1,4 +1,20 @@
-﻿function Resolve-AcceptanceBootstrap {
+﻿function Resolve-AcceptanceResultEntry {
+    param([Parameter(Mandatory)][object] $Entries)
+
+    try {
+        if (-not $Entries.MoveNext()) {
+            throw 'The controller-created acceptance result file is missing.'
+        }
+        $resultPath = [string]$Entries.Current
+        if ([IO.Path]::GetFileName($resultPath) -cne 'acceptance-result.json' -or
+            $Entries.MoveNext()) {
+            throw 'An existing acceptance output directory may contain only its controller-created result file.'
+        }
+        $resultPath
+    }
+    finally { $Entries.Dispose() }
+}
+function Resolve-AcceptanceBootstrap {
     param(
         [Parameter(Mandatory)][string] $Root,
         [Parameter(Mandatory)][string] $ScriptPath,
@@ -167,17 +183,7 @@ function Resolve-AcceptanceBundle {
             throw 'The precreated acceptance output must be an ordinary directory.'
         }
         $entries = [IO.Directory]::EnumerateFileSystemEntries($outputRoot).GetEnumerator()
-        try {
-            if (-not $entries.MoveNext()) {
-                throw 'The controller-created acceptance result file is missing.'
-            }
-            $resultPath = [string]$entries.Current
-            if ([IO.Path]::GetFileName($resultPath) -cne 'acceptance-result.json' -or
-                $entries.MoveNext()) {
-                throw 'An existing acceptance output directory may contain only its controller-created result file.'
-            }
-        }
-        finally { $entries.Dispose() }
+        $resultPath = Resolve-AcceptanceResultEntry -Entries $entries
         $resultItem = Get-Item -LiteralPath $resultPath -Force
         if ($resultItem.PSIsContainer -or
             ($resultItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {

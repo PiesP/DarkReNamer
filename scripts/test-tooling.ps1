@@ -6,6 +6,10 @@ param(
     [string[]] $Category = @(),
     [ValidateSet('PowerShell', 'Python')]
     [string[]] $Runner = @(),
+    [ValidateSet('Current', 'Diagnostics', 'Historical', 'All')]
+    [string] $Scope = 'Current',
+    [ValidateNotNullOrEmpty()]
+    [string] $ResultPath,
     [switch] $List
 )
 
@@ -76,7 +80,7 @@ function Read-ToolingRegistry {
 
     Assert-Properties -Value $registry -Names @('version', 'discovery', 'tests') -Label 'Tooling registry'
     if (($registry.version -isnot [int] -and $registry.version -isnot [long]) -or
-        $registry.version -ne 1) {
+        $registry.version -ne 2) {
         throw "Unsupported tooling registry version: $($registry.version)"
     }
     Assert-Properties `
@@ -132,11 +136,12 @@ function Read-ToolingRegistry {
     foreach ($entry in @($registry.tests)) {
         Assert-Properties `
             -Value $entry `
-            -Names @('id', 'path', 'runner', 'platforms', 'category', 'requiresVm', 'timeout') `
+            -Names @('id', 'path', 'runner', 'platforms', 'scope', 'category', 'requiresVm', 'timeout') `
             -Label 'Tooling test entry'
         if ($entry.id -isnot [string] -or $entry.path -isnot [string] -or
-            $entry.runner -isnot [string] -or $entry.category -isnot [string]) {
-            throw 'Tooling test id, path, runner, and category must be strings.'
+            $entry.runner -isnot [string] -or $entry.category -isnot [string] -or
+            $entry.scope -isnot [string]) {
+            throw 'Tooling test id, path, runner, category, and scope must be strings.'
         }
         $entryId = [string] $entry.id
         if ($entryId -cnotmatch '^[a-z0-9]+(?:-[a-z0-9]+)*$' -or -not $ids.Add($entryId)) {
@@ -181,6 +186,10 @@ function Read-ToolingRegistry {
             @($platforms | Sort-Object -Unique).Count -ne $platforms.Count) {
             throw "Tooling platforms are empty, invalid, or duplicated for $entryId."
         }
+        $entryScope = [string] $entry.scope
+        if ($entryScope -cnotin @('current', 'diagnostics', 'historical')) {
+            throw "Unsupported tooling scope for ${entryId}: $entryScope"
+        }
         $entryCategory = [string] $entry.category
         if ($entryCategory -cnotmatch '^[a-z0-9]+(?:-[a-z0-9]+)*$') {
             throw "Tooling category is invalid for ${entryId}: $entryCategory"
@@ -202,6 +211,7 @@ function Read-ToolingRegistry {
             fullPath = $fullPath
             runner = $entryRunner
             platforms = $platforms
+            scope = $entryScope
             category = $entryCategory
             requiresVm = [bool] $entry.requiresVm
             timeout = [int] $timeout
@@ -231,44 +241,56 @@ function Read-ToolingRegistry {
 function Invoke-ToolingTest {
     param([Parameter(Mandatory)][object] $Test)
 
-    if ($Test.requiresVm) {
-        throw "Tooling suite refuses VM-backed test $($Test.id); run it through its explicit VM entrypoint."
-    }
-    $command = if ($Test.runner -ceq 'PowerShell') {
-        Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1
-    }
-    else {
-        Get-Command python3 -CommandType Application -ErrorAction Stop | Select-Object -First 1
-    }
-    $startInfo = [Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = $command.Source
-    $startInfo.WorkingDirectory = $repositoryRoot
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-    if ($Test.runner -ceq 'PowerShell') {
-        foreach ($argument in @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $Test.fullPath)) {
-            $startInfo.ArgumentList.Add($argument)
-        }
-    }
-    else {
-        $pythonPaths = @(
-            (Join-Path $repositoryRoot 'scripts')
-            (Join-Path $repositoryRoot 'scripts/tests/support')
-        )
-        if ($startInfo.Environment.ContainsKey('PYTHONPATH') -and
-            -not [string]::IsNullOrEmpty($startInfo.Environment['PYTHONPATH'])) {
-            $pythonPaths += $startInfo.Environment['PYTHONPATH']
-        }
-        $startInfo.Environment['PYTHONPATH'] = [string]::Join([IO.Path]::PathSeparator, $pythonPaths)
-        $startInfo.ArgumentList.Add($Test.fullPath)
-    }
-
-    $process = [Diagnostics.Process]::new()
-    $process.StartInfo = $startInfo
     $timer = [Diagnostics.Stopwatch]::StartNew()
+    $process = $null
+    $result = [pscustomobject]@{
+        id = $Test.id
+        path = $Test.path
+        runner = $Test.runner
+        scope = $Test.scope
+        status = 'failed'
+        elapsedSeconds = 0.0
+        exitCode = $null
+        error = $null
+    }
     try {
+        if ($Test.requiresVm) {
+            throw "Tooling suite refuses VM-backed test $($Test.id); run it through its explicit VM entrypoint."
+        }
+        $command = if ($Test.runner -ceq 'PowerShell') {
+            Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1
+        }
+        else {
+            $pythonCommand = if ($Platform -eq 'Windows') { 'python' } else { 'python3' }
+            Get-Command $pythonCommand -CommandType Application -ErrorAction Stop | Select-Object -First 1
+        }
+        $startInfo = [Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $command.Source
+        $startInfo.WorkingDirectory = $repositoryRoot
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        if ($Test.runner -ceq 'PowerShell') {
+            foreach ($argument in @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $Test.fullPath)) {
+                $startInfo.ArgumentList.Add($argument)
+            }
+        }
+        else {
+            $pythonPaths = @(
+                (Join-Path $repositoryRoot 'scripts')
+                (Join-Path $repositoryRoot 'scripts/tests/support')
+            )
+            if ($startInfo.Environment.ContainsKey('PYTHONPATH') -and
+                -not [string]::IsNullOrEmpty($startInfo.Environment['PYTHONPATH'])) {
+                $pythonPaths += $startInfo.Environment['PYTHONPATH']
+            }
+            $startInfo.Environment['PYTHONPATH'] = [string]::Join([IO.Path]::PathSeparator, $pythonPaths)
+            $startInfo.ArgumentList.Add($Test.fullPath)
+        }
+
+        $process = [Diagnostics.Process]::new()
+        $process.StartInfo = $startInfo
         if (-not $process.Start()) {
             throw "Failed to start tooling test $($Test.id)."
         }
@@ -276,6 +298,7 @@ function Invoke-ToolingTest {
         $stderr = $process.StandardError.ReadToEndAsync()
         $timedOut = -not $process.WaitForExit($Test.timeout * 1000)
         if ($timedOut) {
+            $result.status = 'timed-out'
             try {
                 $process.Kill($true)
             }
@@ -297,6 +320,7 @@ function Invoke-ToolingTest {
                 $process.Kill($true)
                 $process.WaitForExit()
             }
+            $result.status = 'timed-out'
             throw "Tooling test $($Test.id) did not close its output streams within its timeout."
         }
         $output = $stdout.GetAwaiter().GetResult()
@@ -307,22 +331,34 @@ function Invoke-ToolingTest {
         if ($errorOutput.Length -ne 0) {
             [Console]::Error.Write($errorOutput)
         }
+        $result.exitCode = $process.ExitCode
         if ($timedOut) {
             throw "Tooling test $($Test.id) timed out after $($Test.timeout) seconds."
         }
         if ($process.ExitCode -ne 0) {
             throw "Tooling test $($Test.id) failed with exit code $($process.ExitCode)."
         }
+        $result.status = 'passed'
+    }
+    catch {
+        $result.error = $_.Exception.Message
     }
     finally {
         $timer.Stop()
-        $process.Dispose()
+        $result.elapsedSeconds = [Math]::Round($timer.Elapsed.TotalSeconds, 3)
+        if ($null -ne $process) {
+            $process.Dispose()
+        }
     }
+    $result
 }
 
 $tests = @(Read-ToolingRegistry)
+$includeAllScopes = $Scope -eq 'All' -or
+    ($Id.Count -ne 0 -and -not $PSBoundParameters.ContainsKey('Scope'))
 $selected = @($tests | Where-Object {
     $_.platforms -contains $Platform -and
+    ($includeAllScopes -or $_.scope -eq $Scope) -and
     ($Id.Count -eq 0 -or $Id -contains $_.id) -and
     ($Category.Count -eq 0 -or $Category -contains $_.category) -and
     ($Runner.Count -eq 0 -or $Runner -contains $_.runner)
@@ -346,13 +382,71 @@ if ($selected.Count -eq 0) {
 }
 
 if ($List) {
-    $selected | Select-Object id, path, runner, platforms, category, requiresVm, timeout | Format-Table -AutoSize
+    $selected | Select-Object id, scope, runner, path, platforms, category, requiresVm, timeout | Format-Table -AutoSize
     return
 }
 
-foreach ($test in $selected) {
-    Write-Host "Running $($test.id) ($($test.runner), $Platform, timeout $($test.timeout)s)"
-    Invoke-ToolingTest -Test $test
+$resultStream = $null
+if ($PSBoundParameters.ContainsKey('ResultPath')) {
+    $fullResultPath = [IO.Path]::GetFullPath($ResultPath, (Get-Location).ProviderPath)
+    if (Test-Path -LiteralPath $fullResultPath) {
+        throw "Tooling result path must name a new file: $ResultPath"
+    }
+    # Reserve the new artifact before running tests; invalid paths fail before execution.
+    $resultStream = [IO.File]::Open(
+        $fullResultPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None
+    )
+}
+$results = [Collections.Generic.List[object]]::new()
+$testFailure = $null
+$suiteCompleted = $false
+try {
+    foreach ($test in $selected) {
+        Write-Host "Running $($test.id) ($($test.runner), $Platform, timeout $($test.timeout)s)"
+        $result = Invoke-ToolingTest -Test $test
+        $results.Add($result)
+        Write-Host "$($result.id): $($result.status) ($($result.elapsedSeconds)s)"
+        if ($result.status -ne 'passed') {
+            throw $result.error
+        }
+    }
+    $suiteCompleted = $true
+}
+catch {
+    $testFailure = $_
+    throw
+}
+finally {
+    if ($null -ne $resultStream) {
+        try {
+            $report = [ordered]@{
+                version = 1
+                platform = $Platform
+                status = if ($suiteCompleted) { 'passed' } else { 'failed' }
+                results = @($results.ToArray())
+            }
+            $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($report | ConvertTo-Json -Depth 10) + "`n")
+            $resultStream.Write($bytes, 0, $bytes.Length)
+            $resultStream.Flush()
+        }
+        catch {
+            if ($null -eq $testFailure) {
+                throw
+            }
+            Write-Warning "Could not write tooling results: $($_.Exception.Message)"
+        }
+        finally {
+            try {
+                $resultStream.Dispose()
+            }
+            catch {
+                if ($null -eq $testFailure) {
+                    throw
+                }
+                Write-Warning "Could not close tooling results: $($_.Exception.Message)"
+            }
+        }
+    }
 }
 
 Write-Host "Tooling tests passed for $Platform ($($selected.Count) tests)."
