@@ -399,6 +399,75 @@ pub(super) struct PromptState {
     pub(super) dpi: u32,
 }
 
+type PromptStateSlot = CallbackState<PromptState>;
+
+/// The modal caller owns the slot; callbacks only borrow its published pointer.
+/// Drop destroys the window before releasing its state and GDI resources.
+struct PromptWindow {
+    window: HWND,
+    slot: *mut PromptStateSlot,
+}
+
+impl PromptWindow {
+    fn lease(&self) -> io::Result<CallbackStateLease<PromptState>> {
+        // SAFETY: this modal owner retains the UI-thread allocation until Drop;
+        // every state reference is bounded by the exclusive returned lease.
+        unsafe { CallbackState::try_lease(self.slot) }
+            .ok_or_else(|| io::Error::other("prompt callback state is busy"))
+    }
+
+    fn close(&self) {
+        close_prompt(self.window, self.slot);
+    }
+
+    fn finished(&self) -> io::Result<bool> {
+        let done = self.lease()?.state().done;
+        Ok(done || prompt_state_slot(self.window) != self.slot)
+    }
+}
+
+impl Drop for PromptWindow {
+    fn drop(&mut self) {
+        self.close();
+        // SAFETY: publication is cleared by window destruction. This is the
+        // unique owner, and any remaining lease defers allocation reclamation.
+        unsafe { CallbackState::request_reclaim(self.slot) };
+    }
+}
+
+fn prompt_state_slot(window: HWND) -> *mut PromptStateSlot {
+    // SAFETY: this value query reads the current publication without borrowing
+    // the slot or its possibly leased PromptState.
+    unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) as *mut PromptStateSlot }
+}
+
+fn close_prompt(window: HWND, slot: *mut PromptStateSlot) {
+    if prompt_state_slot(window) == slot {
+        // SAFETY: this exact publication identifies our live prompt. No state
+        // reference is held, and the modal owner retains the slot until return.
+        unsafe { DestroyWindow(window) };
+    }
+}
+
+fn redraw_prompt(window: HWND, slot: *mut PromptStateSlot) {
+    if prompt_state_slot(window) == slot {
+        // SAFETY: the exact prompt is still published and its callback lease
+        // has ended. Synchronous color/erase callbacks can use the new palette.
+        unsafe {
+            RedrawWindow(
+                window,
+                null(),
+                null_mut(),
+                RDW_INVALIDATE
+                    | RDW_ERASE
+                    | RDW_ALLCHILDREN
+                    | windows_sys::Win32::Graphics::Gdi::RDW_ERASENOW
+                    | windows_sys::Win32::Graphics::Gdi::RDW_UPDATENOW,
+            )
+        };
+    }
+}
+
 const fn prompt_extended_style(read_only: bool) -> u32 {
     if read_only { 0 } else { WS_EX_TOOLWINDOW }
 }
@@ -474,6 +543,68 @@ fn prompt_input_variant(
     spec: PromptSpec,
     read_only: bool,
 ) -> io::Result<Option<PromptResult>> {
+    // Declare restoration first so prompt teardown precedes it on every path.
+    let _owner_guard;
+    let prompt = create_prompt_window(owner, appearance, spec, read_only)?;
+    let dialog = prompt.window;
+    _owner_guard = OwnerEnableGuard::new(owner);
+    // SAFETY: dialog is our live prompt; no PromptState reference survives
+    // showing, repainting, or any modal message dispatch below.
+    unsafe {
+        ShowWindow(dialog, SW_SHOW);
+        UpdateWindow(dialog);
+    }
+    if !run_prompt_message_loop(&prompt)? {
+        return Ok(None);
+    }
+    let mut lease = prompt.lease()?;
+    let state = lease.state_mut();
+    if let Some(error) = state.creation_error.take() {
+        return Err(error);
+    }
+    Ok(state.result.take())
+}
+
+fn run_prompt_message_loop(prompt: &PromptWindow) -> io::Result<bool> {
+    let dialog = prompt.window;
+    let mut message = MSG::default();
+    while !prompt.finished()? {
+        #[cfg(test)]
+        tests::inject_prompt_quit_for_test();
+        // SAFETY: message is writable storage and no state lease is held.
+        let status = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
+        #[cfg(test)]
+        tests::record_prompt_quit_for_test(status, &message);
+        if status == -1 {
+            let error = io::Error::last_os_error();
+            prompt.close();
+            return Err(error);
+        }
+        if status == 0 {
+            prompt.close();
+            // SAFETY: repost the original quit code after the prompt is closed.
+            unsafe { PostQuitMessage(message.wParam as i32) };
+            return Ok(false);
+        }
+        // SAFETY: message is initialized and dialog is the modal target. No
+        // state reference is retained across this synchronous dialog dispatch.
+        if unsafe { IsDialogMessageW(dialog, &message) } == 0 {
+            // SAFETY: message remains live through translation and dispatch.
+            unsafe {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn create_prompt_window(
+    owner: HWND,
+    appearance: PromptAppearance,
+    spec: PromptSpec,
+    read_only: bool,
+) -> io::Result<PromptWindow> {
     // SAFETY: A null module name requests the current process module and dereferences no caller memory.
     let instance = unsafe { GetModuleHandleW(null()) };
     let class_name = wide("DarkReNamerInputWindow");
@@ -498,7 +629,7 @@ fn prompt_input_variant(
     // SAFETY: owner is the live top-level window for this modal prompt.
     let owner_dpi = unsafe { GetDpiForWindow(owner) };
     let dpi = if owner_dpi == 0 { BASE_DPI } else { owner_dpi };
-    let mut state = Box::new(PromptState {
+    let slot = CallbackState::into_raw(PromptState {
         spec,
         read_only,
         result: None,
@@ -519,9 +650,12 @@ fn prompt_input_variant(
         creation_error: None,
         dpi,
     });
-    let state_ptr: *mut PromptState = &mut *state;
-    // SAFETY: owner/instance are live and class_name/title plus stack PromptState
-    // remain allocated for the complete synchronous prompt CreateWindowExW call.
+    let mut prompt = PromptWindow {
+        window: null_mut(),
+        slot,
+    };
+    // SAFETY: owner/instance and strings are live. The owned callback slot stays
+    // allocated through creation, the modal loop, and complete window teardown.
     let dialog = unsafe {
         CreateWindowExW(
             prompt_extended_style(read_only),
@@ -535,57 +669,21 @@ fn prompt_input_variant(
             owner,
             null_mut(),
             instance,
-            state_ptr.cast(),
+            slot.cast(),
         )
     };
     if dialog.is_null() {
-        return Err(state
+        // Failed creation has completed its WM_NCDESTROY before returning;
+        // no publication or callback lease remains when this owner is dropped.
+        return Err(prompt
+            .lease()?
+            .state_mut()
             .creation_error
             .take()
             .unwrap_or_else(io::Error::last_os_error));
     }
-    // SAFETY: window is the non-null top-level HWND just created and remains owned by this UI thread.
-    let _owner_guard = OwnerEnableGuard::new(owner);
-    // SAFETY: window is the non-null top-level HWND just created and remains owned by this UI thread.
-    unsafe {
-        ShowWindow(dialog, SW_SHOW);
-        UpdateWindow(dialog);
-    }
-    let mut message = MSG::default();
-    while !state.done {
-        // SAFETY: message is writable MSG storage outliving GetMessageW; null HWND requests this thread queue.
-        let status = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
-        if status == -1 {
-            let error = io::Error::last_os_error();
-            // SAFETY: dialog is the live prompt HWND created above and has not
-            // been destroyed on this GetMessageW error path.
-            unsafe { DestroyWindow(dialog) };
-            state.done = true;
-            return Err(error);
-        }
-        if status == 0 {
-            // SAFETY: dialog is the live prompt HWND; it is destroyed once before
-            // the original WM_QUIT code is reposted to the same thread.
-            unsafe {
-                DestroyWindow(dialog);
-                PostQuitMessage(message.wParam as i32);
-            }
-            state.done = true;
-            return Ok(None);
-        }
-        // SAFETY: dialog is the live prompt HWND and message is initialized MSG storage from GetMessageW.
-        if unsafe { IsDialogMessageW(dialog, &message) } == 0 {
-            // SAFETY: message was initialized by GetMessageW and remains valid through synchronous translation and dispatch.
-            unsafe {
-                TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
-        }
-    }
-    if let Some(error) = state.creation_error.take() {
-        return Err(error);
-    }
-    Ok(state.result.take())
+    prompt.window = dialog;
+    Ok(prompt)
 }
 
 const MAX_TEXT_DETAILS_UTF16_UNITS: usize = MAX_PATH_UNITS * 8;
@@ -1183,21 +1281,65 @@ pub(super) unsafe extern "system" fn prompt_proc(
     if message == WM_NCCREATE {
         let create = lparam as *const CREATESTRUCTW;
         if !create.is_null() {
-            // SAFETY: WM_NCCREATE supplies a readable CREATESTRUCTW whose
-            // lpCreateParams is the borrowed pointer to prompt_input's live local Box.
+            // SAFETY: creation supplies the pointer to the modal caller's live
+            // CallbackState slot. Publication does not borrow its value.
             unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, (*create).lpCreateParams as isize) };
         }
     }
-    // SAFETY: GWLP_USERDATA holds the borrowed pointer to prompt_input's local
-    // PromptState Box, which remains live until this modal dialog is destroyed.
-    let state_ptr = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *mut PromptState;
-    match message {
-        WM_CREATE if !state_ptr.is_null() => {
-            // SAFETY: state_ptr borrows prompt_input's live local Box and is
-            // confined to this modal callback thread until WM_NCDESTROY clears it.
-            let state = unsafe { &mut *state_ptr };
-            let created = create_prompt_children(window, state);
-            if let Err(error) = created {
+    let slot = prompt_state_slot(window);
+    if message == WM_NCDESTROY {
+        // SAFETY: clear publication even during a nested destruction. The
+        // modal owner retains the slot until every synchronous callback ends.
+        unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, 0) };
+        // SAFETY: final default processing needs no PromptState reference.
+        return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+    }
+    if slot.is_null()
+        || !matches!(
+            message,
+            WM_CREATE
+                | WM_ERASEBKGND
+                | WM_DRAWITEM
+                | WM_NOTIFY
+                | WM_CTLCOLORSTATIC
+                | WM_CTLCOLOREDIT
+                | WM_CTLCOLORLISTBOX
+                | WM_DPICHANGED
+                | WM_THEMECHANGED
+                | WM_SYSCOLORCHANGE
+                | WM_SETTINGCHANGE
+                | WM_FONTCHANGE
+                | WM_COMMAND
+                | WM_CLOSE
+        )
+    {
+        // In particular, default WM_PAINT may synchronously request erase and
+        // child colors; those callbacks must be able to acquire their own lease.
+        // SAFETY: default dispatch receives only copied callback arguments.
+        return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+    }
+    // SAFETY: the modal owner retains this published UI-thread slot. A nested
+    // callback tests only its disjoint scalar status before forming a reference.
+    let Some(mut lease) = (unsafe { CallbackState::try_lease(slot) }) else {
+        if message == WM_CLOSE || message == WM_COMMAND {
+            if message == WM_CLOSE
+                || (((wparam >> 16) & 0xFFFF) as u32 == BN_CLICKED
+                    && matches!((wparam & 0xFFFF) as i32, IDOK | IDCANCEL))
+            {
+                // SAFETY: defer an actionable close/button message using only
+                // scalar arguments; no borrowed state survives this dispatch.
+                unsafe { PostMessageW(window, message, wparam, lparam) };
+            }
+            return 0;
+        }
+        // SAFETY: native paint/notification fallback never accesses the busy
+        // PromptState. Refresh completion repaints again after its lease ends.
+        return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+    };
+    let result = match message {
+        WM_CREATE => {
+            let state = lease.state_mut();
+            if let Err(error) = create_prompt_children(window, state) {
                 state.creation_error = Some(error);
                 return -1;
             }
@@ -1209,16 +1351,17 @@ pub(super) unsafe extern "system" fn prompt_proc(
             } else {
                 state.combo
             };
-            if !first.is_null() {
-                // SAFETY: first is a non-null child HWND created for this active dialog and remains live while focus is assigned.
+            drop(lease);
+            if prompt_state_slot(window) == slot && !first.is_null() {
+                // SAFETY: first is our live prompt's child and no state lease
+                // remains while synchronous focus notifications are delivered.
                 unsafe { SetFocus(first) };
             }
-            0
+            redraw_prompt(window, slot);
+            return 0;
         }
-        WM_ERASEBKGND if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is live prompt state and wparam is this callback's DC.
-            let state = unsafe { &*state_ptr };
-            if let Some(resources) = state.appearance_resources.as_ref() {
+        WM_ERASEBKGND => {
+            if let Some(resources) = lease.state().appearance_resources.as_ref() {
                 let mut rect = RECT::default();
                 // SAFETY: window/DC are live and rect is writable.
                 unsafe {
@@ -1227,23 +1370,21 @@ pub(super) unsafe extern "system" fn prompt_proc(
                 }
                 1
             } else {
-                // SAFETY: native fallback retains the system class background path.
+                // SAFETY: system class background remains the native fallback.
                 unsafe { DefWindowProcW(window, message, wparam, lparam) }
             }
         }
-        WM_DRAWITEM if !state_ptr.is_null() => {
-            // SAFETY: state_ptr and the synchronous draw payload are live.
-            let state = unsafe { &*state_ptr };
+        WM_DRAWITEM => {
+            let state = lease.state();
             if draw_owner_separator(state.appearance_resources.as_ref(), state.separator, lparam) {
                 1
             } else {
-                // SAFETY: unrecognized payload retains standard handling.
+                // SAFETY: unrecognized drawing retains default processing.
                 unsafe { DefWindowProcW(window, message, wparam, lparam) }
             }
         }
-        WM_NOTIFY if !state_ptr.is_null() => {
-            // SAFETY: state_ptr and the synchronous notification are live.
-            let state = unsafe { &*state_ptr };
+        WM_NOTIFY => {
+            let state = lease.state();
             let resources = state.appearance_resources.as_ref();
             if resources.is_some()
                 && let Some(result) = draw_custom_button(resources, state.ok, lparam)
@@ -1251,19 +1392,15 @@ pub(super) unsafe extern "system" fn prompt_proc(
             {
                 result
             } else {
-                // SAFETY: native fallback and unrelated notifications retain default handling.
+                // SAFETY: unrelated notifications retain native processing.
                 unsafe { DefWindowProcW(window, message, wparam, lparam) }
             }
         }
-        WM_CTLCOLORSTATIC if !state_ptr.is_null() => {
-            // SAFETY: state_ptr and callback DC/control HWND are live synchronously.
-            let state = unsafe { &*state_ptr };
-            let resources = state.appearance_resources.as_ref();
-            resources.map_or_else(
-                || {
-                    // SAFETY: native fallback retains system control coloring.
-                    unsafe { DefWindowProcW(window, message, wparam, lparam) }
-                },
+        WM_CTLCOLORSTATIC => {
+            let state = lease.state();
+            state.appearance_resources.as_ref().map_or_else(
+                // SAFETY: native fallback retains system control coloring.
+                || unsafe { DefWindowProcW(window, message, wparam, lparam) },
                 |resources| {
                     if lparam as HWND == state.combo
                         || (state.read_only && lparam as HWND == state.edit_one)
@@ -1275,27 +1412,22 @@ pub(super) unsafe extern "system" fn prompt_proc(
                 },
             )
         }
-        WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX if !state_ptr.is_null() => {
-            // SAFETY: state_ptr and callback DC are live synchronously.
-            let resources = unsafe { (*state_ptr).appearance_resources.as_ref() };
-            resources.map_or_else(
-                || {
-                    // SAFETY: native fallback retains system edit/list-box coloring.
-                    unsafe { DefWindowProcW(window, message, wparam, lparam) }
-                },
+        WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
+            lease.state().appearance_resources.as_ref().map_or_else(
+                // SAFETY: native fallback retains system edit/list-box coloring.
+                || unsafe { DefWindowProcW(window, message, wparam, lparam) },
                 |resources| prompt_input_color(resources, wparam as HDC),
             )
         }
-        WM_DPICHANGED if !state_ptr.is_null() => {
-            // SAFETY: state_ptr borrows the live prompt state on its owning UI thread.
-            let state = unsafe { &mut *state_ptr };
+        WM_DPICHANGED => {
+            let state = lease.state_mut();
             let next_dpi = (wparam & 0xFFFF) as u32;
             state.dpi = if next_dpi == 0 { BASE_DPI } else { next_dpi };
             let suggested = lparam as *const RECT;
             if !suggested.is_null() {
-                // SAFETY: WM_DPICHANGED provides a readable suggested RECT for this live prompt.
+                // SAFETY: the DPI message supplies readable suggested geometry.
                 let suggested = unsafe { *suggested };
-                // SAFETY: window is live and suggested geometry is supplied by Windows for this DPI transition.
+                // SAFETY: window is live and this is the OS-suggested geometry.
                 unsafe {
                     SetWindowPos(
                         window,
@@ -1312,49 +1444,30 @@ pub(super) unsafe extern "system" fn prompt_proc(
             arrange_prompt(window, state, false);
             0
         }
-        WM_THEMECHANGED | WM_SYSCOLORCHANGE if !state_ptr.is_null() => {
-            // SAFETY: state_ptr borrows the live prompt state on its owning UI thread.
-            let state = unsafe { &mut *state_ptr };
-            requery_prompt_appearance(window, state);
+        WM_THEMECHANGED | WM_SYSCOLORCHANGE => {
+            requery_prompt_appearance(window, lease.state_mut());
             0
         }
-        WM_SETTINGCHANGE if !state_ptr.is_null() => {
-            // SAFETY: state_ptr borrows the live prompt state on its owning UI thread.
-            let state = unsafe { &mut *state_ptr };
+        WM_SETTINGCHANGE | WM_FONTCHANGE => {
+            let state = lease.state_mut();
             // SAFETY: window is the live prompt HWND.
             let dpi = unsafe { GetDpiForWindow(window) };
             state.dpi = if dpi == 0 { BASE_DPI } else { dpi };
             recreate_prompt_font(state);
-            requery_prompt_appearance(window, state);
+            if message == WM_SETTINGCHANGE {
+                requery_prompt_appearance(window, state);
+            }
             arrange_prompt(window, state, false);
             0
         }
-        WM_FONTCHANGE if !state_ptr.is_null() => {
-            // SAFETY: state_ptr borrows the live prompt state on its owning UI thread.
-            let state = unsafe { &mut *state_ptr };
-            // SAFETY: window is the live prompt HWND.
-            let dpi = unsafe { GetDpiForWindow(window) };
-            state.dpi = if dpi == 0 { BASE_DPI } else { dpi };
-            recreate_prompt_font(state);
-            arrange_prompt(window, state, false);
-            0
-        }
-        WM_COMMAND if !state_ptr.is_null() => {
+        WM_COMMAND => {
             let id = (wparam & 0xFFFF) as i32;
             let notification = ((wparam >> 16) & 0xFFFF) as u32;
-            // SAFETY: state_ptr is the live prompt state and this scalar read
-            // creates no reference that survives synchronous command handling.
-            let read_only = unsafe { (*state_ptr).read_only };
-            match prompt_button_action(read_only, id, notification) {
+            match prompt_button_action(lease.state().read_only, id, notification) {
                 PromptButtonAction::CopyAll => {
-                    // SAFETY: state_ptr borrows the live local PromptState. The
-                    // cloned text ends this borrow before clipboard ownership
-                    // or any resulting synchronous window work begins.
-                    let text = unsafe { (*state_ptr).spec.value_one.clone() };
+                    let text = lease.state().spec.value_one.clone();
+                    drop(lease);
                     if let Err(error) = copy_clipboard(window, &text) {
-                        // This prompt owns PromptState, not AppState. Report
-                        // directly with no state borrow; the main-window message
-                        // dispatcher must never inspect its user-data pointer.
                         show_message_now(
                             window,
                             &format!(
@@ -1363,52 +1476,46 @@ pub(super) unsafe extern "system" fn prompt_proc(
                             "DarkReNamer - 복사 실패",
                         );
                     }
+                    return 0;
                 }
                 PromptButtonAction::Accept => {
-                    // SAFETY: state_ptr borrows prompt_input's live local Box and is
-                    // confined to this modal callback thread until WM_NCDESTROY clears it.
-                    let state = unsafe { &mut *state_ptr };
+                    let state = lease.state_mut();
                     match prompt_result(state) {
                         Ok(result) => state.result = Some(result),
                         Err(error) => state.creation_error = Some(error),
                     }
                     state.done = true;
-                    // SAFETY: window is the live prompt HWND and IDOK has not yet
-                    // destroyed it on this callback path.
-                    unsafe { DestroyWindow(window) };
+                    drop(lease);
+                    close_prompt(window, slot);
+                    return 0;
                 }
                 PromptButtonAction::Close => {
-                    // SAFETY: state_ptr is the non-null borrowed pointer to the live
-                    // local PromptState Box for this modal callback.
-                    unsafe { (*state_ptr).done = true };
-                    // SAFETY: window is the live prompt HWND and IDCANCEL destroys it
-                    // exactly once after recording completion.
-                    unsafe { DestroyWindow(window) };
+                    lease.state_mut().done = true;
+                    drop(lease);
+                    close_prompt(window, slot);
+                    return 0;
                 }
                 PromptButtonAction::None => {}
             }
             0
         }
-        WM_CLOSE if !state_ptr.is_null() => {
-            // SAFETY: state_ptr is the non-null borrowed pointer to the live local
-            // PromptState Box for this modal callback.
-            unsafe { (*state_ptr).done = true };
-            // SAFETY: window is the live prompt HWND and WM_CLOSE destroys it once
-            // after marking the local boxed PromptState complete.
-            unsafe { DestroyWindow(window) };
-            0
+        WM_CLOSE => {
+            lease.state_mut().done = true;
+            drop(lease);
+            close_prompt(window, slot);
+            return 0;
         }
-        WM_NCDESTROY if !state_ptr.is_null() => {
-            // SAFETY: window is the active prompt HWND; clearing GWLP_USERDATA
-            // ends the borrowed association before prompt_input drops its local
-            // Box and its unambiguously owned font.
-            unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, 0) };
-            // SAFETY: window, message, wparam, and lparam are unchanged values from the active Windows callback.
-            unsafe { DefWindowProcW(window, message, wparam, lparam) }
-        }
-        // SAFETY: window, message, wparam, and lparam are unchanged values from the active Windows callback.
+        // SAFETY: arguments are unchanged values from the active callback.
         _ => unsafe { DefWindowProcW(window, message, wparam, lparam) },
+    };
+    drop(lease);
+    if matches!(
+        message,
+        WM_DPICHANGED | WM_THEMECHANGED | WM_SYSCOLORCHANGE | WM_SETTINGCHANGE | WM_FONTCHANGE
+    ) {
+        redraw_prompt(window, slot);
     }
+    result
 }
 
 const MAX_PROMPT_TEXT_UTF16_UNITS: usize = darknamer_core::MAX_PROPOSED_NAME_UTF16_UNITS;
@@ -2404,6 +2511,483 @@ pub(super) fn modal_native_dialog<T>(owner: HWND, dialog: impl FnOnce() -> T) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        static PROMPT_QUIT_AT_ENTRY: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+        static PROMPT_QUIT_RECEIVED: std::cell::Cell<Option<(u32, usize)>> = const { std::cell::Cell::new(None) };
+    }
+
+    pub(super) fn inject_prompt_quit_for_test() {
+        if let Some(code) = PROMPT_QUIT_AT_ENTRY.with(std::cell::Cell::take) {
+            // SAFETY: this thread-local test stimulus queues quit only after
+            // native prompt setup, immediately before its actual modal pump.
+            unsafe { PostQuitMessage(code) };
+        }
+    }
+
+    pub(super) fn record_prompt_quit_for_test(status: i32, message: &MSG) {
+        if status == 0 {
+            PROMPT_QUIT_RECEIVED.with(|received| {
+                received.set(Some((message.message, message.wParam)));
+            });
+        }
+    }
+
+    struct PromptTestOwner(HWND);
+
+    impl PromptTestOwner {
+        fn create() -> io::Result<Self> {
+            // SAFETY: system STATIC and the current module remain live for
+            // this UI-thread-owned parent, which its guard destroys exactly once.
+            let window = unsafe {
+                CreateWindowExW(
+                    0,
+                    wide("STATIC").as_ptr(),
+                    null(),
+                    WS_OVERLAPPEDWINDOW,
+                    0,
+                    0,
+                    640,
+                    480,
+                    null_mut(),
+                    null_mut(),
+                    GetModuleHandleW(null()),
+                    null_mut(),
+                )
+            };
+            if window.is_null() {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(Self(window))
+            }
+        }
+    }
+
+    impl Drop for PromptTestOwner {
+        fn drop(&mut self) {
+            // SAFETY: this is our one test-owned parent. Its owned prompts have
+            // either already closed or still retain their caller-owned slots.
+            unsafe { DestroyWindow(self.0) };
+        }
+    }
+
+    fn prompt_test_appearance(theme: AppThemeMode) -> PromptAppearance {
+        PromptAppearance {
+            preference: UiAppearance {
+                theme,
+                ..UiAppearance::default()
+            },
+            forced_colors: ForcedColorsState::Inactive,
+            system_theme: Some(ResolvedTheme::Light),
+        }
+    }
+
+    fn prompt_test_spec() -> PromptSpec {
+        PromptSpec {
+            caption: "Prompt callback regression".to_owned(),
+            title: "Native prompt controls".to_owned(),
+            label_one: "First".to_owned(),
+            label_two: "Second".to_owned(),
+            value_one: LegacyText::from("one"),
+            value_two: LegacyText::from("two"),
+            choices: vec!["First choice".to_owned(), "Second choice".to_owned()],
+        }
+    }
+
+    struct FontReentryProbe {
+        parent: HWND,
+        slot: *mut PromptStateSlot,
+        destroy_parent: bool,
+        busy_hits: Cell<usize>,
+        color_hits: Cell<usize>,
+        idle_paints: Cell<usize>,
+        nested_brush: Cell<LRESULT>,
+    }
+
+    // Deliberate deterministic regression, separate from natural OS
+    // characterization: WM_SETFONT drives one valid parent color callback.
+    unsafe extern "system" fn prompt_font_reentry(
+        control: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _id: usize,
+        refdata: usize,
+    ) -> LRESULT {
+        // SAFETY: the subclass guard retains this separate scalar/Cell sidecar
+        // until confirmed detach or complete child destruction.
+        let probe = unsafe { &*(refdata as *const FontReentryProbe) };
+        // SAFETY: the modal owner retains the slot through this child callback;
+        // is_busy reads only its disjoint scalar status, never PromptState.
+        let busy = unsafe { CallbackState::is_busy(probe.slot) };
+        if message == WM_SETFONT {
+            probe
+                .busy_hits
+                .set(probe.busy_hits.get() + usize::from(busy));
+            if probe.destroy_parent {
+                // SAFETY: deliberately destroy the actual parent while its
+                // font callback has a lease; the modal owner retains the slot.
+                unsafe { DestroyWindow(probe.parent) };
+                return 0;
+            }
+            // SAFETY: control and its parent are live; the borrowed DC is
+            // retained through one synchronous color notification and released.
+            unsafe {
+                let dc = GetDC(control);
+                if !dc.is_null() {
+                    probe.color_hits.set(probe.color_hits.get() + 1);
+                    probe.nested_brush.set(SendMessageW(
+                        probe.parent,
+                        WM_CTLCOLORSTATIC,
+                        dc as usize,
+                        control as isize,
+                    ));
+                    ReleaseDC(control, dc);
+                }
+            }
+        } else if message == windows_sys::Win32::UI::WindowsAndMessaging::WM_PAINT && !busy {
+            probe.idle_paints.set(probe.idle_paints.get() + 1);
+        }
+        // SAFETY: callback arguments are unchanged and the subclass is live.
+        unsafe { DefSubclassProc(control, message, wparam, lparam) }
+    }
+
+    struct PromptFontSubclass {
+        control: HWND,
+        probe: Option<Box<FontReentryProbe>>,
+    }
+
+    impl PromptFontSubclass {
+        fn install(prompt: &PromptWindow, destroy_parent: bool) -> io::Result<Self> {
+            let control = prompt.lease()?.state().title;
+            let probe = Box::new(FontReentryProbe {
+                parent: prompt.window,
+                slot: prompt.slot,
+                destroy_parent,
+                busy_hits: Cell::new(0),
+                color_hits: Cell::new(0),
+                idle_paints: Cell::new(0),
+                nested_brush: Cell::new(0),
+            });
+            // SAFETY: control is the live STATIC title. The boxed scalar
+            // sidecar remains stable until this guard detaches the subclass.
+            if unsafe {
+                SetWindowSubclass(
+                    control,
+                    Some(prompt_font_reentry),
+                    1,
+                    (&*probe as *const FontReentryProbe) as usize,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self {
+                control,
+                probe: Some(probe),
+            })
+        }
+    }
+
+    impl Drop for PromptFontSubclass {
+        fn drop(&mut self) {
+            // SAFETY: detach this exact callback/id or confirm that child
+            // destruction has already ended every native use of its refdata.
+            let detached = unsafe {
+                RemoveWindowSubclass(self.control, Some(prompt_font_reentry), 1) != 0
+                    || IsWindow(self.control) == 0
+            };
+            if !detached && let Some(probe) = self.probe.take() {
+                // Preserve the bounded context if native detach is ambiguous.
+                let _ = Box::leak(probe);
+            }
+        }
+    }
+
+    #[test]
+    fn native_prompt_font_reentry_uses_fallback_then_repaints_current_palette() -> io::Result<()> {
+        let owner = PromptTestOwner::create()?;
+        let prompt = create_prompt_window(
+            owner.0,
+            prompt_test_appearance(AppThemeMode::Dark),
+            prompt_test_spec(),
+            false,
+        )?;
+        let brush = prompt
+            .lease()?
+            .state()
+            .appearance_resources
+            .as_ref()
+            .ok_or_else(|| io::Error::other("native prompt palette was not created"))?
+            .dialog_brush() as LRESULT;
+        let subclass = PromptFontSubclass::install(&prompt, false)?;
+        let probe = subclass
+            .probe
+            .as_ref()
+            .ok_or_else(|| io::Error::other("missing subclass probe"))?;
+        // SAFETY: show the actual live prompt without retaining its state.
+        unsafe {
+            ShowWindow(prompt.window, SW_SHOW);
+            UpdateWindow(prompt.window);
+        }
+        probe.idle_paints.set(0);
+        // SAFETY: drive the production refresh after excluding initial paint
+        // counts; this test retains only the disjoint scalar/Cell sidecar.
+        unsafe { SendMessageW(prompt.window, WM_FONTCHANGE, 0, 0) };
+        assert!(probe.busy_hits.get() > 0);
+        assert!(probe.color_hits.get() > 0);
+        assert_ne!(probe.nested_brush.get(), brush);
+        assert!(
+            probe.idle_paints.get() > 0,
+            "font refresh must repaint after releasing its lease"
+        );
+        // SAFETY: the STATIC child/DC are live and the parent callback now has
+        // no outer lease. Verify that palette coloring is restored immediately.
+        let current_brush = unsafe {
+            let dc = GetDC(subclass.control);
+            if dc.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let brush = SendMessageW(
+                prompt.window,
+                WM_CTLCOLORSTATIC,
+                dc as usize,
+                subclass.control as isize,
+            );
+            ReleaseDC(subclass.control, dc);
+            brush
+        };
+        assert_eq!(current_brush, brush);
+        drop(prompt.lease()?);
+        Ok(())
+    }
+
+    #[test]
+    fn native_prompt_nested_destruction_ends_modal_wait_without_reclaiming_active_state()
+    -> io::Result<()> {
+        let owner = PromptTestOwner::create()?;
+        let prompt = create_prompt_window(
+            owner.0,
+            prompt_test_appearance(AppThemeMode::Dark),
+            prompt_test_spec(),
+            false,
+        )?;
+        let _subclass = PromptFontSubclass::install(&prompt, true)?;
+        // SAFETY: the child callback deliberately destroys its parent during
+        // this actual production refresh. The caller still owns the state slot.
+        unsafe { SendMessageW(prompt.window, WM_FONTCHANGE, 0, 0) };
+        assert!(prompt_state_slot(prompt.window).is_null());
+        drop(prompt.lease()?);
+        assert!(
+            !prompt.lease()?.state().done,
+            "native destruction does not use the close command path"
+        );
+        assert!(
+            prompt.finished()?,
+            "detached publication must end the modal loop"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn native_prompt_refresh_preserves_values_buttons_and_final_palette() -> io::Result<()> {
+        let owner = PromptTestOwner::create()?;
+        for theme in [
+            AppThemeMode::Light,
+            AppThemeMode::Dark,
+            AppThemeMode::System,
+        ] {
+            for read_only in [false, true] {
+                let prompt = create_prompt_window(
+                    owner.0,
+                    prompt_test_appearance(theme),
+                    prompt_test_spec(),
+                    read_only,
+                )?;
+                let window = prompt.window;
+                let setting = wide("WindowMetrics");
+                // SAFETY: show the actual prompt and refresh standard children
+                // without subclassing or injecting parent paint/color messages.
+                unsafe {
+                    ShowWindow(window, SW_SHOW);
+                    UpdateWindow(window);
+                    SendMessageW(window, WM_FONTCHANGE, 0, 0);
+                    SendMessageW(window, WM_SETTINGCHANGE, 0, setting.as_ptr() as isize);
+                    SendMessageW(window, WM_THEMECHANGED, 0, 0);
+                    SendMessageW(window, WM_SYSCOLORCHANGE, 0, 0);
+                    let dpi = GetDpiForWindow(window) as usize;
+                    SendMessageW(window, WM_DPICHANGED, dpi | (dpi << 16), 0);
+                }
+                drop(prompt.lease()?);
+                assert!(!prompt.finished()?);
+                let (edit, ok, cancel, font) = {
+                    let lease = prompt.lease()?;
+                    let state = lease.state();
+                    (state.edit_one, state.ok, state.cancel, state.font.as_raw())
+                };
+                assert!(!font.is_null());
+                assert_eq!(prompt_window_text(edit)?, LegacyText::from("one"));
+                let palette =
+                    prompt
+                        .lease()?
+                        .state()
+                        .appearance_resources
+                        .as_ref()
+                        .map(|resources| {
+                            (
+                                resources.control_normal_brush() as LRESULT,
+                                resources.palette().control_normal,
+                            )
+                        });
+                if let Some((expected_brush, expected_background)) = palette {
+                    // SAFETY: the live edit/DC use the actual post-refresh
+                    // color callback. Only copied palette scalars are retained.
+                    let (brush, background) = unsafe {
+                        let dc = GetDC(edit);
+                        if dc.is_null() {
+                            return Err(io::Error::last_os_error());
+                        }
+                        let brush = SendMessageW(
+                            window,
+                            if read_only {
+                                WM_CTLCOLORSTATIC
+                            } else {
+                                WM_CTLCOLOREDIT
+                            },
+                            dc as usize,
+                            edit as isize,
+                        );
+                        let background = windows_sys::Win32::Graphics::Gdi::GetBkColor(dc);
+                        ReleaseDC(edit, dc);
+                        (brush, background)
+                    };
+                    assert_eq!(brush, expected_brush);
+                    assert_eq!(background, expected_background);
+                }
+                // SAFETY: these are live standard BUTTON controls; copied
+                // style queries and a focus notification cannot close the prompt.
+                unsafe {
+                    assert_ne!(
+                        GetWindowLongPtrW(
+                            if read_only { cancel } else { ok },
+                            windows_sys::Win32::UI::WindowsAndMessaging::GWL_STYLE
+                        ) as u32
+                            & BS_DEFPUSHBUTTON as u32,
+                        0
+                    );
+                    SendMessageW(
+                        window,
+                        WM_COMMAND,
+                        IDOK as usize | ((BN_SETFOCUS as usize) << 16),
+                        ok as isize,
+                    );
+                }
+                assert!(!prompt.finished()?);
+                // SAFETY: only an actual clicked Accept/Close command ends this
+                // prompt. The read-only Copy action remains covered separately.
+                unsafe {
+                    SendMessageW(
+                        window,
+                        WM_COMMAND,
+                        if read_only { IDCANCEL } else { IDOK } as usize,
+                        if read_only { cancel } else { ok } as isize,
+                    );
+                }
+                assert!(prompt.finished()?);
+                let result = prompt.lease()?.state_mut().result.take();
+                if read_only {
+                    assert!(result.is_none());
+                } else {
+                    let result =
+                        result.ok_or_else(|| io::Error::other("native prompt did not accept"))?;
+                    assert_eq!(result.value_one, LegacyText::from("one"));
+                    assert_eq!(result.value_two, LegacyText::from("two"));
+                    assert_eq!(result.choice, 0);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_prompt_failed_creation_and_quit_restore_owner_and_clear_publication() -> io::Result<()>
+    {
+        let owner = PromptTestOwner::create()?;
+        let mut spec = prompt_test_spec();
+        spec.value_one =
+            LegacyText::from_units(vec![u16::from(b'x'); MAX_TEXT_DETAILS_UTF16_UNITS + 1]);
+        let Err(error) = prompt_input_variant(
+            owner.0,
+            prompt_test_appearance(AppThemeMode::Dark),
+            spec,
+            true,
+        ) else {
+            return Err(io::Error::other(
+                "oversized details prompt unexpectedly opened",
+            ));
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        // Arm the quit only at the real modal GetMessage entry. Queuing it
+        // before native control creation also exercises unrelated setup pumps.
+        PROMPT_QUIT_AT_ENTRY.with(|pending| pending.set(Some(7)));
+        PROMPT_QUIT_RECEIVED.with(|received| received.set(None));
+        // SAFETY: the owned parent is live and must still be enabled after the
+        // failed creation. The injected quit belongs only to this test thread.
+        unsafe {
+            assert_ne!(IsWindowEnabled(owner.0), 0);
+        }
+        assert!(
+            prompt_input_variant(
+                owner.0,
+                prompt_test_appearance(AppThemeMode::Dark),
+                prompt_test_spec(),
+                false
+            )?
+            .is_none()
+        );
+        assert_eq!(
+            PROMPT_QUIT_RECEIVED.with(std::cell::Cell::take),
+            Some((windows_sys::Win32::UI::WindowsAndMessaging::WM_QUIT, 7))
+        );
+        let mut quit = MSG::default();
+        let mut received_quit = false;
+        // PostQuitMessage generates a low-priority message once the queue is
+        // quiet. Drain teardown messages as the outer, unfiltered pump would;
+        // one filtered Peek can return zero while those messages remain queued.
+        for _ in 0..256 {
+            // SAFETY: this test owns the UI thread and writable message storage.
+            let available = unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::PeekMessageW(
+                    &mut quit,
+                    null_mut(),
+                    0,
+                    0,
+                    windows_sys::Win32::UI::WindowsAndMessaging::PM_REMOVE,
+                )
+            };
+            if available == 0 {
+                break;
+            }
+            if quit.message == windows_sys::Win32::UI::WindowsAndMessaging::WM_QUIT {
+                received_quit = true;
+                break;
+            }
+            // SAFETY: normally dispatch only messages retrieved on this owned
+            // UI thread, without retaining any prompt-state reference.
+            unsafe {
+                TranslateMessage(&quit);
+                DispatchMessageW(&quit);
+            }
+        }
+        assert!(
+            received_quit,
+            "the outer pump must receive the reposted quit"
+        );
+        assert_eq!(quit.wParam, 7);
+        // SAFETY: the owned parent outlives prompt teardown and quit retrieval.
+        assert_ne!(unsafe { IsWindowEnabled(owner.0) }, 0);
+        Ok(())
+    }
 
     #[test]
     fn add_files_picker_extracts_only_capacity_plus_one_witness() -> io::Result<()> {
