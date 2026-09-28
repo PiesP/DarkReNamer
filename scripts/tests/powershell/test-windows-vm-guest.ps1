@@ -191,8 +191,59 @@ function Save-Manifest([object] $Fixture) {
     Write-Utf8Json -Path (Join-Path $Fixture.root 'bundle.json') -Value $Fixture.manifest
 }
 
+function Remove-ProtectedResultFixtures {
+    # Restore deletion only on the exact parents owned by this test, after assertions.
+    # Protected result files keep their production DACL until they are deleted.
+    $rootPath = [IO.Path]::GetFullPath($script:temporaryRoot)
+    $rootPrefix = $rootPath.TrimEnd([IO.Path]::DirectorySeparatorChar) +
+        [IO.Path]::DirectorySeparatorChar
+    foreach ($registeredPath in $script:protectedResultFixturePaths) {
+        $resultPath = [IO.Path]::GetFullPath($registeredPath)
+        if (-not $resultPath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Protected result fixture cleanup must remain beneath its owned temporary root.'
+        }
+        $parentPath = [IO.Path]::GetDirectoryName($resultPath)
+        $cursor = $rootPath
+        $relativeParent = [IO.Path]::GetRelativePath($rootPath, $parentPath)
+        $components = @($relativeParent.Split([IO.Path]::DirectorySeparatorChar))
+        foreach ($component in @('.') + $components) {
+            if ($component -cne '.') { $cursor = Join-Path $cursor $component }
+            $directory = Get-Item -LiteralPath $cursor -Force
+            if (-not $directory.PSIsContainer -or
+                ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Protected result fixture cleanup must not traverse a reparse point.'
+            }
+        }
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            $security = [IO.FileSystemAclExtensions]::GetAccessControl(
+                [IO.DirectoryInfo]::new($parentPath),
+                [Security.AccessControl.AccessControlSections]::Access
+            )
+            $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                [Security.Principal.WindowsIdentity]::GetCurrent().User,
+                [Security.AccessControl.FileSystemRights]::Delete -bor
+                    [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles,
+                [Security.AccessControl.AccessControlType]::Allow
+            ))
+            [IO.FileSystemAclExtensions]::SetAccessControl(
+                [IO.DirectoryInfo]::new($parentPath), $security
+            )
+        }
+        if (Test-Path -LiteralPath $resultPath) {
+            $file = Get-Item -LiteralPath $resultPath -Force
+            if ($file.PSIsContainer -or
+                ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Protected result fixture cleanup requires an ordinary result file.'
+            }
+            [IO.File]::Delete($resultPath)
+        }
+    }
+}
+
 $runner = Join-Path $toolingScriptsRoot 'windows-vm-guest.ps1'
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-vm-guest-' + [Guid]::NewGuid().ToString('N'))
+$script:protectedResultFixturePaths = [Collections.Generic.List[string]]::new()
+$testFailure = $null
 [void](New-Item -ItemType Directory -Path $temporaryRoot)
 try {
     $valid = New-Fixture -Name 'valid'
@@ -1233,6 +1284,7 @@ try {
             function Exit-DesktopTestLock { param($Lock) }
 
             $resultPath = Join-Path $caseRoot 'result.json'
+            $script:protectedResultFixturePaths.Add($resultPath)
             Initialize-TrustedResultWriter -Root $verified.root
             . $Finalizer
             $publishedResult = [IO.File]::ReadAllText($resultPath) | ConvertFrom-Json
@@ -1661,6 +1713,7 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
         ))
         [void][System.IO.FileSystemAclExtensions]::CreateDirectory($testRootSecurity, $trustedResultRoot)
         $trustedResultPath = Join-Path $trustedResultRoot 'result.json'
+        $script:protectedResultFixturePaths.Add($trustedResultPath)
         if (Test-Path -LiteralPath $trustedResultPath) {
             throw 'The direct trusted result fixture must begin without a result file.'
         }
@@ -1668,15 +1721,24 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
         if (-not (Test-Path -LiteralPath $trustedResultPath -PathType Leaf)) {
             throw 'The direct trusted result writer did not atomically create its missing destination.'
         }
-        $writeBlockedByShare = $false
+        $readBlockedByShare = $false
+        $contendingReader = $null
         try {
-            [IO.File]::WriteAllText($trustedResultPath, '{"status":"forged"}')
+            # Read is allowed by the protected DACL; exclusive sharing must fail.
+            $contendingReader = [IO.File]::Open(
+                $trustedResultPath, [IO.FileMode]::Open,
+                [IO.FileAccess]::Read, [IO.FileShare]::None
+            )
         }
         catch [IO.IOException] {
-            $writeBlockedByShare = $true
+            if (($_.Exception.HResult -band 0xffff) -ne 32) { throw }
+            $readBlockedByShare = $true
         }
-        if (-not $writeBlockedByShare) {
-            throw 'The retained result handle allowed another same-user writer.'
+        finally {
+            if ($null -ne $contendingReader) { $contendingReader.Dispose() }
+        }
+        if (-not $readBlockedByShare) {
+            throw 'The retained result handle allowed an exclusive same-user reader.'
         }
         Write-ResultDocument -Root $trustedResultRoot -Result ([ordered]@{
             schema_version = 1
@@ -1728,6 +1790,7 @@ while (-not [IO.File]::Exists($ReleasePath)) { Start-Sleep -Milliseconds 50 }
         $managedResultRoot = Join-Path $valid.root 'trusted-result-managed'
         [void](New-Item -ItemType Directory -Path $managedResultRoot)
         $managedResultPath = Join-Path $managedResultRoot 'result.json'
+        $script:protectedResultFixturePaths.Add($managedResultPath)
         [IO.File]::WriteAllText($managedResultPath, '{}', [Text.UTF8Encoding]::new($false))
         $managedIdentityBefore = Get-FullFileIdentity -Path $managedResultPath
         $missingManagedResultPath = Join-Path $managedResultRoot 'missing-result.json'
@@ -3134,6 +3197,7 @@ Invoke-DrTestPowerShellModuleScope `
             $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
             $principal = [Security.Principal.WindowsPrincipal]::new($identity)
             if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+                $script:protectedResultFixturePaths.Add((Join-Path $valid.root 'result.json'))
                 $busyResultState = Invoke-DesktopLockProbe `
                     -OutputPath (Join-Path $valid.root 'desktop-lock-result.txt') `
                     -RunGuest
@@ -3241,8 +3305,27 @@ Invoke-DrTestPowerShellModuleScope `
 
     Write-Host 'Windows VM guest runner tests passed.'
 }
+catch {
+    $testFailure = $_
+    throw
+}
 finally {
-    if (Test-Path -LiteralPath $temporaryRoot) {
-        Remove-Item -LiteralPath $temporaryRoot -Recurse -Force
+    try {
+        if ($null -ne $script:VmTrustedResultWriter) {
+            $script:VmTrustedResultWriter.Dispose()
+            $script:VmTrustedResultWriter = $null
+        }
+        if (Test-Path -LiteralPath $temporaryRoot) {
+            Remove-ProtectedResultFixtures
+            # PowerShell removes reparse links themselves without recursing into targets.
+            Remove-Item -LiteralPath $temporaryRoot -Recurse -Force
+        }
+        if (Test-Path -LiteralPath $temporaryRoot) {
+            throw 'The Windows VM guest test did not remove its owned fixture root.'
+        }
+    }
+    catch {
+        if ($null -eq $testFailure) { throw }
+        Write-Warning "Fixture cleanup also failed: $($_.Exception.Message)"
     }
 }
