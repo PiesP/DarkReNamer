@@ -21,6 +21,7 @@ function New-TestEntry {
         [Parameter(Mandatory)][string] $Path,
         [string[]] $Platforms = @($actualPlatform),
         [string] $Category = 'fixture',
+        [string] $Scope = 'current',
         [bool] $RequiresVm = $false,
         [int] $Timeout = 10
     )
@@ -29,6 +30,7 @@ function New-TestEntry {
         path = $Path
         runner = 'PowerShell'
         platforms = $Platforms
+        scope = $Scope
         category = $Category
         requiresVm = $RequiresVm
         timeout = $Timeout
@@ -56,7 +58,7 @@ function New-RegistryFixture {
         Set-Content -LiteralPath $path -Value $item.Value
     }
     $registry = [ordered]@{
-        version = 1
+        version = 2
         discovery = [ordered]@{
             roots = @('scripts')
             patterns = @('test-*.ps1', 'test-*.py')
@@ -131,11 +133,15 @@ try {
     $selectionEntries = @(
         (New-TestEntry -Id 'common' -Path 'scripts/test-common.ps1' -Category 'smoke')
         (New-TestEntry -Id 'filtered' -Path 'scripts/test-filtered.ps1' -Category 'other')
+        (New-TestEntry -Id 'diagnostic' -Path 'scripts/test-diagnostic.ps1' -Category 'smoke' -Scope 'diagnostics')
+        (New-TestEntry -Id 'historical' -Path 'scripts/test-historical.ps1' -Category 'smoke' -Scope 'historical')
         (New-TestEntry -Id 'other-platform' -Path 'scripts/test-other-platform.ps1' -Platforms @($otherPlatform) -Category 'smoke')
     )
     $selectionFiles = @{
         'scripts/test-common.ps1' = "Set-Content -LiteralPath (Join-Path `$PSScriptRoot 'common.marker') -Value ran"
         'scripts/test-filtered.ps1' = "Set-Content -LiteralPath (Join-Path `$PSScriptRoot 'filtered.marker') -Value ran"
+        'scripts/test-diagnostic.ps1' = "Set-Content -LiteralPath (Join-Path `$PSScriptRoot 'diagnostic.marker') -Value ran"
+        'scripts/test-historical.ps1' = "Set-Content -LiteralPath (Join-Path `$PSScriptRoot 'historical.marker') -Value ran"
         'scripts/test-other-platform.ps1' = "Set-Content -LiteralPath (Join-Path `$PSScriptRoot 'other.marker') -Value ran"
     }
     $root = New-RegistryFixture -Entries $selectionEntries -Files $selectionFiles
@@ -145,6 +151,30 @@ try {
     Assert-True ($listed.stdout.Contains('common', [StringComparison]::Ordinal)) 'List must show the selected test.'
     Assert-True (-not $listed.stdout.Contains('filtered', [StringComparison]::Ordinal)) 'List must apply category filters.'
     Assert-True (-not (Test-Path (Join-Path $root 'scripts/common.marker'))) 'List must not execute selected tests.'
+    Assert-True (-not $listed.stdout.Contains('diagnostic', [StringComparison]::Ordinal)) 'Category must keep the default current scope.'
+    Assert-True (-not $listed.stdout.Contains('historical', [StringComparison]::Ordinal)) 'Category must not opt into historical tests.'
+    $runnerListed = Invoke-RegistryFixture -Root $root -Arguments @('-List', '-Runner', 'PowerShell')
+    Assert-True ($runnerListed.exitCode -eq 0) "Runner selection failed: $($runnerListed.stderr)"
+    Assert-True (-not $runnerListed.stdout.Contains('diagnostic', [StringComparison]::Ordinal)) 'Runner must keep the default current scope.'
+    Assert-True (-not $runnerListed.stdout.Contains('historical', [StringComparison]::Ordinal)) 'Runner must not opt into historical tests.'
+
+    $defaultReportPath = Join-Path $root 'default-results.json'
+    $default = Invoke-RegistryFixture -Root $root -Arguments @('-ResultPath', $defaultReportPath)
+    Assert-True ($default.exitCode -eq 0) "Default selection fixture failed: $($default.stderr)"
+    Assert-True (Test-Path (Join-Path $root 'scripts/common.marker')) 'Default must execute current tests.'
+    Assert-True (Test-Path (Join-Path $root 'scripts/filtered.marker')) 'Default must execute all current tests on the platform.'
+    Assert-True (-not (Test-Path (Join-Path $root 'scripts/diagnostic.marker'))) 'Default must not execute diagnostic tests.'
+    Assert-True (-not (Test-Path (Join-Path $root 'scripts/historical.marker'))) 'Default must not execute historical tests.'
+    $defaultReport = Get-Content -LiteralPath $defaultReportPath -Raw | ConvertFrom-Json
+    Assert-True ($defaultReport.status -eq 'passed') 'Successful suite report must have passed status.'
+    Assert-True ($defaultReport.version -eq 1 -and $defaultReport.platform -eq $actualPlatform) 'Report must declare its format and actual platform.'
+    Assert-True ($defaultReport.results -is [array] -and $defaultReport.results.Count -eq 2) 'Report must contain exactly the selected current tests.'
+    foreach ($result in $defaultReport.results) {
+        Assert-True ($result.status -eq 'passed' -and $result.exitCode -eq 0 -and $null -eq $result.error) 'Successful report must preserve status and exit code.'
+        Assert-True ($result.elapsedSeconds -gt 0 -and $result.scope -eq 'current') 'Report must include per-script elapsed time and scope.'
+        Assert-True ($result.path.StartsWith('scripts/') -and $result.runner -eq 'PowerShell') 'Report must identify the executed script and runner.'
+    }
+    Remove-Item -LiteralPath (Join-Path $root 'scripts/common.marker'),(Join-Path $root 'scripts/filtered.marker')
     $selected = Invoke-RegistryFixture -Root $root -Arguments @('-Id', 'common')
     Assert-True ($selected.exitCode -eq 0) "Id selection fixture failed: $($selected.stderr)"
     Assert-True (Test-Path (Join-Path $root 'scripts/common.marker')) 'Id selection did not execute its test.'
@@ -154,6 +184,49 @@ try {
         -Fragment 'Unknown tooling test categories: unknown'
     Assert-FailsWith -Result (Invoke-RegistryFixture -Root $root -Arguments @('-Id', 'unknown')) `
         -Fragment 'Unknown tooling test ids: unknown'
+
+    $diagnostic = Invoke-RegistryFixture -Root $root -Arguments @('-Id', 'diagnostic')
+    Assert-True ($diagnostic.exitCode -eq 0) "Explicit diagnostic Id failed: $($diagnostic.stderr)"
+    Assert-True (Test-Path (Join-Path $root 'scripts/diagnostic.marker')) 'Id must deliberately opt into a diagnostic test when Scope is omitted.'
+    $historical = Invoke-RegistryFixture -Root $root -Arguments @('-Scope', 'Historical', '-Category', 'smoke')
+    Assert-True ($historical.exitCode -eq 0) "Historical scope failed: $($historical.stderr)"
+    Assert-True (Test-Path (Join-Path $root 'scripts/historical.marker')) 'Explicit historical scope must execute historical tests.'
+    $all = Invoke-RegistryFixture -Root $root -Arguments @('-List', '-Scope', 'All')
+    Assert-True ($all.exitCode -eq 0) "All scope failed: $($all.stderr)"
+    foreach ($entryId in @('common', 'filtered', 'diagnostic', 'historical')) {
+        Assert-True ($all.stdout.Contains($entryId, [StringComparison]::Ordinal)) "All scope must include $entryId."
+    }
+    Assert-True (-not $all.stdout.Contains('other-platform', [StringComparison]::Ordinal)) 'All scope must retain platform filtering.'
+    $diagnostics = Invoke-RegistryFixture -Root $root -Arguments @('-List', '-Scope', 'Diagnostics', '-Runner', 'PowerShell')
+    Assert-True ($diagnostics.exitCode -eq 0 -and $diagnostics.stdout.Contains('diagnostic', [StringComparison]::Ordinal)) 'Diagnostics scope must combine with Runner.'
+    Assert-True (-not $diagnostics.stdout.Contains('historical', [StringComparison]::Ordinal)) 'Diagnostics scope must exclude historical tests.'
+    Assert-FailsWith -Result (Invoke-RegistryFixture -Root $root -Arguments @('-Id', 'historical', '-Scope', 'Current')) `
+        -Fragment 'No tooling tests match'
+    Assert-FailsWith -Result (Invoke-RegistryFixture -Root $root -Arguments @('-Scope', 'Current', '-Id', 'unknown')) `
+        -Fragment 'Unknown tooling test ids: unknown'
+    Assert-FailsWith -Result (Invoke-RegistryFixture -Root $root -Arguments @('-Scope', 'All', '-Category', 'unknown')) `
+        -Fragment 'Unknown tooling test categories: unknown'
+    Assert-FailsWith -Result (Invoke-RegistryFixture -Root $root -Arguments @('-List', '-Scope', 'Curent')) `
+        -Fragment 'ValidateSet'
+
+    foreach ($invalid in @('Diagnostics', 'diagnostic', 'all', '')) {
+        $invalidRoot = New-RegistryFixture `
+            -Entries @(
+                (New-TestEntry -Id 'current' -Path 'scripts/test-current.ps1')
+                (New-TestEntry -Id 'invalid' -Path 'scripts/test-invalid.ps1' -Scope $invalid)
+            ) `
+            -Files @{'scripts/test-current.ps1' = '# current'; 'scripts/test-invalid.ps1' = '# invalid'}
+        $roots.Add($invalidRoot)
+        Assert-FailsWith -Result (Invoke-RegistryFixture -Root $invalidRoot -Arguments @('-List', '-Id', 'current')) `
+            -Fragment 'Unsupported tooling scope for invalid'
+    }
+
+    $entry = New-TestEntry -Id 'invalid' -Path 'scripts/test-invalid.ps1'
+    $entry.Remove('scope')
+    $invalidRoot = New-RegistryFixture -Entries @($entry) -Files @{'scripts/test-invalid.ps1' = '# invalid'}
+    $roots.Add($invalidRoot)
+    Assert-FailsWith -Result (Invoke-RegistryFixture -Root $invalidRoot -Arguments @('-List')) `
+        -Fragment 'must contain exactly these properties'
 
     foreach ($invalid in @(
         @{ Field = 'runner'; Value = 'powershell'; Fragment = 'Unsupported tooling runner' }
@@ -169,23 +242,66 @@ try {
     }
 
     $failureRoot = New-RegistryFixture `
-        -Entries @((New-TestEntry -Id 'failure' -Path 'scripts/test-failure.ps1')) `
-        -Files @{ 'scripts/test-failure.ps1' = "Write-Output 'failure diagnostic'; exit 7" }
+        -Entries @(
+            (New-TestEntry -Id 'pass' -Path 'scripts/test-pass.ps1')
+            (New-TestEntry -Id 'failure' -Path 'scripts/test-failure.ps1')
+            (New-TestEntry -Id 'after' -Path 'scripts/test-after.ps1')
+        ) `
+        -Files @{
+            'scripts/test-pass.ps1' = "Write-Output 'pass diagnostic'"
+            'scripts/test-failure.ps1' = "Write-Output 'failure diagnostic'; exit 7"
+            'scripts/test-after.ps1' = "Set-Content -LiteralPath (Join-Path `$PSScriptRoot 'after.marker') -Value ran"
+        }
     $roots.Add($failureRoot)
-    $failure = Invoke-RegistryFixture -Root $failureRoot
+    $failureReportPath = Join-Path $failureRoot 'failure-results.json'
+    $failure = Invoke-RegistryFixture -Root $failureRoot -Arguments @('-ResultPath', $failureReportPath)
     Assert-FailsWith -Result $failure -Fragment 'failed with exit code 7'
     Assert-True (($failure.stdout + $failure.stderr).Contains('failure diagnostic', [StringComparison]::Ordinal)) `
         'A failing child must preserve its diagnostic output.'
+
+    $failureReport = Get-Content -LiteralPath $failureReportPath -Raw | ConvertFrom-Json
+    Assert-True ($failureReport.status -eq 'failed') 'Failed suite report must have failed status.'
+    Assert-True ($failureReport.results.Count -eq 2) 'Failed report must retain prior successes and the failure.'
+    Assert-True ($failureReport.results[0].status -eq 'passed' -and $failureReport.results[1].id -eq 'failure') 'Failed report must preserve execution order.'
+    $failedResult = $failureReport.results[1]
+    Assert-True ($failedResult.status -eq 'failed' -and $failedResult.exitCode -eq 7 -and $failedResult.elapsedSeconds -gt 0) 'Failed report must retain child exit code, status, and elapsed time.'
+    Assert-True ($failedResult.error.Contains('failed with exit code 7')) 'Failed report must retain its error.'
+    Assert-True (-not (Test-Path (Join-Path $failureRoot 'scripts/after.marker'))) 'Failure must stop the suite before later tests run.'
+    $preflightRoot = New-RegistryFixture `
+        -Entries @((New-TestEntry -Id 'preflight' -Path 'scripts/test-preflight.ps1')) `
+        -Files @{'scripts/test-preflight.ps1' = "Set-Content -LiteralPath (Join-Path `$PSScriptRoot 'preflight.marker') -Value ran"}
+    $roots.Add($preflightRoot)
+    $unwritableReportPath = Join-Path $preflightRoot 'missing/results.json'
+    Assert-FailsWith -Result (Invoke-RegistryFixture -Root $preflightRoot -Arguments @('-ResultPath', $unwritableReportPath)) `
+        -Fragment 'Could not find a part of the path'
+    Assert-True (-not (Test-Path (Join-Path $preflightRoot 'scripts/preflight.marker'))) 'Invalid result parent must fail before tests execute.'
+    $existingReportPath = Join-Path $preflightRoot 'existing-results.json'
+    Set-Content -LiteralPath $existingReportPath -Value 'existing evidence'
+    Assert-FailsWith -Result (Invoke-RegistryFixture -Root $preflightRoot -Arguments @('-ResultPath', $existingReportPath)) `
+        -Fragment 'Tooling result path must name a new file'
+    Assert-True ((Get-Content -LiteralPath $existingReportPath -Raw).Trim() -ceq 'existing evidence') 'Report must preserve an existing output file.'
+    Assert-True (-not (Test-Path (Join-Path $preflightRoot 'scripts/preflight.marker'))) 'Existing result path must fail before tests execute.'
+    $listReportPath = Join-Path $preflightRoot 'list-results.json'
+    $listReport = Invoke-RegistryFixture -Root $preflightRoot -Arguments @('-List', '-ResultPath', $listReportPath)
+    Assert-True ($listReport.exitCode -eq 0 -and -not (Test-Path -LiteralPath $listReportPath)) 'List must not create execution evidence.'
 
     $timeoutRoot = New-RegistryFixture `
         -Entries @((New-TestEntry -Id 'timeout' -Path 'scripts/test-timeout.ps1' -Timeout 1)) `
         -Files @{ 'scripts/test-timeout.ps1' = "Write-Output 'timeout diagnostic'; Start-Sleep -Seconds 10" }
     $roots.Add($timeoutRoot)
-    $timeout = Invoke-RegistryFixture -Root $timeoutRoot
+    $timeoutReportPath = Join-Path $timeoutRoot 'timeout-results.json'
+    $timeout = Invoke-RegistryFixture -Root $timeoutRoot -Arguments @('-ResultPath', $timeoutReportPath)
     Assert-FailsWith -Result $timeout -Fragment 'timed out after 1 seconds'
     Assert-True (($timeout.stdout + $timeout.stderr).Contains('timeout diagnostic', [StringComparison]::Ordinal)) `
         'A timed-out child must preserve its diagnostic output.'
     Assert-True ($timeout.elapsed.TotalSeconds -lt 8) 'Timed-out child was not terminated promptly.'
+
+    $timeoutReport = Get-Content -LiteralPath $timeoutReportPath -Raw | ConvertFrom-Json
+    Assert-True ($timeoutReport.status -eq 'failed') 'Timed-out suite report must have failed status.'
+    Assert-True ($timeoutReport.results -is [array] -and $timeoutReport.results.Count -eq 1) 'Single-result reports must retain a JSON array.'
+    $timedOutResult = $timeoutReport.results[0]
+    Assert-True ($timedOutResult.status -eq 'timed-out' -and $timedOutResult.elapsedSeconds -ge 1) 'Timeout report must retain timeout status and elapsed time.'
+    Assert-True ($timedOutResult.error.Contains('timed out after 1 seconds')) 'Timeout report must retain its error.'
 
     $missingRoot = New-RegistryFixture `
         -Entries @((New-TestEntry -Id 'registered' -Path 'scripts/test-registered.ps1')) `
@@ -194,7 +310,7 @@ try {
             'scripts/test-missing.ps1' = '# missing'
         }
     $roots.Add($missingRoot)
-    Assert-FailsWith -Result (Invoke-RegistryFixture -Root $missingRoot -Arguments @('-List')) `
+    Assert-FailsWith -Result (Invoke-RegistryFixture -Root $missingRoot -Arguments @('-List', '-Scope', 'Historical')) `
         -Fragment 'scripts/test-missing.ps1'
 
     $duplicateIdRoot = New-RegistryFixture `
@@ -249,8 +365,11 @@ try {
         -Entries @((New-TestEntry -Id 'requires-vm' -Path 'scripts/test-requires-vm.ps1' -RequiresVm $true)) `
         -Files @{ 'scripts/test-requires-vm.ps1' = "Set-Content -LiteralPath (Join-Path `$PSScriptRoot 'vm.marker') -Value ran" }
     $roots.Add($vmRoot)
-    Assert-FailsWith -Result (Invoke-RegistryFixture -Root $vmRoot) `
+    $vmReportPath = Join-Path $vmRoot 'vm-results.json'
+    Assert-FailsWith -Result (Invoke-RegistryFixture -Root $vmRoot -Arguments @('-ResultPath', $vmReportPath)) `
         -Fragment 'refuses VM-backed test requires-vm'
+    $vmReport = Get-Content -LiteralPath $vmReportPath -Raw | ConvertFrom-Json
+    Assert-True ($vmReport.status -eq 'failed' -and $vmReport.results[0].status -eq 'failed' -and $null -eq $vmReport.results[0].exitCode) 'Pre-start test rejection must be reported without inventing a child exit code.'
     Assert-True (-not (Test-Path (Join-Path $vmRoot 'scripts/vm.marker'))) 'VM-backed test was executed.'
 }
 finally {
