@@ -1122,29 +1122,35 @@ impl LegacyList {
     /// Removes caller-selected row indices and returns the number removed.
     pub fn remove_rows(&mut self, selected: &[usize]) -> usize {
         let selected = normalized_indices(selected, self.len());
-        let removed_units = selected
-            .iter()
-            .map(|index| self.items[*index].proposed_name.len())
-            .sum::<usize>();
-        let removed_planned_path_units = selected
-            .iter()
-            .map(|index| {
-                let item = &self.items[*index];
+        let removed_count = selected.len();
+        if removed_count == 0 {
+            return 0;
+        }
+
+        let mut selected = selected.into_iter().peekable();
+        let mut row = 0_usize;
+        let mut removed_units = 0_usize;
+        let mut removed_planned_path_units = 0_usize;
+        self.items.retain(|item| {
+            let remove = selected.peek() == Some(&row);
+            row += 1;
+            if !remove {
+                return true;
+            }
+            selected.next();
+            removed_units += item.proposed_name.len();
+            removed_planned_path_units = removed_planned_path_units.saturating_add(
                 item.destination_parent
                     .len()
                     .saturating_add(destination_separator_units(item.destination_parent.units()))
-                    .saturating_add(item.proposed_name.len())
-            })
-            .fold(0_usize, usize::saturating_add);
-        for index in selected.iter().rev() {
-            self.items.remove(*index);
-        }
+                    .saturating_add(item.proposed_name.len()),
+            );
+            false
+        });
         self.proposed_name_utf16_units -= removed_units;
         self.planned_path_utf16_units -= removed_planned_path_units;
-        if !selected.is_empty() {
-            self.invalidate_source_index();
-        }
-        selected.len()
+        self.invalidate_source_index();
+        removed_count
     }
 
     /// Moves caller-selected rows one position earlier.
