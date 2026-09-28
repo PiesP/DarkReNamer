@@ -62,8 +62,6 @@ function New-RegistryFixture {
             patterns = @('test-*.ps1', 'test-*.py')
             exclusions = @(
                 [ordered]@{ path = 'scripts/test-tooling.ps1'; reason = 'suite-entrypoint' }
-                [ordered]@{ path = 'scripts/tests/support/visual-evidence-fixture.ps1'; reason = 'fixture-helper' }
-                [ordered]@{ path = 'scripts/tests/support/windows-binary-fixture.ps1'; reason = 'fixture-helper' }
                 [ordered]@{ path = 'scripts/test-windows-vm.py'; reason = 'vm-cli' }
             )
         }
@@ -125,72 +123,8 @@ function Assert-FailsWith {
         "Expected failure fragment '$Fragment', received:`n$combined"
 }
 
-$registry = Get-Content -LiteralPath (Join-Path $repositoryRoot 'config/tooling-tests.json') -Raw |
-    ConvertFrom-Json -Depth 20
-$powerShellPaths = @($registry.tests | Where-Object runner -ceq 'PowerShell' | ForEach-Object path)
-$pythonPaths = @($registry.tests | Where-Object runner -ceq 'Python' | ForEach-Object path)
-$expectedPowerShell = @(
-    'scripts/tests/powershell/test-release-handoff-validator.ps1'
-    'scripts/tests/powershell/test-windows-vm-guest.ps1'
-    'scripts/tests/powershell/test-windows-vm-acceptance.ps1'
-    'scripts/tests/powershell/test-windows-vm-recovery-acceptance.ps1'
-    'scripts/tests/powershell/test-toolchain-consistency.ps1'
-    'scripts/tests/powershell/test-measure-windows-binary.ps1'
-    'scripts/tests/powershell/test-get-git-blob-sha256.ps1'
-    'scripts/tests/powershell/test-prepare-release-cyclonedx.ps1'
-    'scripts/tests/powershell/test-release-workflow-powershell-syntax.ps1'
-    'scripts/tests/powershell/test-run-vm-automated-hosted.ps1'
-    'scripts/tests/powershell/test-release-candidate-metadata-validator.ps1'
-    'scripts/tests/powershell/test-windows-acceptance-evidence.ps1'
-    'scripts/tests/powershell/test-new-windows-acceptance-draft.ps1'
-    'scripts/tests/powershell/test-add-windows-acceptance-benchmark.ps1'
-    'scripts/tests/powershell/test-release-acceptance-validator.ps1'
-)
-$expectedPython = @(
-    'scripts/tests/python/test-windows-vm-runner.py'
-    'scripts/tests/python/test-gui-regression-runner.py'
-    'scripts/tests/python/test-gui-regression-evidence.py'
-    'scripts/tests/python/test-vm-automated-authority.py'
-    'scripts/tests/python/test-vm-automated-evidence.py'
-    'scripts/tests/python/test-vm-automated-state.py'
-    'scripts/tests/python/test-vm-automated-journal.py'
-    'scripts/tests/python/test-vm-automated-binding.py'
-    'scripts/tests/python/test-vm-automated-recovery.py'
-    'scripts/tests/python/test-vm-automated-platform.py'
-    'scripts/tests/python/test-vm-automated-campaign.py'
-    'scripts/tests/python/test-vm-automated-recovery-profile.py'
-    'scripts/tests/python/test-vm-automated-verifier.py'
-    'scripts/tests/python/test-vm-automated-menu-layout.py'
-    'scripts/tests/python/test-vm-automated-campaign-runner.py'
-    'scripts/tests/python/test-vm-automated-campaign-verifier.py'
-    'scripts/tests/python/test-vm-automated-cli.py'
-)
-foreach ($expected in $expectedPowerShell) {
-    $matches = @($registry.tests | Where-Object { $_.path -ceq $expected })
-    Assert-True ($matches.Count -eq 1) `
-        "PowerShell registry mapping is missing or duplicated: $expected"
-    $expectedPlatforms = if ($expected -ceq 'scripts/tests/powershell/test-release-handoff-validator.ps1') {
-        @('Ubuntu')
-    }
-    else {
-        @('Ubuntu', 'Windows')
-    }
-    Assert-True (
-        [string]::Join("`n", @($matches[0].platforms)) -ceq [string]::Join("`n", $expectedPlatforms)
-    ) "PowerShell registry platforms changed for: $expected"
-    Assert-True ($matches[0].requiresVm -eq $false) "PowerShell tooling test unexpectedly requires a VM: $expected"
-}
-foreach ($expected in $expectedPython) {
-    $matches = @($registry.tests | Where-Object { $_.path -ceq $expected })
-    Assert-True ($matches.Count -eq 1) `
-        "Python registry mapping is missing or duplicated: $expected"
-    Assert-True ($matches[0].requiresVm -eq $false) "Python tooling test unexpectedly requires a VM: $expected"
-}
-Assert-True ($powerShellPaths.Count -ge 16) 'Registry must contain the 15 existing PowerShell tests plus its contract test.'
-Assert-True ($pythonPaths.Count -ge 17) 'Registry must preserve the 17 existing Python tests.'
-Assert-True (@($registry.tests | Where-Object {
-    $_.runner -ceq 'Python' -and ($_.platforms.Count -ne 1 -or $_.platforms[0] -cne 'Ubuntu')
-}).Count -eq 0) 'Python tooling tests must remain Ubuntu-only in the baseline registry.'
+$listed = Invoke-RegistryFixture -Root $repositoryRoot -Arguments @('-List')
+Assert-True ($listed.exitCode -eq 0) "Repository registry failed discovery: $($listed.stderr)"
 
 $roots = [Collections.Generic.List[string]]::new()
 try {
@@ -216,6 +150,23 @@ try {
     Assert-True (Test-Path (Join-Path $root 'scripts/common.marker')) 'Id selection did not execute its test.'
     Assert-True (-not (Test-Path (Join-Path $root 'scripts/filtered.marker'))) 'Id selection executed a filtered test.'
     Assert-True (-not (Test-Path (Join-Path $root 'scripts/other.marker'))) 'Platform selection executed the other platform.'
+    Assert-FailsWith -Result (Invoke-RegistryFixture -Root $root -Arguments @('-Category', 'unknown')) `
+        -Fragment 'Unknown tooling test categories: unknown'
+    Assert-FailsWith -Result (Invoke-RegistryFixture -Root $root -Arguments @('-Id', 'unknown')) `
+        -Fragment 'Unknown tooling test ids: unknown'
+
+    foreach ($invalid in @(
+        @{ Field = 'runner'; Value = 'powershell'; Fragment = 'Unsupported tooling runner' }
+        @{ Field = 'platforms'; Value = @('ubuntu'); Fragment = 'Tooling platforms are empty, invalid, or duplicated' }
+    )) {
+        $entry = New-TestEntry -Id 'invalid' -Path 'scripts/test-invalid.ps1'
+        $entry[$invalid.Field] = $invalid.Value
+        $invalidRoot = New-RegistryFixture -Entries @($entry) `
+            -Files @{ 'scripts/test-invalid.ps1' = '# never executed' }
+        $roots.Add($invalidRoot)
+        Assert-FailsWith -Result (Invoke-RegistryFixture -Root $invalidRoot -Arguments @('-List')) `
+            -Fragment $invalid.Fragment
+    }
 
     $failureRoot = New-RegistryFixture `
         -Entries @((New-TestEntry -Id 'failure' -Path 'scripts/test-failure.ps1')) `
@@ -285,7 +236,14 @@ try {
         -Files @{}
     $roots.Add($fixtureHelperRoot)
     Assert-FailsWith -Result (Invoke-RegistryFixture -Root $fixtureHelperRoot -Arguments @('-List')) `
-        -Fragment 'scripts/tests/support/visual-evidence-fixture.ps1'
+        -Fragment 'discoverable test-*'
+
+    $outsideScriptsRoot = New-RegistryFixture `
+        -Entries @((New-TestEntry -Id 'outside' -Path 'elsewhere/test-outside.ps1')) `
+        -Files @{ 'elsewhere/test-outside.ps1' = '# outside discovery root' }
+    $roots.Add($outsideScriptsRoot)
+    Assert-FailsWith -Result (Invoke-RegistryFixture -Root $outsideScriptsRoot -Arguments @('-List')) `
+        -Fragment 'discoverable test-*'
 
     $vmRoot = New-RegistryFixture `
         -Entries @((New-TestEntry -Id 'requires-vm' -Path 'scripts/test-requires-vm.ps1' -RequiresVm $true)) `

@@ -6,7 +6,6 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-import os
 from pathlib import Path
 from tooling_test_paths import SCRIPT_ROOT
 import stat

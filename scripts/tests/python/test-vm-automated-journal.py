@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from pathlib import Path
 from tooling_test_paths import REPOSITORY_ROOT
 import struct
 import subprocess

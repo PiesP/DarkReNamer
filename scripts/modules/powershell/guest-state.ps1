@@ -237,7 +237,8 @@ function Get-VmAutomatedRuntimeRootObservation {
             if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
                 throw 'The VM-Automated runtime root contains a reparse point.'
             }
-            if (-not $item.PSIsContainer -and $item -isnot [IO.FileInfo]) {
+            if (($item.Attributes -band [IO.FileAttributes]::Device) -ne 0 -or
+                (-not $item.PSIsContainer -and $item -isnot [IO.FileInfo])) {
                 throw 'The VM-Automated runtime root contains a non-ordinary entry.'
             }
             if ($entries.Count -ge $MaximumEntries) {

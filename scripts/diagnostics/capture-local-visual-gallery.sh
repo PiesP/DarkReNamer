@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ $# -eq 1 && ( "$1" == --help || "$1" == -h ) ]]; then
+  printf 'Usage: %s [absolute-empty-output-directory]\n' "$0"
+  exit 0
+fi
+
+script_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+if [[ "$(pwd -P)" != "$script_root" || "$(git rev-parse --show-toplevel)" != "$script_root" ]]; then
+  printf 'Run this script from its DarkReNamer repository root.\n' >&2
+  exit 1
+fi
+
 for tool in cargo wine wineboot winepath wineserver xvfb-run ffmpeg jq sha256sum timeout; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     printf 'Required visual-gallery tool is unavailable: %s\n' "$tool" >&2
     exit 1
   fi
 done
-
-repo_root="$(git rev-parse --show-toplevel)"
-if [[ "$repo_root" != "$PWD" ]]; then
-  printf 'Run this script from the DarkReNamer repository root.\n' >&2
-  exit 1
-fi
 
 if [[ $# -gt 1 ]]; then
   printf 'Usage: %s [absolute-empty-output-directory]\n' "$0" >&2
@@ -38,7 +43,7 @@ else
 fi
 
 source_sha="$(git rev-parse HEAD)"
-if git diff --quiet && git diff --cached --quiet; then
+if [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
   source_state=clean
 else
   source_state=dirty
@@ -61,7 +66,9 @@ cleanup() {
   fi
   rm -f -- "$build_messages"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 RC="$resource_compiler" cargo xwin test \
   --package darknamer-app \

@@ -58,10 +58,14 @@ def decode_png(
     ihdr = None
     compressed = bytearray()
     saw_iend = False
+    saw_idat = False
+    idat_closed = False
     while offset < len(data):
         require(offset + 12 <= len(data), f"{label} has a truncated PNG chunk.")
         length = struct.unpack(">I", data[offset:offset + 4])[0]
         kind = data[offset + 4:offset + 8]
+        require(all(65 <= byte <= 90 or 97 <= byte <= 122 for byte in kind) and
+                not kind[2] & 0x20, f"{label} has an invalid PNG chunk type.")
         end = offset + 12 + length
         require(length <= MAX_COMPRESSED_BYTES and end <= len(data),
                 f"{label} has an invalid PNG chunk length.")
@@ -72,6 +76,8 @@ def decode_png(
         require(kind != b"tRNS", f"{label} uses unsupported PNG transparency.")
         require(kind in {b"IHDR", b"IDAT", b"IEND"} or kind[0] & 0x20,
                 f"{label} uses an unsupported critical PNG chunk.")
+        if saw_idat and kind != b"IDAT":
+            idat_closed = True
         if kind == b"IHDR":
             require(ihdr is None and length == 13 and offset == 8,
                     f"{label} has an invalid IHDR.")
@@ -92,8 +98,9 @@ def decode_png(
             if budget is not None:
                 budget.reserve(width * height, label)
         elif kind == b"IDAT":
-            require(ihdr is not None and not saw_iend,
+            require(ihdr is not None and not idat_closed,
                     f"{label} has IDAT in an invalid position.")
+            saw_idat = True
             compressed.extend(payload)
             require(len(compressed) <= MAX_COMPRESSED_BYTES,
                     f"{label} has too much compressed raster data.")
@@ -106,11 +113,6 @@ def decode_png(
             f"{label} is missing required PNG chunks.")
     width, height, depth, color_type, compression, filtering, interlace = struct.unpack(
         ">IIBBBBB", ihdr)
-    require(width > 0 and height > 0 and width * height <= MAX_PNG_PIXELS,
-            f"{label} dimensions are invalid.")
-    require(depth == 8 and color_type in {0, 2, 4, 6} and compression == 0 and
-            filtering == 0 and interlace == 0,
-            f"{label} uses an unsupported PNG encoding.")
     channels = {0: 1, 2: 3, 4: 2, 6: 4}[color_type]
     stride = width * channels
     expected = (stride + 1) * height

@@ -102,8 +102,6 @@ function Read-ToolingRegistry {
 
     $requiredExclusions = [ordered]@{
         'scripts/test-tooling.ps1' = 'suite-entrypoint'
-        'scripts/tests/support/visual-evidence-fixture.ps1' = 'fixture-helper'
-        'scripts/tests/support/windows-binary-fixture.ps1' = 'fixture-helper'
         'scripts/test-windows-vm.py' = 'vm-cli'
     }
     $exclusions = @{}
@@ -116,7 +114,7 @@ function Read-ToolingRegistry {
         $exclusions[$path] = [string] $exclusion.reason
     }
     if ($exclusions.Count -ne $requiredExclusions.Count) {
-        throw 'Tooling discovery exclusions must contain only the required suite, fixture, and VM CLI paths.'
+        throw 'Tooling discovery exclusions must contain only the required suite and VM CLI paths.'
     }
     foreach ($required in $requiredExclusions.GetEnumerator()) {
         if (-not $exclusions.ContainsKey($required.Key) -or
@@ -129,7 +127,7 @@ function Read-ToolingRegistry {
     }
 
     $ids = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    $paths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $paths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $validated = [Collections.Generic.List[object]]::new()
     foreach ($entry in @($registry.tests)) {
         Assert-Properties `
@@ -164,18 +162,22 @@ function Read-ToolingRegistry {
         }
 
         $entryRunner = [string] $entry.runner
-        if ($entryRunner -notin @('PowerShell', 'Python')) {
+        if ($entryRunner -cnotin @('PowerShell', 'Python')) {
             throw "Unsupported tooling runner for ${entryId}: $entryRunner"
         }
         $expectedExtension = if ($entryRunner -ceq 'PowerShell') { '.ps1' } else { '.py' }
         if ([IO.Path]::GetExtension($path) -cne $expectedExtension) {
             throw "Tooling runner does not match the path extension for ${entryId}: $path"
         }
+        if (-not $path.StartsWith('scripts/', [StringComparison]::Ordinal) -or
+            [IO.Path]::GetFileName($path) -cnotlike "test-*$expectedExtension") {
+            throw "Registered tooling test must use a discoverable test-* name below scripts/: $path"
+        }
 
         $platforms = @($entry.platforms)
         if ($entry.platforms -isnot [array] -or $platforms.Count -eq 0 -or
             @($platforms | Where-Object { $_ -isnot [string] }).Count -ne 0 -or
-            @($platforms | Where-Object { $_ -notin @('Ubuntu', 'Windows') }).Count -ne 0 -or
+            @($platforms | Where-Object { $_ -cnotin @('Ubuntu', 'Windows') }).Count -ne 0 -or
             @($platforms | Sort-Object -Unique).Count -ne $platforms.Count) {
             throw "Tooling platforms are empty, invalid, or duplicated for $entryId."
         }
@@ -330,6 +332,13 @@ if ($Id.Count -ne 0) {
     $unknownIds = @($Id | Where-Object { $tests.id -notcontains $_ } | Sort-Object -Unique)
     if ($unknownIds.Count -ne 0) {
         throw "Unknown tooling test ids: $($unknownIds -join ', ')"
+    }
+}
+if ($Category.Count -ne 0) {
+    $unknownCategories = @($Category | Where-Object { $tests.category -notcontains $_ } |
+        Sort-Object -Unique)
+    if ($unknownCategories.Count -ne 0) {
+        throw "Unknown tooling test categories: $($unknownCategories -join ', ')"
     }
 }
 if ($selected.Count -eq 0) {

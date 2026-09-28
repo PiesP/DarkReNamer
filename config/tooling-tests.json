@@ -5,14 +5,16 @@
     "patterns": ["test-*.ps1", "test-*.py"],
     "exclusions": [
       { "path": "scripts/test-tooling.ps1", "reason": "suite-entrypoint" },
-      { "path": "scripts/tests/support/visual-evidence-fixture.ps1", "reason": "fixture-helper" },
-      { "path": "scripts/tests/support/windows-binary-fixture.ps1", "reason": "fixture-helper" },
       { "path": "scripts/test-windows-vm.py", "reason": "vm-cli" }
     ]
   },
   "tests": [
-    { "id": "tooling-registry", "path": "scripts/tests/powershell/tooling-registry-tests.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "category": "registry", "requiresVm": false, "timeout": 120 },
+    { "id": "tooling-registry", "path": "scripts/tests/powershell/test-tooling-registry.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "category": "registry", "requiresVm": false, "timeout": 120 },
     { "id": "tooling-powershell-bootstrap", "path": "scripts/tests/powershell/test-tooling-powershell-bootstrap.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "category": "vm-contract", "requiresVm": false, "timeout": 120 },
+    { "id": "automation-invocation-lifecycle", "path": "scripts/tests/powershell/test-automation-invocation-lifecycle.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "category": "vm-contract", "requiresVm": false, "timeout": 120 },
+    { "id": "ui-observations", "path": "scripts/tests/powershell/test-ui-observations.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "category": "acceptance", "requiresVm": false, "timeout": 120 },
+    { "id": "observer-cleanup", "path": "scripts/tests/powershell/test-observer-cleanup.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "category": "vm-contract", "requiresVm": false, "timeout": 120 },
+    { "id": "observer-environment", "path": "scripts/tests/powershell/test-observer-environment.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "category": "vm-contract", "requiresVm": false, "timeout": 120 },
     { "id": "tooling-bundle", "path": "scripts/tests/python/test-tooling-bundle.py", "runner": "Python", "platforms": ["Ubuntu"], "category": "vm-contract", "requiresVm": false, "timeout": 120 },
     { "id": "tooling-bootstrap", "path": "scripts/tests/python/test-tooling-bootstrap.py", "runner": "Python", "platforms": ["Ubuntu"], "category": "vm-contract", "requiresVm": false, "timeout": 120 },
     { "id": "release-handoff-validator", "path": "scripts/tests/powershell/test-release-handoff-validator.ps1", "runner": "PowerShell", "platforms": ["Ubuntu"], "category": "release", "requiresVm": false, "timeout": 300 },
@@ -30,6 +32,7 @@
     { "id": "new-windows-acceptance-draft", "path": "scripts/tests/powershell/test-new-windows-acceptance-draft.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "category": "acceptance", "requiresVm": false, "timeout": 300 },
     { "id": "add-windows-acceptance-benchmark", "path": "scripts/tests/powershell/test-add-windows-acceptance-benchmark.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "category": "acceptance", "requiresVm": false, "timeout": 300 },
     { "id": "release-acceptance-validator", "path": "scripts/tests/powershell/test-release-acceptance-validator.ps1", "runner": "PowerShell", "platforms": ["Ubuntu", "Windows"], "category": "release", "requiresVm": false, "timeout": 300 },
+    { "id": "visual-gallery-diagnostics", "path": "scripts/tests/python/test-visual-gallery-diagnostics.py", "runner": "Python", "platforms": ["Ubuntu"], "category": "diagnostics", "requiresVm": false, "timeout": 120 },
     { "id": "windows-vm-runner", "path": "scripts/tests/python/test-windows-vm-runner.py", "runner": "Python", "platforms": ["Ubuntu"], "category": "vm-contract", "requiresVm": false, "timeout": 300 },
     { "id": "gui-regression-runner", "path": "scripts/tests/python/test-gui-regression-runner.py", "runner": "Python", "platforms": ["Ubuntu"], "category": "gui-regression", "requiresVm": false, "timeout": 300 },
     { "id": "gui-regression-evidence", "path": "scripts/tests/python/test-gui-regression-evidence.py", "runner": "Python", "platforms": ["Ubuntu"], "category": "gui-regression", "requiresVm": false, "timeout": 300 },

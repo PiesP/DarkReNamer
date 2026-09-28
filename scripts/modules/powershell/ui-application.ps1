@@ -124,7 +124,7 @@ function Stop-AndDisposeAcceptanceOwnedProcess {
                 -ExitMethod forced-termination `
                 -ExitCode ([int]$cleanup.termination_exit_code)
         }
-        if (-not $cleanup.job_empty -or -not $cleanup.job_closed) {
+        if ($cleanup.status -cne 'clean' -or -not $cleanup.job_empty -or -not $cleanup.job_closed) {
             throw 'The acceptance candidate process job did not close cleanly.'
         }
     }
@@ -371,6 +371,87 @@ function Set-ObserverManualName {
     } while ((Get-Date) -lt $deadline)
     throw "Manual row $Row preview did not expose the exact requested name."
 }
+function Set-ObserverExactEditFocus {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][object] $Edit,
+        [Parameter(Mandatory)][int] $SessionId,
+        [Parameter(Mandatory)][string] $Label,
+        [ValidateRange(1, 3000)][int] $TimeoutMilliseconds = 3000
+    )
+
+    Assert-AutomationBinding -Element $Edit -Process $Application.process `
+        -ExpectedSession $SessionId -Label "$Label exact edit" -RequireWindowHandle
+    $initial = $Edit.Current
+    $expectedProcessId = [int]$Application.process.Id
+    $handle = [long]$initial.NativeWindowHandle
+    $automationId = $initial.AutomationId
+    $class = $initial.ClassName
+    $controlType = $initial.ControlType.ProgrammaticName
+    $root = [DarkReNamerVmNative]::GetAncestor([IntPtr]$handle, 2)
+    $assertTarget = {
+        $Application.process.Refresh()
+        Assert-AutomationBinding -Element $Edit -Process $Application.process `
+            -ExpectedSession $SessionId -Label "$Label exact edit" -RequireWindowHandle
+        $current = $Edit.Current
+        if ($Application.process.HasExited -or
+            [long]$current.NativeWindowHandle -ne $handle -or
+            $current.AutomationId -cne $automationId -or $current.ClassName -cne $class -or
+            $current.ControlType.ProgrammaticName -cne $controlType -or
+            -not $current.IsEnabled -or $current.IsOffscreen -or
+            $root -eq [IntPtr]::Zero -or -not [DarkReNamerVmNative]::IsWindow($root) -or
+            [DarkReNamerVmNative]::GetAncestor([IntPtr]$handle, 2) -ne $root -or
+            [DarkReNamerVmNative]::GetForegroundWindow() -ne $root) {
+            throw "$Label lost or changed the bound read-only edit before selection."
+        }
+    }
+    & $assertTarget
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $actualHandle = '<not-observed>'
+    $focused = $null
+    $Edit.SetFocus()
+    do {
+        if ($watch.ElapsedMilliseconds -ge $TimeoutMilliseconds) { break }
+        & $assertTarget
+        $focused = Get-FocusedAcceptanceElement `
+            -Process $Application.process -ExpectedSession $SessionId -Label "$Label edit focus"
+        if ($null -eq $focused -or $focused.Current.ProcessId -ne $expectedProcessId -or
+            $Application.process.SessionId -ne $SessionId) {
+            throw "$Label edit focus is not in the expected application and desktop session."
+        }
+        $actualHandle = [long]$focused.Current.NativeWindowHandle
+        if ($actualHandle -eq $handle) {
+            & $assertTarget
+            if ($watch.ElapsedMilliseconds -ge $TimeoutMilliseconds) { break }
+            return $handle
+        }
+        $remaining = $TimeoutMilliseconds - $watch.ElapsedMilliseconds
+        if ($remaining -le 0) { break }
+        Start-Sleep -Milliseconds ([Math]::Min(50, $remaining))
+    } while ($watch.ElapsedMilliseconds -lt $TimeoutMilliseconds)
+    # Control names can contain the whole document; retain only bounded identity
+    # metadata, and never let a diagnostic read replace the focus mismatch.
+    $details = [Collections.Generic.List[string]]::new()
+    foreach ($field in ([ordered]@{
+        actual_pid = { $focused.Current.ProcessId }
+        actual_id = { $focused.Current.AutomationId }
+        actual_class = { $focused.Current.ClassName }
+        actual_type = { $focused.Current.ControlType.ProgrammaticName }
+        foreground_hwnd = { [DarkReNamerVmNative]::GetForegroundWindow() }
+    }).GetEnumerator()) {
+        try {
+            $rawValue = & $field.Value
+            $value = if ($null -eq $rawValue) { '<unavailable:null>' } else { [string]$rawValue }
+            if ($value.Length -gt 128) { $value = $value.Substring(0, 128) + '...' }
+        }
+        catch { $value = '<unavailable:' + $_.Exception.GetType().Name + '>' }
+        $details.Add($field.Key + '=' + $value)
+    }
+    throw ("$Label did not focus the exact read-only edit before selection within ${TimeoutMilliseconds}ms; " +
+        "expected_hwnd=$handle, actual_hwnd=$actualHandle, expected_pid=$expectedProcessId, expected_root_hwnd=$root, " +
+        "session=$SessionId, expected_id=$automationId, expected_class=$class, expected_type=$controlType, " +
+        ([string]::Join(', ', $details)) + ", elapsed_ms=$($watch.ElapsedMilliseconds).")
+}
 function Copy-GuiRegressionDocument {
     param(
         [Parameter(Mandatory)][ValidateSet('selection', 'mnemonic')][string] $Mode,
@@ -389,15 +470,9 @@ function Copy-GuiRegressionDocument {
     }
     if ($Mode -ceq 'selection') {
         if ($null -eq $Edit) { throw 'Selection copy requires the bound read-only Edit.' }
-        Assert-AutomationBinding -Element $Edit -Process $Application.process `
-            -ExpectedSession $SessionId -Label "$Label exact edit" -RequireWindowHandle
-        $editHandle = [long]$Edit.Current.NativeWindowHandle
-        $Edit.SetFocus()
-        $focused = Get-FocusedAcceptanceElement `
-            -Process $Application.process -ExpectedSession $SessionId -Label "$Label edit focus"
-        if ([long]$focused.Current.NativeWindowHandle -ne $editHandle) {
-            throw "$Label did not focus the exact read-only edit before selection."
-        }
+        $editHandle = Set-ObserverExactEditFocus -Application $Application -Edit $Edit `
+            -SessionId $SessionId -Label $Label `
+            -TimeoutMilliseconds ([Math]::Min(3000, [int64]$WaitSeconds * 1000))
         Send-AcceptanceChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 -VirtualKey 0x24 -Label "$Label selection start" -ExtendedKey
         Send-AcceptanceTwoModifierChord -Process $Application.process -ExpectedSession $SessionId -Modifier 0x11 -SecondModifier 0x10 -VirtualKey 0x23 -Label "$Label select to end" -ExtendedKey
         $textObject = $null
@@ -669,17 +744,134 @@ function New-ObserverPathList {
     [IO.File]::WriteAllBytes($path, $bytes)
     $path
 }
+function Assert-ObserverFixturePathSegment {
+    param([Parameter(Mandatory)][string] $Segment)
+
+    if ([string]::IsNullOrEmpty($Segment) -or $Segment.Length -gt 240 -or
+        $Segment -cin @('.', '..') -or
+        $Segment.EndsWith('.', [StringComparison]::Ordinal) -or
+        $Segment.EndsWith(' ', [StringComparison]::Ordinal) -or
+        $Segment.IndexOfAny([char[]]'<>:"/\|?*') -ge 0 -or
+        $Segment.Split('.')[0] -imatch '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') {
+        throw 'The observer fixture inventory contains an unsafe path segment.'
+    }
+    for ($index = 0; $index -lt $Segment.Length; $index++) {
+        $character = $Segment[$index]
+        if ([int]$character -lt 32) {
+            throw 'The observer fixture inventory contains an unsafe path segment.'
+        }
+        if ([char]::IsHighSurrogate($character)) {
+            if ($index + 1 -ge $Segment.Length -or
+                -not [char]::IsLowSurrogate($Segment[$index + 1])) {
+                throw 'The observer fixture inventory contains invalid UTF-16.'
+            }
+            $index++
+        }
+        elseif ([char]::IsLowSurrogate($character)) {
+            throw 'The observer fixture inventory contains invalid UTF-16.'
+        }
+    }
+}
+function ConvertTo-ObserverFixtureRelativePath {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]] $ParentSegments,
+        [Parameter(Mandatory)][string] $Leaf
+    )
+
+    $segments = @($ParentSegments) + @($Leaf)
+    if ($segments.Count -gt 3) {
+        throw 'The observer fixture inventory exceeds depth three.'
+    }
+    foreach ($segment in $segments) {
+        Assert-ObserverFixturePathSegment -Segment $segment
+    }
+    $segments -join '/'
+}
+function Get-ObserverFixtureEntries {
+    param([Parameter(Mandatory)][string] $FixtureRoot)
+
+    $root = Get-Item -LiteralPath $FixtureRoot -Force -ErrorAction Stop
+    if (-not $root.PSIsContainer -or
+        ($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The observer fixture root must be an ordinary directory.'
+    }
+    $entries = [Collections.Generic.List[object]]::new()
+    $relativePaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $bounds = [pscustomobject]@{ total_bytes = [long]0 }
+    $visit = {
+        param([string] $CurrentPath, [AllowEmptyCollection()][string[]] $ParentSegments)
+
+        $enumerator = [IO.Directory]::EnumerateFileSystemEntries($CurrentPath).GetEnumerator()
+        try {
+            while ($enumerator.MoveNext()) {
+                if ($entries.Count -ge 16) { throw 'The observer fixture inventory exceeds sixteen entries.' }
+                $item = Get-Item -LiteralPath ([string]$enumerator.Current) -Force -ErrorAction Stop
+                $relativePath = ConvertTo-ObserverFixtureRelativePath -ParentSegments $ParentSegments -Leaf $item.Name
+                if (-not $relativePaths.Add($relativePath)) {
+                    throw 'The observer fixture inventory contains a case-alias path.'
+                }
+                if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw 'The observer fixture inventory contains a reparse point.'
+                }
+                if (($item.Attributes -band [IO.FileAttributes]::Device) -ne 0 -or
+                    (-not $item.PSIsContainer -and $item -isnot [IO.FileInfo])) {
+                    throw 'The observer fixture inventory requires ordinary files or directories.'
+                }
+                if (-not $item.PSIsContainer) {
+                    if ($item.Length -gt 64MB) { throw 'The observer fixture inventory contains an oversized file.' }
+                    $bounds.total_bytes += [long]$item.Length
+                    if ($bounds.total_bytes -gt 512MB) {
+                        throw 'The observer fixture inventory exceeds its aggregate size bound.'
+                    }
+                }
+                $entries.Add([pscustomobject]@{ relative_path = $relativePath; item = $item })
+                if ($item.PSIsContainer) {
+                    & $visit -CurrentPath $item.FullName -ParentSegments (@($ParentSegments) + @($item.Name))
+                }
+            }
+        }
+        finally { if ($enumerator -is [IDisposable]) { $enumerator.Dispose() } }
+    }
+    & $visit -CurrentPath $root.FullName -ParentSegments ([string[]]@())
+    $entries.ToArray()
+}
+function Get-ObserverFixtureFileHash {
+    param([Parameter(Mandatory)][IO.FileInfo] $File)
+
+    $expectedBytes = [long]$File.Length
+    if ($expectedBytes -gt 64MB) { throw 'The observer fixture inventory contains an oversized file.' }
+    $stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            $buffer = [byte[]]::new(64KB)
+            $total = [long]0
+            while ($true) {
+                $remaining = [int][Math]::Min($buffer.Length, $expectedBytes - $total + 1)
+                $read = $stream.Read($buffer, 0, $remaining)
+                if ($read -eq 0) { break }
+                $total += $read
+                if ($total -gt $expectedBytes) { throw 'The observer fixture file grew during observation.' }
+                [void]$sha256.TransformBlock($buffer, 0, $read, $buffer, 0)
+            }
+            if ($total -ne $expectedBytes) { throw 'The observer fixture file shrank during observation.' }
+            [void]$sha256.TransformFinalBlock([byte[]]@(), 0, 0)
+            ([BitConverter]::ToString($sha256.Hash) -replace '-', '').ToLowerInvariant()
+        }
+        finally { $sha256.Dispose() }
+    }
+    finally { $stream.Dispose() }
+}
 function Get-ObserverFixtureState {
     param([Parameter(Mandatory)][string] $FixtureRoot)
     $rows = [Collections.Generic.List[object]]::new()
-    foreach ($file in @(Get-ChildItem -LiteralPath $FixtureRoot -File -Recurse -Force | Sort-Object FullName)) {
-        if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw 'Fixture contains a reparse point.'
-        }
+    $files = @(Get-ObserverFixtureEntries -FixtureRoot $FixtureRoot | ForEach-Object item |
+        Where-Object { -not $_.PSIsContainer } | Sort-Object FullName)
+    foreach ($file in $files) {
         $rows.Add([ordered]@{
             path = $file.FullName
             name = $file.Name
-            content_sha256 = Get-LowerSha256 -Path $file.FullName
+            content_sha256 = Get-ObserverFixtureFileHash -File $file
             identity = [DarkReNamerVmNative]::GetFileIdentity($file.FullName)
         })
     }
@@ -749,7 +941,7 @@ function Invoke-ObserverPrefix {
         [string] $ExpectedFirstSourceName = 'item-00000.txt'
     )
     $command = Find-UniqueAutomationElement -Root $Application.main -Process $Application.process -ExpectedSession $SessionId -AutomationId '32773' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'large smoke prefix command' -RequireEnabled -RequireWindowHandle
-    $invoke = Start-AutomationControlInvoke -Element $command -Label 'large smoke prefix command'
+    $invoke = Start-AutomationControlInvoke -OwnedProcess $Application.owned -Element $command -Label 'large smoke prefix command'
     $prompt = Wait-UniqueAutomationWindow -Process $Application.process -ExpectedSession $SessionId -Owner $Application.main -Name '이름 앞에 문자열 붙이기' -TimeoutSeconds $WaitSeconds -Label 'large smoke prefix prompt'
     $handle = [IntPtr]$prompt.Current.NativeWindowHandle
     $edit = Find-UniqueAutomationElement -Root $prompt -Process $Application.process -ExpectedSession $SessionId -AutomationId '1004' -ControlType ([Windows.Automation.ControlType]::Edit) -TimeoutSeconds $WaitSeconds -Label 'large smoke prefix edit' -RequireWindowHandle
@@ -971,7 +1163,7 @@ function Start-ObserverApplyFromPublicUi {
         Assert-AutomationBinding -Element $apply -Process $Application.process -ExpectedSession $SessionId -Label $Label
         return [pscustomobject]@{
             input = 'visible-command-rail'
-            invocation = Start-AutomationControlInvoke -Element $apply -Label $Label
+            invocation = Start-AutomationControlInvoke -OwnedProcess $Application.owned -Element $apply -Label $Label
             menu_entry = $null
         }
     }
@@ -1285,7 +1477,7 @@ function Invoke-ObserverActualApply {
     }
     [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $confirmation -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-actual-apply-confirmation.png') -Label 'actual 3/1/2 Apply confirmation'))
     $confirm = Find-UniqueAutomationElement -Root $confirmation -Process $Application.process -ExpectedSession $SessionId -AutomationId 'CommandLink_1101' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'actual Apply command link' -RequireEnabled -RequireWindowHandle
-    $confirmInvocation = Start-AutomationControlInvoke -Element $confirm -Label 'actual Apply command link'
+    $confirmInvocation = Start-AutomationControlInvoke -OwnedProcess $Application.owned -Element $confirm -Label 'actual Apply command link'
     $deadline = (Get-Date).AddSeconds($WaitSeconds)
     do {
         $complete = -not (Test-Path -LiteralPath $Fixture.paths[0]) -and

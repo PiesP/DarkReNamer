@@ -127,7 +127,7 @@ function Invoke-AcceptanceImportAndPrefix {
         -Label 'prefix command after path import' `
         -RequireEnabled `
         -RequireWindowHandle
-    $prefixInvocation = Start-AutomationControlInvoke -Element $prefixCommand -Label 'prefix command'
+    $prefixInvocation = Start-AutomationControlInvoke -OwnedProcess $Application.owned -Element $prefixCommand -Label 'prefix command'
     $prompt = Wait-UniqueAutomationWindow `
         -Process $process `
         -ExpectedSession $SessionId `
@@ -178,7 +178,7 @@ function Invoke-AcceptanceApply {
         -Label 'apply command after prefix' `
         -RequireEnabled `
         -RequireWindowHandle
-    $applyInvocation = Start-AutomationControlInvoke -Element $apply -Label 'apply command'
+    $applyInvocation = Start-AutomationControlInvoke -OwnedProcess $Application.owned -Element $apply -Label 'apply command'
     $confirmation = Wait-UniqueAutomationWindow `
         -Process $process `
         -ExpectedSession $SessionId `
@@ -232,6 +232,169 @@ function Stop-AcceptanceOwnedProcess {
         throw 'The application exit code does not match the observer Job Object termination receipt.'
     }
 }
+function Get-AcceptanceWorkerCancelHandle {
+    param([Parameter(Mandatory)][IntPtr] $MainHandle)
+    Initialize-RecoveryLockNative
+    [DarkReNamerRecoveryLockNative]::GetDlgItem($MainHandle, 1009)
+}
+function Get-AcceptanceWorkerCancelAutomationElement {
+    param([Parameter(Mandatory)][IntPtr] $Handle)
+    [Windows.Automation.AutomationElement]::FromHandle($Handle)
+}
+function New-AcceptanceWorkerCancelBinding {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][int] $SessionId
+    )
+
+    Assert-AcceptanceProcessBinding -Application $Application
+    $binding = [pscustomobject]@{
+        element = $null
+        pattern = $null
+        hwnd = [IntPtr](Get-AcceptanceWorkerCancelHandle -MainHandle $Application.main_handle)
+        main_handle = $Application.main_handle
+        pid = $Application.raw_process_binding.pid
+        session_id = $SessionId
+        start_time_utc_ticks = $Application.raw_process_binding.start_time_utc_ticks
+    }
+    # Hidden native children need not occur in the UIA tree. Verify the exact
+    # source-defined child before asking its HWND provider for an element.
+    [void](Get-AcceptanceWorkerCancelTarget -Application $Application -Binding $binding)
+    $cancel = Get-AcceptanceWorkerCancelAutomationElement -Handle $binding.hwnd
+    if ($null -eq $cancel) {
+        throw 'The retained worker cancellation HWND has no UIA element.'
+    }
+    $current = $cancel.Current
+    if ($current.ProcessId -ne $binding.pid -or
+        [IntPtr]$current.NativeWindowHandle -ne $binding.hwnd -or
+        $current.AutomationId -cne '1009' -or
+        $current.ControlType.ProgrammaticName -cne 'ControlType.Button' -or
+        $current.Name -cne '취소') {
+        throw 'The retained worker cancellation control has an unexpected UIA identity.'
+    }
+    $pattern = $null
+    if (-not $cancel.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$pattern) -or
+        $null -eq $pattern) {
+        throw 'The retained worker cancellation control has no UIA InvokePattern.'
+    }
+    $binding.element = $cancel
+    $binding.pattern = $pattern
+    $binding
+}
+function Read-AcceptanceWorkerControlState {
+    param([Parameter(Mandatory)][object] $Binding)
+
+    Initialize-RecoveryLockNative
+    $handle = [IntPtr]$Binding.hwnd
+    $main = [IntPtr]$Binding.main_handle
+    $controlProcessId = [uint32]0
+    $thread = [DarkReNamerVmNative]::GetWindowThreadProcessId($handle, [ref]$controlProcessId)
+    $rootProcessId = [uint32]0
+    [void][DarkReNamerVmNative]::GetWindowThreadProcessId($main, [ref]$rootProcessId)
+    if ($controlProcessId -ne $Binding.pid -or $rootProcessId -ne $Binding.pid -or
+        [DarkReNamerRecoveryLockNative]::GetDlgItem($main, 1009) -ne $handle -or
+        [DarkReNamerRecoveryLockNative]::GetParent($handle) -ne $main -or
+        [DarkReNamerRecoveryLockNative]::GetAncestor($handle, [uint32]2) -ne $main) {
+        throw 'The worker native text target changed process or child ownership.'
+    }
+    $class = [Text.StringBuilder]::new(64)
+    $rootClass = [Text.StringBuilder]::new(64)
+    $rootName = [Text.StringBuilder]::new(64)
+    [void][DarkReNamerVmNative]::GetClassName($handle, $class, $class.Capacity)
+    [void][DarkReNamerVmNative]::GetClassName($main, $rootClass, $rootClass.Capacity)
+    $name = [DarkReNamerRecoveryLockNative]::ReadButtonText($handle, [uint32]$Binding.pid)
+    [void][DarkReNamerRecoveryLockNative]::GetWindowTextW($main, $rootName, $rootName.Capacity)
+    [pscustomobject]@{
+        live = [DarkReNamerVmNative]::IsWindow($handle) -and [DarkReNamerVmNative]::IsWindow($main)
+        child = [DarkReNamerRecoveryLockNative]::GetDlgItem($main, 1009)
+        parent = [DarkReNamerRecoveryLockNative]::GetParent($handle)
+        root = [DarkReNamerRecoveryLockNative]::GetAncestor($handle, [uint32]2)
+        pid = $controlProcessId; root_pid = $rootProcessId
+        class = $class.ToString(); root_class = $rootClass.ToString()
+        name = $name; root_name = $rootName.ToString()
+        control_id = [DarkReNamerRecoveryLockNative]::GetDlgCtrlID($handle)
+        enabled = [DarkReNamerRecoveryLockNative]::IsWindowEnabled($handle)
+        visible = [DarkReNamerVmNative]::IsWindowVisible($handle)
+        main_enabled = [DarkReNamerRecoveryLockNative]::IsWindowEnabled($main)
+        focused = [DarkReNamerRecoveryLockNative]::IsWindowFocused($handle, [uint32]$thread)
+    }
+}
+function Get-AcceptanceWorkerCancelTarget {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][object] $Binding,
+        [switch] $RequireActive
+    )
+
+    Assert-AcceptanceProcessBinding -Application $Application
+    $process = $Application.owned.process
+    if ($process.HasExited -or $process.SessionId -ne $Binding.session_id -or
+        $Binding.pid -ne $Application.raw_process_binding.pid -or
+        $Binding.start_time_utc_ticks -cne $Application.raw_process_binding.start_time_utc_ticks -or
+        $Binding.main_handle -ne $Application.main_handle -or $Binding.hwnd -eq [IntPtr]::Zero) {
+        throw 'The retained worker cancellation process or main-window binding changed.'
+    }
+    $state = Read-AcceptanceWorkerControlState -Binding $Binding
+    if (-not $state.live -or $state.child -ne $Binding.hwnd -or
+        $state.parent -ne $Binding.main_handle -or $state.root -ne $Binding.main_handle -or
+        $state.pid -ne $Binding.pid -or $state.root_pid -ne $Binding.pid -or
+        $state.class -cne 'Button' -or $state.name -cne '취소' -or
+        $state.root_class -cne 'DarkReNamerWindow' -or $state.root_name -cne 'DarkReNamer' -or
+        $state.control_id -ne 1009 -or -not $state.main_enabled) {
+        throw 'The retained worker cancellation native child or root identity changed.'
+    }
+    if ($RequireActive -and (-not $state.enabled -or -not $state.visible)) {
+        throw 'The active worker cancellation target is not enabled and visible.'
+    }
+    [ordered]@{
+        pid = [int]$Binding.pid; session_id = [int]$Binding.session_id
+        hwnd = [long]$Binding.hwnd; root_hwnd = [long]$Binding.main_handle
+        class = $state.class; control_id = [int]$state.control_id
+        automation_id = '1009'; control_type = 'ControlType.Button'
+        enabled = [bool]$state.enabled; visible = [bool]$state.visible; focused = [bool]$state.focused
+    }
+}
+function Assert-AcceptanceWorkerWitnessesLive {
+    param(
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][string] $LocalAppData,
+        [Parameter(Mandatory)][object] $Boundary
+    )
+
+    $journal = Join-Path (Join-Path $LocalAppData 'DarkReNamer') 'journal'
+    if (-not (Test-Path -LiteralPath (Join-Path $FixtureRoot $Boundary.partial_witness.entries[0].name) -PathType Leaf) -or
+        -not (Test-Path -LiteralPath (Join-Path $FixtureRoot $Boundary.partial_witness.entries[1].name) -PathType Leaf) -or
+        -not (Test-Path -LiteralPath (Join-Path $journal 'active.drj') -PathType Leaf) -or
+        (Test-Path -LiteralPath (Join-Path $journal 'candidate.drj') -PathType Leaf)) {
+        throw 'The partial worker witnesses or active journal were lost before interruption.'
+    }
+}
+function Request-AcceptanceWorkerWindowClose {
+    param([Parameter(Mandatory)][IntPtr] $Handle)
+    [DarkReNamerVmNative]::RequestWindowClose($Handle)
+}
+function Invoke-AcceptanceWorkerInterruption {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][object] $Binding,
+        [Parameter(Mandatory)][object] $Boundary,
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [Parameter(Mandatory)][string] $LocalAppData,
+        [Parameter(Mandatory)][ValidateSet('WorkerCancellation', 'WorkerClose')][string] $Mode
+    )
+
+    $target = Get-AcceptanceWorkerCancelTarget -Application $Application -Binding $Binding -RequireActive
+    Assert-AcceptanceWorkerWitnessesLive `
+        -FixtureRoot $FixtureRoot -LocalAppData $LocalAppData -Boundary $Boundary
+    $observed = [DateTime]::UtcNow.Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
+    if ($Mode -ceq 'WorkerCancellation') {
+        $Binding.pattern.Invoke()
+    }
+    else {
+        Request-AcceptanceWorkerWindowClose -Handle $Binding.main_handle
+    }
+    [pscustomobject]@{ target = $target; observed_utc_ticks = $observed }
+}
 function Get-AcceptanceActiveWorkerBoundary {
     param(
         [Parameter(Mandatory)][object] $Application,
@@ -246,18 +409,10 @@ function Get-AcceptanceActiveWorkerBoundary {
     )
 
     $process = $Application.owned.process
-    Assert-AutomationBinding `
-        -Element $Cancel `
-        -Process $process `
-        -ExpectedSession $SessionId `
-        -Label 'active worker cancellation control' `
-        -RequireWindowHandle
-    if ($Cancel.Current.AutomationId -cne '1009' -or
-        $Cancel.Current.ControlType -ne [Windows.Automation.ControlType]::Button -or
-        $Cancel.Current.Name -cne '취소') {
-        throw 'The cached worker cancellation control changed identity or text.'
+    if ($SessionId -ne $Cancel.session_id) {
+        throw 'The worker boundary session differs from its retained cancellation binding.'
     }
-    $cancelVisible = -not $Cancel.Current.IsOffscreen
+    $cancelTarget = Get-AcceptanceWorkerCancelTarget -Application $Application -Binding $Cancel -RequireActive
     $firstOriginalName = 'item-00000.txt'
     $firstRenamedName = $Prefix + $firstOriginalName
     $lastOriginalName = 'item-{0:D5}.txt' -f ($ExpectedCount - 1)
@@ -308,8 +463,8 @@ function Get-AcceptanceActiveWorkerBoundary {
         -WitnessesRechecked $witnessesRechecked `
         -ActiveJournalExists $activeExists `
         -CandidateJournalExists $candidateExists `
-        -CancelEnabled $Cancel.Current.IsEnabled `
-        -CancelVisible $cancelVisible
+        -CancelEnabled $cancelTarget.enabled `
+        -CancelVisible $cancelTarget.visible
     [pscustomobject]@{
         classification = $classification
         observed_partial_rename = $true
@@ -346,7 +501,6 @@ function Get-AcceptanceActiveWorkerBoundary {
                 }
             )
         }
-        cancel = $Cancel
     }
 }
 function Wait-AcceptanceWorkerRollback {
@@ -375,7 +529,11 @@ function Wait-AcceptanceWorkerRollback {
 function Close-AcceptanceApplicationNormally {
     param(
         [Parameter(Mandatory)][object] $Application,
-        [Parameter(Mandatory)][int] $WaitSeconds
+        [Parameter(Mandatory)][int] $WaitSeconds,
+        [object] $WorkerBinding,
+        [object] $WorkerBoundary,
+        [string] $FixtureRoot,
+        [string] $LocalAppData
     )
 
     $process = $Application.owned.process
@@ -383,14 +541,21 @@ function Close-AcceptanceApplicationNormally {
     if ($process.HasExited) {
         throw 'The acceptance application rejected ordinary window close.'
     }
-    Close-ExactApplicationMainWindow `
-        -Process $process `
-        -ExpectedSession $Application.session_id `
-        -MainWindowHandle $Application.main_handle `
-        -MainWindow $Application.main `
-        -ExpectedClassName 'DarkReNamerWindow' `
-        -ExpectedTitle 'DarkReNamer' `
-        -Label 'recovery ordinary window close'
+    if ($null -ne $WorkerBinding) {
+        [void](Invoke-AcceptanceWorkerInterruption `
+            -Application $Application -Binding $WorkerBinding -Boundary $WorkerBoundary `
+            -FixtureRoot $FixtureRoot -LocalAppData $LocalAppData -Mode WorkerClose)
+    }
+    else {
+        Close-ExactApplicationMainWindow `
+            -Process $process `
+            -ExpectedSession $Application.session_id `
+            -MainWindowHandle $Application.main_handle `
+            -MainWindow $Application.main `
+            -ExpectedClassName 'DarkReNamerWindow' `
+            -ExpectedTitle 'DarkReNamer' `
+            -Label 'recovery ordinary window close'
+    }
     $waitMilliseconds = [int]([Math]::Min([int]::MaxValue, [int64]$WaitSeconds * 1000L))
     if (-not $process.WaitForExit($waitMilliseconds)) {
         throw 'The acceptance application did not close before the bounded deadline.'
@@ -454,7 +619,7 @@ function Invoke-AcceptanceRecovery {
         -Label 'exact recovery confirmation' `
         -RequireEnabled `
         -RequireWindowHandle
-    $invoke = Start-AutomationControlInvoke -Element $confirm -Label 'exact recovery confirmation'
+    $invoke = Start-AutomationControlInvoke -OwnedProcess $Application.owned -Element $confirm -Label 'exact recovery confirmation'
     Wait-WindowClosed -Handle $promptHandle -TimeoutSeconds $WaitSeconds -Label 'startup recovery confirmation'
     Dismiss-AcceptanceMessage `
         -Application $Application `

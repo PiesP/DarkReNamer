@@ -6,8 +6,6 @@ import json
 import os
 from pathlib import Path
 import struct
-import subprocess
-import sys
 import tempfile
 import unittest
 import zlib
@@ -621,6 +619,64 @@ class GuiRegressionRunnerTests(unittest.TestCase):
         cleanup = json.loads((output / "cleanup.json").read_text())
         self.assertTrue(cleanup["desktop_restore"])
         self.assertEqual(cleanup["controller_exit_code"], 0)
+
+    def test_cleanup_summary_requires_all_resource_results_independent_of_controller_exit(self):
+        cases = (
+            ("all-clean", True, True, True, 0, "passed"),
+            ("fixture-failed", False, True, True, 0, "failed"),
+            ("process-failed", True, False, True, 0, "failed"),
+            ("process-unreported", True, None, True, 0, "failed"),
+            ("guest-failed", True, True, False, 0, "failed"),
+            ("transport-missing", True, True, None, 0, "failed"),
+            ("operation-failed-resources-clean", True, True, True, 1, "passed"),
+        )
+        for name, fixture, process, guest, exit_code, expected_status in cases:
+            with self.subTest(name=name):
+                run_root = self.root / name
+                run_root.mkdir()
+                output = run_root / "output"
+                self.write_json(run_root / "input-manifest.json", {"run_id": name})
+
+                @contextmanager
+                def desktop(_arguments):
+                    yield {"expectedGuestSid": "S-1-5-21-1-2-3-4"}
+
+                def controller(*_arguments, **_keywords):
+                    self.write_json(output / "acceptance-observations.json", {
+                        "environment": {"text_scale_factor_percent": 100},
+                    })
+                    self.write_json(output / "acceptance-result.json", {
+                        "guest_cleanup": fixture, "process_cleanup": process,
+                    })
+                    if guest is not None:
+                        self.write_json(output / "transport.json", {"guest_cleanup": guest})
+                    return SimpleNamespace(returncode=exit_code)
+
+                with mock.patch.object(runner, "controller_command", return_value=["controller"]), \
+                        mock.patch.object(runner.subprocess, "run", side_effect=controller), \
+                        mock.patch.object(runner, "finalize_run") as finalize:
+                    arguments = (
+                        self.root, self.root, run_root,
+                        {"run_id": name, "mode": "full-context", "text_scale_percent": 100,
+                         "dpi": 96, "width": 800, "height": 600},
+                        {"ssh_host": "fixture", "desktop_helper": "C:\\fixture.ps1"},
+                        SimpleNamespace(managed_desktop=desktop),
+                    )
+                    if exit_code:
+                        with self.assertRaisesRegex(ValueError, "transport failed"):
+                            runner.execute_run(*arguments)
+                        finalize.assert_not_called()
+                    else:
+                        runner.execute_run(*arguments)
+                        finalize.assert_called_once_with(run_root)
+                cleanup = json.loads((output / "cleanup.json").read_text())
+                self.assertEqual(cleanup["status"], expected_status)
+                self.assertEqual(cleanup["controller_exit_code"], exit_code)
+                self.assertEqual(cleanup["fixture"], fixture)
+                self.assertEqual(cleanup["process"], process is True)
+                self.assertEqual(cleanup["guest"], guest is True)
+                self.assertTrue(cleanup["desktop_restore"])
+                self.assertTrue(cleanup["text_scale_restore"])
 
     def test_four_finalized_producer_fixtures_pass_independent_validator_cli(self):
         default = Path(__file__).with_name("test-gui-regression-evidence.py")

@@ -11,7 +11,7 @@ import re
 import sys
 
 
-INVENTORY = (
+PYTHON_INVENTORY = (
     ("tooling-loader", "scripts/tooling_bootstrap.py", "tooling-loader.py", "python", "darkrenamer_tooling.loader", ("package-root",)),
     ("package-root", "scripts/darkrenamer_tooling/__init__.py", "tooling-package-root.py", "python-package", "darkrenamer_tooling", ()),
     ("package-campaign", "scripts/darkrenamer_tooling/campaign/__init__.py", "tooling-package-campaign.py", "python-package", "darkrenamer_tooling.campaign", ("package-root",)),
@@ -117,6 +117,8 @@ POWERSHELL_INVENTORY = (
     )),
 )
 
+TOOLING_INVENTORY = PYTHON_INVENTORY + POWERSHELL_INVENTORY
+
 PUBLIC_BOOTSTRAPS = (
     "scripts/test-windows-vm.py",
     "scripts/run-gui-regression.py",
@@ -145,13 +147,9 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def selected_inventory(root: Path):
-    return INVENTORY + POWERSHELL_INVENTORY
-
-
 def manifest_bytes(root: Path) -> bytes:
     modules = []
-    for role, source, bundle, kind, module, dependencies in selected_inventory(root):
+    for role, source, bundle, kind, module, dependencies in TOOLING_INVENTORY:
         data = (root / source).read_bytes()
         modules.append({
             "role": role,
@@ -165,45 +163,41 @@ def manifest_bytes(root: Path) -> bytes:
     return (json.dumps({"schema_version": 1, "modules": modules}, indent=2) + "\n").encode()
 
 
-def updated_bootstrap(data: bytes, *, manifest_sha256: str, loader_sha256: str) -> bytes:
-    text = data.decode("utf-8")
-    replacements = {
-        "TOOLING_MANIFEST_SHA256": manifest_sha256,
-        "TOOLING_LOADER_SHA256": loader_sha256,
-    }
+def replace_pins(
+    text: str, pattern: re.Pattern[str], replacements: dict[str, str], label: str
+) -> str:
+    names = [match.group(1).split(" =", 1)[0] for match in pattern.finditer(text)]
+    if sorted(names) != sorted(replacements):
+        raise ValueError(f"{label} must contain each generated tooling pin exactly once.")
 
     def replace(match: re.Match[str]) -> str:
         name = match.group(1).split(" =", 1)[0]
-        return match.group(1) + '"' + replacements[name] + '"'
+        return match.group(1) + replacements[name]
 
-    changed, count = PIN_PATTERN.subn(replace, text)
-    if count != 2:
-        raise ValueError("Public bootstrap does not contain exactly two generated tooling pins.")
+    return pattern.sub(replace, text)
+
+
+def updated_bootstrap(data: bytes, *, manifest_sha256: str, loader_sha256: str) -> bytes:
+    changed = replace_pins(data.decode("utf-8"), PIN_PATTERN, {
+        "TOOLING_MANIFEST_SHA256": f'"{manifest_sha256}"',
+        "TOOLING_LOADER_SHA256": f'"{loader_sha256}"',
+    }, "Python bootstrap")
     return changed.encode()
 
 
 def updated_powershell_bootstrap(
     data: bytes, *, manifest_sha256: str, loader_sha256: str
 ) -> bytes:
-    text = data.decode("utf-8-sig")
-    replacements = {
-        "$ToolingManifestSha256": manifest_sha256,
-        "$ToolingLoaderSha256": loader_sha256,
-    }
-
-    def replace(match: re.Match[str]) -> str:
-        name = match.group(1).split(" =", 1)[0]
-        return match.group(1) + "'" + replacements[name] + "'"
-
-    changed, count = POWERSHELL_PIN_PATTERN.subn(replace, text)
-    if count != 2:
-        raise ValueError("PowerShell bootstrap does not contain exactly two generated tooling pins.")
+    changed = replace_pins(data.decode("utf-8-sig"), POWERSHELL_PIN_PATTERN, {
+        "$ToolingManifestSha256": f"'{manifest_sha256}'",
+        "$ToolingLoaderSha256": f"'{loader_sha256}'",
+    }, "PowerShell bootstrap")
     prefix = b"\xef\xbb\xbf" if data.startswith(b"\xef\xbb\xbf") else b""
     return prefix + changed.encode("utf-8")
 
 
 def unregistered_modules(root: Path) -> list[str]:
-    registered = {source for _role, source, _bundle, _kind, _module, _deps in selected_inventory(root)}
+    registered = {source for _role, source, _bundle, _kind, _module, _deps in TOOLING_INVENTORY}
     actual = {
         path.relative_to(root).as_posix()
         for path in (root / "scripts" / "darkrenamer_tooling").rglob("*.py")
@@ -220,8 +214,7 @@ def main(argv=None) -> int:
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parent.parent
-    inventory = selected_inventory(root)
-    missing = [source for _role, source, _bundle, _kind, _module, _deps in inventory
+    missing = [source for _role, source, _bundle, _kind, _module, _deps in TOOLING_INVENTORY
                if not (root / source).is_file()]
     extras = unregistered_modules(root)
     if missing or extras:

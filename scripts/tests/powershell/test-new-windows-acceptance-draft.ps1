@@ -121,7 +121,7 @@ function Assert-NoOwnedTemporaryFiles {
     }
     $leaf = [IO.Path]::GetFileName($OutputPath)
     $temporaryFiles = @(
-        Get-ChildItem -LiteralPath $parent -File |
+        Get-ChildItem -LiteralPath $parent -File -Force |
             Where-Object { $_.Name -like ".$leaf.*.tmp" }
     )
     if ($temporaryFiles.Count -ne 0) {
@@ -243,6 +243,17 @@ $reparseTargetOutputCleanupOwned = $false
 
 try {
     New-Item -ItemType Directory -Path $testRoot | Out-Null
+    $cleanupProbe = Join-Path $testRoot 'cleanup-probe.json'
+    $hiddenTemporary = Join-Path $testRoot '.cleanup-probe.json.fixture.tmp'
+    [IO.File]::WriteAllText($hiddenTemporary, 'leftover')
+    $detectedTemporary = $false
+    try { Assert-NoOwnedTemporaryFiles -OutputPath $cleanupProbe }
+    catch {
+        if ($_.Exception.Message -notlike '*Generator left owned temporary files*') { throw }
+        $detectedTemporary = $true
+    }
+    finally { Remove-Item -LiteralPath $hiddenTemporary -Force }
+    if (-not $detectedTemporary) { throw 'Cleanup assertion missed a hidden temporary file.' }
     if (Test-Path -LiteralPath $insideRepositoryOutput) {
         throw "Reserved inside-repository test output already exists: $insideRepositoryOutput"
     }

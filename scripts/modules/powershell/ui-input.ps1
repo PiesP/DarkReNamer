@@ -328,6 +328,7 @@ function Send-AcceptanceTwoModifierChord {
     )
 
     [void](Get-FocusedAcceptanceElement -Process $Process -ExpectedSession $ExpectedSession -Label $Label)
+    $inputError = $null
     try {
         [DarkReNamerVmAcceptanceNative]::KeyDown($Modifier)
         [DarkReNamerVmAcceptanceNative]::KeyDown($SecondModifier)
@@ -338,10 +339,19 @@ function Send-AcceptanceTwoModifierChord {
             [DarkReNamerVmAcceptanceNative]::Tap($VirtualKey)
         }
     }
+    catch { $inputError = $_ }
     finally {
-        [DarkReNamerVmAcceptanceNative]::KeyUp($SecondModifier)
-        [DarkReNamerVmAcceptanceNative]::KeyUp($Modifier)
+        $releaseErrors = [Collections.Generic.List[string]]::new()
+        foreach ($key in @($SecondModifier, $Modifier)) {
+            try { [DarkReNamerVmAcceptanceNative]::KeyUp($key) }
+            catch { $releaseErrors.Add($_.Exception.Message) }
+        }
+        if ($releaseErrors.Count -gt 0) {
+            $prefix = if ($null -ne $inputError) { $inputError.Exception.Message + ' ' } else { '' }
+            throw "$($prefix)Modifier release failed: $($releaseErrors -join '; ')"
+        }
     }
+    if ($null -ne $inputError) { throw $inputError }
 }
 function Assert-AcceptanceForegroundBinding {
     param(
@@ -849,19 +859,11 @@ function Save-AcceptanceNativeMenuScreenshot {
             [DarkReNamerVmAcceptanceNative]::FindVisiblePopupMenu([uint32]$Process.Id) -ne $Popup) {
             throw "$Label changed during screenshot capture."
         }
-        $firstColor = $bitmap.GetPixel(0, 0).ToArgb()
-        $hasDifferentColor = $false
-        $stepX = [Math]::Max(1, [int]($width / 64))
-        $stepY = [Math]::Max(1, [int]($height / 64))
-        for ($y = 0; $y -lt $height -and -not $hasDifferentColor; $y += $stepY) {
-            for ($x = 0; $x -lt $width; $x += $stepX) {
-                if ($bitmap.GetPixel($x, $y).ToArgb() -ne $firstColor) {
-                    $hasDifferentColor = $true
-                    break
-                }
-            }
+        $sample = Measure-ScreenshotSparseVariation -Width $width -Height $height -ReadArgb {
+            param($x, $y)
+            $bitmap.GetPixel($x, $y).ToArgb()
         }
-        if (-not $hasDifferentColor) {
+        if (-not $sample.has_sampled_variation) {
             throw "$Label screenshot is a solid image."
         }
         $path = Join-Path $Root $Leaf

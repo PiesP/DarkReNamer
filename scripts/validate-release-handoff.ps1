@@ -26,10 +26,15 @@ $expectedNames = @(
     'THIRD_PARTY_LICENSES.html'
     'THIRD_PARTY_NOTICES.md'
 )
-$actualFiles = @(Get-ChildItem -LiteralPath $handoffPath -File | Sort-Object Name)
-$actualNames = @($actualFiles.Name)
-$directories = @(Get-ChildItem -LiteralPath $handoffPath -Directory)
-if ($directories.Count -ne 0 -or ($actualNames -join "`n") -ne ($expectedNames -join "`n")) {
+$actualFiles = @(Get-ChildItem -LiteralPath $handoffPath -Force | Sort-Object Name)
+$actualNames = @($actualFiles | ForEach-Object Name)
+$actualNameSet = [Collections.Generic.HashSet[string]]::new(
+    [string[]] $actualNames, [StringComparer]::Ordinal
+)
+$unsupportedEntries = @($actualFiles | Where-Object {
+    $_.PSIsContainer -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+})
+if ($unsupportedEntries.Count -ne 0 -or -not $actualNameSet.SetEquals([string[]] $expectedNames)) {
     throw "Release handoff layout mismatch. Expected: $($expectedNames -join ', '). Actual: $($actualNames -join ', ')."
 }
 
@@ -333,35 +338,6 @@ foreach ($name in 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'DISTRIBUTION.md') {
 
 $pdbPath = Join-Path $handoffPath 'DarkReNamer.pdb'
 $symbolsPath = Join-Path $handoffPath 'DarkReNamer-debug-symbols.zip'
-$archive = [IO.Compression.ZipFile]::OpenRead($symbolsPath)
-try {
-    $entries = @($archive.Entries)
-    if ($entries.Count -ne 1 -or $entries[0].FullName -ne 'DarkReNamer.pdb') {
-        throw 'Debug-symbol archive must contain exactly DarkReNamer.pdb at its root.'
-    }
-    $entryStream = $entries[0].Open()
-    try {
-        $sha256 = [Security.Cryptography.SHA256]::Create()
-        try {
-            $entryHashBytes = $sha256.ComputeHash($entryStream)
-        }
-        finally {
-            $sha256.Dispose()
-        }
-    }
-    finally {
-        $entryStream.Dispose()
-    }
-}
-finally {
-    $archive.Dispose()
-}
-$entryHash = [Convert]::ToHexString($entryHashBytes).ToLowerInvariant()
-$pdbHash = (Get-FileHash -LiteralPath $pdbPath -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($entryHash -ne $pdbHash) {
-    throw 'Debug-symbol archive does not contain the handoff PDB bytes.'
-}
-
 $measurerPath = Join-Path $PSScriptRoot 'measure-windows-binary.ps1'
 if (-not (Test-Path -LiteralPath $measurerPath -PathType Leaf)) {
     throw 'Required Windows binary measurement script is missing.'
@@ -431,12 +407,12 @@ if ($checksumLines.Count -ne $expectedChecksumSubjects.Count) {
 $observedSubjects = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 for ($index = 0; $index -lt $checksumLines.Count; $index++) {
     $line = $checksumLines[$index]
-    if ($line -notmatch '^([0-9a-f]{64}) \*(.+)$') {
+    if ($line -cnotmatch '^([0-9a-f]{64}) \*(.+)$') {
         throw "Invalid checksum line: $line"
     }
     $expectedHash = $Matches[1]
     $name = $Matches[2]
-    if ($name -ne $expectedChecksumSubjects[$index]) {
+    if ($name -cne $expectedChecksumSubjects[$index]) {
         throw "Checksum subjects must use the canonical sorted order; observed $name at index $index."
     }
     if (-not $observedSubjects.Add($name)) {

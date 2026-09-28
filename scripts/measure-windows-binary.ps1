@@ -428,9 +428,26 @@ try {
     }
     $entryStream = $entries[0].Open()
     try {
-        $sha256 = [Security.Cryptography.SHA256]::Create()
+        $sha256 = [Security.Cryptography.IncrementalHash]::CreateHash(
+            [Security.Cryptography.HashAlgorithmName]::SHA256
+        )
         try {
-            $entryHashBytes = $sha256.ComputeHash($entryStream)
+            $buffer = [byte[]]::new(64 * 1024)
+            $expandedBytes = [long] 0
+            while ($true) {
+                $remaining = [Math]::Min($buffer.Length, $pdbInfo.Length - $expandedBytes + 1)
+                $read = $entryStream.Read($buffer, 0, [int] $remaining)
+                if ($read -eq 0) { break }
+                $expandedBytes += $read
+                if ($expandedBytes -gt $pdbInfo.Length) {
+                    throw 'Debug-symbol archive expanded PDB exceeds PdbPath length.'
+                }
+                $sha256.AppendData($buffer, 0, $read)
+            }
+            if ($expandedBytes -ne $pdbInfo.Length) {
+                throw 'Debug-symbol archive expanded PDB length does not match PdbPath.'
+            }
+            $entryHashBytes = $sha256.GetHashAndReset()
         }
         finally {
             $sha256.Dispose()

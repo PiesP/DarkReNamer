@@ -1,29 +1,4 @@
-﻿function Assert-AcceptanceBootstrapUniqueJson {
-    param(
-        [Parameter(Mandatory)][Text.Json.JsonElement] $Element,
-        [Parameter(Mandatory)][string] $Location
-    )
-
-    if ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Object) {
-        $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-        foreach ($property in $Element.EnumerateObject()) {
-            if (-not $names.Add($property.Name)) {
-                throw "$Location contains a duplicate field: $($property.Name)."
-            }
-            Assert-AcceptanceBootstrapUniqueJson `
-                -Element $property.Value `
-                -Location "$Location.$($property.Name)"
-        }
-    }
-    elseif ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Array) {
-        $index = 0
-        foreach ($item in $Element.EnumerateArray()) {
-            Assert-AcceptanceBootstrapUniqueJson -Element $item -Location "$Location[$index]"
-            $index++
-        }
-    }
-}
-function Resolve-AcceptanceBootstrap {
+﻿function Resolve-AcceptanceBootstrap {
     param(
         [Parameter(Mandatory)][string] $Root,
         [Parameter(Mandatory)][string] $ScriptPath,
@@ -68,7 +43,7 @@ function Resolve-AcceptanceBootstrap {
     $manifestDocument = $null
     try {
         $manifestDocument = [Text.Json.JsonDocument]::Parse($manifestText)
-        Assert-AcceptanceBootstrapUniqueJson `
+        Assert-UniqueJsonProperties `
             -Element $manifestDocument.RootElement `
             -Location 'bundle.json'
         $manifest = $manifestText | ConvertFrom-Json

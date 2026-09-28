@@ -6,7 +6,7 @@
             throw 'The recovery candidate is not owned by a process job.'
         }
         $cleanup = Complete-AcceptanceOwnedProcessJob -Owned $Owned -StopActive
-        if (-not $cleanup.job_empty -or -not $cleanup.job_closed) {
+        if ($cleanup.status -cne 'clean' -or -not $cleanup.job_empty -or -not $cleanup.job_closed) {
             throw 'The recovery candidate process job did not close cleanly.'
         }
     }
@@ -177,16 +177,59 @@ function Assert-AcceptanceProcessBinding {
         throw 'The candidate process identity changed during raw observation.'
     }
 }
+function Complete-AcceptanceFailureProcessCleanup {
+    param(
+        [Parameter(Mandatory)][object] $Application,
+        [Parameter(Mandatory)][string] $PrivateRoot,
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]] $Processes
+    )
+
+    $errors = [Collections.Generic.List[string]]::new()
+    $verifiedStop = $false
+    try {
+        $Application.owned.process.Refresh()
+        if (-not $Application.owned.process.HasExited) {
+            Stop-AcceptanceOwnedProcess -Application $Application
+            $verifiedStop = $true
+        }
+    }
+    catch { $errors.Add($_.Exception.Message) }
+    # Even an exit during the verified stop must close/capture the owned job.
+    try {
+        $cleanup = Complete-AcceptanceOwnedProcessJob -Owned $Application.owned
+        $Application | Add-Member -NotePropertyName job_cleanup -NotePropertyValue $cleanup -Force
+        if ($cleanup.status -cne 'clean' -or -not $cleanup.job_empty -or -not $cleanup.job_closed) {
+            throw 'The exact acceptance process job did not close during cleanup.'
+        }
+    }
+    catch { $errors.Add($_.Exception.Message) }
+    try {
+        $binding = $Application.PSObject.Properties['raw_process_binding']
+        $recorded = $Application.PSObject.Properties['raw_process_exit_recorded']
+        if ($null -ne $binding -and $null -ne $recorded -and -not [bool]$recorded.Value) {
+            # Observed exit does not claim a normal close or a verified kill.
+            $method = if ($verifiedStop) { 'forced-termination' } else { 'observed-exit' }
+            $Processes.Add((Write-AcceptanceProcessExitEvidence `
+                -Application $Application -PrivateRoot $PrivateRoot `
+                -Boundary 'failure-cleanup' -ExitMethod $method))
+        }
+    }
+    catch { $errors.Add($_.Exception.Message) }
+    if ($errors.Count -gt 0) { throw ([string]::Join(' | ', $errors)) }
+}
 function Write-AcceptanceProcessExitEvidence {
     param(
         [Parameter(Mandatory)][object] $Application,
         [Parameter(Mandatory)][string] $PrivateRoot,
         [Parameter(Mandatory)][ValidateSet('crash-stop', 'normal-exit', 'failure-cleanup')]
         [string] $Boundary,
-        [Parameter(Mandatory)][ValidateSet('normal-close', 'forced-termination', 'worker-close')]
+        [Parameter(Mandatory)][ValidateSet('normal-close', 'forced-termination', 'worker-close', 'observed-exit')]
         [string] $ExitMethod
     )
 
+    if ($ExitMethod -ceq 'observed-exit' -and $Boundary -cne 'failure-cleanup') {
+        throw 'Observed process exit is restricted to failure cleanup.'
+    }
     if ($Application.raw_process_exit_recorded) {
         throw 'The candidate process exit was already recorded.'
     }

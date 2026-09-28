@@ -1544,8 +1544,8 @@ try {
         'raw_appearance = Get-VmAutomatedAppearance'
         'function Resolve-GuiRegressionLayoutVariant'
         'function Get-VmAutomatedNativeMenuCommandSpec'
-        'function Assert-VmAutomatedNativeMenuPathSegment'
-        'function ConvertTo-VmAutomatedNativeMenuRelativePath'
+        'function Assert-ObserverFixturePathSegment'
+        'function ConvertTo-ObserverFixtureRelativePath'
         'function Get-VmAutomatedNativeMenuState'
         'function Assert-VmAutomatedNativeMenuTree'
         'function Get-VmAutomatedHiddenRailControls'
@@ -1698,8 +1698,8 @@ try {
         }
     }
     foreach ($menuHelperName in @(
-        'Assert-VmAutomatedNativeMenuPathSegment',
-        'ConvertTo-VmAutomatedNativeMenuRelativePath',
+        'Assert-ObserverFixturePathSegment',
+        'ConvertTo-ObserverFixtureRelativePath',
         'Get-VmAutomatedNativeMenuCommandSpec',
         'ConvertTo-VmAutomatedMenuPathKey',
         'Test-VmAutomatedMenuPathEqual',
@@ -1753,35 +1753,39 @@ try {
             -MainRect $menuBarRect
     } 'outside its exact owned window'
     $nativeMenuFixtureLeaf = '한글-😀-0001-final.txt'
-    $nativeMenuRelativePath = ConvertTo-VmAutomatedNativeMenuRelativePath `
+    $nativeMenuRelativePath = ConvertTo-ObserverFixtureRelativePath `
         -ParentSegments @($nativeMenuFixtureParent) -Leaf $nativeMenuFixtureLeaf
     if ($nativeMenuRelativePath -cne "$nativeMenuFixtureParent/$nativeMenuFixtureLeaf") {
         throw 'Native menu fixture paths must preserve Unicode segments with canonical separators.'
     }
     Assert-Fails {
-        ConvertTo-VmAutomatedNativeMenuRelativePath `
+        ConvertTo-ObserverFixtureRelativePath `
             -ParentSegments @('one','two','three') -Leaf 'four.txt'
     } 'depth'
     Assert-Fails {
-        ConvertTo-VmAutomatedNativeMenuRelativePath `
+        ConvertTo-ObserverFixtureRelativePath `
             -ParentSegments @() -Leaf ('bad-' + [char]0xD800)
     } 'UTF-16'
     Assert-Fails {
-        ConvertTo-VmAutomatedNativeMenuRelativePath -ParentSegments @() -Leaf 'bad.'
+        ConvertTo-ObserverFixtureRelativePath -ParentSegments @() -Leaf 'bad.'
     } 'unsafe'
     $nativeMenuStateFunction = $acceptanceAst.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
             $node.Name -ceq 'Get-VmAutomatedNativeMenuState'
     }, $true)
-    $nativeMenuStateSource = $nativeMenuStateFunction.Extent.Text
+    $nativeMenuStateSource = $nativeMenuStateFunction.Extent.Text + $acceptanceAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Get-ObserverFixtureEntries'
+    }, $true).Extent.Text
     foreach ($requiredStateSource in @(
-        'The native menu fixture inventory exceeds sixteen entries.',
+        'The observer fixture inventory exceeds sixteen entries.',
         '[IO.FileAttributes]::ReparsePoint',
-        'The native menu fixture inventory contains an oversized file.',
-        'The native menu fixture inventory exceeds its aggregate size bound.',
+        'The observer fixture inventory contains an oversized file.',
+        'The observer fixture inventory exceeds its aggregate size bound.',
         '[StringComparer]::Ordinal.Compare',
-        'relative_path = $relativePath',
+        'relative_path = $entry.relative_path',
         'file_identity = Get-FullFileIdentity -Path $item.FullName'
     )) {
         if ($nativeMenuStateSource.IndexOf($requiredStateSource, [StringComparison]::Ordinal) -lt 0) {

@@ -38,3 +38,31 @@ function New-DirectControllerSession {
     param([guid] $VmId, [Management.Automation.PSCredential] $Credential)
     New-PSSession -VMId $VmId -Credential $Credential
 }
+
+function Close-DrControllerResources {
+    param(
+        [AllowNull()][object] $Session,
+        [AllowNull()][object] $Credential,
+        [AllowNull()][object] $Mutex,
+        [bool] $MutexHeld
+    )
+
+    $errors = [Collections.Generic.List[string]]::new()
+    if ($null -ne $Session) {
+        try { Remove-PSSession -Session $Session -ErrorAction Stop }
+        catch { $errors.Add('Session removal: ' + $_.Exception.Message) }
+    }
+    if ($null -ne $Credential) {
+        try { $Credential.Password.Dispose() }
+        catch { $errors.Add('Credential disposal: ' + $_.Exception.Message) }
+    }
+    if ($null -ne $Mutex) {
+        if ($MutexHeld) {
+            try { $Mutex.ReleaseMutex() }
+            catch { $errors.Add('Mutex release: ' + $_.Exception.Message) }
+        }
+        try { $Mutex.Dispose() }
+        catch { $errors.Add('Mutex disposal: ' + $_.Exception.Message) }
+    }
+    $errors.ToArray()
+}
