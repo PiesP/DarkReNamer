@@ -261,7 +261,8 @@ function Invoke-ToolingTest {
             Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1
         }
         else {
-            Get-Command python3 -CommandType Application -ErrorAction Stop | Select-Object -First 1
+            $pythonCommand = if ($Platform -eq 'Windows') { 'python' } else { 'python3' }
+            Get-Command $pythonCommand -CommandType Application -ErrorAction Stop | Select-Object -First 1
         }
         $startInfo = [Diagnostics.ProcessStartInfo]::new()
         $startInfo.FileName = $command.Source
@@ -398,6 +399,7 @@ if ($PSBoundParameters.ContainsKey('ResultPath')) {
 }
 $results = [Collections.Generic.List[object]]::new()
 $testFailure = $null
+$suiteCompleted = $false
 try {
     foreach ($test in $selected) {
         Write-Host "Running $($test.id) ($($test.runner), $Platform, timeout $($test.timeout)s)"
@@ -408,6 +410,7 @@ try {
             throw $result.error
         }
     }
+    $suiteCompleted = $true
 }
 catch {
     $testFailure = $_
@@ -419,7 +422,7 @@ finally {
             $report = [ordered]@{
                 version = 1
                 platform = $Platform
-                status = if ($null -eq $testFailure) { 'passed' } else { 'failed' }
+                status = if ($suiteCompleted) { 'passed' } else { 'failed' }
                 results = @($results.ToArray())
             }
             $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($report | ConvertTo-Json -Depth 10) + "`n")
