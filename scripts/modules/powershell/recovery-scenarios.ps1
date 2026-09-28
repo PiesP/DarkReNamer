@@ -737,7 +737,7 @@ function Invoke-AcceptanceSession {
             # The persistent child starts hidden/disabled; resolve UIA before
             # mutation, then revalidate its native state at the live boundary.
             $workerCancel = New-AcceptanceWorkerCancelBinding `
-                -Application $first -SessionId $SessionId -WaitSeconds $WaitSeconds
+                -Application $first -SessionId $SessionId
             [void](Get-AcceptanceWorkerCancelTarget -Application $first -Binding $workerCancel)
         }
         Invoke-AcceptanceApply -Application $first -SessionId $SessionId -WaitSeconds $WaitSeconds

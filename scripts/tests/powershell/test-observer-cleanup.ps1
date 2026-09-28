@@ -272,6 +272,83 @@ try {
         }
         function Read-AcceptanceWorkerControlState { param($Binding); $native }
         function Find-UniqueAutomationElement { throw 'No late UIA discovery is allowed at the worker boundary.' }
+        & {
+            # Keep the real binding function; only substitute the unavailable
+            # framework's opaque pattern identifier at the API boundary.
+            $bindingFunction = $ast.Find({ param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -ceq 'New-AcceptanceWorkerCancelBinding'
+            }, $true)
+            $bindingText = $bindingFunction.Extent.Text.Replace(
+                '[Windows.Automation.InvokePattern]::Pattern', "'test-invoke-pattern'"
+            )
+            . ([scriptblock]::Create($bindingText))
+            $factoryCalls = [Collections.Generic.List[long]]::new()
+            function Get-AcceptanceWorkerCancelHandle {
+                param($MainHandle)
+                if ($MainHandle -ne [IntPtr]4096) { throw 'Native lookup received an unpinned main window.' }
+                [IntPtr]4097
+            }
+            $provider = [pscustomobject]@{
+                Current = [pscustomobject]@{
+                    ProcessId = $binding.pid; NativeWindowHandle = 4097
+                    AutomationId = '1009'; Name = '취소'
+                    ControlType = [pscustomobject]@{ ProgrammaticName = 'ControlType.Button' }
+                    IsEnabled = $false; IsOffscreen = $true
+                }
+                Pattern = $pattern; SupportsInvoke = $true
+            }
+            $provider | Add-Member ScriptMethod TryGetCurrentPattern {
+                param($identifier, [ref]$result)
+                if ($identifier -cne 'test-invoke-pattern') { throw 'Wrong pattern identifier.' }
+                $result.Value = $this.Pattern
+                return $this.SupportsInvoke
+            }
+            function Get-AcceptanceWorkerCancelAutomationElement {
+                param($Handle)
+                $factoryCalls.Add([long]$Handle)
+                $provider
+            }
+            # The child is absent from the UIA tree, yet its HWND provider exists.
+            function Find-UniqueAutomationElement { throw 'Hidden child is absent from the UIA tree.' }
+            $native.enabled = $false; $native.visible = $false
+            $hiddenBinding = New-AcceptanceWorkerCancelBinding -Application $application -SessionId 2
+            if ($factoryCalls.Count -ne 1 -or $factoryCalls[0] -ne 4097 -or
+                $hiddenBinding.hwnd -ne [IntPtr]4097 -or
+                -not [object]::ReferenceEquals($hiddenBinding.element, $provider) -or
+                -not [object]::ReferenceEquals($hiddenBinding.pattern, $pattern) -or $pattern.calls -ne 0) {
+                throw 'Hidden child HWND binding did not retain its real provider element and pattern.'
+            }
+            foreach ($invalid in @(
+                @{ name = 'pid'; value = 99 }, @{ name = 'parent'; value = [IntPtr]99 }
+                @{ name = 'root'; value = [IntPtr]99 }, @{ name = 'class'; value = 'Edit' }
+                @{ name = 'control_id'; value = 1010 }
+            )) {
+                $saved = $native.($invalid.name)
+                $native.($invalid.name) = $invalid.value
+                Assert-Fails { New-AcceptanceWorkerCancelBinding -Application $application -SessionId 2 } 'native child or root identity'
+                $native.($invalid.name) = $saved
+            }
+            if ($factoryCalls.Count -ne 1) { throw 'Invalid native ownership reached FromHandle.' }
+            foreach ($invalid in @(
+                @{ name = 'ProcessId'; value = 99 }, @{ name = 'NativeWindowHandle'; value = 99 }
+                @{ name = 'AutomationId'; value = '1010' }, @{ name = 'Name'; value = 'wrong' }
+                @{ name = 'ControlType'; value = [pscustomobject]@{ ProgrammaticName = 'ControlType.Edit' } }
+            )) {
+                $saved = $provider.Current.($invalid.name)
+                $provider.Current.($invalid.name) = $invalid.value
+                Assert-Fails { New-AcceptanceWorkerCancelBinding -Application $application -SessionId 2 } 'unexpected UIA identity'
+                $provider.Current.($invalid.name) = $saved
+            }
+            $provider.SupportsInvoke = $false
+            Assert-Fails { New-AcceptanceWorkerCancelBinding -Application $application -SessionId 2 } 'no UIA InvokePattern'
+            $provider.SupportsInvoke = $true
+            $provider.Pattern = $null
+            Assert-Fails { New-AcceptanceWorkerCancelBinding -Application $application -SessionId 2 } 'no UIA InvokePattern'
+            $provider.Pattern = $pattern
+            $native.enabled = $true; $native.visible = $true
+        }
+
         $fixture = Join-Path $root 'worker-boundary'
         $localData = Join-Path $root 'worker-local'
         $journal = Join-Path $localData 'DarkReNamer/journal'

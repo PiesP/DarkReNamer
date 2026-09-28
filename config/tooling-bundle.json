@@ -642,7 +642,7 @@
       "bundle": "recovery-worker.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "b724880ed2a0ff984cc42bab70e0776aebacb6b4574febed70c4f57773e9ab0f",
+      "sha256": "9e2bc8ef0411c9ce188a71e28c9fcaadb76571e4d214839abd5e5b4d92150894",
       "dependencies": []
     },
     {
@@ -651,7 +651,7 @@
       "bundle": "recovery-scenarios.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "eeec1fbc76c23c207d5ef1289c3bd70653656f4390c01e98f69ef24e51047ab1",
+      "sha256": "aed9f23de31a4803a1062829db05ecc2498ef1543297384e6c0b4b6fc39a078b",
       "dependencies": []
     },
     {

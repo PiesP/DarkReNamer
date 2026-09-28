@@ -232,38 +232,54 @@ function Stop-AcceptanceOwnedProcess {
         throw 'The application exit code does not match the observer Job Object termination receipt.'
     }
 }
+function Get-AcceptanceWorkerCancelHandle {
+    param([Parameter(Mandatory)][IntPtr] $MainHandle)
+    Initialize-RecoveryLockNative
+    [DarkReNamerRecoveryLockNative]::GetDlgItem($MainHandle, 1009)
+}
+function Get-AcceptanceWorkerCancelAutomationElement {
+    param([Parameter(Mandatory)][IntPtr] $Handle)
+    [Windows.Automation.AutomationElement]::FromHandle($Handle)
+}
 function New-AcceptanceWorkerCancelBinding {
     param(
         [Parameter(Mandatory)][object] $Application,
-        [Parameter(Mandatory)][int] $SessionId,
-        [Parameter(Mandatory)][int] $WaitSeconds
+        [Parameter(Mandatory)][int] $SessionId
     )
 
     Assert-AcceptanceProcessBinding -Application $Application
-    $cancel = Find-UniqueAutomationElement `
-        -Root $Application.main -Process $Application.owned.process -ExpectedSession $SessionId `
-        -AutomationId '1009' -ControlType ([Windows.Automation.ControlType]::Button) `
-        -TimeoutSeconds $WaitSeconds -Label 'retained worker cancellation control' `
-        -Scope ([Windows.Automation.TreeScope]::Children) -RequireWindowHandle
-    $current = $cancel.Current
-    if ($current.AutomationId -cne '1009' -or
-        $current.ControlType.ProgrammaticName -cne 'ControlType.Button' -or
-        $current.Name -cne '취소' -or $current.NativeWindowHandle -eq 0) {
-        throw 'The retained worker cancellation control has an unexpected UIA identity.'
-    }
-    $pattern = $null
-    if (-not $cancel.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
-        throw 'The retained worker cancellation control has no UIA InvokePattern.'
-    }
-    [pscustomobject]@{
-        element = $cancel
-        pattern = $pattern
-        hwnd = [IntPtr]$current.NativeWindowHandle
+    $binding = [pscustomobject]@{
+        element = $null
+        pattern = $null
+        hwnd = [IntPtr](Get-AcceptanceWorkerCancelHandle -MainHandle $Application.main_handle)
         main_handle = $Application.main_handle
         pid = $Application.raw_process_binding.pid
         session_id = $SessionId
         start_time_utc_ticks = $Application.raw_process_binding.start_time_utc_ticks
     }
+    # Hidden native children need not occur in the UIA tree. Verify the exact
+    # source-defined child before asking its HWND provider for an element.
+    [void](Get-AcceptanceWorkerCancelTarget -Application $Application -Binding $binding)
+    $cancel = Get-AcceptanceWorkerCancelAutomationElement -Handle $binding.hwnd
+    if ($null -eq $cancel) {
+        throw 'The retained worker cancellation HWND has no UIA element.'
+    }
+    $current = $cancel.Current
+    if ($current.ProcessId -ne $binding.pid -or
+        [IntPtr]$current.NativeWindowHandle -ne $binding.hwnd -or
+        $current.AutomationId -cne '1009' -or
+        $current.ControlType.ProgrammaticName -cne 'ControlType.Button' -or
+        $current.Name -cne '취소') {
+        throw 'The retained worker cancellation control has an unexpected UIA identity.'
+    }
+    $pattern = $null
+    if (-not $cancel.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$pattern) -or
+        $null -eq $pattern) {
+        throw 'The retained worker cancellation control has no UIA InvokePattern.'
+    }
+    $binding.element = $cancel
+    $binding.pattern = $pattern
+    $binding
 }
 function Read-AcceptanceWorkerControlState {
     param([Parameter(Mandatory)][object] $Binding)
