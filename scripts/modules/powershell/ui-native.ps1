@@ -475,9 +475,12 @@ public static class DarkReNamerVmAcceptanceNative {
     }
 
     public static void ReleaseModifiers() {
-        KeyUp(0x10);
-        KeyUp(0x11);
-        KeyUp(0x12);
+        List<Exception> errors = new List<Exception>();
+        foreach (ushort key in new ushort[] { 0x10, 0x11, 0x12 }) {
+            try { KeyUp(key); }
+            catch (Exception error) { errors.Add(error); }
+        }
+        if (errors.Count != 0) throw new AggregateException("Modifier release failed.", errors);
     }
 
     private static bool TryGetMenuCommandState(IntPtr menu, uint command, out uint state) {
@@ -656,10 +659,22 @@ public static class DarkReNamerVmAcceptanceNative {
         SendMessageW(window, 0x0111, new IntPtr(command), IntPtr.Zero);
     }
 
+    private static void EnumerateWindowsChecked(EnumWindowsCallback callback) {
+        Exception callbackError = null;
+        bool complete = EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+            try { return callback(window, parameter); }
+            catch (Exception error) { callbackError = error; return false; }
+        }, IntPtr.Zero);
+        if (callbackError != null)
+            throw new InvalidOperationException("Native window enumeration failed.", callbackError);
+        if (!complete)
+            throw new InvalidOperationException("Native window enumeration did not complete.");
+    }
+
     public static IntPtr FindVisiblePopupMenu(uint expectedProcessId) {
         IntPtr match = IntPtr.Zero;
         int matches = 0;
-        EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+        EnumerateWindowsChecked(delegate(IntPtr window, IntPtr parameter) {
             if (!IsWindowVisible(window)) { return true; }
             uint processId;
             GetWindowThreadProcessId(window, out processId);
@@ -671,7 +686,7 @@ public static class DarkReNamerVmAcceptanceNative {
                 matches++;
             }
             return true;
-        }, IntPtr.Zero);
+        });
         if (matches > 1) {
             throw new InvalidOperationException("More than one visible native menu popup was found.");
         }
@@ -680,7 +695,7 @@ public static class DarkReNamerVmAcceptanceNative {
 
     public static NativePopupMeasurement[] ReadVisibleNativeMenuPopups(uint expectedProcessId) {
         List<NativePopupMeasurement> rows = new List<NativePopupMeasurement>();
-        EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+        EnumerateWindowsChecked(delegate(IntPtr window, IntPtr parameter) {
             if (!IsWindowVisible(window)) { return true; }
             uint processId;
             GetWindowThreadProcessId(window, out processId);
@@ -702,7 +717,7 @@ public static class DarkReNamerVmAcceptanceNative {
                 }
             }
             return true;
-        }, IntPtr.Zero);
+        });
         rows.Sort(delegate(NativePopupMeasurement left, NativePopupMeasurement right) {
             return left.Handle.CompareTo(right.Handle);
         });
@@ -900,12 +915,12 @@ public static class DarkReNamerVmAcceptanceNative {
 
     public static WindowMeasurement[] ReadProcessTopLevelWindows(uint expectedProcessId) {
         List<WindowMeasurement> windows = new List<WindowMeasurement>();
-        EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+        EnumerateWindowsChecked(delegate(IntPtr window, IntPtr parameter) {
             uint processId;
             GetWindowThreadProcessId(window, out processId);
             if (processId != expectedProcessId) return true;
             Rect rect;
-            if (!GetWindowRect(window, out rect)) rect = new Rect();
+            if (!GetWindowRect(window, out rect)) throw new Win32Exception(Marshal.GetLastWin32Error());
             string[] description = DescribeWindow(window);
             windows.Add(new WindowMeasurement {
                 Handle = window.ToInt64(), Owner = Int64.Parse(description[1]), ProcessId = processId,
@@ -914,7 +929,7 @@ public static class DarkReNamerVmAcceptanceNative {
             });
             if (windows.Count > 128) throw new InvalidOperationException("Process window inventory exceeded its bound.");
             return true;
-        }, IntPtr.Zero);
+        });
         return windows.ToArray();
     }
 

@@ -446,6 +446,10 @@ function Invoke-HighContrastRescue {
         Initialize-AcceptanceNative
         if (-not $restore.document.restoration_required -and
             $restore.document.restoration_verified) {
+            $current = [DarkReNamerVmAcceptanceNative]::GetHighContrastSnapshot()
+            if (-not (Test-HighContrastSnapshotEqual -Expected $restore.expected -Actual $current)) {
+                throw 'High Contrast changed after restoration; the current desktop was preserved.'
+            }
             $result.status = 'passed'
             $result.action = 'no_op_already_restored'
             $result.restoration_verified = $true

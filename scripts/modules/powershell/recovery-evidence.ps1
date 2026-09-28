@@ -1,27 +1,4 @@
-﻿function Assert-AcceptanceExactProperties {
-    param(
-        [Parameter(Mandatory)][object] $Value,
-        [Parameter(Mandatory)][string[]] $Names,
-        [Parameter(Mandatory)][string] $Label
-    )
-
-    $actual = @($Value.PSObject.Properties.Name | Sort-Object)
-    $expected = @($Names | Sort-Object)
-    if ($actual.Count -ne $expected.Count) {
-        throw "$Label has unexpected fields."
-    }
-    for ($index = 0; $index -lt $expected.Count; $index++) {
-        if ($actual[$index] -cne $expected[$index]) {
-            throw "$Label has unexpected fields."
-        }
-    }
-}
-function Get-AcceptanceBootstrapSha256 {
-    param([Parameter(Mandatory)][string] $Path)
-
-    (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
-}
-function Get-AcceptanceBootstrapBytesSha256 {
+﻿function Get-AcceptanceBootstrapBytesSha256 {
     param([Parameter(Mandatory)][byte[]] $Bytes)
 
     $algorithm = [Security.Cryptography.SHA256]::Create()

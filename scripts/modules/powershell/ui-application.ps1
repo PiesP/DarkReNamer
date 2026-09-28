@@ -669,17 +669,134 @@ function New-ObserverPathList {
     [IO.File]::WriteAllBytes($path, $bytes)
     $path
 }
+function Assert-ObserverFixturePathSegment {
+    param([Parameter(Mandatory)][string] $Segment)
+
+    if ([string]::IsNullOrEmpty($Segment) -or $Segment.Length -gt 240 -or
+        $Segment -cin @('.', '..') -or
+        $Segment.EndsWith('.', [StringComparison]::Ordinal) -or
+        $Segment.EndsWith(' ', [StringComparison]::Ordinal) -or
+        $Segment.IndexOfAny([char[]]'<>:"/\|?*') -ge 0 -or
+        $Segment.Split('.')[0] -imatch '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') {
+        throw 'The observer fixture inventory contains an unsafe path segment.'
+    }
+    for ($index = 0; $index -lt $Segment.Length; $index++) {
+        $character = $Segment[$index]
+        if ([int]$character -lt 32) {
+            throw 'The observer fixture inventory contains an unsafe path segment.'
+        }
+        if ([char]::IsHighSurrogate($character)) {
+            if ($index + 1 -ge $Segment.Length -or
+                -not [char]::IsLowSurrogate($Segment[$index + 1])) {
+                throw 'The observer fixture inventory contains invalid UTF-16.'
+            }
+            $index++
+        }
+        elseif ([char]::IsLowSurrogate($character)) {
+            throw 'The observer fixture inventory contains invalid UTF-16.'
+        }
+    }
+}
+function ConvertTo-ObserverFixtureRelativePath {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]] $ParentSegments,
+        [Parameter(Mandatory)][string] $Leaf
+    )
+
+    $segments = @($ParentSegments) + @($Leaf)
+    if ($segments.Count -gt 3) {
+        throw 'The observer fixture inventory exceeds depth three.'
+    }
+    foreach ($segment in $segments) {
+        Assert-ObserverFixturePathSegment -Segment $segment
+    }
+    $segments -join '/'
+}
+function Get-ObserverFixtureEntries {
+    param([Parameter(Mandatory)][string] $FixtureRoot)
+
+    $root = Get-Item -LiteralPath $FixtureRoot -Force -ErrorAction Stop
+    if (-not $root.PSIsContainer -or
+        ($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The observer fixture root must be an ordinary directory.'
+    }
+    $entries = [Collections.Generic.List[object]]::new()
+    $relativePaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $bounds = [pscustomobject]@{ total_bytes = [long]0 }
+    $visit = {
+        param([string] $CurrentPath, [AllowEmptyCollection()][string[]] $ParentSegments)
+
+        $enumerator = [IO.Directory]::EnumerateFileSystemEntries($CurrentPath).GetEnumerator()
+        try {
+            while ($enumerator.MoveNext()) {
+                if ($entries.Count -ge 16) { throw 'The observer fixture inventory exceeds sixteen entries.' }
+                $item = Get-Item -LiteralPath ([string]$enumerator.Current) -Force -ErrorAction Stop
+                $relativePath = ConvertTo-ObserverFixtureRelativePath -ParentSegments $ParentSegments -Leaf $item.Name
+                if (-not $relativePaths.Add($relativePath)) {
+                    throw 'The observer fixture inventory contains a case-alias path.'
+                }
+                if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw 'The observer fixture inventory contains a reparse point.'
+                }
+                if (($item.Attributes -band [IO.FileAttributes]::Device) -ne 0 -or
+                    (-not $item.PSIsContainer -and $item -isnot [IO.FileInfo])) {
+                    throw 'The observer fixture inventory requires ordinary files or directories.'
+                }
+                if (-not $item.PSIsContainer) {
+                    if ($item.Length -gt 64MB) { throw 'The observer fixture inventory contains an oversized file.' }
+                    $bounds.total_bytes += [long]$item.Length
+                    if ($bounds.total_bytes -gt 512MB) {
+                        throw 'The observer fixture inventory exceeds its aggregate size bound.'
+                    }
+                }
+                $entries.Add([pscustomobject]@{ relative_path = $relativePath; item = $item })
+                if ($item.PSIsContainer) {
+                    & $visit -CurrentPath $item.FullName -ParentSegments (@($ParentSegments) + @($item.Name))
+                }
+            }
+        }
+        finally { if ($enumerator -is [IDisposable]) { $enumerator.Dispose() } }
+    }
+    & $visit -CurrentPath $root.FullName -ParentSegments ([string[]]@())
+    $entries.ToArray()
+}
+function Get-ObserverFixtureFileHash {
+    param([Parameter(Mandatory)][IO.FileInfo] $File)
+
+    $expectedBytes = [long]$File.Length
+    if ($expectedBytes -gt 64MB) { throw 'The observer fixture inventory contains an oversized file.' }
+    $stream = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            $buffer = [byte[]]::new(64KB)
+            $total = [long]0
+            while ($true) {
+                $remaining = [int][Math]::Min($buffer.Length, $expectedBytes - $total + 1)
+                $read = $stream.Read($buffer, 0, $remaining)
+                if ($read -eq 0) { break }
+                $total += $read
+                if ($total -gt $expectedBytes) { throw 'The observer fixture file grew during observation.' }
+                [void]$sha256.TransformBlock($buffer, 0, $read, $buffer, 0)
+            }
+            if ($total -ne $expectedBytes) { throw 'The observer fixture file shrank during observation.' }
+            [void]$sha256.TransformFinalBlock([byte[]]@(), 0, 0)
+            ([BitConverter]::ToString($sha256.Hash) -replace '-', '').ToLowerInvariant()
+        }
+        finally { $sha256.Dispose() }
+    }
+    finally { $stream.Dispose() }
+}
 function Get-ObserverFixtureState {
     param([Parameter(Mandatory)][string] $FixtureRoot)
     $rows = [Collections.Generic.List[object]]::new()
-    foreach ($file in @(Get-ChildItem -LiteralPath $FixtureRoot -File -Recurse -Force | Sort-Object FullName)) {
-        if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw 'Fixture contains a reparse point.'
-        }
+    $files = @(Get-ObserverFixtureEntries -FixtureRoot $FixtureRoot | ForEach-Object item |
+        Where-Object { -not $_.PSIsContainer } | Sort-Object FullName)
+    foreach ($file in $files) {
         $rows.Add([ordered]@{
             path = $file.FullName
             name = $file.Name
-            content_sha256 = Get-LowerSha256 -Path $file.FullName
+            content_sha256 = Get-ObserverFixtureFileHash -File $file
             identity = [DarkReNamerVmNative]::GetFileIdentity($file.FullName)
         })
     }

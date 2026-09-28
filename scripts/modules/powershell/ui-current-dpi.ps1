@@ -1121,7 +1121,7 @@ try {
                 -Phase post_close -FixtureRoot $fixtureRoot -LocalAppData $env:LOCALAPPDATA))
             $result.raw_checkpoints = $rawCheckpoints.ToArray()
             $result.keyboard_events = $keyboardEvents.ToArray()
-            $rawMainHandle = [long]$mainWindow.Current.NativeWindowHandle
+            $rawMainHandle = [long]$mainHandle
             if (@($rawControls | Where-Object {
                 $_.pid -ne $process.Id -or $_.session_id -ne $ExpectedSessionId -or
                 $_.root_hwnd -ne $rawMainHandle

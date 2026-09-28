@@ -1,29 +1,4 @@
-﻿function Assert-RecoveryBootstrapUniqueJson {
-    param(
-        [Parameter(Mandatory)][Text.Json.JsonElement] $Element,
-        [Parameter(Mandatory)][string] $Location
-    )
-
-    if ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Object) {
-        $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-        foreach ($property in $Element.EnumerateObject()) {
-            if (-not $names.Add($property.Name)) {
-                throw "$Location contains a duplicate field: $($property.Name)."
-            }
-            Assert-RecoveryBootstrapUniqueJson `
-                -Element $property.Value `
-                -Location "$Location.$($property.Name)"
-        }
-    }
-    elseif ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Array) {
-        $index = 0
-        foreach ($item in $Element.EnumerateArray()) {
-            Assert-RecoveryBootstrapUniqueJson -Element $item -Location "$Location[$index]"
-            $index++
-        }
-    }
-}
-function Resolve-AcceptanceBootstrap {
+﻿function Resolve-AcceptanceBootstrap {
     param(
         [Parameter(Mandatory)][string] $Root,
         [Parameter(Mandatory)][string] $ObserverPath,
@@ -56,7 +31,7 @@ function Resolve-AcceptanceBootstrap {
     $manifestDocument = $null
     try {
         $manifestDocument = [Text.Json.JsonDocument]::Parse($manifestText)
-        Assert-RecoveryBootstrapUniqueJson `
+        Assert-UniqueJsonProperties `
             -Element $manifestDocument.RootElement `
             -Location 'bundle.json'
         $manifest = $manifestText | ConvertFrom-Json
@@ -74,7 +49,7 @@ function Resolve-AcceptanceBootstrap {
     if ($null -eq $manifest -or $null -eq $runner) {
         throw 'The bootstrap bundle manifest has no runner object.'
     }
-    Assert-AcceptanceExactProperties `
+    Assert-ExactProperties `
         -Value $runner `
         -Names @('file', 'sha256') `
         -Label 'bootstrap runner'
@@ -133,7 +108,7 @@ function Resolve-AcceptanceBootstrap {
         ($observerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw 'The recovery acceptance observer bootstrap file is invalid.'
     }
-    $observerSha256 = Get-AcceptanceBootstrapSha256 -Path $observerItem.FullName
+    $observerSha256 = Get-LowerSha256 -Path $observerItem.FullName
     if ($observerSha256 -cne $ExpectedObserverSha256) {
         throw 'The recovery acceptance observer hash does not match its staging contract.'
     }

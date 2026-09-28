@@ -126,49 +126,6 @@ function Get-VmAutomatedFocusState {
         journal_entries = @(Get-VmAutomatedJournalInventory -LocalAppData $LocalAppData)
     }
 }
-function Assert-VmAutomatedNativeMenuPathSegment {
-    param([Parameter(Mandatory)][string] $Segment)
-
-    if ([string]::IsNullOrEmpty($Segment) -or $Segment.Length -gt 240 -or
-        $Segment -cin @('.', '..') -or
-        $Segment.EndsWith('.', [StringComparison]::Ordinal) -or
-        $Segment.EndsWith(' ', [StringComparison]::Ordinal) -or
-        $Segment.IndexOfAny([char[]]'<>:"/\|?*') -ge 0 -or
-        $Segment.Split('.')[0] -imatch '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') {
-        throw 'The native menu fixture inventory contains an unsafe path segment.'
-    }
-    for ($index = 0; $index -lt $Segment.Length; $index++) {
-        $character = $Segment[$index]
-        if ([int]$character -lt 32) {
-            throw 'The native menu fixture inventory contains an unsafe path segment.'
-        }
-        if ([char]::IsHighSurrogate($character)) {
-            if ($index + 1 -ge $Segment.Length -or
-                -not [char]::IsLowSurrogate($Segment[$index + 1])) {
-                throw 'The native menu fixture inventory contains invalid UTF-16.'
-            }
-            $index++
-        }
-        elseif ([char]::IsLowSurrogate($character)) {
-            throw 'The native menu fixture inventory contains invalid UTF-16.'
-        }
-    }
-}
-function ConvertTo-VmAutomatedNativeMenuRelativePath {
-    param(
-        [Parameter(Mandatory)][AllowEmptyCollection()][string[]] $ParentSegments,
-        [Parameter(Mandatory)][string] $Leaf
-    )
-
-    $segments = @($ParentSegments) + @($Leaf)
-    if ($segments.Count -gt 3) {
-        throw 'The native menu fixture inventory exceeds depth three.'
-    }
-    foreach ($segment in $segments) {
-        Assert-VmAutomatedNativeMenuPathSegment -Segment $segment
-    }
-    $segments -join '/'
-}
 function Get-VmAutomatedNativeMenuState {
     param(
         [Parameter(Mandatory)][string] $FixtureRoot,
@@ -178,68 +135,16 @@ function Get-VmAutomatedNativeMenuState {
     $root = Get-VmAutomatedCanonicalRootPath -Path $FixtureRoot
     $rootIdentity = Get-FullFileIdentity -Path $root
     $entries = [Collections.Generic.List[object]]::new()
-    $relativePaths = [Collections.Generic.HashSet[string]]::new(
-        [StringComparer]::OrdinalIgnoreCase
-    )
-    $bounds = [pscustomobject]@{ total_bytes = [long]0 }
-    $visit = {
-        param(
-            [Parameter(Mandatory)][string] $CurrentPath,
-            [Parameter(Mandatory)][AllowEmptyCollection()][string[]] $ParentSegments
-        )
-
-        $enumerator = [IO.Directory]::EnumerateFileSystemEntries($CurrentPath).GetEnumerator()
-        try {
-            while ($enumerator.MoveNext()) {
-                if ($entries.Count -ge 16) {
-                    throw 'The native menu fixture inventory exceeds sixteen entries.'
-                }
-                $item = Get-Item -LiteralPath ([string]$enumerator.Current) -Force -ErrorAction Stop
-                $relativePath = ConvertTo-VmAutomatedNativeMenuRelativePath `
-                    -ParentSegments $ParentSegments -Leaf $item.Name
-                if (-not $relativePaths.Add($relativePath)) {
-                    throw 'The native menu fixture inventory contains a case-alias path.'
-                }
-                if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                    throw 'The native menu fixture inventory contains a reparse point.'
-                }
-                if ($item.PSIsContainer) {
-                    $entries.Add([ordered]@{
-                        relative_path = $relativePath
-                        kind = 'directory'
-                        bytes = [long]0
-                        content_sha256 = $null
-                        file_identity = Get-FullFileIdentity -Path $item.FullName
-                    })
-                    & $visit `
-                        -CurrentPath $item.FullName `
-                        -ParentSegments (@($ParentSegments) + @($item.Name))
-                    continue
-                }
-                if ($item -isnot [IO.FileInfo]) {
-                    throw 'The native menu fixture inventory requires ordinary files or directories.'
-                }
-                if ($item.Length -gt 64MB) {
-                    throw 'The native menu fixture inventory contains an oversized file.'
-                }
-                $bounds.total_bytes += [long]$item.Length
-                if ($bounds.total_bytes -gt 512MB) {
-                    throw 'The native menu fixture inventory exceeds its aggregate size bound.'
-                }
-                $entries.Add([ordered]@{
-                    relative_path = $relativePath
-                    kind = 'file'
-                    bytes = [long]$item.Length
-                    content_sha256 = Get-LowerSha256 -Path $item.FullName
-                    file_identity = Get-FullFileIdentity -Path $item.FullName
-                })
-            }
-        }
-        finally {
-            if ($enumerator -is [IDisposable]) { $enumerator.Dispose() }
-        }
+    foreach ($entry in @(Get-ObserverFixtureEntries -FixtureRoot $root)) {
+        $item = $entry.item
+        $entries.Add([ordered]@{
+            relative_path = $entry.relative_path
+            kind = if ($item.PSIsContainer) { 'directory' } else { 'file' }
+            bytes = if ($item.PSIsContainer) { [long]0 } else { [long]$item.Length }
+            content_sha256 = if ($item.PSIsContainer) { $null } else { Get-ObserverFixtureFileHash -File $item }
+            file_identity = Get-FullFileIdentity -Path $item.FullName
+        })
     }
-    & $visit -CurrentPath $root -ParentSegments ([string[]]@())
     $sortedEntries = [object[]]$entries.ToArray()
     [Array]::Sort($sortedEntries, [Comparison[object]]{
         param($left, $right)

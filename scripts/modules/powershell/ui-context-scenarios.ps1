@@ -574,16 +574,8 @@ function Invoke-ObserverContextScenario {
         $confirm = Find-UniqueAutomationElement -Root $actualConfirmation -Process $moveApplication.process -ExpectedSession $SessionId -AutomationId 'CommandLink_1101' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'actual move confirmation Apply link' -RequireEnabled -RequireWindowHandle
         $actualReachability = Get-ObserverControlReachability -Element $confirm -Application $moveApplication -SessionId $SessionId -ExpectedRoot $actualHandle -WorkArea $environment.work_area -Label 'actual move Apply'
         if ($actualReachability.status -cne 'reachable') { throw 'Actual move Apply is mouse-inaccessible.' }
-        if ($actualReachability.status -ceq 'reachable') {
-            $actualApplyInput = 'physical-mouse'
-            $physicalApply = Get-GuiRegressionPhysicalTarget -Click -Element $confirm -Application $moveApplication -SessionId $SessionId -ExpectedRoot $actualHandle -Label 'actual move Apply'
-        }
-        else {
-            $actualApplyInput = 'keyboard-enter-fallback-after-inaccessible-mouse-observation'
-            $confirm.SetFocus()
-            Send-AcceptanceTap -Process $moveApplication.process -ExpectedSession $SessionId -VirtualKey 0x0D -Label 'actual move Apply keyboard fallback'
-            $physicalApply = $null
-        }
+        $actualApplyInput = 'physical-mouse'
+        $physicalApply = Get-GuiRegressionPhysicalTarget -Click -Element $confirm -Application $moveApplication -SessionId $SessionId -ExpectedRoot $actualHandle -Label 'actual move Apply'
         $deadline = (Get-Date).AddSeconds($WaitSeconds)
         do {
             $complete = -not (Test-Path -LiteralPath $moveFixture.source) -and (Test-Path -LiteralPath $moveFixture.destination -PathType Leaf)

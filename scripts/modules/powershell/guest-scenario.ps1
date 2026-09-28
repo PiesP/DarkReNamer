@@ -423,10 +423,17 @@ function Set-GuiSmokeFailureDetail {
     else {
         $null
     }
-    $Row['error_detail'] = [ordered]@{
+    $detail = [ordered]@{
         exception_type = [string]$exception.GetType().FullName
         message = $message
         native_error = $nativeError
+    }
+    if ($null -eq $Row['error_detail']) {
+        $Row['error_detail'] = $detail
+    }
+    else {
+        if (-not $Row.Contains('additional_error_details')) { $Row['additional_error_details'] = @() }
+        $Row['additional_error_details'] += $detail
     }
 }
 function Invoke-GuiSmoke {
@@ -615,19 +622,11 @@ function Invoke-GuiSmoke {
                     $row.failure_reason = 'foreground_changed_during_capture'
                     return
                 }
-                $firstColor = $captureState.bitmap.GetPixel(0, 0).ToArgb()
-                $hasDifferentColor = $false
-                $stepX = [Math]::Max(1, [int]($width / 64))
-                $stepY = [Math]::Max(1, [int]($height / 64))
-                for ($y = 0; $y -lt $height -and -not $hasDifferentColor; $y += $stepY) {
-                    for ($x = 0; $x -lt $width; $x += $stepX) {
-                        if ($captureState.bitmap.GetPixel($x, $y).ToArgb() -ne $firstColor) {
-                            $hasDifferentColor = $true
-                            break
-                        }
-                    }
+                $sample = Measure-ScreenshotSparseVariation -Width $width -Height $height -ReadArgb {
+                    param($x, $y)
+                    $captureState.bitmap.GetPixel($x, $y).ToArgb()
                 }
-                if (-not $hasDifferentColor) {
+                if (-not $sample.has_sampled_variation) {
                     $row.failure_reason = 'screenshot_solid'
                     return
                 }

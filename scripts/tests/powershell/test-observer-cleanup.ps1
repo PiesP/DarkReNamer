@@ -41,6 +41,15 @@ try {
         -not $gui.job_cleanup) {
         throw 'A rejected GUI launch lost its final cleanup evidence.'
     }
+    $details = [ordered]@{ error_detail = $null }
+    foreach ($message in @('original GUI failure', 'process cleanup failed', 'fixture retained')) {
+        try { throw $message }
+        catch { Set-GuiSmokeFailureDetail -Row $details -ErrorRecord $_ }
+    }
+    if ($details.error_detail.message -cne 'original GUI failure' -or
+        ($details.additional_error_details.message -join ',') -cne 'process cleanup failed,fixture retained') {
+        throw 'Cleanup diagnostics must preserve the original GUI error and each later failure.'
+    }
     Assert-OrdinaryDirectoryTree -Path $root
     Assert-Fails { Assert-OrdinaryDirectoryTree -Path (Join-Path $root 'absent') } 'does not exist'
 
