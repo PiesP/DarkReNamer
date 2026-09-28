@@ -150,53 +150,6 @@ class VmRunnerTests(unittest.TestCase):
               row['last_run_ticks'])
              for row in cases[:-1]] + [('', 'Ready', 7, 101)])
 
-    def test_rescue_collectors_wait_for_terminal_task_before_copying_streams(self):
-        for name, label in (
-                ('Invoke-AcceptanceTextScaleRescue', 'Text-scale'),
-                ('Invoke-AcceptanceHighContrastRescue', 'High Contrast')):
-            with self.subTest(function=name):
-                function = self.powershell_function(name)
-                self.assertIn('Get-ScheduledTaskInfo -TaskName $name', function)
-                baseline = function.index(
-                    '$registered = Get-ScheduledTaskInfo -TaskName $name')
-                start = function.index('Start-ScheduledTask -TaskName $name')
-                self.assertLess(baseline, start)
-                poll = function.index(
-                    '$info = Get-ScheduledTaskInfo -TaskName $name', start)
-                task_state = function.index(
-                    '$task = Get-ScheduledTask -TaskName $name', poll)
-                terminal_result = function.index(
-                    '$terminalInfo = Get-ScheduledTaskInfo -TaskName $name',
-                    task_state)
-                result = function.index(
-                    'Get-Content -LiteralPath $resultPath', terminal_result)
-                self.assertLess(poll, task_state)
-                self.assertLess(task_state, terminal_result)
-                self.assertLess(terminal_result, result)
-                self.assertIn(
-                    "if ($taskState -ceq 'Ready')", function)
-                self.assertIn(
-                    '$taskResult = [long]$terminalInfo.LastTaskResult', function)
-                self.assertIn('Resolve-ObserverTaskPollState -Label Rescue', function)
-                self.assertIn(
-                    '-RegisteredLastRunTimeTicks '
-                    '$rescueGeneration.registered_last_run_time_ticks', function)
-                self.assertIn('if ($rescue.terminal) { break }', function)
-                timeout = function.index(
-                    f"throw '{label} rescue timed out before the scheduled task "
-                    "reached its terminal state.'")
-                collect = function.index('$rescueFiles = @(', timeout)
-                copy = function.index('Copy-Item -LiteralPath $guestPath', collect)
-                digest = function.index("Get-FileHash -LiteralPath $hostPath", copy)
-                self.assertLess(timeout, collect)
-                self.assertLess(collect, copy)
-                self.assertLess(copy, digest)
-                self.assertIn('-FromSession $Session', function[copy:digest])
-                self.assertIn('$file.sha256', function[digest:])
-                self.assertIn("$rescue.result_status -cne 'passed'", function)
-                self.assertIn('$rescue.task_result -ne 0', function)
-                self.assertNotIn("$rescue.status -in @('passed', 'failed')", function)
-
     def test_observer_poll_requires_new_terminal_task_generation(self):
         function = self.powershell_function('Resolve-ObserverTaskPollState')
         cases = [

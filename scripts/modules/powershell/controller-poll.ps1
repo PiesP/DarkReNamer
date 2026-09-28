@@ -157,3 +157,24 @@ function Invoke-AcceptancePollFailureRescue {
     }
     throw $OriginalFailure
 }
+
+function Invoke-AcceptanceTerminalFailureRescue {
+    param(
+        [Parameter(Mandatory)][object] $State,
+        [Parameter(Mandatory)][string] $AcceptanceMode,
+        [Parameter(Mandatory)][bool] $HighContrast,
+        [Parameter(Mandatory)][hashtable] $RescueParameters
+    )
+
+    if (-not $State.terminal) { throw 'Acceptance rescue requires a terminal task observation.' }
+    if ($State.result_status -ceq 'review_required' -and $State.task_result -eq 0) { return }
+    if ($AcceptanceMode -ceq 'text-scale') {
+        Invoke-AcceptanceTextScaleRescue @RescueParameters
+    }
+    if ($HighContrast) {
+        $highContrastParameters = @{} + $RescueParameters
+        $highContrastParameters.Remove('InputManifestSha256')
+        $highContrastParameters.Remove('Appearance')
+        Invoke-AcceptanceHighContrastRescue @highContrastParameters
+    }
+}
