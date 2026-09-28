@@ -384,7 +384,7 @@
       "bundle": "tooling-evidence-gui.py",
       "kind": "python",
       "module": "darkrenamer_tooling.evidence.gui",
-      "sha256": "62bb89893f8fd97ae2ec5120f6ca19ebf86cfb61da0dec7db1f0571033a173fc",
+      "sha256": "7143c38438ad9e30c2244eebe9ace695449cffb8c1c5612c1d9de371f68af685",
       "dependencies": [
         "tooling-loader",
         "package-root",

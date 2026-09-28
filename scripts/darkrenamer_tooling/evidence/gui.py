@@ -404,8 +404,8 @@ def validate_collection(run_root: Path, input_hash: str) -> tuple[dict, bytes, d
         total += len(artifact)
     require(total <= MAX_COLLECTION_BYTES, "Collected evidence exceeds its aggregate size bound.")
     mandatory = {
-        "acceptance-result.json", "acceptance-observations.json", "observer.stdout.txt",
-        "observer.stderr.txt", "cleanup.json", "platform-preflight.json", "platform-postlaunch.json",
+        "acceptance-result.json", "acceptance-observations.json", "controller.stdout.txt",
+        "controller.stderr.txt", "cleanup.json", "platform-preflight.json", "platform-postlaunch.json",
         "transport.json",
     }
     require(mandatory <= set(found), f"Collection is missing required raw evidence: {sorted(mandatory - set(found))}")
