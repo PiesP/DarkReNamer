@@ -371,8 +371,8 @@ class PredicateTests(unittest.TestCase):
                                 'raw_cleanup': clean_controller_cleanup()},
                   'tests': [{'file': 'required-tests.exe', 'sha256': binary_sha,
                              'exit_code': 0, 'passed': passed, 'failed': 0, 'ignored': 0,
-                             'stdout': {'file': 'stdout.txt', 'sha256': stdout.sha256},
-                             'stderr': {'file': 'stderr.txt', 'sha256': stderr.sha256}}]}
+                             'stdout': {'file': 'stdout.txt', 'sha256': stdout.sha256, 'bytes': stdout.size},
+                             'stderr': {'file': 'stderr.txt', 'sha256': stderr.sha256, 'bytes': stderr.size}}]}
         add_indexed_json(root, files, 'backend/bundle.json', bundle)
         add_indexed_json(root, files, 'backend/result.json', result)
         return EvidenceReader(ExtractedEvidence(root, files)), result
