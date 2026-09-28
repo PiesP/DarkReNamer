@@ -59,6 +59,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:acceptanceForegroundObservations = [Collections.Generic.List[object]]::new()
 $script:AcceptanceProcessJobCleanup = [Collections.Generic.List[object]]::new()
+$script:AutomationControlInvocations = [Collections.Generic.List[object]]::new()
 
 
 

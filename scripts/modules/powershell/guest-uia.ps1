@@ -391,20 +391,83 @@ function Invoke-AutomationControl {
     }
     ([Windows.Automation.InvokePattern]$pattern).Invoke()
 }
+function Get-AutomationInvocationLedger {
+    $variable = Get-Variable -Name AutomationControlInvocations -Scope Script -ErrorAction SilentlyContinue
+    if ($null -eq $variable) {
+        $script:AutomationControlInvocations = [Collections.Generic.List[object]]::new()
+    }
+    return ,$script:AutomationControlInvocations
+}
+function New-AutomationControlRunspace { [RunspaceFactory]::CreateRunspace() }
+function New-AutomationControlPipeline { [PowerShell]::Create() }
+function Close-AutomationInvocationResources {
+    param([Parameter(Mandatory)][object] $State)
+
+    foreach ($name in @('powershell', 'runspace')) {
+        $attempted = $name + '_dispose_attempted'
+        $disposed = $name + '_disposed'
+        if ($null -eq $State.$name) { $State.$disposed = $true; continue }
+        if ($State.$attempted) { continue }
+        $State.$attempted = $true
+        try {
+            $State.$name.Dispose()
+            $State.$disposed = $true
+        }
+        catch { $State.errors.Add("$($State.label) $name disposal: $($_.Exception.Message)") }
+    }
+    $State.completed = $State.powershell_disposed -and $State.runspace_disposed
+    if ($State.completed) { [void](Get-AutomationInvocationLedger).Remove($State) }
+}
+function Start-OwnedAutomationInvocation {
+    param(
+        [Parameter(Mandatory)][object] $Element,
+        [Parameter(Mandatory)][string] $Label,
+        [Parameter(Mandatory)][object] $OwnedProcess,
+        [Parameter(Mandatory)][string] $ScriptText
+    )
+
+    if ($OwnedProcess.job_closed) { throw 'UI Automation cannot start after its process job closes.' }
+    $state = [pscustomobject]@{
+        owned_process = $OwnedProcess
+        powershell = $null
+        runspace = $null
+        async_result = $null
+        label = $Label
+        end_invoked = $false
+        powershell_dispose_attempted = $false
+        runspace_dispose_attempted = $false
+        powershell_disposed = $false
+        runspace_disposed = $false
+        completed = $false
+        errors = [Collections.Generic.List[string]]::new()
+    }
+    (Get-AutomationInvocationLedger).Add($state)
+    try {
+        $state.runspace = New-AutomationControlRunspace
+        $state.runspace.ApartmentState = [Threading.ApartmentState]::MTA
+        $state.runspace.Open()
+        $state.runspace.SessionStateProxy.SetVariable('automationElement', $Element)
+        $state.runspace.SessionStateProxy.SetVariable('automationLabel', $Label)
+        $state.powershell = New-AutomationControlPipeline
+        $state.powershell.Runspace = $state.runspace
+        [void]$state.powershell.AddScript($ScriptText)
+        $state.async_result = $state.powershell.BeginInvoke()
+        $state
+    }
+    catch {
+        $state.errors.Add("$Label initialization: $($_.Exception.Message)")
+        Close-AutomationInvocationResources -State $state
+        throw
+    }
+}
 function Start-AutomationControlInvoke {
     param(
         [Parameter(Mandatory)][Windows.Automation.AutomationElement] $Element,
-        [Parameter(Mandatory)][string] $Label
+        [Parameter(Mandatory)][string] $Label,
+        [Parameter(Mandatory)][object] $OwnedProcess
     )
 
-    $runspace = [RunspaceFactory]::CreateRunspace()
-    $runspace.ApartmentState = [Threading.ApartmentState]::MTA
-    $runspace.Open()
-    $runspace.SessionStateProxy.SetVariable('automationElement', $Element)
-    $runspace.SessionStateProxy.SetVariable('automationLabel', $Label)
-    $powershell = [PowerShell]::Create()
-    $powershell.Runspace = $runspace
-    [void]$powershell.AddScript(@'
+    Start-OwnedAutomationInvocation -Element $Element -Label $Label -OwnedProcess $OwnedProcess -ScriptText @'
 $invokePattern = $null
 if (-not $automationElement.TryGetCurrentPattern(
     [Windows.Automation.InvokePattern]::Pattern,
@@ -413,49 +476,68 @@ if (-not $automationElement.TryGetCurrentPattern(
     throw "$automationLabel does not support UI Automation InvokePattern."
 }
 ([Windows.Automation.InvokePattern]$invokePattern).Invoke()
-'@)
-    try {
-        $asyncResult = $powershell.BeginInvoke()
-        [pscustomobject]@{
-            powershell = $powershell
-            runspace = $runspace
-            async_result = $asyncResult
-            label = $Label
-            completed = $false
+'@
+}
+function Receive-AutomationControlInvocation {
+    param(
+        [Parameter(Mandatory)][object] $State,
+        [ValidateRange(0, 30000)][int] $WaitMilliseconds
+    )
+
+    if ($State.completed) { return $true }
+    if ($null -ne $State.async_result -and -not $State.end_invoked) {
+        try {
+            if (-not $State.async_result.AsyncWaitHandle.WaitOne($WaitMilliseconds)) { return $false }
         }
+        catch {
+            $State.errors.Add("$($State.label) completion observation: $($_.Exception.Message)")
+            return $false
+        }
+        $State.end_invoked = $true
+        try {
+            [void]$State.powershell.EndInvoke($State.async_result)
+            if ($State.powershell.HadErrors) {
+                $detail = $State.powershell.Streams.Error | Out-String -Width 4096
+                $State.errors.Add("$($State.label) UI Automation invocation failed: $detail")
+            }
+        }
+        catch { $State.errors.Add("$($State.label) invocation: $($_.Exception.Message)") }
     }
-    catch {
-        $powershell.Dispose()
-        $runspace.Dispose()
-        throw
-    }
+    Close-AutomationInvocationResources -State $State
+    $State.completed
 }
 function Complete-AutomationControlInvoke {
     param(
         [Parameter(Mandatory)][object] $State,
-        [Parameter(Mandatory)][int] $TimeoutSeconds
+        [Parameter(Mandatory)][ValidateRange(0, 3600)][int] $TimeoutSeconds
     )
 
-    if ($State.completed) {
-        return
+    $waitMilliseconds = [Math]::Min(30, $TimeoutSeconds) * 1000
+    if (-not (Receive-AutomationControlInvocation -State $State -WaitMilliseconds $waitMilliseconds)) {
+        throw "$($State.label) UI Automation invocation did not finish before the bounded deadline. $($State.errors -join '; ')"
     }
-    $waitMilliseconds = [int]([Math]::Min(
-        [int]::MaxValue,
-        [Math]::Min(30, $TimeoutSeconds) * 1000L
-    ))
-    if (-not $State.async_result.AsyncWaitHandle.WaitOne($waitMilliseconds)) {
-        throw "$($State.label) UI Automation invocation did not return before the bounded deadline."
-    }
-    try {
-        [void]$State.powershell.EndInvoke($State.async_result)
-        if ($State.powershell.HadErrors) {
-            throw "$($State.label) UI Automation invocation failed."
+    if ($State.errors.Count -gt 0) { throw ($State.errors -join '; ') }
+}
+function Complete-OwnedAutomationControlInvocations {
+    param(
+        [Parameter(Mandatory)][object] $Owned,
+        [ValidateRange(0, 10000)][int] $TimeoutMilliseconds = 10000
+    )
+
+    $pending = @((Get-AutomationInvocationLedger).ToArray() | Where-Object {
+        [object]::ReferenceEquals($_.owned_process, $Owned)
+    })
+    $deadline = [Environment]::TickCount64 + $TimeoutMilliseconds
+    foreach ($state in $pending) {
+        if (-not $Owned.job_empty -or -not $Owned.job_closed) {
+            "$($state.label) UI Automation invocation retained because its process job is not proven empty and closed."
+            continue
         }
-    }
-    finally {
-        $State.completed = $true
-        $State.powershell.Dispose()
-        $State.runspace.Dispose()
+        $remaining = [int][Math]::Max(0, $deadline - [Environment]::TickCount64)
+        if (-not (Receive-AutomationControlInvocation -State $state -WaitMilliseconds $remaining)) {
+            "$($state.label) UI Automation invocation remained incomplete after process-job closure."
+        }
+        $state.errors.ToArray()
     }
 }
 function Set-AutomationControlValue {

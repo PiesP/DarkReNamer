@@ -127,7 +127,7 @@ function Invoke-AcceptanceImportAndPrefix {
         -Label 'prefix command after path import' `
         -RequireEnabled `
         -RequireWindowHandle
-    $prefixInvocation = Start-AutomationControlInvoke -Element $prefixCommand -Label 'prefix command'
+    $prefixInvocation = Start-AutomationControlInvoke -OwnedProcess $Application.owned -Element $prefixCommand -Label 'prefix command'
     $prompt = Wait-UniqueAutomationWindow `
         -Process $process `
         -ExpectedSession $SessionId `
@@ -178,7 +178,7 @@ function Invoke-AcceptanceApply {
         -Label 'apply command after prefix' `
         -RequireEnabled `
         -RequireWindowHandle
-    $applyInvocation = Start-AutomationControlInvoke -Element $apply -Label 'apply command'
+    $applyInvocation = Start-AutomationControlInvoke -OwnedProcess $Application.owned -Element $apply -Label 'apply command'
     $confirmation = Wait-UniqueAutomationWindow `
         -Process $process `
         -ExpectedSession $SessionId `
@@ -454,7 +454,7 @@ function Invoke-AcceptanceRecovery {
         -Label 'exact recovery confirmation' `
         -RequireEnabled `
         -RequireWindowHandle
-    $invoke = Start-AutomationControlInvoke -Element $confirm -Label 'exact recovery confirmation'
+    $invoke = Start-AutomationControlInvoke -OwnedProcess $Application.owned -Element $confirm -Label 'exact recovery confirmation'
     Wait-WindowClosed -Handle $promptHandle -TimeoutSeconds $WaitSeconds -Label 'startup recovery confirmation'
     Dismiss-AcceptanceMessage `
         -Application $Application `

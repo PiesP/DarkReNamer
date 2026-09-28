@@ -6,7 +6,7 @@
             throw 'The recovery candidate is not owned by a process job.'
         }
         $cleanup = Complete-AcceptanceOwnedProcessJob -Owned $Owned -StopActive
-        if (-not $cleanup.job_empty -or -not $cleanup.job_closed) {
+        if ($cleanup.status -cne 'clean' -or -not $cleanup.job_empty -or -not $cleanup.job_closed) {
             throw 'The recovery candidate process job did not close cleanly.'
         }
     }

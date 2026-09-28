@@ -604,7 +604,7 @@ function Invoke-AcceptanceIntentOnlyCandidateDiscard {
                 $jobCleanup = Complete-AcceptanceOwnedProcessJob `
                     -Owned $application.owned -StopActive
                 $application | Add-Member -NotePropertyName job_cleanup -NotePropertyValue $jobCleanup -Force
-                if (-not $jobCleanup.job_empty -or -not $jobCleanup.job_closed) {
+                if ($jobCleanup.status -cne 'clean' -or -not $jobCleanup.job_empty -or -not $jobCleanup.job_closed) {
                     throw 'The exact Intent-only process job did not close during cleanup.'
                 }
                 $bindingProperty = $application.PSObject.Properties['raw_process_binding']
@@ -615,10 +615,13 @@ function Invoke-AcceptanceIntentOnlyCandidateDiscard {
                         -Application $application -PrivateRoot $PrivateRoot `
                         -Boundary 'failure-cleanup' -ExitMethod 'forced-termination'))
                 }
-                $process.Dispose()
             }
             catch {
                 $cleanupErrors.Add($_.Exception.Message)
+            }
+            finally {
+                try { $application.owned.process.Dispose() }
+                catch { $cleanupErrors.Add($_.Exception.Message) }
             }
         }
         if ($cleanupErrors.Count -gt 0) {
@@ -1130,7 +1133,7 @@ function Invoke-AcceptanceSession {
                 $jobCleanup = Complete-AcceptanceOwnedProcessJob `
                     -Owned $application.owned -StopActive
                 $application | Add-Member -NotePropertyName job_cleanup -NotePropertyValue $jobCleanup -Force
-                if (-not $jobCleanup.job_empty -or -not $jobCleanup.job_closed) {
+                if ($jobCleanup.status -cne 'clean' -or -not $jobCleanup.job_empty -or -not $jobCleanup.job_closed) {
                     throw 'The exact acceptance process job did not close during cleanup.'
                 }
                 $bindingProperty = $application.PSObject.Properties['raw_process_binding']
@@ -1141,10 +1144,13 @@ function Invoke-AcceptanceSession {
                         -Application $application -PrivateRoot $PrivateRoot `
                         -Boundary 'failure-cleanup' -ExitMethod 'forced-termination'))
                 }
-                $process.Dispose()
             }
             catch {
                 $cleanupErrors.Add($_.Exception.Message)
+            }
+            finally {
+                try { $application.owned.process.Dispose() }
+                catch { $cleanupErrors.Add($_.Exception.Message) }
             }
         }
         if ($cleanupErrors.Count -gt 0) {

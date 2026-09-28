@@ -21,6 +21,7 @@ foreach ($role in $expectedRoles) {
     . $Libraries[$role]
 }
 $script:AcceptanceProcessJobCleanup = [Collections.Generic.List[object]]::new()
+$script:AutomationControlInvocations = [Collections.Generic.List[object]]::new()
 
 function Invoke-DrWindowsVmGuest {
     [CmdletBinding()]

@@ -124,7 +124,7 @@ function Stop-AndDisposeAcceptanceOwnedProcess {
                 -ExitMethod forced-termination `
                 -ExitCode ([int]$cleanup.termination_exit_code)
         }
-        if (-not $cleanup.job_empty -or -not $cleanup.job_closed) {
+        if ($cleanup.status -cne 'clean' -or -not $cleanup.job_empty -or -not $cleanup.job_closed) {
             throw 'The acceptance candidate process job did not close cleanly.'
         }
     }
@@ -749,7 +749,7 @@ function Invoke-ObserverPrefix {
         [string] $ExpectedFirstSourceName = 'item-00000.txt'
     )
     $command = Find-UniqueAutomationElement -Root $Application.main -Process $Application.process -ExpectedSession $SessionId -AutomationId '32773' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'large smoke prefix command' -RequireEnabled -RequireWindowHandle
-    $invoke = Start-AutomationControlInvoke -Element $command -Label 'large smoke prefix command'
+    $invoke = Start-AutomationControlInvoke -OwnedProcess $Application.owned -Element $command -Label 'large smoke prefix command'
     $prompt = Wait-UniqueAutomationWindow -Process $Application.process -ExpectedSession $SessionId -Owner $Application.main -Name '이름 앞에 문자열 붙이기' -TimeoutSeconds $WaitSeconds -Label 'large smoke prefix prompt'
     $handle = [IntPtr]$prompt.Current.NativeWindowHandle
     $edit = Find-UniqueAutomationElement -Root $prompt -Process $Application.process -ExpectedSession $SessionId -AutomationId '1004' -ControlType ([Windows.Automation.ControlType]::Edit) -TimeoutSeconds $WaitSeconds -Label 'large smoke prefix edit' -RequireWindowHandle
@@ -971,7 +971,7 @@ function Start-ObserverApplyFromPublicUi {
         Assert-AutomationBinding -Element $apply -Process $Application.process -ExpectedSession $SessionId -Label $Label
         return [pscustomobject]@{
             input = 'visible-command-rail'
-            invocation = Start-AutomationControlInvoke -Element $apply -Label $Label
+            invocation = Start-AutomationControlInvoke -OwnedProcess $Application.owned -Element $apply -Label $Label
             menu_entry = $null
         }
     }
@@ -1285,7 +1285,7 @@ function Invoke-ObserverActualApply {
     }
     [void]$Captures.Add((Save-WindowScreenshot -ForegroundObservations $script:acceptanceForegroundObservations -Window $confirmation -Process $Application.process -ExpectedSession $SessionId -Root $OutputRoot -Leaf ($Prefix + '-actual-apply-confirmation.png') -Label 'actual 3/1/2 Apply confirmation'))
     $confirm = Find-UniqueAutomationElement -Root $confirmation -Process $Application.process -ExpectedSession $SessionId -AutomationId 'CommandLink_1101' -ControlType ([Windows.Automation.ControlType]::Button) -TimeoutSeconds $WaitSeconds -Label 'actual Apply command link' -RequireEnabled -RequireWindowHandle
-    $confirmInvocation = Start-AutomationControlInvoke -Element $confirm -Label 'actual Apply command link'
+    $confirmInvocation = Start-AutomationControlInvoke -OwnedProcess $Application.owned -Element $confirm -Label 'actual Apply command link'
     $deadline = (Get-Date).AddSeconds($WaitSeconds)
     do {
         $complete = -not (Test-Path -LiteralPath $Fixture.paths[0]) -and

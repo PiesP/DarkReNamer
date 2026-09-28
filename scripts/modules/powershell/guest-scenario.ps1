@@ -98,7 +98,7 @@ function Invoke-ProductionRenameFlow {
             -Label 'file-add command' `
             -RequireEnabled `
             -RequireWindowHandle
-        $invoke = Start-AutomationControlInvoke -Element $add -Label 'file-add command'
+        $invoke = Start-AutomationControlInvoke -OwnedProcess $OwnedProcess -Element $add -Label 'file-add command'
         $pendingInvocations.Add($invoke)
 
         $fileDialog = Wait-UniqueAutomationWindow `
@@ -152,7 +152,7 @@ function Invoke-ProductionRenameFlow {
             -Label 'prefix command' `
             -RequireEnabled `
             -RequireWindowHandle
-        $invoke = Start-AutomationControlInvoke -Element $prefixCommand -Label 'prefix command'
+        $invoke = Start-AutomationControlInvoke -OwnedProcess $OwnedProcess -Element $prefixCommand -Label 'prefix command'
         $pendingInvocations.Add($invoke)
         $prompt = Wait-UniqueAutomationWindow `
             -Process $Process `
@@ -214,7 +214,7 @@ function Invoke-ProductionRenameFlow {
             -Label 'apply command' `
             -RequireEnabled `
             -RequireWindowHandle
-        $invoke = Start-AutomationControlInvoke -Element $apply -Label 'apply command'
+        $invoke = Start-AutomationControlInvoke -OwnedProcess $OwnedProcess -Element $apply -Label 'apply command'
         $pendingInvocations.Add($invoke)
         $confirmation = Wait-UniqueAutomationWindow `
             -Process $Process `
@@ -279,7 +279,7 @@ function Invoke-ProductionRenameFlow {
             -Label 'apply command after cancellation' `
             -RequireEnabled `
             -RequireWindowHandle
-        $invoke = Start-AutomationControlInvoke `
+        $invoke = Start-AutomationControlInvoke -OwnedProcess $OwnedProcess `
             -Element $apply `
             -Label 'apply command after cancellation'
         $pendingInvocations.Add($invoke)
@@ -374,29 +374,6 @@ function Invoke-ProductionRenameFlow {
         $flow.diagnostic = [ordered]@{
             file = $diagnosticLeaf
             sha256 = Get-LowerSha256 -Path $diagnosticPath
-        }
-    }
-    finally {
-        $incomplete = @($pendingInvocations | Where-Object { -not $_.completed })
-        if ($incomplete.Count -gt 0 -and -not $Process.HasExited) {
-            Stop-JobBoundProcess -State $OwnedProcess
-        }
-        foreach ($invocation in $incomplete) {
-            try {
-                if ($invocation.async_result.AsyncWaitHandle.WaitOne(10000)) {
-                    [void]$invocation.powershell.EndInvoke($invocation.async_result)
-                }
-                else {
-                    $invocation.powershell.Stop()
-                }
-            }
-            catch {
-            }
-            finally {
-                $invocation.completed = $true
-                $invocation.powershell.Dispose()
-                $invocation.runspace.Dispose()
-            }
         }
     }
     [pscustomobject]$flow
@@ -757,7 +734,7 @@ function Invoke-GuiSmoke {
                     $jobCleanup = Complete-AcceptanceOwnedProcessJob `
                         -Owned $processState.process -StopActive
                     $row.job_cleanup = $jobCleanup.status -ceq 'clean'
-                    if (-not $jobCleanup.job_empty -or -not $jobCleanup.job_closed) {
+                    if ($jobCleanup.status -cne 'clean' -or -not $jobCleanup.job_empty -or -not $jobCleanup.job_closed) {
                         throw 'The production GUI process job did not close cleanly.'
                     }
                     if ($RawEvidence -and $row.Contains('process_lifecycle')) {
@@ -771,7 +748,8 @@ function Invoke-GuiSmoke {
             }
             catch {
                 $row.status = 'failed'
-                $row.failure_reason = 'process_cleanup_failed'
+                Set-ProcessCleanupFailureReason -Row $row -Reason 'process_cleanup_failed'
+                Set-GuiSmokeFailureDetail -Row $row -ErrorRecord $_
             }
             try { $processState.process.process.Dispose() } catch {}
         }
@@ -796,7 +774,8 @@ function Invoke-GuiSmoke {
             }
             catch {
                 $row.status = 'failed'
-                $row.failure_reason = 'flow_fixture_cleanup_failed'
+                Set-ProcessCleanupFailureReason -Row $row -Reason 'flow_fixture_cleanup_failed'
+                Set-GuiSmokeFailureDetail -Row $row -ErrorRecord $_
             }
         }
     }

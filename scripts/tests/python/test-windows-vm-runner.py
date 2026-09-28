@@ -110,7 +110,7 @@ class VmRunnerTests(unittest.TestCase):
         return completed.stdout
 
     def test_rescue_poll_requires_terminal_task_after_result_document(self):
-        function = self.powershell_function('Resolve-AcceptanceRescuePollState')
+        function = self.powershell_function('Resolve-ObserverTaskPollState')
         cases = [
             {'result_status': 'passed', 'task_state': 'Ready', 'task_result': 0,
              'registered_ticks': 100, 'last_run_ticks': 100},
@@ -126,7 +126,7 @@ class VmRunnerTests(unittest.TestCase):
         script = function + r'''
             $cases = $env:VM_RUNNER_CASES | ConvertFrom-Json
             @($cases | ForEach-Object {
-                Resolve-AcceptanceRescuePollState `
+                Resolve-ObserverTaskPollState -Label Rescue `
                     -ResultStatus $_.result_status `
                     -TaskState $_.task_state `
                     -TaskResult $_.task_result `
@@ -177,7 +177,7 @@ class VmRunnerTests(unittest.TestCase):
                     "if ($taskState -ceq 'Ready')", function)
                 self.assertIn(
                     '$taskResult = [long]$terminalInfo.LastTaskResult', function)
-                self.assertIn('Resolve-AcceptanceRescuePollState', function)
+                self.assertIn('Resolve-ObserverTaskPollState -Label Rescue', function)
                 self.assertIn(
                     '-RegisteredLastRunTimeTicks '
                     '$rescueGeneration.registered_last_run_time_ticks', function)

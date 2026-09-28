@@ -741,12 +741,16 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
     }
 
     private void StartCapture(
-        IntPtr stdoutRead, IntPtr stderrRead, string stdoutPath, string stderrPath,
+        ref IntPtr stdoutRead, ref IntPtr stderrRead, string stdoutPath, string stderrPath,
         long perChannelLimit, long combinedLimit) {
         channelLimit = perChannelLimit;
         aggregateLimit = combinedLimit;
-        stdoutTask = Task.Run(() => Capture(stdoutRead, stdoutPath, true));
-        stderrTask = Task.Run(() => Capture(stderrRead, stderrPath, false));
+        IntPtr stdoutHandle = stdoutRead;
+        stdoutTask = Task.Run(() => Capture(stdoutHandle, stdoutPath, true));
+        stdoutRead = IntPtr.Zero;
+        IntPtr stderrHandle = stderrRead;
+        stderrTask = Task.Run(() => Capture(stderrHandle, stderrPath, false));
+        stderrRead = IntPtr.Zero;
     }
 
     private void Capture(IntPtr readHandle, string path, bool stdout) {
@@ -808,6 +812,7 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
         IntPtr stderrRead = IntPtr.Zero, stderrWrite = IntPtr.Zero;
         IntPtr stdinRead = IntPtr.Zero, stdinWrite = IntPtr.Zero;
         IntPtr attributeList = IntPtr.Zero, handleList = IntPtr.Zero;
+        bool attributeListInitialized = false;
         IntPtr observerToken = IntPtr.Zero;
         IntPtr environmentBlock = IntPtr.Zero;
         ProcessInformation created = new ProcessInformation();
@@ -866,6 +871,7 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
                     attributeList = Marshal.AllocHGlobal(attributeSize);
                     if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref attributeSize))
                         throw new Win32Exception(Marshal.GetLastWin32Error());
+                    attributeListInitialized = true;
                     handleList = Marshal.AllocHGlobal(IntPtr.Size * 3);
                     Marshal.WriteIntPtr(handleList, 0, stdinRead);
                     Marshal.WriteIntPtr(handleList, IntPtr.Size, stdoutWrite);
@@ -946,26 +952,30 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
                 CloseHandle(stderrWrite); stderrWrite = IntPtr.Zero;
                 CloseHandle(stdinRead); stdinRead = IntPtr.Zero;
                 CloseHandle(stdinWrite); stdinWrite = IntPtr.Zero;
-                result.StartCapture(stdoutRead, stderrRead, stdoutPath, stderrPath,
+                result.StartCapture(ref stdoutRead, ref stderrRead, stdoutPath, stderrPath,
                     channelLimit, aggregateLimit);
-                stdoutRead = IntPtr.Zero;
-                stderrRead = IntPtr.Zero;
             }
             if (ResumeThread(created.hThread) == UInt32.MaxValue) {
                 int error = Marshal.GetLastWin32Error();
-                result.Terminate(1);
-                result.Dispose();
-                result = null;
                 throw new Win32Exception(error);
             }
             return result;
+        }
+        catch (Exception launchError) {
+            if (result != null) {
+                try { result.Terminate(1); }
+                catch (Exception error) { launchError.Data["termination_error"] = error.Message; }
+                try { result.Dispose(); }
+                catch (Exception error) { launchError.Data["disposal_error"] = error.Message; }
+            }
+            throw;
         }
         finally {
             if (created.hThread != IntPtr.Zero) CloseHandle(created.hThread);
             if (created.hProcess != IntPtr.Zero) CloseHandle(created.hProcess);
             if (observerToken != IntPtr.Zero) CloseHandle(observerToken);
             if (environmentBlock != IntPtr.Zero) Marshal.FreeHGlobal(environmentBlock);
-            if (attributeList != IntPtr.Zero) DeleteProcThreadAttributeList(attributeList);
+            if (attributeListInitialized) DeleteProcThreadAttributeList(attributeList);
             if (handleList != IntPtr.Zero) Marshal.FreeHGlobal(handleList);
             if (attributeList != IntPtr.Zero) Marshal.FreeHGlobal(attributeList);
             foreach (IntPtr handle in new [] { stdoutRead, stdoutWrite, stderrRead,
@@ -977,7 +987,8 @@ public sealed class DarkReNamerVmJobBoundProcess : IDisposable {
     }
 
     public void WaitForCapture(int milliseconds) {
-        Task[] tasks = stdoutTask == null ? new Task[0] : new [] { stdoutTask, stderrTask };
+        Task[] tasks = stderrTask != null ? new [] { stdoutTask, stderrTask }
+            : stdoutTask != null ? new [] { stdoutTask } : new Task[0];
         if (tasks.Length != 0 && !Task.WaitAll(tasks, milliseconds))
             throw new TimeoutException("Bounded process output did not finish draining.");
         if (captureError != null)
@@ -1782,8 +1793,12 @@ function Complete-AcceptanceOwnedProcessJob {
         }
         try { [void](Close-JobBoundProcess -State $Owned) }
         catch {
-            if ($null -eq $cleanupError) { $cleanupError = $_.Exception.Message }
+            $cleanupError = @($cleanupError, $_.Exception.Message | Where-Object { $_ }) -join '; '
         }
+    }
+    $automationErrors = @(Complete-OwnedAutomationControlInvocations -Owned $Owned)
+    if ($automationErrors.Count -gt 0) {
+        $cleanupError = @(@($cleanupError) + $automationErrors | Where-Object { $_ }) -join '; '
     }
     $record = [ordered]@{
         pid = $processId
@@ -1826,7 +1841,7 @@ function Assert-AcceptanceProcessJobLedgerClosed {
         if ($row.status -cne 'clean' -or -not $row.job_empty -or
             -not $row.job_closed -or -not $row.capture_complete -or
             $row.active_processes_at_close -ne 0 -or $row.had_survivors) {
-            throw 'A candidate process job is not proven empty, closed, and fully captured.'
+            throw "A candidate process job is not proven empty, closed, and fully captured. $($row.error)"
         }
     }
     $rows

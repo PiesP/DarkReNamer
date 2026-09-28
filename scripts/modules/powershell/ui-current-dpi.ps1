@@ -1220,7 +1220,7 @@ finally {
             if (-not $processState.process.job_closed) {
                 $jobCleanup = Complete-AcceptanceOwnedProcessJob `
                     -Owned $processState.process -StopActive
-                if (-not $jobCleanup.job_empty -or -not $jobCleanup.job_closed) {
+                if ($jobCleanup.status -cne 'clean' -or -not $jobCleanup.job_empty -or -not $jobCleanup.job_closed) {
                     throw 'The current-DPI candidate process job did not close cleanly.'
                 }
                 if ($jobCleanup.forced_termination -and
@@ -1238,7 +1238,7 @@ finally {
         }
         catch {
             $result.status = 'failed'
-            $result.failure_reason = 'process_cleanup_failed'
+            Set-ProcessCleanupFailureReason -Row $result -Reason 'process_cleanup_failed'
             $_ | Out-String | Add-Content -LiteralPath $diagnosticPath -Encoding UTF8
         }
         finally {

@@ -73,6 +73,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:AcceptanceProcessSequence = 0
 $script:AcceptanceProcessJobCleanup = [Collections.Generic.List[object]]::new()
+$script:AutomationControlInvocations = [Collections.Generic.List[object]]::new()
 
 
 $requestedBundleRoot = $BundleRoot
