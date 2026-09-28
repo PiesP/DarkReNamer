@@ -587,6 +587,82 @@ fn selected_row_movement_remove_manual_change_and_ctrl_z_are_list_state_only() {
 }
 
 #[test]
+fn remove_rows_preserves_retained_rows_and_exact_utf16_totals() {
+    const ROWS: usize = 128;
+    let cases = [
+        (
+            (0..ROWS / 2).collect::<Vec<_>>(),
+            (ROWS / 2..ROWS).collect::<Vec<_>>(),
+        ),
+        (
+            (0..ROWS).step_by(2).collect(),
+            (1..ROWS).step_by(2).collect(),
+        ),
+        ((0..ROWS).collect(), Vec::new()),
+        (Vec::new(), (0..ROWS).collect()),
+        (
+            vec![usize::MAX, 127, 64, 1, 64, ROWS, 0, 127],
+            (2..ROWS).filter(|row| ![64, 127].contains(row)).collect(),
+        ),
+    ];
+    for (selected, retained) in cases {
+        let mut list = LegacyList::new();
+        assert_eq!(
+            list.append_batch((0..ROWS).map(|row| {
+                let path = if row % 7 == 0 {
+                    format!(r"C:\{row:04}.txt")
+                } else {
+                    format!(r"C:\{}\{row:04}.txt", "p".repeat(row % 7))
+                };
+                LegacyListItem::new(path, false, row as u32, row as u64, row as u64 + 1)
+            })),
+            Ok(ROWS)
+        );
+        for row in 0..ROWS {
+            assert_eq!(
+                list.manual_change(row, format!("{}🙂.txt", "n".repeat(row % 11))),
+                Ok(true)
+            );
+        }
+        let before = list.items().to_vec();
+        let expected = retained
+            .iter()
+            .map(|row| before[*row].clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            list.remove_rows(&selected),
+            ROWS - retained.len(),
+            "{selected:?}"
+        );
+
+        assert_eq!(list.items(), expected, "{selected:?}");
+        assert_eq!(
+            list.proposed_name_utf16_units(),
+            expected
+                .iter()
+                .map(|row| row.proposed_name().len())
+                .sum::<usize>(),
+            "{selected:?}"
+        );
+        assert_eq!(
+            list.planned_path_utf16_units(),
+            expected
+                .iter()
+                .map(|row| row.planned_path().len())
+                .sum::<usize>(),
+            "{selected:?}"
+        );
+    }
+
+    let mut empty = LegacyList::new();
+    assert_eq!(empty.remove_rows(&[0, 0, usize::MAX]), 0);
+    assert!(empty.is_empty());
+    assert_eq!(empty.proposed_name_utf16_units(), 0);
+    assert_eq!(empty.planned_path_utf16_units(), 0);
+}
+
+#[test]
 fn successful_move_record_updates_only_that_row_for_partial_success() {
     let mut list = list(&[(r"C:\one\a.txt", false), (r"C:\two\b.txt", false)]);
     assert!(list.prefix_complete(&LegacyText::from("new-")).is_ok());
@@ -980,6 +1056,18 @@ fn indexed_append_rebuilds_only_after_source_set_changes() {
     let rows = (0..1_024).map(|value| item(&format!(r"C:\root\{value:04}.txt"), false));
     assert_eq!(list.append_batch_indexed(&mut index, rows), Ok(1_024));
 
+    assert_eq!(list.remove_rows(&[]), 0);
+    assert_eq!(list.remove_rows(&[1_024, usize::MAX, 1_024]), 0);
+    comparisons.set(0);
+    assert_eq!(
+        list.append_indexed(&mut index, item(r"C:\root\0512.txt", false)),
+        Ok(false)
+    );
+    assert!(
+        comparisons.get() < 64,
+        "ineffective remove rebuilt the source index"
+    );
+
     assert_eq!(list.manual_change_changed(0, "renamed.txt"), Ok(true));
     assert!(list.move_rows_later_changed(&[0]).changed());
     comparisons.set(0);
@@ -1002,6 +1090,19 @@ fn indexed_append_rebuilds_only_after_source_set_changes() {
         comparisons.get() > 1_000,
         "remove did not rebuild the index"
     );
+    comparisons.set(0);
+    assert_eq!(
+        list.append_indexed(&mut index, item(r"C:\root\0010.txt", false)),
+        Ok(false)
+    );
+    assert_eq!(
+        list.append_indexed(&mut index, item(r"C:\root\0011.txt", false)),
+        Ok(false)
+    );
+    assert!(
+        comparisons.get() < 128,
+        "append did not reuse the rebuilt index"
+    );
 
     assert_eq!(list.manual_change_changed(0, "moved.txt"), Ok(true));
     let old_source = list.items()[0].source_path().clone();
@@ -1014,6 +1115,22 @@ fn indexed_append_rebuilds_only_after_source_set_changes() {
     assert!(
         comparisons.get() > 1_000,
         "successful source move did not rebuild the index"
+    );
+
+    let row_count = list.len();
+    assert_eq!(
+        list.remove_rows(&(0..row_count).collect::<Vec<_>>()),
+        row_count
+    );
+    comparisons.set(0);
+    assert_eq!(
+        list.append_indexed(&mut index, item(r"C:\root\0000.txt", false)),
+        Ok(true)
+    );
+    assert_eq!(comparisons.get(), 0);
+    assert_eq!(
+        list.append_indexed(&mut index, item(r"C:\root\0000.txt", false)),
+        Ok(false)
     );
 
     assert!(list.clear());
