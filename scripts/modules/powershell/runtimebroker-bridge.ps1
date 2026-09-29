@@ -172,7 +172,7 @@ try {
                 function Read-Ordinary([string]$path,[long]$maximum) {
                     $item=Get-Item -LiteralPath $path -Force
                     if($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.Length -gt $maximum){throw 'Diagnostic member is unsafe or oversized.'}
-                    [IO.File]::ReadAllBytes($path)
+                    return ,([IO.File]::ReadAllBytes($path))
                 }
                 function Write-New([string]$path,[byte[]]$bytes) {
                     $temporary=Join-Path $s.root ('bridge-publication-'+[guid]::NewGuid().ToString('N')+'.tmp')

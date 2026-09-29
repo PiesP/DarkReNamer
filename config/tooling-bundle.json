@@ -745,7 +745,7 @@
       "bundle": "runtimebroker-observer.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "b4478783bfed919fb702f20dd6e80d29e4aacc1092faf503b7e667b182499bf4",
+      "sha256": "a8c0c57e82a385acdc10b66b06299472136f2ab43992f9481b4b7e992e7acb67",
       "dependencies": []
     },
     {
@@ -754,7 +754,7 @@
       "bundle": "runtimebroker-bridge.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "3b4798f56f9414a45615147da69c61a4da3c3403088dbc327850b6f5ec34d368",
+      "sha256": "962bdae4f4dc90e1fa7e2b3d4ed95f9792def5181e9ed7c13514074890796686",
       "dependencies": [
         "powershell-runtimebroker-observer",
         "powershell-guest-contracts",

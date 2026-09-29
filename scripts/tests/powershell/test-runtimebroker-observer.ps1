@@ -31,6 +31,31 @@ Assert-ObserverTest (-not [DrRuntimeBrokerNative]::MatchesSnapshotLifetime(50,50
 Assert-ObserverTest ([DrRuntimeBrokerNative]::IsRuntimeBrokerImage('C:\Windows\System32\RuntimeBroker.exe')) 'Native target image leaf failed.'
 Assert-ObserverTest (-not [DrRuntimeBrokerNative]::IsRuntimeBrokerImage('C:\Windows\System32\cmd.exe')) 'Unrelated native process image was enriched.'
 
+if ($env:OS -ceq 'Windows_NT' -and $PSVersionTable.PSEdition -ceq 'Core') {
+    # Exercise the same PS7-to-PS5 environment inheritance as the job launcher,
+    # without starting watchers or invoking any target-process interop.
+    $moduleSetup=${function:Initialize-DrRuntimeBrokerModuleEnvironment}.ToString()
+    $childCode='$ErrorActionPreference="Stop";'+
+        'function Initialize-DrRuntimeBrokerModuleEnvironment {'+$moduleSetup+'};'+
+        'Initialize-DrRuntimeBrokerModuleEnvironment;'+
+        'Import-Module Microsoft.PowerShell.Security,CimCmdlets -ErrorAction Stop;'+
+        '$null=Get-Acl -LiteralPath $PSHOME;'+
+        '$null=Get-Command Get-CimInstance,Get-AuthenticodeSignature -ErrorAction Stop;'+
+        'if($env:PSModulePath -cne [IO.Path]::Combine($PSHOME,"Modules")){throw "Wrong built-in module path."};'+
+        '[Console]::Out.Write("PS5 built-in modules loaded")'
+    $start=[Diagnostics.ProcessStartInfo]::new()
+    $start.FileName=Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $start.UseShellExecute=$false;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+    $start.Environment['PSModulePath']=Join-Path $PSHOME 'Modules'
+    foreach($argument in @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childCode)))){[void]$start.ArgumentList.Add($argument)}
+    $child=[Diagnostics.Process]::Start($start)
+    try {
+        $output=$child.StandardOutput.ReadToEndAsync();$errors=$child.StandardError.ReadToEndAsync()
+        if(-not $child.WaitForExit(30000)){$child.Kill();$child.WaitForExit();throw 'PS5 built-in module check timed out.'}
+        Assert-ObserverTest ($child.ExitCode -eq 0 -and $output.Result -ceq 'PS5 built-in modules loaded') ('PS5 module isolation failed: '+$errors.Result)
+    }finally{$child.Dispose()}
+}
+
 
 # Exercise the actual common target/parent reservation counter, with no process opens.
 $session = [DrRuntimeBrokerSession]::new('S-1-5-21-1')

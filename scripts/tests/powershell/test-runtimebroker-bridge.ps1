@@ -49,3 +49,23 @@ try{
     }
 }finally{Remove-Module -ModuleInfo $module -Force}
 'RuntimeBroker bridge verified BOM source reconstruction passed.'
+
+$readers=@($ast.FindAll({param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Read-Ordinary'
+},$true))
+if($readers.Count -ne 1){throw 'Bridge ordinary reader is not uniquely defined.'}
+. ([scriptblock]::Create($readers[0].Extent.Text))
+$temporary=Join-Path ([IO.Path]::GetTempPath()) ('broker-reader-'+[guid]::NewGuid().ToString('N'))
+[void][IO.Directory]::CreateDirectory($temporary)
+try {
+    foreach($sample in @(@{name='empty';bytes=[byte[]]@()},@{name='one';bytes=[byte[]]@(7)},@{name='many';bytes=[byte[]]@(1,2,3)})){
+        $file=Join-Path $temporary $sample.name
+        [IO.File]::WriteAllBytes($file,$sample.bytes)
+        $bytes=Read-Ordinary $file 64
+        if($bytes -isnot [byte[]] -or $bytes.Length -ne $sample.bytes.Length){throw 'Bridge reader changed the byte-array shape.'}
+        $actual=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+        $expected=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($sample.bytes))
+        if($actual -cne $expected){throw 'Bridge reader changed frozen bytes.'}
+    }
+}finally{[IO.Directory]::Delete($temporary,$true)}
+'RuntimeBroker bridge empty and short file collection checks passed.'
