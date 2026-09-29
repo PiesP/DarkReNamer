@@ -39,6 +39,8 @@ class DiagnosticTests(unittest.TestCase):
         self.args.acceptance_manifest.write_bytes(b'{"schema_version":1,"immutable":"input"}\n')
 
     def prepare_bundle_fixture(self, repo, bundle, args, tooling):
+        # Match the real builder's exclusive output-directory ownership.
+        bundle.mkdir(parents=True)
         observer = b'# frozen UI observer source\n'
         (bundle / 'windows-vm-acceptance.ps1').write_bytes(observer)
         manifest = {'schema_version': 2,
@@ -258,13 +260,18 @@ class DiagnosticTests(unittest.TestCase):
                 diagnostic.verify_cleanup_proof(path, hashlib.sha256(raw).hexdigest(), prior, self.plan)
 
     def run_fake_attempt(self, ready_error=False, controller_error=False,
-                         preparation_only=True, high_contrast=False, restoration='verified'):
+                         preparation_only=True, high_contrast=False, restoration='verified',
+                         deadline_limited_followup=False, workload_cleanup=True):
         order = []
+        elapsed = [0.0]
+        clock = diagnostic.Deadline(clock=lambda: elapsed[0])
         root = self.root / 'attempt'
         root.mkdir()
         owner = self
         self.plan['attempts'][0]['preparation_only'] = preparation_only
         self.args.acceptance_high_contrast = high_contrast
+        if deadline_limited_followup:
+            self.plan['attempts'][0]['followup_seconds'] = 360
 
         class FakeBridge:
             def __init__(self, *args):
@@ -280,8 +287,15 @@ class DiagnosticTests(unittest.TestCase):
             def mark(self, phase, state, details=None):
                 order.append(phase + ':' + state)
 
+            def request(self, operation):
+                owner.assertEqual(operation, 'ready')
+                return {'alive': elapsed[0] < 862}
+
             def stop_and_collect(self):
                 order.append('observer-collect')
+                if deadline_limited_followup:
+                    owner.assertLess(elapsed[0], 862)  # Independent rounded expiry.
+                    owner.assertGreaterEqual(elapsed[0], 840)
                 return {'observer_job': {'clean': True}, 'root_cleanup': {'removed': True},
                         'observer_result': {'retained': True}, 'inventory': [], 'collector_owned_cleanup': True}
 
@@ -307,12 +321,12 @@ class DiagnosticTests(unittest.TestCase):
             output = bundle / 'observer-output'
             self.assertTrue(output.is_dir())
             self.assertEqual((bundle / 'acceptance-input.json').read_bytes(), self.args.acceptance_manifest.read_bytes())
-            (output / 'transport.json').write_text('{"guest_cleanup":true}')
+            (output / 'transport.json').write_bytes(diagnostic.document_bytes({'guest_cleanup': workload_cleanup}))
             if preparation_only:
                 (output / 'runtimebroker-controller.json').write_bytes(diagnostic.document_bytes({
                     'schema_version': 1, 'run_id': 'b' * 32, 'preparation_only': True,
                     'preparation_completed': True, 'acceptance_claim': False,
-                    'controller_status': 'diagnostic-prepared', 'guest_cleanup': True,
+                    'controller_status': 'diagnostic-prepared', 'guest_cleanup': workload_cleanup,
                     'phase_errors': [], 'controller_elapsed_ms': 10,
                     'controller_budget_seconds': 600, 'controller_deadline_exceeded': False}))
             elif high_contrast and restoration != 'missing':
@@ -326,6 +340,8 @@ class DiagnosticTests(unittest.TestCase):
                 (output / 'acceptance-result.json').write_bytes(diagnostic.document_bytes(result))
             if controller_error:
                 raise OSError('controller-disconnect')
+            if deadline_limited_followup:
+                elapsed[0] = 839.0
             return SimpleNamespace(returncode=0 if preparation_only else 1)
 
         with mock.patch.object(diagnostic, 'workload_arguments', return_value=self.args), \
@@ -333,6 +349,9 @@ class DiagnosticTests(unittest.TestCase):
                 mock.patch.object(diagnostic.launcher, 'build_candidate_bundle', side_effect=self.prepare_bundle_fixture), \
                 mock.patch.object(diagnostic.launcher, 'managed_desktop', side_effect=desktop), \
                 mock.patch.object(diagnostic.launcher, 'controller_invocation', return_value=['controller']), \
+                mock.patch.object(diagnostic, 'Deadline', return_value=clock), \
+                mock.patch.object(diagnostic.time, 'monotonic', side_effect=lambda: elapsed[0]), \
+                mock.patch.object(diagnostic.time, 'sleep', side_effect=lambda seconds: elapsed.__setitem__(0, elapsed[0]+seconds)), \
                 mock.patch.object(diagnostic.subprocess, 'run', side_effect=run):
             receipt = diagnostic.run_attempt(self.root, root, self.plan, self.plan['attempts'][0],
                                               'b' * 32, None, FakeBridge)
@@ -354,6 +373,21 @@ class DiagnosticTests(unittest.TestCase):
         self.assertTrue((self.root / 'attempt/workload/observer-output/runtimebroker-controller.json').is_file())
         self.assertFalse((self.root / 'attempt/workload/transport.json').exists())
         self.assertFalse((self.root / 'attempt/workload/observer-output/acceptance-result.json').exists())
+
+    def test_followup_stops_before_independently_rounded_observer_expiry(self):
+        _, receipt = self.run_fake_attempt(deadline_limited_followup=True)
+        self.assertIsNone(receipt['error'])
+        self.assertTrue(receipt['safe_to_continue'])
+        self.assertFalse(receipt['deadline_exceeded'])
+
+    def test_preparation_preserves_strict_cleanup_rejection_for_independent_cleanup_proof(self):
+        _, receipt = self.run_fake_attempt(workload_cleanup=False)
+        self.assertIsNone(receipt['error'])
+        self.assertFalse(receipt['safe_to_continue'])
+        self.assertTrue(receipt['preparation_result']['preparation_completed'])
+        self.assertFalse(receipt['preparation_result']['guest_cleanup'])
+        self.assertFalse(receipt['preparation_result']['acceptance_claim'])
+        self.assertFalse(receipt['restoration_uncertain'])
 
     def test_failed_hc_restoration_stops_next_attempt_without_relabeling_result(self):
         _, receipt = self.run_fake_attempt(preparation_only=False, high_contrast=True, restoration='failed')

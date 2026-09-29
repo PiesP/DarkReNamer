@@ -25,6 +25,7 @@ REPOSITORY = REPOSITORY_ROOT
 MANIFEST = REPOSITORY / "config" / "tooling-bundle.json"
 ENTRYPOINTS = {
     "test-windows-vm.py": "vm-launcher",
+    "diagnose-runtimebroker.py": "vm-runtimebroker-diagnostic",
     "run-gui-regression.py": "vm-gui",
     "run-vm-automated-campaign.py": "campaign-runner",
     "validate-gui-regression-evidence.py": "evidence-gui",
@@ -236,10 +237,14 @@ with verified.importer() as imports:
 
     def test_vm_launcher_stages_the_complete_powershell_runtime(self) -> None:
         verified = self.verified("vm-launcher")
+        diagnostic_roles = {"powershell-runtimebroker-bridge", "powershell-runtimebroker-observer"}
         powershell = {row["role"] for row in json.loads(MANIFEST.read_bytes())["modules"]
-                      if row["kind"] == "powershell"}
+                      if row["kind"] == "powershell" and row["role"] not in diagnostic_roles}
         self.assertIn("powershell-controller-entry", powershell)
         self.assertTrue(powershell.issubset({entry.role for entry in verified.entries}))
+        self.assertTrue(diagnostic_roles.isdisjoint({entry.role for entry in verified.entries}))
+        diagnostic = self.verified("vm-runtimebroker-diagnostic")
+        self.assertTrue((powershell | diagnostic_roles).issubset({entry.role for entry in diagnostic.entries}))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             tooling.stage_verified_tooling(verified, root)

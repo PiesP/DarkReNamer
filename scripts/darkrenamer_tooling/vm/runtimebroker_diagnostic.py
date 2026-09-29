@@ -22,6 +22,7 @@ from darkrenamer_tooling.vm import launcher
 
 TOTAL_SECONDS = 900
 FOLLOWUP_SECONDS = 360
+FOLLOWUP_CLOSE_RESERVE_SECONDS = 60
 COLLECTOR_BYTES = 14 * 1024 * 1024
 PHASE_BYTES = 1024 * 1024
 OUTER_BYTES = 1024 * 1024
@@ -470,7 +471,7 @@ def preparation_result(output, run_id):
             or record['run_id'] != run_id or record['preparation_only'] is not True
             or record['preparation_completed'] is not True or record['acceptance_claim'] is not False
             or record['controller_status'] != 'diagnostic-prepared'
-            or record['guest_cleanup'] is not True
+            or type(record['guest_cleanup']) is not bool
             or record['controller_deadline_exceeded'] is not False
             or type(record['phase_errors']) is not list
             or (output / 'acceptance-result.json').exists()):
@@ -508,7 +509,6 @@ def run_attempt(repo, directory, plan, attempt, run_id, tooling, bridge_factory=
     deadline = Deadline()
     args = workload_arguments(attempt, plan)
     bundle = directory / 'workload'
-    bundle.mkdir()
     receipt = {'schema_version': 1, 'run_id': run_id, 'attempt_id': attempt['id'],
                'diagnostic_source_sha': plan['diagnostic_source_sha'],
                'candidate_source_sha': plan['candidate_source_sha'],
@@ -555,7 +555,10 @@ def run_attempt(repo, directory, plan, attempt, run_id, tooling, bridge_factory=
         desktop_clean = lease.get('cleanup_observed') is True
         receipt['desktop_resources_closed'] = desktop_clean
         bridge.mark('followup', 'begin')
-        end = time.monotonic() + min(attempt['followup_seconds'], max(0, deadline.remaining() - 35))
+        # Stop before the observer's independently rounded deadline (35-second
+        # reserve), leaving time to collect and close its owned resources.
+        end = time.monotonic() + min(attempt['followup_seconds'],
+                                    max(0, deadline.remaining() - FOLLOWUP_CLOSE_RESERVE_SECONDS))
         while time.monotonic() < end:
             state = bridge.request('ready')
             if not state['alive']:

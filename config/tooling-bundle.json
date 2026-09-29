@@ -7,7 +7,7 @@
       "bundle": "tooling-loader.py",
       "kind": "python",
       "module": "darkrenamer_tooling.loader",
-      "sha256": "8e793d4a56a1775adf329f56ca9dd432432faed5a5453b07775168713193fac3",
+      "sha256": "22b9293859ac8ee4a270bac93e949330d1625f0927b1be4d4a73c05bac3220f1",
       "dependencies": [
         "package-root"
       ]
@@ -179,6 +179,25 @@
         "package-evidence",
         "evidence-errors",
         "powershell-controller-entry"
+      ]
+    },
+    {
+      "role": "vm-runtimebroker-diagnostic",
+      "source": "scripts/darkrenamer_tooling/vm/runtimebroker_diagnostic.py",
+      "bundle": "tooling-vm-runtimebroker-diagnostic.py",
+      "kind": "python",
+      "module": "darkrenamer_tooling.vm.runtimebroker_diagnostic",
+      "sha256": "68977492fe8053c7d45cbf55364205798ecee299521fe1ba65abcb14ead7020e",
+      "dependencies": [
+        "tooling-loader",
+        "package-root",
+        "package-vm",
+        "vm-launcher",
+        "powershell-runtimebroker-bridge",
+        "powershell-runtimebroker-observer",
+        "powershell-guest-contracts",
+        "powershell-guest-process",
+        "powershell-guest-native"
       ]
     },
     {
@@ -418,7 +437,7 @@
       "bundle": "tooling-loader.ps1",
       "kind": "powershell",
       "module": null,
-      "sha256": "46e30d634bd4e01645397438b611ad6323f78fd0427508c87b5f190b331f17d3",
+      "sha256": "38f1c11b87e003bfc4ffe11832b8c1c978e4604d9653ffe48623fb382bb09f12",
       "dependencies": []
     },
     {
@@ -718,6 +737,29 @@
         "powershell-guest-state",
         "powershell-guest-scenario",
         "powershell-guest-runtime"
+      ]
+    },
+    {
+      "role": "powershell-runtimebroker-observer",
+      "source": "scripts/modules/powershell/runtimebroker-observer.ps1",
+      "bundle": "runtimebroker-observer.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "b4478783bfed919fb702f20dd6e80d29e4aacc1092faf503b7e667b182499bf4",
+      "dependencies": []
+    },
+    {
+      "role": "powershell-runtimebroker-bridge",
+      "source": "scripts/modules/powershell/runtimebroker-bridge.ps1",
+      "bundle": "runtimebroker-bridge.ps1",
+      "kind": "powershell",
+      "module": null,
+      "sha256": "3b4798f56f9414a45615147da69c61a4da3c3403088dbc327850b6f5ec34d368",
+      "dependencies": [
+        "powershell-runtimebroker-observer",
+        "powershell-guest-contracts",
+        "powershell-guest-process",
+        "powershell-guest-native"
       ]
     },
     {

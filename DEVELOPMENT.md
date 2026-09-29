@@ -331,6 +331,46 @@ visual or comprehensive assistive-technology acceptance, actual IME and
 Explorer drag-and-drop, physical-media performance, physical power loss, and VM
 reset or storage-fault durability remain outside VM-Automated v1.
 
+### RuntimeBroker identity diagnostics
+
+[`scripts/diagnose-runtimebroker.py`](scripts/diagnose-runtimebroker.py) executes
+one selected attempt from an externally stored, hash-pinned diagnostic plan.
+The plan declares at most four attempts and separately pins the unchanged
+candidate source/EXE and the clean diagnostic harness source. Use `--help` for
+the plan and invocation contract. An exclusive attempt directory prevents a
+failed attempt from being replaced or automatically retried.
+
+The observer subscribes to process start/stop events and captures the initial
+RuntimeBroker inventory before reporting READY. Managed desktop preparation
+starts only after READY. It observes runner lifetimes across sessions through
+registration preflight, the original acceptance baselines, the selected UI
+workload, strict cleanup, desktop teardown and bounded follow-up. Preparation-only
+attempts stop after the original baselines and never launch the candidate.
+Diagnostic snapshots and phase journals are separate from acceptance evidence.
+
+Each attempt has a 900-second total budget, with at most 360 seconds of
+post-cleanup observation within that budget. The controller reserves time for
+its existing cleanup and appearance restoration before starting a candidate.
+If a synchronous platform call overruns its cooperative deadline, the attempt
+fails its duration bound and further attempts stop; restoration is completed
+before owned resources are closed. It is never interrupted merely to report a
+successful time bound.
+
+Diagnostic metadata is partitioned into 14 MiB of observer output, 1 MiB of
+phase journals and 1 MiB of orchestration metadata. The observer holds at most
+64 combined target and parent process handles. WMI delivery, access failures,
+processes missed before capture, buffer limits and lifetimes still alive at
+observation end remain explicit coverage limits. Same-held-handle wait, native
+creation/exit times and exit code establish that a lifetime exited; they do not
+establish its termination cause. Package absence and API failure remain distinct.
+
+These records do not change the cleanup allowlist, process singleton rule,
+acceptance baseline or any prior failure. Observer readiness or owned cleanup
+failure, uncertain restoration, and a duration overrun stop further attempts.
+After a strict OS-delta rejection, a separately hash-bound coordinator cleanup
+proof may establish only workload-owned cleanup before the next declared
+attempt. It cannot replace the original receipt or reclassify acceptance.
+
 ## Historical acceptance and GUI diagnostics
 
 Standalone UI and recovery observer staging, the former formal acceptance
