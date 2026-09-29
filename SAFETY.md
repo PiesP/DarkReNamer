@@ -368,17 +368,56 @@ execution history.
 
 Controller cleanup requires complete process and scheduled-task inventories to
 show no runner delta after intervention and after resource removal. One initial
-same-user, same-session process delta may be accounted for only when it is the
-exact `System32\smartscreen.exe -Embedding` broker, owned by the runner and
-spawned by the SYSTEM `System32\svchost.exe` process hosting the running
-`DcomLaunch` service. The controller records its canonical paths, process
-lifetimes, command-line arguments, and valid Microsoft Authenticode signatures,
-then applies a six-minute monotonic deadline to process and scheduled-task
-polling. It accepts only natural exit followed by complete zero-delta inventories
-before the deadline; a late poll fails cleanup. A stalled inventory call may
-delay controller return, but cannot produce a passing late result. Any identity
-mismatch, second process, task delta, incomplete inventory, or timeout fails
-cleanup; the controller never terminates SmartScreen.
+same-user, same-session process delta may be waited for only when it is one of:
+
+- The exact `System32\smartscreen.exe -Embedding` broker.
+- The exact DesktopSpotlight server invocation of
+  `System32\backgroundTaskHost.exe`, authenticated as the
+  `MicrosoftWindows.Client.CBS` package's `Global.DesktopSpotlight` application.
+
+Both classes require valid Microsoft Authenticode signatures, canonical system
+paths, frozen process lifetimes and command-line arguments, and a SYSTEM
+`System32\svchost.exe` parent hosting the running `DcomLaunch` service. This does
+not assert that `DcomLaunch` is the parent's only hosted service. The limit is one
+initial process across both classes.
+
+DesktopSpotlight also requires the process's native package full name and
+application user model ID from the same held handle as its PID, creation time,
+image, token owner and session. The controller captures this identity before
+slower owner inventory calls. Observations and capture failures persist across
+inventory retries; a process disappearing after an incomplete capture cannot
+turn cleanup into a zero-delta success. Native creation times retain all 100 ns
+FILETIME ticks; matching the CIM inventory normalizes only its microsecond
+precision. Process access permits identity queries and waiting, token access
+permits queries, and neither boundary grants termination rights or enables a
+privilege.
+
+A bounded, explicitly owned Windows PowerShell registration query completes
+before the runner baselines. Its child must exit, close its job and streams, and
+leave no owned lifetime. Missing CBS registration disables only the
+DesktopSpotlight class. Classification rechecks that exact registration through
+the current user's native package APIs without starting another process. The
+package must match the fixed Microsoft identity, system signature status, and
+nondevelopment registration. Its protected SystemApps manifest must independently
+bind the package identity, DesktopSpotlight application, background tasks and
+app service. The manifest read is bounded and hash-bound; its exact ordinary
+path and ancestors must have trusted owners and no effective untrusted rights
+that can alter or replace the protected objects. The drive root may permit
+creation of unrelated directories. This class requires the Windows directory
+to be directly below its drive root, so the fixed path inventory includes every
+ancestor. The verifier checks the retained bytes and typed access-control entries
+independently.
+
+The controller applies a six-minute monotonic deadline to complete process and
+scheduled-task polling. DesktopSpotlight additionally requires a signaled exit,
+creation and exit times, and an exit code from its original held handle, followed
+by successful handle closure. The exit code records an observation; it does not
+establish successful OS work or a cause of exit. Both classes require complete
+zero-delta inventories before the deadline and after resource removal. A late
+poll fails cleanup. A stalled inventory call may delay controller return, but
+cannot produce a passing late result. Any identity mismatch, second process,
+task delta, incomplete inventory, or timeout fails cleanup. The controller never
+terminates either OS process.
 
 The independent verifier derives all 22 target verdicts from raw observations;
 producer summaries, `passed` flags, and legacy `review_required` values are not

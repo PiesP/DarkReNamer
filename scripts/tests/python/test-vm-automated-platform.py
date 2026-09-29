@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Negative environment/input/cleanup facts cannot pass a required VM cell."""
 
+import base64
 from copy import deepcopy
+from datetime import datetime
+import hashlib
 import unittest
 
 from darkrenamer_tooling.contracts.platform import (
@@ -101,12 +104,13 @@ class PlatformTests(unittest.TestCase):
                  "unexpected_runner_tasks_after_delete": [],
                  "unexpected_runner_processes_after_delete": [],
                  "removed_runner_tasks": [], "terminated_runner_processes": [],
-                 "resource_cleanup_errors": [], "smart_screen_natural_exit": self.not_required_smart_screen(),
+                 "resource_cleanup_errors": [], "runner_process_natural_exit": self.not_required_smart_screen(),
                  "owned_processes_after": []})
 
     @staticmethod
     def not_required_smart_screen():
-        return {"schema_version": 1, "status": "not-required",
+        return {"schema_version": 2, "status": "not-required",
+                "process_class": None, "native_exit": None, "initial_native_observations": [],
                 "runner_sid": "S-1-5-21-1000-1000-1000-1001", "runner_session_id": 2,
                 "candidate_identity": None, "broker": None, "timeout_ms": 0,
                 "elapsed_ms": 0, "polls": [], "natural_exit_observed": False,
@@ -149,7 +153,8 @@ class PlatformTests(unittest.TestCase):
             "service_state": "Running",
         }
         return {
-            "schema_version": 1, "status": "natural-exit",
+            "schema_version": 2, "status": "natural-exit",
+            "process_class": "smart-screen", "native_exit": None, "initial_native_observations": [],
             "runner_sid": "S-1-5-21-1000-1000-1000-1001", "runner_session_id": 2,
             "candidate_identity": identity, "broker": broker,
             "timeout_ms": 360000, "elapsed_ms": 81,
@@ -165,6 +170,323 @@ class PlatformTests(unittest.TestCase):
             "final_runner_process_delta_identities": [],
             "final_runner_task_delta_identities": [],
         }
+
+    @staticmethod
+    def filetime(stamp):
+        whole, fraction = stamp[:-1].split(".")
+        elapsed = datetime.fromisoformat(whole) - datetime(1601, 1, 1)
+        return (elapsed.days * 86400 + elapsed.seconds) * 10_000_000 + int(fraction)
+
+    @staticmethod
+    def replace_manifest(proof, data):
+        manifest = proof["broker"]["manifest"]
+        manifest.update(byte_length=len(data), sha256=hashlib.sha256(data).hexdigest(),
+                        data_base64=base64.b64encode(data).decode("ascii"))
+
+    def spotlight(self):
+        guest, host = self.clean()
+        proof = self.natural_exit_smart_screen()
+        proof["process_class"] = "desktop-spotlight"
+        broker = proof["broker"]
+        path = r"C:\Windows\System32\backgroundTaskHost.exe"
+        broker.update(process_executable_path=path, process_command_line_arguments=[
+            path, "-ServerName:Global.DesktopSpotlight.AppXz2j21w56bgxkgsjhtn7zkjsepq96erz2.mca"])
+        full_name = "MicrosoftWindows.Client.CBS_1000.26100.372.0_x64__cw5n1h2txyewy"
+        family = "MicrosoftWindows.Client.CBS_cw5n1h2txyewy"
+        package_path = r"C:\Windows\SystemApps" + "\\" + family
+        created = self.filetime(broker["process_creation_time_utc"]) + 7
+
+        def native(pid, stamp, owner, session, image):
+            return {"pid": pid, "creation_filetime_100ns": str(stamp), "owner_sid": owner,
+                    "session_id": session, "image_path": image, "open_error": 0, "pid_error": 0,
+                    "times_error": 0, "image_error": 0, "token_error": 0,
+                    "token_sid_error": 0, "token_session_error": 0}
+
+        child = native(9008, created, proof["runner_sid"], 2, path)
+        child.update(package_first_status=122, package_status=0, aumid_first_status=122,
+                     aumid_status=0, package_full_name=full_name,
+                     aumid=family + "!Global.DesktopSpotlight")
+        broker["native_identity"] = child
+        broker["parent_native_identity"] = native(
+            1000, self.filetime(broker["parent_creation_time_utc"]) + 3,
+            "S-1-5-18", 0, broker["parent_executable_path"])
+        package = {"name": "MicrosoftWindows.Client.CBS", "package_full_name": full_name,
+                   "package_family_name": family, "publisher": broker["process_signer_subject"],
+                   "publisher_id": "cw5n1h2txyewy", "version": "1000.26100.372.0",
+                   "architecture": "x64", "resource_id": ""}
+        broker["registration"] = {
+            "preflight": {**package, "runner_sid": proof["runner_sid"],
+                          "install_location": package_path, "signature_kind": "System", "status": "Ok",
+                          "is_development_mode": False,
+                          "child_lifecycle": {"pid": 2222, "start_time_utc_ticks": str(
+                              self.filetime("2026-09-27T17:00:00.0000000Z") + 504_911_232_000_000_000),
+                              "exit_code": 0, "exited": True, "streams_complete": True,
+                              "exact_lifetime_absent": True, "process_job_closed": True}},
+            "current": {**package, "resource_id": None, "caller_sid": proof["runner_sid"], "path": package_path,
+                        "open_status": 0, "first_status": 122, "second_status": 0, "close_status": 0,
+                        "required_bytes": 512, "returned_bytes": 512, "count": 1,
+                        "request_flags": 0x110, "property_flags": 0},
+        }
+        declarations = "".join(
+            f'<Extension Category="windows.backgroundTasks" EntryPoint="DesktopSpotlight.BackgroundTask.{entry}">'
+            f'<BackgroundTasks><Task Type="{kind}"/></BackgroundTasks></Extension>'
+            for entry, kind in (("UpdateTimer", "timer"), ("RegistrationStatusCheck", "systemEvent"),
+                                ("OnlineIdChange", "systemEvent"), ("Maintenance", "systemEvent")))
+        data = (
+            '<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" '
+            'xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" '
+            'xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3">'
+            '<Identity Name="MicrosoftWindows.Client.CBS" '
+            f'Publisher="{package["publisher"]}" Version="1000.26100.372.0" ProcessorArchitecture="x64"/>'
+            '<Applications><Application Id="Global.DesktopSpotlight"><Extensions>' + declarations +
+            '<uap:Extension Category="windows.appService" EntryPoint="DesktopSpotlight.BackgroundTask.AppService">'
+            '<uap3:AppService Name="com.microsoft.desktopspotlight"/></uap:Extension>'
+            '</Extensions></Application></Applications></Package>').encode()
+        manifest_path = package_path + r"\AppxManifest.xml"
+        objects = [{"path": object_path, "is_directory": index < 4,
+                    "attributes": 16 if index < 4 else 32, "owner_sid": "S-1-5-18",
+                    "dacl_present": True, "aces": [
+                        {"ace_type": 0, "ace_flags": 0, "access_mask": 0x1F01FF, "sid": "S-1-5-18"},
+                        {"ace_type": 9, "ace_flags": 0, "access_mask": 0x1200A9, "sid": "S-1-5-32-545"},
+                    ]} for index, object_path in enumerate([
+                        "C:\\", r"C:\Windows", r"C:\Windows\SystemApps", package_path, manifest_path])]
+        objects[0]["aces"].extend([
+            {"ace_type": 0, "ace_flags": 0, "access_mask": 4, "sid": "S-1-5-11"},
+            {"ace_type": 0, "ace_flags": 8, "access_mask": 0x10000000, "sid": "S-1-5-11"}])
+        broker["manifest"] = {"path": manifest_path, "path_objects": objects}
+        self.replace_manifest(proof, data)
+        proof["native_exit"] = {"pid": 9008, "creation_filetime_100ns": str(created),
+                                "exit_filetime_100ns": str(created + 10_000_000), "wait_result": 0,
+                                "times_succeeded": True, "times_win32_error": 0,
+                                "exit_code_succeeded": True, "exit_code_win32_error": 0,
+                                "exit_code": 1, "handle_closed": True, "close_win32_error": 0}
+        initial = {"identity": proof["candidate_identity"], "pid": 9008, "session_id": 2,
+                   "creation_time_utc": broker["process_creation_time_utc"], "executable_path": path}
+        proof["initial_native_observations"] = [
+            {"attempt": 1, "cim_row": deepcopy(initial), "native_identity": deepcopy(child), "capture_error": None}]
+        host["unexpected_runner_processes"] = [initial]
+        host["runner_process_natural_exit"] = proof
+        return guest, host
+
+    def test_spotlight_requires_same_handle_identity_exit_and_sticky_initial_capture(self):
+        guest, host = self.spotlight()
+        verify_cleanup(guest, host)
+        mutations = (
+            ("unknown class", lambda p: p.update(process_class="background-host")),
+            ("missing exit", lambda p: p.update(native_exit=None)),
+            ("no initial capture", lambda p: p.update(initial_native_observations=[])),
+            ("two captures", lambda p: p["initial_native_observations"].append(deepcopy(p["initial_native_observations"][0]))),
+            ("capture failure", lambda p: p["initial_native_observations"][0].update(capture_error={"error_type": "Error", "hresult": -1})),
+            ("foreign capture", lambda p: p["initial_native_observations"][0]["native_identity"].update(pid=9009)),
+            ("native token", lambda p: p["broker"]["native_identity"].update(owner_sid="S-1-5-18")),
+            ("native session", lambda p: p["broker"]["native_identity"].update(session_id=True)),
+            ("open failed", lambda p: p["broker"]["native_identity"].update(open_error=5)),
+            ("package absent", lambda p: p["broker"]["native_identity"].update(package_status=15700)),
+            ("wrong application", lambda p: p["broker"]["native_identity"].update(aumid="MicrosoftWindows.Client.CBS_cw5n1h2txyewy!Other")),
+            ("server alias", lambda p: p["broker"]["process_command_line_arguments"].__setitem__(1, "-ServerName:Global.DesktopSpotlight")),
+            ("foreign native parent", lambda p: p["broker"]["parent_native_identity"].update(pid=1001)),
+            ("reopened exit lifetime", lambda p: p["native_exit"].update(creation_filetime_100ns=str(int(p["native_exit"]["creation_filetime_100ns"]) + 1))),
+            ("exit before creation", lambda p: p["native_exit"].update(exit_filetime_100ns="1")),
+            ("wait timeout", lambda p: p["native_exit"].update(wait_result=258)),
+            ("times failed", lambda p: p["native_exit"].update(times_succeeded=False)),
+            ("exit-code failed", lambda p: p["native_exit"].update(exit_code_win32_error=5)),
+            ("boolean exit-code", lambda p: p["native_exit"].update(exit_code=True)),
+            ("live handle", lambda p: p["native_exit"].update(handle_closed=False)),
+            ("close failed", lambda p: p["native_exit"].update(close_win32_error=6)),
+            ("poll after receipt", lambda p: p["polls"][-1].update(elapsed_ms=p["elapsed_ms"] + 1)),
+            ("final survivor", lambda p: p["final_runner_process_delta_identities"].append(p["candidate_identity"])),
+        )
+        for label, mutate in mutations:
+            guest, host = self.spotlight()
+            mutate(host["runner_process_natural_exit"])
+            with self.subTest(label=label), self.assertRaises(EvidenceError):
+                verify_cleanup(guest, host)
+
+    def test_native_time_normalization_retains_exact_submicrosecond_exit_lifetime(self):
+        for fraction in range(10):
+            guest, host = self.spotlight()
+            proof = host["runner_process_natural_exit"]
+            native = proof["broker"]["native_identity"]
+            native["creation_filetime_100ns"] = str(self.filetime(proof["broker"]["process_creation_time_utc"]) + fraction)
+            proof["initial_native_observations"][0]["native_identity"] = deepcopy(native)
+            proof["native_exit"]["creation_filetime_100ns"] = native["creation_filetime_100ns"]
+            with self.subTest(fraction=fraction):
+                verify_cleanup(guest, host)
+        for value in (True, 134_350_940_670_489_967, "0134350940670489967", "-1",
+                      "0", "18446744073709551615", "2650467744000000000"):
+            guest, host = self.spotlight()
+            host["runner_process_natural_exit"]["broker"]["native_identity"]["creation_filetime_100ns"] = value
+            with self.subTest(value=value), self.assertRaises(EvidenceError):
+                verify_cleanup(guest, host)
+        guest, host = self.spotlight()
+        proof = host["runner_process_natural_exit"]
+        proof["broker"]["native_identity"]["creation_filetime_100ns"] = str(
+            self.filetime(proof["broker"]["process_creation_time_utc"]) + 10)
+        with self.assertRaises(EvidenceError):
+            verify_cleanup(guest, host)
+
+    def test_spotlight_registration_rejects_unsigned_development_foreign_or_incomplete_queries(self):
+        cases = (
+            ("preflight", "signature_kind", "Developer"), ("preflight", "status", "Modified"),
+            ("preflight", "is_development_mode", True), ("preflight", "runner_sid", "S-1-5-18"),
+            ("preflight", "install_location", r"C:\Users\TestUser\SystemApps"),
+            ("preflight", "version", "1000.26100.65536.0"),
+            ("current", "open_status", 1168), ("current", "first_status", 0),
+            ("current", "second_status", 122), ("current", "close_status", 5),
+            ("current", "caller_sid", "S-1-5-18"), ("current", "count", 2),
+            ("current", "request_flags", 0x10), ("current", "returned_bytes", 513),
+            ("current", "required_bytes", 65537), ("current", "publisher", "CN=Other"),
+            ("current", "resource_id", ""), ("current", "resource_id", "resources"),
+        ) + tuple(("current", "property_flags", flag) for flag in (1, 2, 4, 8, 0x10000))
+        for section, field, value in cases:
+            guest, host = self.spotlight()
+            registration = host["runner_process_natural_exit"]["broker"]["registration"]
+            registration[section][field] = value
+            with self.subTest(section=section, field=field, value=value), self.assertRaises(EvidenceError):
+                verify_cleanup(guest, host)
+        for field in ("exited", "streams_complete", "exact_lifetime_absent", "process_job_closed"):
+            guest, host = self.spotlight()
+            host["runner_process_natural_exit"]["broker"]["registration"]["preflight"]["child_lifecycle"][field] = False
+            with self.subTest(field=field), self.assertRaises(EvidenceError):
+                verify_cleanup(guest, host)
+
+    def test_spotlight_raw_manifest_rejects_hash_tampering_and_semantic_substitution(self):
+        guest, host = self.spotlight()
+        proof = host["runner_process_natural_exit"]
+        original = base64.b64decode(proof["broker"]["manifest"]["data_base64"])
+        replacements = (
+            original.replace(b'Name="MicrosoftWindows.Client.CBS"', b'Name="Other"'),
+            original.replace(b'Id="Global.DesktopSpotlight"', b'Id="Other"'),
+            original.replace(b'Global.DesktopSpotlight', b'Global.DesktopSpotlightOther'),
+            original.replace(b'Version="1000.26100.372.0"', b'Version="1000.26100.373.0"'),
+            original.replace(b'foundation/windows10', b'foundation/other'),
+            original.replace(b'Type="timer"', b'Type="systemEvent"'),
+            original.replace(b'com.microsoft.desktopspotlight', b'com.microsoft.other'),
+            original.replace(b'<Applications>', b'<Applications><Application Id="Global.DesktopSpotlight"/>'),
+            original.replace(b'<BackgroundTasks>', b'<BackgroundTasks ServerName="fake">'),
+            b'<!DOCTYPE Package [<!ENTITY injected "other">]>' + original,
+            original[:-1],
+        )
+        for data in replacements:
+            guest, host = self.spotlight()
+            self.replace_manifest(host["runner_process_natural_exit"], data)
+            with self.subTest(data=data[:50]), self.assertRaises(EvidenceError):
+                verify_cleanup(guest, host)
+        for field, value in (("sha256", "0" * 64), ("byte_length", 1),
+                             ("data_base64", "!"), ("byte_length", 1048577)):
+            guest, host = self.spotlight()
+            host["runner_process_natural_exit"]["broker"]["manifest"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(EvidenceError):
+                verify_cleanup(guest, host)
+
+    def test_spotlight_acl_rejects_reparse_null_dacl_and_untrusted_replacement_grants(self):
+        for index, mask in ((0, 2), (0, 0x40), (0, 0x40000), (1, 4), (2, 0x10),
+                            (3, 0x100), (4, 2), (4, 0x10000), (4, 0x80000),
+                            (4, 0x10000000), (4, 0x40000000)):
+            guest, host = self.spotlight()
+            objects = host["runner_process_natural_exit"]["broker"]["manifest"]["path_objects"]
+            objects[index]["aces"].append({"ace_type": 9, "ace_flags": 0,
+                                           "access_mask": mask, "sid": "S-1-5-11"})
+            with self.subTest(index=index, mask=mask), self.assertRaises(EvidenceError):
+                verify_cleanup(guest, host)
+        for field, value in (("owner_sid", "S-1-5-11"), ("dacl_present", False),
+                             ("aces", []), ("attributes", 0x410), ("is_directory", False),
+                             ("path", r"C:\Windows\SystemApps\..")):
+            guest, host = self.spotlight()
+            objects = host["runner_process_natural_exit"]["broker"]["manifest"]["path_objects"]
+            objects[3][field] = value
+            with self.subTest(field=field), self.assertRaises(EvidenceError):
+                verify_cleanup(guest, host)
+        guest, host = self.spotlight()
+        objects = host["runner_process_natural_exit"]["broker"]["manifest"]["path_objects"]
+        objects[0]["aces"][-1]["ace_flags"] = 0
+        with self.assertRaises(EvidenceError):
+            verify_cleanup(guest, host)
+
+    def test_spotlight_five_path_inventory_cannot_omit_a_nested_windows_ancestor(self):
+        def relocate(value):
+            if type(value) is str and value.startswith(r"C:\Windows"):
+                return r"C:\Parent\Windows" + value[len(r"C:\Windows"):]
+            if type(value) is list:
+                return [relocate(item) for item in value]
+            if type(value) is dict:
+                return {key: relocate(item) for key, item in value.items()}
+            return value
+
+        guest, host = self.spotlight()
+        nested = relocate(host)
+        paths = nested["runner_process_natural_exit"]["broker"]["manifest"]["path_objects"]
+        self.assertEqual(len(paths), 5)
+        self.assertNotIn(r"C:\Parent", [row["path"] for row in paths])
+        with self.assertRaises(EvidenceError):
+            verify_cleanup(guest, nested)
+
+        # The new path constraint belongs only to the package manifest contract.
+        guest, host = self.clean()
+        proof = self.natural_exit_smart_screen()
+        host["runner_process_natural_exit"] = proof
+        host["unexpected_runner_processes"] = [{
+            "identity": proof["candidate_identity"], "pid": 9008, "session_id": 2,
+            "creation_time_utc": proof["broker"]["process_creation_time_utc"],
+            "executable_path": proof["broker"]["process_executable_path"],
+        }]
+        verify_cleanup(guest, relocate(host))
+
+    def test_process_classes_cannot_mix_optional_proofs_or_accept_multiple_initial_processes(self):
+        guest, host = self.spotlight()
+        host["unexpected_runner_processes"].append(deepcopy(host["unexpected_runner_processes"][0]))
+        with self.assertRaises(EvidenceError):
+            verify_cleanup(guest, host)
+        for field, value in (("process_class", "smart-screen"), ("native_exit", {}),
+                             ("initial_native_observations", [{}])):
+            guest, host = self.clean()
+            host["runner_process_natural_exit"][field] = value
+            with self.subTest(field=field), self.assertRaises(EvidenceError):
+                verify_cleanup(guest, host)
+
+    def test_spotlight_does_not_pin_package_version_or_infer_failure_from_exit_code(self):
+        for version, exit_code in (("1.0.0.0", 259), ("65535.65535.65535.65535", 0xFFFFFFFF)):
+            guest, host = self.spotlight()
+            proof = host["runner_process_natural_exit"]
+            broker = proof["broker"]
+            data = base64.b64decode(broker["manifest"]["data_base64"])
+            self.replace_manifest(proof, data.replace(b"1000.26100.372.0", version.encode()))
+            full_name = f"MicrosoftWindows.Client.CBS_{version}_x64__cw5n1h2txyewy"
+            broker["native_identity"]["package_full_name"] = full_name
+            proof["initial_native_observations"][0]["native_identity"]["package_full_name"] = full_name
+            for registration in broker["registration"].values():
+                registration.update(version=version, package_full_name=full_name)
+            proof["native_exit"]["exit_code"] = exit_code
+            with self.subTest(version=version, exit_code=exit_code):
+                verify_cleanup(guest, host)
+
+    def test_closed_schema_and_acl_types_cannot_hide_extra_or_unsupported_evidence(self):
+        for section in ("root", "native", "registration", "manifest", "path", "ace", "exit"):
+            guest, host = self.spotlight()
+            proof = host["runner_process_natural_exit"]
+            broker = proof["broker"]
+            rows = {"root": proof, "native": broker["native_identity"],
+                    "registration": broker["registration"]["current"], "manifest": broker["manifest"],
+                    "path": broker["manifest"]["path_objects"][4],
+                    "ace": broker["manifest"]["path_objects"][4]["aces"][0], "exit": proof["native_exit"]}
+            rows[section]["unverified"] = True
+            with self.subTest(section=section), self.assertRaises(EvidenceError):
+                verify_cleanup(guest, host)
+        for kind in (True, 2, 5, 11):
+            guest, host = self.spotlight()
+            host["runner_process_natural_exit"]["broker"]["manifest"]["path_objects"][4]["aces"][1]["ace_type"] = kind
+            with self.subTest(kind=kind), self.assertRaises(EvidenceError):
+                verify_cleanup(guest, host)
+        guest, host = self.spotlight()
+        aces = host["runner_process_natural_exit"]["broker"]["manifest"]["path_objects"][4]["aces"]
+        aces.extend([{"ace_type": 1, "ace_flags": 0, "access_mask": 2, "sid": "S-1-5-11"},
+                     {"ace_type": 0, "ace_flags": 0, "access_mask": 2, "sid": "S-1-5-11"}])
+        with self.assertRaises(EvidenceError):
+            verify_cleanup(guest, host)
+        guest, host = self.clean()
+        host["smart_screen_natural_exit"] = host.pop("runner_process_natural_exit")
+        with self.assertRaises(EvidenceError):
+            verify_cleanup(guest, host)
 
     def test_cleanup_requires_each_owned_resource_absent_and_clean_journal(self):
         verify_cleanup(*self.clean())
@@ -219,11 +541,11 @@ class PlatformTests(unittest.TestCase):
             "creation_time_utc": proof["broker"]["process_creation_time_utc"],
             "executable_path": proof["broker"]["process_executable_path"],
         }]
-        host["smart_screen_natural_exit"] = proof
+        host["runner_process_natural_exit"] = proof
         verify_cleanup(guest, host)
         verify_controller_cleanup(host)
         case_variant = deepcopy(host)
-        case_variant["smart_screen_natural_exit"]["broker"]["parent_command_line_arguments"] = [
+        case_variant["runner_process_natural_exit"]["broker"]["parent_command_line_arguments"] = [
             proof["broker"]["parent_command_line_arguments"][0],
             "-K", "dcomlaunch", "-P",
         ]
@@ -246,13 +568,13 @@ class PlatformTests(unittest.TestCase):
             changed = self.natural_exit_smart_screen()
             changed_host["unexpected_runner_processes"] = deepcopy(host["unexpected_runner_processes"])
             mutate(changed)
-            changed_host["smart_screen_natural_exit"] = changed
+            changed_host["runner_process_natural_exit"] = changed
             with self.subTest(label=label), self.assertRaises(EvidenceError):
                 verify_cleanup(changed_guest, changed_host)
 
     def test_controller_cleanup_requires_smart_screen_evidence_and_exact_after_deltas(self):
         guest, host = self.clean()
-        del host["smart_screen_natural_exit"]
+        del host["runner_process_natural_exit"]
         with self.assertRaises(EvidenceError):
             verify_cleanup(guest, host)
         guest, host = self.clean()
@@ -262,7 +584,7 @@ class PlatformTests(unittest.TestCase):
             "creation_time_utc": proof["broker"]["process_creation_time_utc"],
             "executable_path": proof["broker"]["process_executable_path"],
         }]
-        host["smart_screen_natural_exit"] = proof
+        host["runner_process_natural_exit"] = proof
         host["unexpected_runner_processes_after_delete"] = [
             deepcopy(host["unexpected_runner_processes"][0])]
         with self.assertRaises(EvidenceError):

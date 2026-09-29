@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param()
 
 Set-StrictMode -Version Latest
@@ -28,7 +28,11 @@ Invoke-DrTestPowerShellModuleScope -Kind controller -Action {
             unexpected_runner_tasks_after_intervention = @(); unexpected_runner_processes_after_intervention = @()
             unexpected_runner_tasks_after_delete = @(); unexpected_runner_processes_after_delete = @()
             removed_runner_tasks = @(); terminated_runner_processes = @(); resource_cleanup_errors = @()
-            owned_processes_after = @(); smart_screen_natural_exit = $null
+            owned_processes_after = @(); runner_process_natural_exit = [pscustomobject]@{
+                schema_version=2;process_class=$null;native_exit=$null;initial_native_observations=@()
+                status='not-required';candidate_identity=$null;natural_exit_observed=$false
+                final_inventory_complete=$true;final_runner_process_delta_identities=@();final_runner_task_delta_identities=@()
+            }
         }
     }
     $completion = [scriptblock]::Create(${function:Test-DrControllerCleanupObservation}.ToString())
@@ -36,7 +40,7 @@ Invoke-DrTestPowerShellModuleScope -Kind controller -Action {
     if (-not (& $completion -Observation $clean)) { throw 'Observed-empty cleanup did not pass.' }
     if (& $completion -Observation $null) { throw 'Missing cleanup evidence passed.' }
     foreach ($field in $clean.PSObject.Properties.Name) {
-        if ($field -ceq 'smart_screen_natural_exit') { continue }
+
         foreach ($mutation in @('missing', 'null', 'residue', 'wrong-type')) {
             $raw = New-CleanObservation
             switch ($mutation) {
@@ -53,20 +57,44 @@ Invoke-DrTestPowerShellModuleScope -Kind controller -Action {
     }
     $raw = New-CleanObservation
     $raw.unexpected_runner_processes = @([pscustomobject]@{ identity = 'broker' })
-    $raw.smart_screen_natural_exit = [pscustomobject]@{
-        status = 'natural-exit'; candidate_identity = 'broker'; natural_exit_observed = $true
+    $raw.runner_process_natural_exit = [pscustomobject]@{
+        schema_version=2;process_class='smart-screen';native_exit=$null;initial_native_observations=@();status = 'natural-exit'; candidate_identity = 'broker'; natural_exit_observed = $true
         final_inventory_complete = $true; final_runner_process_delta_identities = @()
         final_runner_task_delta_identities = @()
     }
     if (-not (& $completion -Observation $raw)) { throw 'The observed SmartScreen natural exit lost its existing exception.' }
-    foreach ($field in $raw.smart_screen_natural_exit.PSObject.Properties.Name) {
+    foreach ($field in $raw.runner_process_natural_exit.PSObject.Properties.Name) {
         $changed = New-CleanObservation
         $changed.unexpected_runner_processes = $raw.unexpected_runner_processes
-        $changed.smart_screen_natural_exit = $raw.smart_screen_natural_exit.PSObject.Copy()
-        $changed.smart_screen_natural_exit.PSObject.Properties.Remove($field)
+        $changed.runner_process_natural_exit = $raw.runner_process_natural_exit.PSObject.Copy()
+        $changed.runner_process_natural_exit.PSObject.Properties.Remove($field)
         if (& $completion -Observation $changed) { throw "Incomplete SmartScreen $field evidence passed." }
     }
-    $raw.smart_screen_natural_exit.candidate_identity = 'foreign'
+    # A nonzero OS exit code is evidence of exit, not an acceptance failure.
+    $desktop=New-CleanObservation
+    $desktop.unexpected_runner_processes=@([pscustomobject]@{identity='desktop'})
+    $desktop.runner_process_natural_exit=[pscustomobject]@{
+        schema_version=2;process_class='desktop-spotlight';status='natural-exit';candidate_identity='desktop'
+        initial_native_observations=@([pscustomobject]@{attempt=1})
+        broker=[pscustomobject]@{native_identity=[pscustomobject]@{pid=9468;creation_filetime_100ns='134351408602899385'}}
+        native_exit=[pscustomobject]@{pid=9468;creation_filetime_100ns='134351408602899385';exit_filetime_100ns='134351409203675720'
+            wait_result=0;times_succeeded=$true;times_win32_error=0;exit_code_succeeded=$true;exit_code_win32_error=0
+            exit_code=[uint32]1;handle_closed=$true;close_win32_error=0}
+        natural_exit_observed=$true;final_inventory_complete=$true;final_runner_process_delta_identities=@();final_runner_task_delta_identities=@()
+    }
+    if(-not(& $completion -Observation $desktop)){throw 'Exact same-handle exit code1 was rejected.'}
+    foreach($field in $desktop.runner_process_natural_exit.native_exit.PSObject.Properties.Name){
+        $saved=$desktop.runner_process_natural_exit.native_exit.$field
+        $desktop.runner_process_natural_exit.native_exit.$field=$null
+        if(& $completion -Observation $desktop){throw "Missing native exit field $field accepted."}
+        $desktop.runner_process_natural_exit.native_exit.$field=$saved
+    }
+    $desktop.runner_process_natural_exit.native_exit.close_win32_error=5
+    if(& $completion -Observation $desktop){throw 'Native close failure accepted.'}
+    $desktop.runner_process_natural_exit.native_exit.close_win32_error=0
+    $desktop.runner_process_natural_exit.initial_native_observations+=@([pscustomobject]@{attempt=2})
+    if(& $completion -Observation $desktop){throw 'Two initial native observations accepted.'}
+    $raw.runner_process_natural_exit.candidate_identity = 'foreign'
     if (& $completion -Observation $raw) { throw 'Another process inherited the SmartScreen exception.' }
 }
 
@@ -385,6 +413,10 @@ try {
             $node -is [Management.Automation.Language.ScriptBlockExpressionAst]
         }, $true).ScriptBlock.GetScriptBlock()
         $completionDefinition = ${function:Test-DrControllerCleanupObservation}.ToString()
+        foreach($name in @('New-DrVmSpotlightCaptureContext','Close-DrVmSpotlightCaptureContext')){
+            $definition=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq ('global:'+$name)}.GetNewClosure(),$true))
+            . ([scriptblock]::Create($definition[0].Extent.Text.Replace('function global:','function ')))
+        }
         $oldProgramData = $env:ProgramData
         $env:ProgramData = Join-Path $FixtureRoot 'cleanup-programdata'
         try {
@@ -404,9 +436,13 @@ try {
                 [pscustomobject]@{ identity = 'baseline-task'; definition_sha256 = $hash }
             }
             function Get-DrVmRunnerProcesses {
-                param($UserSid, $SessionId)
+                param($UserSid, $SessionId, $CaptureContext)
                 if ($UserSid -cne 'runner-sid' -or $SessionId -ne 7) { throw 'Runner process observation escaped its identity.' }
                 $probe.process_reads++
+                if($probe.process_reads -eq 1 -and $probe.mode -ceq 'failed-capture'){
+                    $CaptureContext.failed=$true
+                    $CaptureContext.observations.Add([ordered]@{attempt=1;cim_row=$null;native_identity=$null;capture_error=[ordered]@{error_type='System.Exception';hresult=-1}})
+                }
                 [pscustomobject]@{
                     complete = -not ($probe.process_reads -eq 3 -and $probe.mode -ceq 'incomplete')
                     processes = @($(if ($probe.process_reads -eq 3 -and $probe.mode -ceq 'runner-process') {
@@ -427,7 +463,7 @@ try {
                     ($probe.mode -ceq 'trusted-root' -and $LiteralPath -ceq $trustedRoot)) { return }
                 Microsoft.PowerShell.Management\Remove-Item -LiteralPath $LiteralPath -Recurse -Force
             }
-            foreach ($mode in @('clean', 'task', 'guest-root', 'trusted-root', 'runner-process', 'owned-process', 'incomplete', 'removed-baseline-task', 'changed-baseline-task')) {
+            foreach ($mode in @('clean', 'task', 'guest-root', 'trusted-root', 'runner-process', 'owned-process', 'incomplete', 'removed-baseline-task', 'changed-baseline-task','failed-capture')) {
                 $probe = [pscustomobject]@{ mode = $mode; task_reads = 0; runner_task_reads = 0; process_reads = 0; deletes = 0 }
                 $taskName = 'DarkReNamerTests-' + [guid]::NewGuid().ToString('N')
                 $base = Join-Path $env:ProgramData 'DarkReNamerVmRuns'
@@ -440,6 +476,15 @@ try {
                     baseline_process_identities = @()
                 }
                 $observed = & $remoteBody $guestRoot $trustedRoot $taskName $true $true $context $completionDefinition
+                if($mode -ceq 'failed-capture'){
+                    if($observed.guest_cleanup -or $probe.deletes -ne 0 -or
+                        -not $observed.raw_cleanup.guest_root_present -or -not $observed.raw_cleanup.trusted_task_root_present -or
+                        $observed.raw_cleanup.runner_process_natural_exit.status -cne 'rejected'){
+                        throw 'A sticky failed capture and empty retry deleted retained roots.'
+                    }
+                    foreach($ownedRoot in @($guestRoot,$trustedRoot)){Microsoft.PowerShell.Management\Remove-Item -LiteralPath $ownedRoot -Recurse -Force}
+                    continue
+                }
                 if ($observed.guest_cleanup -isnot [bool] -or $observed.guest_cleanup -ne ($mode -ceq 'clean') -or
                     $probe.deletes -ne 2 -or $probe.process_reads -ne 3 -or $probe.runner_task_reads -ne 3 -or
                     $null -eq $observed.raw_cleanup.unexpected_runner_tasks_after_delete -or

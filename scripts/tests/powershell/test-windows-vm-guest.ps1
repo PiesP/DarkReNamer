@@ -2671,6 +2671,41 @@ $missingTask = Wait-DrVmSmartScreenNaturalExit `
     -BaselineProcessIdentities @($baseline.identity) -BaselineTasks @($baselineTask) `
     -CandidateIdentity $candidateIdentity -OwnedRootPrefixes @('C:\owned\') `
     -TimeoutMilliseconds 360000
+$script:nativeWait=[uint32]0;$script:nativeTimes=$true
+$nativeOwner=[pscustomobject]@{}
+$nativeOwner|Add-Member ScriptMethod Poll { @{wait_result=$script:nativeWait;times_succeeded=$script:nativeTimes;exit_code_succeeded=$true;exit_code=[uint32]1} }
+function New-NativeCapture { [pscustomobject]@{lifetimes=@{$candidateIdentity=[pscustomobject]@{owner=$nativeOwner;exit=@{wait_result=[uint32]258}}}} }
+$common=@{UserSid='S-1-5-21-1-2-3-1001';SessionId=2;BaselineProcessIdentities=@($baseline.identity);BaselineTasks=@();CandidateIdentity=$candidateIdentity;OwnedRootPrefixes=@('C:\owned\');TimeoutMilliseconds=360000}
+$script:inventoryQueue.Enqueue([pscustomobject]@{complete=$true;processes=@($baseline)})
+$nativeNatural=Wait-DrVmSmartScreenNaturalExit @common -NativeCapture (New-NativeCapture)
+# Native signal arriving during a slow inventory requires a fresh clean inventory.
+$lateOwner=[pscustomobject]@{calls=0}
+$lateOwner|Add-Member ScriptMethod Poll {$this.calls++;@{wait_result=([uint32]$(if($this.calls -eq 1){258}else{0}));times_succeeded=$true;exit_code_succeeded=$true;exit_code=[uint32]1}}
+$lateCapture=[pscustomobject]@{lifetimes=@{$candidateIdentity=[pscustomobject]@{owner=$lateOwner;exit=@{wait_result=[uint32]258}}}}
+$script:inventoryQueue.Enqueue([pscustomobject]@{complete=$true;processes=@($baseline)})
+$script:inventoryQueue.Enqueue([pscustomobject]@{complete=$true;processes=@($baseline)})
+$late=Wait-DrVmSmartScreenNaturalExit @common -NativeCapture $lateCapture
+if($late.status -cne 'natural-exit' -or $late.polls.Count -ne 2 -or $script:inventoryQueue.Count -ne 0){throw 'Late signal lacked a new complete inventory or added an intermediate zero poll.'}
+$lateOwner.calls=0;$lateCapture.lifetimes[$candidateIdentity].exit=@{wait_result=[uint32]258}
+$script:inventoryQueue.Enqueue([pscustomobject]@{complete=$true;processes=@($baseline)})
+$script:inventoryQueue.Enqueue([pscustomobject]@{complete=$true;processes=@($baseline,[pscustomobject]@{identity='extra'})})
+$lateExtra=Wait-DrVmSmartScreenNaturalExit @common -NativeCapture $lateCapture
+if($lateExtra.status -cne 'rejected'){throw 'A new process in the fresh inventory was washed away.'}
+$lateOwner.calls=0;$lateCapture.lifetimes[$candidateIdentity].exit=@{wait_result=[uint32]258}
+$script:inventoryQueue.Enqueue([pscustomobject]@{complete=$true;processes=@($baseline)})
+$script:inventoryQueue.Enqueue([pscustomobject]@{complete=$false;processes=@()})
+$lateIncomplete=Wait-DrVmSmartScreenNaturalExit @common -NativeCapture $lateCapture
+if($lateIncomplete.status -cne 'inventory-failed'){throw 'An incomplete fresh inventory accepted a native signal.'}
+$script:nativeWait=[uint32]258
+$script:inventoryQueue.Enqueue([pscustomobject]@{complete=$true;processes=@($baseline)})
+$nativeMissing=Wait-DrVmSmartScreenNaturalExit @common -NativeCapture (New-NativeCapture)
+$script:nativeWait=[uint32]0;$script:nativeTimes=$false
+$nativeFailure=Wait-DrVmSmartScreenNaturalExit @common -NativeCapture (New-NativeCapture)
+$script:nativeTimes=$true
+$script:inventoryQueue.Enqueue([pscustomobject]@{complete=$true;processes=@($baseline,$candidate,[pscustomobject]@{identity='extra'})})
+$nativeExtra=Wait-DrVmSmartScreenNaturalExit @common -NativeCapture (New-NativeCapture)
+if($nativeNatural.status -cne 'natural-exit' -or $nativeMissing.status -cne 'inventory-failed' -or
+    $nativeFailure.status -cne 'inventory-failed' -or $nativeExtra.status -cne 'rejected'){throw 'Native proof weakened whole inventory or same-handle exit requirements.'}
 [pscustomobject]@{
     natural_status = $natural.status
     natural_exit = $natural.natural_exit_observed
@@ -3413,7 +3448,6 @@ Invoke-DrTestPowerShellModuleScope `
         }
     }
 
-    Write-Host 'Windows VM guest runner tests passed.'
 }
 catch {
     $testFailure = $_
@@ -3440,3 +3474,205 @@ finally {
         Write-Warning "Fixture cleanup also failed: $($_.Exception.Message)"
     }
 }
+
+# Exercise the actual early capture seam without invoking Windows APIs on Linux.
+& {
+    $errors=$null;$tokens=$null
+    $ast=[Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $toolingScriptsRoot 'modules/powershell/controller-entry.psm1'),[ref]$tokens,[ref]$errors)
+    if($errors.Count){throw $errors}
+    $names=@('Initialize-DrVmSpotlightNative','New-DrVmSpotlightCaptureContext','Test-DrVmSpotlightNativeIdentity',
+        'Add-DrVmSpotlightInitialObservation','Close-DrVmSpotlightCaptureContext','Get-DrVmRunnerProcesses',
+        'Test-DrVmSpotlightManifestIdentity','Get-DrVmSpotlightBrokerEvidence','Test-DrVmSpotlightRegistration',
+        'Test-DrVmSmartScreenBrokerEvidence','Get-DrVmCommandLineArguments','Test-DrVmCanonicalSystemBinaryPath',
+        'Read-DrVmVerifiedPreflightLoaderBytes','Read-DrVmBoundedOrdinaryBytes')
+    foreach($name in $names){
+        $definitions=@($ast.FindAll({param($node)$node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq ('global:'+$name)}.GetNewClosure(),$true))
+        if($definitions.Count -ne 1){throw "Missing actual Spotlight function $name"}
+        . ([scriptblock]::Create($definitions[0].Extent.Text.Replace('function global:','function ')))
+    }
+    $byteRoot=Join-Path ([IO.Path]::GetTempPath()) ('darkrenamer-preflight-bytes-'+[guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $byteRoot)
+    try {
+        $path=Join-Path $byteRoot 'loader.ps1';$data=[Text.Encoding]::UTF8.GetBytes('$safe=1')
+        [IO.File]::WriteAllBytes($path,$data)
+        $record=[pscustomobject]@{bytes=$data.Length;sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()}
+        $checked=Read-DrVmVerifiedPreflightLoaderBytes $path $record
+        [IO.File]::WriteAllBytes($path,[Text.Encoding]::UTF8.GetBytes('$evil=1'))
+        if([Text.Encoding]::UTF8.GetString($checked) -cne '$safe=1'){throw 'Checked loader bytes changed after pathname replacement.'}
+        Assert-Fails {Read-DrVmVerifiedPreflightLoaderBytes $path $record} 'hash mismatch'
+        [IO.File]::WriteAllBytes($path,[byte[]]::new(65537))
+        Assert-Fails {Read-DrVmBoundedOrdinaryBytes $path 65536} 'byte length'
+        Assert-Fails {Read-DrVmBoundedOrdinaryBytes $path 0} 'byte length'
+        [IO.File]::WriteAllBytes($path,[byte[]]::new(0))
+        if((Read-DrVmBoundedOrdinaryBytes $path 0).Length -ne 0){throw 'Exact empty stderr was not preserved.'}
+    } finally {Remove-Item -LiteralPath $byteRoot -Recurse -Force}
+    Initialize-DrVmSpotlightNative
+    if([Runtime.InteropServices.Marshal]::SizeOf([type][DrVmSpotlightNative+PackageInfo]) -ne 80 -or
+        [Runtime.InteropServices.Marshal]::SizeOf([type][DrVmSpotlightNative+PackageId]) -ne 48 -or
+        [DrVmSpotlightNative]::ProcessAccess -ne 0x101000 -or [DrVmSpotlightNative]::TokenAccess -ne 8){throw 'Native ABI/access boundary changed.'}
+    # Exercise the effective-write guard from the actual raw-ACL producer.
+    $manifestAst=$ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'global:Get-DrVmSpotlightManifest'},$true)
+    $riskAst=$manifestAst.Find({param($n)$n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq '$risk'},$true)
+    $rootRisk=$manifestAst.Find({param($n)$n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -ceq '$effectiveRisk' -and $n.Right.Extent.Text -like '*-bnot*'},$true)
+    $guard=$manifestAst.Find({param($n)$n -is [Management.Automation.Language.IfStatementAst] -and $n.Extent.Text.StartsWith('if ($type -in @(0,9)')},$true)
+    $aclCheck=[scriptblock]::Create('param($type,$flags,$sid,$mask,$isRoot) $trusted=@("S-1-5-18","S-1-5-32-544"); '+$riskAst.Extent.Text+'; $effectiveRisk=$risk; if($isRoot){'+$rootRisk.Extent.Text+'}; '+$guard.Extent.Text)
+    foreach($case in @(@(0,0,'S-1-5-32-545',4,$true),@(9,0,'S-1-5-32-545',0x1200a9,$false),
+        @(0,8,'S-1-5-32-545',0x500D0156,$false),@(0,0,'S-1-5-18',0x500D0156,$false))){& $aclCheck @case}
+    foreach($case in @(@(0,0,'S-1-5-32-545',2,$true),@(0,0,'S-1-5-32-545',0x40,$true),
+        @(9,0,'S-1-5-32-545',4,$false),@(0,0,'S-1-5-32-545',0x40000,$false))){
+        Assert-Fails {& $aclCheck @case} 'effective write'
+    }
+    $registration=[pscustomobject]@{name='MicrosoftWindows.Client.CBS';publisher='CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US';version='1000.26100.372.0';architecture='x64'}
+    $xml='<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"><Identity Name="MicrosoftWindows.Client.CBS" Publisher="CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" Version="1000.26100.372.0" ProcessorArchitecture="x64"/><Applications><Application Id="Global.DesktopSpotlight"><Extensions>'
+    foreach($entry in @('UpdateTimer','RegistrationStatusCheck','OnlineIdChange','Maintenance')){
+        $kind=if($entry -ceq 'UpdateTimer'){'timer'}else{'systemEvent'}
+        $xml+='<Extension Category="windows.backgroundTasks" EntryPoint="DesktopSpotlight.BackgroundTask.'+$entry+'"><BackgroundTasks><Task Type="'+$kind+'"/></BackgroundTasks></Extension>'
+    }
+    $xml+='<uap:Extension Category="windows.appService" EntryPoint="DesktopSpotlight.BackgroundTask.AppService"><uap3:AppService Name="com.microsoft.desktopspotlight"/></uap:Extension></Extensions></Application></Applications></Package>'
+    function New-ManifestFixture([string]$Text){[pscustomobject]@{data_base64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Text))}}
+    if(-not(Test-DrVmSpotlightManifestIdentity (New-ManifestFixture $xml) $registration)){throw 'Synthetic declared application manifest rejected.'}
+    foreach($mutated in @($xml.Replace('Global.DesktopSpotlight','Wrong.Application'),
+        $xml.Replace('Type="timer"','Type="systemEvent"'),$xml.Replace('com.microsoft.desktopspotlight','unrelated.service'),
+        $xml.Replace('foundation/windows10','foundation/unknown'),$xml.Replace('<Applications>','<Applications><Application Id="Global.DesktopSpotlight"/>'),
+        $xml.Replace('Version="1000.26100.372.0"','Version="999.1.1.1"'))){
+        if(Test-DrVmSpotlightManifestIdentity (New-ManifestFixture $mutated) $registration){throw 'Manifest application/declaration mismatch accepted.'}
+    }
+    Assert-Fails {Test-DrVmSpotlightManifestIdentity (New-ManifestFixture ('<!DOCTYPE Package [<!ENTITY bad "unsafe">]>'+$xml)) $registration} 'DTD'
+    # Use the depth actually selected by the final producer command.
+    $jsonCommand=$ast.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst] -and
+        $node.Extent.Text -ceq 'ConvertTo-Json -Depth 16'},$true)
+    if($jsonCommand.Count -ne 1){throw 'Final transport serialization depth is ambiguous.'}
+    $deep=[ordered]@{raw_cleanup=[ordered]@{runner_process_natural_exit=[ordered]@{broker=[ordered]@{
+        manifest=[ordered]@{path_objects=@([ordered]@{aces=@([ordered]@{ace_type=9;ace_flags=0;access_mask=[uint32]0x1200a9;sid='S-1-5-32-545'})})}
+        registration=[ordered]@{preflight=[ordered]@{child_lifecycle=[ordered]@{process_job_closed=$true}}}
+    }}}}
+    $roundtrip=(& ([scriptblock]::Create('param($value) $value | '+$jsonCommand[0].Extent.Text)) $deep)|ConvertFrom-Json
+    if($roundtrip.raw_cleanup.runner_process_natural_exit.broker.manifest.path_objects[0].aces[0].access_mask -ne 0x1200a9 -or
+        -not $roundtrip.raw_cleanup.runner_process_natural_exit.broker.registration.preflight.child_lifecycle.process_job_closed){throw 'Transport truncated nested authentication evidence.'}
+    $candidate=[pscustomobject]@{pid=4242;session_id=2;creation_time_utc='2026-09-29T00:00:00.0000000Z';executable_path='C:\Windows\System32\backgroundTaskHost.exe'}
+    $ticks=[datetime]::Parse($candidate.creation_time_utc).ToFileTimeUtc()
+    $native=@{pid=[uint32]4242;owner_sid='S-1-5-21-1-2-3-1001';session_id=[uint32]2;image_path=$candidate.executable_path
+        creation_filetime_100ns=([long]($ticks+3)).ToString();open_error=0;pid_error=0;times_error=0;image_error=0
+        token_error=0;token_sid_error=0;token_session_error=0}
+    foreach($difference in @(0,3,9)){
+        $native.creation_filetime_100ns=([long]($ticks+$difference)).ToString()
+        if(-not(Test-DrVmSpotlightNativeIdentity $native $candidate $native.owner_sid 2)){throw 'Exact integer CIM normalization rejected.'}
+    }
+    foreach($difference in @(-1,10)){
+        $native.creation_filetime_100ns=([long]($ticks+$difference)).ToString()
+        if(Test-DrVmSpotlightNativeIdentity $native $candidate $native.owner_sid 2){throw 'Out-of-precision native creation accepted.'}
+    }
+    $native.creation_filetime_100ns=([long]($ticks+3)).ToString()
+    foreach($field in @('open_error','pid_error','times_error','image_error','token_error','token_sid_error','token_session_error')){
+        $native[$field]=5
+        if(Test-DrVmSpotlightNativeIdentity $native $candidate $native.owner_sid 2){throw "Native failure $field accepted."}
+        $native[$field]=0
+    }
+    $native.pid=4243
+    if(Test-DrVmSpotlightNativeIdentity $native $candidate $native.owner_sid 2){throw 'Reused PID accepted.'}
+    $native.pid=[uint32]4242
+    $native['package_first_status']=122;$native['package_status']=0;$native['aumid_first_status']=122;$native['aumid_status']=0
+    $native['package_full_name']='MicrosoftWindows.Client.CBS_1000.26100.372.0_x64__cw5n1h2txyewy'
+    $native['aumid']='MicrosoftWindows.Client.CBS_cw5n1h2txyewy!Global.DesktopSpotlight'
+    # Exercise the actual classifier and leaf binder; native argv parsing is mocked on Linux.
+    & {
+        $saved=$env:windir;$env:windir='C:\Windows'
+        $candidate|Add-Member NoteProperty identity ('4242|'+$candidate.creation_time_utc)
+        $preflight=[pscustomobject]@{runner_sid=$native.owner_sid;name=$registration.name;publisher=$registration.publisher
+            version=$registration.version;architecture=$registration.architecture;package_full_name=$native.package_full_name
+            package_family_name='MicrosoftWindows.Client.CBS_cw5n1h2txyewy';publisher_id='cw5n1h2txyewy'
+            resource_id='';install_location='C:\Windows\SystemApps\MicrosoftWindows.Client.CBS_cw5n1h2txyewy'
+            signature_kind='System';status='Ok';is_development_mode=$false
+            child_lifecycle=[pscustomobject]@{pid=10;start_time_utc_ticks=([long]($ticks+504911232000000000-100)).ToString()
+                exit_code=0;exited=$true;streams_complete=$true;exact_lifetime_absent=$true;process_job_closed=$true}}
+        $current=@{open_status=0;first_status=122;second_status=0;close_status=0;required_bytes=658;returned_bytes=658
+            count=1;request_flags=0x110;property_flags=16;caller_sid=$native.owner_sid;resource_id=$null;path=$preflight.install_location}
+        foreach($key in @('name','publisher','version','architecture','package_full_name','package_family_name','publisher_id')){$current[$key]=$preflight.$key}
+        $parent=[pscustomobject]@{ProcessId=1336;SessionId=0;CreationDate=[datetime]::Parse('2026-09-28T00:00:00.0000000Z')
+            ExecutablePath='C:\Windows\System32\svchost.exe';CommandLine='"C:\Windows\System32\svchost.exe" -k DcomLaunch -p'}
+        $parent.ExecutablePath=[IO.Path]::GetFullPath($env:windir).TrimEnd('\')+'\System32\svchost.exe'
+        $parent.CommandLine='"'+$parent.ExecutablePath+'" -k DcomLaunch -p'
+        $parentOwner=[pscustomobject]@{Identity=$native.Clone();Closed=$false;CloseError=0}
+        foreach($key in @('package_first_status','package_status','aumid_first_status','aumid_status','package_full_name','aumid')){$parentOwner.Identity.Remove($key)}
+        $parentOwner.Identity.pid=[uint32]1336;$parentOwner.Identity.owner_sid='S-1-5-18';$parentOwner.Identity.session_id=[uint32]0
+        $parentOwner.Identity.creation_filetime_100ns=$parent.CreationDate.ToFileTimeUtc().ToString();$parentOwner.Identity.image_path=$parent.ExecutablePath
+        $parentOwner|Add-Member ScriptMethod Poll {@{wait_result=[uint32]258}}
+        $parentOwner|Add-Member ScriptMethod Dispose {$this.Closed=$true}
+        $targetOwner=[pscustomobject]@{Identity=$native}
+        $childMetadata=[pscustomobject]@{ProcessId=4242;SessionId=2;CreationDate=[datetime]::Parse($candidate.creation_time_utc);ParentProcessId=1336;CommandLine=$null}
+        $capture=[pscustomobject]@{failed=$false;observations=@([ordered]@{attempt=1});lifetimes=@{$candidate.identity=[pscustomobject]@{owner=$targetOwner;process=$childMetadata}}}
+        $token='-ServerName:Global.DesktopSpotlight.AppXz2j21w56bgxkgsjhtn7zkjsepq96erz2.mca'
+        $script:command='"C:\Windows\System32\backgroundTaskHost.exe" '+$token
+        $childMetadata.CommandLine=$script:command
+        function Get-CimInstance {
+            param($ClassName,$Filter,$OperationTimeoutSec)
+            if($ClassName -ceq 'Win32_Service'){return [pscustomobject]@{Name='DcomLaunch';State='Running';ProcessId=1336}}
+            if($Filter -ceq 'ProcessId=1336'){return $parent}
+            throw 'A short-lived child must not be reopened by CIM during classification.'
+        }
+        function Open-DrVmSpotlightLifetime {param($ProcessId,[switch]$Parent) $parentOwner}
+        function Get-DrVmSpotlightCurrentRegistration {param($PackageFullName) $current}
+        function Get-DrVmCommandLineArguments {
+            param($CommandLine)
+            if($CommandLine -cnotmatch '^"([^"]+)" (.+)$'){throw 'Unexpected command fixture.'}
+            ,([string[]](@($Matches[1])+@($Matches[2].Split(' '))))
+        }
+        function Get-DrVmSpotlightManifest {param($InstallLocation) New-ManifestFixture $xml}
+        function Get-DrVmAuthenticodeEvidence {param($Path)[pscustomobject]@{status='Valid';signer_subject='CN=Microsoft Windows, O=Microsoft Corporation';signer_thumbprint='A'*40}}
+        # Preserve the real ValidateSet so omitting the new leaf is a test failure.
+        $pathDefinition=$ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'global:Test-DrVmCanonicalSystemBinaryPath'},$true)
+        $pathParameters=$pathDefinition.Body.ParamBlock.Extent.Text
+        . ([scriptblock]::Create('function Test-DrVmCanonicalSystemBinaryPath {'+$pathParameters+' $true }'))
+        try {
+            $broker=Get-DrVmSpotlightBrokerEvidence $candidate $capture $preflight $native.owner_sid 2
+            if($broker.process_command_line_arguments.Count -ne 2 -or $broker.process_command_line_arguments[1] -cne $token -or -not $parentOwner.Closed){throw 'Actual classifier lost native two-argument command or parent closure.'}
+            $script:command='"C:\Windows\System32\backgroundTaskHost.exe" -ServerName '+$token.Substring(12)
+            $childMetadata.CommandLine=$script:command
+            Assert-Fails {Get-DrVmSpotlightBrokerEvidence $candidate $capture $preflight $native.owner_sid 2} 'command identity'
+            $current.resource_id=''
+            if(Test-DrVmSpotlightRegistration $preflight $current $native $native.owner_sid){throw 'Native resource NULL was coerced into an empty string.'}
+        } finally {$env:windir=$saved}
+    }
+    $script:cimCalls=0;$script:ownerCalls=0;$script:openCalls=0;$script:disposeCalls=0;$script:failOpen=$false
+    $savedWindir=$env:windir;$env:windir='C:\Windows'
+    function Open-DrVmSpotlightLifetime {
+        param($ProcessId)
+        $script:openCalls++
+        if($script:failOpen){throw 'fixture Open failed'}
+        $owner=[pscustomobject]@{Identity=$native.Clone();Closed=$false;CloseError=0}
+        $owner|Add-Member ScriptMethod Poll { @{wait_result=[uint32]258;handle_closed=$false;close_win32_error=0} }
+        $owner|Add-Member ScriptMethod Dispose {$script:disposeCalls++;$this.Closed=$true}
+        $owner
+    }
+    function Get-CimInstance {
+        param($ClassName,$Filter,$OperationTimeoutSec)
+        $script:cimCalls++
+        if($script:cimCalls -eq 1){
+            [pscustomobject]@{ProcessId=4242;SessionId=2;CreationDate=[datetime]::Parse($candidate.creation_time_utc);ExecutablePath=$candidate.executable_path}
+            [pscustomobject]@{ProcessId=5000;SessionId=2;CreationDate=[datetime]::Parse($candidate.creation_time_utc);ExecutablePath='C:\unrelated.exe'}
+        }
+    }
+    function Invoke-CimMethod {
+        param($InputObject,$MethodName,$OperationTimeoutSec)
+        $script:ownerCalls++
+        if($script:openCalls -ne 1){throw 'Owner lookup ran before native capture.'}
+        throw 'Simulated unrelated owner failure forces a retry.'
+    }
+    function Start-Sleep { param($Milliseconds) }
+    try {
+        $context=New-DrVmSpotlightCaptureContext @()
+        $snapshot=Get-DrVmRunnerProcesses -UserSid $native.owner_sid -SessionId 2 -CaptureContext $context
+        if(-not $snapshot.complete -or $snapshot.attempts -ne 2 -or $snapshot.processes.Count -ne 1 -or
+            $context.observations.Count -ne 1 -or $context.observations[0].attempt -ne 1 -or
+            $script:openCalls -ne 1 -or $script:ownerCalls -ne 1){throw 'Early captured lifetime was lost on the empty retry.'}
+        Close-DrVmSpotlightCaptureContext $context
+        if($script:disposeCalls -ne 1 -or -not $context.lifetimes[$candidate.pid.ToString()+'|'+$candidate.creation_time_utc].exit.handle_closed){throw 'Held lifetime did not close.'}
+        $script:cimCalls=0;$script:openCalls=0;$script:failOpen=$true
+        $failed=New-DrVmSpotlightCaptureContext @()
+        $snapshot=Get-DrVmRunnerProcesses -UserSid $native.owner_sid -SessionId 2 -CaptureContext $failed
+        if(-not $failed.failed -or $failed.observations.Count -ne 1 -or $null -eq $failed.observations[0].capture_error){throw 'Capture error disappeared during inventory retries.'}
+    } finally {$env:windir=$savedWindir}
+}
+
+Write-Host 'Windows VM guest runner tests passed.'

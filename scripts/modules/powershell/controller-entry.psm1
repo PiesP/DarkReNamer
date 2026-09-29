@@ -129,6 +129,7 @@ function Get-DrControllerRecoveryOutputInventory {
 function Test-DrControllerCleanupObservation {
     param([AllowNull()][object] $Observation)
 
+    try {
     if ($null -eq $Observation) { return $false }
     $raw = [pscustomobject]$Observation
     foreach ($field in @('scheduled_task_present', 'guest_root_present', 'trusted_task_root_present')) {
@@ -152,16 +153,34 @@ function Test-DrControllerCleanupObservation {
     $processes = $raw.PSObject.Properties['unexpected_runner_processes']
     if ($null -eq $processes -or $null -eq $processes.Value -or
         $processes.Value -isnot [array]) { return $false }
-    if ($processes.Value.Count -eq 0) { return $true }
-    # The existing narrow SmartScreen exception requires an observed natural exit.
-    $screen = $raw.PSObject.Properties['smart_screen_natural_exit']
+    # Every class shares a complete, closed natural-exit receipt.
+    $screen = $raw.PSObject.Properties['runner_process_natural_exit']
     if ($null -eq $screen -or $null -eq $screen.Value) { return $false }
     $receipt = [pscustomobject]$screen.Value
-    foreach ($field in @('status', 'candidate_identity', 'natural_exit_observed',
+    foreach ($field in @('schema_version','process_class','native_exit','initial_native_observations',
+        'status', 'candidate_identity', 'natural_exit_observed',
         'final_inventory_complete', 'final_runner_process_delta_identities',
         'final_runner_task_delta_identities')) {
         if ($null -eq $receipt.PSObject.Properties[$field]) { return $false }
     }
+    if ($receipt.schema_version -ne 2 -or $receipt.initial_native_observations -isnot [array]) { return $false }
+    if ($processes.Value.Count -eq 0) {
+        return $receipt.status -ceq 'not-required' -and $null -eq $receipt.process_class -and
+            $null -eq $receipt.native_exit -and $receipt.initial_native_observations.Count -eq 0
+    }
+    if ($receipt.process_class -ceq 'smart-screen') {
+        if ($null -ne $receipt.native_exit -or $receipt.initial_native_observations.Count -ne 0) { return $false }
+    } elseif ($receipt.process_class -ceq 'desktop-spotlight') {
+        if ($receipt.initial_native_observations.Count -ne 1 -or $null -eq $receipt.native_exit) { return $false }
+        $exit = $receipt.native_exit
+        if ($null -eq $exit.pid -or $exit.pid -ne $receipt.broker.native_identity.pid -or $exit.wait_result -ne 0 -or $exit.times_succeeded -isnot [bool] -or -not $exit.times_succeeded -or
+            $exit.exit_code_succeeded -isnot [bool] -or -not $exit.exit_code_succeeded -or
+            $exit.handle_closed -isnot [bool] -or -not $exit.handle_closed -or
+            $exit.times_win32_error -ne 0 -or $exit.exit_code_win32_error -ne 0 -or $exit.close_win32_error -ne 0 -or
+            $null -eq $exit.exit_code -or $null -eq $exit.exit_filetime_100ns -or
+            $exit.creation_filetime_100ns -cne $receipt.broker.native_identity.creation_filetime_100ns -or
+            [long]$exit.exit_filetime_100ns -lt [long]$exit.creation_filetime_100ns) { return $false }
+    } else { return $false }
     $processIdentity = $processes.Value[0].PSObject.Properties['identity']
     $processes.Value.Count -eq 1 -and $null -ne $processIdentity -and
         $processIdentity.Value -is [string] -and -not [string]::IsNullOrEmpty($processIdentity.Value) -and
@@ -173,6 +192,7 @@ function Test-DrControllerCleanupObservation {
         $receipt.final_runner_process_delta_identities.Count -eq 0 -and
         $receipt.final_runner_task_delta_identities -is [array] -and
         $receipt.final_runner_task_delta_identities.Count -eq 0
+    } catch { return $false }
 }
 
 function Add-DrControllerLifecycleIdentity {
@@ -536,6 +556,7 @@ $trustedTaskRoot = $null
 $taskName = 'DarkReNamerTests-' + [guid]::NewGuid().ToString('N')
 $runnerTaskBaseline = @()
 $runnerProcessBaseline = @()
+$spotlightPreflight = $null
 $result = $null
 $processJobsClosed = $false
 $acceptancePassed = $false
@@ -1736,10 +1757,581 @@ public static class DarkReNamerVmControllerWorkspace {
                 }
             }
         }
+        function global:Initialize-DrVmSpotlightNative {
+            if ($null -ne ('DrVmSpotlightNative' -as [type])) { return }
+            Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+public sealed class DrVmSpotlightHandle : SafeHandleZeroOrMinusOneIsInvalid {
+    public DrVmSpotlightHandle() : base(true) { }
+    public int CloseError { get; private set; }
+    protected override bool ReleaseHandle() {
+        bool ok = DrVmSpotlightNative.CloseHandle(handle);
+        CloseError = ok ? 0 : Marshal.GetLastWin32Error();
+        return ok;
+    }
+}
+public sealed class DrVmSpotlightLifetime : IDisposable {
+    private readonly DrVmSpotlightHandle handle;
+    public Dictionary<string, object> Identity { get; private set; }
+    public int CloseError { get { return handle.CloseError; } }
+    public bool Closed { get { return handle.IsClosed; } }
+    internal DrVmSpotlightLifetime(DrVmSpotlightHandle handle, Dictionary<string, object> identity) {
+        this.handle = handle; Identity = identity;
+    }
+    public Dictionary<string, object> Poll() {
+        if (handle.IsClosed) throw new ObjectDisposedException("DrVmSpotlightLifetime");
+        uint wait = DrVmSpotlightNative.WaitForSingleObject(handle, 0);
+        if (wait == uint.MaxValue) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        if (wait != 0 && wait != 258) throw new InvalidDataException("Unexpected process wait status.");
+        var row = new Dictionary<string, object> {
+            {"pid", Identity["pid"]}, {"creation_filetime_100ns", Identity["creation_filetime_100ns"]},
+            {"exit_filetime_100ns", null}, {"wait_result", wait}, {"times_succeeded", false},
+            {"times_win32_error", 0}, {"exit_code_succeeded", false}, {"exit_code_win32_error", 0},
+            {"exit_code", null}, {"handle_closed", false}, {"close_win32_error", 0}
+        };
+        if (wait == 0) {
+            DrVmSpotlightNative.FileTime creation, exit, kernel, user;
+            bool ok = DrVmSpotlightNative.GetProcessTimes(handle, out creation, out exit, out kernel, out user);
+            int error = ok ? 0 : Marshal.GetLastWin32Error();
+            row["times_succeeded"] = ok; row["times_win32_error"] = error;
+            if (ok) {
+                if (creation.Value.ToString(CultureInfo.InvariantCulture) != (string)Identity["creation_filetime_100ns"])
+                    throw new InvalidDataException("Same-handle process creation time changed.");
+                row["exit_filetime_100ns"] = exit.Value.ToString(CultureInfo.InvariantCulture);
+            }
+            uint code;
+            ok = DrVmSpotlightNative.GetExitCodeProcess(handle, out code);
+            error = ok ? 0 : Marshal.GetLastWin32Error();
+            row["exit_code_succeeded"] = ok; row["exit_code_win32_error"] = error;
+            if (ok) row["exit_code"] = code;
+        }
+        return row;
+    }
+    public void Dispose() { handle.Dispose(); }
+}
+public static class DrVmSpotlightNative {
+    public const uint ProcessAccess = 0x00101000; // Limited query and synchronize only.
+    public const uint TokenAccess = 8; // TOKEN_QUERY only; no privilege changes.
+    [StructLayout(LayoutKind.Sequential)] public struct FileTime {
+        public uint Low, High;
+        public ulong Value { get { return ((ulong)High << 32) | Low; } }
+    }
+    [StructLayout(LayoutKind.Sequential)] public struct PackageId {
+        public uint Reserved, Architecture;
+        public ulong Version;
+        public IntPtr Name, Publisher, ResourceId, PublisherId;
+    }
+    [StructLayout(LayoutKind.Sequential)] public struct PackageInfo {
+        public uint Reserved, Flags;
+        public IntPtr Path, FullName, FamilyName;
+        public PackageId Id;
+    }
+    [DllImport("kernel32.dll", ExactSpelling=true, SetLastError=true)]
+    private static extern DrVmSpotlightHandle OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, uint pid);
+    [DllImport("kernel32.dll", ExactSpelling=true, SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)] public static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll", ExactSpelling=true, SetLastError=true)]
+    private static extern uint GetProcessId(DrVmSpotlightHandle handle);
+    [DllImport("kernel32.dll", ExactSpelling=true, SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)] public static extern bool GetProcessTimes(DrVmSpotlightHandle handle, out FileTime creation, out FileTime exit, out FileTime kernel, out FileTime user);
+    [DllImport("kernel32.dll", ExactSpelling=true, CharSet=CharSet.Unicode, SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)] private static extern bool QueryFullProcessImageNameW(DrVmSpotlightHandle handle, uint flags, StringBuilder text, ref uint chars);
+    [DllImport("kernel32.dll", ExactSpelling=true, CharSet=CharSet.Unicode)]
+    private static extern int GetPackageFullName(DrVmSpotlightHandle handle, ref uint chars, StringBuilder text);
+    [DllImport("kernel32.dll", ExactSpelling=true, CharSet=CharSet.Unicode)]
+    private static extern int GetApplicationUserModelId(DrVmSpotlightHandle handle, ref uint chars, StringBuilder text);
+    [DllImport("kernel32.dll", ExactSpelling=true, SetLastError=true)]
+    public static extern uint WaitForSingleObject(DrVmSpotlightHandle handle, uint milliseconds);
+    [DllImport("kernel32.dll", ExactSpelling=true, SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)] public static extern bool GetExitCodeProcess(DrVmSpotlightHandle handle, out uint code);
+    [DllImport("advapi32.dll", ExactSpelling=true, SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)] private static extern bool OpenProcessToken(DrVmSpotlightHandle process, uint access, out DrVmSpotlightHandle token);
+    [DllImport("advapi32.dll", ExactSpelling=true, SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetTokenInformation(DrVmSpotlightHandle token, int kind, IntPtr buffer, uint bytes, out uint required);
+    [DllImport("kernel32.dll", ExactSpelling=true, CharSet=CharSet.Unicode)]
+    private static extern int OpenPackageInfoByFullName(string name, uint reserved, out IntPtr reference);
+    [DllImport("kernel32.dll", ExactSpelling=true)]
+    private static extern int GetPackageInfo(IntPtr reference, uint flags, ref uint bytes, IntPtr buffer, out uint count);
+    [DllImport("kernel32.dll", ExactSpelling=true)]
+    private static extern int ClosePackageInfo(IntPtr reference);
+
+    private static void WindowsOnly() {
+        if (Environment.OSVersion.Platform != PlatformID.Win32NT || IntPtr.Size != 8)
+            throw new PlatformNotSupportedException("Spotlight interop requires native x64 Windows.");
+    }
+    private delegate int NameQuery(ref uint length, StringBuilder text);
+    private static void Name(DrVmSpotlightHandle handle, bool package, Dictionary<string, object> row) {
+        string prefix = package ? "package" : "aumid";
+        string key = package ? "package_full_name" : "aumid";
+        uint required = 0;
+        NameQuery query = package ? new NameQuery(delegate(ref uint n, StringBuilder b) { return GetPackageFullName(handle, ref n, b); })
+                                 : new NameQuery(delegate(ref uint n, StringBuilder b) { return GetApplicationUserModelId(handle, ref n, b); });
+        int first = query(ref required, null); row[prefix + "_first_status"] = first;
+        row[prefix + "_status"] = null; row[key] = null;
+        if (first != 122 || required < 2 || required > (package ? 128 : 130)) return;
+        uint length = required; var text = new StringBuilder((int)length);
+        int second = query(ref length, text); row[prefix + "_status"] = second;
+        if (second == 0 && length >= 2 && length <= required && text.Length == length - 1 && text.ToString().IndexOf('\0') < 0)
+            row[key] = text.ToString();
+    }
+    private static void Token(DrVmSpotlightHandle process, Dictionary<string, object> row) {
+        DrVmSpotlightHandle token;
+        bool ok = OpenProcessToken(process, TokenAccess, out token);
+        int openError = ok ? 0 : Marshal.GetLastWin32Error();
+        row["token_error"] = openError;
+        try {
+            if (!ok) return;
+            uint required;
+            ok = GetTokenInformation(token, 1, IntPtr.Zero, 0, out required);
+            int error = ok ? 0 : Marshal.GetLastWin32Error();
+            if (ok || error != 122 || required < 16 || required > 4096) {
+                row["token_sid_error"] = error == 0 ? 13 : error; return;
+            }
+            IntPtr buffer = Marshal.AllocHGlobal((int)required);
+            try {
+                uint returned;
+                ok = GetTokenInformation(token, 1, buffer, required, out returned);
+                error = ok ? 0 : Marshal.GetLastWin32Error();
+                row["token_sid_error"] = error;
+                if (!ok) return;
+                if (returned > required || returned < 16) throw new InvalidDataException("Token user buffer size invalid.");
+                IntPtr sid = Marshal.ReadIntPtr(buffer);
+                long offset = sid.ToInt64() - buffer.ToInt64();
+                if (offset < 16 || offset > returned - 8) throw new InvalidDataException("Token SID pointer outside buffer.");
+                int subs = Marshal.ReadByte(sid, 1);
+                int length = 8 + 4 * subs;
+                if (subs > 15 || offset + length > returned) throw new InvalidDataException("Token SID size outside buffer.");
+                byte[] bytes = new byte[length]; Marshal.Copy(sid, bytes, 0, length);
+                row["owner_sid"] = new SecurityIdentifier(bytes, 0).Value;
+            } finally { Marshal.FreeHGlobal(buffer); }
+            uint sessionBytes;
+            IntPtr session = Marshal.AllocHGlobal(4);
+            try {
+                ok = GetTokenInformation(token, 12, session, 4, out sessionBytes);
+                error = ok ? 0 : Marshal.GetLastWin32Error(); row["token_session_error"] = error;
+                if (ok && sessionBytes == 4) row["session_id"] = unchecked((uint)Marshal.ReadInt32(session));
+                else if (ok) row["token_session_error"] = 13;
+            } finally { Marshal.FreeHGlobal(session); }
+        } finally {
+            if (token != null) {
+                token.Dispose();
+                if (token.CloseError != 0) row["token_error"] = token.CloseError;
+            }
+        }
+    }
+    public static DrVmSpotlightLifetime Open(uint pid, bool package) {
+        WindowsOnly(); if (pid == 0) throw new ArgumentOutOfRangeException("pid");
+        DrVmSpotlightHandle handle = OpenProcess(ProcessAccess, false, pid);
+        int openError = handle.IsInvalid ? Marshal.GetLastWin32Error() : 0;
+        try {
+            var row = new Dictionary<string, object> {
+                {"pid", 0u}, {"creation_filetime_100ns", null}, {"owner_sid", null}, {"session_id", null}, {"image_path", null},
+                {"open_error", openError}, {"pid_error", 0}, {"times_error", 0}, {"image_error", 0},
+                {"token_error", 0}, {"token_sid_error", 0}, {"token_session_error", 0}
+            };
+            if (package) { row["package_first_status"] = null; row["package_status"] = null; row["aumid_first_status"] = null; row["aumid_status"] = null; row["package_full_name"] = null; row["aumid"] = null; }
+            if (!handle.IsInvalid) {
+                uint actual = GetProcessId(handle); int error = actual == 0 ? Marshal.GetLastWin32Error() : 0;
+                row["pid"] = actual; row["pid_error"] = error;
+                FileTime creation, exit, kernel, user;
+                bool ok = GetProcessTimes(handle, out creation, out exit, out kernel, out user);
+                error = ok ? 0 : Marshal.GetLastWin32Error(); row["times_error"] = error;
+                if (ok) row["creation_filetime_100ns"] = creation.Value.ToString(CultureInfo.InvariantCulture);
+                Token(handle, row);
+                var image = new StringBuilder(32768); uint chars = 32768;
+                ok = QueryFullProcessImageNameW(handle, 0, image, ref chars);
+                error = ok ? 0 : Marshal.GetLastWin32Error(); row["image_error"] = error;
+                if (ok && chars > 0 && chars < 32768 && image.Length == chars && image.ToString().IndexOf('\0') < 0) row["image_path"] = image.ToString();
+                if (package) { Name(handle, true, row); Name(handle, false, row); }
+            }
+            return new DrVmSpotlightLifetime(handle, row);
+        } catch { handle.Dispose(); throw; }
+    }
+    private static string Wide(string field, IntPtr pointer, IntPtr buffer, uint bytes, int maximum, bool empty) {
+        long offset = pointer.ToInt64() - buffer.ToInt64();
+        if (pointer == IntPtr.Zero || offset < 0 || (offset & 1) != 0 || offset >= bytes)
+            throw new InvalidDataException(String.Format(CultureInfo.InvariantCulture, "Package field {0} pointer invalid: null={1}, relative_offset={2}, returned_bytes={3}.", field, pointer == IntPtr.Zero, pointer == IntPtr.Zero ? 0 : offset, bytes));
+        int available = (int)Math.Min(maximum + 1, (bytes - offset) / 2);
+        for (int length = 0; length < available; length++) {
+            if (Marshal.ReadInt16(pointer, length * 2) == 0) {
+                if (!empty && length == 0) throw new InvalidDataException("Package string empty.");
+                return Marshal.PtrToStringUni(pointer, length);
+            }
+        }
+        throw new InvalidDataException("Package string exceeds bound or has no terminator.");
+    }
+    public static Dictionary<string, object> Package(string fullName) {
+        WindowsOnly(); if (fullName == null || fullName.Length < 1 || fullName.Length > 127) throw new ArgumentException("Package full name invalid.");
+        IntPtr reference = IntPtr.Zero;
+        string callerSid;
+        using (WindowsIdentity identity = WindowsIdentity.GetCurrent()) { callerSid = identity.User.Value; }
+        var row = new Dictionary<string, object> { {"open_status", 0}, {"first_status", 0}, {"second_status", 0}, {"close_status", 0},
+            {"required_bytes", 0u}, {"returned_bytes", 0u}, {"count", 0u}, {"request_flags", 0x110u}, {"property_flags", 0u},
+            {"caller_sid", callerSid}, {"name", ""}, {"package_full_name", ""}, {"package_family_name", ""},
+            {"publisher", ""}, {"publisher_id", ""}, {"version", ""}, {"architecture", ""}, {"resource_id", ""}, {"path", ""} };
+        int opened = OpenPackageInfoByFullName(fullName, 0, out reference);
+        row["open_status"] = opened;
+        if (opened != 0) return row;
+        try {
+            uint bytes = 0, count;
+            int first = GetPackageInfo(reference, 0x110, ref bytes, IntPtr.Zero, out count);
+            row["first_status"] = first; row["required_bytes"] = bytes;
+            if (first != 122 || bytes < Marshal.SizeOf(typeof(PackageInfo)) || bytes > 65536) return row;
+            uint allocated = bytes; IntPtr buffer = Marshal.AllocHGlobal((int)bytes);
+            try {
+                int second = GetPackageInfo(reference, 0x110, ref bytes, buffer, out count);
+                row["second_status"] = second; row["returned_bytes"] = bytes; row["count"] = count;
+                if (second != 0 || count != 1 || bytes > allocated || bytes < Marshal.SizeOf(typeof(PackageInfo))) return row;
+                PackageInfo info = (PackageInfo)Marshal.PtrToStructure(buffer, typeof(PackageInfo));
+                row["property_flags"] = info.Flags;
+                row["name"] = Wide("name", info.Id.Name, buffer, bytes, 50, false);
+                row["package_full_name"] = Wide("package_full_name", info.FullName, buffer, bytes, 127, false);
+                row["package_family_name"] = Wide("package_family_name", info.FamilyName, buffer, bytes, 64, false);
+                row["publisher"] = Wide("publisher", info.Id.Publisher, buffer, bytes, 8192, false);
+                row["publisher_id"] = Wide("publisher_id", info.Id.PublisherId, buffer, bytes, 13, false);
+                row["resource_id"] = info.Id.ResourceId == IntPtr.Zero ? null : Wide("resource_id", info.Id.ResourceId, buffer, bytes, 30, true);
+                row["path"] = Wide("path", info.Path, buffer, bytes, 32767, false);
+                ulong version = info.Id.Version;
+                row["version"] = String.Format(CultureInfo.InvariantCulture, "{0}.{1}.{2}.{3}", (version >> 48) & 65535, (version >> 32) & 65535, (version >> 16) & 65535, version & 65535);
+                string[] architectures = {"x86","arm","x64","neutral","arm64"};
+                switch (info.Id.Architecture) { case 0: row["architecture"] = architectures[0]; break; case 5: row["architecture"] = architectures[1]; break; case 9: row["architecture"] = architectures[2]; break; case 11: row["architecture"] = architectures[3]; break; case 12: row["architecture"] = architectures[4]; break; default: throw new InvalidDataException("Unsupported package architecture."); }
+            } finally { Marshal.FreeHGlobal(buffer); }
+        } finally { row["close_status"] = ClosePackageInfo(reference); }
+        return row;
+    }
+}
+'@ -ErrorAction Stop
+        }
+        function global:Open-DrVmSpotlightLifetime {
+            param([Parameter(Mandatory)][uint32] $ProcessId, [switch] $Parent)
+            Initialize-DrVmSpotlightNative
+            [DrVmSpotlightNative]::Open($ProcessId, -not $Parent)
+        }
+        function global:New-DrVmSpotlightCaptureContext {
+            param([AllowEmptyCollection()][string[]] $BaselineIdentities)
+            $baseline = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+            foreach ($identity in $BaselineIdentities) { [void]$baseline.Add($identity) }
+            [pscustomobject]@{
+                baseline = $baseline
+                observations = [Collections.Generic.List[object]]::new()
+                lifetimes = @{}
+                initial_rows = @{}
+                failed = $false
+            }
+        }
+        function global:Test-DrVmSpotlightNativeIdentity {
+            param([object] $Native, [object] $Candidate, [string] $UserSid, [int] $SessionId)
+            try {
+                foreach ($key in @('open_error','pid_error','times_error','image_error',
+                    'token_error','token_sid_error','token_session_error')) {
+                    if ($Native[$key] -ne 0) { return $false }
+                }
+                if ($Native['pid'] -ne $Candidate.pid -or $Native['owner_sid'] -cne $UserSid -or
+                    $Native['session_id'] -ne $SessionId -or
+                    $Native['image_path'] -ine $Candidate.executable_path -or
+                    [string]$Native['creation_filetime_100ns'] -cnotmatch '^[1-9][0-9]{0,19}$') { return $false }
+                $nativeTicks = [long]::Parse($Native['creation_filetime_100ns'], [Globalization.CultureInfo]::InvariantCulture)
+                $cimTicks = [datetime]::Parse($Candidate.creation_time_utc,
+                    [Globalization.CultureInfo]::InvariantCulture,
+                    [Globalization.DateTimeStyles]::RoundtripKind).ToFileTimeUtc()
+                $difference = $nativeTicks - $cimTicks
+                $difference -ge 0 -and $difference -le 9 -and $cimTicks % 10 -eq 0
+            } catch { return $false }
+        }
+        function global:Add-DrVmSpotlightInitialObservation {
+            param([object] $Context, [object] $Process, [int] $Attempt)
+            $created = ([datetime]$Process.CreationDate).ToUniversalTime().ToString('o')
+            $identity = [string]$Process.ProcessId + '|' + $created
+            if ($Context.baseline.Contains($identity) -or $Context.lifetimes.ContainsKey($identity)) { return }
+            if ($Context.observations.Count -ge 2) { $Context.failed = $true; return }
+            $row = [pscustomobject]@{
+                identity = $identity; pid = [int]$Process.ProcessId; session_id = [int]$Process.SessionId
+                creation_time_utc = $created; executable_path = [string]$Process.ExecutablePath
+            }
+            $observation = [ordered]@{attempt=$Attempt; cim_row=$row; native_identity=$null; capture_error=$null}
+            $Context.observations.Add($observation)
+            $lifetime = $null
+            try {
+                $lifetime = Open-DrVmSpotlightLifetime -ProcessId $row.pid
+                $Context.lifetimes[$identity] = $lifetime
+                $observation.native_identity = $lifetime.Identity
+                if (-not (Test-DrVmSpotlightNativeIdentity -Native $lifetime.Identity -Candidate $row `
+                    -UserSid $lifetime.Identity['owner_sid'] -SessionId $row.session_id)) {
+                    throw 'The initial native process identity was incomplete or mismatched.'
+                }
+                # Capture a signaled exit without reopening the PID later.
+                $Context.lifetimes[$identity] = [pscustomobject]@{
+                    owner=$lifetime; exit=$lifetime.Poll(); process=$Process
+                }
+            } catch {
+                $Context.failed = $true
+                $observation.capture_error = [ordered]@{
+                    error_type=$_.Exception.GetType().FullName; hresult=[int]$_.Exception.HResult
+                }
+            }
+        }
+        function global:Close-DrVmSpotlightCaptureContext {
+            param([object] $Context)
+            $errors = [Collections.Generic.List[string]]::new()
+            foreach ($identity in @($Context.lifetimes.Keys)) {
+                $entry = $Context.lifetimes[$identity]
+                $owner = if ($null -ne $entry.PSObject.Properties['owner']) { $entry.owner } else { $entry }
+                try {
+                    $owner.Dispose()
+                    if (-not $owner.Closed -or $owner.CloseError -ne 0) { throw 'Native handle close failed.' }
+                    if ($null -ne $entry.PSObject.Properties['exit']) {
+                        $entry.exit['handle_closed'] = $owner.Closed
+                        $entry.exit['close_win32_error'] = $owner.CloseError
+                    }
+                } catch { $errors.Add('A retained native process handle could not be closed.') }
+            }
+            if ($errors.Count -ne 0) { throw ($errors -join ' ') }
+        }
+        function global:Get-DrVmSpotlightManifest {
+            param([Parameter(Mandatory)][string] $InstallLocation)
+            $windows = [IO.Path]::GetFullPath($env:windir).TrimEnd('\')
+            if ($windows -cnotmatch '^[A-Za-z]:\\[^\\]+$') { throw 'DesktopSpotlight requires a direct drive-child Windows directory.' }
+            $family = Join-Path (Join-Path $windows 'SystemApps') 'MicrosoftWindows.Client.CBS_cw5n1h2txyewy'
+            if ($InstallLocation -ine $family) { throw 'CBS must be registered at its exact protected SystemApps path.' }
+            $path = Join-Path $family 'AppxManifest.xml'
+            $objects = [Collections.Generic.List[object]]::new()
+            $trusted = @('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+            $risk = [uint32]0x500D0156
+            $paths = @([IO.Path]::GetPathRoot($windows),$windows,(Join-Path $windows 'SystemApps'),$family,$path)
+            foreach ($objectPath in $paths) {
+                $item = Get-Item -LiteralPath $objectPath -Force -ErrorAction Stop
+                if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                    $item.PSIsContainer -ne ($objectPath -ine $path)) { throw 'CBS manifest path contains an unexpected object.' }
+                $acl = Get-Acl -LiteralPath $objectPath -ErrorAction Stop
+                $raw = [Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(),0)
+                if (($raw.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclPresent) -eq 0 -or
+                    $null -eq $raw.DiscretionaryAcl -or $raw.DiscretionaryAcl.Count -lt 1 -or
+                    $raw.DiscretionaryAcl.Count -gt 64 -or $raw.Owner.Value -cnotin $trusted) { throw 'CBS manifest path security descriptor is incomplete or untrusted.' }
+                $aces = [Collections.Generic.List[object]]::new()
+                foreach ($ace in $raw.DiscretionaryAcl) {
+                    $type = [int]$ace.AceType
+                    if ($type -notin @(0,1,9,10) -or $ace -isnot [Security.AccessControl.QualifiedAce]) { throw 'CBS path contains an unsupported ACE.' }
+                    $mask = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$ace.AccessMask),0)
+                    $sid = $ace.SecurityIdentifier.Value
+                    $flags = [int]$ace.AceFlags
+                    $effectiveRisk = $risk
+                    if ($objectPath -ieq $paths[0]) { $effectiveRisk = $risk -band (-bnot [uint32]4) }
+                    if ($type -in @(0,9) -and ($flags -band 8) -eq 0 -and
+                        $sid -cnotin $trusted -and ($mask -band $effectiveRisk) -ne 0) { throw 'CBS manifest path grants untrusted effective write access.' }
+                    $aces.Add([ordered]@{ace_type=$type;ace_flags=$flags;access_mask=$mask;sid=$sid})
+                }
+                $objects.Add([ordered]@{path=$objectPath;is_directory=[bool]$item.PSIsContainer
+                    attributes=[int]$item.Attributes;owner_sid=$raw.Owner.Value;dacl_present=$true;aces=@($aces.ToArray())})
+            }
+            $stream = [IO.FileStream]::new($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+            try {
+                $length = $stream.Length
+                if ($length -lt 1 -or $length -gt 1MB) { throw 'CBS manifest exceeds its byte bound.' }
+                $bytes = [byte[]]::new([int]$length)
+                $offset = 0
+                while ($offset -lt $bytes.Length) {
+                    $count = $stream.Read($bytes,$offset,$bytes.Length-$offset)
+                    if ($count -le 0) { throw 'CBS manifest ended early.' }
+                    $offset += $count
+                }
+                if ($stream.ReadByte() -ne -1 -or $stream.Length -ne $length) { throw 'CBS manifest changed length.' }
+            } finally { $stream.Dispose() }
+            $sha = [Security.Cryptography.SHA256]::Create()
+            try { $hash = [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-','').ToLowerInvariant() }
+            finally { $sha.Dispose() }
+            [ordered]@{path=$path;byte_length=$bytes.Length;sha256=$hash;data_base64=[Convert]::ToBase64String($bytes);path_objects=@($objects.ToArray())}
+        }
+        function global:Test-DrVmSpotlightRegistration {
+            param([object] $Preflight,[object] $Current,[object] $Native,[string] $UserSid)
+            try {
+                if ($null -eq $Preflight -or $Preflight.runner_sid -cne $UserSid -or
+                    $Preflight.name -cne 'MicrosoftWindows.Client.CBS' -or
+                    $Preflight.package_family_name -cne 'MicrosoftWindows.Client.CBS_cw5n1h2txyewy' -or
+                    $Preflight.publisher_id -cne 'cw5n1h2txyewy' -or
+                    $Preflight.publisher -cne 'CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US' -or
+                    $Preflight.resource_id -cne '' -or $Preflight.signature_kind -cne 'System' -or
+                    $Preflight.status -cne 'Ok' -or $Preflight.is_development_mode -isnot [bool] -or
+                    $Preflight.is_development_mode -or $Current['caller_sid'] -cne $UserSid -or
+                    $Current['open_status'] -ne 0 -or $Current['first_status'] -ne 122 -or
+                    $Current['second_status'] -ne 0 -or $Current['close_status'] -ne 0 -or
+                    $Current['required_bytes'] -lt 80 -or $Current['required_bytes'] -gt 65536 -or
+                    $Current['returned_bytes'] -gt $Current['required_bytes'] -or $Current['returned_bytes'] -lt 80 -or
+                    $null -ne $Current['resource_id'] -or $Current['count'] -ne 1 -or $Current['request_flags'] -ne 0x110 -or
+                    ($Current['property_flags'] -band 0x1000f) -ne 0) { return $false }
+                foreach ($key in @('name','package_full_name','package_family_name','publisher','publisher_id','version','architecture')) {
+                    if ($Current[$key] -cne $Preflight.$key) { return $false }
+                }
+                if ($Current['path'] -ine $Preflight.install_location -or
+                    $Current['package_full_name'] -cne $Native['package_full_name']) { return $false }
+                $child = $Preflight.child_lifecycle
+                if ($child.exit_code -ne 0 -or -not $child.exited -or -not $child.streams_complete -or
+                    -not $child.exact_lifetime_absent -or -not $child.process_job_closed -or
+                    [long]$child.start_time_utc_ticks - 504911232000000000 -ge [long]$Native['creation_filetime_100ns']) { return $false }
+                return $true
+            } catch { return $false }
+        }
+        function global:Test-DrVmSpotlightManifestIdentity {
+            param([object] $Manifest,[object] $Registration)
+            $settings = [Xml.XmlReaderSettings]::new()
+            $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+            $settings.XmlResolver = $null
+            $settings.MaxCharactersInDocument = 1MB
+            $bytes = [Convert]::FromBase64String($Manifest.data_base64)
+            $stream = [IO.MemoryStream]::new($bytes,$false)
+            $reader = $null
+            try {
+                $reader = [Xml.XmlReader]::Create($stream,$settings)
+                $xml = [Xml.XmlDocument]::new(); $xml.XmlResolver=$null; $xml.Load($reader)
+                $ns = [Xml.XmlNamespaceManager]::new($xml.NameTable)
+                $ns.AddNamespace('f','http://schemas.microsoft.com/appx/manifest/foundation/windows10')
+                $ns.AddNamespace('u','http://schemas.microsoft.com/appx/manifest/uap/windows10')
+                $ns.AddNamespace('u3','http://schemas.microsoft.com/appx/manifest/uap/windows10/3')
+                $ids = $xml.SelectNodes('/f:Package/f:Identity',$ns)
+                $apps = $xml.SelectNodes('/f:Package/f:Applications/f:Application[@Id="Global.DesktopSpotlight"]',$ns)
+                if ($ids.Count -ne 1 -or $apps.Count -ne 1) { return $false }
+                $id = $ids[0];$app=$apps[0]
+                if ($id.GetAttribute('Name') -cne $Registration.name -or $id.GetAttribute('Publisher') -cne $Registration.publisher -or
+                    $id.GetAttribute('Version') -cne $Registration.version -or $id.GetAttribute('ProcessorArchitecture') -cne $Registration.architecture -or
+                    $id.GetAttribute('ResourceId') -cne '') { return $false }
+                $expected = @{
+                    'DesktopSpotlight.BackgroundTask.UpdateTimer'='timer'
+                    'DesktopSpotlight.BackgroundTask.RegistrationStatusCheck'='systemEvent'
+                    'DesktopSpotlight.BackgroundTask.OnlineIdChange'='systemEvent'
+                    'DesktopSpotlight.BackgroundTask.Maintenance'='systemEvent'
+                }
+                $tasks = $app.SelectNodes('f:Extensions/f:Extension[@Category="windows.backgroundTasks"]',$ns)
+                if ($tasks.Count -ne 4) { return $false }
+                foreach ($task in $tasks) {
+                    $entry=$task.GetAttribute('EntryPoint')
+                    $types=$task.SelectNodes('f:BackgroundTasks/f:Task',$ns)
+                    if (-not $expected.ContainsKey($entry) -or $types.Count -ne 1 -or
+                        $types[0].GetAttribute('Type') -cne $expected[$entry]) { return $false }
+                    $expected.Remove($entry)
+                }
+                $service = $app.SelectNodes('f:Extensions/u:Extension[@Category="windows.appService"]',$ns)
+                $names = $app.SelectNodes('f:Extensions/u:Extension[@Category="windows.appService"]/u3:AppService',$ns)
+                $service.Count -eq 1 -and $service[0].GetAttribute('EntryPoint') -ceq 'DesktopSpotlight.BackgroundTask.AppService' -and
+                    $names.Count -eq 1 -and $names[0].GetAttribute('Name') -ceq 'com.microsoft.desktopspotlight'
+            } finally { if ($null -ne $reader) {$reader.Dispose()};$stream.Dispose() }
+        }
+        function global:Read-DrVmBoundedOrdinaryBytes {
+            param([Parameter(Mandatory)][string] $Path,[Parameter(Mandatory)][ValidateRange(0,2097152)][int] $MaximumBytes,
+                [long] $ExpectedBytes = -1)
+            $item=Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+            if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Preflight input or output is not an ordinary file.'
+            }
+            $stream=[IO.FileStream]::new($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+            try {
+                $length=$stream.Length
+                if ($length -gt $MaximumBytes -or ($ExpectedBytes -ge 0 -and $length -ne $ExpectedBytes)) {
+                    throw 'Preflight byte length exceeds or mismatches its bound.'
+                }
+                $bytes=[byte[]]::new([int]$length);$offset=0
+                while ($offset -lt $bytes.Length) {
+                    $count=$stream.Read($bytes,$offset,$bytes.Length-$offset)
+                    if($count -le 0){throw 'Preflight file ended early.'};$offset+=$count
+                }
+                if($stream.ReadByte() -ne -1 -or $stream.Length -ne $length){throw 'Preflight file changed length.'}
+                return ,$bytes
+            } finally {$stream.Dispose()}
+        }
+        function global:Read-DrVmVerifiedPreflightLoaderBytes {
+            param([Parameter(Mandatory)][string] $Path,[Parameter(Mandatory)][object] $Record)
+            if($Record.bytes -lt 1 -or $Record.bytes -gt 2MB){throw 'Registration preflight loader bound is invalid.'}
+            $bytes=Read-DrVmBoundedOrdinaryBytes -Path $Path -MaximumBytes 2MB -ExpectedBytes $Record.bytes
+            $sha=[Security.Cryptography.SHA256]::Create()
+            try{$hash=[BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-','').ToLowerInvariant()}
+            finally{$sha.Dispose()}
+            if($hash -cne $Record.sha256){throw 'Registration preflight loader hash mismatch.'}
+            return ,$bytes
+        }
+        function global:Get-DrVmSpotlightCurrentRegistration {
+            param([Parameter(Mandatory)][string] $PackageFullName)
+            Initialize-DrVmSpotlightNative
+            [DrVmSpotlightNative]::Package($PackageFullName)
+        }
+        function global:Get-DrVmSpotlightBrokerEvidence {
+            param([object] $Candidate,[object] $Capture,[object] $Preflight,[string] $UserSid,[int] $SessionId)
+            $held = $Capture.lifetimes[[string]$Candidate.identity].owner
+            if ($Capture.failed -or $Capture.observations.Count -ne 1 -or
+                -not (Test-DrVmSpotlightNativeIdentity -Native $held.Identity -Candidate $Candidate -UserSid $UserSid -SessionId $SessionId)) { throw 'DesktopSpotlight initial capture was not a complete singleton.' }
+            $native = $held.Identity
+            if ($native['package_first_status'] -ne 122 -or $native['package_status'] -ne 0 -or
+                $native['aumid_first_status'] -ne 122 -or $native['aumid_status'] -ne 0 -or
+                $native['aumid'] -cne 'MicrosoftWindows.Client.CBS_cw5n1h2txyewy!Global.DesktopSpotlight' -or
+                -not (Test-DrVmCanonicalSystemBinaryPath -Path $Candidate.executable_path -Leaf 'backgroundTaskHost.exe')) { throw 'DesktopSpotlight native application identity was not authenticated.' }
+            # Retain first-snapshot metadata with the held lifetime; the child may
+            # already have exited before slow owner/signature inventories finish.
+            $process=$Capture.lifetimes[[string]$Candidate.identity].process
+            if ($null -eq $process) { throw 'DesktopSpotlight initial CIM metadata is missing.' }
+            if (([string]$process.ProcessId+'|'+([datetime]$process.CreationDate).ToUniversalTime().ToString('o')) -cne $Candidate.identity) { throw 'DesktopSpotlight PID was reused.' }
+            $args=[string[]](Get-DrVmCommandLineArguments -CommandLine $process.CommandLine)
+            if ($args.Count -ne 2 -or $args[0] -ine $Candidate.executable_path -or
+                $args[1] -cne '-ServerName:Global.DesktopSpotlight.AppXz2j21w56bgxkgsjhtn7zkjsepq96erz2.mca') { throw 'DesktopSpotlight command identity mismatched.' }
+            $signature=Get-DrVmAuthenticodeEvidence -Path $Candidate.executable_path
+            $parentHeld=$null
+            try {
+                $parentHeld=Open-DrVmSpotlightLifetime -ProcessId ([uint32]$process.ParentProcessId) -Parent
+                $parentMatches=@(Get-CimInstance Win32_Process -Filter "ProcessId=$($process.ParentProcessId)" -OperationTimeoutSec 5 -ErrorAction Stop)
+                if ($parentMatches.Count -ne 1) { throw 'DesktopSpotlight parent metadata unavailable.' }
+                $parent=$parentMatches[0];$parentCreated=([datetime]$parent.CreationDate).ToUniversalTime().ToString('o')
+                $parentRow=[pscustomobject]@{pid=[int]$parent.ProcessId;executable_path=[string]$parent.ExecutablePath;creation_time_utc=$parentCreated}
+                if (-not (Test-DrVmSpotlightNativeIdentity -Native $parentHeld.Identity -Candidate $parentRow -UserSid 'S-1-5-18' -SessionId 0) -or
+                    [long]$parentHeld.Identity['creation_filetime_100ns'] -gt [long]$native['creation_filetime_100ns'] -or
+                    -not (Test-DrVmCanonicalSystemBinaryPath -Path $parentRow.executable_path -Leaf 'svchost.exe')) { throw 'DesktopSpotlight parent native identity mismatched.' }
+                $parentArgs=[string[]](Get-DrVmCommandLineArguments -CommandLine $parent.CommandLine)
+                $parentSignature=Get-DrVmAuthenticodeEvidence -Path $parentRow.executable_path
+                $services=@(Get-CimInstance Win32_Service -Filter "ProcessId=$($parent.ProcessId)" -OperationTimeoutSec 5 -ErrorAction Stop)
+                if ($services.Count -gt 64) { throw 'Parent service inventory exceeded its bound.' }
+                $dcom=@($services|Where-Object { $_.Name -ceq 'DcomLaunch' -and $_.State -ceq 'Running' })
+                if ($dcom.Count -ne 1 -or $parentHeld.Poll()['wait_result'] -ne 258) { throw 'DcomLaunch parent was not uniquely running.' }
+                $current=Get-DrVmSpotlightCurrentRegistration -PackageFullName $native['package_full_name']
+                if (-not (Test-DrVmSpotlightRegistration -Preflight $Preflight -Current $current -Native $native -UserSid $UserSid)) { throw 'DesktopSpotlight current registration mismatched its preflight.' }
+                $manifest=Get-DrVmSpotlightManifest -InstallLocation $Preflight.install_location
+                if (-not (Test-DrVmSpotlightManifestIdentity -Manifest $manifest -Registration $Preflight)) { throw 'DesktopSpotlight protected manifest application mismatched.' }
+                $broker=[ordered]@{
+                    windows_directory=[IO.Path]::GetFullPath($env:windir).TrimEnd('\')
+                    process_identity=[string]$Candidate.identity;process_pid=[int]$Candidate.pid
+                    process_creation_time_utc=[string]$Candidate.creation_time_utc;process_session_id=$SessionId
+                    process_owner_sid=$UserSid;process_executable_path=[string]$Candidate.executable_path;process_path_verified=$true
+                    process_command_line_arguments=@($args);process_signature_status=$signature.status
+                    process_signer_subject=$signature.signer_subject;process_signer_thumbprint=$signature.signer_thumbprint
+                    parent_identity=([string]$parent.ProcessId+'|'+$parentCreated);parent_pid=[int]$parent.ProcessId
+                    parent_creation_time_utc=$parentCreated;parent_session_id=[int]$parent.SessionId
+                    parent_owner_sid='S-1-5-18';parent_executable_path=$parentRow.executable_path;parent_path_verified=$true
+                    parent_command_line_arguments=@($parentArgs);parent_signature_status=$parentSignature.status
+                    parent_signer_subject=$parentSignature.signer_subject;parent_signer_thumbprint=$parentSignature.signer_thumbprint
+                    service_name=[string]$dcom[0].Name;service_process_id=[int]$dcom[0].ProcessId;service_state=[string]$dcom[0].State
+                    native_identity=$native;parent_native_identity=$parentHeld.Identity
+                    registration=[ordered]@{preflight=$Preflight;current=$current};manifest=$manifest
+                }
+                # Reuse every existing parent and signature predicate without changing SmartScreen.
+                $screen=[ordered]@{};foreach($key in $broker.Keys){$screen[$key]=$broker[$key]}
+                $screen.process_executable_path=$broker.windows_directory+'\System32\smartscreen.exe'
+                $screen.process_command_line_arguments=@($screen.process_executable_path,'-Embedding')
+                if (-not (Test-DrVmSmartScreenBrokerEvidence -Evidence $screen -UserSid $UserSid -SessionId $SessionId -CandidateIdentity $Candidate.identity)) { throw 'DesktopSpotlight signed service broker failed authentication.' }
+                $broker
+            } finally {
+                if ($null -ne $parentHeld) {
+                    $parentHeld.Dispose()
+                    if (-not $parentHeld.Closed -or $parentHeld.CloseError -ne 0) { throw 'DesktopSpotlight parent handle close failed.' }
+                }
+            }
+        }
         function global:Get-DrVmRunnerProcesses {
             param(
                 [Parameter(Mandatory)][string] $UserSid,
-                [Parameter(Mandatory)][int] $SessionId
+                [Parameter(Mandatory)][int] $SessionId,
+                [AllowNull()][object] $CaptureContext = $null
             )
             for ($attempt = 1; $attempt -le 3; $attempt++) {
                 $rows = [Collections.Generic.List[object]]::new()
@@ -1752,11 +2344,31 @@ public static class DarkReNamerVmControllerWorkspace {
                 catch {
                     $complete = $false
                 }
+                # Open only new canonical targets before any potentially slow owner query.
+                if ($null -ne $CaptureContext) {
+                    foreach ($process in $sessionProcesses) {
+                        if ([string]$process.ExecutablePath -ieq ($env:windir.TrimEnd('\') + '\System32\backgroundTaskHost.exe')) {
+                            Add-DrVmSpotlightInitialObservation -Context $CaptureContext -Process $process -Attempt $attempt
+                        }
+                    }
+                }
                 foreach ($process in $sessionProcesses) {
+                    $created = ([datetime]$process.CreationDate).ToUniversalTime().ToString('o')
+                    $identity = [string]$process.ProcessId + '|' + $created
                     $owner = $null
                     try {
-                        $owner = Invoke-CimMethod -InputObject $process `
-                            -MethodName GetOwnerSid -OperationTimeoutSec 5 -ErrorAction Stop
+                        if ($null -ne $CaptureContext -and $CaptureContext.lifetimes.ContainsKey($identity)) {
+                            $entry = $CaptureContext.lifetimes[$identity]
+                            $held = if ($null -ne $entry.PSObject.Properties['owner']) { $entry.owner } else { $entry }
+                            if (-not (Test-DrVmSpotlightNativeIdentity -Native $held.Identity -Candidate ([pscustomobject]@{
+                                pid=[int]$process.ProcessId; executable_path=[string]$process.ExecutablePath
+                                creation_time_utc=$created
+                            }) -UserSid $UserSid -SessionId $SessionId)) { throw 'Native owner evidence invalid.' }
+                            $owner = [pscustomobject]@{ReturnValue=0; Sid=$held.Identity['owner_sid']}
+                        } else {
+                            $owner = Invoke-CimMethod -InputObject $process `
+                                -MethodName GetOwnerSid -OperationTimeoutSec 5 -ErrorAction Stop
+                        }
                     }
                     catch {
                         $complete = $false
@@ -1775,6 +2387,14 @@ public static class DarkReNamerVmControllerWorkspace {
                             creation_time_utc = $created
                             executable_path = [string]$process.ExecutablePath
                         })
+                    }
+                }
+                if ($null -ne $CaptureContext) {
+                    foreach ($row in $rows) {
+                        if (-not $CaptureContext.baseline.Contains($row.identity)) { $CaptureContext.initial_rows[$row.identity] = $row }
+                    }
+                    foreach ($row in $CaptureContext.initial_rows.Values) {
+                        if (@($rows | Where-Object identity -CEQ $row.identity).Count -eq 0) { $rows.Add($row) }
                     }
                 }
                 $snapshot = [pscustomobject]@{
@@ -1830,7 +2450,7 @@ public static class DrVmCommandLineNative {
         function global:Test-DrVmCanonicalSystemBinaryPath {
             param(
                 [Parameter(Mandatory)][string] $Path,
-                [Parameter(Mandatory)][ValidateSet('smartscreen.exe', 'svchost.exe')][string] $Leaf
+                [Parameter(Mandatory)][ValidateSet('smartscreen.exe', 'svchost.exe', 'backgroundTaskHost.exe')][string] $Leaf
             )
 
             try {
@@ -2063,7 +2683,8 @@ public static class DrVmCommandLineNative {
                 [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $BaselineTasks,
                 [Parameter(Mandatory)][string] $CandidateIdentity,
                 [Parameter(Mandatory)][AllowEmptyCollection()][string[]] $OwnedRootPrefixes,
-                [Parameter(Mandatory)][ValidateRange(0, 360000)][int] $TimeoutMilliseconds
+                [Parameter(Mandatory)][ValidateRange(0, 360000)][int] $TimeoutMilliseconds,
+                [AllowNull()][object] $NativeCapture = $null
             )
 
             $baselineProcesses = [Collections.Generic.HashSet[string]]::new(
@@ -2096,6 +2717,14 @@ public static class DrVmCommandLineNative {
                 $processDeltaIdentities = @()
                 $ownedRootProcesses = @()
                 try {
+                    if ($null -ne $NativeCapture) {
+                        $entry = $NativeCapture.lifetimes[$CandidateIdentity]
+                        if ($entry.exit['wait_result'] -ne 0) { $entry.exit = $entry.owner.Poll() }
+                        if ($entry.exit['wait_result'] -eq 0 -and
+                            (-not $entry.exit['times_succeeded'] -or -not $entry.exit['exit_code_succeeded'])) {
+                            throw 'Same-handle exit evidence was incomplete.'
+                        }
+                    }
                     $processSnapshot = Get-DrVmRunnerProcesses `
                         -UserSid $UserSid -SessionId $SessionId
                     if (-not $processSnapshot.complete) {
@@ -2139,6 +2768,23 @@ public static class DrVmCommandLineNative {
                     $status = 'inventory-failed'
                     break
                 }
+                # A signal obtained after the inventory needs another complete inventory.
+                # Do not erase an earlier task/process/owned-root failure to obtain it.
+                if ($null -ne $NativeCapture -and $processDeltaIdentities.Count -eq 0 -and
+                    $NativeCapture.lifetimes[$CandidateIdentity].exit['wait_result'] -ne 0 -and
+                    $taskDelta.Count -eq 0 -and $ownedRootProcesses.Count -eq 0 -and
+                    $watch.Elapsed.TotalMilliseconds -lt $TimeoutMilliseconds) {
+                    try {
+                        $entry = $NativeCapture.lifetimes[$CandidateIdentity]
+                        $entry.exit = $entry.owner.Poll()
+                        if ($entry.exit['wait_result'] -eq 0) {
+                            if (-not $entry.exit['times_succeeded'] -or -not $entry.exit['exit_code_succeeded']) {
+                                throw 'Same-handle exit evidence was incomplete after disappearance.'
+                            }
+                            continue
+                        }
+                    } catch { $status='inventory-failed'; break }
+                }
                 $pollElapsed = [int][Math]::Min(
                     [int]::MaxValue, [Math]::Floor($watch.Elapsed.TotalMilliseconds))
                 $polls.Add([ordered]@{
@@ -2165,6 +2811,9 @@ public static class DrVmCommandLineNative {
                     break
                 }
                 if ($processDeltaIdentities.Count -eq 0) {
+                    if ($null -ne $NativeCapture -and $NativeCapture.lifetimes[$CandidateIdentity].exit['wait_result'] -ne 0) {
+                        $status = 'inventory-failed'; break
+                    }
                     $status = 'natural-exit'
                     break
                 }
@@ -2172,6 +2821,7 @@ public static class DrVmCommandLineNative {
                     $status = 'timed-out'
                     break
                 }
+                if ($polls.Count -ge 362) { $status = 'timed-out'; break }
                 $remaining = $TimeoutMilliseconds - [int][Math]::Floor($watch.Elapsed.TotalMilliseconds)
                 Start-Sleep -Milliseconds ([Math]::Min(1000, [Math]::Max(1, $remaining)))
             }
@@ -2198,20 +2848,6 @@ public static class DrVmCommandLineNative {
     }
     $guestRoot = [string]$workspaceRoots.guest_root
     $trustedTaskRoot = [string]$workspaceRoots.trusted_task_root
-    $runnerTaskBaseline = @(Invoke-Command -Session $session -ArgumentList $desktop.sid -ScriptBlock {
-        param($sid)
-        @(Get-DrVmRunnerTasks -UserSid $sid | Sort-Object identity)
-    })
-    $transport['runner_task_baseline'] = @($runnerTaskBaseline)
-    $processSnapshot = Invoke-Command -Session $session -ArgumentList $desktop.sid,$desktop.session_id -ScriptBlock {
-        param($sid,$sessionId)
-        Get-DrVmRunnerProcesses -UserSid $sid -SessionId $sessionId
-    }
-    if ($null -eq $processSnapshot -or -not $processSnapshot.complete) {
-        throw 'The VM runner process baseline was incomplete; refusing to start an untrackable candidate.'
-    }
-    $runnerProcessBaseline = @($processSnapshot.processes)
-    $transport['runner_process_baseline'] = @($runnerProcessBaseline)
     $toolingTransfer = New-ControllerToolingTransferStage -VerifiedTooling $VerifiedTooling
     Copy-Item `
         -LiteralPath (Join-Path $toolingTransfer.root 'tooling-bundle.json') `
@@ -2265,6 +2901,97 @@ public static class DrVmCommandLineNative {
             }
         }
     $transport['tooling'] = $transferredTooling
+    # A narrow, fully owned PS5 registration query finishes before either baseline.
+    $spotlightPreflight = Invoke-Command -Session $session -ArgumentList $guestRoot,$desktop.sid -ScriptBlock {
+        param($root,$sid)
+        $loaderRecord=@($global:DrVmToolingRecords|Where-Object role -CEQ 'powershell-loader')
+        if ($loaderRecord.Count -ne 1) { throw 'Registration preflight loader binding is missing.' }
+        $loaderPath=Join-Path $root $loaderRecord[0].file
+        $loaderBytes=Read-DrVmVerifiedPreflightLoaderBytes -Path $loaderPath -Record $loaderRecord[0]
+        $loaderModule=$null;$guestModule=$null
+        try {
+            $loaderOffset=if($loaderBytes.Length -ge 3 -and $loaderBytes[0] -eq 0xef -and $loaderBytes[1] -eq 0xbb -and $loaderBytes[2] -eq 0xbf){3}else{0}
+            $loaderText=[Text.UTF8Encoding]::new($false,$true).GetString($loaderBytes,$loaderOffset,$loaderBytes.Length-$loaderOffset)
+            $loaderModule=New-Module -Name ('DarkReNamer.preflight.loader.'+[guid]::NewGuid().ToString('N')) -ScriptBlock ([scriptblock]::Create($loaderText))
+            $verified=& $loaderModule {
+                param($r,$h)
+                Get-DrToolingVerifiedBundle -Root $r -ManifestLocation 'tooling-bundle.json' -ExpectedManifestSha256 $h -Mode bundle -RequiredRoles @('powershell-guest-entry')
+            } $root $global:DrVmToolingManifestSha256
+            $roles=@('powershell-guest-contracts','powershell-guest-process','powershell-guest-native','powershell-guest-platform',
+                'powershell-guest-uia','powershell-guest-state','powershell-guest-scenario','powershell-guest-runtime')
+            $libraries=@{}
+            foreach($role in $roles){$libraries[$role]=& $loaderModule {param($v,$r) New-DrToolingVerifiedScriptBlock -VerifiedBundle $v -Role $r} $verified $role}
+            $entry=& $loaderModule {param($v) New-DrToolingVerifiedScriptBlock -VerifiedBundle $v -Role 'powershell-guest-entry'} $verified
+            $guestModule=New-Module -Name ('DarkReNamer.preflight.guest.'+[guid]::NewGuid().ToString('N')) -ScriptBlock $entry -ArgumentList (,$libraries)
+            & $guestModule {
+                param($r,$expectedSid)
+                $ps5=Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
+                if (-not (Test-Path -LiteralPath $ps5 -PathType Leaf)) { throw 'Registration preflight requires native Windows PowerShell 5.1.' }
+                $command=@'
+$ErrorActionPreference='Stop'
+$items=@(Get-AppxPackage -Name MicrosoftWindows.Client.CBS)
+if($items.Count -gt 1){throw 'CBS registration is ambiguous.'}
+if($items.Count -eq 0){'null';exit 0}
+$p=$items[0]
+[ordered]@{name=[string]$p.Name;package_full_name=[string]$p.PackageFullName;package_family_name=[string]$p.PackageFamilyName;
+publisher=[string]$p.Publisher;publisher_id=[string]$p.PublisherId;version=[string]$p.Version;architecture=([string]$p.Architecture).ToLowerInvariant();
+resource_id=[string]$p.ResourceId;install_location=[string]$p.InstallLocation;signature_kind=[string]$p.SignatureKind;status=[string]$p.Status;
+is_development_mode=[bool]$p.IsDevelopmentMode}|ConvertTo-Json -Compress
+'@
+                $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+                $stdout=Join-Path $r 'cbs-preflight.stdout.json';$stderr=Join-Path $r 'cbs-preflight.stderr.txt'
+                $state=$null;$closed=$false;$record=$null
+                try {
+                    $state=Start-JobBoundProcess -FilePath $ps5 -Arguments ('-NoLogo -NoProfile -NonInteractive -EncodedCommand '+$encoded) `
+                        -WorkingDirectory $r -StdoutPath $stdout -StderrPath $stderr -SingleProcessOnly -AggregateOutputLimitBytes 65536
+                    $wait=Wait-JobBoundProcessWithOutputLimit -State $state -StdoutPath $stdout -StderrPath $stderr -TimeoutSeconds 30
+                    if ($wait.failure_reason -or -not $state.process.HasExited -or $state.process.ExitCode -ne 0) { throw 'CBS registration preflight failed.' }
+                    $state.owner.WaitForCapture(10000)
+                    $closed=Close-JobBoundProcess -State $state
+                    if (-not $closed -or $state.owner.OutputLimitExceeded) { throw 'CBS registration preflight job or streams did not close.' }
+                    $nativePid=$state.process.Id;$ticks=$state.process_start_time_utc_ticks
+                    $remaining=Get-Process -Id $nativePid -ErrorAction SilentlyContinue
+                    try {
+                        if ($null -ne $remaining -and $remaining.StartTime.ToUniversalTime().Ticks.ToString() -ceq $ticks) { throw 'CBS registration preflight exact child lifetime remains.' }
+                    } finally { if($null -ne $remaining){$remaining.Dispose()} }
+                    $stdoutBytes=Read-DrVmBoundedOrdinaryBytes -Path $stdout -MaximumBytes 65536
+                    $stderrBytes=Read-DrVmBoundedOrdinaryBytes -Path $stderr -MaximumBytes 0
+                    $record=[Text.UTF8Encoding]::new($false,$true).GetString($stdoutBytes)|ConvertFrom-Json
+                    if($null -ne $record){
+                        $record|Add-Member -NotePropertyName runner_sid -NotePropertyValue $expectedSid
+                        $record|Add-Member -NotePropertyName child_lifecycle -NotePropertyValue ([ordered]@{
+                            pid=$nativePid;start_time_utc_ticks=$ticks;exit_code=$state.process.ExitCode
+                            exited=$true;streams_complete=$true;exact_lifetime_absent=$true;process_job_closed=$closed
+                        })
+                    }
+                } finally {
+                    if ($null -ne $state) {
+                        try { if(-not $closed){[void](Close-JobBoundProcess -State $state)} }
+                        finally {$state.owner.Dispose()}
+                    }
+                }
+                $record
+            } $root $sid
+        } finally {
+            if($null -ne $guestModule){Remove-Module -ModuleInfo $guestModule -Force -ErrorAction Stop}
+            if($null -ne $loaderModule){Remove-Module -ModuleInfo $loaderModule -Force -ErrorAction Stop}
+        }
+    }
+    $runnerTaskBaseline = @(Invoke-Command -Session $session -ArgumentList $desktop.sid -ScriptBlock {
+        param($sid)
+        @(Get-DrVmRunnerTasks -UserSid $sid | Sort-Object identity)
+    })
+    $transport['runner_task_baseline'] = @($runnerTaskBaseline)
+    $processSnapshot = Invoke-Command -Session $session -ArgumentList $desktop.sid,$desktop.session_id -ScriptBlock {
+        param($sid,$sessionId)
+        Get-DrVmRunnerProcesses -UserSid $sid -SessionId $sessionId
+    }
+    if ($null -eq $processSnapshot -or -not $processSnapshot.complete) {
+        throw 'The VM runner process baseline was incomplete; refusing to start an untrackable candidate.'
+    }
+    $runnerProcessBaseline = @($processSnapshot.processes)
+    $transport['runner_process_baseline'] = @($runnerProcessBaseline)
+
     $trustedBundleRecords = @(
         foreach ($name in @('bundle.json') + @($artifacts | ForEach-Object { $_.file })) {
             $path = Join-Path $BundleRoot $name
@@ -3103,6 +3830,7 @@ public static class DrVmCommandLineNative {
                     $cleanupTaskContext = [pscustomobject]@{
                         runner_sid = [string]$desktop.sid
                         baseline_tasks = @($runnerTaskBaseline)
+                        spotlight_preflight = $spotlightPreflight
                         runner_session_id = [int]$desktop.session_id
                         baseline_process_identities = @(
                             $runnerProcessBaseline | ForEach-Object identity
@@ -3164,9 +3892,11 @@ public static class DrVmCommandLineNative {
                                 [void]$removedRunnerTasks.Add([string]$identity)
                             }
                         }
+                        $nativeCapture = New-DrVmSpotlightCaptureContext -BaselineIdentities @($taskContext.baseline_process_identities)
+                        try {
                         $processSnapshotBeforeCleanup = Get-DrVmRunnerProcesses `
                             -UserSid $taskContext.runner_sid `
-                            -SessionId $taskContext.runner_session_id
+                            -SessionId $taskContext.runner_session_id -CaptureContext $nativeCapture
                         $unexpectedRunnerProcessesBeforeCleanup = @($processSnapshotBeforeCleanup.processes |
                             Where-Object { -not $baselineProcesses.Contains([string]$_.identity) } |
                             Sort-Object identity)
@@ -3176,9 +3906,12 @@ public static class DrVmCommandLineNative {
                             -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object {
                             Test-ProcessExecutableInOwnedRoots -Path $_.ExecutablePath -Prefixes $prefixes
                         } | Sort-Object ProcessId)
-                        $smartScreenNaturalExit = [ordered]@{
-                            schema_version = 1
+                        $runnerProcessNaturalExit = [ordered]@{
+                            schema_version = 2
                             status = 'rejected'
+                            process_class = $null
+                            native_exit = $null
+                            initial_native_observations = @($nativeCapture.observations.ToArray())
                             runner_sid = [string]$taskContext.runner_sid
                             runner_session_id = [int]$taskContext.runner_session_id
                             candidate_identity = $null
@@ -3194,9 +3927,10 @@ public static class DrVmCommandLineNative {
                         if ($processSnapshotBeforeCleanup.complete -and
                             $unexpectedRunnerTasksBeforeCleanup.Count -eq 0 -and
                             $removedRunnerTasks.Count -eq 0 -and
-                            $unexpectedRunnerProcessesBeforeCleanup.Count -eq 0) {
-                            $smartScreenNaturalExit.status = 'not-required'
-                            $smartScreenNaturalExit.final_inventory_complete = $true
+                            $unexpectedRunnerProcessesBeforeCleanup.Count -eq 0 -and -not $nativeCapture.failed -and
+                            $nativeCapture.observations.Count -eq 0) {
+                            $runnerProcessNaturalExit.status = 'not-required'
+                            $runnerProcessNaturalExit.final_inventory_complete = $true
                         }
                         elseif ($mayDelete -and $jobsClosed -and
                             $processSnapshotBeforeCleanup.complete -and
@@ -3205,23 +3939,31 @@ public static class DrVmCommandLineNative {
                             $unexpectedRunnerProcessesBeforeCleanup.Count -eq 1 -and
                             $ownedRootProcessCandidates.Count -eq 0) {
                             $candidate = $unexpectedRunnerProcessesBeforeCleanup[0]
-                            $smartScreenNaturalExit.candidate_identity = [string]$candidate.identity
+                            $runnerProcessNaturalExit.candidate_identity = [string]$candidate.identity
                             try {
-                                $smartScreenNaturalExit.broker = Get-DrVmSmartScreenBrokerEvidence `
-                                    -Candidate $candidate `
-                                    -UserSid $taskContext.runner_sid `
-                                    -SessionId $taskContext.runner_session_id
-                                $smartScreenNaturalExit.status = 'pending'
-                                $smartScreenNaturalExit.timeout_ms = 360000
+                                if ([string]$candidate.executable_path -ieq ($env:windir.TrimEnd('\')+'\System32\backgroundTaskHost.exe')) {
+                                    $runnerProcessNaturalExit.process_class = 'desktop-spotlight'
+                                    $runnerProcessNaturalExit.broker = Get-DrVmSpotlightBrokerEvidence -Candidate $candidate `
+                                        -Capture $nativeCapture -Preflight $taskContext.spotlight_preflight `
+                                        -UserSid $taskContext.runner_sid -SessionId $taskContext.runner_session_id
+                                } else {
+                                    if ($nativeCapture.failed -or $nativeCapture.observations.Count -ne 0) { throw 'Sticky native observations forbid another process class.' }
+                                    $runnerProcessNaturalExit.process_class = 'smart-screen'
+                                    $runnerProcessNaturalExit.broker = Get-DrVmSmartScreenBrokerEvidence `
+                                        -Candidate $candidate -UserSid $taskContext.runner_sid -SessionId $taskContext.runner_session_id
+                                }
+                                $runnerProcessNaturalExit.status = 'pending'
+                                $runnerProcessNaturalExit.timeout_ms = 360000
                             }
                             catch {
-                                $smartScreenNaturalExit.status = 'classification-failed'
+                                $runnerProcessNaturalExit.status = 'classification-failed'
+                                $cleanupResourceErrors.Add('Runner process identity or native resource authentication failed.')
                             }
                         }
-                        if ($smartScreenNaturalExit.status -ceq 'rejected') {
-                            $smartScreenNaturalExit.final_runner_process_delta_identities = @(
+                        if ($runnerProcessNaturalExit.status -ceq 'rejected') {
+                            $runnerProcessNaturalExit.final_runner_process_delta_identities = @(
                                 $unexpectedRunnerProcessesBeforeCleanup | ForEach-Object { [string]$_.identity })
-                            $smartScreenNaturalExit.final_runner_task_delta_identities = @(
+                            $runnerProcessNaturalExit.final_runner_task_delta_identities = @(
                                 $unexpectedRunnerTasksBeforeCleanup | ForEach-Object { [string]$_.identity })
                         }
                         foreach ($candidateProcess in $ownedRootProcessCandidates) {
@@ -3295,34 +4037,35 @@ public static class DrVmCommandLineNative {
                                 [string]$_.TaskName -ceq $name -and [string]$_.TaskPath -ceq '\'
                             })
                         $taskPresentBeforeDelete = $ownedScheduledTasksBeforeDelete.Count -gt 0
-                        if ($smartScreenNaturalExit.status -ceq 'pending') {
+                        if ($runnerProcessNaturalExit.status -ceq 'pending') {
                             if ($mayDelete -and $jobsClosed -and -not $taskPresentBeforeDelete -and
                                 $processSnapshotAfterIntervention.complete -and
                                 $unexpectedRunnerTasksAfterIntervention.Count -eq 0 -and
                                 $unexpectedRunnerProcessesAfterIntervention.Count -le 1 -and
                                 ($unexpectedRunnerProcessesAfterIntervention.Count -eq 0 -or
                                     [string]$unexpectedRunnerProcessesAfterIntervention[0].identity -ceq
-                                        [string]$smartScreenNaturalExit.candidate_identity) -and
+                                        [string]$runnerProcessNaturalExit.candidate_identity) -and
                                 $ownedRootProcessCandidates.Count -eq 0 -and
                                 $removedRunnerTasks.Count -eq 0 -and
                                 $terminatedRunnerProcesses.Count -eq 0 -and
                                 $cleanupResourceErrors.Count -eq 0) {
+                                $nativeWait = if ($runnerProcessNaturalExit.process_class -ceq 'desktop-spotlight') { $nativeCapture } else { $null }
                                 $waitResult = Wait-DrVmSmartScreenNaturalExit `
                                     -UserSid $taskContext.runner_sid `
                                     -SessionId $taskContext.runner_session_id `
                                     -BaselineProcessIdentities @($taskContext.baseline_process_identities) `
                                     -BaselineTasks @($taskContext.baseline_tasks) `
-                                    -CandidateIdentity ([string]$smartScreenNaturalExit.candidate_identity) `
+                                    -CandidateIdentity ([string]$runnerProcessNaturalExit.candidate_identity) `
                                     -OwnedRootPrefixes $prefixes `
-                                    -TimeoutMilliseconds 360000
-                                $smartScreenNaturalExit.status = [string]$waitResult.status
-                                $smartScreenNaturalExit.elapsed_ms = [int]$waitResult.elapsed_ms
-                                $smartScreenNaturalExit.polls = @($waitResult.polls)
-                                $smartScreenNaturalExit.natural_exit_observed = [bool]$waitResult.natural_exit_observed
-                                $smartScreenNaturalExit.final_inventory_complete = [bool]$waitResult.final_inventory_complete
-                                $smartScreenNaturalExit.final_runner_process_delta_identities = @(
+                                    -TimeoutMilliseconds 360000 -NativeCapture $nativeWait
+                                $runnerProcessNaturalExit.status = [string]$waitResult.status
+                                $runnerProcessNaturalExit.elapsed_ms = [int]$waitResult.elapsed_ms
+                                $runnerProcessNaturalExit.polls = @($waitResult.polls)
+                                $runnerProcessNaturalExit.natural_exit_observed = [bool]$waitResult.natural_exit_observed
+                                $runnerProcessNaturalExit.final_inventory_complete = [bool]$waitResult.final_inventory_complete
+                                $runnerProcessNaturalExit.final_runner_process_delta_identities = @(
                                     $waitResult.final_runner_process_delta_identities)
-                                $smartScreenNaturalExit.final_runner_task_delta_identities = @(
+                                $runnerProcessNaturalExit.final_runner_task_delta_identities = @(
                                     $waitResult.final_runner_task_delta_identities)
                                 if ($waitResult.final_inventory_complete -and
                                     $null -ne $waitResult.final_process_snapshot) {
@@ -3350,29 +4093,47 @@ public static class DrVmCommandLineNative {
                                 }
                             }
                             else {
-                                $smartScreenNaturalExit.status = 'rejected'
-                                $smartScreenNaturalExit.final_runner_process_delta_identities = @(
+                                $runnerProcessNaturalExit.status = 'rejected'
+                                $runnerProcessNaturalExit.final_runner_process_delta_identities = @(
                                     $unexpectedRunnerProcessesAfterIntervention | ForEach-Object { [string]$_.identity })
-                                $smartScreenNaturalExit.final_runner_task_delta_identities = @(
+                                $runnerProcessNaturalExit.final_runner_task_delta_identities = @(
                                     $unexpectedRunnerTasksAfterIntervention | ForEach-Object { [string]$_.identity })
                             }
                         }
+                        try { Close-DrVmSpotlightCaptureContext -Context $nativeCapture }
+                        catch { $cleanupResourceErrors.Add('Retained native handle cleanup failed.'); $runnerProcessNaturalExit.status='classification-failed' }
+                        if ($runnerProcessNaturalExit.process_class -ceq 'desktop-spotlight' -and
+                            $nativeCapture.lifetimes.ContainsKey([string]$runnerProcessNaturalExit.candidate_identity) -and
+                            $null -ne $nativeCapture.lifetimes[[string]$runnerProcessNaturalExit.candidate_identity].PSObject.Properties['exit']) {
+                            $runnerProcessNaturalExit.native_exit = $nativeCapture.lifetimes[[string]$runnerProcessNaturalExit.candidate_identity].exit
+                        }
                         $guestRootPresentBeforeDelete = [bool](Test-Path -LiteralPath $root)
                         $trustedRootPresentBeforeDelete = [bool](Test-Path -LiteralPath $trustedRoot)
-                        $smartScreenInitialDeltaAccepted =
-                            $smartScreenNaturalExit.status -ceq 'natural-exit' -and
+                        $runnerProcessInitialDeltaAccepted =
+                            $runnerProcessNaturalExit.status -ceq 'natural-exit' -and
                             $unexpectedRunnerProcessesBeforeCleanup.Count -eq 1 -and
                             [string]$unexpectedRunnerProcessesBeforeCleanup[0].identity -ceq
-                                [string]$smartScreenNaturalExit.candidate_identity -and
-                            $smartScreenNaturalExit.natural_exit_observed -and
-                            $smartScreenNaturalExit.final_inventory_complete -and
-                            $smartScreenNaturalExit.final_runner_process_delta_identities.Count -eq 0 -and
-                            $smartScreenNaturalExit.final_runner_task_delta_identities.Count -eq 0
+                                [string]$runnerProcessNaturalExit.candidate_identity -and
+                            $runnerProcessNaturalExit.natural_exit_observed -and
+                            $runnerProcessNaturalExit.final_inventory_complete -and
+                            $runnerProcessNaturalExit.final_runner_process_delta_identities.Count -eq 0 -and
+                            $runnerProcessNaturalExit.final_runner_task_delta_identities.Count -eq 0 -and
+                            ($runnerProcessNaturalExit.process_class -cne 'desktop-spotlight' -or
+                                ($null -ne $runnerProcessNaturalExit.native_exit -and
+                                    $runnerProcessNaturalExit.native_exit['wait_result'] -eq 0 -and
+                                    $runnerProcessNaturalExit.native_exit['times_succeeded'] -and
+                                    $runnerProcessNaturalExit.native_exit['exit_code_succeeded'] -and
+                                    $runnerProcessNaturalExit.native_exit['handle_closed'] -and
+                                    $runnerProcessNaturalExit.native_exit['times_win32_error'] -eq 0 -and
+                                    $runnerProcessNaturalExit.native_exit['exit_code_win32_error'] -eq 0 -and
+                                    $runnerProcessNaturalExit.native_exit['close_win32_error'] -eq 0))
                         if (-not $mayDelete -or -not $jobsClosed -or $taskPresentBeforeDelete -or
                             -not $processSnapshotBeforeCleanup.complete -or
                             $unexpectedRunnerTasksBeforeCleanup.Count -ne 0 -or
-                            ($unexpectedRunnerProcessesBeforeCleanup.Count -ne 0 -and
-                                -not $smartScreenInitialDeltaAccepted) -or
+                            -not (($unexpectedRunnerProcessesBeforeCleanup.Count -eq 0 -and
+                                $runnerProcessNaturalExit.status -ceq 'not-required' -and
+                                -not $nativeCapture.failed -and $nativeCapture.observations.Count -eq 0) -or
+                                $runnerProcessInitialDeltaAccepted) -or
                             -not $processSnapshotAfterIntervention.complete -or
                             $unexpectedRunnerTasksAfterIntervention.Count -ne 0 -or
                             $unexpectedRunnerProcessesAfterIntervention.Count -ne 0 -or
@@ -3397,7 +4158,7 @@ public static class DrVmCommandLineNative {
                                     removed_runner_tasks = @($removedRunnerTasks | Sort-Object)
                                     terminated_runner_processes = @($terminatedRunnerProcesses)
                                     resource_cleanup_errors = @($cleanupResourceErrors)
-                                    smart_screen_natural_exit = $smartScreenNaturalExit
+                                    runner_process_natural_exit = $runnerProcessNaturalExit
                                     owned_processes_after = @(Get-CimInstance Win32_Process | Where-Object {
                                         Test-ProcessExecutableInOwnedRoots -Path $_.ExecutablePath -Prefixes $prefixes
                                     } | Sort-Object ProcessId | ForEach-Object {
@@ -3475,13 +4236,14 @@ public static class DrVmCommandLineNative {
                             removed_runner_tasks = @($removedRunnerTasks | Sort-Object)
                             terminated_runner_processes = @($terminatedRunnerProcesses)
                             resource_cleanup_errors = @($cleanupResourceErrors)
-                            smart_screen_natural_exit = $smartScreenNaturalExit
+                            runner_process_natural_exit = $runnerProcessNaturalExit
                             owned_processes_after = $ownedAfter
                         }
                         [pscustomobject]@{
                             guest_cleanup = & ([scriptblock]::Create($completionDefinition)) -Observation $rawCleanup
                             raw_cleanup = $rawCleanup
                         }
+                        } finally { Close-DrVmSpotlightCaptureContext -Context $nativeCapture }
                     }
                     if ($null -eq $cleanupResult -or $cleanupResult.guest_cleanup -isnot [bool] -or
                         $null -eq $cleanupResult.raw_cleanup) {
@@ -3504,7 +4266,7 @@ public static class DrVmCommandLineNative {
             $transport.status = 'failed'
             $transport['controller_cleanup_errors'] = $controllerCleanupErrors
         }
-        $transport | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $transportOutputRoot 'transport.json') -Encoding UTF8
+        $transport | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath (Join-Path $transportOutputRoot 'transport.json') -Encoding UTF8
         if ($result -and $taskSelection.kind -ceq 'core') {
             $result | Add-Member -NotePropertyName transport -NotePropertyValue $transport -Force
             $result | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $BundleRoot 'result.json') -Encoding UTF8
